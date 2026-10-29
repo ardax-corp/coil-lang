@@ -42,20 +42,30 @@ test("nested array index") {
     assert!(
         !body
             .iter()
-            .any(|b| matches!(*b.bytecode(), Instruction::MakeArray)),
+            .any(|b| matches!(*b.bytecode(), Instruction::MakeArray | Instruction::DenseMake)),
         "a.len() of a stack array must not box it"
     );
+    // A stack `CONST`, or the dense tier's immediate `DenseConst`.
     let folded = body
         .iter()
-        .find(|b| matches!(*b.bytecode(), Instruction::CONST))
+        .find_map(|b| match *b.bytecode() {
+            Instruction::CONST => Some(b.operand_u32()),
+            Instruction::DenseConst => {
+                let (_, _, imm, pool) = b.dense_const_parts();
+                (!pool).then_some(imm as u32)
+            }
+            _ => None,
+        })
         .expect("a.len() folds to a constant");
     assert_eq!(
-        folded.operand_u32(),
+        folded,
         4,
         "a.len() must const-fold to 4, not to the later nested outer len"
     );
     assert!(
-        !body.iter().any(|b| matches!(*b.bytecode(), Instruction::ArrayLen)),
+        !body
+            .iter()
+            .any(|b| matches!(*b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen)),
         "a.len() of a stack array must not read a length at run time"
     );
 }

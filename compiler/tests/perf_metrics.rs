@@ -1859,7 +1859,9 @@ fn mir_weighted_census() {
 /// no `STORE n; LOAD n` of a slot that nothing else reads.
 #[test]
 fn host_result_match_has_no_dead_spill() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/host_try.hy");
+    // The LIR tier: dense still spills the scrutinee once (#2120).
+    let (bc, _, _, _, pipeline) =
+        compile_tuned("examples/perf/host_try.hy", |p| p.compiler_mut().set_mir_dense(false));
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "main", bc.len());
     let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();

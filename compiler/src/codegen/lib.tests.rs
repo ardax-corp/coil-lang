@@ -58,21 +58,40 @@ fn compile_src(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |_| {})
 }
 
-/// Two-slot ABI tests pin the direct `CALL`; tiny leaf callees would inline.
-fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
-    compile_src_tuned(src, |c| c.inline_cost.max_inline_cost = 0)
+/// Tests of how LIR lowers a body: with the dense tier on, most bodies
+/// would take it instead.
+fn compile_src_lir(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| c.set_mir_dense(false))
+}
+
+fn compile_src_no_inline_lir(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| {
+        c.inline_cost.max_inline_cost = 0;
+        c.set_mir_dense(false);
+    })
 }
 
 /// Tests of a callee's own code: one with heap locals would splice into its
 /// caller.
-fn compile_src_heap_calls(src: &str) -> (Vec<Byte>, Vec<u64>) {
-    compile_src_tuned(src, |c| c.opt_options.hir_inline_heap = false)
+fn compile_src_heap_calls_lir(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| {
+        c.opt_options.hir_inline_heap = false;
+        c.set_mir_dense(false);
+    })
 }
 
 /// Tests of how an enum value is built: a local built in place would
 /// otherwise stay in two slots with no `MakeEnum`.
-fn compile_src_boxed_locals(src: &str) -> (Vec<Byte>, Vec<u64>) {
-    compile_src_tuned(src, |c| c.set_hir_pair_locals(false))
+fn compile_src_boxed_locals_lir(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| {
+        c.set_hir_pair_locals(false);
+        c.set_mir_dense(false);
+    })
+}
+
+/// Two-slot ABI tests pin the direct `CALL`; tiny leaf callees would inline.
+fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| c.inline_cost.max_inline_cost = 0)
 }
 
 /// A whole program through the pipeline, with the workspace's stdlib roots
@@ -95,7 +114,16 @@ fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>,
 /// builtin operator thunks (`Pow`, `SHL`, `XOR`, …), which a test of how
 /// one body lowers must not see.
 fn compile_fn_body(src: &str, name: &str) -> Vec<Byte> {
-    let (bc, compiler) = compile_src_compiler(src, |_| {});
+    compile_fn_body_tuned(src, name, |_| {})
+}
+
+/// [`compile_fn_body`] through the LIR tier (see [`compile_src_lir`]).
+fn compile_fn_body_lir(src: &str, name: &str) -> Vec<Byte> {
+    compile_fn_body_tuned(src, name, |c| c.set_mir_dense(false))
+}
+
+fn compile_fn_body_tuned(src: &str, name: &str, tune: impl FnOnce(&mut Compiler)) -> Vec<Byte> {
+    let (bc, compiler) = compile_src_compiler(src, tune);
     let start = *compiler.functions.get(name).unwrap_or_else(|| panic!("no fn `{name}`"));
     let end = compiler
         .functions
@@ -609,7 +637,7 @@ fn return_match_keeps_fusion_barrier() {
     // would stay a pair and skip JumpIfMatch ,  this test needs the
     // boxed cascade so the Some arm's Unpack;RETURN fusion barrier
     // stays observable.
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         r#"
 fn foo(Option<int> r) -> int {
     return match r {
@@ -740,7 +768,7 @@ fn float_unary_minus_emits_negf_not_neg() {
 #[test]
 fn int_unary_minus_still_emits_neg() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn n(int x) -> int { return -x; }");
+    let (bc, _pool) = compile_src_lir("fn n(int x) -> int { return -x; }");
     let last_neg = bc
         .iter()
         .rev()
@@ -761,7 +789,7 @@ fn int_unary_minus_still_emits_neg() {
 fn integer_arithmetic_emits_int_opcode() {
     use common::Instruction;
     // Only `add`'s own body: the builtin Num thunks hold float ADDF too.
-    let bc = compile_fn_body("fn add(int a, int b) -> int { return a + b; }", "add");
+    let bc = compile_fn_body_lir("fn add(int a, int b) -> int { return a + b; }", "add");
     let has_int_bin_slot = bc.iter().any(|b| {
         *b.bytecode() == Instruction::BinSlotSlot
             && b.bin_slot_slot_parts().0 == Instruction::ADD as u8
@@ -999,7 +1027,7 @@ fn not_if_else_inverts_away_log_not_jmpf() {
 /// Commuted form `8 * x` on a byte uses the same SHL lowering (LHS factor).
 #[test]
 fn mul_by_lhs_power_of_two_emits_shl() {
-    let (bc, _pool) = compile_src("fn scale(byte x) -> byte { return 8 * x; }");
+    let (bc, _pool) = compile_src_lir("fn scale(byte x) -> byte { return 8 * x; }");
     assert!(
         bytecode_has_shl_by(&bc, 3),
         "expected SHL (shift 3) for 8*x; opcodes: {:?}",
@@ -1037,7 +1065,7 @@ fn mul_by_one_does_not_emit_shl() {
 #[test]
 fn float_mul_does_not_emit_shl() {
     use common::Instruction;
-    let bc = compile_fn_body("fn scale(float x) -> float { return x * 8.0; }", "scale");
+    let bc = compile_fn_body_lir("fn scale(float x) -> float { return x * 8.0; }", "scale");
     assert!(
         !bytecode_has_any_shl(&bc),
         "float mul must not emit SHL; opcodes: {:?}",
@@ -1063,7 +1091,7 @@ fn float_mul_does_not_emit_shl() {
 /// strength-reduce (not be excluded by the int-only type gate).
 #[test]
 fn byte_mul_by_power_of_two_emits_shl() {
-    let (bc, _pool) = compile_src("fn scale(byte x) -> byte { return x * 8; }");
+    let (bc, _pool) = compile_src_lir("fn scale(byte x) -> byte { return x * 8; }");
     assert!(
         bytecode_has_shl_by(&bc, 3),
         "expected SHL (shift 3) for byte*8; opcodes: {:?}",
@@ -1074,7 +1102,7 @@ fn byte_mul_by_power_of_two_emits_shl() {
 /// Unsigned `byte / 8` is `>> 3`. Signed `int / 8` must stay `DIV`.
 #[test]
 fn byte_div_by_power_of_two_emits_shr() {
-    let (bc, _pool) = compile_src("fn scale(byte x) -> byte { return x / 8; }");
+    let (bc, _pool) = compile_src_lir("fn scale(byte x) -> byte { return x / 8; }");
     assert!(
         bytecode_has_shr_by(&bc, 3),
         "expected SHR (shift 3) for byte/8; opcodes: {:?}",
@@ -1085,7 +1113,7 @@ fn byte_div_by_power_of_two_emits_shr() {
 #[test]
 fn int_div_by_power_of_two_keeps_div() {
     use common::Instruction;
-    let bc = compile_fn_body("fn scale(int x) -> int { return x / 8; }", "scale");
+    let bc = compile_fn_body_lir("fn scale(int x) -> int { return x / 8; }", "scale");
     assert!(
         !bytecode_has_any_shr(&bc),
         "signed int / 8 must not become SHR; opcodes: {:?}",
@@ -1180,7 +1208,7 @@ fn shl_zero_skips_shl() {
 /// Type aliases to `byte` expand at check time, so `B * 8` still SHLs.
 #[test]
 fn aliased_byte_mul_by_power_of_two_emits_shl() {
-    let (bc, _pool) = compile_src("type B = byte; fn scale(B x) -> B { return x * 8; }");
+    let (bc, _pool) = compile_src_lir("type B = byte; fn scale(B x) -> B { return x * 8; }");
     assert!(
         bytecode_has_shl_by(&bc, 3),
         "expected SHL for aliased int*8; opcodes: {:?}",
@@ -1510,7 +1538,7 @@ fn main() {
 /// bits = tag, lower 16 bits = arity).
 #[test]
 fn construct_emits_make_enum_with_correct_tag_and_arity() {
-    let (bc, _pool) = compile_src("fn keep(int x) -> Vec<Option<int>> { return [Option::Some(x)]; }");
+    let (bc, _pool) = compile_src_lir("fn keep(int x) -> Vec<Option<int>> { return [Option::Some(x)]; }");
 
     // Find the MAKE_ENUM instruction. Its operands encode
     // (tag, arity) ,  for `Option::Some(42)`, tag=1, arity=1.
@@ -1791,7 +1819,7 @@ fn pure_call_binop_leaves_results_on_stack_for_bin_return() {
 #[test]
 fn pure_helper_binop_stacks_across_call_for_bin_return() {
     use common::Instruction;
-    let (bc, _) = compile_src_no_inline(
+    let (bc, _) = compile_src_no_inline_lir(
         "fn left(int n) -> int { \
                let s = 0; \
                let i = 0; \
@@ -1979,7 +2007,7 @@ fn two_local_compare_if_fuses_bin_slot_slot_jmpf() {
 #[test]
 fn bitand_imm_fuses_bin_slot_imm() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn lowbit(int x) -> int { return x & 1; }");
+    let (bc, _pool) = compile_src_lir("fn lowbit(int x) -> int { return x & 1; }");
     assert!(
         bc.iter().any(|b| {
             *b.bytecode() == Instruction::BinSlotImm
@@ -2022,7 +2050,7 @@ fn assign_add_imm_fuses_bin_slot_imm_store() {
                i = i + 1; \
                return i; \
              }",
-        |_| {},
+        |c| c.set_mir_dense(false),
     );
     let start = compiler.functions["bump"];
     let end = compiler.functions.values().copied().filter(|&pc| pc > start).min().unwrap_or(bc.len()).min(bc.len());
@@ -2050,7 +2078,7 @@ fn assign_add_imm_fuses_bin_slot_imm_store() {
 #[test]
 fn assign_bitand_fuses_bin_slot_slot_store() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         "fn mask_bits(int flags, int mask) -> int { \
                flags = flags & mask; \
                return flags; \
@@ -2077,7 +2105,7 @@ fn assign_bitand_fuses_bin_slot_slot_store() {
 #[test]
 fn assign_logical_and_fuses_bin_slot_slot_store() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         "fn both(bool a, bool b) -> bool { \
                a = a && b; \
                return a; \
@@ -2622,7 +2650,7 @@ fn nested_match_in_loop_emits_expected_opcodes() {
 fn record_construct_one_field_emits_correct_bytecode() {
     use common::Instruction;
     let (bc, _pool) =
-        compile_src_boxed_locals("enum E { Foo { x: int } } fn main() { let v: Vec<E> = Vec::new(); v.push(E::Foo { x: 1 }); return v.len(); }");
+        compile_src_boxed_locals_lir("enum E { Foo { x: int } } fn main() { let v: Vec<E> = Vec::new(); v.push(E::Foo { x: 1 }); return v.len(); }");
 
     // Find the MAKE_ENUM. Its operand is tag (upper 16) and
     // arity (lower 16).
@@ -2665,7 +2693,7 @@ fn match_emits_binding_interns_in_declaration_order() {
 fn mixed_enum_unit_tuple_record_all_in_one() {
     // Use bindings to keep the constructs alive in the
     // bytecode (the codegen is silent on unused `let _`).
-    let (bc, _pool) = compile_src_boxed_locals(
+    let (bc, _pool) = compile_src_boxed_locals_lir(
         "enum E { A, B(int), C { x: int } } \
  fn mk() -> Vec<E> { \
  let a = E::A; \
@@ -2810,7 +2838,7 @@ fn match_with_simple_binding_subpatterns_keeps_current_layout() {
 #[test]
 fn access_field_emits_receiver_then_load_field() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         "enum Point { Origin, Point { x: int, y: int } } \
  fn get_x(Point p) -> int { return p.x; } \
  fn main() { return get_x(Point::Point { x: 42, y: 7 }); }",
@@ -2854,7 +2882,7 @@ fn access_field_emits_correct_field_index_for_each_field() {
     // x_coord access emits LoadField(0); the y_coord access
     // emits LoadField(1). Not inlined: an inlined accessor is unreferenced
     // and the tree shake drops its body.
-    let (bc, _pool) = compile_src_no_inline(
+    let (bc, _pool) = compile_src_no_inline_lir(
         "enum Point { Origin, Point { x: int, y: int } } \
  fn x_coord(Point p) -> int { return p.x; } \
  fn y_coord(Point p) -> int { return p.y; } \
@@ -4030,6 +4058,7 @@ fn main() {
     // The callees are looked up by name: keep them calls.
     pipeline.compiler_mut().opt_options.hir_inline_heap = false;
     pipeline.set_inline_max_cost(0);
+    pipeline.compiler_mut().set_mir_dense(false);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let nested_off = pipeline
@@ -5073,7 +5102,7 @@ fn main() {
 #[test]
 fn access_chained_field_emits_two_load_fields() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         "enum Inner { Inner { v: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_v(Outer o) -> int { return o.x.v; } \
@@ -5103,7 +5132,7 @@ fn access_chained_field_emits_two_load_fields() {
 #[test]
 fn access_chained_field_second_load_field_targets_inner_enum() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         "enum Inner { Inner { v: int, w: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_v(Outer o) -> int { return o.x.v; } \
@@ -5146,7 +5175,7 @@ fn access_chained_field_second_load_field_targets_inner_enum() {
 #[test]
 fn access_chained_field_with_correct_field_index() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         "enum Inner { Inner { v: int, w: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_w(Outer o) -> int { return o.x.w; } \
@@ -5716,7 +5745,7 @@ fn ground_user_typeclass_call_uses_dict_not_mono() {
 #[test]
 fn generic_bound_method_consumes_dictionary_indirectly() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         "trait Measurable<T> { fn size(T x) -> int; } \
              impl Measurable for int { pub fn size(int x) -> int { return x; } } \
              fn size_of<T: Measurable>(T x) -> int { return x.size(); } \
@@ -5804,7 +5833,10 @@ fn length_bound_ground_call_uses_dictionary_not_mono() {
     let (bc, _pool) = compile_src_tuned(
         "fn n<T: Length>(T x) -> int { return x.len(); } \
              fn main() { return n(\"ab\"); }",
-        |c| c.set_hir_inline(false),
+        |c| {
+            c.set_hir_inline(false);
+            c.set_mir_dense(false);
+        },
     );
     let max_call_arity = bc
         .iter()
@@ -6246,7 +6278,7 @@ fn main() {
 #[test]
 fn named_call_shuffled_args_emits_declaration_order() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         r#"
 fn greet(string name, int age) -> int {
     let acc = 0;
@@ -6318,7 +6350,7 @@ fn main() {
 #[test]
 fn rest_call_emits_make_array_before_call() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         r#"
 fn sum(int... xs) -> int { return xs.len(); }
 fn main() {
@@ -6704,7 +6736,7 @@ fn packed_host_meta(bc: &[common::Byte]) -> u32 {
 #[test]
 fn matrix_add_emits_packed_matrix_zip_add() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 use io::{stdout};
 
@@ -6731,7 +6763,7 @@ fn main() {
 #[test]
 fn matrix_sub_emits_packed_matrix_zip_sub() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 use io::{stdout};
 
@@ -6821,7 +6853,7 @@ fn main() {
 #[test]
 fn float_dot_emits_packed_dot_with_float_flag() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 fn main() {
     return dot([1.0, 2.0], [3.0, 4.0]);
@@ -6844,7 +6876,7 @@ fn main() {
 #[test]
 fn aggregate_zip_len8_emits_packed_vec_arith() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 fn main() {
     let a = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -6924,7 +6956,7 @@ fn main() {
 fn aggregate_packed_vec_arith_meta_flags() {
     use common::Instruction;
 
-    let (bc_bc, _) = compile_src(
+    let (bc_bc, _) = compile_src_lir(
         r#"
 fn main() {
     let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -6945,7 +6977,7 @@ fn main() {
     assert_ne!(ops & (1 << 26), 0, "broadcast");
     assert_ne!(ops & (1 << 27), 0, "scalar_left");
 
-    let (bc_neg, _) = compile_src(
+    let (bc_neg, _) = compile_src_lir(
         r#"
 fn main() {
     let a = (1, 2, 3, 4, 5, 6, 7, 8);
@@ -6980,7 +7012,7 @@ fn unescape_coil_string_supports_hex_and_unicode() {
 #[test]
 fn cast_as_int_emits_cast_opcode() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 fn to_int(float x) -> int {
     return x as int;
@@ -7921,7 +7953,7 @@ fn tests_err_bit(b: &Byte) -> bool {
 /// ReturnPair and use the tag EQ/JMPF path ,  not PairToHeap + JumpIfMatch.
 #[test]
 fn nested_method_try_mismatched_result_keeps_pair_path() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 class Enc {}
 impl Enc {
@@ -7969,7 +8001,7 @@ fn main() {
 /// the reserved entry Try path, not Unknown method or PairToHeap-before-tag-check.
 #[test]
 fn forward_mismatched_result_method_try_keeps_pair_path() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 class EncFwd {}
 impl EncFwd {
@@ -8436,7 +8468,10 @@ fn main() {
     let _ = pipe(2);
 }
 "#,
-        |c| c.set_hir_inline(false),
+        |c| {
+            c.set_hir_inline(false);
+            c.set_mir_dense(false);
+        },
     );
     let has_add_then_call = bc.windows(2).any(|w| {
         let add_then_call = matches!(

@@ -25,7 +25,7 @@ coil-dissect examples/fib.hy --fn fib --il
 | `--hir` | Also print each body's HIR (typed, desugared tree) |
 | `--expand` | Print the entry file after macro expansion (no bytecode); generated and `comptime` items are marked with where they came from |
 | `--tests` | Compile `test("…") { … }` cases too (`__zs_test_N`), so PCs match a `coil test` run (for example a gc-stress report) |
-| `--mir` | Also print the MIR of each numeric body that reached emission, marked `dense` / `lir`; a dense body says whether it was kept or lost the cost gate to its LIR form |
+| `--mir` | Also print the MIR of each numeric body that reached emission, marked `dense` / `lir`; a dense body says whether it was kept or refused after emission (its LIR form runs instead) |
 | `--effects` | Also print each function's effects with the first reason for each (`step: uses {write, suspend}: calls `write_all` (write, suspend)`, `apply: pure apart from its parameters: calls parameter `f``) and the parameters it mutates (`Point::bump: uses {mutate}: writes field `x` of a shared object (mutate); mutates self`, the summary a call with a `readonly` argument is checked against), then, when auto-par is on, each counted loop or fork site left sequential only because a callee is impure (`;; loop over `i` in `main` not parallelized: `step` reads static `SCALE` (read)`). See [auto-par.md](auto-par.md) |
 | `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print body tiers, HIR counters and compile-time work) |
 | `--ast` | Also pretty-print the entry-file AST (as `coil fmt` writes it) |

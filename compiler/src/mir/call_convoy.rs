@@ -1,8 +1,8 @@
 //! Stack-convoy reconstruct for dense `CALL` / `TailCall` (COI-340 B2).
 //!
-//! Tight recursive leafs lose the cost gate when every SSA value gets a
-//! unique slot, a prologue `Seek`, `DensePush`, and a `STORE` after each
-//! `CALL`. Values that only feed a same-block call / return stay on the
+//! Tight recursive leafs run slower than their LIR form when every SSA
+//! value gets a unique slot, a prologue `Seek`, `DensePush`, and a `STORE`
+//! after each `CALL`. Values that only feed a same-block call / return stay on the
 //! operand stack — the fuse-IL convoy — so Seek is skipped when only
 //! param slots are live.
 
