@@ -226,6 +226,9 @@ impl Checker {
             pending_exhaustive: Vec::new(),
             open_operands: Vec::new(),
             open_empty_arrays: Vec::new(),
+            class_param_bounds: HashMap::new(),
+            deferred_goals: Vec::new(),
+            retrying_deferred_goals: false,
             defer_empty_array: false,
             mixed_literals: Vec::new(),
             fn_body_depth: 0,
@@ -2335,6 +2338,64 @@ impl Checker {
         previous
     }
 
+    /// `class Sorted<T: Ord>`: record the bounds on the class's parameters
+    /// with each argument schemaized to its parameter name (`Ord<T>`), the
+    /// form the class's field types take, so a `new` site and an inherent
+    /// impl substitute their own variables for it (#2085).
+    fn register_class_param_bounds(
+        &mut self,
+        key: &str,
+        type_params: &[parser::ast::TypeParam<'_>],
+        range: &Range<usize>,
+    ) {
+        if type_params.iter().all(|tp| tp.bounds.is_empty()) {
+            self.class_param_bounds.remove(key);
+            return;
+        }
+        let frame = self
+            .type_params_in_scope
+            .last()
+            .expect("type-param frame just pushed")
+            .clone();
+        let var_to_name: HashMap<TyVarId, String> =
+            frame.iter().map(|(n, id)| (*id, n.clone())).collect();
+        let mut bounds = Vec::new();
+        for tp in type_params {
+            let var = *frame.get(tp.name).expect("type param registered in frame");
+            for bound in &tp.bounds {
+                if let Some(c) = self.constraint_from_bound(bound, Ty::Var(var), range) {
+                    bounds.push(Constraint {
+                        class: c.class,
+                        args: c.args.iter().map(|a| schemaize_ty(a, &var_to_name)).collect(),
+                    });
+                }
+            }
+        }
+        self.class_param_bounds.insert(key.to_string(), bounds);
+    }
+
+    /// The class's bounds at `args`, the type arguments standing for its
+    /// parameters (by `generic_type_ctors` order); empty when it has none.
+    fn class_param_bounds_at(&self, key: &str, args: &[Ty]) -> Vec<Constraint> {
+        let Some(bounds) = self.class_param_bounds.get(key) else {
+            return Vec::new();
+        };
+        let names = self
+            .generics
+            .generic_type_ctors
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
+        let map: HashMap<String, Ty> = names.into_iter().zip(args.iter().cloned()).collect();
+        bounds
+            .iter()
+            .map(|c| Constraint {
+                class: c.class.clone(),
+                args: c.args.iter().map(|a| subst_ty_params(a, &map)).collect(),
+            })
+            .collect()
+    }
+
     fn restore_generic_type_ctor(&mut self, name: &str, previous: Option<Vec<String>>) {
         match previous {
             Some(params) => {
@@ -3558,6 +3619,7 @@ impl Checker {
                 let key = self.qualify_module_name(name);
                 let _ = self.register_generic_type_ctor(&key, type_params);
                 let pushed = self.push_type_params_for_type_parsing(type_params);
+                self.register_class_param_bounds(&key, type_params, &range);
                 self.register_class(name, fields, &range);
                 if !invariants.is_empty() {
                     self.infer_class_invariants(&key, type_params, invariants);
@@ -4190,6 +4252,7 @@ impl Checker {
                 .unwrap_or_default();
             // Freshen field types at each `new` site so independent
             // instantiations don't share type variables.
+            let mut bound_goals: Vec<Constraint> = Vec::new();
             let (field_tys, result_ty) = if param_names.is_empty() {
                 (
                     fields.iter().map(|(_, _, t)| t.clone()).collect::<Vec<_>>(),
@@ -4207,6 +4270,11 @@ impl Checker {
                     .iter()
                     .map(|(_, _, t)| subst_ty_params(t, &map))
                     .collect();
+                // `class Sorted<T: Ord>`: the bound holds at every
+                // construction, checked once the arguments have unified
+                // (#2085). No dictionary is recorded: the class's methods
+                // take theirs at their own call sites.
+                bound_goals = self.class_param_bounds_at(&class_name, &app_args);
                 (
                     field_tys,
                     Ty::App(Box::new(Ty::Con(class_name.clone())), app_args),
@@ -4217,7 +4285,9 @@ impl Checker {
             // they name, after any positional prefix.
             if provided.iter().any(|a| matches!(a.1.as_ref(), Expression::NamedArg(..))) {
                 let names: Vec<&str> = fields.iter().map(|(_, n, _)| n.as_str()).collect();
-                return self.infer_named_instantiate(&class_name, &names, &field_tys, provided, result_ty, range);
+                let ty = self.infer_named_instantiate(&class_name, &names, &field_tys, provided, result_ty, range.clone());
+                self.discharge_constraints(None, &bound_goals, &range);
+                return ty;
             }
             if provided.len() != fields.len() {
                 let _ = self.error_with_help(
@@ -4228,7 +4298,7 @@ impl Checker {
                         fields.len(),
                         provided.len()
                     ),
-                    range,
+                    range.clone(),
                     Some("pass one argument per class field, in declaration order".to_string()),
                 );
             } else {
@@ -4245,6 +4315,7 @@ impl Checker {
                     );
                 }
             }
+            self.discharge_constraints(None, &bound_goals, &range);
             return apply_ty_prune(&self.subst, &result_ty);
         }
         Ty::Con(class_name)
@@ -7222,6 +7293,18 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// Retry the call-site goals deferred since `mark` (`deferred_goals`):
+    /// the body's later statements may have pinned their variables; one
+    /// still open resolves or reports as it would have at the call.
+    pub(super) fn check_deferred_goals(&mut self, mark: usize) {
+        let goals: Vec<_> = self.deferred_goals.drain(mark..).collect();
+        let prev = std::mem::replace(&mut self.retrying_deferred_goals, true);
+        for (call_id, constraints, range) in goals {
+            self.discharge_constraints(call_id, &constraints, &range);
+        }
+        self.retrying_deferred_goals = prev;
     }
 
     /// E0119 for each operand noted since `mark` whose type the function
@@ -10697,7 +10780,7 @@ impl Checker {
         constraints: &[Constraint],
         range: &Range<usize>,
     ) {
-        for c in constraints {
+        for (i, c) in constraints.iter().enumerate() {
             let resolved_args: Vec<Ty> = c
                 .args
                 .iter()
@@ -10741,6 +10824,20 @@ impl Checker {
                             .push(dict_index);
                     }
                     continue;
+                }
+                // Every argument open (`Ord<a>` at `let h: Heap<int> =
+                // Heap::new()`) and several instances match: a later
+                // statement may still pin `a`, so the enclosing body retries
+                // this goal and the ones after it (their dictionaries stay
+                // in call order) before searching would report (#2085).
+                if self.fn_body_depth > 0
+                    && !self.retrying_deferred_goals
+                    && resolved_args.iter().all(|a| matches!(a, Ty::Var(_)))
+                    && self.matching_instances(&c.class, &resolved_args).len() > 1
+                {
+                    self.deferred_goals
+                        .push((call_id, constraints[i..].to_vec(), range.clone()));
+                    return;
                 }
                 // Partially open (e.g. `Convert<int, β>`): unify against
                 // registered instances so free args get pinned by the match.
@@ -11188,6 +11285,34 @@ impl Checker {
         wanted: &[Ty],
         range: &Range<usize>,
     ) -> Result<Option<InstanceDef>, ()> {
+        let mut matches = self.matching_instances(class, wanted);
+        match matches.len() {
+            0 => Ok(None),
+            1 => {
+                let (inst, local, fresh_vars) = matches.pop().expect("one match");
+                self.absorb(local);
+                // Its methods' `weak()` calls on the head's parameters (#1670).
+                self.weak_checks.record_instance(fresh_vars, range);
+                Ok(Some(inst))
+            }
+            _ => {
+                let first = &matches[0].0;
+                let second = &matches[1].0;
+                self.report_ambiguous_instance(class, wanted, first, second, range);
+                Err(())
+            }
+        }
+    }
+
+    /// The instances of `class` whose head unifies with `wanted`, each
+    /// with the unifier and its freshened variables; nothing is bound.
+    /// A ground goal another instance meets does not take the arity-wide
+    /// tuple instance (#1479) or a shape's (`Length<Vec<a>>`, #1542).
+    fn matching_instances(
+        &mut self,
+        class: &str,
+        wanted: &[Ty],
+    ) -> Vec<(InstanceDef, Subst, FreshVars)> {
         self.ensure_structural_instance(class, wanted);
         let wanted_lookup = self.instance_lookup_args(class, wanted);
         let candidates: Vec<_> = self
@@ -11266,28 +11391,10 @@ impl Checker {
                 }
             }
         }
-        // A goal another instance meets does not take the arity-wide tuple
-        // instance (#1479) or a shape's (`Length<Vec<a>>`, #1542): a ground
-        // tuple has its own.
         if matches.is_empty() {
             matches = structural;
         }
-        match matches.len() {
-            0 => Ok(None),
-            1 => {
-                let (inst, local, fresh_vars) = matches.pop().expect("one match");
-                self.absorb(local);
-                // Its methods' `weak()` calls on the head's parameters (#1670).
-                self.weak_checks.record_instance(fresh_vars, range);
-                Ok(Some(inst))
-            }
-            _ => {
-                let first = &matches[0].0;
-                let second = &matches[1].0;
-                self.report_ambiguous_instance(class, wanted, first, second, range);
-                Err(())
-            }
-        }
+        matches
     }
 
     fn report_ambiguous_instance(
@@ -14519,9 +14626,11 @@ impl Checker {
         self.push_scope();
         let (open_mark, mixed_mark) = (self.open_operands.len(), self.mixed_literals.len());
         let empty_mark = self.open_empty_arrays.len();
+        let goals_mark = self.deferred_goals.len();
         self.fn_body_depth += 1;
         let _ = self.infer(body);
         self.fn_body_depth -= 1;
+        self.check_deferred_goals(goals_mark);
         self.check_mixed_literals(mixed_mark);
         self.check_open_operands(open_mark);
         self.check_open_empty_arrays(empty_mark);
