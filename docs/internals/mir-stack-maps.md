@@ -42,8 +42,7 @@ and relocate mapped slots on collect.
   `try_build_draft`, and unmapped allocating bodies stayed stack-lowered;
   both are gone.)
 - Mapped **preheader** and **in-loop** `Make*` may take dense (S2d / S2l,
-  [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)); dense keeps such a body
-  only when it wins the cost gate against the body's LIR form.
+  [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
   rewritten if a live object address changes. Cranelift (P5) stays parked.
 - **Precise frames** (archive **minor 21**). A

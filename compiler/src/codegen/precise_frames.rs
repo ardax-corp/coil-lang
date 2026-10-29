@@ -106,6 +106,10 @@ pub fn bind_precise_frames(
                 };
                 let seed = EntrySeed {
                     prologue_entry: prologue_entry as usize,
+                    setup_end: (!starts.contains(&prologue_entry))
+                        .then(|| starts.iter().find(|&&s| s > prologue_entry))
+                        .flatten()
+                        .map(|&s| s as usize),
                     declared,
                     params,
                 };
@@ -772,7 +776,18 @@ fn analyze_body(
     indirect_one_word: bool,
 ) -> Option<Vec<SlotMap>> {
     let (entry, end) = (entry as usize, end as usize);
-    let (arity, coroutine) = entry_arity(bytecode, constants, entry, seed)?;
+    let (arity, coroutine) = entry_arity(bytecode, constants, entry, seed).or_else(|| {
+        entered_from_setup(
+            bytecode,
+            constants,
+            match_arities,
+            entry,
+            seed,
+            ret_ptr,
+            indirect_one_word,
+        )
+        .then_some((0, false))
+    })?;
     let body = Body {
         bytecode,
         constants,
@@ -782,6 +797,7 @@ fn analyze_body(
         params: (!coroutine && seed.params.len() == arity).then_some(&seed.params[..]),
         ret_ptr,
         indirect_one_word,
+        handoff: None,
     };
     let mut merged: std::collections::BTreeMap<usize, std::collections::BTreeSet<u16>> =
         std::collections::BTreeMap::new();
@@ -861,6 +877,9 @@ struct Body<'a> {
     /// No `CallIndirect` target returns two words
     /// ([`indirect_returns_one_word`]).
     indirect_one_word: bool,
+    /// A PC past the body that control may leave to with an empty frame
+    /// (setup's `JMP` to `main`).
+    handoff: Option<usize>,
 }
 
 impl Body<'_> {
@@ -913,6 +932,9 @@ impl Body<'_> {
                 .chain(step.jump.map(|t| (t, jump_state)));
             for (succ, out) in edges {
                 if succ < entry || succ >= end {
+                    if Some(succ) == self.handoff && out.hi == 0 {
+                        continue;
+                    }
                     return None;
                 }
                 match states.get_mut(&succ) {
@@ -1113,6 +1135,9 @@ impl Body<'_> {
 struct EntrySeed {
     /// The prologue `JMP` target (`main` or setup).
     prologue_entry: usize,
+    /// End of the setup code (static inits, FFI, finalizer registry) when
+    /// the prologue jumps there rather than to a body: the first body after it.
+    setup_end: Option<usize>,
     /// Codegen's entry height (params, `self`, dictionaries) for this body.
     declared: Option<usize>,
     /// Must-pointer parameters from the signature (used only when their
@@ -1199,6 +1224,52 @@ fn entry_arity(
         (None, None) if referenced && !code_ref => None,
         (None, None) => seed.declared.map(|a| (a.max(closure_words), false)),
     }
+}
+
+/// `main` after setup: the prologue enters the setup code only, every
+/// transfer into `entry` is a jump from that code, and the setup leaves the
+/// frame empty on each of them. `main` then starts at height `0` in the same
+/// frame; the words setup wrote above it are dead (never read before a store).
+fn entered_from_setup(
+    bytecode: &[Byte],
+    constants: &[u64],
+    match_arities: &HashMap<u32, u32>,
+    entry: usize,
+    seed: &EntrySeed,
+    ret_ptr: &HashMap<u32, bool>,
+    indirect_one_word: bool,
+) -> bool {
+    let Some(setup_end) = seed.setup_end else {
+        return false;
+    };
+    let setup = seed.prologue_entry;
+    if entry == setup || !entered_by_prologue_only(bytecode, constants, setup) {
+        return false;
+    }
+    let inbound = inbound_targets(bytecode, constants);
+    let mut into_entry = inbound.iter().filter(|&&(_, to)| to as usize == entry);
+    let from_setup_jumps = into_entry.clone().all(|&(from, _)| {
+        let from = from as usize;
+        (setup..setup_end).contains(&from)
+            && bytecode
+                .get(from)
+                .is_some_and(|b| jump_target(b, constants) == Some(entry))
+    });
+    if !from_setup_jumps || into_entry.next().is_none() {
+        return false;
+    }
+    let body = Body {
+        bytecode,
+        constants,
+        match_arities,
+        entry: setup,
+        end: setup_end,
+        params: None,
+        ret_ptr,
+        indirect_one_word,
+        handoff: Some(entry),
+    };
+    body.analyze_from(setup, 0, false).is_some()
 }
 
 /// A resume pushes the sent value when the op it resumes at stores it.
@@ -1574,7 +1645,15 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             }
         }
         // Dense register ops write frame slots without moving the cursor.
-        DenseBin | DenseCmp => st.set(b.dense_abc_parts().1, false)?,
+        // A dense bit op builds or strips the heap-heap niche tag, as the
+        // stack ones do (see `BITAND | BITOR | XOR`): its result may still
+        // name an object when an operand did.
+        DenseBin => {
+            let (kind, dest, x, y) = b.dense_abc_parts();
+            let tag = matches!(kind, common::dense::IAND64 | common::dense::IOR64 | common::dense::IXOR64);
+            st.set(dest, tag && (st.bit(x) || st.bit(y)))?;
+        }
+        DenseCmp => st.set(b.dense_abc_parts().1, false)?,
         DenseUnary | DenseCast => st.set(b.dense_unary_parts().1, false)?,
         DenseConst => {
             let (_, dest, value, pooled) = b.dense_const_parts();
@@ -1820,6 +1899,25 @@ mod tests {
         // The result word of the allocating op is not a must-pointer at its
         // own safepoint (the collector runs before it is pushed).
         assert_eq!(must_at(&maps, 6), Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn dense_bit_op_keeps_a_tagged_heap_word() {
+        // `Result::Err(e)` of a heap niche is `e | 1`: on the dense tier an
+        // IOR64 into a register, which a collection must still see.
+        // [2] Seek 3 [3] DenseConst r1 = 1 [4] r2 = r0 | r1 [5] InitTyped
+        // [6] POP [7] DensePush r2 [8] RETURN
+        let maps = bind(&[
+            op(Instruction::Seek).with_operand_u32(3),
+            op(Instruction::DenseConst).with_dense_const(common::dense::TY_I64, 1, 1, false),
+            op(Instruction::DenseBin).with_dense_abc(common::dense::IOR64, 2, 0, 1),
+            op(Instruction::InitTyped),
+            op(Instruction::POP),
+            op(Instruction::DensePush).with_dense_move(1, 2),
+            op(Instruction::RETURN),
+        ]);
+        let at = slots_at(&maps, 5).expect("alloc recorded");
+        assert!(at.contains(&2), "the tagged word names the param's object: {at:?}");
     }
 
     #[test]

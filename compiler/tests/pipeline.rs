@@ -3724,9 +3724,10 @@ fn main() {
         .unwrap_or(bytecode.len());
     let main_code = &bytecode[start..end];
     assert!(
-        main_code
-            .iter()
-            .any(|byte| matches!(byte.bytecode(), common::Instruction::InitTyped)),
+        main_code.iter().any(|byte| matches!(
+            byte.bytecode(),
+            common::Instruction::InitTyped | common::Instruction::DenseMakeObject
+        )),
         "identity use must InitTyped once; opcodes: {:?}",
         main_code
             .iter()
@@ -3861,9 +3862,10 @@ fn main() {
         .unwrap_or(bytecode.len());
     let main_code = &bytecode[start..end];
     assert!(
-        main_code
-            .iter()
-            .any(|byte| matches!(byte.bytecode(), common::Instruction::InitTyped)),
+        main_code.iter().any(|byte| matches!(
+            byte.bytecode(),
+            common::Instruction::InitTyped | common::Instruction::DenseMakeObject
+        )),
         "drop class temp must allocate in main so the finalizer can run; opcodes: {:?}",
         main_code
             .iter()
@@ -3871,9 +3873,10 @@ fn main() {
             .collect::<Vec<_>>()
     );
     assert!(
-        main_code
-            .iter()
-            .any(|byte| matches!(byte.bytecode(), common::Instruction::LoadField)),
+        main_code.iter().any(|byte| matches!(
+            byte.bytecode(),
+            common::Instruction::LoadField | common::Instruction::DenseFieldLoad
+        )),
         "drop class temp must LoadField the heap instance; opcodes: {:?}",
         main_code
             .iter()
@@ -4273,16 +4276,18 @@ fn main() {
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    // The dense tier spells both as `DenseUnary` kinds.
+    let unary = |b: &common::Byte, kind: u8| {
+        *b.bytecode() == Instruction::DenseUnary && b.dense_unary_parts().0 == kind
+    };
     assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::NEGF)),
+        bytecode.iter().any(|b| matches!(b.bytecode(), Instruction::NEGF)
+            || unary(b, common::dense::UNARY_FNEG)),
         "expected NEGF for float aggregate negate"
     );
     assert!(
-        !bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::NEG)),
+        !bytecode.iter().any(|b| matches!(b.bytecode(), Instruction::NEG)
+            || unary(b, common::dense::UNARY_NEG)),
         "float aggregate negate must not emit int NEG"
     );
     assert_eq!(

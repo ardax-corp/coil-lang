@@ -1538,26 +1538,6 @@ fn main() {
 }
 
 #[test]
-fn pipeline_refuses_straight_line_when_cost_loses() {
-    let src = r#"
-fn eval_a(int i, int j) -> int {
-    return i + j * 2;
-}
-fn main() {
-    let _ = eval_a(1, 2);
-}
-"#;
-    let mut p = crate::Pipeline::new();
-    let (bc, constants) = p.compile_src(src).expect("compile below-gate i64");
-    assert!(
-        !bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
-        "tiny straight-line helper loses the dense cost gate vs fuse-IL"
-    );
-    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
-    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-}
-
-#[test]
 fn pipeline_i8_compare_diamond_stays_not_dense() {
     let src = r#"
 fn pick(int a, int b, bool c) -> int {
@@ -1768,8 +1748,8 @@ fn main() {
 
 #[test]
 fn pipeline_recursive_work_loop_is_dense() {
-    // Tight tak/fib leafs convoy CALL on the operand stack (B2) so they
-    // can win the cost gate without a prologue Seek. A self-recursive
+    // Tight tak/fib leafs convoy CALL on the operand stack (B2), with no
+    // prologue Seek. A self-recursive
     // body with a counted loop still densifies + typed CALL (Q7).
     let src = r#"
 fn rec(int n) -> int {
@@ -2221,7 +2201,7 @@ fn main() {
     let dense = bc.iter().any(|b| is_dense_bin_op(*b.bytecode()));
     assert!(
         dense,
-        "nbody eval_a beats the dense cost gate and emits DenseBin"
+        "nbody eval_a takes dense and emits DenseBin"
     );
 }
 
@@ -2582,7 +2562,7 @@ fn main() {
 }
 
 #[test]
-fn s2c_mapped_pair_helper_takes_lir() {
+fn s2c_mapped_pair_helper_maps_its_alloc() {
     let src = r#"
 fn pair(int a, int b) -> [int; 2] {
     return [a, b];
@@ -2613,16 +2593,12 @@ fn main() {
     assert!(
         pair_bc
             .iter()
-            .any(|b| *b.bytecode() == Instruction::MakeArray),
-        "pair keeps MakeArray; opcodes={:?}",
+            .any(|b| matches!(*b.bytecode(), Instruction::MakeArray | Instruction::DenseMake)),
+        "pair still builds its array; opcodes={:?}",
         pair_bc
             .iter()
             .map(|b| b.bytecode().mnemonic())
             .collect::<Vec<_>>()
-    );
-    assert!(
-        pair_bc.iter().all(|b| !is_dense_bin_op(*b.bytecode())),
-        "S3: pair stays LIR MakeArray (not dense+match)"
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -3460,7 +3436,7 @@ fn is_jmpt(op: Instruction) -> bool {
     )
 }
 
-/// A format loop may take dense (the cost gate decides); either way it runs
+/// A format loop may take dense or LIR; either way it runs
 /// the shipped `FORMAT` opcode and keeps a safepoint map at it.
 #[test]
 fn pipeline_format_loop_keeps_format_opcode() {
@@ -5329,4 +5305,45 @@ fn main() {
     assert!(moves <= 6, "arm results should land in the join register; moves={moves}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+}
+
+/// `**` runs on the dense tier like the other arithmetic: a numeric loop
+/// with a float and an int power stays dense, with no stack `PowF` / `Pow`.
+#[test]
+fn pipeline_dense_takes_pow() {
+    let src = r#"
+fn powers(float base, int e, int n) -> float {
+    let s = 0.0;
+    let k = 0;
+    while k < n {
+        s = s + base ** (k as float) + ((k ** e) as float);
+        k = k + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = powers(2.0, 2, 4);
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
+    let (bc, constants) = p.compile_src(src).expect("compile pow kernel");
+    let symbols = p.program_debug().fn_symbols;
+    let body = fn_ops(&bc, &symbols, "powers");
+    assert!(
+        body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
+        "pow kernel must emit DenseBin: {:?}",
+        body.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+    );
+    assert!(
+        !body
+            .iter()
+            .any(|b| matches!(*b.bytecode(), Instruction::PowF | Instruction::Pow)),
+        "pow kernel must not fall back to stack Pow: {:?}",
+        body.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+    );
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked());
 }

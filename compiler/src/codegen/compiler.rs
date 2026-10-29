@@ -439,6 +439,12 @@ impl Compiler {
         self.opt_options.hir_pair_locals = on;
     }
 
+    /// Let MIR bodies take the dense tier (the default), or lower every
+    /// body through LIR.
+    pub fn set_mir_dense(&mut self, on: bool) {
+        self.opt_options.mir_dense = on;
+    }
+
     /// Apply an [`crate::OptLevel`] preset to IL opts and inlining budgets.
     /// The switches no level sets keep their values.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
@@ -8802,14 +8808,17 @@ impl Compiler {
     }
 
     /// Pure calls with constant arguments in the finalized code, as
-    /// `(pc of the CALL, its arity, the call)`: a `CALL` to a function
-    /// [`Self::fold_fns`] lists, one word back, whose arguments are the
-    /// `CONST` / `STRING` words right before it with no branch landing
-    /// among them (so they are its arguments on every path). A call to an
+    /// `(pc of the CALL, the argument words before it, the call)`: a `CALL`
+    /// to a function [`Self::fold_fns`] lists, one word back, whose
+    /// arguments are the `CONST` / `STRING` words right before it, or a
+    /// dense `DensePush` of registers the `DenseConst`s right before it set,
+    /// with no branch landing among them (so they are its arguments on every
+    /// path). Folding clears the argument words; a dense call's registers
+    /// keep their constants. A call to an
     /// auto-par worker computes the function it runs (its last argument is
     /// the worker's depth).
     pub fn fold_sites(&self) -> Vec<(usize, usize, crate::macros::FoldCall)> {
-        use crate::macros::{FoldCall, FoldValue};
+        use crate::macros::FoldCall;
         // A call computed at compile time drops its values there, so a
         // program with a `fn drop()` would miss those finalizers.
         if self.fold_fns.is_empty() || self.checker.any_drop() {
@@ -8841,27 +8850,86 @@ impl Compiler {
             let Some(&(entry, text, worker)) = entries.get(&target) else {
                 continue;
             };
-            if arity > pc || (worker && arity == 0) || targets[pc + 1 - arity..=pc].iter().any(|&t| t) {
+            if worker && arity == 0 {
                 continue;
             }
-            let args: Option<Vec<FoldValue>> = code[pc - arity..pc]
-                .iter()
-                .map(|w| match *w.bytecode() {
-                    Instruction::CONST => Some(FoldValue::Word(w.constant(&self.constants))),
-                    Instruction::STRING => self.strings.get(w.operand_u32() as usize).cloned().map(FoldValue::Text),
-                    _ => None,
-                })
-                .collect();
-            let Some(mut args) = args else { continue };
+            let Some((words, mut args)) = self
+                .stack_fold_args(code, &targets, pc, arity)
+                .or_else(|| self.dense_fold_args(code, &targets, pc, arity))
+            else {
+                continue;
+            };
             if worker {
                 args.pop();
             }
-            out.push((pc, arity, FoldCall { entry: entry as u32, args, text }));
+            out.push((pc, words, FoldCall { entry: entry as u32, args, text }));
         }
         out
     }
 
-    /// Replace each folded call (`(pc of the CALL, arity, value)`, from
+    /// The `CONST` / `STRING` words right before the `CALL` at `pc`.
+    fn stack_fold_args(
+        &self,
+        code: &[Byte],
+        targets: &[bool],
+        pc: usize,
+        arity: usize,
+    ) -> Option<(usize, Vec<crate::macros::FoldValue>)> {
+        use crate::macros::FoldValue;
+        if arity > pc || targets[pc + 1 - arity..=pc].iter().any(|&t| t) {
+            return None;
+        }
+        let args = code[pc - arity..pc]
+            .iter()
+            .map(|w| match *w.bytecode() {
+                Instruction::CONST => Some(FoldValue::Word(w.constant(&self.constants))),
+                Instruction::STRING => self.strings.get(w.operand_u32() as usize).cloned().map(FoldValue::Text),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some((arity, args))
+    }
+
+    /// A dense call's arguments: `DenseConst`s right before the
+    /// `DensePush` that feeds the `CALL` at `pc`, one per pushed register.
+    /// Only the push is an argument word.
+    fn dense_fold_args(
+        &self,
+        code: &[Byte],
+        targets: &[bool],
+        pc: usize,
+        arity: usize,
+    ) -> Option<(usize, Vec<crate::macros::FoldValue>)> {
+        use crate::macros::FoldValue;
+        let push = code.get(pc.checked_sub(1)?)?;
+        if *push.bytecode() != Instruction::DensePush || arity == 0 || arity + 1 > pc {
+            return None;
+        }
+        let (n, base) = push.dense_move_parts();
+        if n != arity || targets[pc - 1 - arity..=pc].iter().any(|&t| t) {
+            return None;
+        }
+        let mut args = vec![None; arity];
+        for w in &code[pc - 1 - arity..pc - 1] {
+            if *w.bytecode() != Instruction::DenseConst {
+                return None;
+            }
+            let (ty, dest, payload, pool) = w.dense_const_parts();
+            let slot = args.get_mut(dest.checked_sub(base)?)?;
+            if slot.is_some() || !matches!(ty, common::dense::TY_I64 | common::dense::TY_F64) {
+                return None;
+            }
+            let raw = if pool {
+                *self.constants.get(payload as usize)?
+            } else {
+                payload as i16 as i64 as u64
+            };
+            *slot = Some(FoldValue::Word(raw));
+        }
+        Some((1, args.into_iter().collect::<Option<Vec<_>>>()?))
+    }
+
+    /// Replace each folded call (`(pc of the CALL, argument words, value)`, from
     /// [`Self::fold_sites`]) with its value: its argument words become
     /// `NOOP`s and the `CALL` a `CONST` or `STRING`.
     pub fn apply_call_folds(&mut self, folds: &[(usize, usize, crate::macros::FoldValue)]) {
@@ -8885,8 +8953,8 @@ impl Compiler {
         let Some(code) = self.bytecode.lowered_mut() else {
             return;
         };
-        for ((pc, arity, _), word) in folds.iter().zip(words) {
-            for w in &mut code[pc - arity..*pc] {
+        for ((pc, n, _), word) in folds.iter().zip(words) {
+            for w in &mut code[pc - n..*pc] {
                 *w = Byte::new(Instruction::NOOP);
             }
             code[*pc] = word;
