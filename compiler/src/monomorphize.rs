@@ -1403,6 +1403,30 @@ mod tests {
         assert!(plan.specializations.is_empty());
     }
 
+    #[test]
+    fn plans_one_clone_per_ground_type_past_eight() {
+        let classes: String = (0..20).map(|i| format!("class C{i} {{ pub v: int, }} ")).collect();
+        let calls: String = (0..20).map(|i| format!("id(new C{i}({i})); ")).collect();
+        let plan = plan(&format!("{classes} fn id<T>(T x) -> T {{ return x; }} fn main() {{ {calls} }}"));
+        assert_eq!(plan.specializations.len(), 20, "{plan:?}");
+        assert!(plan.cap_hits.is_empty(), "{:?}", plan.cap_hits);
+    }
+
+    #[test]
+    fn mutual_polymorphic_recursion_stops_at_the_first_repeat() {
+        // `f<int>` -> `g<(int, int)>` -> `f<((int, int), int)>` -> ... grows
+        // without end; the repeat of `f` on its own chain takes the shared body.
+        let plan = plan(
+            "fn f<T>(T x, int n) -> int { if n == 0 { return 0; } return 1 + g((x, 1), n - 1); } \
+             fn g<T>(T x, int n) -> int { if n == 0 { return 0; } return 1 + f((x, 2), n - 1); } \
+             fn main() { f(1, 20); }",
+        );
+        let names: Vec<_> = plan.specializations.iter().map(|s| s.fn_name.as_str()).collect();
+        assert_eq!(names, ["f", "g"], "{plan:?}");
+        assert_eq!(plan.cap_hits.len(), 1, "{:?}", plan.cap_hits);
+        assert_eq!(plan.cap_hits[0].fn_name, "f");
+    }
+
     fn dummy_candidate(i: usize, def: u32, fn_name: &str) -> MonoCandidate {
         MonoCandidate {
             value: false,
