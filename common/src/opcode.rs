@@ -578,6 +578,10 @@ pub mod dense {
     pub const FMUL32: u8 = 22;
     pub const FDIV32: u8 = 23;
     pub const FREM32: u8 = 24;
+    /// `a ** b` on `i64` (traps like `Pow`) and on `f64` (`powf`, like
+    /// `PowF`). Archive 6.4.
+    pub const IPOW64: u8 = 25;
+    pub const FPOW64: u8 = 26;
 
     pub const CMP_I64: u8 = 0;
     pub const CMP_F64: u8 = 1;
@@ -662,6 +666,8 @@ pub mod dense {
             FMUL32 => "FMUL32",
             FDIV32 => "FDIV32",
             FREM32 => "FREM32",
+            IPOW64 => "IPOW64",
+            FPOW64 => "FPOW64",
             _ => "DenseBin?",
         }
     }

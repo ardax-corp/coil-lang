@@ -27,6 +27,8 @@ pub fn eval_bin(kind: u8, a: Value, b: Value) -> Result<Value, IntTrap> {
         dense::FMUL64 => f64_op(FloatOp::Mul),
         dense::FDIV64 => f64_op(FloatOp::Div),
         dense::FREM64 => f64_op(FloatOp::Rem),
+        dense::IPOW64 => return i64_op(IntOp::Pow),
+        dense::FPOW64 => f64_op(FloatOp::Pow),
         // The 32-bit lanes are wire ISA (minor 6); no compiler emits them.
         dense::IADD32 => return i32_bin(a, b, i32::checked_add),
         dense::ISUB32 => return i32_bin(a, b, i32::checked_sub),
