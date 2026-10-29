@@ -155,6 +155,9 @@ pub fn try_specialize_body_side(
     if let Some(why) = func.emit_refusal {
         return refuse_dense(why);
     }
+    if !opts.mir_dense {
+        return refuse_dense("dense tier off");
+    }
     let mut direct_side = BodySidecar::default();
     let mut direct_pool = pool.clone();
     let out = specialize_side(fallback, labels, name, &mut direct_pool, calls, official_entry, func, &mut direct_side, opts)?;

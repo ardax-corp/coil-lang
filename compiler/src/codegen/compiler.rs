@@ -439,6 +439,12 @@ impl Compiler {
         self.opt_options.hir_pair_locals = on;
     }
 
+    /// Let MIR bodies take the dense tier (the default), or lower every
+    /// body through LIR.
+    pub fn set_mir_dense(&mut self, on: bool) {
+        self.opt_options.mir_dense = on;
+    }
+
     /// Apply an [`crate::OptLevel`] preset to IL opts and inlining budgets.
     /// The switches no level sets keep their values.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {

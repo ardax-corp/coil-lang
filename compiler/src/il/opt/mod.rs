@@ -56,6 +56,10 @@ pub struct OptimizeOptions {
     /// An enum local built in place lives in two slots when its type is a
     /// two-word pair. Always on; unit tests turn it off.
     pub hir_pair_locals: bool,
+    /// MIR bodies may take the dense (register) tier; off, every body
+    /// lowers through LIR. Always on; unit tests of LIR lowering turn it
+    /// off.
+    pub mir_dense: bool,
     /// Lower only the first `N` bodies HIR lowering admits (per process)
     /// and name the `N`th on stderr, to bisect a miscompile.
     /// `COIL_HIR_BISECT=N`; `None` (unset) lowers every body.
