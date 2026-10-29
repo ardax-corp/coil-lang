@@ -1,8 +1,8 @@
 //! Stack-convoy reconstruct for dense `CALL` / `TailCall` (COI-340 B2).
 //!
-//! Tight recursive leafs lose the cost gate when every SSA value gets a
-//! unique slot, a prologue `Seek`, `DensePush`, and a `STORE` after each
-//! `CALL`. Values that only feed a same-block call / return stay on the
+//! Tight recursive leafs run slower than their LIR form when every SSA
+//! value gets a unique slot, a prologue `Seek`, `DensePush`, and a `STORE`
+//! after each `CALL`. Values that only feed a same-block call / return stay on the
 //! operand stack — the fuse-IL convoy — so Seek is skipped when only
 //! param slots are live.
 
@@ -10,7 +10,7 @@ use crate::il::Label;
 
 use super::emit_common::term_uses;
 use super::func::MirFunc;
-use super::inst::{BlockId, MirConst, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, MirAllocKind, MirConst, MirInst, Terminator, ValueId};
 
 pub(super) struct ConvoyPlan {
     pub need_slot: Vec<bool>,
@@ -109,9 +109,10 @@ impl ConvoyPlan {
             if rematerialize_const(func, &def[i]) && !keep[i] {
                 continue;
             }
-            // A `ClearWord` / `KeepAlive` token is never written or read.
+            // A `ClearWord` / `KeepAlive` / `PanicStore` token is never
+            // written or read.
             let token = def[i].is_some_and(|(b, k)| {
-                matches!(func.block(b).insts.get(k), Some(MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
+                matches!(func.block(b).insts.get(k), Some(MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } | MirInst::PanicStore { .. }))
             });
             if !token && (def[i].is_some() || def_block[i].is_some()) {
                 need_slot[i] = true;
@@ -191,29 +192,6 @@ impl ConvoyPlan {
             }
         }
 
-        // Boxed match parks payloads in slots. Self-CALL dests must not stay
-        // B2-convoy there: unassigned dest regs are 0, so rematerialized
-        // `1 + item_check(left) + item_check(right)` would LOAD the param.
-        let has_match_payload = func.blocks.iter().any(|b| {
-            b.insts
-                .iter()
-                .any(|i| matches!(i, MirInst::MatchPayload { .. }))
-        });
-        if has_match_payload {
-            for block in &func.blocks {
-                for inst in &block.insts {
-                    if is_tail_call_inst(func, block, inst) {
-                        continue;
-                    }
-                    if let MirInst::Call { dest, dest_hi, .. } = inst {
-                        need_slot[dest.index()] = true;
-                        if let Some(hi) = dest_hi {
-                            need_slot[hi.index()] = true;
-                        }
-                    }
-                }
-            }
-        }
         ConvoyPlan {
             need_slot,
             def,
@@ -256,11 +234,14 @@ fn park_self_call_beside_slot(
             let MirInst::Bin { lhs, rhs, .. } = inst else {
                 continue;
             };
-            for (call_v, other) in [(*lhs, *rhs), (*rhs, *lhs)] {
+            // A call result on the left is TOS when the right operand is
+            // pushed after it; only a right-hand result needs the left
+            // operand under it.
+            for (call_v, other) in [(*rhs, *lhs)] {
                 if !convoy.get(call_v.index()).copied().unwrap_or(false) {
                     continue;
                 }
-                if is_self_call_value(func, def, other, entry) {
+                if is_self_call_value(func, def, other, entry) || folds_before(func, def, other, call_v, entry) {
                     continue;
                 }
                 if is_self_call_value(func, def, call_v, entry) {
@@ -272,6 +253,38 @@ fn park_self_call_beside_slot(
     for i in park {
         convoy[i] = false;
     }
+}
+
+/// `other` is `g(..) op k` (`k` a constant or parameter) defined ahead of
+/// `call_v` in its block: emit folds it on the first result while that is
+/// TOS, so `call_v` lands on top of it.
+fn folds_before(
+    func: &MirFunc,
+    def: &[Option<(BlockId, usize)>],
+    other: ValueId,
+    call_v: ValueId,
+    entry: Option<Label>,
+) -> bool {
+    let (Some((b, i)), Some((cb, ci))) = (def[other.index()], def[call_v.index()]) else {
+        return false;
+    };
+    if b != cb || i >= ci {
+        return false;
+    }
+    let Some(MirInst::Bin { lhs, rhs, .. }) = func.block(b).insts.get(i) else {
+        return false;
+    };
+    let plain = |v: ValueId| {
+        func.params.contains(&v)
+            || def[v.index()].is_some_and(|(vb, vi)| matches!(func.block(vb).insts.get(vi), Some(MirInst::Const { .. })))
+    };
+    is_self_call_value(func, def, *lhs, entry) && plain(*rhs)
+}
+
+/// A make the stack builds as LIR does (`MakeArray` / `MakeTuple` /
+/// `MakeEnum`), so a returned one fuses into `MakeEnumReturn`.
+fn stack_make(kind: MirAllocKind) -> bool {
+    matches!(kind, MirAllocKind::Array | MirAllocKind::Tuple | MirAllocKind::Enum { .. })
 }
 
 fn is_self_call_value(
@@ -361,8 +374,14 @@ fn is_convoy_shape(
     match kind {
         Some(MirInst::Const { .. } | MirInst::Bin { .. }) => {}
         Some(inst) if is_self_call_inst(inst, entry) => {}
+        // Built where the return reads it, so nothing may run between
+        // (a `ClearWord` there would zero an element first).
+        Some(MirInst::Alloc { kind, .. })
+            if stack_make(*kind)
+                && def[v.index()].is_some_and(|(b, i)| i + 1 == func.block(b).insts.len()) => {}
         _ => return false,
     }
+    let is_make = matches!(kind, Some(MirInst::Alloc { .. }));
     let is_call = kind.is_some_and(|inst| is_self_call_inst(inst, entry));
     let is_join = matches!(kind, Some(MirInst::Bin { lhs, rhs, .. }) if {
         is_call_like(func, def, *lhs, convoy, entry)
@@ -378,7 +397,7 @@ fn is_convoy_shape(
                 if block.id != home {
                     return false;
                 }
-                if !consumer_keeps_tos(func, inst, convoy, entry) {
+                if !consumer_keeps_tos(func, v, inst, convoy, entry) {
                     return false;
                 }
                 saw = true;
@@ -389,7 +408,7 @@ fn is_convoy_shape(
                 if block.id != home {
                     return false;
                 }
-                if !return_keeps_tos(term, v, is_call, is_join, func, def, entry) {
+                if !return_keeps_tos(term, v, is_call || is_make, is_join, func, def, entry) {
                     return false;
                 }
                 saw = true;
@@ -411,12 +430,37 @@ fn return_keeps_tos(
 ) -> bool {
     match term {
         Terminator::Return { lo: Some(x), hi: None } if *x == v => is_call || is_join,
+        // `return Some(x + 1)`: the sum, then the constant tag, both
+        // built where the return pushes them.
+        Terminator::Return {
+            lo: Some(lo),
+            hi: Some(hi),
+        } if *lo == v && *hi != v && plain_bin(func, def, v, entry) && is_const(func, def, *hi) => true,
         Terminator::Return {
             lo: Some(lo),
             hi: Some(hi),
         } if *lo == v || *hi == v => same_self_call_pair(func, def, *lo, *hi, entry),
         _ => false,
     }
+}
+
+/// A `Bin` rebuilt from slots and constants: no operand is a one-word
+/// self-call result (a two-word one is parked whole, below).
+fn plain_bin(func: &MirFunc, def: &[Option<(BlockId, usize)>], v: ValueId, entry: Option<Label>) -> bool {
+    let Some((b, i)) = def[v.index()] else {
+        return false;
+    };
+    let slotted = |x: ValueId| {
+        !is_self_call_value(func, def, x, entry)
+            || def[x.index()].is_some_and(|(xb, xi)| {
+                matches!(func.block(xb).insts.get(xi), Some(MirInst::Call { dest_hi: Some(_), .. }))
+            })
+    };
+    matches!(func.block(b).insts.get(i), Some(MirInst::Bin { lhs, rhs, .. }) if slotted(*lhs) && slotted(*rhs))
+}
+
+fn is_const(func: &MirFunc, def: &[Option<(BlockId, usize)>], v: ValueId) -> bool {
+    def[v.index()].is_some_and(|(b, i)| matches!(func.block(b).insts.get(i), Some(MirInst::Const { .. })))
 }
 
 fn same_self_call_pair(
@@ -494,12 +538,16 @@ fn const_fits_i16(func: &MirFunc, def: &Option<(BlockId, usize)>) -> bool {
 
 fn consumer_keeps_tos(
     func: &MirFunc,
+    v: ValueId,
     inst: &MirInst,
     convoy: &[bool],
     entry: Option<Label>,
 ) -> bool {
     match inst {
         MirInst::Call { target, .. } if Some(*target) == entry => true,
+        // A returned make pushes its elements in order: a stacked call
+        // result can only be the first, already in place.
+        MirInst::Alloc { dest, elems, .. } if convoy[dest.index()] => elems.first() == Some(&v),
         MirInst::Bin { dest, .. }
             if convoy[dest.index()] || join_bin(func, *dest, convoy, entry) =>
         {

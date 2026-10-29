@@ -16,6 +16,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Numeric MIR](mir.md) | MIR: every body lowers from HIR to SSA; dense and LIR tiers; pass history (P1–P12, I1–I8) |
 | [MIR language islands](mir-islands.md) | Historical: COI-292 I0–I8 ladder that grew MIR coverage before every body went through MIR (M4/M5, 2026-10) |
 | [Int overflow](int-overflow.md) | Int `+ - * / % **` and negation give the exact result or panic; where the VM, folds, optimizations, auto-par, SIMD and packed kernels keep that |
+| [Locality and loop optimizations](locality.md) | `feature/locality`: vectorize nested and mixed loops, field scalar promotion, mod/ref summaries, array-order GC copying, prefetch, loop interchange; semantics rules and probe numbers |
 | [Escape facts and early freeing](escape-memory.md) | `feature/escape-memory`: escape summaries across calls, freeing at scope end, static uniqueness, nursery; the GC stays as backstop |
 | [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
 | [`if` expression](if-expression.md) | #1877: `if … else …` / `if let … else …` as a value; primary precedence like `match`; E0137 for a missing `else`; reuses the `If` / `Match` HIR |

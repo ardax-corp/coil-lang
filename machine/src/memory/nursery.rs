@@ -227,10 +227,17 @@ impl Heap {
         for &addr in &self.finalizable {
             reach(self, &mut gray, addr, true);
         }
+        // Young objects an array reached first, in index order: they are
+        // copied first, so a loop over the array reads its elements' copies
+        // one after another (locality step 5). The rest keep their nursery
+        // order. Marking pushes only what it newly marks, so an array's
+        // share of `gray` is its new elements in order.
+        let mut by_index: Vec<Object> = Vec::new();
         for &addr in &remembered {
             let Some(obj) = self.find_object_by_addr(addr) else {
                 continue;
             };
+            let at = gray.len();
             match obj {
                 // FFI code may hold a rooted object's address.
                 Object::Root(r) => {
@@ -244,9 +251,16 @@ impl Heap {
                 }
                 _ => obj.for_each_reference(self, &mut |a, p| reach(self, &mut gray, a, p)),
             }
+            if matches!(obj, Object::Array(_)) {
+                by_index.extend_from_slice(&gray[at..]);
+            }
         }
         while let Some(obj) = gray.pop() {
+            let at = gray.len();
             obj.for_each_reference(self, &mut |a, p| reach(self, &mut gray, a, p));
+            if matches!(obj, Object::Array(_)) {
+                by_index.extend_from_slice(&gray[at..]);
+            }
         }
         // Weak targets are raw words: a live one stays put, a dead one
         // clears its weak.
@@ -270,29 +284,25 @@ impl Heap {
 
         // Copy the survivors nothing ambiguous names.
         let mut fwd = AddrMap::default();
+        let mut ranges: Vec<(u64, u64)> = spans.iter().map(|&(_, first, end, _)| (first, end)).collect();
+        ranges.sort_unstable();
+        let in_use = |addr: u64| {
+            let i = ranges.partition_point(|&(first, _)| first <= addr);
+            i > 0 && addr < ranges[i - 1].1
+        };
+        for obj in by_index {
+            // A held survivor (pinned by an earlier minor) is young too but
+            // stays where it is.
+            if in_use(obj.addr()) {
+                self.copy_survivor(obj, &mut fwd, true);
+            }
+        }
+        let moved = !fwd.is_empty();
         for &(_, first, end, size) in &spans {
             for addr in slots(first, end, size) {
-                let Some(obj) = (unsafe { Object::from_header(addr) }) else {
-                    continue;
-                };
-                if !obj.is_marked() || obj.generation() & GEN_PINNED != 0 {
-                    continue;
+                if let Some(obj) = unsafe { Object::from_header(addr) } {
+                    self.copy_survivor(obj, &mut fwd, moved);
                 }
-                let Some(layout) = obj.movable_layout() else {
-                    obj.set_generation(obj.generation() | GEN_PINNED);
-                    continue;
-                };
-                let to = self.slab.alloc(layout);
-                // SAFETY: same size class; the young copy is poisoned in
-                // `minor_finish` and never dropped, so the payload (spill
-                // `Vec`s included) moves bitwise.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(addr as *const u8, to.as_ptr(), layout.size());
-                    let header = &*(to.as_ptr() as *const GcHeader);
-                    header.marked.set(false);
-                    header.generation.set(0);
-                }
-                fwd.insert(addr, to.as_ptr() as u64);
             }
         }
 
@@ -323,6 +333,32 @@ impl Heap {
             self.forward_side_lists(&fwd);
         }
         MinorPlan { fwd, remembered, spans }
+    }
+
+    /// Copy `obj`, a young survivor, to an old slot unless something
+    /// ambiguous names it or (`moved`: some object may have) it already
+    /// moved.
+    #[inline]
+    fn copy_survivor(&mut self, obj: Object, fwd: &mut AddrMap, moved: bool) {
+        let addr = obj.addr();
+        if !obj.is_marked() || obj.generation() & GEN_PINNED != 0 || moved && fwd.contains_key(&addr) {
+            return;
+        }
+        let Some(layout) = obj.movable_layout() else {
+            obj.set_generation(obj.generation() | GEN_PINNED);
+            return;
+        };
+        let to = self.slab.alloc(layout);
+        // SAFETY: same size class; the young copy is poisoned in
+        // `minor_finish` and never dropped, so the payload (spill `Vec`s
+        // included) moves bitwise.
+        unsafe {
+            std::ptr::copy_nonoverlapping(addr as *const u8, to.as_ptr(), layout.size());
+            let header = &*(to.as_ptr() as *const GcHeader);
+            header.marked.set(false);
+            header.generation.set(0);
+        }
+        fwd.insert(addr, to.as_ptr() as u64);
     }
 
     /// Poison the moved slots, reclaim the dead young objects, hold the
@@ -521,6 +557,33 @@ mod tests {
         heap.pretenure_bytes = 0;
         let young = cons_list(&mut heap, 1);
         assert_eq!(heap.find_object_by_addr(young).expect("young").generation(), GEN_YOUNG);
+    }
+
+    #[test]
+    fn a_minor_copies_an_arrays_young_elements_in_index_order() {
+        let mut heap = nursery_heap();
+        let mut made = Vec::new();
+        for v in 0..64 {
+            let (e, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(v)).with_kinds(1)), Object::Enum);
+            made.push(e.addr());
+        }
+        // The array holds them last allocated first.
+        let words = made.iter().rev().map(|&a| Value::from(a)).collect();
+        let (arr, mut gc) = heap.alloc(ObjArray::new(words), Object::Array);
+        gc.as_mut().set_elem_kind(common::WORD_POINTER);
+        let mut roots = [arr.addr()];
+        assert_eq!(minor(&mut heap, &[], &mut roots), 65);
+        let Some(Object::Array(a)) = heap.find_object_by_addr(roots[0]) else {
+            panic!("array moved");
+        };
+        let addrs: Vec<u64> = a.as_ref().iter().map(|w| w.heap_addr()).collect();
+        for (k, &addr) in addrs.iter().enumerate() {
+            let Some(Object::Enum(e)) = heap.find_object_by_addr(addr) else {
+                panic!("element {k} is not an enum");
+            };
+            assert_eq!(e.as_ref().payload[0].as_int(), 63 - k as i64);
+        }
+        assert!(addrs.windows(2).all(|w| w[0] < w[1]), "copies follow the array's order");
     }
 
     #[test]

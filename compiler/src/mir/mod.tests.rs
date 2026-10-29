@@ -887,6 +887,391 @@ fn main() {
 }
 
 #[test]
+fn pipeline_vectorizes_inner_loop_over_invariant_base() {
+    // `a[row + j]`: the inner loop's lanes start at a value the inner loop
+    // does not change (a flattened 2D array walked in a nest).
+    let src = r#"
+fn flat_sum(Vec<int> a, int n) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        let row = i * n;
+        let j = 0;
+        while j < n {
+            s = s + a[row + j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return s;
+}
+fn flat_map(Vec<int> a, Vec<int> b, int n) {
+    let i = 0;
+    while i < n {
+        let row = i * n;
+        let j = 0;
+        while j < n {
+            b[row + j] = a[row + j] * 3;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+fn main() {
+    let a: Vec<int> = Vec::new();
+    let b: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 144 {
+        a.push(k);
+        b.push(0);
+        k = k + 1;
+    }
+    if flat_sum(a, 12) != 10296 {
+        panic "flat_sum checksum";
+    }
+    flat_map(a, b, 12);
+    if b[143] != 429 {
+        panic "flat_map checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile flat nest");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "flat nest checksums");
+    let symbols = p.program_debug().fn_symbols;
+    assert_vec_loop(fn_ops(&bc, &symbols, "flat_sum"), "flat_sum");
+    assert_vec_loop(fn_ops(&bc, &symbols, "flat_map"), "flat_map");
+}
+
+#[test]
+fn pipeline_vectorizes_map_and_fold_in_one_loop() {
+    let src = r#"
+fn map_sum(Vec<int> a, Vec<int> b) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i] * 3;
+        b[i] = v;
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let a: Vec<int> = Vec::new();
+    let b: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 20 {
+        a.push(k);
+        b.push(0);
+        k = k + 1;
+    }
+    if map_sum(a, b) != 570 || b[19] != 57 {
+        panic "map_sum checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile map_sum");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "map_sum checksum");
+    let symbols = p.program_debug().fn_symbols;
+    let ops = fn_ops(&bc, &symbols, "map_sum");
+    assert_vec_loop(ops, "map_sum");
+    assert!(ops.iter().any(|b| *b.bytecode() == Instruction::VStore), "map_sum stores in the vector loop");
+    assert!(ops.iter().any(|b| *b.bytecode() == Instruction::VReduce), "map_sum folds in the vector loop");
+}
+
+#[test]
+fn pipeline_keeps_written_fields_in_registers_across_loop() {
+    let src = r#"
+class Acc {
+    pub total: int,
+    pub count: int,
+}
+fn field_acc(Acc acc, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        acc.total = acc.total + a[i];
+        acc.count = acc.count + 1;
+        i = i + 1;
+    }
+}
+fn main() {
+    let a: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 20 {
+        a.push(k);
+        k = k + 1;
+    }
+    let acc = new Acc(5, 0);
+    field_acc(acc, a);
+    field_acc(acc, a);
+    if acc.total != 385 || acc.count != 40 {
+        panic "field_acc checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile field_acc");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "field_acc checksum");
+    let debug = p.program_debug();
+    let entry = debug.fn_symbols.iter().find(|s| s.name == "field_acc").expect("field_acc symbol").entry_pc;
+    let ops = fn_ops(&bc, &debug.fn_symbols, "field_acc");
+    // The loop panics through write-back pads: ranges inside the body.
+    let end = entry as usize + ops.len();
+    assert!(
+        debug.cleanup.iter().any(|r| r.start_pc >= entry && (r.end_pc as usize) <= end),
+        "field_acc has panic write-back ranges"
+    );
+}
+
+#[test]
+fn pipeline_keeps_fields_in_registers_across_calls_that_cannot_touch_them() {
+    let src = r#"
+class Acc {
+    pub total: int,
+    pub count: int,
+}
+fn weight(int x) -> int {
+    if x <= 0 {
+        return 0;
+    }
+    return x % 7 + weight(x / 100);
+}
+fn peek(Acc a, int depth) -> int {
+    if depth > 0 {
+        return peek(a, depth - 1);
+    }
+    return a.total;
+}
+fn by_weight(Acc acc, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        acc.total = acc.total + weight(a[i]);
+        i = i + 1;
+    }
+}
+fn by_peek(Acc acc, int n) {
+    let i = 0;
+    while i < n {
+        acc.total = acc.total + peek(acc, 1);
+        i = i + 1;
+    }
+}
+fn main() {
+    let acc = new Acc(0, 0);
+    by_weight(acc, [5, 123, 77]);
+    by_peek(acc, 3);
+    if acc.total != 80 {
+        panic "checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile calls");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "checksum");
+    let debug = p.program_debug();
+    // A promoted loop panics through write-back pads: ranges inside it.
+    let pads = |name: &str| {
+        let entry = debug.fn_symbols.iter().find(|s| s.name == name).expect("symbol").entry_pc;
+        let end = entry as usize + fn_ops(&bc, &debug.fn_symbols, name).len();
+        debug.cleanup.iter().any(|r| r.start_pc >= entry && (r.end_pc as usize) <= end)
+    };
+    assert!(pads("by_weight"), "`weight` touches no field: `total` stays in a register");
+    assert!(!pads("by_peek"), "`peek` reads `total`");
+}
+
+#[test]
+fn pipeline_keeps_fields_in_registers_unless_a_finalizer_touches_them() {
+    // Any call may run a `fn drop()`: the loop keeps `total` in a register
+    // only while no finalizer in the program reads or writes it.
+    let src = |field: &str| {
+        format!(
+            r#"
+static let seen: int = 0;
+class Acc {{
+    pub total: int,
+}}
+class Spy {{
+    pub n: int,
+    pub total: int,
+}}
+impl Spy {{
+    fn drop() {{
+        seen = seen + self.{field};
+    }}
+}}
+fn weight(int x) -> int {{
+    if x <= 0 {{
+        return 0;
+    }}
+    return x % 7 + weight(x / 100);
+}}
+fn by_weight(Acc acc, Vec<int> a) {{
+    let i = 0;
+    while i < a.len() {{
+        acc.total = acc.total + weight(a[i]);
+        i = i + 1;
+    }}
+}}
+fn main() {{
+    let spy = new Spy(1, 2);
+    let acc = new Acc(0);
+    by_weight(acc, [5, 123, 77]);
+    if acc.total != 10 || spy.n != 1 {{
+        panic "checksum";
+    }}
+}}
+"#
+        )
+    };
+    let pads = |field: &str| {
+        let mut p = crate::Pipeline::new();
+        p.set_auto_par(false);
+        let (bc, constants) = p.compile_src(&src(field)).expect("compile finalizer");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "checksum");
+        let debug = p.program_debug();
+        let entry = debug.fn_symbols.iter().find(|s| s.name == "by_weight").expect("symbol").entry_pc;
+        let end = entry as usize + fn_ops(&bc, &debug.fn_symbols, "by_weight").len();
+        debug.cleanup.iter().any(|r| r.start_pc >= entry && (r.end_pc as usize) <= end)
+    };
+    assert!(pads("n"), "`Spy::drop` touches `n` only: `total` stays in a register");
+    assert!(!pads("total"), "`Spy::drop` reads a `total`");
+}
+
+#[test]
+fn pipeline_prefetches_forward_scans_of_object_arrays_only() {
+    let src = r#"
+class P {
+    pub x: int,
+}
+fn walk(Vec<P> ps) -> int {
+    let t = 0;
+    let i = 0;
+    while i < ps.len() {
+        t = t + ps[i].x;
+        i = i + 1;
+    }
+    return t;
+}
+fn ints(Vec<int> a) -> int {
+    let t = 0;
+    let i = 0;
+    while i < a.len() {
+        if a[i] % 3 == 0 {
+            t = t + a[i];
+        }
+        i = i + 1;
+    }
+    return t;
+}
+fn hop(Vec<P> ps) -> int {
+    let t = 0;
+    let i = 0;
+    while i < ps.len() {
+        t = t + ps[(i * 7) % ps.len()].x;
+        i = i + 1;
+    }
+    return t;
+}
+fn main() {
+    let ps: Vec<P> = Vec::new();
+    let a: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 20 {
+        ps.push(new P(k));
+        a.push(k);
+        k = k + 1;
+    }
+    if walk(ps) != 190 || ints(a) != 63 || hop(ps) != 190 {
+        panic "checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile scans");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "checksum");
+    let symbols = p.program_debug().fn_symbols.clone();
+    let hinted = |name: &str| {
+        fn_ops(&bc, &symbols, name)
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseIndex && b.dense_abc_parts().0 & common::dense::HEAP_PREFETCH != 0)
+    };
+    assert!(hinted("walk"), "a forward scan of objects prefetches");
+    assert!(!hinted("ints"), "int elements name no object");
+    assert!(!hinted("hop"), "a computed index is no forward scan");
+}
+
+#[test]
+fn pipeline_interchanges_column_order_nest_into_vector_loop() {
+    let src = r#"
+fn cols(Vec<float> a, Vec<float> b, int n, int m) {
+    let j = 0;
+    while j < m {
+        let i = 0;
+        while i < n {
+            b[i * m + j] = a[i * m + j] * 2.0 + 1.0;
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+}
+fn main() {
+    let a: Vec<float> = Vec::new();
+    let b: Vec<float> = Vec::new();
+    let k = 0;
+    while k < 24 {
+        a.push(k as float);
+        b.push(0.0);
+        k = k + 1;
+    }
+    cols(a, b, 6, 4);
+    let s = 0.0;
+    for x in b {
+        s = s + x;
+    }
+    if s != 576.0 || b[5] != 11.0 {
+        panic "cols checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile cols");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "cols checksum");
+    // The inner loop strides by `m` in the source; once interchanged it
+    // walks a row and vectorizes.
+    let ops = fn_ops(&bc, &p.program_debug().fn_symbols, "cols");
+    assert!(ops.iter().any(|b| *b.bytecode() == Instruction::VStore), "cols stores in a vector loop");
+}
+
+#[test]
 fn pipeline_vectorizes_reduce_without_load_and_nonzero_start() {
     let src = r#"
 fn sum_i(int n) -> int {
@@ -1153,26 +1538,6 @@ fn main() {
 }
 
 #[test]
-fn pipeline_refuses_straight_line_when_cost_loses() {
-    let src = r#"
-fn eval_a(int i, int j) -> int {
-    return i + j * 2;
-}
-fn main() {
-    let _ = eval_a(1, 2);
-}
-"#;
-    let mut p = crate::Pipeline::new();
-    let (bc, constants) = p.compile_src(src).expect("compile below-gate i64");
-    assert!(
-        !bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
-        "tiny straight-line helper loses the dense cost gate vs fuse-IL"
-    );
-    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
-    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-}
-
-#[test]
 fn pipeline_i8_compare_diamond_stays_not_dense() {
     let src = r#"
 fn pick(int a, int b, bool c) -> int {
@@ -1383,8 +1748,8 @@ fn main() {
 
 #[test]
 fn pipeline_recursive_work_loop_is_dense() {
-    // Tight tak/fib leafs convoy CALL on the operand stack (B2) so they
-    // can win the cost gate without a prologue Seek. A self-recursive
+    // Tight tak/fib leafs convoy CALL on the operand stack (B2), with no
+    // prologue Seek. A self-recursive
     // body with a counted loop still densifies + typed CALL (Q7).
     let src = r#"
 fn rec(int n) -> int {
@@ -1836,7 +2201,7 @@ fn main() {
     let dense = bc.iter().any(|b| is_dense_bin_op(*b.bytecode()));
     assert!(
         dense,
-        "nbody eval_a beats the dense cost gate and emits DenseBin"
+        "nbody eval_a takes dense and emits DenseBin"
     );
 }
 
@@ -2197,7 +2562,7 @@ fn main() {
 }
 
 #[test]
-fn s2c_mapped_pair_helper_takes_lir() {
+fn s2c_mapped_pair_helper_maps_its_alloc() {
     let src = r#"
 fn pair(int a, int b) -> [int; 2] {
     return [a, b];
@@ -2228,16 +2593,12 @@ fn main() {
     assert!(
         pair_bc
             .iter()
-            .any(|b| *b.bytecode() == Instruction::MakeArray),
-        "pair keeps MakeArray; opcodes={:?}",
+            .any(|b| matches!(*b.bytecode(), Instruction::MakeArray | Instruction::DenseMake)),
+        "pair still builds its array; opcodes={:?}",
         pair_bc
             .iter()
             .map(|b| b.bytecode().mnemonic())
             .collect::<Vec<_>>()
-    );
-    assert!(
-        pair_bc.iter().all(|b| !is_dense_bin_op(*b.bytecode())),
-        "S3: pair stays LIR MakeArray (not dense+match)"
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -3075,7 +3436,7 @@ fn is_jmpt(op: Instruction) -> bool {
     )
 }
 
-/// A format loop may take dense (the cost gate decides); either way it runs
+/// A format loop may take dense or LIR; either way it runs
 /// the shipped `FORMAT` opcode and keeps a safepoint map at it.
 #[test]
 fn pipeline_format_loop_keeps_format_opcode() {
@@ -4944,4 +5305,45 @@ fn main() {
     assert!(moves <= 6, "arm results should land in the join register; moves={moves}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+}
+
+/// `**` runs on the dense tier like the other arithmetic: a numeric loop
+/// with a float and an int power stays dense, with no stack `PowF` / `Pow`.
+#[test]
+fn pipeline_dense_takes_pow() {
+    let src = r#"
+fn powers(float base, int e, int n) -> float {
+    let s = 0.0;
+    let k = 0;
+    while k < n {
+        s = s + base ** (k as float) + ((k ** e) as float);
+        k = k + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = powers(2.0, 2, 4);
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
+    let (bc, constants) = p.compile_src(src).expect("compile pow kernel");
+    let symbols = p.program_debug().fn_symbols;
+    let body = fn_ops(&bc, &symbols, "powers");
+    assert!(
+        body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
+        "pow kernel must emit DenseBin: {:?}",
+        body.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+    );
+    assert!(
+        !body
+            .iter()
+            .any(|b| matches!(*b.bytecode(), Instruction::PowF | Instruction::Pow)),
+        "pow kernel must not fall back to stack Pow: {:?}",
+        body.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+    );
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked());
 }

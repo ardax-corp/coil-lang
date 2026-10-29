@@ -1028,6 +1028,10 @@ impl Slab {
             }
             p += slot_size;
         }
+        // The free list pops from its back: hand the chunk out in address
+        // order, so objects allocated (or copied) one after another sit
+        // that way too (locality step 5).
+        rest.reverse();
         if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
             class.slots.append(&mut rest);
         } else if !rest.is_empty() {

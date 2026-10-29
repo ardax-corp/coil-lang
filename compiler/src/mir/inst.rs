@@ -609,6 +609,17 @@ pub enum MirInst {
         dest: ValueId,
         value: ValueId,
     },
+    /// The field store a panic in the code after this owes the heap: a
+    /// field kept in a register across a loop ([`super::promote_fields`])
+    /// holds `value` here, where the source had stored it. A panic between
+    /// this and the next label stores it before unwinding. Dest is a
+    /// `bool` unit token. Emits nothing in line.
+    PanicStore {
+        dest: ValueId,
+        object: ValueId,
+        value: ValueId,
+        index: u32,
+    },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
     ArrayPush {
@@ -838,8 +849,10 @@ impl VecExpr {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecLoopKind {
     /// `dest = init`, then `dest = dest ⊕ term` lane by lane, left to
-    /// right (`fold` is `simd::REDUCE_*`, `ty` `dense::TY_*`).
-    Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr },
+    /// right (`fold` is `simd::REDUCE_*`, `ty` `dense::TY_*`). `stores`
+    /// (as in [`Self::Store`]) run first in each block: a loop that both
+    /// maps and folds.
+    Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr, stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
     /// `array[p + off + k] = value` for each store, in order.
     Store { stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
 }
@@ -848,9 +861,13 @@ impl VecLoopKind {
     pub fn values(&self) -> Vec<ValueId> {
         let mut out = Vec::new();
         match self {
-            Self::Reduce { init, term, .. } => {
+            Self::Reduce { init, term, stores, .. } => {
                 out.push(*init);
                 term.values(&mut out);
+                for (array, off, _, value) in stores {
+                    out.extend([*array, *off]);
+                    value.values(&mut out);
+                }
             }
             Self::Store { stores } => {
                 for (array, off, _, value) in stores {
@@ -864,9 +881,14 @@ impl VecLoopKind {
 
     pub fn rewrite(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
         match self {
-            Self::Reduce { init, term, .. } => {
+            Self::Reduce { init, term, stores, .. } => {
                 *init = map(*init);
                 term.rewrite(map);
+                for (array, off, _, value) in stores {
+                    *array = map(*array);
+                    *off = map(*off);
+                    value.rewrite(map);
+                }
             }
             Self::Store { stores } => {
                 for (array, off, _, value) in stores {
@@ -880,7 +902,7 @@ impl VecLoopKind {
 
     pub fn uses_index(&self) -> bool {
         match self {
-            Self::Reduce { term, .. } => term.uses_index(),
+            Self::Reduce { term, stores, .. } => term.uses_index() || stores.iter().any(|(_, _, _, v)| v.uses_index()),
             Self::Store { stores } => stores.iter().any(|(_, _, _, v)| v.uses_index()),
         }
     }
@@ -1063,6 +1085,7 @@ impl MirInst {
             | Self::HomeStore { dest, .. }
             | Self::ClearWord { dest, .. }
             | Self::KeepAlive { dest, .. }
+            | Self::PanicStore { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
@@ -1126,7 +1149,7 @@ impl MirInst {
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::HeapFieldLoad { object, .. } => vec![*object],
-            Self::HeapFieldStore { object, value, .. } => vec![*object, *value],
+            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => vec![*object, *value],
             Self::Index { array, index, .. } => vec![*array, *index],
             Self::StoreIndex {
                 array,
@@ -1191,7 +1214,7 @@ impl MirInst {
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
             Self::HeapFieldLoad { object, .. } => *object = map(*object),
-            Self::HeapFieldStore { object, value, .. } => {
+            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => {
                 *object = map(*object);
                 *value = map(*value);
             }

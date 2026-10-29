@@ -565,7 +565,7 @@ jobs:
             -O0 --fn sq --hir --root .deps/coil-stdlib/src > target/wasm-dissect/out.txt
           cat target/wasm-dissect/out.txt
           grep -q '=== hir ===' target/wasm-dissect/out.txt
-          grep -q 'op=MUL' target/wasm-dissect/out.txt
+          grep -qE 'op=MUL|kind=IMUL64' target/wasm-dissect/out.txt
 
       - name: Language harness (wasm)
         run: |

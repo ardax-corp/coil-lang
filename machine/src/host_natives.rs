@@ -132,7 +132,7 @@ pub fn build_standard_host_natives(
     push_from_bytes_take(&mut out, &mut register_id);
     // Append-only after from_bytes_take: `region` enter / exit (major 6 minor 5).
     push_region(&mut out, &mut register_id);
-    // Append-only after region: `symbol::next_id` (major 6 minor 7).
+    // Append-only after region: `symbol::next_id` (major 6 minor 8).
     push_wiring(&mut out, &mut register_id, crate::symbol::SYMBOL_WIRING, "symbol");
     assert_eq!(
         out.len(),

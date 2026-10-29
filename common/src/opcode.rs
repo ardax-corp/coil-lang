@@ -590,6 +590,10 @@ pub mod dense {
     pub const FMUL32: u8 = 22;
     pub const FDIV32: u8 = 23;
     pub const FREM32: u8 = 24;
+    /// `a ** b` on `i64` (traps like `Pow`) and on `f64` (`powf`, like
+    /// `PowF`). Archive 6.7.
+    pub const IPOW64: u8 = 25;
+    pub const FPOW64: u8 = 26;
 
     pub const CMP_I64: u8 = 0;
     pub const CMP_F64: u8 = 1;
@@ -626,6 +630,12 @@ pub mod dense {
     /// `string`, as `string_byte_at` answers it: the byte, or `-1` out of
     /// range (the caller's test panics).
     pub const HEAP_STR_BYTE: u8 = 2;
+    /// [`super::Instruction::DenseIndex`] hint: a forward scan of an array
+    /// of heap words. The VM may prefetch the object [`PREFETCH_DISTANCE`]
+    /// elements ahead; a VM that ignores the bit reads the same value.
+    pub const HEAP_PREFETCH: u8 = 4;
+    /// How many elements ahead [`HEAP_PREFETCH`] reaches.
+    pub const PREFETCH_DISTANCE: usize = 8;
     /// [`super::Instruction::DenseFieldLoad`] / [`super::Instruction::DenseFieldStore`]:
     /// `c` is a name slot (GetField), not a field index.
     pub const FIELD_NAMED: u8 = 1;
@@ -685,6 +695,8 @@ pub mod dense {
             FMUL32 => "FMUL32",
             FDIV32 => "FDIV32",
             FREM32 => "FREM32",
+            IPOW64 => "IPOW64",
+            FPOW64 => "FPOW64",
             _ => "DenseBin?",
         }
     }

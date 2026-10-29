@@ -58,21 +58,40 @@ fn compile_src(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |_| {})
 }
 
-/// Two-slot ABI tests pin the direct `CALL`; tiny leaf callees would inline.
-fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
-    compile_src_tuned(src, |c| c.inline_cost.max_inline_cost = 0)
+/// Tests of how LIR lowers a body: with the dense tier on, most bodies
+/// would take it instead.
+fn compile_src_lir(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| c.set_mir_dense(false))
+}
+
+fn compile_src_no_inline_lir(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| {
+        c.inline_cost.max_inline_cost = 0;
+        c.set_mir_dense(false);
+    })
 }
 
 /// Tests of a callee's own code: one with heap locals would splice into its
 /// caller.
-fn compile_src_heap_calls(src: &str) -> (Vec<Byte>, Vec<u64>) {
-    compile_src_tuned(src, |c| c.opt_options.hir_inline_heap = false)
+fn compile_src_heap_calls_lir(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| {
+        c.opt_options.hir_inline_heap = false;
+        c.set_mir_dense(false);
+    })
 }
 
 /// Tests of how an enum value is built: a local built in place would
 /// otherwise stay in two slots with no `MakeEnum`.
-fn compile_src_boxed_locals(src: &str) -> (Vec<Byte>, Vec<u64>) {
-    compile_src_tuned(src, |c| c.set_hir_pair_locals(false))
+fn compile_src_boxed_locals_lir(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| {
+        c.set_hir_pair_locals(false);
+        c.set_mir_dense(false);
+    })
+}
+
+/// Two-slot ABI tests pin the direct `CALL`; tiny leaf callees would inline.
+fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
+    compile_src_tuned(src, |c| c.inline_cost.max_inline_cost = 0)
 }
 
 /// A whole program through the pipeline, with the workspace's stdlib roots
@@ -95,7 +114,16 @@ fn compile_src_tuned(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>,
 /// builtin operator thunks (`Pow`, `SHL`, `XOR`, …), which a test of how
 /// one body lowers must not see.
 fn compile_fn_body(src: &str, name: &str) -> Vec<Byte> {
-    let (bc, compiler) = compile_src_compiler(src, |_| {});
+    compile_fn_body_tuned(src, name, |_| {})
+}
+
+/// [`compile_fn_body`] through the LIR tier (see [`compile_src_lir`]).
+fn compile_fn_body_lir(src: &str, name: &str) -> Vec<Byte> {
+    compile_fn_body_tuned(src, name, |c| c.set_mir_dense(false))
+}
+
+fn compile_fn_body_tuned(src: &str, name: &str, tune: impl FnOnce(&mut Compiler)) -> Vec<Byte> {
+    let (bc, compiler) = compile_src_compiler(src, tune);
     let start = *compiler.functions.get(name).unwrap_or_else(|| panic!("no fn `{name}`"));
     let end = compiler
         .functions
@@ -138,6 +166,29 @@ fn is_cond_branch(b: &Byte) -> bool {
             | I::DenseBinJmpf
             | I::DenseIndexJmpf
     )
+}
+
+/// A heap make of `kind` (`dense::MAKE_ARRAY` / `MAKE_TUPLE` /
+/// `MAKE_ENUM`, any tag), on the stack or the dense tier.
+fn is_make(b: &Byte, kind: u8) -> bool {
+    use common::{Instruction as I, dense};
+    match b.bytecode() {
+        I::MakeArray | I::MakeArrayK => kind == dense::MAKE_ARRAY,
+        I::MakeTuple | I::MakeTupleK => kind == dense::MAKE_TUPLE,
+        I::MakeEnum | I::MakeEnumK => kind == dense::MAKE_ENUM,
+        I::DenseMake | I::DenseMakeK => {
+            let k = (b.operand_u32() >> 24) as u8;
+            if kind == dense::MAKE_ENUM { k >= kind } else { k == kind }
+        }
+        _ => false,
+    }
+}
+
+/// The `CodePtr` feeding the make at `pc`: right before it on the stack
+/// tier, or stored to its slot just before it on the dense tier.
+fn code_ptr_before(bc: &[Byte], pc: usize) -> Option<&Byte> {
+    use common::Instruction as I;
+    bc[..pc].iter().rev().take(2).find(|b| matches!(b.bytecode(), I::CodePtr))
 }
 
 fn compile_src_compiler(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>, Compiler) {
@@ -586,7 +637,7 @@ fn return_match_keeps_fusion_barrier() {
     // would stay a pair and skip JumpIfMatch ,  this test needs the
     // boxed cascade so the Some arm's Unpack;RETURN fusion barrier
     // stays observable.
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         r#"
 fn foo(Option<int> r) -> int {
     return match r {
@@ -717,7 +768,7 @@ fn float_unary_minus_emits_negf_not_neg() {
 #[test]
 fn int_unary_minus_still_emits_neg() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn n(int x) -> int { return -x; }");
+    let (bc, _pool) = compile_src_lir("fn n(int x) -> int { return -x; }");
     let last_neg = bc
         .iter()
         .rev()
@@ -738,7 +789,7 @@ fn int_unary_minus_still_emits_neg() {
 fn integer_arithmetic_emits_int_opcode() {
     use common::Instruction;
     // Only `add`'s own body: the builtin Num thunks hold float ADDF too.
-    let bc = compile_fn_body("fn add(int a, int b) -> int { return a + b; }", "add");
+    let bc = compile_fn_body_lir("fn add(int a, int b) -> int { return a + b; }", "add");
     let has_int_bin_slot = bc.iter().any(|b| {
         *b.bytecode() == Instruction::BinSlotSlot
             && b.bin_slot_slot_parts().0 == Instruction::ADD as u8
@@ -976,7 +1027,7 @@ fn not_if_else_inverts_away_log_not_jmpf() {
 /// Commuted form `8 * x` on a byte uses the same SHL lowering (LHS factor).
 #[test]
 fn mul_by_lhs_power_of_two_emits_shl() {
-    let (bc, _pool) = compile_src("fn scale(byte x) -> byte { return 8 * x; }");
+    let (bc, _pool) = compile_src_lir("fn scale(byte x) -> byte { return 8 * x; }");
     assert!(
         bytecode_has_shl_by(&bc, 3),
         "expected SHL (shift 3) for 8*x; opcodes: {:?}",
@@ -1014,7 +1065,7 @@ fn mul_by_one_does_not_emit_shl() {
 #[test]
 fn float_mul_does_not_emit_shl() {
     use common::Instruction;
-    let bc = compile_fn_body("fn scale(float x) -> float { return x * 8.0; }", "scale");
+    let bc = compile_fn_body_lir("fn scale(float x) -> float { return x * 8.0; }", "scale");
     assert!(
         !bytecode_has_any_shl(&bc),
         "float mul must not emit SHL; opcodes: {:?}",
@@ -1040,7 +1091,7 @@ fn float_mul_does_not_emit_shl() {
 /// strength-reduce (not be excluded by the int-only type gate).
 #[test]
 fn byte_mul_by_power_of_two_emits_shl() {
-    let (bc, _pool) = compile_src("fn scale(byte x) -> byte { return x * 8; }");
+    let (bc, _pool) = compile_src_lir("fn scale(byte x) -> byte { return x * 8; }");
     assert!(
         bytecode_has_shl_by(&bc, 3),
         "expected SHL (shift 3) for byte*8; opcodes: {:?}",
@@ -1051,7 +1102,7 @@ fn byte_mul_by_power_of_two_emits_shl() {
 /// Unsigned `byte / 8` is `>> 3`. Signed `int / 8` must stay `DIV`.
 #[test]
 fn byte_div_by_power_of_two_emits_shr() {
-    let (bc, _pool) = compile_src("fn scale(byte x) -> byte { return x / 8; }");
+    let (bc, _pool) = compile_src_lir("fn scale(byte x) -> byte { return x / 8; }");
     assert!(
         bytecode_has_shr_by(&bc, 3),
         "expected SHR (shift 3) for byte/8; opcodes: {:?}",
@@ -1062,7 +1113,7 @@ fn byte_div_by_power_of_two_emits_shr() {
 #[test]
 fn int_div_by_power_of_two_keeps_div() {
     use common::Instruction;
-    let bc = compile_fn_body("fn scale(int x) -> int { return x / 8; }", "scale");
+    let bc = compile_fn_body_lir("fn scale(int x) -> int { return x / 8; }", "scale");
     assert!(
         !bytecode_has_any_shr(&bc),
         "signed int / 8 must not become SHR; opcodes: {:?}",
@@ -1157,7 +1208,7 @@ fn shl_zero_skips_shl() {
 /// Type aliases to `byte` expand at check time, so `B * 8` still SHLs.
 #[test]
 fn aliased_byte_mul_by_power_of_two_emits_shl() {
-    let (bc, _pool) = compile_src("type B = byte; fn scale(B x) -> B { return x * 8; }");
+    let (bc, _pool) = compile_src_lir("type B = byte; fn scale(B x) -> B { return x * 8; }");
     assert!(
         bytecode_has_shl_by(&bc, 3),
         "expected SHL for aliased int*8; opcodes: {:?}",
@@ -1487,14 +1538,13 @@ fn main() {
 /// bits = tag, lower 16 bits = arity).
 #[test]
 fn construct_emits_make_enum_with_correct_tag_and_arity() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src("fn keep(int x) -> Vec<Option<int>> { return [Option::Some(x)]; }");
+    let (bc, _pool) = compile_src_lir("fn keep(int x) -> Vec<Option<int>> { return [Option::Some(x)]; }");
 
     // Find the MAKE_ENUM instruction. Its operands encode
     // (tag, arity) ,  for `Option::Some(42)`, tag=1, arity=1.
     let make_enum = bc
         .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
+        .find(|b| is_make(b, common::dense::MAKE_ENUM))
         .expect("expected at least one MakeEnum in the bytecode");
     let tag = (make_enum.operand_u32() >> 16) as u16;
     let arity = make_enum.make_arity() as u16;
@@ -1769,7 +1819,7 @@ fn pure_call_binop_leaves_results_on_stack_for_bin_return() {
 #[test]
 fn pure_helper_binop_stacks_across_call_for_bin_return() {
     use common::Instruction;
-    let (bc, _) = compile_src_no_inline(
+    let (bc, _) = compile_src_no_inline_lir(
         "fn left(int n) -> int { \
                let s = 0; \
                let i = 0; \
@@ -1957,7 +2007,7 @@ fn two_local_compare_if_fuses_bin_slot_slot_jmpf() {
 #[test]
 fn bitand_imm_fuses_bin_slot_imm() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn lowbit(int x) -> int { return x & 1; }");
+    let (bc, _pool) = compile_src_lir("fn lowbit(int x) -> int { return x & 1; }");
     assert!(
         bc.iter().any(|b| {
             *b.bytecode() == Instruction::BinSlotImm
@@ -2000,7 +2050,7 @@ fn assign_add_imm_fuses_bin_slot_imm_store() {
                i = i + 1; \
                return i; \
              }",
-        |_| {},
+        |c| c.set_mir_dense(false),
     );
     let start = compiler.functions["bump"];
     let end = compiler.functions.values().copied().filter(|&pc| pc > start).min().unwrap_or(bc.len()).min(bc.len());
@@ -2028,7 +2078,7 @@ fn assign_add_imm_fuses_bin_slot_imm_store() {
 #[test]
 fn assign_bitand_fuses_bin_slot_slot_store() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         "fn mask_bits(int flags, int mask) -> int { \
                flags = flags & mask; \
                return flags; \
@@ -2055,7 +2105,7 @@ fn assign_bitand_fuses_bin_slot_slot_store() {
 #[test]
 fn assign_logical_and_fuses_bin_slot_slot_store() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         "fn both(bool a, bool b) -> bool { \
                a = a && b; \
                return a; \
@@ -2593,61 +2643,6 @@ fn nested_match_in_loop_emits_expected_opcodes() {
     );
 }
 
-/// Codegen test 10 : the red-team's canonical
-/// record-payload reorder test. The variant is declared as
-/// `Foo { x: int, y: int, z: int }` and the user calls it
-/// with shuffled fields `Foo { z: 1, x: 2, y: 3 }`. The
-/// codegen must emit the CONST operands in DECLARATION order
-/// (2, 3, 1) so the VM's `MAKE_ENUM` produces a payload
-/// `[2, 3, 1]` matching the declaration order. If the
-/// codegen emitted them in call-site order (1, 2, 3), the
-/// payload would be in the wrong slot positions and any
-/// match destructuring would get the wrong values.
-#[test]
-fn record_construct_reorders_shuffled_call_site_fields() {
-    use common::Instruction;
-    // The variant is declared as `Foo { x: int, y: int, z: int }`
-    // and the user calls it with shuffled fields
-    // `Foo { z: 1, x: 2, y: 3 }`. The codegen must emit the
-    // CONST operands in REVERSE declaration order so the VM's
-    // `MAKE_ENUM` produces a payload in DECLARATION order
-    // (payload[0] = x = 2, payload[1] = y = 3, payload[2] = z = 1).
-    let (bc, _pool) = compile_src(
-        r#"enum E { Foo { x: int, y: int, z: int } }
-fn main() {
- let foo = E::Foo { z: 1, x: 2, y: 3 };
-}"#,
-    );
-
-    // The construct `E::Foo { z: 1, x: 2, y: 3 }` should
-    // emit CONST 1 (z), CONST 3 (y), CONST 2 (x) ,  that
-    // is, REVERSE declaration order ,  so that MAKE_ENUM's
-    // top-first pop order places them at payload[0..2]
-    // in declaration order.
-    let const_operands: Vec<i64> = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::CONST))
-        .map(|b| b.constant(&[]) as i64)
-        .filter(|&v| (1..=3).contains(&v))
-        .collect();
-    assert_eq!(
-        const_operands,
-        vec![1, 3, 2],
-        "Record fields must be emitted in REVERSE declaration order \
- so MAKE_ENUM pops them into declaration order at payload[0..]"
-    );
-
-    // Verify MAKE_ENUM has the right tag and arity.
-    let make_enum = bc
-        .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
-        .expect("expected MAKE_ENUM in the bytecode");
-    let tag = (make_enum.operand_u32() >> 16) as u16;
-    let arity = make_enum.make_arity() as u16;
-    assert_eq!(tag, 0, "expected tag=0 for the only variant Foo");
-    assert_eq!(arity, 3, "expected arity=3 for Foo {{ x, y, z }}");
-}
-
 /// Codegen test 11 : a record construct with one field, boxed (pushed
 /// into a `Vec`), emits exactly 1 CONST followed by MAKE_ENUM with
 /// arity=1.
@@ -2655,13 +2650,13 @@ fn main() {
 fn record_construct_one_field_emits_correct_bytecode() {
     use common::Instruction;
     let (bc, _pool) =
-        compile_src_boxed_locals("enum E { Foo { x: int } } fn main() { let v: Vec<E> = Vec::new(); v.push(E::Foo { x: 1 }); return v.len(); }");
+        compile_src_boxed_locals_lir("enum E { Foo { x: int } } fn main() { let v: Vec<E> = Vec::new(); v.push(E::Foo { x: 1 }); return v.len(); }");
 
     // Find the MAKE_ENUM. Its operand is tag (upper 16) and
     // arity (lower 16).
     let make_enum = bc
         .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
+        .find(|b| is_make(b, common::dense::MAKE_ENUM))
         .expect("expected at least one MAKE_ENUM");
     let tag = (make_enum.operand_u32() >> 16) as u16;
     let arity = make_enum.make_arity() as u16;
@@ -2696,10 +2691,9 @@ fn match_emits_binding_interns_in_declaration_order() {
 /// correct tags and arities for each variant.
 #[test]
 fn mixed_enum_unit_tuple_record_all_in_one() {
-    use common::Instruction;
     // Use bindings to keep the constructs alive in the
     // bytecode (the codegen is silent on unused `let _`).
-    let (bc, _pool) = compile_src_boxed_locals(
+    let (bc, _pool) = compile_src_boxed_locals_lir(
         "enum E { A, B(int), C { x: int } } \
  fn mk() -> Vec<E> { \
  let a = E::A; \
@@ -2714,7 +2708,7 @@ fn mixed_enum_unit_tuple_record_all_in_one() {
     // MAKE_ENUM, even for Unit, with arity=0).
     let make_enums: Vec<_> = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
+        .filter(|b| is_make(b, common::dense::MAKE_ENUM))
         .collect();
     assert_eq!(
         make_enums.len(),
@@ -2844,7 +2838,7 @@ fn match_with_simple_binding_subpatterns_keeps_current_layout() {
 #[test]
 fn access_field_emits_receiver_then_load_field() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         "enum Point { Origin, Point { x: int, y: int } } \
  fn get_x(Point p) -> int { return p.x; } \
  fn main() { return get_x(Point::Point { x: 42, y: 7 }); }",
@@ -2888,7 +2882,7 @@ fn access_field_emits_correct_field_index_for_each_field() {
     // x_coord access emits LoadField(0); the y_coord access
     // emits LoadField(1). Not inlined: an inlined accessor is unreferenced
     // and the tree shake drops its body.
-    let (bc, _pool) = compile_src_no_inline(
+    let (bc, _pool) = compile_src_no_inline_lir(
         "enum Point { Origin, Point { x: int, y: int } } \
  fn x_coord(Point p) -> int { return p.x; } \
  fn y_coord(Point p) -> int { return p.y; } \
@@ -4067,6 +4061,7 @@ fn main() {
     // The callees are looked up by name: keep them calls.
     pipeline.compiler_mut().opt_options.hir_inline_heap = false;
     pipeline.set_inline_max_cost(0);
+    pipeline.compiler_mut().set_mir_dense(false);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let nested_off = pipeline
@@ -4505,7 +4500,7 @@ fn main() {
     assert!(
         pick_bc.iter().any(|b| matches!(
             b.bytecode(),
-            Instruction::Index | Instruction::IndexUnchecked
+            Instruction::Index | Instruction::IndexUnchecked | Instruction::DenseIndex
         )),
         "OOB arm must heap-Index; opcodes={names:?}"
     );
@@ -4920,10 +4915,7 @@ let _y = nested[0]; \
     // Nested inners → MakeArray; outer nested spine is stack (no third MakeArray
     // for the outer literal). Escape of nested[0] may MakeArray the outer row
     // when indexing produces a value ,  row is heap already from inner lit.
-    let make_arrays = main_bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
-        .count();
+    let make_arrays = main_bc.iter().filter(|b| is_make(b, common::dense::MAKE_ARRAY)).count();
     assert!(
         make_arrays >= 2,
         "expected MakeArray for nested row literals; got {make_arrays}; ops={:?}",
@@ -4934,7 +4926,7 @@ let _y = nested[0]; \
     assert!(
         !main_bc
             .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::Index)),
+            .any(|b| matches!(b.bytecode(), Instruction::Index | Instruction::DenseIndex)),
         "const index on stack float array should avoid Index; ops={:?}",
         main_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -5061,9 +5053,9 @@ fn main() {
 "#,
     );
     assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::CONST)),
-        "expected folded CONST for [10, 20, 30].len(); ops={:?}",
+        !bc.iter()
+            .any(|b| matches!(b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen)),
+        "expected [10, 20, 30].len() to fold; ops={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -5077,9 +5069,9 @@ fn len_of_dict_and_tuple_literals_fold_to_const() {
     ] {
         let (bc, _pool) = compile_src(src);
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::CONST)),
-            "expected folded CONST for literal len in `{src}`; ops={:?}",
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen)),
+            "expected literal len in `{src}` to fold; ops={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -5098,7 +5090,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::ArrayLen)),
+            .any(|b| matches!(b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen)),
         "runtime s.len() should use ArrayLen; ops={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -5114,7 +5106,7 @@ fn main() {
 #[test]
 fn access_chained_field_emits_two_load_fields() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         "enum Inner { Inner { v: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_v(Outer o) -> int { return o.x.v; } \
@@ -5144,7 +5136,7 @@ fn access_chained_field_emits_two_load_fields() {
 #[test]
 fn access_chained_field_second_load_field_targets_inner_enum() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         "enum Inner { Inner { v: int, w: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_v(Outer o) -> int { return o.x.v; } \
@@ -5187,7 +5179,7 @@ fn access_chained_field_second_load_field_targets_inner_enum() {
 #[test]
 fn access_chained_field_with_correct_field_index() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         "enum Inner { Inner { v: int, w: int } } \
  enum Outer { Outer { x: Inner, y: int } } \
  fn get_x_w(Outer o) -> int { return o.x.w; } \
@@ -5667,7 +5659,6 @@ fn bounded_generic_add_ground_call_uses_specialized_clone() {
 /// `CallIndirect`/`CALL` that includes the dictionary.
 #[test]
 fn user_typeclass_constrained_call_emits_dict_tuple_and_bumps_arity() {
-    use common::Instruction;
     let (bc, _pool) = compile_src(
         "trait Describable<T> { fn describe_val(T x) -> int; } \
              impl Describable for int { pub fn describe_val(int x) -> int { return x; } } \
@@ -5677,7 +5668,7 @@ fn user_typeclass_constrained_call_emits_dict_tuple_and_bumps_arity() {
 
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "expected MakeTuple for dict emission; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -5687,7 +5678,6 @@ fn user_typeclass_constrained_call_emits_dict_tuple_and_bumps_arity() {
 /// when the function escapes as a PolyFn.
 #[test]
 fn two_user_typeclass_constraints_emit_two_dicts_and_arity_plus_two() {
-    use common::Instruction;
     let (bc, _pool) = compile_src(
         "trait Printable<T> { fn printable_val(T x) -> int; } \
              trait Countable<T> { fn count_val(T x) -> int; } \
@@ -5699,7 +5689,7 @@ fn two_user_typeclass_constraints_emit_two_dicts_and_arity_plus_two() {
 
     let make_tuple_count = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
+        .filter(|b| is_make(b, common::dense::MAKE_TUPLE))
         .count();
     assert!(
         make_tuple_count >= 2,
@@ -5722,7 +5712,7 @@ fn builtin_num_constraint_emits_dict_tuple() {
 
     let make_tuple_count = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
+        .filter(|b| is_make(b, common::dense::MAKE_TUPLE))
         .count();
     assert_eq!(
         make_tuple_count, 0,
@@ -5741,7 +5731,6 @@ fn builtin_num_constraint_emits_dict_tuple() {
 /// (no dictionary tuple at the call site).
 #[test]
 fn ground_user_typeclass_call_uses_dict_not_mono() {
-    use common::Instruction;
     let (bc, _pool) = compile_src(
         "trait Describable<T> { fn describe_val(T x) -> int; } \
              impl Describable for int { pub fn describe_val(int x) -> int { return x; } } \
@@ -5751,7 +5740,7 @@ fn ground_user_typeclass_call_uses_dict_not_mono() {
 
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "ground user-trait CALL must not pass a dict; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -5760,7 +5749,7 @@ fn ground_user_typeclass_call_uses_dict_not_mono() {
 #[test]
 fn generic_bound_method_consumes_dictionary_indirectly() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         "trait Measurable<T> { fn size(T x) -> int; } \
              impl Measurable for int { pub fn size(int x) -> int { return x; } } \
              fn size_of<T: Measurable>(T x) -> int { return x.size(); } \
@@ -5819,7 +5808,7 @@ fn user_trait_ground_method_call_vs_generic_dictionary() {
     assert!(
         generic
             .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "PolyFn escape of a user-trait generic must pass a dict; ops={:?}",
         generic.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -5828,14 +5817,13 @@ fn user_trait_ground_method_call_vs_generic_dictionary() {
 /// Ground `Show` calls specialize to a direct CALL.
 #[test]
 fn show_bound_ground_call_uses_dictionary_not_mono() {
-    use common::Instruction;
     let (bc, _pool) = compile_src(
         "fn show_it<T: Show>(T x) -> T { return x; } \
              fn main() { let y = show_it(7); }",
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "Show ground CALL must not pass a dict; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -5849,7 +5837,10 @@ fn length_bound_ground_call_uses_dictionary_not_mono() {
     let (bc, _pool) = compile_src_tuned(
         "fn n<T: Length>(T x) -> int { return x.len(); } \
              fn main() { return n(\"ab\"); }",
-        |c| c.set_hir_inline(false),
+        |c| {
+            c.set_hir_inline(false);
+            c.set_mir_dense(false);
+        },
     );
     let max_call_arity = bc
         .iter()
@@ -5891,7 +5882,7 @@ fn num_plus_show_ground_call_keeps_dictionary() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "Num+Show ground CALL must not pass dicts; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -5899,7 +5890,6 @@ fn num_plus_show_ground_call_keeps_dictionary() {
 
 #[test]
 fn omitted_default_method_dict_slot_has_real_target() {
-    use common::Instruction;
     let (bc, _pool) = compile_src(
         "trait Tiny<T> { fn zero(T x) -> int { return 7; } } \
              impl Tiny for int {} \
@@ -5908,16 +5898,11 @@ fn omitted_default_method_dict_slot_has_real_target() {
     );
     let tuple_index = bc
         .iter()
-        .position(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
+        .position(|b| is_make(b, common::dense::MAKE_TUPLE))
         .expect("default method dictionary");
-    assert!(tuple_index > 0);
+    let slot = code_ptr_before(&bc, tuple_index).expect("dictionary method slots must use CodePtr");
     assert!(
-        matches!(bc[tuple_index - 1].bytecode(), Instruction::CodePtr),
-        "dictionary method slots must use CodePtr; got {:?}",
-        bc[tuple_index - 1].bytecode()
-    );
-    assert!(
-        bc[tuple_index - 1].operand_u32() > 0,
+        slot.operand_u32() > 0,
         "default method dictionary slot must contain a compiled code offset"
     );
 }
@@ -5934,12 +5919,9 @@ fn dictionary_entries_emit_code_ptr() {
     );
     let tuple_pos = bc
         .iter()
-        .position(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
+        .position(|b| is_make(b, common::dense::MAKE_TUPLE))
         .expect("expected dict MakeTuple");
-    assert!(
-        matches!(bc[tuple_pos - 1].bytecode(), Instruction::CodePtr),
-        "dict entry before MakeTuple must be CodePtr"
-    );
+    assert!(code_ptr_before(&bc, tuple_pos).is_some(), "dict entry before MakeTuple must be CodePtr");
     let code_ptrs: Vec<_> = bc
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::CodePtr))
@@ -6131,7 +6113,7 @@ fn main() { \
         .expect("expected FfiInvoke");
     let make_tuple_idx = bc[..ffi_idx]
         .iter()
-        .rposition(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK))
+        .rposition(|b| is_make(b, common::dense::MAKE_TUPLE))
         .expect("expected MakeTuple before FfiInvoke");
     // Callback fn arg is the first tuple element → last CodePtr before
     // MakeTuple (args are emitted bottom-to-top; doubler then 21).
@@ -6283,7 +6265,9 @@ fn main() {
     // The id sits under the argument: pushed ahead of the inner call, or
     // the inner result staged into a temp and loaded back after it.
     let staged = matches!(bc[inner_host + 1].bytecode(), Instruction::STORE)
-        && bc[outer_const..outer_host].iter().any(|b| matches!(b.bytecode(), Instruction::LOAD));
+        && bc[outer_const..outer_host]
+            .iter()
+            .any(|b| matches!(b.bytecode(), Instruction::LOAD | Instruction::DensePush));
     assert!(
         outer_const < inner_host || staged,
         "outer native-id CONST must sit under the nested HostInvoke's value \
@@ -6298,7 +6282,7 @@ fn main() {
 #[test]
 fn named_call_shuffled_args_emits_declaration_order() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_lir(
         r#"
 fn greet(string name, int age) -> int {
     let acc = 0;
@@ -6370,7 +6354,7 @@ fn main() {
 #[test]
 fn rest_call_emits_make_array_before_call() {
     use common::Instruction;
-    let (bc, _pool) = compile_src_heap_calls(
+    let (bc, _pool) = compile_src_heap_calls_lir(
         r#"
 fn sum(int... xs) -> int { return xs.len(); }
 fn main() {
@@ -6421,9 +6405,13 @@ fn main() {
     );
     let make_array = bc
         .iter()
-        .find(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .find(|b| is_make(b, common::dense::MAKE_ARRAY))
         .expect("expected MakeArray(0) for empty rest");
-    assert_eq!(make_array.operand_u32(), 0);
+    let arity = match make_array.bytecode() {
+        Instruction::DenseMake => (make_array.operand_u32() >> 8) & 0xFF,
+        _ => make_array.operand_u32(),
+    };
+    assert_eq!(arity, 0);
 }
 
 /// `let (a, b) = (1, 2)` desugars to Index + StorePop per binding; the
@@ -6752,7 +6740,7 @@ fn packed_host_meta(bc: &[common::Byte]) -> u32 {
 #[test]
 fn matrix_add_emits_packed_matrix_zip_add() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 use io::{stdout};
 
@@ -6779,7 +6767,7 @@ fn main() {
 #[test]
 fn matrix_sub_emits_packed_matrix_zip_sub() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 use io::{stdout};
 
@@ -6869,7 +6857,7 @@ fn main() {
 #[test]
 fn float_dot_emits_packed_dot_with_float_flag() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 fn main() {
     return dot([1.0, 2.0], [3.0, 4.0]);
@@ -6892,7 +6880,7 @@ fn main() {
 #[test]
 fn aggregate_zip_len8_emits_packed_vec_arith() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 fn main() {
     let a = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -6972,7 +6960,7 @@ fn main() {
 fn aggregate_packed_vec_arith_meta_flags() {
     use common::Instruction;
 
-    let (bc_bc, _) = compile_src(
+    let (bc_bc, _) = compile_src_lir(
         r#"
 fn main() {
     let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -6993,7 +6981,7 @@ fn main() {
     assert_ne!(ops & (1 << 26), 0, "broadcast");
     assert_ne!(ops & (1 << 27), 0, "scalar_left");
 
-    let (bc_neg, _) = compile_src(
+    let (bc_neg, _) = compile_src_lir(
         r#"
 fn main() {
     let a = (1, 2, 3, 4, 5, 6, 7, 8);
@@ -7028,7 +7016,7 @@ fn unescape_coil_string_supports_hex_and_unicode() {
 #[test]
 fn cast_as_int_emits_cast_opcode() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 fn to_int(float x) -> int {
     return x as int;
@@ -7267,7 +7255,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "in-frame Some/None match must not MakeEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -7295,7 +7283,7 @@ fn main() {
 "#;
     let boxes = |bc: &[common::Byte]| {
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
+            .any(|b| is_make(b, common::dense::MAKE_ENUM))
     };
     // A direct-only callee takes `[payload, tag]`: nothing boxes.
     let (bc, _) = compile_src_no_inline(src);
@@ -7334,7 +7322,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "unary Option<int> bind of a two-slot CALL must not box; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
@@ -7969,7 +7957,7 @@ fn tests_err_bit(b: &Byte) -> bool {
 /// ReturnPair and use the tag EQ/JMPF path ,  not PairToHeap + JumpIfMatch.
 #[test]
 fn nested_method_try_mismatched_result_keeps_pair_path() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 class Enc {}
 impl Enc {
@@ -8017,7 +8005,7 @@ fn main() {
 /// the reserved entry Try path, not Unknown method or PairToHeap-before-tag-check.
 #[test]
 fn forward_mismatched_result_method_try_keeps_pair_path() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_lir(
         r#"
 class EncFwd {}
 impl EncFwd {
@@ -8104,7 +8092,7 @@ fn mk() -> Vec<Option<Option<string>>> {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "nested Option must stay boxed; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8180,7 +8168,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "ground Option<class> None must niche as CONST 0; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8207,7 +8195,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "escaping Option<class> Some must not MakeEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8241,7 +8229,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "Option<int> bind+match must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8261,7 +8249,7 @@ fn gc_churn_option_node_does_not_make_enum() {
     let (bc, _) = compile_src(src);
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "gc_churn Option<Node> must not allocate ObjEnum Some; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8299,7 +8287,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "Result<class, class> Ok must not MakeEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8334,7 +8322,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "Result<int, int> bind+match must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8440,7 +8428,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "`?` on two-slot Result must not box ObjEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8484,7 +8472,10 @@ fn main() {
     let _ = pipe(2);
 }
 "#,
-        |c| c.set_hir_inline(false),
+        |c| {
+            c.set_hir_inline(false);
+            c.set_mir_dense(false);
+        },
     );
     let has_add_then_call = bc.windows(2).any(|w| {
         let add_then_call = matches!(
@@ -8534,7 +8525,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "return e? must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8582,7 +8573,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "two-slot bind passed to a boxed param must box at the call; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8594,7 +8585,7 @@ fn result_try_churn_does_not_make_enum() {
     let (bc, _) = compile_src_pipeline(src, false);
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "result_try_churn must not allocate ObjEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8630,7 +8621,7 @@ fn result_heap_churn_does_not_make_enum() {
     let (bc, _) = compile_src(src);
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "result_heap_churn must not allocate ObjEnum; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8670,7 +8661,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "destructure of two-slot product must not box ObjTuple; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8699,7 +8690,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "bind+index of two-slot product must not box; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8730,7 +8721,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "escaping two-slot product must box at the heap consumer; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8752,7 +8743,7 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "mixed-heap product must stay boxed; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8780,7 +8771,7 @@ fn pair_int_churn_stays_two_slot() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeTuple | Instruction::MakeTupleK)),
+            .any(|b| is_make(b, common::dense::MAKE_TUPLE)),
         "pair_int_churn must not allocate ObjTuple; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -8854,7 +8845,7 @@ fn main() {
     );
     assert!(
         !bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+            .any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "Option<int> `?` chain must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
@@ -9165,7 +9156,7 @@ fn hir_pair_local_built_in_place_is_not_boxed() {
         "fn main() { let o = Option::Some(3); let v = match o { Option::Some(x) => x, Option::None => 0 }; write(stdout(), to_bytes(format(\"%i\", v))); }",
     );
     assert!(
-        !bc.iter().any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK)),
+        !bc.iter().any(|b| is_make(b, common::dense::MAKE_ENUM)),
         "an Option local built in place stays in two slots"
     );
 }

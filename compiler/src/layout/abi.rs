@@ -41,14 +41,14 @@
 //! | Args | `arity` | callee slots `0..arity` (same bits as caller `LOAD`s) |
 //! | Return | 1..=2 | TOS after `RETURN`; caller `STORE`s dests |
 //! | Niche Option/Result | 1 | Q8 word lane (match reconstructs as `Br`) |
-//! | Multi-word return | 2 | `[payload, tag]` / `[a, b]` (B3 / C1; cost gate vs fuse) |
+//! | Multi-word return | 2 | `[payload, tag]` / `[a, b]` (B3 / C1) |
 //!
 //! HostInvoke: LICM hoists scalar-pure math; S3 / Q9 R2 emit I6-typed hosts
 //! including `from_bytes` / `to_bytes`. User `CALL` uses this map when the callee is already
 //! dense, or an open one-word / two-slot ABI (S3 / B3). Q7 one-word
 //! self-`CALL` / `TailCall` use the open one-word ABI. **B7** sibling /
 //! mutual `TailCall` and **C1** self two-slot `CALL` / `RETURN` use the
-//! same open ABI; keep/refuse is the cost gate. `CallIndirect` stays refuse.
+//! same open ABI. `CallIndirect` stays refuse.
 //! HeapRef and niche words are one-word lanes (Q8).
 //!
 //! SSA models at most dest + `dest_hi`. N>2 is the same `ret_words` field

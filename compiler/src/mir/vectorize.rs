@@ -27,14 +27,22 @@ pub(super) struct StoreSpec {
     pub(super) value: VOp,
     pub(super) ty: u8,
     /// `a[i + index_off]`. Zero is `a[i]`.
-    pub(super) index_off: i64,
+    pub(super) index_off: Off,
+}
+
+/// How far a stream's lanes sit from the loop index: a constant, or a
+/// value the loop does not change (`a[row + j]` in an inner loop).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Off {
+    K(i64),
+    V(ValueId),
 }
 
 #[derive(Clone)]
 pub(super) enum VOp {
     Splat { v: ValueId, ty: u8 },
     Iota,
-    Load { array: ValueId, ty: u8, off: i64 },
+    Load { array: ValueId, ty: u8, off: Off },
     Bin { kind: u8, lhs: Box<VOp>, rhs: Box<VOp> },
     Neg { kind: u8, src: Box<VOp> },
     CastI2F(Box<VOp>),
@@ -112,7 +120,7 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
                 value,
                 ..
             } => {
-                let index_off = index_offset(func, *index, *iv)?;
+                let index_off = index_offset(func, *index, *iv, &lp.blocks)?;
                 if !is_invariant(func, *array, &lp.blocks) {
                     return None;
                 }
@@ -156,6 +164,9 @@ pub(super) struct ReduceLoop {
     pub(super) ty: u8,
     /// [`simd::REDUCE_ADD`] or [`simd::REDUCE_MUL`].
     pub(super) fold: u8,
+    /// Stores the same body makes (a loop that maps and folds), in body
+    /// order. Empty for a plain reduction.
+    pub(super) stores: Vec<StoreSpec>,
 }
 
 pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Option<ReduceLoop> {
@@ -261,9 +272,22 @@ pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opt
         return None;
     };
 
+    let mut stores = Vec::new();
     for inst in &func.block(body).insts {
         match inst {
-            MirInst::StoreIndex { .. } | MirInst::Phi { .. } => return None,
+            MirInst::StoreIndex { array, index, value, .. } => {
+                let index_off = index_offset(func, *index, iv, &lp.blocks)?;
+                if !is_invariant(func, *array, &lp.blocks) {
+                    return None;
+                }
+                stores.push(StoreSpec {
+                    array: *array,
+                    value: classify(func, *value, iv, &lp.blocks)?,
+                    ty: store_ty(func, *value)?,
+                    index_off,
+                });
+            }
+            MirInst::Phi { .. } => return None,
             MirInst::Index { .. }
             | MirInst::Bin { .. }
             | MirInst::Unary { .. }
@@ -278,6 +302,9 @@ pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opt
     if region_has_barrier(func, &[header, body]) {
         return None;
     }
+    if !stores.is_empty() && !traps_in_store_order(func, body, term_v, acc_next) {
+        return None;
+    }
     Some(ReduceLoop {
         iv,
         iv_init,
@@ -286,7 +313,59 @@ pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opt
         term,
         ty: store_ty(func, acc)?,
         fold,
+        stores,
     })
+}
+
+/// A map-and-fold body runs, lane by lane, each store's value then the
+/// store, then the fold (`emit::vec_loop_body`); the VM replays a block
+/// that traps in that order. That matches the scalar loop when every
+/// instruction of `body` that can trap is first computed, in that order,
+/// after as many stores as precede it in `body`, and the fold itself
+/// comes after the last store.
+fn traps_in_store_order(func: &MirFunc, body: BlockId, term: ValueId, acc_next: ValueId) -> bool {
+    let insts = &func.block(body).insts;
+    let pos = |v: ValueId| insts.iter().position(|i| i.dest() == v);
+    let store_pos: Vec<usize> = insts
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i, MirInst::StoreIndex { .. }))
+        .map(|(k, _)| k)
+        .collect();
+    let mut segments: Vec<Vec<ValueId>> = insts
+        .iter()
+        .filter_map(|i| match i {
+            MirInst::StoreIndex { value, .. } => Some(vec![*value]),
+            _ => None,
+        })
+        .collect();
+    segments.push(vec![term, acc_next]);
+    let mut seen = std::collections::HashSet::new();
+    for (seg, roots) in segments.iter().enumerate() {
+        let mut stack = roots.clone();
+        while let Some(v) = stack.pop() {
+            let Some(at) = pos(v) else { continue };
+            if !seen.insert(v) {
+                continue;
+            }
+            let inst = &insts[at];
+            if may_trap(func, inst) && store_pos.iter().filter(|&&s| s < at).count() != seg {
+                return false;
+            }
+            stack.extend(inst.operands());
+        }
+    }
+    true
+}
+
+/// Int arithmetic that can overflow or divide by zero. Element reads are
+/// in range under the vector loop's guard; floats and bit ops never trap.
+fn may_trap(func: &MirFunc, inst: &MirInst) -> bool {
+    match inst {
+        MirInst::Bin { op, ty: MirTy::I64, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
+        MirInst::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
+        _ => false,
+    }
 }
 
 fn split_fma(func: &MirFunc, lhs: ValueId, rhs: ValueId) -> Option<(ValueId, ValueId, ValueId)> {
@@ -341,7 +420,7 @@ fn classify(
     }
     match def(func, v)? {
         MirInst::Index { array, index, .. } => {
-            let off = index_offset(func, *index, iv)?;
+            let off = index_offset(func, *index, iv, loop_blocks)?;
             if !is_invariant(func, *array, loop_blocks) {
                 return None;
             }
@@ -582,7 +661,7 @@ pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -
         }
         // The value the body compared, not the `then` block's copy.
         let term = classify(func, x, iv, &lp.blocks)?;
-        return Some(ReduceLoop { iv, iv_init, acc, n, term, ty, fold: simd::REDUCE_TAKE + pred(op) });
+        return Some(ReduceLoop { iv, iv_init, acc, n, term, ty, fold: simd::REDUCE_TAKE + pred(op), stores: Vec::new() });
     }
     // Conditional add: `then` adds `t` to the accumulator.
     if acc_ty != MirTy::I64 {
@@ -606,7 +685,7 @@ pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -
         VOp::Splat { v, .. } if as_const_i64(func, v) == Some(1) => mask,
         t => VOp::Bin { kind: simd::IMUL64, lhs: Box::new(mask), rhs: Box::new(t) },
     };
-    Some(ReduceLoop { iv, iv_init, acc, n, term, ty, fold: simd::REDUCE_ADD })
+    Some(ReduceLoop { iv, iv_init, acc, n, term, ty, fold: simd::REDUCE_ADD, stores: Vec::new() })
 }
 
 /// `a` and `b` compute the same word: one value, or the same pure op on
@@ -726,9 +805,14 @@ fn loop_bound(func: &MirFunc, cond: ValueId, iv: ValueId) -> Option<ValueId> {
     }
 }
 
-fn index_offset(func: &MirFunc, index: ValueId, iv: ValueId) -> Option<i64> {
+fn index_offset(
+    func: &MirFunc,
+    index: ValueId,
+    iv: ValueId,
+    loop_blocks: &std::collections::HashSet<BlockId>,
+) -> Option<Off> {
     if index == iv {
-        return Some(0);
+        return Some(Off::K(0));
     }
     if let Some(MirInst::Bin {
         op: MirBinOp::Add,
@@ -738,11 +822,18 @@ fn index_offset(func: &MirFunc, index: ValueId, iv: ValueId) -> Option<i64> {
         ..
     }) = def(func, index)
     {
-        if *lhs == iv {
-            return as_const_i64(func, *rhs);
+        let other = if *lhs == iv {
+            *rhs
+        } else if *rhs == iv {
+            *lhs
+        } else {
+            return None;
+        };
+        if let Some(k) = as_const_i64(func, other) {
+            return Some(Off::K(k));
         }
-        if *rhs == iv {
-            return as_const_i64(func, *lhs);
+        if func.ty(other) == MirTy::I64 && is_invariant(func, other, loop_blocks) {
+            return Some(Off::V(other));
         }
     }
     None

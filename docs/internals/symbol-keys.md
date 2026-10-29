@@ -93,7 +93,7 @@ being reached:
 
 ## `next_id`
 
-`symbol_next_id` (archive 6.7, `machine/src/symbol.rs`) is a
+`symbol_next_id` (archive 6.8, `machine/src/symbol.rs`) is a
 `fetch_add(1, Relaxed)` on one `static AtomicI64` starting at `1`. It is
 process-wide: every thread, task and VM in the process (the test runner runs
 files and cases side by side in one process) shares it, so no two calls

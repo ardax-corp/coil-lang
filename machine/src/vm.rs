@@ -379,12 +379,32 @@ fn pin_current_array_in(
             pins.sticky[idx] = false;
             return;
         }
-    let mut by_slot = vec![None; idx + 1];
-    by_slot[idx] = Some(obj);
-    frame_pins.push(FramePins {
-        depth: frames_len,
-        by_slot,
-        sticky: vec![false; idx + 1],
+    let mut pins = SPARE_PINS.with_borrow_mut(Vec::pop).unwrap_or_else(|| FramePins {
+        depth: 0,
+        by_slot: Vec::new(),
+        sticky: Vec::new(),
+    });
+    pins.depth = frames_len;
+    pins.by_slot.resize(idx + 1, None);
+    pins.sticky.resize(idx + 1, false);
+    pins.by_slot[idx] = Some(obj);
+    frame_pins.push(pins);
+}
+
+thread_local! {
+    /// Emptied pin tables of returned frames: a call that pins (any dense
+    /// heap op) reuses one instead of allocating two vectors.
+    static SPARE_PINS: std::cell::RefCell<Vec<FramePins>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keep `pins`' buffers for the next frame that pins; it holds no objects.
+fn recycle_pins(mut pins: FramePins) {
+    pins.by_slot.clear();
+    pins.sticky.clear();
+    SPARE_PINS.with_borrow_mut(|spare| {
+        if spare.len() < 64 {
+            spare.push(pins);
+        }
     });
 }
 
@@ -477,6 +497,16 @@ fn vstore_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES], index: i64
     true
 }
 
+/// A decoded `VLoop` body word.
+#[derive(Clone, Copy)]
+enum VloopOp {
+    Load { reg: usize, obj: Option<Object>, off: i64 },
+    Store { reg: usize, obj: Option<Object>, off: i64 },
+    Bin { kind: u8, dest: usize, a: usize, b: usize },
+    Fma { ty: u8, dest: usize, a: usize, b: usize },
+    Reduce { ty: u8, slot: usize, src: usize, fold: u8 },
+}
+
 /// `VLoop` (see [`Instruction::VLoop`]): the body over lanes `p ..= p + 7`
 /// for `p = from, from + 8, ..` below `to`, with `dest = p` first when
 /// `pos`. The arrays are resolved once (nothing in the body resizes or
@@ -496,14 +526,7 @@ pub(crate) fn vloop(
     use common::simd;
     const BAD: &str = "VLoop: malformed body";
     const OOB: &str = "VLoop out of bounds";
-    #[derive(Clone, Copy)]
-    enum Op {
-        Load { reg: usize, obj: Option<Object>, off: i64 },
-        Store { reg: usize, obj: Option<Object>, off: i64 },
-        Bin { kind: u8, dest: usize, a: usize, b: usize },
-        Fma { ty: u8, dest: usize, a: usize, b: usize },
-        Reduce { ty: u8, slot: usize, src: usize, fold: u8 },
-    }
+    use VloopOp as Op;
     let lanes = simd::LANES as i64;
     if from > to || (to - from) % lanes != 0 {
         return Err(BAD);
@@ -549,12 +572,26 @@ pub(crate) fn vloop(
             _ => return Err(BAD),
         });
     }
-    let z = [0u64; simd::LANES];
+    // Stores wait until the block's other words ran: a block that traps
+    // stores nothing and runs again one lane at a time (`vloop_lanes`), so
+    // the lanes before the trapping one store and fold as the scalar loop
+    // would. The compiler only takes bodies whose reads come before their
+    // stores, so deferring a block's stores changes no value it reads.
+    let mut pending: Vec<(Option<Object>, i64, [u64; simd::LANES])> = Vec::new();
+    let mut saved: Vec<(usize, Value)> = Vec::new();
     let mut p = from;
     while p < to {
         if pos {
             stack[sp + dest] = Value::from(p);
         }
+        pending.clear();
+        saved.clear();
+        for op in &ops {
+            if let Op::Reduce { slot, .. } = *op {
+                saved.push((slot, stack[sp + slot]));
+            }
+        }
+        let mut trapped = false;
         for op in &ops {
             match *op {
                 Op::Load { reg, obj: Some(Object::Array(gc)), off } => {
@@ -562,33 +599,151 @@ pub(crate) fn vloop(
                         return Err(OOB);
                     }
                 }
-                Op::Store { reg, obj: Some(Object::Array(mut gc)), off } => {
-                    if !vstore_lanes(gc.as_mut(), &regs[reg], p + off) {
-                        return Err(OOB);
+                Op::Store { reg, obj, off } => pending.push((obj, off, regs[reg])),
+                Op::Load { .. } => return Err(BAD),
+                Op::Bin { kind, dest, a, b } => match vbin_block(stack, sp, regs, kind, a, b) {
+                    Ok(out) => regs[dest] = out,
+                    Err(_) => {
+                        trapped = true;
+                        break;
+                    }
+                },
+                Op::Fma { ty, dest, a, b } => match crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]) {
+                    Ok(out) => regs[dest] = out,
+                    Err(_) => {
+                        trapped = true;
+                        break;
+                    }
+                },
+                Op::Reduce { ty, slot, src, fold } => {
+                    match crate::simd::eval_vreduce(ty, stack[sp + slot], &regs[src], fold) {
+                        Ok(v) => stack[sp + slot] = v,
+                        Err(_) => {
+                            trapped = true;
+                            break;
+                        }
                     }
                 }
-                Op::Load { .. } | Op::Store { .. } => return Err(BAD),
-                Op::Bin { kind, dest, a, b } => {
-                    let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
-                    let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
-                    let no_lhs = splat || matches!(kind, simd::IOTA_I64 | simd::IOTA_F64);
-                    let no_rhs = no_lhs || matches!(kind, simd::INEG | simd::FNEG);
-                    let lhs = if no_lhs { z } else { regs[a % simd::NREGS] };
-                    let rhs = if no_rhs { z } else { regs[b % simd::NREGS] };
-                    regs[dest] = crate::simd::eval_vbin(kind, &lhs, &rhs, scalar).map_err(|t| t.message())?;
-                }
-                Op::Fma { ty, dest, a, b } => {
-                    regs[dest] = crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]).map_err(|t| t.message())?;
-                }
-                Op::Reduce { ty, slot, src, fold } => {
-                    let acc = stack[sp + slot];
-                    stack[sp + slot] = crate::simd::eval_vreduce(ty, acc, &regs[src], fold).map_err(|t| t.message())?;
+            }
+        }
+        if trapped {
+            for &(slot, v) in &saved {
+                stack[sp + slot] = v;
+            }
+            vloop_lanes(stack, sp, regs, &ops, p)?;
+        } else {
+            for (obj, off, lanes) in &pending {
+                let Some(Object::Array(mut gc)) = *obj else {
+                    return Err(BAD);
+                };
+                if !vstore_lanes(gc.as_mut(), lanes, p + off) {
+                    return Err(OOB);
                 }
             }
         }
         p += lanes;
     }
     Ok(())
+}
+
+/// One `VBin` of a `VLoop` body over whole vector registers.
+fn vbin_block(
+    stack: &Stack<Value>,
+    sp: usize,
+    regs: &[[u64; common::simd::LANES]; common::simd::NREGS],
+    kind: u8,
+    a: usize,
+    b: usize,
+) -> Result<[u64; common::simd::LANES], common::int_arith::IntTrap> {
+    use common::simd;
+    let z = [0u64; simd::LANES];
+    let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
+    let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
+    let no_lhs = splat || matches!(kind, simd::IOTA_I64 | simd::IOTA_F64);
+    let no_rhs = no_lhs || matches!(kind, simd::INEG | simd::FNEG);
+    let lhs = if no_lhs { z } else { regs[a % simd::NREGS] };
+    let rhs = if no_rhs { z } else { regs[b % simd::NREGS] };
+    crate::simd::eval_vbin(kind, &lhs, &rhs, scalar)
+}
+
+/// The block at `p` of a `VLoop` body, one lane at a time in scalar
+/// order: each register holds lane `j`'s value in every lane, a store
+/// writes element `p + j + off`, a fold takes lane `j` alone. `Err` is the
+/// trap of the first lane that traps, after the lanes before it stored
+/// and folded.
+fn vloop_lanes(
+    stack: &mut Stack<Value>,
+    sp: usize,
+    regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
+    ops: &[VloopOp],
+    p: i64,
+) -> Result<(), &'static str> {
+    use common::simd;
+    const OOB: &str = "VLoop out of bounds";
+    for j in 0..simd::LANES as i64 {
+        for op in ops {
+            match *op {
+                VloopOp::Load { reg, obj, off } => {
+                    let Some(Object::Array(gc)) = obj else {
+                        return Err(OOB);
+                    };
+                    let i = p + j + off;
+                    let v = usize::try_from(i).ok().and_then(|i| gc.as_ref().get(i)).ok_or(OOB)?;
+                    regs[reg] = [v.bits(); simd::LANES];
+                }
+                VloopOp::Store { reg, obj, off } => {
+                    let Some(Object::Array(mut gc)) = obj else {
+                        return Err(OOB);
+                    };
+                    let arr = gc.as_mut();
+                    let i = usize::try_from(p + j + off).map_err(|_| OOB)?;
+                    if i >= arr.len() {
+                        return Err(OOB);
+                    }
+                    // SAFETY: `i < len` checked above; lanes are numeric.
+                    unsafe { arr.set_numeric_unchecked(i, Value::from(regs[reg][0])) };
+                }
+                VloopOp::Bin { kind, dest, a, b } => {
+                    regs[dest] = match kind {
+                        simd::IOTA_I64 => [j as u64; simd::LANES],
+                        simd::IOTA_F64 => [(j as f64).to_bits(); simd::LANES],
+                        _ => vbin_block(stack, sp, regs, kind, a, b).map_err(|t| t.message())?,
+                    };
+                }
+                VloopOp::Fma { ty, dest, a, b } => {
+                    regs[dest] = crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]).map_err(|t| t.message())?;
+                }
+                VloopOp::Reduce { ty, slot, src, fold } => {
+                    let x = regs[src][0];
+                    let one = if fold >= simd::REDUCE_TAKE {
+                        [x; simd::LANES]
+                    } else {
+                        let mut v = [fold_identity(ty, fold); simd::LANES];
+                        v[0] = x;
+                        v
+                    };
+                    stack[sp + slot] =
+                        crate::simd::eval_vreduce(ty, stack[sp + slot], &one, fold).map_err(|t| t.message())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A lane that leaves a fold unchanged: `0` for an add (`-0.0` for a float
+/// add, so a `-0.0` total stays negative), `1` for a product, all ones for
+/// an and, `0` for or / xor.
+fn fold_identity(ty: u8, fold: u8) -> u64 {
+    use common::{dense, simd};
+    let float = ty == dense::TY_F64;
+    match fold {
+        simd::REDUCE_ADD if float => (-0.0f64).to_bits(),
+        simd::REDUCE_MUL if float => 1.0f64.to_bits(),
+        simd::REDUCE_MUL => 1,
+        simd::REDUCE_AND => u64::MAX,
+        _ => 0,
+    }
 }
 
 /// `VScan` (see [`Instruction::VScan`]): from `p = from` in steps of 64,
@@ -1829,8 +1984,10 @@ impl<const S: usize> Machine<S> {
     #[inline]
     fn pop_pin_map_for_current_frame(&mut self) {
         let depth = self.frames.len();
-        if self.frame_pins.last().is_some_and(|p| p.depth == depth) {
-            self.frame_pins.pop();
+        if self.frame_pins.last().is_some_and(|p| p.depth == depth)
+            && let Some(pins) = self.frame_pins.pop()
+        {
+            recycle_pins(pins);
         }
     }
 
@@ -4346,6 +4503,13 @@ impl<const S: usize> Machine<S> {
         }
         let _ = self.pop_call_frame();
         self.stack.seek(saved_sp);
+        // The caller's frame map may list the word its host call returns
+        // into (a collection after the call roots the result there): the
+        // argument left in it would root the value past this call, a
+        // finalized object past its `drop`.
+        for i in saved_sp..(saved_sp + args.len()).min(self.stack.capacity()) {
+            self.stack[i] = Value::default();
+        }
         self.nested_depth -= 1;
         let _ = self.nested_frame_depths.pop();
         self.return_bookkeeping = self.nested_depth > 0

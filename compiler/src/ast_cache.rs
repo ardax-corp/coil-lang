@@ -251,6 +251,10 @@ impl AstCache {
         }
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&PathBuf, &CachedAst)> {
+        self.files.iter()
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &CachedAst> {
         self.files.values()
     }
