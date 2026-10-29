@@ -4945,3 +4945,44 @@ fn main() {
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
 }
+
+/// `**` runs on the dense tier like the other arithmetic: a numeric loop
+/// with a float and an int power stays dense, with no stack `PowF` / `Pow`.
+#[test]
+fn pipeline_dense_takes_pow() {
+    let src = r#"
+fn powers(float base, int e, int n) -> float {
+    let s = 0.0;
+    let k = 0;
+    while k < n {
+        s = s + base ** (k as float) + ((k ** e) as float);
+        k = k + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = powers(2.0, 2, 4);
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
+    let (bc, constants) = p.compile_src(src).expect("compile pow kernel");
+    let symbols = p.program_debug().fn_symbols;
+    let body = fn_ops(&bc, &symbols, "powers");
+    assert!(
+        body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
+        "pow kernel must emit DenseBin: {:?}",
+        body.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+    );
+    assert!(
+        !body
+            .iter()
+            .any(|b| matches!(*b.bytecode(), Instruction::PowF | Instruction::Pow)),
+        "pow kernel must not fall back to stack Pow: {:?}",
+        body.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+    );
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked());
+}
