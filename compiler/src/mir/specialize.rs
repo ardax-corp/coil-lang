@@ -218,9 +218,6 @@ fn specialize_side(
     if from_hir.keep_lines {
         return refuse_dense("coverage");
     }
-    if !has_numeric_arith(from_hir) {
-        return refuse_dense("no numeric arith");
-    }
     if !calls_agree(from_hir, calls) {
         return refuse_dense("call ABI");
     }
@@ -353,17 +350,6 @@ fn calls_agree(func: &crate::mir::MirFunc, calls: &DenseCallMap) -> bool {
                 && abi.params.iter().zip(args).all(|(&p, &a)| p == func.ty(a))
         }),
         _ => true,
-    })
-}
-
-/// The arithmetic dense pays for: float `+ - * /` or int `+ - * / %`.
-fn has_numeric_arith(func: &crate::mir::MirFunc) -> bool {
-    use crate::mir::{MirBinOp, MirInst};
-    func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
-        matches!(
-            i,
-            MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Pow, ty, .. } if ty.is_float() || ty.is_int()
-        ) || matches!(i, MirInst::Bin { op: MirBinOp::Rem, ty, .. } if ty.is_int())
     })
 }
 

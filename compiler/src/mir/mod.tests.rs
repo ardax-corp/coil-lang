@@ -2197,7 +2197,7 @@ fn main() {
 }
 
 #[test]
-fn s2c_mapped_pair_helper_takes_lir() {
+fn s2c_mapped_pair_helper_maps_its_alloc() {
     let src = r#"
 fn pair(int a, int b) -> [int; 2] {
     return [a, b];
@@ -2228,16 +2228,12 @@ fn main() {
     assert!(
         pair_bc
             .iter()
-            .any(|b| *b.bytecode() == Instruction::MakeArray),
-        "pair keeps MakeArray; opcodes={:?}",
+            .any(|b| matches!(*b.bytecode(), Instruction::MakeArray | Instruction::DenseMake)),
+        "pair still builds its array; opcodes={:?}",
         pair_bc
             .iter()
             .map(|b| b.bytecode().mnemonic())
             .collect::<Vec<_>>()
-    );
-    assert!(
-        pair_bc.iter().all(|b| !is_dense_bin_op(*b.bytecode())),
-        "S3: pair stays LIR MakeArray (not dense+match)"
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
