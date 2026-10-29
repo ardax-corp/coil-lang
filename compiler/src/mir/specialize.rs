@@ -343,13 +343,17 @@ fn specialize_side(
 }
 
 /// Every `CALL` in `func` uses its callee's dense ABI, when the callee has one.
+/// The callee may declare more entry words than the call passes: dictionary
+/// slots past its parameters (heap words, read only where a dictionary
+/// program loads one), which the LIR `CALL` leaves unset too.
 fn calls_agree(func: &crate::mir::MirFunc, calls: &DenseCallMap) -> bool {
-    use crate::mir::MirInst;
+    use crate::mir::{MirInst, MirTy};
     func.blocks.iter().flat_map(|b| b.insts.iter()).all(|i| match i {
         MirInst::Call { dest, dest_hi, target, args } => calls.get(&target.0).is_none_or(|abi| {
             abi.ret_hi == dest_hi.map(|h| func.ty(h))
                 && abi.ret == func.ty(*dest)
-                && abi.params.len() == args.len()
+                && abi.params.len() >= args.len()
+                && abi.params[args.len()..].iter().all(|&p| p == MirTy::HeapRef)
                 && abi.params.iter().zip(args).all(|(&p, &a)| p == func.ty(a))
         }),
         _ => true,
