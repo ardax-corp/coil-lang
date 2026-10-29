@@ -880,7 +880,7 @@ fn operand_mismatch_does_not_cascade_into_unknown_operand_type() {
     // (E0119) was a cascade of the same mistake.
     for src in [
         "fn main() { let v = Vec::new(); let x = v.pop(); let y = x + 1; }",
-        "fn main() { let b: byte = 65; let c = b - 32; }",
+        "fn main() { let b: byte = 65; let n = 32; let c = b - n; }",
     ] {
         let msgs = check_messages(src);
         let mismatches = messages_with(&msgs, ErrorCode::TypeMismatch);
