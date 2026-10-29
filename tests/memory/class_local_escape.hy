@@ -1,6 +1,8 @@
 // A class local kept in frame slots is boxed into its object where it
 // escapes; field reads and writes after that go through the object, in
-// direct MIR as in HIR emission.
+// direct MIR as in HIR emission. Classes are copy-on-write: a write after
+// the object was stored lands on a fresh copy, so the stored value keeps
+// what it had at the store.
 use tests::assert;
 
 class Cell {
@@ -48,6 +50,6 @@ fn after_escape(int a) -> int {
 }
 
 test("frame-slot class locals boxed at their escape") {
-    assert!(chain(4) == 64);
-    assert!(after_escape(3) == 16);
+    assert!(chain(4) == 60);
+    assert!(after_escape(3) == 12);
 }

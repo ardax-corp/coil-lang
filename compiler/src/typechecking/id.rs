@@ -356,7 +356,7 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             visit(body);
         }
         // Expanded before this runs; its body is the expansion program's.
-        Expression::ComptimeBlock(_) => {}
+        Expression::ComptimeBlock(_) | Expression::RegionMark => {}
 
         Expression::Branch(cond, body) => {
             if let Some(c) = cond {

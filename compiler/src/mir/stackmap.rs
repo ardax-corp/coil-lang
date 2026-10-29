@@ -18,7 +18,7 @@ pub fn mir_maps_ok(func: &MirFunc) -> bool {
         let mut pending = false;
         for inst in &block.insts {
             match inst {
-                MirInst::Alloc { .. } | MirInst::ArrayPush { .. } | MirInst::Format { .. } | MirInst::Stringify { .. } => {
+                MirInst::Alloc { .. } | MirInst::ArrayPush { .. } | MirInst::Format { .. } | MirInst::Stringify { .. } | MirInst::Cow { .. } => {
                     if pending {
                         return false;
                     }

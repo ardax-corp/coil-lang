@@ -508,6 +508,18 @@ pub enum Instruction {
     /// `p ..= p + 7`. A load or store out of range, or a lane that traps,
     /// panics. Execution resumes past the body.
     VLoop,
+    /// Early free (archive 6.4): pop a heap word the compiler proved dead
+    /// and give its object back to the heap now; operand bit 0 frees what
+    /// it reaches through precise words too. The VM skips what it cannot
+    /// free safely (see `Heap::free_early`). Never collects.
+    FreeEarly,
+    /// Copy-on-write (archive 6.6): pop a heap word and push it back.
+    /// Operand 0 (share): a second place now names the object, so the next
+    /// write copies it. Operand 1 (unique): a write through the word
+    /// follows, so a shared class instance or array is replaced by a
+    /// shallow copy first (an allocation and safepoint). Identity classes
+    /// and other kinds pass through.
+    Cow,
 }
 
 impl From<u8> for Instruction {
@@ -579,7 +591,7 @@ pub mod dense {
     pub const FDIV32: u8 = 23;
     pub const FREM32: u8 = 24;
     /// `a ** b` on `i64` (traps like `Pow`) and on `f64` (`powf`, like
-    /// `PowF`). Archive 6.4.
+    /// `PowF`). Archive 6.7.
     pub const IPOW64: u8 = 25;
     pub const FPOW64: u8 = 26;
 
@@ -621,6 +633,17 @@ pub mod dense {
     /// [`super::Instruction::DenseFieldLoad`] / [`super::Instruction::DenseFieldStore`]:
     /// `c` is a name slot (GetField), not a field index.
     pub const FIELD_NAMED: u8 = 1;
+
+    /// [`super::Instruction::Cow`] operand bit: unique field `[31:16]` of
+    /// the object in frame slot `[15:8]` in place (stack-neutral), writing
+    /// the field back only when it copied. Bit 0 (unique) is set with it.
+    pub const COW_FIELD: u32 = 2;
+
+    /// Pack a field-mode [`super::Instruction::Cow`] operand.
+    #[inline]
+    pub const fn pack_cow_field(object: u8, field: u16) -> u32 {
+        ((field as u32) << 16) | ((object as u32) << 8) | COW_FIELD | 1
+    }
     pub const MAKE_ARRAY: u8 = 0;
     pub const MAKE_TUPLE: u8 = 1;
     pub const MAKE_ENUM: u8 = 2;
@@ -1036,6 +1059,8 @@ impl Instruction {
             Self::VMask => "VMask",
             Self::VScan => "VScan",
             Self::VLoop => "VLoop",
+            Self::FreeEarly => "FreeEarly",
+            Self::Cow => "Cow",
         }
     }
 }
@@ -2153,7 +2178,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::VLoop as u8;
+        let last = Instruction::Cow as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

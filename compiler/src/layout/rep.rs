@@ -437,8 +437,8 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
 }
 
 /// Element kind an array of `elem` is stamped with at construction
-/// (`MakeArrayK`): `WORD_POINTER` for ground heap words,
-/// `WORD_BYTE` for `byte` / `bool` (the runtime packs those one byte per
+/// (`MakeArrayK`): `WORD_POINTER` for ground heap words and closed
+/// two-word values (stored boxed), `WORD_BYTE` for `byte` / `bool` (the runtime packs those one byte per
 /// element), else `WORD_UNKNOWN` (no stamp).
 pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
     let ty = apply_ty_prune(checker.subst(), elem);
@@ -446,6 +446,10 @@ pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
         && matches!(name.as_str(), crate::typechecking::ty::BOOL | crate::typechecking::ty::BYTE)
     {
         return common::WORD_BYTE;
+    }
+    // A two-word value stored in an array is its boxed object (#2074).
+    if matches!(of_resolved(checker, &ty), Layout::Pair(_)) {
+        return common::WORD_POINTER;
     }
     match word_kind(checker, &ty) {
         common::WORD_POINTER => common::WORD_POINTER,
@@ -517,7 +521,8 @@ mod word_tests {
         assert_eq!(stamp(int()), common::WORD_UNKNOWN);
         assert_eq!(stamp(Ty::Con("float".into())), common::WORD_UNKNOWN);
         assert_eq!(stamp(string()), common::WORD_POINTER);
-        assert_eq!(stamp(option_ty(int())), common::WORD_UNKNOWN);
+        // A two-word `Option<int>` element is its boxed object (#2074).
+        assert_eq!(stamp(option_ty(int())), common::WORD_POINTER);
         assert_eq!(stamp(Ty::Con("T".into())), common::WORD_UNKNOWN);
     }
 

@@ -128,6 +128,8 @@ pub struct Pipeline {
     /// Typed inlining of HIR bodies, when set; `None` keeps the compiler's
     /// [`crate::il::opt::OptimizeOptions::hir_inline`] (on).
     hir_inline: Option<bool>,
+    /// `--early-free on|off`; `None` follows the opt level.
+    early_free: Option<bool>,
     /// Host/test `dload` grants (stem + file to hash). Not set from CLI flags.
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
@@ -325,6 +327,9 @@ impl Pipeline {
             c.set_auto_par(self.auto_par);
             if let Some(on) = self.hir_inline {
                 c.set_hir_inline(on);
+            }
+            if let Some(on) = self.early_free {
+                c.set_early_free(on);
             }
             c.set_include_tests(self.include_tests);
             c.set_keep_fns_in(self.keep_fns_in.clone());
@@ -737,6 +742,7 @@ impl Pipeline {
             keep_fns_in: None,
             auto_par: true,
             hir_inline: None,
+            early_free: None,
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
@@ -2237,6 +2243,15 @@ impl Pipeline {
     /// compiles to turn it off. `--fold-calls on|off` calls this.
     pub fn set_call_fold(&mut self, on: bool) {
         self.call_fold = on;
+    }
+
+    /// Emit the early frees (`--early-free on`) or not (`off`) whatever
+    /// the opt level.
+    pub fn set_early_free(&mut self, on: bool) {
+        self.early_free = Some(on);
+        if self.compiler.get().is_some() {
+            self.compiler_lazy_mut().set_early_free(on);
+        }
     }
 
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {

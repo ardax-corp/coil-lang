@@ -40,6 +40,7 @@ impl<'a> Synth<'a> {
                 pinned_param: false,
                 captures: Vec::new(),
                 declared: None,
+                stated_escape: None,
                 contract_spans: Vec::new(),
                 locals: Vec::new(),
                 exprs: Vec::new(),
@@ -56,6 +57,7 @@ impl<'a> Synth<'a> {
             ty: Some(ty),
             kind,
             captured: false,
+            borrow: false,
         });
         if kind == LocalKind::Param {
             self.body.params.push(id);

@@ -2662,6 +2662,26 @@ impl Lower<'_> {
                 self.at_expr(id, |l| l.b.ins_print(s).map_err(mir))?;
                 Ok(Val::Unit)
             }
+            // An early free (`FreeEarly`) of a local's object.
+            HirKind::Builtin { op: Builtin::FreeEarly { deep }, args } if let [local] = args.as_slice() => {
+                let Some(v) = self.word(*local)? else {
+                    return Ok(Val::Never);
+                };
+                // A word that is no reference (a scalar niche) has nothing
+                // to free; a pointer niche frees the object it points at.
+                if !matches!(self.b.value_ty(v), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64) {
+                    return Ok(Val::Unit);
+                }
+                self.at_expr(id, |l| l.b.ins_free_early(v, *deep).map_err(mir))?;
+                Ok(Val::Unit)
+            }
+            // `region { … }`: its enter / leave HostInvoke.
+            HirKind::Builtin { op: Builtin::Region { enter }, .. } => {
+                let native = if *enter { common::GC_REGION_ENTER_ID } else { common::GC_REGION_EXIT_ID };
+                let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
+                self.at_expr(id, |l| l.b.ins_host_invoke_as(native, Vec::new(), layout, None).map_err(mir))?;
+                Ok(Val::Unit)
+            }
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
                 let Some(h) = self.word(*handle)? else {
                     return Ok(Val::Never);
@@ -2745,6 +2765,17 @@ impl Lower<'_> {
                     }
                     _ => Err("relayout".into()),
                 }
+            }
+            // Copy-on-write share / unique: the operand's word, or a copy's.
+            HirKind::Builtin { op: Builtin::Cow { unique }, args } if let [inner] = args.as_slice() => {
+                let Some(v) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(v) != MirTy::HeapRef {
+                    return Ok(Val::V(v));
+                }
+                let out = self.at_expr(id, |l| l.b.ins_cow(v, *unique).map_err(mir))?;
+                Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
             }
             // A primitive's text (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {
@@ -2884,6 +2915,9 @@ impl Lower<'_> {
                 self.stack_store(*place, base, index, *value)
             }
             HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
+                if let Some(done) = self.cow_field(*place, *value, slot)? {
+                    return Ok(done);
+                }
                 let boxed = self.boxed_slot_field(*place);
                 let open = self.open_slot_niche(*place);
                 let ty = self
@@ -2996,6 +3030,15 @@ impl Lower<'_> {
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
                     && let Some(&(slot, ty)) = self.inp.heap_fields.get(&place.0) =>
             {
+                // `obj.f = unique(obj.f)`: one in-place op.
+                if ty == MirTy::HeapRef && !self.inp.boxed_niches.contains_key(&place.0) && self.same_field(*place, *value) {
+                    let Some(obj) = self.word(base)? else {
+                        return Ok(Val::Never);
+                    };
+                    let out = self.at_expr(*value, |l| l.b.ins_cow_at(obj, true, Some(slot)).map_err(mir))?;
+                    self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+                    return Ok(Val::Unit);
+                }
                 // The value, then the object, as HIR emission's `SetField`.
                 let v = match self.inp.boxed_niches.get(&place.0) {
                     Some(&layout) => self.boxed_niche_word(*value, layout)?,
@@ -3989,6 +4032,33 @@ impl Lower<'_> {
 
     /// For field `field` (slot `slot`) of a frame-slot class local boxed
     /// before here: the object and the field's index in it.
+    /// `obj.f = unique(obj.f)` on a heap object's field (what copy-on-write
+    /// puts before a write through `obj.f`): one in-place op that writes the
+    /// field back only when it copied.
+    fn cow_field(&mut self, place: HirId, value: HirId, slot: u32) -> Result<Option<Val>, Refusal> {
+        if !self.same_field(place, value) || self.boxed_slot_field(place) || self.open_slot_niche(place).is_some() || self.expr_ty(place).and_then(|t| self.inp.word(t)) != Some(MirTy::HeapRef) {
+            return Ok(None);
+        }
+        let Some((obj, index)) = self.boxed_field(place, slot)? else {
+            return Ok(None);
+        };
+        let out = self.at_expr(value, |l| l.b.ins_cow_at(obj, true, Some(index)).map_err(mir))?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+        Ok(Some(Val::Unit))
+    }
+
+    /// `value` is `unique(place)` and `place` is a field of a local: the
+    /// assignment `place = value` copy-on-write puts before a write.
+    fn same_field(&self, place: HirId, value: HirId) -> bool {
+        let (HirKind::Field { base, name }, HirKind::Builtin { op: Builtin::Cow { unique: true }, args }) = (&self.hir.expr(place).kind, &self.hir.expr(value).kind) else {
+            return false;
+        };
+        let ([inner], HirKind::Local(local)) = (args.as_slice(), &self.hir.expr(*base).kind) else {
+            return false;
+        };
+        matches!(&self.hir.expr(*inner).kind, HirKind::Field { base: b, name: n } if n == name && matches!(self.hir.expr(*b).kind, HirKind::Local(l) if l == *local))
+    }
+
     fn boxed_field(&mut self, field: HirId, slot: u32) -> Result<Option<(ValueId, u32)>, Refusal> {
         let HirKind::Field { base, .. } = self.hir.expr(field).kind else {
             return Ok(None);
@@ -5938,7 +6008,11 @@ impl Lower<'_> {
     /// id is the instruction's, not a value the lowering has to find).
     fn host(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         let (native, layout, unbox) = &self.inp.hosts[&id.0];
-        let (native, layout) = (*native, *layout);
+        let (mut native, layout) = (*native, *layout);
+        // A `from_bytes` whose buffer is dead after it takes the bytes.
+        if self.hir.expr(id).flags.contains(crate::hir::HirFlags::TAKE) && common::host_native_id("from_bytes") == Some(usize::from(native)) {
+            native = common::FROM_BYTES_TAKE_ID;
+        }
         let raw = std::mem::take(&mut self.raw_host);
         let pair = match (self.inp.pair_tys.get(&id.0), unbox) {
             (Some(_), Some(_)) if raw => None,

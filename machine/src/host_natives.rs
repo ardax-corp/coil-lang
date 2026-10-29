@@ -128,6 +128,10 @@ pub fn build_standard_host_natives(
     push_wiring(&mut out, &mut register_id, crate::tty::TTY_WIRING, "io tty");
     // Append-only after io tty: bulk Vec copy / fill (major 6 minor 1).
     push_wiring(&mut out, &mut register_id, crate::vec_ops::VEC_BULK_WIRING, "vec bulk");
+    // Append-only after vec bulk: `from_bytes` taking a dead buffer (major 6 minor 4).
+    push_from_bytes_take(&mut out, &mut register_id);
+    // Append-only after from_bytes_take: `region` enter / exit (major 6 minor 5).
+    push_region(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -380,6 +384,35 @@ fn push_string_bytes(
 
 /// `black_box(x) -> x`: the identity, as a call the optimizer cannot see
 /// through.
+/// `from_bytes_take(buf) -> Result<string, StringError>`: `from_bytes`
+/// that moves the bytes out of a buffer nothing reads again.
+fn push_from_bytes_take(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    let name = common::FROM_BYTES_TAKE_NATIVE;
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("from_bytes_take signature");
+    let id = out.len();
+    register_id(name, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        let r = crate::io::from_bytes_take(heap, args[0]);
+        Ok(Some(crate::str_bytes::as_string_result_value(heap, r)))
+    })));
+}
+
+/// `gc_region_enter` / `gc_region_exit`: VM hooks ([`HostOp::RegionEnter`]).
+fn push_region(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    for (name, op) in [
+        (common::GC_REGION_ENTER_NATIVE, HostOp::RegionEnter),
+        (common::GC_REGION_EXIT_NATIVE, HostOp::RegionExit),
+    ] {
+        let sig = FfiSignature::from_parts(name.to_string(), vec![], FfiType::Int).expect("region signature");
+        let id = out.len();
+        register_id(name, id);
+        out.push(Arc::new(
+            HostClosureFn::new(sig, move |_heap, _args| Err(FfiError::Unsupported(format!("{name} is a VM hook only"))))
+                .with_host_op(op),
+        ));
+    }
+}
+
 fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let name = common::BLACK_BOX_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("black_box signature");
@@ -1338,12 +1371,20 @@ mod tests {
             Some(common::TTY_IS_TTY_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 3).map(String::as_str),
+            names.get(173).map(String::as_str),
             Some(common::TTY_ENABLE_VT_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(175).map(String::as_str),
             Some(common::VEC_FILL_NATIVE)
+        );
+        assert_eq!(
+            names.get(176).map(String::as_str),
+            Some(common::FROM_BYTES_TAKE_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::GC_REGION_EXIT_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1683,6 +1724,18 @@ mod tests {
             registrations.get(end + 39).map(|(n, _)| n.as_str()),
             Some(common::VEC_FILL_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 40);
+        assert_eq!(
+            registrations.get(end + 40).map(|(n, _)| n.as_str()),
+            Some(common::FROM_BYTES_TAKE_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 41).map(|(n, _)| n.as_str()),
+            Some(common::GC_REGION_ENTER_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 42).map(|(n, _)| n.as_str()),
+            Some(common::GC_REGION_EXIT_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 43);
     }
 }

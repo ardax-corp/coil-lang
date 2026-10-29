@@ -40,6 +40,7 @@ pub fn stage(body: &HirBody, target: HirId) -> Option<HirBody> {
         ty: moved.ty.clone(),
         kind: LocalKind::Temp,
         captured: false,
+        borrow: false,
     });
     let init = HirId(b.exprs.len() as u32);
     b.exprs.push(moved.clone());
@@ -120,6 +121,7 @@ fn split_adjust(body: &HirBody, target: HirId) -> Option<HirBody> {
         ty: node.ty.clone(),
         kind: LocalKind::Temp,
         captured: false,
+        borrow: false,
     });
     let mut stmts = Vec::new();
     if prefix {
@@ -189,6 +191,7 @@ fn split_assign(body: &HirBody, target: HirId) -> Option<HirBody> {
         ty: ty.clone(),
         kind: LocalKind::Temp,
         captured: false,
+        borrow: false,
     });
     let bind = push_let(&mut b, temp, value, node.span);
     let read = HirExpr {
@@ -263,6 +266,7 @@ fn stage_place_indices(body: &HirBody, target: HirId) -> Option<HirBody> {
             ty: moved.ty.clone(),
             kind: LocalKind::Temp,
             captured: false,
+            borrow: false,
         });
         let init = push(&mut b, moved.clone());
         let bind = push_let(&mut b, temp, init, moved.span);

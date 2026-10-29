@@ -52,7 +52,8 @@ class int {}
 /// go through `int`. Mixing `int` and `float` in one operator is a type error.
 ///
 /// `float` implements `Num`, `Ord`, `Eq` and `Show`, but not `Integral`.
-/// Math functions such as `sqrt` and `sin` are in `prelude::math`.
+/// Math functions such as `sqrt` and `sin` are in the standard library's
+/// `math` module (`use math::{sqrt};`).
 ///
 /// # Examples
 ///

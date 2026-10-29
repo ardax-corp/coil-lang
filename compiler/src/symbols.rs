@@ -454,7 +454,7 @@ impl SymbolIndex {
                     visit_output(index, file, source, body);
                 }
                 // Expanded before this runs; its body is the expansion program's.
-                Expression::ComptimeBlock(_) => {}
+                Expression::ComptimeBlock(_) | Expression::RegionMark => {}
                 Expression::EnumDecl { variants, .. } => visit_outputs(index, file, source, variants),
                 Expression::EnumVariant { payload, .. } => match payload {
                     EnumVariantPayload::Unit => {}

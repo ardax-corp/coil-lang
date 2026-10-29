@@ -212,6 +212,7 @@ impl Checker {
             next_static_slot: 0,
             const_class_fields: HashMap::new(),
             readonly_classes: HashSet::new(),
+            shared_classes: HashSet::new(),
             impl_owner: None,
             enums: BTreeMap::new(),
             enum_tags: BTreeMap::new(),
@@ -1792,6 +1793,7 @@ impl Checker {
         self.static_methods.retain(|k, _| k.contains("::") || Self::is_lang_enum_key(k));
         self.const_class_fields.retain(|k, _| k.contains("::"));
         self.readonly_classes.retain(|k| k.contains("::"));
+        self.shared_classes.retain(|k| k.contains("::"));
         self.generics
             .generic_type_ctors
             .retain(|k, _| k.contains("::"));
@@ -3601,12 +3603,13 @@ impl Checker {
                 args,
                 captures,
                 body,
+                ..
             } => self.infer_lambda(args, captures, body, range),
 
             Expression::TestCase { name, body } => self.infer_test_case(name, body, &range),
             // Left in place only when it could not be expanded, which
             // was reported.
-            Expression::ComptimeBlock(_) => unit_ty(),
+            Expression::ComptimeBlock(_) | Expression::RegionMark => unit_ty(),
             Expression::Implementation {
                 what,
                 owner,
@@ -5577,6 +5580,12 @@ impl Checker {
         // `old(e)` in an `ensures`: `e` as it was on entry.
         if self.in_ensures
             && let Expression::Identifier("old") = name.1.as_ref()
+            && let Some([arg]) = args.as_deref()
+        {
+            return self.infer(arg);
+        }
+        // `mut e` (a borrow of the place `e`): `e`'s type.
+        if let Expression::Identifier("__mut") = name.1.as_ref()
             && let Some([arg]) = args.as_deref()
         {
             return self.infer(arg);
@@ -16130,9 +16139,16 @@ impl Checker {
     /// Record this module's `readonly class` keys before any body is
     /// typed, so a use ahead of the declaration sees the class as immutable.
     fn pre_register_readonly_classes(&mut self, ast: &Output) {
-        fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<&'a str>) {
+        fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<(&'a str, bool)>) {
             match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
-                Expression::Class { name, readonly: true, .. } => out.push(name),
+                Expression::Class { name, readonly, attrs, .. } => {
+                    if *readonly {
+                        out.push((name, false));
+                    }
+                    if attrs.iter().any(|a| a.name == "shared") {
+                        out.push((name, true));
+                    }
+                }
                 Expression::Program(children) | Expression::Fragment(children) => {
                     for child in children {
                         walk(child, out);
@@ -16143,9 +16159,13 @@ impl Checker {
         }
         let mut names = Vec::new();
         walk(ast, &mut names);
-        for name in names {
+        for (name, shared) in names {
             let key = self.qualify_module_name(name);
-            self.readonly_classes.insert(key);
+            if shared {
+                self.shared_classes.insert(key);
+            } else {
+                self.readonly_classes.insert(key);
+            }
         }
     }
 
@@ -16175,6 +16195,11 @@ impl Checker {
     /// Whether class `key` was declared `readonly class`.
     pub fn is_readonly_class(&self, key: &str) -> bool {
         self.readonly_classes.contains(key)
+    }
+
+    /// Whether class `key` was declared `shared class`.
+    pub fn is_shared_class(&self, key: &str) -> bool {
+        self.shared_classes.contains(key)
     }
 
     /// Names of the classes and enums this module declares at the top level.
@@ -17788,7 +17813,7 @@ impl Checker {
                 self.pre_register_enums_walk(body, errors);
             }
             // Expanded before this runs; its body is the expansion program's.
-            Expression::ComptimeBlock(_) => {}
+            Expression::ComptimeBlock(_) | Expression::RegionMark => {}
 
             Expression::Branch(cond, body) => {
                 if let Some(c) = cond {

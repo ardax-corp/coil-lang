@@ -81,6 +81,7 @@ pub fn take_pc_profile() -> Vec<u64> {
 thread_local! {
     static VM_ALLOC_COUNT: AtomicU64 = const { AtomicU64::new(0) };
     static VM_GC_COUNT: AtomicU64 = const { AtomicU64::new(0) };
+    static VM_MINOR_COUNT: AtomicU64 = const { AtomicU64::new(0) };
     static VM_MAKE_FAST_COUNT: AtomicU64 = const { AtomicU64::new(0) };
     static VM_INTERN_STR_COUNT: AtomicU64 = const { AtomicU64::new(0) };
 }
@@ -103,6 +104,7 @@ pub(crate) fn note_heap_alloc() {}
 pub fn reset_alloc_profile() {
     VM_ALLOC_COUNT.with(|c| c.store(0, Ordering::Relaxed));
     VM_GC_COUNT.with(|c| c.store(0, Ordering::Relaxed));
+    VM_MINOR_COUNT.with(|c| c.store(0, Ordering::Relaxed));
     VM_MAKE_FAST_COUNT.with(|c| c.store(0, Ordering::Relaxed));
     VM_INTERN_STR_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 }
@@ -120,6 +122,19 @@ pub fn alloc_count() -> u64 {
 #[cfg(not(any(test, feature = "vm_profile")))]
 #[must_use]
 pub fn alloc_count() -> u64 {
+    0
+}
+
+/// Number of nursery minor collections since the last reset.
+#[cfg(any(test, feature = "vm_profile"))]
+#[must_use]
+pub fn minor_gc_count() -> u64 {
+    VM_MINOR_COUNT.with(|c| c.load(Ordering::Relaxed))
+}
+
+#[cfg(not(any(test, feature = "vm_profile")))]
+#[must_use]
+pub fn minor_gc_count() -> u64 {
     0
 }
 
@@ -898,6 +913,11 @@ pub struct Machine<const S: usize> {
     frames: ArrayVec<Frame, S>,
     /// Pin tables for frames that ran `ArrayPin` or a dense heap index.
     frame_pins: Vec<FramePins>,
+    /// `COIL_COW_REPORT`: copies the `Cow` instruction made, by its PC.
+    cow_sites: Option<std::collections::HashMap<usize, u64>>,
+    /// Shares counted while reporting copies.
+    cow_shares: u64,
+    /// Scratch for [`Self::free_early`]: the addresses one call freed.
     /// Last dense-index array identity (predicted hit in counted loops).
     dense_obj_addr: u64,
     dense_obj: Option<Object>,
@@ -1077,9 +1097,15 @@ impl<const S: usize> Machine<S> {
         Self {
             frames,
             frame_pins: Vec::new(),
+            cow_sites: std::env::var_os("COIL_COW_REPORT").map(|_| std::collections::HashMap::new()),
+            cow_shares: 0,
             dense_obj_addr: 0,
             dense_obj: None,
-            heap: crate::memory::HeapSlot::default(),
+            heap: {
+                let mut heap = crate::memory::HeapSlot::default();
+                heap.get_mut().set_nursery(crate::memory::nursery_enabled());
+                heap
+            },
             stack: Stack::with_capacity(cap),
             output: None,
             natives: crate::ffi::Natives::new(),
@@ -1627,6 +1653,35 @@ impl<const S: usize> Machine<S> {
         p
     }
 
+    /// `COIL_COW_REPORT`: the copies copy-on-write made, by source line,
+    /// most first, on stderr.
+    fn print_cow_report(&mut self) {
+        let Some(sites) = self.cow_sites.take() else { return };
+        let mut by_line: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for (ip, n) in sites {
+            let at = self
+                .pc_file_line_column(ip)
+                .and_then(|(file, line, _)| Some(format!("{}:{line}", self.program_debug.source_files.get(file as usize)?)))
+                .unwrap_or_else(|| format!("pc {ip}"));
+            *by_line.entry(at).or_insert(0) += n;
+        }
+        let mut rows: Vec<(String, u64)> = by_line.into_iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let total: u64 = rows.iter().map(|r| r.1).sum();
+        eprintln!(
+            "cow-report: {total} copies for {} shares ({} objects copied; each share is a copy a copy-on-assign design makes)",
+            self.cow_shares,
+            self.heap.cow_copies()
+        );
+        // A line that copies over and over (a write in a loop to a value
+        // something else shares) is worth a borrow or a `Ref<T>`.
+        const HOT: u64 = 100;
+        for (at, n) in &rows {
+            let hint = if *n >= HOT { "  <- copied repeatedly: borrow with `let x = mut …` or share through a `Ref<T>`" } else { "" };
+            eprintln!("  {n:>10}  {at}{hint}");
+        }
+    }
+
     fn format_panic_location(&self, panic_insn_ip: usize) -> Option<String> {
         let (file, line, column) = self.pc_file_line_column(panic_insn_ip)?;
         let path = self.program_debug.source_files.get(file as usize)?;
@@ -1799,6 +1854,15 @@ impl<const S: usize> Machine<S> {
         {
             recycle_pins(pins);
         }
+    }
+
+    /// `FreeEarly` (`deep` from its operand): free what the compiler proved dead
+    /// ([`Heap::free_early`]). An `ArrayPin` keeps its array; a dense
+    /// index's pin and the dense object cache forget a freed address. `--early-free off` turns it
+    /// off; `--early-free check` frees nothing and aborts when the next
+    /// mark still reaches an object it would have freed.
+    pub(crate) fn free_early(&mut self, v: Value, deep: bool) {
+        free_early_in(&mut self.heap, &mut self.frame_pins, &mut self.dense_obj_addr, &mut self.dense_obj, v, deep);
     }
 
     #[inline]
@@ -2050,6 +2114,7 @@ impl<const S: usize> Machine<S> {
             if self.heap.gc_is_sweeping() {
                 self.heap.finish_sweep();
             }
+            self.gc_minor();
             self.clear_dense_obj_cache();
 
             self.mark_from_vm_roots();
@@ -2074,6 +2139,7 @@ impl<const S: usize> Machine<S> {
 
             #[cfg(feature = "gc-stats")]
             self.note_gc_census();
+            self.check_early_frees();
             self.heap.clear_dead_weaks();
             // SAFETY: all reachable objects were marked above; dead weaks cleared.
             unsafe { self.heap.sweep() };
@@ -2095,6 +2161,92 @@ impl<const S: usize> Machine<S> {
     /// movable each cycle and checks that no word still names an old slot.
     #[cold]
     #[inline(never)]
+    /// Minor collection: copy the surviving young objects out of the
+    /// nursery and reset it (`feature/escape-memory` step 4). Where nothing
+    /// may move it promotes the young objects in place instead.
+    fn gc_minor(&mut self) {
+        if !self.heap.has_young() || !self.heap.gc_is_idle() {
+            return;
+        }
+        #[cfg(any(test, feature = "vm_profile"))]
+        VM_MINOR_COUNT.with(|c| {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+        let can_move = IN_EXECUTE.get() <= 1
+            && self.shared_epoch.is_none()
+            && !self.heap.epoch_stw()
+            && !self.heap.is_borrowed();
+        #[cfg(any(test, feature = "debugger"))]
+        let can_move = can_move && self.debug.is_none();
+        if !can_move {
+            self.heap.promote_young();
+            self.heap.pretenure_after_promote();
+            return;
+        }
+        // The dense-index cache names an object that may move.
+        self.clear_dense_obj_cache();
+        let mut pins = self.heap.take_gc_roots();
+        let mut must = Vec::new();
+        self.for_each_stack_word(&mut |idx, kind| match kind {
+            crate::memory::RootKind::Precise => must.push(idx),
+            _ => pins.push(self.stack[idx].heap_addr()),
+        });
+        let mut must_statics = Vec::new();
+        self.for_each_static_root(&mut |i, addr, kind| match kind {
+            crate::memory::RootKind::Precise => must_statics.push(i),
+            _ => pins.push(addr),
+        });
+        self.for_each_handle_root(&mut |addr, _| pins.push(addr));
+        let precise: Vec<u64> = must
+            .iter()
+            .map(|&idx| self.stack[idx].heap_addr())
+            .chain(must_statics.iter().map(|&i| self.statics[i].heap_addr()))
+            .collect();
+        let plan = self.heap.minor_plan(&pins, &precise);
+        self.heap.restore_gc_roots(pins);
+        for idx in must {
+            if let Some(v) = plan.forward(self.stack[idx]) {
+                self.stack[idx] = v;
+            }
+        }
+        for i in must_statics {
+            if let Some(v) = plan.forward(self.statics[i]) {
+                self.statics[i] = v;
+            }
+        }
+        #[cfg(feature = "gc-stress")]
+        self.for_each_vm_root(&mut |addr, kind| {
+            assert!(
+                !plan.moved().contains_key(&addr),
+                "gc-stress: {kind:?} VM root still names young {addr:#x} after a minor collection"
+            );
+        });
+        self.heap.minor_finish(plan);
+    }
+
+    /// `gc_region_enter` / `gc_region_exit` around a `region` block. The
+    /// outermost one starts and ends with a minor collection, so what the
+    /// block allocated and dropped is reclaimed when it ends.
+    fn gc_region(&mut self, enter: bool) {
+        if !self.heap.nursery() {
+            return;
+        }
+        if enter {
+            if self.heap.region_enter() {
+                if self.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
+                    self.gc_finish_sweep();
+                }
+                self.gc_minor();
+            }
+        } else if self.heap.region_exit() {
+            if self.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
+                self.gc_finish_sweep();
+            }
+            self.invalidate_program_string_cache();
+            self.gc_minor();
+        }
+    }
+
     fn gc_compact(&mut self) {
         if !COMPACT_ENABLED.with(|e| *e)
             || IN_EXECUTE.get() > 1
@@ -2173,6 +2325,30 @@ impl<const S: usize> Machine<S> {
         eprintln!("{}", self.heap.census(&roots));
     }
 
+    /// `--early-free check`, with a complete mark: mark again from the
+    /// roots that are certainly live (precise frame slots, statics and VM
+    /// handles, not words a conservative frame scan finds, which may be
+    /// stale copies), fail if that reaches an object an early free gave
+    /// up, then restore the full mark.
+    fn check_early_frees(&mut self) {
+        if !self.heap.has_doomed() {
+            return;
+        }
+        self.unmark_heap();
+        let mut roots = self.heap.take_gc_roots();
+        self.for_each_stack_root(&mut |addr, kind| {
+            if kind == crate::memory::RootKind::Precise {
+                roots.push(addr);
+            }
+        });
+        self.for_each_non_stack_root(&mut |addr, _| roots.push(addr));
+        self.heap.mark_from_roots(&roots);
+        self.heap.restore_gc_roots(roots);
+        self.heap.check_doomed();
+        self.unmark_heap();
+        self.mark_from_vm_roots();
+    }
+
     fn gc_start_mark(&mut self) {
         // The dense-index cache is not a root (it kept the last indexed
         // array alive after its frame returned); drop it before objects can
@@ -2208,11 +2384,18 @@ impl<const S: usize> Machine<S> {
         }
         match self.heap.gc_phase() {
             crate::memory::GcPhase::Idle => {
-                if self.heap.should_collect() {
+                if self.heap.should_collect_young() {
+                    self.gc_minor();
+                }
+                if self.heap.should_collect_old() {
                     self.gc_start_incremental();
                 }
             }
             crate::memory::GcPhase::Marking => self.gc_mark_slice(),
+            crate::memory::GcPhase::Sweeping if self.heap.should_collect_young() => {
+                self.gc_finish_sweep();
+                self.gc_minor();
+            }
             crate::memory::GcPhase::Sweeping => self.gc_sweep_slice(),
         }
         if unlikely(self.heap.get().over_byte_cap()) {
@@ -2227,6 +2410,8 @@ impl<const S: usize> Machine<S> {
         VM_GC_COUNT.with(|c| {
             c.fetch_add(1, Ordering::Relaxed);
         });
+        // Empty the nursery first: the major cycle then sees only old objects.
+        self.gc_minor();
         self.gc_start_mark();
         self.gc_mark_slice();
     }
@@ -2264,6 +2449,7 @@ impl<const S: usize> Machine<S> {
         }
         #[cfg(feature = "gc-stats")]
         self.note_gc_census();
+        self.check_early_frees();
         self.heap.clear_dead_weaks();
         self.heap.begin_sweep();
         // Intern table is unlinked; unmarked literals will be freed across
@@ -2412,7 +2598,7 @@ impl<const S: usize> Machine<S> {
                 let loc = pc
                     .and_then(|pc| self.program_debug.loc_at(pc))
                     .map_or(String::from("?"), |l| format!("{l:?}"));
-                if !(addr == 0 || heap.find_object_by_addr(addr).is_some()) {
+                if !(addr == 0 || heap.find_object_by_addr(addr).is_some() || heap.early_freed_slot(addr)) {
                     let n = self.frames.len();
                     let hi = if frame + 1 < n {
                         self.frames.iter().nth(frame + 1).map_or(0, |f| f.get())
@@ -3906,6 +4092,7 @@ impl<const S: usize> Machine<S> {
             while self.reactor.help_local_once() {}
         }
         crate::thread::join_undetached_threads(&self.live_threads);
+        self.print_cow_report();
         // Remaining class finalizers need host IO / FFI while the reactor is
         // still up. `Drop` still runs this as a safety net for embedders.
         self.run_remaining_finalizers();
@@ -4411,7 +4598,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::VLoop as u8);
+            promise!(*bc as u8 <= Instruction::Cow as u8);
 
             match bc {
                 Instruction::STORE => {
@@ -4927,6 +5114,55 @@ impl<const S: usize> Machine<S> {
                         self.stack.push(self.stack[sp + base + i]);
                     }
                 }
+                Instruction::FreeEarly => {
+                    let v = self.stack.pop();
+                    self.free_early(v, opcode.operand_u32() & 1 != 0);
+                }
+                Instruction::Cow if opcode.operand_u32() & common::dense::COW_FIELD != 0 => {
+                    // `obj.f = unique(obj.f)` in place: the field is written
+                    // back only when it was shared and so copied.
+                    let op = opcode.operand_u32();
+                    let (obj, field) = (((op >> 8) & 0xff) as usize, (op >> 16) as usize);
+                    promise!(sp + obj < stack_cap);
+                    if let Some(crate::memory::Object::Instance(mut gc)) = self.heap.find_object_by_addr(self.stack[sp + obj].bits())
+                        && let Some(v) = gc.as_ref().slot(field)
+                        && let Some(copy) = self.heap.cow_unique(v)
+                    {
+                        gc.as_mut().set_slot(field, copy);
+                        if let Some(sites) = self.cow_sites.as_mut() {
+                            *sites.entry(ip.saturating_sub(1)).or_insert(0) += 1;
+                        }
+                        self.maybe_gc_after_alloc(ip);
+                    }
+                }
+                Instruction::Cow => {
+                    let v = self.stack.pop();
+                    if opcode.operand_u32() & 1 == 0 {
+                        // Measuring only: a deep copy at every share, as a
+                        // design that copies on assignment makes.
+                        if cow_eager() && matches!(self.heap.find_object_by_addr(v.heap_addr()), Some(crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) {
+                            if self.cow_sites.is_some() {
+                                self.cow_shares += 1;
+                            }
+                            let copy = self.heap.cow_deep_copy(v);
+                            self.stack.push(copy);
+                            self.maybe_gc_after_alloc(ip);
+                        } else {
+                            if self.heap.cow_share(v) && self.cow_sites.is_some() {
+                                self.cow_shares += 1;
+                            }
+                            self.stack.push(v);
+                        }
+                    } else if let Some(copy) = self.heap.cow_unique(v) {
+                        if let Some(sites) = self.cow_sites.as_mut() {
+                            *sites.entry(ip.saturating_sub(1)).or_insert(0) += 1;
+                        }
+                        self.stack.push(copy);
+                        self.maybe_gc_after_alloc(ip);
+                    } else {
+                        self.stack.push(v);
+                    }
+                }
                 _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
                     Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
                     Err(paused) => return paused,
@@ -4934,6 +5170,37 @@ impl<const S: usize> Machine<S> {
             }
         }
         false
+    }
+}
+
+/// `COIL_COW_EAGER=1` (measuring only): every copy-on-write share copies.
+fn cow_eager() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_COW_EAGER").is_some())
+}
+
+/// [`Machine::free_early`] on the parts the dense streak holds too.
+fn free_early_in(heap: &mut Heap, frame_pins: &mut [FramePins], dense_obj_addr: &mut u64, dense_obj: &mut Option<Object>, v: Value, deep: bool) {
+    let mode = crate::memory::early_free_mode();
+    if mode == crate::memory::EarlyFreeMode::Off {
+        return;
+    }
+    // An `ArrayPin` holds its array for the frame; a dense index's pin
+    // only caches its register's object, and is dropped with it below.
+    let pins = &*frame_pins;
+    let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
+    if heap.free_early(v, deep, mode == crate::memory::EarlyFreeMode::Check, &keep) == 0 {
+        return;
+    }
+    *dense_obj_addr = 0;
+    *dense_obj = None;
+    let freed = heap.early_freed();
+    for p in frame_pins.iter_mut() {
+        for o in &mut p.by_slot {
+            if o.is_some_and(|o| freed.contains(&o.addr())) {
+                *o = None;
+            }
+        }
     }
 }
 

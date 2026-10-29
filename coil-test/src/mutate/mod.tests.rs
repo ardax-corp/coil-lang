@@ -134,6 +134,8 @@ fn weak_suite_end_to_end() {
             debug_level: None,
             contracts: None,
             fold_calls: None,
+            early_free: None,
+            nursery: None,
             auto_par: None,
             contract_runs: 0,
             grants: HostGrants::deny_all(),

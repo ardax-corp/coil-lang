@@ -95,8 +95,8 @@ test("escape by return and by call") {
     assert!(pack_field(4) == 8);
 }
 
-test("writes after an escape reach the shared array") {
-    assert!(alias_writes() == 900 + 70 + 7 - 7 + 0);
+test("writes after an escape copy the shared array") {
+    assert!(alias_writes() == 300 + 10 + 2 - 7);
 }
 
 test("escapes in loops and several arrays") {

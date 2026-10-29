@@ -30,16 +30,21 @@ test("compound assign through an index base") {
     assert!(rows[0][1] == 7);
 }
 
-fn rows_of(Vec<int> log, Vec<int> a) -> Vec<int> {
+// Shared, so the write through the call's result reaches the caller's rows.
+shared class Rows {
+    pub v: Vec<int>,
+}
+
+fn rows_of(Vec<int> log, Rows a) -> Rows {
     log.push(2);
     return a;
 }
 
 test("call base for an index") {
     let log: Vec<int> = Vec::new();
-    let a = Vec::from([0, 0]);
-    rows_of(log, a)[step(log, 3, 1)] = step(log, 1, 5);
-    assert!(a[1] == 5);
+    let a = new Rows(Vec::from([0, 0]));
+    rows_of(log, a).v[step(log, 3, 1)] = step(log, 1, 5);
+    assert!(a.v[1] == 5);
     assert!(log[0] == 1);
     assert!(log[1] == 2);
     assert!(log[2] == 3);

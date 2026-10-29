@@ -647,6 +647,11 @@ pub enum Expression<'expr> {
     /// the body alone: it is not code of the enclosing function.
     ComptimeBlock(Output<'expr>),
 
+    /// First item of the block a `region { … }` parses to (escape step 5):
+    /// what the block allocates is reclaimed when it ends. A leaf, so the
+    /// block itself stays an ordinary [`Self::Block`] for every walker.
+    RegionMark,
+
     /// Top-level `enum` declaration.
     EnumDecl {
         /// Leading `///` doc lines (without the `///` prefix).
@@ -736,6 +741,9 @@ pub enum Expression<'expr> {
     Lambda {
         args: Output<'expr>,
         captures: Vec<&'expr str>,
+        /// The captures written `use (mut x)`: borrowed, not copied
+        /// (a subset of `captures`).
+        borrows: Vec<&'expr str>,
         body: Output<'expr>,
     },
 }
@@ -1318,6 +1326,10 @@ impl<'a> Display for Expression<'a> {
                 write!(f, "test({}) {{\n{}}}", name.1, body.1)
             }
             Self::ComptimeBlock(body) => write!(f, "comptime {}", body.1),
+            Self::RegionMark => write!(f, "region"),
+            Self::Call { name, args: Some(args) } if matches!(name.1.as_ref(), Self::Identifier("__mut")) && args.len() == 1 => {
+                write!(f, "mut {}", args[0].1)
+            }
             Self::Call { name, args } => {
                 write!(
                     f,
@@ -1829,6 +1841,7 @@ impl<'a> Display for Expression<'a> {
             Self::Lambda {
                 args,
                 captures,
+                borrows,
                 body,
             } => {
                 // Prefer comma-separated params for round-trip with `arg_list`.
@@ -1842,7 +1855,8 @@ impl<'a> Display for Expression<'a> {
                 };
                 write!(f, "fn ({})", params)?;
                 if !captures.is_empty() {
-                    write!(f, " use ({})", captures.join(", "))?;
+                    let caps: Vec<String> = captures.iter().map(|c| if borrows.contains(c) { format!("mut {c}") } else { (*c).to_string() }).collect();
+                    write!(f, " use ({})", caps.join(", "))?;
                 }
                 match body.1.as_ref() {
                     Self::Block(_) => write!(f, " {{\n{}}}", body.1),
@@ -1919,6 +1933,7 @@ impl<'expr> Expression<'expr> {
             | E::Float(_)
             | E::String(_)
             | E::Bool(_)
+            | E::RegionMark
             | E::Identifier(_)
             | E::Type(_)
             | E::Default(_)
@@ -2161,6 +2176,7 @@ impl<'expr> Expression<'expr> {
             | E::Float(_)
             | E::String(_)
             | E::Bool(_)
+            | E::RegionMark
             | E::Identifier(_)
             | E::Type(_)
             | E::Default(_)
@@ -2442,6 +2458,7 @@ impl Expression<'_> {
             E::AttrDecl { where_constraints, .. } => shift_where(where_constraints, delta),
             // The walkers skip its body.
             E::ComptimeBlock(body) => shift_spans(body, delta),
+            E::RegionMark => {}
             E::Function { where_constraints, effects, contracts, .. } => {
                 shift_where(where_constraints, delta);
                 if let Some(effects) = effects {

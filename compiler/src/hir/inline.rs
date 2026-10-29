@@ -16,7 +16,7 @@
 //! next round (`Compiler::hir_inline_replan`).
 
 use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, HirPatFields, LocalId, LocalKind};
-use super::{BinOp, BodyKind, Lit};
+use super::{BinOp, BodyKind, Builtin, Lit};
 use crate::typechecking::ty;
 
 /// What a callee's body splices in as: its statements and its result.
@@ -106,7 +106,6 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
             | HirKind::Defer { .. }
             | HirKind::Yield { .. }
             | HirKind::Resume { .. }
-            | HirKind::Builtin { .. }
             | HirKind::Named { .. }
             | HirKind::Spread(_)
             | HirKind::Unsupported(_) => return Err("construct"),
@@ -114,6 +113,10 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
                 returns += 1;
                 0
             }
+            // Copy-on-write ops splice with the body: they act on the
+            // places they name, which the splice keeps (see `cow`).
+            HirKind::Builtin { op: Builtin::Cow { .. }, .. } => 1,
+            HirKind::Builtin { .. } => return Err("construct"),
             HirKind::Call { .. } => CALL_COST,
             // A loop's body splices whole (its `break` / `continue` still
             // name the callee's loop); the loop itself costs its test.
@@ -728,6 +731,7 @@ impl Inliner<'_> {
             ty: moved.ty.clone(),
             kind: LocalKind::Temp,
             captured: false,
+            borrow: false,
         });
         let span = moved.span;
         let init = HirId(self.body.exprs.len() as u32);
@@ -771,6 +775,7 @@ impl Inliner<'_> {
                 ty: l.ty.clone(),
                 kind: if l.kind == LocalKind::Param { LocalKind::Let } else { l.kind },
                 captured: l.captured,
+                borrow: false,
             });
         }
         let param_of = |l: LocalId| callee.params.iter().position(|&p| p == l);
@@ -827,6 +832,7 @@ impl Inliner<'_> {
                             ty,
                             kind: LocalKind::Temp,
                             captured: false,
+                            borrow: false,
                         });
                         out.push(self.push(HirKind::Let { local, init: Some(r) }, Some(ty::unit()), span));
                         self.body.exprs[call.0 as usize].kind = HirKind::Local(local);

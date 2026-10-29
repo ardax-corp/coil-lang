@@ -67,7 +67,30 @@ pub struct Summary {
     /// or element path from one. A caller that passes there only objects
     /// it owns ([`BodyFacts::owned`]) discharges them (design §3.7, #1648).
     pub param_only: u16,
+    /// Bit `i`: the call may keep what its parameter `i` reaches after it
+    /// returns, other than through its result ([`escape`]).
+    pub escapes: u64,
+    /// Bit `i`: the call may keep the object passed as parameter `i`
+    /// itself (not only what it reaches) after it returns, other than
+    /// through its result: what copy-on-write must share at the call.
+    pub keeps: u64,
+    /// Bit `i`: the call hands parameter `i` itself to code not known here
+    /// (a trait method, a closure), which may keep it all the same.
+    pub opaque_args: u64,
+    /// Bit `i`: the result may reach what parameter `i` reaches.
+    pub returns: u64,
+    /// The result may reach an object this call did not allocate, or one
+    /// something else also reaches. `false`: a caller that drops the
+    /// result may free all of it.
+    pub shared_ret: bool,
 }
+
+#[path = "escape.rs"]
+mod escape;
+#[path = "early_free.rs"]
+mod early_free;
+#[path = "cow.rs"]
+pub mod cow;
 
 /// Effects a write to an object can have that its owner hides.
 const OWNED_BITS: u16 = EffectFlags::HEAP_MUT | EffectFlags::RESIZE;
@@ -114,6 +137,11 @@ impl Summary {
             mutates: 0,
             statics: false,
             param_only: 0,
+            escapes: u64::MAX,
+            keeps: 0,
+            opaque_args: if flags.contains(EffectFlags::UNKNOWN) { u64::MAX } else { 0 },
+            returns: u64::MAX,
+            shared_ret: true,
         }
     }
 }
@@ -199,6 +227,89 @@ impl ProgramEffects {
     /// The summary of the body named `name` (`module::f`, `module::Owner::m`).
     pub fn summary_named(&self, name: &str) -> Option<Summary> {
         self.by_name.get(name).copied()
+    }
+
+    /// `body` (as the HIR optimizer left it) with early frees of the
+    /// objects nothing else reaches ([`early_free`]), when it has any.
+    /// `host` names the host native a call node runs, as planned.
+    pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
+        let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
+        early_free::rewrite(module, body, &lookup, host)
+    }
+
+    /// `body` with its copy-on-write ops ([`cow`]), when it needs any.
+    /// `mutates` is the body's own summary bits: the parameters it writes
+    /// in place for its caller.
+    pub fn cow_rewrite(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, mutates: u64) -> (Option<HirBody>, Vec<reporting::Message>) {
+        let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
+        cow::rewrite(checker, module, body, &lookup, mutates)
+    }
+
+    /// What a call in `body` may do, from the summaries recorded so far:
+    /// the solver's view of a call ([`Cx::named`], [`Cx::method`]) without
+    /// its fixed point. `None` (unknown) where that view needs more.
+    fn call_summary(&self, checker: &Checker, module_path: &str, body: &HirBody, callee: &Callee, args: &[HirId]) -> Option<Summary> {
+        match callee {
+            Callee::Named { name, def, .. } => self.named_summary(checker, module_path, name, *def),
+            Callee::Method { name } => {
+                let recv = body.expr(*args.first()?);
+                let ty = recv.ty.as_ref();
+                if matches!(ty.map(crate::typechecking::ty::strip_readonly), Some(Ty::Existential { .. })) {
+                    return None;
+                }
+                let owner = checker.class_owner_at_span(recv.span).or_else(|| class_of(ty).map(str::to_string))?;
+                let key = format!("{owner}::{name}");
+                [key.clone(), format!("{module_path}::{key}"), format!("core::{key}")]
+                    .iter()
+                    .find_map(|k| self.by_name.get(k.as_str()).copied())
+            }
+            Callee::Value(f) => match &body.expr(*f).kind {
+                HirKind::Global { name, def } => self.named_summary(checker, module_path, name, *def),
+                _ => None,
+            },
+        }
+    }
+
+    fn named_summary(&self, checker: &Checker, module_path: &str, name: &str, def: Option<DefId>) -> Option<Summary> {
+        let current = checker.current_module_name() == module_path;
+        let def = def.or_else(|| current.then(|| checker.def_id_of(name)).flatten());
+        if let Some(def) = def {
+            return self.fns.get(&def).copied();
+        }
+        if let Some(&s) = self.by_name.get(name).or_else(|| self.by_name.get(format!("{module_path}::{name}").as_str())) {
+            return Some(s);
+        }
+        // An imported type's static (`Pool::with_capacity`), by the module
+        // the type is in; never a host native of the same short name.
+        if let Some((owner, m)) = name.rsplit_once("::")
+            && let Some(key) = checker.resolve_class_key(owner)
+            && let Some(&s) = self.by_name.get(format!("{key}::{m}").as_str())
+        {
+            return Some(s);
+        }
+        if user_type_member(checker, name) {
+            return None;
+        }
+        let member = name.rsplit_once("::");
+        let method = member.map_or(name, |(_, m)| m);
+        if checker.generics().typeclasses.values().any(|t| t.methods.iter().any(|m| m.name == method)) {
+            return None;
+        }
+        if is_vec_ctor(name) || name == "Vec::from" || member.is_some_and(|(owner, m)| checker.tag_for(owner, m).is_some()) {
+            return Some(Summary {
+                returns: u64::MAX,
+                ..Summary::default()
+            });
+        }
+        let short = if current && let Some(export) = checker.scope_binding(name) {
+            export.short_name().to_string()
+        } else {
+            name.to_string()
+        };
+        let flags = classify_host_name(&short);
+        // Only a known native: anything else is a user function this view
+        // cannot see.
+        (!flags.contains(EffectFlags::UNKNOWN) || escape::is_listed_host(&short)).then(|| escape::host_summary(&short, Summary::of(flags)))
     }
 
     /// Keep why a module's bodies mutate their parameters
@@ -296,6 +407,9 @@ thread_local! {
 pub struct EffectsCapture {
     /// `(body name, description)` per function and method, in compile order.
     pub fns: Vec<(String, String)>,
+    /// `(body name, escape facts)` per function and method, in compile
+    /// order: `keeps `x`; returns `y`; result fresh`.
+    pub escape: Vec<(String, String)>,
     /// Why auto-par left a loop or a function sequential.
     pub auto_par: Vec<String>,
     /// Auto-par was off for some module.
@@ -325,9 +439,17 @@ pub(crate) fn capture(module: &HirModule, fx: &ModuleEffects<'_>, auto_par: Opti
         .filter(|(_, b)| matches!(b.kind, BodyKind::Function | BodyKind::Method))
         .map(|(i, b)| (b.name.clone(), fx.describe(i)))
         .collect();
+    let escape: Vec<(String, String)> = module
+        .bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.kind, BodyKind::Function | BodyKind::Method))
+        .map(|(i, b)| (b.name.clone(), fx.describe_escape(i)))
+        .collect();
     EFFECTS_CAPTURE.with(|c| {
         if let Some(out) = c.borrow_mut().as_mut() {
             out.fns.extend(fns);
+            out.escape.extend(escape);
             match auto_par {
                 Some(lines) => out.auto_par.extend(lines),
                 None => out.auto_par_off = true,
@@ -610,6 +732,87 @@ impl<'a> ModuleEffects<'a> {
         out
     }
 
+    /// E0139: an escape fact a function states (`#[noescape(x)]`,
+    /// `#[fresh]`) that its inferred facts do not support. Stating facts is
+    /// optional; a stated fact is checked, never trusted.
+    pub fn escape_messages(&self) -> Vec<reporting::Message> {
+        use reporting::{ErrorCode, Message};
+        let mut out = Vec::new();
+        for (i, body) in self.cx.module.bodies.iter().enumerate() {
+            let Some(stated) = &body.stated_escape else { continue };
+            let s = self.summaries[i];
+            let local = local_name(self.cx.module_path, &body.name).unwrap_or(&body.name);
+            let span = stated.span.0..stated.span.1;
+            for name in &stated.noescape {
+                let Some(j) = body.params.iter().position(|p| body.local(*p).name == *name) else {
+                    out.push(Message::error(
+                        ErrorCode::EscapeMismatch,
+                        format!("`#[noescape({name})]` names no parameter of `{local}`"),
+                        span.clone(),
+                    ));
+                    continue;
+                };
+                let bit = if j < 64 { 1u64 << j } else { u64::MAX };
+                let what = if s.escapes & bit != 0 {
+                    "may keep"
+                } else if s.returns & bit != 0 {
+                    "may hand back in its result"
+                } else {
+                    continue;
+                };
+                let mut msg = Message::error(
+                    ErrorCode::EscapeMismatch,
+                    format!("`{local}` states `#[noescape({name})]`, but it {what} `{name}`"),
+                    span.clone(),
+                );
+                msg.with_help(
+                    "a call keeps a parameter when it stores it outside objects it made, captures it, or passes it where a callee keeps it; remove the attribute or the escape".to_string(),
+                );
+                out.push(msg);
+            }
+            if stated.fresh && s.shared_ret {
+                let mut msg = Message::error(
+                    ErrorCode::EscapeMismatch,
+                    format!("`{local}` states `#[fresh]`, but its result may reach an object it did not allocate, or one something else also reaches"),
+                    span.clone(),
+                );
+                msg.with_help("a fresh result holds only objects the call made and nothing else keeps; remove the attribute or return a new object".to_string());
+                out.push(msg);
+            }
+        }
+        out
+    }
+
+    /// E0140: an object made inside a `region { … }` block that can leave
+    /// it (see [`escape::region_leaks`]).
+    pub fn region_messages(&self) -> Vec<reporting::Message> {
+        use reporting::{ErrorCode, Label, Message};
+        let mut out = Vec::new();
+        for (i, body) in self.cx.module.bodies.iter().enumerate() {
+            if !body.exprs.iter().any(|x| matches!(x.kind, HirKind::Builtin { op: Builtin::Region { enter: true }, .. })) {
+                continue;
+            }
+            let w = self.cx.walk(i, &self.summaries, false);
+            let lookup = |callee: &Callee, args: &[HirId]| match callee {
+                Callee::Named { name, def, .. } => Some(self.cx.named(&w, name, *def)),
+                Callee::Method { name } => self.cx.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Value(f) => self.cx.fn_value(&w, *f),
+            };
+            for leak in escape::region_leaks(self.cx.module, body, &lookup) {
+                let mut msg = Message::error(
+                    ErrorCode::RegionEscape,
+                    format!("an object made inside this region {}, so it would outlive the region", leak.how),
+                    leak.at.0..leak.at.1,
+                );
+                msg.push(Label::new("leaves the region here".to_string(), leak.at.0..leak.at.1));
+                msg.push(Label::new("the region".to_string(), leak.region.0..leak.region.1));
+                msg.with_help("objects made in a region are freed when it ends; make the object before the region, or copy what you need out as plain values".to_string());
+                out.push(msg);
+            }
+        }
+        out
+    }
+
     /// Every reason body `index` is not pure, in source order.
     pub fn explain(&self, index: usize) -> Vec<Cause> {
         self.cx.walk(index, &self.summaries, true).causes.unwrap_or_default()
@@ -650,6 +853,38 @@ impl<'a> ModuleEffects<'a> {
             uses_clause(s.visible)
         };
         format!("{head}: {}", parts.join("; "))
+    }
+
+    /// Body `index`'s escape facts in one line: the parameters it keeps
+    /// and hands back, and whether its result is fresh.
+    pub fn describe_escape(&self, index: usize) -> String {
+        let s = self.summaries[index];
+        let body = &self.cx.module.bodies[index];
+        let names = |bits: u64| -> Vec<String> {
+            body.params
+                .iter()
+                .enumerate()
+                .take(64)
+                .filter(|(i, _)| bits & (1 << i) != 0)
+                .map(|(_, p)| format!("`{}`", body.local(*p).name))
+                .collect()
+        };
+        let mut parts = Vec::new();
+        let keeps = names(s.escapes);
+        if !keeps.is_empty() {
+            parts.push(format!("keeps {}", keeps.join(", ")));
+        }
+        let returns = names(s.returns);
+        if !returns.is_empty() {
+            parts.push(format!("returns {}", returns.join(", ")));
+        }
+        if body.ret.is_some() && !escape::no_heap(body.ret.as_ref()) {
+            parts.push(if s.shared_ret { "result shared".into() } else { "result fresh".into() });
+        }
+        if parts.is_empty() {
+            return "keeps nothing".into();
+        }
+        parts.join("; ")
     }
 
     /// Every function whose effects break what it declares (`pure fn`,
@@ -1113,7 +1348,7 @@ fn local_roots(body: &HirBody, derived: &HashMap<LocalId, u64>, l: LocalId) -> u
     own | derived.get(&l).copied().unwrap_or(0)
 }
 
-fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
+pub(crate) fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
     match pat {
         HirPat::Bind(l) => out.push(*l),
         HirPat::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),
@@ -1217,6 +1452,15 @@ fn readonly_at_top(checker: &Checker, ty: Option<&Ty>) -> bool {
         }
         _ => false,
     }
+}
+
+/// `Owner::member` where `Owner` is a class or enum of the program (not
+/// `Vec`): a user function, never a host native.
+fn user_type_member(checker: &Checker, name: &str) -> bool {
+    name.rsplit_once("::").is_some_and(|(owner, _)| {
+        let short = owner.rsplit("::").next().unwrap_or(owner);
+        short != "Vec" && short.starts_with(|c: char| c.is_ascii_uppercase()) && checker.has_impl(owner)
+    })
 }
 
 fn is_vec_ctor(name: &str) -> bool {
@@ -1357,7 +1601,29 @@ pub struct Called {
 
 impl Cx<'_> {
     fn body(&self, index: usize, summaries: &[Summary]) -> Summary {
-        self.walk(index, summaries, false).out
+        let w = self.walk(index, summaries, false);
+        let (escapes, returns, shared_ret) = escape::summarize(self, &w);
+        let (keeps, opaque_args) = {
+            let body = &self.module.bodies[index];
+            let lookup = |callee: &Callee, args: &[HirId]| match callee {
+                Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
+                Callee::Method { name } => self.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Value(f) => self.fn_value(&w, *f),
+            };
+            let k = cow::keeps(self.module, body, &lookup);
+            if std::env::var("COIL_COW_TRACE").is_ok() {
+                eprintln!("keeps {} = {:b} opaque {:b}", body.name, k.0, k.1);
+            }
+            k
+        };
+        Summary {
+            escapes,
+            keeps,
+            opaque_args,
+            returns,
+            shared_ret,
+            ..w.out
+        }
     }
 
     fn walk<'s>(&self, index: usize, summaries: &'s [Summary], explain: bool) -> Walk<'s> {
@@ -1871,8 +2137,10 @@ impl Cx<'_> {
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
-                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout => {}
+                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } | Builtin::Cow { .. } => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
+                // Runs a minor collection: no effect a caller can see.
+                Builtin::Region { .. } => self.note_hidden(w, id, EffectFlags::GC, || "has a `region`".into()),
             },
             // Workers of a parallel region have no statics, and another
             // call may change one (coil-lang#793).
@@ -2180,6 +2448,11 @@ impl Cx<'_> {
             // reads or writes.
             statics: visible.contains(EffectFlags::HOST) || visible.contains(EffectFlags::HEAP_MUT),
             param_only: 0,
+            escapes: u64::MAX,
+            keeps: 0,
+            opaque_args: u64::MAX,
+            returns: u64::MAX,
+            shared_ret: true,
         })
     }
 
@@ -2348,22 +2621,34 @@ impl Cx<'_> {
 
     /// [`Self::named`] for a name that is no user function or trait method.
     fn named_host(&self, name: &str) -> Summary {
+        // A new `Vec` or variant holds its arguments and nothing else.
+        let holds_args = Summary {
+            returns: u64::MAX,
+            ..Summary::default()
+        };
         if is_vec_ctor(name) || name == "Vec::from" {
-            return Summary::default();
+            return holds_args;
         }
         if let Some((owner, member)) = name.rsplit_once("::")
             && self.checker.tag_for(owner, member).is_some()
         {
-            return Summary::default();
+            return holds_args;
         }
         // `use string::{to_bytes as tb}`: classify the builtin by its export
         // name, not the local alias (#1075).
-        if self.checker.current_module_name() == self.module_path
+        let short = if self.checker.current_module_name() == self.module_path
             && let Some(export) = self.checker.scope_binding(name)
         {
-            return Summary::of(classify_host_name(export.short_name()));
+            export.short_name().to_string()
+        } else {
+            name.to_string()
+        };
+        // A user type's static is unknown code here, whatever its short
+        // name: `Pool::with_capacity` is not the `with_capacity` native.
+        if user_type_member(self.checker, name) {
+            return Summary::of(classify_host_name(&short));
         }
-        Summary::of(classify_host_name(name))
+        escape::host_summary(&short, Summary::of(classify_host_name(&short)))
     }
 
     /// A user function's summary: this module's, an earlier module's, or
@@ -2393,7 +2678,12 @@ impl Cx<'_> {
             .and_then(|info| Some((interner.module_path(info.module)?, info.name.as_str())))
             .map(|(module, short)| if module.is_empty() { short.to_string() } else { format!("{module}::{short}") });
         let qualified = format!("{}::{name}", self.module_path);
-        for key in [Some(name), declared.as_deref(), Some(qualified.as_str())].into_iter().flatten() {
+        // An imported type's static (`Pool::with_capacity`): the type's
+        // key names the module it is in.
+        let owned = name
+            .rsplit_once("::")
+            .and_then(|(owner, member)| Some(format!("{}::{member}", self.checker.resolve_class_key(owner)?)));
+        for key in [Some(name), declared.as_deref(), Some(qualified.as_str()), owned.as_deref()].into_iter().flatten() {
             if let Some(&s) = self.program.by_name.get(key) {
                 return Some(s);
             }
@@ -2429,6 +2719,11 @@ impl Cx<'_> {
                     statics: o.statics || s.statics,
                     // Discharged only where every impl's bits are.
                     param_only: o.param_only & s.param_only,
+                    escapes: o.escapes | s.escapes,
+                    keeps: o.keeps | s.keeps,
+                    opaque_args: o.opaque_args | s.opaque_args,
+                    returns: o.returns | s.returns,
+                    shared_ret: o.shared_ret || s.shared_ret,
                 },
             });
         }

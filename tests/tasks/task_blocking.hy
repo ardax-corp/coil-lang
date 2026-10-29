@@ -55,13 +55,13 @@ test("blocking returns a string result") {
 
 test("other tasks run while one waits on blocking") {
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        let worker = s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        let worker = s.spawn(fn () use (mut log) {
             let v = got(task::blocking(slow_crunch));
             log.push("blocking done");
             v
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             log.push("other ran");
             0
         });

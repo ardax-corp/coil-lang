@@ -171,6 +171,7 @@ pub(super) fn fresh(body: &mut HirBody, name: &str, ty: Ty) -> LocalId {
         ty: Some(ty),
         kind: LocalKind::Temp,
         captured: false,
+        borrow: false,
     });
     id
 }

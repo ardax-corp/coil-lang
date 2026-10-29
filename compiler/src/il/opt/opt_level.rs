@@ -58,6 +58,34 @@ impl OptLevel {
     }
 }
 
+/// `--early-free`: free what the escape facts prove dead (`on`), compile
+/// no frees (`off`), or compile them and have the run check instead of
+/// free (`check`, which aborts at the next collection if a freed object
+/// was still reachable). Unset, it follows the level: on at `-O1` and
+/// above, off at `-O0` and `-Og`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarlyFree {
+    On,
+    Off,
+    Check,
+}
+
+impl EarlyFree {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "on" => Ok(Self::On),
+            "off" => Ok(Self::Off),
+            "check" => Ok(Self::Check),
+            _ => Err(format!("invalid --early-free `{s}` (expected on|off|check)")),
+        }
+    }
+
+    /// Whether the compile emits the frees.
+    pub fn compiles(self) -> bool {
+        self != Self::Off
+    }
+}
+
 /// `OptLevel::parse` rejected the token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BadOptLevel;
@@ -117,6 +145,7 @@ fn all_off() -> OptimizeOptions {
         mir_dense: false,
         hir_bisect: None,
         auto_par: false,
+        early_free: false,
         require_mir: false,
     }
 }
@@ -176,6 +205,9 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     // only at Basic.
     o.mir_fold = !matches!(level, OptLevel::None | OptLevel::Debug);
     o.mir_loop = standard;
+    // Free what the escape facts prove dead; not where frames and locals
+    // should match the source.
+    o.early_free = !matches!(level, OptLevel::None | OptLevel::Debug);
     o
 }
 
@@ -242,6 +274,17 @@ mod tests {
     #[test]
     fn standard_matches_optimize_options_default() {
         assert_eq!(OptLevel::Standard.options(), OptimizeOptions::default());
+    }
+
+    #[test]
+    fn early_free_follows_the_level() {
+        for level in [OptLevel::Basic, OptLevel::Standard, OptLevel::Aggressive, OptLevel::Size] {
+            assert!(level.options().early_free, "{level}");
+        }
+        assert!(!OptLevel::None.options().early_free);
+        assert!(!OptLevel::Debug.options().early_free);
+        assert_eq!(EarlyFree::parse("check"), Ok(EarlyFree::Check));
+        assert!(EarlyFree::parse("1").is_err());
     }
 
     #[test]

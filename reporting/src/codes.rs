@@ -87,6 +87,18 @@ pub enum ErrorCode {
     /// no `else`: there is no value on the false path.
     IfWithoutElse,
     ComptimeFoldBudget,
+    /// A function states an escape fact (`#[noescape(x)]`, `#[fresh]`)
+    /// that the inferred escape facts do not support.
+    EscapeMismatch,
+    /// An object made inside a `region { … }` block can leave it.
+    RegionEscape,
+    /// A write copies an object another name shares (copy-on-write).
+    CowCopy,
+    /// A write lands on a temporary copy and is dropped.
+    CowDroppedWrite,
+    /// A closure assigns a `use (mut x)` capture: the outer local keeps
+    /// its value.
+    CaptureAssign,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -200,6 +212,11 @@ impl ErrorCode {
             Self::UnusedResult => "E0136",
             Self::IfWithoutElse => "E0137",
             Self::ComptimeFoldBudget => "E0138",
+            Self::EscapeMismatch => "E0139",
+            Self::RegionEscape => "E0140",
+            Self::CowCopy => "E0141",
+            Self::CowDroppedWrite => "E0142",
+            Self::CaptureAssign => "E0143",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -295,6 +312,11 @@ impl ErrorCode {
             Self::UnusedResult => "unused `Result` value",
             Self::IfWithoutElse => "`if` used as a value has no `else`",
             Self::ComptimeFoldBudget => "call too long to compute while compiling without `comptime`",
+            Self::EscapeMismatch => "stated escape fact does not hold",
+            Self::RegionEscape => "object made in a region leaves it",
+            Self::CowCopy => "write copies a shared object",
+            Self::CowDroppedWrite => "write to a temporary copy is dropped",
+            Self::CaptureAssign => "assignment to a captured local stays in the closure",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -398,6 +420,11 @@ mod tests {
             | UnusedResult
             | IfWithoutElse
             | ComptimeFoldBudget
+            | EscapeMismatch
+            | RegionEscape
+            | CowCopy
+            | CowDroppedWrite
+            | CaptureAssign
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -483,6 +510,11 @@ mod tests {
             UnusedResult,
             IfWithoutElse,
             ComptimeFoldBudget,
+            EscapeMismatch,
+            RegionEscape,
+            CowCopy,
+            CowDroppedWrite,
+            CaptureAssign,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

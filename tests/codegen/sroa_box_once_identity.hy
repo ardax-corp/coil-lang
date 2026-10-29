@@ -1,4 +1,6 @@
-// Q1: two named escapes of a `[T; N]` local share one heap object.
+// Q1: two named escapes of a `[T; N]` local share one heap object until a
+// write: copy-on-write then copies it, so a write through one name never
+// shows through another (passing the same name twice still writes one).
 use tests::assert;
 
 fn observe([int; 3] a, [int; 3] b) -> int {
@@ -14,10 +16,10 @@ class Holder {
     pub a: [int; 3],
 }
 
-test("two call-arg escapes are the same object") {
+test("a write through one call-arg escape copies it") {
     let xs = [1, 2, 3];
     let a = bounce(xs);
-    assert!(observe(a, bounce(xs)) == 99);
+    assert!(observe(a, bounce(xs)) == 1);
 }
 
 test("return then call-arg reuse the boxed identity") {
@@ -26,16 +28,17 @@ test("return then call-arg reuse the boxed identity") {
     assert!(observe(a, a) == 99);
 }
 
-test("nested bounce args share one box") {
+test("nested bounce args are copied on write") {
     let xs = [1, 2, 3];
-    assert!(observe(bounce(xs), bounce(xs)) == 99);
+    assert!(observe(bounce(xs), bounce(xs)) == 1);
 }
 
-test("field store and later call-arg are the same object") {
+test("field store and later call-arg are copied on write") {
     let xs = [1, 2, 3];
     let h = new Holder([0, 0, 0]);
     h.a = xs;
-    assert!(observe(h.a, xs) == 99);
+    assert!(observe(h.a, xs) == 1);
+    assert!(h.a[0] == 99);
 }
 
 test("host observe then two call-args share the box") {
@@ -45,11 +48,12 @@ test("host observe then two call-args share the box") {
     assert!(observe(xs, xs) == 99);
 }
 
-test("mutation after escape is visible on the boxed identity") {
+test("mutation after escape copies the boxed object") {
     let xs = [1, 2, 3];
     let a = bounce(xs);
     xs[0] = 77;
-    assert!(a[0] == 77);
+    assert!(a[0] == 1);
     a[1] = 88;
-    assert!(xs[1] == 88);
+    assert!(xs[1] == 2);
+    assert!(xs[0] == 77 && a[1] == 88);
 }

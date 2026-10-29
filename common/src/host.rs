@@ -1297,6 +1297,27 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HEAP_R,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "from_bytes_take",
+        arity: 1,
+        id: 176,
+        effects: TEXT,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "gc_region_enter",
+        arity: 0,
+        id: 177,
+        effects: GC_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "gc_region_exit",
+        arity: 0,
+        id: 178,
+        effects: GC_R,
+        caps: NO_CAP,
+    },
 ];
 
 /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
@@ -1411,6 +1432,18 @@ pub const TTY_IS_RAW_NATIVE: &str = "tty_is_raw";
 pub const TTY_READ_TIMEOUT_NATIVE: &str = "tty_read_timeout";
 pub const TTY_RESIZED_NATIVE: &str = "tty_resized";
 pub const TTY_ENABLE_VT_NATIVE: &str = "tty_enable_vt";
+/// `from_bytes` of a buffer the compiler proved dead after the call (archive
+/// 6.4): the string takes the buffer's bytes. Never named in source; the
+/// compiler swaps it in for `from_bytes`.
+pub const FROM_BYTES_TAKE_ID: u16 = 176;
+pub const FROM_BYTES_TAKE_NATIVE: &str = "from_bytes_take";
+/// HostInvoke ids around a `region { ... }` block (escape step 5, archive
+/// 6.2): enter starts a fresh nursery for the block, exit collects it.
+/// Never named in source; the compiler emits them for `region`.
+pub const GC_REGION_ENTER_ID: u16 = 177;
+pub const GC_REGION_ENTER_NATIVE: &str = "gc_region_enter";
+pub const GC_REGION_EXIT_ID: u16 = 178;
+pub const GC_REGION_EXIT_NATIVE: &str = "gc_region_exit";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1458,9 +1491,12 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 176);
+    assert!(HOST_NATIVES.len() == 179);
     assert!(HOST_NATIVES[VEC_EXTEND_RANGE_ID as usize].id == VEC_EXTEND_RANGE_ID);
     assert!(HOST_NATIVES[VEC_FILL_ID as usize].id == VEC_FILL_ID);
+    assert!(HOST_NATIVES[GC_REGION_ENTER_ID as usize].id == GC_REGION_ENTER_ID);
+    assert!(HOST_NATIVES[GC_REGION_EXIT_ID as usize].id == GC_REGION_EXIT_ID);
+    assert!(HOST_NATIVES[FROM_BYTES_TAKE_ID as usize].id == FROM_BYTES_TAKE_ID);
     assert!(HOST_NATIVES[TTY_IS_TTY_ID as usize].id == TTY_IS_TTY_ID);
     assert!(HOST_NATIVES[TTY_ENABLE_VT_ID as usize].id == TTY_ENABLE_VT_ID);
     assert!(HOST_NATIVES[BLACK_BOX_ID as usize].id == BLACK_BOX_ID);

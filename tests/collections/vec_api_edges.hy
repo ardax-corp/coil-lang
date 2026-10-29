@@ -52,14 +52,15 @@ test("equality is element-wise") {
     assert!(Vec::from([1, 2]) != Vec::from([1, 2, 3]));
 }
 
-test("from copies the array, assignment shares the Vec") {
+test("from copies the array, assignment copies the Vec on write") {
     let a = [1, 2, 3];
     let v = Vec::from(a);
     v[0] = 9;
     assert!(a[0] == 1);
     let w = v;
     w.push(4);
-    assert!(v.len() == 4);
+    assert!(v.len() == 3);
+    assert!(w.len() == 4);
 }
 
 test("index writes, compound and increment") {

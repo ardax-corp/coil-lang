@@ -1,6 +1,6 @@
 // A class local made by `new` that is later reassigned to another object
-// and then has a field written names that other object: the write is seen
-// through both names (#1556).
+// and then has a field written names that other object (#1556). Classes are
+// copy-on-write, so the write copies and the first name keeps its value.
 use tests::assert;
 
 class P {
@@ -42,8 +42,8 @@ fn reassign_in_loop(int n) -> int {
     return a.x * 1000 + b.x;
 }
 
-test("a reassigned class local writes the object it now names") {
-    assert!(alias_then_write() == 9);
-    assert!(write_before_and_after() == 741);
-    assert!(reassign_in_loop(5) == 3102);
+test("a reassigned class local writes a copy of the object it now names") {
+    assert!(alias_then_write() == 1);
+    assert!(write_before_and_after() == 701);
+    assert!(reassign_in_loop(5) == 100);
 }

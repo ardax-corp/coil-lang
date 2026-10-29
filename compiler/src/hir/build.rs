@@ -15,7 +15,7 @@
 //! A construct the builder does not cover yet becomes
 //! [`HirKind::Unsupported`]; [`super::check::problems`] reports them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use parser::ast::{
     AdjustOp, AssignOp, Contract, ContractKind, EnumConstructPayload, Expression, LetPattern, MatchArm,
@@ -115,6 +115,34 @@ fn proved_bounds(module: &mut HirModule) {
     });
 }
 
+/// `#[noescape(a, b)]` / `#[fresh]` on a function.
+fn stated_escape(attrs: &[parser::ast::Attribute<'_>], span: super::Span) -> Option<super::StatedEscape> {
+    use parser::ast::{AttrArgs, AttrLit};
+    let mut out = super::StatedEscape { span, ..Default::default() };
+    let mut any = false;
+    for attr in attrs {
+        match attr.name {
+            "fresh" => {
+                any = true;
+                out.fresh = true;
+            }
+            "noescape" => {
+                any = true;
+                match &attr.args {
+                    AttrArgs::Idents(names) => out.noescape.extend(names.iter().map(|n| n.to_string())),
+                    AttrArgs::KeyValues(kvs) => out.noescape.extend(kvs.iter().filter_map(|(k, v)| match v {
+                        AttrLit::String(n) if k.is_empty() => Some(n.to_string()),
+                        _ => None,
+                    })),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    any.then_some(out)
+}
+
 fn declared_effects(e: &parser::ast::EffectDecl<'_>) -> super::DeclaredEffects {
     super::DeclaredEffects {
         names: e.uses.iter().map(|n| n.to_string()).collect(),
@@ -171,6 +199,8 @@ struct BodyBuilder {
     /// `old(e)` calls in the `ensures` clauses (by node address) and the
     /// local that holds `e` from entry.
     olds: HashMap<usize, LocalId>,
+    /// Values written `mut e`: a `let` or `for` binding from one borrows.
+    mut_marks: HashSet<HirId>,
 }
 
 impl BodyBuilder {
@@ -189,6 +219,7 @@ impl BodyBuilder {
                 pinned_param: false,
                 captures: Vec::new(),
                 declared: None,
+                stated_escape: None,
                 contract_spans: Vec::new(),
                 locals: Vec::new(),
                 exprs: Vec::new(),
@@ -200,6 +231,7 @@ impl BodyBuilder {
             ok_is_result: false,
             type_params: Vec::new(),
             olds: HashMap::new(),
+            mut_marks: HashSet::new(),
         }
     }
 
@@ -229,6 +261,7 @@ impl BodyBuilder {
             ty,
             kind,
             captured: false,
+            borrow: false,
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), id);
@@ -243,6 +276,7 @@ impl BodyBuilder {
             ty,
             kind: LocalKind::Temp,
             captured: false,
+            borrow: false,
         });
         id
     }
@@ -262,6 +296,7 @@ impl BodyBuilder {
                     ty: None,
                     kind: LocalKind::Capture,
                     captured: false,
+                    borrow: false,
                 });
                 self.body.captures.push((outer_id, inner));
                 self.scopes[0].insert(name.to_string(), inner);
@@ -271,7 +306,21 @@ impl BodyBuilder {
         None
     }
 
-    fn finish(self) -> HirBody {
+    fn finish(mut self) -> HirBody {
+        // `let x = mut place` and `for mut x in xs` bind borrows.
+        if !self.mut_marks.is_empty() {
+            let mut borrows = Vec::new();
+            for e in &self.body.exprs {
+                match &e.kind {
+                    HirKind::Let { local, init: Some(v) } if self.mut_marks.contains(v) => borrows.push(*local),
+                    HirKind::ForIn { pat, iterable, .. } if self.mut_marks.contains(iterable) => super::effects::pat_binds(pat, &mut borrows),
+                    _ => {}
+                }
+            }
+            for l in borrows {
+                self.body.locals[l.0 as usize].borrow = true;
+            }
+        }
         self.body
     }
 }
@@ -634,6 +683,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         invariants: &[&Contract<'_>],
     ) {
         let Expression::Function {
+            attrs,
             is_coro,
             is_static,
             type_params,
@@ -652,6 +702,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let mut b = BodyBuilder::new(full, kind, span_of(node));
         b.body.is_coro = *is_coro;
         b.body.declared = effects.as_ref().map(declared_effects);
+        b.body.stated_escape = stated_escape(attrs, span_of(node));
         b.body.contract_spans = contracts.iter().map(|c| (c.span.start, c.span.end)).collect();
         b.body.is_generic = !type_params.is_empty();
         // A trait's default method body has only the trait method's scheme.
@@ -1438,7 +1489,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 self.emit_ty(b, node, HirKind::Loop { body }, Some(coil_ty::unit()))
             }
 
-            E::Lambda { args, body, .. } => self.lambda(b, node, args, body),
+            E::Lambda { args, body, borrows, .. } => self.lambda(b, node, args, body, borrows),
             E::Defer { captures, body } => {
                 let captures: Vec<Option<LocalId>> = captures.iter().map(|c| b.lookup(c)).collect();
                 // The thunk's frame copies each capture as one word (#1758):
@@ -1572,6 +1623,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     fn block(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>], scoped: bool) -> HirId {
+        if let Some((first, rest)) = items.split_first()
+            && matches!(first.1.as_ref(), Expression::RegionMark)
+        {
+            return self.region(b, node, rest);
+        }
         if scoped {
             b.scopes.push(HashMap::new());
         }
@@ -1589,6 +1645,66 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             Some(_) => self.pop_tail(b, &mut stmts),
         };
         self.emit(b, node, HirKind::Block { stmts, tail })
+    }
+
+    /// `region { items }`: enter, the block, leave; and leave before every
+    /// `return`, and every `break` / `continue` of a loop outside it. The
+    /// block's value is kept in a temporary across the leave.
+    fn region(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>]) -> HirId {
+        let span = span_of(node);
+        let unit = Some(coil_ty::unit());
+        let mark = |this: &Self, b: &mut BodyBuilder, enter: bool| {
+            this.synth(b, span, HirKind::Builtin { op: Builtin::Region { enter }, args: Vec::new() }, Some(coil_ty::unit()))
+        };
+        let inner = self.block(b, node, items, true);
+        // Leave before each jump out of the block.
+        let mut exits = Vec::new();
+        let mut work = vec![(inner, false)];
+        while let Some((at, in_loop)) = work.pop() {
+            match &b.body.expr(at).kind {
+                HirKind::Return(_) => exits.push(at),
+                HirKind::Break | HirKind::Continue if !in_loop => exits.push(at),
+                HirKind::Loop { body } => work.push((*body, true)),
+                HirKind::ForIn { iterable, body, .. } => work.extend([(*iterable, in_loop), (*body, true)]),
+                _ => work.extend(super::lower::children(&b.body, at).into_iter().map(|k| (k, in_loop))),
+            }
+        }
+        for at in exits {
+            let jump = b.body.expr(at).clone();
+            let mut stmts = Vec::new();
+            let kind = match jump.kind {
+                HirKind::Return(Some(v)) => {
+                    let ty = b.body.ret.clone();
+                    let t = b.temp("<region>", ty.clone());
+                    stmts.push(self.synth(b, span, HirKind::Let { local: t, init: Some(v) }, unit.clone()));
+                    let read = self.synth(b, span, HirKind::Local(t), ty);
+                    HirKind::Return(Some(read))
+                }
+                other => other,
+            };
+            stmts.push(mark(self, b, false));
+            let moved = b.push(kind, jump.ty.clone(), jump.span, jump.node);
+            let x = &mut b.body.exprs[at.0 as usize];
+            x.kind = HirKind::Block { stmts, tail: Some(moved) };
+            x.node = None;
+        }
+        let enter = mark(self, b, true);
+        let ty = b.body.expr(inner).ty.clone();
+        let is_unit = |t: &Ty| match strip_readonly(t) {
+            Ty::Con(n) => n == coil_ty::UNIT,
+            Ty::Tuple(items) => items.is_empty(),
+            _ => false,
+        };
+        // A block that only jumps out (`never`) has no value to keep.
+        if ty.as_ref().is_none_or(|t| is_unit(t) || matches!(strip_readonly(t), Ty::Never)) {
+            let exit = mark(self, b, false);
+            return self.synth(b, span, HirKind::Block { stmts: vec![enter, inner, exit], tail: None }, unit);
+        }
+        let t = b.temp("<region>", ty.clone());
+        let keep = self.synth(b, span, HirKind::Let { local: t, init: Some(inner) }, unit.clone());
+        let exit = mark(self, b, false);
+        let read = self.synth(b, span, HirKind::Local(t), ty.clone());
+        self.synth(b, span, HirKind::Block { stmts: vec![enter, keep, exit], tail: Some(read) }, ty)
     }
 
     fn fragment(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>]) -> HirId {
@@ -1859,6 +1975,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             return self.emit_ty(b, node, HirKind::Local(local), ty);
         }
         let callee_node = peel(name);
+        // `mut e` is `e`, marked for the binding it initializes.
+        if let E::Identifier("__mut") = callee_node.1.as_ref()
+            && let [arg] = args
+        {
+            let v = self.expr(b, arg);
+            b.mut_marks.insert(v);
+            return v;
+        }
         match callee_node.1.as_ref() {
             E::Identifier(n) if b.lookup(n).is_none() => {
                 if matches!(*n, "Some") {
@@ -2821,7 +2945,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
     }
 
-    fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>) -> HirId {
+    fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>, borrows: &[&str]) -> HirId {
         let name = format!("{}::<lambda@{}>", b.body.name, node.0.start);
         let mut inner = BodyBuilder::new(&name, BodyKind::Lambda, span_of(node));
         let mode_key = Checker::lambda_mode_key(node.0.start);
@@ -2848,6 +2972,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             .map(|(_, inner_id)| inner.body.locals[inner_id.0 as usize].name.clone())
             .collect();
         for (i, name) in captured.iter().enumerate() {
+            // `use (mut x)`: the lambda borrows `x`.
+            if borrows.contains(&name.as_str()) {
+                let inner_local = inner.body.captures[i].1;
+                inner.body.locals[inner_local.0 as usize].borrow = true;
+            }
             if let Some(outer) = b.lookup(name) {
                 inner.body.captures[i].0 = outer;
                 b.body.locals[outer.0 as usize].captured = true;
