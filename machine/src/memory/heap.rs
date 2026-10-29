@@ -1915,6 +1915,16 @@ impl Heap {
         (header.kind.get() == 3).then(|| unsafe { Gc::from_addr(addr) })
     }
 
+    /// The enum cell at `addr`, without [`Self::find_enum_by_addr`]'s slab
+    /// lookup.
+    ///
+    /// # Safety
+    /// `addr` must be a live `ObjEnum` slot.
+    #[inline(always)]
+    pub(crate) unsafe fn enum_at_unchecked(&self, addr: u64) -> Gc<ObjEnum> {
+        unsafe { Gc::from_addr(addr) }
+    }
+
     /// Classify a raw payload / field word as an object or an immediate.
     #[cfg(test)]
     pub(crate) fn member_of(&self, v: Value) -> Member {

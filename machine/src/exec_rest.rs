@@ -1177,47 +1177,44 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.peek().bits();
 
-                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
-
-                    if let Some(enum_ref) = obj_enum {
-                        let enum_ref = enum_ref.as_ref();
-                        if enum_ref.tag == expected_tag {
-                            let pool_idx = (operands & 0xFFFF) as usize;
-                            promise!(pool_idx < constants.len());
-                            let target_offset = opcode.jump_if_match_target(constants);
-                            let _ = self.stack.pop();
-                            let payload: &[Value] = &enum_ref.payload;
-                            // The frame reserve counts the widest payload the program builds.
-                            let wide = payload.len() > self.match_payload_bound;
-                            if unlikely(wide) && !self.reserve_wide_payload(payload.len()) {
-                                return dispatch::RestExit::done(
-                                    self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
-                                );
-                            }
-                            for member in payload {
-                                let value = *member;
-                                self.stack.push(value);
-                            }
-                            if unlikely(wide) {
-                                self.rearm_call_window();
-                            }
-                            charge_step!(target_offset < ip);
-                            set_jump_target(&mut ip, target_offset, code);
-                        } else if ip < code.len()
-                            && *unsafe { code.get_unchecked(ip) }.bytecode() as u8 == Instruction::Unpack as u8
-                            && unsafe { code.get_unchecked(ip) }.operand_u32() as usize == enum_ref.payload.len()
-                            && !self.exec_hooks_attached()
-                        {
-                            // A two-arm match: the other arm's `Unpack` of the
-                            // same scrutinee is next. Run it here on the enum
-                            // this op already resolved, as `Unpack` would. A
-                            // debugger / coverage still sees the `Unpack`.
-                            let _ = self.stack.pop();
-                            for member in enum_ref.payload.iter() {
-                                self.stack.push(*member);
-                            }
-                            ip += 1;
+                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let enum_ref = cell.as_ref();
+                    if enum_ref.tag == expected_tag {
+                        let pool_idx = (operands & 0xFFFF) as usize;
+                        promise!(pool_idx < constants.len());
+                        let target_offset = opcode.jump_if_match_target(constants);
+                        let _ = self.stack.pop();
+                        let payload: &[Value] = &enum_ref.payload;
+                        // The frame reserve counts the widest payload the program builds.
+                        let wide = payload.len() > self.match_payload_bound;
+                        if unlikely(wide) && !self.reserve_wide_payload(payload.len()) {
+                            return dispatch::RestExit::done(
+                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                            );
                         }
+                        for member in payload {
+                            let value = *member;
+                            self.stack.push(value);
+                        }
+                        if unlikely(wide) {
+                            self.rearm_call_window();
+                        }
+                        charge_step!(target_offset < ip);
+                        set_jump_target(&mut ip, target_offset, code);
+                    } else if ip < code.len()
+                        && *unsafe { code.get_unchecked(ip) }.bytecode() as u8 == Instruction::Unpack as u8
+                        && unsafe { code.get_unchecked(ip) }.operand_u32() as usize == enum_ref.payload.len()
+                        && !self.exec_hooks_attached()
+                    {
+                        // A two-arm match: the other arm's `Unpack` of the
+                        // same scrutinee is next. Run it here on the enum
+                        // this op already resolved, as `Unpack` would. A
+                        // debugger / coverage still sees the `Unpack`.
+                        let _ = self.stack.pop();
+                        for member in enum_ref.payload.iter() {
+                            self.stack.push(*member);
+                        }
+                        ip += 1;
                     }
                 }
                 Instruction::Unpack => {
@@ -1228,16 +1225,13 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().bits();
 
-                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
-
-                    if let Some(enum_ref) = obj_enum {
-                        let enum_ref = enum_ref.as_ref();
-                        promise!(arity == enum_ref.payload.len());
-                        for i in 0..arity {
-                            let member = unsafe { enum_ref.payload.get_unchecked(i) };
-                            let value = *member;
-                            self.stack.push(value);
-                        }
+                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let enum_ref = cell.as_ref();
+                    promise!(arity == enum_ref.payload.len());
+                    for i in 0..arity {
+                        let member = unsafe { enum_ref.payload.get_unchecked(i) };
+                        let value = *member;
+                        self.stack.push(value);
                     }
                 }
                 Instruction::LoadField => {
@@ -1280,20 +1274,17 @@ impl<const S: usize> Machine<S> {
                     promise!(slot < self.stack.tell());
                     let scrutinee_addr = self.stack[slot].bits();
 
-                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
-
-                    if let Some(enum_ref) = obj_enum {
-                        let enum_ref = enum_ref.as_ref();
-                        promise!(arity == enum_ref.payload.len());
-                        for i in 0..arity {
-                            let member = unsafe { enum_ref.payload.get_unchecked(i) };
-                            let value = *member;
-                            self.stack[slot + i] = value;
-                        }
-                        let end = slot + arity;
-                        if self.stack.tell() < end {
-                            self.stack.seek(end);
-                        }
+                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let enum_ref = cell.as_ref();
+                    promise!(arity == enum_ref.payload.len());
+                    for i in 0..arity {
+                        let member = unsafe { enum_ref.payload.get_unchecked(i) };
+                        let value = *member;
+                        self.stack[slot + i] = value;
+                    }
+                    let end = slot + arity;
+                    if self.stack.tell() < end {
+                        self.stack.seek(end);
                     }
                 }
                 // Deprecated STORE discriminant alias (same handler).

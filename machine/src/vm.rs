@@ -1818,6 +1818,22 @@ impl<const S: usize> Machine<S> {
         heap.find_enum_by_addr(addr)
     }
 
+    /// The `ObjEnum` a `JumpIfMatch` / `Unpack` / `UnpackAt` scrutinee
+    /// points at. The compiler emits those ops only on boxed enum values,
+    /// which are always an enum cell, so release builds skip the slab
+    /// lookup and read the cell directly; debug builds still check.
+    #[inline(always)]
+    fn trusted_enum(heap: &Heap, addr: u64) -> crate::memory::Gc<crate::memory::ObjEnum> {
+        #[cfg(debug_assertions)]
+        assert!(
+            Self::find_enum_exact(heap, addr).is_some(),
+            "match scrutinee {addr:#x} is not an enum cell"
+        );
+        // SAFETY: the compiler only matches boxed enum values (checked above
+        // in debug builds); a live one is a mapped `ObjEnum` slot.
+        unsafe { heap.enum_at_unchecked(addr) }
+    }
+
     fn pop_call_frame(&mut self) -> usize {
         if unlikely(self.return_bookkeeping) {
             self.pop_pin_map_for_current_frame();
