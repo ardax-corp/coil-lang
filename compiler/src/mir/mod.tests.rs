@@ -1098,6 +1098,73 @@ fn main() {
 }
 
 #[test]
+fn pipeline_prefetches_forward_scans_of_object_arrays_only() {
+    let src = r#"
+class P {
+    pub x: int,
+}
+fn walk(Vec<P> ps) -> int {
+    let t = 0;
+    let i = 0;
+    while i < ps.len() {
+        t = t + ps[i].x;
+        i = i + 1;
+    }
+    return t;
+}
+fn ints(Vec<int> a) -> int {
+    let t = 0;
+    let i = 0;
+    while i < a.len() {
+        if a[i] % 3 == 0 {
+            t = t + a[i];
+        }
+        i = i + 1;
+    }
+    return t;
+}
+fn hop(Vec<P> ps) -> int {
+    let t = 0;
+    let i = 0;
+    while i < ps.len() {
+        t = t + ps[(i * 7) % ps.len()].x;
+        i = i + 1;
+    }
+    return t;
+}
+fn main() {
+    let ps: Vec<P> = Vec::new();
+    let a: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 20 {
+        ps.push(new P(k));
+        a.push(k);
+        k = k + 1;
+    }
+    if walk(ps) != 190 || ints(a) != 63 || hop(ps) != 190 {
+        panic "checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile scans");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "checksum");
+    let symbols = p.program_debug().fn_symbols.clone();
+    let hinted = |name: &str| {
+        fn_ops(&bc, &symbols, name)
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseIndex && b.dense_abc_parts().0 & common::dense::HEAP_PREFETCH != 0)
+    };
+    assert!(hinted("walk"), "a forward scan of objects prefetches");
+    assert!(!hinted("ints"), "int elements name no object");
+    assert!(!hinted("hop"), "a computed index is no forward scan");
+}
+
+#[test]
 fn pipeline_interchanges_column_order_nest_into_vector_loop() {
     let src = r#"
 fn cols(Vec<float> a, Vec<float> b, int n, int m) {

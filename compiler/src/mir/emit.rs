@@ -2953,11 +2953,14 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             index,
             unchecked,
         } => {
-            let flags = if *unchecked {
+            let mut flags = if *unchecked {
                 dense::HEAP_UNCHECKED
             } else {
                 0
             };
+            if func.prefetch_loads.contains(dest) {
+                flags |= dense::HEAP_PREFETCH;
+            }
             out.push(byte(
                 Byte::new(Instruction::DenseIndex).with_dense_abc(
                     flags,
