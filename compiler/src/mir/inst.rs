@@ -838,8 +838,10 @@ impl VecExpr {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecLoopKind {
     /// `dest = init`, then `dest = dest ⊕ term` lane by lane, left to
-    /// right (`fold` is `simd::REDUCE_*`, `ty` `dense::TY_*`).
-    Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr },
+    /// right (`fold` is `simd::REDUCE_*`, `ty` `dense::TY_*`). `stores`
+    /// (as in [`Self::Store`]) run first in each block: a loop that both
+    /// maps and folds.
+    Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr, stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
     /// `array[p + off + k] = value` for each store, in order.
     Store { stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
 }
@@ -848,9 +850,13 @@ impl VecLoopKind {
     pub fn values(&self) -> Vec<ValueId> {
         let mut out = Vec::new();
         match self {
-            Self::Reduce { init, term, .. } => {
+            Self::Reduce { init, term, stores, .. } => {
                 out.push(*init);
                 term.values(&mut out);
+                for (array, off, _, value) in stores {
+                    out.extend([*array, *off]);
+                    value.values(&mut out);
+                }
             }
             Self::Store { stores } => {
                 for (array, off, _, value) in stores {
@@ -864,9 +870,14 @@ impl VecLoopKind {
 
     pub fn rewrite(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
         match self {
-            Self::Reduce { init, term, .. } => {
+            Self::Reduce { init, term, stores, .. } => {
                 *init = map(*init);
                 term.rewrite(map);
+                for (array, off, _, value) in stores {
+                    *array = map(*array);
+                    *off = map(*off);
+                    value.rewrite(map);
+                }
             }
             Self::Store { stores } => {
                 for (array, off, _, value) in stores {
@@ -880,7 +891,7 @@ impl VecLoopKind {
 
     pub fn uses_index(&self) -> bool {
         match self {
-            Self::Reduce { term, .. } => term.uses_index(),
+            Self::Reduce { term, stores, .. } => term.uses_index() || stores.iter().any(|(_, _, _, v)| v.uses_index()),
             Self::Store { stores } => stores.iter().any(|(_, _, _, v)| v.uses_index()),
         }
     }

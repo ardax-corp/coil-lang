@@ -60,7 +60,7 @@ pub fn vec_loops(func: &mut MirFunc) -> usize {
 /// A loop body's tree with constant offsets (`VOp`), before its values
 /// are placed in front of the loop.
 enum Shape {
-    Reduce { acc: ValueId, ty: u8, fold: u8, term: VOp },
+    Reduce { acc: ValueId, ty: u8, fold: u8, term: VOp, stores: Vec<(ValueId, Off, u8, VOp)> },
     Store { stores: Vec<(ValueId, Off, u8, VOp)> },
 }
 
@@ -80,11 +80,34 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
         if uses_index(&r.term) && r.ty != dense::TY_I64 {
             return None;
         }
+        if !r.stores.is_empty() {
+            // As a store loop: every read before the first store, one
+            // store offset, no read behind it (the fold's reads included).
+            let body = lp.blocks.iter().copied().find(|&b| b != lp.header)?;
+            let insts = &func.block(body).insts;
+            let first_store = insts.iter().position(|i| matches!(i, MirInst::StoreIndex { .. }))?;
+            if insts[first_store..].iter().any(|i| matches!(i, MirInst::Index { .. })) {
+                return None;
+            }
+            let at = r.stores[0].index_off;
+            if r.stores.iter().any(|st| st.index_off != at || !loads_not_behind(&st.value, at)) || !loads_not_behind(&r.term, at) {
+                return None;
+            }
+            if r.stores.iter().any(|st| uses_index(&st.value) && st.ty != dense::TY_I64) {
+                return None;
+            }
+        }
         Plan {
             iv: r.iv,
             init: r.iv_init,
             n: r.n,
-            shape: Shape::Reduce { acc: r.acc, ty: r.ty, fold: r.fold, term: r.term },
+            shape: Shape::Reduce {
+                acc: r.acc,
+                ty: r.ty,
+                fold: r.fold,
+                term: r.term,
+                stores: r.stores.into_iter().map(|st| (st.array, st.index_off, st.ty, st.value)).collect(),
+            },
         }
     } else {
         let s = match_store_on(func, lp)?;
@@ -113,10 +136,22 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
     // Every value the vector loop reads must be placeable in front of it.
     let mut vals = vec![plan.n];
     match &plan.shape {
-        Shape::Reduce { term, .. } => leaves(term, &mut vals)?,
-        Shape::Store { stores } => {
-            for (array, _, _, v) in stores {
+        Shape::Reduce { term, stores, .. } => {
+            leaves(term, &mut vals)?;
+            for (array, off, _, v) in stores {
                 vals.push(*array);
+                if let Off::V(o) = off {
+                    vals.push(*o);
+                }
+                leaves(v, &mut vals)?;
+            }
+        }
+        Shape::Store { stores } => {
+            for (array, off, _, v) in stores {
+                vals.push(*array);
+                if let Off::V(o) = off {
+                    vals.push(*o);
+                }
                 leaves(v, &mut vals)?;
             }
         }
@@ -334,9 +369,16 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     let mut at = Place { b, lp, at: pre, done: HashMap::new() };
     let n = at.value(plan.n);
     let kind = match &plan.shape {
-        Shape::Reduce { acc, ty, fold, term, .. } => {
-            VecLoopKind::Reduce { init: init[acc], ty: *ty, fold: *fold, term: at.expr(term) }
-        }
+        Shape::Reduce { acc, ty, fold, term, stores } => VecLoopKind::Reduce {
+            init: init[acc],
+            ty: *ty,
+            fold: *fold,
+            term: at.expr(term),
+            stores: stores
+                .iter()
+                .map(|(array, off, ty, value)| (at.value(*array), at.off(*off), *ty, at.expr(value)))
+                .collect(),
+        },
         Shape::Store { stores } => VecLoopKind::Store {
             stores: stores
                 .iter()
@@ -348,7 +390,13 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     let mut ok = at.cmp(MirCmpOp::Lt, i0, n);
     let mut reads = Vec::new();
     match &kind {
-        VecLoopKind::Reduce { term, .. } => streams(term, &mut reads),
+        VecLoopKind::Reduce { term, stores, .. } => {
+            streams(term, &mut reads);
+            for (array, off, _, value) in stores {
+                reads.push((*array, *off));
+                streams(value, &mut reads);
+            }
+        }
         VecLoopKind::Store { stores } => {
             for (array, off, _, value) in stores {
                 reads.push((*array, *off));

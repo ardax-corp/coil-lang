@@ -79,7 +79,11 @@ beat Rust/`memcmp` slice equality.
   `VFma` / `VReduce`) decoded once and no dispatch per block, and the
   scalar loop takes the last lanes. A failed guard runs the loop as
   written. `VReduce` folds left (float sums keep their order; an int
-  fold traps on the first partial that overflows). Store loops keep the
+  fold traps on the first partial that overflows). A loop may store and
+  fold in one body (`feature/locality` step 2): the stores run before the
+  fold. A block stores only once its other words ran; a block that traps
+  runs again lane by lane, so a panic leaves the scalar loop's stores.
+  Store loops keep the
   scalar order however the arrays alias: every read before the first
   store, one store offset `S`, no read at an offset below `S`. VM glue
   in `machine/src/simd.rs` calls `coil_simd::lanes` only.

@@ -948,6 +948,48 @@ fn main() {
 }
 
 #[test]
+fn pipeline_vectorizes_map_and_fold_in_one_loop() {
+    let src = r#"
+fn map_sum(Vec<int> a, Vec<int> b) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i] * 3;
+        b[i] = v;
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let a: Vec<int> = Vec::new();
+    let b: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 20 {
+        a.push(k);
+        b.push(0);
+        k = k + 1;
+    }
+    if map_sum(a, b) != 570 || b[19] != 57 {
+        panic "map_sum checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile map_sum");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "map_sum checksum");
+    let symbols = p.program_debug().fn_symbols;
+    let ops = fn_ops(&bc, &symbols, "map_sum");
+    assert_vec_loop(ops, "map_sum");
+    assert!(ops.iter().any(|b| *b.bytecode() == Instruction::VStore), "map_sum stores in the vector loop");
+    assert!(ops.iter().any(|b| *b.bytecode() == Instruction::VReduce), "map_sum folds in the vector loop");
+}
+
+#[test]
 fn pipeline_vectorizes_reduce_without_load_and_nonzero_start() {
     let src = r#"
 fn sum_i(int n) -> int {

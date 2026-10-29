@@ -356,3 +356,100 @@ test("a base past either end still panics") {
     assert!(panics(past_end_base));
     assert!(panics(negative_base));
 }
+
+// One loop that stores a map and folds a sum: the stores and the fold run
+// in the same vector loop.
+fn map_sum(Vec<int> out, Vec<int> a, int k) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i] * k + i;
+        out[i] = v;
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn map_sum_scalar(Vec<int> out, Vec<int> a, int k) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        let v = black_box(a[i] * k + i);
+        out[i] = v;
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+
+// Both reads come before the store, so the arrays may alias.
+fn scale_dot(Vec<float> out, Vec<float> a, Vec<float> b) -> float {
+    let s = 0.25;
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        let y = b[i];
+        out[i] = x * 2.0;
+        s = s + x * y;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn scale_dot_scalar(Vec<float> out, Vec<float> a, Vec<float> b) -> float {
+    let s = 0.25;
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        let y = b[i];
+        out[i] = black_box(x * 2.0);
+        s = s + x * y;
+        i = i + 1;
+    }
+    return s;
+}
+
+// The fold reads what the store just wrote: stays scalar.
+fn double_then_sum(Vec<int> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        a[i] = a[i] * 2;
+        s = s + a[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+test("loops that store a map and fold a sum") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65] {
+        let a = ints(n);
+        let x = ints(n);
+        let y = ints(n);
+        assert!(map_sum(x, a, 3) == map_sum_scalar(y, a, 3));
+        let i = 0;
+        while i < n {
+            assert!(x[i] == y[i]);
+            i = i + 1;
+        }
+        let fa = floats(n);
+        let fx = floats(n);
+        let fy = floats(n);
+        assert!(scale_dot(fx, fa, fa) == scale_dot_scalar(fy, fa, fa));
+        let j = 0;
+        while j < n {
+            assert!(fx[j] == fy[j]);
+            j = j + 1;
+        }
+        let d = ints(n);
+        let e = ints(n);
+        let expect = 0;
+        let m = 0;
+        while m < n {
+            expect = expect + e[m] * 2;
+            m = m + 1;
+        }
+        assert!(double_then_sum(d) == expect);
+    }
+}
