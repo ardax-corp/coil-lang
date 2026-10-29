@@ -22,7 +22,7 @@ reordering measured as no gain and are out of scope.
 | 2 | Vectorize one loop that both stores a map and folds a reduction | `fusion.hy`: fused 417 ms vs split 162 ms (2.6x) | done |
 | 3 | Field-sensitive mod/ref summaries (which slots and array kinds a call may write) | lets step 4 keep a field across a call that cannot touch it | planned |
 | 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.hy`: 3.1x (8 vs 3 dispatches per iteration) | done (loops without calls) |
-| 5 | Copy the objects a pointer array holds in index order when the nursery promotes or evacuation compacts | `objorder.hy`: 24 vs 147 ns per object (6.2x) | planned |
+| 5 | Copy the objects a pointer array holds in index order when the nursery promotes them | `objorder.hy`: 24 vs 147 ns per object (6.2x); `young_shuffle.hy` | done (minor collections) |
 | 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap | planned |
 | 7 | Loop interchange for affine nests | `interchange.hy`: rows 277 ms vs columns 749 ms (2.7x) | planned |
 
@@ -87,3 +87,18 @@ Numbers land here as each step merges.
   (`tests/collections/field_promotion_panic.hy`). `promo.hy` 1M x 20:
   field accumulation 820 → 270 ms, equal to the hand-written locals
   (265-300 ms); the loop body went from 8 ops to 4.
+- **Step 5** (GC copy order): a minor collection copies the young objects
+  an array reached first, in the array's index order, then the rest in
+  nursery (allocation) order as before (`Heap::minor_plan`). Marking pushes
+  only what it newly marks, so an array's share of the gray stack is its
+  new elements in order: no second walk. Fresh old-space chunks are now
+  handed out in address order (`Slab::carve_slots` reverses the slots it
+  files, since the free list pops from its back); before, consecutive
+  copies landed at falling addresses. `examples/perf/young_shuffle.hy`
+  (16384 objects shuffled while young, then 2000 walks): 979 → 658 ms,
+  equal to the unshuffled walk (657 ms). `binary_trees` (depth 18),
+  `gc_churn`, `gc_rebuild`, `gc_frag`, `region_rounds`: flat within run
+  noise. Limit: objects already old when a program reorders them stay put
+  (old chunks move only when sparse evacuation picks them), so
+  `objorder.hy`'s 1M-object shuffle is unchanged. Closing that needs a
+  major collection that relocates for order, which is a separate decision.
