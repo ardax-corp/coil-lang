@@ -314,15 +314,18 @@ impl Checker {
     }
 
     /// An impl method's type must match the trait's declaration with the
-    /// trait's parameters set to the instance head (#1185): a body typed
-    /// against a different signature would be called through the trait's.
-    /// Both sides are instantiated fresh, so method-level generics and
-    /// associated-type projections stay flexible; only a concrete clash
-    /// (`-> string` for `-> int`) is reported.
+    /// trait's parameters set to the instance head (#1185) and the trait's
+    /// associated types set to the instance's own (`Option<Item>` is
+    /// `Option<int>` under `type Item = int`, #2086): a body typed against a
+    /// different signature would be called through the trait's. Both sides
+    /// are instantiated fresh, so method-level generics (and the projections
+    /// on them) stay flexible; only a concrete clash (`-> string` for
+    /// `-> int`) is reported.
     fn check_instance_method_signature(
         &mut self,
         class: &str,
         arg_tys: &[Ty],
+        assoc_tys: &HashMap<String, AssocTypeValue>,
         mname: &str,
         fqn: &str,
         range: &Range<usize>,
@@ -337,7 +340,7 @@ impl Checker {
         let Some(have) = self.env.lookup(fqn).cloned() else {
             return;
         };
-        let (want_ty, want_cs, _) = self.instantiate_scheme_mapped(&decl);
+        let (want_ty, want_cs, mapping) = self.instantiate_scheme_mapped(&decl);
         let Some(head) = want_cs.iter().find(|c| c.class == class) else {
             return;
         };
@@ -347,6 +350,36 @@ impl Checker {
         let mut local = self.subst.clone();
         for (param, arg) in head.args.iter().zip(arg_tys) {
             match crate::typechecking::unify::unify_with(&local, param, arg) {
+                Ok(s) => local = s,
+                Err(_) => return,
+            }
+        }
+        // The trait's own projections (`Item` in `Option<Item>`) take the
+        // instance's associated types. A projection on a method-level
+        // parameter (`U::Item` under `fn m<U: Iterator>`) has an owner that
+        // is not the instance head and stays open.
+        for projection in &decl.assoc_projections {
+            let Some(&fresh) = mapping.get(&projection.var) else {
+                continue;
+            };
+            if let Some(owner) = self.declared_projection_owner(projection) {
+                let owner_ty = mapping
+                    .get(&owner)
+                    .map(|o| apply_ty_prune(&local, &Ty::Var(*o)));
+                if !owner_ty.is_some_and(|o| arg_tys.contains(&o)) {
+                    continue;
+                }
+            }
+            let Some(value) = assoc_tys.get(&projection.name) else {
+                continue;
+            };
+            let args: Vec<Ty> = projection
+                .args
+                .iter()
+                .map(|arg| crate::typechecking::env::substitute_vars(arg, &mapping))
+                .collect();
+            let concrete = self.instantiate_assoc_value(value, &args);
+            match crate::typechecking::unify::unify_with(&local, &Ty::Var(fresh), &concrete) {
                 Ok(s) => local = s,
                 Err(_) => return,
             }
@@ -605,6 +638,7 @@ impl Checker {
                 args: Vec::new(),
             });
         }
+        let mut pending_signature_checks: Vec<(String, String, Range<usize>)> = Vec::new();
         for m in methods {
             match m.1.as_ref() {
                 Expression::AssocTypeDef {
@@ -833,19 +867,18 @@ impl Checker {
                         });
                         self.current_instance_method = outer_method;
                         self.record_instance_method_under_fqn(mname, &fqn);
-                        self.check_instance_method_signature(
-                            class,
-                            &arg_tys,
-                            mname,
-                            &fqn,
-                            &m.0.into_range(),
-                        );
+                        // Checked once every `type X = ...` of the impl is
+                        // collected, whichever side of the method it is on.
+                        pending_signature_checks.push((mname.to_string(), fqn.clone(), m.0.into_range()));
                         self.unshield_bare_names(shield);
                     } else {
                         let _ = self.infer(m);
                     }
                 }
             }
+        }
+        for (mname, fqn, range) in pending_signature_checks {
+            self.check_instance_method_signature(class, &arg_tys, &assoc_tys, &mname, &fqn, &range);
         }
         self.active_constraints.truncate(prev_active_len);
         self.impl_owner = prev_impl_owner;
