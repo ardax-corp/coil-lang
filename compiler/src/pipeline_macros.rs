@@ -77,6 +77,16 @@ static EXPANSION_CACHE: std::sync::Mutex<Option<HashMap<u64, CachedOutput>>> = s
 /// Rounds of macros-in-generated-code before giving up.
 const MAX_ROUNDS: usize = 16;
 
+/// What one expansion round did.
+enum Round {
+    /// Nothing was pending.
+    Done,
+    /// Macros ran and their output was spliced.
+    Ran,
+    /// Every pending use waited for another; nothing ran.
+    Stalled,
+}
+
 /// Name of the pseudo entry file of an expansion program.
 fn expansion_entry_path() -> PathBuf {
     PathBuf::from("<coil>/expand.hy")
@@ -102,9 +112,14 @@ impl Pipeline {
     }
 
     fn expand_macro_rounds(&mut self) {
+        let mut defer = true;
         for _ in 0..MAX_ROUNDS {
-            if !self.expand_macro_round() {
-                return;
+            match self.expand_macro_round(defer) {
+                Round::Done => return,
+                Round::Ran => defer = true,
+                // Nothing ran, so no later round can declare what is
+                // missing: the next one reports instead of waiting (#2094).
+                Round::Stalled => defer = false,
             }
         }
         // Still pending: report instead of looping forever.
@@ -128,8 +143,9 @@ impl Pipeline {
         }
     }
 
-    /// One expansion round. False when nothing was pending.
-    fn expand_macro_round(&mut self) -> bool {
+    /// One expansion round. `defer` lets an unresolved use wait for a
+    /// macro that this round's item-level output may declare.
+    fn expand_macro_round(&mut self, defer: bool) -> Round {
         let files: Vec<PathBuf> = self
             .processed
             .iter()
@@ -141,7 +157,7 @@ impl Pipeline {
             .cloned()
             .collect();
         if files.is_empty() {
-            return false;
+            return Round::Done;
         }
         // A module with macros pending this round may generate the macro an
         // importer needs (comptime step 10): the importer waits a round.
@@ -242,13 +258,36 @@ impl Pipeline {
                             Err(msg) => errors.push(msg),
                         }
                     }
-                    Err(None)
-                        if generating > usize::from(item_level(&p))
-                            || self.import_candidates(file, &p.name).iter().any(|c| c != file && busy.contains(c)) =>
-                    {
-                        deferred.push((file.clone(), p));
-                    }
                     Err(None) => {
+                        let candidates = self.import_candidates(file, &p.name);
+                        // The provider does not parse: that is why nothing
+                        // declares the macro, and the use site says so, as
+                        // it does for a provider that does not typecheck.
+                        if let Some((provider, err)) = candidates.iter().find_map(|c| {
+                            self.ast_cache
+                                .get(c)
+                                .and_then(|cached| cached.parse_error())
+                                .map(|err| (c, err.message().to_string()))
+                        }) {
+                            errors.push(Message::error(
+                                ErrorCode::GenericTypeError,
+                                format!(
+                                    "{} `{}` failed: could not compile the macro module `{}`: {err}",
+                                    p.kind.describe(),
+                                    p.name,
+                                    self.namespace_for(provider)
+                                ),
+                                p.range.clone(),
+                            ));
+                            continue;
+                        }
+                        if defer
+                            && (generating > usize::from(item_level(&p))
+                                || candidates.iter().any(|c| c != file && busy.contains(c)))
+                        {
+                            deferred.push((file.clone(), p));
+                            continue;
+                        }
                         let mut msg = crate::attrs::unresolved_macro_message(&p);
                         // A call in macro output resolves where it lands and
                         // in the provider that wrote it.
@@ -280,7 +319,7 @@ impl Pipeline {
             }
         }
         if jobs.is_empty() {
-            return waiting;
+            return if waiting { Round::Stalled } else { Round::Done };
         }
         let results = self.run_expansions(&jobs);
         // Calls in expression / statement position are replaced in one walk
@@ -312,7 +351,7 @@ impl Pipeline {
         }
         // Generated code may `use` modules nothing else imported.
         self.discover_all();
-        true
+        Round::Ran
     }
 
     /// Entry-file source after every built-in and user macro expanded, as

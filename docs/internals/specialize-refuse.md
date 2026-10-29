@@ -84,7 +84,6 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `pack` | `mir_simd_axpy.hy` | HostInvoke 136 | P12 pack |
 | `hot` | `mir_dense_i64.hy` | dense | counted i64 |
 | `hot` | `mir_dense_straight.hy` | dense | straight-line wins cost |
-| `hot` | `mir_dense_host.hy` | dense + HostInvoke | pure `math_sin` in loop |
 | `hot` / `kernel` | `mir_dense_call.hy` | dense + dense `CALL` | one-word CALL |
 | `main` / `iv_mul` / `nested` | `numeric.hy` / `iv_mul_sr.hy` / `licm_nested_chains.hy` | dense | counted i64 |
 | `eval_a` | `nbody.hy` | dense | straight-line wins cost |

@@ -91,10 +91,9 @@ pub(super) fn emit_lir_framed(
         ));
     }
     let mut plan = EmitPlan::new(func);
-    let (regs, scratch) = assign_needed(func, &mut plan)?;
+    let (regs, scratch) = frame_regs(func, &mut plan)?;
     plan.home_base = home_base(func, scratch)?;
     let plan = plan;
-    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let mut cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
     let mut entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
     let mut source_clears = super::emit::source_clears(func, &regs, &plan.need_slot, &super::emit::Gathers::default());
@@ -240,8 +239,7 @@ pub(super) type LirSidecars = (std::collections::HashMap<u32, u32>, super::deopt
 /// emission assigns.
 pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     let mut plan = EmitPlan::new(func);
-    let (regs, _) = assign_needed(func, &mut plan).unwrap_or_else(|_| (Vec::new(), 0));
-    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
+    let (regs, _) = frame_regs(func, &mut plan).unwrap_or_else(|_| (Vec::new(), 0));
     (
         super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
         super::deopt::encode_draft(func, &regs, &plan.need_slot),
@@ -254,9 +252,8 @@ pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
 #[cfg(test)]
 pub(super) fn lir_home_frame(func: &MirFunc) -> Option<(u8, u32)> {
     let mut plan = EmitPlan::new(func);
-    let (regs, scratch) = assign_needed(func, &mut plan).ok()?;
+    let (regs, scratch) = frame_regs(func, &mut plan).ok()?;
     plan.home_base = home_base(func, scratch).ok()?;
-    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let max_reg = plan.need_slot.iter().enumerate().filter(|(_, n)| **n).map(|(i, _)| regs[i]).max().unwrap_or(0);
     let frame = (u32::from(max_reg) + 1).max(plan.home_slot(0) + func.homes.len() as u32);
     Some((plan.home_base, frame))
@@ -914,7 +911,23 @@ fn emit_last_arm_unpack(args: EmitLastArmUnpackArgs<'_>) -> Result<(), LowerErro
     Ok(())
 }
 
-fn assign_needed(func: &MirFunc, plan: &mut EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
+/// The frame registers of `func`'s slotted values and the phi-cycle
+/// scratch word. The φ coalescing in [`coalesce_latch_overwrite`] aliases
+/// a φ with its incoming on the assumption that every value has its own
+/// register; once [`assign_shared`] has packed values into shared words,
+/// an alias can land on a register another live value holds (a loop bound
+/// overwritten by an array element), so shared frames are not coalesced.
+fn frame_regs(func: &MirFunc, plan: &mut EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
+    let (regs, scratch, shared) = assign_needed(func, plan)?;
+    if shared {
+        return Ok((regs, scratch));
+    }
+    Ok((coalesce_latch_overwrite(func, regs, &plan.need_slot), scratch))
+}
+
+/// Registers for `func`'s slotted values, the scratch word, and whether
+/// values share registers ([`assign_shared`]).
+fn assign_needed(func: &MirFunc, plan: &mut EmitPlan) -> Result<(Vec<u8>, u8, bool), LowerError> {
     match super::emit::assign_regs_prefer_payloads(func, &plan.need_slot) {
         // One register per value overflows the frame (a body with many
         // inlined calls, #1375): share registers between values never live
@@ -930,9 +943,9 @@ fn assign_needed(func: &MirFunc, plan: &mut EmitPlan) -> Result<(Vec<u8>, u8), L
                     plan.need_slot[i] = true;
                 }
             }
-            assign_shared(func, plan)
+            assign_shared(func, plan).map(|(regs, scratch)| (regs, scratch, true))
         }
-        other => other,
+        other => other.map(|(regs, scratch)| (regs, scratch, false)),
     }
 }
 
@@ -1270,6 +1283,7 @@ fn emit_stored(
         }
         // Dense-only (`byte_scan`).
         MirInst::ByteScan { .. } => return Err(LowerError::Refused("LIR has no byte lanes".into())),
+        MirInst::VecLoop { .. } => return Err(LowerError::Refused("LIR has no vector loops".into())),
         MirInst::Unary { dest, op, src } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             push_unary(out, *op, func.ty(*src), loc);
@@ -1975,6 +1989,7 @@ fn emit_stack(
             loc,
         }),
         MirInst::ByteScan { .. } => Err(LowerError::Refused("LIR has no byte lanes".into())),
+        MirInst::VecLoop { .. } => Err(LowerError::Refused("LIR has no vector loops".into())),
         MirInst::Unary { op, src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             push_unary(out, *op, func.ty(*src), loc);

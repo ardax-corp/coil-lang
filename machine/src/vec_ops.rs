@@ -111,6 +111,52 @@ pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
     Value::from(obj.addr())
 }
 
+/// `vec_extend_range(dst, src, from, to) -> int`: append `src[from..to]`
+/// to `dst` (a counted copy loop the compiler rewrote, which checked
+/// `0 <= from < to <= src.len()`) and return `to`. The same array on both
+/// sides appends nothing and returns `from`: the loop then runs scalar.
+pub fn host_vec_extend_range(heap: &mut Heap, args: &[Value]) -> Value {
+    let arg = |i: usize| args.get(i).copied().unwrap_or(Value::from(0i64));
+    let (dst, src) = (arg(0).bits(), arg(1).bits());
+    let (from, to) = (arg(2).as_int(), arg(3).as_int());
+    if dst == src {
+        return Value::from(from);
+    }
+    let (Some(Object::Array(mut out)), Some(Object::Array(inp))) =
+        (heap.find_object_by_addr(dst), heap.find_object_by_addr(src))
+    else {
+        return Value::from(from);
+    };
+    let (Ok(lo), Ok(hi)) = (usize::try_from(from), usize::try_from(to)) else {
+        return Value::from(from);
+    };
+    if lo > hi || hi > inp.as_ref().len() {
+        return Value::from(from);
+    }
+    out.as_mut().extend_from(inp.as_ref(), lo, hi);
+    heap.account_array(out.as_mut());
+    Value::from(to)
+}
+
+/// `vec_fill(dst, v, n) -> int`: push `v` onto `dst` `n` times (a counted
+/// fill loop the compiler rewrote).
+pub fn host_vec_fill(heap: &mut Heap, args: &[Value]) -> Value {
+    let arg = |i: usize| args.get(i).copied().unwrap_or(Value::from(0i64));
+    let n = usize::try_from(arg(2).as_int()).unwrap_or(0);
+    if let Some(Object::Array(mut out)) = heap.find_object_by_addr(arg(0).bits()) {
+        out.as_mut().fill_push(arg(1), n);
+        heap.account_array(out.as_mut());
+    }
+    Value::from(0i64)
+}
+
+/// HostInvoke wiring for the bulk Vec natives (archive 6.1), after
+/// `io::tty`.
+pub const VEC_BULK_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
+    (common::VEC_EXTEND_RANGE_NATIVE, 4, host_vec_extend_range),
+    (common::VEC_FILL_NATIVE, 3, host_vec_fill),
+];
+
 /// Append-only HostInvoke wiring for Vec helpers.
 pub const VEC_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     ("vec_with_capacity", 1, host_vec_with_capacity),

@@ -142,6 +142,7 @@ fn weak_suite_end_to_end() {
             extra_roots: vec![root.join("src")],
             report: Default::default(),
             doc_tests: crate::runner::DocTests::Off,
+            wall_timeout: None,
         },
         files: Vec::new(),
         operators: Operator::ALL.to_vec(),

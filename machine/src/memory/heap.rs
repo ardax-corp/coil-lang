@@ -3617,6 +3617,39 @@ impl ObjArray {
         }
     }
 
+    /// Append elements `lo..hi` of `src` (caller checks bounds; `src` is
+    /// another array). Packed into packed is one copy.
+    pub fn extend_from(&mut self, src: &Self, lo: usize, hi: usize) {
+        match (&mut self.data, &src.data) {
+            (ArrayData::Bytes(out), ArrayData::Bytes(inp)) => out.extend_from_slice(&inp[lo..hi]),
+            (ArrayData::Words(out), ArrayData::Words(inp)) => {
+                out.extend_from_slice(&inp[lo..hi]);
+                if src.may_hold_refs {
+                    self.note();
+                }
+            }
+            _ => {
+                self.reserve(hi - lo);
+                for i in lo..hi {
+                    self.push(src.get(i).expect("in bounds"));
+                }
+            }
+        }
+    }
+
+    /// Push `v` `n` times.
+    pub fn fill_push(&mut self, v: Value, n: usize) {
+        if let ArrayData::Bytes(b) = &mut self.data
+            && let Some(byte) = byte_of(v)
+        {
+            b.resize(b.len() + n, byte);
+            return;
+        }
+        self.note();
+        let w = self.words_vec();
+        w.resize(w.len() + n, v);
+    }
+
     pub fn reserve(&mut self, extra: usize) {
         match &mut self.data {
             ArrayData::Words(w) => w.reserve(extra),

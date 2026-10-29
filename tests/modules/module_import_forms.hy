@@ -1,8 +1,8 @@
-// `use` forms: a module-file item (`math::add`), a brace group with `as`,
+// `use` forms: a module-file item (`calc::add`), a brace group with `as`,
 // classes, generic classes, enums and generic functions brought in by name or
 // alias, and a nested module's items through a brace group.
 use tests::assert;
-use math::{add, mul as product, add as plus};
+use calc::{add, mul as product, add as plus};
 use qpath_provider::Point;
 use qpath_provider::Box as Crate;
 use qpath_provider::Shape;

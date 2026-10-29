@@ -967,3 +967,79 @@ fn independent_modules_link_in_the_same_order_every_compile() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Compile `files` (entry `src/main.hy`) with `./src` as a root and return
+/// the error messages, for programs expected to fail.
+fn compile_errors(test_name: &str, files: &[(&str, &str)]) -> Vec<String> {
+    let (root, entry) = build_project(test_name, "", files, "src/main.hy");
+    let msgs = with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::with_reporter(reporting::ReportConfig::default(), Box::new(std::io::sink()));
+        bind_ns_pipeline(&mut pipeline, &[root.join("src")]);
+        assert!(
+            pipeline.compile_src_from_file(entry.to_str().unwrap()).is_err(),
+            "{test_name}: expected a compile error"
+        );
+        pipeline
+            .messages()
+            .iter()
+            .filter(|m| matches!(m.kind(), reporting::MessageKind::ERROR))
+            .map(|m| m.message().to_string())
+            .collect::<Vec<_>>()
+    });
+    let _ = std::fs::remove_dir_all(&root);
+    msgs
+}
+
+/// #2094: a macro provider that does not parse is reported at each use
+/// site as the provider's error, the way a provider that does not typecheck
+/// is, instead of "macro expansion did not finish after 16 rounds".
+#[test]
+fn macro_provider_parse_error_is_reported_at_the_use_sites() {
+    let msgs = compile_errors(
+        "macro_provider_parse_error",
+        &[
+            (
+                "src/mac.hy",
+                "use macro::{TypeDecl, Code, raw};\npub trait Broken\nderive Named(TypeDecl t) -> Code { return raw(\"\"); }\nderive Twice(TypeDecl t) -> Code { return raw(\"\"); }\n",
+            ),
+            (
+                "src/main.hy",
+                "use mac::Named;\nuse mac::Twice;\n\n#[derive(Named)]\nclass A {\n    pub x: int,\n}\n\n#[derive(Twice)]\nclass B {\n    pub x: int,\n}\n\nfn main() {}\n",
+            ),
+        ],
+    );
+    assert!(
+        !msgs.iter().any(|m| m.contains("did not finish after")),
+        "a provider parse error is not an expansion loop, got: {msgs:?}"
+    );
+    for name in ["Named", "Twice"] {
+        assert!(
+            msgs.iter().any(|m| m.contains(&format!("derive `{name}` failed: could not compile the macro module `mac`"))
+                && m.contains("`pub` is not allowed on `trait`")),
+            "use of `{name}` reports the provider's parse error, got: {msgs:?}"
+        );
+    }
+}
+
+/// #2094: two unresolved item-level macros in one file waited on each
+/// other for 16 rounds; nothing ran in a round, so nothing could change.
+#[test]
+fn two_unresolved_derives_report_unknown_derives_not_an_expansion_loop() {
+    let msgs = compile_errors(
+        "two_unresolved_derives",
+        &[(
+            "src/main.hy",
+            "#[derive(Named)]\nclass A {\n    pub x: int,\n}\n\n#[derive(Twice)]\nclass B {\n    pub x: int,\n}\n\nfn main() {}\n",
+        )],
+    );
+    assert!(
+        !msgs.iter().any(|m| m.contains("did not finish after")),
+        "got: {msgs:?}"
+    );
+    for name in ["Named", "Twice"] {
+        assert!(
+            msgs.iter().any(|m| m.contains(&format!("`{name}`")) && m.contains("Cannot derive")),
+            "`{name}` is reported as unknown, got: {msgs:?}"
+        );
+    }
+}

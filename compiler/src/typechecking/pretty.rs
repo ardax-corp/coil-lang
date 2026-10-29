@@ -293,9 +293,9 @@ fn format_ty_renamed(ty: &Ty, rename: &mut HashMap<TyVarId, String>, next: &mut 
             out.push_str(" }");
             out
         }
-        Ty::Constructor { owner, tag, .. } => {
-            format!("{}::v{}", format_ty_renamed(owner, rename, next), tag)
-        }
+        // A refinement to one case is an inference detail: the message names
+        // the enum the value belongs to, not the `::vN` tag.
+        Ty::Constructor { owner, .. } => format_ty_renamed(owner, rename, next),
         Ty::Tuple(tys) => {
             let inner = tys
                 .iter()

@@ -3459,6 +3459,24 @@ fn main() {
     }
 
     #[test]
+    fn duplicate_class_fields_are_not_formatted() {
+        for src in [
+            "class C { pub x: int, pub x: int }\nfn main() {}\n",
+            "class C { pub x: int, pub static x: int = 0 }\nfn main() {}\n",
+            "class C { const X: int = 1, const X: int = 2 }\nfn main() {}\n",
+        ] {
+            let err = format_source(src).expect_err("duplicate class fields must not format");
+            assert_eq!(err.code(), Some(reporting::ErrorCode::DuplicateField), "{src}");
+            assert!(
+                err.message().contains("Duplicate field `x`")
+                    || err.message().contains("Duplicate field `X`"),
+                "got {}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
     fn duplicate_construct_and_enum_fields_are_not_formatted() {
         let construct = format_source(
             "enum E { Foo { x: int, y: int } }\nfn main() { E::Foo { x: 1, x: 2 }; }\n",

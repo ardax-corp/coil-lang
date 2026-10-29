@@ -498,12 +498,22 @@ pub enum Instruction {
     /// `p - 63 + (63 - lzcnt(mask))`, else `p -= 64`. Execution resumes
     /// past the body.
     VScan,
-    /// Early free (archive 6.1): pop a heap word the compiler proved dead
+    /// Compiler-only counted vector loop (archive 6.2), dense abc:
+    /// `[31:24]` body length `n` (with [`simd::LOOP_POS`]), `[23:16]` dest
+    /// slot, `[15:8]` from slot, `[7:0]` to slot. The next `n` words are
+    /// its body: numeric `VLoad` / `VStore` (whose index slot holds an
+    /// offset from the block position), `VBin`, `VFma` and `VReduce`. For
+    /// `p = from, from + 8, ..` while `p < to` (`to - from` is a multiple
+    /// of 8): with `LOOP_POS`, `dest = p`; then the body runs on lanes
+    /// `p ..= p + 7`. A load or store out of range, or a lane that traps,
+    /// panics. Execution resumes past the body.
+    VLoop,
+    /// Early free (archive 6.4): pop a heap word the compiler proved dead
     /// and give its object back to the heap now; operand bit 0 frees what
     /// it reaches through precise words too. The VM skips what it cannot
     /// free safely (see `Heap::free_early`). Never collects.
     FreeEarly,
-    /// Copy-on-write (archive 6.3): pop a heap word and push it back.
+    /// Copy-on-write (archive 6.6): pop a heap word and push it back.
     /// Operand 0 (share): a second place now names the object, so the next
     /// write copies it. Operand 1 (unique): a write through the word
     /// follows, so a shared class instance or array is replaced by a
@@ -780,6 +790,10 @@ pub mod simd {
     pub const FSUB64: u8 = dense::FSUB64;
     pub const FMUL64: u8 = dense::FMUL64;
     pub const FDIV64: u8 = dense::FDIV64;
+    /// Int lane bit ops (archive 6.3); they never trap.
+    pub const IAND64: u8 = dense::IAND64;
+    pub const IOR64: u8 = dense::IOR64;
+    pub const IXOR64: u8 = dense::IXOR64;
     pub const SPLAT_I64: u8 = 32;
     pub const SPLAT_F64: u8 = 33;
     pub const IOTA_I64: u8 = 34;
@@ -791,6 +805,19 @@ pub mod simd {
     /// which is what every existing archive emits.
     pub const REDUCE_ADD: u8 = 0;
     pub const REDUCE_MUL: u8 = 1;
+    /// Int bit folds (archive 6.3).
+    pub const REDUCE_AND: u8 = 2;
+    pub const REDUCE_OR: u8 = 3;
+    pub const REDUCE_XOR: u8 = 4;
+    /// `REDUCE_TAKE + pred` (archive 6.3, `pred` one of `dense::CMP_LT`
+    /// ..= `CMP_GE`): lane by lane in order, `acc = x` when `x pred acc`
+    /// (a max is `CMP_GT`, a min `CMP_LT`; floats compare as IEEE).
+    pub const REDUCE_TAKE: u8 = 8;
+    /// `VBin` `kind = ICMP + pred` (archive 6.3, `dense::CMP_*`): int lanes
+    /// `a pred b` as `1` / `0` int lanes. `FCMP + pred` compares float
+    /// lanes (IEEE: a NaN compares unequal and unordered).
+    pub const ICMP: u8 = 64;
+    pub const FCMP: u8 = 72;
 
     /// Byte lanes (minor 46, `docs/internals/byte-simd.md`): a vector
     /// register read as [`BYTE_LANES`] `u8` lanes. A lane mask is `0xFF` /
@@ -806,6 +833,11 @@ pub mod simd {
     pub const SCAN_BACKWARD: u8 = 0x40;
     /// `VScan` length-field bits that hold the body length.
     pub const SCAN_LEN: u8 = 0x3F;
+    /// `VLoop` length-field flag (archive 6.2): `dest` holds the block
+    /// position `p` while the body runs (a splat of it is the index).
+    pub const LOOP_POS: u8 = 0x80;
+    /// `VLoop` length-field bits that hold the body length.
+    pub const LOOP_LEN: u8 = 0x7F;
     /// `VLoad` type: 64 bytes of a `string` or a byte array from `idx`.
     pub const TY_U8: u8 = 8;
     /// `VBin` mask logic on byte lanes: `a & b`, `a | b`, `a & !b`, `!a`.
@@ -1020,6 +1052,7 @@ impl Instruction {
             Self::RestoreSnapshot => "RestoreSnapshot",
             Self::VMask => "VMask",
             Self::VScan => "VScan",
+            Self::VLoop => "VLoop",
             Self::FreeEarly => "FreeEarly",
             Self::Cow => "Cow",
         }

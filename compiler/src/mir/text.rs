@@ -118,6 +118,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             write!(f, "]")
         }
+        MirInst::VecLoop { dest, pos, from, to, kind } => {
+            write!(f, "{dest} = vecloop {from}..{to} {kind:?}")?;
+            match pos {
+                Some(p) => write!(f, " pos {p}"),
+                None => Ok(()),
+            }
+        }
         MirInst::Unary { dest, op, src } => {
             let name = match (op, func.ty(*src).is_float()) {
                 (MirUnaryOp::Neg, false) => "ineg",

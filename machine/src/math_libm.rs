@@ -1,258 +1,52 @@
-//! IEEE-754 scalar math host natives for virtual `prelude::math`.
+//! Retired `prelude::math` HostInvoke slots.
 //!
-//! Remainder is `rem` (Rust `f64::rem` / C `fmod`), not IEEE `remainder`.
-//! Named constants `PI` / `E` / `TAU` stay in userland `num`, not HostInvoke.
+//! The scalar float functions are coil-stdlib's userland `math` module now.
+//! Their ids stay frozen (see `common::HOST_NATIVES`), so each slot is a
+//! panic stub: an archive compiled before the retirement fails loudly when
+//! it reaches one instead of every later id sliding. `math_pow` / `math_rem`
+//! lost their surface earlier, to the `**` and `%` operators.
 
-use common::Value;
-
-use crate::Heap;
-
-pub fn math_sin(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().sin())
-}
-
-pub fn math_cos(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().cos())
-}
-
-pub fn math_tan(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().tan())
-}
-
-pub fn math_sqrt(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().sqrt())
-}
-
-pub fn math_floor(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().floor())
-}
-
-pub fn math_ceil(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().ceil())
-}
-
-pub fn math_exp(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().exp())
-}
-
-pub fn math_ln(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().ln())
-}
-
-pub fn math_pow(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().powf(args[1].as_float()))
-}
-
-pub fn math_atan(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().atan())
-}
-
-/// `atan2(y, x)` — same argument order as libm / Rust `f64::atan2`.
-pub fn math_atan2(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().atan2(args[1].as_float()))
-}
-
-pub fn math_asin(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().asin())
-}
-
-pub fn math_acos(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().acos())
-}
-
-pub fn math_log10(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().log10())
-}
-
-pub fn math_log2(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().log2())
-}
-
-pub fn math_cbrt(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().cbrt())
-}
-
-/// Float remainder via Rust `f64::rem` (C `fmod`): sign follows the dividend.
-pub fn math_rem(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float() % args[1].as_float())
-}
-
-pub fn math_sinh(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().sinh())
-}
-
-pub fn math_cosh(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().cosh())
-}
-
-pub fn math_tanh(_heap: &mut Heap, args: &[Value]) -> Value {
-    Value::from(args[0].as_float().tanh())
-}
-
-/// Frozen HostInvoke block **102–110**. Do not append here — later ids would slide.
-pub const MATH_LIBM_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
-    ("math_sin", 1, math_sin),
-    ("math_cos", 1, math_cos),
-    ("math_tan", 1, math_tan),
-    ("math_sqrt", 1, math_sqrt),
-    ("math_floor", 1, math_floor),
-    ("math_ceil", 1, math_ceil),
-    ("math_exp", 1, math_exp),
-    ("math_ln", 1, math_ln),
-    ("math_pow", 2, math_pow),
+/// Frozen math slots after `gc_register_finalizer` (ids **102–110**).
+pub const MATH_LIBM_REMOVED: &[(&str, usize)] = &[
+    ("math_sin", 1),
+    ("math_cos", 1),
+    ("math_tan", 1),
+    ("math_sqrt", 1),
+    ("math_floor", 1),
+    ("math_ceil", 1),
+    ("math_exp", 1),
+    ("math_ln", 1),
+    ("math_pow", 2),
 ];
 
-/// M1 expansion, appended after `result_unit_probe` (ids **125–135**).
-pub const MATH_LIBM_M1_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
-    ("math_atan", 1, math_atan),
-    ("math_atan2", 2, math_atan2),
-    ("math_asin", 1, math_asin),
-    ("math_acos", 1, math_acos),
-    ("math_log10", 1, math_log10),
-    ("math_log2", 1, math_log2),
-    ("math_cbrt", 1, math_cbrt),
-    ("math_rem", 2, math_rem),
-    ("math_sinh", 1, math_sinh),
-    ("math_cosh", 1, math_cosh),
-    ("math_tanh", 1, math_tanh),
+/// M1 expansion slots after `result_unit_probe` (ids **125–135**).
+pub const MATH_LIBM_M1_REMOVED: &[(&str, usize)] = &[
+    ("math_atan", 1),
+    ("math_atan2", 2),
+    ("math_asin", 1),
+    ("math_acos", 1),
+    ("math_log10", 1),
+    ("math_log2", 1),
+    ("math_cbrt", 1),
+    ("math_rem", 2),
+    ("math_sinh", 1),
+    ("math_cosh", 1),
+    ("math_tanh", 1),
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn call(host: crate::HostValueFn, args: &[f64]) -> f64 {
-        let mut heap = Heap::default();
-        let values: Vec<Value> = args.iter().copied().map(Value::from).collect();
-        host(&mut heap, &values).as_float()
-    }
-
     #[test]
-    fn math_libm_unary_functions_match_f64() {
-        let cases: &[(crate::HostValueFn, f64, f64)] = &[
-            (math_sin, std::f64::consts::FRAC_PI_2, 1.0),
-            (math_cos, std::f64::consts::PI, -1.0),
-            (math_tan, 0.0, 0.0),
-            (math_sqrt, 9.0, 3.0),
-            (math_floor, -1.25, -2.0),
-            (math_ceil, -1.25, -1.0),
-            (math_exp, 1.0, std::f64::consts::E),
-            (math_ln, std::f64::consts::E, 1.0),
-        ];
-
-        for &(host, input, expected) in cases {
-            let actual = call(host, &[input]);
-            assert!(
-                (actual - expected).abs() < 1e-12,
-                "input {input}: expected {expected}, got {actual}"
-            );
+    fn removed_math_slots_cover_both_frozen_blocks() {
+        assert_eq!(MATH_LIBM_REMOVED.len(), 9);
+        assert_eq!(MATH_LIBM_REMOVED[0].0, "math_sin");
+        assert_eq!(MATH_LIBM_M1_REMOVED[0].0, "math_atan");
+        assert_eq!(MATH_LIBM_M1_REMOVED.last().map(|w| w.0), Some("math_tanh"));
+        for &(name, arity) in MATH_LIBM_REMOVED.iter().chain(MATH_LIBM_M1_REMOVED) {
+            let row = common::host_native_id(name).map(|id| &common::HOST_NATIVES[id]);
+            assert_eq!(row.map(|r| r.arity as usize), Some(arity), "{name}");
         }
-    }
-
-    #[test]
-    fn math_libm_pow_uses_powf() {
-        assert_eq!(call(math_pow, &[2.0, 3.0]), 8.0);
-        assert_eq!(call(math_pow, &[9.0, 0.5]), 3.0);
-    }
-
-    #[test]
-    fn math_libm_m1_unary_functions_match_f64() {
-        let cases: &[(crate::HostValueFn, f64, f64)] = &[
-            (math_atan, 1.0, std::f64::consts::FRAC_PI_4),
-            (math_asin, 1.0, std::f64::consts::FRAC_PI_2),
-            (math_acos, 1.0, 0.0),
-            (math_log10, 1000.0, 3.0),
-            (math_log2, 8.0, 3.0),
-            (math_cbrt, 27.0, 3.0),
-            (math_sinh, 0.0, 0.0),
-            (math_cosh, 0.0, 1.0),
-            (math_tanh, 0.0, 0.0),
-        ];
-
-        for &(host, input, expected) in cases {
-            let actual = call(host, &[input]);
-            assert!(
-                (actual - expected).abs() < 1e-12,
-                "input {input}: expected {expected}, got {actual}"
-            );
-        }
-    }
-
-    #[test]
-    fn math_libm_atan2_and_rem_match_f64() {
-        assert!((call(math_atan2, &[0.0, -1.0]) - std::f64::consts::PI).abs() < 1e-12);
-        assert_eq!(call(math_rem, &[5.5, 2.0]), 5.5 % 2.0);
-        assert_eq!(call(math_rem, &[-5.5, 2.0]), -5.5 % 2.0);
-    }
-
-    #[test]
-    fn math_libm_atan2_quadrants_match_f64() {
-        let cases: &[(f64, f64)] = &[
-            (1.0, 1.0),
-            (1.0, -1.0),
-            (-1.0, -1.0),
-            (-1.0, 1.0),
-            (1.0, 0.0),
-            (-1.0, 0.0),
-            (0.0, 1.0),
-            (0.0, -1.0),
-            (f64::INFINITY, f64::INFINITY),
-            (f64::INFINITY, f64::NEG_INFINITY),
-        ];
-        for &(y, x) in cases {
-            let actual = call(math_atan2, &[y, x]);
-            let expected = y.atan2(x);
-            assert_eq!(actual, expected, "atan2({y}, {x})");
-        }
-    }
-
-    #[test]
-    fn math_libm_rem_sign_follows_dividend() {
-        let cases: &[(f64, f64)] = &[
-            (5.5, 2.0),
-            (5.5, -2.0),
-            (-5.5, 2.0),
-            (-5.5, -2.0),
-            (4.0, 2.0),
-            (1.0, 0.0),
-            (f64::INFINITY, 1.0),
-        ];
-        for &(a, b) in cases {
-            let actual = call(math_rem, &[a, b]);
-            let expected = a % b;
-            if expected.is_nan() {
-                assert!(actual.is_nan(), "rem({a}, {b})");
-            } else {
-                assert_eq!(actual, expected, "rem({a}, {b})");
-            }
-        }
-    }
-
-    #[test]
-    fn math_libm_preserves_ieee_nan_and_infinity() {
-        assert!(call(math_sqrt, &[-1.0]).is_nan());
-        assert!(call(math_ln, &[-1.0]).is_nan());
-        assert_eq!(call(math_ln, &[0.0]), f64::NEG_INFINITY);
-        assert_eq!(call(math_exp, &[1000.0]), f64::INFINITY);
-        assert!(call(math_pow, &[-2.0, 0.5]).is_nan());
-        assert!(call(math_asin, &[2.0]).is_nan());
-        assert!(call(math_acos, &[-2.0]).is_nan());
-        assert!(call(math_log10, &[-1.0]).is_nan());
-        assert!(call(math_log2, &[-1.0]).is_nan());
-        assert!(call(math_rem, &[1.0, 0.0]).is_nan());
-        assert_eq!(call(math_log10, &[0.0]), f64::NEG_INFINITY);
-        assert_eq!(call(math_log2, &[0.0]), f64::NEG_INFINITY);
-        assert_eq!(call(math_cbrt, &[-27.0]), -3.0);
-        assert_eq!(call(math_tanh, &[f64::INFINITY]), 1.0);
-        assert_eq!(call(math_tanh, &[f64::NEG_INFINITY]), -1.0);
-        assert_eq!(call(math_sinh, &[f64::INFINITY]), f64::INFINITY);
-        assert_eq!(call(math_atan, &[f64::INFINITY]), std::f64::consts::FRAC_PI_2);
-    }
-
-    #[test]
-    fn math_libm_m1_wiring_is_append_only() {
-        assert_eq!(MATH_LIBM_WIRING.len(), 9);
-        assert_eq!(MATH_LIBM_M1_WIRING[0].0, "math_atan");
-        assert_eq!(MATH_LIBM_M1_WIRING.last().map(|w| w.0), Some("math_tanh"));
     }
 }

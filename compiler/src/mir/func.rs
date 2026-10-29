@@ -103,6 +103,9 @@ pub struct MirFunc {
     /// or call changes the word, so LICM and CSE treat them as operators
     /// on the object (#1560).
     pub invariant_loads: HashSet<ValueId>,
+    /// `Index` reads of a `byte` element (a `Vec<byte>` or `[byte; N]`):
+    /// `byte_scan` reads them as byte lanes.
+    pub byte_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write
     /// elements and fields).
     pub steady_calls: HashSet<ValueId>,
@@ -213,6 +216,7 @@ impl MirFunc {
             tail_targets: HashSet::new(),
             pure_calls: HashSet::new(),
             invariant_loads: HashSet::new(),
+            byte_loads: HashSet::new(),
             steady_calls: HashSet::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
@@ -290,13 +294,6 @@ impl MirFunc {
                 i.is_gc_edge() && !is_fn(i) && !after_fn
             })
         })
-    }
-
-    /// True when any inst is an explicit I7 deopt / stop edge.
-    pub fn has_deopt_edge(&self) -> bool {
-        self.blocks
-            .iter()
-            .any(|b| b.insts.iter().any(MirInst::is_deopt_edge))
     }
 
     /// Lay the blocks out in `layout` order, numbered as they come; a
@@ -628,6 +625,21 @@ impl MirFunc {
                     }
                 }
             },
+            MirInst::VecLoop { dest, pos, from, to, kind } => {
+                if [*from, *to].iter().chain(pos.iter()).any(|&v| self.ty(v) != MirTy::I64) {
+                    return Err(format!("{dest} vec loop range is not i64"));
+                }
+                let want = match kind {
+                    super::inst::VecLoopKind::Reduce { init, .. } => self.ty(*init),
+                    super::inst::VecLoopKind::Store { .. } => MirTy::I64,
+                };
+                if self.ty(*dest) != want {
+                    return Err(format!("{dest} vec loop dest type"));
+                }
+                if pos.is_some() != kind.uses_index() {
+                    return Err(format!("{dest} vec loop position without an index, or none for one"));
+                }
+            }
             MirInst::ByteScan { dest, from, bound, streams, scalars, .. } => {
                 if [*dest, *from, *bound].iter().any(|&v| self.ty(v) != MirTy::I64) {
                     return Err(format!("{dest} byte scan position is not i64"));

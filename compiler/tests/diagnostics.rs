@@ -92,6 +92,92 @@ fn main() {
     );
 }
 
+/// The constraint messages must rename open unknowns like the mismatch
+/// ones do: an unsolved `where` argument, a constructor-kinded bound, an
+/// `Into` call whose target is never pinned and a constraint-kind parameter
+/// all used to print the raw `tN` counter.
+#[test]
+fn constraint_messages_avoid_raw_tvar_ids() {
+    let cases = [
+        (
+            "open where argument",
+            r#"
+trait Convert<A, B> { fn conv(A a) -> B; }
+class M {}
+class N {}
+impl Convert<N> for M { fn conv(M a) -> N { return new N(); } }
+fn cast<A, B>(A x) -> B where Convert<A, B> { return conv(x); }
+fn main() { let y = cast(1.5); }
+"#,
+            "Cannot satisfy constraint `Convert<float, a>`",
+        ),
+        (
+            "constructor-kinded bound",
+            r#"
+trait Functor<F: * -> *> { fn fmap<A, B>(F<A> fa, fn(A) -> B f) -> F<B>; }
+fn twice<F: Functor, A>(F<A> x, fn(A) -> A f) -> F<A> { return fmap(fmap(x, f), f); }
+fn main() { let _ = twice(1, fn (int x) => x); }
+"#,
+            "Cannot satisfy constraint `Functor<a>`",
+        ),
+        (
+            "Into without a target",
+            r#"
+class M { pub v: int }
+fn main() { let m = new M(1); let z = m.into(); }
+"#,
+            "Cannot satisfy constraint `Into<M, a>`",
+        ),
+        (
+            "constraint-kind parameter",
+            r#"
+fn apply_c<c: * -> Constraint, T: c>(T x) -> T { return x; }
+fn main() { let _ = apply_c(1); }
+"#,
+            "Cannot satisfy abstract constraint `c<T>`",
+        ),
+    ];
+    for (what, src, expected) in cases {
+        let msgs: Vec<String> = check_messages(src).iter().map(|m| m.message().to_string()).collect();
+        let joined = msgs.join("\n");
+        assert!(
+            joined.contains(expected),
+            "{what}: expected `{expected}`, got: {joined}"
+        );
+        assert!(
+            !joined.contains("`t") && !joined.contains("<t"),
+            "{what}: diagnostics must not show raw tN type-var ids, got: {joined}"
+        );
+    }
+}
+
+/// A refined constructor type (`Tree::Node(…)` before it joins its enum) is
+/// an inference detail: a mismatch names the enum, never the `::v1` tag.
+#[test]
+fn constructor_refinement_prints_as_its_enum() {
+    let cases = [
+        (
+            r#"
+enum Tree<T> { Leaf, Node(T, Tree<T>, Tree<T>) }
+fn main() { let t: Tree<int> = Tree::Node("a", Tree::Leaf, Tree::Leaf); }
+"#,
+            "expected `Tree<int>`, found `Tree<string>`",
+        ),
+        (
+            r#"
+fn main() { let a: Option<Option<int>> = Option::Some(1); }
+"#,
+            "expected `Option<Option<int>>`, found `Option<int>`",
+        ),
+    ];
+    for (src, expected) in cases {
+        let msgs: Vec<String> = check_messages(src).iter().map(|m| m.message().to_string()).collect();
+        let joined = msgs.join("\n");
+        assert!(joined.contains(expected), "expected `{expected}`, got: {joined}");
+        assert!(!joined.contains("::v"), "constructor tags must not leak, got: {joined}");
+    }
+}
+
 #[test]
 fn multiple_errors_are_reported_in_one_pass() {
     // Two distinct problems: an unknown identifier and an assignment
@@ -777,4 +863,115 @@ fn main() {
             msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
         );
     }
+}
+
+/// Messages of `code` among `msgs`, as strings.
+fn messages_with(msgs: &[Message], code: ErrorCode) -> Vec<String> {
+    msgs.iter()
+        .filter(|m| m.code() == Some(code))
+        .map(|m| m.message().to_string())
+        .collect()
+}
+
+#[test]
+fn operand_mismatch_does_not_cascade_into_unknown_operand_type() {
+    // #2092: once an operand of `+` / `-` mismatched (E0102), the operator
+    // has nothing more to say; "the operands of `+` have no known type"
+    // (E0119) was a cascade of the same mistake.
+    for src in [
+        "fn main() { let v = Vec::new(); let x = v.pop(); let y = x + 1; }",
+        "fn main() { let b: byte = 65; let n = 32; let c = b - n; }",
+    ] {
+        let msgs = check_messages(src);
+        let mismatches = messages_with(&msgs, ErrorCode::TypeMismatch);
+        assert_eq!(mismatches.len(), 1, "one mismatch for `{src}`, got: {msgs:?}");
+        assert!(
+            !msgs.iter().any(|m| m.message().contains("have no known type")),
+            "operand mismatch must not cascade for `{src}`, got: {msgs:?}"
+        );
+    }
+}
+
+#[test]
+fn scalar_enum_literal_mismatches_are_reported_once() {
+    // #2092: `let s: S = 1` and a raw `1` pattern on an `S` scrutinee each
+    // report the mismatch once, not from both sides.
+    for src in [
+        "enum S { A = 1, B = 2 }\nfn main() { let s: S = 1; }",
+        "enum S { A = 1, B = 2 }\nfn main() { let s = S::A; match s { 1 => {}, default => {} } }",
+    ] {
+        let msgs = check_messages(src);
+        let mismatches = messages_with(&msgs, ErrorCode::TypeMismatch);
+        assert_eq!(
+            mismatches.len(),
+            1,
+            "one mismatch for `{src}`, got: {:?}",
+            msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn duplicate_overload_is_reported_once_per_declaration() {
+    // #2092: the second `fn f(int)` was rejected when its signature was
+    // pre-registered and again when its body was checked.
+    let msgs = check_messages(
+        "fn f(int x) -> int { return x; }\nfn f(int x) -> int { return x; }\nfn main() {}",
+    );
+    let dups = messages_with(&msgs, ErrorCode::DuplicateOverload);
+    assert_eq!(dups.len(), 1, "expected one E0121, got: {msgs:?}");
+}
+
+#[test]
+fn option_try_in_non_option_function_is_reported_once_with_payload() {
+    // #2092: `f()?` on an `Option<int>` inside `fn g() -> int` is one
+    // mistake, named with the payload the operand carries (`Option<int>`),
+    // not `Option<a>` once at the `?` and once more at the function.
+    let msgs = check_messages(
+        "fn f() -> Option<int> { return Some(1); }\nfn g() -> int { let x = f()?; return x; }\nfn main() { g(); }",
+    );
+    let mismatches = messages_with(&msgs, ErrorCode::TypeMismatch);
+    assert_eq!(mismatches.len(), 1, "expected one E0102, got: {msgs:?}");
+    assert!(
+        mismatches[0].contains("Option<int>"),
+        "the mismatch names the operand's payload, got: {}",
+        mismatches[0]
+    );
+}
+
+#[test]
+fn readonly_index_store_reports_only_the_readonly_violation() {
+    // #2092: `v[0] = 5` on a `readonly` array is one mistake; the index
+    // target itself is fine, so no "Invalid assignment target" follows.
+    let msgs = check_messages("fn main() { let v = readonly [1, 2, 3]; v[0] = 5; }");
+    let errors: Vec<&str> = msgs
+        .iter()
+        .filter(|m| m.code() == Some(ErrorCode::InvalidAssignment))
+        .map(|m| m.message())
+        .collect();
+    assert_eq!(
+        errors,
+        vec!["Cannot mutate a `readonly` value"],
+        "got: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn orphan_instance_in_entry_file_names_the_file_and_the_foreign_argument() {
+    // #2094: the entry file's module path is empty; the message said
+    // "in module ``". It names the file and the argument defined elsewhere.
+    let msgs = check_messages(
+        "class M {}\nimpl Into<string> for M { fn into(M m) -> string { return \"m\"; } }\nfn main() {}",
+    );
+    let orphan = msgs
+        .iter()
+        .find(|m| m.message().contains("Orphan instance"))
+        .map(|m| m.message().to_string())
+        .unwrap_or_else(|| panic!("expected an orphan instance error, got: {msgs:?}"));
+    assert!(
+        orphan.contains("in the entry file") && !orphan.contains("``"),
+        "names the entry file, got: {orphan}"
+    );
+    assert!(orphan.contains("`string`"), "names the foreign argument, got: {orphan}");
 }

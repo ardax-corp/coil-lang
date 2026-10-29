@@ -1266,16 +1266,25 @@ fn perf_phase0_numeric_shape_inventory() {
     // turns the loop compare from `BinSlotImmJmpf` into `BinSlotSlotJmpf`.
     // The fork-join is its own function (`__coil_par_loop_fork_0`), and the
     // worker lowers to MIR and runs dense; inventory its loop.
+    //
+    // 6.2: `acc = acc + i` runs 8 lanes at a time in a `VLoop`; the loop
+    // left is the scalar tail of the last few lanes, rotated (its entry
+    // test before it, a fused `*Jmpt` back edge).
     let (bc, pool, _, _, pipeline) = compile("examples/perf/numeric.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "__coil_par_loop_1", bc.len());
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::VLoop),
+        1,
+        "the worker's loop runs in a VLoop"
+    );
     let (loop_start, back_edge) = innermost_loop_range(&bc, &pool, start, end);
     let body = &bc[loop_start..=back_edge];
     let (h, g) = (inventory_health(body), inventory_gaps(body, loop_start));
 
     assert!(
-        h.fused_jmpf_total() >= 1,
-        "loop compare should stay a fused *Jmpf: {h:?}"
+        h.fused_jmpf_total() + h.fused_jmpt_total() >= 1,
+        "loop compare should stay a fused compare-jump: {h:?}"
     );
     // The worker is its own body with MIR, so it runs dense: the adds are
     // `DenseBin`s on its registers.

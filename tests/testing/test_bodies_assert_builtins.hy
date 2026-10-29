@@ -1,6 +1,7 @@
 // Test bodies use `assert!` (raising its message), host builtins such as
-// `sqrt` / `floor` / `ord`, early `return`, and `Result` values as arguments.
+// `ord` (and stdlib `sqrt` / `floor`), early `return`, and `Result` values as arguments.
 use tests::assert;
+use math::{floor, sqrt};
 
 fn positive(int x) -> Result<(), string> {
     assert!(x > 0, "not positive");

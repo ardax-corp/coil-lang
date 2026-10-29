@@ -457,7 +457,7 @@ fn classify_unknown_callee(name: &str) -> EffectFlags {
 
 /// Effect bits for a host / virtual-module callee (I6), by registry name
 /// (`math_sin`, `fs_exists`) or by the short name a virtual module exports
-/// (`sin`, `exists`).
+/// (`exists`).
 ///
 /// Registry names read the `effects` column of [`common::HOST_NATIVES`]. A
 /// short name takes the union of every row it is exported as (`close` is both
@@ -536,12 +536,9 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
             EffectFlags::from_bits(EffectFlags::FFI | EffectFlags::RESIZE)
         }
         BuiltinExport::Fn { kind: crate::typechecking::PreludeFn::BlackBox } => row(common::BLACK_BOX_NATIVE),
-        BuiltinExport::Fn { kind } => match kind.math_native_name() {
-            Some(registry) => row(registry),
-            // `ord`, `char`, matrix helpers: compiled inline or
-            // in userland, not a host row.
-            None => UNKNOWN_CALLEE,
-        },
+        // `ord`, `char`, matrix helpers: compiled inline or in userland,
+        // not a host row.
+        BuiltinExport::Fn { .. } => UNKNOWN_CALLEE,
         BuiltinExport::IoFn { kind } => row(kind.native_name()),
         BuiltinExport::StringFn { kind } => match kind.native_name() {
             Some(registry) => row(registry),
@@ -1517,9 +1514,7 @@ fn main() { return; }
 
     #[test]
     fn classify_host_name_math_is_pure_clocks_and_io_are_not() {
-        assert!(classify_host_name("sin").is_pure());
         assert!(classify_host_name("math_sin").is_pure());
-        assert!(classify_host_name("math::sqrt").is_pure());
         assert!(classify_host_name("packed_dot").is_pure());
         assert!(classify_host_name("simd_axpy_reduce").is_pure());
         assert!(classify_host_name("mono_nanos").contains(EffectFlags::HOST));
@@ -1531,11 +1526,11 @@ fn main() { return; }
     }
 
     #[test]
-    fn math_helper_is_pure_clock_helper_is_not() {
+    fn float_helper_is_pure_clock_helper_is_not() {
         let ast = parse_ast(
             r#"
 use clock::{mono_nanos};
-fn wave(float x) -> float { return sin(x); }
+fn wave(float x) -> float { return x * x - 1.0; }
 fn tick() -> int { return mono_nanos(); }
 fn main() { return; }
 "#,
@@ -1543,7 +1538,7 @@ fn main() { return; }
         let set = analyze_pure_fns(&ast, BareCases::none());
         assert!(
             set.contains("wave"),
-            "prelude math must not poison purity: {set:?}"
+            "float arithmetic must not poison purity: {set:?}"
         );
         assert!(!set.contains("tick"), "clocks are observational: {set:?}");
     }
@@ -1846,7 +1841,6 @@ fn main() { return; }
                 BuiltinExport::ThreadFn { kind } => Some(kind.native_name()),
                 BuiltinExport::GcFn { kind } => Some(kind.native_name()),
                 BuiltinExport::HostFn { registry, .. } => Some(*registry),
-                BuiltinExport::Fn { kind } => kind.math_native_name(),
                 _ => None,
             };
             if let Some(registry) = registry {

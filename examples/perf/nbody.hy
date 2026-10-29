@@ -4,6 +4,7 @@
 // VM-only time vs this baseline.
 use io::sync::print;
 use string::format;
+use math::sqrt;
 
 fn eval_a(int i, int j) -> float {
     let ij = i + j;

@@ -227,6 +227,9 @@ impl Checker {
             pending_exhaustive: Vec::new(),
             open_operands: Vec::new(),
             open_empty_arrays: Vec::new(),
+            class_param_bounds: HashMap::new(),
+            deferred_goals: Vec::new(),
+            retrying_deferred_goals: false,
             defer_empty_array: false,
             mixed_literals: Vec::new(),
             fn_body_depth: 0,
@@ -234,6 +237,7 @@ impl Checker {
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
             current_yield_ty: None,
+            coro_body: false,
             current_send_ty: None,
             yield_receives_used: false,
             c_structs: Vec::new(),
@@ -1769,6 +1773,7 @@ impl Checker {
         self.async_functions.clear();
         self.async_depth = 0;
         self.current_yield_ty = None;
+        self.coro_body = false;
         self.current_send_ty = None;
         self.yield_receives_used = false;
         self.fn_result_mode = None;
@@ -2335,6 +2340,64 @@ impl Checker {
             type_params.iter().map(|tp| tp.name.to_string()).collect(),
         );
         previous
+    }
+
+    /// `class Sorted<T: Ord>`: record the bounds on the class's parameters
+    /// with each argument schemaized to its parameter name (`Ord<T>`), the
+    /// form the class's field types take, so a `new` site and an inherent
+    /// impl substitute their own variables for it (#2085).
+    fn register_class_param_bounds(
+        &mut self,
+        key: &str,
+        type_params: &[parser::ast::TypeParam<'_>],
+        range: &Range<usize>,
+    ) {
+        if type_params.iter().all(|tp| tp.bounds.is_empty()) {
+            self.class_param_bounds.remove(key);
+            return;
+        }
+        let frame = self
+            .type_params_in_scope
+            .last()
+            .expect("type-param frame just pushed")
+            .clone();
+        let var_to_name: HashMap<TyVarId, String> =
+            frame.iter().map(|(n, id)| (*id, n.clone())).collect();
+        let mut bounds = Vec::new();
+        for tp in type_params {
+            let var = *frame.get(tp.name).expect("type param registered in frame");
+            for bound in &tp.bounds {
+                if let Some(c) = self.constraint_from_bound(bound, Ty::Var(var), range) {
+                    bounds.push(Constraint {
+                        class: c.class,
+                        args: c.args.iter().map(|a| schemaize_ty(a, &var_to_name)).collect(),
+                    });
+                }
+            }
+        }
+        self.class_param_bounds.insert(key.to_string(), bounds);
+    }
+
+    /// The class's bounds at `args`, the type arguments standing for its
+    /// parameters (by `generic_type_ctors` order); empty when it has none.
+    fn class_param_bounds_at(&self, key: &str, args: &[Ty]) -> Vec<Constraint> {
+        let Some(bounds) = self.class_param_bounds.get(key) else {
+            return Vec::new();
+        };
+        let names = self
+            .generics
+            .generic_type_ctors
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
+        let map: HashMap<String, Ty> = names.into_iter().zip(args.iter().cloned()).collect();
+        bounds
+            .iter()
+            .map(|c| Constraint {
+                class: c.class.clone(),
+                args: c.args.iter().map(|a| subst_ty_params(a, &map)).collect(),
+            })
+            .collect()
     }
 
     fn restore_generic_type_ctor(&mut self, name: &str, previous: Option<Vec<String>>) {
@@ -3068,6 +3131,13 @@ impl Checker {
                 }
             }
             Expression::Return(e) | Expression::ImplicitReturn(e) => {
+                // A bare `return;` in a `gen fn` finishes the coroutine
+                // whatever it yields: its last `resume` gives the yield
+                // type's default, as falling off the end does (#2088).
+                if self.coro_body && matches!(expr.1.as_ref(), Expression::Return(_)) && Self::expr_is_bare_return(e) {
+                    let _ = self.infer(e);
+                    return never();
+                }
                 // Pin expected return for Into; Result mode: bare return → Ok payload, explicit Result → full type.
                 let prev_expected = self.current_expected.take();
                 let flat_explicit_result = self.fn_result_mode.as_ref().is_some_and(|(ok, _)| {
@@ -3561,6 +3631,7 @@ impl Checker {
                 let key = self.qualify_module_name(name);
                 let _ = self.register_generic_type_ctor(&key, type_params);
                 let pushed = self.push_type_params_for_type_parsing(type_params);
+                self.register_class_param_bounds(&key, type_params, &range);
                 self.register_class(name, fields, &range);
                 if !invariants.is_empty() {
                     self.infer_class_invariants(&key, type_params, invariants);
@@ -3835,6 +3906,14 @@ impl Checker {
             .or_insert_with(|| target_ty.clone());
         let val_ty = self.infer(value);
         let op_name = Self::compound_op_name(*op);
+        // `b -= 1` checks like `b = b - 1`: the literal takes the target's
+        // `byte` type (#2093); a shift count stays an `int`.
+        let val_ty = if matches!(op, parser::ast::AssignOp::Shl | parser::ast::AssignOp::Shr) {
+            val_ty
+        } else {
+            let tp = apply_ty_prune(&self.subst, &target_ty);
+            self.coerce_literal_operand_to_byte(&tp, value, &val_ty)
+        };
         let tp = apply_ty_prune(&self.subst, &target_ty);
         let vp = apply_ty_prune(&self.subst, &val_ty);
         if crate::typechecking::aggregate_arith::is_matrix_ty(&tp)
@@ -4185,6 +4264,7 @@ impl Checker {
                 .unwrap_or_default();
             // Freshen field types at each `new` site so independent
             // instantiations don't share type variables.
+            let mut bound_goals: Vec<Constraint> = Vec::new();
             let (field_tys, result_ty) = if param_names.is_empty() {
                 (
                     fields.iter().map(|(_, _, t)| t.clone()).collect::<Vec<_>>(),
@@ -4202,6 +4282,11 @@ impl Checker {
                     .iter()
                     .map(|(_, _, t)| subst_ty_params(t, &map))
                     .collect();
+                // `class Sorted<T: Ord>`: the bound holds at every
+                // construction, checked once the arguments have unified
+                // (#2085). No dictionary is recorded: the class's methods
+                // take theirs at their own call sites.
+                bound_goals = self.class_param_bounds_at(&class_name, &app_args);
                 (
                     field_tys,
                     Ty::App(Box::new(Ty::Con(class_name.clone())), app_args),
@@ -4212,7 +4297,9 @@ impl Checker {
             // they name, after any positional prefix.
             if provided.iter().any(|a| matches!(a.1.as_ref(), Expression::NamedArg(..))) {
                 let names: Vec<&str> = fields.iter().map(|(_, n, _)| n.as_str()).collect();
-                return self.infer_named_instantiate(&class_name, &names, &field_tys, provided, result_ty, range);
+                let ty = self.infer_named_instantiate(&class_name, &names, &field_tys, provided, result_ty, range.clone());
+                self.discharge_constraints(None, &bound_goals, &range);
+                return ty;
             }
             if provided.len() != fields.len() {
                 let _ = self.error_with_help(
@@ -4223,7 +4310,7 @@ impl Checker {
                         fields.len(),
                         provided.len()
                     ),
-                    range,
+                    range.clone(),
                     Some("pass one argument per class field, in declaration order".to_string()),
                 );
             } else {
@@ -4240,6 +4327,7 @@ impl Checker {
                     );
                 }
             }
+            self.discharge_constraints(None, &bound_goals, &range);
             return apply_ty_prune(&self.subst, &result_ty);
         }
         Ty::Con(class_name)
@@ -5633,6 +5721,22 @@ impl Checker {
             return self.infer_foreign_variadic_call(&ident, &fqn, raw_args, id, range);
         }
 
+        // The scalar float functions left `prelude::math` for coil-stdlib's `math`.
+        if crate::typechecking::virtual_modules::REMOVED_MATH_FNS.contains(&ident.as_str())
+            && self.lookup_fn_scheme(&ident).is_none()
+        {
+            for arg in raw_args {
+                let _ = self.infer(arg);
+            }
+            return self.error_with_help(
+                ErrorCode::UnknownFunction,
+                format!(
+                    "there is no built-in `{ident}`; the float functions moved from `prelude::math` to coil-stdlib's `math` module"
+                ),
+                range,
+                Some(format!("add `use math::{{{ident}}};`")),
+            );
+        }
         // The free `len(x)` was removed: a length is the method `x.len()`.
         if ident == "len" && self.lookup_fn_scheme(&ident).is_none() {
             for arg in raw_args {
@@ -5726,24 +5830,6 @@ impl Checker {
                     PreludeFn::Ord => self.infer_ord(&reordered, range),
                     PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
                     PreludeFn::Char => self.infer_char(&reordered, range),
-                    PreludeFn::Sin
-                    | PreludeFn::Cos
-                    | PreludeFn::Tan
-                    | PreludeFn::Sqrt
-                    | PreludeFn::Floor
-                    | PreludeFn::Ceil
-                    | PreludeFn::Exp
-                    | PreludeFn::Ln
-                    | PreludeFn::Atan
-                    | PreludeFn::Atan2
-                    | PreludeFn::Asin
-                    | PreludeFn::Acos
-                    | PreludeFn::Log10
-                    | PreludeFn::Log2
-                    | PreludeFn::Cbrt
-                    | PreludeFn::Sinh
-                    | PreludeFn::Cosh
-                    | PreludeFn::Tanh => self.infer_math(kind, &reordered, range),
                 };
             }
             let arg_slice = args.as_deref().unwrap_or(&[]);
@@ -5759,24 +5845,6 @@ impl Checker {
                 PreludeFn::Ord => self.infer_ord(arg_slice, range),
                 PreludeFn::BlackBox => self.infer_black_box(arg_slice, range),
                 PreludeFn::Char => self.infer_char(arg_slice, range),
-                PreludeFn::Sin
-                | PreludeFn::Cos
-                | PreludeFn::Tan
-                | PreludeFn::Sqrt
-                | PreludeFn::Floor
-                | PreludeFn::Ceil
-                | PreludeFn::Exp
-                | PreludeFn::Ln
-                | PreludeFn::Atan
-                | PreludeFn::Atan2
-                | PreludeFn::Asin
-                | PreludeFn::Acos
-                | PreludeFn::Log10
-                | PreludeFn::Log2
-                | PreludeFn::Cbrt
-                | PreludeFn::Sinh
-                | PreludeFn::Cosh
-                | PreludeFn::Tanh => self.infer_math(kind, arg_slice, range),
             };
         }
         // `dload` / `declare` / `invoke` after `use ffi::{…}`.
@@ -6848,6 +6916,8 @@ impl Checker {
     ) -> Ty {
         let lt = Self::peel_comparison_ty(&self.infer(lhs));
         let rt = Self::peel_comparison_ty(&self.infer(rhs));
+        // `b == "/"`, `b == 48`: a literal next to a `byte` compares as one.
+        let (lt, rt) = self.coerce_byte_literal_operands(lhs, rhs, lt, rt);
         let lt = apply_ty_prune(&self.subst, &lt);
         let rt = apply_ty_prune(&self.subst, &rt);
         if crate::typechecking::aggregate_arith::is_matrix_ty(&lt)
@@ -6866,15 +6936,6 @@ impl Checker {
         if self.cmp_scalar_enum_with_backing(&lt, &rt) {
             return boolean();
         }
-        // `b == "/"`, single-byte string literal compares as `byte`.
-        if Self::is_byte_ty(&lt) && Self::is_string_ty(&rt) {
-            if self.try_mark_string_literal_as_byte(rhs) {
-                return boolean();
-            }
-        } else if Self::is_byte_ty(&rt) && Self::is_string_ty(&lt)
-            && self.try_mark_string_literal_as_byte(lhs) {
-                return boolean();
-            }
         let unified = self.unify(&lt, &rt, &range, "comparison operands");
         let pruned = apply_ty_prune(&self.subst, &unified);
         if class != "Eq" && !matches!(&pruned, Ty::Var(_)) {
@@ -7130,6 +7191,13 @@ impl Checker {
     ) -> Ty {
         let lt = self.infer(lhs);
         let rt = self.infer(rhs);
+        // A shift count is an `int` whatever `x` is, so only the other
+        // operators take a literal as a `byte` (#2093).
+        let (lt, rt) = if matches!(op, "<<" | ">>") {
+            (lt, rt)
+        } else {
+            self.coerce_byte_literal_operands(lhs, rhs, lt, rt)
+        };
         if op == "+" {
             let lp = apply_ty_prune(&self.subst, &lt);
             let rp = apply_ty_prune(&self.subst, &rt);
@@ -7168,7 +7236,13 @@ impl Checker {
             return self.infer_shift(lhs, rhs, lt, rt, id, range, op);
         }
 
+        let before = self.messages.len();
         let result = self.unify(&lt, &rt, &range, &format!("operands of `{}`", op));
+        if self.messages.len() > before {
+            // The operands mismatched: that is the mistake. The fresh
+            // result var is not an operand "with no known type" (#2092).
+            return result;
+        }
         // Open type variables need the matching op trait (`Add` for `+`, …).
         // `T: Num` also covers these via superclass implication.
         let pruned = apply_ty_prune(&self.subst, &result);
@@ -7243,6 +7317,18 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// Retry the call-site goals deferred since `mark` (`deferred_goals`):
+    /// the body's later statements may have pinned their variables; one
+    /// still open resolves or reports as it would have at the call.
+    pub(super) fn check_deferred_goals(&mut self, mark: usize) {
+        let goals: Vec<_> = self.deferred_goals.drain(mark..).collect();
+        let prev = std::mem::replace(&mut self.retrying_deferred_goals, true);
+        for (call_id, constraints, range) in goals {
+            self.discharge_constraints(call_id, &constraints, &range);
+        }
+        self.retrying_deferred_goals = prev;
     }
 
     /// E0119 for each operand noted since `mark` whose type the function
@@ -8226,7 +8312,9 @@ impl Checker {
                 self.check_readonly_external_mutation(&target_ty, range.clone());
                 let index_ty = self.infer(idx);
                 let _ = unify_with(&self.subst, &apply_ty_prune(&self.subst, &index_ty), &int());
-                match &target_ty {
+                // A `readonly` array is still an array: the readonly
+                // violation above is the whole mistake (#2092).
+                match strip_readonly(&target_ty) {
                     Ty::Array { element, length } => {
                         if let ArrayLength::Static(n) = length
                             && let Expression::Integer(i) = idx.1.as_ref()
@@ -8419,47 +8507,6 @@ impl Checker {
         self.current_expected = prev_expected;
         self.unify(&b_ty, &byte(), &args[0].0.into_range(), "char argument");
         result_app_ty(string(), string())
-    }
-
-    /// Scalar `prelude::math` natives: unary `float -> float`, or binary `float, float -> float`.
-    fn infer_math(&mut self, kind: PreludeFn, args: &[Output], range: Range<usize>) -> Ty {
-        let expected_arity = kind.math_arity().unwrap_or(1);
-        if args.len() != expected_arity {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            let hint = match kind {
-                PreludeFn::Atan2 => "y, x",
-                _ => "x",
-            };
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!(
-                    "{} expects {} argument{}, got {}",
-                    kind.as_str(),
-                    expected_arity,
-                    if expected_arity == 1 { "" } else { "s" },
-                    args.len()
-                ),
-                range,
-                Some(format!(
-                    "use `{}({})` with float arguments",
-                    kind.as_str(),
-                    hint
-                )),
-            );
-        }
-
-        for arg in args {
-            let arg_ty = self.infer(arg);
-            self.unify(
-                &arg_ty,
-                &float(),
-                &arg.0.into_range(),
-                &format!("{} argument", kind.as_str()),
-            );
-        }
-        float()
     }
 
     /// `dot(a, b)`, equal-length homogeneous numeric vectors → scalar.
@@ -10070,6 +10117,15 @@ impl Checker {
         matches!(ty, Ty::Con(n) if n == crate::typechecking::ty::STRING)
     }
 
+    /// True when `node` is the value of a bare `return;` (the parser's
+    /// empty tuple).
+    fn expr_is_bare_return(node: &Output) -> bool {
+        matches!(
+            unwrap_expr_wrappers(node).1.as_ref(),
+            Expression::Tuple(items) if items.is_empty()
+        )
+    }
+
     /// True when `node` is `raise …`, including a parenthesized
     /// `Group(Fragment([Raise]))` form from `(raise err)`.
     fn expr_is_raise(node: &Output) -> bool {
@@ -10203,6 +10259,80 @@ impl Checker {
                 // `Vec<byte>` accepts `[byte; N]` via array length flexibility.
                 crate::typechecking::ty::array_fixed(crate::typechecking::ty::byte(), bytes.len())
             }
+        }
+    }
+
+    /// The operand types of a binary operator after a literal next to a
+    /// `byte` peer takes that peer's type (#2093): `b - 32`, `48 == b`,
+    /// `b - "0"`. See [`Self::coerce_literal_operand_to_byte`].
+    fn coerce_byte_literal_operands(
+        &mut self,
+        lhs: &Output,
+        rhs: &Output,
+        lt: Ty,
+        rt: Ty,
+    ) -> (Ty, Ty) {
+        let lp = apply_ty_prune(&self.subst, &lt);
+        let rp = apply_ty_prune(&self.subst, &rt);
+        if Self::is_byte_ty(&lp) {
+            let rt = self.coerce_literal_operand_to_byte(&lp, rhs, &rt);
+            (lt, rt)
+        } else if Self::is_byte_ty(&rp) {
+            let lt = self.coerce_literal_operand_to_byte(&rp, lhs, &lt);
+            (lt, rt)
+        } else {
+            (lt, rt)
+        }
+    }
+
+    /// `operand`'s type next to a `peer` operand: when the peer is a
+    /// `byte` and the operand an `int` literal or a single-byte string
+    /// literal, the operand types as `byte`, the rule an expected `byte`
+    /// applies in a `let`, an argument or a return. An `int` literal
+    /// outside 0..=255 is E0102; anything else keeps `ty` (a non-literal
+    /// `int` stays a mismatch).
+    fn coerce_literal_operand_to_byte(&mut self, peer: &Ty, operand: &Output, ty: &Ty) -> Ty {
+        if !Self::is_byte_ty(peer) {
+            return ty.clone();
+        }
+        let actual = apply_ty_prune(&self.subst, ty);
+        let byte = crate::typechecking::ty::byte();
+        if Self::is_int_ty(&actual) {
+            return match Self::byte_literal_coercion(operand) {
+                Ok(()) => {
+                    self.retarget_literal_operand(operand, &byte);
+                    byte
+                }
+                Err(Some(n)) => self.error_with_help(
+                    ErrorCode::TypeMismatch,
+                    format!("byte literal out of range: `{n}` is not in 0..=255"),
+                    operand.0.into_range(),
+                    Some("a `byte` must be an integer between 0 and 255".to_string()),
+                ),
+                Err(None) => ty.clone(),
+            };
+        }
+        if Self::is_string_ty(&actual) && self.try_mark_string_literal_as_byte(operand) {
+            self.retarget_literal_operand(operand, &byte);
+            return byte;
+        }
+        ty.clone()
+    }
+
+    /// Retarget a literal operand's codegen type, through the `(…)` /
+    /// one-item fragment wrappers around it, so HIR reads the literal
+    /// (and each wrapper) as `ty`.
+    fn retarget_literal_operand(&mut self, operand: &Output, ty: &Ty) {
+        self.retarget_node_ty(operand.0.start, operand.0.end, ty.clone());
+        match operand.1.as_ref() {
+            Expression::Expr(inner)
+            | Expression::Group(inner)
+            | Expression::Statement(inner)
+            | Expression::ExprStatement(inner) => self.retarget_literal_operand(inner, ty),
+            Expression::Fragment(items) if items.len() == 1 => {
+                self.retarget_literal_operand(&items[0], ty)
+            }
+            _ => {}
         }
     }
 
@@ -10479,7 +10609,10 @@ impl Checker {
                 if !self.constraint_is_covered(&needed) {
                     self.messages.push(Message::error(
                         ErrorCode::GenericTypeError,
-                        format!("Cannot satisfy constraint `{}`", constraint.class),
+                        format!(
+                            "Cannot satisfy constraint `{}`",
+                            self.instance_signature(&needed.class, &needed.args)
+                        ),
                         arg_expr
                             .map(|arg| arg.0.into_range())
                             .unwrap_or_else(|| range.clone()),
@@ -10682,7 +10815,7 @@ impl Checker {
         constraints: &[Constraint],
         range: &Range<usize>,
     ) {
-        for c in constraints {
+        for (i, c) in constraints.iter().enumerate() {
             let resolved_args: Vec<Ty> = c
                 .args
                 .iter()
@@ -10727,6 +10860,20 @@ impl Checker {
                     }
                     continue;
                 }
+                // Every argument open (`Ord<a>` at `let h: Heap<int> =
+                // Heap::new()`) and several instances match: a later
+                // statement may still pin `a`, so the enclosing body retries
+                // this goal and the ones after it (their dictionaries stay
+                // in call order) before searching would report (#2085).
+                if self.fn_body_depth > 0
+                    && !self.retrying_deferred_goals
+                    && resolved_args.iter().all(|a| matches!(a, Ty::Var(_)))
+                    && self.matching_instances(&c.class, &resolved_args).len() > 1
+                {
+                    self.deferred_goals
+                        .push((call_id, constraints[i..].to_vec(), range.clone()));
+                    return;
+                }
                 // Partially open (e.g. `Convert<int, β>`): unify against
                 // registered instances so free args get pinned by the match.
                 match self.find_unique_instance(&c.class, &resolved_args, range) {
@@ -10738,7 +10885,10 @@ impl Checker {
                     Ok(None) => {
                         self.messages.push(Message::error(
                             ErrorCode::GenericTypeError,
-                            format!("Cannot satisfy constraint `{}`", needed),
+                            format!(
+                                "Cannot satisfy constraint `{}`",
+                                self.instance_signature(&needed.class, &needed.args)
+                            ),
                             range.clone(),
                         ));
                     }
@@ -11170,6 +11320,34 @@ impl Checker {
         wanted: &[Ty],
         range: &Range<usize>,
     ) -> Result<Option<InstanceDef>, ()> {
+        let mut matches = self.matching_instances(class, wanted);
+        match matches.len() {
+            0 => Ok(None),
+            1 => {
+                let (inst, local, fresh_vars) = matches.pop().expect("one match");
+                self.absorb(local);
+                // Its methods' `weak()` calls on the head's parameters (#1670).
+                self.weak_checks.record_instance(fresh_vars, range);
+                Ok(Some(inst))
+            }
+            _ => {
+                let first = &matches[0].0;
+                let second = &matches[1].0;
+                self.report_ambiguous_instance(class, wanted, first, second, range);
+                Err(())
+            }
+        }
+    }
+
+    /// The instances of `class` whose head unifies with `wanted`, each
+    /// with the unifier and its freshened variables; nothing is bound.
+    /// A ground goal another instance meets does not take the arity-wide
+    /// tuple instance (#1479) or a shape's (`Length<Vec<a>>`, #1542).
+    fn matching_instances(
+        &mut self,
+        class: &str,
+        wanted: &[Ty],
+    ) -> Vec<(InstanceDef, Subst, FreshVars)> {
         self.ensure_structural_instance(class, wanted);
         let wanted_lookup = self.instance_lookup_args(class, wanted);
         let candidates: Vec<_> = self
@@ -11248,28 +11426,10 @@ impl Checker {
                 }
             }
         }
-        // A goal another instance meets does not take the arity-wide tuple
-        // instance (#1479) or a shape's (`Length<Vec<a>>`, #1542): a ground
-        // tuple has its own.
         if matches.is_empty() {
             matches = structural;
         }
-        match matches.len() {
-            0 => Ok(None),
-            1 => {
-                let (inst, local, fresh_vars) = matches.pop().expect("one match");
-                self.absorb(local);
-                // Its methods' `weak()` calls on the head's parameters (#1670).
-                self.weak_checks.record_instance(fresh_vars, range);
-                Ok(Some(inst))
-            }
-            _ => {
-                let first = &matches[0].0;
-                let second = &matches[1].0;
-                self.report_ambiguous_instance(class, wanted, first, second, range);
-                Err(())
-            }
-        }
+        matches
     }
 
     fn report_ambiguous_instance(
@@ -12062,9 +12222,11 @@ impl Checker {
     }
 
     /// Extract the type variable that a bound method should dispatch on.
-    /// First-order: bare `T`. HKT: the constructor head of `F<A>`.
+    /// First-order: bare `T`. HKT: the constructor head of `F<A>`. Seen
+    /// through `readonly`: a `readonly T self` receiver dispatches through
+    /// `T`'s dictionary as the plain one does (#2087).
     fn constraint_var_of_ty(ty: &Ty) -> Option<TyVarId> {
-        match ty {
+        match strip_readonly(ty) {
             Ty::Var(v) => Some(*v),
             Ty::App(head, _) => match head.as_ref() {
                 Ty::Var(v) => Some(*v),
@@ -12126,25 +12288,28 @@ impl Checker {
         }
     }
 
-    fn instance_satisfies_orphan_rule(
+    /// The instance arguments the orphan rule rejects: each non-variable
+    /// argument whose nominal head is not defined in this module. Empty
+    /// when the trait is local, or every argument is.
+    pub(super) fn foreign_instance_args(
         &self,
         class_def: &TypeClassDef,
         arg_exprs: &[Output],
         arg_tys: &[Ty],
-    ) -> bool {
+    ) -> Vec<Ty> {
         if class_def.defined_module == self.current_module {
-            return true;
+            return Vec::new();
         }
 
         arg_exprs
             .iter()
             .zip(arg_tys.iter())
             .filter(|(_, ty)| !matches!(apply_ty_prune(&self.subst, ty), Ty::Var(_)))
-            .all(|(expr, ty)| {
+            .filter(|(expr, ty)| {
                 let head = self
                     .nominal_head_from_instance_arg(expr)
                     .or_else(|| self.nominal_head_from_ty(ty));
-                head.as_deref().is_some_and(|name| {
+                !head.as_deref().is_some_and(|name| {
                     let mod_of = |n: &str| self.generics.nominal_type_module(n);
                     // The core prelude declares `Option` / `Result`, which
                     // the registry files under `prelude` (#1906).
@@ -12158,6 +12323,8 @@ impl Checker {
                         || home(mod_of(&self.qualify_module_name(name)))
                 })
             })
+            .map(|(_, ty)| ty.clone())
+            .collect()
     }
 
     fn nominal_head_from_instance_arg(&self, arg: &Output) -> Option<String> {
@@ -14497,13 +14664,16 @@ impl Checker {
         self.fn_result_mode = Some((unit_ty(), string()));
         self.current_return_ty = Some(unit_ty());
         let prev_in_test = std::mem::replace(&mut self.in_test_case, true);
+        let prev_coro_body = std::mem::replace(&mut self.coro_body, false);
 
         self.push_scope();
         let (open_mark, mixed_mark) = (self.open_operands.len(), self.mixed_literals.len());
         let empty_mark = self.open_empty_arrays.len();
+        let goals_mark = self.deferred_goals.len();
         self.fn_body_depth += 1;
         let _ = self.infer(body);
         self.fn_body_depth -= 1;
+        self.check_deferred_goals(goals_mark);
         self.check_mixed_literals(mixed_mark);
         self.check_open_operands(open_mark);
         self.check_open_empty_arrays(empty_mark);
@@ -14511,6 +14681,7 @@ impl Checker {
         self.in_test_case = prev_in_test;
 
         self.result_mode_fns.insert(fn_name);
+        self.coro_body = prev_coro_body;
         self.current_return_ty = prev_ret;
         self.fn_result_mode = prev_result_mode;
         self.fn_option_mode = prev_option_mode;
@@ -19734,8 +19905,7 @@ impl Checker {
             return;
         }
         // `None` carries no payload: the operand's `Option<T>` need not
-        // share the function's `T` (#1165).
-        let _ = inner_ty;
+        // share the function's `T` (#1165); it only names the mismatch.
         if self.fn_option_mode.is_some() {
             return;
         }
@@ -19757,6 +19927,14 @@ impl Checker {
             }
             let payload = Ty::Var(self.counter.fresh());
             let opt = option_ty(payload.clone());
+            if unify_with(&self.subst, &ret, &opt).is_err() {
+                // Report with the operand's payload (`Option<int>`, not
+                // `Option<a>`) and leave the function's own type alone,
+                // so its final check does not repeat the mismatch (#2092).
+                let shown = option_ty(apply_ty_prune(&self.subst, inner_ty));
+                let _ = self.unify(&ret, &shown, range, "option return type");
+                return;
+            }
             self.unify(&ret, &opt, range, "option return type");
             self.fn_option_mode = Some(payload);
         } else {

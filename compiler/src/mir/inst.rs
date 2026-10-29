@@ -238,8 +238,9 @@ pub enum LaneExpr {
 }
 
 impl LaneExpr {
-    /// `a & b`, folding constants, `a & a`, `a & !a`, and
-    /// `a & (!a | b)` (what a branch chain's masks look like).
+    /// `a & b`, folding constants, `a & a`, `a & !a`,
+    /// `a & (!a | b)` (what a branch chain's masks look like), and on
+    /// `&` chains `x & (x & y)` and a term against its negation.
     pub fn and(a: Self, b: Self) -> Self {
         match (a, b) {
             (Self::Const(false), _) | (_, Self::Const(false)) => Self::Const(false),
@@ -248,11 +249,42 @@ impl LaneExpr {
             (a, b) if a.is_not_of(&b) => Self::Const(false),
             (a, Self::Or(x, y)) if x.is_not_of(&a) => Self::and(a, *y),
             (Self::Or(x, y), b) if x.is_not_of(&b) => Self::and(*y, b),
-            (a, b) => Self::And(Box::new(a), Box::new(b)),
+            (a, b) => {
+                let (ca, cb) = (a.conjuncts(), b.conjuncts());
+                if ca.iter().any(|x| cb.iter().any(|y| x.is_not_of(y))) {
+                    return Self::Const(false);
+                }
+                if cb.iter().all(|y| ca.contains(y)) {
+                    return a;
+                }
+                if ca.iter().all(|x| cb.contains(x)) {
+                    return b;
+                }
+                Self::And(Box::new(a), Box::new(b))
+            }
         }
     }
 
-    /// `a | b`, folding constants, `a | a`, `a | !a`, and `a | (!a & b)`.
+    /// The terms of an `&` chain (`self` alone when it is not one).
+    fn conjuncts(&self) -> Vec<&Self> {
+        match self {
+            Self::And(x, y) => {
+                let mut out = x.conjuncts();
+                out.extend(y.conjuncts());
+                out
+            }
+            e => vec![e],
+        }
+    }
+
+    /// `terms` joined by `&`; `true` when empty.
+    fn all(terms: &[&Self]) -> Self {
+        terms.iter().fold(Self::Const(true), |acc, t| Self::and(acc, (*t).clone()))
+    }
+
+    /// `a | b`, folding constants, `a | a`, `a | !a`, `a | (!a & b)`,
+    /// and the terms two `&` chains share: `(x & a) | (x & b)` is
+    /// `x & (a | b)`, so the two ways out of a branch join back to `x`.
     pub fn or(a: Self, b: Self) -> Self {
         match (a, b) {
             (Self::Const(true), _) | (_, Self::Const(true)) => Self::Const(true),
@@ -261,7 +293,15 @@ impl LaneExpr {
             (a, b) if a.is_not_of(&b) => Self::Const(true),
             (a, Self::And(x, y)) if x.is_not_of(&a) => Self::or(a, *y),
             (Self::And(x, y), b) if x.is_not_of(&b) => Self::or(*y, b),
-            (a, b) => Self::Or(Box::new(a), Box::new(b)),
+            (a, b) => {
+                let (ca, cb) = (a.conjuncts(), b.conjuncts());
+                let shared: Vec<&Self> = ca.iter().copied().filter(|x| cb.contains(x)).collect();
+                if shared.is_empty() {
+                    return Self::Or(Box::new(a), Box::new(b));
+                }
+                let rest = |c: &[&Self]| Self::all(&c.iter().copied().filter(|x| !shared.contains(x)).collect::<Vec<_>>());
+                Self::and(Self::all(&shared), Self::or(rest(&ca), rest(&cb)))
+            }
         }
     }
 
@@ -710,6 +750,140 @@ pub enum MirInst {
         scalars: Vec<ValueId>,
         expr: LaneExpr,
     },
+    /// A counted map or reduce loop over 8 lanes at a time (archive 6.2,
+    /// VM `VLoop`): `kind` for `p = from, from + 8, ..` below `to`
+    /// (`to - from` a multiple of 8, every read and write in range). A
+    /// reduce's `dest` is the accumulator; a store loop's is unused.
+    /// `pos` (a second dest) holds the block position while the body
+    /// runs, when the body reads the index. May trap (int lanes); a store
+    /// loop writes array elements.
+    VecLoop {
+        dest: ValueId,
+        pos: Option<ValueId>,
+        from: ValueId,
+        to: ValueId,
+        kind: VecLoopKind,
+    },
+}
+
+/// One 8-lane value of a [`MirInst::VecLoop`] body, at block position
+/// `p`. Kinds are `common::simd` / `dense` codes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VecExpr {
+    /// An invariant `i64` / `f64` in every lane (`ty` is `dense::TY_*`).
+    Splat { v: ValueId, ty: u8 },
+    /// The loop index `p + k` in lane `k` (an int lane).
+    Index,
+    /// `array[p + off + k]`.
+    Load { array: ValueId, off: ValueId, ty: u8 },
+    Bin { kind: u8, lhs: Box<VecExpr>, rhs: Box<VecExpr> },
+    Neg { kind: u8, src: Box<VecExpr> },
+    /// `a * b + c`, two roundings.
+    Fma { ty: u8, a: Box<VecExpr>, b: Box<VecExpr>, c: Box<VecExpr> },
+}
+
+impl VecExpr {
+    /// Its values, in a fixed order.
+    pub fn values(&self, out: &mut Vec<ValueId>) {
+        match self {
+            Self::Splat { v, .. } => out.push(*v),
+            Self::Index => {}
+            Self::Load { array, off, .. } => out.extend([*array, *off]),
+            Self::Bin { lhs, rhs, .. } => {
+                lhs.values(out);
+                rhs.values(out);
+            }
+            Self::Neg { src, .. } => src.values(out),
+            Self::Fma { a, b, c, .. } => {
+                a.values(out);
+                b.values(out);
+                c.values(out);
+            }
+        }
+    }
+
+    pub fn rewrite(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
+        match self {
+            Self::Splat { v, .. } => *v = map(*v),
+            Self::Index => {}
+            Self::Load { array, off, .. } => {
+                *array = map(*array);
+                *off = map(*off);
+            }
+            Self::Bin { lhs, rhs, .. } => {
+                lhs.rewrite(map);
+                rhs.rewrite(map);
+            }
+            Self::Neg { src, .. } => src.rewrite(map),
+            Self::Fma { a, b, c, .. } => {
+                a.rewrite(map);
+                b.rewrite(map);
+                c.rewrite(map);
+            }
+        }
+    }
+
+    pub fn uses_index(&self) -> bool {
+        match self {
+            Self::Index => true,
+            Self::Splat { .. } | Self::Load { .. } => false,
+            Self::Bin { lhs, rhs, .. } => lhs.uses_index() || rhs.uses_index(),
+            Self::Neg { src, .. } => src.uses_index(),
+            Self::Fma { a, b, c, .. } => a.uses_index() || b.uses_index() || c.uses_index(),
+        }
+    }
+}
+
+/// What a [`MirInst::VecLoop`] does with each block.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VecLoopKind {
+    /// `dest = init`, then `dest = dest ⊕ term` lane by lane, left to
+    /// right (`fold` is `simd::REDUCE_*`, `ty` `dense::TY_*`).
+    Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr },
+    /// `array[p + off + k] = value` for each store, in order.
+    Store { stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
+}
+
+impl VecLoopKind {
+    pub fn values(&self) -> Vec<ValueId> {
+        let mut out = Vec::new();
+        match self {
+            Self::Reduce { init, term, .. } => {
+                out.push(*init);
+                term.values(&mut out);
+            }
+            Self::Store { stores } => {
+                for (array, off, _, value) in stores {
+                    out.extend([*array, *off]);
+                    value.values(&mut out);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn rewrite(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
+        match self {
+            Self::Reduce { init, term, .. } => {
+                *init = map(*init);
+                term.rewrite(map);
+            }
+            Self::Store { stores } => {
+                for (array, off, _, value) in stores {
+                    *array = map(*array);
+                    *off = map(*off);
+                    value.rewrite(map);
+                }
+            }
+        }
+    }
+
+    pub fn uses_index(&self) -> bool {
+        match self {
+            Self::Reduce { term, .. } => term.uses_index(),
+            Self::Store { stores } => stores.iter().any(|(_, _, _, v)| v.uses_index()),
+        }
+    }
 }
 
 /// The FFI opcode a [`MirInst::Ffi`] reconstructs.
@@ -903,7 +1077,8 @@ impl MirInst {
             | Self::Cow { dest, .. }
             | Self::Unbox { dest, .. }
             | Self::StrEq { dest, .. }
-            | Self::ByteScan { dest, .. } => dest,
+            | Self::ByteScan { dest, .. }
+            | Self::VecLoop { dest, .. } => dest,
         }
     }
 
@@ -913,6 +1088,7 @@ impl MirInst {
             Self::Call {
                 dest_hi: Some(h), ..
             } => Some(h),
+            Self::VecLoop { pos: Some(p), .. } => Some(p),
             _ => None,
         };
         std::iter::once(self.dest()).chain(hi)
@@ -985,6 +1161,7 @@ impl MirInst {
                 .chain(streams.iter().flat_map(|&(a, i)| [a, i]))
                 .chain(scalars.iter().copied())
                 .collect(),
+            Self::VecLoop { from, to, kind, .. } => [*from, *to].into_iter().chain(kind.values()).collect(),
         }
     }
 
@@ -1075,6 +1252,11 @@ impl MirInst {
                 for v in scalars.iter_mut() {
                     *v = map(*v);
                 }
+            }
+            Self::VecLoop { from, to, kind, .. } => {
+                *from = map(*from);
+                *to = map(*to);
+                kind.rewrite(&mut map);
             }
         }
     }
@@ -1175,5 +1357,24 @@ mod tests {
         assert_eq!(MirConst::f64(-2.25).ty(), MirTy::F64);
         assert_eq!(MirConst::I64(1).as_f64(), None);
         assert_eq!(MirConst::Bool(true).as_f64(), None);
+    }
+
+    fn ne(k: u8) -> LaneExpr {
+        LaneExpr::Cmp { op: MirCmpOp::Ne, lhs: LaneVal::Stream(0), rhs: LaneVal::Scalar(k) }
+    }
+
+    /// A four-way `c != a && c != b && ...` chain, as the walk builds it
+    /// from its branches and `bool` φs, folds back to the plain chain.
+    #[test]
+    fn lane_expr_factors_shared_conjuncts() {
+        let x = LaneExpr::and(ne(0), ne(1));
+        // `(x & !k2) | (x & k2)` is `x`.
+        assert_eq!(LaneExpr::or(LaneExpr::and(x.clone(), LaneExpr::not(ne(2))), LaneExpr::and(x.clone(), ne(2))), x);
+        // `x & (x & k2)` is `x & k2`; a term against its negation is false.
+        let x2 = LaneExpr::and(x.clone(), ne(2));
+        assert_eq!(LaneExpr::and(x.clone(), x2.clone()), x2);
+        assert_eq!(LaneExpr::and(x2, LaneExpr::and(ne(3), LaneExpr::not(ne(1)))), LaneExpr::Const(false));
+        // Nothing shared: left as it is.
+        assert_eq!(LaneExpr::or(ne(0), ne(1)).size(), 3);
     }
 }

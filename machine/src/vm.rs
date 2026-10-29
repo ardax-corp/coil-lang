@@ -391,11 +391,15 @@ fn pin_current_array_in(
 /// Eight numeric words of the array at `addr` from `index` into `reg`;
 /// `false` past either end.
 pub(crate) fn vload_words_into(heap: &Heap, reg: &mut [u64; common::simd::LANES], addr: u64, index: i64) -> bool {
-    let n = common::simd::LANES;
     let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
         return false;
     };
-    let arr = gc.as_ref();
+    vload_lanes(gc.as_ref(), reg, index)
+}
+
+/// 8 word lanes of `arr` from `index` into `reg`; `false` past either end.
+fn vload_lanes(arr: &ObjArray, reg: &mut [u64; common::simd::LANES], index: i64) -> bool {
+    let n = common::simd::LANES;
     if index < 0 || (index as usize).saturating_add(n) > arr.len() {
         return false;
     }
@@ -456,6 +460,135 @@ pub(crate) fn vload_bytes_into(
         _ => return false,
     }
     true
+}
+
+/// The 8 lanes of `src` into `arr` from `index`; `false` past either end.
+fn vstore_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES], index: i64) -> bool {
+    let n = common::simd::LANES;
+    if index < 0 || (index as usize).saturating_add(n) > arr.len() {
+        return false;
+    }
+    let base = index as usize;
+    for (i, &lane) in src.iter().enumerate() {
+        // SAFETY: `base + n <= len` checked above; SIMD lanes are
+        // numeric (stride-1 numeric loops only), never references.
+        unsafe { arr.set_numeric_unchecked(base + i, Value::from(lane)) };
+    }
+    true
+}
+
+/// `VLoop` (see [`Instruction::VLoop`]): the body over lanes `p ..= p + 7`
+/// for `p = from, from + 8, ..` below `to`, with `dest = p` first when
+/// `pos`. The arrays are resolved once (nothing in the body resizes or
+/// allocates). `Err` on a malformed body, a lane out of range or a trap.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn vloop(
+    heap: &Heap,
+    stack: &mut Stack<Value>,
+    sp: usize,
+    regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
+    body: &[Byte],
+    dest: usize,
+    from: i64,
+    to: i64,
+    pos: bool,
+) -> Result<(), &'static str> {
+    use common::simd;
+    const BAD: &str = "VLoop: malformed body";
+    const OOB: &str = "VLoop out of bounds";
+    #[derive(Clone, Copy)]
+    enum Op {
+        Load { reg: usize, obj: Option<Object>, off: i64 },
+        Store { reg: usize, obj: Option<Object>, off: i64 },
+        Bin { kind: u8, dest: usize, a: usize, b: usize },
+        Fma { ty: u8, dest: usize, a: usize, b: usize },
+        Reduce { ty: u8, slot: usize, src: usize, fold: u8 },
+    }
+    let lanes = simd::LANES as i64;
+    if from > to || (to - from) % lanes != 0 {
+        return Err(BAD);
+    }
+    if from == to {
+        return Ok(());
+    }
+    let array = |slot: usize| match heap.find_object_by_addr(stack[sp + slot].bits()) {
+        o @ Some(Object::Array(_)) => Ok(o),
+        _ => Err(BAD),
+    };
+    // Every lane of every block in range, checked once.
+    let span = |obj: Option<Object>, off: i64| {
+        let Some(Object::Array(gc)) = obj else {
+            return Err(BAD);
+        };
+        let len = gc.as_ref().len() as i64;
+        match (from.checked_add(off), to.checked_add(off)) {
+            (Some(lo), Some(hi)) if lo >= 0 && hi <= len => Ok(()),
+            _ => Err(OOB),
+        }
+    };
+    let mut ops = Vec::with_capacity(body.len());
+    for word in body {
+        let (kind, d, a, b) = word.dense_abc_parts();
+        if d >= simd::NREGS && !matches!(*word.bytecode(), Instruction::VReduce) {
+            return Err(BAD);
+        }
+        ops.push(match *word.bytecode() {
+            Instruction::VLoad if kind != simd::TY_U8 => {
+                let (obj, off) = (array(a)?, stack[sp + b].as_int());
+                span(obj, off)?;
+                Op::Load { reg: d, obj, off }
+            }
+            Instruction::VStore => {
+                let (obj, off) = (array(a)?, stack[sp + b].as_int());
+                span(obj, off)?;
+                Op::Store { reg: d, obj, off }
+            }
+            Instruction::VBin if !simd::is_byte_kind(kind) => Op::Bin { kind, dest: d, a, b },
+            Instruction::VFma if a < simd::NREGS && b < simd::NREGS => Op::Fma { ty: kind, dest: d, a, b },
+            Instruction::VReduce if a < simd::NREGS => Op::Reduce { ty: kind, slot: d, src: a, fold: b as u8 },
+            _ => return Err(BAD),
+        });
+    }
+    let z = [0u64; simd::LANES];
+    let mut p = from;
+    while p < to {
+        if pos {
+            stack[sp + dest] = Value::from(p);
+        }
+        for op in &ops {
+            match *op {
+                Op::Load { reg, obj: Some(Object::Array(gc)), off } => {
+                    if !vload_lanes(gc.as_ref(), &mut regs[reg], p + off) {
+                        return Err(OOB);
+                    }
+                }
+                Op::Store { reg, obj: Some(Object::Array(mut gc)), off } => {
+                    if !vstore_lanes(gc.as_mut(), &regs[reg], p + off) {
+                        return Err(OOB);
+                    }
+                }
+                Op::Load { .. } | Op::Store { .. } => return Err(BAD),
+                Op::Bin { kind, dest, a, b } => {
+                    let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
+                    let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
+                    let no_lhs = splat || matches!(kind, simd::IOTA_I64 | simd::IOTA_F64);
+                    let no_rhs = no_lhs || matches!(kind, simd::INEG | simd::FNEG);
+                    let lhs = if no_lhs { z } else { regs[a % simd::NREGS] };
+                    let rhs = if no_rhs { z } else { regs[b % simd::NREGS] };
+                    regs[dest] = crate::simd::eval_vbin(kind, &lhs, &rhs, scalar).map_err(|t| t.message())?;
+                }
+                Op::Fma { ty, dest, a, b } => {
+                    regs[dest] = crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]).map_err(|t| t.message())?;
+                }
+                Op::Reduce { ty, slot, src, fold } => {
+                    let acc = stack[sp + slot];
+                    stack[sp + slot] = crate::simd::eval_vreduce(ty, acc, &regs[src], fold).map_err(|t| t.message())?;
+                }
+            }
+        }
+        p += lanes;
+    }
+    Ok(())
 }
 
 /// `VScan` (see [`Instruction::VScan`]): from `p = from` in steps of 64,
@@ -1786,21 +1919,10 @@ impl<const S: usize> Machine<S> {
     }
 
     fn vstore(&mut self, vsrc: usize, addr: u64, index: i64, _ty: u8) -> bool {
-        let n = common::simd::LANES;
         let Some(Object::Array(mut gc)) = Self::find_object_by_addr(&self.heap, addr) else {
             return false;
         };
-        let arr = gc.as_mut();
-        if index < 0 || (index as usize).saturating_add(n) > arr.len() {
-            return false;
-        }
-        let base = index as usize;
-        for i in 0..n {
-            // SAFETY: `base + n <= len` checked above; SIMD lanes are
-            // numeric (stride-1 numeric loops only), never references.
-            unsafe { arr.set_numeric_unchecked(base + i, Value::from(self.vregs[vsrc][i])) };
-        }
-        true
+        vstore_lanes(gc.as_mut(), &self.vregs[vsrc], index)
     }
 
     fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {

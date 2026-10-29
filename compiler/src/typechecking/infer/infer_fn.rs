@@ -80,6 +80,28 @@ impl Checker {
         }
         if name == "main" {
             self.main_decl_span = Some(range.clone());
+            // The entry point is called with nothing on the stack: a
+            // parameter would silently read as its type's default (#2091).
+            if self.impl_owner.is_none()
+                && self.current_typeclass.is_none()
+                && let Expression::Fragment(params) = args.1.as_ref()
+                && !params.is_empty()
+            {
+                let mut msg = Message::error(
+                    ErrorCode::GenericTypeError,
+                    "`main` takes no parameters".to_string(),
+                    args.0.into_range(),
+                );
+                msg.push(Label::new(
+                    "the entry point is called without arguments".to_string(),
+                    args.0.into_range(),
+                ));
+                msg.with_help(
+                    "write `fn main()`; read program arguments with `env::args()` (`use env::args;`)"
+                        .to_string(),
+                );
+                self.messages.push(msg);
+            }
         }
         let prev_overloadable = self.registering_overloadable_fn;
         self.registering_overloadable_fn = self.current_typeclass.is_none();
@@ -272,6 +294,9 @@ impl Checker {
         let ret_slot = Ty::Var(self.counter.fresh());
         let prev_ret = self.current_return_ty.replace(ret_slot.clone());
         let prev_in_test = std::mem::replace(&mut self.in_test_case, false);
+        // A lambda's bare `return;` returns `()` from the lambda, not
+        // from the enclosing `gen fn`.
+        let prev_coro_body = std::mem::replace(&mut self.coro_body, false);
         // A lambda's `return` returns from the lambda: its `raise` / `?`
         // put the lambda, not the enclosing function, in result or option
         // mode (#1164).
@@ -284,6 +309,7 @@ impl Checker {
             self.note_result_mode_fn(&Self::lambda_mode_key(range.start), &ok);
         }
         self.fn_option_mode = prev_option_mode;
+        self.coro_body = prev_coro_body;
         self.current_return_ty = prev_ret;
         self.lambda_uncaptured_outer = prev_uncaptured;
         self.lambda_rebound_statics = prev_statics;
@@ -576,6 +602,7 @@ impl Checker {
         };
 
         let prev_ret = self.current_return_ty.replace(return_slot);
+        let prev_coro_body = std::mem::replace(&mut self.coro_body, is_coro);
         let prev_yield = self.current_yield_ty.take();
         let prev_send = self.current_send_ty.take();
         let prev_yield_receives = self.yield_receives_used;
@@ -649,9 +676,11 @@ impl Checker {
         let open_mark = self.open_operands.len();
         let empty_mark = self.open_empty_arrays.len();
         let mixed_mark = self.mixed_literals.len();
+        let goals_mark = self.deferred_goals.len();
         self.fn_body_depth += 1;
         let _ = self.infer(body);
         self.fn_body_depth -= 1;
+        self.check_deferred_goals(goals_mark);
         self.infer_contracts(contracts, &arg_tys, &ret_ty, is_coro);
         self.check_mixed_literals(mixed_mark);
         self.check_open_operands(open_mark);
@@ -779,6 +808,7 @@ impl Checker {
         }
         self.current_yield_ty = prev_yield;
         self.current_send_ty = prev_send;
+        self.coro_body = prev_coro_body;
 
         self.current_return_ty = prev_ret;
         self.fn_result_mode = prev_result_mode;
@@ -819,7 +849,7 @@ impl Checker {
                         ErrorCode::GenericTypeError,
                         format!(
                             "Cannot satisfy abstract constraint `{}`; no concrete trait was selected",
-                            constraint
+                            self.instance_signature(&constraint.class, &constraint.args)
                         ),
                         range.clone(),
                     ));
@@ -1001,12 +1031,21 @@ impl Checker {
                         key, fixed_n, rest_k
                     )
                 };
-                let mut err = Message::error(ErrorCode::DuplicateOverload, msg_text, range.clone());
-                err.with_help(
-                    "choose distinct arities or parameter types, or make the fixed overload have fewer params than the rest's fixed prefix"
-                        .to_string(),
-                );
-                self.messages.push(err);
+                // A conflicting declaration is not entered in
+                // `overload_decl_by_span`, so its body pass registers it
+                // again: one report per declaration (#2092).
+                let reported = self
+                    .messages
+                    .iter()
+                    .any(|m| m.code() == Some(ErrorCode::DuplicateOverload) && m.range() == range);
+                if !reported {
+                    let mut err = Message::error(ErrorCode::DuplicateOverload, msg_text, range.clone());
+                    err.with_help(
+                        "choose distinct arities or parameter types, or make the fixed overload have fewer params than the rest's fixed prefix"
+                            .to_string(),
+                    );
+                    self.messages.push(err);
+                }
                 break;
             }
         }

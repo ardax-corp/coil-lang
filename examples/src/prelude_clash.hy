@@ -1,10 +1,10 @@
 // Module whose functions share names with prelude builtins (#1488).
-fn sin(float x) -> float {
-    return 100.0;
+fn ord(string s) -> int {
+    return 100;
 }
 
-fn cos(float x) -> float {
-    return 200.0;
+fn char(byte b) -> int {
+    return 200;
 }
 
 fn diff(int a, int b) -> int {

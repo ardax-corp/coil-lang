@@ -222,3 +222,16 @@ impl Hash for Result<T: Hash, E: Hash> {
         };
     }
 }
+
+// The prelude `Eq` trait's default bodies (#2089). The trait itself is a
+// builtin registered by the checker under `prelude::ops`; this core
+// declaration only says which methods default, so an `impl Eq` writes `eq`
+// and gets `ne` as `!(a == b)` (what `#[derive(Eq)]` writes), like any
+// user trait's default. An impl that writes `ne` keeps its own.
+trait Eq<T> {
+    fn eq(T a, T b) -> bool {}
+
+    fn ne(T a, T b) -> bool {
+        return !(a == b);
+    }
+}

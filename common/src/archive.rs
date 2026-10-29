@@ -164,19 +164,36 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
+/// Major 6 / minor 6: `Cow` (the last opcode), copy-on-write share /
+/// unique of a class instance or array. Older runtimes do not know it.
+///
+/// Major 6 / minor 5: HostInvoke `gc_region_enter` / `gc_region_exit`
+/// (ids 177, 178) around a `region` block. Older runtimes do not know
+/// them.
+///
+/// Major 6 / minor 4: `FreeEarly` frees an object the compiler proved
+/// dead (escape analysis), and HostInvoke `from_bytes_take` (id 176).
+/// Older runtimes know neither.
+///
+/// Major 6 / minor 3: `VBin` int bit ops (`simd::IAND64` / `IOR64` /
+/// `IXOR64`) and lane compares (`simd::ICMP` / `FCMP` + pred, `0` / `1`
+/// lanes); `VReduce` folds `REDUCE_AND` / `OR` / `XOR` and
+/// `REDUCE_TAKE + pred` (min / max). Older runtimes read the new kinds
+/// as zeros and the new folds as adds.
+///
+/// Major 6 / minor 2: `VLoop`, a counted map or
+/// reduce loop over 8 lanes that runs its body words without dispatch.
+/// Older runtimes do not know it.
+///
+/// Major 6 / minor 1: HostInvoke `vec_extend_range` / `vec_fill` (ids
+/// 174, 175): the compiler turns a counted `out.push(src[i])` copy loop
+/// and an `out.push(k)` fill loop into one call. Older runtimes do not
+/// know the ids.
+///
 /// Major 6 / minor 0: `env::exec` moved to the coil-process package.
 /// `EnvError` drops `ExecFailed` (`Other` is now tag 2) and HostInvoke id
 /// 64 (`env_exec`) is a removed slot. Major-5 archives would read
 /// `EnvError::Other` as a missing tag.
-///
-/// Major 6 minors:
-/// 1 — `FreeEarly`: free an object the compiler proved dead (escape
-///     analysis), and HostInvoke `from_bytes_take` (id 174). Older VMs
-///     know neither.
-/// 2 — HostInvoke `gc_region_enter` / `gc_region_exit` (ids 175, 176)
-///     around a `region` block. Older VMs do not know them.
-/// 3 — `Cow`: copy-on-write share / unique of a class instance or array.
-///     Older VMs do not know it.
 ///
 /// Major 5 / minor 0: builtin error regrouping. `IoError` drops
 /// `Certificate` / `Handshake` / `NotATerminal` for `Protocol` (tag 10);
@@ -189,7 +206,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 3;
+pub const ARCHIVE_MINOR: u16 = 6;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1266,9 +1283,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
-        assert_eq!(ARCHIVE_MINOR, 3);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 3));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.3");
+        assert_eq!(ARCHIVE_MINOR, 6);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 6));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.6");
     }
 
     #[test]

@@ -85,9 +85,20 @@ impl Checker {
         } else {
             Vec::new()
         };
+        // The core prelude redeclares a builtin trait to give it default
+        // method bodies (`Eq::ne`, #2089): the builtin entry keeps its
+        // module and superclasses, and only learns which methods default.
+        let core_builtin =
+            self.current_module == crate::macros::CORE_MODULE && Checker::is_builtin_class(name);
         if let Some(previous) = self.generics.typeclass(name) {
             let is_prelude = Checker::is_builtin_class(name);
-            if is_prelude && !self.builtin_name_in_scope(name) {
+            if core_builtin {
+                let mut def = previous.clone();
+                for m in &mut def.methods {
+                    m.has_default = method_defs.iter().any(|d| d.name == m.name && d.has_default);
+                }
+                self.generics.typeclasses.insert(name.to_string(), def);
+            } else if is_prelude && !self.builtin_name_in_scope(name) {
                 // Short name was rebound (`use prelude::ops::Eq as …`);
                 // allow the user trait to replace the builtin entry.
             } else {
@@ -116,16 +127,18 @@ impl Checker {
                 return unit_ty();
             }
         }
-        let def = TypeClassDef {
-            name: name.to_string(),
-            defined_module: self.current_module.clone(),
-            type_params: param_names,
-            param_kinds: param_kinds.clone(),
-            superclasses,
-            assoc_types: assoc_types.clone(),
-            methods: method_defs.clone(),
-        };
-        self.generics.typeclasses.insert(name.to_string(), def);
+        if !core_builtin {
+            let def = TypeClassDef {
+                name: name.to_string(),
+                defined_module: self.current_module.clone(),
+                type_params: param_names,
+                param_kinds: param_kinds.clone(),
+                superclasses,
+                assoc_types: assoc_types.clone(),
+                methods: method_defs.clone(),
+            };
+            self.generics.typeclasses.insert(name.to_string(), def);
+        }
 
         // Build method schemes with trait parameters in scope.
         // Applied associated types are recorded as explicit projection
@@ -240,16 +253,19 @@ impl Checker {
                 all_kinds.extend(std::iter::repeat_n(Kind::Type, assoc_projections.len()));
                 let mut constraints = class_constraints.clone();
                 constraints.extend(own_constraints);
-                self.typeclass_method_schemes.insert(
-                    (name.to_string(), method_name.to_string()),
-                    Scheme::poly_with_kinds_and_assoc(
-                        all_bounds,
-                        all_kinds,
-                        constraints,
-                        assoc_projections,
-                        fun_ty,
-                    ),
-                );
+                // A builtin keeps the checker's own method schemes.
+                if !core_builtin {
+                    self.typeclass_method_schemes.insert(
+                        (name.to_string(), method_name.to_string()),
+                        Scheme::poly_with_kinds_and_assoc(
+                            all_bounds,
+                            all_kinds,
+                            constraints,
+                            assoc_projections,
+                            fun_ty,
+                        ),
+                    );
+                }
             }
         }
 
@@ -314,15 +330,18 @@ impl Checker {
     }
 
     /// An impl method's type must match the trait's declaration with the
-    /// trait's parameters set to the instance head (#1185): a body typed
-    /// against a different signature would be called through the trait's.
-    /// Both sides are instantiated fresh, so method-level generics and
-    /// associated-type projections stay flexible; only a concrete clash
-    /// (`-> string` for `-> int`) is reported.
+    /// trait's parameters set to the instance head (#1185) and the trait's
+    /// associated types set to the instance's own (`Option<Item>` is
+    /// `Option<int>` under `type Item = int`, #2086): a body typed against a
+    /// different signature would be called through the trait's. Both sides
+    /// are instantiated fresh, so method-level generics (and the projections
+    /// on them) stay flexible; only a concrete clash (`-> string` for
+    /// `-> int`) is reported.
     fn check_instance_method_signature(
         &mut self,
         class: &str,
         arg_tys: &[Ty],
+        assoc_tys: &HashMap<String, AssocTypeValue>,
         mname: &str,
         fqn: &str,
         range: &Range<usize>,
@@ -337,7 +356,7 @@ impl Checker {
         let Some(have) = self.env.lookup(fqn).cloned() else {
             return;
         };
-        let (want_ty, want_cs, _) = self.instantiate_scheme_mapped(&decl);
+        let (want_ty, want_cs, mapping) = self.instantiate_scheme_mapped(&decl);
         let Some(head) = want_cs.iter().find(|c| c.class == class) else {
             return;
         };
@@ -347,6 +366,36 @@ impl Checker {
         let mut local = self.subst.clone();
         for (param, arg) in head.args.iter().zip(arg_tys) {
             match crate::typechecking::unify::unify_with(&local, param, arg) {
+                Ok(s) => local = s,
+                Err(_) => return,
+            }
+        }
+        // The trait's own projections (`Item` in `Option<Item>`) take the
+        // instance's associated types. A projection on a method-level
+        // parameter (`U::Item` under `fn m<U: Iterator>`) has an owner that
+        // is not the instance head and stays open.
+        for projection in &decl.assoc_projections {
+            let Some(&fresh) = mapping.get(&projection.var) else {
+                continue;
+            };
+            if let Some(owner) = self.declared_projection_owner(projection) {
+                let owner_ty = mapping
+                    .get(&owner)
+                    .map(|o| apply_ty_prune(&local, &Ty::Var(*o)));
+                if !owner_ty.is_some_and(|o| arg_tys.contains(&o)) {
+                    continue;
+                }
+            }
+            let Some(value) = assoc_tys.get(&projection.name) else {
+                continue;
+            };
+            let args: Vec<Ty> = projection
+                .args
+                .iter()
+                .map(|arg| crate::typechecking::env::substitute_vars(arg, &mapping))
+                .collect();
+            let concrete = self.instantiate_assoc_value(value, &args);
+            match crate::typechecking::unify::unify_with(&local, &Ty::Var(fresh), &concrete) {
                 Ok(s) => local = s,
                 Err(_) => return,
             }
@@ -450,16 +499,28 @@ impl Checker {
         if let Some(ref cdef) = class_def {
             self.validate_instance_head_kinds(cdef, &arg_tys, &range);
         }
-        let orphaned = class_def
+        let foreign = class_def
             .as_ref()
-            .is_some_and(|cdef| !self.instance_satisfies_orphan_rule(cdef, args, &arg_tys));
+            .map(|cdef| self.foreign_instance_args(cdef, args, &arg_tys))
+            .unwrap_or_default();
+        let orphaned = !foreign.is_empty();
         if orphaned {
             let instance = self.instance_signature(class, &arg_tys);
+            let here = if self.current_module.is_empty() {
+                "in the entry file".to_string()
+            } else {
+                format!("in module `{}`", self.current_module)
+            };
+            let foreign = self
+                .diag_tys(&foreign.iter().collect::<Vec<_>>())
+                .into_iter()
+                .map(|t| format!("`{t}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let mut msg = Message::error(
                 ErrorCode::GenericTypeError,
                 format!(
-                    "Orphan instance `{}` is not allowed in module `{}`",
-                    instance, self.current_module
+                    "Orphan instance `{instance}` is not allowed {here}: neither the trait `{class}` nor {foreign} is defined here"
                 ),
                 range.clone(),
             );
@@ -579,6 +640,19 @@ impl Checker {
         // an instance with no context slot 0 still holds the instance's own
         // dictionary, which nothing in its methods dispatches through: a
         // placeholder no goal matches keeps their own bounds from 1 (#1471).
+        // A trait impl in the head type's own module is part of that type,
+        // as its inherent `impl` is: a derive (always expanded beside the
+        // declaration) and a hand-written `impl Trait for C` there read
+        // `C`'s private members, following module privacy. An impl in
+        // another module stays a foreign site and still gets E0128 (#2084).
+        let head_owner = args
+            .first()
+            .and_then(|a| self.nominal_head_from_instance_arg(a))
+            .filter(|key| {
+                self.generics.nominal_type_module(key) == Some(self.current_module.as_str())
+            });
+        let prev_impl_owner = self.impl_owner.take();
+        self.impl_owner = head_owner;
         let prev_active_len = self.active_constraints.len();
         if !context.is_empty() {
             self.active_constraints.push(Constraint {
@@ -592,6 +666,7 @@ impl Checker {
                 args: Vec::new(),
             });
         }
+        let mut pending_signature_checks: Vec<(String, String, Range<usize>)> = Vec::new();
         for m in methods {
             match m.1.as_ref() {
                 Expression::AssocTypeDef {
@@ -820,13 +895,9 @@ impl Checker {
                         });
                         self.current_instance_method = outer_method;
                         self.record_instance_method_under_fqn(mname, &fqn);
-                        self.check_instance_method_signature(
-                            class,
-                            &arg_tys,
-                            mname,
-                            &fqn,
-                            &m.0.into_range(),
-                        );
+                        // Checked once every `type X = ...` of the impl is
+                        // collected, whichever side of the method it is on.
+                        pending_signature_checks.push((mname.to_string(), fqn.clone(), m.0.into_range()));
                         self.unshield_bare_names(shield);
                     } else {
                         let _ = self.infer(m);
@@ -834,7 +905,11 @@ impl Checker {
                 }
             }
         }
+        for (mname, fqn, range) in pending_signature_checks {
+            self.check_instance_method_signature(class, &arg_tys, &assoc_tys, &mname, &fqn, &range);
+        }
         self.active_constraints.truncate(prev_active_len);
+        self.impl_owner = prev_impl_owner;
         let mut invalid_instance =
             class_def.is_none() || orphaned || (overlapping.is_some() && !same_decl);
         if let Some(class_def) = class_def.as_ref() {
@@ -1147,10 +1222,17 @@ impl Checker {
                     })
                     .collect()
             };
+            // The class's own bounds (`class Sorted<T: Ord>`) hold on every
+            // inherent impl of it, its i-th parameter being the impl's i-th;
+            // they come first in the dictionary order, and a bound the impl
+            // restates is not taken twice (#2085).
+            let args: Vec<Ty> = bound_vars.iter().map(|(_, var)| Ty::Var(*var)).collect();
+            impl_constraints = self.class_param_bounds_at(&owner_key, &args);
             for (tp, (_name, var)) in type_params.iter().zip(bound_vars.iter()) {
                 for bound in &tp.bounds {
                     if let Some(constraint) =
                         self.constraint_from_bound(bound, Ty::Var(*var), range)
+                        && !impl_constraints.contains(&constraint)
                     {
                         impl_constraints.push(constraint);
                     }

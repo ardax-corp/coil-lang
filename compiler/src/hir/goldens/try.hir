@@ -1,6 +1,6 @@
 Function g(n%0: int) -> Result<int, string> [pair Result] result-mode
   block : never
-    if : never
+    if : unit
       bin Lt : bool
         local n%0 : int
         lit 0 : int {nonneg}

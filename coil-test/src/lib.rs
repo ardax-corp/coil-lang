@@ -10,3 +10,4 @@ pub mod events;
 pub mod mutate;
 pub mod order;
 pub mod runner;
+pub mod watchdog;

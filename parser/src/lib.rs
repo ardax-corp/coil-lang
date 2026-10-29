@@ -280,6 +280,18 @@ fn duplicate_field_error<'src>(
     first_duplicate_name(names).map(|name| Rich::custom(span, format!("Duplicate field `{name}`")))
 }
 
+/// Like [`duplicate_field_error`], but each name carries its own span and
+/// the error points at the second occurrence instead of the whole list.
+fn duplicate_field_error_at<'src>(
+    fields: impl IntoIterator<Item = (&'src str, SimpleSpan)>,
+) -> Option<Rich<'src, char>> {
+    let mut seen = HashSet::new();
+    fields
+        .into_iter()
+        .find(|(name, _)| !seen.insert(*name))
+        .map(|(name, span)| Rich::custom(span, format!("Duplicate field `{name}`")))
+}
+
 fn is_duplicate_field_parse_error(err: &Rich<'_, char>) -> bool {
     matches!(
         err.reason(),
@@ -2837,7 +2849,23 @@ impl<'pratt> Pratt<'pratt> {
                     .separated_by(op!(','))
                     .allow_trailing()
                     .collect::<Vec<_>>()
-                    .delimited_by(op!("{"), op!("}")),
+                    .delimited_by(op!("{"), op!("}"))
+                    .validate(|fields: Vec<Output<'pratt>>, _, emitter| {
+                        // Instance, `static` and `const` fields share one
+                        // namespace (`C.x` / `C::x`), so a name may appear
+                        // once per class (#2090).
+                        let names = fields.iter().filter_map(|(span, f)| match f.as_ref() {
+                            Expression::Field { name, .. } => match name.1.as_ref() {
+                                Expression::Identifier(n) => Some((*n, *span)),
+                                _ => None,
+                            },
+                            _ => None,
+                        });
+                        if let Some(err) = duplicate_field_error_at(names) {
+                            emitter.emit(err);
+                        }
+                        fields
+                    }),
             )
             .map_with(|(((((((docs, mut attrs), shared), readonly), name), type_params), invariants), fields), e| {
                 if shared.is_some() {
@@ -4042,6 +4070,11 @@ const NOT_PUB_ITEMS: &[&str] = &[
 /// methods only; anywhere else the parser read it as an expression and
 /// asked for `;` (coil-lang#1725).
 fn misplaced_pub<'a>(input: &'a str, err: &Rich<'_, char>) -> Option<(&'a str, std::ops::Range<usize>)> {
+    // A custom error (duplicate field) carries its own message; it may
+    // start at a `pub static` field without `pub` being misplaced.
+    if !matches!(err.reason(), RichReason::ExpectedFound { .. }) {
+        return None;
+    }
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let word_at = |at: usize| {
         let rest = input.get(at..)?;

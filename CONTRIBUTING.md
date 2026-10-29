@@ -43,7 +43,7 @@ and compares, so a broken or drifting example fails CI.
 | VM / natives | `machine/` |
 | Opcodes / archive | `common/` |
 
-Routing detail: [.cursor/skills/coil-contributor/SKILL.md](.cursor/skills/coil-contributor/SKILL.md).
+Routing detail: [.claude/skills/coil-contributor/SKILL.md](.claude/skills/coil-contributor/SKILL.md).
 
 ## Invariants (do not break)
 

@@ -132,6 +132,13 @@ const MAX_SPARES: usize = 64;
 /// Per-root-VM work-stealing reactor.
 pub struct Reactor {
     injector: Injector<Job>,
+    /// Harness cases ([`Self::submit_test`]). Only an idle worker takes one
+    /// ([`Self::find_job`], after every thread job): a case may block in a
+    /// host wait for a thread it spawned, so one run under a join, a task
+    /// scheduler's idle help or a spare thread would hold that executor
+    /// (and could wait on the frame it sits on); the pool wedged that way
+    /// once every worker and the runner sat under such a case.
+    cases: Injector<Job>,
     stealers: RwLock<Vec<Stealer<Job>>>,
     sleep: Mutex<()>,
     sleep_cvar: Condvar,
@@ -160,6 +167,7 @@ impl Reactor {
     pub fn new(n_workers: usize) -> Arc<Self> {
         Arc::new(Self {
             injector: Injector::new(),
+            cases: Injector::new(),
             stealers: RwLock::new(Vec::with_capacity(n_workers.max(1))),
             sleep: Mutex::new(()),
             sleep_cvar: Condvar::new(),
@@ -287,13 +295,18 @@ impl Reactor {
             .push(stealer);
     }
 
+    /// An idle worker's next job: its own deque, the queued thread jobs,
+    /// then a harness case (see [`Self::cases`]).
     fn find_job(&self, local: &Worker<Job>) -> Option<Job> {
         if let Some(job) = local.pop() {
             return Some(job);
         }
-        steal_from_injector(self).or_else(|| steal_from_peers(self))
+        steal_from_injector(self)
+            .or_else(|| steal_from_peers(self))
+            .or_else(|| steal_from(self, &self.cases))
     }
 
+    /// A thread job to help with while waiting; never a harness case.
     fn steal_job(&self) -> Option<Job> {
         steal_from_injector(self).or_else(|| steal_from_peers(self))
     }
@@ -394,8 +407,12 @@ impl Reactor {
 }
 
 fn steal_from_injector(reactor: &Reactor) -> Option<Job> {
+    steal_from(reactor, &reactor.injector)
+}
+
+fn steal_from(reactor: &Reactor, queue: &Injector<Job>) -> Option<Job> {
     loop {
-        match reactor.injector.steal() {
+        match queue.steal() {
             Steal::Success(job) => {
                 bump(&reactor.steal_success);
                 return Some(job);
@@ -821,7 +838,24 @@ pub struct TestHandle {
     report: Arc<Mutex<Option<TestReport>>>,
 }
 
+/// Answers whether a submitted case has finished, without waiting on it
+/// (`coil test --wall-timeout` watches the cases in flight).
+pub struct TestProbe(Arc<JoinState>);
+
+impl TestProbe {
+    /// True once the case's worker stored its result (a report, or a Rust
+    /// panic turned into a failed join); stays true after [`TestHandle::wait`].
+    pub fn finished(&self) -> bool {
+        self.0.is_done()
+    }
+}
+
 impl TestHandle {
+    /// A probe for this case's completion.
+    pub fn probe(&self) -> TestProbe {
+        TestProbe(Arc::clone(&self.state))
+    }
+
     /// Block until the case finishes. A Rust panic inside the VM (an ICE) is
     /// a failed case, not a harness abort.
     pub fn wait(self) -> TestReport {
@@ -854,7 +888,11 @@ impl Reactor {
         print: Arc<Mutex<Vec<u8>>>,
     ) -> TestHandle {
         let (job, state, report) = self.test_job(ctx, case, print);
-        self.submit(job);
+        self.ensure_started();
+        self.submitted.fetch_add(1, Ordering::Relaxed);
+        self.inflight.fetch_add(1, Ordering::SeqCst);
+        self.cases.push(job);
+        self.notify();
         TestHandle {
             reactor: Arc::clone(self),
             state,

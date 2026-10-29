@@ -87,6 +87,17 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
             lanes::neg_f64(&a, &mut o);
             from_f64(&o)
         }
+        simd::IAND64 => std::array::from_fn(|i| lhs[i] & rhs[i]),
+        simd::IOR64 => std::array::from_fn(|i| lhs[i] | rhs[i]),
+        simd::IXOR64 => std::array::from_fn(|i| lhs[i] ^ rhs[i]),
+        k if (simd::ICMP..simd::ICMP + 6).contains(&k) => {
+            let pred = k - simd::ICMP;
+            std::array::from_fn(|i| u64::from(cmp_lane(pred, Some((lhs[i] as i64).cmp(&(rhs[i] as i64))))))
+        }
+        k if (simd::FCMP..simd::FCMP + 6).contains(&k) => {
+            let pred = k - simd::FCMP;
+            std::array::from_fn(|i| u64::from(cmp_lane(pred, f64::from_bits(lhs[i]).partial_cmp(&f64::from_bits(rhs[i])))))
+        }
         simd::SPLAT_I64 => [scalar.as_int() as u64; LANES],
         simd::SPLAT_F64 => [scalar.as_float().to_bits(); LANES],
         simd::IOTA_I64 => {
@@ -107,11 +118,41 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
     })
 }
 
+/// `a pred b` from their ordering (`None`: a NaN, true only for `!=`).
+fn cmp_lane(pred: u8, ord: Option<std::cmp::Ordering>) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    match (pred, ord) {
+        (dense::CMP_NE, None) => true,
+        (_, None) => false,
+        (dense::CMP_LT, Some(o)) => o == Less,
+        (dense::CMP_LE, Some(o)) => o != Greater,
+        (dense::CMP_GT, Some(o)) => o == Greater,
+        (dense::CMP_GE, Some(o)) => o != Less,
+        (dense::CMP_EQ, Some(o)) => o == Equal,
+        (_, Some(o)) => o != Equal,
+    }
+}
+
 /// `acc ⊕ left-fold(lanes)` — float add is sequential (P11), and so is an
-/// int fold, which traps on the first partial result that overflows.
+/// int fold, which traps on the first partial result that overflows. A
+/// take fold keeps `x` when `x pred acc`, lane by lane.
 #[inline]
 pub fn eval_vreduce(ty: u8, acc: Value, src: &[u64; LANES], fold: u8) -> Result<Value, IntTrap> {
+    if fold >= simd::REDUCE_TAKE {
+        let pred = fold - simd::REDUCE_TAKE;
+        return Ok(Value::from(src.iter().fold(acc.bits(), |a, &x| {
+            let ord = if ty == dense::TY_F64 {
+                f64::from_bits(x).partial_cmp(&f64::from_bits(a))
+            } else {
+                Some((x as i64).cmp(&(a as i64)))
+            };
+            if cmp_lane(pred, ord) { x } else { a }
+        })));
+    }
     Ok(match (ty, fold) {
+        (dense::TY_I64, simd::REDUCE_AND) => Value::from(src.iter().fold(acc.as_int(), |a, &x| a & x as i64)),
+        (dense::TY_I64, simd::REDUCE_OR) => Value::from(src.iter().fold(acc.as_int(), |a, &x| a | x as i64)),
+        (dense::TY_I64, simd::REDUCE_XOR) => Value::from(src.iter().fold(acc.as_int(), |a, &x| a ^ x as i64)),
         (dense::TY_I64, simd::REDUCE_MUL) => {
             let lanes = as_i64(src);
             Value::from(lanes.iter().try_fold(acc.as_int(), |a, &x| int_arith::mul(a, x))?)

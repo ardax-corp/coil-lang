@@ -384,7 +384,12 @@ jobs:
     name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
     needs: harness-build
     runs-on: ${{ matrix.os }}
-    # A hung IO test fails here instead of holding the runner for 6 h (#869).
+    # The last resort for a hang: `coil test --wall-timeout` (600 s; 1200 s
+    # in the GC-stress cells, see below) ends a run whose case never
+    # returns, naming the case and the seed, and
+    # `test_corpora.py --timeout` (1800 s) kills a corpus process that
+    # wedges outside a case. A job that still reaches this limit is a
+    # harness bug; its logs are uploaded all the same (`cancelled()` below).
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -466,13 +471,17 @@ jobs:
             # local, so the roots differ from the default level (#1481).
             # Generics too: uninlined calls through `forall` parameters
             # pass dictionaries the default level folds away (#1530).
+            # A full cycle per allocation makes allocation-heavy cases cost
+            # minutes each (heap_churn_checksums.hy, bare_unit_case_in_pure_fn.hy:
+            # 3 to 4 minutes alone on one core), so the per-case wall limit
+            # is wider than the default 600 s.
             gc-stress)
-              $run --harness harness-bin/gc-stress/coil-test -- $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 $FLAGS ;;
+              $run --harness harness-bin/gc-stress/coil-test -- --wall-timeout 1200 $FLAGS
+              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
             gc-stress-1|gc-stress-2)
-              $run --harness harness-bin/gc-stress/coil-test --shard "${{ matrix.variant == 'gc-stress-1' && '1' || '2' }}/2" -- $FLAGS ;;
+              $run --harness harness-bin/gc-stress/coil-test --shard "${{ matrix.variant == 'gc-stress-1' && '1' || '2' }}/2" -- --wall-timeout 1200 $FLAGS ;;
             gc-stress-O0)
-              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 $FLAGS ;;
+              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
           esac
 
       # The examples in the builtin doc stubs (compiler/src/builtin_docs/),
@@ -484,7 +493,9 @@ jobs:
             --root examples/src --root .deps/coil-stdlib/src compiler/src/builtin_docs
 
       - uses: actions/upload-artifact@v4
-        if: failure()
+        # `cancelled()`: a job cut off by `timeout-minutes` still uploads
+        # the per-corpus logs (which corpus hung, and the seed).
+        if: failure() || cancelled()
         with:
           name: harness-logs-${{ matrix.os }}-${{ matrix.mode }}-${{ matrix.variant }}
           path: target/corpora

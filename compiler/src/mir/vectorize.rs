@@ -1,269 +1,37 @@
-//! V0/V1 compiler-only SIMD: counted stride-1 numeric store (COI-310)
-//! plus horizontal add/mul-reduce and conservative FMA (COI-311).
-//! A straight chain of those loops is lowered in order.
-//!
-//! Execution is `coil-simd` 8-lane kernels. Heap refs never enter vregs.
-//! Float reduce left-folds into the scalar acc (P11). `VFma` is mul-then-add.
+//! Counted map and reduce loops a vector loop can run (`vec_loop`):
+//! `a[i + k] = value(i)` stores and `s = s ⊕ term(i)` reductions (add /
+//! mul) over stride-1 `i64` / `f64` lanes, read as a [`VOp`] tree
+//! (loads, splats of invariants, the index, `+ - * /`, negation, an
+//! int-to-float cast and conservative FMA).
 
-use common::{dense, simd, Byte, DebugLoc, Instruction};
+use common::{dense, simd};
 
-use crate::il::{IlJumpKind, IlOp, Label};
-
-use super::emit::{assign_regs, emit_inst, max_label_hint, EmitInstArgs};
 use super::func::MirFunc;
-use super::inst::{
-    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
-};
-use super::licm::natural_loops;
+use super::inst::{BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId};
 use super::ty::MirTy;
 
 const LANES: i64 = simd::LANES as i64;
 
-/// Replace a qualifying counted store loop with `V*` + a scalar tail.
-pub fn try_vectorize(
-    func: &MirFunc,
-    entry_label: Option<Label>,
-    pool: &mut Vec<u64>,
-    label_hi: u32,
-) -> Option<Vec<IlOp>> {
-    // Deopt is function-wide. A call or allocation outside the counted loop
-    // is emitted with the prologue / exit; only the loop region must stay pure.
-    if func.has_deopt_edge() {
-        return None;
-    }
-    // A straight chain of counted loops (fill, then scan). A branch between
-    // them still bails: this emitter has no φ.
-    if let Some(chained) = try_vectorize_chain(func, entry_label, pool, label_hi) {
-        return Some(chained);
-    }
-    if let Some(spec) = match_store_loop(func) {
-        if !straight_outside(func, [spec.header, spec.body], spec.exit) {
-            return None;
-        }
-        return emit_vectorized(func, &spec, entry_label, pool, label_hi);
-    }
-    let spec = match_reduce_loop(func)?;
-    if !straight_outside(func, [spec.header, spec.body], spec.exit) {
-        return None;
-    }
-    emit_reduced(func, &spec, entry_label, pool, label_hi)
-}
 
-/// The blocks outside the loop and its exit run straight through: the
-/// single-loop emitters lay their instructions out in a row (a guarded
-/// preheader's branch and φ would be lost).
-fn straight_outside(func: &MirFunc, lp: [BlockId; 2], exit: BlockId) -> bool {
-    func.blocks.iter().filter(|b| !lp.contains(&b.id) && b.id != exit).all(|b| {
-        matches!(b.term, Some(Terminator::Jump { .. })) && !b.insts.iter().any(MirInst::is_phi)
-    })
-}
-
-enum ChainPiece {
-    Store(StoreLoop),
-    Reduce(ReduceLoop),
-    Glue(BlockId),
-    Exit(BlockId),
-}
-
-/// Two or more counted loops, each exiting into the next or into `return`.
-fn try_vectorize_chain(
-    func: &MirFunc,
-    entry_label: Option<Label>,
-    pool: &mut Vec<u64>,
-    label_hi: u32,
-) -> Option<Vec<IlOp>> {
-    let loops = natural_loops(func);
-    if loops.len() < 2 {
-        return None;
-    }
-    let mut pieces = Vec::new();
-    let mut at = func.entry;
-    let mut seen = std::collections::HashSet::new();
-    let mut covered = std::collections::HashSet::new();
-    for _ in 0..=func.blocks.len() {
-        if !seen.insert(at) {
-            return None;
-        }
-        if let Some(lp) = loops.iter().find(|lp| lp.header == at) {
-            if let Some(spec) = match_store_on(func, lp, false) {
-                covered.extend(lp.blocks.iter().copied());
-                at = spec.exit;
-                pieces.push(ChainPiece::Store(spec));
-                continue;
-            }
-            if let Some(spec) = match_reduce_on(func, lp, false) {
-                covered.extend(lp.blocks.iter().copied());
-                at = spec.exit;
-                pieces.push(ChainPiece::Reduce(spec));
-                continue;
-            }
-            return None;
-        }
-        covered.insert(at);
-        match func.block(at).term.as_ref()? {
-            Terminator::Return { hi: None, .. } => {
-                pieces.push(ChainPiece::Exit(at));
-                break;
-            }
-            Terminator::Jump { dest } => {
-                pieces.push(ChainPiece::Glue(at));
-                at = *dest;
-            }
-            _ => return None,
-        }
-    }
-    let vector_loops = pieces
-        .iter()
-        .filter(|p| matches!(p, ChainPiece::Store(_) | ChainPiece::Reduce(_)))
-        .count();
-    if vector_loops < 2 || !matches!(pieces.last(), Some(ChainPiece::Exit(_))) {
-        return None;
-    }
-    if func.blocks.iter().any(|b| !covered.contains(&b.id)) {
-        return None;
-    }
-
-    let need = vec![true; func.types.len()];
-    let (regs, scratch) = assign_regs(func, &need).ok()?;
-    let max_reg = scratch.checked_add(3)?;
-    let loc = DebugLoc::unknown();
-    let mut next_label = label_hi
-        .saturating_add(1)
-        .max(max_label_hint(entry_label));
-    let entry = entry_label.unwrap_or_else(|| {
-        let l = Label(next_label);
-        next_label += 1;
-        l
-    });
-    let mut out = vec![IlOp::Label(entry)];
-    out.push(IlOp::byte(
-        Byte::new(Instruction::Seek).with_operand_u32(u32::from(max_reg) + 1),
-    ));
-    let mut acc_alias: Option<(ValueId, ValueId, u8)> = None;
-    for piece in &pieces {
-        match piece {
-            ChainPiece::Glue(id) => {
-                for inst in &func.block(*id).insts {
-                    if inst.is_phi() {
-                        continue;
-                    }
-                    emit_inst(EmitInstArgs {
-                        out: &mut out,
-                        inst,
-                        func,
-                        regs: &regs,
-                        scratch,
-                        pool,
-                        loc,
-                        across_alloc: false,
-                    }).ok()?;
-                }
-            }
-            ChainPiece::Store(spec) => {
-                let cont = Label(next_label);
-                next_label += 1;
-                append_store_loop(AppendStoreLoopArgs {
-                    out: &mut out,
-                    func,
-                    spec,
-                    regs: &regs,
-                    scratch,
-                    pool,
-                    loc,
-                    next_label: &mut next_label,
-                    cont,
-                })?;
-                out.push(IlOp::Label(cont));
-            }
-            ChainPiece::Reduce(spec) => {
-                let cont = Label(next_label);
-                next_label += 1;
-                acc_alias = Some((spec.acc, spec.acc_next, regs[spec.acc.index()]));
-                append_reduce_loop(AppendReduceLoopArgs {
-                    out: &mut out,
-                    func,
-                    spec,
-                    regs: &regs,
-                    scratch,
-                    pool,
-                    loc,
-                    next_label: &mut next_label,
-                    cont,
-                })?;
-                out.push(IlOp::Label(cont));
-            }
-            ChainPiece::Exit(id) => {
-                for inst in &func.block(*id).insts {
-                    if inst.is_phi() {
-                        continue;
-                    }
-                    emit_inst(EmitInstArgs {
-                        out: &mut out,
-                        inst,
-                        func,
-                        regs: &regs,
-                        scratch,
-                        pool,
-                        loc,
-                        across_alloc: false,
-                    }).ok()?;
-                }
-                match func.block(*id).term.as_ref()? {
-                    Terminator::Return { lo: Some(v), hi: None } => {
-                        let slot = if let Some((acc, acc_next, acc_slot)) = acc_alias {
-                            if *v == acc || *v == acc_next {
-                                acc_slot
-                            } else {
-                                regs[v.index()]
-                            }
-                        } else {
-                            regs[v.index()]
-                        };
-                        out.push(IlOp::Load {
-                            slot: u32::from(slot),
-                            loc,
-                        });
-                        out.push(IlOp::Return {
-                            loc,
-                            ret_words: 1,
-                        });
-                    }
-                    Terminator::Return { lo: None, hi: None } => {
-                        out.push(IlOp::Const { imm: 0, loc });
-                        out.push(IlOp::Return {
-                            loc,
-                            ret_words: 1,
-                        });
-                    }
-                    _ => return None,
-                }
-            }
-        }
-    }
-    Some(out)
-}
-
-struct StoreLoop {
-    header: BlockId,
-    body: BlockId,
-    exit: BlockId,
-    iv: ValueId,
+pub(super) struct StoreLoop {
+    pub(super) body: BlockId,
+    pub(super) iv: ValueId,
     /// Loop-invariant start. Not required to be zero.
-    init: ValueId,
-    n: ValueId,
-    stores: Vec<StoreSpec>,
+    pub(super) init: ValueId,
+    pub(super) n: ValueId,
+    pub(super) stores: Vec<StoreSpec>,
 }
 
-struct StoreSpec {
-    array: ValueId,
-    value: VOp,
-    ty: u8,
+pub(super) struct StoreSpec {
+    pub(super) array: ValueId,
+    pub(super) value: VOp,
+    pub(super) ty: u8,
     /// `a[i + index_off]`. Zero is `a[i]`.
-    index_off: i64,
+    pub(super) index_off: i64,
 }
 
 #[derive(Clone)]
-enum VOp {
+pub(super) enum VOp {
     Splat { v: ValueId, ty: u8 },
     Iota,
     Load { array: ValueId, ty: u8, off: i64 },
@@ -278,33 +46,7 @@ enum VOp {
     },
 }
 
-/// Values a vector op splats (loop invariants read as a scalar register).
-fn vop_splats(op: &VOp, out: &mut Vec<ValueId>) {
-    match op {
-        VOp::Splat { v, .. } => out.push(*v),
-        VOp::Iota | VOp::Load { .. } => {}
-        VOp::Bin { lhs, rhs, .. } => {
-            vop_splats(lhs, out);
-            vop_splats(rhs, out);
-        }
-        VOp::Neg { src, .. } | VOp::CastI2F(src) => vop_splats(src, out),
-        VOp::Fma { a, b, c, .. } => {
-            vop_splats(a, out);
-            vop_splats(b, out);
-            vop_splats(c, out);
-        }
-    }
-}
-
-fn match_store_loop(func: &MirFunc) -> Option<StoreLoop> {
-    let loops = natural_loops(func);
-    if loops.len() != 1 {
-        return None;
-    }
-    match_store_on(func, &loops[0], true)
-}
-
-fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo, require_return: bool) -> Option<StoreLoop> {
+pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Option<StoreLoop> {
     let header = lp.header;
     let preds = func.preds();
     let latch = preds[header.index()]
@@ -319,27 +61,15 @@ fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo, require_return: bo
     else {
         return None;
     };
-    let (body, exit) = if lp.blocks.contains(taken) && !lp.blocks.contains(not_taken) {
-        (*taken, *not_taken)
+    let body = if lp.blocks.contains(taken) && !lp.blocks.contains(not_taken) {
+        *taken
     } else if lp.blocks.contains(not_taken) && !lp.blocks.contains(taken) {
-        (*not_taken, *taken)
+        *not_taken
     } else {
         return None;
     };
     if body != latch {
         return None;
-    }
-    if require_return {
-        let Terminator::Return { hi: None, .. } = func.block(exit).term.as_ref()? else {
-            return None;
-        };
-        if func
-            .blocks
-            .iter()
-            .any(|b| matches!(b.term, Some(Terminator::Return { .. })) && b.id != exit)
-        {
-            return None;
-        }
     }
 
     let phis: Vec<&MirInst> = func
@@ -374,7 +104,6 @@ fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo, require_return: bo
         }
 
     let mut stores = Vec::new();
-    let mut stored_arrs = Vec::new();
     for inst in &func.block(body).insts {
         match inst {
             MirInst::StoreIndex {
@@ -388,14 +117,13 @@ fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo, require_return: bo
                     return None;
                 }
                 let ty = store_ty(func, *value)?;
-                let vop = classify(func, *value, *iv, &lp.blocks, &stored_arrs)?;
+                let vop = classify(func, *value, *iv, &lp.blocks)?;
                 stores.push(StoreSpec {
                     array: *array,
                     value: vop,
                     ty,
                     index_off,
                 });
-                stored_arrs.push(*array);
             }
             MirInst::Index { .. }
             | MirInst::Bin { .. }
@@ -411,9 +139,7 @@ fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo, require_return: bo
         return None;
     }
     Some(StoreLoop {
-        header,
         body,
-        exit,
         iv: *iv,
         init,
         n,
@@ -421,35 +147,18 @@ fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo, require_return: bo
     })
 }
 
-struct ReduceLoop {
-    header: BlockId,
-    body: BlockId,
-    exit: BlockId,
-    iv: ValueId,
-    iv_init: ValueId,
-    acc: ValueId,
-    acc_next: ValueId,
-    acc_init: ValueId,
-    n: ValueId,
-    term: VOp,
-    ty: u8,
+pub(super) struct ReduceLoop {
+    pub(super) iv: ValueId,
+    pub(super) iv_init: ValueId,
+    pub(super) acc: ValueId,
+    pub(super) n: ValueId,
+    pub(super) term: VOp,
+    pub(super) ty: u8,
     /// [`simd::REDUCE_ADD`] or [`simd::REDUCE_MUL`].
-    fold: u8,
+    pub(super) fold: u8,
 }
 
-fn match_reduce_loop(func: &MirFunc) -> Option<ReduceLoop> {
-    let loops = natural_loops(func);
-    if loops.len() != 1 {
-        return None;
-    }
-    match_reduce_on(func, &loops[0], true)
-}
-
-fn match_reduce_on(
-    func: &MirFunc,
-    lp: &super::licm::LoopInfo,
-    require_return: bool,
-) -> Option<ReduceLoop> {
+pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Option<ReduceLoop> {
     let header = lp.header;
     let preds = func.preds();
     let latch = preds[header.index()]
@@ -464,27 +173,15 @@ fn match_reduce_on(
     else {
         return None;
     };
-    let (body, exit) = if lp.blocks.contains(taken) && !lp.blocks.contains(not_taken) {
-        (*taken, *not_taken)
+    let body = if lp.blocks.contains(taken) && !lp.blocks.contains(not_taken) {
+        *taken
     } else if lp.blocks.contains(not_taken) && !lp.blocks.contains(taken) {
-        (*not_taken, *taken)
+        *not_taken
     } else {
         return None;
     };
     if body != latch {
         return None;
-    }
-    if require_return {
-        let Terminator::Return { hi: None, .. } = func.block(exit).term.as_ref()? else {
-            return None;
-        };
-        if func
-            .blocks
-            .iter()
-            .any(|b| matches!(b.term, Some(Terminator::Return { .. })) && b.id != exit)
-        {
-            return None;
-        }
     }
 
     let phis: Vec<&MirInst> = func
@@ -524,7 +221,7 @@ fn match_reduce_on(
     if !is_invariant(func, iv_init, &lp.blocks) {
         return None;
     }
-    let (acc, acc_init, acc_next, acc_ty) = acc?;
+    let (acc, _, acc_next, acc_ty) = acc?;
     let n = loop_bound(func, *cond, iv)?;
     if !is_invariant(func, n, &lp.blocks) {
         return None;
@@ -545,9 +242,12 @@ fn match_reduce_on(
     else {
         return None;
     };
-    let fold = match op {
-        MirBinOp::Add => simd::REDUCE_ADD,
-        MirBinOp::Mul => simd::REDUCE_MUL,
+    let fold = match (op, ty) {
+        (MirBinOp::Add, _) => simd::REDUCE_ADD,
+        (MirBinOp::Mul, _) => simd::REDUCE_MUL,
+        (MirBinOp::BitAnd, MirTy::I64) => simd::REDUCE_AND,
+        (MirBinOp::BitOr, MirTy::I64) => simd::REDUCE_OR,
+        (MirBinOp::Xor, MirTy::I64) => simd::REDUCE_XOR,
         _ => return None,
     };
     if *ty != acc_ty {
@@ -574,19 +274,14 @@ fn match_reduce_on(
         }
     }
 
-    let term = classify(func, term_v, iv, &lp.blocks, &[])?;
+    let term = classify(func, term_v, iv, &lp.blocks)?;
     if region_has_barrier(func, &[header, body]) {
         return None;
     }
     Some(ReduceLoop {
-        header,
-        body,
-        exit,
         iv,
         iv_init,
         acc,
-        acc_next,
-        acc_init,
         n,
         term,
         ty: store_ty(func, acc)?,
@@ -625,12 +320,14 @@ fn store_ty(func: &MirFunc, v: ValueId) -> Option<u8> {
     }
 }
 
+/// `v` as an 8-lane tree over the loop's index `iv`, or `None`. It does
+/// not look at aliasing between a store loop's arrays: `vec_loop` orders
+/// the reads and writes it accepts (`vec_loop::plan_loop`).
 fn classify(
     func: &MirFunc,
     v: ValueId,
     iv: ValueId,
     loop_blocks: &std::collections::HashSet<BlockId>,
-    stored: &[ValueId],
 ) -> Option<VOp> {
     if v == iv {
         return Some(VOp::Iota);
@@ -648,7 +345,6 @@ fn classify(
             if !is_invariant(func, *array, loop_blocks) {
                 return None;
             }
-            let _ = stored;
             let ty = store_ty(func, v)?;
             Some(VOp::Load {
                 array: *array,
@@ -665,9 +361,9 @@ fn classify(
         } => {
             if *op == MirBinOp::Add && matches!(ty, MirTy::I64 | MirTy::F64)
                 && let Some((a, b, c)) = split_fma(func, *lhs, *rhs) {
-                    let va = classify(func, a, iv, loop_blocks, stored)?;
-                    let vb = classify(func, b, iv, loop_blocks, stored)?;
-                    let vc = classify(func, c, iv, loop_blocks, stored)?;
+                    let va = classify(func, a, iv, loop_blocks)?;
+                    let vb = classify(func, b, iv, loop_blocks)?;
+                    let vc = classify(func, c, iv, loop_blocks)?;
                     return Some(VOp::Fma {
                         ty: store_ty(func, v)?,
                         a: Box::new(va),
@@ -676,8 +372,8 @@ fn classify(
                     });
                 }
             let kind = vbin_kind(*op, *ty)?;
-            let l = classify(func, *lhs, iv, loop_blocks, stored)?;
-            let r = classify(func, *rhs, iv, loop_blocks, stored)?;
+            let l = classify(func, *lhs, iv, loop_blocks)?;
+            let r = classify(func, *rhs, iv, loop_blocks)?;
             Some(VOp::Bin {
                 kind,
                 lhs: Box::new(l),
@@ -690,7 +386,7 @@ fn classify(
                 (MirUnaryOp::Neg, MirTy::F64) => simd::FNEG,
                 _ => return None,
             };
-            let s = classify(func, *src, iv, loop_blocks, stored)?;
+            let s = classify(func, *src, iv, loop_blocks)?;
             Some(VOp::Neg {
                 kind,
                 src: Box::new(s),
@@ -701,7 +397,7 @@ fn classify(
             src,
             ..
         } => {
-            let s = classify(func, *src, iv, loop_blocks, stored)?;
+            let s = classify(func, *src, iv, loop_blocks)?;
             Some(VOp::CastI2F(Box::new(s)))
         }
         _ => None,
@@ -714,6 +410,9 @@ fn vbin_kind(op: MirBinOp, ty: MirTy) -> Option<u8> {
         (MirBinOp::Sub, MirTy::I64) => simd::ISUB64,
         (MirBinOp::Mul, MirTy::I64) => simd::IMUL64,
         (MirBinOp::Div, MirTy::I64) => simd::IDIV64,
+        (MirBinOp::BitAnd, MirTy::I64) => simd::IAND64,
+        (MirBinOp::BitOr, MirTy::I64) => simd::IOR64,
+        (MirBinOp::Xor, MirTy::I64) => simd::IXOR64,
         (MirBinOp::Add, MirTy::F64) => simd::FADD64,
         (MirBinOp::Sub, MirTy::F64) => simd::FSUB64,
         (MirBinOp::Mul, MirTy::F64) => simd::FMUL64,
@@ -722,1170 +421,215 @@ fn vbin_kind(op: MirBinOp, ty: MirTy) -> Option<u8> {
     })
 }
 
-struct AppendStoreLoopArgs<'args> {
-    out: &'args mut Vec<IlOp>,
-    func: &'args MirFunc,
-    spec: &'args StoreLoop,
-    regs: &'args [u8],
-    scratch: u8,
-    pool: &'args mut Vec<u64>,
-    loc: DebugLoc,
-    next_label: &'args mut u32,
-    cont: Label,
-}
-
-fn append_store_loop(args: AppendStoreLoopArgs<'_>) -> Option<()> {
-    let AppendStoreLoopArgs {
-        out,
-        func,
-        spec,
-        regs,
-        scratch,
-        pool,
-        loc,
-        next_label,
-        cont,
-    } = args;
-
-    let i_slot = *regs.get(spec.iv.index())?;
-    let n_slot = *regs.get(spec.n.index())?;
-    let nvec = scratch;
-    let eight = scratch.checked_add(2)?;
-    let max_reg = scratch.checked_add(3)?;
-    let vloop = Label(*next_label);
-    *next_label += 1;
-    let rem = Label(*next_label);
-    *next_label += 1;
-    let mut emitted_header = std::collections::HashSet::new();
-    emit_header_invariant(EmitHeaderInvariantArgs {
-        out,
-        func,
-        header: spec.header,
-        body: spec.body,
-        v: spec.n,
-        regs,
-        scratch,
-        pool,
-        loc,
-        seen: &mut emitted_header,
-    })?;
-    emit_header_invariant(EmitHeaderInvariantArgs {
-        out,
-        func,
-        header: spec.header,
-        body: spec.body,
-        v: spec.init,
-        regs,
-        scratch,
-        pool,
-        loc,
-        seen: &mut emitted_header,
-    })?;
-    // Invariants the vector ops splat must hold their value before the
-    // vector loop, also when they are computed in the loop body.
-    let mut splats = Vec::new();
-    for st in &spec.stores {
-        vop_splats(&st.value, &mut splats);
-    }
-    for v in splats {
-        emit_header_invariant(EmitHeaderInvariantArgs {
-            out,
-            func,
-            header: spec.header,
-            body: spec.body,
-            v,
-            regs,
-            scratch,
-            pool,
-            loc,
-            seen: &mut emitted_header,
-        })?;
-    }
-    emit_iv_init(out, func, spec.init, i_slot, regs, pool, loc)?;
-    out.push(IlOp::byte(
-        Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, eight, 8, false),
-    ));
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::ISUB64, nvec, n_slot, eight,
-    )));
-    out.push(IlOp::Label(vloop));
-    out.push(IlOp::Load { slot: u32::from(i_slot), loc });
-    out.push(IlOp::Load { slot: u32::from(nvec), loc });
-    out.push(IlOp::Bin { op: Instruction::LE, loc });
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::JumpIfFalse,
-        target: rem,
-        loc,
-        hint: Default::default(),
-    });
-    let mut next_v = 0u8;
-    for st in &spec.stores {
-        let v = emit_vop(EmitVopArgs {
-            out,
-            op: &st.value,
-            regs,
-            i_slot,
-            store_ty: st.ty,
-            next_v: &mut next_v,
-            pool,
-            idx_tmp: max_reg,
-        })?;
-        let index = index_slot(out, i_slot, st.index_off, max_reg, pool, loc)?;
-        out.push(IlOp::byte(Byte::new(Instruction::VStore).with_dense_abc(
-            st.ty, v, regs[st.array.index()], index,
-        )));
-    }
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64, i_slot, i_slot, eight,
-    )));
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: vloop,
-        loc,
-        hint: Default::default(),
-    });
-    out.push(IlOp::Label(rem));
-    out.push(IlOp::Load { slot: u32::from(i_slot), loc });
-    out.push(IlOp::Load { slot: u32::from(n_slot), loc });
-    out.push(IlOp::Bin { op: Instruction::LE, loc });
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::JumpIfFalse,
-        target: cont,
-        loc,
-        hint: Default::default(),
-    });
-    for inst in &func.block(spec.body).insts {
-        if inst.is_phi() {
-            continue;
-        }
-        if is_iv_step(func, inst, spec.iv) {
-            continue;
-        }
-        emit_inst(EmitInstArgs {
-            out,
-            inst,
-            func,
-            regs,
-            scratch,
-            pool,
-            loc,
-            across_alloc: false,
-        }).ok()?;
-    }
-    out.push(emit_const_i64(pool, max_reg, 1, loc)?);
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64, i_slot, i_slot, max_reg,
-    )));
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: rem,
-        loc,
-        hint: Default::default(),
-    });
-    Some(())
-}
-
-struct AppendReduceLoopArgs<'args> {
-    out: &'args mut Vec<IlOp>,
-    func: &'args MirFunc,
-    spec: &'args ReduceLoop,
-    regs: &'args [u8],
-    scratch: u8,
-    pool: &'args mut Vec<u64>,
-    loc: DebugLoc,
-    next_label: &'args mut u32,
-    cont: Label,
-}
-
-fn append_reduce_loop(args: AppendReduceLoopArgs<'_>) -> Option<()> {
-    let AppendReduceLoopArgs {
-        out,
-        func,
-        spec,
-        regs,
-        scratch,
-        pool,
-        loc,
-        next_label,
-        cont,
-    } = args;
-
-    let i_slot = *regs.get(spec.iv.index())?;
-    let n_slot = *regs.get(spec.n.index())?;
-    let acc_slot = *regs.get(spec.acc.index())?;
-    let nvec = scratch;
-    let eight = scratch.checked_add(2)?;
-    let max_reg = scratch.checked_add(3)?;
-    let vloop = Label(*next_label);
-    *next_label += 1;
-    let rem = Label(*next_label);
-    *next_label += 1;
-    if defined_in(func, spec.acc_init) == Some(spec.header) {
-        let inst = def(func, spec.acc_init)?;
-        if !inst.is_phi() {
-            emit_inst(EmitInstArgs {
-                out,
-                inst,
-                func,
-                regs,
-                scratch,
-                pool,
-                loc,
-                across_alloc: false,
-            }).ok()?;
-        }
-    }
-    let mut emitted_header = std::collections::HashSet::new();
-    emit_header_invariant(EmitHeaderInvariantArgs {
-        out,
-        func,
-        header: spec.header,
-        body: spec.body,
-        v: spec.n,
-        regs,
-        scratch,
-        pool,
-        loc,
-        seen: &mut emitted_header,
-    })?;
-    emit_header_invariant(EmitHeaderInvariantArgs {
-        out,
-        func,
-        header: spec.header,
-        body: spec.body,
-        v: spec.iv_init,
-        regs,
-        scratch,
-        pool,
-        loc,
-        seen: &mut emitted_header,
-    })?;
-    // Invariants the vector ops splat must hold their value before the
-    // vector loop, also when they are computed in the loop body.
-    let mut splats = Vec::new();
-    vop_splats(&spec.term, &mut splats);
-    for v in splats {
-        emit_header_invariant(EmitHeaderInvariantArgs {
-            out,
-            func,
-            header: spec.header,
-            body: spec.body,
-            v,
-            regs,
-            scratch,
-            pool,
-            loc,
-            seen: &mut emitted_header,
-        })?;
-    }
-    emit_iv_init(out, func, spec.iv_init, i_slot, regs, pool, loc)?;
-    let init_slot = *regs.get(spec.acc_init.index())?;
-    if acc_slot != init_slot {
-        out.push(IlOp::byte(
-            Byte::new(Instruction::DenseMove).with_dense_move(acc_slot, init_slot),
-        ));
-    }
-    out.push(IlOp::byte(
-        Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, eight, 8, false),
-    ));
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::ISUB64, nvec, n_slot, eight,
-    )));
-    out.push(IlOp::Label(vloop));
-    out.push(IlOp::Load { slot: u32::from(i_slot), loc });
-    out.push(IlOp::Load { slot: u32::from(nvec), loc });
-    out.push(IlOp::Bin { op: Instruction::LE, loc });
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::JumpIfFalse,
-        target: rem,
-        loc,
-        hint: Default::default(),
-    });
-    let mut next_v = 0u8;
-    let v = emit_vop(EmitVopArgs {
-        out,
-        op: &spec.term,
-        regs,
-        i_slot,
-        store_ty: spec.ty,
-        next_v: &mut next_v,
-        pool,
-        idx_tmp: max_reg,
-    })?;
-    out.push(IlOp::byte(Byte::new(Instruction::VReduce).with_dense_abc(
-        spec.ty, acc_slot, v, spec.fold,
-    )));
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64, i_slot, i_slot, eight,
-    )));
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: vloop,
-        loc,
-        hint: Default::default(),
-    });
-    out.push(IlOp::Label(rem));
-    out.push(IlOp::Load { slot: u32::from(i_slot), loc });
-    out.push(IlOp::Load { slot: u32::from(n_slot), loc });
-    out.push(IlOp::Bin { op: Instruction::LE, loc });
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::JumpIfFalse,
-        target: cont,
-        loc,
-        hint: Default::default(),
-    });
-    for inst in &func.block(spec.body).insts {
-        if inst.is_phi() {
-            continue;
-        }
-        if is_iv_step(func, inst, spec.iv) {
-            continue;
-        }
-        emit_inst(EmitInstArgs {
-            out,
-            inst,
-            func,
-            regs,
-            scratch,
-            pool,
-            loc,
-            across_alloc: false,
-        }).ok()?;
-    }
-    let acc_next_slot = *regs.get(spec.acc_next.index())?;
-    if acc_next_slot != acc_slot {
-        out.push(IlOp::byte(
-            Byte::new(Instruction::DenseMove).with_dense_move(acc_slot, acc_next_slot),
-        ));
-    }
-    out.push(emit_const_i64(pool, max_reg, 1, loc)?);
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64, i_slot, i_slot, max_reg,
-    )));
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: rem,
-        loc,
-        hint: Default::default(),
-    });
-    Some(())
-}
-
-fn emit_vectorized(
-    func: &MirFunc,
-    spec: &StoreLoop,
-    entry_label: Option<Label>,
-    pool: &mut Vec<u64>,
-    label_hi: u32,
-) -> Option<Vec<IlOp>> {
-    let need = vec![true; func.types.len()];
-    let (regs, scratch) = assign_regs(func, &need).ok()?;
-    let i_slot = regs[spec.iv.index()];
-    let n_slot = regs[spec.n.index()];
-    let nvec = scratch;
-    let _mask = scratch.checked_add(1)?;
-    let eight = scratch.checked_add(2)?;
-    let max_reg = scratch.checked_add(3)?;
-    let loc = DebugLoc::unknown();
-    // Fresh ids must not reuse the official CALL entry or any pre-rewrite
-    // label: concat maps `meta.entry` onto whichever new Label keeps that id.
-    let mut next_label = label_hi
-        .saturating_add(1)
-        .max(max_label_hint(entry_label));
-    let entry = entry_label.unwrap_or_else(|| {
-        let l = Label(next_label);
-        next_label += 1;
-        l
-    });
-    let vloop = Label(next_label);
-    next_label += 1;
-    let rem = Label(next_label);
-    next_label += 1;
-    let exit_l = Label(next_label);
-
-    let mut out = vec![IlOp::Label(entry)];
-    out.push(IlOp::byte(
-        Byte::new(Instruction::Seek).with_operand_u32(u32::from(max_reg) + 1),
-    ));
-
-    let loop_blocks: std::collections::HashSet<BlockId> =
-        [spec.header, spec.body].into_iter().collect();
-    for block in &func.blocks {
-        if loop_blocks.contains(&block.id) || block.id == spec.exit {
-            continue;
-        }
-        for inst in &block.insts {
-            if inst.is_phi() {
-                continue;
-            }
-            emit_inst(EmitInstArgs {
-                out: &mut out,
-                inst,
-                func,
-                regs: &regs,
-                scratch,
-                pool,
-                loc,
-                across_alloc: false,
-            }).ok()?;
-        }
-    }
-    // Bound may be an ArrayLen that SSA left in the exit block.
-    if defined_in(func, spec.n) == Some(spec.exit) {
-        let inst = def(func, spec.n)?;
-        emit_inst(EmitInstArgs {
-            out: &mut out,
-            inst,
-            func,
-            regs: &regs,
-            scratch,
-            pool,
-            loc,
-            across_alloc: false,
-        }).ok()?;
-    }
-    let mut emitted_header = std::collections::HashSet::new();
-    emit_header_invariant(EmitHeaderInvariantArgs {
-        out: &mut out,
-        func,
-        header: spec.header,
-        body: spec.body,
-        v: spec.n,
-        regs: &regs,
-        scratch,
-        pool,
-        loc,
-        seen: &mut emitted_header,
-    })?;
-    emit_header_invariant(EmitHeaderInvariantArgs {
-        out: &mut out,
-        func,
-        header: spec.header,
-        body: spec.body,
-        v: spec.init,
-        regs: &regs,
-        scratch,
-        pool,
-        loc,
-        seen: &mut emitted_header,
-    })?;
-    // Invariants the vector ops splat must hold their value before the
-    // vector loop, also when they are computed in the loop body.
-    let mut splats = Vec::new();
-    for st in &spec.stores {
-        vop_splats(&st.value, &mut splats);
-    }
-    for v in splats {
-        emit_header_invariant(EmitHeaderInvariantArgs {
-            out: &mut out,
-            func,
-            header: spec.header,
-            body: spec.body,
-            v,
-            regs: &regs,
-            scratch,
-            pool,
-            loc,
-            seen: &mut emitted_header,
-        })?;
-    }
-
-    emit_iv_init(&mut out, func, spec.init, i_slot, &regs, pool, loc)?;
-    // `i + 8 <= n`  <=>  `i <= n - 8`. Works for a non-zero start; `n & -8`
-    // only lines up when the index starts at 0.
-    out.push(IlOp::byte(
-        Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, eight, 8, false),
-    ));
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::ISUB64,
-        nvec,
-        n_slot,
-        eight,
-    )));
-
-    out.push(IlOp::Label(vloop));
-    out.push(IlOp::Load {
-        slot: u32::from(i_slot),
-        loc,
-    });
-    out.push(IlOp::Load {
-        slot: u32::from(nvec),
-        loc,
-    });
-    out.push(IlOp::Bin {
-        op: Instruction::LE,
-        loc,
-    });
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::JumpIfFalse,
-        target: rem,
-        loc,
-        hint: Default::default(),
-    });
-
-    let mut next_v = 0u8;
-    for st in &spec.stores {
-        let v = emit_vop(EmitVopArgs {
-            out: &mut out,
-            op: &st.value,
-            regs: &regs,
-            i_slot,
-            store_ty: st.ty,
-            next_v: &mut next_v,
-            pool,
-            idx_tmp: max_reg,
-        })?;
-        let arr = regs[st.array.index()];
-        let index = index_slot(&mut out, i_slot, st.index_off, max_reg, pool, loc)?;
-        out.push(IlOp::byte(Byte::new(Instruction::VStore).with_dense_abc(
-            st.ty, v, arr, index,
-        )));
-    }
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64,
-        i_slot,
-        i_slot,
-        eight,
-    )));
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: vloop,
-        loc,
-        hint: Default::default(),
-    });
-
-    out.push(IlOp::Label(rem));
-    out.push(IlOp::Load {
-        slot: u32::from(i_slot),
-        loc,
-    });
-    out.push(IlOp::Load {
-        slot: u32::from(n_slot),
-        loc,
-    });
-    out.push(IlOp::Bin {
-        op: Instruction::LE,
-        loc,
-    });
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::JumpIfFalse,
-        target: exit_l,
-        loc,
-        hint: Default::default(),
-    });
-    for inst in &func.block(spec.body).insts {
-        if inst.is_phi() {
-            continue;
-        }
-        if matches!(
-            inst,
-            MirInst::Bin {
-                dest,
-                op: MirBinOp::Add,
-                ty: MirTy::I64,
-                ..
-            } if *dest == spec.iv || is_iv_step(func, inst, spec.iv)
-        ) {
-            continue;
-        }
-        emit_inst(EmitInstArgs {
-            out: &mut out,
-            inst,
-            func,
-            regs: &regs,
-            scratch,
-            pool,
-            loc,
-            across_alloc: false,
-        }).ok()?;
-    }
-    // IV step +1 (DenseConst into scratch — not CONST; STORE; DenseBin)
-    let one = {
-        out.push(emit_const_i64(pool, max_reg, 1, loc)?);
-        max_reg
-    };
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64,
-        i_slot,
-        i_slot,
-        one,
-    )));
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: rem,
-        loc,
-        hint: Default::default(),
-    });
-
-    out.push(IlOp::Label(exit_l));
-    for inst in &func.block(spec.exit).insts {
-        if inst.is_phi() {
-            continue;
-        }
-        if inst.dest() == spec.n && defined_in(func, spec.n) == Some(spec.exit) {
-            continue;
-        }
-        emit_inst(EmitInstArgs {
-            out: &mut out,
-            inst,
-            func,
-            regs: &regs,
-            scratch,
-            pool,
-            loc,
-            across_alloc: false,
-        }).ok()?;
-    }
-    match func.block(spec.exit).term.as_ref()? {
-        Terminator::Return { lo: Some(v), hi: None } => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[v.index()]),
-                loc,
-            });
-            out.push(IlOp::Return {
-                loc,
-                ret_words: 1,
-            });
-        }
-        Terminator::Return { lo: None, hi: None } => {
-            out.push(IlOp::Const { imm: 0, loc });
-            out.push(IlOp::Return {
-                loc,
-                ret_words: 1,
-            });
-        }
-        _ => return None,
-    }
-    Some(out)
-}
-
-fn emit_reduced(
-    func: &MirFunc,
-    spec: &ReduceLoop,
-    entry_label: Option<Label>,
-    pool: &mut Vec<u64>,
-    label_hi: u32,
-) -> Option<Vec<IlOp>> {
-    let need = vec![true; func.types.len()];
-    let (regs, scratch) = assign_regs(func, &need).ok()?;
-    let i_slot = regs[spec.iv.index()];
-    let n_slot = regs[spec.n.index()];
-    let acc_slot = regs[spec.acc.index()];
-    let nvec = scratch;
-    let _mask = scratch.checked_add(1)?;
-    let eight = scratch.checked_add(2)?;
-    let max_reg = scratch.checked_add(3)?;
-    let loc = DebugLoc::unknown();
-    let mut next_label = label_hi
-        .saturating_add(1)
-        .max(max_label_hint(entry_label));
-    let entry = entry_label.unwrap_or_else(|| {
-        let l = Label(next_label);
-        next_label += 1;
-        l
-    });
-    let vloop = Label(next_label);
-    next_label += 1;
-    let rem = Label(next_label);
-    next_label += 1;
-    let exit_l = Label(next_label);
-
-    let mut out = vec![IlOp::Label(entry)];
-    out.push(IlOp::byte(
-        Byte::new(Instruction::Seek).with_operand_u32(u32::from(max_reg) + 1),
-    ));
-
-    let loop_blocks: std::collections::HashSet<BlockId> =
-        [spec.header, spec.body].into_iter().collect();
-    for block in &func.blocks {
-        if loop_blocks.contains(&block.id) || block.id == spec.exit {
-            continue;
-        }
-        for inst in &block.insts {
-            if inst.is_phi() {
-                continue;
-            }
-            emit_inst(EmitInstArgs {
-                out: &mut out,
-                inst,
-                func,
-                regs: &regs,
-                scratch,
-                pool,
-                loc,
-                across_alloc: false,
-            }).ok()?;
-        }
-    }
-    if defined_in(func, spec.n) == Some(spec.exit) {
-        let inst = def(func, spec.n)?;
-        emit_inst(EmitInstArgs {
-            out: &mut out,
-            inst,
-            func,
-            regs: &regs,
-            scratch,
-            pool,
-            loc,
-            across_alloc: false,
-        }).ok()?;
-    }
-    if defined_in(func, spec.acc_init) == Some(spec.header) {
-        let inst = def(func, spec.acc_init)?;
-        if !inst.is_phi() {
-            emit_inst(EmitInstArgs {
-                out: &mut out,
-                inst,
-                func,
-                regs: &regs,
-                scratch,
-                pool,
-                loc,
-                across_alloc: false,
-            }).ok()?;
-        }
-    }
-    let mut emitted_header = std::collections::HashSet::new();
-    emit_header_invariant(EmitHeaderInvariantArgs {
-        out: &mut out,
-        func,
-        header: spec.header,
-        body: spec.body,
-        v: spec.n,
-        regs: &regs,
-        scratch,
-        pool,
-        loc,
-        seen: &mut emitted_header,
-    })?;
-    emit_header_invariant(EmitHeaderInvariantArgs {
-        out: &mut out,
-        func,
-        header: spec.header,
-        body: spec.body,
-        v: spec.iv_init,
-        regs: &regs,
-        scratch,
-        pool,
-        loc,
-        seen: &mut emitted_header,
-    })?;
-    // Invariants the vector ops splat must hold their value before the
-    // vector loop, also when they are computed in the loop body.
-    let mut splats = Vec::new();
-    vop_splats(&spec.term, &mut splats);
-    for v in splats {
-        emit_header_invariant(EmitHeaderInvariantArgs {
-            out: &mut out,
-            func,
-            header: spec.header,
-            body: spec.body,
-            v,
-            regs: &regs,
-            scratch,
-            pool,
-            loc,
-            seen: &mut emitted_header,
-        })?;
-    }
-
-    emit_iv_init(&mut out, func, spec.iv_init, i_slot, &regs, pool, loc)?;
-    let init_slot = regs[spec.acc_init.index()];
-    if acc_slot != init_slot {
-        out.push(IlOp::byte(
-            Byte::new(Instruction::DenseMove).with_dense_move(acc_slot, init_slot),
-        ));
-    }
-    out.push(IlOp::byte(
-        Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, eight, 8, false),
-    ));
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::ISUB64,
-        nvec,
-        n_slot,
-        eight,
-    )));
-
-    out.push(IlOp::Label(vloop));
-    out.push(IlOp::Load {
-        slot: u32::from(i_slot),
-        loc,
-    });
-    out.push(IlOp::Load {
-        slot: u32::from(nvec),
-        loc,
-    });
-    out.push(IlOp::Bin {
-        op: Instruction::LE,
-        loc,
-    });
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::JumpIfFalse,
-        target: rem,
-        loc,
-        hint: Default::default(),
-    });
-
-    let mut next_v = 0u8;
-    let v = emit_vop(EmitVopArgs {
-        out: &mut out,
-        op: &spec.term,
-        regs: &regs,
-        i_slot,
-        store_ty: spec.ty,
-        next_v: &mut next_v,
-        pool,
-        idx_tmp: max_reg,
-    })?;
-    out.push(IlOp::byte(Byte::new(Instruction::VReduce).with_dense_abc(
-        spec.ty, acc_slot, v, spec.fold,
-    )));
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64,
-        i_slot,
-        i_slot,
-        eight,
-    )));
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: vloop,
-        loc,
-        hint: Default::default(),
-    });
-
-    out.push(IlOp::Label(rem));
-    out.push(IlOp::Load {
-        slot: u32::from(i_slot),
-        loc,
-    });
-    out.push(IlOp::Load {
-        slot: u32::from(n_slot),
-        loc,
-    });
-    out.push(IlOp::Bin {
-        op: Instruction::LE,
-        loc,
-    });
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::JumpIfFalse,
-        target: exit_l,
-        loc,
-        hint: Default::default(),
-    });
-    for inst in &func.block(spec.body).insts {
-        if inst.is_phi() {
-            continue;
-        }
-        if matches!(
-            inst,
-            MirInst::Bin {
-                dest,
-                op: MirBinOp::Add,
-                ty: MirTy::I64,
-                ..
-            } if *dest == spec.iv || is_iv_step(func, inst, spec.iv)
-        ) {
-            continue;
-        }
-        emit_inst(EmitInstArgs {
-            out: &mut out,
-            inst,
-            func,
-            regs: &regs,
-            scratch,
-            pool,
-            loc,
-            across_alloc: false,
-        }).ok()?;
-    }
-    let acc_next_slot = regs[spec.acc_next.index()];
-    if acc_next_slot != acc_slot {
-        out.push(IlOp::byte(
-            Byte::new(Instruction::DenseMove).with_dense_move(acc_slot, acc_next_slot),
-        ));
-    }
-    let one = {
-        out.push(emit_const_i64(pool, max_reg, 1, loc)?);
-        max_reg
-    };
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64,
-        i_slot,
-        i_slot,
-        one,
-    )));
-    out.push(IlOp::Jump {
-        kind: IlJumpKind::Unconditional,
-        target: rem,
-        loc,
-        hint: Default::default(),
-    });
-
-    out.push(IlOp::Label(exit_l));
-    for inst in &func.block(spec.exit).insts {
-        if inst.is_phi() {
-            continue;
-        }
-        if inst.dest() == spec.n && defined_in(func, spec.n) == Some(spec.exit) {
-            continue;
-        }
-        emit_inst(EmitInstArgs {
-            out: &mut out,
-            inst,
-            func,
-            regs: &regs,
-            scratch,
-            pool,
-            loc,
-            across_alloc: false,
-        }).ok()?;
-    }
-    match func.block(spec.exit).term.as_ref()? {
-        Terminator::Return { lo: Some(v), hi: None } => {
-            let ret = if *v == spec.acc_next || *v == spec.acc {
-                acc_slot
-            } else {
-                regs[v.index()]
-            };
-            out.push(IlOp::Load {
-                slot: u32::from(ret),
-                loc,
-            });
-            out.push(IlOp::Return {
-                loc,
-                ret_words: 1,
-            });
-        }
-        Terminator::Return { lo: None, hi: None } => {
-            out.push(IlOp::Const { imm: 0, loc });
-            out.push(IlOp::Return {
-                loc,
-                ret_words: 1,
-            });
-        }
-        _ => return None,
-    }
-    Some(out)
-}
-
-struct EmitVopArgs<'args> {
-    out: &'args mut Vec<IlOp>,
-    op: &'args VOp,
-    regs: &'args [u8],
-    i_slot: u8,
-    store_ty: u8,
-    next_v: &'args mut u8,
-    pool: &'args mut Vec<u64>,
-    idx_tmp: u8,
-}
-
-fn emit_vop(args: EmitVopArgs<'_>) -> Option<u8> {
-    let EmitVopArgs {
-        out,
-        op,
-        regs,
-        i_slot,
-        store_ty,
-        next_v,
-        pool,
-        idx_tmp,
-    } = args;
-
-    match op {
-        VOp::Splat { v, ty } => {
-            let dest = alloc_v(next_v)?;
-            let kind = splat_kind_ty(*ty);
-            out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
-                kind,
-                dest,
-                regs[v.index()],
-                0,
-            )));
-            Some(dest)
-        }
-        VOp::Iota => {
-            let iota = alloc_v(next_v)?;
-            let splat = alloc_v(next_v)?;
-            let dest = alloc_v(next_v)?;
-            let (iota_k, splat_k, add_k) = if store_ty == dense::TY_F64 {
-                (simd::IOTA_F64, simd::SPLAT_F64, simd::FADD64)
-            } else {
-                (simd::IOTA_I64, simd::SPLAT_I64, simd::IADD64)
-            };
-            out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
-                iota_k, iota, 0, 0,
-            )));
-            // `SPLAT_F64` reads raw f64 bits: convert the int IV first.
-            let splat_src = if store_ty == dense::TY_F64 {
-                out.push(IlOp::byte(Byte::new(Instruction::DenseCast).with_dense_unary(
-                    dense::CAST_I2F,
-                    idx_tmp,
-                    i_slot,
-                )));
-                idx_tmp
-            } else {
-                i_slot
-            };
-            out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
-                splat_k, splat, splat_src, 0,
-            )));
-            out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
-                add_k, dest, splat, iota,
-            )));
-            Some(dest)
-        }
-        VOp::Load { array, ty, off } => {
-            let dest = alloc_v(next_v)?;
-            let index = index_slot(out, i_slot, *off, idx_tmp, pool, DebugLoc::unknown())?;
-            out.push(IlOp::byte(Byte::new(Instruction::VLoad).with_dense_abc(
-                *ty,
-                dest,
-                regs[array.index()],
-                index,
-            )));
-            Some(dest)
-        }
-        VOp::Bin { kind, lhs, rhs } => {
-            let l = emit_vop(EmitVopArgs {
-                out,
-                op: lhs,
-                regs,
-                i_slot,
-                store_ty: ty_for_kind(*kind),
-                next_v,
-                pool,
-                idx_tmp,
-            })?;
-            let r = emit_vop(EmitVopArgs {
-                out,
-                op: rhs,
-                regs,
-                i_slot,
-                store_ty: ty_for_kind(*kind),
-                next_v,
-                pool,
-                idx_tmp,
-            })?;
-            let dest = alloc_v(next_v)?;
-            out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
-                *kind, dest, l, r,
-            )));
-            Some(dest)
-        }
-        VOp::Neg { kind, src } => {
-            let s = emit_vop(EmitVopArgs {
-                out,
-                op: src,
-                regs,
-                i_slot,
-                store_ty: ty_for_kind(*kind),
-                next_v,
-                pool,
-                idx_tmp,
-            })?;
-            let dest = alloc_v(next_v)?;
-            out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
-                *kind, dest, s, 0,
-            )));
-            Some(dest)
-        }
-        VOp::Fma { ty, a, b, c } => {
-            let va = emit_vop(EmitVopArgs {
-                out,
-                op: a,
-                regs,
-                i_slot,
-                store_ty: *ty,
-                next_v,
-                pool,
-                idx_tmp,
-            })?;
-            let vb = emit_vop(EmitVopArgs {
-                out,
-                op: b,
-                regs,
-                i_slot,
-                store_ty: *ty,
-                next_v,
-                pool,
-                idx_tmp,
-            })?;
-            let vc = emit_vop(EmitVopArgs {
-                out,
-                op: c,
-                regs,
-                i_slot,
-                store_ty: *ty,
-                next_v,
-                pool,
-                idx_tmp,
-            })?;
-            out.push(IlOp::byte(Byte::new(Instruction::VFma).with_dense_abc(
-                *ty, vc, va, vb,
-            )));
-            Some(vc)
-        }
-        VOp::CastI2F(src) => {
-            // V0: `i as float` on the IV becomes f64 iota + splat(float(i)).
-            // Exact for |i| < 2^53 (index loops).
-            match src.as_ref() {
-                VOp::Iota => {
-                    let dest = emit_vop(EmitVopArgs {
-                        out,
-                        op: &VOp::Iota,
-                        regs,
-                        i_slot,
-                        store_ty: dense::TY_F64,
-                        next_v,
-                        pool,
-                        idx_tmp,
-                    })?;
-                    Some(dest)
-                }
-                VOp::Splat { v, .. } => {
-                    let dest = alloc_v(next_v)?;
-                    out.push(IlOp::byte(Byte::new(Instruction::DenseCast).with_dense_unary(
-                        dense::CAST_I2F,
-                        idx_tmp,
-                        regs[v.index()],
-                    )));
-                    out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
-                        simd::SPLAT_F64,
-                        dest,
-                        idx_tmp,
-                        0,
-                    )));
-                    Some(dest)
-                }
-                _ => None,
-            }
-        }
-    }
-}
-
-fn splat_kind_ty(store_ty: u8) -> u8 {
-    if store_ty == dense::TY_F64 {
-        simd::SPLAT_F64
-    } else {
-        simd::SPLAT_I64
-    }
-}
-
-fn ty_for_kind(kind: u8) -> u8 {
-    match kind {
-        simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::FDIV64 | simd::FNEG | simd::SPLAT_F64
-        | simd::IOTA_F64 => dense::TY_F64,
-        _ => dense::TY_I64,
-    }
-}
-
-fn alloc_v(next: &mut u8) -> Option<u8> {
-    if *next as usize >= simd::NREGS {
+/// A reduce through one `if` (header, body, one or two arm blocks, latch):
+///
+/// - a select, `if x > m { m = x; }` (`<`, `<=`, `>=`, either operand
+///   order): `REDUCE_TAKE + pred`, taking `x` when `x pred m`;
+/// - a conditional add, `if c { n = n + t; }` on `int`: `n + (c ? t : 0)`,
+///   the compare as `0` / `1` lanes times `t`.
+///
+/// Every lane runs what the vector body computes, so the value taken is
+/// the element the body compared (read on every iteration), and a
+/// conditional term cannot trap (a load, an invariant or the index).
+/// A float compare is used only as written (`!(a < b)` is not `a >= b`
+/// with a NaN).
+pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Option<ReduceLoop> {
+    let header = lp.header;
+    if !(4..=5).contains(&lp.blocks.len()) {
         return None;
     }
-    let v = *next;
-    *next += 1;
-    Some(v)
+    let preds = func.preds();
+    let latch = preds[header.index()].iter().copied().find(|p| lp.blocks.contains(p))?;
+    let Terminator::Br { cond, taken, not_taken } = func.block(header).term.as_ref()? else {
+        return None;
+    };
+    let body = if lp.blocks.contains(taken) && !lp.blocks.contains(not_taken) {
+        *taken
+    } else if lp.blocks.contains(not_taken) && !lp.blocks.contains(taken) {
+        *not_taken
+    } else {
+        return None;
+    };
+    let Terminator::Br { cond: c, taken: bt, not_taken: bf } = func.block(body).term.as_ref()? else {
+        return None;
+    };
+    // Each way out of the body reaches the latch straight, or through
+    // one block that only computes (`if c {} else { .. }` keeps an empty
+    // one); the latch's φ takes a value from each.
+    let arm = |b: BlockId| {
+        if b == latch {
+            Some(body)
+        } else {
+            matches!(func.block(b).term, Some(Terminator::Jump { dest }) if dest == latch).then_some(b)
+        }
+    };
+    let (arm_t, arm_f) = (arm(*bt)?, arm(*bf)?);
+    if arm_t == arm_f || lp.blocks.len() != 3 + usize::from(arm_t != body) + usize::from(arm_f != body) {
+        return None;
+    }
+    if !matches!(func.block(latch).term, Some(Terminator::Jump { dest }) if dest == header) {
+        return None;
+    }
+
+    // The header's φs: the index and the accumulator.
+    let mut iv = None;
+    let mut acc = None;
+    for inst in &func.block(header).insts {
+        let MirInst::Phi { dest, ty, args } = inst else {
+            continue;
+        };
+        let init = phi_from(args, latch, false)?;
+        let step = phi_from(args, latch, true)?;
+        if *ty == MirTy::I64 && iv.is_none() && is_iadd_k(func, step, *dest, 1) {
+            iv = Some((*dest, init));
+        } else if matches!(ty, MirTy::I64 | MirTy::F64) && acc.is_none() {
+            acc = Some((*dest, init, step, *ty));
+        } else {
+            return None;
+        }
+    }
+    let (iv, iv_init) = iv?;
+    let (acc, _, acc_next, acc_ty) = acc?;
+    if !is_invariant(func, iv_init, &lp.blocks) {
+        return None;
+    }
+    let n = loop_bound(func, *cond, iv)?;
+    if !is_invariant(func, n, &lp.blocks) || as_const_i64(func, n).is_some_and(|k| k < LANES) {
+        return None;
+    }
+    // The latch: the accumulator's join, the step, constants.
+    let Some(MirInst::Phi { args: join, .. }) = func.block(latch).insts.iter().find(|i| i.dest() == acc_next) else {
+        return None;
+    };
+    let on_t = join.iter().find(|(b, _)| *b == arm_t)?.1;
+    let on_f = join.iter().find(|(b, _)| *b == arm_f)?.1;
+    // `then` is the arm that changes the accumulator.
+    let (on_true, from_then) = match (on_t == acc, on_f == acc) {
+        (false, true) => (true, on_t),
+        (true, false) => (false, on_f),
+        _ => return None,
+    };
+    for inst in &func.block(latch).insts {
+        match inst {
+            MirInst::Phi { dest, .. } if *dest == acc_next => {}
+            MirInst::Const { .. } => {}
+            MirInst::Bin { dest, .. } if is_iadd_k(func, *dest, iv, 1) => {}
+            _ => return None,
+        }
+    }
+    for b in [body, arm_t, arm_f] {
+        for inst in &func.block(b).insts {
+            if !matches!(
+                inst,
+                MirInst::Index { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Const { .. } | MirInst::ArrayLen { .. }
+            ) {
+                return None;
+            }
+        }
+    }
+    if region_has_barrier(func, &[header, body, arm_t, arm_f, latch]) {
+        return None;
+    }
+    let Some(MirInst::Cmp { op, ty: cmp_ty, lhs, rhs, .. }) = def(func, *c) else {
+        return None;
+    };
+    let ty = store_ty(func, acc)?;
+    let flip = |op: MirCmpOp| match op {
+        MirCmpOp::Lt => MirCmpOp::Gt,
+        MirCmpOp::Le => MirCmpOp::Ge,
+        MirCmpOp::Gt => MirCmpOp::Lt,
+        MirCmpOp::Ge => MirCmpOp::Le,
+        o => o,
+    };
+    let negate = |op: MirCmpOp| match op {
+        MirCmpOp::Lt => MirCmpOp::Ge,
+        MirCmpOp::Le => MirCmpOp::Gt,
+        MirCmpOp::Gt => MirCmpOp::Le,
+        MirCmpOp::Ge => MirCmpOp::Lt,
+        MirCmpOp::Eq => MirCmpOp::Ne,
+        MirCmpOp::Ne => MirCmpOp::Eq,
+    };
+    // The compare as the `then` block's condition.
+    let op = if on_true {
+        *op
+    } else if *cmp_ty == MirTy::I64 {
+        negate(*op)
+    } else {
+        return None;
+    };
+    let pred = |op: MirCmpOp| match op {
+        MirCmpOp::Lt => dense::CMP_LT,
+        MirCmpOp::Le => dense::CMP_LE,
+        MirCmpOp::Gt => dense::CMP_GT,
+        MirCmpOp::Ge => dense::CMP_GE,
+        MirCmpOp::Eq => dense::CMP_EQ,
+        MirCmpOp::Ne => dense::CMP_NE,
+    };
+    // Select: `then` takes `x`, compared with the accumulator.
+    let same = |a: ValueId, b: ValueId| same_value(func, a, b, 6);
+    let select = if *cmp_ty != acc_ty {
+        None
+    } else if *rhs == acc && same(*lhs, from_then) {
+        Some((op, *lhs))
+    } else if *lhs == acc && same(*rhs, from_then) {
+        Some((flip(op), *rhs))
+    } else {
+        None
+    };
+    if let Some((op, x)) = select {
+        if !matches!(op, MirCmpOp::Lt | MirCmpOp::Le | MirCmpOp::Gt | MirCmpOp::Ge) {
+            return None;
+        }
+        // The value the body compared, not the `then` block's copy.
+        let term = classify(func, x, iv, &lp.blocks)?;
+        return Some(ReduceLoop { iv, iv_init, acc, n, term, ty, fold: simd::REDUCE_TAKE + pred(op) });
+    }
+    // Conditional add: `then` adds `t` to the accumulator.
+    if acc_ty != MirTy::I64 {
+        return None;
+    }
+    let Some(MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs: a, rhs: b, .. }) = def(func, from_then) else {
+        return None;
+    };
+    let t = if *a == acc { *b } else if *b == acc { *a } else { return None };
+    let t = classify(func, t, iv, &lp.blocks)?;
+    if !matches!(t, VOp::Load { .. } | VOp::Splat { .. } | VOp::Iota) {
+        return None;
+    }
+    let base = if *cmp_ty == MirTy::F64 { simd::FCMP } else { simd::ICMP };
+    let mask = VOp::Bin {
+        kind: base + pred(op),
+        lhs: Box::new(classify(func, *lhs, iv, &lp.blocks)?),
+        rhs: Box::new(classify(func, *rhs, iv, &lp.blocks)?),
+    };
+    let term = match t {
+        VOp::Splat { v, .. } if as_const_i64(func, v) == Some(1) => mask,
+        t => VOp::Bin { kind: simd::IMUL64, lhs: Box::new(mask), rhs: Box::new(t) },
+    };
+    Some(ReduceLoop { iv, iv_init, acc, n, term, ty, fold: simd::REDUCE_ADD })
+}
+
+/// `a` and `b` compute the same word: one value, or the same pure op on
+/// operands that do (an element read again, `xs[i] * k + i` again),
+/// looking at most `depth` ops down.
+fn same_value(func: &MirFunc, a: ValueId, b: ValueId, depth: u8) -> bool {
+    if a == b {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let same = |x: ValueId, y: ValueId| same_value(func, x, y, depth - 1);
+    match (def(func, a), def(func, b)) {
+        (Some(MirInst::Index { array: x, index: i, .. }), Some(MirInst::Index { array: y, index: j, .. })) => x == y && same(*i, *j),
+        (Some(MirInst::Bin { op: o1, ty: t1, lhs: l1, rhs: r1, .. }), Some(MirInst::Bin { op: o2, ty: t2, lhs: l2, rhs: r2, .. })) => {
+            o1 == o2 && t1 == t2 && same(*l1, *l2) && same(*r1, *r2)
+        }
+        (Some(MirInst::Unary { op: o1, src: s1, .. }), Some(MirInst::Unary { op: o2, src: s2, .. })) => o1 == o2 && same(*s1, *s2),
+        (Some(MirInst::Cast { kind: k1, src: s1, .. }), Some(MirInst::Cast { kind: k2, src: s2, .. })) => k1 == k2 && same(*s1, *s2),
+        (Some(MirInst::Const { c: c1, .. }), Some(MirInst::Const { c: c2, .. })) => c1 == c2,
+        _ => false,
+    }
 }
 
 fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
@@ -1921,160 +665,6 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                 )
         }) || matches!(block.term, Some(Terminator::JumpIfMatch { .. }))
     })
-}
-
-struct EmitHeaderInvariantArgs<'args> {
-    out: &'args mut Vec<IlOp>,
-    func: &'args MirFunc,
-    header: BlockId,
-    /// The loop body: invariants a vector op splats may be computed there
-    /// (no LICM at `-O0` / `-O1`), not only in the header.
-    body: BlockId,
-    v: ValueId,
-    regs: &'args [u8],
-    scratch: u8,
-    pool: &'args mut Vec<u64>,
-    loc: DebugLoc,
-    seen: &'args mut std::collections::HashSet<ValueId>,
-}
-
-fn emit_header_invariant(args: EmitHeaderInvariantArgs<'_>) -> Option<()> {
-    let EmitHeaderInvariantArgs {
-        out,
-        func,
-        header,
-        body,
-        v,
-        regs,
-        scratch,
-        pool,
-        loc,
-        seen,
-    } = args;
-
-    if !seen.insert(v) || !matches!(defined_in(func, v), Some(b) if b == header || b == body) {
-        return Some(());
-    }
-    let inst = def(func, v)?;
-    if inst.is_phi() {
-        return Some(());
-    }
-    match inst {
-        MirInst::Bin { lhs, rhs, .. } => {
-            emit_header_invariant(EmitHeaderInvariantArgs {
-                out,
-                func,
-                header,
-                body,
-                v: *lhs,
-                regs,
-                scratch,
-                pool,
-                loc,
-                seen,
-            })?;
-            emit_header_invariant(EmitHeaderInvariantArgs {
-                out,
-                func,
-                header,
-                body,
-                v: *rhs,
-                regs,
-                scratch,
-                pool,
-                loc,
-                seen,
-            })?;
-        }
-        MirInst::Unary { src, .. } | MirInst::Cast { src, .. } => {
-            emit_header_invariant(EmitHeaderInvariantArgs {
-                out,
-                func,
-                header,
-                body,
-                v: *src,
-                regs,
-                scratch,
-                pool,
-                loc,
-                seen,
-            })?;
-        }
-        MirInst::ArrayLen { array, .. } | MirInst::Index { array, .. } => {
-            emit_header_invariant(EmitHeaderInvariantArgs {
-                out,
-                func,
-                header,
-                body,
-                v: *array,
-                regs,
-                scratch,
-                pool,
-                loc,
-                seen,
-            })?;
-        }
-        _ => {}
-    }
-    emit_inst(EmitInstArgs {
-        out,
-        inst,
-        func,
-        regs,
-        scratch,
-        pool,
-        loc,
-        across_alloc: false,
-    }).ok()?;
-    Some(())
-}
-
-fn emit_iv_init(
-    out: &mut Vec<IlOp>,
-    func: &MirFunc,
-    init: ValueId,
-    i_slot: u8,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
-    loc: DebugLoc,
-) -> Option<()> {
-    if let Some(n) = as_const_i64(func, init) {
-        out.push(emit_const_i64(pool, i_slot, n, loc)?);
-        return Some(());
-    }
-    let src = *regs.get(init.index())?;
-    if src != i_slot {
-        out.push(IlOp::byte(
-            Byte::new(Instruction::DenseMove).with_dense_move(i_slot, src),
-        ));
-    }
-    Some(())
-}
-
-/// `i` or `i + off` in `idx_tmp`. `off == 0` keeps the induction slot.
-fn index_slot(
-    out: &mut Vec<IlOp>,
-    i_slot: u8,
-    off: i64,
-    idx_tmp: u8,
-    pool: &mut Vec<u64>,
-    loc: DebugLoc,
-) -> Option<u8> {
-    if off == 0 {
-        return Some(i_slot);
-    }
-    out.push(emit_const_i64(pool, idx_tmp, off, loc)?);
-    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
-        dense::IADD64,
-        idx_tmp,
-        i_slot,
-        idx_tmp,
-    )));
-    Some(idx_tmp)
-}
-
-fn emit_const_i64(pool: &mut Vec<u64>, dest: u8, n: i64, loc: DebugLoc) -> Option<IlOp> {
-    super::emit::emit_const(MirConst::I64(n), dest, pool, loc).ok()
 }
 
 fn def(func: &MirFunc, v: ValueId) -> Option<&MirInst> {
@@ -2116,25 +706,6 @@ fn is_iadd_k(func: &MirFunc, v: ValueId, iv: ValueId, k: i64) -> bool {
         return false;
     };
     (*lhs == iv && is_const_i64(func, *rhs, k)) || (*rhs == iv && is_const_i64(func, *lhs, k))
-}
-
-fn is_iv_step(func: &MirFunc, inst: &MirInst, iv: ValueId) -> bool {
-    match inst {
-        MirInst::Bin {
-            dest,
-            op: MirBinOp::Add,
-            ty: MirTy::I64,
-            lhs,
-            rhs,
-            ..
-        } => {
-            // Only the induction update. `i + 1` used as `a[i + 1]` must stay.
-            *dest == iv
-                && (*lhs == iv || *rhs == iv)
-                && (is_const_i64(func, *lhs, 1) || is_const_i64(func, *rhs, 1))
-        }
-        _ => false,
-    }
 }
 
 fn loop_bound(func: &MirFunc, cond: ValueId, iv: ValueId) -> Option<ValueId> {

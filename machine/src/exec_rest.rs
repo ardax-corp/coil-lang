@@ -996,6 +996,23 @@ impl<const S: usize> Machine<S> {
                     }
                     ip += n;
                 }
+                Instruction::VLoop => {
+                    let (n, dest, from, to) = opcode.dense_abc_parts();
+                    let pos = n & common::simd::LOOP_POS != 0;
+                    let n = usize::from(n & common::simd::LOOP_LEN);
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + from < stack_cap);
+                    promise!(sp + to < stack_cap);
+                    let (from, to) = (self.stack[sp + from].as_int(), self.stack[sp + to].as_int());
+                    let ran = match code.get(ip..ip + n) {
+                        Some(body) => vloop(&self.heap, &mut self.stack, sp, &mut self.vregs, body, dest, from, to, pos),
+                        None => Err("VLoop body past the code"),
+                    };
+                    if let Err(msg) = ran {
+                        return dispatch::RestExit::done(self.runtime_panic(msg, ip.saturating_sub(1)));
+                    }
+                    ip += n;
+                }
                 Instruction::VMask => {
                     let (dest, src) = opcode.dense_move_parts();
                     promise!(src < common::simd::NREGS);

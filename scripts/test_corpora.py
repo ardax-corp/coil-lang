@@ -16,7 +16,10 @@ entirely and `--bin DIR` runs the `coil` / `coil-test` already in DIR.
 `--harness PATH` runs that binary instead of `coil test` (the GC-stress
 build of `coil-test`). `--wasm PATH` runs a wasm32-wasip1 `coil.wasm` under
 Node's WASI (`scripts/wasi_coil.mjs`). `--limit-as-kb` caps each process's address space
-like `ulimit -v` (the leak smoke). Exits 1 when any corpus fails.
+like `ulimit -v` (the leak smoke). A corpus still running after `--timeout`
+seconds is killed and fails as timed out (`coil test --wall-timeout` names
+the stuck case first; this is the backstop for a wedge outside a case).
+Exits 1 when any corpus fails.
 """
 
 import argparse
@@ -75,6 +78,8 @@ def main():
     ap.add_argument("--wasm", type=Path, help="run this coil.wasm under Node's WASI")
     ap.add_argument("--limit-as-kb", type=int,
                     help="address-space cap per coil test process (leak smoke; POSIX)")
+    ap.add_argument("--timeout", type=float, default=1800,
+                    help="kill a corpus process after S seconds (default 1800; 0: never)")
     ap.add_argument("--logs", type=Path, default=ROOT / "target" / "corpora",
                     help="per-corpus logs (default: target/corpora)")
     args = ap.parse_args(argv)
@@ -127,14 +132,25 @@ def main():
     def run(name):
         log = args.logs / f"{name}.log"
         start = time.monotonic()
+        timed_out = False
         with open(log, "wb") as out:
-            code = subprocess.run(
-                cmd + [f"tests/{name}", "-j", str(jobs)] + passthrough,
-                cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, preexec_fn=limit).returncode
+            try:
+                code = subprocess.run(
+                    cmd + [f"tests/{name}", "-j", str(jobs)] + passthrough,
+                    cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, preexec_fn=limit,
+                    timeout=args.timeout or None).returncode
+            except subprocess.TimeoutExpired:
+                # `run` killed the process; its log holds whatever it printed.
+                timed_out = True
+                code = None
+                out.write(f"\n[test_corpora] killed after {args.timeout:.0f}s (--timeout)\n".encode())
         secs = time.monotonic() - start
         text = log.read_text(errors="replace")
         m = re.search(r"test result: (\w+)\. (\d+) passed; (\d+) failed", text)
-        summary = f"{m.group(2)} passed, {m.group(3)} failed" if m else "no summary"
+        if timed_out:
+            summary = f"timed out after {args.timeout:.0f}s"
+        else:
+            summary = f"{m.group(2)} passed, {m.group(3)} failed" if m else "no summary"
         ok = code == 0 and m is not None and m.group(1) == "ok"
         print(f"{'ok    ' if ok else 'FAILED'} {name:<13} {summary:<24} {secs:6.1f}s", flush=True)
         return name, ok, text

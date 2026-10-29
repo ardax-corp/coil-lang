@@ -83,8 +83,8 @@ HostInvoke. **Q9 R3** maps `FORMAT` / `STRINGIFY`. Unicode / regex stay out unti
 | HostInvoke inside numeric | dense + box/unbox at host edge; LICM hoists scalar-pure (purity bits); `packed_*` stays in-place | S3 / Q9 R2 emit I6-typed hosts including `from_bytes` / `to_bytes` |
 | One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3 + **Q7** one-word self-recursive `CALL` / `TailCall` (`tak` / `fib`). **B7** sibling / mutual `TailCall` may dense. **C1** self two-slot `CALL` / `RETURN` may dense or LIR. LIR still cannot reconstruct one-word `CALL` |
 | Saxpy-reduce | HostInvoke `simd_axpy_reduce` (P12) | stay |
-| Stride-1 numeric store (`v[i] = i` / zip / scale) | `VLoad` / `VStore` / `VBin` / `VMove` (S5a V0) | stay |
-| Stride-1 add-reduce / conservative FMA | `VReduce` / `VFma` (S5b V1) | stay; no fast-math |
+| Stride-1 numeric store (`v[i] = i` / zip / scale) | `VLoop` with `VLoad` / `VStore` / `VBin` (6.2) | stay |
+| Stride-1 add-reduce / conservative FMA | `VLoop` with `VReduce` / `VFma` (6.2) | stay; no fast-math |
 | `Option<int>` / immediate-Ok `Result` / arity-2 immediate product leafs | P3 MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL. **Q8** dense when match is register `Br` and cost ≤ fuse | I2 + **Q8** dense+match (not only LIR) |
 | Heap `Option<T>` / heap-heap `Result<T,E>` (COI-92 niche words) | **Q8** dense reconstruct of niche match (`LogNot` / `EQ` / `BITAND` + `Br`) when cost ≤ fuse; else LIR / fuse-IL | I1 SSA types; I2 match; Q8 dense |
 | Nested / mixed / `CallIndirect` Option/Result | boxed `ObjEnum` + fuse-IL | stay refuse until a later island says otherwise |

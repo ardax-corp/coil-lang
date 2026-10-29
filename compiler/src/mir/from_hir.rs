@@ -833,6 +833,11 @@ fn array_elem(ty: &Ty) -> Option<&Ty> {
     }
 }
 
+/// `byte` itself (not a scalar enum backed by one).
+fn is_byte(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::BYTE)
+}
+
 /// A short name for the kind of `ty`, for refusal reasons.
 fn ty_kind(ty: &Ty) -> &'static str {
     match strip_readonly(ty) {
@@ -5374,7 +5379,12 @@ impl Lower<'_> {
         };
         // A boxed stack array's read is always checked, as HIR emission's.
         let proven = self.hir.expr(id).flags.contains(HirFlags::IN_BOUNDS) && self.boxed(base).is_none();
-        Ok(Val::V(self.b.ins_index(arr, idx, ty, proven).map_err(mir)?))
+        let byte = self.expr_ty(base).and_then(array_elem).is_some_and(is_byte);
+        let v = self.b.ins_index(arr, idx, ty, proven).map_err(mir)?;
+        if byte {
+            self.b.mark_byte_load(v);
+        }
+        Ok(Val::V(v))
     }
 
     /// `s[i]` on a string, as HIR emission's: `string_byte_at`, which

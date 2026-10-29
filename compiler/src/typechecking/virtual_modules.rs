@@ -103,24 +103,6 @@ pub enum PreludeFn {
     /// The identity, through the `black_box` host native the optimizer
     /// cannot see through.
     BlackBox,
-    Sin,
-    Cos,
-    Tan,
-    Sqrt,
-    Floor,
-    Ceil,
-    Exp,
-    Ln,
-    Atan,
-    Atan2,
-    Asin,
-    Acos,
-    Log10,
-    Log2,
-    Cbrt,
-    Sinh,
-    Cosh,
-    Tanh,
 }
 
 impl PreludeFn {
@@ -135,24 +117,6 @@ impl PreludeFn {
             Self::Char => "char",
             Self::Ord => "ord",
             Self::BlackBox => "black_box",
-            Self::Sin => "sin",
-            Self::Cos => "cos",
-            Self::Tan => "tan",
-            Self::Sqrt => "sqrt",
-            Self::Floor => "floor",
-            Self::Ceil => "ceil",
-            Self::Exp => "exp",
-            Self::Ln => "ln",
-            Self::Atan => "atan",
-            Self::Atan2 => "atan2",
-            Self::Asin => "asin",
-            Self::Acos => "acos",
-            Self::Log10 => "log10",
-            Self::Log2 => "log2",
-            Self::Cbrt => "cbrt",
-            Self::Sinh => "sinh",
-            Self::Cosh => "cosh",
-            Self::Tanh => "tanh",
         }
     }
 
@@ -167,61 +131,20 @@ impl PreludeFn {
             "char" => Some(Self::Char),
             "ord" => Some(Self::Ord),
             "black_box" => Some(Self::BlackBox),
-            "sin" => Some(Self::Sin),
-            "cos" => Some(Self::Cos),
-            "tan" => Some(Self::Tan),
-            "sqrt" => Some(Self::Sqrt),
-            "floor" => Some(Self::Floor),
-            "ceil" => Some(Self::Ceil),
-            "exp" => Some(Self::Exp),
-            "ln" => Some(Self::Ln),
-            "atan" => Some(Self::Atan),
-            "atan2" => Some(Self::Atan2),
-            "asin" => Some(Self::Asin),
-            "acos" => Some(Self::Acos),
-            "log10" => Some(Self::Log10),
-            "log2" => Some(Self::Log2),
-            "cbrt" => Some(Self::Cbrt),
-            "sinh" => Some(Self::Sinh),
-            "cosh" => Some(Self::Cosh),
-            "tanh" => Some(Self::Tanh),
-            _ => None,
-        }
-    }
-
-    pub fn math_native_name(self) -> Option<&'static str> {
-        match self {
-            Self::Sin => Some("math_sin"),
-            Self::Cos => Some("math_cos"),
-            Self::Tan => Some("math_tan"),
-            Self::Sqrt => Some("math_sqrt"),
-            Self::Floor => Some("math_floor"),
-            Self::Ceil => Some("math_ceil"),
-            Self::Exp => Some("math_exp"),
-            Self::Ln => Some("math_ln"),
-            Self::Atan => Some("math_atan"),
-            Self::Atan2 => Some("math_atan2"),
-            Self::Asin => Some("math_asin"),
-            Self::Acos => Some("math_acos"),
-            Self::Log10 => Some("math_log10"),
-            Self::Log2 => Some("math_log2"),
-            Self::Cbrt => Some("math_cbrt"),
-            Self::Sinh => Some("math_sinh"),
-            Self::Cosh => Some("math_cosh"),
-            Self::Tanh => Some("math_tanh"),
-            _ => None,
-        }
-    }
-
-    /// Binary `float, float -> float` scalar math (`atan2`).
-    pub fn math_arity(self) -> Option<usize> {
-        match self {
-            Self::Atan2 => Some(2),
-            kind if kind.math_native_name().is_some() => Some(1),
             _ => None,
         }
     }
 }
+
+/// The scalar float functions `prelude::math` exported as host natives
+/// until they moved to coil-stdlib's userland `math` module.
+pub const REMOVED_MATH_FNS: &[&str] = &[
+    "sin", "cos", "tan", "sqrt", "floor", "ceil", "exp", "ln", "atan", "atan2", "asin", "acos",
+    "log10", "log2", "cbrt", "sinh", "cosh", "tanh",
+];
+/// [`REMOVED_MATH_FNS`] are coil-stdlib's `math` module now.
+const REMOVED_MATH_HELP: &str =
+    "the float functions moved from `prelude::math` to coil-stdlib's `math` module: write `use math::{sin, sqrt};` (any of `sin` … `tanh`)";
 
 /// `prelude::math::pow` was removed in favour of the `**` operator.
 const REMOVED_POW_HELP: &str =
@@ -833,60 +756,6 @@ impl VirtualModules {
                 BuiltinExport::Fn {
                     kind: PreludeFn::Diff,
                 },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Sin,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Cos,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Tan,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Sqrt,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Floor,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Ceil,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Exp,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Ln,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Atan,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Atan2,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Asin,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Acos,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Log10,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Log2,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Cbrt,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Sinh,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Cosh,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Tanh,
-                },
                 BuiltinExport::OpaqueType {
                     name: common::BUILTIN_MATRIX_TYPE,
                 },
@@ -1107,6 +976,7 @@ impl VirtualModules {
             ("io", "to_bytes") => Some("`to_bytes` is in the `string` module: `use string::{to_bytes};`"),
             ("prelude::math", "pow") => Some(REMOVED_POW_HELP),
             ("prelude::math", "rem") => Some(REMOVED_REM_HELP),
+            ("prelude::math", name) if REMOVED_MATH_FNS.contains(&name) => Some(REMOVED_MATH_HELP),
             _ => None,
         }
     }
@@ -1198,37 +1068,8 @@ mod tests {
                 kind: PreludeFn::Dot
             }
         )));
-        for kind in [
-            PreludeFn::Sin,
-            PreludeFn::Cos,
-            PreludeFn::Tan,
-            PreludeFn::Sqrt,
-            PreludeFn::Floor,
-            PreludeFn::Ceil,
-            PreludeFn::Exp,
-            PreludeFn::Ln,
-            PreludeFn::Atan,
-            PreludeFn::Atan2,
-            PreludeFn::Asin,
-            PreludeFn::Acos,
-            PreludeFn::Log10,
-            PreludeFn::Log2,
-            PreludeFn::Cbrt,
-            PreludeFn::Sinh,
-            PreludeFn::Cosh,
-            PreludeFn::Tanh,
-        ] {
-            assert!(
-                exports
-                    .iter()
-                    .any(|e| matches!(e, BuiltinExport::Fn { kind: found } if *found == kind)),
-                "missing prelude::math export {}",
-                kind.as_str()
-            );
-            assert!(kind.math_native_name().is_some());
-        }
         let math = ["prelude".to_string(), "math".to_string()];
-        for removed in ["pow", "rem"] {
+        for removed in ["pow", "rem"].iter().chain(REMOVED_MATH_FNS) {
             assert!(PreludeFn::from_name(removed).is_none());
             assert!(vm.resolve_item(&math, removed).is_none());
             assert!(VirtualModules::removed_item(&math, removed).is_some());

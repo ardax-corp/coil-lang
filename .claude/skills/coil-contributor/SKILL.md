@@ -1,0 +1,126 @@
+---
+name: coil-contributor
+description: >-
+  Modify the coil compiler, VM, pipeline, or language implementation in Rust.
+  Use when changing parser/typechecker/codegen/VM crates, adding opcodes or
+  language features, bumping ARCHIVE_VERSION, running poop/vm_bench, or when
+  the user asks about coil internals, bytecode, or the compilation pipeline.
+---
+
+# coil contributor
+
+coil is a Rust workspace: parse → HM typecheck → HIR (inlining + optimization passes) → MIR for every body → dense or LIR stack ops → fuse-select → `.hyc` archive → VM.
+
+Read [AGENTS.md](AGENTS.md) for user preferences and global invariants — this skill covers **where to change code** and **verification**.
+
+## Workspace map
+
+```
+coil/
+├── common/       # Instruction opcodes, Value, archive (ARCHIVE_VERSION)
+├── parser/       # Pratt parser, AST
+├── compiler/     # HM typechecker, HIR (compiler/src/hir/), MIR (compiler/src/mir/), stack-op encoding (compiler/src/il/), pipeline
+├── machine/      # VM, heap/GC, FFI, host natives (HostInvoke)
+├── coil-simd/    # Stable std::arch SIMD kernels (packed LA, bytes)
+├── src/main.rs   # CLI: run, compile, test, debug, dissect
+├── examples/     # Runnable .hy demos
+├── tests/        # Integration .hy tests (coil test)
+└── docs/         # Contributor internals (user docs: coil-website)
+```
+
+Pipeline detail: [docs/internals/pipeline.md](docs/internals/pipeline.md).
+
+## Change routing
+
+| Task | Primary location |
+|------|------------------|
+| Syntax / grammar | `parser/` |
+| Types / diagnostics | `compiler/src/typechecking/` |
+| Optimizations | HIR passes in `compiler/src/hir/` (no IL optimization passes remain) |
+| Codegen | `compiler/src/codegen/` (`emit_hir.rs` plan), `compiler/src/mir/` (`from_hir.rs`, `emit.rs`, `emit_lir.rs`), `compiler/src/il/` |
+| Opcodes / VM handlers | `common/` (Instruction), `machine/src/vm.rs` |
+| Archive format | `common/src/archive.rs` |
+| Host natives / virtual modules | `compiler/` (resolve), `machine/` (HostInvoke) |
+| CLI | `src/main.rs` |
+
+Single compilation path: HIR → MIR (`compiler/src/mir/from_hir.rs`, planned by `compiler/src/codegen/emit_hir.rs`) → dense or LIR. The AST codegen (2026-10) and HIR → stack-IL lowering (M5, 2026-10-15) are gone; a body MIR cannot take is an internal error.
+
+## Hard invariants (never skip)
+
+1. **Append-only opcodes** — new `Instruction` variants only at end of enum (`#[repr(u8)]`). Then bump:
+   - archive **minor** (`ARCHIVE_MINOR` / packed `ARCHIVE_VERSION` in `common/src/archive.rs`)
+   - `promise!` ceiling in `machine/src/vm.rs`
+   - `instruction_from_u8_covers_last_appended_variant` test
+   Incompatible ABI/layout changes bump archive **major** (reset minor). Loaders accept same major with archive minor ≤ runtime minor.
+2. **Virtual module natives** — use `HostInvoke`, not new opcodes for `io`/`thread`/etc.
+3. **Reject benchmark-shaped opcodes** unless pattern is universal (see AGENTS.md user preferences).
+4. **New language features** — full HM integration + user-doc updates in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`) + internals here when needed + minimal runnable example. Prefer **method-based APIs** (`impl` methods on classes) over free functions for operations tied to a receiver type; free generic fns returning enums are codegen-fragile (see [limitations.md](docs/internals/limitations.md)).
+
+`STORE` vs deprecated `StorePop`: compiler emits `STORE` only. Match bindings skip store (value already in slot via `UNPACK`/`JUMP_IF_MATCH`) but codegen must reserve those slots in `variables` so arm-body temps cannot clobber them.
+
+Stack IL: what dense / LIR emit from MIR, with symbolic labels until `finalize_bytecode` → single `il::lower` after concat (not per-function lower). See [reference.md](reference.md) and `docs/internals/pipeline.md`.
+
+## Verification checklist
+
+Local checks before pushing (CI runs the full suites; don't duplicate them):
+
+```bash
+cargo build --release
+cargo test -p <crate> <filter>                  # unit tests nearest the change
+cargo test -p compiler --features vm-wire --tests   # when touching compiler behaviour
+./target/release/coil test path/to/touched.hy   # .hy tests you added or changed
+cargo clippy --workspace --lib --tests --bins -- -D warnings   # lint gate; Gc::payload_mut allows mut_from_ref
+cargo build -p coil-fmt && ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
+./scripts/poop_baseline.sh       # perf work only: before/after
+```
+
+Full-suite commands (what CI runs) are listed in AGENTS.md "Commands".
+
+| Work type | Extra check |
+|-----------|-------------|
+| VM / alloc | valgrind memcheck on debug build |
+| Perf | `./scripts/poop_baseline.sh` (precompiled `coil run` on mandelbrot/tak/nsieve/binary_trees). If an opt does not fire on those flagships, add `examples/perf` hit benches and prove those — identical flagship `.hyc` is not a skip. Prefer alloc reduction over new opcodes. **No PGO.** |
+| Debug info | `coil debug`, `coil dissect` |
+| Formatting | `coil fmt` |
+| Packaged apps | `coil package` defaults to `coil-embed` runner |
+
+## Feature work workflow
+
+1. Draft plan for large language changes (do not edit attached plan files during impl).
+2. Parser + AST if syntax changes.
+3. Typechecker — new types/constraints/diagnostics (`E####` in coil-website `src/content/docs/references/error-codes.md`).
+4. Codegen — HIR lowering to MIR (`mir/from_hir.rs`); new optimizations go in HIR or MIR passes, never on the stack IL.
+5. VM only if new opcode (rare) or runtime behavior.
+6. coil-website `src/content/docs/` (manual/references; routes `/docs/…`) + example in `examples/` or `tests/`.
+7. Bump archive **minor** for additive bytecode; bump **major** if bytecode/tag/opcode incompatible.
+8. Granular conventional commits; stage only related files.
+
+## Virtual modules (compiler-provided)
+
+Auto: `prelude`, `prelude::ops`, `prelude::math`.
+
+Explicit `use`: `ffi`, `io`, `thread`, `env`, `string`, `gc`, `clock`. Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
+
+Cargo default features are `[]`. There is no virtual `time` module; consume [coil-time](https://github.com/ardax-corp/coil-time). Process clocks are virtual `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`). There is no virtual crypto module; hashes/AEAD live in [coil-crypto](https://github.com/ardax-corp/coil-crypto). The archive version lives in `common/src/archive.rs` (`ARCHIVE_MAJOR` / `ARCHIVE_MINOR`); older minors are in [archive-history.md](../../../docs/internals/archive-history.md). Frozen HostInvoke ids are the `*_ID` consts in `common/src/host.rs`. `PI`/`E`/`TAU` are [coil-stdlib `num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md).
+
+Prefer compiler builtins over userland for core type machinery.
+
+**API shape:** inherent and trait methods over free functions for type-tied ops (`map.insert(k, v)` not `insert(map, k, v)`). Virtual-module free fns are fine for host primitives (`io::read`); stdlib and new language surface should default to methods.
+
+## Useful tools
+
+| Tool | Use |
+|------|-----|
+| `coil dissect file.hy --fn pat` | IL/bytecode dump without running |
+| `coil debug file.hy -x script --batch` | VM debugger (see coil-debug skill) |
+| `coil fmt [--check] path` | Pretty-print `.hy` (AST; keeps `//` / `///` comments) |
+| `poop` | Instruction/HW counter baselines |
+| `valgrind` | Leaks, callgrind |
+| `heaptrack` | Allocation tracing |
+
+## Additional resources
+
+- Opcode list: [docs/internals/opcodes.md](docs/internals/opcodes.md)
+- Debug line table: [docs/internals/debug-info.md](docs/internals/debug-info.md)
+- Crate/file detail: [reference.md](reference.md)
+- Writing `.hy` programs: **coil-language** skill

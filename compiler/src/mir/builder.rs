@@ -96,6 +96,12 @@ impl MirBuilder {
         self.func.invariant_loads.insert(dest);
     }
 
+    /// `dest` is an `Index` read of a `byte` element
+    /// ([`MirFunc::byte_loads`]).
+    pub fn mark_byte_load(&mut self, dest: ValueId) {
+        self.func.byte_loads.insert(dest);
+    }
+
     /// `dest` is the result of a call to a pure function
     /// ([`MirFunc::pure_calls`]).
     pub fn mark_pure_call(&mut self, dest: ValueId) {

@@ -70,6 +70,7 @@ impl MirInst {
             }
             Self::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
             Self::Index { unchecked, .. } => !unchecked,
+            Self::VecLoop { .. } => true,
             _ => false,
         }
     }
@@ -98,7 +99,8 @@ impl MirInst {
     /// (`SetField`, `DenseFieldStore`) only `Object::Instance` slots, so
     /// neither kind of store changes what a read of the other sees (#1559).
     pub fn writes_elements(&self, calls: &CallFacts) -> bool {
-        self.runs_effects(calls) || matches!(self, Self::StoreIndex { .. })
+        self.runs_effects(calls)
+            || matches!(self, Self::StoreIndex { .. } | Self::VecLoop { kind: super::inst::VecLoopKind::Store { .. }, .. })
     }
 
     /// May change a word a [`MirInst::HeapFieldLoad`] reads (an instance
@@ -143,6 +145,7 @@ impl MirInst {
             | Self::Panic { .. }
             | Self::Format { .. }
             | Self::Stringify { .. }
+            | Self::VecLoop { .. }
             | Self::Cow { .. } => true,
             _ => false,
         }
