@@ -990,6 +990,54 @@ fn main() {
 }
 
 #[test]
+fn pipeline_keeps_written_fields_in_registers_across_loop() {
+    let src = r#"
+class Acc {
+    pub total: int,
+    pub count: int,
+}
+fn field_acc(Acc acc, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        acc.total = acc.total + a[i];
+        acc.count = acc.count + 1;
+        i = i + 1;
+    }
+}
+fn main() {
+    let a: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 20 {
+        a.push(k);
+        k = k + 1;
+    }
+    let acc = new Acc(5, 0);
+    field_acc(acc, a);
+    field_acc(acc, a);
+    if acc.total != 385 || acc.count != 40 {
+        panic "field_acc checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile field_acc");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "field_acc checksum");
+    let debug = p.program_debug();
+    let entry = debug.fn_symbols.iter().find(|s| s.name == "field_acc").expect("field_acc symbol").entry_pc;
+    let ops = fn_ops(&bc, &debug.fn_symbols, "field_acc");
+    // The loop panics through write-back pads: ranges inside the body.
+    let end = entry as usize + ops.len();
+    assert!(
+        debug.cleanup.iter().any(|r| r.start_pc >= entry && (r.end_pc as usize) <= end),
+        "field_acc has panic write-back ranges"
+    );
+}
+
+#[test]
 fn pipeline_vectorizes_reduce_without_load_and_nonzero_start() {
     let src = r#"
 fn sum_i(int n) -> int {
