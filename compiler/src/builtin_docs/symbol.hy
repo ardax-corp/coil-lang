@@ -6,8 +6,9 @@
 /// path, name and arity, and writes in place of the call: every call in
 /// the same function returns the same key, whatever its arguments or its
 /// caller, and every other function, method, overload, lambda and test
-/// has its own. Inlining does not change it, and a generic function has
-/// one key for all its instantiations. The key is not negative, and it
+/// has its own. Inlining does not change it, and a generic function (or a
+/// generic class's method) has a key per instantiation: `ident(1)` and
+/// `ident(2)` share one, `ident("a")` has another. The key is not negative, and it
 /// stays the same across builds as long as the function keeps its module,
 /// name and arity (a lambda's key also depends on where it sits in the
 /// file).
@@ -16,7 +17,8 @@
 /// spelling the function's name. Call it directly inside a function,
 /// method, lambda or test; anywhere else (a `const` or `static`
 /// initializer, top-level code) is error `E0144`, and it cannot be taken as
-/// a function value.
+/// a function value. A generic function that calls it cannot be used as a
+/// function value either (`E0145`): wrap the call at concrete types.
 ///
 /// # Examples
 ///

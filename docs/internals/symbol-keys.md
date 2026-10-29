@@ -46,11 +46,7 @@ optimization:
 
 - **Inlining** copies the callee's literal into the caller, so an inlined
   function keeps its own key.
-- **Generics** share one key per source function: the HIR body is built once
-  per definition, and both the shared (dictionary-passing) body and every
-  mono clone come from it. `ident(1)` and `ident("a")` see the same key. A
-  memo table keyed by `fn_key()` alone therefore needs the argument types in
-  its key too when a generic function's results differ by instantiation.
+- **Generics** get a key per instantiation (see below).
 - **DCE / tree-shaking** removes bodies, not keys: a key does not depend on
   which functions survive or on their order.
 - **Incremental and build caches**: the key is a function of the module
@@ -64,6 +60,37 @@ Stability: a function's key stays the same across builds while its module,
 name and arity do. A lambda's key also changes when code above it in the
 file moves it.
 
+## Generic bodies
+
+In a generic body (own type parameters, a generic class's method, or a
+lambda in one) the builder cannot know the types, so it records the call
+in `HirBody::fn_key_sites` with the body's key name and writes a panic block
+(`{ panic "fn_key() in `f` reached without its type arguments ..."; 0 }`)
+in its place. `Compiler::hir_instance`, which lowers every mono clone and
+instance clone from the generic HIR at its types, replaces each site with
+the literal `fn_key("name<T1, T2>")`, the types in the order of the body's
+type variables. So `ident(1)` and `ident(2)` share a key, `ident("a")` has
+another, and a sibling generic called from a clone (#1419) is keyed at the
+clone's types (`wrap(1) == ident(1)`).
+
+The shared body has no type arguments at run time (unbounded `T` carries
+no type information), so the design (agreed 2026-10-29) is to keep it from
+being reached:
+
+- `monomorphize::mark_keyed` marks a generic function *keyed* when it calls
+  `fn_key()` or another keyed generic (fixpoint over bare-identifier calls).
+  Calls of a keyed function bypass the clone caps (`MAX_SPECIALIZATIONS_*`),
+  like `let g = wrap` aliases (#916).
+- A keyed generic read as a value (`let f = ident;`, passed as an
+  argument) is `E0145` (`MonoPlan::keyed_values`): wrap the call at concrete
+  types instead.
+- A body with `fn_key_sites` is never inlined (`hir::inline::inlinable`).
+- What is left reaches the panic: a keyed generic of another module used as
+  a value, a clone refused by a gate (`knows_tys`, `layout_safe`), a
+  trait-bound dictionary call. A trait default method body is not treated as
+  generic: it keeps one key for every type that uses it, since it is often
+  called through the shared dictionary path.
+
 ## `next_id`
 
 `symbol_next_id` (archive 6.7, `machine/src/symbol.rs`) is a
@@ -76,6 +103,7 @@ consecutive unless another thread took ids in between. The host row's
 of a loop, removed, or run in parallel automatically, and a `pure fn`
 cannot call it (`E0413`).
 
-Tests: `tests/functions/fn_key.hy`, `tests/modules/fn_key_across_modules.hy`
+Tests: `tests/functions/fn_key.hy`, `tests/generics/fn_key_per_instance.hy`,
+`tests/generics/compile_fail/fn_key_generic_value.hy`, `tests/modules/fn_key_across_modules.hy`
 (with `examples/src/fn_key_mod.hy`), `tests/functions/compile_fail/fn_key_outside_function.hy`,
 `tests/host/symbol_next_id.hy`.
