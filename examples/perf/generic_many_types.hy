@@ -2,8 +2,6 @@
 // eight types per function the old clone caps sent calls to the shared
 // body (boxed arguments, a dictionary per call); each type has its own
 // clone now.
-//
-// @output 54900000
 use io::sync::print;
 use string::format;
 
