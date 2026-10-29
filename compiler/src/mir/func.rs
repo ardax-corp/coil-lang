@@ -106,9 +106,21 @@ pub struct MirFunc {
     /// `Index` reads of a `byte` element (a `Vec<byte>` or `[byte; N]`):
     /// `byte_scan` reads them as byte lanes.
     pub byte_loads: HashSet<ValueId>,
+    /// `Index` reads of a heap word in a forward scan: dense emission
+    /// asks the VM to prefetch the object a few elements ahead
+    /// ([`super::mark_prefetch_scans`]).
+    pub prefetch_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write
     /// elements and fields).
     pub steady_calls: HashSet<ValueId>,
+    /// Per call, the fields it may read or write, as
+    /// [`crate::hir::effects::field_bit`]s of their names; a call not
+    /// listed may touch any.
+    pub call_fields: HashMap<ValueId, u64>,
+    /// Per heap slot, the [`crate::hir::effects::field_bit`]s of the field
+    /// names this body reads or writes there by name. A call whose
+    /// [`Self::call_fields`] miss them leaves the slot's word alone.
+    pub slot_fields: HashMap<u32, u64>,
     /// No code that runs at an allocation (a finalizer) resizes an array:
     /// an allocation leaves every length as it was.
     pub lengths_steady: bool,
@@ -217,7 +229,10 @@ impl MirFunc {
             pure_calls: HashSet::new(),
             invariant_loads: HashSet::new(),
             byte_loads: HashSet::new(),
+            prefetch_loads: HashSet::new(),
             steady_calls: HashSet::new(),
+            call_fields: HashMap::new(),
+            slot_fields: HashMap::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
             heap_pair_calls: HashSet::new(),
@@ -817,6 +832,14 @@ impl MirFunc {
                 }
                 if !self.ty(*value).is_word_lane() {
                     return Err(format!("{dest} StoreStatic value type"));
+                }
+            }
+            MirInst::PanicStore { dest, object, value, .. } => {
+                if self.ty(*dest) != MirTy::Bool || self.ty(*object) != MirTy::HeapRef {
+                    return Err(format!("{dest} PanicStore types"));
+                }
+                if !self.ty(*value).is_word_lane() {
+                    return Err(format!("{dest} PanicStore value type"));
                 }
             }
             MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {

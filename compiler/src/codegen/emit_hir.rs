@@ -1461,6 +1461,15 @@ impl Compiler {
         let checker = &self.checker;
         let pure_fns = &self.pure_fns;
         let steady_fns = &self.steady_fns;
+        let program_effects = &self.program_effects;
+        let module_path = checker.current_module_name().to_string();
+        // A finalizer may run at any allocation in a call: what the ones
+        // recorded so far touch, or anything while one is still to come.
+        let finalizers = if self.pending_finalizers {
+            crate::hir::effects::ALL_FIELDS
+        } else {
+            self.program_effects.drop_fields()
+        };
         let string_indices = &self.string_indices;
         let is_class = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
@@ -1910,6 +1919,10 @@ impl Compiler {
             alloc_steady: self.alloc_steady,
             pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),
             steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
+            call_fields: Box::new(move |n: &str, def| {
+                let stem = n.split("$mono$").next().unwrap_or(n);
+                finalizers | program_effects.call_fields(checker, &module_path, stem, def)
+            }),
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
             pair_class: Box::new(move |t: &Ty| {

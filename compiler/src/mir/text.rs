@@ -267,6 +267,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::HomeStore { dest, home, value } => write!(f, "{dest} = homestore {home}, {value}"),
         MirInst::ClearWord { dest, value } => write!(f, "{dest} = clearword {value}"),
         MirInst::KeepAlive { dest, value } => write!(f, "{dest} = keepalive {value}"),
+        MirInst::PanicStore { dest, object, value, index } => write!(f, "{dest} = panicstore {object}, {value}, {index}"),
         MirInst::ArrayPush {
             dest,
             array,
@@ -665,6 +666,15 @@ impl<'a> Parser<'a> {
             let value = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::ClearWord { dest, value });
+        }
+        if op == "panicstore" {
+            let object = self.value()?;
+            self.expect(',')?;
+            let value = self.value()?;
+            self.expect(',')?;
+            let index = self.uint()? as u32;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::PanicStore { dest, object, value, index });
         }
         if op == "keepalive" {
             let value = self.value()?;

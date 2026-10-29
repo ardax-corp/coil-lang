@@ -3402,6 +3402,18 @@ impl ObjArray {
         }
     }
 
+    /// Ask the cache for the object the word `dist` elements past `index`
+    /// names ([`common::dense::HEAP_PREFETCH`]). A hint: a word that is no
+    /// address, or one past the end, costs nothing but the check.
+    #[inline(always)]
+    pub fn prefetch_ahead(&self, index: i64, dist: usize) {
+        if let ArrayData::Words(w) = &self.data
+            && let Some(v) = w.get((index as usize).wrapping_add(dist))
+        {
+            prefetch_addr(v.bits());
+        }
+    }
+
     /// `elements[index]` with the VM's bounds rules: `unchecked` is a proven
     /// index; otherwise out of range returns `None`.
     #[inline(always)]
@@ -3720,6 +3732,23 @@ impl ObjArray {
             ArrayData::Bytes(_) => None,
         }
     }
+}
+
+/// A read prefetch of `addr` into every cache level; never faults.
+#[inline(always)]
+fn prefetch_addr(addr: u64) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch reads nothing the program sees and never faults.
+    unsafe {
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(addr as *const i8)
+    };
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: as above.
+    unsafe {
+        core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) addr, options(nostack, preserves_flags, readonly))
+    };
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = addr;
 }
 
 /// Shared bounds rule of [`ObjArray::read_indexed`].
