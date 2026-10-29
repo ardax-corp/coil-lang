@@ -4819,7 +4819,15 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
 
     let mut cx = Ctx { out: Vec::new(), next: 0, regs, p };
     match kind {
-        VecLoopKind::Reduce { ty, fold, term, .. } => {
+        // A map-and-fold body stores first, as the scalar loop does
+        // (`vec_loop` takes only bodies whose fold comes after the stores).
+        VecLoopKind::Reduce { ty, fold, term, stores, .. } => {
+            for (array, off, ty, value) in stores {
+                cx.next = 0;
+                let v = cx.eval(value)?;
+                cx.word(Instruction::VStore, *ty, v, cx.slot(*array), cx.slot(*off));
+            }
+            cx.next = 0;
             let v = cx.eval(term)?;
             cx.word(Instruction::VReduce, *ty, d, v, *fold);
         }

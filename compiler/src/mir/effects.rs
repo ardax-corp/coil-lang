@@ -100,7 +100,11 @@ impl MirInst {
     /// neither kind of store changes what a read of the other sees (#1559).
     pub fn writes_elements(&self, calls: &CallFacts) -> bool {
         self.runs_effects(calls)
-            || matches!(self, Self::StoreIndex { .. } | Self::VecLoop { kind: super::inst::VecLoopKind::Store { .. }, .. })
+            || match self {
+                Self::StoreIndex { .. } | Self::VecLoop { kind: super::inst::VecLoopKind::Store { .. }, .. } => true,
+                Self::VecLoop { kind: super::inst::VecLoopKind::Reduce { stores, .. }, .. } => !stores.is_empty(),
+                _ => false,
+            }
     }
 
     /// May change a word a [`MirInst::HeapFieldLoad`] reads (an instance
