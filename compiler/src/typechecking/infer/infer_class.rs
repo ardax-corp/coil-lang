@@ -85,9 +85,20 @@ impl Checker {
         } else {
             Vec::new()
         };
+        // The core prelude redeclares a builtin trait to give it default
+        // method bodies (`Eq::ne`, #2089): the builtin entry keeps its
+        // module and superclasses, and only learns which methods default.
+        let core_builtin =
+            self.current_module == crate::macros::CORE_MODULE && Checker::is_builtin_class(name);
         if let Some(previous) = self.generics.typeclass(name) {
             let is_prelude = Checker::is_builtin_class(name);
-            if is_prelude && !self.builtin_name_in_scope(name) {
+            if core_builtin {
+                let mut def = previous.clone();
+                for m in &mut def.methods {
+                    m.has_default = method_defs.iter().any(|d| d.name == m.name && d.has_default);
+                }
+                self.generics.typeclasses.insert(name.to_string(), def);
+            } else if is_prelude && !self.builtin_name_in_scope(name) {
                 // Short name was rebound (`use prelude::ops::Eq as …`);
                 // allow the user trait to replace the builtin entry.
             } else {
@@ -116,16 +127,18 @@ impl Checker {
                 return unit_ty();
             }
         }
-        let def = TypeClassDef {
-            name: name.to_string(),
-            defined_module: self.current_module.clone(),
-            type_params: param_names,
-            param_kinds: param_kinds.clone(),
-            superclasses,
-            assoc_types: assoc_types.clone(),
-            methods: method_defs.clone(),
-        };
-        self.generics.typeclasses.insert(name.to_string(), def);
+        if !core_builtin {
+            let def = TypeClassDef {
+                name: name.to_string(),
+                defined_module: self.current_module.clone(),
+                type_params: param_names,
+                param_kinds: param_kinds.clone(),
+                superclasses,
+                assoc_types: assoc_types.clone(),
+                methods: method_defs.clone(),
+            };
+            self.generics.typeclasses.insert(name.to_string(), def);
+        }
 
         // Build method schemes with trait parameters in scope.
         // Applied associated types are recorded as explicit projection
@@ -240,16 +253,19 @@ impl Checker {
                 all_kinds.extend(std::iter::repeat_n(Kind::Type, assoc_projections.len()));
                 let mut constraints = class_constraints.clone();
                 constraints.extend(own_constraints);
-                self.typeclass_method_schemes.insert(
-                    (name.to_string(), method_name.to_string()),
-                    Scheme::poly_with_kinds_and_assoc(
-                        all_bounds,
-                        all_kinds,
-                        constraints,
-                        assoc_projections,
-                        fun_ty,
-                    ),
-                );
+                // A builtin keeps the checker's own method schemes.
+                if !core_builtin {
+                    self.typeclass_method_schemes.insert(
+                        (name.to_string(), method_name.to_string()),
+                        Scheme::poly_with_kinds_and_assoc(
+                            all_bounds,
+                            all_kinds,
+                            constraints,
+                            assoc_projections,
+                            fun_ty,
+                        ),
+                    );
+                }
             }
         }
 

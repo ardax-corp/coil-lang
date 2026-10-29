@@ -7691,6 +7691,15 @@ impl Compiler {
         // `bool`.
         let ret = match &lookup {
             Ty::Tuple(_) => crate::typechecking::ty::boolean(),
+            // A trait default (`Eq::ne`, #2089) has only the trait method's
+            // scheme.
+            _ if Self::is_default_method_fqn(class, method, &fqn) => {
+                let mut ty = &self.checker.typeclass_method_scheme(class, method)?.ty;
+                while let Ty::Fun(_, next) = ty {
+                    ty = next;
+                }
+                apply_ty_prune(self.checker.subst(), ty)
+            }
             _ => self.checker.fn_return_ty(&fqn)?,
         };
         if !matches!(

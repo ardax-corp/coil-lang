@@ -455,7 +455,8 @@ trait Integral<T: Num + Shl + Shr + BitAnd + BitOr + BitXor + BitNot> {
 /// content). Arrays, `Vec`s, tuples, records and enums compare structurally,
 /// and an element with an `Eq` instance (a class's too) compares with it.
 /// Classes without an instance compare by identity. `#[derive(Eq)]`
-/// generates a field-by-field instance.
+/// generates a field-by-field instance. An `impl Eq` writes `eq` only:
+/// `ne` defaults to `!(a == b)`, and an impl may still write its own.
 ///
 /// # Examples
 ///
@@ -469,9 +470,6 @@ trait Integral<T: Num + Shl + Shr + BitAnd + BitOr + BitXor + BitNot> {
 ///     pub fn eq(Money a, Money b) -> bool {
 ///         return a.cents == b.cents;
 ///     }
-///     pub fn ne(Money a, Money b) -> bool {
-///         return a.cents != b.cents;
-///     }
 /// }
 ///
 /// fn main() {
@@ -482,7 +480,8 @@ trait Integral<T: Num + Shl + Shr + BitAnd + BitOr + BitXor + BitNot> {
 trait Eq<T> {
     /// Returns `true` when `a` and `b` are equal.
     fn eq(T a, T b) -> bool {}
-    /// Returns `true` when `a` and `b` are not equal.
+    /// Returns `true` when `a` and `b` are not equal. Defaults to
+    /// `!(a == b)`.
     fn ne(T a, T b) -> bool {}
 }
 
