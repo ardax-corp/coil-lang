@@ -3159,6 +3159,20 @@ impl Compiler {
                 exprs[i].kind = HirKind::Bin { op, lhs, rhs };
             }
         }
+        // `symbol::fn_key()`: the key of this instance, its types in the
+        // order of the body's type variables.
+        if !body.fn_key_sites.is_empty() {
+            let mut vars: Vec<_> = map.iter().collect();
+            vars.sort_by_key(|(v, _)| **v);
+            let tys: Vec<String> = vars
+                .iter()
+                .map(|(_, t)| apply_ty_prune(self.checker.subst(), t).to_string())
+                .collect();
+            for (site, name) in &body.fn_key_sites {
+                let key = crate::hir::build::fn_key(&crate::hir::build::fn_key_instance_name(name, &tys));
+                exprs[site.0 as usize].kind = HirKind::Lit(crate::hir::Lit::Int(key));
+            }
+        }
         HirBody {
             name: body.name.clone(),
             kind: body.kind,
@@ -3182,6 +3196,7 @@ impl Compiler {
             exprs,
             root: body.root,
             aliased_fn_values: body.aliased_fn_values.clone(),
+            fn_key_sites: Vec::new(),
         }
     }
 

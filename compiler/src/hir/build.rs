@@ -205,6 +205,9 @@ struct BodyBuilder {
     /// for a named function, its arity (overloads differ by arity). `None`
     /// for top-level code and static initializers.
     key_name: Option<String>,
+    /// Inside a generic function or a generic class's method (or a lambda
+    /// in one): `fn_key()` depends on the instance's types.
+    generic: bool,
 }
 
 impl BodyBuilder {
@@ -229,6 +232,7 @@ impl BodyBuilder {
                 exprs: Vec::new(),
                 root: None,
                 aliased_fn_values: Vec::new(),
+                fn_key_sites: Vec::new(),
             },
             scopes: vec![HashMap::new()],
             outer: Vec::new(),
@@ -237,6 +241,7 @@ impl BodyBuilder {
             olds: HashMap::new(),
             mut_marks: HashSet::new(),
             key_name: None,
+            generic: false,
         }
     }
 
@@ -753,6 +758,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         {
             b.type_params.extend(params.iter().cloned());
         }
+        b.generic = !b.type_params.is_empty();
         let param_tys = sig.map(|(params, _)| params).or_else(|| default_sig.map(|(params, _)| params));
         // A generic enum's `self` is the scheme's `E<T>` (`Option<T>`), so a
         // clone at `T = string` holds it in that type's own layout.
@@ -1996,9 +2002,22 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 // inlining and mono clones keep the key of the source body.
                 if args.is_empty()
                     && self.checker.prelude_fn_in_scope(n) == Some(crate::typechecking::PreludeFn::FnKey)
-                    && let Some(key) = b.key_name.as_deref().map(fn_key)
+                    && let Some(name) = b.key_name.clone()
                 {
-                    return self.emit_ty(b, node, HirKind::Lit(Lit::Int(key)), Some(coil_ty::int()));
+                    if !b.generic {
+                        return self.emit_ty(b, node, HirKind::Lit(Lit::Int(fn_key(&name))), Some(coil_ty::int()));
+                    }
+                    // Generic: each mono clone writes its instance's key here.
+                    let span = span_of(node);
+                    let text = format!(
+                        "fn_key() in `{}` reached without its type arguments (a shared generic body); call it at concrete types",
+                        b.body.name
+                    );
+                    let panic = self.contract_panic(b, span, text, false);
+                    let zero = self.synth(b, span, HirKind::Lit(Lit::Int(0)), Some(coil_ty::int()));
+                    let site = self.emit_ty(b, node, HirKind::Block { stmts: vec![panic], tail: Some(zero) }, Some(coil_ty::int()));
+                    b.body.fn_key_sites.push((site, name));
+                    return site;
                 }
                 if matches!(*n, "Some") {
                     let args = self.exprs(b, args);
@@ -2967,6 +2986,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             Some(outer) => format!("{outer}::<lambda@{}>", node.0.start),
             None => name.clone(),
         });
+        inner.generic = b.generic;
         let mode_key = Checker::lambda_mode_key(node.0.start);
         inner.body.result_mode = self.checker.fn_is_result_mode(&mode_key);
         inner.ok_is_result = self.checker.fn_result_ok_is_result(&mode_key);
@@ -3022,6 +3042,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         self.module.bodies.push(inner.finish());
         self.emit(b, node, HirKind::Lambda { body: index })
     }
+}
+
+/// The key name of a generic body's instance: `name<A, B>` with the
+/// instance's types in the order of the body's type variables.
+pub(crate) fn fn_key_instance_name(name: &str, tys: &[String]) -> String {
+    format!("{name}<{}>", tys.join(", "))
 }
 
 /// The `symbol::fn_key()` value of a body whose key name is `name`: FNV-1a

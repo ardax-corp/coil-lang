@@ -142,6 +142,10 @@ pub struct HirBody {
     /// called: those calls were rewritten to call the function by name
     /// (`let g = wrap; g(2.5)`, #916), so the value itself is never used.
     pub aliased_fn_values: Vec<HirId>,
+    /// `symbol::fn_key()` calls in a generic body (or a lambda in one), with
+    /// the body's key name: the shared body panics there, and a mono clone
+    /// (`Compiler::hir_instance`) writes the key of its instance instead.
+    pub fn_key_sites: Vec<(HirId, String)>,
 }
 
 impl HirBody {
