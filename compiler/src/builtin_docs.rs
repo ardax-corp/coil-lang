@@ -20,6 +20,7 @@ pub const MODULE_SOURCES: &[(&str, &str)] = &[
     ("gc", include_str!("builtin_docs/gc.hy")),
     ("env", include_str!("builtin_docs/env.hy")),
     ("clock", include_str!("builtin_docs/clock.hy")),
+    ("symbol", include_str!("builtin_docs/symbol.hy")),
     ("ffi", include_str!("builtin_docs/ffi.hy")),
     ("ffi::types", include_str!("builtin_docs/ffi/types.hy")),
 ];
