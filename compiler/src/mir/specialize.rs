@@ -285,6 +285,10 @@ fn specialize_side(
     if opts.mir_loop && crate::mir::promote_fields(&mut func) > 0 {
         check_after(&func, "promote_fields");
     }
+    // Hints only: forward scans of pointer arrays prefetch ahead.
+    if opts.mir_loop {
+        crate::mir::mark_prefetch_scans(&mut func);
+    }
     super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func

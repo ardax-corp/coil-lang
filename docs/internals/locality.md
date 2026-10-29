@@ -23,7 +23,7 @@ reordering measured as no gain and are out of scope.
 | 3 | Field-sensitive mod/ref summaries (which fields a call may read or write) | lets step 4 keep a field across a call that cannot touch it; `promocall.hy`: 1327 vs 985 ms | done |
 | 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.hy`: 3.1x (8 vs 3 dispatches per iteration) | done |
 | 5 | Copy the objects a pointer array holds in index order when the nursery promotes them | `objorder.hy`: 24 vs 147 ns per object (6.2x); `young_shuffle.hy` | done (minor collections) |
-| 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap | planned |
+| 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap; `scattered_scan.hy` | done |
 | 7 | Loop interchange for affine nests | `interchange.hy`: rows 277 ms vs columns 749 ms (2.7x); `fmapcols.hy` | done (non-trapping map bodies) |
 
 Probes: `/mnt/project-files/reordering/probes/` (project files). Numbers are
@@ -139,3 +139,16 @@ Numbers land here as each step merges.
   `promocall.hy` (the step 4 probe with a non-inlined recursive call in
   the loop, 1M x 20, three alternating runs): 1250-1370 → 930-1020 ms,
   the same as hand-written locals (910-1010 ms).
+- **Step 6** (prefetch): `mir::mark_prefetch_scans` marks each `Index`
+  that reads a heap word from an array made before its loop, at a header
+  φ the loop steps up by a positive constant. Dense emission sets the
+  `DenseIndex` flag `HEAP_PREFETCH` on those (no new opcode; a VM that
+  ignores the bit reads the same value). The VM then issues a read
+  prefetch for the word `PREFETCH_DISTANCE` (8) elements ahead, when that
+  element exists (`prfm` on aarch64, `prefetcht0` on x86_64, nothing
+  elsewhere). The word is not checked to be an address: a prefetch never
+  faults. `examples/perf/scattered_scan.hy` (1M old objects walked 10
+  times in a scattered order): 1190-1290 → 910-1060 ms end to end, about
+  840 → 540 ms for the walks alone. The ordered walk and an int-array
+  scan with a branch are unchanged. A distance of 8, 16 or 32 measured
+  the same.

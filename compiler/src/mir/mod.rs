@@ -38,6 +38,7 @@ mod interchange;
 mod licm;
 mod from_hir;
 mod pack;
+mod prefetch;
 mod specialize;
 mod sccp;
 mod sroa;
@@ -86,6 +87,7 @@ pub use bulk::bulk_push;
 pub use byte_scan::byte_scan;
 pub use vec_loop::vec_loops;
 pub use promote::promote_fields;
+pub use prefetch::mark_prefetch_scans;
 pub use interchange::interchange_loops;
 pub use strength::strength_reduce;
 #[cfg(test)]

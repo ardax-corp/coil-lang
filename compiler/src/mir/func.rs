@@ -106,6 +106,10 @@ pub struct MirFunc {
     /// `Index` reads of a `byte` element (a `Vec<byte>` or `[byte; N]`):
     /// `byte_scan` reads them as byte lanes.
     pub byte_loads: HashSet<ValueId>,
+    /// `Index` reads of a heap word in a forward scan: dense emission
+    /// asks the VM to prefetch the object a few elements ahead
+    /// ([`super::mark_prefetch_scans`]).
+    pub prefetch_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write
     /// elements and fields).
     pub steady_calls: HashSet<ValueId>,
@@ -225,6 +229,7 @@ impl MirFunc {
             pure_calls: HashSet::new(),
             invariant_loads: HashSet::new(),
             byte_loads: HashSet::new(),
+            prefetch_loads: HashSet::new(),
             steady_calls: HashSet::new(),
             call_fields: HashMap::new(),
             slot_fields: HashMap::new(),
