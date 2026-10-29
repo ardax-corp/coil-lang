@@ -364,12 +364,32 @@ fn pin_current_array_in(
             pins.sticky[idx] = false;
             return;
         }
-    let mut by_slot = vec![None; idx + 1];
-    by_slot[idx] = Some(obj);
-    frame_pins.push(FramePins {
-        depth: frames_len,
-        by_slot,
-        sticky: vec![false; idx + 1],
+    let mut pins = SPARE_PINS.with_borrow_mut(Vec::pop).unwrap_or_else(|| FramePins {
+        depth: 0,
+        by_slot: Vec::new(),
+        sticky: Vec::new(),
+    });
+    pins.depth = frames_len;
+    pins.by_slot.resize(idx + 1, None);
+    pins.sticky.resize(idx + 1, false);
+    pins.by_slot[idx] = Some(obj);
+    frame_pins.push(pins);
+}
+
+thread_local! {
+    /// Emptied pin tables of returned frames: a call that pins (any dense
+    /// heap op) reuses one instead of allocating two vectors.
+    static SPARE_PINS: std::cell::RefCell<Vec<FramePins>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keep `pins`' buffers for the next frame that pins; it holds no objects.
+fn recycle_pins(mut pins: FramePins) {
+    pins.by_slot.clear();
+    pins.sticky.clear();
+    SPARE_PINS.with_borrow_mut(|spare| {
+        if spare.len() < 64 {
+            spare.push(pins);
+        }
     });
 }
 
@@ -1774,8 +1794,10 @@ impl<const S: usize> Machine<S> {
     #[inline]
     fn pop_pin_map_for_current_frame(&mut self) {
         let depth = self.frames.len();
-        if self.frame_pins.last().is_some_and(|p| p.depth == depth) {
-            self.frame_pins.pop();
+        if self.frame_pins.last().is_some_and(|p| p.depth == depth)
+            && let Some(pins) = self.frame_pins.pop()
+        {
+            recycle_pins(pins);
         }
     }
 
