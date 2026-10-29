@@ -1,7 +1,8 @@
-// @expected E0801 — past the clone cap (E0804) the shared body holds its
+// @expected E0801 — past the clone budget (E0804) the shared body holds its
 // type parameter's value boxed inside the tuple inside the `Option` it
 // returns, which the call does not rebuild, so the call is refused rather
 // than misread (#1549).
+// @flags --clone-budget 8
 class A {
     pub v: int,
 }
