@@ -134,8 +134,12 @@ Numbers land here as each step merges.
   slot unknown). `promote_fields` now accepts a loop with direct calls
   and keeps a slot in a register when none of the calls' bits meet the
   slot's names; a call may panic, so a `PanicStore` goes before it like
-  any trap. A program that declares a `fn drop()` anywhere gets no
-  promotion across calls, since a finalizer can run at any allocation.
+  any trap. A finalizer can run at any allocation, so every call also
+  carries the bits of every `fn drop()` in the program
+  (`ProgramEffects::drop_fields`). Modules compile in dependency order:
+  one compiled while a later module (or the entry) still declares a drop
+  treats every call as touching every field
+  (`Compiler::set_pending_finalizers`).
   `promocall.hy` (the step 4 probe with a non-inlined recursive call in
   the loop, 1M x 20, three alternating runs): 1250-1370 → 930-1020 ms,
   the same as hand-written locals (910-1010 ms).
