@@ -7791,6 +7791,17 @@ impl Compiler {
                 hit.call_span.start..hit.call_span.end,
             ));
         }
+        for (name, span) in &self.mono_plan.keyed_values {
+            let mut msg = Message::error(
+                ErrorCode::KeyedGenericFnValue,
+                format!("generic `{name}` calls `fn_key()`, so it cannot be used as a function value"),
+                span.start..span.end,
+            );
+            msg.with_help(format!(
+                "a function value has no type arguments for its key: wrap the call at concrete types, as `fn (int x) => {name}(x)`"
+            ));
+            self.messages.push(msg);
+        }
 
         let mut program = self.do_compile(ast);
         self.namespace = ns.to_string();

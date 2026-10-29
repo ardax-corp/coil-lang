@@ -123,6 +123,9 @@ pub struct MonoPlan {
     pub retargets: Vec<MonoRetarget>,
     pub escaped_generic_fns: BTreeSet<String>,
     pub cap_hits: Vec<MonoCapHit>,
+    /// A keyed generic function (one that calls `symbol::fn_key()`) read
+    /// as a value: its shared body has no type arguments for the key.
+    pub keyed_values: Vec<(String, parser::SimpleSpan)>,
 }
 
 impl MonoPlan {
@@ -190,14 +193,20 @@ struct GenericFnSig {
     /// A `let g = wrap;` local named for `wrap`, whose calls the HIR makes
     /// calls of `wrap` (#916).
     alias: bool,
+    /// Names the body calls by a bare identifier.
+    calls: BTreeSet<String>,
+    /// The body calls `symbol::fn_key()`, or a keyed generic function: its
+    /// shared body has no key, so every ground call gets its clone, past
+    /// the caps.
+    keyed: bool,
 }
 
 #[derive(Clone, Debug)]
 struct MonoCandidate {
     span: SimpleSpan,
     specialization: MonoSpecialization,
-    /// A call through a `let g = wrap;` alias, which has no shared-body
-    /// fallback past the caps (#916).
+    /// A call through a `let g = wrap;` alias (#916), or of a keyed generic
+    /// function, which has no shared-body fallback past the caps.
     value: bool,
 }
 
@@ -216,18 +225,22 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
     let mut escaped = BTreeSet::new();
     collect_escaped_generic_refs(ast, &sigs, false, &mut escaped);
     collect_generic_fn_aliases(ast, checker, &mut sigs);
+    mark_keyed(checker, &mut sigs);
 
     let mut candidates = Vec::new();
     collect_candidates(ast, checker, &|e| ground_ty(checker, e), &sigs, &mut intern, &mut candidates);
     collect_transitive(ast, checker, &sigs, &mut intern, &mut candidates);
 
     let (specializations, retargets, cap_hits) = apply_caps(candidates);
+    let mut keyed_values = Vec::new();
+    collect_keyed_values(ast, &sigs, false, &mut keyed_values);
     MonoPlan {
         intern,
         specializations,
         retargets,
         escaped_generic_fns: escaped,
         cap_hits,
+        keyed_values,
     }
 }
 
@@ -359,6 +372,9 @@ fn collect_generic_functions(
                     .or_else(|| checker.interned_def(module, name))
                 {
                     let mut sig = signature_from_function(type_params, args);
+                    if let Some(body) = body {
+                        call_names(body, &mut sig.calls);
+                    }
                     sig.def_id = def_id;
                     sig.fn_name = (*name).to_string();
                     sigs.insert(name.to_string(), sig.clone());
@@ -403,6 +419,47 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
         param_type_params,
         param_is_rest,
         alias: false,
+        calls: BTreeSet::new(),
+        keyed: false,
+    }
+}
+
+/// Every name `node` calls by a bare identifier (lambdas included).
+fn call_names(node: &Output, out: &mut BTreeSet<String>) {
+    if let Expression::Call { name, .. } = node.1.as_ref()
+        && let Expression::Identifier(n) = name.1.as_ref()
+    {
+        out.insert((*n).to_string());
+    }
+    walk_children(node, &mut |child| call_names(child, out));
+}
+
+/// Mark the generic functions that call `symbol::fn_key()`, directly or
+/// through another keyed generic function.
+fn mark_keyed(checker: &Checker, sigs: &mut HashMap<String, GenericFnSig>) {
+    let fn_key = checker
+        .prelude_fn_in_scope("fn_key")
+        .is_some_and(|k| k == crate::typechecking::PreludeFn::FnKey);
+    let mut keyed: BTreeSet<String> = sigs
+        .iter()
+        .filter(|(_, sig)| fn_key && sig.calls.contains("fn_key"))
+        .map(|(name, _)| name.clone())
+        .collect();
+    loop {
+        let more: Vec<String> = sigs
+            .iter()
+            .filter(|(name, sig)| !keyed.contains(*name) && sig.calls.iter().any(|c| keyed.contains(c)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        keyed.extend(more);
+    }
+    for name in keyed {
+        if let Some(sig) = sigs.get_mut(&name) {
+            sig.keyed = true;
+        }
     }
 }
 
@@ -432,7 +489,7 @@ fn collect_candidates(
             out.push(MonoCandidate {
                 span: node.0,
                 specialization,
-                value: sig.alias,
+                value: sig.alias || sig.keyed,
             });
         }
         // A call in callee position (`maker(4)()`, #1533) is a call too.
@@ -890,6 +947,29 @@ fn collect_escaped_generic_refs(
         _ => walk_children(node, &mut |child| {
             collect_escaped_generic_refs(child, sigs, false, escaped)
         }),
+    }
+}
+
+/// Each read of a keyed generic function that is not a call's callee.
+fn collect_keyed_values(
+    node: &Output,
+    sigs: &HashMap<String, GenericFnSig>,
+    is_call_target: bool,
+    out: &mut Vec<(String, SimpleSpan)>,
+) {
+    match node.1.as_ref() {
+        Expression::Identifier(name) if !is_call_target && sigs.get(*name).is_some_and(|s| s.keyed) => {
+            out.push((name.to_string(), node.0));
+        }
+        Expression::Call { name, args } => {
+            collect_keyed_values(name, sigs, true, out);
+            if let Some(args) = args {
+                for arg in args {
+                    collect_keyed_values(arg, sigs, false, out);
+                }
+            }
+        }
+        _ => walk_children(node, &mut |child| collect_keyed_values(child, sigs, false, out)),
     }
 }
 
