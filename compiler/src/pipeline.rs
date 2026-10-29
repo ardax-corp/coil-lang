@@ -2829,6 +2829,56 @@ fn main() {
     }
 
     #[test]
+    fn main_after_static_setup_gets_a_precise_frame_map() {
+        // The prologue jumps to the static setup, which jumps to `main`:
+        // without a map, `main`'s frame is scanned conservatively and stale
+        // words the setup left above it keep dead objects alive.
+        let mut pipeline = Pipeline::new();
+        pipeline
+            .compile_src(
+                r#"
+// A `fn drop()` keeps the static from folding at compile time.
+static let drops = 0;
+enum Conn {
+    Open(int),
+    Closed,
+}
+impl Conn {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+fn open(int fd) -> int {
+    let c = Conn::Open(fd);
+    return match c {
+        Conn::Open(x) => x,
+        Conn::Closed => 0,
+    };
+}
+static let first = open(3);
+fn main() {
+    let c = Conn::Open(first);
+    let _ = match c {
+        Conn::Open(x) => x + open(4),
+        Conn::Closed => 0,
+    };
+}
+"#,
+            )
+            .expect("compile");
+        let main = pipeline.main_offset().expect("main");
+        let row = pipeline
+            .precise_frames()
+            .iter()
+            .find(|r| r.entry_pc == main)
+            .expect("main has a frame map row");
+        assert!(
+            row.any_pc.is_some() || !row.at_pc.is_empty(),
+            "main entered from the setup should be mapped precisely"
+        );
+    }
+
+    #[test]
     fn non_recursive_compile_keeps_default_operand_stack_slots() {
         let mut pipeline = Pipeline::new();
         pipeline
