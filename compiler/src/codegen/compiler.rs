@@ -5,8 +5,6 @@ use reporting::{ErrorCode, Message};
 
 /// Synthetic function name prefix for a static initializer body.
 pub(super) const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
-/// Most generic-head instance / default-body clones in one compilation.
-const INST_CLONE_MAX_TOTAL: usize = 256;
 
 #[path = "capabilities.rs"]
 mod capabilities;
@@ -1581,7 +1579,6 @@ impl Compiler {
     /// instance's own words and no dictionary, as a raw instance method.
     /// `None` when `fqn` has no clone there.
     pub(super) fn instance_clone(&mut self, fqn: &str, lookup: &[Ty]) -> Option<String> {
-        const MAX_PER_METHOD: usize = 8;
         let src = self.inst_clone_srcs.get(fqn)?;
         // Keyed without `readonly`, which has no runtime form (#1806).
         let lookup = &lookup.iter().map(crate::typechecking::ty::strip_readonly_deep).collect::<Vec<_>>()[..];
@@ -1593,10 +1590,12 @@ impl Compiler {
             return Some(name.clone());
         }
         // Instance types may grow without end (`Show<Tree<Box<T>>>` from
-        // `Show<Tree<T>>`): a bounded number of clones, then the shared body.
-        if self.inst_clones.len() >= INST_CLONE_MAX_TOTAL || self.inst_clones.keys().filter(|(f, _)| f == fqn).count() >= MAX_PER_METHOD {
+        // `Show<Tree<T>>`): a method already on this clone's chain takes the
+        // shared body, as does any clone past `--clone-budget`.
+        if self.inst_clones.len() >= self.checker.host_grants().clone_budget() || self.inst_clone_recursive(fqn) {
             return None;
         }
+        let chain = self.inst_clone_chain(fqn);
         let (class, method) = (src.class.clone(), src.method.clone());
         let inherent = src.method_of.is_some();
         // A default body cloned at its own bounds' types too: the trait's
@@ -1644,6 +1643,7 @@ impl Compiler {
                 src: fqn.to_string(),
                 lookup: lookup.to_vec(),
                 name: name.clone(),
+                chain: chain.clone(),
             });
             return Some(name);
         }
@@ -1653,8 +1653,23 @@ impl Compiler {
             src: fqn.to_string(),
             lookup: lookup.to_vec(),
             name: name.clone(),
+            chain,
         });
         Some(name)
+    }
+
+    /// Whether a new clone of `fqn` would repeat a clone source already on
+    /// the chain of the clone being compiled: polymorphic recursion
+    /// (`Nest<T>::depth` calling `Nest<Nest<T>>::depth`).
+    fn inst_clone_recursive(&self, fqn: &str) -> bool {
+        self.inst_clone_fallback.as_ref().is_some_and(|(_, req)| req.chain.iter().any(|f| f == fqn))
+    }
+
+    /// The chain of a clone of `fqn` asked for from the body being compiled.
+    fn inst_clone_chain(&self, fqn: &str) -> Vec<String> {
+        let mut chain = self.inst_clone_fallback.as_ref().map(|(_, req)| req.chain.clone()).unwrap_or_default();
+        chain.push(fqn.to_string());
+        chain
     }
 
     /// The name of the clone of `fqn` at ground types `lookup`.
@@ -1668,7 +1683,6 @@ impl Compiler {
     /// still have room for it next to the ones already planned (which it
     /// then joins), so [`Self::instance_clone`] makes it at emission.
     pub(super) fn method_clone_room(&self, fqn: &str, lookup: &[Ty]) -> bool {
-        const MAX_PER_METHOD: usize = 8;
         let key = (fqn.to_string(), lookup.to_vec());
         if self.inst_clones.contains_key(&key) {
             return true;
@@ -1677,9 +1691,8 @@ impl Compiler {
         if planned.contains(&key) {
             return true;
         }
-        let per_method = self.inst_clones.keys().chain(planned.iter()).filter(|(f, _)| f == fqn).count();
-        let room = self.inst_clones.len() + planned.len() < INST_CLONE_MAX_TOTAL
-            && per_method < MAX_PER_METHOD
+        let room = self.inst_clones.len() + planned.len() < self.checker.host_grants().clone_budget()
+            && !self.inst_clone_recursive(fqn)
             && planned.len() < self.inst_clone_labels.len();
         if room {
             planned.insert(key);
@@ -1694,7 +1707,7 @@ impl Compiler {
         if self.inst_clone_srcs.is_empty() {
             return;
         }
-        let want = 2 * INST_CLONE_MAX_TOTAL.saturating_sub(self.inst_clones.len());
+        let want = 2 * self.checker.host_grants().clone_budget().saturating_sub(self.inst_clones.len());
         while self.inst_clone_labels.len() < want {
             let label = self.bytecode.fresh_label();
             self.inst_clone_labels.push(label);
@@ -7788,13 +7801,19 @@ impl Compiler {
         self.bytecode.bind_fresh_entry();
         self.mono_plan = crate::monomorphize::run_monomorphize_pass(module, ast, &self.checker);
         for hit in &self.mono_plan.cap_hits {
-            let kind = if hit.per_fn { "per-function" } else { "total" };
-            self.messages.push(Message::warn(
-                ErrorCode::MonomorphizeCap,
-                format!(
-                    "monomorphization {kind} cap hit for `{}`; using shared generic body",
+            let why = match hit.reason {
+                crate::monomorphize::MonoCapReason::Recursive => {
+                    format!("`{}` instantiates itself at a growing type", hit.fn_name)
+                }
+                crate::monomorphize::MonoCapReason::Budget => format!(
+                    "monomorphization budget ({} clones) reached at `{}`",
+                    crate::monomorphize::MAX_TOTAL_SPECIALIZATIONS,
                     hit.fn_name
                 ),
+            };
+            self.messages.push(Message::warn(
+                ErrorCode::MonomorphizeCap,
+                format!("{why}; using shared generic body"),
                 hit.call_span.start..hit.call_span.end,
             ));
         }

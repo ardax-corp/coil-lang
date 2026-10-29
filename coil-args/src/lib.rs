@@ -201,6 +201,10 @@ pub struct HostGrantFlags {
     /// Load STEM's library without a hash check (repeatable)
     #[arg(long = "dload-trusted", value_name = "STEM", action = clap::ArgAction::Append)]
     pub dload_trusted: Vec<String>,
+    /// Most per-type clones of generic code one compile makes (default
+    /// 4096); past it a ground call takes the shared generic body (E0804)
+    #[arg(long = "clone-budget", value_name = "N")]
+    pub clone_budget: Option<usize>,
     /// Most steps (loop iterations + calls) one compile-time evaluation may
     /// run, such as a macro call (default 1000000000)
     #[arg(long = "comptime-steps", value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
@@ -284,6 +288,7 @@ impl HostGrantFlags {
             || !self.ffi_search_path.is_empty()
             || !self.dload_pin.is_empty()
             || !self.dload_trusted.is_empty()
+            || self.clone_budget.is_some()
             || self.comptime_steps.is_some()
             || self.comptime_mem.is_some()
             || !self.comptime_read.is_empty()
@@ -316,6 +321,9 @@ impl HostGrantFlags {
         let mem = self.comptime_mem;
         let timeout = self.comptime_timeout;
         let extra = self.into_grants();
+        if extra.clone_budget.is_some() {
+            grants.clone_budget = extra.clone_budget;
+        }
         grants.comptime_io.extend(extra.comptime_io);
         if extra.comptime_cache.dir.is_some() {
             grants.comptime_cache.dir = extra.comptime_cache.dir;
@@ -359,6 +367,7 @@ impl HostGrantFlags {
             ffi_search_paths: self.ffi_search_path,
             dload_pins: self.dload_pin,
             dload_trusted: self.dload_trusted,
+            clone_budget: self.clone_budget,
             comptime: ComptimeLimits {
                 steps: self.comptime_steps.unwrap_or(ComptimeLimits::DEFAULT_STEPS),
                 heap_bytes: self.comptime_mem.unwrap_or(ComptimeLimits::DEFAULT_MEM_MIB) << 20,
