@@ -259,10 +259,28 @@ fn post(body: &mut HirBody, id: HirId, hits: &mut usize) {
         .or_else(|| regroup(body, id))
         .or_else(|| known_variant(body, id))
     {
+        // An `if` that folds to a branch that always leaves leaves too.
+        let never = taken(body, id).is_some_and(|b| matches!(body.expr(b).ty, Some(Ty::Never)));
         let e = &mut body.exprs[id.0 as usize];
         e.kind = kind;
         e.node = None;
+        if never {
+            e.ty = Some(Ty::Never);
+        }
         *hits += 1;
+    }
+}
+
+/// The branch an `if` on a literal takes; `None` for anything else, and
+/// for a `false` with no `else`.
+fn taken(body: &HirBody, id: HirId) -> Option<HirId> {
+    let HirKind::If { cond, then, els } = body.expr(id).kind else {
+        return None;
+    };
+    match body.expr(cond).kind {
+        HirKind::Lit(Lit::Bool(true)) => Some(then),
+        HirKind::Lit(Lit::Bool(false)) => els,
+        _ => None,
     }
 }
 
@@ -296,15 +314,18 @@ fn rewrite(body: &HirBody, id: HirId) -> Option<HirKind> {
             HirKind::Lit(Lit::Bool(a)) => Some(HirKind::Lit(Lit::Bool(a))),
             _ => None,
         },
-        // The branch taken stands in for the `if` when it has the same type.
-        HirKind::If { cond, then, els } => {
-            let taken = match body.expr(*cond).kind {
-                HirKind::Lit(Lit::Bool(true)) => Some(*then),
-                HirKind::Lit(Lit::Bool(false)) => *els,
-                _ => return None,
-            };
-            match taken {
-                Some(b) => (body.expr(b).ty == e.ty).then(|| body.expr(b).kind.clone()),
+        // The branch taken stands in for the `if` when it has the same type,
+        // or always leaves (`if true { return a; }`, an `if` with no `else`
+        // and so `()`).
+        HirKind::If { cond, .. } => {
+            if !matches!(body.expr(*cond).kind, HirKind::Lit(Lit::Bool(_))) {
+                return None;
+            }
+            match taken(body, id) {
+                Some(b) => {
+                    let ty = &body.expr(b).ty;
+                    (*ty == e.ty || matches!(ty, Some(Ty::Never))).then(|| body.expr(b).kind.clone())
+                }
                 None => e.ty.as_ref().is_some_and(|t| named(t, "unit") || *t == ty::unit()).then(|| HirKind::Block { stmts: Vec::new(), tail: None }),
             }
         }

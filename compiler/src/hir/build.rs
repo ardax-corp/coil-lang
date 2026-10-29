@@ -2183,7 +2183,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
     fn if_chain(&mut self, b: &mut BodyBuilder, node: &Output<'_>, branches: &[Output<'_>]) -> HirId {
         // Build from the last branch backwards so each `else` nests.
-        let chain_ty = self.ty_of(node);
+        let mut chain_ty = self.ty_of(node);
+        // A chain with no final `else` falls through when every condition
+        // is false, so it is `()` even where the checker gives it the
+        // `never` of its diverging branches (`if c { raise e; }`).
+        let has_else = branches.last().is_some_and(|b| !matches!(b.1.as_ref(), Expression::Branch(Some(_), _)));
+        if !has_else && matches!(chain_ty, Some(Ty::Never)) {
+            chain_ty = Some(coil_ty::unit());
+        }
         let mut els: Option<HirId> = None;
         for (i, branch) in branches.iter().enumerate().rev() {
             match branch.1.as_ref() {
