@@ -1,6 +1,6 @@
 # Opt generalization (COI-333 A0)
 
-> **Status: historical.** Written while stack IL with an IL→MIR lift was the production path. Since M4/M5 (2026-10) every body lowers from HIR to MIR. Today's pipeline: [pipeline.md](pipeline.md).
+> **Status: historical.** Written while stack IL with an IL→MIR lift was the production path. Since M4/M5 (2026-10) every body lowers from HIR to MIR. Today's pipeline: [pipeline.md](pipeline.md). The dense cost gate it refers to is gone: dense keeps every body it can emit, and LIR runs only where dense refuses.
 
 Doctrine for generalizing MIR / IL opts so they fit **majority** programs,
 not prove-board shapes. No compiler changes in this note.

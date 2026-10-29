@@ -157,6 +157,9 @@ pub fn try_specialize_body_side(
     if let Some(why) = func.emit_refusal {
         return refuse_dense(why);
     }
+    if !opts.mir_dense {
+        return refuse_dense("dense tier off");
+    }
     let mut direct_side = BodySidecar::default();
     let mut direct_pool = pool.clone();
     let out = specialize_side(fallback, labels, name, &mut direct_pool, calls, official_entry, func, &mut direct_side, opts)?;
@@ -180,16 +183,15 @@ fn specialize_side(
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, or counted i64 +/−/×/÷/%. A
-    // back-edge or a straight-line numeric body may lift; keep/refuse is
-    // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
+    // back-edge or a straight-line numeric body may lift, and dense keeps
+    // every body it can emit (no cost compare against LIR). S3/S3b: one-word CALL (dense map or
     // open), I6 HostInvoke including Q9 R2 `from_bytes` / `to_bytes`, heap
     // index / ArrayLen / StoreIndex (dense residuals after V*). FORMAT /
     // STRING / PRINT / STRINGIFY stay off dense (Q9 R1 is MIR→LIR; R3
     // maps FORMAT / STRINGIFY). Q6
     // counted `for` is i64 + index.
-    // Q8: niche / two-slot match may dense when the reconstruct beats
-    // fuse-IL. D3: boxed JumpIfMatch / multi-payload Unpack may dense
-    // (stack JIM + per-index MatchPayload; cost gate). Alloc / InitTyped
+    // Q8: niche / two-slot match may dense. D3: boxed JumpIfMatch /
+    // multi-payload Unpack may dense (stack JIM + per-index MatchPayload). Alloc / InitTyped
     // take dense with a frame extent (minor 22). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
     // StoreIndex emit dense-native. D2: heap LoadField / GetField /
@@ -203,7 +205,6 @@ fn specialize_side(
     // B7 / C1: sibling / mutual TailCall and self multi-word CALL/RETURN
     // may lift (stack-arg protocol, reserved callee entry labels). N>2
     // still refuses at infer/lower.
-    let select_cfg = fallback.is_some_and(has_sroa_select_cfg);
     let facts = super::gates::GateFacts::of(from_hir);
     let has_alloc = facts.has_alloc;
     let inloop_alloc = facts.alloc_in_loop;
@@ -219,9 +220,6 @@ fn specialize_side(
     // each line's code there (`keep_lines`).
     if from_hir.keep_lines {
         return refuse_dense("coverage");
-    }
-    if !has_numeric_arith(from_hir) {
-        return refuse_dense("no numeric arith");
     }
     if !calls_agree(from_hir, calls) {
         return refuse_dense("call ABI");
@@ -338,23 +336,11 @@ fn specialize_side(
     {
         return refuse_dense("boxed in-loop alloc");
     }
-    // Straight-line / leftover reconstruct: never denser-but-slower.
-    // Loops amortize prologue Seek; they skip this static compare unless
-    // the body is a select diamond or still has in-loop Make*.
-    // Native in-loop Make* / ArrayPush amortize prologue Seek (A2 / B6).
-    // Boxed leftover reconstruct is already refused above.
-    let loop_tax = facts.has_loop && !select_cfg;
-    // Both compares are against the code that runs if dense refuses (its
+    // The compare is against the code that runs if dense refuses (its
     // LIR): a body the LIR tier refuses has nothing to lose to.
     let Some(ops) = fallback else {
         return Some((out, abi));
     };
-    // Q7 self-CALL is eligible; keep/refuse is still this cost compare.
-    // B2 convoys CALL on the stack so tight fib/tak can win without
-    // skipping the gate (the old Seek + STORE reconstruct was ~2× fib).
-    if !loop_tax && emit_cost(&out) > emit_cost(ops) {
-        return refuse_dense("dense cost gate");
-    }
     // Two-slot CALL/RETURN must not grow a boxed reconstruct (C1).
     if count_make_enum(&out) > count_make_enum(ops) {
         return refuse_dense("MakeEnum growth");
@@ -363,27 +349,20 @@ fn specialize_side(
 }
 
 /// Every `CALL` in `func` uses its callee's dense ABI, when the callee has one.
+/// The callee may declare more entry words than the call passes: dictionary
+/// slots past its parameters (heap words, read only where a dictionary
+/// program loads one), which the LIR `CALL` leaves unset too.
 fn calls_agree(func: &crate::mir::MirFunc, calls: &DenseCallMap) -> bool {
-    use crate::mir::MirInst;
+    use crate::mir::{MirInst, MirTy};
     func.blocks.iter().flat_map(|b| b.insts.iter()).all(|i| match i {
         MirInst::Call { dest, dest_hi, target, args } => calls.get(&target.0).is_none_or(|abi| {
             abi.ret_hi == dest_hi.map(|h| func.ty(h))
                 && abi.ret == func.ty(*dest)
-                && abi.params.len() == args.len()
+                && abi.params.len() >= args.len()
+                && abi.params[args.len()..].iter().all(|&p| p == MirTy::HeapRef)
                 && abi.params.iter().zip(args).all(|(&p, &a)| p == func.ty(a))
         }),
         _ => true,
-    })
-}
-
-/// The arithmetic dense pays for: float `+ - * /` or int `+ - * / %`.
-fn has_numeric_arith(func: &crate::mir::MirFunc) -> bool {
-    use crate::mir::{MirBinOp, MirInst};
-    func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
-        matches!(
-            i,
-            MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div, ty, .. } if ty.is_float() || ty.is_int()
-        ) || matches!(i, MirInst::Bin { op: MirBinOp::Rem, ty, .. } if ty.is_int())
     })
 }
 
@@ -510,23 +489,6 @@ fn residual_heap_box(ops: &[IlOp]) -> bool {
         IlOp::Byte { byte, .. } => is_stack_heap_op(*byte.bytecode()),
         _ => false,
     })
-}
-
-/// Reconstruct size vs fuse-IL. Weights `Seek` and LOAD/STORE, not opcode
-/// novelty — packed `Dense*` must not grow this (COI-385 S8).
-fn emit_cost(ops: &[IlOp]) -> usize {
-    ops.iter()
-        .filter(|op| !matches!(op, IlOp::Label(_)))
-        .map(|op| match op {
-            IlOp::StorePop { .. } | IlOp::Load { .. } => 2,
-            IlOp::Byte { byte, .. } => match *byte.bytecode() {
-                Instruction::Seek => 2 + (byte.operand_u32() as usize) / 16,
-                Instruction::LOAD | Instruction::StorePop => 2,
-                _ => 1,
-            },
-            _ => 1,
-        })
-        .sum()
 }
 
 /// MIR→LIR for a body dense does not keep: `from_hir` (MIR lowered from
@@ -801,55 +763,6 @@ fn emit_cleanup_pad(
     Ok((label, frame, ops))
 }
 
-/// S2f computed-index slot-select: several EQ/JMPF arms into one join.
-fn has_sroa_select_cfg(ops: &[IlOp]) -> bool {
-    use crate::il::IlJumpKind;
-    let mut n = 0usize;
-    for (i, op) in ops.iter().enumerate() {
-        match op {
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue,
-                ..
-            } if eq_immediately_before(ops, i) => n += 1,
-            IlOp::Byte { byte, .. } if fused_eq_jmp(byte) => n += 1,
-            _ => {}
-        }
-    }
-    n >= 2
-}
-
-fn eq_immediately_before(ops: &[IlOp], jump_i: usize) -> bool {
-    let mut i = jump_i;
-    while i > 0 {
-        i -= 1;
-        match &ops[i] {
-            IlOp::Label(_) => continue,
-            other => return is_eq_byte(other),
-        }
-    }
-    false
-}
-
-fn is_eq_byte(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::Byte { byte, .. } if matches!(*byte.bytecode(), Instruction::EQ | Instruction::IEQ)
-    ) || matches!(op, IlOp::Bin { op: Instruction::EQ | Instruction::IEQ, .. })
-}
-
-fn fused_eq_jmp(byte: &common::Byte) -> bool {
-    let eq = |op: u8| op == Instruction::EQ as u8 || op == Instruction::IEQ as u8;
-    match *byte.bytecode() {
-        Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => {
-            eq(byte.bin_slot_imm_jmpf_parts().0)
-        }
-        Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
-            eq(byte.bin_slot_slot_jmpf_parts().0)
-        }
-        _ => false,
-    }
-}
-
 /// Make* / InitTyped between a loop header and its back-edge.
 /// Preheader alloc plus an index loop is not this — S2d may specialize those.
 fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
@@ -888,7 +801,7 @@ mod cost_gate_tests {
 
     use crate::il::IlOp;
 
-    use super::{emit_cost, residual_heap_box};
+    use super::residual_heap_box;
 
     fn loc() -> DebugLoc {
         DebugLoc::unknown()
@@ -905,32 +818,6 @@ mod cost_gate_tests {
     }
 
     #[test]
-    fn emit_cost_weights_load_store_above_dense() {
-        let boxed = [
-            IlOp::Load { slot: 0, loc: loc() },
-            IlOp::Load { slot: 1, loc: loc() },
-            IlOp::Index { loc: loc() },
-            IlOp::StorePop { slot: 2, loc: loc() },
-        ];
-        let native = [IlOp::byte(
-            Byte::new(Instruction::DenseIndex).with_dense_abc(0, 2, 0, 1),
-        )];
-        assert!(emit_cost(&native) < emit_cost(&boxed));
-        assert!(emit_cost(&native) <= emit_cost(&boxed));
-    }
-
-    #[test]
-    fn emit_cost_weights_seek_by_frame_size() {
-        let small = [IlOp::byte(
-            Byte::new(Instruction::Seek).with_operand_u32(8),
-        )];
-        let large = [IlOp::byte(
-            Byte::new(Instruction::Seek).with_operand_u32(80),
-        )];
-        assert!(emit_cost(&large) > emit_cost(&small));
-    }
-
-    #[test]
     fn body_labels_read_only_the_labels() {
         use crate::il::Label;
         let ops = [
@@ -944,16 +831,6 @@ mod cost_gate_tests {
         assert_eq!(labels.head, vec![Label(4), Label(9)]);
         assert_eq!(super::BodyLabels::of(&ops[2..]).first, Some(Label(12)));
         assert!(super::BodyLabels::of(&ops[2..]).head.is_empty());
-    }
-
-    /// COI-385: packed dense ops cost 1 — same as any non-Seek/LOAD Byte.
-    #[test]
-    fn emit_cost_does_not_tax_packed_dense_ops() {
-        let dense = [
-            IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(0, 2, 0, 1)),
-            IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_abc(0, 1, 0, 0)),
-        ];
-        assert_eq!(emit_cost(&dense), 2);
     }
 
     /// A pass that leaves broken MIR is named in debug builds (#1869).

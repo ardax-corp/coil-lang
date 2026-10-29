@@ -1566,6 +1566,7 @@ mod tests {
             hir_inline: false,
             hir_inline_heap: false,
             hir_pair_locals: false,
+            mir_dense: false,
             hir_bisect: None,
             auto_par: false,
             early_free: false,

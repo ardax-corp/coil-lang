@@ -137,6 +137,7 @@ mod tests {
             (dense::IXOR64, Instruction::XOR),
             (dense::ISHL64, Instruction::SHL),
             (dense::ISHR64, Instruction::SHR),
+            (dense::IPOW64, Instruction::Pow),
         ];
         for (kind, op) in ints {
             for a in INTS {
@@ -154,6 +155,7 @@ mod tests {
             (dense::FMUL64, Instruction::MULF),
             (dense::FDIV64, Instruction::DIVF),
             (dense::FREM64, Instruction::MODF),
+            (dense::FPOW64, Instruction::PowF),
         ];
         for (kind, op) in floats {
             for a in FLOATS {

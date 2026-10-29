@@ -254,6 +254,34 @@ pub fn emit_dense(
                 continue;
             }
             if !plan.needs_slot(inst.dest()) {
+                // A make the return builds: the frame ends there, so its
+                // elements need no clearing after it.
+                if matches!(inst, MirInst::Alloc { .. }) {
+                    after = &[];
+                }
+                // `f(a) + 1` on the self-call result still on TOS: fold it
+                // now, so a later self-call stacks its result on top.
+                if let MirInst::Bin { dest, op, ty, lhs, rhs } = inst
+                    && stacked.last() == Some(lhs)
+                    && (plan.needs_slot(*rhs)
+                        || plan.def[rhs.index()]
+                            .is_some_and(|(b, i)| matches!(func.block(b).insts[i], MirInst::Const { .. })))
+                {
+                    emit_stack_bin(EmitStackBinArgs {
+                        out: &mut out,
+                        stacked: &mut stacked,
+                        op: *op,
+                        ty: *ty,
+                        lhs: *lhs,
+                        rhs: *rhs,
+                        dest: *dest,
+                        func,
+                        plan: &plan,
+                        regs: &regs,
+                        pool,
+                        loc,
+                    })?;
+                }
                 continue;
             }
             // Register form needs every operand in a register. A convoyed
@@ -4063,11 +4091,13 @@ fn bin_kind(op: MirBinOp, ty: MirTy) -> Result<u8, LowerError> {
         (MirBinOp::Xor, MirTy::I64) => dense::IXOR64,
         (MirBinOp::Shl, MirTy::I64) => dense::ISHL64,
         (MirBinOp::Shr, MirTy::I64) => dense::ISHR64,
+        (MirBinOp::Pow, MirTy::I64) => dense::IPOW64,
         (MirBinOp::Add, MirTy::F64) => dense::FADD64,
         (MirBinOp::Sub, MirTy::F64) => dense::FSUB64,
         (MirBinOp::Mul, MirTy::F64) => dense::FMUL64,
         (MirBinOp::Div, MirTy::F64) => dense::FDIV64,
         (MirBinOp::Rem, MirTy::F64) => dense::FREM64,
+        (MirBinOp::Pow, MirTy::F64) => dense::FPOW64,
         _ => return Err(LowerError::Refused(format!("dense bin {op:?} {ty}"))),
     })
 }
@@ -4436,6 +4466,24 @@ fn emit_stack_value(args: EmitStackValueArgs<'_>) -> Result<(), LowerError> {
                 loc,
             })
         }
+        // A make whose only use is the return: its elements, then the
+        // stack make, which lowering fuses with the `RETURN`.
+        MirInst::Alloc { dest, kind, elems, kinds } => {
+            emit_args_on_stack(EmitArgsOnStackArgs {
+                out,
+                stacked,
+                args: elems,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            })?;
+            out.extend(il_for_alloc(*kind, elems.len() as u32, *kinds, loc)?);
+            stacked.truncate(stacked.len().saturating_sub(elems.len()));
+            stacked.push(*dest);
+            Ok(())
+        }
         // A slotless call result is only valid while it is still TOS
         // (`stacked.last()` above). Reloading `regs[v]` reads an
         // unassigned slot — 0, the first parameter — so `n * fact(n-1)`
@@ -4516,16 +4564,22 @@ fn emit_stack_bin(args: EmitStackBinArgs<'_>) -> Result<(), LowerError> {
         pool,
         loc,
     })?;
-    emit_stack_value(EmitStackValueArgs {
-        out,
-        stacked,
-        v: rhs,
-        func,
-        plan,
-        regs,
-        pool,
-        loc,
-    })?;
+    if rhs == lhs {
+        // `x + x`: the operand on top is spoken for.
+        out.push(IlOp::Dup { loc });
+        stacked.push(rhs);
+    } else {
+        emit_stack_value(EmitStackValueArgs {
+            out,
+            stacked,
+            v: rhs,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        })?;
+    }
     out.push(IlOp::Bin {
         op: stack_op,
         loc,
