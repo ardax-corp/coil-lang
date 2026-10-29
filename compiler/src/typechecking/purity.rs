@@ -346,13 +346,15 @@ pub struct LengthStability {
     pub alloc_stable: bool,
 }
 
-/// True when some `fn drop()` in `ast` may change an array's length.
+/// Whether `ast` declares a `fn drop()`, and whether one may change an
+/// array's length.
 ///
 /// This runs before the checker, so every bare pattern name counts as a
 /// binding. Only a function or static that shares a unit case's name and is
 /// used in the same body could tell the difference.
-pub fn finalizers_may_resize(ast: &Output<'_>) -> bool {
-    finalizers_resize(&analyze_fn_effects(ast, BareCases::none()))
+pub fn finalizer_facts(ast: &Output<'_>) -> (bool, bool) {
+    let effects = analyze_fn_effects(ast, BareCases::none());
+    (effects.contains_key("drop"), finalizers_resize(&effects))
 }
 
 fn finalizers_resize(effects: &HashMap<String, EffectFlags>) -> bool {

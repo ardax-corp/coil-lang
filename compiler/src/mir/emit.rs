@@ -20,6 +20,20 @@ use super::inst::{
 use super::error::LowerError;
 use super::ty::MirTy;
 
+/// A run of `PanicStore`s: the label opening its range, and each store's
+/// object, word and slot.
+type PanicGroup = (Label, Vec<(ValueId, ValueId, u32)>);
+
+/// The panic write-backs of a body with [`MirInst::PanicStore`]s: a panic
+/// at a pc from `start` up to `end` (the next label) continues at `pad`,
+/// which does the stores the source owed the heap there and resumes the
+/// unwind. `frame` is the body's frame words.
+#[derive(Clone, Debug, Default)]
+pub struct PanicPads {
+    pub ranges: Vec<(Label, Label, Label)>,
+    pub frame: u32,
+}
+
 /// Emit dense IL for `func`. Preserves `entry_label` so CALL targets stay valid.
 ///
 /// `across_alloc` is S2c: emit `Make*` / `InitTyped` residuals at mapped
@@ -29,7 +43,7 @@ pub fn emit_dense(
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
     across_alloc: bool,
-) -> Result<Vec<IlOp>, LowerError> {
+) -> Result<(Vec<IlOp>, PanicPads), LowerError> {
     if func.has_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
             "dense emit refuses Alloc/GcBarrier without GC maps (S2c)".into(),
@@ -98,6 +112,9 @@ pub fn emit_dense(
 
     let cmp_dests = term_cmp_dests(func);
     let all_preds = func.preds();
+    // Each run of `PanicStore`s opens a range at a label: its stores, and
+    // where the label sits in `out`.
+    let mut groups: Vec<PanicGroup> = Vec::new();
     let rotate = rotatable_headers(func, &cmp_dests, &all_preds, &arg_clears, &entry_clears, regs.as_slice(), scratch);
     for block in &func.blocks {
         let preds = &all_preds[block.id.index()];
@@ -119,7 +136,30 @@ pub fn emit_dense(
         }
         // The zeros [`arg_clears`] puts after the op emitted last.
         let mut after: &[u8] = &[];
+        let mut run: Vec<(ValueId, ValueId, u32)> = Vec::new();
+        // The last range opened in this block, while no label follows it.
+        let mut open: Option<usize> = None;
         for inst in &block.insts {
+            if let MirInst::PanicStore { object, value, index, .. } = inst {
+                if !plan.needs_slot(*object) || !plan.needs_slot(*value) {
+                    return Err(LowerError::Refused("panic store word without a register".into()));
+                }
+                run.push((*object, *value, *index));
+                continue;
+            }
+            if !run.is_empty() {
+                let run = std::mem::take(&mut run);
+                let same = open.is_some_and(|at| {
+                    groups.last().is_some_and(|(_, prev)| *prev == run)
+                        && !out[at + 1..].iter().any(|op| matches!(op, IlOp::Label(_)))
+                });
+                if !same {
+                    let label = take_label(&mut next_label, &reserved);
+                    open = Some(out.len());
+                    out.push(IlOp::Label(label));
+                    groups.push((label, run));
+                }
+            }
             for &r in std::mem::replace(&mut after, arg_clears.after(inst.dest())) {
                 push_clear_word(&mut out, r);
             }
@@ -291,7 +331,61 @@ pub fn emit_dense(
     pack_chained_dense_bin(&mut out);
     pack_dense_bin_jmpf(&mut out);
     pack_dense_index_jmpf(&mut out);
-    Ok(out)
+    let pads = emit_panic_pads(&mut out, &groups, &regs, frame, &mut next_label, &reserved)?;
+    Ok((out, pads))
+}
+
+/// The pads of `groups` ([`PanicPads`]), after the body: each stores its
+/// words from their registers and ends in `unwind_resume`.
+fn emit_panic_pads(
+    out: &mut Vec<IlOp>,
+    groups: &[PanicGroup],
+    regs: &[u8],
+    frame: u32,
+    next_label: &mut u32,
+    reserved: &HashSet<u32>,
+) -> Result<PanicPads, LowerError> {
+    let mut pads = PanicPads { ranges: Vec::new(), frame };
+    if groups.is_empty() {
+        return Ok(pads);
+    }
+    // Each range ends at the next label after its own.
+    let mut ends = Vec::with_capacity(groups.len());
+    for (start, _) in groups {
+        let at = out.iter().position(|op| matches!(op, IlOp::Label(l) if l == start));
+        let next = at.and_then(|at| {
+            out[at + 1..].iter().find_map(|op| match op {
+                IlOp::Label(l) => Some(*l),
+                _ => None,
+            })
+        });
+        ends.push(next);
+    }
+    let loc = DebugLoc::unknown();
+    // Ranges whose words sit in the same registers share a pad.
+    let mut made: HashMap<Vec<(u8, u8, u32)>, Label> = HashMap::new();
+    for ((start, stores), end) in groups.iter().zip(ends) {
+        let words: Vec<(u8, u8, u32)> = stores.iter().map(|&(o, v, k)| (regs[o.index()], regs[v.index()], k)).collect();
+        let pad = match made.get(&words) {
+            Some(&pad) => pad,
+            None => {
+                let pad = take_label(next_label, reserved);
+                out.push(IlOp::Label(pad));
+                for &(object, value, index) in &words {
+                    emit_dense_field_store(out, value, object, index, loc)?;
+                }
+                out.push(IlOp::Const { imm: i32::from(common::UNWIND_RESUME_ID), loc });
+                out.push(IlOp::HostInvoke { arity: 0, layout: common::HOST_ENUM_LAYOUT_BOXED as u8, loc });
+                // Not reached (`unwind_resume` never returns to the pad).
+                out.push(IlOp::Return { loc, ret_words: 1 });
+                made.insert(words, pad);
+                pad
+            }
+        };
+        // A range running to the body's end stops at its pad.
+        pads.ranges.push((*start, end.unwrap_or(pad), pad));
+    }
+    Ok(pads)
 }
 
 /// Named-let remap and deopt draft, after the same register assign as emit.
@@ -2861,11 +2955,14 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             index,
             unchecked,
         } => {
-            let flags = if *unchecked {
+            let mut flags = if *unchecked {
                 dense::HEAP_UNCHECKED
             } else {
                 0
             };
+            if func.prefetch_loads.contains(dest) {
+                flags |= dense::HEAP_PREFETCH;
+            }
             out.push(byte(
                 Byte::new(Instruction::DenseIndex).with_dense_abc(
                     flags,
@@ -2980,6 +3077,10 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
         }
         // Emitted where it stands (`cleared_words`).
         MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
+        // Gathered into panic pads (`emit_dense_padded`).
+        MirInst::PanicStore { .. } => {
+            return Err(LowerError::Refused("panic store outside a body".into()));
+        }
         // A cleanup pad's homes: the LIR tier only (`emit_lir`).
         MirInst::HomeLoad { .. } | MirInst::HomeStore { .. } => {
             return Err(LowerError::Refused("homes are LIR-only".into()));
@@ -4821,7 +4922,15 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
 
     let mut cx = Ctx { out: Vec::new(), next: 0, regs, p };
     match kind {
-        VecLoopKind::Reduce { ty, fold, term, .. } => {
+        // A map-and-fold body stores first, as the scalar loop does
+        // (`vec_loop` takes only bodies whose fold comes after the stores).
+        VecLoopKind::Reduce { ty, fold, term, stores, .. } => {
+            for (array, off, ty, value) in stores {
+                cx.next = 0;
+                let v = cx.eval(value)?;
+                cx.word(Instruction::VStore, *ty, v, cx.slot(*array), cx.slot(*off));
+            }
+            cx.next = 0;
             let v = cx.eval(term)?;
             cx.word(Instruction::VReduce, *ty, d, v, *fold);
         }

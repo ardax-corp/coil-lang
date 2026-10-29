@@ -632,6 +632,12 @@ pub mod dense {
     /// `string`, as `string_byte_at` answers it: the byte, or `-1` out of
     /// range (the caller's test panics).
     pub const HEAP_STR_BYTE: u8 = 2;
+    /// [`super::Instruction::DenseIndex`] hint: a forward scan of an array
+    /// of heap words. The VM may prefetch the object [`PREFETCH_DISTANCE`]
+    /// elements ahead; a VM that ignores the bit reads the same value.
+    pub const HEAP_PREFETCH: u8 = 4;
+    /// How many elements ahead [`HEAP_PREFETCH`] reaches.
+    pub const PREFETCH_DISTANCE: usize = 8;
     /// [`super::Instruction::DenseFieldLoad`] / [`super::Instruction::DenseFieldStore`]:
     /// `c` is a name slot (GetField), not a field index.
     pub const FIELD_NAMED: u8 = 1;

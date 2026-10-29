@@ -1110,3 +1110,38 @@ fn text(Vec<byte> b) -> string {
     let left = rewritten(src, "text").map(|b| calls(&b)).unwrap_or_default();
     assert!(!left.iter().any(|c| c.1), "{left:?}");
 }
+
+const FIELDS: &str = "
+class Acc {
+    pub total: int,
+    pub count: int,
+}
+fn weight(int x) -> int {
+    if x <= 0 {
+        return 0;
+    }
+    return x % 7 + weight(x / 100);
+}
+fn peek(Acc a) -> int {
+    return a.total;
+}
+fn via(Acc a) -> int {
+    return peek(a) + weight(3);
+}
+fn same(Acc a, Acc b) -> bool {
+    return a == b;
+}
+fn apply(int x, int -> int f) -> int {
+    return f(x);
+}
+";
+
+#[test]
+fn fields_name_what_a_body_and_its_callees_touch() {
+    let (m, out) = summaries(FIELDS);
+    assert_eq!(of(&m, &out, "weight").fields, 0, "no object");
+    assert_eq!(of(&m, &out, "peek").fields, field_bit("total"));
+    assert_eq!(of(&m, &out, "via").fields, field_bit("total"), "through `peek`");
+    assert_eq!(of(&m, &out, "same").fields, ALL_FIELDS, "`==` may read every field");
+    assert_ne!(of(&m, &out, "apply").latent, 0, "a call of its parameter: any field at the call site");
+}

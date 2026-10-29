@@ -560,7 +560,12 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
         dense_obj,
         addr,
     ) {
-        Some(Object::Array(gc)) => gc.as_ref().read_indexed(index, unchecked),
+        Some(Object::Array(gc)) => {
+            if flags & common::dense::HEAP_PREFETCH != 0 {
+                gc.as_ref().prefetch_ahead(index, common::dense::PREFETCH_DISTANCE);
+            }
+            gc.as_ref().read_indexed(index, unchecked)
+        }
         Some(Object::Tuple(gc)) => {
             super::Machine::<8>::read_indexed(gc.as_ref().elements(), index, unchecked)
         }
