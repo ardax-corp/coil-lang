@@ -1313,28 +1313,10 @@ fn run_parallel(run: &Run<'_>, files: &[Target], jobs: usize) -> SuiteResult {
     let progress = Mutex::new((0usize, 0usize)); // (next to claim, reported)
     let advanced = Condvar::new();
     let stop = AtomicBool::new(false);
-    let done = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel::<(usize, PendingFile)>();
     let mut result = SuiteResult::default();
 
     std::thread::scope(|scope| {
-        // Name a file that holds up the report for minutes: a hang in CI
-        // otherwise ends in a job timeout with no file named.
-        let (progress_ref, done_ref) = (&progress, &done);
-        scope.spawn(move || {
-            const STALL: std::time::Duration = std::time::Duration::from_secs(300);
-            let (mut seen, mut since, mut named) = (usize::MAX, std::time::Instant::now(), false);
-            while !done_ref.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let next = progress_ref.lock().unwrap_or_else(|e| e.into_inner()).1;
-                if next != seen {
-                    (seen, since, named) = (next, std::time::Instant::now(), false);
-                } else if !named && next < files.len() && since.elapsed() >= STALL {
-                    eprintln!("still running after {}s: {}", STALL.as_secs(), files[next].path.display());
-                    named = true;
-                }
-            }
-        });
         for _ in 0..jobs {
             let tx = tx.clone();
             let (progress, advanced, stop) = (&progress, &advanced, &stop);
@@ -1384,7 +1366,6 @@ fn run_parallel(run: &Run<'_>, files: &[Target], jobs: usize) -> SuiteResult {
                 advanced.notify_all();
             }
         }
-        done.store(true, Ordering::SeqCst);
     });
     result
 }

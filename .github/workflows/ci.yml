@@ -483,9 +483,8 @@ jobs:
           harness-bin/coil test --doc-tests-only -A ${{ matrix.variant == 'O0' && '-O 0' || '' }} \
             --root examples/src --root .deps/coil-stdlib/src compiler/src/builtin_docs
 
-      # Also on a timeout: the logs hold the seed and any stalled file.
       - uses: actions/upload-artifact@v4
-        if: failure() || cancelled()
+        if: failure()
         with:
           name: harness-logs-${{ matrix.os }}-${{ matrix.mode }}-${{ matrix.variant }}
           path: target/corpora
