@@ -201,6 +201,10 @@ struct BodyBuilder {
     olds: HashMap<usize, LocalId>,
     /// Values written `mut e`: a `let` or `for` binding from one borrows.
     mut_marks: HashSet<HirId>,
+    /// What `symbol::fn_key()` hashes in this body: its qualified name and,
+    /// for a named function, its arity (overloads differ by arity). `None`
+    /// for top-level code and static initializers.
+    key_name: Option<String>,
 }
 
 impl BodyBuilder {
@@ -232,6 +236,7 @@ impl BodyBuilder {
             type_params: Vec::new(),
             olds: HashMap::new(),
             mut_marks: HashSet::new(),
+            key_name: None,
         }
     }
 
@@ -614,6 +619,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     _ => "test".to_string(),
                 };
                 let mut tb = BodyBuilder::new(&label, BodyKind::Test, span_of(node));
+                tb.key_name = Some(join(prefix, &label));
                 tb.body.result_mode = true;
                 tb.body.ret = Some(result_ty(coil_ty::unit(), coil_ty::string()));
                 let root = self.expr(&mut tb, body);
@@ -700,6 +706,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         // A signature without a body (trait declaration, `fn f();`).
         let Some(body) = body else { return };
         let mut b = BodyBuilder::new(full, kind, span_of(node));
+        b.key_name = Some(format!("{full}/{}", Self::arg_items(args).len()));
         b.body.is_coro = *is_coro;
         b.body.declared = effects.as_ref().map(declared_effects);
         b.body.stated_escape = stated_escape(attrs, span_of(node));
@@ -1985,6 +1992,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
         match callee_node.1.as_ref() {
             E::Identifier(n) if b.lookup(n).is_none() => {
+                // `symbol::fn_key()`: this body's key, as a literal, so
+                // inlining and mono clones keep the key of the source body.
+                if args.is_empty()
+                    && self.checker.prelude_fn_in_scope(n) == Some(crate::typechecking::PreludeFn::FnKey)
+                    && let Some(key) = b.key_name.as_deref().map(fn_key)
+                {
+                    return self.emit_ty(b, node, HirKind::Lit(Lit::Int(key)), Some(coil_ty::int()));
+                }
                 if matches!(*n, "Some") {
                     let args = self.exprs(b, args);
                     return self.make_variant(b, node, common::BUILTIN_OPTION_ENUM, "Some", args, None);
@@ -2948,6 +2963,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>, borrows: &[&str]) -> HirId {
         let name = format!("{}::<lambda@{}>", b.body.name, node.0.start);
         let mut inner = BodyBuilder::new(&name, BodyKind::Lambda, span_of(node));
+        inner.key_name = Some(match &b.key_name {
+            Some(outer) => format!("{outer}::<lambda@{}>", node.0.start),
+            None => name.clone(),
+        });
         let mode_key = Checker::lambda_mode_key(node.0.start);
         inner.body.result_mode = self.checker.fn_is_result_mode(&mode_key);
         inner.ok_is_result = self.checker.fn_result_ok_is_result(&mode_key);
@@ -3003,6 +3022,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         self.module.bodies.push(inner.finish());
         self.emit(b, node, HirKind::Lambda { body: index })
     }
+}
+
+/// The `symbol::fn_key()` value of a body whose key name is `name`: FNV-1a
+/// (stable across builds, platforms and compile order), kept non-negative.
+pub(crate) fn fn_key(name: &str) -> i64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h >> 1) as i64
 }
 
 /// `List<T>` → `List`, for matching an instance head to its source text.
