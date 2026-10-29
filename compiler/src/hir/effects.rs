@@ -345,6 +345,15 @@ impl ProgramEffects {
         }
     }
 
+    /// [`Summary::fields`] of every `fn drop()` recorded so far: what a
+    /// finalizer run at an allocation may touch.
+    pub fn drop_fields(&self) -> u64 {
+        self.by_name
+            .iter()
+            .filter(|(name, _)| name.rsplit("::").next() == Some("drop"))
+            .fold(0, |m, (_, s)| m | if s.latent == 0 { s.fields } else { ALL_FIELDS })
+    }
+
     /// Keep why a module's bodies mutate their parameters
     /// ([`ModuleEffects::mutations`]), so a later module's E0107 can say so.
     pub fn record_mutations(&mut self, mutations: Mutations) {

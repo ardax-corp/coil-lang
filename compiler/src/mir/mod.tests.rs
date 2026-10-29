@@ -1098,6 +1098,67 @@ fn main() {
 }
 
 #[test]
+fn pipeline_keeps_fields_in_registers_unless_a_finalizer_touches_them() {
+    // Any call may run a `fn drop()`: the loop keeps `total` in a register
+    // only while no finalizer in the program reads or writes it.
+    let src = |field: &str| {
+        format!(
+            r#"
+static let seen: int = 0;
+class Acc {{
+    pub total: int,
+}}
+class Spy {{
+    pub n: int,
+    pub total: int,
+}}
+impl Spy {{
+    fn drop() {{
+        seen = seen + self.{field};
+    }}
+}}
+fn weight(int x) -> int {{
+    if x <= 0 {{
+        return 0;
+    }}
+    return x % 7 + weight(x / 100);
+}}
+fn by_weight(Acc acc, Vec<int> a) {{
+    let i = 0;
+    while i < a.len() {{
+        acc.total = acc.total + weight(a[i]);
+        i = i + 1;
+    }}
+}}
+fn main() {{
+    let spy = new Spy(1, 2);
+    let acc = new Acc(0);
+    by_weight(acc, [5, 123, 77]);
+    if acc.total != 10 || spy.n != 1 {{
+        panic "checksum";
+    }}
+}}
+"#
+        )
+    };
+    let pads = |field: &str| {
+        let mut p = crate::Pipeline::new();
+        p.set_auto_par(false);
+        let (bc, constants) = p.compile_src(&src(field)).expect("compile finalizer");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "checksum");
+        let debug = p.program_debug();
+        let entry = debug.fn_symbols.iter().find(|s| s.name == "by_weight").expect("symbol").entry_pc;
+        let end = entry as usize + fn_ops(&bc, &debug.fn_symbols, "by_weight").len();
+        debug.cleanup.iter().any(|r| r.start_pc >= entry && (r.end_pc as usize) <= end)
+    };
+    assert!(pads("n"), "`Spy::drop` touches `n` only: `total` stays in a register");
+    assert!(!pads("total"), "`Spy::drop` reads a `total`");
+}
+
+#[test]
 fn pipeline_prefetches_forward_scans_of_object_arrays_only() {
     let src = r#"
 class P {
