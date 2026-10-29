@@ -109,6 +109,14 @@ pub struct MirFunc {
     /// Calls of a function that never resizes an array (it may write
     /// elements and fields).
     pub steady_calls: HashSet<ValueId>,
+    /// Per call, the fields it may read or write, as
+    /// [`crate::hir::effects::field_bit`]s of their names; a call not
+    /// listed may touch any.
+    pub call_fields: HashMap<ValueId, u64>,
+    /// Per heap slot, the [`crate::hir::effects::field_bit`]s of the field
+    /// names this body reads or writes there by name. A call whose
+    /// [`Self::call_fields`] miss them leaves the slot's word alone.
+    pub slot_fields: HashMap<u32, u64>,
     /// No code that runs at an allocation (a finalizer) resizes an array:
     /// an allocation leaves every length as it was.
     pub lengths_steady: bool,
@@ -218,6 +226,8 @@ impl MirFunc {
             invariant_loads: HashSet::new(),
             byte_loads: HashSet::new(),
             steady_calls: HashSet::new(),
+            call_fields: HashMap::new(),
+            slot_fields: HashMap::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
             heap_pair_calls: HashSet::new(),

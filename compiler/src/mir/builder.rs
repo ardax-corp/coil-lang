@@ -59,6 +59,10 @@ pub struct MirBuilder {
     pub homed: HashMap<LocalId, u16>,
     /// The heap words [`Self::def_local`] bound ([`MirFunc::bound_words`]).
     bound: Vec<ValueId>,
+    /// Field names announced for the next heap field access at their slot
+    /// ([`Self::note_slot_field`]): `(note, slot, bit)`.
+    field_notes: Vec<(u32, u32, u64)>,
+    next_note: u32,
 }
 
 impl MirBuilder {
@@ -78,6 +82,8 @@ impl MirBuilder {
             pending_loc: DebugLoc::unknown(),
             homed: HashMap::new(),
             bound: Vec::new(),
+            field_notes: Vec::new(),
+            next_note: 0,
         }
     }
 
@@ -112,6 +118,35 @@ impl MirBuilder {
     /// array ([`MirFunc::steady_calls`]).
     pub fn mark_steady_call(&mut self, dest: ValueId) {
         self.func.steady_calls.insert(dest);
+    }
+
+    /// The call defining `dest` may touch only `fields`
+    /// ([`MirFunc::call_fields`]).
+    pub fn mark_call_fields(&mut self, dest: ValueId, fields: u64) {
+        self.func.call_fields.insert(dest, fields);
+    }
+
+    /// The next heap field access at `slot` reads or writes field `name`
+    /// ([`MirFunc::slot_fields`]); the note ends at [`Self::end_field_note`]
+    /// if no access took it. An access at a slot with no note may be any
+    /// field, so it makes the slot's names unknown.
+    pub fn note_slot_field(&mut self, slot: u32, name: &str) -> u32 {
+        let note = self.next_note;
+        self.next_note += 1;
+        self.field_notes.push((note, slot, crate::hir::effects::field_bit(name)));
+        note
+    }
+
+    pub fn end_field_note(&mut self, note: u32) {
+        self.field_notes.retain(|&(n, ..)| n != note);
+    }
+
+    fn name_slot(&mut self, slot: u32) {
+        let bits = match self.field_notes.iter().rposition(|&(_, s, _)| s == slot) {
+            Some(at) => self.field_notes.remove(at).2,
+            None => crate::hir::effects::ALL_FIELDS,
+        };
+        *self.func.slot_fields.entry(slot).or_insert(0) |= bits;
     }
 
     /// `dest` is the low word of a pair a call returns that may carry a
@@ -684,6 +719,7 @@ impl MirBuilder {
         if !dest_ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldLoad dest {dest_ty}")));
         }
+        self.name_slot(index);
         let dest = self.alloc(dest_ty);
         self.push(MirInst::HeapFieldLoad {
             dest,
@@ -711,6 +747,7 @@ impl MirBuilder {
         if !ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldStore value {ty}")));
         }
+        self.name_slot(index);
         let dest = self.alloc(ty);
         let value = self.resolve(value);
         self.push(MirInst::HeapFieldStore {

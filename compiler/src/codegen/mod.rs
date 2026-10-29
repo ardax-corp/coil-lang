@@ -609,6 +609,9 @@ pub struct Compiler {
     /// No `fn drop()` can resize an array, so allocating cannot change a
     /// length.
     alloc_steady: bool,
+    /// Whether some file declares a `fn drop()` (`None`: not known). A
+    /// finalizer may run at any allocation and read any field.
+    program_finalizers: Option<bool>,
     /// HIR effect summaries of every module compiled so far (E1).
     program_effects: crate::hir::effects::ProgramEffects,
     /// Detected independent-parallel-arm fork sites for pure fns.
@@ -845,6 +848,7 @@ impl Default for Compiler {
             pure_fns: HashSet::new(),
             steady_fns: HashSet::new(),
             alloc_steady: false,
+            program_finalizers: None,
             program_effects: Default::default(),
             par_shapes: HashMap::new(),
             par_workers: HashSet::new(),
