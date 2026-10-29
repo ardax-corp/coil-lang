@@ -18,7 +18,7 @@ reordering measured as no gain and are out of scope.
 
 | Step | What | Probe gap (before) | Status |
 |------|------|--------------------|--------|
-| 1 | Vectorize inner loops that index `a[base + j]` with a base the inner loop does not change (flattened 2D arrays in a nest) | `nested.hy`: `a[row + j]` 274 ms vs `r[j]` on a row 19 ms (14x), 1024² x 20 | planned |
+| 1 | Vectorize inner loops that index `a[base + j]` with a base the inner loop does not change (flattened 2D arrays in a nest) | `nested.hy`: `a[row + j]` 274 ms vs `r[j]` on a row 19 ms (14x), 1024² x 20 | done |
 | 2 | Vectorize one loop that both stores a map and folds a reduction | `fusion.hy`: fused 417 ms vs split 162 ms (2.6x) | planned |
 | 3 | Field-sensitive mod/ref summaries (which slots and array kinds a call may write) | enables 4 | planned |
 | 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.hy`: 3.1x (8 vs 3 dispatches per iteration) | planned |
@@ -48,3 +48,12 @@ subtracted.
 ## Progress log
 
 Numbers land here as each step merges.
+
+- **Step 1** (`vec_loops` value offsets): a stream's lanes may sit at
+  `j + base` with `base` invariant in the loop (`vectorize::Off::V`). The
+  guard checks `i0 >= 0`, `0 <= base <= len` with compares only, then
+  `n <= len - base` in a second guard block, so building the guard never
+  overflows. A store loop with a value offset takes only loads at that
+  same value. `nested.hy` 1024² x 20: flat sum 274 → 32 ms (now equal to
+  the row-of-rows walk), flat map `b[row + j] = a[row + j] * 3` 465 →
+  106 ms.
