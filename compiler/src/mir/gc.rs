@@ -243,7 +243,7 @@ pub(super) fn live_opaque_words(func: &MirFunc) -> BTreeSet<ValueId> {
 pub(super) fn collects(inst: &MirInst) -> bool {
     !matches!(
         inst,
-        MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. }
+        MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. } | MirInst::PanicStore { .. }
     )
 }
 

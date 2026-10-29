@@ -8513,6 +8513,24 @@ impl Compiler {
             // its instances carry their own pads) resolves to nothing.
             cleanup.extend(ranges.unwrap_or_default());
         }
+        // A promoted field's write-backs: a range per stretch of the loop
+        // between two of the source's stores ([`crate::mir::PanicPads`]).
+        for (func, pads) in &lowered.panic_pads {
+            for &(start, end, pad) in &pads.ranges {
+                let pcs = (|| Some((resolve_fn_label_pc(func, start.0)?, resolve_fn_label_pc(func, end.0)?, resolve_fn_label_pc(func, pad.0)?)))();
+                // A range the body's labels do not resolve would leave its
+                // traps without the stores they owe: the build stops.
+                let (start_pc, end_pc, pad_pc) = pcs.unwrap_or_else(|| panic!("panic pad of {func} does not resolve"));
+                if start_pc < end_pc {
+                    cleanup.push(common::CleanupRange {
+                        start_pc: start_pc as u32,
+                        end_pc: end_pc as u32,
+                        pad_pc: pad_pc as u32,
+                        frame_words: pads.frame,
+                    });
+                }
+            }
+        }
         cleanup.sort_unstable_by_key(|r: &common::CleanupRange| r.start_pc);
         self.cleanup_ranges = cleanup;
 

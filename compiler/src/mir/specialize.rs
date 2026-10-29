@@ -23,6 +23,8 @@ pub struct BodySidecar {
     /// A LIR body's unwind cleanup pad, emitted after it: its label and the
     /// frame words it reads ([`super::MirFunc::cleanup`]).
     pub cleanup_pad: Option<(Label, u32)>,
+    /// A dense body's panic write-backs ([`super::emit::PanicPads`]).
+    pub panic_pads: super::emit::PanicPads,
 }
 
 type RefusalSlot = std::thread::LocalKey<std::cell::RefCell<Option<String>>>;
@@ -272,6 +274,11 @@ fn specialize_side(
     if opts.mir_loop && crate::mir::vec_loops(&mut func) > 0 {
         check_after(&func, "vec_loops");
     }
+    // A field a loop writes stays in a register across it; last, so no
+    // pass moves code across the stores a panic owes the heap.
+    if opts.mir_loop && crate::mir::promote_fields(&mut func) > 0 {
+        check_after(&func, "promote_fields");
+    }
     super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
@@ -300,7 +307,10 @@ fn specialize_side(
     }
     capture_mir(name, "dense", &func);
     let out = match emit_dense(&func, entry, pool, has_alloc) {
-        Ok(o) => o,
+        Ok((o, pads)) => {
+            side.panic_pads = pads;
+            o
+        }
         Err(e) => return refuse_dense(format!("emit: {e}")),
     };
     // Heap writes have no SSA users; refuse if reconstruct dropped one.

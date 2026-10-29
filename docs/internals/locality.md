@@ -20,8 +20,8 @@ reordering measured as no gain and are out of scope.
 |------|------|--------------------|--------|
 | 1 | Vectorize inner loops that index `a[base + j]` with a base the inner loop does not change (flattened 2D arrays in a nest) | `nested.hy`: `a[row + j]` 274 ms vs `r[j]` on a row 19 ms (14x), 1024² x 20 | done |
 | 2 | Vectorize one loop that both stores a map and folds a reduction | `fusion.hy`: fused 417 ms vs split 162 ms (2.6x) | done |
-| 3 | Field-sensitive mod/ref summaries (which slots and array kinds a call may write) | enables 4 | planned |
-| 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.hy`: 3.1x (8 vs 3 dispatches per iteration) | planned |
+| 3 | Field-sensitive mod/ref summaries (which slots and array kinds a call may write) | lets step 4 keep a field across a call that cannot touch it | planned |
+| 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.hy`: 3.1x (8 vs 3 dispatches per iteration) | done (loops without calls) |
 | 5 | Copy the objects a pointer array holds in index order when the nursery promotes or evacuation compacts | `objorder.hy`: 24 vs 147 ns per object (6.2x) | planned |
 | 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap | planned |
 | 7 | Loop interchange for affine nests | `interchange.hy`: rows 277 ms vs columns 749 ms (2.7x) | planned |
@@ -38,10 +38,11 @@ subtracted.
    path writes it back.
 2. **Effects are barriers.** Host, FFI, IO, `yield`, park/attach, GC and
    unknown calls keep their order (`common::EffectFlags`).
-3. **Tasks and threads.** A suspension point ends a promotion. An object
-   another thread can reach is never promoted.
+3. **Tasks and threads.** A suspension point ends a promotion. No other
+   thread writes an object a loop holds: `thread::spawn` copies, and
+   auto-par shares only frozen or immediate values.
 4. **Copy-on-write.** The uniqueness check runs where the first write
-   was; `shared class` and `Ref<T>` are refused.
+   was; a loop holding a `Cow` is refused.
 5. **`drop` timing.** Classes with `fn drop()` keep their allocation and
    free points.
 
@@ -70,3 +71,19 @@ Numbers land here as each step merges.
   (`tests/collections/vec_loop_panic_stores.hy`: 16 stores instead of 18).
   `fusion.hy` 4M x 5: fused loop 417 → 167 ms, equal to the two split loops
   (161 ms, unchanged).
+- **Step 4** (`mir::promote_fields`, dense tier, last MIR pass): a field
+  a loop writes, touched only through one object made before the loop and
+  holding an `int` or `float`, is read once before the loop, carried in a
+  φ and stored once on each exit. The loop may hold arithmetic, compares,
+  casts, element and field reads and writes, explicit panics and pure
+  natives; a call, allocation, yield or any other effect refuses it, as
+  does a second object value touching the slot. Before each instruction
+  that may trap the pass places `MirInst::PanicStore`s naming the word each
+  field holds there. Dense emission opens a label at each run of them and
+  gives the stretch up to the next label a cleanup range whose pad stores
+  those registers and calls `unwind_resume` (`emit::PanicPads`); runs with
+  the same registers share a pad. A trapping op writes no register, so
+  the pad reads the words as the source left them
+  (`tests/collections/field_promotion_panic.hy`). `promo.hy` 1M x 20:
+  field accumulation 820 → 270 ms, equal to the hand-written locals
+  (265-300 ms); the loop body went from 8 ops to 4.

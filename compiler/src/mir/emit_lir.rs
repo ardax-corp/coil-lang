@@ -1464,6 +1464,10 @@ fn emit_stored(
         }
         // Emitted where it stands (`cleared_words`).
         MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
+        // Promotion runs for the dense tier only.
+        MirInst::PanicStore { .. } => {
+            return Err(LowerError::Refused("panic store in LIR".into()));
+        }
         MirInst::ArrayPush {
             dest,
             array,
@@ -2144,6 +2148,7 @@ fn emit_stack(
             Ok(())
         }
         MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => Ok(()),
+        MirInst::PanicStore { .. } => Err(LowerError::Refused("panic store in LIR".into())),
         MirInst::ArrayPush {
             dest,
             array,

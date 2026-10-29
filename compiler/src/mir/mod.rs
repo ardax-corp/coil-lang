@@ -43,6 +43,7 @@ mod sroa;
 mod vectorize;
 mod bool_thread;
 mod phi_sroa;
+mod promote;
 mod strength;
 mod stackmap;
 mod text;
@@ -51,6 +52,7 @@ mod ty;
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;
+pub use emit::PanicPads;
 #[cfg(test)]
 pub use emit_lir::emit_lir;
 #[cfg(test)]
@@ -82,6 +84,7 @@ pub use phi_sroa::phi_sroa;
 pub use bulk::bulk_push;
 pub use byte_scan::byte_scan;
 pub use vec_loop::vec_loops;
+pub use promote::promote_fields;
 pub use strength::strength_reduce;
 #[cfg(test)]
 pub use text::{ParseError, parse_func};

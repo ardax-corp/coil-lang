@@ -143,6 +143,7 @@ impl MirInst {
             | Self::HomeStore { .. }
             | Self::ClearWord { .. }
             | Self::KeepAlive { .. }
+            | Self::PanicStore { .. }
             | Self::ArrayPush { .. }
             | Self::Print { .. }
             | Self::FreeEarly { .. }

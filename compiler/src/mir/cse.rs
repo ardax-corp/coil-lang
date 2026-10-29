@@ -606,6 +606,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::HomeStore { .. }
         | MirInst::ClearWord { .. }
         | MirInst::KeepAlive { .. }
+        | MirInst::PanicStore { .. }
         | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }

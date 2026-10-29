@@ -609,6 +609,17 @@ pub enum MirInst {
         dest: ValueId,
         value: ValueId,
     },
+    /// The field store a panic in the code after this owes the heap: a
+    /// field kept in a register across a loop ([`super::promote_fields`])
+    /// holds `value` here, where the source had stored it. A panic between
+    /// this and the next label stores it before unwinding. Dest is a
+    /// `bool` unit token. Emits nothing in line.
+    PanicStore {
+        dest: ValueId,
+        object: ValueId,
+        value: ValueId,
+        index: u32,
+    },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
     ArrayPush {
@@ -1074,6 +1085,7 @@ impl MirInst {
             | Self::HomeStore { dest, .. }
             | Self::ClearWord { dest, .. }
             | Self::KeepAlive { dest, .. }
+            | Self::PanicStore { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
@@ -1137,7 +1149,7 @@ impl MirInst {
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::HeapFieldLoad { object, .. } => vec![*object],
-            Self::HeapFieldStore { object, value, .. } => vec![*object, *value],
+            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => vec![*object, *value],
             Self::Index { array, index, .. } => vec![*array, *index],
             Self::StoreIndex {
                 array,
@@ -1202,7 +1214,7 @@ impl MirInst {
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
             Self::HeapFieldLoad { object, .. } => *object = map(*object),
-            Self::HeapFieldStore { object, value, .. } => {
+            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => {
                 *object = map(*object);
                 *value = map(*value);
             }
