@@ -1894,6 +1894,25 @@ mod tests {
     }
 
     #[test]
+    fn dense_bit_op_keeps_a_tagged_heap_word() {
+        // `Result::Err(e)` of a heap niche is `e | 1`: on the dense tier an
+        // IOR64 into a register, which a collection must still see.
+        // [2] Seek 3 [3] DenseConst r1 = 1 [4] r2 = r0 | r1 [5] InitTyped
+        // [6] POP [7] DensePush r2 [8] RETURN
+        let maps = bind(&[
+            op(Instruction::Seek).with_operand_u32(3),
+            op(Instruction::DenseConst).with_dense_const(common::dense::TY_I64, 1, 1, false),
+            op(Instruction::DenseBin).with_dense_abc(common::dense::IOR64, 2, 0, 1),
+            op(Instruction::InitTyped),
+            op(Instruction::POP),
+            op(Instruction::DensePush).with_dense_move(1, 2),
+            op(Instruction::RETURN),
+        ]);
+        let at = slots_at(&maps, 5).expect("alloc recorded");
+        assert!(at.contains(&2), "the tagged word names the param's object: {at:?}");
+    }
+
+    #[test]
     fn join_with_a_constant_is_not_a_must_pointer() {
         // [2] CONST [3] JMPF 7 [4] InitTyped [5] store 0 [6] JMP 9
         // [7] CONST [8] store 0 [9] InitTyped [10] RETURN
