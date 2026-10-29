@@ -520,6 +520,12 @@ pub enum Instruction {
     /// shallow copy first (an allocation and safepoint). Identity classes
     /// and other kinds pass through.
     Cow,
+    /// `int` / `bool` `==` (archive 6.7): compares the two words bit for
+    /// bit. The compiler emits it where both operands are typed as
+    /// immediates, so the VM skips `EQ`'s heap-reference checks.
+    IEQ,
+    /// `int` / `bool` `!=` (archive 6.7), the negation of [`Self::IEQ`].
+    INEQ,
 }
 
 impl From<u8> for Instruction {
@@ -872,6 +878,9 @@ pub const fn set_field_slot_index(operand: u32) -> Option<u32> {
 }
 
 impl Instruction {
+    /// The last appended variant: every discriminant up to it decodes.
+    pub const LAST: Self = Self::INEQ;
+
     /// Stable mnemonic for disassembly / DX tooling (always available).
     pub fn mnemonic(self) -> &'static str {
         match self {
@@ -1055,6 +1064,8 @@ impl Instruction {
             Self::VLoop => "VLoop",
             Self::FreeEarly => "FreeEarly",
             Self::Cow => "Cow",
+            Self::IEQ => "IEQ",
+            Self::INEQ => "INEQ",
         }
     }
 }
@@ -2172,7 +2183,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::Cow as u8;
+        let last = Instruction::LAST as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

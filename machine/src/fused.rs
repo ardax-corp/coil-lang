@@ -78,6 +78,8 @@ pub(crate) fn eval_bin<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) ->
         Instruction::GEQ => icmp(Cmp::Ge),
         Instruction::EQ => Value::from(eq_values(heap, lhs, rhs) as i64),
         Instruction::NEQ => Value::from((!eq_values(heap, lhs, rhs)) as i64),
+        Instruction::IEQ => icmp(Cmp::Eq),
+        Instruction::INEQ => icmp(Cmp::Ne),
         Instruction::ADDF => float(FloatOp::Add),
         Instruction::SUBF => float(FloatOp::Sub),
         Instruction::MULF => float(FloatOp::Mul),
@@ -108,6 +110,8 @@ pub(crate) fn eval_cmp<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) ->
         Instruction::GEQ => icmp(Cmp::Ge),
         Instruction::EQ => eq_values(heap, lhs, rhs),
         Instruction::NEQ => !eq_values(heap, lhs, rhs),
+        Instruction::IEQ => icmp(Cmp::Eq),
+        Instruction::INEQ => icmp(Cmp::Ne),
         Instruction::LEF => fcmp(Cmp::Lt),
         Instruction::LEQF => fcmp(Cmp::Le),
         Instruction::EQF => fcmp(Cmp::Eq),
@@ -143,6 +147,22 @@ mod tests {
         assert!(!eq(&heap, wa, Value::from(4_i64)));
         assert!(eq(&heap, Value::from(a.addr() | 1), Value::from(b.addr() | 1)));
         assert!(!eval_cmp(Instruction::NEQ as u8, wa, wb, &heap));
+    }
+
+    /// `IEQ` / `INEQ` compare the words bit for bit, with no heap probe:
+    /// two equal strings at different addresses are not `IEQ`.
+    #[test]
+    fn immediate_eq_compares_words() {
+        use crate::memory::{ObjString, Object};
+        let mut heap = Heap::default();
+        let ieq = |h: &Heap, a: Value, b: Value| eval_cmp(Instruction::IEQ as u8, a, b, h);
+        assert!(ieq(&heap, Value::from(7_i64), Value::from(7_i64)));
+        assert!(!ieq(&heap, Value::from(7_i64), Value::from(8_i64)));
+        assert!(eval_cmp(Instruction::INEQ as u8, Value::from(7_i64), Value::from(8_i64), &heap));
+        let (a, _) = heap.alloc(ObjString::new("same".to_string()), Object::String);
+        let (b, _) = heap.alloc(ObjString::new("same".to_string()), Object::String);
+        assert!(!ieq(&heap, Value::from(a.addr()), Value::from(b.addr())));
+        assert_eq!(eval_bin(Instruction::IEQ as u8, Value::from(-1_i64), Value::from(-1_i64), &heap), Ok(Value::from(1_i64)));
     }
 
     #[test]

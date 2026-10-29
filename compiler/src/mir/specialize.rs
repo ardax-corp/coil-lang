@@ -813,17 +813,18 @@ fn eq_immediately_before(ops: &[IlOp], jump_i: usize) -> bool {
 fn is_eq_byte(op: &IlOp) -> bool {
     matches!(
         op,
-        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::EQ
-    ) || matches!(op, IlOp::Bin { op: Instruction::EQ, .. })
+        IlOp::Byte { byte, .. } if matches!(*byte.bytecode(), Instruction::EQ | Instruction::IEQ)
+    ) || matches!(op, IlOp::Bin { op: Instruction::EQ | Instruction::IEQ, .. })
 }
 
 fn fused_eq_jmp(byte: &common::Byte) -> bool {
+    let eq = |op: u8| op == Instruction::EQ as u8 || op == Instruction::IEQ as u8;
     match *byte.bytecode() {
         Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => {
-            byte.bin_slot_imm_jmpf_parts().0 == Instruction::EQ as u8
+            eq(byte.bin_slot_imm_jmpf_parts().0)
         }
         Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
-            byte.bin_slot_slot_jmpf_parts().0 == Instruction::EQ as u8
+            eq(byte.bin_slot_slot_jmpf_parts().0)
         }
         _ => false,
     }

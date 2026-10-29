@@ -151,6 +151,8 @@ impl<const S: usize> Machine<S> {
                 Instruction::GEQ => bin!(GEQ),
                 Instruction::EQ => bin!(EQ),
                 Instruction::NEQ => bin!(NEQ),
+                Instruction::IEQ => bin!(IEQ),
+                Instruction::INEQ => bin!(INEQ),
                 Instruction::ADDF => bin!(ADDF),
                 Instruction::SUBF => bin!(SUBF),
                 Instruction::MULF => bin!(MULF),

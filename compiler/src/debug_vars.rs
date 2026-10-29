@@ -456,7 +456,7 @@ fn writes_of(b: &Byte, constants: &[u64]) -> Option<Vec<u32>> {
         | BinSlotSlot | BinSlotImmJmpf | BinSlotImmJmpt | BinSlotSlotJmpf | BinSlotSlotJmpt
         | DenseBinJmpf | DenseIndexJmpf | DenseStoreIndex | DenseFieldStore | DenseArrayPush
         | DensePush | NOOP | DATA | HALT | Panic | CodePtr | PRINT | FreeEarly | Cow | ADD | SUB | MUL | DIV
-        | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | BITAND | BITOR | ADDF | SUBF | MULF
+        | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | IEQ | INEQ | Pow | BITAND | BITOR | ADDF | SUBF | MULF
         | DIVF | MODF | LEF | LEQF | EQF | NEQF | GTF | GEQF | PowF | SHL | SHR | XOR | AND | OR | NOT
         | LogNot | NEG | NEGF | CastIntToFloat | CastFloatToInt | CastIntToByte
         | CastByteToInt | CastIntToBool | CastBoolToInt | JMP | JMPF | JMPT | CmpJmpf
