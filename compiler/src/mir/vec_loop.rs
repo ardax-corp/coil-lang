@@ -29,7 +29,7 @@ use super::func::MirFunc;
 use super::inst::{BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId, VecExpr, VecLoopKind};
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
-use super::vectorize::{match_cond_reduce_on, match_reduce_on, match_store_on, VOp};
+use super::vectorize::{match_cond_reduce_on, match_reduce_on, match_store_on, Off, VOp};
 
 /// Rewrite every loop that qualifies. Returns how many did.
 pub fn vec_loops(func: &mut MirFunc) -> usize {
@@ -61,7 +61,7 @@ pub fn vec_loops(func: &mut MirFunc) -> usize {
 /// are placed in front of the loop.
 enum Shape {
     Reduce { acc: ValueId, ty: u8, fold: u8, term: VOp },
-    Store { stores: Vec<(ValueId, i64, u8, VOp)> },
+    Store { stores: Vec<(ValueId, Off, u8, VOp)> },
 }
 
 struct Plan {
@@ -96,7 +96,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
             return None;
         }
         let at = s.stores[0].index_off;
-        if s.stores.iter().any(|st| st.index_off != at || min_load(&st.value).is_some_and(|k| k < at)) {
+        if s.stores.iter().any(|st| st.index_off != at || !loads_not_behind(&st.value, at)) {
             return None;
         }
         // The index lane is an int lane.
@@ -134,14 +134,20 @@ fn uses_index(op: &VOp) -> bool {
     }
 }
 
-/// The lowest offset `op` loads at.
-fn min_load(op: &VOp) -> Option<i64> {
+/// Every load of `op` reads at or ahead of a store at offset `at`: with a
+/// constant store offset, every load is constant and `>= at`; with a value
+/// offset, every load uses that same value.
+fn loads_not_behind(op: &VOp, at: Off) -> bool {
     match op {
-        VOp::Load { off, .. } => Some(*off),
-        VOp::Splat { .. } | VOp::Iota => None,
-        VOp::Bin { lhs, rhs, .. } => [min_load(lhs), min_load(rhs)].into_iter().flatten().min(),
-        VOp::Neg { src, .. } | VOp::CastI2F(src) => min_load(src),
-        VOp::Fma { a, b, c, .. } => [min_load(a), min_load(b), min_load(c)].into_iter().flatten().min(),
+        VOp::Load { off, .. } => match (*off, at) {
+            (Off::K(k), Off::K(s)) => k >= s,
+            (Off::V(v), Off::V(s)) => v == s,
+            _ => false,
+        },
+        VOp::Splat { .. } | VOp::Iota => true,
+        VOp::Bin { lhs, rhs, .. } => loads_not_behind(lhs, at) && loads_not_behind(rhs, at),
+        VOp::Neg { src, .. } | VOp::CastI2F(src) => loads_not_behind(src, at),
+        VOp::Fma { a, b, c, .. } => loads_not_behind(a, at) && loads_not_behind(b, at) && loads_not_behind(c, at),
     }
 }
 
@@ -152,8 +158,10 @@ fn leaves(op: &VOp, out: &mut Vec<ValueId>) -> Option<()> {
         VOp::Splat { v, .. } => out.push(*v),
         VOp::Iota => {}
         VOp::Load { array, off, .. } => {
-            if !(-127..=127).contains(off) {
-                return None;
+            match *off {
+                Off::K(k) if !(-127..=127).contains(&k) => return None,
+                Off::K(_) => {}
+                Off::V(v) => out.push(v),
             }
             out.push(*array);
         }
@@ -223,6 +231,13 @@ impl Place<'_, '_> {
         self.b.konst(self.at, MirConst::I64(k))
     }
 
+    fn off(&mut self, off: Off) -> ValueId {
+        match off {
+            Off::K(k) => self.konst(k),
+            Off::V(v) => self.value(v),
+        }
+    }
+
     fn cmp(&mut self, op: MirCmpOp, lhs: ValueId, rhs: ValueId) -> ValueId {
         let dest = self.b.value(MirTy::Bool);
         self.b.push(self.at, MirInst::Cmp { dest, op, ty: MirTy::I64, lhs, rhs })
@@ -238,7 +253,7 @@ impl Place<'_, '_> {
         match op {
             VOp::Splat { v, ty } => VecExpr::Splat { v: self.value(*v), ty: *ty },
             VOp::Iota => VecExpr::Index,
-            VOp::Load { array, ty, off } => VecExpr::Load { array: self.value(*array), off: self.konst(*off), ty: *ty },
+            VOp::Load { array, ty, off } => VecExpr::Load { array: self.value(*array), off: self.off(*off), ty: *ty },
             VOp::Bin { kind, lhs, rhs } => VecExpr::Bin { kind: *kind, lhs: Box::new(self.expr(lhs)), rhs: Box::new(self.expr(rhs)) },
             VOp::Neg { kind, src } => VecExpr::Neg { kind: *kind, src: Box::new(self.expr(src)) },
             VOp::CastI2F(src) => {
@@ -325,7 +340,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
         Shape::Store { stores } => VecLoopKind::Store {
             stores: stores
                 .iter()
-                .map(|(array, off, ty, value)| (at.value(*array), at.konst(*off), *ty, at.expr(value)))
+                .map(|(array, off, ty, value)| (at.value(*array), at.off(*off), *ty, at.expr(value)))
                 .collect(),
         },
     };
@@ -347,10 +362,11 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     if let Some(MirInst::ArrayLen { array, .. }) = at.b.func.blocks.iter().flat_map(|b| &b.insts).find(|i| i.dest() == n) {
         lens.insert(*array, n);
     }
+    // A value offset `o` needs `0 <= o <= len` before `len - o` can be
+    // computed without overflowing: those compares go in `pre`, the
+    // subtraction and its compare in a second guard block `pre2`.
+    let mut later: Vec<(ValueId, ValueId)> = Vec::new();
     for (array, off) in reads {
-        let k = const_of(at.b.func, off);
-        let lo = at.konst(-k);
-        let from_ok = at.cmp(MirCmpOp::Ge, i0, lo);
         let len = match lens.get(&array) {
             Some(&len) => len,
             None => {
@@ -360,13 +376,52 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
                 len
             }
         };
-        let hi = at.bin(MirBinOp::Sub, MirTy::I64, len, off);
-        let to_ok = at.cmp(MirCmpOp::Le, n, hi);
-        let both = at.bin(MirBinOp::BitAnd, MirTy::Bool, from_ok, to_ok);
-        ok = at.bin(MirBinOp::BitAnd, MirTy::Bool, ok, both);
+        match const_of(at.b.func, off) {
+            Some(k) => {
+                let lo = at.konst(-k);
+                let from_ok = at.cmp(MirCmpOp::Ge, i0, lo);
+                let hi = at.bin(MirBinOp::Sub, MirTy::I64, len, off);
+                let to_ok = at.cmp(MirCmpOp::Le, n, hi);
+                let both = at.bin(MirBinOp::BitAnd, MirTy::Bool, from_ok, to_ok);
+                ok = at.bin(MirBinOp::BitAnd, MirTy::Bool, ok, both);
+            }
+            None => {
+                let zero = at.konst(0);
+                let i0_ok = at.cmp(MirCmpOp::Ge, i0, zero);
+                let off_lo = at.cmp(MirCmpOp::Ge, off, zero);
+                let off_hi = at.cmp(MirCmpOp::Le, off, len);
+                let a = at.bin(MirBinOp::BitAnd, MirTy::Bool, i0_ok, off_lo);
+                let b = at.bin(MirBinOp::BitAnd, MirTy::Bool, a, off_hi);
+                ok = at.bin(MirBinOp::BitAnd, MirTy::Bool, ok, b);
+                later.push((len, off));
+            }
+        }
     }
     let Place { mut b, .. } = at;
-    b.func.block_mut(pre).term = Some(Terminator::Br { cond: ok, taken: fast, not_taken: skip });
+    let pre2 = if later.is_empty() {
+        b.func.block_mut(pre).term = Some(Terminator::Br { cond: ok, taken: fast, not_taken: skip });
+        None
+    } else {
+        let pre2 = b.block();
+        b.func.block_mut(pre).term = Some(Terminator::Br { cond: ok, taken: pre2, not_taken: skip });
+        let mut ok2 = None;
+        for (len, off) in later {
+            let hi = b.value(MirTy::I64);
+            b.push(pre2, MirInst::Bin { dest: hi, op: MirBinOp::Sub, ty: MirTy::I64, lhs: len, rhs: off });
+            let to_ok = b.value(MirTy::Bool);
+            b.push(pre2, MirInst::Cmp { dest: to_ok, op: MirCmpOp::Le, ty: MirTy::I64, lhs: n, rhs: hi });
+            ok2 = Some(match ok2 {
+                None => to_ok,
+                Some(prev) => {
+                    let both = b.value(MirTy::Bool);
+                    b.push(pre2, MirInst::Bin { dest: both, op: MirBinOp::BitAnd, ty: MirTy::Bool, lhs: prev, rhs: to_ok })
+                }
+            });
+        }
+        let cond = ok2.expect("a value offset");
+        b.func.block_mut(pre2).term = Some(Terminator::Br { cond, taken: fast, not_taken: skip });
+        Some(pre2)
+    };
     b.func.block_mut(skip).term = Some(Terminator::Jump { dest: join });
 
     // F: the whole blocks of lanes. `i0 >= -k` and `n <= len - k`, so
@@ -409,16 +464,16 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
             args.push((join, entry));
         }
     }
-    vec![pre, fast, skip, join]
+    let mut run = vec![pre];
+    run.extend(pre2);
+    run.extend([fast, skip, join]);
+    run
 }
 
-fn const_of(func: &MirFunc, v: ValueId) -> i64 {
-    func.blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .find_map(|i| match i {
-            MirInst::Const { dest, c: MirConst::I64(k) } if *dest == v => Some(*k),
-            _ => None,
-        })
-        .expect("an offset constant")
+/// The constant `v` holds, when it is one (a constant stream offset).
+fn const_of(func: &MirFunc, v: ValueId) -> Option<i64> {
+    func.blocks.iter().flat_map(|b| &b.insts).find_map(|i| match i {
+        MirInst::Const { dest, c: MirConst::I64(k) } if *dest == v => Some(*k),
+        _ => None,
+    })
 }

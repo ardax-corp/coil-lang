@@ -27,14 +27,22 @@ pub(super) struct StoreSpec {
     pub(super) value: VOp,
     pub(super) ty: u8,
     /// `a[i + index_off]`. Zero is `a[i]`.
-    pub(super) index_off: i64,
+    pub(super) index_off: Off,
+}
+
+/// How far a stream's lanes sit from the loop index: a constant, or a
+/// value the loop does not change (`a[row + j]` in an inner loop).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Off {
+    K(i64),
+    V(ValueId),
 }
 
 #[derive(Clone)]
 pub(super) enum VOp {
     Splat { v: ValueId, ty: u8 },
     Iota,
-    Load { array: ValueId, ty: u8, off: i64 },
+    Load { array: ValueId, ty: u8, off: Off },
     Bin { kind: u8, lhs: Box<VOp>, rhs: Box<VOp> },
     Neg { kind: u8, src: Box<VOp> },
     CastI2F(Box<VOp>),
@@ -112,7 +120,7 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
                 value,
                 ..
             } => {
-                let index_off = index_offset(func, *index, *iv)?;
+                let index_off = index_offset(func, *index, *iv, &lp.blocks)?;
                 if !is_invariant(func, *array, &lp.blocks) {
                     return None;
                 }
@@ -341,7 +349,7 @@ fn classify(
     }
     match def(func, v)? {
         MirInst::Index { array, index, .. } => {
-            let off = index_offset(func, *index, iv)?;
+            let off = index_offset(func, *index, iv, loop_blocks)?;
             if !is_invariant(func, *array, loop_blocks) {
                 return None;
             }
@@ -726,9 +734,14 @@ fn loop_bound(func: &MirFunc, cond: ValueId, iv: ValueId) -> Option<ValueId> {
     }
 }
 
-fn index_offset(func: &MirFunc, index: ValueId, iv: ValueId) -> Option<i64> {
+fn index_offset(
+    func: &MirFunc,
+    index: ValueId,
+    iv: ValueId,
+    loop_blocks: &std::collections::HashSet<BlockId>,
+) -> Option<Off> {
     if index == iv {
-        return Some(0);
+        return Some(Off::K(0));
     }
     if let Some(MirInst::Bin {
         op: MirBinOp::Add,
@@ -738,11 +751,18 @@ fn index_offset(func: &MirFunc, index: ValueId, iv: ValueId) -> Option<i64> {
         ..
     }) = def(func, index)
     {
-        if *lhs == iv {
-            return as_const_i64(func, *rhs);
+        let other = if *lhs == iv {
+            *rhs
+        } else if *rhs == iv {
+            *lhs
+        } else {
+            return None;
+        };
+        if let Some(k) = as_const_i64(func, other) {
+            return Some(Off::K(k));
         }
-        if *rhs == iv {
-            return as_const_i64(func, *lhs);
+        if func.ty(other) == MirTy::I64 && is_invariant(func, other, loop_blocks) {
+            return Some(Off::V(other));
         }
     }
     None

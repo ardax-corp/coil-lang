@@ -887,6 +887,67 @@ fn main() {
 }
 
 #[test]
+fn pipeline_vectorizes_inner_loop_over_invariant_base() {
+    // `a[row + j]`: the inner loop's lanes start at a value the inner loop
+    // does not change (a flattened 2D array walked in a nest).
+    let src = r#"
+fn flat_sum(Vec<int> a, int n) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        let row = i * n;
+        let j = 0;
+        while j < n {
+            s = s + a[row + j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return s;
+}
+fn flat_map(Vec<int> a, Vec<int> b, int n) {
+    let i = 0;
+    while i < n {
+        let row = i * n;
+        let j = 0;
+        while j < n {
+            b[row + j] = a[row + j] * 3;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+fn main() {
+    let a: Vec<int> = Vec::new();
+    let b: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 144 {
+        a.push(k);
+        b.push(0);
+        k = k + 1;
+    }
+    if flat_sum(a, 12) != 10296 {
+        panic "flat_sum checksum";
+    }
+    flat_map(a, b, 12);
+    if b[143] != 429 {
+        panic "flat_map checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile flat nest");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "flat nest checksums");
+    let symbols = p.program_debug().fn_symbols;
+    assert_vec_loop(fn_ops(&bc, &symbols, "flat_sum"), "flat_sum");
+    assert_vec_loop(fn_ops(&bc, &symbols, "flat_map"), "flat_map");
+}
+
+#[test]
 fn pipeline_vectorizes_reduce_without_load_and_nonzero_start() {
     let src = r#"
 fn sum_i(int n) -> int {
