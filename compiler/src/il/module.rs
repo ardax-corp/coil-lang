@@ -47,6 +47,8 @@ pub struct IlModule {
     /// A pinned (`defer`) body the LIR tier took: its cleanup pad's label
     /// and frame words, in place of HIR emission's pad and thunks.
     pub lir_cleanup_pads: HashMap<String, (Label, u32)>,
+    /// A dense body's panic write-back pads, by body.
+    pub panic_pads: HashMap<String, crate::mir::PanicPads>,
 }
 
 impl IlModule {
@@ -81,6 +83,7 @@ impl IlModule {
                 needs_frame_extent: HashSet::new(),
                 debug_slot_remaps: HashMap::new(),
                 lir_cleanup_pads: HashMap::new(),
+                panic_pads: HashMap::new(),
             };
         }
 
@@ -361,6 +364,7 @@ impl IlModule {
         // Each body's MIR is dropped once its tier is settled; this keeps
         // whether it had one, for the checks and stats below.
         let had_mir: Vec<bool> = self.funcs.iter().map(|b| b.meta.hir_mir.is_some()).collect();
+        self.panic_pads.clear();
         while !pending.is_empty() {
             let mut next = Vec::new();
             let mut progressed = false;
@@ -389,6 +393,9 @@ impl IlModule {
                     }
                     if side.needs_frame_extent {
                         self.needs_frame_extent.insert(body.meta.name.clone());
+                    }
+                    if !side.panic_pads.ranges.is_empty() {
+                        self.panic_pads.insert(body.meta.name.clone(), side.panic_pads);
                     }
                     if let Some(crate::il::Label(id)) = body.meta.entry {
                         dense_calls.insert(id, abi.clone());
