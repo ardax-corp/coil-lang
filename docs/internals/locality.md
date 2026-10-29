@@ -24,7 +24,7 @@ reordering measured as no gain and are out of scope.
 | 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.hy`: 3.1x (8 vs 3 dispatches per iteration) | done (loops without calls) |
 | 5 | Copy the objects a pointer array holds in index order when the nursery promotes them | `objorder.hy`: 24 vs 147 ns per object (6.2x); `young_shuffle.hy` | done (minor collections) |
 | 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap | planned |
-| 7 | Loop interchange for affine nests | `interchange.hy`: rows 277 ms vs columns 749 ms (2.7x) | planned |
+| 7 | Loop interchange for affine nests | `interchange.hy`: rows 277 ms vs columns 749 ms (2.7x); `fmapcols.hy` | done (non-trapping map bodies) |
 
 Probes: `/mnt/project-files/reordering/probes/` (project files). Numbers are
 release builds, `--auto-par off --fold-calls off`, median of 5, setup time
@@ -102,3 +102,22 @@ Numbers land here as each step merges.
   (old chunks move only when sparse evacuation picks them), so
   `objorder.hy`'s 1M-object shuffle is unchanged. Closing that needs a
   major collection that relocates for order, which is a separate decision.
+- **Step 7** (loop interchange, `mir::interchange_loops`): a perfect
+  two-loop nest whose body is one block and indexes every array at the
+  same `inner * stride + outer` swaps its loops, so the inner loop walks a
+  row and step 1's vectorizer takes it. It runs after the first
+  `loop_opts`, and `loop_opts` runs again on what it changed. Exactness:
+  every iteration touches one distinct cell and the body cannot trap, so
+  any order gives the same stores. A guard in front checks both ranges
+  are non-empty and non-negative, `stride >= outer extent`, that the
+  largest index does not overflow, and that it is in bounds for every
+  array; otherwise a clone of the source nest runs, and an out-of-bounds
+  index panics after the same stores as before. The body may hold
+  non-trapping `Const` / `Bin` / `Cmp` / `Unary` and int-to-float casts,
+  so float maps, bit-op maps and copies qualify. `fmapcols.hy` (2048²
+  float map, column order, 4 passes): 1303 → 298 ms, equal to row order
+  (295 ms). Limit: int arithmetic traps on overflow, and which cell
+  overflows first is observable, so an int map like `* 3` stays in column
+  order; so does a column reduction (`interchange.hy`), whose partial
+  sums would overflow in a different order. Those would need a proof
+  that no overflow happens (range analysis), which is not planned.
