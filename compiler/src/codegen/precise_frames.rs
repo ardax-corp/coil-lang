@@ -1557,8 +1557,11 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         HostInvoke => {
             let arity = (b.operand_u32() & 0xFFFF) as usize;
             st.pop_n(arity + 1)?;
-            st.push(true)?;
+            // The collector runs inside the host call, before the result is
+            // pushed: its word then holds the host id, or the words a host
+            // re-entry (a finalizer `drop`) pushed there, so it is no root.
             step.record = Some(st.heap_slots(st.hi, true));
+            st.push(true)?;
         }
         MakeTuple | MakeArray | MakeEnum => {
             st.pop_n((b.operand_u32() & 0xFFFF) as usize)?;
