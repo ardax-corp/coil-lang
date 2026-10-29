@@ -12187,9 +12187,11 @@ impl Checker {
     }
 
     /// Extract the type variable that a bound method should dispatch on.
-    /// First-order: bare `T`. HKT: the constructor head of `F<A>`.
+    /// First-order: bare `T`. HKT: the constructor head of `F<A>`. Seen
+    /// through `readonly`: a `readonly T self` receiver dispatches through
+    /// `T`'s dictionary as the plain one does (#2087).
     fn constraint_var_of_ty(ty: &Ty) -> Option<TyVarId> {
-        match ty {
+        match strip_readonly(ty) {
             Ty::Var(v) => Some(*v),
             Ty::App(head, _) => match head.as_ref() {
                 Ty::Var(v) => Some(*v),
