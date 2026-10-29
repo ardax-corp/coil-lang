@@ -4930,10 +4930,11 @@ impl Compiler {
         self.checker.program_finalizers_resize = resize;
     }
 
-    /// Whole-compile answer to "does any file declare a `fn drop()`?"
-    /// (`None`: not known, so one may).
-    pub fn set_program_finalizers(&mut self, finalizers: Option<bool>) {
-        self.program_finalizers = finalizers;
+    /// Whether a module compiled after the next one may declare a
+    /// `fn drop()` (true when not known). Those finalizers' summaries are
+    /// not recorded yet, so a call may touch any field.
+    pub fn set_pending_finalizers(&mut self, pending: bool) {
+        self.pending_finalizers = pending;
     }
 
     pub fn set_written_names_program(&mut self, names: Option<HashSet<String>>) {
