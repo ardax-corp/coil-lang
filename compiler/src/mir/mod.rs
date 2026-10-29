@@ -34,6 +34,7 @@ mod emit_lir;
 mod func;
 mod inst;
 mod instcombine;
+mod interchange;
 mod licm;
 mod from_hir;
 mod pack;
@@ -85,6 +86,7 @@ pub use bulk::bulk_push;
 pub use byte_scan::byte_scan;
 pub use vec_loop::vec_loops;
 pub use promote::promote_fields;
+pub use interchange::interchange_loops;
 pub use strength::strength_reduce;
 #[cfg(test)]
 pub use text::{ParseError, parse_func};

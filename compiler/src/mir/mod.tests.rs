@@ -1038,6 +1038,52 @@ fn main() {
 }
 
 #[test]
+fn pipeline_interchanges_column_order_nest_into_vector_loop() {
+    let src = r#"
+fn cols(Vec<float> a, Vec<float> b, int n, int m) {
+    let j = 0;
+    while j < m {
+        let i = 0;
+        while i < n {
+            b[i * m + j] = a[i * m + j] * 2.0 + 1.0;
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+}
+fn main() {
+    let a: Vec<float> = Vec::new();
+    let b: Vec<float> = Vec::new();
+    let k = 0;
+    while k < 24 {
+        a.push(k as float);
+        b.push(0.0);
+        k = k + 1;
+    }
+    cols(a, b, 6, 4);
+    let s = 0.0;
+    for x in b {
+        s = s + x;
+    }
+    if s != 576.0 || b[5] != 11.0 {
+        panic "cols checksum";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile cols");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "cols checksum");
+    // The inner loop strides by `m` in the source; once interchanged it
+    // walks a row and vectorizes.
+    let ops = fn_ops(&bc, &p.program_debug().fn_symbols, "cols");
+    assert!(ops.iter().any(|b| *b.bytecode() == Instruction::VStore), "cols stores in a vector loop");
+}
+
+#[test]
 fn pipeline_vectorizes_reduce_without_load_and_nonzero_start() {
     let src = r#"
 fn sum_i(int n) -> int {

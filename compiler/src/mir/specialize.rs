@@ -234,6 +234,12 @@ fn specialize_side(
     }
     if opts.mir_loop {
         loop_opts(&mut func, true);
+        // A nest walking memory across its rows walks along them instead;
+        // the inner loop's row base is then invariant: hoist it.
+        if crate::mir::interchange_loops(&mut func) > 0 {
+            check_after(&func, "interchange_loops");
+            loop_opts(&mut func, true);
+        }
     }
     if opts.mir_fold {
         crate::mir::instcombine(&mut func);
