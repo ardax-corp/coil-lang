@@ -248,7 +248,13 @@ impl Checker {
                 pruned
             }
             Pattern::Integer(_) => {
+                let before = self.messages.len();
                 self.unify(expected_ty, &int(), pattern_range, "match integer pattern");
+                if self.messages.len() > before {
+                    // Reported here; the arm's check against the
+                    // scrutinee would only repeat it (#2092).
+                    return expected_ty.clone();
+                }
                 int()
             }
             Pattern::Constructor {

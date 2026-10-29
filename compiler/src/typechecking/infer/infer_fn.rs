@@ -1025,12 +1025,21 @@ impl Checker {
                         key, fixed_n, rest_k
                     )
                 };
-                let mut err = Message::error(ErrorCode::DuplicateOverload, msg_text, range.clone());
-                err.with_help(
-                    "choose distinct arities or parameter types, or make the fixed overload have fewer params than the rest's fixed prefix"
-                        .to_string(),
-                );
-                self.messages.push(err);
+                // A conflicting declaration is not entered in
+                // `overload_decl_by_span`, so its body pass registers it
+                // again: one report per declaration (#2092).
+                let reported = self
+                    .messages
+                    .iter()
+                    .any(|m| m.code() == Some(ErrorCode::DuplicateOverload) && m.range() == range);
+                if !reported {
+                    let mut err = Message::error(ErrorCode::DuplicateOverload, msg_text, range.clone());
+                    err.with_help(
+                        "choose distinct arities or parameter types, or make the fixed overload have fewer params than the rest's fixed prefix"
+                            .to_string(),
+                    );
+                    self.messages.push(err);
+                }
                 break;
             }
         }

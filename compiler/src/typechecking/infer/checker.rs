@@ -7218,7 +7218,13 @@ impl Checker {
             return self.infer_shift(lhs, rhs, lt, rt, id, range, op);
         }
 
+        let before = self.messages.len();
         let result = self.unify(&lt, &rt, &range, &format!("operands of `{}`", op));
+        if self.messages.len() > before {
+            // The operands mismatched: that is the mistake. The fresh
+            // result var is not an operand "with no known type" (#2092).
+            return result;
+        }
         // Open type variables need the matching op trait (`Add` for `+`, …).
         // `T: Num` also covers these via superclass implication.
         let pruned = apply_ty_prune(&self.subst, &result);
@@ -8288,7 +8294,9 @@ impl Checker {
                 self.check_readonly_external_mutation(&target_ty, range.clone());
                 let index_ty = self.infer(idx);
                 let _ = unify_with(&self.subst, &apply_ty_prune(&self.subst, &index_ty), &int());
-                match &target_ty {
+                // A `readonly` array is still an array: the readonly
+                // violation above is the whole mistake (#2092).
+                match strip_readonly(&target_ty) {
                     Ty::Array { element, length } => {
                         if let ArrayLength::Static(n) = length
                             && let Expression::Integer(i) = idx.1.as_ref()
@@ -12253,25 +12261,28 @@ impl Checker {
         }
     }
 
-    fn instance_satisfies_orphan_rule(
+    /// The instance arguments the orphan rule rejects: each non-variable
+    /// argument whose nominal head is not defined in this module. Empty
+    /// when the trait is local, or every argument is.
+    pub(super) fn foreign_instance_args(
         &self,
         class_def: &TypeClassDef,
         arg_exprs: &[Output],
         arg_tys: &[Ty],
-    ) -> bool {
+    ) -> Vec<Ty> {
         if class_def.defined_module == self.current_module {
-            return true;
+            return Vec::new();
         }
 
         arg_exprs
             .iter()
             .zip(arg_tys.iter())
             .filter(|(_, ty)| !matches!(apply_ty_prune(&self.subst, ty), Ty::Var(_)))
-            .all(|(expr, ty)| {
+            .filter(|(expr, ty)| {
                 let head = self
                     .nominal_head_from_instance_arg(expr)
                     .or_else(|| self.nominal_head_from_ty(ty));
-                head.as_deref().is_some_and(|name| {
+                !head.as_deref().is_some_and(|name| {
                     let mod_of = |n: &str| self.generics.nominal_type_module(n);
                     // The core prelude declares `Option` / `Result`, which
                     // the registry files under `prelude` (#1906).
@@ -12285,6 +12296,8 @@ impl Checker {
                         || home(mod_of(&self.qualify_module_name(name)))
                 })
             })
+            .map(|(_, ty)| ty.clone())
+            .collect()
     }
 
     fn nominal_head_from_instance_arg(&self, arg: &Output) -> Option<String> {
@@ -19847,8 +19860,7 @@ impl Checker {
             return;
         }
         // `None` carries no payload: the operand's `Option<T>` need not
-        // share the function's `T` (#1165).
-        let _ = inner_ty;
+        // share the function's `T` (#1165); it only names the mismatch.
         if self.fn_option_mode.is_some() {
             return;
         }
@@ -19870,6 +19882,14 @@ impl Checker {
             }
             let payload = Ty::Var(self.counter.fresh());
             let opt = option_ty(payload.clone());
+            if unify_with(&self.subst, &ret, &opt).is_err() {
+                // Report with the operand's payload (`Option<int>`, not
+                // `Option<a>`) and leave the function's own type alone,
+                // so its final check does not repeat the mismatch (#2092).
+                let shown = option_ty(apply_ty_prune(&self.subst, inner_ty));
+                let _ = self.unify(&ret, &shown, range, "option return type");
+                return;
+            }
             self.unify(&ret, &opt, range, "option return type");
             self.fn_option_mode = Some(payload);
         } else {
