@@ -800,7 +800,7 @@ impl<const S: usize> Machine<S> {
                     let index = index_val.as_int();
                     let unchecked = matches!(*bc, Instruction::IndexUnchecked);
                     // Arrays dominate Index traffic (Vec); check Array before Tuple.
-                    let result = match Self::find_object_by_addr(&self.heap, target_addr) {
+                    let result = match self.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Array(gc)) => {
                             gc.as_ref().read_indexed(index, unchecked)
                         }
@@ -864,7 +864,7 @@ impl<const S: usize> Machine<S> {
                     let target_val = self.stack.pop();
                     let key = Self::intern_key(&mut self.heap, name_val);
                     let target_addr = target_val.bits();
-                    let result = match Self::find_object_by_addr(&self.heap, target_addr) {
+                    let result = match self.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Instance(gc)) => match gc.as_ref().get(key) {
                             Some(v) => v,
                             None => {
@@ -883,7 +883,7 @@ impl<const S: usize> Machine<S> {
                         let value = self.stack.pop();
                         let target_addr = target_val.bits();
                         if let Some(crate::memory::Object::Instance(mut gc)) =
-                            Self::find_object_by_addr(&self.heap, target_addr)
+                            self.heap.trusted_object(target_addr)
                         {
                             let idx = slot as usize;
                             promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
@@ -899,7 +899,7 @@ impl<const S: usize> Machine<S> {
                         let key = Self::intern_key(&mut self.heap, name_val);
                         let target_addr = target_val.bits();
                         if let Some(crate::memory::Object::Instance(mut gc)) =
-                            Self::find_object_by_addr(&self.heap, target_addr)
+                            self.heap.trusted_object(target_addr)
                         {
                             let member = Self::value_as_member(&self.heap, value);
                             gc.as_mut().set(key, member);
@@ -917,7 +917,7 @@ impl<const S: usize> Machine<S> {
                     let index = index_val.as_int();
                     let unchecked = matches!(*bc, Instruction::StoreIndexUnchecked);
                     if let Some(crate::memory::Object::Array(mut gc)) =
-                        Self::find_object_by_addr(&self.heap, target_addr)
+                        self.heap.trusted_object(target_addr)
                     {
                         if !gc.as_mut().store_indexed(index, value, unchecked) {
                     return dispatch::RestExit::done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
@@ -1126,7 +1126,7 @@ impl<const S: usize> Machine<S> {
                 Instruction::ArrayLen => {
                     let target_val = self.stack.pop();
                     let target_addr = target_val.bits();
-                    let len = match Self::find_object_by_addr(&self.heap, target_addr) {
+                    let len = match self.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Array(gc)) => gc.as_ref().len(),
                         Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().len(),
                         Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
@@ -1240,7 +1240,7 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().bits();
 
-                    match Self::find_object_by_addr(&self.heap, scrutinee_addr) {
+                    match self.heap.trusted_object(scrutinee_addr) {
                         Some(Object::Enum(enum_ref)) => {
                             let enum_ref = enum_ref.as_ref();
                             promise!(field_index < enum_ref.payload.len());

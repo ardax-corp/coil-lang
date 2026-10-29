@@ -1902,6 +1902,25 @@ impl Heap {
         unsafe { Object::from_header(addr) }
     }
 
+    /// [`Self::find_object_by_addr`] for a word the compiler typed as a heap
+    /// object (the target of an index, field or length op). Release builds
+    /// read the header without the slab lookup; debug builds still check
+    /// that a non-zero word is a mapped slot.
+    #[inline(always)]
+    pub(crate) fn trusted_object(&self, addr: u64) -> Option<Object> {
+        #[cfg(debug_assertions)]
+        assert!(
+            addr == 0 || self.slab.contains_slot(addr),
+            "heap operand {addr:#x} is not an object"
+        );
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: a non-zero word typed as a heap object is a live slot
+        // (checked above in debug builds).
+        unsafe { Object::from_header(addr) }
+    }
+
     /// [`Self::find_object_by_addr`] for an enum (`match` / `Unpack`): reads
     /// the header kind once instead of building an [`Object`] to match on.
     #[inline]
