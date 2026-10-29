@@ -1584,6 +1584,29 @@ pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_bytes
     Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
 }
 
+/// [`from_bytes`] of a buffer the compiler proved dead after the call: the
+/// string takes the buffer's bytes instead of copying them, and the buffer
+/// is left empty. Invalid UTF-8 puts the bytes back.
+pub fn from_bytes_take(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_bytes::StringErrorTag> {
+    use crate::str_bytes::StringErrorTag;
+    let Some(Object::Array(mut arr_gc)) = heap.find_object_by_addr(buf.bits()) else {
+        return Err(StringErrorTag::InvalidUtf8);
+    };
+    let arr: &mut ObjArray = arr_gc.as_mut();
+    let Some(bytes) = arr.take_bytes() else {
+        return from_bytes(heap, buf);
+    };
+    let s = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            arr.restore_bytes(e.into_bytes());
+            return Err(StringErrorTag::InvalidUtf8);
+        }
+    };
+    let gc = heap.alloc_string(s);
+    Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
+}
+
 /// Encode a heap string as a fresh `Vec<byte>` (UTF-8).
 ///
 /// Non-string input yields an empty buffer (defensive — the typechecker
@@ -1838,6 +1861,19 @@ mod tests {
         let buf = make_byte_array(&mut heap, b"hello");
         let s = from_bytes(&mut heap, buf).expect("utf-8");
         assert_eq!(value_as_string(&heap, s).unwrap(), "hello");
+    }
+
+    #[test]
+    fn from_bytes_take_moves_the_bytes_and_restores_them_on_an_error() {
+        let mut heap = Heap::default();
+        let packed = |heap: &mut Heap, b: &[u8]| Value::from(heap.alloc(ObjArray::from_bytes(b.to_vec()), Object::Array).0.addr());
+        let buf = packed(&mut heap, b"hello");
+        let s = from_bytes_take(&mut heap, buf).expect("utf-8");
+        assert_eq!(value_as_string(&heap, s).unwrap(), "hello");
+        assert_eq!(value_as_bytes(&heap, buf).unwrap(), Vec::<u8>::new());
+        let bad = packed(&mut heap, &[0xff, 0xfe]);
+        assert!(from_bytes_take(&mut heap, bad).is_err());
+        assert_eq!(value_as_bytes(&heap, bad).unwrap(), vec![0xff, 0xfe]);
     }
 
     #[test]

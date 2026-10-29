@@ -1561,6 +1561,7 @@ mod tests {
             hir_pair_locals: false,
             hir_bisect: None,
             auto_par: false,
+            early_free: false,
             require_mir: false,
         }
     }

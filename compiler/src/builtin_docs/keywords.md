@@ -40,6 +40,37 @@ fn main() {
 }
 ```
 
+## mut
+
+Borrows a place instead of copying it: the new name reaches the same object.
+
+Class instances, vectors and maps are values: `let b = a;` gives `b` a
+copy, made only when one side writes (copy-on-write). `mut` asks for the
+original instead. `let c = mut a.config;` makes `c` another name for
+`a.config`, `for mut item in items` changes each element in place, and
+`fn () use (mut list) { … }` lets a lambda change the outer `list`.
+
+```coil
+use tests::assert;
+
+class Point {
+    pub x: int,
+}
+
+fn main() {
+    let a = new Point(1);
+    let b = a;
+    b.x = 2; // copies: `a.x` stays 1
+    let c = mut a;
+    c.x = 5; // writes `a`'s object
+    let ps: Vec<Point> = [new Point(0)];
+    for mut p in ps {
+        p.x = 9;
+    }
+    assert!(a.x == 5 && b.x == 2 && ps[0].x == 9);
+}
+```
+
 ## const
 
 Declares a binding that cannot be reassigned: a local, a module constant, or a class field that is set only by `new`.
@@ -228,7 +259,8 @@ fn main() {
 Iterates over the values of an array, `Vec`, range, coroutine or any `IntoIterator`.
 
 `for x in expr { … }` pulls one value at a time; ranges such as `0..n` are
-lazy and allocate nothing. C-style `for (init; cond; step)` loops do not
+lazy and allocate nothing. `x` is a copy of each element; `for mut x in xs`
+borrows it, so writes through `x` change `xs`. C-style `for (init; cond; step)` loops do not
 exist. In `impl Trait for Type`, `for` names the type the trait is
 implemented for.
 
@@ -615,6 +647,31 @@ fn main() {
 }
 ```
 
+## shared
+
+Declares a `shared class`: a class whose instances are never copied.
+
+Plain class instances are values, copied on write (see `mut`). A shared
+class stands for one identity, such as a connection, a window or a
+registry: every name that holds an instance reaches the same object, and
+a write through one is seen through all. `Ref<T>` from `cell` is a shared
+class. `shared` is a keyword only before `class` or `readonly class`.
+
+```coil
+use tests::assert;
+
+shared class Log {
+    pub lines: int,
+}
+
+fn main() {
+    let log = new Log(0);
+    let alias = log;
+    alias.lines += 1;
+    assert!(log.lines == 1);
+}
+```
+
 ## impl
 
 Adds methods to a type (`impl Type { … }`) or implements a trait for it (`impl Trait for Type { … }`).
@@ -714,6 +771,41 @@ fn work(Vec<string> log) -> int {
 fn main() {
     let log: Vec<string> = Vec::new();
     let n = work(log); // log is now ["start", "cleanup"]
+}
+```
+
+## region
+
+Runs a block whose garbage is freed in one go when the block ends.
+
+`region { … }` suits a clear unit of work: one request, one frame, one
+pass over a file. Objects made inside are reclaimed together at the end
+instead of one by one by the collector. The compiler checks that none of
+them can leave the region (E0140): an object made inside may not be
+assigned to a local declared outside, stored into an object or static
+from outside, passed to a function that keeps it, or be the block's value.
+The value may be a plain value or an object made before the region.
+`return`, `?`, `break` and `continue` leave the region on the way out, and
+`region` is only a keyword before `{`: elsewhere it is an ordinary name.
+
+```coil
+use string::format;
+
+fn total_len(int rounds) -> int {
+    let total = 0;
+    let i = 0;
+    while i < rounds {
+        total += region {
+            let line = format("row %i", i);
+            line.len()
+        };
+        i += 1;
+    }
+    return total;
+}
+
+fn main() {
+    let n = total_len(3); // 15
 }
 ```
 

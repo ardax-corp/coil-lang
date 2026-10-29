@@ -40,8 +40,8 @@ test("methods that only read") {
     let m = new Counter(0);
     let c = readonly m;
     assert!(m.bump() == 1);
-    assert!(c.peek() == 1);
-    assert!(c.n == 1);
+    assert!(c.peek() == 0);
+    assert!(c.n == 0);
 }
 
 test("typeof shows the readonly type") {

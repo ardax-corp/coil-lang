@@ -329,7 +329,7 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
         // Net pops or in place.
         NOOP | DATA | NATIVE | POP | ADD | SUB | MUL | DIV | MOD | ADDF | SUBF | MULF | DIVF
         | MODF | NOT | NEG | NEGF | AND | OR | SHL | SHR | XOR | EQ | NEQ | LE | LEQ | LEF
-        | LEQF | EQF | NEQF | GT | GEQ | GTF | GEQF | Pow | PowF | BITAND | BITOR | LogNot | PRINT | FORMAT
+        | LEQF | EQF | NEQF | GT | GEQ | GTF | GEQF | Pow | PowF | BITAND | BITOR | LogNot | PRINT | FreeEarly | Cow | FORMAT
         | STRINGIFY | LoadField | Index | IndexUnchecked | StoreIndex | StoreIndexUnchecked
         | GetField | SetField | YieldCoro | DoneCoro | ArrayPush | ArrayLen | BoxValue
         | UnboxValue | DynAdd | DynSub | DynMul | DynDiv | DynMod | DynCmp | DynEq | DynNe

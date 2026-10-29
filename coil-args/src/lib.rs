@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use compiler::{ComptimeGrants, ComptimeLimits, ContractLevel, DebugLevel, HostGrants, OptLevel, Scoped};
+use compiler::{ComptimeGrants, ComptimeLimits, ContractLevel, DebugLevel, EarlyFree, HostGrants, OptLevel, Scoped};
 
 /// SARIF / LSP diagnostic stream (commands that report through the compiler).
 #[derive(Args, Clone, Debug, Default)]
@@ -40,6 +40,11 @@ pub struct OptLevelFlags {
     /// (default, at -O2 and above) or off
     #[arg(long, value_name = "on|off", value_parser = parse_fold_calls, action = clap::ArgAction::Set)]
     pub fold_calls: Option<bool>,
+    /// Free objects the compiler proves dead: on (default at -O1 and
+    /// above), off (default at -O0 and -Og), or check (compile the frees;
+    /// a run frees nothing and aborts if a freed object was still in use)
+    #[arg(long, value_name = "on|off|check", value_parser = EarlyFree::parse, action = clap::ArgAction::Set)]
+    pub early_free: Option<EarlyFree>,
     /// Automatic fork-join of pure recursive calls and counted loops: on
     /// (default) or off
     #[arg(long, value_name = "on|off", value_parser = parse_auto_par, action = clap::ArgAction::Set)]
@@ -61,6 +66,25 @@ fn parse_opt_level(s: &str) -> Result<OptLevel, String> {
         "invalid --opt-level (expected none|basic|standard|aggressive|size|debug or 0|1|2|3|s|g)"
             .into()
     })
+}
+
+/// `--nursery on|off` for commands that run Coil code.
+#[derive(Args, Clone, Debug, Default)]
+pub struct NurseryFlag {
+    /// Allocate young objects in a copying nursery: on (default) or off
+    #[arg(long, value_name = "on|off", value_parser = parse_nursery, action = clap::ArgAction::Set)]
+    pub nursery: Option<bool>,
+    /// At exit, print how many copy-on-write copies each source line made
+    #[arg(long)]
+    pub cow_report: bool,
+}
+
+fn parse_nursery(s: &str) -> Result<bool, String> {
+    match s {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("invalid --nursery `{s}` (expected on|off)")),
+    }
 }
 
 fn parse_fold_calls(s: &str) -> Result<bool, String> {

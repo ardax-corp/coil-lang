@@ -816,7 +816,7 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
         ) || matches!(
             // Boxing ops of compiler-made bodies keep the stack as it is.
             &e.kind,
-            HirKind::Builtin { op, .. } if !matches!(op, Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout)
+            HirKind::Builtin { op, .. } if !matches!(op, Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::Cow { .. })
         );
     });
     found
@@ -2699,7 +2699,7 @@ impl Walk<'_> {
             // `UnboxValue` / `BoxValue` / `STRINGIFY` of a dictionary-entry
             // word: the word, then the op.
             HirKind::Builtin {
-                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
+                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::Cow { .. },
                 args,
             } => {
                 let [inner] = args.as_slice() else {
@@ -3052,6 +3052,21 @@ impl Walk<'_> {
                 self.word(*msg)?;
                 self.value(*msg)
             }
+            // An early free of a local's object.
+            HirKind::Builtin {
+                op: Builtin::FreeEarly { .. },
+                args,
+            } => {
+                let [local] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.value(*local)
+            }
+            // A region mark: a host call with no operands.
+            HirKind::Builtin {
+                op: Builtin::Region { .. },
+                ..
+            } => Ok(()),
             // `panic msg`: the message, then `Panic`.
             HirKind::Builtin {
                 op: Builtin::Panic,
@@ -3145,7 +3160,7 @@ impl Walk<'_> {
             | HirKind::Resume { .. }
             | HirKind::Lambda { .. }
             | HirKind::Builtin {
-                op: Builtin::Done | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
+                op: Builtin::Done | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::Cow { .. },
                 ..
             } => self.value(id),
             other => Err(kind_name(other)),

@@ -46,8 +46,8 @@ fn slow_seven() -> int {
 test("a full channel suspends the sender until the receiver takes a value") {
     let log: Vec<string> = Vec::new();
     let ch: Channel<int> = task::channel(1);
-    let r = scope(fn (Scope s) use (ch, log) {
-        s.spawn(fn () use (ch, log) {
+    let r = scope(fn (Scope s) use (ch, mut log) {
+        s.spawn(fn () use (ch, mut log) {
             put(ch, 1);
             log.push("sent 1");
             put(ch, 2);
@@ -99,10 +99,10 @@ test("try_send and try_recv do not wait") {
     assert!(closed && ch.is_closed());
 }
 
-test("values are shared, not copied") {
+test("a sent value is the receiver's own copy") {
     let ch: Channel<Vec<int>> = task::channel(1);
     let v: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (ch, v) {
+    let r = scope(fn (Scope s) use (ch, mut v) {
         s.spawn(fn () use (ch) {
             match ch.recv() {
                 Result::Ok(got) => got.push(42),
@@ -117,13 +117,13 @@ test("values are shared, not copied") {
         0
     });
     assert!(ok_or(r, -1) == 0);
-    assert!(v.len() == 1 && v[0] == 42);
+    assert!(v.len() == 0);
 }
 
 test("blocking runs on a worker while other tasks keep going") {
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        let b = s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        let b = s.spawn(fn () use (mut log) {
             let n = match task::blocking_with(slow_square, 6) {
                 Result::Ok(v) => v,
                 Result::Err(_) => -1,
@@ -131,7 +131,7 @@ test("blocking runs on a worker while other tasks keep going") {
             log.push("blocking done");
             n
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             log.push("other task ran");
             0
         });
@@ -160,14 +160,14 @@ test("a thread channel recv suspends only the receiving task") {
     let (go_tx, go_rx) = thread_channel()?;
     let worker = spawn(produce, (tx, go_rx))?;
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (rx, go_tx, log) {
-        let reader = s.spawn(fn () use (rx, log) {
+    let r = scope(fn (Scope s) use (rx, go_tx, mut log) {
+        let reader = s.spawn(fn () use (rx, mut log) {
             let a = got(recv(rx));
             log.push("got first");
             let b = got(recv(rx));
             a + b
         });
-        s.spawn(fn () use (go_tx, log) {
+        s.spawn(fn () use (go_tx, mut log) {
             log.push("ticker");
             let _ = send(go_tx, 1);
             0
@@ -187,13 +187,13 @@ test("a contended with_lock suspends only the waiting task") {
     let m = mutex(10)?;
     lock(m)?;
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (m, log) {
-        let locker = s.spawn(fn () use (m, log) {
+    let r = scope(fn (Scope s) use (m, mut log) {
+        let locker = s.spawn(fn () use (m, mut log) {
             let before = got(with_lock(m, bump));
             log.push("locked");
             before
         });
-        s.spawn(fn () use (m, log) {
+        s.spawn(fn () use (m, mut log) {
             log.push("unlocking");
             let _ = unlock(m);
             0
@@ -206,8 +206,8 @@ test("a contended with_lock suspends only the waiting task") {
 
 test("join on a running thread suspends only the joining task") {
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        let joiner = s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        let joiner = s.spawn(fn () use (mut log) {
             let n = match spawn(slow_square, 4) {
                 Result::Ok(t) => got(join(t)),
                 Result::Err(_) => -1,
@@ -215,7 +215,7 @@ test("join on a running thread suspends only the joining task") {
             log.push("joined");
             n
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             log.push("ticker");
             0
         });

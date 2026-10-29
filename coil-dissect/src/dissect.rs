@@ -33,6 +33,8 @@ pub struct DissectArgs {
     pub contracts: Option<compiler::ContractLevel>,
     /// `--fold-calls on|off`; `None` keeps the pipeline default.
     pub fold_calls: Option<bool>,
+    /// `--early-free`; `None` follows the opt level.
+    pub early_free: Option<compiler::EarlyFree>,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
     pub opt_stats: bool,
@@ -93,6 +95,9 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     }
     if let Some(on) = args.fold_calls {
         pipeline.set_call_fold(on);
+    }
+    if let Some(mode) = args.early_free {
+        pipeline.set_early_free(mode.compiles());
     }
     if let Some(on) = args.auto_par {
         pipeline.set_auto_par(on);
@@ -248,6 +253,13 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
             .filter(|(name, _)| pat.is_none_or(|p| compiler::matches_fn_pat(name, p)))
         {
             println!("{name}: {text}");
+        }
+        for (name, text) in effects
+            .escape
+            .iter()
+            .filter(|(name, _)| pat.is_none_or(|p| compiler::matches_fn_pat(name, p)))
+        {
+            println!(";; escape {name}: {text}");
         }
         if effects.auto_par_off {
             println!(";; auto-par is off");

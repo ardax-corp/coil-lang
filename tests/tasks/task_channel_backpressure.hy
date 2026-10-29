@@ -54,8 +54,8 @@ test("a producer never runs more than capacity ahead of the consumer") {
     let ch: Channel<int> = task::channel(2);
     let max_ahead: Vec<int> = Vec::new();
     max_ahead.push(0);
-    let r = scope(fn (Scope s) use (ch, max_ahead) {
-        s.spawn(fn () use (ch, max_ahead) {
+    let r = scope(fn (Scope s) use (ch, mut max_ahead) {
+        s.spawn(fn () use (ch, mut max_ahead) {
             for i in 1..21 {
                 put(ch, i);
                 if ch.len() > max_ahead[0] {

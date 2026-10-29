@@ -12,12 +12,12 @@ fn ok_or(Result<int, TaskError> r, int fallback) -> int {
 
 test("children run at the parent's first suspension, in spawn order") {
     let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        s.spawn(fn () use (mut log) {
             log.push(1);
             0
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             log.push(2);
             0
         });
@@ -40,18 +40,18 @@ test("join returns the child's value") {
 
 test("sleep orders tasks by deadline") {
     let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        s.spawn(fn () use (mut log) {
             task::sleep(40);
             log.push(40);
             0
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             task::sleep(5);
             log.push(5);
             0
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             task::sleep(20);
             log.push(20);
             0
@@ -65,14 +65,14 @@ test("sleep orders tasks by deadline") {
 
 test("yield_now interleaves ready tasks") {
     let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        s.spawn(fn () use (mut log) {
             log.push(1);
             task::yield_now();
             log.push(3);
             0
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             log.push(2);
             task::yield_now();
             log.push(4);
@@ -104,7 +104,7 @@ test("nested scopes inside a child") {
 
 test("join after the scope ended") {
     let kept: Vec<Task<int>> = Vec::new();
-    let r = scope(fn (Scope s) use (kept) {
+    let r = scope(fn (Scope s) use (mut kept) {
         kept.push(s.spawn(fn () {
             task::sleep(1);
             9
@@ -117,8 +117,8 @@ test("join after the scope ended") {
 
 test("a child panic fails the scope and drops its siblings") {
     let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        s.spawn(fn () use (mut log) {
             task::sleep(50);
             log.push(1);
             0
@@ -143,7 +143,7 @@ test("a child panic fails the scope and drops its siblings") {
 
 test("joining a panicked child reports it") {
     let seen: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (seen) {
+    let r = scope(fn (Scope s) use (mut seen) {
         let bad = s.spawn(fn () {
             panic "bad child";
             0
@@ -167,13 +167,13 @@ test("joining a panicked child reports it") {
 
 test("clock::sleep_ms inside a scope suspends the task") {
     let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        s.spawn(fn () use (mut log) {
             sleep_ms(30);
             log.push(2);
             0
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             log.push(1);
             0
         });
@@ -185,11 +185,11 @@ test("clock::sleep_ms inside a scope suspends the task") {
 
 test("many tasks") {
     let total: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (total) {
+    let r = scope(fn (Scope s) use (mut total) {
         let i = 0;
         while i < 200 {
             let k = i;
-            s.spawn(fn () use (total, k) {
+            s.spawn(fn () use (mut total, k) {
                 task::yield_now();
                 total.push(k);
                 0

@@ -665,6 +665,15 @@ pub enum MirInst {
         dest: ValueId,
         src: ValueId,
     },
+    /// `FreeEarly` (escape step 2): give `value`'s object back to the heap
+    /// (with what it reaches when `deep`); the compiler proved nothing
+    /// reads it again. Dest is a `bool` unit token. A side effect; never
+    /// collects.
+    FreeEarly {
+        dest: ValueId,
+        value: ValueId,
+        deep: bool,
+    },
     /// `Panic` of the string `msg`: the frame never continues, so the
     /// block ends in [`Terminator::Unreachable`]. Dest is a `bool` unit
     /// token, as [`Self::Print`]. A side effect.
@@ -685,6 +694,21 @@ pub enum MirInst {
     Stringify {
         dest: ValueId,
         src: ValueId,
+    },
+    /// The `Cow` instruction: copy-on-write share (`unique: false`) or
+    /// unique of `src`'s object. Dest is `src`'s word, or a copy's for
+    /// unique. A side effect and an allocating safepoint; pair with
+    /// [`Self::GcBarrier`].
+    ///
+    /// With `field: Some(i)` (unique only), `src` is an object and the op
+    /// makes its field `i` unique in place, writing the field back only
+    /// when it copied: `src.f = unique(src.f)` in one instruction. Dest is
+    /// then `src`'s word.
+    Cow {
+        dest: ValueId,
+        src: ValueId,
+        unique: bool,
+        field: Option<u32>,
     },
     /// `UnboxValue tag`: the payload of `src` when it is a box of `tag`
     /// (the default word for another box); any other word as it is. A
@@ -1046,9 +1070,11 @@ impl MirInst {
             | Self::String { dest, .. }
             | Self::CodePtr { dest, .. }
             | Self::Print { dest, .. }
+            | Self::FreeEarly { dest, .. }
             | Self::Panic { dest, .. }
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
+            | Self::Cow { dest, .. }
             | Self::Unbox { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
@@ -1076,6 +1102,7 @@ impl MirInst {
                 | Self::ArrayPush { .. }
                 | Self::Format { .. }
                 | Self::Stringify { .. }
+                | Self::Cow { .. }
                 | Self::GcBarrier { .. }
         )
     }
@@ -1123,7 +1150,7 @@ impl MirInst {
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1208,7 +1235,7 @@ impl MirInst {
                 }
             }
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => {}
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {

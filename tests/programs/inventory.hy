@@ -30,12 +30,14 @@ impl Inventory {
         return Option::None;
     }
     pub fn restock(string name, int by) -> Result<int, string> {
-        let it = match self.find(name) {
-            Option::Some(i) => i,
-            Option::None => raise format("unknown item '%s'", name),
-        };
-        it.qty += by;
-        return it.qty;
+        // `find` hands back a copy-on-write share: write through a borrow.
+        for mut it in self.items {
+            if it.name == name {
+                it.qty += by;
+                return it.qty;
+            }
+        }
+        raise format("unknown item '%s'", name);
     }
     pub fn low(int threshold) -> Vec<string> {
         let out: Vec<string> = Vec::new();

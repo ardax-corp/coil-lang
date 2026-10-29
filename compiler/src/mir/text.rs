@@ -329,6 +329,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
         MirInst::CodePtr { dest, target } => write!(f, "{dest} = codeptr {}", target.0),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
+        MirInst::FreeEarly { dest, value, deep } => write!(f, "{dest} = free{} {value}", if *deep { ".deep" } else { "" }),
         MirInst::Panic { dest, msg } => write!(f, "{dest} = panic {msg}"),
         MirInst::Format { dest, fmt, args } => {
             write!(f, "{dest} = format {fmt}")?;
@@ -338,6 +339,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             Ok(())
         }
         MirInst::Stringify { dest, src } => write!(f, "{dest} = stringify {src}"),
+        MirInst::Cow { dest, src, unique, field: None } => write!(f, "{dest} = cow.{} {src}", if *unique { "unique" } else { "share" }),
+        MirInst::Cow { dest, src, field: Some(i), .. } => write!(f, "{dest} = cow.unique_field {src} {i}"),
         MirInst::Unbox { dest, src, tag } => write!(f, "{dest} = unbox.{} {tag}, {src}", func.ty(*dest)),
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             write!(f, "{dest} = {} {lhs}, {rhs}", if *ne { "strne" } else { "streq" })
@@ -919,6 +922,11 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::String { dest, idx });
         }
+        if op == "free" || op == "free.deep" {
+            let value = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::FreeEarly { dest, value, deep: op == "free.deep" });
+        }
         if op == "print" {
             let src = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
@@ -945,6 +953,17 @@ impl<'a> Parser<'a> {
             let src = self.value()?;
             ensure_ty(types, dest, ty);
             return Ok(MirInst::Unbox { dest, src, tag });
+        }
+        if op == "cow.share" || op == "cow.unique" {
+            let src = self.value()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::Cow { dest, src, unique: op == "cow.unique", field: None });
+        }
+        if op == "cow.unique_field" {
+            let src = self.value()?;
+            let i = self.uint()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::Cow { dest, src, unique: true, field: Some(i as u32) });
         }
         if op == "stringify" {
             let src = self.value()?;

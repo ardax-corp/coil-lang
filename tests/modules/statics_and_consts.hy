@@ -75,8 +75,8 @@ fn read_twice(int n) -> int {
 }
 
 fn acc_sum(int n) -> int {
-    // A field store needs a local base: the static's object, read once.
-    let a = acc;
+    // A field store needs a local base: the static's object, borrowed once.
+    let a = mut acc;
     let i = 0;
     while i < n {
         a.sum = a.sum + i;

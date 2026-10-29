@@ -223,8 +223,8 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::TailCall => None,
         Instruction::HostInvoke => Some(-((byte.operand_u32() & 0xFFFF) as i32)),
         Instruction::HostInvokeNiche => Some(-1),
-        Instruction::FloatChainStore => Some(0),
-        Instruction::PRINT | Instruction::GetField => Some(-1),
+        Instruction::FloatChainStore | Instruction::Cow => Some(0),
+        Instruction::PRINT | Instruction::FreeEarly | Instruction::GetField => Some(-1),
         Instruction::SetField => {
             if common::set_field_slot_index(byte.operand_u32()).is_some() {
                 Some(-1)

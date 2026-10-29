@@ -27,6 +27,12 @@ const EPOCH_GC_HEADROOM_MIN: usize = 256 * 1024 * 1024;
 /// Growth when most of the heap survived its last collection: the live set is
 /// still growing, so re-marking it every doubling is mostly wasted work.
 const GC_GROWTH_FACTOR_SURVIVING: usize = 4;
+/// Nursery size in 64 KiB slab chunks: filling this many asks for a minor
+/// collection (`feature/escape-memory` step 4).
+const NURSERY_CHUNKS: usize = 32;
+/// Nursery chunks a `region` block may fill (64 MiB) before a minor
+/// collection runs inside it.
+const REGION_CHUNKS: usize = 1024;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
@@ -58,6 +64,8 @@ struct EpochBatch {
     /// [`Heap::finalizable`].
     weaks: Vec<u64>,
     finalizable: Vec<u64>,
+    /// Objects that can hold references, for [`Heap::epoch_born`].
+    born: Vec<u64>,
 }
 
 impl EpochBatch {
@@ -67,6 +75,7 @@ impl EpochBatch {
             && self.objects == 0
             && self.weaks.is_empty()
             && self.finalizable.is_empty()
+            && self.born.is_empty()
     }
 }
 
@@ -216,6 +225,9 @@ pub struct Heap {
     gc_growth_factor: usize,
     /// Heap bytes when the current sweep started (survival for the next budget).
     gc_sweep_start_bytes: usize,
+    /// Bytes the current sweep has freed: what survived the mark is
+    /// `gc_sweep_start_bytes` less this, whatever was allocated meanwhile.
+    gc_sweep_freed: usize,
     strings: Table<()>,
     slab: Slab,
     /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
@@ -230,6 +242,12 @@ pub struct Heap {
     /// Class / enum `type_id`s with a `drop` (the VM's finalizer registry),
     /// one bit per id: every allocation asks while any is registered.
     finalizer_types: Vec<u64>,
+    /// Class `type_id`s that are identities, never copied on write
+    /// (`shared class`, `Ref<T>`), one bit per id. Classes with a `drop`
+    /// are identities too.
+    identity_types: Vec<u64>,
+    /// Objects [`Self::cow_unique`] copied.
+    cow_copies: u64,
     /// Every object of a [`Self::finalizer_types`] type, a superset pruned
     /// by [`Self::unmarked_finalizable`] like [`Self::weaks`].
     finalizable: Vec<u64>,
@@ -245,6 +263,38 @@ pub struct Heap {
     gc_root_objects: Vec<Object>,
     gc_roots: Vec<u64>,
     gc_dangling_strings: Vec<RefString>,
+    /// Check mode of [`Self::free_early`]: objects it would have freed,
+    /// which the next mark must not reach ([`Self::check_doomed`]).
+    doomed: Vec<u64>,
+    /// What the last [`Self::free_early`] gave back.
+    early_freed: Vec<u64>,
+    /// [`Self::free_early`] freed something: a dead frame word or a dead
+    /// object may now point at a freed or reused slot, so a typed handle
+    /// is looked up before it is marked ([`Self::early_freed_slot`]).
+    freed_early: bool,
+    /// Allocate movable kinds in the nursery ([`Self::set_nursery`]).
+    nursery: bool,
+    /// Objects born in the open steal epoch that can hold references. The
+    /// nursery is empty during an epoch, so they start out naming nothing
+    /// young; when it closes they join the write barrier
+    /// ([`Self::exit_epoch_stw`]).
+    epoch_born: Vec<u64>,
+    /// Bytes allocated in the nursery since the last minor collection
+    /// (part of `alloc_bytes`; an estimate, arrays grow in place).
+    young_bytes: usize,
+    /// Nursery chunks in use that ask for a minor collection.
+    nursery_chunks: usize,
+    /// Bytes still to allocate old after a minor collection most of the
+    /// nursery survived ([`Self::note_survival`]).
+    pretenure_bytes: usize,
+    /// Minor collections in a row most of the nursery survived.
+    pretenure_streak: u32,
+    /// Open `region` blocks ([`Self::region_enter`]); while non-zero the
+    /// nursery takes strings too, never pretenures, and holds up to
+    /// [`REGION_CHUNKS`].
+    region_depth: u32,
+    /// [`Self::nursery_chunks`] outside the region.
+    region_saved_chunks: usize,
     /// Incremental mark / lazy sweep (COI-309 S4).
     gc_phase: GcPhase,
     /// Next object to consider while sweeping; `None` when the cursor is idle.
@@ -280,12 +330,15 @@ impl Default for Heap {
             byte_cap: usize::MAX,
             gc_growth_factor: GC_GROWTH_FACTOR,
             gc_sweep_start_bytes: 0,
+            gc_sweep_freed: 0,
             strings: Table::default(),
             slab: Slab::new(),
             live_count: 0,
             class_kinds: std::sync::Arc::default(),
             weaks: Vec::new(),
             finalizer_types: Vec::new(),
+            identity_types: Vec::new(),
+            cow_copies: 0,
             finalizable: Vec::new(),
             immortal_enums: HashMap::default(),
             unit_enum: None,
@@ -294,6 +347,17 @@ impl Default for Heap {
             gc_root_objects: Vec::new(),
             gc_roots: Vec::new(),
             gc_dangling_strings: Vec::new(),
+            doomed: Vec::new(),
+            early_freed: Vec::new(),
+            freed_early: false,
+            nursery: false,
+            epoch_born: Vec::new(),
+            young_bytes: 0,
+            nursery_chunks: NURSERY_CHUNKS,
+            pretenure_bytes: 0,
+            pretenure_streak: 0,
+            region_depth: 0,
+            region_saved_chunks: 0,
             gc_phase: GcPhase::Idle,
             gc_sweep_cursor: None,
             ffi_strings: Vec::new(),
@@ -399,6 +463,9 @@ impl Heap {
     }
 
     pub fn enter_epoch_stw(&mut self, lock: &Mutex<()>) {
+        // Epoch mutators allocate old and have no barrier of their own: no
+        // young object may exist for them to store.
+        self.promote_young();
         self.epoch_stw = true;
         self.epoch_gc_ceiling = self
             .gc_next_threshold
@@ -415,6 +482,13 @@ impl Heap {
     pub fn exit_epoch_stw(&mut self) {
         self.epoch_stw = false;
         self.alloc_lock = ptr::null();
+        for addr in std::mem::take(&mut self.epoch_born) {
+            if let Some(obj) = self.find_object_by_addr(addr)
+                && obj.generation() & GEN_YOUNG == 0
+            {
+                obj.set_generation(GEN_UNLOGGED);
+            }
+        }
     }
 
     /// Allocates an object and returns its handle. The object is pushed to the
@@ -475,6 +549,9 @@ impl Heap {
                 Some(SideList::Finalizable) => batch.finalizable.push(object.addr()),
                 None => {}
             }
+            if T::HOLDS_REFS && self.nursery {
+                batch.born.push(object.addr());
+            }
         });
         crate::vm::note_heap_alloc();
         (object, content)
@@ -486,6 +563,7 @@ impl Heap {
         self.live_count += std::mem::take(&mut batch.objects);
         self.weaks.append(&mut batch.weaks);
         self.finalizable.append(&mut batch.finalizable);
+        self.epoch_born.append(&mut batch.born);
     }
 
     /// Give this thread's unused epoch slots back and fold its counts in.
@@ -525,12 +603,52 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
+        self.alloc_unlocked_in(data, map, true)
+    }
+
+    /// [`Self::alloc_unlocked`]; `may_young: false` puts it in the old space
+    /// whatever its kind (an interned string, which the intern table names).
+    fn alloc_unlocked_in<T: GcSized, F>(&mut self, data: T, map: F, may_young: bool) -> (Object, Gc<T>)
+    where
+        F: Fn(Gc<T>) -> Object,
+    {
         let layout = Layout::new::<GcData<T>>();
-        let slot = self.slab.alloc(layout).cast::<GcData<T>>();
-        let (object, content) = Self::init_slot(slot, data, map);
+        // Objects allocated while a mark is open are black, and a young
+        // object must not carry a major-cycle mark: those go old.
+        let young = (T::NURSERY || (T::REGION && self.region_depth != 0))
+            && may_young
+            && self.nursery
+            && !self.epoch_stw
+            && self.pretenure_bytes == 0
+            && self.gc_phase != GcPhase::Marking
+            && (self.finalizer_types.is_empty()
+                || data.finalizer_type_id().is_none_or(|t| !self.has_finalizer(t)));
+        let slot = if young { self.slab.alloc_young(layout) } else { self.slab.alloc(layout) };
+        let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
         let size = object.size();
         self.alloc_bytes += size;
         self.live_count += 1;
+        if young {
+            content.header.generation.set(GEN_YOUNG);
+            self.young_bytes += size;
+            crate::vm::note_heap_alloc();
+            return (object, content);
+        }
+        if T::NURSERY && self.pretenure_bytes != 0 {
+            self.pretenure_bytes = self.pretenure_bytes.saturating_sub(size);
+        }
+        if T::HOLDS_REFS && self.nursery {
+            if self.epoch_stw {
+                self.epoch_born.push(object.addr());
+            } else if self.slab.young_chunks_in_use() == 0 {
+                // Nothing young to name yet (pretenuring right after a
+                // minor): the barrier records its first write.
+                content.header.generation.set(GEN_UNLOGGED);
+            } else {
+                // Born old, maybe naming young objects: remembered at once.
+                REMEMBERED.with_borrow_mut(|r| r.push(object.addr()));
+            }
+        }
         match self.side_list_of(object) {
             Some(SideList::Weak) => self.weaks.push(object.addr()),
             Some(SideList::Finalizable) => self.finalizable.push(object.addr()),
@@ -611,6 +729,137 @@ impl Heap {
     pub fn clear_finalizer_types(&mut self) {
         self.finalizer_types.clear();
         self.finalizable.clear();
+        self.identity_types.clear();
+    }
+
+    /// Note that `type_id` is an identity: [`Self::cow_unique`] never
+    /// copies its objects.
+    pub fn register_identity_type(&mut self, type_id: u32) {
+        let word = type_id as usize / 64;
+        if self.identity_types.len() <= word {
+            self.identity_types.resize(word + 1, 0);
+        }
+        self.identity_types[word] |= 1 << (type_id % 64);
+    }
+
+    fn is_identity_type(&self, type_id: u32) -> bool {
+        self.has_finalizer(type_id)
+            || self
+                .identity_types
+                .get(type_id as usize / 64)
+                .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
+    }
+
+    /// Copy-on-write: a second place now names `v`'s object, so the next
+    /// write through either place copies it first. Anything but a class
+    /// instance or an array is left alone.
+    /// `true` when it marked an object.
+    #[inline]
+    pub fn cow_share(&self, v: Value) -> bool {
+        if let Some(obj @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(v.heap_addr()) {
+            obj.set_shared();
+            return true;
+        }
+        false
+    }
+
+    /// Copy-on-write: before a write through `v`, a shallow copy of its
+    /// object when another place may name it. The original and the copy
+    /// then both name the children, so those are marked shared in turn.
+    /// `None` when `v` can be written in place: not shared, an identity
+    /// class, or not a class instance or array.
+    pub fn cow_unique(&mut self, v: Value) -> Option<Value> {
+        let obj = self.find_object_by_addr(v.heap_addr())?;
+        if !obj.is_shared() {
+            return None;
+        }
+        let copy = match obj {
+            Object::Instance(gc) => {
+                let inst = gc.as_ref();
+                if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
+                    return None;
+                }
+                let slots = inst.storage.as_slice()?.to_vec();
+                self.alloc(ObjInstance::with_slots(inst.type_id, slots), Object::Instance).0
+            }
+            Object::Array(gc) => {
+                let copy = gc.as_ref().copy();
+                self.alloc(copy, Object::Array).0
+            }
+            _ => return None,
+        };
+        copy.for_each_reference(self, &mut |addr, _| {
+            if let Some(child @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(addr) {
+                child.set_shared();
+            }
+        });
+        self.cow_copies += 1;
+        Some(Value::from(copy.addr()))
+    }
+
+    /// Measuring only (`COIL_COW_EAGER`): a deep copy of `v`'s class
+    /// instances and arrays, as a design that copies on assignment makes.
+    pub fn cow_deep_copy(&mut self, v: Value) -> Value {
+        let mut seen: std::collections::HashMap<u64, Value> = std::collections::HashMap::new();
+        self.deep_copy_in(v, &mut seen, 0)
+    }
+
+    fn deep_copy_in(&mut self, v: Value, seen: &mut std::collections::HashMap<u64, Value>, depth: u32) -> Value {
+        let addr = v.heap_addr();
+        if addr == 0 || depth > 10_000 {
+            return v;
+        }
+        if let Some(&c) = seen.get(&addr) {
+            return c;
+        }
+        let words = match self.find_object_by_addr(addr) {
+            Some(Object::Instance(gc)) => {
+                let inst = gc.as_ref();
+                if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
+                    return v;
+                }
+                let Some(slots) = inst.storage.as_slice() else { return v };
+                (Some(inst.type_id), slots.to_vec())
+            }
+            Some(Object::Array(gc)) => match &gc.as_ref().data {
+                ArrayData::Words(w) => (None, w.clone()),
+                ArrayData::Bytes(_) => {
+                    let copy = gc.as_ref().copy();
+                    let c = Value::from(self.alloc(copy, Object::Array).0.addr());
+                    seen.insert(addr, c);
+                    return c;
+                }
+            },
+            _ => return v,
+        };
+        let (type_id, mut slots) = words;
+        let kind = match self.find_object_by_addr(addr) {
+            Some(Object::Array(gc)) => Some(gc.as_ref().elem_kind),
+            _ => None,
+        };
+        for w in &mut slots {
+            if matches!(self.find_object_by_addr(w.heap_addr()), Some(Object::Instance(_) | Object::Array(_))) {
+                *w = self.deep_copy_in(*w, seen, depth + 1);
+            }
+        }
+        let c = match type_id {
+            Some(t) => Value::from(self.alloc(ObjInstance::with_slots(t, slots), Object::Instance).0.addr()),
+            None => {
+                let mut a = ObjArray::new(slots);
+                if let Some(k) = kind {
+                    a.elem_kind = k;
+                }
+                Value::from(self.alloc(a, Object::Array).0.addr())
+            }
+        };
+        self.cow_copies += 1;
+        seen.insert(addr, c);
+        c
+    }
+
+    /// How many objects [`Self::cow_unique`] copied.
+    pub fn cow_copies(&self) -> u64 {
+        self.cow_copies
     }
 
     /// An enum typed after its allocation (`TagEnumType`).
@@ -724,13 +973,19 @@ impl Heap {
         if let Some(s) = self.strings.find(&data.data, data.hash_code()) {
             return s;
         }
+        // The table is not traced by a minor collection: a young key would
+        // be freed under it. Intern an old copy instead.
+        if string.header.generation.get() & GEN_YOUNG != 0 {
+            let hash = data.hash_code();
+            return self.intern_new(data.data.to_string(), hash);
+        }
         self.strings.insert(string, ());
         string
     }
 
     fn intern_new(&mut self, data: String, hash: u32) -> RefString {
         let obj_string = ObjString::with_hash(data, hash);
-        let (_, s) = self.alloc_unlocked(obj_string, Object::String);
+        let (_, s) = self.alloc_unlocked_in(obj_string, Object::String, false);
         self.strings.insert(s, ());
         s
     }
@@ -775,8 +1030,10 @@ impl Heap {
         }
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
+        self.unmark_young();
         self.gc_sweep_start_bytes = self.alloc_bytes;
-        self.gc_sweep_cursor = Some(super::slab::SlotCursor::default());
+        self.gc_sweep_freed = 0;
+        self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
         self.finish_sweep();
     }
 
@@ -878,9 +1135,11 @@ impl Heap {
             return;
         }
         self.unlink_unmarked_interns();
+        self.unmark_young();
         self.gc_phase = GcPhase::Sweeping;
         self.gc_sweep_start_bytes = self.alloc_bytes;
-        self.gc_sweep_cursor = Some(super::slab::SlotCursor::default());
+        self.gc_sweep_freed = 0;
+        self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
     }
 
     /// Reclaim up to `n` unmarked objects. Returns true when sweep finished.
@@ -930,16 +1189,16 @@ impl Heap {
                 break obj;
             }
         };
-        self.gc_sweep_cursor = Some(cur);
         // A `fresh` object is kept whatever its mark (it may postdate the
         // mark phase) — but still unmarked: a stale mark would make the next
         // cycle skip tracing its children.
-        let fresh = obj.take_fresh();
-        if obj.is_marked() {
-            obj.unmark();
-        } else if !fresh {
-            unsafe { self.dealloc(obj) };
+        // SAFETY: a live slot starts with its header.
+        let header = unsafe { &*(obj.addr() as *const GcHeader) };
+        let fresh = header.fresh.replace(false);
+        if !header.marked.replace(false) && !fresh {
+            unsafe { self.dealloc_swept(obj, &mut cur) };
         }
+        self.gc_sweep_cursor = Some(cur);
     }
 
     fn finish_sweep_cycle(&mut self) {
@@ -950,8 +1209,11 @@ impl Heap {
         } else {
             self.gc_growth_factor
         };
-        self.gc_next_threshold = self
-            .alloc_bytes
+        // What the mark kept, not what a lazy sweep let the program allocate
+        // meanwhile: counting those (pretenured objects, mostly) as live
+        // would push the next collection out by the growth factor.
+        let survived = self.gc_sweep_start_bytes.saturating_sub(self.gc_sweep_freed).min(self.alloc_bytes);
+        self.gc_next_threshold = (survived.saturating_sub(self.young_bytes))
             .saturating_mul(growth)
             .max(GC_NEXT_THRESHOLD)
             .min(self.byte_cap);
@@ -973,6 +1235,132 @@ impl Heap {
             self.strings.remove(s);
         }
         self.gc_dangling_strings = dangling_strings;
+    }
+
+    /// Free the object `v` points at before a collection would, because
+    /// the compiler proved nothing else reaches it (`feature/escape-memory`
+    /// step 2). `deep` also frees every object it reaches through precise
+    /// pointer words. `keep` names objects the VM still holds itself (frame
+    /// pins); those and anything this cannot free safely stay for the GC:
+    /// interned strings, the shared unit variants and `()`, objects with
+    /// a `drop`, handles, and everything while a cycle or a steal epoch is
+    /// open. `check` frees nothing and records the objects instead, which
+    /// the next mark must not reach. Returns how many objects it freed.
+    /// [`Self::early_freed`] lists the addresses it freed.
+    pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool) -> usize {
+        self.early_freed.clear();
+        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+            return 0;
+        }
+        let Some(root) = self.find_object_by_addr(v.heap_addr()) else {
+            return 0;
+        };
+        if !self.early_freeable(root) || keep(root.addr()) {
+            return 0;
+        }
+        if !deep {
+            // One object: no walk, no list.
+            if check {
+                self.doomed.push(root.addr());
+                return 0;
+            }
+            self.freed_early = true;
+            self.early_freed.push(root.addr());
+            unsafe { self.dealloc(root) };
+            return 1;
+        }
+        let mut found = vec![root];
+        {
+            // Every mark bit is clear while idle: a set bit means visited.
+            let mut work = Vec::new();
+            root.mark(&mut work);
+            let mut children = Vec::new();
+            while let Some(obj) = work.pop() {
+                obj.for_each_reference(self, &mut |addr, precise| {
+                    if precise {
+                        children.push(addr);
+                    }
+                });
+                for addr in children.drain(..) {
+                    if let Some(child) = self.find_object_by_addr(addr)
+                        && self.early_freeable(child)
+                        && !child.is_marked()
+                        && !keep(addr)
+                    {
+                        child.mark(&mut work);
+                        found.push(child);
+                    }
+                }
+            }
+            for obj in &found {
+                obj.unmark();
+            }
+        }
+        if check {
+            self.doomed.extend(found.iter().map(Object::addr));
+            return 0;
+        }
+        self.freed_early = true;
+        self.early_freed.extend(found.iter().map(Object::addr));
+        for &obj in &found {
+            unsafe { self.dealloc(obj) };
+        }
+        found.len()
+    }
+
+    /// The addresses the last [`Self::free_early`] gave back.
+    pub fn early_freed(&self) -> &[u64] {
+        &self.early_freed
+    }
+
+    /// Whether `addr` may be a slot [`Self::free_early`] gave back: a stale
+    /// reference there is no heap corruption.
+    pub fn early_freed_slot(&self, addr: u64) -> bool {
+        self.freed_early && self.slab.contains_slot(addr)
+    }
+
+    /// Whether check mode recorded objects since the last check.
+    pub fn has_doomed(&self) -> bool {
+        !self.doomed.is_empty()
+    }
+
+    /// Whether [`Self::free_early`] may free `obj` (when nothing reaches it).
+    fn early_freeable(&self, obj: Object) -> bool {
+        match obj {
+            Object::String(s) => {
+                // Interning hashes a string first; an unhashed one is not interned.
+                let s_ref = s.as_ref();
+                !s_ref.hash_set() || self.strings.find(&s_ref.data, s_ref.hash_code()).is_none_or(|i| i.as_ptr() != s.as_ptr())
+            }
+            Object::Array(_) => true,
+            Object::Tuple(t) => !t.as_ref().elements().is_empty(),
+            Object::Enum(e) => self.finalizer_types.is_empty() && !e.as_ref().payload.is_empty(),
+            Object::Instance(_) => self.finalizer_types.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Check mode of [`Self::free_early`], once a mark from the roots that
+    /// are certainly live is complete: an object it would have freed that
+    /// the mark reached was still in use.
+    pub fn check_doomed(&mut self) {
+        for addr in std::mem::take(&mut self.doomed) {
+            if let Some(obj) = self.find_object_by_addr(addr)
+                && obj.is_marked()
+            {
+                let root = self.gc_roots.contains(&addr);
+                let mut holders = Vec::new();
+                for o in self.objects() {
+                    o.for_each_reference(self, &mut |a, precise| {
+                        if a == addr {
+                            holders.push(format!("{o}{}", if precise { "" } else { " (imprecise)" }));
+                        }
+                    });
+                }
+                eprintln!("early free check: {obj} at {addr:#x} was freed while still reachable (root: {root}, held by: {holders:?})");
+                std::process::abort();
+            }
+        }
     }
 
     /// Returns the number of bytes that are being allocated.
@@ -1022,7 +1410,94 @@ impl Heap {
             self.gc_next_threshold
         };
         self.gc_phase == GcPhase::Idle
-            && (cfg!(feature = "gc-stress") || self.alloc_bytes > limit)
+            && (cfg!(feature = "gc-stress")
+                || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+                || self.slab.held_chunks() >= self.nursery_chunks
+                || self.slab.young_chunks_in_use() >= self.nursery_chunks)
+    }
+
+    /// The nursery is full: run a minor collection.
+    #[inline]
+    pub fn should_collect_young(&self) -> bool {
+        self.nursery
+            && (cfg!(feature = "gc-stress") || self.slab.young_chunks_in_use() >= self.nursery_chunks)
+    }
+
+    /// A minor collection that could not move promoted the nursery in
+    /// place: allocate old for a nursery's worth, into the promoted
+    /// chunks' free tails. Otherwise a nested run, where every minor
+    /// promotes, maps a fresh nursery chunk per collection: under
+    /// `gc-stress` one per allocation, thousands of mostly empty chunks
+    /// that every later collection sweeps.
+    pub fn pretenure_after_promote(&mut self) {
+        self.pretenure_bytes = self.nursery_chunks * super::slab::CHUNK_BYTES;
+    }
+
+    /// A minor collection found `survivors` of `objects` young objects
+    /// live. When most survived (a large structure being built), copying
+    /// them buys nothing: allocate old for a while, longer each time in a
+    /// row, and try the nursery again after.
+    pub(super) fn note_survival(&mut self, survivors: usize, objects: usize) {
+        if self.region_depth != 0 {
+            return;
+        }
+        if survivors * 2 > objects {
+            self.pretenure_streak = (self.pretenure_streak + 1).min(6);
+            self.pretenure_bytes = (self.nursery_chunks * super::slab::CHUNK_BYTES) << (self.pretenure_streak - 1);
+        } else {
+            self.pretenure_streak = 0;
+        }
+    }
+
+    /// A `region` block opens. Returns true for the outermost one, which
+    /// the VM starts with an empty nursery.
+    pub fn region_enter(&mut self) -> bool {
+        self.region_depth += 1;
+        if self.region_depth != 1 {
+            return false;
+        }
+        self.region_saved_chunks = self.nursery_chunks;
+        self.nursery_chunks = self.nursery_chunks.max(REGION_CHUNKS);
+        self.pretenure_bytes = 0;
+        self.pretenure_streak = 0;
+        true
+    }
+
+    /// A `region` block ends. Returns true for the outermost one, after
+    /// which the VM collects the nursery.
+    pub fn region_exit(&mut self) -> bool {
+        if self.region_depth == 0 {
+            return false;
+        }
+        self.region_depth -= 1;
+        if self.region_depth != 0 {
+            return false;
+        }
+        self.nursery_chunks = self.region_saved_chunks;
+        true
+    }
+
+    /// The old space crossed its budget: run a major cycle.
+    #[inline]
+    pub fn should_collect_old(&self) -> bool {
+        let limit = if self.epoch_stw {
+            self.epoch_gc_ceiling
+        } else {
+            self.gc_next_threshold
+        };
+        cfg!(feature = "gc-stress")
+            || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+            || self.slab.held_chunks() >= self.nursery_chunks
+    }
+
+    /// Allocate instances, enums, boxes, tuples and arrays in the nursery
+    /// (the VM turns it on; `--nursery off` keeps it off).
+    pub fn set_nursery(&mut self, on: bool) {
+        self.nursery = on;
+    }
+
+    pub fn nursery(&self) -> bool {
+        self.nursery
     }
 
     /// Objects to sweep at one safepoint (doubles under pressure).
@@ -1036,10 +1511,12 @@ impl Heap {
     }
 
     /// Lower the byte threshold so the next [`Self::should_collect`] check
-    /// fires (test helper for GC stress).
+    /// fires (test helper for GC stress). The nursery then collects at every
+    /// safepoint that finds a young object.
     #[cfg(any(test, feature = "debugger"))]
     pub fn set_gc_threshold_for_test(&mut self, bytes: usize) {
         self.gc_next_threshold = bytes;
+        self.nursery_chunks = 1;
     }
 
     /// Count an array's storage change (see [`ObjArray::take_resize`]).
@@ -1075,8 +1552,27 @@ impl Heap {
         debug_assert!(self.live_count > 0);
         self.live_count -= 1;
         let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
+        let young = object.generation() & GEN_YOUNG != 0;
         unsafe { object.recycle_payload() };
-        self.slab.free(ptr);
+        if young {
+            // Reused by the nursery until its chunk is reset.
+            self.young_bytes = self.young_bytes.saturating_sub(size);
+            self.slab.free_young(ptr);
+        } else {
+            self.slab.free(ptr);
+        }
+    }
+
+    /// [`Self::dealloc`] of the slot the sweep walk is at.
+    unsafe fn dealloc_swept(&mut self, object: Object, cur: &mut super::slab::SlotCursor) {
+        let size = object.size();
+        self.alloc_bytes -= size;
+        self.gc_sweep_freed += size;
+        debug_assert!(self.live_count > 0);
+        self.live_count -= 1;
+        let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
+        unsafe { object.recycle_payload() };
+        self.slab.free_at_cursor(cur, ptr);
     }
 
     pub fn trace(&mut self, values: &[u64]) {
@@ -1371,7 +1867,7 @@ impl Heap {
         if kind == common::WORD_SCALAR && resolves {
             panic!("gc-stress: scalar word {index} of {what} holds a heap reference");
         }
-        if kind == common::WORD_POINTER && addr != 0 && !resolves {
+        if kind == common::WORD_POINTER && addr != 0 && !resolves && !self.early_freed_slot(addr) {
             panic!("gc-stress: pointer word {index} of {what} holds a non-object");
         }
     }
@@ -1468,6 +1964,10 @@ impl Drop for Heap {
     fn drop(&mut self) {
         // Drop payloads in place; the slab (and its free lists) goes away
         // next, so slots are not returned and nothing is collected first.
+        self.forget_remembered();
+        if self.slab.young_chunks_in_use() != 0 {
+            note_young_heap(false);
+        }
         let mut cur = super::slab::SlotCursor::default();
         while let Some(addr) = self.slab.next_slot(&mut cur) {
             if let Some(object) = unsafe { Object::from_header(addr) } {
@@ -1680,6 +2180,8 @@ impl Object {
     /// Mark a stored member, including Result `Err` tagged pointers in `Value`.
     fn mark_member(heap: &Heap, member: &Member, grey_objects: &mut Vec<Self>) {
         match member {
+            // A dead object may still name a slot an early free gave back.
+            Member::Object(o) if heap.freed_early => heap.mark_value(Value::from(o.addr()), grey_objects),
             Member::Object(o) => o.mark(grey_objects),
             Member::Value(v) => heap.mark_value(*v, grey_objects),
         }
@@ -1864,10 +2366,28 @@ impl Object {
         }
     }
 
-    /// Clear the header's `fresh` bit (allocated during a sweep), returning
-    /// whether it was set. Every kind shares the `repr(C)` header layout.
-    fn take_fresh(&self) -> bool {
-        unsafe { &*(self.addr() as *const GcHeader) }.fresh.replace(false)
+    /// Header nursery bits ([`GEN_YOUNG`] and friends).
+    #[inline]
+    pub(crate) fn generation(&self) -> u8 {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.generation.get()
+    }
+
+    #[inline]
+    pub(crate) fn set_generation(&self, bits: u8) {
+        unsafe { &*(self.addr() as *const GcHeader) }.generation.set(bits);
+    }
+
+    /// Copy-on-write: whether a second place may name this object.
+    #[inline]
+    pub fn is_shared(&self) -> bool {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.shared.get()
+    }
+
+    #[inline]
+    pub(crate) fn set_shared(&self) {
+        unsafe { &*(self.addr() as *const GcHeader) }.shared.set(true);
     }
 
     #[must_use]
@@ -2274,6 +2794,12 @@ impl Iterator for InstanceFieldIter<'_> {
 }
 
 impl GcSized for ObjInstance {
+    const NURSERY: bool = true;
+
+    fn finalizer_type_id(&self) -> Option<u32> {
+        Some(self.type_id)
+    }
+
     fn size(&self) -> usize {
         // `Table` / inline slots live in the object; only a spill `Vec` is extra.
         std::mem::size_of::<Self>()
@@ -2478,6 +3004,12 @@ impl ObjEnum {
 }
 
 impl GcSized for ObjEnum {
+    const NURSERY: bool = true;
+
+    fn finalizer_type_id(&self) -> Option<u32> {
+        Some(self.type_id)
+    }
+
     fn size(&self) -> usize {
         std::mem::size_of::<Self>() + self.payload.spill_capacity() * std::mem::size_of::<Member>()
     }
@@ -2526,6 +3058,11 @@ impl ObjString {
 
     /// Content hash ([`Self::hash`] of `data`), cached after the first call.
     #[inline]
+    /// Whether [`Self::hash_code`] ran (interning computes it first).
+    fn hash_set(&self) -> bool {
+        self.hash.load(Ordering::Relaxed) & HASH_SET != 0
+    }
+
     pub fn hash_code(&self) -> u32 {
         let cached = self.hash.load(Ordering::Relaxed);
         if cached & HASH_SET != 0 {
@@ -2548,6 +3085,9 @@ impl ObjString {
 }
 
 impl GcSized for ObjString {
+    const HOLDS_REFS: bool = false;
+    const REGION: bool = true;
+
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.data.accounted_bytes()
     }
@@ -3118,6 +3658,20 @@ impl ObjArray {
     }
 
     /// The elements narrowed to bytes (`as u8`): one copy when packed.
+    /// Packed bytes moved out, leaving the array empty
+    /// ([`Self::restore_bytes`] puts them back); `None` for word storage.
+    pub fn take_bytes(&mut self) -> Option<Vec<u8>> {
+        match &mut self.data {
+            ArrayData::Words(_) => None,
+            ArrayData::Bytes(b) => Some(std::mem::take(b)),
+        }
+    }
+
+    /// Put back the bytes [`Self::take_bytes`] took.
+    pub fn restore_bytes(&mut self, bytes: Vec<u8>) {
+        self.data = ArrayData::Bytes(bytes);
+    }
+
     pub fn to_byte_vec(&self) -> Vec<u8> {
         match &self.data {
             ArrayData::Words(w) => w.iter().map(|v| v.as_int() as u8).collect(),
@@ -3386,12 +3940,16 @@ impl fmt::Display for ObjRwLock {
 }
 
 impl GcSized for ObjTuple {
+    const NURSERY: bool = true;
+
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.elements.spill_capacity() * mem::size_of::<Value>()
     }
 }
 
 impl GcSized for ObjArray {
+    const NURSERY: bool = true;
+
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.accounted
     }
@@ -3406,6 +3964,8 @@ impl GcSized for ObjCoroutine {
 }
 
 impl GcSized for ObjBoxed {
+    const NURSERY: bool = true;
+
     fn size(&self) -> usize {
         mem::size_of::<Self>()
     }
@@ -3648,6 +4208,117 @@ impl fmt::Display for ObjLibrary {
 
 pub trait GcSized {
     fn size(&self) -> usize;
+    /// Allocated in the nursery when it is on: a kind a minor collection
+    /// can move ([`Object::movable_layout`]).
+    const NURSERY: bool = false;
+    /// Allocated in the nursery inside a `region` block: the movable kinds,
+    /// and strings, which a minor collection frees but never moves (a
+    /// surviving one is held in place).
+    const REGION: bool = Self::NURSERY;
+    /// Can hold heap references: an old object of this kind is remembered
+    /// when it is born, since it may start out naming young objects.
+    const HOLDS_REFS: bool = true;
+    /// Class or enum type id, so an object whose type has a `drop` stays
+    /// out of the nursery.
+    fn finalizer_type_id(&self) -> Option<u32> {
+        None
+    }
+}
+
+/// [`GcHeader::generation`]: the object lives in a young (nursery) chunk.
+pub(crate) const GEN_YOUNG: u8 = 1;
+/// [`GcHeader::generation`]: an old object not in the remembered set; its
+/// next payload write records it ([`remember_written`]).
+pub(crate) const GEN_UNLOGGED: u8 = 2;
+/// [`GcHeader::generation`]: a young object a minor collection may not
+/// move (an ambiguous word names it). Only set during a minor collection.
+pub(crate) const GEN_PINNED: u8 = 4;
+
+thread_local! {
+    /// Old objects written since the last minor collection (the nursery's
+    /// remembered set). The barrier has no heap at hand, so the set lives
+    /// with the thread; a heap takes only its own entries
+    /// ([`Heap::take_remembered`]).
+    static REMEMBERED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Heaps on this thread with nursery chunks in use. While none has, no
+    /// young object exists for a write to store, and the barrier records
+    /// nothing (pretenured objects are written while the nursery is empty).
+    static YOUNG_HEAPS: Cell<u32> = const { Cell::new(0) };
+    /// Old objects written while no heap here had young objects: their
+    /// barrier is off (nothing young to record) until their heap's nursery
+    /// starts again ([`relog_quiet`]), so a write loop pays it once.
+    static QUIET: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Times [`QUIET`] outgrew [`QUIET_CAP`] and was dropped: a heap that
+    /// has not seen the latest count relogs all its old objects instead
+    /// ([`relog_all`]).
+    static QUIET_OVERFLOWS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Entries [`QUIET`] holds before it is dropped for a whole-heap relog. A
+/// long pretenured stretch writes every new object once; a list per write
+/// would grow with the program (and every compaction forwards it).
+const QUIET_CAP: usize = 1 << 16;
+
+/// [`QUIET_OVERFLOWS`] now.
+pub(super) fn quiet_overflows() -> u64 {
+    QUIET_OVERFLOWS.with(Cell::get)
+}
+
+/// [`relog_quiet`] for a heap whose entries [`QUIET`] dropped: log every
+/// old object of `slab` again.
+pub(super) fn relog_all(slab: &super::slab::Slab) {
+    let mut cur = super::slab::SlotCursor::default();
+    while let Some(addr) = slab.next_slot(&mut cur) {
+        // SAFETY: `next_slot` yields slot starts in mapped chunks.
+        let header = unsafe { &*(addr as *const GcHeader) };
+        if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
+            header.generation.set(header.generation.get() | GEN_UNLOGGED);
+        }
+    }
+}
+
+/// `slab`'s nursery starts again (no young object exists yet): turn the
+/// barrier back on for its old objects written while it was empty.
+pub(super) fn relog_quiet(slab: &super::slab::Slab) {
+    QUIET.with_borrow_mut(|q| {
+        q.retain(|&addr| {
+            if !slab.contains_slot(addr) {
+                return true;
+            }
+            // SAFETY: a slot start in a mapped chunk holds a header; a
+            // freed or re-carved slot reads as free or as another old
+            // object, and an extra log bit only costs one more record.
+            let header = unsafe { &*(addr as *const GcHeader) };
+            if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
+                header.generation.set(header.generation.get() | GEN_UNLOGGED);
+            }
+            false
+        });
+    });
+}
+
+/// A heap on this thread started (`true`) or stopped using nursery chunks.
+pub(super) fn note_young_heap(on: bool) {
+    YOUNG_HEAPS.with(|n| n.set(if on { n.get() + 1 } else { n.get().saturating_sub(1) }));
+}
+
+/// Slow path of the write barrier in [`GcData::as_mut`].
+#[cold]
+#[inline(never)]
+fn remember_written(header: &GcHeader) {
+    header.generation.set(header.generation.get() & !GEN_UNLOGGED);
+    let addr = header as *const GcHeader as u64;
+    if YOUNG_HEAPS.with(Cell::get) == 0 {
+        QUIET.with_borrow_mut(|q| {
+            q.push(addr);
+            if q.len() >= QUIET_CAP {
+                q.clear();
+                QUIET_OVERFLOWS.with(|n| n.set(n.get() + 1));
+            }
+        });
+        return;
+    }
+    REMEMBERED.with_borrow_mut(|r| r.push(addr));
 }
 
 /// Prefix of every managed allocation. Kind reconstructs [`Object`] without
@@ -3658,6 +4329,12 @@ struct GcHeader {
     marked: Cell<bool>,
     /// Allocated while a sweep was running; that sweep skips it once.
     fresh: Cell<bool>,
+    /// Nursery bits ([`GEN_YOUNG`], [`GEN_UNLOGGED`], [`GEN_PINNED`]).
+    generation: Cell<u8>,
+    /// Copy-on-write: a second place may name this object, so a write
+    /// copies it first ([`Heap::cow_unique`]). Sticky until the slot is
+    /// reused.
+    shared: Cell<bool>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
     /// byte of what is header padding before an 8-aligned payload; release
@@ -3678,6 +4355,8 @@ impl GcHeader {
             kind: Cell::new(0),
             marked: Cell::new(false),
             fresh: Cell::new(false),
+            generation: Cell::new(0),
+            shared: Cell::new(false),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
         }
@@ -3727,6 +4406,12 @@ impl<T> AsMut<T> for GcData<T> {
     fn as_mut(&mut self) -> &mut T {
         #[cfg(any(debug_assertions, feature = "gc-stress"))]
         self.check_epoch_write();
+        // Write barrier: the first write to an old object since the last
+        // minor collection records it, so the nursery finds a young object
+        // it may now name ([`remember_written`]).
+        if unlikely(self.header.generation.get() & GEN_UNLOGGED != 0) {
+            remember_written(&self.header);
+        }
         &mut self.data
     }
 }
@@ -3789,6 +4474,8 @@ impl<T> Gc<T> {
             (*p).header.kind.set(0);
             (*p).header.marked.set(false);
             (*p).header.fresh.set(false);
+            (*p).header.generation.set(0);
+            (*p).header.shared.set(false);
         }
     }
 
@@ -4164,6 +4851,10 @@ fn resident_kib() -> usize {
 #[path = "compact.rs"]
 mod compact;
 pub use compact::{AddrMap, EvacPlan, Evacuation};
+
+#[path = "nursery.rs"]
+mod nursery;
+pub use nursery::MinorPlan;
 
 #[path = "snapshot.rs"]
 mod snapshot;

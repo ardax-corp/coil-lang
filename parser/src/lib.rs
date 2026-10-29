@@ -681,6 +681,8 @@ impl<'pratt> Pratt<'pratt> {
                 keyword!("comptime")
                     .ignore_then(self.brace_body(stmt.clone(), expr.clone()))
                     .map_with(|body, e| (e.span(), Box::new(Expression::ComptimeBlock(body)))),
+                // Contextual `region { … }`; any other `region` is a name.
+                self.region_block(stmt.clone(), expr.clone()),
                 // Anonymous `fn (…)` before `ident` so `fn` stays a keyword.
                 self.lambda_atom(expr.clone(), stmt),
                 self.ident(),
@@ -861,6 +863,7 @@ impl<'pratt> Pratt<'pratt> {
                         op!('+'),
                         op!('!'),
                         keyword!("readonly").to('r'),
+                        keyword!("mut").to('m'),
                         keyword!("comptime").to('c'),
                         keyword!("typeof").to('t'),
                     )),
@@ -873,6 +876,12 @@ impl<'pratt> Pratt<'pratt> {
                                 '~' => Expression::Not(rhs),
                                 '!' => Expression::LogicalNot(rhs),
                                 'r' => Expression::Readonly(rhs),
+                                // `mut e`: a borrow of the place `e`, kept as
+                                // a call of the prelude's identity `__mut`.
+                                'm' => Expression::Call {
+                                    name: (rhs.0, Box::new(Expression::Identifier("__mut"))),
+                                    args: Some(vec![rhs]),
+                                },
                                 'c' => Expression::Comptime(rhs),
                                 't' => Expression::TypeOf(rhs),
                                 _ => unreachable!("No other prefix operators"),
@@ -1157,17 +1166,23 @@ impl<'pratt> Pratt<'pratt> {
         stmt: S,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
+        // `use (a, mut b)`: `mut` borrows the capture instead of copying it.
         let captures = keyword!("use")
             .ignore_then(
-                text::ident()
-                    .padded_by(trivia())
+                keyword!("mut")
+                    .or_not()
+                    .then(text::ident().padded_by(trivia()))
                     .separated_by(op!(','))
                     .allow_trailing()
                     .collect::<Vec<_>>()
                     .delimited_by(op!("("), op!(")")),
             )
             .or_not()
-            .map(|opt| opt.unwrap_or_default());
+            .map(|opt| {
+                let list = opt.unwrap_or_default();
+                let borrows: Vec<&str> = list.iter().filter(|(m, _)| m.is_some()).map(|(_, n)| *n).collect();
+                (list.into_iter().map(|(_, n)| n).collect::<Vec<_>>(), borrows)
+            });
 
         let short_body = op!("=>").ignore_then(expr.clone());
         // Use only handles built inside the surrounding `recursive(|expr| …)`.
@@ -1177,12 +1192,13 @@ impl<'pratt> Pratt<'pratt> {
             .ignore_then(self.arg_list())
             .then(captures)
             .then(choice((short_body, long_body)))
-            .map_with(|((args, captures), body), e| {
+            .map_with(|((args, (captures, borrows)), body), e| {
                 (
                     e.span(),
                     Box::new(Expression::Lambda {
                         args,
                         captures,
+                        borrows,
                         body,
                     }),
                 )
@@ -1586,6 +1602,37 @@ impl<'pratt> Pratt<'pratt> {
     ///
     /// The template is kept as text with `${expr}` / `$(expr) sep *` holes.
     /// Braces must balance; holes inside string literals are plain text.
+    /// `region { … }`: a block whose first item is [`Expression::RegionMark`].
+    /// `region` is contextual: followed by anything but `{` it is a name.
+    fn region_block<
+        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        stmt: S,
+        expr: E,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        text::ident()
+            .filter(|w: &&str| *w == "region")
+            .map_with(|_, e| e.span())
+            .padded_by(trivia())
+            .then(self.brace_body(stmt, expr))
+            .map_with(|(kw, (span, body)), e| {
+                let mut body = *body;
+                if let Expression::Block(items) = &mut body {
+                    items.insert(0, (kw, Box::new(Expression::RegionMark)));
+                }
+                let _ = span;
+                (e.span(), Box::new(body))
+            })
+            .labelled("region")
+    }
+
     fn quote_atom<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -1884,13 +1931,20 @@ impl<'pratt> Pratt<'pratt> {
             self.let_record_pattern(),
         ))
         .map(|pattern| (None, Some(pattern)));
+        // `for mut x in xs` borrows each element: kept as `for x in mut xs`.
         keyword!("for")
-            .ignore_then(choice((pattern_bind, ident_bind)))
+            .ignore_then(keyword!("mut").or_not())
+            .then(choice((pattern_bind, ident_bind)))
             .then_ignore(keyword!("in"))
             .then(expr.clone())
             .then(self.contracts_with(expr, FOR_CONTRACTS))
             .then(self.block(stmt))
-            .map_with(|((((identifier, pattern), iterable), contracts), body), e| {
+            .map_with(|((((borrow, (identifier, pattern)), iterable), contracts), body), e| {
+                let iterable = if borrow.is_some() {
+                    (iterable.0, Box::new(Expression::Call { name: (iterable.0, Box::new(Expression::Identifier("__mut"))), args: Some(vec![iterable]) }))
+                } else {
+                    iterable
+                };
                 (
                     e.span(),
                     Box::new(Expression::Loop {
@@ -2256,6 +2310,10 @@ impl<'pratt> Pratt<'pratt> {
                 // `brace_body` uses that to turn a trailing one into the
                 // body's value.
                 self.match_expr(expr.clone(), stmt.clone())
+                    .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
+                    .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
+                // A `region { … }` statement ends at its `}` too.
+                self.region_block(stmt.clone(), expr.clone())
                     .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
                     .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
                 self.expr_statement(expr.clone()),
@@ -2768,7 +2826,10 @@ impl<'pratt> Pratt<'pratt> {
             .collect::<Vec<_>>()
     }
 
-    /// `[readonly] class Name { [pub] field: Type, ... }`
+    /// `[shared] [readonly] class Name { [pub] field: Type, ... }`
+    ///
+    /// `shared` is kept as the attribute `shared`: an identity type that
+    /// copy-on-write never copies.
     ///
     /// Fields are private by default; `pub` makes them public.
     fn class(
@@ -2777,6 +2838,7 @@ impl<'pratt> Pratt<'pratt> {
     {
         self.docs_prefix()
             .then(self.attr_list())
+            .then(keyword!("shared").or_not())
             .then(keyword!("readonly").or_not())
             .then_ignore(keyword!("class"))
             .then(text::ident().padded_by(trivia()))
@@ -2805,7 +2867,10 @@ impl<'pratt> Pratt<'pratt> {
                         fields
                     }),
             )
-            .map_with(|((((((docs, attrs), readonly), name), type_params), invariants), fields), e| {
+            .map_with(|(((((((docs, mut attrs), shared), readonly), name), type_params), invariants), fields), e| {
+                if shared.is_some() {
+                    attrs.push(Attribute { name: "shared", args: AttrArgs::Empty });
+                }
                 (
                     e.span(),
                     Box::new(Expression::Class {
@@ -4097,6 +4162,7 @@ const EXPRESSION_LABELS: &[&str] = &[
     "qualified access",
     "named argument",
     "quote",
+    "region",
 ];
 
 /// What the parser wanted, in words: `;`, a structural production

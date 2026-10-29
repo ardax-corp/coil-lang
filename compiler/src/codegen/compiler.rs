@@ -444,12 +444,20 @@ impl Compiler {
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         let mut opts = level.options();
         opts.keep_knobs(&self.opt_options);
+        opts.early_free = self.early_free.unwrap_or(opts.early_free);
         self.opt_options = opts;
         self.inline_cost.max_inline_cost = level.inline_max_cost();
         self.inline_cost.inline_across_modules = level.inline_across_modules();
         if !level.inline_across_modules() {
             self.inline_cost.max_cross_module_inline_cost = 0;
         }
+        self.bytecode.set_opt_options(self.opt_options.clone());
+    }
+
+    /// `--early-free on|off`: emit the early frees whatever the level.
+    pub fn set_early_free(&mut self, on: bool) {
+        self.early_free = Some(on);
+        self.opt_options.early_free = on;
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
@@ -7684,6 +7692,7 @@ impl Compiler {
         self.pure_static_inits.clear();
         self.startup_consts.clear();
         self.fold_bodies.clear();
+        let mut cow_mutates = None;
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {
@@ -7691,6 +7700,8 @@ impl Compiler {
             let fx = effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);
             self.messages.extend(fx.violation_messages());
             self.messages.extend(fx.readonly_messages());
+            self.messages.extend(fx.escape_messages());
+            self.messages.extend(fx.region_messages());
             let pure = effects::pure_names(hir, module, &fx.summaries, &self.pure_fns);
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && self.opt_options.auto_par).then(|| {
@@ -7706,10 +7717,41 @@ impl Compiler {
             self.fold_bodies = fold_bodies(hir, &fx);
             let mutations = fx.mutations();
             let summaries = fx.summaries;
+            cow_mutates = Some(summaries.iter().map(|s| s.mutates).collect::<Vec<u64>>());
             self.pure_fns.extend(pure);
             self.steady_fns.extend(effects::steady_names(hir, module, &summaries, &self.pure_fns));
             self.program_effects.record(hir, &self.checker, module, &summaries);
             self.program_effects.record_mutations(mutations);
+        }
+        // Copy-on-write: share and unique ops in every body, before typed
+        // inlining splices any of them.
+        if crate::hir::effects::cow::enabled()
+            && let Some(mutates) = cow_mutates
+            && let Some(mut hir) = self.hir_module.take()
+        {
+            let mut notes = Vec::new();
+            let rewritten: Vec<(usize, crate::hir::HirBody)> = hir
+                .bodies
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| {
+                    let m = mutates.get(i).copied().unwrap_or(0);
+                    if std::env::var("COIL_COW_TRACE").is_ok() {
+                        eprintln!("cow: {}", b.name);
+                    }
+                    let (body, n) = self.program_effects.cow_rewrite(&self.checker, module, &hir, b, m);
+                    notes.extend(n);
+                    body.map(|n| (i, n))
+                })
+                .collect();
+            self.messages.extend(notes);
+            for (i, body) in rewritten {
+                hir.bodies[i] = body;
+                if std::env::var("COIL_COW_DUMP").is_ok_and(|n| hir.bodies[i].name.contains(n.as_str())) {
+                    eprintln!("{}", crate::hir::print::body_to_string(&hir, &hir.bodies[i]));
+                }
+            }
+            self.hir_module = Some(hir);
         }
         if self.auto_par && self.opt_options.auto_par {
             // IPA sites on any pure function (self-recursion or helper arms).

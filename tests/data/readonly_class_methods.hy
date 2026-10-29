@@ -27,12 +27,13 @@ test("reading methods on a readonly instance") {
     assert!(p.plus(2).get() == 3);
 }
 
-test("the mutable name still mutates") {
+test("the mutable name still mutates; the readonly name keeps its copy") {
     let m = new P(1);
     let p = readonly m;
     m.bump();
     m.bump();
-    assert!(p.get() == 3);
+    assert!(m.get() == 3);
+    assert!(p.get() == 1);
 }
 
 test("readonly variable can be rebound") {

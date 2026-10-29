@@ -1040,6 +1040,41 @@ impl Compiler {
         {
             self.hir_portable.insert(key, portable);
         }
+        let mut freed = None;
+        // Objects the escape facts prove dead are freed at the end of
+        // their scope or after the call they were passed to, when the
+        // rewritten body plans (`feature/escape-memory` step 2). Other
+        // modules splice the body as it was before.
+        let plan = match plan {
+            Ok(emit) if self.opt_options.early_free && !self.debugger_attached && !hir.is_coro => {
+                let module_path = self.checker.current_module_name().to_string();
+                let hosts: HashMap<u32, usize> = emit
+                    .plan
+                    .calls
+                    .iter()
+                    .filter_map(|(&i, c)| match c.builtin {
+                        Some(HirBuiltin::Host(n)) => Some((i, n)),
+                        _ => None,
+                    })
+                    .collect();
+                let host = |id: HirId| hosts.get(&id.0).copied();
+                match self.program_effects.early_frees(&self.checker, &module_path, &module, hir, &host) {
+                    Some(next) => match lower::refusal(&next, &self.checker)
+                        .map_or_else(|| self.plan_hir_body(&next), Err)
+                        .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
+                    {
+                        Ok(replanned) => {
+                            freed = Some(next);
+                            Ok(replanned)
+                        }
+                        Err(_) => Ok(emit),
+                    },
+                    None => Ok(emit),
+                }
+            }
+            plan => plan,
+        };
+        let hir = freed.as_ref().unwrap_or(hir);
         let plan = plan.and_then(|emit| hir_bisect(&hir.name, self.opt_options.hir_bisect).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
@@ -3137,6 +3172,7 @@ impl Compiler {
             pinned_param: body.pinned_param,
             captures: body.captures.clone(),
             declared: body.declared.clone(),
+            stated_escape: body.stated_escape.clone(),
             contract_spans: body.contract_spans.clone(),
             locals: body
                 .locals
@@ -7040,7 +7076,7 @@ impl Compiler {
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout, .. } => {
+            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -8072,6 +8108,11 @@ impl Compiler {
                 op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
+            // A copy-on-write op passes its operand's word through.
+            HirKind::Builtin { op: Builtin::Cow { .. }, args } => {
+                let want = self.hir_natural(hir, emit, id).ok_or("cow-shape")?;
+                self.hir_check_value(hir, emit, args[0], &want)?
+            }
             HirKind::Call { args, .. } => {
                 let call = emit.plan.calls.get(&id.0).ok_or("callee")?;
                 let args = match call.builtin {
@@ -8446,6 +8487,17 @@ impl Compiler {
     fn hir_check_effect(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
         match &hir.expr(id).kind {
             HirKind::Clear(_) => Ok(()),
+            // An early free reads a one-word object reference.
+            HirKind::Builtin { op: Builtin::Region { .. }, .. } => Ok(()),
+            // A share as a statement: its operand's word, then dropped.
+            HirKind::Builtin { op: Builtin::Cow { .. }, args } => {
+                let want = self.hir_natural(hir, emit, args[0]).ok_or("cow-shape")?;
+                self.hir_check_value(hir, emit, args[0], &want)
+            }
+            HirKind::Builtin { op: Builtin::FreeEarly { .. }, args } => match self.hir_natural(hir, emit, args[0]) {
+                Some(want @ Rep::Word(_)) => self.hir_check_value(hir, emit, args[0], &want),
+                _ => Err("free-shape"),
+            },
             HirKind::Block { stmts, tail } => {
                 for &s in stmts.iter().chain(tail) {
                     self.hir_check_effect(hir, emit, s)?;
@@ -9320,7 +9372,7 @@ impl Compiler {
         let int = hir.local(acc).ty.clone()?;
         let mut w = hir.clone();
         let param = |w: &mut HirBody, name: &str| {
-            w.locals.push(HirLocal { name: name.to_string(), ty: Some(int.clone()), kind: LocalKind::Param, captured: false });
+            w.locals.push(HirLocal { name: name.to_string(), ty: Some(int.clone()), kind: LocalKind::Param, captured: false, borrow: false });
             LocalId(w.locals.len() as u32 - 1)
         };
         let hi = param(&mut w, "__coil_par_hi");

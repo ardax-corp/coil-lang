@@ -1,7 +1,8 @@
-// A class instance bound to a local is one heap object: copies of the
-// reference, a `Vec` slot, a field of another object and a function parameter
-// all see the same fields, and the object outlives a collection while any of
-// them holds it.
+// A class instance bound to a local is one heap object until a write: a
+// second local, a `Vec` slot or a field of another object then gets its own
+// copy (copy-on-write), while a borrow (`let b = mut a`) and a parameter the
+// callee writes see the same fields. The object outlives a collection while
+// any name holds it.
 use tests::assert;
 use gc::collect;
 
@@ -23,9 +24,17 @@ fn stash(Vec<Cell> v) -> Cell {
     return c;
 }
 
-test("two locals name the same object") {
+test("two locals copy on write") {
     let a = new Cell(1);
     let b = a;
+    b.n = 5;
+    assert!(a.n == 1);
+    assert!(b.n == 5);
+}
+
+test("a borrow names the same object") {
+    let a = new Cell(1);
+    let b = mut a;
     b.n = 5;
     assert!(a.n == 5);
 }
@@ -37,20 +46,22 @@ test("a parameter mutates the caller's object") {
     assert!(a.n == 3);
 }
 
-test("a Vec slot and a returned reference alias") {
+test("a Vec slot and a returned reference copy on write") {
     let v: Vec<Cell> = Vec::new();
     let c = stash(v);
     c.n = 11;
-    assert!(v[0].n == 11);
+    assert!(v[0].n == 10);
     v[0].n = 12;
-    assert!(c.n == 12);
+    assert!(c.n == 11);
+    assert!(v[0].n == 12);
 }
 
-test("a field of another object aliases the original") {
+test("a field of another object copies on write") {
     let c = new Cell(2);
     let b = new Box(c);
     b.inner.n = 9;
-    assert!(c.n == 9);
+    assert!(c.n == 2);
+    assert!(b.inner.n == 9);
 }
 
 test("distinct constructions are distinct objects") {

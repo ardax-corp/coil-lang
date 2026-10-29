@@ -85,6 +85,15 @@ pub struct DeclaredEffects {
 }
 
 /// What a [`HirBody`] was built from.
+/// Escape facts a function states: `#[noescape(a, b)]` names parameters
+/// the call never keeps or hands back, `#[fresh]` says its result is fresh.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StatedEscape {
+    pub noescape: Vec<String>,
+    pub fresh: bool,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyKind {
     Function,
@@ -120,6 +129,9 @@ pub struct HirBody {
     pub captures: Vec<(LocalId, LocalId)>,
     /// `pure fn` / `uses {…}` on the function.
     pub declared: Option<DeclaredEffects>,
+    /// Escape facts the function states (`#[noescape(..)]`, `#[fresh]`),
+    /// checked against the inferred ones.
+    pub stated_escape: Option<StatedEscape>,
     /// The function's `requires` / `ensures` clauses: what runs inside one
     /// must have no visible effect.
     pub contract_spans: Vec<Span>,
@@ -168,6 +180,9 @@ pub struct HirLocal {
     /// A lambda or `defer` in this body captures it, so it stays one plain
     /// word in its own slot.
     pub captured: bool,
+    /// Written `let x = mut place`, `for mut x in …` or `use (mut x)`: a
+    /// borrow of the object, which copy-on-write writes in place.
+    pub borrow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +213,9 @@ impl HirFlags {
     /// An `Assign` from `x op= e` or `x++`: its place is also read, so
     /// the place's base and index are built twice.
     pub const COMPOUND: Self = Self(64);
+    /// A `from_bytes` call whose buffer nothing reads again: the string
+    /// takes the buffer's bytes (`from_bytes_take`) instead of a copy.
+    pub const TAKE: Self = Self(128);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -359,6 +377,18 @@ pub enum Builtin {
     /// dictionary's boxed enum and a method's niche word). A niche word
     /// boxes to its enum object; an enum object becomes its niche word.
     Relayout,
+    /// Free the object a local holds, which nothing else reaches
+    /// (the `FreeEarly` instruction; `deep`: and everything it reaches). Added after
+    /// the HIR optimizer by the early-free rewrite only.
+    FreeEarly { deep: bool },
+    /// Copy-on-write: the `Cow` instruction on its operand's object, which
+    /// it returns. `unique: false` marks it shared (a second place now
+    /// names it); `unique: true` makes it safe to write through, copying it
+    /// when shared. Added by the copy-on-write rewrite only.
+    Cow { unique: bool },
+    /// Enter (`true`) or leave a `region { … }` block (escape step 5): the
+    /// `gc_region_enter` / `gc_region_exit` HostInvoke. No arguments.
+    Region { enter: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]

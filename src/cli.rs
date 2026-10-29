@@ -5,10 +5,10 @@ use std::process::exit;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use coil_args::{
-    CompileProfileFlags, DebugLevelFlags, EntryFlag, HostGrantFlags, LogFlags, OptLevelFlags,
-    RootFlags, expand_o_shorts, merge_entry,
+    CompileProfileFlags, DebugLevelFlags, EntryFlag, HostGrantFlags, LogFlags, NurseryFlag,
+    OptLevelFlags, RootFlags, expand_o_shorts, merge_entry,
 };
-use compiler::{DebugLevel, HostGrants, OptLevel};
+use compiler::{DebugLevel, EarlyFree, HostGrants, OptLevel};
 use crate::package_app::{FfiNative, parse_ffi_native};
 
 pub(crate) const DEFAULT_OUT: &str = "out.hyc";
@@ -83,6 +83,12 @@ pub(crate) struct CliArgs {
     pub contracts: Option<compiler::ContractLevel>,
     /// `--fold-calls on|off`; `None` keeps the pipeline default.
     pub fold_calls: Option<bool>,
+    /// `--early-free on|off|check`; `None` follows the opt level.
+    pub early_free: Option<EarlyFree>,
+    /// `--nursery on|off` for `coil FILE` / `coil run`; `None` is on.
+    pub nursery: Option<bool>,
+    /// `--cow-report`: copies per source line at exit.
+    pub cow_report: bool,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
     pub opt_stats: bool,
@@ -120,6 +126,8 @@ struct RawCli {
     log: LogFlags,
     #[command(flatten)]
     opt: OptLevelFlags,
+    #[command(flatten)]
+    nursery: NurseryFlag,
     #[command(flatten)]
     debug: DebugLevelFlags,
     #[command(flatten)]
@@ -173,6 +181,8 @@ enum RawCommand {
         log: LogFlags,
         #[command(flatten)]
         grants: HostGrantFlags,
+        #[command(flatten)]
+        nursery: NurseryFlag,
         /// Archive path
         archive: String,
     },
@@ -368,6 +378,9 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             debug_level: None,
             contracts: None,
             fold_calls: None,
+            early_free: None,
+            nursery: None,
+            cow_report: false,
             auto_par: None,
             opt_stats: false,
             opt_stats_json: false,
@@ -430,6 +443,9 @@ fn cli_from(
         debug_level: None,
         contracts: opt.contracts,
         fold_calls: opt.fold_calls,
+        early_free: opt.early_free,
+        nursery: None,
+        cow_report: false,
         auto_par: opt.auto_par,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
@@ -452,6 +468,8 @@ impl RawCli {
     fn parent_run_flags_set(&self) -> bool {
         self.log.is_set()
             || self.opt.is_set()
+            || self.nursery.nursery.is_some()
+            || self.nursery.cow_report
             || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
@@ -476,6 +494,8 @@ impl RawCli {
                 }
                 CliArgs {
                     debug_level: self.debug.level(),
+                    nursery: self.nursery.nursery,
+                    cow_report: self.nursery.cow_report,
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -573,16 +593,21 @@ impl RawCli {
             Some(RawCommand::Run {
                 log,
                 grants,
+                nursery,
                 archive,
-            }) => cli_from(
-                Command::Run { archive },
-                log,
-                false,
-                OptLevelFlags::default(),
-                CompileProfileFlags::default(),
-                grants,
-                Vec::new(),
-            ),
+            }) => CliArgs {
+                nursery: nursery.nursery,
+                cow_report: nursery.cow_report,
+                ..cli_from(
+                    Command::Run { archive },
+                    log,
+                    false,
+                    OptLevelFlags::default(),
+                    CompileProfileFlags::default(),
+                    grants,
+                    Vec::new(),
+                )
+            },
             Some(RawCommand::Package {
                 log,
                 opt,

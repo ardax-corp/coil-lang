@@ -538,3 +538,575 @@ fn main() {{
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].starts_with("Cannot pass the `readonly` `p` to `.put()`: it mutates parameter `b`"), "{errs:?}");
 }
+
+// Escape facts (`escapes`, `returns`, `shared_ret`; feature/escape-memory step 1).
+
+const TREES: &str = "
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+fn bottom_up(int depth) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf();
+    }
+    return Tree::Node(bottom_up(depth - 1), bottom_up(depth - 1));
+}
+fn item_check(Tree t) -> int {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Node(left, right) => 1 + item_check(left) + item_check(right),
+    };
+}
+";
+
+#[test]
+fn a_tree_built_and_checked_stays_with_the_caller() {
+    let (m, out) = summaries(TREES);
+    let build = of(&m, &out, "bottom_up");
+    assert!(!build.shared_ret, "{build:?}");
+    let check = of(&m, &out, "item_check");
+    assert_eq!(check.escapes, 0, "{check:?}");
+    assert_eq!(check.returns, 0, "{check:?}");
+}
+
+#[test]
+fn a_store_into_a_static_or_a_parameter_keeps_the_value() {
+    let src = "
+class Box2 { pub v: string }
+static let LOG: Vec<string> = Vec::new();
+fn remember(string s) {
+    LOG.push(s);
+}
+fn put(Box2 b, string s) {
+    b.v = s;
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "remember").escapes, 1);
+    let put = of(&m, &out, "put");
+    assert_eq!(put.escapes, 1 << 1, "{put:?}");
+}
+
+#[test]
+fn a_getter_hands_back_what_its_receiver_reaches() {
+    let src = "
+class Holder {
+    pub name: string,
+}
+impl Holder {
+    pub fn get() -> string {
+        return self.name;
+    }
+}
+";
+    let (m, out) = summaries(src);
+    let get = of(&m, &out, "Holder::get");
+    assert_eq!(get.escapes, 0, "{get:?}");
+    assert_eq!(get.returns, 1, "{get:?}");
+    assert!(get.shared_ret);
+}
+
+#[test]
+fn a_new_vec_holding_a_parameter_returns_it() {
+    let src = "
+fn wrap(string s) -> Vec<string> {
+    let out: Vec<string> = Vec::new();
+    out.push(s);
+    return out;
+}
+fn fresh_vec(int n) -> Vec<int> {
+    let out: Vec<int> = Vec::new();
+    out.push(n);
+    return out;
+}
+";
+    let (m, out) = summaries(src);
+    let wrap = of(&m, &out, "wrap");
+    assert_eq!(wrap.escapes, 0, "{wrap:?}");
+    assert_eq!(wrap.returns, 1, "{wrap:?}");
+    assert!(wrap.shared_ret);
+    let fresh = of(&m, &out, "fresh_vec");
+    assert!(!fresh.shared_ret, "{fresh:?}");
+}
+
+#[test]
+fn a_captured_parameter_escapes_and_a_literal_counts_as_fresh() {
+    let src = "
+fn later(string s) -> () -> int {
+    return fn () use (s) => s.len();
+}
+fn name() -> string {
+    return \"coil\";
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "later").escapes, 1);
+    // Interned and immutable: holding one is like holding nothing.
+    assert!(!of(&m, &out, "name").shared_ret);
+}
+
+#[test]
+fn a_local_byte_copy_keeps_nothing() {
+    let src = "
+use string::{to_bytes};
+fn count_commas(string s) -> int {
+    let b = to_bytes(s);
+    // Changed, so it stays a copy.
+    b.push(\".\" as byte);
+    let n = 0;
+    let i = 0;
+    while i < b.len() {
+        if b[i] == \",\" {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+";
+    let (m, out) = summaries(src);
+    let s = of(&m, &out, "count_commas");
+    assert_eq!(s.escapes, 0, "{s:?}");
+}
+
+#[test]
+fn an_unknown_function_value_keeps_its_arguments() {
+    let src = "
+fn give(string s, string -> int f) -> int {
+    return f(s);
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "give").escapes & 1, 1);
+}
+
+#[test]
+fn a_fresh_object_given_to_a_mutating_callee_comes_back_shared() {
+    let src = "
+class Holder {
+    pub items: Vec<string>,
+}
+fn add(Holder h, string s) {
+    h.items.push(s);
+}
+fn build(string s) -> Holder {
+    let h = new Holder(Vec::new());
+    add(h, s);
+    return h;
+}
+";
+    let (m, out) = summaries(src);
+    // `add` may have stored anything into `h`: freeing what `build`
+    // returns could free `s`.
+    assert!(of(&m, &out, "build").shared_ret);
+}
+
+#[test]
+fn a_partial_application_keeps_its_arguments() {
+    let src = "
+class Box {
+    pub n: int,
+}
+fn weigh(Box b, int k) -> int {
+    return b.n * k;
+}
+fn bind(Box b) -> (int) -> int {
+    return weigh(b);
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "weigh").escapes, 0);
+    assert_eq!(of(&m, &out, "bind").escapes & 1, 1);
+}
+
+// Early frees (feature/escape-memory step 2).
+
+/// The body `name` after the early-free rewrite, if it changed.
+fn rewritten(src: &str, name: &str) -> Option<HirBody> {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let mut program = ProgramEffects::default();
+    let out = ModuleEffects::solve(&module, &checker, "", &program).summaries;
+    program.record(&module, &checker, "", &out);
+    let body = module.bodies.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("no body `{name}`"));
+    let host = |id: HirId| match &body.expr(id).kind {
+        HirKind::Call { callee: Callee::Named { name, .. }, .. } => common::host_native_id(name),
+        _ => None,
+    };
+    program.early_frees(&checker, "", &module, body, &host)
+}
+
+/// Names of the calls left in `body`, and whether each takes its buffer.
+fn calls(body: &HirBody) -> Vec<(String, bool)> {
+    body.exprs
+        .iter()
+        .filter_map(|x| match &x.kind {
+            HirKind::Call { callee: Callee::Named { name, .. }, .. } => Some((name.clone(), x.flags.contains(crate::hir::HirFlags::TAKE))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `(deep, local name)` of each early free the rewrite adds to `name`.
+fn frees(src: &str, name: &str) -> Vec<(bool, String)> {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let mut program = ProgramEffects::default();
+    let out = ModuleEffects::solve(&module, &checker, "", &program).summaries;
+    program.record(&module, &checker, "", &out);
+    let body = module.bodies.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("no body `{name}`"));
+    // Host natives by name, as the planner finds them.
+    let host = |id: HirId| match &body.expr(id).kind {
+        HirKind::Call { callee: Callee::Named { name, .. }, .. } => common::host_native_id(name),
+        _ => None,
+    };
+    let Some(rewritten) = program.early_frees(&checker, "", &module, body, &host) else {
+        return Vec::new();
+    };
+    rewritten
+        .exprs
+        .iter()
+        .filter_map(|x| match &x.kind {
+            HirKind::Builtin { op: crate::hir::Builtin::FreeEarly { deep }, args } => match rewritten.expr(args[0]).kind {
+                HirKind::Local(l) => Some((*deep, rewritten.local(l).name.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_tree_checked_right_after_it_is_built_is_freed_whole() {
+    let src = format!("{TREES}\nfn run(int d) -> int {{\n    return item_check(bottom_up(d));\n}}\n");
+    let got = frees(&src, "run");
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].0, "{got:?}");
+}
+
+#[test]
+fn a_local_byte_copy_is_freed_before_the_return() {
+    let src = "
+use string::{to_bytes};
+fn count_commas(string s) -> int {
+    let b = to_bytes(s);
+    // Changed, so it stays a copy.
+    b.push(\".\" as byte);
+    let n = 0;
+    let i = 0;
+    while i < b.len() {
+        if b[i] == \",\" {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+";
+    assert_eq!(frees(src, "count_commas"), vec![(false, "b".to_string())]);
+}
+
+#[test]
+fn a_stored_returned_or_aliased_object_is_not_freed() {
+    let src = "
+use string::{to_bytes};
+fn keep(Vec<string> out, string s) {
+    let t = s + \"!\";
+    out.push(t);
+}
+fn give(string s) -> string {
+    let t = s + \"!\";
+    return t;
+}
+fn alias(string s) -> int {
+    let a = to_bytes(s);
+    let b = a;
+    return b.len();
+}
+";
+    assert!(frees(src, "keep").is_empty());
+    assert!(frees(src, "give").is_empty());
+    assert!(frees(src, "alias").is_empty());
+}
+
+#[test]
+fn a_local_byte_copy_is_freed_before_every_return() {
+    let src = "
+use string::{to_bytes};
+fn needs_quote(string s) -> bool {
+    let b = to_bytes(s);
+    // Changed, so it stays a copy.
+    b.push(\".\" as byte);
+    let i = 0;
+    while i < b.len() {
+        if b[i] == \",\" {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+";
+    assert_eq!(frees(src, "needs_quote"), vec![(false, "b".to_string()), (false, "b".to_string())]);
+}
+
+#[test]
+fn a_string_rebuilt_in_place_frees_its_old_value() {
+    let src = "
+fn build(int n) -> string {
+    let s = \"\";
+    let i = 0;
+    while i < n {
+        s = s + \"ab\";
+        i = i + 1;
+    }
+    return s;
+}
+";
+    assert_eq!(frees(src, "build"), vec![(false, "s".to_string())]);
+}
+
+#[test]
+fn a_string_copied_before_a_rebuild_is_not_freed() {
+    let src = "
+fn snapshot(int n) -> string {
+    let s = \"x\";
+    let keep = s;
+    let i = 0;
+    while i < n {
+        s = s + \"y\";
+        i = i + 1;
+    }
+    return keep + s;
+}
+";
+    assert_eq!(frees(src, "snapshot"), vec![]);
+}
+
+#[test]
+fn a_fresh_concat_operand_is_freed_after_the_concat() {
+    let src = "
+use string::{format};
+fn piece(int i) -> string {
+    return format(\"<%i>\", i);
+}
+fn wrap(int i) -> string {
+    return \"[\" + piece(i) + \"]\";
+}
+";
+    assert_eq!(frees(src, "wrap").len(), 1);
+}
+
+
+#[test]
+fn a_byte_buffer_a_method_appends_to_is_still_freed() {
+    let src = "
+use string::{from_bytes};
+class P {
+    pub i: int,
+}
+impl P {
+    pub fn esc(Vec<byte> out) {
+        out.push(\"x\" as byte);
+        self.i = self.i + 1;
+    }
+    pub fn parse() -> Result<string, int> {
+        let out: Vec<byte> = Vec::new();
+        while self.i < 10 {
+            if self.i == 3 {
+                self.esc(out);
+                continue;
+            }
+            out.push(\"a\" as byte);
+            self.i = self.i + 1;
+        }
+        return match from_bytes(out) {
+            Result::Ok(s) => s,
+            Result::Err(_) => raise 1,
+        };
+    }
+}
+";
+    // Before the `raise` and before the final `return`.
+    assert_eq!(frees(src, "P::parse"), vec![(false, "out".to_string()), (false, "out".to_string())]);
+}
+
+const NODES: &str = "
+class Node {
+    pub v: int,
+    pub next: Option<Node>,
+}
+
+fn step(int i) -> Result<Node, Node> {
+    if i % 2 == 0 {
+        return Result::Ok(new Node(i, Option::None));
+    }
+    return Result::Err(new Node(i, Option::None));
+}
+
+fn build(int n) -> Option<Node> {
+    let head: Option<Node> = Option::None;
+    let i = 0;
+    while i < n {
+        head = Option::Some(new Node(i, head));
+        i = i + 1;
+    }
+    return head;
+}
+
+fn len_of(Option<Node> head) -> int {
+    let n = 0;
+    let cur = head;
+    let go = true;
+    while go {
+        match cur {
+            Option::Some(node) => {
+                n = n + 1;
+                cur = node.next;
+            },
+            Option::None => {
+                go = false;
+            },
+        }
+    }
+    return n;
+}
+";
+
+const LINES: &str = "
+fn line(string a, int i) -> Option<string> {
+    if i % 2 == 0 {
+        return Option::Some(a + \"cd\");
+    }
+    return Option::None;
+}
+";
+
+#[test]
+fn a_fresh_match_scrutinee_read_in_place_is_freed_after_the_match() {
+    let src = format!("{LINES}\nfn run(int i) -> int {{\n    return match line(\"ab\", i) {{\n        Option::Some(s) => s[0] as int,\n        Option::None => 0,\n    }};\n}}\n");
+    assert_eq!(frees(&src, "run").len(), 1, "{:?}", frees(&src, "run"));
+}
+
+#[test]
+fn a_match_binding_kept_past_the_match_is_not_freed() {
+    let src = format!("{LINES}\nfn run(int i) -> string {{\n    return match line(\"ab\", i) {{\n        Option::Some(s) => s,\n        Option::None => \"\",\n    }};\n}}\n");
+    assert_eq!(frees(&src, "run"), vec![]);
+}
+
+#[test]
+fn a_small_fixed_size_match_scrutinee_is_left_to_the_collector() {
+    let src = format!("{NODES}\nfn run(int i) -> int {{\n    return match step(i) {{\n        Result::Ok(n) => n.v,\n        Result::Err(e) => e.v,\n    }};\n}}\n");
+    assert_eq!(frees(&src, "run"), vec![]);
+}
+
+#[test]
+fn a_list_replaced_by_reassignment_frees_the_old_list_whole() {
+    let src = format!("{NODES}\nfn run(int k) -> int {{\n    let total = 0;\n    let list = build(1);\n    let r = 0;\n    while r < k {{\n        list = build(100);\n        total = total + len_of(list);\n        r = r + 1;\n    }}\n    return total;\n}}\n");
+    assert!(frees(&src, "run").contains(&(true, "list".to_string())), "{:?}", frees(&src, "run"));
+}
+
+#[test]
+fn a_list_another_local_shares_is_not_freed_on_reassignment() {
+    let src = format!("{NODES}\nfn run(int k) -> int {{\n    let list = build(1);\n    let first = list;\n    let r = 0;\n    while r < k {{\n        list = build(100);\n        r = r + 1;\n    }}\n    return len_of(first);\n}}\n");
+    assert!(!frees(&src, "run").iter().any(|f| f.1 == "list"), "{:?}", frees(&src, "run"));
+}
+
+#[test]
+fn a_byte_copy_only_indexed_reads_the_string_instead() {
+    let src = "
+use string::{to_bytes};
+fn commas(string s) -> int {
+    let b = to_bytes(s);
+    let n = 0;
+    let i = 0;
+    while i < b.len() {
+        if b[i] == \",\" {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+";
+    let body = rewritten(src, "commas").expect("rewritten");
+    // The copy's `let` binds nothing, and the reads index the string.
+    assert!(body.exprs.iter().any(|x| matches!(x.kind, HirKind::Let { init: None, .. })));
+    assert!(body.exprs.iter().any(|x| matches!(x.kind, HirKind::Index { kind: crate::hir::IndexKind::String, .. })));
+}
+
+#[test]
+fn a_byte_copy_that_is_changed_stays_a_copy() {
+    let src = "
+use string::{to_bytes};
+fn bump(string s) -> int {
+    let b = to_bytes(s);
+    b[0] = \"x\";
+    return b.len();
+}
+";
+    let body = rewritten(src, "bump");
+    assert!(!body.is_some_and(|b| b.exprs.iter().any(|x| matches!(x.kind, HirKind::Index { kind: crate::hir::IndexKind::String, .. }))));
+}
+
+#[test]
+fn a_buffer_returned_as_a_string_gives_up_its_bytes() {
+    let src = "
+use string::{from_bytes};
+fn word(int n) -> string {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < n {
+        out.push(\"a\" as byte);
+        i = i + 1;
+    }
+    return match from_bytes(out) {
+        Result::Ok(s) => s,
+        Result::Err(_) => \"\",
+    };
+}
+";
+    let body = rewritten(src, "word").expect("rewritten");
+    assert!(calls(&body).iter().any(|c| c.0.ends_with("from_bytes") && c.1), "{:?}", calls(&body));
+}
+
+#[test]
+fn a_buffer_read_after_its_conversion_keeps_its_bytes() {
+    let src = "
+use string::{from_bytes};
+fn word(int n) -> int {
+    let out: Vec<byte> = Vec::new();
+    out.push(\"a\" as byte);
+    return match from_bytes(out) {
+        Result::Ok(s) => out.len(),
+        Result::Err(_) => 0,
+    };
+}
+";
+    let left = rewritten(src, "word").map(|b| calls(&b)).unwrap_or_default();
+    assert!(!left.iter().any(|c| c.1), "{left:?}");
+}
+
+#[test]
+fn a_parameter_buffer_keeps_its_bytes() {
+    let src = "
+use string::{from_bytes};
+fn text(Vec<byte> b) -> string {
+    return match from_bytes(b) {
+        Result::Ok(s) => s,
+        Result::Err(_) => \"\",
+    };
+}
+";
+    let left = rewritten(src, "text").map(|b| calls(&b)).unwrap_or_default();
+    assert!(!left.iter().any(|c| c.1), "{left:?}");
+}

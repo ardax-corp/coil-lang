@@ -21,7 +21,7 @@ pub(crate) mod pure_call;
 mod sp;
 mod treeshake;
 
-pub use opt::OptLevel;
+pub use opt::{EarlyFree, OptLevel};
 #[cfg(any(test, feature = "dissect"))]
 #[cfg(any(test, feature = "dissect"))]
 pub(crate) use sp::stack_delta;

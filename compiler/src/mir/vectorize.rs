@@ -656,9 +656,11 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                         | MirInst::ClearWord { .. }
                         | MirInst::KeepAlive { .. }
                         | MirInst::Print { .. }
+                        | MirInst::FreeEarly { .. }
                         | MirInst::Panic { .. }
                         | MirInst::Format { .. }
                         | MirInst::Stringify { .. }
+                        | MirInst::Cow { .. }
                         | MirInst::Unbox { .. }
                 )
         }) || matches!(block.term, Some(Terminator::JumpIfMatch { .. }))

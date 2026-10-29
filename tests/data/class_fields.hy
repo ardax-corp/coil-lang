@@ -75,14 +75,17 @@ test("class fields in direct MIR") {
     assert!(a.total == 5.0);
     assert!(a.last == 90);
     let b = new Acc(7, 1.0, 0);
+    // A returned object is a copy on write: `b` keeps its value.
     let p = pick(a, b, false);
     p.n = p.n + 1;
-    assert!(b.n == 8);
+    assert!(p.n == 8);
+    assert!(b.n == 7);
     assert!(pick(a, b, true).n == 10);
     let x = new Node(4, b);
-    assert!(relink(x, a) == 8);
-    assert!(a.n == 14);
-    assert!(b.n == 8);
+    assert!(relink(x, a) == 7);
+    assert!(x.next.n == 14);
+    assert!(a.n == 10);
+    assert!(b.n == 7);
     assert!(unbox(new Box(5)) == 16);
 }
 

@@ -3880,9 +3880,11 @@ fn main() {
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
     let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+    // Register (dense) emission boxes with `DenseMake`, e.g. when the body
+    // also frees `h` early.
     let makes = pack_bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake))
         .count();
     assert!(makes >= 1, "box xs at field store; opcodes={names:?}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -3998,7 +4000,8 @@ test("zip locals") {
     assert!(machine.result_is_ok(ret), "z[0]+z[1]==10");
 }
 
-/// Q1: two escape edges share one heap object (mutation is visible).
+/// Q1: two escape edges share one heap object. Under copy-on-write a write
+/// through one copies it, so the other keeps its value.
 #[test]
 fn stack_array_box_once_identity() {
     use common::Instruction;
@@ -4043,19 +4046,19 @@ fn mutate_after() -> int {
     return a[0];
 }
 fn main() {
-    if pack() != 99 {
+    if pack() != 1 {
         panic "box-once identity";
     }
-    if nested() != 99 {
+    if nested() != 1 {
         panic "nested bounce identity";
     }
-    if field_and_call() != 99 {
+    if field_and_call() != 1 {
         panic "field+call identity";
     }
     if host_and_call() != 99 {
         panic "host+call identity";
     }
-    if mutate_after() != 77 {
+    if mutate_after() != 1 {
         panic "post-escape mutate";
     }
 }
@@ -4343,7 +4346,8 @@ fn main() {
     assert!(!vm.panicked(), "hot()==13; opcodes={names:?}");
 }
 
-/// Q2: two identity edges share one heap instance (mutation is visible).
+/// Q2: two identity edges share one heap instance. Under copy-on-write a
+/// write through one copies it, so the other keeps its value.
 #[test]
 fn named_class_box_once_identity() {
     use common::Instruction;
@@ -4375,13 +4379,13 @@ fn mutate_after() -> int {
     return a.x;
 }
 fn main() {
-    if pack() != 99 {
+    if pack() != 1 {
         panic "box-once identity";
     }
-    if nested() != 99 {
+    if nested() != 1 {
         panic "nested bounce identity";
     }
-    if mutate_after() != 77 {
+    if mutate_after() != 1 {
         panic "post-escape mutate";
     }
 }

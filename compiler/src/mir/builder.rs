@@ -1051,6 +1051,14 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `FreeEarly` of `value`'s object (and what it reaches when `deep`).
+    pub fn ins_free_early(&mut self, value: ValueId, deep: bool) -> Result<ValueId, MirError> {
+        let value = self.resolve(value);
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::FreeEarly { dest, value, deep })?;
+        Ok(dest)
+    }
+
     /// `FORMAT n` (I4 / Q9 R1). `fmt` is the format-string heap word.
     pub fn ins_format(&mut self, fmt: ValueId, args: Vec<ValueId>) -> Result<ValueId, MirError> {
         let ft = self.resolve_ty(fmt);
@@ -1077,6 +1085,22 @@ impl MirBuilder {
     }
 
     /// `STRINGIFY` of `src` ([`MirInst::Stringify`]): a new string.
+    /// Copy-on-write share (`unique: false`) or unique of `src`'s object:
+    /// the same word, or a copy's for unique. Pair with a GC barrier.
+    pub fn ins_cow(&mut self, src: ValueId, unique: bool) -> Result<ValueId, MirError> {
+        self.ins_cow_at(src, unique, None)
+    }
+
+    /// [`MirInst::Cow`]; with `field`, unique field `field` of object `src`
+    /// in place.
+    pub fn ins_cow_at(&mut self, src: ValueId, unique: bool, field: Option<u32>) -> Result<ValueId, MirError> {
+        let src = self.resolve(src);
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::Cow { dest, src, unique, field })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
     pub fn ins_stringify(&mut self, src: ValueId) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() {
             return Err(MirError::msg("Stringify type".to_string()));
