@@ -111,9 +111,10 @@ test("inlining keeps the callee's key") {
     assert!(small() != fn_key());
 }
 
-test("generic instantiations share their function's key") {
-    assert!(ident(1) == ident("one"));
-    assert!(ident(1.5) == ident(true));
+test("each generic instantiation has its own key") {
+    assert!(ident(1) == ident(2));
+    assert!(ident(1) != ident("one"));
+    assert!(ident(1.5) != ident(true));
 }
 
 test("each lambda has its own key") {
