@@ -819,6 +819,14 @@ impl MirFunc {
                     return Err(format!("{dest} StoreStatic value type"));
                 }
             }
+            MirInst::PanicStore { dest, object, value, .. } => {
+                if self.ty(*dest) != MirTy::Bool || self.ty(*object) != MirTy::HeapRef {
+                    return Err(format!("{dest} PanicStore types"));
+                }
+                if !self.ty(*value).is_word_lane() {
+                    return Err(format!("{dest} PanicStore value type"));
+                }
+            }
             MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} ClearWord dest is not bool"));
