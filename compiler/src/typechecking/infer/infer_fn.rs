@@ -294,6 +294,9 @@ impl Checker {
         let ret_slot = Ty::Var(self.counter.fresh());
         let prev_ret = self.current_return_ty.replace(ret_slot.clone());
         let prev_in_test = std::mem::replace(&mut self.in_test_case, false);
+        // A lambda's bare `return;` returns `()` from the lambda, not
+        // from the enclosing `gen fn`.
+        let prev_coro_body = std::mem::replace(&mut self.coro_body, false);
         // A lambda's `return` returns from the lambda: its `raise` / `?`
         // put the lambda, not the enclosing function, in result or option
         // mode (#1164).
@@ -306,6 +309,7 @@ impl Checker {
             self.note_result_mode_fn(&Self::lambda_mode_key(range.start), &ok);
         }
         self.fn_option_mode = prev_option_mode;
+        self.coro_body = prev_coro_body;
         self.current_return_ty = prev_ret;
         self.lambda_uncaptured_outer = prev_uncaptured;
         self.lambda_rebound_statics = prev_statics;
@@ -598,6 +602,7 @@ impl Checker {
         };
 
         let prev_ret = self.current_return_ty.replace(return_slot);
+        let prev_coro_body = std::mem::replace(&mut self.coro_body, is_coro);
         let prev_yield = self.current_yield_ty.take();
         let prev_send = self.current_send_ty.take();
         let prev_yield_receives = self.yield_receives_used;
@@ -803,6 +808,7 @@ impl Checker {
         }
         self.current_yield_ty = prev_yield;
         self.current_send_ty = prev_send;
+        self.coro_body = prev_coro_body;
 
         self.current_return_ty = prev_ret;
         self.fn_result_mode = prev_result_mode;

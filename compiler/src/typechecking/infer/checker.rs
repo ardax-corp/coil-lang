@@ -236,6 +236,7 @@ impl Checker {
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
             current_yield_ty: None,
+            coro_body: false,
             current_send_ty: None,
             yield_receives_used: false,
             c_structs: Vec::new(),
@@ -1771,6 +1772,7 @@ impl Checker {
         self.async_functions.clear();
         self.async_depth = 0;
         self.current_yield_ty = None;
+        self.coro_body = false;
         self.current_send_ty = None;
         self.yield_receives_used = false;
         self.fn_result_mode = None;
@@ -3127,6 +3129,13 @@ impl Checker {
                 }
             }
             Expression::Return(e) | Expression::ImplicitReturn(e) => {
+                // A bare `return;` in a `gen fn` finishes the coroutine
+                // whatever it yields: its last `resume` gives the yield
+                // type's default, as falling off the end does (#2088).
+                if self.coro_body && matches!(expr.1.as_ref(), Expression::Return(_)) && Self::expr_is_bare_return(e) {
+                    let _ = self.infer(e);
+                    return never();
+                }
                 // Pin expected return for Into; Result mode: bare return → Ok payload, explicit Result → full type.
                 let prev_expected = self.current_expected.take();
                 let flat_explicit_result = self.fn_result_mode.as_ref().is_some_and(|(ok, _)| {
@@ -10099,6 +10108,15 @@ impl Checker {
         matches!(ty, Ty::Con(n) if n == crate::typechecking::ty::STRING)
     }
 
+    /// True when `node` is the value of a bare `return;` (the parser's
+    /// empty tuple).
+    fn expr_is_bare_return(node: &Output) -> bool {
+        matches!(
+            unwrap_expr_wrappers(node).1.as_ref(),
+            Expression::Tuple(items) if items.is_empty()
+        )
+    }
+
     /// True when `node` is `raise …`, including a parenthesized
     /// `Group(Fragment([Raise]))` form from `(raise err)`.
     fn expr_is_raise(node: &Output) -> bool {
@@ -14637,6 +14655,7 @@ impl Checker {
         self.fn_result_mode = Some((unit_ty(), string()));
         self.current_return_ty = Some(unit_ty());
         let prev_in_test = std::mem::replace(&mut self.in_test_case, true);
+        let prev_coro_body = std::mem::replace(&mut self.coro_body, false);
 
         self.push_scope();
         let (open_mark, mixed_mark) = (self.open_operands.len(), self.mixed_literals.len());
@@ -14653,6 +14672,7 @@ impl Checker {
         self.in_test_case = prev_in_test;
 
         self.result_mode_fns.insert(fn_name);
+        self.coro_body = prev_coro_body;
         self.current_return_ty = prev_ret;
         self.fn_result_mode = prev_result_mode;
         self.fn_option_mode = prev_option_mode;
