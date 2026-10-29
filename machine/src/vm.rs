@@ -4368,6 +4368,13 @@ impl<const S: usize> Machine<S> {
         }
         let _ = self.pop_call_frame();
         self.stack.seek(saved_sp);
+        // The caller's frame map may list the word its host call returns
+        // into (a collection after the call roots the result there): the
+        // argument left in it would root the value past this call, a
+        // finalized object past its `drop`.
+        for i in saved_sp..(saved_sp + args.len()).min(self.stack.capacity()) {
+            self.stack[i] = Value::default();
+        }
         self.nested_depth -= 1;
         let _ = self.nested_frame_depths.pop();
         self.return_bookkeeping = self.nested_depth > 0
