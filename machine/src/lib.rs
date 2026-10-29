@@ -3,6 +3,7 @@
 mod arith;
 pub mod char_ord;
 pub mod clock;
+pub mod symbol;
 #[cfg(any(test, feature = "debugger"))]
 pub mod debug;
 pub mod env;

@@ -164,6 +164,10 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
+/// Major 6 / minor 7: HostInvoke `symbol_next_id` (id 179,
+/// `symbol::next_id()`): the next value of a process-wide counter. Older
+/// runtimes do not know the id.
+///
 /// Major 6 / minor 6: `Cow` (the last opcode), copy-on-write share /
 /// unique of a class instance or array. Older runtimes do not know it.
 ///
@@ -206,7 +210,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 6;
+pub const ARCHIVE_MINOR: u16 = 7;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1283,9 +1287,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
-        assert_eq!(ARCHIVE_MINOR, 6);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 6));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.6");
+        assert_eq!(ARCHIVE_MINOR, 7);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 7));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.7");
     }
 
     #[test]
