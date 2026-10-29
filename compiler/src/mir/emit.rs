@@ -3940,11 +3940,13 @@ fn bin_kind(op: MirBinOp, ty: MirTy) -> Result<u8, LowerError> {
         (MirBinOp::Xor, MirTy::I64) => dense::IXOR64,
         (MirBinOp::Shl, MirTy::I64) => dense::ISHL64,
         (MirBinOp::Shr, MirTy::I64) => dense::ISHR64,
+        (MirBinOp::Pow, MirTy::I64) => dense::IPOW64,
         (MirBinOp::Add, MirTy::F64) => dense::FADD64,
         (MirBinOp::Sub, MirTy::F64) => dense::FSUB64,
         (MirBinOp::Mul, MirTy::F64) => dense::FMUL64,
         (MirBinOp::Div, MirTy::F64) => dense::FDIV64,
         (MirBinOp::Rem, MirTy::F64) => dense::FREM64,
+        (MirBinOp::Pow, MirTy::F64) => dense::FPOW64,
         _ => return Err(LowerError::Refused(format!("dense bin {op:?} {ty}"))),
     })
 }

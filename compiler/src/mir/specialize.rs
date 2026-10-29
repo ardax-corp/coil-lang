@@ -362,7 +362,7 @@ fn has_numeric_arith(func: &crate::mir::MirFunc) -> bool {
     func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
         matches!(
             i,
-            MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div, ty, .. } if ty.is_float() || ty.is_int()
+            MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Pow, ty, .. } if ty.is_float() || ty.is_int()
         ) || matches!(i, MirInst::Bin { op: MirBinOp::Rem, ty, .. } if ty.is_int())
     })
 }
