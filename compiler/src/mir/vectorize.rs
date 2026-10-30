@@ -100,7 +100,8 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
     } else {
         return None;
     };
-    if body != latch {
+    let (body, reads) = string_reads(func, body, &lp.blocks);
+    if body != latch || (!reads.is_empty() && lp.blocks.len() != 2 + reads.len()) {
         return None;
     }
 
@@ -170,6 +171,9 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
     if stores.is_empty() || region_has_barrier(func, &[header, body]) {
         return None;
     }
+    if !reads_covered(func, &reads, *iv, &lp.blocks, stores.iter().map(|s| &s.value)) {
+        return None;
+    }
     Some(StoreLoop {
         body: vec![body],
         iv: *iv,
@@ -194,7 +198,7 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
 /// covers). The body and the latch run in every iteration and may.
 pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Option<StoreLoop> {
     let header = lp.header;
-    if !(4..=5).contains(&lp.blocks.len()) {
+    if lp.blocks.len() < 4 {
         return None;
     }
     let preds = func.preds();
@@ -209,6 +213,7 @@ pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> O
     } else {
         return None;
     };
+    let (body, reads) = string_reads(func, body, &lp.blocks);
     let Terminator::Br { cond: c, taken: bt, not_taken: bf } = func.block(body).term.as_ref()? else {
         return None;
     };
@@ -222,7 +227,7 @@ pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> O
         }
     };
     let ((arm_t, edge_t), (arm_f, edge_f)) = (arm(*bt)?, arm(*bf)?);
-    if edge_t == edge_f || lp.blocks.len() != 3 + usize::from(arm_t.is_some()) + usize::from(arm_f.is_some()) {
+    if edge_t == edge_f || lp.blocks.len() != 3 + reads.len() + usize::from(arm_t.is_some()) + usize::from(arm_f.is_some()) {
         return None;
     }
     if !matches!(func.block(latch).term, Some(Terminator::Jump { dest }) if dest == header) {
@@ -362,7 +367,7 @@ pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> O
             _ => return None,
         }
     }
-    if stores.is_empty() {
+    if stores.is_empty() || !reads_covered(func, &reads, iv, &lp.blocks, stores.iter().map(|s| &s.value)) {
         return None;
     }
     let mut blocks = vec![body];
@@ -469,7 +474,8 @@ pub(super) fn match_push_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Optio
         push
     };
     let mut bounds = Bounds::new();
-    let (value, vty) = if body == latch && lp.blocks.len() == 2 {
+    let (body, reads) = string_reads(func, body, &lp.blocks);
+    let (value, vty) = if body == latch && lp.blocks.len() == 2 + reads.len() {
         let (dest, v) = push_in(body, false, &mut bounds)?;
         if dest != acc_next {
             return None;
@@ -481,7 +487,7 @@ pub(super) fn match_push_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Optio
             return None;
         };
         let (bt, bf) = (*bt, *bf);
-        if lp.blocks.len() != 5 || [bt, bf].iter().any(|&a| a == latch || preds[a.index()].len() != 1) {
+        if lp.blocks.len() != 5 + reads.len() || [bt, bf].iter().any(|&a| a == latch || preds[a.index()].len() != 1) {
             return None;
         }
         if [bt, bf].iter().any(|&a| !matches!(func.block(a).term, Some(Terminator::Jump { dest }) if dest == latch)) {
@@ -520,8 +526,13 @@ pub(super) fn match_push_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Optio
         };
         (value, vt)
     };
-    let all: Vec<BlockId> = lp.blocks.iter().copied().filter(|&b| b != header).collect();
+    // A read block's `string_byte_at` is the read the vector loop's loads
+    // take over.
+    let all: Vec<BlockId> = lp.blocks.iter().copied().filter(|&b| b != header && !reads.iter().any(|r| r.0 == b)).collect();
     if region_has_barrier_but_push(func, &all) || region_has_barrier(func, &[header]) {
+        return None;
+    }
+    if !reads_covered(func, &reads, iv, &lp.blocks, std::iter::once(&value)) {
         return None;
     }
     Some(PushLoop { iv, init, n, acc, value, ty: store_ty(func, vty)?, bounds })
@@ -874,6 +885,16 @@ fn classify_with(
                 ty,
                 off,
             })
+        }
+        // `s[i + k]` on a `string`: a byte as an int lane. Only a read block
+        // ([`string_reads`]) holds one in a body the matchers take.
+        MirInst::HostInvoke { native_id, args, .. } if Some(*native_id) == string_byte_at_id() && args.len() == 2 => {
+            let (s, index) = (args[0], args[1]);
+            if !func.ty(s).is_heap_word() || !is_invariant(func, s, loop_blocks) || func.ty(v) != MirTy::I64 {
+                return None;
+            }
+            let off = index_offset(func, index, iv, loop_blocks)?;
+            Some(VOp::Load { array: s, ty: dense::TY_I64, off })
         }
         MirInst::Bin {
             op,
@@ -1233,6 +1254,97 @@ fn region_has_barrier_inst(_func: &MirFunc, inst: &MirInst) -> bool {
                 | MirInst::Cow { .. }
                 | MirInst::Unbox { .. }
         )
+}
+
+/// The `string_byte_at` host id, the read of `s[i]` on a `string`.
+fn string_byte_at_id() -> Option<u16> {
+    super::host_allow::host_edge_spec_by_name("string_byte_at").map(|s| s.id)
+}
+
+/// The string reads that open a loop body from `from`: blocks
+/// `v = string_byte_at(s, i + k); br v < 0, panic, next`, each with its
+/// panic outside the loop and `next` inside. Returns the block after
+/// them and the read blocks with their bytes. The vector loop's guard
+/// puts every lane it reads in range, so in the lanes it runs no read
+/// answers `-1` and no panic branch is taken; [`reads_covered`] checks
+/// each read is one of those lanes.
+fn string_reads(func: &MirFunc, from: BlockId, loop_blocks: &std::collections::HashSet<BlockId>) -> (BlockId, Vec<(BlockId, ValueId)>) {
+    let mut at = from;
+    let mut reads = Vec::new();
+    let Some(byte_at) = string_byte_at_id() else {
+        return (at, reads);
+    };
+    while reads.len() < 8 {
+        let Some(Terminator::Br { cond, taken, not_taken }) = func.block(at).term else {
+            break;
+        };
+        if loop_blocks.contains(&taken) || !loop_blocks.contains(&not_taken) || not_taken == at {
+            break;
+        }
+        let (mut byte, mut test) = (None, false);
+        let mut ok = true;
+        for inst in &func.block(at).insts {
+            match inst {
+                MirInst::HostInvoke { dest, native_id, args, .. } if *native_id == byte_at && args.len() == 2 && byte.is_none() => {
+                    byte = Some(*dest);
+                }
+                MirInst::Cmp { dest, op: MirCmpOp::Lt, ty: MirTy::I64, lhs, rhs }
+                    if *dest == cond && Some(*lhs) == byte && is_const_i64(func, *rhs, 0) =>
+                {
+                    test = true;
+                }
+                // What a body may hold besides (the step, the last read's
+                // mask): the matcher's own `pure` set.
+                MirInst::Index { .. }
+                | MirInst::Bin { .. }
+                | MirInst::Unary { .. }
+                | MirInst::Cast { .. }
+                | MirInst::Cmp { .. }
+                | MirInst::Const { .. }
+                | MirInst::ArrayLen { .. } => {}
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        match byte {
+            Some(b) if ok && test => {
+                reads.push((at, b));
+                at = not_taken;
+            }
+            _ => break,
+        }
+    }
+    (at, reads)
+}
+
+/// Every read of `reads` is a load of one of `ops`, so the guard covers
+/// its lanes.
+fn reads_covered<'a>(
+    func: &MirFunc,
+    reads: &[(BlockId, ValueId)],
+    iv: ValueId,
+    loop_blocks: &std::collections::HashSet<BlockId>,
+    ops: impl Iterator<Item = &'a VOp> + Clone,
+) -> bool {
+    fn has(op: &VOp, s: ValueId, at: Off) -> bool {
+        match op {
+            VOp::Load { array, off, .. } => *array == s && *off == at,
+            VOp::Splat { .. } | VOp::Iota => false,
+            VOp::Bin { lhs, rhs, .. } => has(lhs, s, at) || has(rhs, s, at),
+            VOp::Unary { src, .. } => has(src, s, at),
+            VOp::Select { mask, then, els } => has(mask, s, at) || has(then, s, at) || has(els, s, at),
+            VOp::Fma { a, b, c, .. } => has(a, s, at) || has(b, s, at) || has(c, s, at),
+        }
+    }
+    reads.iter().all(|&(_, v)| match def(func, v) {
+        Some(MirInst::HostInvoke { args, .. }) => match index_offset(func, args[1], iv, loop_blocks) {
+            Some(at) => ops.clone().any(|op| has(op, args[0], at)),
+            None => false,
+        },
+        _ => false,
+    })
 }
 
 fn def(func: &MirFunc, v: ValueId) -> Option<&MirInst> {

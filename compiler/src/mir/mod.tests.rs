@@ -5603,3 +5603,106 @@ fn main() {
         assert_vec_loop(fn_ops(&bc, &symbols, name), name);
     }
 }
+
+/// A map whose stream is a `string` (`s[i]` is `string_byte_at` and a
+/// branch to its panic) runs as a `VLoop` too: a push, a push per arm, a
+/// store and a store per arm, and two reads of one string (#2150).
+#[test]
+fn pipeline_vectorizes_string_source_maps() {
+    let src = r#"
+fn shift_str(string s, int delta) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c >= "A" && c <= "Z" {
+            out.push(((c as int) + delta) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+fn codes(string s) -> Vec<int> {
+    let out: Vec<int> = Vec::new();
+    let i = 0;
+    while i < s.len() {
+        out.push((s[i] as int) * 3 + 1);
+        i = i + 1;
+    }
+    return out;
+}
+fn pair_sums(string s) -> Vec<int> {
+    let out: Vec<int> = Vec::new();
+    let i = 0;
+    let n = s.len() - 1;
+    while i < n {
+        out.push((s[i] as int) + (s[i + 1] as int));
+        i = i + 1;
+    }
+    return out;
+}
+fn store_codes(Vec<int> out, string s) {
+    let i = 0;
+    while i < s.len() {
+        out[i] = (s[i] as int) * 2 + 1;
+        i = i + 1;
+    }
+}
+fn lower_into(Vec<byte> out, string s) {
+    let i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+fn main() {
+    let s = "Hello, World! été ABCXYZ abcxyz 0123456789";
+    let u = shift_str(s, 32);
+    if u.len() != s.len() || u[0] != "h" || u[7] != "w" || u[14] != 195 as byte || u[20] != "a" {
+        panic "shift_str";
+    }
+    let c = codes(s);
+    if c.len() != s.len() || c[0] != 72 * 3 + 1 || c[14] != 195 * 3 + 1 {
+        panic "codes";
+    }
+    let p = pair_sums(s);
+    if p.len() != s.len() - 1 || p[0] != 72 + 101 || p[13] != 32 + 195 {
+        panic "pair_sums";
+    }
+    let o: Vec<int> = Vec::new();
+    let w: Vec<byte> = Vec::new();
+    let k = 0;
+    while k < s.len() {
+        o.push(0);
+        w.push(0 as byte);
+        k = k + 1;
+    }
+    store_codes(o, s);
+    if o[0] != 145 || o[14] != 391 {
+        panic "store_codes";
+    }
+    lower_into(w, s);
+    if w[0] != "h" || w[7] != "w" || w[14] != 195 as byte || w[20] != "a" {
+        panic "lower_into";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile string maps");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "string map checksums");
+    let symbols = p.program_debug().fn_symbols;
+    for name in ["shift_str", "codes", "pair_sums", "store_codes", "lower_into"] {
+        assert_vec_loop(fn_ops(&bc, &symbols, name), name);
+    }
+}

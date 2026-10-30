@@ -959,6 +959,48 @@
         assert_eq!(got, [9, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
     }
 
+    /// A `VLoop` load of a `string` reads its bytes as int lanes (#2150);
+    /// a block that traps replays lane by lane from the string too.
+    #[test]
+    fn vloop_loads_string_bytes() {
+        use common::simd;
+        let mut vm = Machine::<8>::default();
+        let (obj, _) = vm.heap_mut().alloc(ObjArray::new(vec![Value::from(9i64)]), Object::Array);
+        let out = Value::from(obj.addr()).bits();
+        // 'i' (105) is the first byte whose sum overflows.
+        let k = i64::MAX - 104;
+        let strings = vec!["abcdefghabciabcd".to_string()];
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(7),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            store_pop(0),
+            Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG),
+            store_pop(1),
+            const_int(0),
+            store_pop(2),
+            const_int(0),
+            store_pop(3),
+            const_int(16),
+            store_pop(4),
+            Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG | 1),
+            store_pop(6),
+            abc(Instruction::VLoop, 4, 5, 3, 4),
+            abc(Instruction::VLoad, common::dense::TY_I64, 0, 0, 2),
+            abc(Instruction::VBin, simd::SPLAT_I64, 1, 6, 0),
+            abc(Instruction::VBin, simd::IADD64, 0, 0, 1),
+            abc(Instruction::VStore, common::dense::TY_I64 | simd::STORE_PUSH, 0, 1, 0),
+            Byte::new(Instruction::HALT),
+        ];
+        vm.run_with_pool(&code, &[out, Value::from(k).bits()], &strings, 0);
+        assert!(vm.panicked(), "lane 11 ('i') overflows");
+        let Some(Object::Array(gc)) = vm.heap().find_object_by_addr(out) else {
+            panic!("out is an array");
+        };
+        let got: Vec<i64> = gc.as_ref().iter().map(|v| v.as_int()).collect();
+        let want: Vec<i64> = std::iter::once(9).chain(b"abcdefghabc".iter().map(|&b| i64::from(b) + k)).collect();
+        assert_eq!(got, want);
+    }
+
     #[test]
     fn dense_store_index_writes_what_dense_index_reads() {
         let mut vm = Machine::<8>::default();
