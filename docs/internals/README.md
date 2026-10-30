@@ -49,6 +49,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Contracts](contracts.md) | `requires` / `ensures`: syntax, typing, effect-free clauses, HIR checks, caller blame (`contract_fail`, HostInvoke **159**), `--contracts` levels, generated tests, `coil verify` (SMT) |
 | [Tasks](tasks.md) | `task::scope` / `spawn` / `join` / `sleep` / `yield_now` / `cancel` / `timeout` / `shield` / `channel` / `blocking` on one VM: scheduler, suspension points, child panics, cancellation, the `defer` unwinder, waits on other threads; HostInvoke **144–158** |
 | [IO reactor](io-reactor.md) | Sync adapter waits + `wait_readable` / `wait_writable` (task-aware) / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park`; clocks **121–123**; M1 math **125–135** (archive minor 5: `atan`…`tanh`). `PI`/`E`/`TAU` → coil-stdlib `num` |
+| [Function keys](symbol-keys.md) | `symbol::fn_key()` (compile-time per-function, per-instantiation `int` key: what it hashes, inlining, generic clones, DCE, caches) and `symbol::next_id()` (process-wide counter, HostInvoke **179**) |
 | [Stack bounds](stack-bounds.md) | Operand stack sizing, run-time growth, and the optional `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |

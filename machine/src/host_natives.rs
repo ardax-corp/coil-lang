@@ -132,6 +132,8 @@ pub fn build_standard_host_natives(
     push_from_bytes_take(&mut out, &mut register_id);
     // Append-only after from_bytes_take: `region` enter / exit (major 6 minor 5).
     push_region(&mut out, &mut register_id);
+    // Append-only after region: `symbol::next_id` (major 6 minor 9).
+    push_wiring(&mut out, &mut register_id, crate::symbol::SYMBOL_WIRING, "symbol");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -1383,8 +1385,12 @@ mod tests {
             Some(common::FROM_BYTES_TAKE_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(178).map(String::as_str),
             Some(common::GC_REGION_EXIT_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::SYMBOL_NEXT_ID_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1736,6 +1742,10 @@ mod tests {
             registrations.get(end + 42).map(|(n, _)| n.as_str()),
             Some(common::GC_REGION_EXIT_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 43);
+        assert_eq!(
+            registrations.get(end + 43).map(|(n, _)| n.as_str()),
+            Some(common::SYMBOL_NEXT_ID_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 44);
     }
 }

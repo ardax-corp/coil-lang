@@ -83,7 +83,7 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         return Err("kind");
     }
     // A Result-mode body's returns are explicit `Ok` / `Err` values.
-    if callee.is_coro || callee.is_generic || !callee.captures.is_empty() {
+    if callee.is_coro || callee.is_generic || !callee.captures.is_empty() || !callee.fn_key_sites.is_empty() {
         return Err("body");
     }
     // A fixed array, tuple or record argument is shared with the callee,

@@ -538,6 +538,8 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
             EffectFlags::from_bits(EffectFlags::FFI | EffectFlags::RESIZE)
         }
         BuiltinExport::Fn { kind: crate::typechecking::PreludeFn::BlackBox } => row(common::BLACK_BOX_NATIVE),
+        // `fn_key()` is an `int` literal by the time anything runs.
+        BuiltinExport::Fn { kind: crate::typechecking::PreludeFn::FnKey } => EffectFlags::empty(),
         // `ord`, `char`, matrix helpers: compiled inline or in userland,
         // not a host row.
         BuiltinExport::Fn { .. } => UNKNOWN_CALLEE,

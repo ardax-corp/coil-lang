@@ -46,6 +46,7 @@ impl<'a> Synth<'a> {
                 exprs: Vec::new(),
                 root: None,
                 aliased_fn_values: Vec::new(),
+                fn_key_sites: Vec::new(),
             },
         }
     }

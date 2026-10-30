@@ -1318,6 +1318,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: GC_R,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "symbol_next_id",
+        arity: 0,
+        id: 179,
+        effects: HOST,
+        caps: NO_CAP,
+    },
 ];
 
 /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
@@ -1444,6 +1451,11 @@ pub const GC_REGION_ENTER_ID: u16 = 177;
 pub const GC_REGION_ENTER_NATIVE: &str = "gc_region_enter";
 pub const GC_REGION_EXIT_ID: u16 = 178;
 pub const GC_REGION_EXIT_NATIVE: &str = "gc_region_exit";
+/// `symbol::next_id()` (archive 6.9): the next value of one process-wide
+/// atomic counter. Its `HOST` effect keeps it from being folded at compile
+/// time, hoisted or removed.
+pub const SYMBOL_NEXT_ID_ID: u16 = 179;
+pub const SYMBOL_NEXT_ID_NATIVE: &str = "symbol_next_id";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1491,7 +1503,8 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 179);
+    assert!(HOST_NATIVES.len() == 180);
+    assert!(HOST_NATIVES[SYMBOL_NEXT_ID_ID as usize].id == SYMBOL_NEXT_ID_ID);
     assert!(HOST_NATIVES[VEC_EXTEND_RANGE_ID as usize].id == VEC_EXTEND_RANGE_ID);
     assert!(HOST_NATIVES[VEC_FILL_ID as usize].id == VEC_FILL_ID);
     assert!(HOST_NATIVES[GC_REGION_ENTER_ID as usize].id == GC_REGION_ENTER_ID);

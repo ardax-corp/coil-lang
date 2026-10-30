@@ -53,6 +53,9 @@ pub const GC_MODULE: &str = "gc";
 /// Process clocks (`wall_nanos`, `mono_nanos`, `sleep_ms`). Not virtual `time`.
 pub const CLOCK_MODULE: &str = "clock";
 
+/// Per-function keys and a process-wide id counter (`fn_key`, `next_id`).
+pub const SYMBOL_MODULE: &str = "symbol";
+
 /// Task scheduler natives behind the embedded `task` module (`task::scope`, …).
 /// Not meant for direct use: the `task` module wraps them.
 pub const PRELUDE_TASK_MODULE: &str = "prelude::task";
@@ -103,6 +106,9 @@ pub enum PreludeFn {
     /// The identity, through the `black_box` host native the optimizer
     /// cannot see through.
     BlackBox,
+    /// `symbol::fn_key()`: the enclosing function's compile-time key, an
+    /// `int` literal once the HIR is built (never a call at run time).
+    FnKey,
 }
 
 impl PreludeFn {
@@ -117,6 +123,7 @@ impl PreludeFn {
             Self::Char => "char",
             Self::Ord => "ord",
             Self::BlackBox => "black_box",
+            Self::FnKey => "fn_key",
         }
     }
 
@@ -131,6 +138,7 @@ impl PreludeFn {
             "char" => Some(Self::Char),
             "ord" => Some(Self::Ord),
             "black_box" => Some(Self::BlackBox),
+            "fn_key" => Some(Self::FnKey),
             _ => None,
         }
     }
@@ -896,6 +904,19 @@ impl VirtualModules {
                 ("mono_nanos", common::CLOCK_MONO_NANOS_NATIVE),
                 ("sleep_ms", common::CLOCK_SLEEP_MS_NATIVE),
             ]),
+        );
+
+        modules.insert(
+            SYMBOL_MODULE,
+            vec![
+                BuiltinExport::Fn {
+                    kind: PreludeFn::FnKey,
+                },
+                BuiltinExport::HostFn {
+                    surface: "next_id",
+                    registry: common::SYMBOL_NEXT_ID_NATIVE,
+                },
+            ],
         );
 
         modules.insert(
