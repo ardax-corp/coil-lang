@@ -255,7 +255,7 @@ fn params_closed(ty: &Ty) -> bool {
 fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, unit: bool, seen: &mut Vec<String>) -> Option<ValueClass> {
     items
         .all(|t| {
-            (params_closed(t) || is_existential(t) || mono_fun(checker, t, seen))
+            (params_closed(t) || is_existential(t) || mono_fun(checker, t, seen) || open_fun(checker, t, seen))
                 && classify_in(checker, t, seen).is_none_or(|class| is_word(class) || unit && class == ValueClass::Unit)
         })
         .then_some(ValueClass::Aggregate)
@@ -265,6 +265,13 @@ fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, uni
 /// word, stored in an aggregate as that word.
 fn mono_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
     matches!(strip_readonly(ty), Ty::Fun(..)) && crate::typechecking::subst::ftv(ty).is_empty() && fun_words(checker, ty, seen)
+}
+
+/// A function type over type parameters whose words are plain
+/// ([`fun_words`]: a bare `T` is one boxed word), such as the elements of a
+/// shared generic body's `Vec<unit -> T>`: one closure word each (#2136).
+fn open_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    matches!(strip_readonly(ty), Ty::Fun(..)) && fun_words(checker, ty, seen)
 }
 
 /// A class declared with type parameters (`class HashMap<K, V>`).
@@ -1710,7 +1717,7 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         // variable nothing pinned (`fn () => Ok(2)`'s error type, #1520):
         // it is `MakeFn`'s plain closure word.
         LocalKind::Let => {
-            poly_fun(t) && !let_init_is_lambda(body, local)
+            poly_fun(t) && !let_init_is_lambda(body, local) && !let_init_is_element(body, local)
                 || matches!(strip_readonly(t), Ty::Fun(..))
                     && body.exprs.iter().any(|e| match &e.kind {
                         HirKind::Let { local: l, init: Some(init) } if *l == local => {
@@ -1736,6 +1743,15 @@ fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
     })
 }
 
+/// A `let` bound to an element read by index (`let b = bodies[i]`): the
+/// closure word the `Vec` stored, never a `PolyFn` (#2136).
+fn let_init_is_element(body: &HirBody, local: LocalId) -> bool {
+    body.exprs.iter().any(|e| {
+        matches!(&e.kind, HirKind::Let { local: l, init: Some(init) }
+            if *l == local && matches!(body.expr(*init).kind, HirKind::Index { .. }))
+    })
+}
+
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     indirect_callee_in(body, checker, f, &mut Vec::new())
 }
@@ -1748,9 +1764,10 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
     // `const` or `static` holding one (#1685): the closure word it was
     // stored as.
     if let HirKind::Index { .. } | HirKind::Global { .. } = body.expr(f).kind {
+        let index = matches!(body.expr(f).kind, HirKind::Index { .. });
         return body.expr(f).ty.as_ref().is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
-            mono_fun(checker, &t, &mut Vec::new())
+            mono_fun(checker, &t, &mut Vec::new()) || index && open_fun(checker, &t, &mut Vec::new())
         });
     }
     // A call's returned closure called in place (#1533), as a `let` of it.
@@ -1831,9 +1848,14 @@ fn closure_word(body: &HirBody, checker: &Checker, value: HirId, seen: &mut Vec<
         // generic one, whose `MakePolyFn` calls differently).
         HirKind::Global { .. } | HirKind::Lambda { .. } => true,
         // A function field or element: the closure word stored there.
-        HirKind::Field { .. } | HirKind::Index { .. } => body.expr(value).ty.as_ref().is_some_and(|t| {
+        HirKind::Field { .. } => body.expr(value).ty.as_ref().is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
             mono_fun(checker, &t, &mut Vec::new())
+        }),
+        // An element of a shared generic body's `Vec<unit -> T>` too (#2136).
+        HirKind::Index { .. } => body.expr(value).ty.as_ref().is_some_and(|t| {
+            let t = apply_ty_prune(checker.subst(), t);
+            mono_fun(checker, &t, &mut Vec::new()) || open_fun(checker, &t, &mut Vec::new())
         }),
         _ => false,
     }

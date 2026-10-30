@@ -4245,8 +4245,9 @@ impl Compiler {
         {
             ret = apply_ty_prune(self.checker.subst(), ty);
         }
-        // A returned function (`return show`, a `PolyFn`) is one word.
-        let fun = matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Fun(..) | Ty::Forall { .. });
+        // A returned function (`return show`, a `PolyFn`) is one word, and
+        // so is a `Vec` of ground ones (#2136).
+        let fun = matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Fun(..) | Ty::Forall { .. }) || ground_fun(&ret);
         if !(crate::layout::ty_is_closed(&ret) || fun) || lower::classify(&self.checker, &ret).is_none() {
             return Err("callee-signature");
         }
@@ -9602,13 +9603,19 @@ fn hir_bisect(name: &str, limit: Option<usize>) -> bool {
     n <= limit
 }
 
-/// A function type whose parameter and result types are all ground.
+/// A function type whose parameter and result types are all ground, or a
+/// container of them.
 fn ground_fun(ty: &Ty) -> bool {
+    let ground = |t: &Ty| crate::layout::ty_is_closed(t) || ground_fun(t);
     match crate::typechecking::ty::strip_readonly(ty) {
-        Ty::Fun(param, ret) => {
-            let ground = |t: &Ty| crate::layout::ty_is_closed(t) || ground_fun(t);
-            ground(param) && ground(ret)
+        Ty::Fun(param, ret) => ground(param) && ground(ret),
+        // A `Vec`, array or tuple of ground functions holds their closure
+        // words (`Vec<unit -> string>`, #2136).
+        t @ Ty::App(..) if crate::typechecking::ty::vec_element_ty(t).is_some() => {
+            crate::typechecking::ty::vec_element_ty(t).is_some_and(|e| ground_fun(e))
         }
+        Ty::Array { element, .. } => ground_fun(element),
+        Ty::Tuple(items) => items.iter().all(ground) && items.iter().any(ground_fun),
         _ => false,
     }
 }
