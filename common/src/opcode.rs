@@ -818,7 +818,7 @@ pub mod simd {
     pub const IOTA_F64: u8 = 35;
     pub const INEG: u8 = 36;
     pub const FNEG: u8 = 37;
-    /// Lane casts (archive 6.10): int lanes to float lanes, and float
+    /// Lane casts (archive 6.11): int lanes to float lanes, and float
     /// lanes to int lanes truncating as `as int` does (NaN is `0`, out of
     /// range saturates). Neither traps.
     pub const I2F: u8 = 38;
@@ -841,7 +841,7 @@ pub mod simd {
     /// lanes (IEEE: a NaN compares unequal and unordered).
     pub const ICMP: u8 = 64;
     pub const FCMP: u8 = 72;
-    /// `VBin` select (archive 6.10): `dest = dest != 0 ? a : b` lane by
+    /// `VBin` select (archive 6.11): `dest = dest != 0 ? a : b` lane by
     /// lane, the mask in `dest` as `0` / `1` int lanes. Never traps.
     pub const SELECT: u8 = 80;
 
@@ -864,7 +864,7 @@ pub mod simd {
     pub const LOOP_POS: u8 = 0x80;
     /// `VLoop` length-field bits that hold the body length.
     pub const LOOP_LEN: u8 = 0x7F;
-    /// `VStore` type flag (archive 6.10, `VLoop` bodies): append the 8
+    /// `VStore` type flag (archive 6.11, `VLoop` bodies): append the 8
     /// lanes to the array in lane order instead of storing them at an
     /// index (the index slot is unused).
     pub const STORE_PUSH: u8 = 0x80;

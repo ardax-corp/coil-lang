@@ -158,6 +158,9 @@ impl TaskRec {
 pub(crate) struct ScopeRec {
     pub owner: TaskId,
     pub children: Vec<TaskId>,
+    /// Children not finished yet: [`Scheduler::children_finished`] without
+    /// scanning `children` on every finish (#2135).
+    pub unfinished: usize,
     /// The body returned; no more spawns.
     pub closed: bool,
     /// First child panic message (fails the scope).
@@ -229,6 +232,7 @@ impl Scheduler {
             ScopeRec {
                 owner: self.current,
                 children: Vec::new(),
+                unfinished: 0,
                 closed: false,
                 failed: None,
             },
@@ -237,13 +241,20 @@ impl Scheduler {
     }
 
     pub(crate) fn add_task(&mut self, coro: RefCoroutine, scope: ScopeId) -> TaskId {
+        let id = self.add_record(TaskRec::new(Some(coro), scope));
+        self.run_queue.push_back(id);
+        id
+    }
+
+    /// Register a child task record in its scope.
+    fn add_record(&mut self, rec: TaskRec) -> TaskId {
         let id = self.next_task;
         self.next_task += 1;
-        self.tasks.insert(id, TaskRec::new(Some(coro), scope));
-        if let Some(s) = self.scopes.get_mut(&scope) {
+        if let Some(s) = self.scopes.get_mut(&rec.scope) {
             s.children.push(id);
+            s.unfinished += 1;
         }
-        self.run_queue.push_back(id);
+        self.tasks.insert(id, rec);
         self.live += 1;
         id
     }
@@ -313,9 +324,16 @@ impl Scheduler {
         let Some(rec) = self.tasks.get_mut(&id) else {
             return;
         };
+        let was_finished = rec.state.finished();
         rec.state = state;
         rec.ending = None;
         self.live -= 1;
+        if !was_finished
+            && state.finished()
+            && let Some(s) = self.scopes.get_mut(&rec.scope)
+        {
+            s.unfinished -= 1;
+        }
         for scope in self.scopes_owned_by(id) {
             self.remove_scope(scope);
         }
@@ -354,11 +372,7 @@ impl Scheduler {
     }
 
     pub(crate) fn children_finished(&self, scope: ScopeId) -> bool {
-        self.scopes.get(&scope).is_none_or(|s| {
-            s.children
-                .iter()
-                .all(|c| self.tasks.get(c).is_none_or(|r| r.state.finished()))
-        })
+        self.scopes.get(&scope).is_none_or(|s| s.unfinished == 0)
     }
 
     /// Forget a finished scope and its children's records.
@@ -816,6 +830,51 @@ pub(crate) fn tasks_active() -> bool {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A child task record with no coroutine, as `add_task` makes one.
+    fn add_bare_task(s: &mut Scheduler, scope: ScopeId) -> TaskId {
+        s.add_record(TaskRec::new(None, scope))
+    }
+
+    #[test]
+    fn finishing_a_task_does_not_scan_its_finished_siblings() {
+        // coil-lang#2135: each finish rescanned every child of the scope, so
+        // N spawn + join pairs in one scope cost O(N^2).
+        let mut s = Scheduler::new(0);
+        let scope = s.open_scope();
+        let n = 20_000;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            let id = add_bare_task(&mut s, scope);
+            assert!(!s.children_finished(scope));
+            s.finalize(id, TaskState::Done);
+            assert!(s.children_finished(scope));
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(s.live, 0);
+        // Linear work takes milliseconds even in a debug build; the old
+        // quadratic scan took minutes.
+        assert!(elapsed < std::time::Duration::from_secs(5), "{n} spawn + finish took {elapsed:?}");
+    }
+
+    #[test]
+    fn a_scope_counts_only_its_unfinished_children() {
+        let mut s = Scheduler::new(0);
+        let a = s.open_scope();
+        let b = s.open_scope();
+        let a1 = add_bare_task(&mut s, a);
+        let a2 = add_bare_task(&mut s, a);
+        let b1 = add_bare_task(&mut s, b);
+        s.finalize(a1, TaskState::Failed);
+        assert!(!s.children_finished(a));
+        assert!(!s.children_finished(b));
+        s.finalize(b1, TaskState::Dropped);
+        assert!(s.children_finished(b));
+        assert!(!s.owned_children_finished(ROOT));
+        s.finalize(a2, TaskState::Done);
+        assert!(s.children_finished(a));
+        assert!(s.owned_children_finished(ROOT));
+    }
 
     #[test]
     #[cfg(any(unix, windows))]
