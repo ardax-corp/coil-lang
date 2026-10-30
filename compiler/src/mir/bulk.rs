@@ -19,6 +19,9 @@
 //! the array's identity, so `out` after the loop is `out` before it.
 //! `vec_extend_range` appends nothing and returns `i0` when `out` is
 //! `src` (a loop growing what it reads, which the call must not finish).
+//! `src` may be a `string` (`out.push(s[i])`, whose read is its own
+//! block: `string_byte_at` and the branch to its panic): the call copies
+//! its bytes.
 
 use std::collections::HashSet;
 
@@ -79,7 +82,7 @@ struct Plan {
 
 fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
     let h = lp.header;
-    if h == func.entry || lp.blocks.len() != 2 {
+    if h == func.entry || !(2..=3).contains(&lp.blocks.len()) {
         return None;
     }
     let preds = func.preds_of(h);
@@ -124,19 +127,36 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
     let ((iv, step), (acc, push, value)) = (iv?, acc?);
     let (n, inclusive, cont) = header_test(&defs, cond, iv, false)?;
     let (body, exit) = if cont { (taken, not_taken) } else { (not_taken, taken) };
-    if body != latch || lp.blocks.contains(&exit) {
+    if lp.blocks.contains(&exit) {
         return None;
+    }
+    // A string read `s[i]` is its own block: `string_byte_at`, then a
+    // branch out to the panic when it answers `-1`.
+    // `s[i] as int` is `byte & 255`: the byte it already is.
+    let mut read = None;
+    let mut mask = None;
+    if body != latch {
+        let byte = match defs.get(&value) {
+            Some((at, MirInst::Bin { dest, op: MirBinOp::BitAnd, ty: MirTy::I64, lhs, rhs }))
+                if *at == latch && const_i64(&defs, *rhs) == Some(255) =>
+            {
+                mask = Some(*dest);
+                *lhs
+            }
+            _ => value,
+        };
+        let zero = |v: ValueId| const_i64(&defs, v) == Some(0);
+        read = Some(string_read(func, lp, body, latch, iv, byte, &invariant, &zero)?);
     }
 
     // The body: the read, the push and the step, nothing else.
-    let mut read = None;
     for inst in &func.block(latch).insts {
         match inst {
             MirInst::Const { .. } => {}
-            MirInst::Index { dest, array, index, .. } if *index == iv && *dest == value && invariant(*array) => {
+            MirInst::Index { dest, array, index, .. } if read.is_none() && *index == iv && *dest == value && invariant(*array) => {
                 read = Some(*array);
             }
-            i if i.dest() == push || i.dest() == step => {}
+            i if i.dest() == push || i.dest() == step || Some(i.dest()) == mask => {}
             _ => return None,
         }
     }
@@ -163,6 +183,43 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
         return None;
     }
     Some(Plan { iv, acc, bound, inclusive, kind })
+}
+
+/// The string `s` of a block `byte = string_byte_at(s, iv); br byte < 0,
+/// panic, latch`, when `byte` is the value pushed.
+#[allow(clippy::too_many_arguments)]
+fn string_read(
+    func: &MirFunc,
+    lp: &LoopInfo,
+    body: BlockId,
+    latch: BlockId,
+    iv: ValueId,
+    value: ValueId,
+    invariant: &impl Fn(ValueId) -> bool,
+    zero: &impl Fn(ValueId) -> bool,
+) -> Option<ValueId> {
+    let byte_at = super::host_allow::host_edge_spec_by_name("string_byte_at")?.id;
+    let Some(Terminator::Br { cond, taken, not_taken }) = func.block(body).term else {
+        return None;
+    };
+    if not_taken != latch || lp.blocks.contains(&taken) {
+        return None;
+    }
+    let (mut src, mut test) = (None, false);
+    for inst in &func.block(body).insts {
+        match inst {
+            MirInst::HostInvoke { dest, native_id, args, .. } if *native_id == byte_at && *dest == value => match args[..] {
+                [s, i] if i == iv && invariant(s) => src = Some(s),
+                _ => return None,
+            },
+            MirInst::Const { .. } => {}
+            MirInst::Cmp { dest, op: MirCmpOp::Lt, ty: MirTy::I64, lhs, rhs } if *dest == cond && *lhs == value && zero(*rhs) => {
+                test = true;
+            }
+            _ => return None,
+        }
+    }
+    test.then_some(src?)
 }
 
 /// Put the guarded call in front of the loop. Returns its blocks in
