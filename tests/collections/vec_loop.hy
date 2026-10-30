@@ -746,3 +746,53 @@ test("selects in map loops") {
         }
     }
 }
+
+// An `int` add in an arm runs in every lane when its operands' ranges
+// keep it from overflowing: `(c as int) + 32` on a byte.
+fn lower_bytes(Vec<byte> out, Vec<byte> b) {
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+fn lower_bytes_scalar(Vec<byte> out, Vec<byte> b) {
+    let i = 0;
+    while i < b.len() {
+        let c = black_box(b[i]);
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+test("byte maps with a ranged add in an arm") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65, 300] {
+        let src: Vec<byte> = Vec::new();
+        let x: Vec<byte> = Vec::new();
+        let y: Vec<byte> = Vec::new();
+        let k = 0;
+        while k < n {
+            src.push(((k * 37 + 11) % 256) as byte);
+            x.push(0 as byte);
+            y.push(0 as byte);
+            k = k + 1;
+        }
+        lower_bytes(x, src);
+        lower_bytes_scalar(y, src);
+        let i = 0;
+        while i < n {
+            assert!(x[i] == y[i]);
+            i = i + 1;
+        }
+    }
+}

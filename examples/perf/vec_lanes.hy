@@ -55,13 +55,31 @@ fn clamp_map(Vec<float> out, Vec<float> a, float hi, int from) {
     }
 }
 
+// ASCII lower case in place of a copy: a ranged `int` add in an arm.
+fn lower_bytes(Vec<byte> out, Vec<byte> b, int from) {
+    let i = from;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
 fn main() {
     let n = 8192;
     let xs: Vec<int> = Vec::new();
     let fs: Vec<float> = Vec::new();
     let out: Vec<float> = Vec::new();
+    let text: Vec<byte> = Vec::new();
+    let low: Vec<byte> = Vec::new();
     let j = 0;
     while j < n {
+        text.push((48 + (j * 7) % 75) as byte);
+        low.push(0 as byte);
         xs.push(j % 1000 - 500);
         fs.push((j % 100) as float * 1.37 - 60.0);
         out.push(0.0);
@@ -93,9 +111,16 @@ fn main() {
         k = k + 1;
     }
     let t4 = mono_nanos();
+    k = 0;
+    while k < reps {
+        lower_bytes(low, text, k % 3);
+        k = k + 1;
+    }
+    let t5 = mono_nanos();
     say(format("trunc_map %i ns\n", (t1 - t0) / reps));
     say(format("halves    %i ns\n", (t2 - t1) / reps));
     say(format("abs_map   %i ns\n", (t3 - t2) / reps));
     say(format("clamp_map %i ns\n", (t4 - t3) / reps));
-    say(format("check %f\n", out[17] + out[n - 1]));
+    say(format("lower     %i ns\n", (t5 - t4) / reps));
+    say(format("check %f %i\n", out[17] + out[n - 1], low[n - 1] as int));
 }
