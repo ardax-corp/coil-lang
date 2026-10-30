@@ -1465,12 +1465,15 @@ impl<const S: usize> Machine<S> {
                     let v = self.stack.pop();
                     let addr = v.bits();
                     let obj = if addr == 0 { None } else { Self::find_object_by_addr(&self.heap, addr) };
-                    // A heap enum is already one tagged object word: it
-                    // passes as itself, so a shared generic body holds an
-                    // open `Option<T>` the way its caller does, also inside
-                    // a `Vec<U>` (#2138). `UnboxValue` passes a word that is
-                    // no box through.
-                    if tag == common::ValueTag::Instance as u16 && matches!(obj, Some(Object::Enum(_))) {
+                    // A heap enum or class instance is already one tagged
+                    // object word: it passes as itself, so a shared generic
+                    // body holds an open `Option<T>` or `Slot<T>` the way
+                    // its caller does, also inside a `Vec<U>` (#2138,
+                    // #2149). `UnboxValue` passes a word that is no box
+                    // through.
+                    if tag == common::ValueTag::Instance as u16
+                        && matches!(obj, Some(Object::Enum(_) | Object::Instance(_)))
+                    {
                         self.stack.push(v);
                     } else {
                         let payload = match obj {

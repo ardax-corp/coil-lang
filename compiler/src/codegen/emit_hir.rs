@@ -6017,10 +6017,11 @@ impl Compiler {
         // shared body may hold boxed inside its result (#1549).
         let mut boxed_vars = HashMap::new();
         for (i, b) in boxed[receivers..].iter().enumerate() {
-            // A heap enum boxes to itself (#2138): nothing to unbox.
+            // A heap enum or class instance boxes to itself (#2138,
+            // #2149): nothing to unbox.
             if let (Some(ty), Some(Ty::Var(v))) = (b, params.get(skip + i))
                 && Self::ty_to_value_tag(ty).is_some()
-                && !self.hir_enum_object_word(ty)
+                && !self.hir_object_word(ty)
             {
                 boxed_vars.insert(*v, ty.clone());
             }
@@ -6702,10 +6703,18 @@ impl Compiler {
         self.value_layout(ty) == ValueLayout::Boxed
     }
 
-    /// An enum held as its `ObjEnum` object word, open or ground:
-    /// `BoxValue` passes it through as itself (#2138).
-    fn hir_enum_object_word(&self, ty: &Ty) -> bool {
-        lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && self.hir_boxed_enum_word(ty)
+    /// An enum held as its `ObjEnum` object word or a user class
+    /// instance, open or ground: `BoxValue` passes it through as itself
+    /// (#2138, #2149).
+    fn hir_object_word(&self, ty: &Ty) -> bool {
+        if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && self.hir_boxed_enum_word(ty) {
+            return true;
+        }
+        let head = match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::App(head, _) => head.as_ref(),
+            t => t,
+        };
+        matches!(head, Ty::Con(name) if self.checker.resolve_class_key(name).is_some())
     }
 
     /// An `Option` or `Result` held as a niche word (`Option<string>`).
