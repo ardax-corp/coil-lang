@@ -561,3 +561,188 @@ test("lane casts between int and float") {
         assert!(int_sum_of(fs) == int_sum_of_scalar(fs));
     }
 }
+
+// Selects: an `if` whose arms cannot trap runs both arms in every lane
+// and picks per lane, so it must give the scalar loop's elements, NaN and
+// signed zeros included.
+fn abs_map(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x < 0.0 {
+            x = 0.0 - x;
+        }
+        out[i] = x;
+        i = i + 1;
+    }
+}
+
+fn abs_map_scalar(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = black_box(a[i]);
+        if x < 0.0 {
+            x = 0.0 - x;
+        }
+        out[i] = x;
+        i = i + 1;
+    }
+}
+
+fn clamp_or_double(Vec<float> out, Vec<float> a, float hi) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x > hi {
+            out[i] = hi;
+        } else {
+            out[i] = x * 2.0;
+        }
+        i = i + 1;
+    }
+}
+
+fn clamp_or_double_scalar(Vec<float> out, Vec<float> a, float hi) {
+    let i = 0;
+    while i < a.len() {
+        let x = black_box(a[i]);
+        if x > hi {
+            out[i] = hi;
+        } else {
+            out[i] = x * 2.0;
+        }
+        i = i + 1;
+    }
+}
+
+// One arm stores; the other side keeps the element.
+fn cap(Vec<int> a, int hi) {
+    let i = 0;
+    while i < a.len() {
+        if a[i] > hi {
+            a[i] = hi;
+        }
+        i = i + 1;
+    }
+}
+
+fn cap_scalar(Vec<int> a, int hi) {
+    let i = 0;
+    while i < a.len() {
+        if black_box(a[i]) > hi {
+            a[i] = hi;
+        }
+        i = i + 1;
+    }
+}
+
+fn fold_upper(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let c = a[i];
+        if c >= 65 && c <= 90 {
+            out[i] = c | 32;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+fn fold_upper_scalar(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let c = black_box(a[i]);
+        if c >= 65 && c <= 90 {
+            out[i] = c | 32;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+// The `then` arm would overflow in the lanes that take `else`: it must
+// not run there.
+fn shift_small(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x < 10 {
+            out[i] = x + 9223372036854775000;
+        } else {
+            out[i] = x;
+        }
+        i = i + 1;
+    }
+}
+
+test("selects in map loops") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65] {
+        let fa = floats(n);
+        let k = 0;
+        while k < n {
+            fa[k] = fa[k] - 4.0;
+            k = k + 1;
+        }
+        if n > 9 {
+            fa[2] = 0.0 / 0.0;
+            fa[3] = -0.0;
+            fa[4] = -1.0 / 0.0;
+        }
+        let x = floats(n);
+        let y = floats(n);
+        abs_map(x, fa);
+        abs_map_scalar(y, fa);
+        let i = 0;
+        while i < n {
+            assert!(same_float(x[i], y[i]));
+            assert!(1.0 / x[i] == 1.0 / y[i] || x[i] != x[i]);
+            i = i + 1;
+        }
+        clamp_or_double(x, fa, 1.5);
+        clamp_or_double_scalar(y, fa, 1.5);
+        let j = 0;
+        while j < n {
+            assert!(same_float(x[j], y[j]));
+            j = j + 1;
+        }
+        let ia = ints(n);
+        let ib = ints(n);
+        cap(ia, 100);
+        cap_scalar(ib, 100);
+        let letters: Vec<int> = Vec::new();
+        let m = 0;
+        while m < n {
+            assert!(ia[m] == ib[m]);
+            letters.push(40 + (m * 7) % 80);
+            m = m + 1;
+        }
+        let la = ints(n);
+        let lb = ints(n);
+        fold_upper(la, letters);
+        fold_upper_scalar(lb, letters);
+        let big: Vec<int> = Vec::new();
+        let q = 0;
+        while q < n {
+            assert!(la[q] == lb[q]);
+            if q % 3 == 0 {
+                big.push(q);
+            } else {
+                big.push(9223372036854775000 + q);
+            }
+            q = q + 1;
+        }
+        let sh = ints(n);
+        shift_small(sh, big);
+        let r = 0;
+        while r < n {
+            if big[r] < 10 {
+                assert!(sh[r] == big[r] + 9223372036854775000);
+            } else {
+                assert!(sh[r] == big[r]);
+            }
+            r = r + 1;
+        }
+    }
+}

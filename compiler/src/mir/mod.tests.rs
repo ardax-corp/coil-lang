@@ -5410,3 +5410,113 @@ fn main() {
         assert_vec_loop(fn_ops(&bc, &symbols, name), name);
     }
 }
+
+#[test]
+fn pipeline_vectorizes_selects_in_map_loops() {
+    let src = r#"
+fn abs_map(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x < 0.0 {
+            x = 0.0 - x;
+        }
+        out[i] = x;
+        i = i + 1;
+    }
+}
+fn clamp_or_double(Vec<float> out, Vec<float> a, float hi) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x > hi {
+            out[i] = hi;
+        } else {
+            out[i] = x * 2.0;
+        }
+        i = i + 1;
+    }
+}
+fn cap(Vec<int> a, int hi) {
+    let i = 0;
+    while i < a.len() {
+        if a[i] > hi {
+            a[i] = hi;
+        }
+        i = i + 1;
+    }
+}
+fn fold_upper(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let c = a[i];
+        if c >= 65 && c <= 90 {
+            out[i] = c | 32;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+fn shift_small(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x < 10 {
+            out[i] = x + 1;
+        } else {
+            out[i] = x;
+        }
+        i = i + 1;
+    }
+}
+fn main() {
+    let f: Vec<float> = Vec::new();
+    let o: Vec<float> = Vec::new();
+    let n: Vec<int> = Vec::new();
+    let m: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 40 {
+        f.push((k as float) - 20.5);
+        o.push(0.0);
+        n.push(k * 3);
+        m.push(0);
+        k = k + 1;
+    }
+    abs_map(o, f);
+    if o[0] != 20.5 || o[39] != 18.5 {
+        panic "abs_map";
+    }
+    clamp_or_double(o, f, 1.0);
+    if o[0] != -41.0 || o[39] != 1.0 {
+        panic "clamp_or_double";
+    }
+    fold_upper(m, n);
+    if m[22] != 98 || m[30] != 122 {
+        panic "fold_upper";
+    }
+    shift_small(m, n);
+    if m[0] != 1 || m[4] != 12 {
+        panic "shift_small";
+    }
+    cap(n, 50);
+    if n[39] != 50 || n[3] != 9 {
+        panic "cap";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile selects");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "select checksums");
+    let symbols = p.program_debug().fn_symbols;
+    for name in ["abs_map", "clamp_or_double", "cap", "fold_upper"] {
+        assert_vec_loop(fn_ops(&bc, &symbols, name), name);
+    }
+    // An int add can overflow, so an arm that adds runs only where taken.
+    let ops = fn_ops(&bc, &symbols, "shift_small");
+    assert!(!ops.iter().any(|b| *b.bytecode() == Instruction::VLoop), "shift_small: an arm that can trap stays scalar");
+}
