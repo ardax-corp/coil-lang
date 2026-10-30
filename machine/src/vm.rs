@@ -426,6 +426,27 @@ fn vload_lanes(arr: &ObjArray, reg: &mut [u64; common::simd::LANES], index: i64)
     true
 }
 
+/// 8 lanes of `bytes` (a `string`'s) from `index` into `reg`, each byte as
+/// an int lane; `false` past either end.
+fn vload_byte_lanes(bytes: &[u8], reg: &mut [u64; common::simd::LANES], index: i64) -> bool {
+    let Some(src) = usize::try_from(index).ok().and_then(|b| bytes.get(b..b.checked_add(common::simd::LANES)?)) else {
+        return false;
+    };
+    for (lane, &b) in reg.iter_mut().zip(src) {
+        *lane = u64::from(b);
+    }
+    true
+}
+
+/// The elements a `VLoop` load reads: an array's, or a `string`'s bytes.
+fn vloop_source_len(obj: Option<Object>) -> Option<usize> {
+    match obj {
+        Some(Object::Array(gc)) => Some(gc.as_ref().len()),
+        Some(Object::String(gc)) => Some(gc.as_ref().data.as_str().len()),
+        _ => None,
+    }
+}
+
 /// 64 byte lanes of the `string` or byte array `obj` (at `addr`) from
 /// `index` into `reg`; `false` past either end (the compiler guards the
 /// range first). A boxed string is read through its box.
@@ -564,12 +585,21 @@ fn vloop_run(
         o @ Some(Object::Array(_)) => Ok(o),
         _ => Err(BAD),
     };
+    // A load also reads a `string`'s bytes (through its box, if boxed).
+    let source = |slot: usize| {
+        let addr = stack[sp + slot].bits();
+        match heap.find_object_by_addr(addr) {
+            o @ Some(Object::Array(_) | Object::String(_)) => Ok(o),
+            Some(Object::Boxed(_)) => match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits()) {
+                o @ Some(Object::String(_)) => Ok(o),
+                _ => Err(BAD),
+            },
+            _ => Err(BAD),
+        }
+    };
     // Every lane of every block in range, checked once.
     let span = |obj: Option<Object>, off: i64| {
-        let Some(Object::Array(gc)) = obj else {
-            return Err(BAD);
-        };
-        let len = gc.as_ref().len() as i64;
+        let len = vloop_source_len(obj).ok_or(BAD)? as i64;
         match (from.checked_add(off), to.checked_add(off)) {
             (Some(lo), Some(hi)) if lo >= 0 && hi <= len => Ok(()),
             _ => Err(OOB),
@@ -583,7 +613,7 @@ fn vloop_run(
         }
         ops.push(match *word.bytecode() {
             Instruction::VLoad if kind != simd::TY_U8 => {
-                let (obj, off) = (array(a)?, stack[sp + b].as_int());
+                let (obj, off) = (source(a)?, stack[sp + b].as_int());
                 span(obj, off)?;
                 Op::Load { reg: d, obj, off }
             }
@@ -629,6 +659,11 @@ fn vloop_run(
             match *op {
                 Op::Load { reg, obj: Some(Object::Array(gc)), off } => {
                     if !vload_lanes(gc.as_ref(), &mut regs[reg], p + off) {
+                        return Err(OOB);
+                    }
+                }
+                Op::Load { reg, obj: Some(Object::String(gc)), off } => {
+                    if !vload_byte_lanes(gc.as_ref().data.as_str().as_bytes(), &mut regs[reg], p + off) {
                         return Err(OOB);
                     }
                 }
@@ -724,12 +759,13 @@ fn vloop_lanes(
         for op in ops {
             match *op {
                 VloopOp::Load { reg, obj, off } => {
-                    let Some(Object::Array(gc)) = obj else {
-                        return Err(OOB);
+                    let i = usize::try_from(p + j + off).map_err(|_| OOB)?;
+                    let bits = match obj {
+                        Some(Object::Array(gc)) => gc.as_ref().get(i).ok_or(OOB)?.bits(),
+                        Some(Object::String(gc)) => u64::from(*gc.as_ref().data.as_str().as_bytes().get(i).ok_or(OOB)?),
+                        _ => return Err(OOB),
                     };
-                    let i = p + j + off;
-                    let v = usize::try_from(i).ok().and_then(|i| gc.as_ref().get(i)).ok_or(OOB)?;
-                    regs[reg] = [v.bits(); simd::LANES];
+                    regs[reg] = [bits; simd::LANES];
                 }
                 VloopOp::Push { reg, obj } => {
                     let Some(Object::Array(mut gc)) = obj else {
