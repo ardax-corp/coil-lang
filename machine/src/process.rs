@@ -133,8 +133,8 @@ pub fn spawn(spec: &SpawnSpec) -> Result<i64, IoErrorTag> {
     for key in &spec.env_remove {
         cmd.env_remove(key);
     }
-    for pair in spec.env.chunks_exact(2) {
-        cmd.env(&pair[0], &pair[1]);
+    for [key, value] in spec.env.as_chunks::<2>().0 {
+        cmd.env(key, value);
     }
     if !spec.cwd.is_empty() {
         cmd.current_dir(&spec.cwd);
@@ -183,7 +183,7 @@ fn pipe_handle<P>(_pipe: P) -> Result<NativeHandle, IoErrorTag> {
 /// Wait for the child to end (closing a stdin pipe still held here first).
 pub fn wait(id: i64) -> Result<i64, IoErrorTag> {
     with_child(id, |child| {
-        drop(child.stdin.take());
+        child.stdin = None;
         child.wait().map(exit_code).map_err(io_tag)
     })
 }
@@ -197,7 +197,7 @@ pub fn try_wait(id: i64) -> Result<Option<i64>, IoErrorTag> {
 /// `(exit code, stdout, stderr)`. A pipe already taken reads as empty.
 pub fn output(id: i64) -> Result<(i64, Vec<u8>, Vec<u8>), IoErrorTag> {
     with_child(id, |child| {
-        drop(child.stdin.take());
+        child.stdin = None;
         let out = child.stdout.take();
         let err = child.stderr.take();
         // Drain stderr on a helper thread so neither pipe can fill up and
