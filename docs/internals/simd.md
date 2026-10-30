@@ -73,7 +73,8 @@ beat Rust/`memcmp` slice equality.
   (archive 6.2). `vectorize.rs` matches the loop and reads its body as a
   tree: loads `a[i + k]`, splats of invariants, the index, `+ - * /`,
   negation, casts between int and float lanes (`VBin` `I2F` / `F2I`,
-  archive 6.10; a cast of an invariant is done once in front), and `VFma`
+  archive 6.10; a cast of an invariant is done once in front), selects
+  (`VBin` `SELECT`, archive 6.10, below), and `VFma`
   (mul-then-add, two IEEE roundings). A guard in front of the loop checks
   every read and write of lanes `i0 .. n` is in range; `VLoop` runs the
   whole 8-lane blocks with its body words (`VLoad` / `VStore` / `VBin` /
@@ -108,6 +109,20 @@ beat Rust/`memcmp` slice equality.
   `IOR64` / `IXOR64`) cover `h = h ^ x[i]` and `out[i] = a[i] & m`.
   Same probe: max 68 000 → 5 900, count of one value 69 000 → 19 600,
   xor 63 000 → 7 500.
+- Archive 6.10 if-converts a store loop through one `if`
+  (`vectorize::match_if_store_on`): a φ at the join
+  (`if x < 0.0 { x = -x; } out[i] = x;`) is `cond ? from_then :
+  from_else`, a store in each arm to the same element is one store of a
+  select, and a store in one arm alone keeps the element on the other
+  side. Every lane runs both arms, so an arm may only compute what
+  cannot trap (float arithmetic, bit ops, compares, casts, loads the
+  guard covers); an `int` add in an arm keeps the loop scalar. The mask
+  is the compare as written (`0` / `1` lanes, `&&` of compares as
+  `IAND64`), so a NaN takes the side the scalar branch takes. A body
+  word computes each distinct node once (`emit::vec_loop_body`), falling
+  back to the tree when that needs more than the eight registers.
+  `examples/perf/vec_lanes.hy`, 8192 elements: abs 170 → 76 µs, clamp
+  with a store per arm 178 → 72 µs.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 - `packed_matrix_zip` / `packed_matrix_neg` also lower matrix compares

@@ -1,4 +1,5 @@
-// Map loops over 8192 elements that need lane casts. Prints ns per call;
+// Map loops over 8192 elements that need lane casts or selects. Prints
+// ns per call;
 // the compiler runs each loop 8 lanes at a time in one op
 // (`mir/vec_loop.rs`, `docs/internals/simd-lanes.md`).
 use clock::mono_nanos;
@@ -23,6 +24,33 @@ fn halves(Vec<float> out, Vec<int> a, int from) {
     let i = from;
     while i < a.len() {
         out[i] = (a[i] as float) * 0.5;
+        i = i + 1;
+    }
+}
+
+// `if x < 0.0 { x = -x; }`: a select through a join.
+fn abs_map(Vec<float> out, Vec<float> a, int from) {
+    let i = from;
+    while i < a.len() {
+        let x = a[i];
+        if x < 0.0 {
+            x = 0.0 - x;
+        }
+        out[i] = x;
+        i = i + 1;
+    }
+}
+
+// A store in each arm.
+fn clamp_map(Vec<float> out, Vec<float> a, float hi, int from) {
+    let i = from;
+    while i < a.len() {
+        let x = a[i];
+        if x > hi {
+            out[i] = hi;
+        } else {
+            out[i] = x * 2.0;
+        }
         i = i + 1;
     }
 }
@@ -53,7 +81,21 @@ fn main() {
         k = k + 1;
     }
     let t2 = mono_nanos();
+    k = 0;
+    while k < reps {
+        abs_map(out, fs, k % 3);
+        k = k + 1;
+    }
+    let t3 = mono_nanos();
+    k = 0;
+    while k < reps {
+        clamp_map(out, fs, 20.0, k % 3);
+        k = k + 1;
+    }
+    let t4 = mono_nanos();
     say(format("trunc_map %i ns\n", (t1 - t0) / reps));
     say(format("halves    %i ns\n", (t2 - t1) / reps));
+    say(format("abs_map   %i ns\n", (t3 - t2) / reps));
+    say(format("clamp_map %i ns\n", (t4 - t3) / reps));
     say(format("check %f\n", out[17] + out[n - 1]));
 }

@@ -29,7 +29,7 @@ use super::func::MirFunc;
 use super::inst::{BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId, VecExpr, VecLoopKind};
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
-use super::vectorize::{match_cond_reduce_on, match_reduce_on, match_store_on, Off, VOp};
+use super::vectorize::{match_cond_reduce_on, match_if_store_on, match_reduce_on, match_store_on, Off, VOp};
 
 /// Rewrite every loop that qualifies. Returns how many did.
 pub fn vec_loops(func: &mut MirFunc) -> usize {
@@ -110,12 +110,12 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
             },
         }
     } else {
-        let s = match_store_on(func, lp)?;
-        let body = func.block(s.body);
+        let s = match_store_on(func, lp).or_else(|| match_if_store_on(func, lp))?;
+        let insts: Vec<&MirInst> = s.body.iter().flat_map(|&b| &func.block(b).insts).collect();
         // Every read before the first store, one store offset, no read
         // behind it.
-        let first_store = body.insts.iter().position(|i| matches!(i, MirInst::StoreIndex { .. }))?;
-        if body.insts[first_store..].iter().any(|i| matches!(i, MirInst::Index { .. })) {
+        let first_store = insts.iter().position(|i| matches!(i, MirInst::StoreIndex { .. }))?;
+        if insts[first_store..].iter().any(|i| matches!(i, MirInst::Index { .. })) {
             return None;
         }
         let at = s.stores[0].index_off;
@@ -171,6 +171,7 @@ fn index_int(op: &VOp, int_lane: bool) -> bool {
             index_int(lhs, !float) && index_int(rhs, !float)
         }
         VOp::Unary { kind, src } => index_int(src, matches!(*kind, simd::INEG | simd::I2F)),
+        VOp::Select { mask, then, els } => index_int(mask, true) && index_int(then, int_lane) && index_int(els, int_lane),
         VOp::Fma { ty, a, b, c } => {
             let int = *ty == dense::TY_I64;
             index_int(a, int) && index_int(b, int) && index_int(c, int)
@@ -191,6 +192,7 @@ fn loads_not_behind(op: &VOp, at: Off) -> bool {
         VOp::Splat { .. } | VOp::Iota => true,
         VOp::Bin { lhs, rhs, .. } => loads_not_behind(lhs, at) && loads_not_behind(rhs, at),
         VOp::Unary { src, .. } => loads_not_behind(src, at),
+        VOp::Select { mask, then, els } => loads_not_behind(mask, at) && loads_not_behind(then, at) && loads_not_behind(els, at),
         VOp::Fma { a, b, c, .. } => loads_not_behind(a, at) && loads_not_behind(b, at) && loads_not_behind(c, at),
     }
 }
@@ -214,6 +216,11 @@ fn leaves(op: &VOp, out: &mut Vec<ValueId>) -> Option<()> {
             leaves(rhs, out)?;
         }
         VOp::Unary { src, .. } => leaves(src, out)?,
+        VOp::Select { mask, then, els } => {
+            leaves(mask, out)?;
+            leaves(then, out)?;
+            leaves(els, out)?;
+        }
         VOp::Fma { a, b, c, .. } => {
             leaves(a, out)?;
             leaves(b, out)?;
@@ -245,6 +252,9 @@ struct Place<'a, 'f> {
     lp: &'a LoopInfo,
     at: BlockId,
     done: HashMap<ValueId, ValueId>,
+    /// One constant per value, so the same stream offset is one value
+    /// (one guard, one load of a node the body reads twice).
+    konsts: HashMap<i64, ValueId>,
 }
 
 impl Place<'_, '_> {
@@ -268,7 +278,12 @@ impl Place<'_, '_> {
     }
 
     fn konst(&mut self, k: i64) -> ValueId {
-        self.b.konst(self.at, MirConst::I64(k))
+        if let Some(&v) = self.konsts.get(&k) {
+            return v;
+        }
+        let v = self.b.konst(self.at, MirConst::I64(k));
+        self.konsts.insert(k, v);
+        v
     }
 
     fn off(&mut self, off: Off) -> ValueId {
@@ -309,6 +324,11 @@ impl Place<'_, '_> {
                 VecExpr::Splat { v: dest, ty }
             }
             VOp::Unary { kind, src } => VecExpr::Unary { kind: *kind, src: Box::new(self.expr(src)) },
+            VOp::Select { mask, then, els } => VecExpr::Select {
+                mask: Box::new(self.expr(mask)),
+                then: Box::new(self.expr(then)),
+                els: Box::new(self.expr(els)),
+            },
             VOp::Fma { ty, a, b, c } => VecExpr::Fma {
                 ty: *ty,
                 a: Box::new(self.expr(a)),
@@ -339,6 +359,11 @@ fn streams(op: &VecExpr, out: &mut Vec<(ValueId, ValueId)>) {
             streams(rhs, out);
         }
         VecExpr::Unary { src, .. } => streams(src, out),
+        VecExpr::Select { mask, then, els } => {
+            streams(mask, out);
+            streams(then, out);
+            streams(els, out);
+        }
         VecExpr::Fma { a, b, c, .. } => {
             streams(a, out);
             streams(b, out);
@@ -377,7 +402,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
         init.insert(*p, v);
     }
     let i0 = init.get(&plan.iv).copied().unwrap_or(plan.init);
-    let mut at = Place { b, lp, at: pre, done: HashMap::new() };
+    let mut at = Place { b, lp, at: pre, done: HashMap::new(), konsts: HashMap::new() };
     let n = at.value(plan.n);
     let kind = match &plan.shape {
         Shape::Reduce { acc, ty, fold, term, stores } => VecLoopKind::Reduce {
@@ -415,7 +440,8 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
             }
         }
     }
-    reads.dedup();
+    let mut seen = HashSet::new();
+    reads.retain(|r| seen.insert(*r));
     // One length per array; the bound's own when it is one (`i < a.len()`).
     let mut lens: HashMap<ValueId, ValueId> = HashMap::new();
     if let Some(MirInst::ArrayLen { array, .. }) = at.b.func.blocks.iter().flat_map(|b| &b.insts).find(|i| i.dest() == n) {

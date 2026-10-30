@@ -164,8 +164,9 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
-/// Major 6 / minor 10: `VBin` lane casts `simd::I2F` / `F2I` in `VLoop`
-/// bodies. Older runtimes read the new kinds as zeros.
+/// Major 6 / minor 10: `VBin` lane casts `simd::I2F` / `F2I` and the
+/// lane select `simd::SELECT` in `VLoop` bodies. Older runtimes read the
+/// new kinds as zeros.
 ///
 /// Major 6 / minor 9: HostInvoke `symbol_next_id` (id 179,
 /// `symbol::next_id()`): the next value of a process-wide counter. Older

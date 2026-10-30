@@ -69,6 +69,18 @@ Each step proves itself on `examples/perf` hit benches (the flagships
 do not have these loops), per the hit-bench rule in
 `optimization-roadmap.md`.
 
+## Progress
+
+| Step | PR | Hit bench (`vec_lanes.hy`, 8192 elements) |
+|---|---|---|
+| 1 lane casts | #2137 | trunc map 172.8 → 38.5 µs, int-to-float map 154.5 → 49.7 µs |
+| 2 selects | this branch | abs 170 → 76 µs, clamp 178 → 72 µs |
+
+Seen along the way: a `VLoop` body word costs about 9 ns per block of
+8 lanes (the interpreter loop in `machine::vm::vloop` copies registers
+per word), so a 6-word body runs at about 9 ns per element. Tuning that
+loop helps every step here and is a candidate after step 6.
+
 ## Not in this plan
 
 - **`sqrt` lanes.** The userland `math::sqrt` is a loop with an integer

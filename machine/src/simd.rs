@@ -120,6 +120,12 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
     })
 }
 
+/// `mask != 0 ? a : b` lane by lane (`VBin` [`simd::SELECT`]).
+#[inline]
+pub fn eval_select(mask: &[u64; LANES], a: &[u64; LANES], b: &[u64; LANES]) -> [u64; LANES] {
+    std::array::from_fn(|i| if mask[i] != 0 { a[i] } else { b[i] })
+}
+
 /// `a pred b` from their ordering (`None`: a NaN, true only for `!=`).
 fn cmp_lane(pred: u8, ord: Option<std::cmp::Ordering>) -> bool {
     use std::cmp::Ordering::{Equal, Greater, Less};

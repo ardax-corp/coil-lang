@@ -1021,6 +1021,12 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + dest < stack_cap);
                     self.stack[sp + dest] = Value::from(crate::simd::movemask(&self.vregs[src]));
                 }
+                Instruction::VBin if opcode.dense_abc_parts().0 == common::simd::SELECT => {
+                    let (_, dest, a, b) = opcode.dense_abc_parts();
+                    promise!(dest < common::simd::NREGS);
+                    let (x, y) = (self.vregs[a % common::simd::NREGS], self.vregs[b % common::simd::NREGS]);
+                    self.vregs[dest] = crate::simd::eval_select(&self.vregs[dest], &x, &y);
+                }
                 Instruction::VBin => {
                     let (kind, dest, a, b) = opcode.dense_abc_parts();
                     promise!(dest < common::simd::NREGS);
