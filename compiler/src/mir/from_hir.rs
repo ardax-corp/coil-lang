@@ -1150,14 +1150,24 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             if assigns {
                 return Err("defer assigns a capture".into());
             }
-            let mut lets = Vec::new();
-            lower::visit(hir, *body, &mut |x| {
-                if let HirKind::Let { local, .. } = x.kind
-                    && inp.slots.get(local.0 as usize).copied().flatten().is_none()
-                {
-                    lets.push(local.0);
+            // The body's own bindings (`let`, a `for` variable, a pattern)
+            // live in the thunk's frame, not the function's (#2134).
+            let mut binds = Vec::new();
+            lower::visit(hir, *body, &mut |x| match &x.kind {
+                HirKind::Let { local, .. } => binds.push(*local),
+                HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => {
+                    crate::hir::effects::pat_binds(pat, &mut binds);
                 }
+                HirKind::Match { arms, .. } => {
+                    arms.iter().for_each(|a| crate::hir::effects::pat_binds(&a.pat, &mut binds));
+                }
+                _ => {}
             });
+            let lets: Vec<u32> = binds
+                .into_iter()
+                .filter(|l| inp.slots.get(l.0 as usize).copied().flatten().is_none())
+                .map(|l| l.0)
+                .collect();
             for l in lets {
                 let t = lower.temp();
                 lower.defer_locals.insert(l, t);

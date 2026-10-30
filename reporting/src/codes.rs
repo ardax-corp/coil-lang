@@ -103,6 +103,12 @@ pub enum ErrorCode {
     FnKeyOutsideFunction,
     /// A generic function that calls `symbol::fn_key()` used as a value.
     KeyedGenericFnValue,
+    /// `return`, `raise`, `?`, or a `break` / `continue` that would leave
+    /// the body, inside a `defer`.
+    ExitInDefer,
+    /// A `defer` the next loop iteration can reach again: it runs once, at
+    /// function exit.
+    DeferInLoop,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -223,6 +229,8 @@ impl ErrorCode {
             Self::CaptureAssign => "E0143",
             Self::FnKeyOutsideFunction => "E0144",
             Self::KeyedGenericFnValue => "E0145",
+            Self::ExitInDefer => "E0146",
+            Self::DeferInLoop => "E0147",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -325,6 +333,8 @@ impl ErrorCode {
             Self::CaptureAssign => "assignment to a captured local stays in the closure",
             Self::FnKeyOutsideFunction => "`fn_key()` outside a function body",
             Self::KeyedGenericFnValue => "generic function using `fn_key()` used as a value",
+            Self::ExitInDefer => "`defer` body leaves its block",
+            Self::DeferInLoop => "`defer` inside a loop runs once",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -435,6 +445,8 @@ mod tests {
             | CaptureAssign
             | FnKeyOutsideFunction
             | KeyedGenericFnValue
+            | ExitInDefer
+            | DeferInLoop
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -527,6 +539,8 @@ mod tests {
             CaptureAssign,
             FnKeyOutsideFunction,
             KeyedGenericFnValue,
+            ExitInDefer,
+            DeferInLoop,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

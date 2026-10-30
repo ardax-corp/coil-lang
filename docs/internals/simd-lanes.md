@@ -84,7 +84,7 @@ do not have these loops), per the hit-bench rule in
 | 3 byte maps | #2142 | ASCII lower case on `Vec<byte>` 279 → 101 µs |
 | 4 map-push | #2143 | `out.push(a[i] * 3 + 1)` 284 → 69 µs, `shift_ascii` shape on `Vec<byte>` 504 → 127 µs |
 | 5 copy from a string | #2145 | `out.push(s[i])` over 1 MiB: 32 ms → about 0.15 ms (`vec_bulk.hy`) |
-| 6 copy until a byte | this branch | 1 MiB up to a quote: 41 ms → about 0.3 ms (`vec_bulk.hy`) |
+| 6 copy until a byte | #2146 | 1 MiB up to a quote: 41 ms → about 0.3 ms (`vec_bulk.hy`) |
 
 Step 3 also fixed `VLoop` lane loads from a packed `Vec<byte>`, which
 skipped to the block through the element iterator, so the loads were
