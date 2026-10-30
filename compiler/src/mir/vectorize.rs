@@ -22,6 +22,25 @@ pub(super) struct StoreLoop {
     pub(super) init: ValueId,
     pub(super) n: ValueId,
     pub(super) stores: Vec<StoreSpec>,
+    /// Ranges the guard checks invariants are in, so an arm cannot trap.
+    pub(super) bounds: Bounds,
+}
+
+/// `(v, lo, hi)`: the vector loop runs only when invariant `v` is in
+/// `lo ..= hi`.
+pub(super) type Bounds = Vec<(ValueId, i64, i64)>;
+
+/// A counted loop whose body appends one value: `out.push(value(i))`,
+/// or one push in each arm of an `if` (a select of the two values).
+pub(super) struct PushLoop {
+    pub(super) iv: ValueId,
+    pub(super) init: ValueId,
+    pub(super) n: ValueId,
+    /// The header's φ of the array pushed to.
+    pub(super) acc: ValueId,
+    pub(super) value: VOp,
+    pub(super) ty: u8,
+    pub(super) bounds: Bounds,
 }
 
 pub(super) struct StoreSpec {
@@ -157,6 +176,7 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
         init,
         n,
         stores,
+        bounds: Bounds::new(),
     })
 }
 
@@ -269,7 +289,8 @@ pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> O
         }
     }
     // An arm: what cannot trap, and at most one store.
-    let arm_store = |a: Option<BlockId>| -> Option<Option<(&MirInst, ValueId)>> {
+    let mut bounds = Bounds::new();
+    let mut arm_store = |a: Option<BlockId>| -> Option<Option<(&MirInst, ValueId)>> {
         let Some(a) = a else {
             return Some(None);
         };
@@ -277,7 +298,7 @@ pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> O
         for inst in &func.block(a).insts {
             match inst {
                 MirInst::StoreIndex { value, .. } if st.is_none() => st = Some((inst, *value)),
-                _ if !cannot_trap(func, inst) => return None,
+                _ if !arm_ok(func, inst, &lp.blocks, &mut bounds) => return None,
                 _ => {}
             }
         }
@@ -347,7 +368,172 @@ pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> O
     let mut blocks = vec![body];
     blocks.extend(arms);
     blocks.push(latch);
-    Some(StoreLoop { body: blocks, iv, init, n, stores })
+    Some(StoreLoop { body: blocks, iv, init, n, stores, bounds })
+}
+
+/// `inst` may run in every lane: it [`cannot_trap`], or it is an `int`
+/// `+` / `-` of a ranged value and an invariant whose range the guard
+/// checks (`(c as int) + delta` with `delta` a parameter), added to
+/// `bounds`.
+fn arm_ok(func: &MirFunc, inst: &MirInst, loop_blocks: &std::collections::HashSet<BlockId>, bounds: &mut Bounds) -> bool {
+    if cannot_trap(func, inst) {
+        return true;
+    }
+    let MirInst::Bin { op: op @ (MirBinOp::Add | MirBinOp::Sub), ty: MirTy::I64, lhs, rhs, .. } = inst else {
+        return false;
+    };
+    let inv = |v: ValueId| func.ty(v) == MirTy::I64 && is_invariant(func, v, loop_blocks);
+    let (lo, hi) = (i128::from(i64::MIN), i128::from(i64::MAX));
+    // The range of the invariant `k` that keeps every result in `i64`.
+    let (k, k_lo, k_hi) = match (int_range(func, *lhs, 4), int_range(func, *rhs, 4)) {
+        // x + k, x - k
+        (Some((a, b)), None) if inv(*rhs) => {
+            let (a, b) = (i128::from(a), i128::from(b));
+            if *op == MirBinOp::Add { (*rhs, lo - a, hi - b) } else { (*rhs, b - hi, a - lo) }
+        }
+        // k + x, k - x
+        (None, Some((a, b))) if inv(*lhs) => {
+            let (a, b) = (i128::from(a), i128::from(b));
+            if *op == MirBinOp::Add { (*lhs, lo - a, hi - b) } else { (*lhs, lo + b, hi + a) }
+        }
+        _ => return false,
+    };
+    let clamp = |x: i128| x.clamp(lo, hi) as i64;
+    if k_lo > k_hi {
+        return false;
+    }
+    bounds.push((k, clamp(k_lo), clamp(k_hi)));
+    true
+}
+
+/// A push loop ([`PushLoop`]): the header's φs are the index and the
+/// array; the body pushes once, straight or in each arm of one `if`
+/// (whose arms may only run what [`arm_ok`] takes).
+pub(super) fn match_push_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Option<PushLoop> {
+    let header = lp.header;
+    let preds = func.preds();
+    let latch = preds[header.index()].iter().copied().find(|p| lp.blocks.contains(p))?;
+    let Terminator::Br { cond, taken, not_taken } = func.block(header).term.as_ref()? else {
+        return None;
+    };
+    let body = if lp.blocks.contains(taken) && !lp.blocks.contains(not_taken) {
+        *taken
+    } else if lp.blocks.contains(not_taken) && !lp.blocks.contains(taken) {
+        *not_taken
+    } else {
+        return None;
+    };
+    if !matches!(func.block(latch).term, Some(Terminator::Jump { dest }) if dest == header) {
+        return None;
+    }
+    let mut iv = None;
+    let mut acc = None;
+    for inst in &func.block(header).insts {
+        match inst {
+            MirInst::Phi { dest, ty: MirTy::I64, args } if iv.is_none() => {
+                iv = Some((*dest, phi_from(args, latch, false)?, phi_from(args, latch, true)?));
+            }
+            MirInst::Phi { dest, ty: MirTy::HeapRef, args } if acc.is_none() => acc = Some((*dest, phi_from(args, latch, true)?)),
+            MirInst::Phi { .. } => return None,
+            MirInst::Cmp { dest, .. } if dest == cond => {}
+            MirInst::ArrayLen { .. } | MirInst::Const { .. } => {}
+            _ => return None,
+        }
+    }
+    let ((iv, init, step), (acc, acc_next)) = (iv?, acc?);
+    if !is_invariant(func, init, &lp.blocks) || !is_iadd_k(func, step, iv, 1) {
+        return None;
+    }
+    let n = loop_bound(func, *cond, iv)?;
+    if !is_invariant(func, n, &lp.blocks) || as_const_i64(func, n).is_some_and(|k| k < LANES) {
+        return None;
+    }
+    let pure = |inst: &MirInst| {
+        matches!(
+            inst,
+            MirInst::Index { .. } | MirInst::Bin { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Cmp { .. } | MirInst::Const { .. } | MirInst::ArrayLen { .. }
+        )
+    };
+    // The push of a block: `acc.push(v)`, the rest pure.
+    let push_in = |b: BlockId, arm: bool, bounds: &mut Bounds| -> Option<(ValueId, ValueId)> {
+        let mut push = None;
+        for inst in &func.block(b).insts {
+            match inst {
+                MirInst::ArrayPush { dest, array, value } if *array == acc && push.is_none() => push = Some((*dest, *value)),
+                MirInst::Bin { dest, .. } if *dest == step => {}
+                _ if arm && !arm_ok(func, inst, &lp.blocks, bounds) => return None,
+                _ if !pure(inst) => return None,
+                _ => {}
+            }
+        }
+        push
+    };
+    let mut bounds = Bounds::new();
+    let (value, vty) = if body == latch && lp.blocks.len() == 2 {
+        let (dest, v) = push_in(body, false, &mut bounds)?;
+        if dest != acc_next {
+            return None;
+        }
+        (classify(func, v, iv, &lp.blocks)?, v)
+    } else {
+        // `if c { out.push(p); } else { out.push(q); }`
+        let Terminator::Br { cond: c, taken: bt, not_taken: bf } = func.block(body).term.as_ref()? else {
+            return None;
+        };
+        let (bt, bf) = (*bt, *bf);
+        if lp.blocks.len() != 5 || [bt, bf].iter().any(|&a| a == latch || preds[a.index()].len() != 1) {
+            return None;
+        }
+        if [bt, bf].iter().any(|&a| !matches!(func.block(a).term, Some(Terminator::Jump { dest }) if dest == latch)) {
+            return None;
+        }
+        for inst in &func.block(body).insts {
+            if !pure(inst) {
+                return None;
+            }
+        }
+        let (pt, vt) = push_in(bt, true, &mut bounds)?;
+        let (pf, vf) = push_in(bf, true, &mut bounds)?;
+        let mut join = false;
+        for inst in &func.block(latch).insts {
+            match inst {
+                MirInst::Phi { dest, args, .. } if *dest == acc_next => {
+                    let from = |e: BlockId| args.iter().find(|(b, _)| *b == e).map(|(_, v)| *v);
+                    if from(bt) != Some(pt) || from(bf) != Some(pf) {
+                        return None;
+                    }
+                    join = true;
+                }
+                MirInst::Bin { dest, .. } if *dest == step => {}
+                MirInst::Const { .. } => {}
+                _ => return None,
+            }
+        }
+        if !join || store_ty(func, vt)? != store_ty(func, vf)? {
+            return None;
+        }
+        let blocks = &lp.blocks;
+        let value = VOp::Select {
+            mask: Box::new(classify(func, *c, iv, blocks)?),
+            then: Box::new(classify(func, vt, iv, blocks)?),
+            els: Box::new(classify(func, vf, iv, blocks)?),
+        };
+        (value, vt)
+    };
+    let all: Vec<BlockId> = lp.blocks.iter().copied().filter(|&b| b != header).collect();
+    if region_has_barrier_but_push(func, &all) || region_has_barrier(func, &[header]) {
+        return None;
+    }
+    Some(PushLoop { iv, init, n, acc, value, ty: store_ty(func, vty)?, bounds })
+}
+
+/// [`region_has_barrier`], but for the loop's own `ArrayPush`es (a GC
+/// edge the vector loop's appends take over).
+fn region_has_barrier_but_push(func: &MirFunc, blocks: &[BlockId]) -> bool {
+    blocks.iter().any(|&b| {
+        func.block(b).insts.iter().any(|i| !matches!(i, MirInst::ArrayPush { .. }) && region_has_barrier_inst(func, i))
+            || matches!(func.block(b).term, Some(Terminator::JumpIfMatch { .. }))
+    })
 }
 
 /// `inst` gives a value in every lane without a trap: float arithmetic,
@@ -1013,36 +1199,40 @@ fn same_value(func: &MirFunc, a: ValueId, b: ValueId, depth: u8) -> bool {
 fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
     blocks.iter().any(|id| {
         let block = func.block(*id);
-        block.insts.iter().any(|inst| {
-            inst.is_gc_edge()
-                || inst.is_deopt_edge()
-                || matches!(
-                    inst,
-                    MirInst::Call { .. }
-                        | MirInst::CallIndirect { .. }
-                        | MirInst::HostInvoke { .. }
-                        | MirInst::Ffi { .. }
-                        | MirInst::MatchPayload { .. }
-                        | MirInst::HeapFieldLoad { .. }
-                        | MirInst::HeapFieldStore { .. }
-                        | MirInst::String { .. }
-                        | MirInst::CodePtr { .. }
-                        | MirInst::LoadStatic { .. }
-                        | MirInst::StoreStatic { .. }
-                        | MirInst::HomeLoad { .. }
-                        | MirInst::HomeStore { .. }
-                        | MirInst::ClearWord { .. }
-                        | MirInst::KeepAlive { .. }
-                        | MirInst::Print { .. }
-                        | MirInst::FreeEarly { .. }
-                        | MirInst::Panic { .. }
-                        | MirInst::Format { .. }
-                        | MirInst::Stringify { .. }
-                        | MirInst::Cow { .. }
-                        | MirInst::Unbox { .. }
-                )
-        }) || matches!(block.term, Some(Terminator::JumpIfMatch { .. }))
+        block.insts.iter().any(|inst| region_has_barrier_inst(func, inst)) || matches!(block.term, Some(Terminator::JumpIfMatch { .. }))
     })
+}
+
+/// An op no vector loop body may hold: an allocation or GC edge, a call,
+/// a field or static access, an effect.
+fn region_has_barrier_inst(_func: &MirFunc, inst: &MirInst) -> bool {
+    inst.is_gc_edge()
+        || inst.is_deopt_edge()
+        || matches!(
+            inst,
+            MirInst::Call { .. }
+                | MirInst::CallIndirect { .. }
+                | MirInst::HostInvoke { .. }
+                | MirInst::Ffi { .. }
+                | MirInst::MatchPayload { .. }
+                | MirInst::HeapFieldLoad { .. }
+                | MirInst::HeapFieldStore { .. }
+                | MirInst::String { .. }
+                | MirInst::CodePtr { .. }
+                | MirInst::LoadStatic { .. }
+                | MirInst::StoreStatic { .. }
+                | MirInst::HomeLoad { .. }
+                | MirInst::HomeStore { .. }
+                | MirInst::ClearWord { .. }
+                | MirInst::KeepAlive { .. }
+                | MirInst::Print { .. }
+                | MirInst::FreeEarly { .. }
+                | MirInst::Panic { .. }
+                | MirInst::Format { .. }
+                | MirInst::Stringify { .. }
+                | MirInst::Cow { .. }
+                | MirInst::Unbox { .. }
+        )
 }
 
 fn def(func: &MirFunc, v: ValueId) -> Option<&MirInst> {

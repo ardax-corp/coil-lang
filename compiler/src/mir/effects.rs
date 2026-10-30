@@ -79,6 +79,7 @@ impl MirInst {
     /// native, a coroutine step, an append, a `Show` format.
     fn runs_effects(&self, calls: &CallFacts) -> bool {
         match self {
+            Self::VecLoop { kind: super::inst::VecLoopKind::Push { .. }, .. } => true,
             Self::Call { dest, .. } => !calls.pure.contains(dest),
             Self::HostInvoke { native_id, .. } => !host_is_pure(*native_id),
             Self::CallIndirect { .. }

@@ -126,6 +126,16 @@ beat Rust/`memcmp` slice equality.
   when that still needs more than the eight registers.
   `examples/perf/vec_lanes.hy`, 8192 elements: abs 170 → 76 µs, clamp
   with a store per arm 178 → 72 µs.
+- Archive 6.10 also runs a counted loop whose body is one
+  `out.push(value(i))`, or a push in each arm of an `if` (a select of the
+  two values), as a `VLoop` append (`vectorize::match_push_on`, `VStore`
+  flag `STORE_PUSH`): each block appends its 8 lanes once its other words
+  ran, and a block that traps runs again lane by lane, so a panic leaves
+  the pushes before it. The guard also checks `out` is none of the
+  arrays the body reads nor the bound's array, and the invariant ranges
+  an arm's ranged add rests on (`(c as int) + delta` with `delta` in
+  range). `vec_lanes.hy`: `out.push(a[i] * 3 + 1)` 284 → 69 µs, the
+  `shift_ascii` shape on `Vec<byte>` 504 → 127 µs.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 - `packed_matrix_zip` / `packed_matrix_neg` also lower matrix compares

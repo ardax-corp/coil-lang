@@ -29,7 +29,7 @@ use super::func::MirFunc;
 use super::inst::{BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId, VecExpr, VecLoopKind};
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
-use super::vectorize::{match_cond_reduce_on, match_if_store_on, match_reduce_on, match_store_on, Off, VOp};
+use super::vectorize::{match_cond_reduce_on, match_if_store_on, match_push_on, match_reduce_on, match_store_on, Bounds, Off, VOp};
 
 /// Rewrite every loop that qualifies. Returns how many did.
 pub fn vec_loops(func: &mut MirFunc) -> usize {
@@ -62,6 +62,8 @@ pub fn vec_loops(func: &mut MirFunc) -> usize {
 enum Shape {
     Reduce { acc: ValueId, ty: u8, fold: u8, term: VOp, stores: Vec<(ValueId, Off, u8, VOp)> },
     Store { stores: Vec<(ValueId, Off, u8, VOp)> },
+    /// `acc.push(value)`; `acc` is the header's φ of the array.
+    Push { acc: ValueId, ty: u8, value: VOp },
 }
 
 struct Plan {
@@ -69,6 +71,8 @@ struct Plan {
     init: ValueId,
     n: ValueId,
     shape: Shape,
+    /// Invariants the guard checks the ranges of.
+    bounds: Bounds,
 }
 
 fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
@@ -108,7 +112,13 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
                 term: r.term,
                 stores: r.stores.into_iter().map(|st| (st.array, st.index_off, st.ty, st.value)).collect(),
             },
+            bounds: Bounds::new(),
         }
+    } else if let Some(p) = match_push_on(func, lp) {
+        if !index_int(&p.value, p.ty == dense::TY_I64) {
+            return None;
+        }
+        Plan { iv: p.iv, init: p.init, n: p.n, shape: Shape::Push { acc: p.acc, ty: p.ty, value: p.value }, bounds: p.bounds }
     } else {
         let s = match_store_on(func, lp).or_else(|| match_if_store_on(func, lp))?;
         let insts: Vec<&MirInst> = s.body.iter().flat_map(|&b| &func.block(b).insts).collect();
@@ -131,6 +141,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
             init: s.init,
             n: s.n,
             shape: Shape::Store { stores: s.stores.into_iter().map(|st| (st.array, st.index_off, st.ty, st.value)).collect() },
+            bounds: s.bounds,
         }
     };
     // Every value the vector loop reads must be placeable in front of it.
@@ -155,7 +166,9 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
                 leaves(v, &mut vals)?;
             }
         }
+        Shape::Push { value, .. } => leaves(value, &mut vals)?,
     }
+    vals.extend(plan.bounds.iter().map(|b| b.0));
     vals.iter().all(|&v| placeable(func, lp, v)).then_some(plan)
 }
 
@@ -298,6 +311,12 @@ impl Place<'_, '_> {
         self.b.push(self.at, MirInst::Cmp { dest, op, ty: MirTy::I64, lhs, rhs })
     }
 
+    /// A heap reference's word, to compare identities.
+    fn word(&mut self, v: ValueId) -> ValueId {
+        let dest = self.b.value(MirTy::I64);
+        self.b.push(self.at, MirInst::Cast { dest, kind: MirCastKind::Word, to: MirTy::I64, src: v })
+    }
+
     fn bin(&mut self, op: MirBinOp, ty: MirTy, lhs: ValueId, rhs: ValueId) -> ValueId {
         let dest = self.b.value(ty);
         self.b.push(self.at, MirInst::Bin { dest, op, ty, lhs, rhs })
@@ -421,6 +440,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
                 .map(|(array, off, ty, value)| (at.value(*array), at.off(*off), *ty, at.expr(value)))
                 .collect(),
         },
+        Shape::Push { acc, ty, value } => VecLoopKind::Push { out: init[acc], ty: *ty, value: at.expr(value) },
     };
     // `i0 < n`, and each stream's lanes `i0 + k .. n + k` in its array.
     let mut ok = at.cmp(MirCmpOp::Lt, i0, n);
@@ -439,6 +459,16 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
                 streams(value, &mut reads);
             }
         }
+        VecLoopKind::Push { value, .. } => streams(value, &mut reads),
+    }
+    // Each invariant an arm's range rests on, in its range.
+    for &(v, lo, hi) in &plan.bounds {
+        let v = at.value(v);
+        let (lo, hi) = (at.konst(lo), at.konst(hi));
+        let ge = at.cmp(MirCmpOp::Ge, v, lo);
+        let le = at.cmp(MirCmpOp::Le, v, hi);
+        let both = at.bin(MirBinOp::BitAnd, MirTy::Bool, ge, le);
+        ok = at.bin(MirBinOp::BitAnd, MirTy::Bool, ok, both);
     }
     let mut seen = HashSet::new();
     reads.retain(|r| seen.insert(*r));
@@ -446,6 +476,21 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     let mut lens: HashMap<ValueId, ValueId> = HashMap::new();
     if let Some(MirInst::ArrayLen { array, .. }) = at.b.func.blocks.iter().flat_map(|b| &b.insts).find(|i| i.dest() == n) {
         lens.insert(*array, n);
+    }
+    // A push grows its array: it is none the loop reads, and not the
+    // bound's (`i < out.len()` would never end).
+    if let VecLoopKind::Push { out, .. } = &kind {
+        let out = *out;
+        let mut others: Vec<ValueId> = reads.iter().map(|&(a, _)| a).chain(lens.keys().copied()).collect();
+        others.sort();
+        others.dedup();
+        let w = at.word(out);
+        for a in others {
+            let wa = at.word(a);
+            let ne = at.b.value(MirTy::Bool);
+            at.b.push(pre, MirInst::Cmp { dest: ne, op: MirCmpOp::Ne, ty: MirTy::I64, lhs: w, rhs: wa });
+            ok = at.bin(MirBinOp::BitAnd, MirTy::Bool, ok, ne);
+        }
     }
     // A value offset `o` needs `0 <= o <= len` before `len - o` can be
     // computed without overflowing: those compares go in `pre`, the
@@ -519,7 +564,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     let end = b.value(MirTy::I64);
     b.push(fast, MirInst::Bin { dest: end, op: MirBinOp::Add, ty: MirTy::I64, lhs: i0, rhs: whole });
     let acc = match &plan.shape {
-        Shape::Reduce { acc, .. } => Some(*acc),
+        Shape::Reduce { acc, .. } | Shape::Push { acc, .. } => Some(*acc),
         Shape::Store { .. } => None,
     };
     let dest = b.value(acc.map_or(MirTy::I64, |a| b.func.ty(a)));
@@ -541,7 +586,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
             let entry = if *p == plan.iv {
                 iv
             } else if Some(*p) == acc {
-                acc_in.expect("reduce")
+                acc_in.expect("an accumulator")
             } else {
                 init[p]
             };

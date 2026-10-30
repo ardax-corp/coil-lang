@@ -870,6 +870,9 @@ pub enum VecLoopKind {
     Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr, stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
     /// `array[p + off + k] = value` for each store, in order.
     Store { stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
+    /// `out.push(value)` for lanes `k` in order; `dest` is `out` (a push
+    /// keeps the array's identity).
+    Push { out: ValueId, ty: u8, value: VecExpr },
 }
 
 impl VecLoopKind {
@@ -889,6 +892,10 @@ impl VecLoopKind {
                     out.extend([*array, *off]);
                     value.values(&mut out);
                 }
+            }
+            Self::Push { out: array, value, .. } => {
+                out.push(*array);
+                value.values(&mut out);
             }
         }
         out
@@ -912,6 +919,10 @@ impl VecLoopKind {
                     value.rewrite(map);
                 }
             }
+            Self::Push { out, value, .. } => {
+                *out = map(*out);
+                value.rewrite(map);
+            }
         }
     }
 
@@ -919,6 +930,7 @@ impl VecLoopKind {
         match self {
             Self::Reduce { term, stores, .. } => term.uses_index() || stores.iter().any(|(_, _, _, v)| v.uses_index()),
             Self::Store { stores } => stores.iter().any(|(_, _, _, v)| v.uses_index()),
+            Self::Push { value, .. } => value.uses_index(),
         }
     }
 }

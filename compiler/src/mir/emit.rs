@@ -2852,12 +2852,20 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
         MirInst::VecLoop { dest, pos, from, to, kind } => {
             let d = regs[dest.index()];
             let p = pos.map_or(d, |p| regs[p.index()]);
-            // `dest` and `pos` are written before the operands are last read.
-            if inst.operands().iter().any(|v| regs[v.index()] == d || regs[v.index()] == p) || (pos.is_some() && p == d) {
+            // `dest` and `pos` are written before the operands are last read;
+            // the start value `dest` takes first may already be in it.
+            let start = match kind {
+                super::inst::VecLoopKind::Reduce { init, .. } | super::inst::VecLoopKind::Push { out: init, .. } => Some(*init),
+                super::inst::VecLoopKind::Store { .. } => None,
+            };
+            let ops = inst.operands();
+            let start = start.filter(|s| ops.iter().filter(|v| *v == s).count() == 1);
+            let clash = |v: &ValueId| (Some(*v) != start && regs[v.index()] == d) || regs[v.index()] == p;
+            if ops.iter().any(clash) || (pos.is_some() && p == d) {
                 return Err(LowerError::Refused("vec loop dest shares an operand slot".into()));
             }
             let body = vec_loop_body(kind, regs, d, p).ok_or_else(|| LowerError::Refused("vec loop body too large".into()))?;
-            if let super::inst::VecLoopKind::Reduce { init, .. } = kind
+            if let super::inst::VecLoopKind::Reduce { init, .. } | super::inst::VecLoopKind::Push { out: init, .. } = kind
                 && regs[init.index()] != d
             {
                 out.push(move_op(d, regs[init.index()]));
@@ -5147,6 +5155,11 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
                 let v = cx.value(value)?;
                 cx.word(Instruction::VStore, *ty, v, cx.slot(*array), cx.slot(*off));
             }
+        }
+        // The array is in `d` (moved there in front of the loop).
+        VecLoopKind::Push { ty, value, .. } => {
+            let v = cx.value(value)?;
+            cx.word(Instruction::VStore, *ty | simd::STORE_PUSH, v, d, 0);
         }
     }
     (cx.out.len() <= usize::from(common::simd::LOOP_LEN)).then_some(cx.out)

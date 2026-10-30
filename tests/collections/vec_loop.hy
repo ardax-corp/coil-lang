@@ -796,3 +796,110 @@ test("byte maps with a ranged add in an arm") {
         }
     }
 }
+
+// `out.push(value(i))`: the grown array, 8 lanes a time.
+fn mul_push(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out.push(a[i] * 3 + 1);
+        i = i + 1;
+    }
+}
+
+fn mul_push_scalar(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out.push(black_box(a[i]) * 3 + 1);
+        i = i + 1;
+    }
+}
+
+fn shift_bytes(Vec<byte> b, byte lo, byte hi, int delta) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= lo && c <= hi {
+            out.push(((c as int) + delta) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn shift_bytes_scalar(Vec<byte> b, byte lo, byte hi, int delta) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < b.len() {
+        let c = black_box(b[i]);
+        if c >= lo && c <= hi {
+            out.push(((c as int) + delta) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+test("map-push loops") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65, 300] {
+        let a: Vec<int> = Vec::new();
+        let src: Vec<byte> = Vec::new();
+        let k = 0;
+        while k < n {
+            a.push(k * 7 - 40);
+            src.push(((k * 37 + 11) % 256) as byte);
+            k = k + 1;
+        }
+        // Onto an array that already holds a few.
+        let x: Vec<int> = [5, 6, 7];
+        let y: Vec<int> = [5, 6, 7];
+        mul_push(x, a);
+        mul_push_scalar(y, a);
+        assert!(x.len() == n + 3);
+        assert!(x == y);
+        for delta in [32, -32, 300, -1000] {
+            let p = shift_bytes(src, "A" as byte, "Z" as byte, delta);
+            let q = shift_bytes_scalar(src, "A" as byte, "Z" as byte, delta);
+            assert!(p.len() == n);
+            assert!(p == q);
+        }
+    }
+}
+
+test("a map-push onto the array it reads stays scalar") {
+    let a: Vec<int> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let i = 0;
+    let n = a.len();
+    while i < n {
+        a.push(a[i] * 3 + 1);
+        i = i + 1;
+    }
+    assert!(a.len() == 20);
+    assert!(a[10] == 4 && a[19] == 31);
+}
+
+fn push_overflow() -> int {
+    let a: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 40 {
+        a.push(
+            if k == 21 {
+                9223372036854775807 / 2
+            } else {
+                k
+            },
+        );
+        k = k + 1;
+    }
+    let out: Vec<int> = Vec::new();
+    mul_push(out, a);
+    return out.len();
+}
+
+test("a trap in a map-push still panics") {
+    assert!(panics(push_overflow));
+}
