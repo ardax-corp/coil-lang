@@ -413,6 +413,11 @@ fn vload_lanes(arr: &ObjArray, reg: &mut [u64; common::simd::LANES], index: i64)
         for (i, lane) in reg.iter_mut().enumerate() {
             *lane = unsafe { elems.get_unchecked(base + i).bits() };
         }
+    } else if let Some(bytes) = arr.bytes() {
+        // A packed `Vec<byte>`: each byte as an int lane.
+        for (i, lane) in reg.iter_mut().enumerate() {
+            *lane = u64::from(unsafe { *bytes.get_unchecked(base + i) });
+        }
     } else {
         for (i, v) in arr.iter().skip(base).take(n).enumerate() {
             reg[i] = v.bits();
