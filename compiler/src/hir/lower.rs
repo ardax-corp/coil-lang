@@ -270,8 +270,11 @@ fn mono_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
 /// A function type over type parameters whose words are plain
 /// ([`fun_words`]: a bare `T` is one boxed word), such as the elements of a
 /// shared generic body's `Vec<unit -> T>`: one closure word each (#2136).
+/// An open `Option` / `Result` (`Vec<unit -> Result<T, E>>`) is its one
+/// object word here too: a ground caller reaches the mono clone, so every
+/// closure the shared body sees was made where the enum is open (#2153).
 fn open_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
-    matches!(strip_readonly(ty), Ty::Fun(..)) && fun_words(checker, ty, seen)
+    matches!(strip_readonly(ty), Ty::Fun(..)) && fun_words_in(checker, ty, seen, true)
 }
 
 /// A class declared with type parameters (`class HashMap<K, V>`).
@@ -1766,6 +1769,13 @@ fn let_init_is_element(body: &HirBody, local: LocalId) -> bool {
     })
 }
 
+/// Whether `local` is a `for` loop's binding of each element (`for f in fs`).
+fn for_binds_element(body: &HirBody, local: LocalId) -> bool {
+    body.exprs
+        .iter()
+        .any(|e| matches!(&e.kind, HirKind::ForIn { pat: HirPat::Bind(l), .. } if *l == local))
+}
+
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     indirect_callee_in(body, checker, f, &mut Vec::new())
 }
@@ -1825,7 +1835,11 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
                     checker,
                     &t,
                     &mut Vec::new(),
-                    info.kind == LocalKind::Param || info.kind == LocalKind::Let && let_init_is_lambda(body, local) && assigned.is_empty(),
+                    info.kind == LocalKind::Param
+                        || info.kind == LocalKind::Let && let_init_is_lambda(body, local) && assigned.is_empty()
+                        // An element of a shared body's `Vec<unit -> Result<T, E>>`:
+                        // the closure word stored there (#2153).
+                        || assigned.is_empty() && (let_init_is_element(body, local) || for_binds_element(body, local)),
                 )
         })
     {
