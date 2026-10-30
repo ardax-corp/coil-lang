@@ -487,11 +487,20 @@ fn vstore_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES], index: i64
     true
 }
 
+/// The 8 lanes of `src` appended to `arr` in lane order (numeric lanes).
+fn vpush_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES]) {
+    for &lane in src {
+        arr.push(Value::from(lane));
+    }
+}
+
 /// A decoded `VLoop` body word.
 #[derive(Clone, Copy)]
 enum VloopOp {
     Load { reg: usize, obj: Option<Object>, off: i64 },
     Store { reg: usize, obj: Option<Object>, off: i64 },
+    /// Append the lanes ([`common::simd::STORE_PUSH`]).
+    Push { reg: usize, obj: Option<Object> },
     Bin { kind: u8, dest: usize, a: usize, b: usize },
     Sel { dest: usize, a: usize, b: usize },
     Fma { ty: u8, dest: usize, a: usize, b: usize },
@@ -500,10 +509,35 @@ enum VloopOp {
 
 /// `VLoop` (see [`Instruction::VLoop`]): the body over lanes `p ..= p + 7`
 /// for `p = from, from + 8, ..` below `to`, with `dest = p` first when
-/// `pos`. The arrays are resolved once (nothing in the body resizes or
-/// allocates). `Err` on a malformed body, a lane out of range or a trap.
+/// `pos`. The arrays are resolved once: nothing in the body allocates,
+/// and the only resize is an append (`STORE_PUSH`) to an array the body
+/// does not read (the compiler guards that). `Err` on a malformed body, a lane out of range or a trap.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn vloop(
+    heap: &mut Heap,
+    stack: &mut Stack<Value>,
+    sp: usize,
+    regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
+    body: &[Byte],
+    dest: usize,
+    from: i64,
+    to: i64,
+    pos: bool,
+) -> Result<(), &'static str> {
+    let mut pushed = Vec::new();
+    let ran = vloop_run(heap, stack, sp, regs, body, dest, from, to, pos, &mut pushed);
+    // The arrays a body appended to grew: count their storage once.
+    for obj in pushed {
+        if let Object::Array(mut gc) = obj {
+            heap.account_array(gc.as_mut());
+        }
+    }
+    ran
+}
+
+/// [`vloop`]'s loop; `pushed` gets the arrays the body appends to.
+#[allow(clippy::too_many_arguments)]
+fn vloop_run(
     heap: &Heap,
     stack: &mut Stack<Value>,
     sp: usize,
@@ -513,6 +547,7 @@ pub(crate) fn vloop(
     from: i64,
     to: i64,
     pos: bool,
+    pushed: &mut Vec<Object>,
 ) -> Result<(), &'static str> {
     use common::simd;
     const BAD: &str = "VLoop: malformed body";
@@ -552,6 +587,11 @@ pub(crate) fn vloop(
                 span(obj, off)?;
                 Op::Load { reg: d, obj, off }
             }
+            Instruction::VStore if kind & simd::STORE_PUSH != 0 => {
+                let obj = array(a)?;
+                pushed.extend(obj);
+                Op::Push { reg: d, obj }
+            }
             Instruction::VStore => {
                 let (obj, off) = (array(a)?, stack[sp + b].as_int());
                 span(obj, off)?;
@@ -569,7 +609,8 @@ pub(crate) fn vloop(
     // the lanes before the trapping one store and fold as the scalar loop
     // would. The compiler only takes bodies whose reads come before their
     // stores, so deferring a block's stores changes no value it reads.
-    let mut pending: Vec<(Option<Object>, i64, [u64; simd::LANES])> = Vec::new();
+    // `None` for an append.
+    let mut pending: Vec<(Option<Object>, Option<i64>, [u64; simd::LANES])> = Vec::new();
     let mut saved: Vec<(usize, Value)> = Vec::new();
     let mut p = from;
     while p < to {
@@ -591,7 +632,8 @@ pub(crate) fn vloop(
                         return Err(OOB);
                     }
                 }
-                Op::Store { reg, obj, off } => pending.push((obj, off, regs[reg])),
+                Op::Store { reg, obj, off } => pending.push((obj, Some(off), regs[reg])),
+                Op::Push { reg, obj } => pending.push((obj, None, regs[reg])),
                 Op::Load { .. } => return Err(BAD),
                 Op::Bin { kind, dest, a, b } => match vbin_block(stack, sp, regs, kind, a, b) {
                     Ok(out) => regs[dest] = out,
@@ -629,8 +671,13 @@ pub(crate) fn vloop(
                 let Some(Object::Array(mut gc)) = *obj else {
                     return Err(BAD);
                 };
-                if !vstore_lanes(gc.as_mut(), lanes, p + off) {
-                    return Err(OOB);
+                match off {
+                    Some(off) => {
+                        if !vstore_lanes(gc.as_mut(), lanes, p + off) {
+                            return Err(OOB);
+                        }
+                    }
+                    None => vpush_lanes(gc.as_mut(), lanes),
                 }
             }
         }
@@ -683,6 +730,12 @@ fn vloop_lanes(
                     let i = p + j + off;
                     let v = usize::try_from(i).ok().and_then(|i| gc.as_ref().get(i)).ok_or(OOB)?;
                     regs[reg] = [v.bits(); simd::LANES];
+                }
+                VloopOp::Push { reg, obj } => {
+                    let Some(Object::Array(mut gc)) = obj else {
+                        return Err(OOB);
+                    };
+                    gc.as_mut().push(Value::from(regs[reg][0]));
                 }
                 VloopOp::Store { reg, obj, off } => {
                     let Some(Object::Array(mut gc)) = obj else {

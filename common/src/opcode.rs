@@ -864,6 +864,10 @@ pub mod simd {
     pub const LOOP_POS: u8 = 0x80;
     /// `VLoop` length-field bits that hold the body length.
     pub const LOOP_LEN: u8 = 0x7F;
+    /// `VStore` type flag (archive 6.10, `VLoop` bodies): append the 8
+    /// lanes to the array in lane order instead of storing them at an
+    /// index (the index slot is unused).
+    pub const STORE_PUSH: u8 = 0x80;
     /// `VLoad` type: 64 bytes of a `string` or a byte array from `idx`.
     pub const TY_U8: u8 = 8;
     /// `VBin` mask logic on byte lanes: `a & b`, `a | b`, `a & !b`, `!a`.

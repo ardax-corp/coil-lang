@@ -1007,7 +1007,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + to < stack_cap);
                     let (from, to) = (self.stack[sp + from].as_int(), self.stack[sp + to].as_int());
                     let ran = match code.get(ip..ip + n) {
-                        Some(body) => vloop(&self.heap, &mut self.stack, sp, &mut self.vregs, body, dest, from, to, pos),
+                        Some(body) => vloop(&mut self.heap, &mut self.stack, sp, &mut self.vregs, body, dest, from, to, pos),
                         None => Err("VLoop body past the code"),
                     };
                     if let Err(msg) = ran {

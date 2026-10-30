@@ -916,6 +916,49 @@
         assert_eq!(vm.pop().as_int(), 10);
     }
 
+    fn abc(op: Instruction, kind: u8, dest: u8, a: u8, b: u8) -> Byte {
+        Byte::new(op).with_operand_u32(((kind as u32) << 24) | ((dest as u32) << 16) | ((a as u32) << 8) | (b as u32))
+    }
+
+    /// A `VLoop` append whose block traps replays it lane by lane: the
+    /// lanes before the trapping one are pushed, as the scalar loop would.
+    #[test]
+    fn vloop_push_keeps_lanes_before_a_trap() {
+        use common::simd;
+        let mut vm = Machine::<8>::default();
+        let mut array = |elems: Vec<i64>| {
+            let (obj, _) = vm.heap_mut().alloc(ObjArray::new(elems.into_iter().map(Value::from).collect()), Object::Array);
+            Value::from(obj.addr()).bits()
+        };
+        let src = array((0..16).map(|k| if k == 11 { i64::MAX / 2 + 1 } else { k }).collect());
+        let out = array(vec![9]);
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(6),
+            Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG),
+            store_pop(0),
+            Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG | 1),
+            store_pop(1),
+            const_int(0),
+            store_pop(2),
+            const_int(0),
+            store_pop(3),
+            const_int(16),
+            store_pop(4),
+            abc(Instruction::VLoop, 3, 5, 3, 4),
+            abc(Instruction::VLoad, common::dense::TY_I64, 0, 0, 2),
+            abc(Instruction::VBin, simd::IADD64, 0, 0, 0),
+            abc(Instruction::VStore, common::dense::TY_I64 | simd::STORE_PUSH, 0, 1, 0),
+            Byte::new(Instruction::HALT),
+        ];
+        vm.run_with_pool(&code, &[src, out], &[], 0);
+        assert!(vm.panicked(), "the doubled lane 11 overflows");
+        let Some(Object::Array(gc)) = vm.heap().find_object_by_addr(out) else {
+            panic!("out is an array");
+        };
+        let got: Vec<i64> = gc.as_ref().iter().map(|v| v.as_int()).collect();
+        assert_eq!(got, [9, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
+    }
+
     #[test]
     fn dense_store_index_writes_what_dense_index_reads() {
         let mut vm = Machine::<8>::default();
