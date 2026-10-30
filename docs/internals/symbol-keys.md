@@ -87,9 +87,11 @@ being reached:
 - A body with `fn_key_sites` is never inlined (`hir::inline::inlinable`).
 - What is left reaches the panic: a keyed generic of another module used as
   a value, a clone refused by a gate (`knows_tys`, `layout_safe`), a
-  trait-bound dictionary call. A trait default method body is not treated as
-  generic: it keeps one key for every type that uses it, since it is often
-  called through the shared dictionary path.
+  trait-bound dictionary call, polymorphic recursion (its types grow
+  without end, so the chain of clones stops at the shared body). A trait
+  default method body is not treated as generic: it keeps one key for every
+  type that uses it, since it is often called through the shared dictionary
+  path.
 
 ## `next_id`
 
