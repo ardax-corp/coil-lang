@@ -817,6 +817,58 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    /// A child task record with no coroutine, as `add_task` makes one.
+    fn add_bare_task(s: &mut Scheduler, scope: ScopeId) -> TaskId {
+        let id = s.next_task;
+        s.next_task += 1;
+        s.tasks.insert(id, TaskRec::new(None, scope));
+        if let Some(sc) = s.scopes.get_mut(&scope) {
+            sc.children.push(id);
+        }
+        s.live += 1;
+        id
+    }
+
+    #[test]
+    fn finishing_a_task_does_not_scan_its_finished_siblings() {
+        // coil-lang#2135: each finish rescanned every child of the scope, so
+        // N spawn + join pairs in one scope cost O(N^2).
+        let mut s = Scheduler::new(0);
+        let scope = s.open_scope();
+        let n = 20_000;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            let id = add_bare_task(&mut s, scope);
+            assert!(!s.children_finished(scope));
+            s.finalize(id, TaskState::Done);
+            assert!(s.children_finished(scope));
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(s.live, 0);
+        // Linear work takes milliseconds even in a debug build; the old
+        // quadratic scan took minutes.
+        assert!(elapsed < std::time::Duration::from_secs(5), "{n} spawn + finish took {elapsed:?}");
+    }
+
+    #[test]
+    fn a_scope_counts_only_its_unfinished_children() {
+        let mut s = Scheduler::new(0);
+        let a = s.open_scope();
+        let b = s.open_scope();
+        let a1 = add_bare_task(&mut s, a);
+        let a2 = add_bare_task(&mut s, a);
+        let b1 = add_bare_task(&mut s, b);
+        s.finalize(a1, TaskState::Failed);
+        assert!(!s.children_finished(a));
+        assert!(!s.children_finished(b));
+        s.finalize(b1, TaskState::Dropped);
+        assert!(s.children_finished(b));
+        assert!(!s.owned_children_finished(ROOT));
+        s.finalize(a2, TaskState::Done);
+        assert!(s.children_finished(a));
+        assert!(s.owned_children_finished(ROOT));
+    }
+
     #[test]
     #[cfg(any(unix, windows))]
     fn connect_in_task_parks_then_returns_the_stream() {
