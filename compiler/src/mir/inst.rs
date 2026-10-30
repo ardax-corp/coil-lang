@@ -791,6 +791,8 @@ pub enum VecExpr {
     /// A one-register `VBin` ([`common::simd::is_unary_kind`]): a negation
     /// or a lane cast.
     Unary { kind: u8, src: Box<VecExpr> },
+    /// `mask ? then : els` per lane (`mask` is `0` / `1` int lanes).
+    Select { mask: Box<VecExpr>, then: Box<VecExpr>, els: Box<VecExpr> },
     /// `a * b + c`, two roundings.
     Fma { ty: u8, a: Box<VecExpr>, b: Box<VecExpr>, c: Box<VecExpr> },
 }
@@ -807,6 +809,11 @@ impl VecExpr {
                 rhs.values(out);
             }
             Self::Unary { src, .. } => src.values(out),
+            Self::Select { mask, then, els } => {
+                mask.values(out);
+                then.values(out);
+                els.values(out);
+            }
             Self::Fma { a, b, c, .. } => {
                 a.values(out);
                 b.values(out);
@@ -828,6 +835,11 @@ impl VecExpr {
                 rhs.rewrite(map);
             }
             Self::Unary { src, .. } => src.rewrite(map),
+            Self::Select { mask, then, els } => {
+                mask.rewrite(map);
+                then.rewrite(map);
+                els.rewrite(map);
+            }
             Self::Fma { a, b, c, .. } => {
                 a.rewrite(map);
                 b.rewrite(map);
@@ -842,6 +854,7 @@ impl VecExpr {
             Self::Splat { .. } | Self::Load { .. } => false,
             Self::Bin { lhs, rhs, .. } => lhs.uses_index() || rhs.uses_index(),
             Self::Unary { src, .. } => src.uses_index(),
+            Self::Select { mask, then, els } => mask.uses_index() || then.uses_index() || els.uses_index(),
             Self::Fma { a, b, c, .. } => a.uses_index() || b.uses_index() || c.uses_index(),
         }
     }

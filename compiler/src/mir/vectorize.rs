@@ -14,7 +14,9 @@ const LANES: i64 = simd::LANES as i64;
 
 
 pub(super) struct StoreLoop {
-    pub(super) body: BlockId,
+    /// The body's blocks in program order (one, or an if-converted
+    /// `if` and its join).
+    pub(super) body: Vec<BlockId>,
     pub(super) iv: ValueId,
     /// Loop-invariant start. Not required to be zero.
     pub(super) init: ValueId,
@@ -46,6 +48,9 @@ pub(super) enum VOp {
     Bin { kind: u8, lhs: Box<VOp>, rhs: Box<VOp> },
     /// A negation or a lane cast (`simd::is_unary_kind`).
     Unary { kind: u8, src: Box<VOp> },
+    /// `mask ? then : els` lane by lane; `mask` is `0` / `1` int lanes
+    /// (a compare, or bit ops of compares).
+    Select { mask: Box<VOp>, then: Box<VOp>, els: Box<VOp> },
     Fma {
         ty: u8,
         a: Box<VOp>,
@@ -147,12 +152,216 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
         return None;
     }
     Some(StoreLoop {
-        body,
+        body: vec![body],
         iv: *iv,
         init,
         n,
         stores,
     })
+}
+
+/// A store loop through one `if` (header, body, one or two arm blocks,
+/// latch), if-converted: every lane runs both arms and a select picks.
+///
+/// - a φ in the latch, `let x = a[i]; if x < 0.0 { x = -x; } out[i] = x;`,
+///   is `cond ? from_then : from_else`;
+/// - a store in each arm to the same element, `if c { out[i] = p; } else
+///   { out[i] = q; }`, is one store of `c ? p : q`; a store in one arm
+///   alone keeps the element on the other side (`c ? p : out[i]`).
+///
+/// An arm runs in every lane, so it may only compute what cannot trap
+/// (float arithmetic, bit ops, compares, casts and loads the guard
+/// covers). The body and the latch run in every iteration and may.
+pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Option<StoreLoop> {
+    let header = lp.header;
+    if !(4..=5).contains(&lp.blocks.len()) {
+        return None;
+    }
+    let preds = func.preds();
+    let latch = preds[header.index()].iter().copied().find(|p| lp.blocks.contains(p))?;
+    let Terminator::Br { cond, taken, not_taken } = func.block(header).term.as_ref()? else {
+        return None;
+    };
+    let body = if lp.blocks.contains(taken) && !lp.blocks.contains(not_taken) {
+        *taken
+    } else if lp.blocks.contains(not_taken) && !lp.blocks.contains(taken) {
+        *not_taken
+    } else {
+        return None;
+    };
+    let Terminator::Br { cond: c, taken: bt, not_taken: bf } = func.block(body).term.as_ref()? else {
+        return None;
+    };
+    // Each way out of the body reaches the latch straight, or through one
+    // block; `edge` is the latch's predecessor on that side.
+    let arm = |b: BlockId| -> Option<(Option<BlockId>, BlockId)> {
+        if b == latch {
+            Some((None, body))
+        } else {
+            matches!(func.block(b).term, Some(Terminator::Jump { dest }) if dest == latch).then_some((Some(b), b))
+        }
+    };
+    let ((arm_t, edge_t), (arm_f, edge_f)) = (arm(*bt)?, arm(*bf)?);
+    if edge_t == edge_f || lp.blocks.len() != 3 + usize::from(arm_t.is_some()) + usize::from(arm_f.is_some()) {
+        return None;
+    }
+    if !matches!(func.block(latch).term, Some(Terminator::Jump { dest }) if dest == header) {
+        return None;
+    }
+    let arms: Vec<BlockId> = arm_t.into_iter().chain(arm_f).collect();
+    if arms.iter().any(|&a| preds[a.index()].len() != 1) || preds[latch.index()].len() != 2 {
+        return None;
+    }
+
+    // The header: the index alone.
+    let phis: Vec<&MirInst> = func.block(header).insts.iter().filter(|i| i.is_phi()).collect();
+    let [MirInst::Phi { dest: iv, ty: MirTy::I64, args }] = phis[..] else {
+        return None;
+    };
+    let iv = *iv;
+    let init = phi_from(args, latch, false)?;
+    let step = phi_from(args, latch, true)?;
+    if !is_invariant(func, init, &lp.blocks) || !is_iadd_k(func, step, iv, 1) {
+        return None;
+    }
+    let n = loop_bound(func, *cond, iv)?;
+    if !is_invariant(func, n, &lp.blocks) || as_const_i64(func, n).is_some_and(|k| k < LANES) {
+        return None;
+    }
+    if region_has_barrier(func, &[header, body, latch]) || region_has_barrier(func, &arms) {
+        return None;
+    }
+
+    let mut sel = Selects::new();
+    for inst in &func.block(latch).insts {
+        if let MirInst::Phi { dest, args, .. } = inst {
+            let from = |e: BlockId| args.iter().find(|(b, _)| *b == e).map(|(_, v)| *v);
+            sel.insert(*dest, (*c, from(edge_t)?, from(edge_f)?));
+        }
+    }
+    let pure = |inst: &MirInst| {
+        matches!(
+            inst,
+            MirInst::Index { .. } | MirInst::Bin { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Cmp { .. } | MirInst::Const { .. } | MirInst::ArrayLen { .. }
+        )
+    };
+    let store = |inst: &MirInst| -> Option<StoreSpec> {
+        let MirInst::StoreIndex { array, index, value, .. } = inst else {
+            return None;
+        };
+        if !is_invariant(func, *array, &lp.blocks) {
+            return None;
+        }
+        Some(StoreSpec {
+            array: *array,
+            index_off: index_offset(func, *index, iv, &lp.blocks)?,
+            ty: store_ty(func, *value)?,
+            value: classify_with(func, *value, iv, &lp.blocks, &sel)?,
+        })
+    };
+
+    let mut stores = Vec::new();
+    for inst in &func.block(body).insts {
+        if matches!(inst, MirInst::StoreIndex { .. }) {
+            stores.push(store(inst)?);
+        } else if !pure(inst) {
+            return None;
+        }
+    }
+    // An arm: what cannot trap, and at most one store.
+    let arm_store = |a: Option<BlockId>| -> Option<Option<(&MirInst, ValueId)>> {
+        let Some(a) = a else {
+            return Some(None);
+        };
+        let mut st = None;
+        for inst in &func.block(a).insts {
+            match inst {
+                MirInst::StoreIndex { value, .. } if st.is_none() => st = Some((inst, *value)),
+                _ if !cannot_trap(func, inst) => return None,
+                _ => {}
+            }
+        }
+        Some(st)
+    };
+    let (st_t, st_f) = (arm_store(arm_t)?, arm_store(arm_f)?);
+    let mask = || classify_with(func, *c, iv, &lp.blocks, &sel);
+    let arm_spec = |inst: &MirInst, v: ValueId| -> Option<StoreSpec> {
+        let MirInst::StoreIndex { array, index, .. } = inst else { unreachable!() };
+        if !is_invariant(func, *array, &lp.blocks) {
+            return None;
+        }
+        Some(StoreSpec {
+            array: *array,
+            index_off: index_offset(func, *index, iv, &lp.blocks)?,
+            ty: store_ty(func, v)?,
+            value: classify_with(func, v, iv, &lp.blocks, &sel)?,
+        })
+    };
+    match (st_t, st_f) {
+        (None, None) => {}
+        (Some((it, vt)), Some((jf, vf))) => {
+            let (t, f) = (arm_spec(it, vt)?, arm_spec(jf, vf)?);
+            if t.array != f.array || t.index_off != f.index_off || t.ty != f.ty {
+                return None;
+            }
+            stores.push(StoreSpec {
+                value: VOp::Select { mask: Box::new(mask()?), then: Box::new(t.value), els: Box::new(f.value) },
+                ..t
+            });
+        }
+        (one_t, one_f) => {
+            // One side stores; the other keeps the element. Its read comes
+            // before every store of the block, so the body must store
+            // nothing ahead of it.
+            if !stores.is_empty() {
+                return None;
+            }
+            let (st, on_then) = match (one_t, one_f) {
+                (Some(x), None) => (x, true),
+                (None, Some(x)) => (x, false),
+                _ => unreachable!(),
+            };
+            let spec = arm_spec(st.0, st.1)?;
+            let keep = VOp::Load { array: spec.array, ty: spec.ty, off: spec.index_off };
+            let (then, els) = if on_then { (spec.value, keep) } else { (keep, spec.value) };
+            stores.push(StoreSpec {
+                value: VOp::Select { mask: Box::new(mask()?), then: Box::new(then), els: Box::new(els) },
+                array: spec.array,
+                ty: spec.ty,
+                index_off: spec.index_off,
+            });
+        }
+    }
+    for inst in &func.block(latch).insts {
+        match inst {
+            MirInst::Phi { .. } => {}
+            MirInst::StoreIndex { .. } => stores.push(store(inst)?),
+            MirInst::Bin { dest, .. } if *dest == step => {}
+            _ if pure(inst) => {}
+            _ => return None,
+        }
+    }
+    if stores.is_empty() {
+        return None;
+    }
+    let mut blocks = vec![body];
+    blocks.extend(arms);
+    blocks.push(latch);
+    Some(StoreLoop { body: blocks, iv, init, n, stores })
+}
+
+/// `inst` gives a value in every lane without a trap: float arithmetic,
+/// bit ops, compares, casts between int and float, constants and loads
+/// (the vector loop's guard covers every lane it reads).
+fn cannot_trap(func: &MirFunc, inst: &MirInst) -> bool {
+    match inst {
+        MirInst::Bin { op, ty: MirTy::F64, .. } => matches!(op, MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div),
+        MirInst::Bin { op, ty: MirTy::I64 | MirTy::Bool, .. } => matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
+        MirInst::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::F64,
+        MirInst::Cast { kind: MirCastKind::IntToFloat | MirCastKind::FloatToInt, .. } => true,
+        MirInst::Cmp { .. } | MirInst::Const { .. } | MirInst::Index { .. } => true,
+        _ => false,
+    }
 }
 
 pub(super) struct ReduceLoop {
@@ -408,6 +617,20 @@ fn classify(
     iv: ValueId,
     loop_blocks: &std::collections::HashSet<BlockId>,
 ) -> Option<VOp> {
+    classify_with(func, v, iv, loop_blocks, &Selects::new())
+}
+
+/// The φs of an if-converted body, each `cond ? from_then : from_else`.
+type Selects = std::collections::HashMap<ValueId, (ValueId, ValueId, ValueId)>;
+
+/// [`classify`], reading the φs in `sel` as selects.
+fn classify_with(
+    func: &MirFunc,
+    v: ValueId,
+    iv: ValueId,
+    loop_blocks: &std::collections::HashSet<BlockId>,
+    sel: &Selects,
+) -> Option<VOp> {
     if v == iv {
         return Some(VOp::Iota);
     }
@@ -440,9 +663,9 @@ fn classify(
         } => {
             if *op == MirBinOp::Add && matches!(ty, MirTy::I64 | MirTy::F64)
                 && let Some((a, b, c)) = split_fma(func, *lhs, *rhs) {
-                    let va = classify(func, a, iv, loop_blocks)?;
-                    let vb = classify(func, b, iv, loop_blocks)?;
-                    let vc = classify(func, c, iv, loop_blocks)?;
+                    let va = classify_with(func, a, iv, loop_blocks, sel)?;
+                    let vb = classify_with(func, b, iv, loop_blocks, sel)?;
+                    let vc = classify_with(func, c, iv, loop_blocks, sel)?;
                     return Some(VOp::Fma {
                         ty: store_ty(func, v)?,
                         a: Box::new(va),
@@ -451,8 +674,8 @@ fn classify(
                     });
                 }
             let kind = vbin_kind(*op, *ty)?;
-            let l = classify(func, *lhs, iv, loop_blocks)?;
-            let r = classify(func, *rhs, iv, loop_blocks)?;
+            let l = classify_with(func, *lhs, iv, loop_blocks, sel)?;
+            let r = classify_with(func, *rhs, iv, loop_blocks, sel)?;
             Some(VOp::Bin {
                 kind,
                 lhs: Box::new(l),
@@ -465,7 +688,7 @@ fn classify(
                 (MirUnaryOp::Neg, MirTy::F64) => simd::FNEG,
                 _ => return None,
             };
-            let s = classify(func, *src, iv, loop_blocks)?;
+            let s = classify_with(func, *src, iv, loop_blocks, sel)?;
             Some(VOp::Unary {
                 kind,
                 src: Box::new(s),
@@ -477,13 +700,46 @@ fn classify(
                 (MirCastKind::FloatToInt, MirTy::F64, MirTy::I64) => simd::F2I,
                 _ => return None,
             };
-            let s = classify(func, *src, iv, loop_blocks)?;
+            let s = classify_with(func, *src, iv, loop_blocks, sel)?;
             Some(VOp::Unary {
                 kind,
                 src: Box::new(s),
             })
         }
+        MirInst::Cmp { op, ty, lhs, rhs, .. } => {
+            let base = match ty {
+                MirTy::I64 => simd::ICMP,
+                MirTy::F64 => simd::FCMP,
+                _ => return None,
+            };
+            let l = classify_with(func, *lhs, iv, loop_blocks, sel)?;
+            let r = classify_with(func, *rhs, iv, loop_blocks, sel)?;
+            Some(VOp::Bin {
+                kind: base + cmp_pred(*op),
+                lhs: Box::new(l),
+                rhs: Box::new(r),
+            })
+        }
+        MirInst::Phi { dest, .. } => {
+            let &(c, t, f) = sel.get(dest)?;
+            Some(VOp::Select {
+                mask: Box::new(classify_with(func, c, iv, loop_blocks, sel)?),
+                then: Box::new(classify_with(func, t, iv, loop_blocks, sel)?),
+                els: Box::new(classify_with(func, f, iv, loop_blocks, sel)?),
+            })
+        }
         _ => None,
+    }
+}
+
+fn cmp_pred(op: MirCmpOp) -> u8 {
+    match op {
+        MirCmpOp::Lt => dense::CMP_LT,
+        MirCmpOp::Le => dense::CMP_LE,
+        MirCmpOp::Gt => dense::CMP_GT,
+        MirCmpOp::Ge => dense::CMP_GE,
+        MirCmpOp::Eq => dense::CMP_EQ,
+        MirCmpOp::Ne => dense::CMP_NE,
     }
 }
 
@@ -496,6 +752,10 @@ fn vbin_kind(op: MirBinOp, ty: MirTy) -> Option<u8> {
         (MirBinOp::BitAnd, MirTy::I64) => simd::IAND64,
         (MirBinOp::BitOr, MirTy::I64) => simd::IOR64,
         (MirBinOp::Xor, MirTy::I64) => simd::IXOR64,
+        // Bools are `0` / `1` lanes (masks).
+        (MirBinOp::BitAnd, MirTy::Bool) => simd::IAND64,
+        (MirBinOp::BitOr, MirTy::Bool) => simd::IOR64,
+        (MirBinOp::Xor, MirTy::Bool) => simd::IXOR64,
         (MirBinOp::Add, MirTy::F64) => simd::FADD64,
         (MirBinOp::Sub, MirTy::F64) => simd::FSUB64,
         (MirBinOp::Mul, MirTy::F64) => simd::FMUL64,
