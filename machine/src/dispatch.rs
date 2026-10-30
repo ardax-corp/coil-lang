@@ -14,19 +14,17 @@
 
 use common::int_arith::IntTrap;
 use common::{
-    ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Value, promise,
+    ArchivedByte as Byte, ArchivedInstruction as Instruction, Value, promise,
     unlikely,
 };
 
 use super::{
-    FramePins, STEP_BUDGET_EXHAUSTED, prefetch_code, resolve_dense_index_object_in,
+    STEP_BUDGET_EXHAUSTED, prefetch_code, resolve_dense_index_object_in,
     set_jump_target,
 };
-use crate::{Frame, Heap, Object, Stack};
+use crate::{Heap, Object, Stack};
 
 struct HotExtra<'a> {
-    frames_len: usize,
-    frame_pins: &'a mut Vec<FramePins>,
     dense_obj_addr: &'a mut u64,
     dense_obj: &'a mut Option<Object>,
     vregs: &'a mut [[u64; common::simd::LANES]; common::simd::NREGS],
@@ -520,8 +518,6 @@ pub(super) struct DenseIndexArgs<'a> {
     pub sp: usize,
     pub opcode: &'a Byte,
     pub heap: &'a Heap,
-    pub frames_len: usize,
-    pub frame_pins: &'a mut Vec<FramePins>,
     pub dense_obj_addr: &'a mut u64,
     pub dense_obj: &'a mut Option<Object>,
     pub stack_cap: usize,
@@ -534,8 +530,6 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
         sp,
         opcode,
         heap,
-        frames_len,
-        frame_pins,
         dense_obj_addr,
         dense_obj,
         stack_cap,
@@ -550,11 +544,8 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
     if flags & common::dense::HEAP_STR_BYTE != 0 {
         let b = match resolve_dense_index_object_in(
             heap,
-            frames_len,
-            frame_pins,
             dense_obj_addr,
             dense_obj,
-            arr as u32,
             addr,
         ) {
             Some(Object::String(gc)) => crate::str_bytes::byte_at(gc.as_ref().data.as_str().as_bytes(), index),
@@ -565,11 +556,8 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
     }
     let result = match resolve_dense_index_object_in(
         heap,
-        frames_len,
-        frame_pins,
         dense_obj_addr,
         dense_obj,
-        arr as u32,
         addr,
     ) {
         Some(Object::Array(gc)) => {
@@ -595,8 +583,6 @@ pub(super) struct DenseStoreIndexArgs<'a> {
     pub sp: usize,
     pub opcode: &'a Byte,
     pub heap: &'a Heap,
-    pub frames_len: usize,
-    pub frame_pins: &'a mut Vec<FramePins>,
     pub dense_obj_addr: &'a mut u64,
     pub dense_obj: &'a mut Option<Object>,
     pub stack_cap: usize,
@@ -609,8 +595,6 @@ pub(super) fn dense_store_index(args: DenseStoreIndexArgs<'_>) -> Result<(), Den
         sp,
         opcode,
         heap,
-        frames_len,
-        frame_pins,
         dense_obj_addr,
         dense_obj,
         stack_cap,
@@ -625,11 +609,8 @@ pub(super) fn dense_store_index(args: DenseStoreIndexArgs<'_>) -> Result<(), Den
     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
     if let Some(Object::Array(mut gc)) = resolve_dense_index_object_in(
         heap,
-        frames_len,
-        frame_pins,
         dense_obj_addr,
         dense_obj,
-        arr as u32,
         addr,
     ) {
         if !gc.as_mut().store_indexed(index, value, unchecked) {
@@ -661,11 +642,8 @@ fn dense_array_push(ctx: &mut HotCtx<'_, '_>, opcode: &Byte) -> bool {
     let value = ctx.stack[sp + val];
     let Some(Object::Array(mut gc)) = resolve_dense_index_object_in(
         ctx.heap,
-        ctx.extra.frames_len,
-        ctx.extra.frame_pins,
         ctx.extra.dense_obj_addr,
         ctx.extra.dense_obj,
-        arr as u32,
         target.bits(),
     ) else {
         return false;
@@ -689,7 +667,7 @@ pub(super) fn dense_array_len(
     promise!(sp + dest < stack_cap);
     promise!(sp + arr < stack_cap);
     let addr = stack[sp + arr].bits();
-    let len = match heap.find_object_by_addr(addr) {
+    let len = match heap.trusted_object(addr) {
         Some(Object::Array(gc)) => gc.as_ref().len(),
         Some(Object::Tuple(gc)) => gc.as_ref().elements().len(),
         Some(Object::String(gc)) => gc.as_ref().data.len(),
@@ -718,7 +696,7 @@ pub(super) fn dense_field_load(
     let result = if named {
         promise!(sp + c < stack_cap);
         let key = super::Machine::<8>::intern_key(heap, stack[sp + c]);
-        match heap.find_object_by_addr(addr) {
+        match heap.trusted_object(addr) {
             Some(Object::Instance(gc)) => {
                 gc.as_ref().get(key)
             }
@@ -726,7 +704,7 @@ pub(super) fn dense_field_load(
         }
     } else {
         let field_index = c;
-        match heap.find_object_by_addr(addr) {
+        match heap.trusted_object(addr) {
             Some(Object::Enum(enum_ref)) => {
                 let enum_ref = enum_ref.as_ref();
                 promise!(field_index < enum_ref.payload.len());
@@ -764,7 +742,7 @@ pub(super) fn dense_field_store(
     let value = stack[sp + dest];
     let addr = stack[sp + obj].bits();
     let named = flags & common::dense::FIELD_NAMED != 0;
-    if let Some(Object::Instance(mut gc)) = heap.find_object_by_addr(addr) {
+    if let Some(Object::Instance(mut gc)) = heap.trusted_object(addr) {
         if named {
             promise!(sp + c < stack_cap);
             let key = super::Machine::<8>::intern_key(heap, stack[sp + c]);
@@ -1104,11 +1082,8 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
                 let x = &mut *ctx.extra;
                 let obj = resolve_dense_index_object_in(
                     ctx.heap,
-                    x.frames_len,
-                    x.frame_pins,
                     x.dense_obj_addr,
                     x.dense_obj,
-                    arr as u32,
                     addr,
                 );
                 super::vload_bytes_into(ctx.heap, obj, &mut x.vregs[vdest], addr, index)
@@ -1216,8 +1191,6 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
                 sp: ctx.sp,
                 opcode: &opcode,
                 heap: ctx.heap,
-                frames_len: ctx.extra.frames_len,
-                frame_pins: ctx.extra.frame_pins,
                 dense_obj_addr: ctx.extra.dense_obj_addr,
                 dense_obj: ctx.extra.dense_obj,
                 stack_cap: ctx.stack_cap,
@@ -1315,8 +1288,6 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
                 sp: ctx.sp,
                 opcode: &opcode,
                 heap: ctx.heap,
-                frames_len: ctx.extra.frames_len,
-                frame_pins: ctx.extra.frame_pins,
                 dense_obj_addr: ctx.extra.dense_obj_addr,
                 dense_obj: ctx.extra.dense_obj,
                 stack_cap: ctx.stack_cap,
@@ -1339,8 +1310,6 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
             sp: ctx.sp,
             opcode: &opcode,
             heap: ctx.heap,
-            frames_len: ctx.extra.frames_len,
-            frame_pins: ctx.extra.frame_pins,
             dense_obj_addr: ctx.extra.dense_obj_addr,
             dense_obj: ctx.extra.dense_obj,
             stack_cap: ctx.stack_cap,
@@ -1385,7 +1354,7 @@ fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
         // Same ceiling as the giant match: the `exec_dense` jump table then
         // needs no range check.
         #[cfg(not(debug_assertions))]
-        promise!(bc as u8 <= Instruction::Cow as u8);
+        promise!(bc as u8 <= common::Instruction::LAST as u8);
         let at = ctx.ip;
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
@@ -1400,15 +1369,13 @@ fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
     }
 }
 
-pub(super) struct ConsumeAlwaysHotStreakArgs<'a, const S: usize> {
+pub(super) struct ConsumeAlwaysHotStreakArgs<'a> {
     pub stack: &'a mut Stack<Value>,
     pub sp: &'a mut usize,
     pub ip: &'a mut usize,
     pub code: &'a [Byte],
     pub constants: &'a [u64],
     pub heap: &'a mut Heap,
-    pub frames: &'a mut ArrayVec<Frame, S>,
-    pub frame_pins: &'a mut Vec<FramePins>,
     pub dense_obj_addr: &'a mut u64,
     pub dense_obj: &'a mut Option<Object>,
     pub vregs: &'a mut [[u64; common::simd::LANES]; common::simd::NREGS],
@@ -1424,8 +1391,8 @@ pub(super) struct ConsumeAlwaysHotStreakArgs<'a, const S: usize> {
 /// Mandelbrot enters once and stays in the dense loop across the back edge.
 #[inline(never)]
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
-pub(super) fn consume_always_hot_streak<const S: usize>(
-    args: ConsumeAlwaysHotStreakArgs<'_, S>,
+pub(super) fn consume_always_hot_streak(
+    args: ConsumeAlwaysHotStreakArgs<'_>,
 ) -> Option<&'static str> {
     let ConsumeAlwaysHotStreakArgs {
         stack,
@@ -1434,8 +1401,6 @@ pub(super) fn consume_always_hot_streak<const S: usize>(
         code,
         constants,
         heap,
-        frames,
-        frame_pins,
         dense_obj_addr,
         dense_obj,
         vregs,
@@ -1449,10 +1414,7 @@ pub(super) fn consume_always_hot_streak<const S: usize>(
     if !is_always_hot_disc(disc) {
         return None;
     }
-    let frames_len = frames.len();
     let mut extra = HotExtra {
-        frames_len,
-        frame_pins,
         dense_obj_addr,
         dense_obj,
         vregs,
@@ -1536,19 +1498,16 @@ mod tests {
     fn exec_dense_refuses_every_op_outside_always_hot() {
         let mut stack = Stack::<Value>::with_capacity(16);
         let mut heap = Heap::default();
-        let mut frame_pins = Vec::new();
         let mut dense_obj_addr = 0u64;
         let mut dense_obj = None;
         let mut vregs = [[0u64; common::simd::LANES]; common::simd::NREGS];
         let code = [Byte::new(Instruction::HALT)];
-        for disc in 0..=Instruction::Cow as u8 {
+        for disc in 0..=common::Instruction::LAST as u8 {
             let op: Instruction = disc.into();
             if is_always_hot(op) {
                 continue;
             }
             let mut extra = HotExtra {
-                frames_len: 1,
-                frame_pins: &mut frame_pins,
                 dense_obj_addr: &mut dense_obj_addr,
                 dense_obj: &mut dense_obj,
                 vregs: &mut vregs,

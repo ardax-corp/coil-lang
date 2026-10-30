@@ -808,6 +808,8 @@ fn is_int_bin_op(i: Instruction) -> bool {
             | Instruction::GEQ
             | Instruction::EQ
             | Instruction::NEQ
+            | Instruction::IEQ
+            | Instruction::INEQ
             | Instruction::Pow
             | Instruction::BITAND
             | Instruction::BITOR
@@ -828,6 +830,8 @@ fn is_cmp_op(i: Instruction) -> bool {
             | Instruction::GEQ
             | Instruction::EQ
             | Instruction::NEQ
+            | Instruction::IEQ
+            | Instruction::INEQ
             | Instruction::LEF
             | Instruction::LEQF
             | Instruction::GTF
@@ -1005,6 +1009,8 @@ fn swap_binop(op: Instruction) -> Option<Instruction> {
         | Instruction::MUL
         | Instruction::EQ
         | Instruction::NEQ
+        | Instruction::IEQ
+        | Instruction::INEQ
         | Instruction::AND
         | Instruction::OR
         | Instruction::BITAND

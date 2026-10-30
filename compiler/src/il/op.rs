@@ -251,6 +251,8 @@ fn is_plain_bin_instruction(op: Instruction) -> bool {
             | Instruction::GEQ
             | Instruction::EQ
             | Instruction::NEQ
+            | Instruction::IEQ
+            | Instruction::INEQ
             | Instruction::Pow
             | Instruction::BITAND
             | Instruction::BITOR

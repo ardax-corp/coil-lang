@@ -242,6 +242,7 @@
             const_int(0),
             const_int(1000),
             Byte::new(Instruction::StoreIndex),
+            Byte::new(Instruction::POP),
             Byte::new(Instruction::HALT),
         ]);
         assert!(!packed(&vm), "a word that does not fit unpacks");
@@ -852,10 +853,10 @@
         assert_eq!(vm.pop().as_int(), 4);
     }
 
-    /// COI-372: DenseIndex fills `frame_pins` from the array register so the
-    /// second index skips `find_object_by_addr`.
+    /// COI-372: the second index of the same array register hits the
+    /// one-entry dense object cache.
     #[test]
-    fn dense_index_pins_array_register_across_repeated_reads() {
+    fn dense_index_caches_array_register_across_repeated_reads() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
             Byte::new(Instruction::Seek).with_operand_u32(4),
@@ -873,39 +874,7 @@
             Byte::new(Instruction::HALT),
         ]);
         assert_eq!(vm.pop().as_int(), 6);
-        assert_eq!(vm.live_pin_map_count(), 1);
-        let pin = vm.pinned_addr_for_test(0).expect("array slot pinned");
-        assert_ne!(pin, 0);
-        assert_eq!(vm.dense_cache_addr_for_test(), pin);
-    }
-
-    /// #1651: a collection drops a dense index's pin once its register no
-    /// longer holds the array (a clear zeroed it), and keeps one whose
-    /// register still does.
-    #[test]
-    fn collect_drops_dense_index_pin_of_a_zeroed_register() {
-        let mut vm = Machine::<8>::default();
-        vm.run(&[
-            Byte::new(Instruction::Seek).with_operand_u32(6),
-            const_int(5),
-            Byte::new(Instruction::MakeArray).with_operand_u32(1),
-            store_pop(0),
-            const_int(7),
-            Byte::new(Instruction::MakeArray).with_operand_u32(1),
-            store_pop(4),
-            const_int(0),
-            store_pop(1),
-            dense_index(common::dense::HEAP_UNCHECKED, 2, 0, 1),
-            dense_index(common::dense::HEAP_UNCHECKED, 3, 4, 1),
-            const_int(0),
-            store_pop(0),
-            Byte::new(Instruction::HALT),
-        ]);
-        let kept = vm.pinned_addr_for_test(4).expect("second array pinned");
-        assert!(vm.pinned_addr_for_test(0).is_some());
-        vm.gc_collect();
-        assert_eq!(vm.pinned_addr_for_test(0), None, "zeroed register's pin survived a collect");
-        assert_eq!(vm.pinned_addr_for_test(4), Some(kept));
+        assert_ne!(vm.dense_cache_addr_for_test(), 0);
     }
 
     fn dense_array_push(flags: u8, dest: u8, arr: u8, val: u8) -> Byte {
@@ -948,7 +917,7 @@
     }
 
     #[test]
-    fn dense_store_index_reuses_pin_and_writes() {
+    fn dense_store_index_writes_what_dense_index_reads() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
             Byte::new(Instruction::Seek).with_operand_u32(4),
@@ -966,7 +935,6 @@
             Byte::new(Instruction::HALT),
         ]);
         assert_eq!(vm.pop().as_int(), 9);
-        assert_eq!(vm.live_pin_map_count(), 1);
     }
 
     #[test]
@@ -991,7 +959,6 @@
             Byte::new(Instruction::HALT),
         ]);
         assert_eq!(vm.pop().as_int(), 8);
-        assert_eq!(vm.live_pin_map_count(), 1);
     }
 
     #[test]
@@ -1188,7 +1155,14 @@
             0,
         );
         assert!(vm.panicked(), "negative array Index");
+    }
 
+    /// `Index` trusts the type checker that its target is an object; debug
+    /// builds check it.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not an object")]
+    fn index_on_a_non_object_debug_asserts() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
             const_int(42),
@@ -1196,7 +1170,6 @@
             Byte::new(Instruction::Index),
             Byte::new(Instruction::HALT),
         ]);
-        assert!(vm.panicked(), "non-array Index");
     }
 
     /// Docs contract: `StoreIndex` with a bad index panics.
@@ -1214,7 +1187,12 @@
             Byte::new(Instruction::HALT),
         ]);
         assert!(vm.panicked(), "OOB StoreIndex");
+    }
 
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not an object")]
+    fn store_index_on_a_non_object_debug_asserts() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
             const_int(42),
@@ -1223,7 +1201,6 @@
             Byte::new(Instruction::StoreIndex),
             Byte::new(Instruction::HALT),
         ]);
-        assert!(vm.panicked(), "non-array StoreIndex");
     }
 
     /// Empty MakeTuple / MakeArray still allocate a rooted aggregate.
@@ -2319,8 +2296,12 @@
         assert_eq!(s, "42");
     }
 
+    /// A heap-heap `Result::Err` word (`pointer | 1`) is never a match
+    /// scrutinee; debug builds catch codegen that makes it one.
     #[test]
-    fn jump_if_match_does_not_treat_tagged_err_as_enum() {
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not an enum cell")]
+    fn jump_if_match_on_tagged_err_debug_asserts() {
         let mut vm = Machine::<16>::default();
         let strings = vec!["n".to_string()];
         let mut bytecode = vec![
@@ -2335,10 +2316,6 @@
         bytecode.push(Byte::new(Instruction::Panic));
         let constants = [panic_arm as u64];
         vm.run_with_pool(&bytecode, &constants, &strings, 0);
-        assert!(
-            !vm.panicked(),
-            "Result Err (pointer | 1) must not JumpIfMatch as ObjEnum Ok"
-        );
     }
 
     #[test]
@@ -4295,7 +4272,9 @@
     }
 
     #[test]
-    fn jump_if_match_on_non_enum_falls_through() {
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not an enum cell")]
+    fn jump_if_match_on_non_enum_debug_asserts() {
         let mut vm = Machine::<4>::default();
         vm.run_with_pool(
             &[
@@ -4308,8 +4287,6 @@
             &[],
             0,
         );
-        assert_eq!(vm.pop().as_int(), 7);
-        assert_eq!(vm.pop().as_int(), 42);
     }
 
     #[test]
@@ -4330,22 +4307,19 @@
     }
 
     #[test]
-    fn unpack_on_non_enum_discards_scrutinee_without_payload() {
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not an enum cell")]
+    fn unpack_on_non_enum_debug_asserts() {
         let mut vm = Machine::<4>::default();
         vm.run(&[const_int(1), unpack(1), Byte::new(Instruction::HALT)]);
-        assert_eq!(vm.tell(), 0, "non-enum UNPACK should leave stack empty");
     }
 
     #[test]
-    fn unpack_at_on_non_enum_is_noop() {
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not an enum cell")]
+    fn unpack_at_on_non_enum_debug_asserts() {
         let mut vm = Machine::<4>::default();
-        vm.run(&[
-            const_int(5),
-            unpack_at(0, 1),
-            load(0),
-            Byte::new(Instruction::HALT),
-        ]);
-        assert_eq!(vm.pop().as_int(), 5);
+        vm.run(&[const_int(5), unpack_at(0, 1), Byte::new(Instruction::HALT)]);
     }
 
     /// Scratch-area nested records unpack past the live cursor; UnpackAt must
@@ -4422,11 +4396,11 @@
     }
 
     #[test]
-    fn load_field_on_non_enum_pushes_default() {
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not an object")]
+    fn load_field_on_non_object_debug_asserts() {
         let mut vm = Machine::<4>::default();
         vm.run(&[const_int(9), load_field(0), Byte::new(Instruction::HALT)]);
-        assert_eq!(vm.tell(), 1);
-        assert_eq!(vm.pop(), Value::default());
     }
 
     /// MakeFn packing: [7:0]=n_cap [15:8]=n_filled [23:16]=arity [24]=is_rest
