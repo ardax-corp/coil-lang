@@ -17,6 +17,7 @@
 mod builder;
 mod bulk;
 mod byte_scan;
+mod copy_until;
 mod vec_loop;
 mod call_convoy;
 mod cse;
@@ -85,6 +86,7 @@ pub use bool_thread::thread_bool_phis;
 pub use phi_sroa::phi_sroa;
 pub use bulk::bulk_push;
 pub use byte_scan::byte_scan;
+pub use copy_until::copy_until;
 pub use vec_loop::vec_loops;
 pub use promote::promote_fields;
 pub use prefetch::mark_prefetch_scans;

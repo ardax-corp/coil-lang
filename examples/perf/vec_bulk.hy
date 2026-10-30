@@ -1,7 +1,8 @@
 // Counted copy and fill loops over `Vec`: a byte copy and a byte fill of
-// 1 MiB, an int copy of 128 Ki elements, and a copy of a 1 MiB `string`'s
-// bytes. Prints ns per call; the compiler runs each loop as one call
-// (`mir/bulk.rs`).
+// 1 MiB, an int copy of 128 Ki elements, a copy of a 1 MiB `string`'s
+// bytes, and a copy of 1 MiB up to a quote. Prints ns per call; the
+// compiler runs each loop as one call (`mir/bulk.rs`), the last as a
+// byte scan and one call (`mir/copy_until.rs`).
 use clock::mono_nanos;
 use io::{stdout, write};
 use string::{format, from_bytes, to_bytes};
@@ -50,6 +51,20 @@ fn copy_str(string s, int from) -> Vec<byte> {
     return out;
 }
 
+fn copy_until_quote(Vec<byte> src, int from) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = from;
+    while i < src.len() {
+        let c = src[i];
+        if c == "\"" || c == "\\" {
+            break;
+        }
+        out.push(c);
+        i = i + 1;
+    }
+    return out;
+}
+
 fn main() {
     let mib = 1048576;
     let bytes = fill_bytes(97 as byte, mib);
@@ -87,9 +102,18 @@ fn main() {
         k = k + 1;
     }
     let t4 = mono_nanos();
+    let quoted = fill_bytes(97 as byte, mib);
+    quoted.push(34 as byte);
+    k = 0;
+    while k < reps {
+        acc = acc + copy_until_quote(quoted, k % 3).len();
+        k = k + 1;
+    }
+    let t5 = mono_nanos();
     say(format("acc=%i\n", acc));
     say(format("copy bytes 1 MiB  %i ns\n", (t1 - t0) / reps));
     say(format("fill bytes 1 MiB  %i ns\n", (t2 - t1) / reps));
     say(format("copy ints 128 Ki  %i ns\n", (t3 - t2) / reps));
     say(format("copy str 1 MiB    %i ns\n", (t4 - t3) / reps));
+    say(format("copy until 1 MiB  %i ns\n", (t5 - t4) / reps));
 }

@@ -164,6 +164,16 @@ beat Rust/`memcmp` slice equality.
   string source answers `i0`, so the loop runs scalar there and no
   archive bump is needed. Copy 1 MiB of a string 32 000 000 → about
   150 000 (`feature/simd-lanes` step 5).
+- MIR `copy_until` (`compiler/src/mir/copy_until.rs`, dense tier,
+  before `byte_scan`) — a loop that pushes each byte it reads until a
+  byte stops it (`if c == "," || c == "\n" { break; } out.push(c);`)
+  gets a guarded scan and copy in front of it: the test's blocks cloned
+  into a loop that changes nothing but its index (so `byte_scan` takes
+  it), then one `vec_extend_range` of the run, and the loop entered at
+  the stop, where it leaves through its own `break`. The test may only
+  read `src[i]`, compare and mask, and the guard keeps the reads in
+  range (`0 <= i0 < n <= src.len()`). `vec_bulk.hy`: copy 1 MiB up to a
+  quote 41 000 000 → about 300 000 (`feature/simd-lanes` step 6).
 
 Matrix `*` remains matmul; Hadamard `*` on bare tuples/arrays uses
 `packed_vec_arith`.

@@ -61,8 +61,9 @@ For scale, a `VLoop` store map is about 4 ns per element and a
    so `out.push(s[i])` runs as one copy. An older runtime answers the
    start for a source it does not copy, so the loop runs scalar there.
 6. **Copy until a byte.** A loop that scans for a stop set and pushes
-   every other byte becomes `VScan` to the stop, then one
-   `vec_extend_range` of the run, with `i` and `out` as the loop leaves
+   every other byte becomes a scan to the stop (its test cloned into a
+   loop `byte_scan` takes), then one `vec_extend_range` of the run, and
+   the loop entered at the stop, so `i` and `out` are as it leaves
    them.
 7. **Library follow-ups** (their own repos, after the branch lands):
    `bytes::region_eq` in the `break` form so `VScan` takes it;
@@ -82,7 +83,8 @@ do not have these loops), per the hit-bench rule in
 | 2 selects | #2140 | abs 170 → 76 µs, clamp 178 → 72 µs |
 | 3 byte maps | #2142 | ASCII lower case on `Vec<byte>` 279 → 101 µs |
 | 4 map-push | #2143 | `out.push(a[i] * 3 + 1)` 284 → 69 µs, `shift_ascii` shape on `Vec<byte>` 504 → 127 µs |
-| 5 copy from a string | this branch | `out.push(s[i])` over 1 MiB: 32 ms → about 0.15 ms (`vec_bulk.hy`) |
+| 5 copy from a string | #2145 | `out.push(s[i])` over 1 MiB: 32 ms → about 0.15 ms (`vec_bulk.hy`) |
+| 6 copy until a byte | this branch | 1 MiB up to a quote: 41 ms → about 0.3 ms (`vec_bulk.hy`) |
 
 Step 3 also fixed `VLoop` lane loads from a packed `Vec<byte>`, which
 skipped to the block through the element iterator, so the loads were
