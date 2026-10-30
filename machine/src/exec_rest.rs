@@ -1041,13 +1041,9 @@ impl<const S: usize> Machine<S> {
                         &self.vregs[a]
                     };
                     let rhs = if splat
-                        || matches!(
-                            kind,
-                            common::simd::IOTA_I64
-                                | common::simd::IOTA_F64
-                                | common::simd::INEG
-                                | common::simd::FNEG
-                        ) {
+                        || matches!(kind, common::simd::IOTA_I64 | common::simd::IOTA_F64)
+                        || common::simd::is_unary_kind(kind)
+                    {
                         &z
                     } else {
                         promise!(b < common::simd::NREGS);

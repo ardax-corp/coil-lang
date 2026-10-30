@@ -818,6 +818,11 @@ pub mod simd {
     pub const IOTA_F64: u8 = 35;
     pub const INEG: u8 = 36;
     pub const FNEG: u8 = 37;
+    /// Lane casts (archive 6.10): int lanes to float lanes, and float
+    /// lanes to int lanes truncating as `as int` does (NaN is `0`, out of
+    /// range saturates). Neither traps.
+    pub const I2F: u8 = 38;
+    pub const F2I: u8 = 39;
 
     /// Low byte of `VReduce`: fold the lanes into the scalar. `0` is add,
     /// which is what every existing archive emits.
@@ -875,6 +880,12 @@ pub mod simd {
     #[inline]
     pub const fn is_byte_kind(kind: u8) -> bool {
         kind >= M_AND && kind < BS_CMP + 6
+    }
+
+    /// Whether a `VBin` of `kind` reads only its `a` register.
+    #[inline]
+    pub const fn is_unary_kind(kind: u8) -> bool {
+        matches!(kind, INEG | FNEG | I2F | F2I)
     }
 }
 
