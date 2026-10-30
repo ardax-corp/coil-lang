@@ -158,6 +158,12 @@ beat Rust/`memcmp` slice equality.
   release, ns per call (main `435021f` → after): copy 1 MiB of bytes
   17 400 000 → 280 000, fill 1 MiB 7 500 000 → 208 000, copy 128 Ki ints
   2 156 000 → 267 000.
+  `src` may also be a `string` (`out.push(s[i])`, or `s[i] as int`):
+  its read is a block of its own (`string_byte_at` and the branch to its
+  panic), and the call appends the bytes. A runtime that does not copy a
+  string source answers `i0`, so the loop runs scalar there and no
+  archive bump is needed. Copy 1 MiB of a string 32 000 000 → about
+  150 000 (`feature/simd-lanes` step 5).
 
 Matrix `*` remains matmul; Hadamard `*` on bare tuples/arrays uses
 `packed_vec_arith`.

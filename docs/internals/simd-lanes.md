@@ -57,8 +57,9 @@ For scale, a `VLoop` store map is about 4 ns per element and a
    checks `out` is not an array the body reads or the bound's. Covers
    `shift_ascii` and every `out.push(f(a[i]))` with a body steps 1–3
    take.
-5. **Copy from a string.** `vec_extend_range` (or a new id next to it)
-   takes a `string` source, so `out.push(s[i])` runs as one copy.
+5. **Copy from a string.** `vec_extend_range` takes a `string` source,
+   so `out.push(s[i])` runs as one copy. An older runtime answers the
+   start for a source it does not copy, so the loop runs scalar there.
 6. **Copy until a byte.** A loop that scans for a stop set and pushes
    every other byte becomes `VScan` to the stop, then one
    `vec_extend_range` of the run, with `i` and `out` as the loop leaves
@@ -80,7 +81,8 @@ do not have these loops), per the hit-bench rule in
 | 1 lane casts | #2137 | trunc map 172.8 → 38.5 µs, int-to-float map 154.5 → 49.7 µs |
 | 2 selects | #2140 | abs 170 → 76 µs, clamp 178 → 72 µs |
 | 3 byte maps | #2142 | ASCII lower case on `Vec<byte>` 279 → 101 µs |
-| 4 map-push | this branch | `out.push(a[i] * 3 + 1)` 284 → 69 µs, `shift_ascii` shape on `Vec<byte>` 504 → 127 µs |
+| 4 map-push | #2143 | `out.push(a[i] * 3 + 1)` 284 → 69 µs, `shift_ascii` shape on `Vec<byte>` 504 → 127 µs |
+| 5 copy from a string | this branch | `out.push(s[i])` over 1 MiB: 32 ms → about 0.15 ms (`vec_bulk.hy`) |
 
 Step 3 also fixed `VLoop` lane loads from a packed `Vec<byte>`, which
 skipped to the block through the element iterator, so the loads were
