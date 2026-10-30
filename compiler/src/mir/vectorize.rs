@@ -351,10 +351,15 @@ pub(super) fn match_if_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> O
 }
 
 /// `inst` gives a value in every lane without a trap: float arithmetic,
-/// bit ops, compares, casts between int and float, constants and loads
-/// (the vector loop's guard covers every lane it reads).
+/// bit ops, compares, casts between int and float, constants, loads (the
+/// vector loop's guard covers every lane it reads), and `int` `+ - *` on
+/// operands whose ranges keep the result in range (`(c as int) + 32` on a
+/// byte: `as int` masks to `0 ..= 255`).
 fn cannot_trap(func: &MirFunc, inst: &MirInst) -> bool {
     match inst {
+        MirInst::Bin { op: op @ (MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul), ty: MirTy::I64, lhs, rhs, .. } => {
+            matches!((int_range(func, *lhs, 4), int_range(func, *rhs, 4)), (Some(a), Some(b)) if range_of(*op, a, b).is_some())
+        }
         MirInst::Bin { op, ty: MirTy::F64, .. } => matches!(op, MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div),
         MirInst::Bin { op, ty: MirTy::I64 | MirTy::Bool, .. } => matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
         MirInst::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::F64,
@@ -362,6 +367,36 @@ fn cannot_trap(func: &MirFunc, inst: &MirInst) -> bool {
         MirInst::Cmp { .. } | MirInst::Const { .. } | MirInst::Index { .. } => true,
         _ => false,
     }
+}
+
+/// Bounds on an `int` value, from constants and non-negative masks
+/// (`x & 255`) through `+ - *`, looking at most `depth` ops down.
+fn int_range(func: &MirFunc, v: ValueId, depth: u8) -> Option<(i64, i64)> {
+    if depth == 0 {
+        return None;
+    }
+    match def(func, v)? {
+        MirInst::Const { c: MirConst::I64(k), .. } => Some((*k, *k)),
+        MirInst::Bin { op: MirBinOp::BitAnd, ty: MirTy::I64, lhs, rhs, .. } => {
+            let mask = |x: ValueId| as_const_i64(func, x).filter(|&k| k >= 0);
+            mask(*rhs).or_else(|| mask(*lhs)).map(|k| (0, k))
+        }
+        MirInst::Bin { op: op @ (MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul), ty: MirTy::I64, lhs, rhs, .. } => {
+            range_of(*op, int_range(func, *lhs, depth - 1)?, int_range(func, *rhs, depth - 1)?)
+        }
+        _ => None,
+    }
+}
+
+/// `a op b` over the two ranges, `None` when some result would overflow.
+fn range_of(op: MirBinOp, a: (i64, i64), b: (i64, i64)) -> Option<(i64, i64)> {
+    let f = |x: i64, y: i64| match op {
+        MirBinOp::Add => x.checked_add(y),
+        MirBinOp::Sub => x.checked_sub(y),
+        _ => x.checked_mul(y),
+    };
+    let ends = [f(a.0, b.0)?, f(a.0, b.1)?, f(a.1, b.0)?, f(a.1, b.1)?];
+    Some((*ends.iter().min()?, *ends.iter().max()?))
 }
 
 pub(super) struct ReduceLoop {
