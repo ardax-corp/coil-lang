@@ -72,7 +72,8 @@ beat Rust/`memcmp` slice equality.
   function, becomes one `VecLoop` MIR instruction and one `VLoop` op
   (archive 6.2). `vectorize.rs` matches the loop and reads its body as a
   tree: loads `a[i + k]`, splats of invariants, the index, `+ - * /`,
-  negation, an int-to-float cast of an invariant, and `VFma`
+  negation, casts between int and float lanes (`VBin` `I2F` / `F2I`,
+  archive 6.10; a cast of an invariant is done once in front), and `VFma`
   (mul-then-add, two IEEE roundings). A guard in front of the loop checks
   every read and write of lanes `i0 .. n` is in range; `VLoop` runs the
   whole 8-lane blocks with its body words (`VLoad` / `VStore` / `VBin` /

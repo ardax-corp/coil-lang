@@ -5347,3 +5347,66 @@ fn main() {
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     assert!(!vm.panicked());
 }
+
+#[test]
+fn pipeline_vectorizes_lane_casts() {
+    let src = r#"
+fn trunc_map(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] as int) as float;
+        i = i + 1;
+    }
+}
+fn halves(Vec<float> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] as float) * 0.5 + (i as float);
+        i = i + 1;
+    }
+}
+fn int_sum_of(Vec<float> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + (a[i] as int);
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let f: Vec<float> = Vec::new();
+    let o: Vec<float> = Vec::new();
+    let n: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 40 {
+        f.push((k as float) * 1.5 - 20.25);
+        o.push(0.0);
+        n.push(k - 7);
+        k = k + 1;
+    }
+    trunc_map(o, f);
+    if o[0] != -20.0 || o[39] != 38.0 {
+        panic "trunc_map";
+    }
+    halves(o, n);
+    if o[0] != -3.5 || o[39] != 55.0 {
+        panic "halves";
+    }
+    if int_sum_of(f) != 354 {
+        panic "int_sum_of";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile lane casts");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "lane cast checksums");
+    let symbols = p.program_debug().fn_symbols;
+    for name in ["trunc_map", "halves", "int_sum_of"] {
+        assert_vec_loop(fn_ops(&bc, &symbols, name), name);
+    }
+}

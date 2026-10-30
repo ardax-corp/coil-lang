@@ -453,3 +453,111 @@ test("loops that store a map and fold a sum") {
         assert!(double_then_sum(d) == expect);
     }
 }
+
+// Lane casts: `as int` truncates toward zero (NaN is 0, out of range
+// saturates) and `as float` rounds, in every lane as in the scalar loop.
+fn trunc_map(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] as int) as float;
+        i = i + 1;
+    }
+}
+
+fn trunc_map_scalar(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = black_box((a[i] as int) as float);
+        i = i + 1;
+    }
+}
+
+fn to_ints(Vec<int> out, Vec<float> a, float k) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] * k) as int / 3;
+        i = i + 1;
+    }
+}
+
+fn to_ints_scalar(Vec<int> out, Vec<float> a, float k) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = black_box((a[i] * k) as int / 3);
+        i = i + 1;
+    }
+}
+
+fn halves(Vec<float> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] as float) * 0.5 + (i as float);
+        i = i + 1;
+    }
+}
+
+fn int_sum_of(Vec<float> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + (a[i] as int);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn int_sum_of_scalar(Vec<float> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + black_box(a[i] as int);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn same_float(float x, float y) -> bool {
+    return x == y || (x != x && y != y);
+}
+
+test("lane casts between int and float") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65] {
+        let fa = floats(n);
+        let k = 0;
+        while k < n {
+            fa[k] = fa[k] * 3.7 - 9.0;
+            k = k + 1;
+        }
+        if n > 9 {
+            fa[3] = 0.0 / 0.0;
+            fa[5] = 9223372036854776000.0 * 1000.0;
+            fa[6] = -9223372036854776000.0 * 1000.0;
+            fa[7] = -0.75;
+            fa[8] = 1.0 / 0.0;
+        }
+        let x = floats(n);
+        let y = floats(n);
+        trunc_map(x, fa);
+        trunc_map_scalar(y, fa);
+        let ix = ints(n);
+        let iy = ints(n);
+        to_ints(ix, fa, 2.5);
+        to_ints_scalar(iy, fa, 2.5);
+        let i = 0;
+        while i < n {
+            assert!(same_float(x[i], y[i]));
+            assert!(ix[i] == iy[i]);
+            i = i + 1;
+        }
+        let h = floats(n);
+        let src = ints(n);
+        halves(h, src);
+        let j = 0;
+        while j < n {
+            assert!(h[j] == (src[j] as float) * 0.5 + (j as float));
+            j = j + 1;
+        }
+        let fs = floats(n);
+        assert!(int_sum_of(fs) == int_sum_of_scalar(fs));
+    }
+}
