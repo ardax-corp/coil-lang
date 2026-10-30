@@ -193,7 +193,11 @@ pub(super) fn stack_bin_op(op: MirBinOp, ty: MirTy) -> Result<Instruction, Lower
 
 /// The stack opcode for a MIR compare on `ty`.
 pub(super) fn stack_cmp_op(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
+    // Two immediates compare bit for bit: `IEQ` skips `EQ`'s heap checks.
+    let immediate = matches!(ty, MirTy::I64 | MirTy::Bool);
     Ok(match (op, ty.is_float()) {
+        (MirCmpOp::Eq, false) if immediate => Instruction::IEQ,
+        (MirCmpOp::Ne, false) if immediate => Instruction::INEQ,
         (MirCmpOp::Lt, false) => Instruction::LE,
         (MirCmpOp::Le, false) => Instruction::LEQ,
         (MirCmpOp::Gt, false) => Instruction::GT,

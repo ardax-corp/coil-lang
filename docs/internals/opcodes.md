@@ -7,8 +7,19 @@ User code does not name these directly; the compiler emits them.
 pipeline reload); debug builds also verify freshly compiled programs. It
 rejects retired opcodes (tombstones below) and out-of-range jump / call
 targets (including pool-held fused-jump descriptors), constant-pool,
-string-table and static-slot indices. Frame-slot operands and stack height
-remain compiler invariants.
+string-table and static-slot indices, and a direct `CALL` whose return width
+(bit 31) differs from what its callee's frame returns, tail calls followed.
+Frame-slot operands are bounded at load by `common::frame_reserve`. Stack
+height and call arity remain compiler invariants: a dictionary adapter
+passes trailing words its shared entry never reads, so arity varies per
+call site by design.
+
+**Trusted heap operands.** `JumpIfMatch` / `Unpack` / `UnpackAt` read the
+scrutinee's enum cell, and `Index` / `GetField` / `SetField` /
+`StoreIndex` / `ArrayLen` / `LoadField` and their dense forms read their
+object, straight from the word without the slab lookup
+(`Heap::trusted_object`, `enum_at_unchecked`). The type checker proved the
+word is that object; debug builds assert it.
 
 | Opcode | Role |
 |--------|------|
@@ -28,6 +39,7 @@ remain compiler invariants.
 | `CmpJmpt` / `BinSlotImmJmpt` / `LogNotJmpt` / `BinSlotSlotJmpt` / `BinSlotSlotConstJmpt` | Jump-if-true twins of the `*Jmpf` family (same packing; fused invert of `*Jmpf; JMP`) |
 | `IndexUnchecked` / `StoreIndexUnchecked` | Bounds-proofed array access (`hir::bounds` counted loops, `index_facts` sidecar) |
 | `ArrayPin` / `IndexPin*` / `StoreIndexPin*` | Pinned array indexing: `ArrayPin` caches the array in the frame pin table; `IndexPin*` / `StoreIndexPin*` skip per-site `find_object_by_addr`. Layout: [array-pin.md](array-pin.md) |
+| `IEQ` / `INEQ` | `==` / `!=` on two words the compiler typed `int` or `bool`: compare the raw words, no `eq_values` dispatch on the value kind. `EQ` / `NEQ` stay for every other type. Archive **major 6 / minor 8**. |
 | `NEGF` | Float unary negate (IEEE sign-bit flip); replaces `CONST -1; MULF` |
 | `InitTyped` | Allocate a class instance. Operand `[31:16] field_count`, `[15:0] type_id`. Non-zero field count pre-sizes dense slots; `INIT` remains for untyped bags / old archives. Typed field get/set uses `LoadField` / indexed `SetField` (bit 31). |
 | `CALL` (bit 31) | Two-slot return width. Bit 31 set (`Byte::CALL_RET2_BIT`) means the callee leaves two words instead of one boxed word; arity moves to `[30:24]` (0..=127) to make room. Enums use `[payload, tag]`; arity-2 immediate products use `[a, b]` (second on top). Clear (old archives, or any `with_call_packed` caller) means one word — no archive bump. See [limitations.md](limitations.md) two-slot direct CALL/RETURN. |

@@ -1902,6 +1902,25 @@ impl Heap {
         unsafe { Object::from_header(addr) }
     }
 
+    /// [`Self::find_object_by_addr`] for a word the compiler typed as a heap
+    /// object (the target of an index, field or length op). Release builds
+    /// read the header without the slab lookup; debug builds still check
+    /// that a non-zero word is a mapped slot.
+    #[inline(always)]
+    pub(crate) fn trusted_object(&self, addr: u64) -> Option<Object> {
+        #[cfg(debug_assertions)]
+        assert!(
+            addr == 0 || self.slab.contains_slot(addr),
+            "heap operand {addr:#x} is not an object"
+        );
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: a non-zero word typed as a heap object is a live slot
+        // (checked above in debug builds).
+        unsafe { Object::from_header(addr) }
+    }
+
     /// [`Self::find_object_by_addr`] for an enum (`match` / `Unpack`): reads
     /// the header kind once instead of building an [`Object`] to match on.
     #[inline]
@@ -1913,6 +1932,16 @@ impl Heap {
         let header = unsafe { &*(addr as *const GcHeader) };
         // Kind 3 is `Object::Enum` (see `Object::from_header`).
         (header.kind.get() == 3).then(|| unsafe { Gc::from_addr(addr) })
+    }
+
+    /// The enum cell at `addr`, without [`Self::find_enum_by_addr`]'s slab
+    /// lookup.
+    ///
+    /// # Safety
+    /// `addr` must be a live `ObjEnum` slot.
+    #[inline(always)]
+    pub(crate) unsafe fn enum_at_unchecked(&self, addr: u64) -> Gc<ObjEnum> {
+        unsafe { Gc::from_addr(addr) }
     }
 
     /// Classify a raw payload / field word as an object or an immediate.

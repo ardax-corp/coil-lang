@@ -107,6 +107,8 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::GEQ
         | Instruction::EQ
         | Instruction::NEQ
+        | Instruction::IEQ
+        | Instruction::INEQ
         | Instruction::Pow
         | Instruction::BITAND
         | Instruction::BITOR

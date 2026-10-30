@@ -108,10 +108,19 @@ impl Heap {
     pub(super) fn forward_remembered(&self, fwd: &AddrMap) {
         for set in [&REMEMBERED, &QUIET] {
             set.with_borrow_mut(|r| {
+                let mut moved = false;
                 for addr in r.iter_mut() {
                     if let Some(&to) = fwd.get(addr) {
                         *addr = to;
+                        moved = true;
                     }
+                }
+                // A moved copy is unlogged again, so its next write adds
+                // the new address a second time: drop the repeat, or a
+                // compaction loop grows the set by one per cycle.
+                if moved {
+                    r.sort_unstable();
+                    r.dedup();
                 }
             });
         }

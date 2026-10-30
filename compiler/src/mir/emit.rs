@@ -2537,7 +2537,7 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         // `LOAD; JMPF` took two dispatches and left the dense streak.
         if canonical_bool_in(block, cond, 2) {
             out.push(IlOp::BinSlotImm {
-                op: Instruction::NEQ as u8,
+                op: Instruction::INEQ as u8,
                 slot: regs[cond.index()],
                 imm: 0,
                 loc,
@@ -2756,6 +2756,8 @@ fn is_jmpf_cond_op(i: Instruction) -> bool {
             | Instruction::GEQ
             | Instruction::EQ
             | Instruction::NEQ
+            | Instruction::IEQ
+            | Instruction::INEQ
             | Instruction::LEF
             | Instruction::LEQF
             | Instruction::EQF
@@ -3740,7 +3742,7 @@ fn emit_dense_jump_if_match(args: EmitDenseJumpIfMatchArgs<'_>) -> Result<(), Lo
             // None = 0 (tag 0), Some = nonzero pointer (tag 1).
             out.push(IlOp::Const { imm: 0, loc });
             out.push(IlOp::Bin {
-                op: Instruction::EQ,
+                op: Instruction::IEQ,
                 loc,
             });
         }

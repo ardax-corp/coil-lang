@@ -1451,7 +1451,7 @@ pub const GC_REGION_ENTER_ID: u16 = 177;
 pub const GC_REGION_ENTER_NATIVE: &str = "gc_region_enter";
 pub const GC_REGION_EXIT_ID: u16 = 178;
 pub const GC_REGION_EXIT_NATIVE: &str = "gc_region_exit";
-/// `symbol::next_id()` (archive 6.8): the next value of one process-wide
+/// `symbol::next_id()` (archive 6.9): the next value of one process-wide
 /// atomic counter. Its `HOST` effect keeps it from being folded at compile
 /// time, hoisted or removed.
 pub const SYMBOL_NEXT_ID_ID: u16 = 179;

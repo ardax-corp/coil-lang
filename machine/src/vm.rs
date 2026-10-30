@@ -347,21 +347,6 @@ fn pinned_object_in(frame_pins: &[FramePins], frames_len: usize, slot: u32) -> O
 }
 
 #[inline]
-fn pinned_object_matching_in(
-    frame_pins: &[FramePins],
-    frames_len: usize,
-    slot: u32,
-    addr: u64,
-) -> Option<Object> {
-    let obj = pinned_object_in(frame_pins, frames_len, slot)?;
-    if obj.addr() == addr {
-        Some(obj)
-    } else {
-        None
-    }
-}
-
-#[inline]
 fn pin_current_array_in(
     frame_pins: &mut Vec<FramePins>,
     frames_len: usize,
@@ -988,30 +973,21 @@ pub(crate) fn vscan(
     Ok(p)
 }
 
-/// Reuse a cached `Object` while the array address is unchanged (COI-372).
+/// The array, tuple or string a dense index op names. The last one is
+/// cached while the address is unchanged (COI-372); otherwise its header
+/// is read directly, as the compiler only indexes such objects.
 #[inline(always)]
 fn resolve_dense_index_object_in(
     heap: &Heap,
-    frames_len: usize,
-    frame_pins: &mut Vec<FramePins>,
     dense_obj_addr: &mut u64,
     dense_obj: &mut Option<Object>,
-    slot: u32,
     addr: u64,
 ) -> Option<Object> {
     if likely(addr != 0 && addr == *dense_obj_addr) {
         return *dense_obj;
     }
-    if let Some(obj) = pinned_object_matching_in(frame_pins, frames_len, slot, addr) {
-        *dense_obj_addr = addr;
-        *dense_obj = Some(obj);
-        return Some(obj);
-    }
-    let obj = heap.find_object_by_addr(addr)?;
-    // A string too (`s[i]`): a pin is per register, so a loop reading two
-    // strings (`s[i + j] == p[j]`) finds both without a heap lookup.
+    let obj = heap.trusted_object(addr)?;
     if matches!(obj, Object::Array(_) | Object::Tuple(_) | Object::String(_)) {
-        pin_current_array_in(frame_pins, frames_len, slot, obj);
         *dense_obj_addr = addr;
         *dense_obj = Some(obj);
     }
@@ -1971,6 +1947,22 @@ impl<const S: usize> Machine<S> {
             return None;
         }
         heap.find_enum_by_addr(addr)
+    }
+
+    /// The `ObjEnum` a `JumpIfMatch` / `Unpack` / `UnpackAt` scrutinee
+    /// points at. The compiler emits those ops only on boxed enum values,
+    /// which are always an enum cell, so release builds skip the slab
+    /// lookup and read the cell directly; debug builds still check.
+    #[inline(always)]
+    fn trusted_enum(heap: &Heap, addr: u64) -> crate::memory::Gc<crate::memory::ObjEnum> {
+        #[cfg(debug_assertions)]
+        assert!(
+            Self::find_enum_exact(heap, addr).is_some(),
+            "match scrutinee {addr:#x} is not an enum cell"
+        );
+        // SAFETY: the compiler only matches boxed enum values (checked above
+        // in debug builds); a live one is a mapped `ObjEnum` slot.
+        unsafe { heap.enum_at_unchecked(addr) }
     }
 
     fn pop_call_frame(&mut self) -> usize {
@@ -4668,8 +4660,6 @@ impl<const S: usize> Machine<S> {
                         code,
                         constants,
                         heap: &mut self.heap,
-                        frames: &mut self.frames,
-                        frame_pins: &mut self.frame_pins,
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
                         vregs: &mut self.vregs,
@@ -4740,7 +4730,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::Cow as u8);
+            promise!(*bc as u8 <= common::Instruction::LAST as u8);
 
             match bc {
                 Instruction::STORE => {
@@ -5087,8 +5077,6 @@ impl<const S: usize> Machine<S> {
                         sp,
                         opcode,
                         heap: &self.heap,
-                        frames_len: self.frames.len(),
-                        frame_pins: &mut self.frame_pins,
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
                         stack_cap,
@@ -5121,8 +5109,6 @@ impl<const S: usize> Machine<S> {
                         sp,
                         opcode,
                         heap: &self.heap,
-                        frames_len: self.frames.len(),
-                        frame_pins: &mut self.frame_pins,
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
                         stack_cap,

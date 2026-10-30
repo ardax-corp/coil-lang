@@ -151,6 +151,8 @@ impl<const S: usize> Machine<S> {
                 Instruction::GEQ => bin!(GEQ),
                 Instruction::EQ => bin!(EQ),
                 Instruction::NEQ => bin!(NEQ),
+                Instruction::IEQ => bin!(IEQ),
+                Instruction::INEQ => bin!(INEQ),
                 Instruction::ADDF => bin!(ADDF),
                 Instruction::SUBF => bin!(SUBF),
                 Instruction::MULF => bin!(MULF),
@@ -800,7 +802,7 @@ impl<const S: usize> Machine<S> {
                     let index = index_val.as_int();
                     let unchecked = matches!(*bc, Instruction::IndexUnchecked);
                     // Arrays dominate Index traffic (Vec); check Array before Tuple.
-                    let result = match Self::find_object_by_addr(&self.heap, target_addr) {
+                    let result = match self.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Array(gc)) => {
                             gc.as_ref().read_indexed(index, unchecked)
                         }
@@ -864,7 +866,7 @@ impl<const S: usize> Machine<S> {
                     let target_val = self.stack.pop();
                     let key = Self::intern_key(&mut self.heap, name_val);
                     let target_addr = target_val.bits();
-                    let result = match Self::find_object_by_addr(&self.heap, target_addr) {
+                    let result = match self.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Instance(gc)) => match gc.as_ref().get(key) {
                             Some(v) => v,
                             None => {
@@ -883,7 +885,7 @@ impl<const S: usize> Machine<S> {
                         let value = self.stack.pop();
                         let target_addr = target_val.bits();
                         if let Some(crate::memory::Object::Instance(mut gc)) =
-                            Self::find_object_by_addr(&self.heap, target_addr)
+                            self.heap.trusted_object(target_addr)
                         {
                             let idx = slot as usize;
                             promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
@@ -899,7 +901,7 @@ impl<const S: usize> Machine<S> {
                         let key = Self::intern_key(&mut self.heap, name_val);
                         let target_addr = target_val.bits();
                         if let Some(crate::memory::Object::Instance(mut gc)) =
-                            Self::find_object_by_addr(&self.heap, target_addr)
+                            self.heap.trusted_object(target_addr)
                         {
                             let member = Self::value_as_member(&self.heap, value);
                             gc.as_mut().set(key, member);
@@ -917,7 +919,7 @@ impl<const S: usize> Machine<S> {
                     let index = index_val.as_int();
                     let unchecked = matches!(*bc, Instruction::StoreIndexUnchecked);
                     if let Some(crate::memory::Object::Array(mut gc)) =
-                        Self::find_object_by_addr(&self.heap, target_addr)
+                        self.heap.trusted_object(target_addr)
                     {
                         if !gc.as_mut().store_indexed(index, value, unchecked) {
                     return dispatch::RestExit::done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
@@ -1126,7 +1128,7 @@ impl<const S: usize> Machine<S> {
                 Instruction::ArrayLen => {
                     let target_val = self.stack.pop();
                     let target_addr = target_val.bits();
-                    let len = match Self::find_object_by_addr(&self.heap, target_addr) {
+                    let len = match self.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Array(gc)) => gc.as_ref().len(),
                         Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().len(),
                         Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
@@ -1177,47 +1179,44 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.peek().bits();
 
-                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
-
-                    if let Some(enum_ref) = obj_enum {
-                        let enum_ref = enum_ref.as_ref();
-                        if enum_ref.tag == expected_tag {
-                            let pool_idx = (operands & 0xFFFF) as usize;
-                            promise!(pool_idx < constants.len());
-                            let target_offset = opcode.jump_if_match_target(constants);
-                            let _ = self.stack.pop();
-                            let payload: &[Value] = &enum_ref.payload;
-                            // The frame reserve counts the widest payload the program builds.
-                            let wide = payload.len() > self.match_payload_bound;
-                            if unlikely(wide) && !self.reserve_wide_payload(payload.len()) {
-                                return dispatch::RestExit::done(
-                                    self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
-                                );
-                            }
-                            for member in payload {
-                                let value = *member;
-                                self.stack.push(value);
-                            }
-                            if unlikely(wide) {
-                                self.rearm_call_window();
-                            }
-                            charge_step!(target_offset < ip);
-                            set_jump_target(&mut ip, target_offset, code);
-                        } else if ip < code.len()
-                            && *unsafe { code.get_unchecked(ip) }.bytecode() as u8 == Instruction::Unpack as u8
-                            && unsafe { code.get_unchecked(ip) }.operand_u32() as usize == enum_ref.payload.len()
-                            && !self.exec_hooks_attached()
-                        {
-                            // A two-arm match: the other arm's `Unpack` of the
-                            // same scrutinee is next. Run it here on the enum
-                            // this op already resolved, as `Unpack` would. A
-                            // debugger / coverage still sees the `Unpack`.
-                            let _ = self.stack.pop();
-                            for member in enum_ref.payload.iter() {
-                                self.stack.push(*member);
-                            }
-                            ip += 1;
+                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let enum_ref = cell.as_ref();
+                    if enum_ref.tag == expected_tag {
+                        let pool_idx = (operands & 0xFFFF) as usize;
+                        promise!(pool_idx < constants.len());
+                        let target_offset = opcode.jump_if_match_target(constants);
+                        let _ = self.stack.pop();
+                        let payload: &[Value] = &enum_ref.payload;
+                        // The frame reserve counts the widest payload the program builds.
+                        let wide = payload.len() > self.match_payload_bound;
+                        if unlikely(wide) && !self.reserve_wide_payload(payload.len()) {
+                            return dispatch::RestExit::done(
+                                self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
+                            );
                         }
+                        for member in payload {
+                            let value = *member;
+                            self.stack.push(value);
+                        }
+                        if unlikely(wide) {
+                            self.rearm_call_window();
+                        }
+                        charge_step!(target_offset < ip);
+                        set_jump_target(&mut ip, target_offset, code);
+                    } else if ip < code.len()
+                        && *unsafe { code.get_unchecked(ip) }.bytecode() as u8 == Instruction::Unpack as u8
+                        && unsafe { code.get_unchecked(ip) }.operand_u32() as usize == enum_ref.payload.len()
+                        && !self.exec_hooks_attached()
+                    {
+                        // A two-arm match: the other arm's `Unpack` of the
+                        // same scrutinee is next. Run it here on the enum
+                        // this op already resolved, as `Unpack` would. A
+                        // debugger / coverage still sees the `Unpack`.
+                        let _ = self.stack.pop();
+                        for member in enum_ref.payload.iter() {
+                            self.stack.push(*member);
+                        }
+                        ip += 1;
                     }
                 }
                 Instruction::Unpack => {
@@ -1228,16 +1227,13 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().bits();
 
-                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
-
-                    if let Some(enum_ref) = obj_enum {
-                        let enum_ref = enum_ref.as_ref();
-                        promise!(arity == enum_ref.payload.len());
-                        for i in 0..arity {
-                            let member = unsafe { enum_ref.payload.get_unchecked(i) };
-                            let value = *member;
-                            self.stack.push(value);
-                        }
+                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let enum_ref = cell.as_ref();
+                    promise!(arity == enum_ref.payload.len());
+                    for i in 0..arity {
+                        let member = unsafe { enum_ref.payload.get_unchecked(i) };
+                        let value = *member;
+                        self.stack.push(value);
                     }
                 }
                 Instruction::LoadField => {
@@ -1246,7 +1242,7 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().bits();
 
-                    match Self::find_object_by_addr(&self.heap, scrutinee_addr) {
+                    match self.heap.trusted_object(scrutinee_addr) {
                         Some(Object::Enum(enum_ref)) => {
                             let enum_ref = enum_ref.as_ref();
                             promise!(field_index < enum_ref.payload.len());
@@ -1280,20 +1276,17 @@ impl<const S: usize> Machine<S> {
                     promise!(slot < self.stack.tell());
                     let scrutinee_addr = self.stack[slot].bits();
 
-                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
-
-                    if let Some(enum_ref) = obj_enum {
-                        let enum_ref = enum_ref.as_ref();
-                        promise!(arity == enum_ref.payload.len());
-                        for i in 0..arity {
-                            let member = unsafe { enum_ref.payload.get_unchecked(i) };
-                            let value = *member;
-                            self.stack[slot + i] = value;
-                        }
-                        let end = slot + arity;
-                        if self.stack.tell() < end {
-                            self.stack.seek(end);
-                        }
+                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let enum_ref = cell.as_ref();
+                    promise!(arity == enum_ref.payload.len());
+                    for i in 0..arity {
+                        let member = unsafe { enum_ref.payload.get_unchecked(i) };
+                        let value = *member;
+                        self.stack[slot + i] = value;
+                    }
+                    let end = slot + arity;
+                    if self.stack.tell() < end {
+                        self.stack.seek(end);
                     }
                 }
                 // Deprecated STORE discriminant alias (same handler).

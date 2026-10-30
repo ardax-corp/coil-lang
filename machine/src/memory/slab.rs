@@ -269,6 +269,12 @@ impl Drop for ChunkTable {
     }
 }
 
+/// Whether `addr` lies in one of the chunks starting at `starts` (sorted).
+fn in_chunks(starts: &[u64], addr: u64) -> bool {
+    let i = starts.partition_point(|&s| s <= addr);
+    i > 0 && addr < starts[i - 1] + CHUNK as u64
+}
+
 /// Free slots of one `(slot_size, align)` class.
 struct FreeClass {
     key: (u32, u32),
@@ -937,12 +943,13 @@ impl Slab {
     #[cold]
     pub fn take_free_in(&mut self, chunks: &[bool]) -> Vec<NonNull<u8>> {
         let mut parked = Vec::new();
-        let table = &self.chunks;
+        let starts = self.chunk_starts(chunks);
+        if starts.is_empty() {
+            return parked;
+        }
         for class in &mut self.free {
             class.slots.retain(|p| {
-                let inside = table
-                    .position(p.as_ptr() as u64)
-                    .is_some_and(|i| chunks.get(i).copied().unwrap_or(false));
+                let inside = in_chunks(&starts, p.as_ptr() as u64);
                 if inside {
                     parked.push(*p);
                 }
@@ -978,17 +985,26 @@ impl Slab {
                 None => self.released.push((key, vec![i])),
             }
         }
-        let table = &self.chunks;
-        let mask = &self.released_mask;
+        let starts = self.chunk_starts(emptied);
         for class in &mut self.free {
-            class.slots.retain(|p| {
-                table
-                    .position(p.as_ptr() as u64)
-                    .is_none_or(|i| !mask.get(i).copied().unwrap_or(false))
-            });
+            class.slots.retain(|p| !in_chunks(&starts, p.as_ptr() as u64));
             class.low_water = class.low_water.min(class.slots.len());
         }
         released_bytes
+    }
+
+    /// Start addresses of the chunks flagged in `chunks`, sorted. A free
+    /// slot scan tests these few ranges instead of looking every slot's
+    /// chunk up in the table.
+    fn chunk_starts(&self, chunks: &[bool]) -> Vec<u64> {
+        let mut starts: Vec<u64> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .filter_map(|(i, _)| self.chunks.get(i).map(|c| c.ptr as u64))
+            .collect();
+        starts.sort_unstable();
+        starts
     }
 
     /// Bytes of chunks whose pages were given back and not yet reused.
