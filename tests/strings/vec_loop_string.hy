@@ -60,7 +60,8 @@ fn codes_scalar(string s, int from, int to) -> Vec<int> {
 fn pair_sums(string s) -> Vec<int> {
     let out: Vec<int> = Vec::new();
     let i = 0;
-    while i < s.len() - 1 {
+    let n = s.len() - 1;
+    while i < n {
         out.push((s[i] as int) + (s[i + 1] as int));
         i = i + 1;
     }
@@ -70,7 +71,8 @@ fn pair_sums(string s) -> Vec<int> {
 fn pair_sums_scalar(string s) -> Vec<int> {
     let out: Vec<int> = Vec::new();
     let i = 0;
-    while i < s.len() - 1 {
+    let n = s.len() - 1;
+    while i < n {
         out.push((black_box(s[i]) as int) + (s[i + 1] as int));
         i = i + 1;
     }

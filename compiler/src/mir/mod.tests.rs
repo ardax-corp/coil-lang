@@ -5636,7 +5636,8 @@ fn codes(string s) -> Vec<int> {
 fn pair_sums(string s) -> Vec<int> {
     let out: Vec<int> = Vec::new();
     let i = 0;
-    while i < s.len() - 1 {
+    let n = s.len() - 1;
+    while i < n {
         out.push((s[i] as int) + (s[i + 1] as int));
         i = i + 1;
     }
