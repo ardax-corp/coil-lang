@@ -9612,7 +9612,7 @@ fn ground_fun(ty: &Ty) -> bool {
         // A `Vec`, array or tuple of ground functions holds their closure
         // words (`Vec<unit -> string>`, #2136).
         t @ Ty::App(..) if crate::typechecking::ty::vec_element_ty(t).is_some() => {
-            crate::typechecking::ty::vec_element_ty(t).is_some_and(|e| ground_fun(e))
+            crate::typechecking::ty::vec_element_ty(t).is_some_and(ground_fun)
         }
         Ty::Array { element, .. } => ground_fun(element),
         Ty::Tuple(items) => items.iter().all(ground) && items.iter().any(ground_fun),
