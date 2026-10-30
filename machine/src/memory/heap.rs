@@ -5694,6 +5694,39 @@ mod tests {
         assert_eq!(heap.weaks, vec![live_weak.addr()]);
     }
 
+    /// One `drop` type does not stop early freeing of other types' objects;
+    /// an object of a `drop` type, or one reaching it, is left to the
+    /// collector, which runs the `drop`.
+    #[test]
+    fn early_free_is_per_drop_type() {
+        let mut heap = Heap::default();
+        heap.register_finalizer_type(7);
+        let keep = |_: u64| false;
+        let (plain, _) = heap.alloc(ObjInstance::with_type_id_and_fields(8, 1), Object::Instance);
+        assert_eq!(heap.free_early(Value::from(plain.addr()), false, false, &keep), 1);
+        assert!(heap.find_object_by_addr(plain.addr()).is_none());
+
+        let (tagged, tagged_gc) = heap.alloc(ObjEnum::new(1, EnumPayload::one(Value::from(1i64))), Object::Enum);
+        tagged_gc.payload_mut().type_id = 9;
+        assert_eq!(heap.free_early(Value::from(tagged.addr()), true, false, &keep), 1);
+
+        let (dropped, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
+        assert_eq!(heap.free_early(Value::from(dropped.addr()), true, false, &keep), 0);
+        assert!(heap.find_object_by_addr(dropped.addr()).is_some());
+
+        // A parent reaching a `drop` object keeps both: the `drop` may read
+        // what the parent shares with it.
+        let (shared, _) = heap.alloc(ObjString::from("shared"), Object::String);
+        let (child, child_gc) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(shared.addr()))), Object::Enum);
+        child_gc.payload_mut().type_id = 7;
+        heap.note_enum_type(child, 7);
+        let (parent, _) = heap.alloc(ObjArray::new(vec![Value::from(shared.addr()), Value::from(child.addr())]), Object::Array);
+        assert_eq!(heap.free_early(Value::from(parent.addr()), true, false, &keep), 0);
+        for obj in [parent, child, shared] {
+            assert!(heap.find_object_by_addr(obj.addr()).is_some());
+        }
+    }
+
     /// Objects of a `drop` type are listed from their allocation (or from
     /// the registration, for ones made before it) until they are finalized.
     #[test]
