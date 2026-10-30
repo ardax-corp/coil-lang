@@ -117,6 +117,7 @@ pub fn reference_url(module: &str) -> String {
         "string" => "references/string.md",
         "thread" => "manual/tutorial/11-threads.md",
         "env" => "references/env.md",
+        "process" => "references/process.md",
         "gc" => "references/gc.md",
         "ffi" | "ffi::types" => "references/ffi.md",
         _ => "references/modules.md",

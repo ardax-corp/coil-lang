@@ -22,6 +22,7 @@ impl CapViolation {
     fn shown(&self) -> String {
         match self.native {
             "env_exit" => "`env::exit`".into(),
+            "process_spawn" => "running a program (`process`)".into(),
             "stream_attach" => "`Stream.attach`".into(),
             "open" => "`io::open`".into(),
             other => {
@@ -34,7 +35,9 @@ impl CapViolation {
     }
 
     pub fn message(&self) -> Message {
-        let code = if self.needed.contains(Caps::EXIT) {
+        let code = if self.needed.contains(Caps::EXEC) {
+            ErrorCode::HostExecDenied
+        } else if self.needed.contains(Caps::EXIT) {
             ErrorCode::HostExitDenied
         } else if self.needed.contains(Caps::ATTACH) {
             ErrorCode::HostAttachDenied

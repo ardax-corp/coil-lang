@@ -60,6 +60,9 @@ pub const SYMBOL_MODULE: &str = "symbol";
 /// Not meant for direct use: the `task` module wraps them.
 pub const PRELUDE_TASK_MODULE: &str = "prelude::task";
 
+/// Child-process natives behind the embedded `process` module.
+pub const PRELUDE_PROCESS_MODULE: &str = "prelude::process";
+
 /// Which userland FFI builtin a virtual export names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FfiBuiltin {
@@ -936,6 +939,21 @@ impl VirtualModules {
                 ("task_cond_new", "task_cond_new"),
                 ("task_cond_wait", "task_cond_wait"),
                 ("task_cond_notify", "task_cond_notify"),
+            ]),
+        );
+
+        modules.insert(
+            PRELUDE_PROCESS_MODULE,
+            host_exports(&[
+                ("process_spawn", common::PROCESS_SPAWN_NATIVE),
+                ("process_take_pipe", common::PROCESS_TAKE_PIPE_NATIVE),
+                ("process_wait", common::PROCESS_WAIT_NATIVE),
+                ("process_try_wait", common::PROCESS_TRY_WAIT_NATIVE),
+                ("process_output", common::PROCESS_OUTPUT_NATIVE),
+                ("process_kill", common::PROCESS_KILL_NATIVE),
+                ("process_signal", common::PROCESS_SIGNAL_NATIVE),
+                ("process_pid", common::PROCESS_PID_NATIVE),
+                ("process_release", common::PROCESS_RELEASE_NATIVE),
             ]),
         );
 

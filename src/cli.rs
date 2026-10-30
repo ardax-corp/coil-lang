@@ -114,7 +114,7 @@ Program arguments follow `--`: `coil FILE -- a b` and `coil run X.hyc -- a b` ru
 with `env::args()` == [FILE, a, b]; coil's own flags are never visible to the program.\n\
 Default diagnostics: pretty reports on stderr.\n\
 `--root DIR` is repeatable extra `use`/`mod` search (default is `src` under cwd).\n\
-Host grants (`--allow-attach`, `--allow-exit`, `--allow-ffi-exec`,\n\
+Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
 `--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck.\n\
 `coil run out.hyc` and coil-embed do\n\
 not re-apply allow flags; if the bytecode has the op, it runs. `--ffi-search-path` is\n\
@@ -1316,6 +1316,7 @@ mod tests {
             "run",
             "out.hyc",
             "--allow-attach",
+            "--allow-exec",
             "--allow-exit",
             "--allow-ffi-exec",
             "--allow-dload",
@@ -1327,6 +1328,7 @@ mod tests {
         ]))
         .unwrap();
         assert!(cli.host_grants.allow_attach);
+        assert!(cli.host_grants.allow_exec);
         assert!(cli.host_grants.allow_exit);
         assert!(cli.host_grants.allow_ffi_exec);
         assert_eq!(

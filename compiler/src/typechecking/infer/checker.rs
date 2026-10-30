@@ -1264,7 +1264,7 @@ impl Checker {
                 ("is_symlink".into(), boolean()),
                 ("modified_unix".into(), int()),
             ]),
-            io_err,
+            io_err.clone(),
         );
 
         let res_string_env = result_app_ty(string(), env_err.clone());
@@ -1309,6 +1309,28 @@ impl Checker {
             "tty_leave_raw" => fun(&[stream_ty()], res_unit_tty),
             "tty_read_timeout" => fun(&[stream_ty(), vec_app_ty(byte()), int()], res_read_tty),
             "tty_resized" => fun(&[], boolean()),
+
+            "process_spawn" => fun(
+                &[
+                    string(),
+                    vec_app_ty(string()),
+                    vec_app_ty(string()),
+                    vec_app_ty(string()),
+                    string(),
+                    int(),
+                ],
+                result_app_ty(int(), io_err.clone()),
+            ),
+            "process_take_pipe" => fun(&[int(), int()], option_app_ty(stream_ty())),
+            "process_wait" | "process_pid" => fun(&[int()], result_app_ty(int(), io_err.clone())),
+            "process_try_wait" => fun(&[int()], result_app_ty(option_app_ty(int()), io_err.clone())),
+            "process_output" => fun(
+                &[int()],
+                result_app_ty(tuple_ty(vec![int(), string(), string()]), io_err.clone()),
+            ),
+            "process_kill" => fun(&[int()], res_unit_io.clone()),
+            "process_signal" => fun(&[int(), int()], res_unit_io.clone()),
+            "process_release" => fun(&[int()], unit_ty()),
 
             "task_scope_open" => fun(&[], int()),
             "task_scope_close" | "task_join" => fun(&[int()], int()),

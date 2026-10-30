@@ -578,6 +578,9 @@ fn merge_launch_grants(cli: &HostGrants, args: &Value) -> HostGrants {
     if args.get("allowExit").and_then(|v| v.as_bool()) == Some(true) {
         grants.allow_exit = true;
     }
+    if args.get("allowExec").and_then(|v| v.as_bool()) == Some(true) {
+        grants.allow_exec = true;
+    }
     if args.get("allowFfiExec").and_then(|v| v.as_bool()) == Some(true) {
         grants.allow_ffi_exec = true;
     }
