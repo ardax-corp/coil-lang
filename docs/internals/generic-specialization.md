@@ -67,6 +67,36 @@ their own layout and bounds resolve statically.
 Tests: `perf_metrics::foreign_method_clone_is_specialized`,
 `perf_metrics::foreign_fn_clone_is_specialized`.
 
+## How many clones
+
+A ground call clones, at any number of types, with two exceptions that
+take the shared body instead (warning E0804):
+
+- **Polymorphic recursion.** Each clone carries the functions on its
+  chain of clones (the clone whose body asked for it, that clone's, …). A
+  call to one of them at new types (`f<T>` calling `g<(T, int)>` calling
+  `f<((T, int), int)>`, or `Nest<T>::depth` calling
+  `Nest<Nest<T>>::depth`) would grow without end, so it keeps the shared
+  body. Chains are no longer than the number of generic functions, so
+  planning terminates. Free functions: `collect_transitive`
+  (`monomorphize.rs`); instance and foreign clones: `InstClone::chain`,
+  `Compiler::inst_clone_recursive`. A recursive call at types another
+  path clones anyway calls that clone.
+- **Budget.** `--clone-budget N` (default 4096,
+  `monomorphize::MAX_TOTAL_SPECIALIZATIONS`) bounds one module's plan and,
+  separately, a program's instance and foreign clones, against fan-out
+  through many functions at distinct types. Tests that need the shared
+  body set it low (`// @flags --clone-budget 8`).
+
+Until 2026-10 these were counts (8 clones per function or method, 64 per
+module, 256 instance clones per program), which real code did not reach
+except coil-tui's component methods, and which were the only thing that
+stopped polymorphic recursion. With the counts raised to 64/1024 the
+examples, `examples/perf`, spool and coil-http compiled to byte-identical
+archives; a file calling three generics at 60 types each compiled 45%
+slower into a 22% larger archive; and two mutually recursive generics
+took 1.7 s and 346 MB to compile (without the counts, forever).
+
 ## Measurements
 
 2026-10-17, one run each, `--auto-par off`, `vm_profile` builds (counting

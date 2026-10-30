@@ -1001,6 +1001,9 @@ pub(crate) struct InstClone {
     src: String,
     lookup: Vec<Ty>,
     name: String,
+    /// The clone sources on its chain of clones, its own last: the clone
+    /// whose body asked for it, that clone's, and so on.
+    chain: Vec<String>,
 }
 
 /// A function's cleanup pad, before label resolution.

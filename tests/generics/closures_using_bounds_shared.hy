@@ -1,5 +1,6 @@
 // A closure in a bounded generic function's shared body (past the clone
-// cap, E0804) reads the bound's dictionary it captured (#1526).
+// budget, E0804) reads the bound's dictionary it captured (#1526).
+// @flags --clone-budget 8
 use tests::assert;
 use string::format;
 

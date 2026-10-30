@@ -1,8 +1,9 @@
-// A shared generic body (past the clone cap, E0804) that takes its type
+// A shared generic body (past the clone budget, E0804) that takes its type
 // parameter bare and returns it inside an `Option`, a `Result` or a tuple
 // holds the boxed value there: the call reads each such item back
 // unboxed, so a scalar `T` is its own value, not the box's address
 // (#1549).
+// @flags --clone-budget 8
 use tests::assert;
 
 class A {

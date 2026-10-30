@@ -1,8 +1,9 @@
 // A closure a generic function's shared body returns (past the clone
-// cap, E0804) is called at the call's ground type: its type parameter
+// budget, E0804) is called at the call's ground type: its type parameter
 // arguments boxed and its type parameter result unboxed on the way, a
 // niche `Option` included, through a function parameter, a `let` and in
 // place (#1532).
+// @flags --clone-budget 8
 use tests::assert;
 use string::format;
 

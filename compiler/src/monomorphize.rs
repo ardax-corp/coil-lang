@@ -4,7 +4,7 @@
 //! are safe and small enough to specialize; `Compiler` owns the bytecode
 //! emission for each accepted specialization.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use parser::{
     SimpleSpan,
@@ -14,8 +14,12 @@ use parser::{
 use crate::typechecking::{Checker, DefId, Ty};
 use crate::typechecking::subst::apply_ty_prune;
 
-pub const MAX_SPECIALIZATIONS_PER_FN: usize = 8;
-pub const MAX_TOTAL_SPECIALIZATIONS: usize = 64;
+/// Default backstop on the clones one module's plan (and, separately, a
+/// program's instance and foreign clones) make: `--clone-budget`. Real code
+/// stays far below it; what reaches it is fan-out through many generic
+/// functions at distinct types. Unbounded growth is cut earlier by the
+/// recursion guard in [`collect_transitive`].
+pub const MAX_TOTAL_SPECIALIZATIONS: usize = 4096;
 
 /// Interned type identity for monomorphize keys (not `Ty::to_string()`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -113,7 +117,17 @@ pub struct MonoRetarget {
 pub struct MonoCapHit {
     pub call_span: parser::SimpleSpan,
     pub fn_name: String,
-    pub per_fn: bool,
+    pub reason: MonoCapReason,
+}
+
+/// Why a ground call takes the shared generic body (E0804).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonoCapReason {
+    /// The clone would repeat a function already on its own chain of clones
+    /// at other types: polymorphic recursion, whose types grow without end.
+    Recursive,
+    /// The clone budget (`--clone-budget`, [`MAX_TOTAL_SPECIALIZATIONS`]) reached.
+    Budget,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -199,6 +213,9 @@ struct MonoCandidate {
     /// A call through a `let g = wrap;` alias, which has no shared-body
     /// fallback past the caps (#916).
     value: bool,
+    /// Found in a clone whose chain of clones already holds this function
+    /// at other types (polymorphic recursion): no clone of its own.
+    recursive: bool,
 }
 
 /// Explicit monomorphize pass: after check, before emit.
@@ -219,9 +236,10 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
 
     let mut candidates = Vec::new();
     collect_candidates(ast, checker, &|e| ground_ty(checker, e), &sigs, &mut intern, &mut candidates);
-    collect_transitive(ast, checker, &sigs, &mut intern, &mut candidates);
+    let budget = checker.host_grants().clone_budget();
+    collect_transitive(ast, checker, &sigs, &mut intern, &mut candidates, budget);
 
-    let (specializations, retargets, cap_hits) = apply_caps(candidates);
+    let (specializations, retargets, cap_hits) = apply_caps(candidates, budget);
     MonoPlan {
         intern,
         specializations,
@@ -235,22 +253,29 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
 /// ground at the clone's type arguments (`fn twice<T>(T x) { wrap(x) }`
 /// planned at `int` needs `wrap<int>`, #915): a clone calling the shared
 /// body instead would hand back an `Option` around a boxed `T`.
+///
+/// Each clone carries the functions on its chain of clones. A call to one of
+/// them at new types is polymorphic recursion (`f<T>` calling `g<(T, int)>`
+/// calling `f<((T, int), int)>`), whose types grow without end: it is marked
+/// `recursive` and keeps the shared body, so the walk is bounded by the
+/// number of generic functions along any chain.
 fn collect_transitive(
     ast: &Output,
     checker: &Checker,
     sigs: &HashMap<String, GenericFnSig>,
     intern: &mut TyInterner,
     candidates: &mut Vec<MonoCandidate>,
+    budget: usize,
 ) {
     let mut seen: BTreeSet<MonoKey> = BTreeSet::new();
     let mut work = Vec::new();
     for c in candidates.iter() {
         if seen.insert(c.specialization.key.clone()) {
-            work.push(c.specialization.clone());
+            work.push((c.specialization.clone(), vec![c.specialization.key.def_id]));
         }
     }
-    while let Some(spec) = work.pop() {
-        if seen.len() > MAX_TOTAL_SPECIALIZATIONS {
+    while let Some((spec, chain)) = work.pop() {
+        if seen.len() > budget {
             break;
         }
         let Some(sig) = sigs.get(&spec.fn_name) else {
@@ -286,9 +311,17 @@ fn collect_transitive(
         with_fn_body(ast, &spec.fn_name, &mut |body| {
             collect_candidates(body, checker, &ty_of, sigs, intern, &mut found)
         });
-        for c in found {
-            if seen.insert(c.specialization.key.clone()) {
-                work.push(c.specialization.clone());
+        for mut c in found {
+            let key = &c.specialization.key;
+            if !seen.contains(key) {
+                if chain.contains(&key.def_id) {
+                    c.recursive = true;
+                } else {
+                    seen.insert(key.clone());
+                    let mut next = chain.clone();
+                    next.push(key.def_id);
+                    work.push((c.specialization.clone(), next));
+                }
             }
             candidates.push(c);
         }
@@ -433,6 +466,7 @@ fn collect_candidates(
                 span: node.0,
                 specialization,
                 value: sig.alias,
+                recursive: false,
             });
         }
         // A call in callee position (`maker(4)()`, #1533) is a call too.
@@ -824,18 +858,21 @@ fn contains_var(ty: &Ty) -> bool {
 
 fn apply_caps(
     candidates: Vec<MonoCandidate>,
+    budget: usize,
 ) -> (
     Vec<MonoSpecialization>,
     Vec<MonoRetarget>,
     Vec<MonoCapHit>,
 ) {
     let mut seen = BTreeSet::new();
-    let mut per_fn: BTreeMap<DefId, usize> = BTreeMap::new();
     let mut specializations = Vec::new();
     let mut retargets = Vec::new();
     let mut cap_hits = Vec::new();
 
-    for candidate in candidates {
+    // A recursive call whose types another path clones anyway calls that
+    // clone, so recursive candidates go last.
+    let (plain, recursive): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| !c.recursive);
+    for candidate in plain.into_iter().chain(recursive) {
         let key = candidate.specialization.key.clone();
         if seen.contains(&key) {
             retargets.push(MonoRetarget {
@@ -845,19 +882,24 @@ fn apply_caps(
             continue;
         }
 
-        let count = per_fn.entry(key.def_id).or_default();
-        let per_fn_hit = *count >= MAX_SPECIALIZATIONS_PER_FN;
-        let total_hit = specializations.len() >= MAX_TOTAL_SPECIALIZATIONS;
-        if (per_fn_hit || total_hit) && !candidate.value {
+        let reason = if candidate.recursive {
+            Some(MonoCapReason::Recursive)
+        } else if specializations.len() >= budget {
+            Some(MonoCapReason::Budget)
+        } else {
+            None
+        };
+        if let Some(reason) = reason
+            && !candidate.value
+        {
             cap_hits.push(MonoCapHit {
                 call_span: candidate.span,
                 fn_name: candidate.specialization.fn_name.clone(),
-                per_fn: per_fn_hit,
+                reason,
             });
             continue;
         }
 
-        *count += 1;
         seen.insert(key.clone());
         specializations.push(candidate.specialization.clone());
         retargets.push(MonoRetarget {
@@ -1403,9 +1445,34 @@ mod tests {
         assert!(plan.specializations.is_empty());
     }
 
+    #[test]
+    fn plans_one_clone_per_ground_type_past_eight() {
+        let classes: String = (0..20).map(|i| format!("class C{i} {{ pub v: int, }} ")).collect();
+        let calls: String = (0..20).map(|i| format!("id(new C{i}({i})); ")).collect();
+        let plan = plan(&format!("{classes} fn id<T>(T x) -> T {{ return x; }} fn main() {{ {calls} }}"));
+        assert_eq!(plan.specializations.len(), 20, "{plan:?}");
+        assert!(plan.cap_hits.is_empty(), "{:?}", plan.cap_hits);
+    }
+
+    #[test]
+    fn mutual_polymorphic_recursion_stops_at_the_first_repeat() {
+        // `f<int>` -> `g<(int, int)>` -> `f<((int, int), int)>` -> ... grows
+        // without end; the repeat of `f` on its own chain takes the shared body.
+        let plan = plan(
+            "fn f<T>(T x, int n) -> int { if n == 0 { return 0; } return 1 + g((x, 1), n - 1); } \
+             fn g<T>(T x, int n) -> int { if n == 0 { return 0; } return 1 + f((x, 2), n - 1); } \
+             fn main() { f(1, 20); }",
+        );
+        let names: Vec<_> = plan.specializations.iter().map(|s| s.fn_name.as_str()).collect();
+        assert_eq!(names, ["f", "g"], "{plan:?}");
+        assert_eq!(plan.cap_hits.len(), 1, "{:?}", plan.cap_hits);
+        assert_eq!(plan.cap_hits[0].fn_name, "f");
+    }
+
     fn dummy_candidate(i: usize, def: u32, fn_name: &str) -> MonoCandidate {
         MonoCandidate {
             value: false,
+            recursive: false,
             span: SimpleSpan::from(i..i + 1),
             specialization: MonoSpecialization {
                 key: MonoKey {
@@ -1419,16 +1486,31 @@ mod tests {
     }
 
     #[test]
-    fn per_function_cap_limits_specializations() {
-        let candidates = (0..(MAX_SPECIALIZATIONS_PER_FN + 2))
-            .map(|i| dummy_candidate(i, 1, "f"))
-            .collect();
+    fn one_function_has_no_count_cap() {
+        let candidates = (0..100).map(|i| dummy_candidate(i, 1, "f")).collect();
 
-        let (specializations, retargets, cap_hits) = apply_caps(candidates);
-        assert_eq!(specializations.len(), MAX_SPECIALIZATIONS_PER_FN);
-        assert_eq!(retargets.len(), MAX_SPECIALIZATIONS_PER_FN);
-        assert_eq!(cap_hits.len(), 2);
-        assert!(cap_hits.iter().all(|h| h.per_fn));
+        let (specializations, retargets, cap_hits) = apply_caps(candidates, MAX_TOTAL_SPECIALIZATIONS);
+        assert_eq!(specializations.len(), 100);
+        assert_eq!(retargets.len(), 100);
+        assert!(cap_hits.is_empty());
+    }
+
+    #[test]
+    fn recursive_candidate_calls_a_clone_another_path_made() {
+        let mut rec = dummy_candidate(1, 1, "f");
+        rec.recursive = true;
+        let fresh = {
+            let mut c = dummy_candidate(2, 1, "f");
+            c.recursive = true;
+            c
+        };
+        let candidates = vec![rec, dummy_candidate(1, 1, "f"), fresh];
+
+        let (specializations, retargets, cap_hits) = apply_caps(candidates, MAX_TOTAL_SPECIALIZATIONS);
+        assert_eq!(specializations.len(), 1);
+        assert_eq!(retargets.len(), 2);
+        assert_eq!(cap_hits.len(), 1);
+        assert_eq!(cap_hits[0].reason, MonoCapReason::Recursive);
     }
 
     #[test]
@@ -1437,10 +1519,10 @@ mod tests {
             .map(|i| dummy_candidate(i, i as u32 + 1, &format!("f{i}")))
             .collect();
 
-        let (specializations, retargets, cap_hits) = apply_caps(candidates);
+        let (specializations, retargets, cap_hits) = apply_caps(candidates, MAX_TOTAL_SPECIALIZATIONS);
         assert_eq!(specializations.len(), MAX_TOTAL_SPECIALIZATIONS);
         assert_eq!(retargets.len(), MAX_TOTAL_SPECIALIZATIONS);
         assert_eq!(cap_hits.len(), 2);
-        assert!(cap_hits.iter().all(|h| !h.per_fn));
+        assert!(cap_hits.iter().all(|h| h.reason == MonoCapReason::Budget));
     }
 }
