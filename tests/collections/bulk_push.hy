@@ -132,6 +132,57 @@ test("fill ints and strings") {
     assert!(fill_strings("x", 0).len() == 0);
 }
 
+// `out.push(s[i])` from a `string`: its bytes in one copy.
+fn copy_str(string s, Vec<byte> out, int from, int to) -> int {
+    let i = from;
+    while i < to {
+        out.push(s[i]);
+        i = i + 1;
+    }
+    return i;
+}
+
+fn copy_str_all(string s, Vec<int> out) {
+    let i = 0;
+    while i < s.len() {
+        out.push(s[i] as int);
+        i = i + 1;
+    }
+}
+
+fn copy_str_scalar(string s, Vec<byte> out, int from, int to) {
+    let i = from;
+    while i < to {
+        out.push(black_box(s[i]));
+        i = i + 1;
+    }
+}
+
+test("copy a string range") {
+    let s = "héllo, wörld; the quick brown fox";
+    for from in [0, 1, 5, 20] {
+        for to in [from, from + 1, from + 9, s.len()] {
+            let x = to_bytes("ab");
+            let y = to_bytes("ab");
+            assert!(copy_str(s, x, from, to) == to);
+            copy_str_scalar(s, y, from, to);
+            assert!(same_bytes(x, y));
+        }
+    }
+    // Onto an int array, every byte as its value.
+    let w: Vec<int> = [-1];
+    copy_str_all("aé", w);
+    assert!(w.len() == 4 && w[0] == -1 && w[1] == 97 && w[2] == 195 && w[3] == 169);
+}
+
+fn copy_str_past_end() -> int {
+    return copy_str("abcdef", to_bytes(""), 2, 9);
+}
+
+fn copy_str_before_start() -> int {
+    return copy_str("abcdef", to_bytes(""), -1, 3);
+}
+
 fn copy_past_end() -> int {
     let out = to_bytes("");
     let n = copy_bytes(to_bytes("abcdef"), out, 2, 9);
@@ -157,4 +208,6 @@ fn panics(() -> int f) -> bool {
 test("a read out of range still panics") {
     assert!(panics(copy_past_end));
     assert!(panics(copy_before_start));
+    assert!(panics(copy_str_past_end));
+    assert!(panics(copy_str_before_start));
 }

@@ -113,8 +113,10 @@ pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
 
 /// `vec_extend_range(dst, src, from, to) -> int`: append `src[from..to]`
 /// to `dst` (a counted copy loop the compiler rewrote, which checked
-/// `0 <= from < to <= src.len()`) and return `to`. The same array on both
-/// sides appends nothing and returns `from`: the loop then runs scalar.
+/// `0 <= from < to <= src.len()`) and return `to`. `src` is an array or
+/// a `string`, whose bytes are appended. The same array on both sides,
+/// or a source this runtime does not copy, appends nothing and returns
+/// `from`: the loop then runs scalar.
 pub fn host_vec_extend_range(heap: &mut Heap, args: &[Value]) -> Value {
     let arg = |i: usize| args.get(i).copied().unwrap_or(Value::from(0i64));
     let (dst, src) = (arg(0).bits(), arg(1).bits());
@@ -122,18 +124,20 @@ pub fn host_vec_extend_range(heap: &mut Heap, args: &[Value]) -> Value {
     if dst == src {
         return Value::from(from);
     }
-    let (Some(Object::Array(mut out)), Some(Object::Array(inp))) =
-        (heap.find_object_by_addr(dst), heap.find_object_by_addr(src))
-    else {
+    let Some(Object::Array(mut out)) = heap.find_object_by_addr(dst) else {
         return Value::from(from);
     };
     let (Ok(lo), Ok(hi)) = (usize::try_from(from), usize::try_from(to)) else {
         return Value::from(from);
     };
-    if lo > hi || hi > inp.as_ref().len() {
-        return Value::from(from);
+    match heap.find_object_by_addr(src) {
+        Some(Object::Array(inp)) if lo <= hi && hi <= inp.as_ref().len() => out.as_mut().extend_from(inp.as_ref(), lo, hi),
+        Some(Object::String(s)) => match s.as_ref().data.as_bytes().get(lo..hi) {
+            Some(bytes) => out.as_mut().extend_bytes(bytes),
+            None => return Value::from(from),
+        },
+        _ => return Value::from(from),
     }
-    out.as_mut().extend_from(inp.as_ref(), lo, hi);
     heap.account_array(out.as_mut());
     Value::from(to)
 }
