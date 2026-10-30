@@ -1,8 +1,8 @@
 // @needs processes
 // @flags --allow-exec
 // The `process` module: exit codes, captured output, pipes in both
-// directions as streams, environment and working directory, signals,
-// `try_wait`, and a program that does not exist.
+// directions as streams, the environment, `try_wait` and `kill`, and a
+// program that does not exist. Unix-only behaviour is in process_unix.hy.
 use tests::assert;
 use process::{Command, Stdio, ProcessError, exec};
 use io::IoError;
@@ -44,19 +44,14 @@ test("arguments reach the program unchanged, without a shell") {
     assert!(out_of(c) == "a b|$HOME");
 }
 
-test("env, env_remove, env_clear and cwd shape the child") {
-    let c = sh("printf '%s:%s' \"$COIL_PROC_T\" \"$(pwd)\"");
+test("env and env_remove shape the child") {
+    let c = sh("printf '%s' \"$COIL_PROC_T\"");
     c.env("COIL_PROC_T", "set");
-    c.cwd("/");
-    assert!(out_of(c) == "set:/");
+    assert!(out_of(c) == "set");
     let gone = sh("printf '[%s]' \"$COIL_PROC_T\"");
     gone.env("COIL_PROC_T", "x");
     gone.env_remove("COIL_PROC_T");
     assert!(out_of(gone) == "[]");
-    let empty = Command::new("/bin/sh");
-    empty.args(["-c", "printf '[%s]' \"$HOME\""]);
-    empty.env_clear();
-    assert!(out_of(empty) == "[]");
 }
 
 test("one command starts any number of children") {
@@ -99,23 +94,15 @@ test("output with stdin piped but not written sees end of input") {
     assert!(o.stdout == "");
 }
 
-test("try_wait, signal and kill") {
+test("try_wait and kill") {
     let c = Command::new("sleep");
     c.arg("5");
     let child = c.spawn()?;
     let running = child.try_wait()?;
     assert!(running.is_none());
-    child.signal(15)?;
-    assert!(child.wait()? == 128 + 15);
-    let bad = match child.signal(15) {
-        Result::Err(ProcessError::Io(IoError::InvalidInput)) => true,
-        default => false,
-    };
-    assert!(bad);
-    let other = c.spawn()?;
-    other.kill()?;
-    assert!(other.wait()? == 128 + 9);
-    other.kill()?;
+    child.kill()?;
+    assert!(child.wait()? != 0);
+    child.kill()?;
 }
 
 test("a missing program fails to spawn with NotFound") {

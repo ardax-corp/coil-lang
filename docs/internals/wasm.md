@@ -45,4 +45,4 @@ needs something wasm lacks says so in its header and is skipped there:
 // @needs sockets
 ```
 
-Known features: `sockets`, `symlinks`, `ffi`, `processes`. An unknown name fails the file.
+Known features: `sockets`, `symlinks`, `ffi`, `processes`, and `unix` (Unix-only behaviour such as signals; false on Windows and wasm). An unknown name fails the file.
