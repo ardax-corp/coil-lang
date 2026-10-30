@@ -32,6 +32,7 @@ Release builds publish it as `coil-wasm32-wasip1.wasm` (edge and `v*` tags).
 | stdio | WASI cannot `dup`, so a stdio stream owns descriptor 0/1/2; closing the stream never closes the process's own stdio. |
 | `coil test` | Runs the test runner in the `coil` binary (no `coil-test` to re-exec). `coil mutate` is not available. |
 | `coil dissect` | Runs in the `coil` binary too (`coil-dissect` is a library as well as a binary). The playground's Inspect panel uses it. Other helpers (`fmt`, `lsp`, `verify`, `debug`) are not in the wasm build. |
+| Child processes | The `process` module compiles, but starting a program fails (`ProcessError::Spawn(IoError::Other)`). |
 | Process ids | `std::process::id` panics on wasm; code that mixes in the pid (temp names, seeds) uses 0 there. |
 
 ## Tests
@@ -44,4 +45,4 @@ needs something wasm lacks says so in its header and is skipped there:
 // @needs sockets
 ```
 
-Known features: `sockets`, `symlinks`, `ffi`. An unknown name fails the file.
+Known features: `sockets`, `symlinks`, `ffi`, `processes`. An unknown name fails the file.
