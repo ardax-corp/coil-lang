@@ -118,3 +118,19 @@ fn main() {{
 ");
     assert!(cow_notes(&src).is_empty(), "{:?}", cow_notes(&src));
 }
+
+// #2155: a `Stream` is an opaque handle, so passing a captured one on is no copy.
+#[test]
+fn captured_stream_passed_on_does_not_warn() {
+    let src = "
+use io::{close};
+fn takes(Stream s, Stream -> unit h) { h(s); }
+fn run(Stream l) {
+    let g = fn () use (l) { takes(l, fn (Stream x) { let _ = close(x); }); };
+    g();
+}
+fn main() {}
+";
+    let notes = cow_notes(src);
+    assert!(notes.is_empty(), "{notes:?}");
+}
