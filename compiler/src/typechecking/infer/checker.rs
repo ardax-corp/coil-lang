@@ -3462,6 +3462,25 @@ impl Checker {
             Expression::Invoke(args) => self.infer_ffi_invoke(args, range),
 
             Expression::Defer { captures, body } => {
+                // A defer runs while its function is leaving: it cannot
+                // choose another exit.
+                let exits = crate::typechecking::control_flow::defer_body_exits(body);
+                if !exits.is_empty() {
+                    for (span, what) in exits {
+                        self.error_with_help(
+                            ErrorCode::ExitInDefer,
+                            format!("{what} cannot leave a `defer` body"),
+                            span,
+                            Some(
+                                "a defer runs while its function is already returning or unwinding; \
+                                 handle the error inside the block (`match`, `if let`, `.unwrap_or(..)`) \
+                                 or move the code out of the defer"
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    return unit_ty();
+                }
                 // Same explicit-capture isolation as lambdas: outer locals
                 // are invisible unless listed in `use (…)` (named `fn`s
                 // rebound like imports).
