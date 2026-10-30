@@ -1110,6 +1110,11 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
                 crate::simd::vbin_bytes_in(regs, kind, dest, a, b, scalar);
                 return true;
             }
+            if kind == common::simd::SELECT {
+                let (x, y) = (regs[a % common::simd::NREGS], regs[b % common::simd::NREGS]);
+                regs[dest] = crate::simd::eval_select(&regs[dest], &x, &y);
+                return true;
+            }
             let splat = matches!(kind, common::simd::SPLAT_I64 | common::simd::SPLAT_F64);
             let scalar = if splat {
                 promise!(ctx.sp + a < ctx.stack_cap);

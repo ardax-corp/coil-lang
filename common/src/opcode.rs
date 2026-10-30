@@ -841,6 +841,9 @@ pub mod simd {
     /// lanes (IEEE: a NaN compares unequal and unordered).
     pub const ICMP: u8 = 64;
     pub const FCMP: u8 = 72;
+    /// `VBin` select (archive 6.10): `dest = dest != 0 ? a : b` lane by
+    /// lane, the mask in `dest` as `0` / `1` int lanes. Never traps.
+    pub const SELECT: u8 = 80;
 
     /// Byte lanes (minor 46, `docs/internals/byte-simd.md`): a vector
     /// register read as [`BYTE_LANES`] `u8` lanes. A lane mask is `0xFF` /

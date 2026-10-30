@@ -488,6 +488,7 @@ enum VloopOp {
     Load { reg: usize, obj: Option<Object>, off: i64 },
     Store { reg: usize, obj: Option<Object>, off: i64 },
     Bin { kind: u8, dest: usize, a: usize, b: usize },
+    Sel { dest: usize, a: usize, b: usize },
     Fma { ty: u8, dest: usize, a: usize, b: usize },
     Reduce { ty: u8, slot: usize, src: usize, fold: u8 },
 }
@@ -551,6 +552,7 @@ pub(crate) fn vloop(
                 span(obj, off)?;
                 Op::Store { reg: d, obj, off }
             }
+            Instruction::VBin if kind == simd::SELECT && a < simd::NREGS && b < simd::NREGS => Op::Sel { dest: d, a, b },
             Instruction::VBin if !simd::is_byte_kind(kind) => Op::Bin { kind, dest: d, a, b },
             Instruction::VFma if a < simd::NREGS && b < simd::NREGS => Op::Fma { ty: kind, dest: d, a, b },
             Instruction::VReduce if a < simd::NREGS => Op::Reduce { ty: kind, slot: d, src: a, fold: b as u8 },
@@ -593,6 +595,7 @@ pub(crate) fn vloop(
                         break;
                     }
                 },
+                Op::Sel { dest, a, b } => regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b]),
                 Op::Fma { ty, dest, a, b } => match crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]) {
                     Ok(out) => regs[dest] = out,
                     Err(_) => {
@@ -695,6 +698,7 @@ fn vloop_lanes(
                         _ => vbin_block(stack, sp, regs, kind, a, b).map_err(|t| t.message())?,
                     };
                 }
+                VloopOp::Sel { dest, a, b } => regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b]),
                 VloopOp::Fma { ty, dest, a, b } => {
                     regs[dest] = crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]).map_err(|t| t.message())?;
                 }
