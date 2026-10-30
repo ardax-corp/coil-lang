@@ -78,9 +78,9 @@ impl Scope {
     /// let total = scope(fn (Scope s) {
     ///     let a = s.spawn(fn () => 20);
     ///     let b = s.spawn(fn () => 22);
-    ///     return (a.join() ?? 0) + (b.join() ?? 0);
+    ///     return a.join().unwrap_or(0) + b.join().unwrap_or(0);
     /// });
-    /// assert!((total ?? 0) == 42);
+    /// assert!(total.unwrap_or(0) == 42);
     /// ```
     pub fn spawn<R>(unit -> R body) -> Task<R> {
         let t = new Task(0, Option::None);
@@ -155,9 +155,9 @@ impl Task<R> {
 ///         return "slow";
 ///     });
 ///     let fast = s.spawn(fn () => "fast");
-///     return (fast.join() ?? "") + "," + (slow.join() ?? "");
+///     return fast.join().unwrap_or("") + "," + slow.join().unwrap_or("");
 /// });
-/// assert!((order ?? "") == "fast,slow");
+/// assert!(order.unwrap_or("") == "fast,slow");
 /// ```
 fn scope<T>(Scope -> T body) -> Result<T, TaskError> {
     let id = task_scope_open();
@@ -216,7 +216,7 @@ gen fn __task_timer(int id, int ms) -> int {
 ///     default => false,
 /// };
 /// assert!(timed_out);
-/// assert!((timeout(1000, fn () => 7) ?? 0) == 7);
+/// assert!(timeout(1000, fn () => 7).unwrap_or(0) == 7);
 /// ```
 fn timeout<T>(int ms, unit -> T body) -> Result<T, TaskError> {
     let id = task_scope_open();
@@ -272,7 +272,7 @@ fn shield<T>(unit -> T body) -> T {
 ///     let producer = s.spawn(fn () use (ch) {
 ///         let i = 1;
 ///         while i <= 5 {
-///             ch.send(i) ?? ();
+///             let _ = ch.send(i);
 ///             i = i + 1;
 ///         }
 ///         ch.close();
@@ -281,10 +281,10 @@ fn shield<T>(unit -> T body) -> T {
 ///     while let Result::Ok(v) = ch.recv() {
 ///         total = total + v;
 ///     }
-///     producer.join() ?? ();
+///     let _ = producer.join();
 ///     return total;
 /// });
-/// assert!((sum ?? 0) == 15);
+/// assert!(sum.unwrap_or(0) == 15);
 /// ```
 shared class Channel<T> {
     pub __buf: Vec<Option<T>>,
