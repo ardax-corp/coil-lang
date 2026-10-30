@@ -49,12 +49,14 @@ For scale, a `VLoop` store map is about 4 ns per element and a
    `int` add that could trap. An arm may now add, subtract and multiply
    when the operands' ranges (constants, non-negative masks) keep the
    result in range, so `out[i] = to_lower(b[i])` runs 8 lanes a time.
-4. **Map-push.** A counted loop whose body is one `out.push(value(i))`
-   grows `out` by `n - i0` once (`vec_fill` with a placeholder), then runs
-   the map as a `VLoop` store at `out.len() + i - i0`. A trap leaves the
-   pushes before it, as the scalar loop would: the grow is trimmed back
-   to the lanes that stored. Covers `shift_ascii` and every
-   `out.push(f(a[i]))` with a body steps 1–3 take.
+4. **Map-push.** A counted loop whose body is one `out.push(value(i))`,
+   or a push in each arm of an `if`, runs as a `VLoop` whose body ends in
+   an append (`VStore` flag `STORE_PUSH`): each block appends its 8 lanes
+   once its other words ran. A trap replays the block lane by lane, so it
+   leaves the pushes before it, as the scalar loop would. The guard
+   checks `out` is not an array the body reads or the bound's. Covers
+   `shift_ascii` and every `out.push(f(a[i]))` with a body steps 1–3
+   take.
 5. **Copy from a string.** `vec_extend_range` (or a new id next to it)
    takes a `string` source, so `out.push(s[i])` runs as one copy.
 6. **Copy until a byte.** A loop that scans for a stop set and pushes
@@ -77,7 +79,8 @@ do not have these loops), per the hit-bench rule in
 |---|---|---|
 | 1 lane casts | #2137 | trunc map 172.8 → 38.5 µs, int-to-float map 154.5 → 49.7 µs |
 | 2 selects | #2140 | abs 170 → 76 µs, clamp 178 → 72 µs |
-| 3 byte maps | this branch | ASCII lower case on `Vec<byte>` 279 → 101 µs |
+| 3 byte maps | #2142 | ASCII lower case on `Vec<byte>` 279 → 101 µs |
+| 4 map-push | this branch | `out.push(a[i] * 3 + 1)` 284 → 69 µs, `shift_ascii` shape on `Vec<byte>` 504 → 127 µs |
 
 Step 3 also fixed `VLoop` lane loads from a packed `Vec<byte>`, which
 skipped to the block through the element iterator, so the loads were
