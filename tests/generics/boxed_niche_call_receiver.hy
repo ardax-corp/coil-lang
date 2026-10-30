@@ -3,7 +3,7 @@
 // (coil-lang#2154): `mk(3).unwrap_or(d)` reads the call's result, as
 // binding it to a local first does.
 use tests::assert;
-use future::{all};
+use future::all;
 
 fn mk<T>(T x) -> Result<Vec<T>, string> {
     let v: Vec<T> = Vec::new();
