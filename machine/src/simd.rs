@@ -87,6 +87,8 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
             lanes::neg_f64(&a, &mut o);
             from_f64(&o)
         }
+        simd::I2F => std::array::from_fn(|i| ((lhs[i] as i64) as f64).to_bits()),
+        simd::F2I => std::array::from_fn(|i| (f64::from_bits(lhs[i]) as i64) as u64),
         simd::IAND64 => std::array::from_fn(|i| lhs[i] & rhs[i]),
         simd::IOR64 => std::array::from_fn(|i| lhs[i] | rhs[i]),
         simd::IXOR64 => std::array::from_fn(|i| lhs[i] ^ rhs[i]),

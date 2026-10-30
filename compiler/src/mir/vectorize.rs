@@ -1,8 +1,8 @@
 //! Counted map and reduce loops a vector loop can run (`vec_loop`):
 //! `a[i + k] = value(i)` stores and `s = s ⊕ term(i)` reductions (add /
 //! mul) over stride-1 `i64` / `f64` lanes, read as a [`VOp`] tree
-//! (loads, splats of invariants, the index, `+ - * /`, negation, an
-//! int-to-float cast and conservative FMA).
+//! (loads, splats of invariants, the index, `+ - * /`, negation, casts
+//! between int and float lanes and conservative FMA).
 
 use common::{dense, simd};
 
@@ -44,8 +44,8 @@ pub(super) enum VOp {
     Iota,
     Load { array: ValueId, ty: u8, off: Off },
     Bin { kind: u8, lhs: Box<VOp>, rhs: Box<VOp> },
-    Neg { kind: u8, src: Box<VOp> },
-    CastI2F(Box<VOp>),
+    /// A negation or a lane cast (`simd::is_unary_kind`).
+    Unary { kind: u8, src: Box<VOp> },
     Fma {
         ty: u8,
         a: Box<VOp>,
@@ -466,18 +466,22 @@ fn classify(
                 _ => return None,
             };
             let s = classify(func, *src, iv, loop_blocks)?;
-            Some(VOp::Neg {
+            Some(VOp::Unary {
                 kind,
                 src: Box::new(s),
             })
         }
-        MirInst::Cast {
-            kind: MirCastKind::IntToFloat,
-            src,
-            ..
-        } => {
+        MirInst::Cast { kind, to, src, .. } => {
+            let kind = match (kind, func.ty(*src), to) {
+                (MirCastKind::IntToFloat, MirTy::I64, MirTy::F64) => simd::I2F,
+                (MirCastKind::FloatToInt, MirTy::F64, MirTy::I64) => simd::F2I,
+                _ => return None,
+            };
             let s = classify(func, *src, iv, loop_blocks)?;
-            Some(VOp::CastI2F(Box::new(s)))
+            Some(VOp::Unary {
+                kind,
+                src: Box::new(s),
+            })
         }
         _ => None,
     }

@@ -645,7 +645,7 @@ fn vbin_block(
     let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
     let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
     let no_lhs = splat || matches!(kind, simd::IOTA_I64 | simd::IOTA_F64);
-    let no_rhs = no_lhs || matches!(kind, simd::INEG | simd::FNEG);
+    let no_rhs = no_lhs || simd::is_unary_kind(kind);
     let lhs = if no_lhs { z } else { regs[a % simd::NREGS] };
     let rhs = if no_rhs { z } else { regs[b % simd::NREGS] };
     crate::simd::eval_vbin(kind, &lhs, &rhs, scalar)

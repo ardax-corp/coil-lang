@@ -1119,7 +1119,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
             };
             let z = [0u64; common::simd::LANES];
             let no_lhs = splat || matches!(kind, common::simd::IOTA_I64 | common::simd::IOTA_F64);
-            let no_rhs = no_lhs || matches!(kind, common::simd::INEG | common::simd::FNEG);
+            let no_rhs = no_lhs || common::simd::is_unary_kind(kind);
             let lhs = if no_lhs { z } else { regs[a % common::simd::NREGS] };
             let rhs = if no_rhs { z } else { regs[b % common::simd::NREGS] };
             match crate::simd::eval_vbin(kind, &lhs, &rhs, scalar) {
