@@ -4,7 +4,7 @@
 // (`mir/vec_loop.rs`, `docs/internals/simd-lanes.md`).
 use clock::mono_nanos;
 use io::{stdout, write};
-use string::{format, to_bytes};
+use string::{format, from_bytes, to_bytes};
 
 fn say(string s) {
     let _ = write(stdout(), to_bytes(s));
@@ -96,6 +96,36 @@ fn shift_bytes(Vec<byte> b, int delta, int from) -> Vec<byte> {
     return out;
 }
 
+// The same over a `string` (`text::shift_ascii` itself).
+fn shift_str(string s, int delta, int from) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = from;
+    while i < s.len() {
+        let c = s[i];
+        if c >= "A" && c <= "Z" {
+            out.push(((c as int) + delta) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// A store map from a `string`.
+fn lower_str(Vec<byte> out, string s, int from) {
+    let i = from;
+    while i < s.len() {
+        let c = s[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
 fn main() {
     let n = 8192;
     let xs: Vec<int> = Vec::new();
@@ -157,6 +187,22 @@ fn main() {
         k = k + 1;
     }
     let t7 = mono_nanos();
+    let str = match from_bytes(text) {
+        Result::Ok(x) => x,
+        Result::Err(_) => panic "text is ASCII",
+    };
+    k = 0;
+    while k < reps {
+        pushed = pushed + shift_str(str, 32, k % 3).len();
+        k = k + 1;
+    }
+    let t8 = mono_nanos();
+    k = 0;
+    while k < reps {
+        lower_str(low, str, k % 3);
+        k = k + 1;
+    }
+    let t9 = mono_nanos();
     say(format("trunc_map %i ns\n", (t1 - t0) / reps));
     say(format("halves    %i ns\n", (t2 - t1) / reps));
     say(format("abs_map   %i ns\n", (t3 - t2) / reps));
@@ -164,5 +210,7 @@ fn main() {
     say(format("lower     %i ns\n", (t5 - t4) / reps));
     say(format("mul_push  %i ns\n", (t6 - t5) / reps));
     say(format("shift     %i ns\n", (t7 - t6) / reps));
+    say(format("shift_str %i ns\n", (t8 - t7) / reps));
+    say(format("lower_str %i ns\n", (t9 - t8) / reps));
     say(format("check %f %i %i\n", out[17] + out[n - 1], low[n - 1] as int, pushed));
 }
