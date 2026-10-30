@@ -136,6 +136,16 @@ beat Rust/`memcmp` slice equality.
   an arm's ranged add rests on (`(c as int) + delta` with `delta` in
   range). `vec_lanes.hy`: `out.push(a[i] * 3 + 1)` 284 → 69 µs, the
   `shift_ascii` shape on `Vec<byte>` 504 → 127 µs.
+- Archive 6.13 lets a map-push or store map read a `string`
+  (`vectorize::string_reads`, #2150): each `s[i + k]` is a block of its
+  own (`string_byte_at` and the branch to its panic) at the head of the
+  body, and is read as an int lane (`VLoad` of the string's bytes). The
+  guard puts every lane in `0 ..= s.len()`, so no read in those lanes
+  takes its panic branch; each read must be one of the loads the guard
+  checks. Covers `text::shift_ascii` and `ascii::to_lower` / `to_upper`.
+  `vec_lanes.hy`, 8192 bytes: `shift_str` about 530 → 120 µs,
+  `lower_str` (a store per arm) about 390 → 115 µs; `shift_ascii` over
+  1 MiB about 80 → 15 ms.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 - `packed_matrix_zip` / `packed_matrix_neg` also lower matrix compares
