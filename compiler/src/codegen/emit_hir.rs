@@ -5962,15 +5962,9 @@ impl Compiler {
             Self::bind_scheme_vars(param, ty, &mut vars);
         }
         Self::bind_scheme_vars(cur, &ret_ty, &mut vars);
-        // An open enum instance passes as its own word only where the
-        // signature names its type parameter bare: nested (`Option<T>`), the
-        // shared body would hold it boxed inside the object (#1517).
-        let nested = |v: &crate::typechecking::ty::TyVarId| {
-            params.iter().chain(ret_parts.iter().copied()).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
-        };
-        if vars.iter().any(|(v, ty)| !crate::layout::ty_is_closed(ty) && self.hir_open_enum_word(ty) && nested(v)) {
-            return Err("callee-generic");
-        }
+        // An open enum instance is its own object word in both shared bodies,
+        // also nested in the signature (`Vec<U>` at `U = Option<T>`):
+        // boxing a heap enum passes it through (#2138).
         // In a clone, `self` is typed by its class alone (`HashMap`): its
         // type arguments are the clone's (`HashMap<int, int>`), which ground
         // a sibling method's class parameters (`self.grow()`).
@@ -6023,8 +6017,10 @@ impl Compiler {
         // shared body may hold boxed inside its result (#1549).
         let mut boxed_vars = HashMap::new();
         for (i, b) in boxed[receivers..].iter().enumerate() {
+            // A heap enum boxes to itself (#2138): nothing to unbox.
             if let (Some(ty), Some(Ty::Var(v))) = (b, params.get(skip + i))
                 && Self::ty_to_value_tag(ty).is_some()
+                && !self.hir_enum_object_word(ty)
             {
                 boxed_vars.insert(*v, ty.clone());
             }
@@ -6704,6 +6700,12 @@ impl Compiler {
     /// An enum whose word is the heap object (no pointer niche).
     fn hir_boxed_enum_word(&self, ty: &Ty) -> bool {
         self.value_layout(ty) == ValueLayout::Boxed
+    }
+
+    /// An enum held as its `ObjEnum` object word, open or ground:
+    /// `BoxValue` passes it through as itself (#2138).
+    fn hir_enum_object_word(&self, ty: &Ty) -> bool {
+        lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && self.hir_boxed_enum_word(ty)
     }
 
     /// An `Option` or `Result` held as a niche word (`Option<string>`).
