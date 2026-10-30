@@ -164,6 +164,10 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
+/// Major 6 / minor 12: HostInvoke `process_*` (ids 180–188, the embedded
+/// `process` module): spawn a program, take its pipes as streams, wait,
+/// kill, signal. Older runtimes do not know the ids.
+///
 /// Major 6 / minor 11: `VBin` lane casts `simd::I2F` / `F2I`, the lane
 /// select `simd::SELECT` and the `VStore` flag `simd::STORE_PUSH` (append
 /// the lanes) in `VLoop` bodies. Older runtimes read the new kinds as
@@ -229,7 +233,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 11;
+pub const ARCHIVE_MINOR: u16 = 12;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1306,9 +1310,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
-        assert_eq!(ARCHIVE_MINOR, 11);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 11));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.11");
+        assert_eq!(ARCHIVE_MINOR, 12);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 12));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.12");
     }
 
     #[test]
