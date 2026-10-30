@@ -1518,16 +1518,32 @@ impl Compiler {
         if param != ValueLayout::Boxed {
             return None;
         }
+        if let Some(layout) = self.hir_boxed_niche_call(hir, emit, id) {
+            return Some(layout);
+        }
         let layout = self.value_layout(&apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?));
         let natural = self.hir_natural(hir, emit, id);
         (layout != ValueLayout::Boxed && natural.is_none_or(|n| n == Rep::Word(layout))).then_some(layout)
+    }
+
+    /// The niche layout of call `id` whose `Option` / `Result` result
+    /// comes back as its boxed enum object (a generic's shared entry,
+    /// #2154). Direct MIR reads that result as its niche word, so in a
+    /// boxed parameter it goes as the object the call returned, and in a
+    /// parameter of its niche layout as that word.
+    fn hir_boxed_niche_call(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<ValueLayout> {
+        if !matches!(hir.expr(id).kind, HirKind::Call { .. }) || self.hir_natural(hir, emit, id) != Some(Rep::Word(ValueLayout::Boxed)) {
+            return None;
+        }
+        let layout = self.value_layout(&apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?));
+        matches!(layout, ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult).then_some(layout)
     }
 
     /// Whether direct MIR passes argument `id` in `param` as HIR emission
     /// does: its own word in that layout, or a numeric range's two words
     /// boxed to its typed object (MIR's `box_pair_val`).
     fn hir_arg_word(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> bool {
-        self.hir_natural(hir, emit, id) == Some(Rep::Word(param))
+        (self.hir_natural(hir, emit, id) == Some(Rep::Word(param)) && self.hir_boxed_niche_call(hir, emit, id).is_none())
             || (param == ValueLayout::Boxed
                 && Self::hir_ty(hir, id).is_some_and(|ty| {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
@@ -1700,6 +1716,7 @@ impl Compiler {
     /// same way (MIR's `box_pair_val`, emission's pair-to-word convert).
     fn hir_arg_passes(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> bool {
         self.hir_arg_word(hir, emit, id, param)
+            || self.hir_boxed_niche_call(hir, emit, id) == Some(param)
             || (matches!(self.hir_natural(hir, emit, id), None | Some(Rep::Pair(_)))
                 && Self::hir_ty(hir, id).is_some_and(|ty| self.value_layout(&apply_ty_prune(self.checker.subst(), ty)) == param))
     }
