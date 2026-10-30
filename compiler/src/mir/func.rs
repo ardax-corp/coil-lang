@@ -647,6 +647,7 @@ impl MirFunc {
                 let want = match kind {
                     super::inst::VecLoopKind::Reduce { init, .. } => self.ty(*init),
                     super::inst::VecLoopKind::Store { .. } => MirTy::I64,
+                    super::inst::VecLoopKind::Push { out, .. } => self.ty(*out),
                 };
                 if self.ty(*dest) != want {
                     return Err(format!("{dest} vec loop dest type"));
