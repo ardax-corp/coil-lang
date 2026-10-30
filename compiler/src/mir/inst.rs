@@ -788,7 +788,11 @@ pub enum VecExpr {
     /// `array[p + off + k]`.
     Load { array: ValueId, off: ValueId, ty: u8 },
     Bin { kind: u8, lhs: Box<VecExpr>, rhs: Box<VecExpr> },
-    Neg { kind: u8, src: Box<VecExpr> },
+    /// A one-register `VBin` ([`common::simd::is_unary_kind`]): a negation
+    /// or a lane cast.
+    Unary { kind: u8, src: Box<VecExpr> },
+    /// `mask ? then : els` per lane (`mask` is `0` / `1` int lanes).
+    Select { mask: Box<VecExpr>, then: Box<VecExpr>, els: Box<VecExpr> },
     /// `a * b + c`, two roundings.
     Fma { ty: u8, a: Box<VecExpr>, b: Box<VecExpr>, c: Box<VecExpr> },
 }
@@ -804,7 +808,12 @@ impl VecExpr {
                 lhs.values(out);
                 rhs.values(out);
             }
-            Self::Neg { src, .. } => src.values(out),
+            Self::Unary { src, .. } => src.values(out),
+            Self::Select { mask, then, els } => {
+                mask.values(out);
+                then.values(out);
+                els.values(out);
+            }
             Self::Fma { a, b, c, .. } => {
                 a.values(out);
                 b.values(out);
@@ -825,7 +834,12 @@ impl VecExpr {
                 lhs.rewrite(map);
                 rhs.rewrite(map);
             }
-            Self::Neg { src, .. } => src.rewrite(map),
+            Self::Unary { src, .. } => src.rewrite(map),
+            Self::Select { mask, then, els } => {
+                mask.rewrite(map);
+                then.rewrite(map);
+                els.rewrite(map);
+            }
             Self::Fma { a, b, c, .. } => {
                 a.rewrite(map);
                 b.rewrite(map);
@@ -839,7 +853,8 @@ impl VecExpr {
             Self::Index => true,
             Self::Splat { .. } | Self::Load { .. } => false,
             Self::Bin { lhs, rhs, .. } => lhs.uses_index() || rhs.uses_index(),
-            Self::Neg { src, .. } => src.uses_index(),
+            Self::Unary { src, .. } => src.uses_index(),
+            Self::Select { mask, then, els } => mask.uses_index() || then.uses_index() || els.uses_index(),
             Self::Fma { a, b, c, .. } => a.uses_index() || b.uses_index() || c.uses_index(),
         }
     }
@@ -855,6 +870,9 @@ pub enum VecLoopKind {
     Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr, stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
     /// `array[p + off + k] = value` for each store, in order.
     Store { stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
+    /// `out.push(value)` for lanes `k` in order; `dest` is `out` (a push
+    /// keeps the array's identity).
+    Push { out: ValueId, ty: u8, value: VecExpr },
 }
 
 impl VecLoopKind {
@@ -874,6 +892,10 @@ impl VecLoopKind {
                     out.extend([*array, *off]);
                     value.values(&mut out);
                 }
+            }
+            Self::Push { out: array, value, .. } => {
+                out.push(*array);
+                value.values(&mut out);
             }
         }
         out
@@ -897,6 +919,10 @@ impl VecLoopKind {
                     value.rewrite(map);
                 }
             }
+            Self::Push { out, value, .. } => {
+                *out = map(*out);
+                value.rewrite(map);
+            }
         }
     }
 
@@ -904,6 +930,7 @@ impl VecLoopKind {
         match self {
             Self::Reduce { term, stores, .. } => term.uses_index() || stores.iter().any(|(_, _, _, v)| v.uses_index()),
             Self::Store { stores } => stores.iter().any(|(_, _, _, v)| v.uses_index()),
+            Self::Push { value, .. } => value.uses_index(),
         }
     }
 }

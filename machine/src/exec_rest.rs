@@ -1007,7 +1007,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + to < stack_cap);
                     let (from, to) = (self.stack[sp + from].as_int(), self.stack[sp + to].as_int());
                     let ran = match code.get(ip..ip + n) {
-                        Some(body) => vloop(&self.heap, &mut self.stack, sp, &mut self.vregs, body, dest, from, to, pos),
+                        Some(body) => vloop(&mut self.heap, &mut self.stack, sp, &mut self.vregs, body, dest, from, to, pos),
                         None => Err("VLoop body past the code"),
                     };
                     if let Err(msg) = ran {
@@ -1020,6 +1020,12 @@ impl<const S: usize> Machine<S> {
                     promise!(src < common::simd::NREGS);
                     promise!(sp + dest < stack_cap);
                     self.stack[sp + dest] = Value::from(crate::simd::movemask(&self.vregs[src]));
+                }
+                Instruction::VBin if opcode.dense_abc_parts().0 == common::simd::SELECT => {
+                    let (_, dest, a, b) = opcode.dense_abc_parts();
+                    promise!(dest < common::simd::NREGS);
+                    let (x, y) = (self.vregs[a % common::simd::NREGS], self.vregs[b % common::simd::NREGS]);
+                    self.vregs[dest] = crate::simd::eval_select(&self.vregs[dest], &x, &y);
                 }
                 Instruction::VBin => {
                     let (kind, dest, a, b) = opcode.dense_abc_parts();
@@ -1041,13 +1047,9 @@ impl<const S: usize> Machine<S> {
                         &self.vregs[a]
                     };
                     let rhs = if splat
-                        || matches!(
-                            kind,
-                            common::simd::IOTA_I64
-                                | common::simd::IOTA_F64
-                                | common::simd::INEG
-                                | common::simd::FNEG
-                        ) {
+                        || matches!(kind, common::simd::IOTA_I64 | common::simd::IOTA_F64)
+                        || common::simd::is_unary_kind(kind)
+                    {
                         &z
                     } else {
                         promise!(b < common::simd::NREGS);

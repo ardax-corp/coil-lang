@@ -413,6 +413,11 @@ fn vload_lanes(arr: &ObjArray, reg: &mut [u64; common::simd::LANES], index: i64)
         for (i, lane) in reg.iter_mut().enumerate() {
             *lane = unsafe { elems.get_unchecked(base + i).bits() };
         }
+    } else if let Some(bytes) = arr.bytes() {
+        // A packed `Vec<byte>`: each byte as an int lane.
+        for (i, lane) in reg.iter_mut().enumerate() {
+            *lane = u64::from(unsafe { *bytes.get_unchecked(base + i) });
+        }
     } else {
         for (i, v) in arr.iter().skip(base).take(n).enumerate() {
             reg[i] = v.bits();
@@ -482,22 +487,57 @@ fn vstore_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES], index: i64
     true
 }
 
+/// The 8 lanes of `src` appended to `arr` in lane order (numeric lanes).
+fn vpush_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES]) {
+    for &lane in src {
+        arr.push(Value::from(lane));
+    }
+}
+
 /// A decoded `VLoop` body word.
 #[derive(Clone, Copy)]
 enum VloopOp {
     Load { reg: usize, obj: Option<Object>, off: i64 },
     Store { reg: usize, obj: Option<Object>, off: i64 },
+    /// Append the lanes ([`common::simd::STORE_PUSH`]).
+    Push { reg: usize, obj: Option<Object> },
     Bin { kind: u8, dest: usize, a: usize, b: usize },
+    Sel { dest: usize, a: usize, b: usize },
     Fma { ty: u8, dest: usize, a: usize, b: usize },
     Reduce { ty: u8, slot: usize, src: usize, fold: u8 },
 }
 
 /// `VLoop` (see [`Instruction::VLoop`]): the body over lanes `p ..= p + 7`
 /// for `p = from, from + 8, ..` below `to`, with `dest = p` first when
-/// `pos`. The arrays are resolved once (nothing in the body resizes or
-/// allocates). `Err` on a malformed body, a lane out of range or a trap.
+/// `pos`. The arrays are resolved once: nothing in the body allocates,
+/// and the only resize is an append (`STORE_PUSH`) to an array the body
+/// does not read (the compiler guards that). `Err` on a malformed body, a lane out of range or a trap.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn vloop(
+    heap: &mut Heap,
+    stack: &mut Stack<Value>,
+    sp: usize,
+    regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
+    body: &[Byte],
+    dest: usize,
+    from: i64,
+    to: i64,
+    pos: bool,
+) -> Result<(), &'static str> {
+    let mut pushed = Vec::new();
+    let ran = vloop_run(heap, stack, sp, regs, body, dest, from, to, pos, &mut pushed);
+    // The arrays a body appended to grew: count their storage once.
+    for obj in pushed {
+        if let Object::Array(mut gc) = obj {
+            heap.account_array(gc.as_mut());
+        }
+    }
+    ran
+}
+
+/// [`vloop`]'s loop; `pushed` gets the arrays the body appends to.
+#[allow(clippy::too_many_arguments)]
+fn vloop_run(
     heap: &Heap,
     stack: &mut Stack<Value>,
     sp: usize,
@@ -507,6 +547,7 @@ pub(crate) fn vloop(
     from: i64,
     to: i64,
     pos: bool,
+    pushed: &mut Vec<Object>,
 ) -> Result<(), &'static str> {
     use common::simd;
     const BAD: &str = "VLoop: malformed body";
@@ -546,11 +587,17 @@ pub(crate) fn vloop(
                 span(obj, off)?;
                 Op::Load { reg: d, obj, off }
             }
+            Instruction::VStore if kind & simd::STORE_PUSH != 0 => {
+                let obj = array(a)?;
+                pushed.extend(obj);
+                Op::Push { reg: d, obj }
+            }
             Instruction::VStore => {
                 let (obj, off) = (array(a)?, stack[sp + b].as_int());
                 span(obj, off)?;
                 Op::Store { reg: d, obj, off }
             }
+            Instruction::VBin if kind == simd::SELECT && a < simd::NREGS && b < simd::NREGS => Op::Sel { dest: d, a, b },
             Instruction::VBin if !simd::is_byte_kind(kind) => Op::Bin { kind, dest: d, a, b },
             Instruction::VFma if a < simd::NREGS && b < simd::NREGS => Op::Fma { ty: kind, dest: d, a, b },
             Instruction::VReduce if a < simd::NREGS => Op::Reduce { ty: kind, slot: d, src: a, fold: b as u8 },
@@ -562,7 +609,8 @@ pub(crate) fn vloop(
     // the lanes before the trapping one store and fold as the scalar loop
     // would. The compiler only takes bodies whose reads come before their
     // stores, so deferring a block's stores changes no value it reads.
-    let mut pending: Vec<(Option<Object>, i64, [u64; simd::LANES])> = Vec::new();
+    // `None` for an append.
+    let mut pending: Vec<(Option<Object>, Option<i64>, [u64; simd::LANES])> = Vec::new();
     let mut saved: Vec<(usize, Value)> = Vec::new();
     let mut p = from;
     while p < to {
@@ -584,7 +632,8 @@ pub(crate) fn vloop(
                         return Err(OOB);
                     }
                 }
-                Op::Store { reg, obj, off } => pending.push((obj, off, regs[reg])),
+                Op::Store { reg, obj, off } => pending.push((obj, Some(off), regs[reg])),
+                Op::Push { reg, obj } => pending.push((obj, None, regs[reg])),
                 Op::Load { .. } => return Err(BAD),
                 Op::Bin { kind, dest, a, b } => match vbin_block(stack, sp, regs, kind, a, b) {
                     Ok(out) => regs[dest] = out,
@@ -593,6 +642,7 @@ pub(crate) fn vloop(
                         break;
                     }
                 },
+                Op::Sel { dest, a, b } => regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b]),
                 Op::Fma { ty, dest, a, b } => match crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]) {
                     Ok(out) => regs[dest] = out,
                     Err(_) => {
@@ -621,8 +671,13 @@ pub(crate) fn vloop(
                 let Some(Object::Array(mut gc)) = *obj else {
                     return Err(BAD);
                 };
-                if !vstore_lanes(gc.as_mut(), lanes, p + off) {
-                    return Err(OOB);
+                match off {
+                    Some(off) => {
+                        if !vstore_lanes(gc.as_mut(), lanes, p + off) {
+                            return Err(OOB);
+                        }
+                    }
+                    None => vpush_lanes(gc.as_mut(), lanes),
                 }
             }
         }
@@ -645,7 +700,7 @@ fn vbin_block(
     let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
     let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
     let no_lhs = splat || matches!(kind, simd::IOTA_I64 | simd::IOTA_F64);
-    let no_rhs = no_lhs || matches!(kind, simd::INEG | simd::FNEG);
+    let no_rhs = no_lhs || simd::is_unary_kind(kind);
     let lhs = if no_lhs { z } else { regs[a % simd::NREGS] };
     let rhs = if no_rhs { z } else { regs[b % simd::NREGS] };
     crate::simd::eval_vbin(kind, &lhs, &rhs, scalar)
@@ -676,6 +731,12 @@ fn vloop_lanes(
                     let v = usize::try_from(i).ok().and_then(|i| gc.as_ref().get(i)).ok_or(OOB)?;
                     regs[reg] = [v.bits(); simd::LANES];
                 }
+                VloopOp::Push { reg, obj } => {
+                    let Some(Object::Array(mut gc)) = obj else {
+                        return Err(OOB);
+                    };
+                    gc.as_mut().push(Value::from(regs[reg][0]));
+                }
                 VloopOp::Store { reg, obj, off } => {
                     let Some(Object::Array(mut gc)) = obj else {
                         return Err(OOB);
@@ -695,6 +756,7 @@ fn vloop_lanes(
                         _ => vbin_block(stack, sp, regs, kind, a, b).map_err(|t| t.message())?,
                     };
                 }
+                VloopOp::Sel { dest, a, b } => regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b]),
                 VloopOp::Fma { ty, dest, a, b } => {
                     regs[dest] = crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]).map_err(|t| t.message())?;
                 }

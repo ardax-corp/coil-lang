@@ -72,7 +72,9 @@ beat Rust/`memcmp` slice equality.
   function, becomes one `VecLoop` MIR instruction and one `VLoop` op
   (archive 6.2). `vectorize.rs` matches the loop and reads its body as a
   tree: loads `a[i + k]`, splats of invariants, the index, `+ - * /`,
-  negation, an int-to-float cast of an invariant, and `VFma`
+  negation, casts between int and float lanes (`VBin` `I2F` / `F2I`,
+  archive 6.11; a cast of an invariant is done once in front), selects
+  (`VBin` `SELECT`, archive 6.11, below), and `VFma`
   (mul-then-add, two IEEE roundings). A guard in front of the loop checks
   every read and write of lanes `i0 .. n` is in range; `VLoop` runs the
   whole 8-lane blocks with its body words (`VLoad` / `VStore` / `VBin` /
@@ -107,6 +109,33 @@ beat Rust/`memcmp` slice equality.
   `IOR64` / `IXOR64`) cover `h = h ^ x[i]` and `out[i] = a[i] & m`.
   Same probe: max 68 000 → 5 900, count of one value 69 000 → 19 600,
   xor 63 000 → 7 500.
+- Archive 6.11 if-converts a store loop through one `if`
+  (`vectorize::match_if_store_on`): a φ at the join
+  (`if x < 0.0 { x = -x; } out[i] = x;`) is `cond ? from_then :
+  from_else`, a store in each arm to the same element is one store of a
+  select, and a store in one arm alone keeps the element on the other
+  side. Every lane runs both arms, so an arm may only compute what
+  cannot trap (float arithmetic, bit ops, compares, casts, loads the
+  guard covers, and `int` `+ - *` whose operand ranges keep it in
+  range, like `(c as int) + 32` on a byte); any other `int` add in an
+  arm keeps the loop scalar. The mask
+  is the compare as written (`0` / `1` lanes, `&&` of compares as
+  `IAND64`), so a NaN takes the side the scalar branch takes. A body
+  word computes each distinct node once (`emit::vec_loop_body`) and
+  reuses a register after its last reader, falling back to the tree
+  when that still needs more than the eight registers.
+  `examples/perf/vec_lanes.hy`, 8192 elements: abs 170 → 76 µs, clamp
+  with a store per arm 178 → 72 µs.
+- Archive 6.11 also runs a counted loop whose body is one
+  `out.push(value(i))`, or a push in each arm of an `if` (a select of the
+  two values), as a `VLoop` append (`vectorize::match_push_on`, `VStore`
+  flag `STORE_PUSH`): each block appends its 8 lanes once its other words
+  ran, and a block that traps runs again lane by lane, so a panic leaves
+  the pushes before it. The guard also checks `out` is none of the
+  arrays the body reads nor the bound's array, and the invariant ranges
+  an arm's ranged add rests on (`(c as int) + delta` with `delta` in
+  range). `vec_lanes.hy`: `out.push(a[i] * 3 + 1)` 284 → 69 µs, the
+  `shift_ascii` shape on `Vec<byte>` 504 → 127 µs.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 - `packed_matrix_zip` / `packed_matrix_neg` also lower matrix compares
@@ -129,6 +158,22 @@ beat Rust/`memcmp` slice equality.
   release, ns per call (main `435021f` → after): copy 1 MiB of bytes
   17 400 000 → 280 000, fill 1 MiB 7 500 000 → 208 000, copy 128 Ki ints
   2 156 000 → 267 000.
+  `src` may also be a `string` (`out.push(s[i])`, or `s[i] as int`):
+  its read is a block of its own (`string_byte_at` and the branch to its
+  panic), and the call appends the bytes. A runtime that does not copy a
+  string source answers `i0`, so the loop runs scalar there and no
+  archive bump is needed. Copy 1 MiB of a string 32 000 000 → about
+  150 000 (`feature/simd-lanes` step 5).
+- MIR `copy_until` (`compiler/src/mir/copy_until.rs`, dense tier,
+  before `byte_scan`) — a loop that pushes each byte it reads until a
+  byte stops it (`if c == "," || c == "\n" { break; } out.push(c);`)
+  gets a guarded scan and copy in front of it: the test's blocks cloned
+  into a loop that changes nothing but its index (so `byte_scan` takes
+  it), then one `vec_extend_range` of the run, and the loop entered at
+  the stop, where it leaves through its own `break`. The test may only
+  read `src[i]`, compare and mask, and the guard keeps the reads in
+  range (`0 <= i0 < n <= src.len()`). `vec_bulk.hy`: copy 1 MiB up to a
+  quote 41 000 000 → about 300 000 (`feature/simd-lanes` step 6).
 
 Matrix `*` remains matmul; Hadamard `*` on bare tuples/arrays uses
 `packed_vec_arith`.

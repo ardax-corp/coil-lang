@@ -3678,6 +3678,14 @@ impl ObjArray {
         }
     }
 
+    /// Append `bytes`, each as an `int` element.
+    pub fn extend_bytes(&mut self, bytes: &[u8]) {
+        match &mut self.data {
+            ArrayData::Bytes(out) => out.extend_from_slice(bytes),
+            ArrayData::Words(out) => out.extend(bytes.iter().map(|&b| Value::from(i64::from(b)))),
+        }
+    }
+
     /// Push `v` `n` times.
     pub fn fill_push(&mut self, v: Value, n: usize) {
         if let ArrayData::Bytes(b) = &mut self.data

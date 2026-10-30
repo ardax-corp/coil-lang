@@ -264,6 +264,11 @@ fn specialize_side(
     if opts.mir_fold && crate::mir::thread_bool_phis(&mut func) > 0 {
         check_after(&func, "thread_bool_phis");
     }
+    // A loop that pushes each byte until one stops it: a scan for the
+    // stop (which `byte_scan` takes next) and one copy of the run.
+    if opts.mir_loop && crate::mir::copy_until(&mut func) > 0 {
+        check_after(&func, "copy_until");
+    }
     // Early-exit byte loops skip 64 no-op iterations at a time. Their
     // range setup is invariant in any outer loop: hoist it.
     if opts.mir_loop && crate::mir::byte_scan(&mut func) > 0 {

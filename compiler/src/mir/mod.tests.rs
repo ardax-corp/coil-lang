@@ -5347,3 +5347,259 @@ fn main() {
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     assert!(!vm.panicked());
 }
+
+#[test]
+fn pipeline_vectorizes_lane_casts() {
+    let src = r#"
+fn trunc_map(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] as int) as float;
+        i = i + 1;
+    }
+}
+fn halves(Vec<float> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] as float) * 0.5 + (i as float);
+        i = i + 1;
+    }
+}
+fn int_sum_of(Vec<float> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + (a[i] as int);
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let f: Vec<float> = Vec::new();
+    let o: Vec<float> = Vec::new();
+    let n: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 40 {
+        f.push((k as float) * 1.5 - 20.25);
+        o.push(0.0);
+        n.push(k - 7);
+        k = k + 1;
+    }
+    trunc_map(o, f);
+    if o[0] != -20.0 || o[39] != 38.0 {
+        panic "trunc_map";
+    }
+    halves(o, n);
+    if o[0] != -3.5 || o[39] != 55.0 {
+        panic "halves";
+    }
+    if int_sum_of(f) != 354 {
+        panic "int_sum_of";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile lane casts");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "lane cast checksums");
+    let symbols = p.program_debug().fn_symbols;
+    for name in ["trunc_map", "halves", "int_sum_of"] {
+        assert_vec_loop(fn_ops(&bc, &symbols, name), name);
+    }
+}
+
+#[test]
+fn pipeline_vectorizes_selects_in_map_loops() {
+    let src = r#"
+fn abs_map(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x < 0.0 {
+            x = 0.0 - x;
+        }
+        out[i] = x;
+        i = i + 1;
+    }
+}
+fn clamp_or_double(Vec<float> out, Vec<float> a, float hi) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x > hi {
+            out[i] = hi;
+        } else {
+            out[i] = x * 2.0;
+        }
+        i = i + 1;
+    }
+}
+fn cap(Vec<int> a, int hi) {
+    let i = 0;
+    while i < a.len() {
+        if a[i] > hi {
+            a[i] = hi;
+        }
+        i = i + 1;
+    }
+}
+fn fold_upper(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let c = a[i];
+        if c >= 65 && c <= 90 {
+            out[i] = c | 32;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+fn lower_bytes(Vec<byte> out, Vec<byte> b) {
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+fn shift_small(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x < 10 {
+            out[i] = x + 1;
+        } else {
+            out[i] = x;
+        }
+        i = i + 1;
+    }
+}
+fn main() {
+    let f: Vec<float> = Vec::new();
+    let o: Vec<float> = Vec::new();
+    let n: Vec<int> = Vec::new();
+    let m: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 40 {
+        f.push((k as float) - 20.5);
+        o.push(0.0);
+        n.push(k * 3);
+        m.push(0);
+        k = k + 1;
+    }
+    abs_map(o, f);
+    if o[0] != 20.5 || o[39] != 18.5 {
+        panic "abs_map";
+    }
+    clamp_or_double(o, f, 1.0);
+    if o[0] != -41.0 || o[39] != 1.0 {
+        panic "clamp_or_double";
+    }
+    fold_upper(m, n);
+    if m[22] != 98 || m[30] != 122 {
+        panic "fold_upper";
+    }
+    shift_small(m, n);
+    if m[0] != 1 || m[4] != 12 {
+        panic "shift_small";
+    }
+    cap(n, 50);
+    if n[39] != 50 || n[3] != 9 {
+        panic "cap";
+    }
+    let t: Vec<byte> = Vec::new();
+    let u: Vec<byte> = Vec::new();
+    let j = 0;
+    while j < 40 {
+        t.push((60 + j) as byte);
+        u.push(0 as byte);
+        j = j + 1;
+    }
+    lower_bytes(u, t);
+    if u[0] != 60 as byte || u[5] != 97 as byte || u[39] != 99 as byte {
+        panic "lower_bytes";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile selects");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "select checksums");
+    let symbols = p.program_debug().fn_symbols;
+    for name in ["abs_map", "clamp_or_double", "cap", "fold_upper", "lower_bytes"] {
+        assert_vec_loop(fn_ops(&bc, &symbols, name), name);
+    }
+    // An int add can overflow, so an arm that adds runs only where taken.
+    let ops = fn_ops(&bc, &symbols, "shift_small");
+    assert!(!ops.iter().any(|b| *b.bytecode() == Instruction::VLoop), "shift_small: an arm that can trap stays scalar");
+}
+
+/// `out.push(value(i))`, plain or one push per arm, runs as a `VLoop`
+/// append.
+#[test]
+fn pipeline_vectorizes_map_push_loops() {
+    let src = r#"
+fn mul_push(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out.push(a[i] * 3 + 1);
+        i = i + 1;
+    }
+}
+fn shift_bytes(Vec<byte> b, int delta) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out.push(((c as int) + delta) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+fn main() {
+    let a: Vec<int> = Vec::new();
+    let t: Vec<byte> = Vec::new();
+    let k = 0;
+    while k < 40 {
+        a.push(k);
+        t.push((60 + k) as byte);
+        k = k + 1;
+    }
+    let o: Vec<int> = [7];
+    mul_push(o, a);
+    if o.len() != 41 || o[0] != 7 || o[1] != 1 || o[40] != 118 {
+        panic "mul_push";
+    }
+    let u = shift_bytes(t, 32);
+    if u.len() != 40 || u[0] != 60 as byte || u[5] != 97 as byte || u[39] != 99 as byte {
+        panic "shift_bytes";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile map-push");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "map-push checksums");
+    let symbols = p.program_debug().fn_symbols;
+    for name in ["mul_push", "shift_bytes"] {
+        assert_vec_loop(fn_ops(&bc, &symbols, name), name);
+    }
+}

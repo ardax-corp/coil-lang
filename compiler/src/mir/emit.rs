@@ -2852,12 +2852,20 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
         MirInst::VecLoop { dest, pos, from, to, kind } => {
             let d = regs[dest.index()];
             let p = pos.map_or(d, |p| regs[p.index()]);
-            // `dest` and `pos` are written before the operands are last read.
-            if inst.operands().iter().any(|v| regs[v.index()] == d || regs[v.index()] == p) || (pos.is_some() && p == d) {
+            // `dest` and `pos` are written before the operands are last read;
+            // the start value `dest` takes first may already be in it.
+            let start = match kind {
+                super::inst::VecLoopKind::Reduce { init, .. } | super::inst::VecLoopKind::Push { out: init, .. } => Some(*init),
+                super::inst::VecLoopKind::Store { .. } => None,
+            };
+            let ops = inst.operands();
+            let start = start.filter(|s| ops.iter().filter(|v| *v == s).count() == 1);
+            let clash = |v: &ValueId| (Some(*v) != start && regs[v.index()] == d) || regs[v.index()] == p;
+            if ops.iter().any(clash) || (pos.is_some() && p == d) {
                 return Err(LowerError::Refused("vec loop dest shares an operand slot".into()));
             }
             let body = vec_loop_body(kind, regs, d, p).ok_or_else(|| LowerError::Refused("vec loop body too large".into()))?;
-            if let super::inst::VecLoopKind::Reduce { init, .. } = kind
+            if let super::inst::VecLoopKind::Reduce { init, .. } | super::inst::VecLoopKind::Push { out: init, .. } = kind
                 && regs[init.index()] != d
             {
                 out.push(move_op(d, regs[init.index()]));
@@ -4906,9 +4914,149 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
         next: u8,
         regs: &'a [u8],
         p: u8,
+        /// [`Ctx::shared`]'s registers by node, the readers each node has
+        /// left, and the registers free again.
+        memo: std::collections::HashMap<VecExpr, u8>,
+        uses: std::collections::HashMap<VecExpr, usize>,
+        free: Vec<u8>,
     }
 
     impl Ctx<'_> {
+        /// One store's value or the fold's term in a register: each
+        /// distinct node once ([`Ctx::shared`]), or, when that needs more
+        /// than the registers, as the tree ([`Ctx::eval`]).
+        fn value(&mut self, e: &VecExpr) -> Option<u8> {
+            let at = self.out.len();
+            self.next = 0;
+            self.memo.clear();
+            self.uses.clear();
+            self.free.clear();
+            self.count(e, false);
+            if let Some(r) = self.shared(e, true) {
+                return Some(r);
+            }
+            self.out.truncate(at);
+            self.next = 0;
+            self.eval(e)
+        }
+
+        /// How many parents read each shared node (`owned`: the node a
+        /// `SELECT` / `VFma` writes into, computed again for each).
+        fn count(&mut self, e: &VecExpr, owned: bool) {
+            if !owned {
+                let n = self.uses.entry(e.clone()).or_insert(0);
+                *n += 1;
+                if *n > 1 {
+                    return;
+                }
+            }
+            match e {
+                VecExpr::Splat { .. } | VecExpr::Index | VecExpr::Load { .. } => {}
+                VecExpr::Bin { lhs, rhs, .. } => {
+                    self.count(lhs, false);
+                    self.count(rhs, false);
+                }
+                VecExpr::Unary { src, .. } => self.count(src, false),
+                VecExpr::Select { mask, then, els } => {
+                    self.count(mask, true);
+                    self.count(then, false);
+                    self.count(els, false);
+                }
+                VecExpr::Fma { a, b, c, .. } => {
+                    self.count(c, true);
+                    self.count(a, false);
+                    self.count(b, false);
+                }
+            }
+        }
+
+        /// A register for [`Ctx::shared`]: a freed one first.
+        fn sreg(&mut self) -> Option<u8> {
+            self.free.pop().or_else(|| self.reg())
+        }
+
+        /// A parent has read shared node `e`; its register is free after
+        /// its last reader.
+        fn release(&mut self, e: &VecExpr) {
+            if let Some(n) = self.uses.get_mut(e) {
+                *n -= 1;
+                if *n == 0
+                    && let Some(r) = self.memo.remove(e)
+                {
+                    self.free.push(r);
+                }
+            }
+        }
+
+        /// `e` with a node seen before in this value read from its
+        /// register, which is reused once its last reader ran. The node a
+        /// `VBin SELECT` / `VFma` writes into is computed again for it, not
+        /// shared (`memo` false).
+        fn shared(&mut self, e: &VecExpr, memo: bool) -> Option<u8> {
+            if memo && let Some(&r) = self.memo.get(e) {
+                return Some(r);
+            }
+            let r = match e {
+                VecExpr::Splat { v, ty } => {
+                    let r = self.sreg()?;
+                    let k = if *ty == dense::TY_F64 { simd::SPLAT_F64 } else { simd::SPLAT_I64 };
+                    self.word(Instruction::VBin, k, r, self.slot(*v), 0);
+                    r
+                }
+                VecExpr::Index => {
+                    let (r, p) = (self.sreg()?, self.sreg()?);
+                    self.word(Instruction::VBin, simd::IOTA_I64, r, 0, 0);
+                    self.word(Instruction::VBin, simd::SPLAT_I64, p, self.p, 0);
+                    self.word(Instruction::VBin, simd::IADD64, r, r, p);
+                    self.free.push(p);
+                    r
+                }
+                VecExpr::Load { array, off, ty } => {
+                    let r = self.sreg()?;
+                    self.word(Instruction::VLoad, *ty, r, self.slot(*array), self.slot(*off));
+                    r
+                }
+                VecExpr::Bin { kind, lhs, rhs } => {
+                    let x = self.shared(lhs, true)?;
+                    let y = self.shared(rhs, true)?;
+                    self.release(lhs);
+                    self.release(rhs);
+                    let r = self.sreg()?;
+                    self.word(Instruction::VBin, *kind, r, x, y);
+                    r
+                }
+                VecExpr::Unary { kind, src } => {
+                    let x = self.shared(src, true)?;
+                    self.release(src);
+                    let r = self.sreg()?;
+                    self.word(Instruction::VBin, *kind, r, x, 0);
+                    r
+                }
+                VecExpr::Select { mask, then, els } => {
+                    let m = self.shared(mask, false)?;
+                    let x = self.shared(then, true)?;
+                    let y = self.shared(els, true)?;
+                    self.word(Instruction::VBin, simd::SELECT, m, x, y);
+                    self.release(then);
+                    self.release(els);
+                    m
+                }
+                VecExpr::Fma { ty, a, b, c } => {
+                    let z = self.shared(c, false)?;
+                    let x = self.shared(a, true)?;
+                    let y = self.shared(b, true)?;
+                    self.word(Instruction::VFma, *ty, z, x, y);
+                    self.release(a);
+                    self.release(b);
+                    z
+                }
+            };
+            if memo {
+                self.memo.insert(e.clone(), r);
+            }
+            Some(r)
+        }
+
         fn reg(&mut self) -> Option<u8> {
             let r = self.next;
             if usize::from(r) >= simd::NREGS {
@@ -4954,10 +5102,18 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
                     self.word(Instruction::VBin, *kind, x, x, y);
                     x
                 }
-                VecExpr::Neg { kind, src } => {
+                VecExpr::Unary { kind, src } => {
                     let x = self.eval(src)?;
                     self.word(Instruction::VBin, *kind, x, x, 0);
                     x
+                }
+                // `VBin SELECT` picks into its dest, which holds the mask.
+                VecExpr::Select { mask, then, els } => {
+                    let m = self.eval(mask)?;
+                    let x = self.eval(then)?;
+                    let y = self.eval(els)?;
+                    self.word(Instruction::VBin, simd::SELECT, m, x, y);
+                    m
                 }
                 // `VFma` adds into its dest: `c` first, so it lands at `base`.
                 VecExpr::Fma { ty, a, b, c } => {
@@ -4974,26 +5130,36 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
         }
     }
 
-    let mut cx = Ctx { out: Vec::new(), next: 0, regs, p };
+    let mut cx = Ctx {
+        out: Vec::new(),
+        next: 0,
+        regs,
+        p,
+        memo: std::collections::HashMap::new(),
+        uses: std::collections::HashMap::new(),
+        free: Vec::new(),
+    };
     match kind {
         // A map-and-fold body stores first, as the scalar loop does
         // (`vec_loop` takes only bodies whose fold comes after the stores).
         VecLoopKind::Reduce { ty, fold, term, stores, .. } => {
             for (array, off, ty, value) in stores {
-                cx.next = 0;
-                let v = cx.eval(value)?;
+                let v = cx.value(value)?;
                 cx.word(Instruction::VStore, *ty, v, cx.slot(*array), cx.slot(*off));
             }
-            cx.next = 0;
-            let v = cx.eval(term)?;
+            let v = cx.value(term)?;
             cx.word(Instruction::VReduce, *ty, d, v, *fold);
         }
         VecLoopKind::Store { stores } => {
             for (array, off, ty, value) in stores {
-                cx.next = 0;
-                let v = cx.eval(value)?;
+                let v = cx.value(value)?;
                 cx.word(Instruction::VStore, *ty, v, cx.slot(*array), cx.slot(*off));
             }
+        }
+        // The array is in `d` (moved there in front of the loop).
+        VecLoopKind::Push { ty, value, .. } => {
+            let v = cx.value(value)?;
+            cx.word(Instruction::VStore, *ty | simd::STORE_PUSH, v, d, 0);
         }
     }
     (cx.out.len() <= usize::from(common::simd::LOOP_LEN)).then_some(cx.out)

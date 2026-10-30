@@ -818,6 +818,11 @@ pub mod simd {
     pub const IOTA_F64: u8 = 35;
     pub const INEG: u8 = 36;
     pub const FNEG: u8 = 37;
+    /// Lane casts (archive 6.11): int lanes to float lanes, and float
+    /// lanes to int lanes truncating as `as int` does (NaN is `0`, out of
+    /// range saturates). Neither traps.
+    pub const I2F: u8 = 38;
+    pub const F2I: u8 = 39;
 
     /// Low byte of `VReduce`: fold the lanes into the scalar. `0` is add,
     /// which is what every existing archive emits.
@@ -836,6 +841,9 @@ pub mod simd {
     /// lanes (IEEE: a NaN compares unequal and unordered).
     pub const ICMP: u8 = 64;
     pub const FCMP: u8 = 72;
+    /// `VBin` select (archive 6.11): `dest = dest != 0 ? a : b` lane by
+    /// lane, the mask in `dest` as `0` / `1` int lanes. Never traps.
+    pub const SELECT: u8 = 80;
 
     /// Byte lanes (minor 46, `docs/internals/byte-simd.md`): a vector
     /// register read as [`BYTE_LANES`] `u8` lanes. A lane mask is `0xFF` /
@@ -856,6 +864,10 @@ pub mod simd {
     pub const LOOP_POS: u8 = 0x80;
     /// `VLoop` length-field bits that hold the body length.
     pub const LOOP_LEN: u8 = 0x7F;
+    /// `VStore` type flag (archive 6.11, `VLoop` bodies): append the 8
+    /// lanes to the array in lane order instead of storing them at an
+    /// index (the index slot is unused).
+    pub const STORE_PUSH: u8 = 0x80;
     /// `VLoad` type: 64 bytes of a `string` or a byte array from `idx`.
     pub const TY_U8: u8 = 8;
     /// `VBin` mask logic on byte lanes: `a & b`, `a | b`, `a & !b`, `!a`.
@@ -875,6 +887,12 @@ pub mod simd {
     #[inline]
     pub const fn is_byte_kind(kind: u8) -> bool {
         kind >= M_AND && kind < BS_CMP + 6
+    }
+
+    /// Whether a `VBin` of `kind` reads only its `a` register.
+    #[inline]
+    pub const fn is_unary_kind(kind: u8) -> bool {
+        matches!(kind, INEG | FNEG | I2F | F2I)
     }
 }
 

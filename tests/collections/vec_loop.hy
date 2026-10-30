@@ -453,3 +453,453 @@ test("loops that store a map and fold a sum") {
         assert!(double_then_sum(d) == expect);
     }
 }
+
+// Lane casts: `as int` truncates toward zero (NaN is 0, out of range
+// saturates) and `as float` rounds, in every lane as in the scalar loop.
+fn trunc_map(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] as int) as float;
+        i = i + 1;
+    }
+}
+
+fn trunc_map_scalar(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = black_box((a[i] as int) as float);
+        i = i + 1;
+    }
+}
+
+fn to_ints(Vec<int> out, Vec<float> a, float k) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] * k) as int / 3;
+        i = i + 1;
+    }
+}
+
+fn to_ints_scalar(Vec<int> out, Vec<float> a, float k) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = black_box((a[i] * k) as int / 3);
+        i = i + 1;
+    }
+}
+
+fn halves(Vec<float> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out[i] = (a[i] as float) * 0.5 + (i as float);
+        i = i + 1;
+    }
+}
+
+fn int_sum_of(Vec<float> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + (a[i] as int);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn int_sum_of_scalar(Vec<float> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + black_box(a[i] as int);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn same_float(float x, float y) -> bool {
+    return x == y || (x != x && y != y);
+}
+
+test("lane casts between int and float") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65] {
+        let fa = floats(n);
+        let k = 0;
+        while k < n {
+            fa[k] = fa[k] * 3.7 - 9.0;
+            k = k + 1;
+        }
+        if n > 9 {
+            fa[3] = 0.0 / 0.0;
+            fa[5] = 9223372036854776000.0 * 1000.0;
+            fa[6] = -9223372036854776000.0 * 1000.0;
+            fa[7] = -0.75;
+            fa[8] = 1.0 / 0.0;
+        }
+        let x = floats(n);
+        let y = floats(n);
+        trunc_map(x, fa);
+        trunc_map_scalar(y, fa);
+        let ix = ints(n);
+        let iy = ints(n);
+        to_ints(ix, fa, 2.5);
+        to_ints_scalar(iy, fa, 2.5);
+        let i = 0;
+        while i < n {
+            assert!(same_float(x[i], y[i]));
+            assert!(ix[i] == iy[i]);
+            i = i + 1;
+        }
+        let h = floats(n);
+        let src = ints(n);
+        halves(h, src);
+        let j = 0;
+        while j < n {
+            assert!(h[j] == (src[j] as float) * 0.5 + (j as float));
+            j = j + 1;
+        }
+        let fs = floats(n);
+        assert!(int_sum_of(fs) == int_sum_of_scalar(fs));
+    }
+}
+
+// Selects: an `if` whose arms cannot trap runs both arms in every lane
+// and picks per lane, so it must give the scalar loop's elements, NaN and
+// signed zeros included.
+fn abs_map(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x < 0.0 {
+            x = 0.0 - x;
+        }
+        out[i] = x;
+        i = i + 1;
+    }
+}
+
+fn abs_map_scalar(Vec<float> out, Vec<float> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = black_box(a[i]);
+        if x < 0.0 {
+            x = 0.0 - x;
+        }
+        out[i] = x;
+        i = i + 1;
+    }
+}
+
+fn clamp_or_double(Vec<float> out, Vec<float> a, float hi) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x > hi {
+            out[i] = hi;
+        } else {
+            out[i] = x * 2.0;
+        }
+        i = i + 1;
+    }
+}
+
+fn clamp_or_double_scalar(Vec<float> out, Vec<float> a, float hi) {
+    let i = 0;
+    while i < a.len() {
+        let x = black_box(a[i]);
+        if x > hi {
+            out[i] = hi;
+        } else {
+            out[i] = x * 2.0;
+        }
+        i = i + 1;
+    }
+}
+
+// One arm stores; the other side keeps the element.
+fn cap(Vec<int> a, int hi) {
+    let i = 0;
+    while i < a.len() {
+        if a[i] > hi {
+            a[i] = hi;
+        }
+        i = i + 1;
+    }
+}
+
+fn cap_scalar(Vec<int> a, int hi) {
+    let i = 0;
+    while i < a.len() {
+        if black_box(a[i]) > hi {
+            a[i] = hi;
+        }
+        i = i + 1;
+    }
+}
+
+fn fold_upper(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let c = a[i];
+        if c >= 65 && c <= 90 {
+            out[i] = c | 32;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+fn fold_upper_scalar(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let c = black_box(a[i]);
+        if c >= 65 && c <= 90 {
+            out[i] = c | 32;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+// The `then` arm would overflow in the lanes that take `else`: it must
+// not run there.
+fn shift_small(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        let x = a[i];
+        if x < 10 {
+            out[i] = x + 9223372036854775000;
+        } else {
+            out[i] = x;
+        }
+        i = i + 1;
+    }
+}
+
+test("selects in map loops") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65] {
+        let fa = floats(n);
+        let k = 0;
+        while k < n {
+            fa[k] = fa[k] - 4.0;
+            k = k + 1;
+        }
+        if n > 9 {
+            fa[2] = 0.0 / 0.0;
+            fa[3] = -0.0;
+            fa[4] = -1.0 / 0.0;
+        }
+        let x = floats(n);
+        let y = floats(n);
+        abs_map(x, fa);
+        abs_map_scalar(y, fa);
+        let i = 0;
+        while i < n {
+            assert!(same_float(x[i], y[i]));
+            assert!(1.0 / x[i] == 1.0 / y[i] || x[i] != x[i]);
+            i = i + 1;
+        }
+        clamp_or_double(x, fa, 1.5);
+        clamp_or_double_scalar(y, fa, 1.5);
+        let j = 0;
+        while j < n {
+            assert!(same_float(x[j], y[j]));
+            j = j + 1;
+        }
+        let ia = ints(n);
+        let ib = ints(n);
+        cap(ia, 100);
+        cap_scalar(ib, 100);
+        let letters: Vec<int> = Vec::new();
+        let m = 0;
+        while m < n {
+            assert!(ia[m] == ib[m]);
+            letters.push(40 + (m * 7) % 80);
+            m = m + 1;
+        }
+        let la = ints(n);
+        let lb = ints(n);
+        fold_upper(la, letters);
+        fold_upper_scalar(lb, letters);
+        let big: Vec<int> = Vec::new();
+        let q = 0;
+        while q < n {
+            assert!(la[q] == lb[q]);
+            if q % 3 == 0 {
+                big.push(q);
+            } else {
+                big.push(9223372036854775000 + q);
+            }
+            q = q + 1;
+        }
+        let sh = ints(n);
+        shift_small(sh, big);
+        let r = 0;
+        while r < n {
+            if big[r] < 10 {
+                assert!(sh[r] == big[r] + 9223372036854775000);
+            } else {
+                assert!(sh[r] == big[r]);
+            }
+            r = r + 1;
+        }
+    }
+}
+
+// An `int` add in an arm runs in every lane when its operands' ranges
+// keep it from overflowing: `(c as int) + 32` on a byte.
+fn lower_bytes(Vec<byte> out, Vec<byte> b) {
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+fn lower_bytes_scalar(Vec<byte> out, Vec<byte> b) {
+    let i = 0;
+    while i < b.len() {
+        let c = black_box(b[i]);
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+test("byte maps with a ranged add in an arm") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65, 300] {
+        let src: Vec<byte> = Vec::new();
+        let x: Vec<byte> = Vec::new();
+        let y: Vec<byte> = Vec::new();
+        let k = 0;
+        while k < n {
+            src.push(((k * 37 + 11) % 256) as byte);
+            x.push(0 as byte);
+            y.push(0 as byte);
+            k = k + 1;
+        }
+        lower_bytes(x, src);
+        lower_bytes_scalar(y, src);
+        let i = 0;
+        while i < n {
+            assert!(x[i] == y[i]);
+            i = i + 1;
+        }
+    }
+}
+
+// `out.push(value(i))`: the grown array, 8 lanes a time.
+fn mul_push(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out.push(a[i] * 3 + 1);
+        i = i + 1;
+    }
+}
+
+fn mul_push_scalar(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out.push(black_box(a[i]) * 3 + 1);
+        i = i + 1;
+    }
+}
+
+fn shift_bytes(Vec<byte> b, byte lo, byte hi, int delta) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= lo && c <= hi {
+            out.push(((c as int) + delta) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn shift_bytes_scalar(Vec<byte> b, byte lo, byte hi, int delta) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < b.len() {
+        let c = black_box(b[i]);
+        if c >= lo && c <= hi {
+            out.push(((c as int) + delta) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+test("map-push loops") {
+    for n in [0, 1, 7, 8, 9, 16, 17, 63, 64, 65, 300] {
+        let a: Vec<int> = Vec::new();
+        let src: Vec<byte> = Vec::new();
+        let k = 0;
+        while k < n {
+            a.push(k * 7 - 40);
+            src.push(((k * 37 + 11) % 256) as byte);
+            k = k + 1;
+        }
+        // Onto an array that already holds a few.
+        let x: Vec<int> = [5, 6, 7];
+        let y: Vec<int> = [5, 6, 7];
+        mul_push(x, a);
+        mul_push_scalar(y, a);
+        assert!(x.len() == n + 3);
+        assert!(x == y);
+        for delta in [32, -32, 300, -1000] {
+            let p = shift_bytes(src, "A" as byte, "Z" as byte, delta);
+            let q = shift_bytes_scalar(src, "A" as byte, "Z" as byte, delta);
+            assert!(p.len() == n);
+            assert!(p == q);
+        }
+    }
+}
+
+test("a map-push onto the array it reads stays scalar") {
+    let a: Vec<int> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let i = 0;
+    let n = a.len();
+    while i < n {
+        a.push(a[i] * 3 + 1);
+        i = i + 1;
+    }
+    assert!(a.len() == 20);
+    assert!(a[10] == 4 && a[19] == 31);
+}
+
+fn push_overflow() -> int {
+    let a: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 40 {
+        a.push(
+            if k == 21 {
+                9223372036854775807 / 2
+            } else {
+                k
+            },
+        );
+        k = k + 1;
+    }
+    let out: Vec<int> = Vec::new();
+    mul_push(out, a);
+    return out.len();
+}
+
+test("a trap in a map-push still panics") {
+    assert!(panics(push_overflow));
+}
