@@ -361,13 +361,18 @@ jobs:
 
       - name: Build coil-test with GC stress
         # `coil test` re-execs `coil-test`; build the harness itself with the feature.
+        # Release only: the debug GC-stress cells are off (#2131).
+        if: matrix.mode == 'release'
         run: cargo build ${{ matrix.mode == 'release' && '--release' || '' }} -p coil-test --features gc-stress --target-dir target/gc-stress
 
       - name: Collect binaries
         run: |
-          mkdir -p harness-bin/gc-stress
+          mkdir -p harness-bin
           cp target/${{ matrix.mode }}/coil target/${{ matrix.mode }}/coil-test harness-bin/
-          cp target/gc-stress/${{ matrix.mode }}/coil-test harness-bin/gc-stress/
+          if [ "${{ matrix.mode }}" = release ]; then
+            mkdir -p harness-bin/gc-stress
+            cp target/gc-stress/release/coil-test harness-bin/gc-stress/
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -396,15 +401,12 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         mode: [debug, release]
-        variant: [default, O0, leak-smoke, gc-stress, gc-stress-1, gc-stress-2, gc-stress-O0]
-        # A debug GC-stress run takes over 30 minutes in one cell; on Linux it
-        # is split in three (two halves of the corpora, then the -O0 pass).
-        # Release, and macOS below, run it whole as `gc-stress`.
-        exclude:
+        variant: [default, O0, leak-smoke, gc-stress]
+        # GC stress runs in release only. The debug cells took over 30
+        # minutes even split in three and kept timing out on a stall
+        # (#2131), so PRs ignored them; restore them once that is fixed.
+        exclude: &no-debug-gc-stress
           - { mode: debug, variant: gc-stress }
-          - { mode: release, variant: gc-stress-1 }
-          - { mode: release, variant: gc-stress-2 }
-          - { mode: release, variant: gc-stress-O0 }
     env: &harness-env
       # A worker abort (coil-lang#804) prints where it happened.
       RUST_BACKTRACE: "1"
@@ -451,7 +453,8 @@ jobs:
 
       - name: Language harness (${{ matrix.variant }}, ${{ matrix.mode }})
         run: |
-          chmod +x harness-bin/coil harness-bin/coil-test harness-bin/gc-stress/coil-test
+          chmod +x harness-bin/coil harness-bin/coil-test
+          if [ -f harness-bin/gc-stress/coil-test ]; then chmod +x harness-bin/gc-stress/coil-test; fi
           run="python3 scripts/test_corpora.py --bin harness-bin"
           case "${{ matrix.variant }}" in
             default) $run -- $FLAGS ;;
@@ -477,10 +480,6 @@ jobs:
             # is wider than the default 600 s.
             gc-stress)
               $run --harness harness-bin/gc-stress/coil-test -- --wall-timeout 1200 $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
-            gc-stress-1|gc-stress-2)
-              $run --harness harness-bin/gc-stress/coil-test --shard "${{ matrix.variant == 'gc-stress-1' && '1' || '2' }}/2" -- --wall-timeout 1200 $FLAGS ;;
-            gc-stress-O0)
               $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
           esac
 
@@ -607,6 +606,7 @@ jobs:
         os: [macos-latest]
         mode: [debug, release]
         variant: [default, gc-stress]
+        exclude: *no-debug-gc-stress
     env: *harness-env
     steps: *harness-steps
 
