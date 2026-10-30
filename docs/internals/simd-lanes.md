@@ -44,9 +44,11 @@ For scale, a `VLoop` store map is about 4 ns per element and a
    new body word (`VSel`, three registers like `VFma`). Covers abs,
    clamp, `if x < 0 { x = -x }`, and once inlined, `math::fabs`,
    `floor`, `ceil`.
-3. **Byte lanes in `VLoop`.** Loads and stores on packed `Vec<byte>` with
-   the result narrowed back to a byte (`as byte` wraps or panics as
-   written), so `out[i] = to_lower(b[i])` runs 8 lanes a time.
+3. **Byte maps.** A `Vec<byte>` already runs as int lanes (`as byte`
+   and `as int` are `& 255`), but `(c as int) + 32` in an arm is an
+   `int` add that could trap. An arm may now add, subtract and multiply
+   when the operands' ranges (constants, non-negative masks) keep the
+   result in range, so `out[i] = to_lower(b[i])` runs 8 lanes a time.
 4. **Map-push.** A counted loop whose body is one `out.push(value(i))`
    grows `out` by `n - i0` once (`vec_fill` with a placeholder), then runs
    the map as a `VLoop` store at `out.len() + i - i0`. A trap leaves the
@@ -74,7 +76,13 @@ do not have these loops), per the hit-bench rule in
 | Step | PR | Hit bench (`vec_lanes.hy`, 8192 elements) |
 |---|---|---|
 | 1 lane casts | #2137 | trunc map 172.8 → 38.5 µs, int-to-float map 154.5 → 49.7 µs |
-| 2 selects | this branch | abs 170 → 76 µs, clamp 178 → 72 µs |
+| 2 selects | #2140 | abs 170 → 76 µs, clamp 178 → 72 µs |
+| 3 byte maps | this branch | ASCII lower case on `Vec<byte>` 279 → 101 µs |
+
+Step 3 also fixed `VLoop` lane loads from a packed `Vec<byte>`, which
+skipped to the block through the element iterator, so the loads were
+quadratic in the array's length. The body words now reuse a register
+once its last reader ran, so a 12-node body fits the 8 registers.
 
 Seen along the way: a `VLoop` body word costs about 9 ns per block of
 8 lanes (the interpreter loop in `machine::vm::vloop` copies registers

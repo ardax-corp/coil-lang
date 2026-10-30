@@ -116,11 +116,14 @@ beat Rust/`memcmp` slice equality.
   select, and a store in one arm alone keeps the element on the other
   side. Every lane runs both arms, so an arm may only compute what
   cannot trap (float arithmetic, bit ops, compares, casts, loads the
-  guard covers); an `int` add in an arm keeps the loop scalar. The mask
+  guard covers, and `int` `+ - *` whose operand ranges keep it in
+  range, like `(c as int) + 32` on a byte); any other `int` add in an
+  arm keeps the loop scalar. The mask
   is the compare as written (`0` / `1` lanes, `&&` of compares as
   `IAND64`), so a NaN takes the side the scalar branch takes. A body
-  word computes each distinct node once (`emit::vec_loop_body`), falling
-  back to the tree when that needs more than the eight registers.
+  word computes each distinct node once (`emit::vec_loop_body`) and
+  reuses a register after its last reader, falling back to the tree
+  when that still needs more than the eight registers.
   `examples/perf/vec_lanes.hy`, 8192 elements: abs 170 → 76 µs, clamp
   with a store per arm 178 → 72 µs.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key

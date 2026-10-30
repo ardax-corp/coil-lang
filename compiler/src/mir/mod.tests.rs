@@ -5458,6 +5458,18 @@ fn fold_upper(Vec<int> out, Vec<int> a) {
         i = i + 1;
     }
 }
+fn lower_bytes(Vec<byte> out, Vec<byte> b) {
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
 fn shift_small(Vec<int> out, Vec<int> a) {
     let i = 0;
     while i < a.len() {
@@ -5503,6 +5515,18 @@ fn main() {
     if n[39] != 50 || n[3] != 9 {
         panic "cap";
     }
+    let t: Vec<byte> = Vec::new();
+    let u: Vec<byte> = Vec::new();
+    let j = 0;
+    while j < 40 {
+        t.push((60 + j) as byte);
+        u.push(0 as byte);
+        j = j + 1;
+    }
+    lower_bytes(u, t);
+    if u[0] != 60 as byte || u[5] != 97 as byte || u[39] != 99 as byte {
+        panic "lower_bytes";
+    }
 }
 "#;
     let mut p = crate::Pipeline::new();
@@ -5513,7 +5537,7 @@ fn main() {
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     assert!(!vm.panicked(), "select checksums");
     let symbols = p.program_debug().fn_symbols;
-    for name in ["abs_map", "clamp_or_double", "cap", "fold_upper"] {
+    for name in ["abs_map", "clamp_or_double", "cap", "fold_upper", "lower_bytes"] {
         assert_vec_loop(fn_ops(&bc, &symbols, name), name);
     }
     // An int add can overflow, so an arm that adds runs only where taken.
