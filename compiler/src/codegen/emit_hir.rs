@@ -4245,8 +4245,9 @@ impl Compiler {
         {
             ret = apply_ty_prune(self.checker.subst(), ty);
         }
-        // A returned function (`return show`, a `PolyFn`) is one word.
-        let fun = matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Fun(..) | Ty::Forall { .. });
+        // A returned function (`return show`, a `PolyFn`) is one word, and
+        // so is a `Vec` of ground ones (#2136).
+        let fun = matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Fun(..) | Ty::Forall { .. }) || ground_fun(&ret);
         if !(crate::layout::ty_is_closed(&ret) || fun) || lower::classify(&self.checker, &ret).is_none() {
             return Err("callee-signature");
         }
@@ -5961,15 +5962,9 @@ impl Compiler {
             Self::bind_scheme_vars(param, ty, &mut vars);
         }
         Self::bind_scheme_vars(cur, &ret_ty, &mut vars);
-        // An open enum instance passes as its own word only where the
-        // signature names its type parameter bare: nested (`Option<T>`), the
-        // shared body would hold it boxed inside the object (#1517).
-        let nested = |v: &crate::typechecking::ty::TyVarId| {
-            params.iter().chain(ret_parts.iter().copied()).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
-        };
-        if vars.iter().any(|(v, ty)| !crate::layout::ty_is_closed(ty) && self.hir_open_enum_word(ty) && nested(v)) {
-            return Err("callee-generic");
-        }
+        // An open enum instance is its own object word in both shared bodies,
+        // also nested in the signature (`Vec<U>` at `U = Option<T>`):
+        // boxing a heap enum passes it through (#2138).
         // In a clone, `self` is typed by its class alone (`HashMap`): its
         // type arguments are the clone's (`HashMap<int, int>`), which ground
         // a sibling method's class parameters (`self.grow()`).
@@ -6022,8 +6017,11 @@ impl Compiler {
         // shared body may hold boxed inside its result (#1549).
         let mut boxed_vars = HashMap::new();
         for (i, b) in boxed[receivers..].iter().enumerate() {
+            // A heap enum or class instance boxes to itself (#2138,
+            // #2149): nothing to unbox.
             if let (Some(ty), Some(Ty::Var(v))) = (b, params.get(skip + i))
                 && Self::ty_to_value_tag(ty).is_some()
+                && !self.hir_object_word(ty)
             {
                 boxed_vars.insert(*v, ty.clone());
             }
@@ -6703,6 +6701,20 @@ impl Compiler {
     /// An enum whose word is the heap object (no pointer niche).
     fn hir_boxed_enum_word(&self, ty: &Ty) -> bool {
         self.value_layout(ty) == ValueLayout::Boxed
+    }
+
+    /// An enum held as its `ObjEnum` object word or a user class
+    /// instance, open or ground: `BoxValue` passes it through as itself
+    /// (#2138, #2149).
+    fn hir_object_word(&self, ty: &Ty) -> bool {
+        if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && self.hir_boxed_enum_word(ty) {
+            return true;
+        }
+        let head = match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::App(head, _) => head.as_ref(),
+            t => t,
+        };
+        matches!(head, Ty::Con(name) if self.checker.resolve_class_key(name).is_some())
     }
 
     /// An `Option` or `Result` held as a niche word (`Option<string>`).
@@ -9602,13 +9614,19 @@ fn hir_bisect(name: &str, limit: Option<usize>) -> bool {
     n <= limit
 }
 
-/// A function type whose parameter and result types are all ground.
+/// A function type whose parameter and result types are all ground, or a
+/// container of them.
 fn ground_fun(ty: &Ty) -> bool {
+    let ground = |t: &Ty| crate::layout::ty_is_closed(t) || ground_fun(t);
     match crate::typechecking::ty::strip_readonly(ty) {
-        Ty::Fun(param, ret) => {
-            let ground = |t: &Ty| crate::layout::ty_is_closed(t) || ground_fun(t);
-            ground(param) && ground(ret)
+        Ty::Fun(param, ret) => ground(param) && ground(ret),
+        // A `Vec`, array or tuple of ground functions holds their closure
+        // words (`Vec<unit -> string>`, #2136).
+        t @ Ty::App(..) if crate::typechecking::ty::vec_element_ty(t).is_some() => {
+            crate::typechecking::ty::vec_element_ty(t).is_some_and(ground_fun)
         }
+        Ty::Array { element, .. } => ground_fun(element),
+        Ty::Tuple(items) => items.iter().all(ground) && items.iter().any(ground_fun),
         _ => false,
     }
 }

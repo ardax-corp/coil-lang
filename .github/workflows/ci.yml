@@ -484,13 +484,16 @@ jobs:
               $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
           esac
 
-      # The examples in the builtin doc stubs (compiler/src/builtin_docs/),
+      # The examples in the builtin doc stubs (compiler/src/builtin_docs/)
+      # and the embedded modules (compiler/src/prelude/, such as `task`),
       # which no test file imports. `-A`: they show exit and FFI too.
       - name: Builtin doc-tests (${{ matrix.variant }}, ${{ matrix.mode }})
         if: matrix.variant == 'default' || matrix.variant == 'O0'
         run: |
-          harness-bin/coil test --doc-tests-only -A ${{ matrix.variant == 'O0' && '-O 0' || '' }} \
-            --root examples/src --root .deps/coil-stdlib/src compiler/src/builtin_docs
+          for docs in compiler/src/builtin_docs compiler/src/prelude; do
+            harness-bin/coil test --doc-tests-only -A ${{ matrix.variant == 'O0' && '-O 0' || '' }} \
+              --root examples/src --root .deps/coil-stdlib/src "$docs" || exit 1
+          done
 
       - uses: actions/upload-artifact@v4
         # `cancelled()`: a job cut off by `timeout-minutes` still uploads
