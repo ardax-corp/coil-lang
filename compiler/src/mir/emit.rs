@@ -4906,9 +4906,87 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
         next: u8,
         regs: &'a [u8],
         p: u8,
+        /// [`Ctx::shared`]'s registers by node.
+        memo: std::collections::HashMap<VecExpr, u8>,
     }
 
     impl Ctx<'_> {
+        /// One store's value or the fold's term, in a register from `v0`:
+        /// each distinct node once ([`Ctx::shared`]), or, when that needs
+        /// more than the registers, as the tree ([`Ctx::eval`]).
+        fn value(&mut self, e: &VecExpr) -> Option<u8> {
+            let at = self.out.len();
+            self.next = 0;
+            self.memo.clear();
+            if let Some(r) = self.shared(e, true) {
+                return Some(r);
+            }
+            self.out.truncate(at);
+            self.next = 0;
+            self.eval(e)
+        }
+
+        /// `e` with a node seen before in this value read from its
+        /// register. Every node writes a register of its own, but the one
+        /// a `VBin SELECT` / `VFma` writes into: that one is computed
+        /// again, not shared (`memo` false).
+        fn shared(&mut self, e: &VecExpr, memo: bool) -> Option<u8> {
+            if memo && let Some(&r) = self.memo.get(e) {
+                return Some(r);
+            }
+            let r = match e {
+                VecExpr::Splat { v, ty } => {
+                    let r = self.reg()?;
+                    let k = if *ty == dense::TY_F64 { simd::SPLAT_F64 } else { simd::SPLAT_I64 };
+                    self.word(Instruction::VBin, k, r, self.slot(*v), 0);
+                    r
+                }
+                VecExpr::Index => {
+                    let (r, p) = (self.reg()?, self.reg()?);
+                    self.word(Instruction::VBin, simd::IOTA_I64, r, 0, 0);
+                    self.word(Instruction::VBin, simd::SPLAT_I64, p, self.p, 0);
+                    self.word(Instruction::VBin, simd::IADD64, r, r, p);
+                    r
+                }
+                VecExpr::Load { array, off, ty } => {
+                    let r = self.reg()?;
+                    self.word(Instruction::VLoad, *ty, r, self.slot(*array), self.slot(*off));
+                    r
+                }
+                VecExpr::Bin { kind, lhs, rhs } => {
+                    let x = self.shared(lhs, true)?;
+                    let y = self.shared(rhs, true)?;
+                    let r = self.reg()?;
+                    self.word(Instruction::VBin, *kind, r, x, y);
+                    r
+                }
+                VecExpr::Unary { kind, src } => {
+                    let x = self.shared(src, true)?;
+                    let r = self.reg()?;
+                    self.word(Instruction::VBin, *kind, r, x, 0);
+                    r
+                }
+                VecExpr::Select { mask, then, els } => {
+                    let m = self.shared(mask, false)?;
+                    let x = self.shared(then, true)?;
+                    let y = self.shared(els, true)?;
+                    self.word(Instruction::VBin, simd::SELECT, m, x, y);
+                    m
+                }
+                VecExpr::Fma { ty, a, b, c } => {
+                    let z = self.shared(c, false)?;
+                    let x = self.shared(a, true)?;
+                    let y = self.shared(b, true)?;
+                    self.word(Instruction::VFma, *ty, z, x, y);
+                    z
+                }
+            };
+            if memo {
+                self.memo.insert(e.clone(), r);
+            }
+            Some(r)
+        }
+
         fn reg(&mut self) -> Option<u8> {
             let r = self.next;
             if usize::from(r) >= simd::NREGS {
@@ -4959,6 +5037,14 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
                     self.word(Instruction::VBin, *kind, x, x, 0);
                     x
                 }
+                // `VBin SELECT` picks into its dest, which holds the mask.
+                VecExpr::Select { mask, then, els } => {
+                    let m = self.eval(mask)?;
+                    let x = self.eval(then)?;
+                    let y = self.eval(els)?;
+                    self.word(Instruction::VBin, simd::SELECT, m, x, y);
+                    m
+                }
                 // `VFma` adds into its dest: `c` first, so it lands at `base`.
                 VecExpr::Fma { ty, a, b, c } => {
                     let z = self.eval(c)?;
@@ -4974,24 +5060,21 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
         }
     }
 
-    let mut cx = Ctx { out: Vec::new(), next: 0, regs, p };
+    let mut cx = Ctx { out: Vec::new(), next: 0, regs, p, memo: std::collections::HashMap::new() };
     match kind {
         // A map-and-fold body stores first, as the scalar loop does
         // (`vec_loop` takes only bodies whose fold comes after the stores).
         VecLoopKind::Reduce { ty, fold, term, stores, .. } => {
             for (array, off, ty, value) in stores {
-                cx.next = 0;
-                let v = cx.eval(value)?;
+                let v = cx.value(value)?;
                 cx.word(Instruction::VStore, *ty, v, cx.slot(*array), cx.slot(*off));
             }
-            cx.next = 0;
-            let v = cx.eval(term)?;
+            let v = cx.value(term)?;
             cx.word(Instruction::VReduce, *ty, d, v, *fold);
         }
         VecLoopKind::Store { stores } => {
             for (array, off, ty, value) in stores {
-                cx.next = 0;
-                let v = cx.eval(value)?;
+                let v = cx.value(value)?;
                 cx.word(Instruction::VStore, *ty, v, cx.slot(*array), cx.slot(*off));
             }
         }
