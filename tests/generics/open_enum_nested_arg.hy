@@ -68,3 +68,37 @@ test("a channel of an open Result") {
     };
     assert!(second);
 }
+
+fn none_in_vec<T>(T x) -> Vec<Option<T>> {
+    let r: Option<T> = Option::None;
+    let v = one(r);
+    v.push(Option::Some(x));
+    return v;
+}
+
+enum Shape {
+    Dot,
+    Box(int),
+}
+
+fn wrap_any<U>(U x) -> Vec<U> {
+    return one(x);
+}
+
+test("None and a ground heap enum pass through a shared body") {
+    let v = none_in_vec(4);
+    assert!(v[0] == Option::None);
+    assert!(v[1] == Option::Some(4));
+    let shapes = wrap_any(Shape::Box(3));
+    let ok = match shapes[0] {
+        Shape::Box(n) => n == 3,
+        Shape::Dot => false,
+    };
+    assert!(ok);
+    let dots = wrap_any(Shape::Dot);
+    let dot = match dots[0] {
+        Shape::Dot => true,
+        default => false,
+    };
+    assert!(dot);
+}
