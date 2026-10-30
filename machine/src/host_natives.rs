@@ -134,6 +134,8 @@ pub fn build_standard_host_natives(
     push_region(&mut out, &mut register_id);
     // Append-only after region: `symbol::next_id` (major 6 minor 9).
     push_wiring(&mut out, &mut register_id, crate::symbol::SYMBOL_WIRING, "symbol");
+    // Append-only after symbol: the `process` module (major 6 minor 10).
+    push_wiring(&mut out, &mut register_id, crate::process::PROCESS_WIRING, "process");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -1389,8 +1391,16 @@ mod tests {
             Some(common::GC_REGION_EXIT_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(179).map(String::as_str),
             Some(common::SYMBOL_NEXT_ID_NATIVE)
+        );
+        assert_eq!(
+            names.get(180).map(String::as_str),
+            Some(common::PROCESS_SPAWN_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::PROCESS_RELEASE_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1746,6 +1756,14 @@ mod tests {
             registrations.get(end + 43).map(|(n, _)| n.as_str()),
             Some(common::SYMBOL_NEXT_ID_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 44);
+        assert_eq!(
+            registrations.get(end + 44).map(|(n, _)| n.as_str()),
+            Some(common::PROCESS_SPAWN_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 52).map(|(n, _)| n.as_str()),
+            Some(common::PROCESS_RELEASE_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 53);
     }
 }

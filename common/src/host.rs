@@ -58,6 +58,7 @@ const WRITE_FS: Caps = Caps::WRITE;
 const COPY_FS: Caps = Caps::READ.union(Caps::WRITE);
 const NET_CAP: Caps = Caps::NET;
 const ENV_CAP: Caps = Caps::ENV;
+const EXEC_CAP: Caps = Caps::EXEC;
 const EXIT_CAP: Caps = Caps::EXIT;
 const ATTACH_CAP: Caps = Caps::ATTACH;
 
@@ -511,7 +512,7 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: EXEC,
         caps: EXIT_CAP,
     },
-    // Removed slot: `env::exec` moved to the coil-process package. Kept so
+    // Removed slot: `env::exec` (now the `process` module, ids 180–188). Kept so
     // later ids do not slide; nothing exports it and the runtime panics.
     HostNative {
         name: "env_exec",
@@ -1325,6 +1326,69 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HOST,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "process_spawn",
+        arity: 6,
+        id: 180,
+        effects: EXEC,
+        caps: EXEC_CAP,
+    },
+    HostNative {
+        name: "process_take_pipe",
+        arity: 2,
+        id: 181,
+        effects: HOST_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "process_wait",
+        arity: 1,
+        id: 182,
+        effects: EXEC,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "process_try_wait",
+        arity: 1,
+        id: 183,
+        effects: EXEC,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "process_output",
+        arity: 1,
+        id: 184,
+        effects: EXEC,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "process_kill",
+        arity: 1,
+        id: 185,
+        effects: EXEC,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "process_signal",
+        arity: 2,
+        id: 186,
+        effects: EXEC,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "process_pid",
+        arity: 1,
+        id: 187,
+        effects: HOST,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "process_release",
+        arity: 1,
+        id: 188,
+        effects: HOST,
+        caps: NO_CAP,
+    },
 ];
 
 /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
@@ -1456,6 +1520,21 @@ pub const GC_REGION_EXIT_NATIVE: &str = "gc_region_exit";
 /// time, hoisted or removed.
 pub const SYMBOL_NEXT_ID_ID: u16 = 179;
 pub const SYMBOL_NEXT_ID_NATIVE: &str = "symbol_next_id";
+/// The embedded `process` module's natives (archive 6.10, ids 180–188):
+/// spawn a program, take its pipes as streams, wait, kill, signal. Only
+/// `process_spawn` needs a grant (`--allow-exec`); the rest act on a child
+/// it started.
+pub const PROCESS_SPAWN_ID: u16 = 180;
+pub const PROCESS_SPAWN_NATIVE: &str = "process_spawn";
+pub const PROCESS_TAKE_PIPE_NATIVE: &str = "process_take_pipe";
+pub const PROCESS_WAIT_NATIVE: &str = "process_wait";
+pub const PROCESS_TRY_WAIT_NATIVE: &str = "process_try_wait";
+pub const PROCESS_OUTPUT_NATIVE: &str = "process_output";
+pub const PROCESS_KILL_NATIVE: &str = "process_kill";
+pub const PROCESS_SIGNAL_NATIVE: &str = "process_signal";
+pub const PROCESS_PID_NATIVE: &str = "process_pid";
+pub const PROCESS_RELEASE_ID: u16 = 188;
+pub const PROCESS_RELEASE_NATIVE: &str = "process_release";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1503,7 +1582,9 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 180);
+    assert!(HOST_NATIVES.len() == 189);
+    assert!(HOST_NATIVES[PROCESS_SPAWN_ID as usize].id == PROCESS_SPAWN_ID);
+    assert!(HOST_NATIVES[PROCESS_RELEASE_ID as usize].id == PROCESS_RELEASE_ID);
     assert!(HOST_NATIVES[SYMBOL_NEXT_ID_ID as usize].id == SYMBOL_NEXT_ID_ID);
     assert!(HOST_NATIVES[VEC_EXTEND_RANGE_ID as usize].id == VEC_EXTEND_RANGE_ID);
     assert!(HOST_NATIVES[VEC_FILL_ID as usize].id == VEC_FILL_ID);

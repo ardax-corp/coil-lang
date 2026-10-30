@@ -65,7 +65,7 @@ fn var(string name) -> Result<string, EnvError> {}
 
 /// Sets the environment variable `name` to `value` for this process.
 ///
-/// Programs started later (coil-process) inherit it. A name or value with a
+/// Programs started later (the `process` module) inherit it. A name or value with a
 /// NUL byte is `Err(EnvError::InvalidInput)`. Needs `--allow-env`.
 ///
 /// # Examples

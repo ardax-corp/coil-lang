@@ -10,6 +10,7 @@ pub const MODULE_SOURCES: &[(&str, &str)] = &[
     ("prelude::ops", include_str!("builtin_docs/prelude/ops.hy")),
     ("prelude::math", include_str!("builtin_docs/prelude/math.hy")),
     ("prelude::task", include_str!("builtin_docs/prelude/task.hy")),
+    ("prelude::process", include_str!("builtin_docs/prelude/process.hy")),
     ("io", include_str!("builtin_docs/io.hy")),
     ("io::fs", include_str!("builtin_docs/io/fs.hy")),
     ("io::tty", include_str!("builtin_docs/io/tty.hy")),

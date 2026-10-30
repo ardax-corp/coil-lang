@@ -6,7 +6,8 @@
 
 use std::path::PathBuf;
 
-/// Deny-by-default host capabilities (`dload`, attach, env exit, and
+/// Deny-by-default host capabilities (`dload`, attach, running programs,
+/// env exit, and
 /// read / write / net / env).
 ///
 /// The default denies everything. `dload("c")` /
@@ -15,6 +16,8 @@ use std::path::PathBuf;
 pub struct HostGrants {
     /// `Stream.attach` at typecheck (`--allow-attach`).
     pub allow_attach: bool,
+    /// Running a program (`process`).
+    pub allow_exec: bool,
     /// `env::exit`.
     pub allow_exit: bool,
     /// FFI process-exec symbols (`system`, `execve`, …).
@@ -215,6 +218,7 @@ impl HostGrants {
     /// Every capability except `dload` (`--allow-all`).
     pub fn grant_all(&mut self) {
         self.allow_attach = true;
+        self.allow_exec = true;
         self.allow_exit = true;
         self.allow_ffi_exec = true;
         self.allow_read = true;
@@ -223,7 +227,7 @@ impl HostGrants {
         self.allow_env = true;
     }
 
-    /// Grant the capability named `name` (`read`, `net`, `exit`, …). False
+    /// Grant the capability named `name` (`read`, `net`, `exec`, …). False
     /// when there is no such capability.
     pub fn grant_named(&mut self, name: &str) -> bool {
         let flag = match name {
@@ -231,6 +235,7 @@ impl HostGrants {
             "write" => &mut self.allow_write,
             "net" => &mut self.allow_net,
             "env" => &mut self.allow_env,
+            "exec" => &mut self.allow_exec,
             "exit" => &mut self.allow_exit,
             "attach" => &mut self.allow_attach,
             "ffi-exec" => &mut self.allow_ffi_exec,
@@ -248,6 +253,7 @@ impl HostGrants {
             (self.allow_write, Caps::WRITE),
             (self.allow_net, Caps::NET),
             (self.allow_env, Caps::ENV),
+            (self.allow_exec, Caps::EXEC),
             (self.allow_exit, Caps::EXIT),
             (self.allow_attach, Caps::ATTACH),
         ]

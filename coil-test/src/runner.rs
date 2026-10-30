@@ -163,9 +163,11 @@ pub fn declared_flags(src: &str) -> Result<Option<coil_args::HostGrantFlags>, St
 pub fn missing_platform_feature(src: &str) -> Result<(), String> {
     for name in test_headers::values(src, "needs").flat_map(str::split_whitespace) {
         let has = match name {
-            // wasm (the website playground) has no sockets, no symlinks
-            // and no dynamic libraries.
-            "sockets" | "symlinks" | "ffi" => !cfg!(target_family = "wasm"),
+            // wasm (the website playground) has no sockets, no symlinks,
+            // no dynamic libraries and no child processes. `unix` is for
+            // behaviour only Unix has (signals, Unix paths).
+            "sockets" | "symlinks" | "ffi" | "processes" => !cfg!(target_family = "wasm"),
+            "unix" => cfg!(unix),
             other => return Err(format!("unknown `// @needs` feature `{other}`")),
         };
         if !has {

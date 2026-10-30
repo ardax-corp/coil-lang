@@ -166,6 +166,9 @@ pub struct HostGrantFlags {
     /// Allow env::exit
     #[arg(long)]
     pub allow_exit: bool,
+    /// Allow running programs (the `process` module)
+    #[arg(long)]
+    pub allow_exec: bool,
     /// Allow FFI process-exec symbols (system, execve, …)
     #[arg(long)]
     pub allow_ffi_exec: bool,
@@ -278,6 +281,7 @@ impl HostGrantFlags {
     pub fn is_set(&self) -> bool {
         self.allow_attach
             || self.allow_exit
+            || self.allow_exec
             || self.allow_ffi_exec
             || self.allow_read
             || self.allow_write
@@ -331,6 +335,7 @@ impl HostGrantFlags {
         grants.comptime_cache.offline |= extra.comptime_cache.offline;
         grants.comptime_cache.refresh |= extra.comptime_cache.refresh;
         grants.allow_attach |= extra.allow_attach;
+        grants.allow_exec |= extra.allow_exec;
         grants.allow_exit |= extra.allow_exit;
         grants.allow_ffi_exec |= extra.allow_ffi_exec;
         grants.allow_read |= extra.allow_read;
@@ -357,6 +362,7 @@ impl HostGrantFlags {
         let mut grants = HostGrants {
             comptime_io,
             allow_attach: self.allow_attach,
+            allow_exec: self.allow_exec,
             allow_exit: self.allow_exit,
             allow_ffi_exec: self.allow_ffi_exec,
             allow_read: self.allow_read,

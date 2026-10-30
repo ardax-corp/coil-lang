@@ -1,5 +1,5 @@
 //! Host process environment: argv, env vars, cwd, exit. Running programs
-//! is the coil-process package's job.
+//! is the embedded `process` module ([`crate::process`]).
 
 use std::cell::Cell;
 use std::sync::OnceLock;
@@ -265,10 +265,10 @@ pub fn try_host_exit(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     Err(format!("env::exit({code}) ends only this job under the test harness"))
 }
 
-/// The removed `env_exec` slot (id 64): `env::exec` moved to the
-/// coil-process package, and no program can name it any more.
+/// The removed `env_exec` slot (id 64): `env::exec` became the `process`
+/// module ([`crate::process`]), and no program can name it any more.
 fn host_exec_removed(_heap: &mut Heap, _args: &[Value]) -> Value {
-    panic!("removed HostInvoke `env_exec` (use the coil-process package)");
+    panic!("removed HostInvoke `env_exec` (use the `process` module)");
 }
 
 /// Pipeline wiring: `(registry_name, arity, host_fn)`.

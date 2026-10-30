@@ -40,6 +40,12 @@ pub const TASK_MODULE: &str = "task";
 /// Source of the embedded `task` module.
 pub const TASK_SOURCE: &str = include_str!("../prelude/task.hy");
 
+/// Module path of the embedded child-process API (`use process::{Command, exec}`).
+pub const PROCESS_MODULE: &str = "process";
+
+/// Source of the embedded `process` module.
+pub const PROCESS_SOURCE: &str = include_str!("../prelude/process.hy");
+
 /// Module path of the embedded property-test values (`use arbitrary::{Arbitrary, Gen}`).
 pub const ARBITRARY_MODULE: &str = "arbitrary";
 
@@ -143,6 +149,11 @@ pub fn task_module_path() -> PathBuf {
     PathBuf::from("<coil>/task.hy")
 }
 
+/// Pseudo path of the embedded `process` module.
+pub fn process_module_path() -> PathBuf {
+    PathBuf::from("<coil>/process.hy")
+}
+
 /// Pseudo path of the embedded `arbitrary` module.
 pub fn arbitrary_module_path() -> PathBuf {
     PathBuf::from("<coil>/arbitrary.hy")
@@ -161,6 +172,8 @@ pub fn embedded_source(path: &Path) -> Option<&'static str> {
         Some(DERIVE_SOURCE)
     } else if path == task_module_path() {
         Some(TASK_SOURCE)
+    } else if path == process_module_path() {
+        Some(PROCESS_SOURCE)
     } else if path == arbitrary_module_path() {
         Some(ARBITRARY_SOURCE)
     } else if path == core_module_path() {
@@ -178,6 +191,8 @@ pub fn embedded_module(path: &Path) -> Option<&'static str> {
         Some(DERIVE_MODULE)
     } else if path == task_module_path() {
         Some(TASK_MODULE)
+    } else if path == process_module_path() {
+        Some(PROCESS_MODULE)
     } else if path == arbitrary_module_path() {
         Some(ARBITRARY_MODULE)
     } else if path == core_module_path() {
@@ -195,6 +210,9 @@ pub fn embedded_use(path: &[String], name: &str) -> Option<(PathBuf, &'static st
     }
     if head == TASK_MODULE {
         return Some((task_module_path(), TASK_MODULE));
+    }
+    if head == PROCESS_MODULE {
+        return Some((process_module_path(), PROCESS_MODULE));
     }
     if head == ARBITRARY_MODULE {
         return Some((arbitrary_module_path(), ARBITRARY_MODULE));

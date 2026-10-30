@@ -553,7 +553,7 @@ impl Pipeline {
         self.try_sync_host_caps();
     }
 
-    /// Allow a capability by name (`read`, `write`, `net`, `env`,
+    /// Allow a capability by name (`read`, `write`, `net`, `env`, `exec`,
     /// `exit`, `attach`, `ffi-exec`): `--allow-<name>`. False for an
     /// unknown name.
     pub fn grant_capability(&mut self, name: &str) -> bool {
