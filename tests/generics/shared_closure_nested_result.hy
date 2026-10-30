@@ -1,7 +1,8 @@
-// Past the clone cap (E0804) a shared generic body returns a closure
+// Past the clone budget (E0804) a shared generic body returns a closure
 // whose result holds its type parameter's value boxed inside an `Option`,
 // a `Result` or a tuple: the closure's adapter rebuilds that result in its
 // ground layout, as a direct call's is (#1593).
+// @flags --clone-budget 8
 use tests::assert;
 
 class A {

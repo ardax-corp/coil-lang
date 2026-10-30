@@ -1,6 +1,7 @@
 // `symbol::fn_key()` in generic code is a key per instantiation: the same
 // for every call at the same types, and different at other types, through
-// wrappers, lambdas, generic class methods and past the clone caps.
+// wrappers, lambdas, generic class methods and past the clone budget.
+// @flags --clone-budget 8
 use tests::assert;
 use symbol::fn_key;
 
@@ -78,7 +79,7 @@ test("a generic class's method") {
     assert!(a.key() != b.key());
 }
 
-test("more instantiations than the clone cap") {
+test("more instantiations than the clone budget") {
     let keys = [
         ident(1),
         ident("a"),

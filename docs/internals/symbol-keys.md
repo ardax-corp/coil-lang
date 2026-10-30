@@ -79,7 +79,7 @@ being reached:
 
 - `monomorphize::mark_keyed` marks a generic function *keyed* when it calls
   `fn_key()` or another keyed generic (fixpoint over bare-identifier calls).
-  Calls of a keyed function bypass the clone caps (`MAX_SPECIALIZATIONS_*`),
+  Calls of a keyed function bypass the clone budget (`--clone-budget`),
   like `let g = wrap` aliases (#916).
 - A keyed generic read as a value (`let f = ident;`, passed as an
   argument) is `E0145` (`MonoPlan::keyed_values`): wrap the call at concrete

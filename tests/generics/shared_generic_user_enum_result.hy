@@ -1,3 +1,6 @@
+// A user generic enum over a shared body's type parameter, past the clone
+// budget (E0804).
+// @flags --clone-budget 8
 use tests::assert;
 
 class A {

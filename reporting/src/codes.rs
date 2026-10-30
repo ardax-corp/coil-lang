@@ -363,7 +363,7 @@ impl ErrorCode {
             Self::CodegenError => "codegen error",
             Self::UnboundedRecursion => "unbounded recursion depth",
             Self::StackDepthExceeded => "stack depth exceeds VM limit",
-            Self::MonomorphizeCap => "monomorphization specialization cap hit",
+            Self::MonomorphizeCap => "generic call uses the shared body (polymorphic recursion or clone budget)",
             Self::ParLockHint => "parallelization hint: lock a shared escape",
             Self::IoError => "I/O error",
             Self::ArchiveVersionMismatch => "bytecode archive version mismatch",

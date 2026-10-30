@@ -36,6 +36,11 @@ pub struct HostGrants {
     pub dload_pins: Vec<(String, String)>,
     /// Stems loaded without a hash check (`--dload-trusted`).
     pub dload_trusted: Vec<String>,
+    /// Most per-type clones of generic code one compile makes
+    /// (`--clone-budget`; `None` is [`crate::monomorphize::MAX_TOTAL_SPECIALIZATIONS`]).
+    /// Past it a ground call takes the shared generic body (E0804). A
+    /// compile limit, not a capability: [`Self::grant_all`] leaves it.
+    pub clone_budget: Option<usize>,
     /// Limits for code the build runs at compile time (`--comptime-steps`,
     /// `--comptime-mem`). Not a capability: [`Self::grant_all`] leaves it.
     pub comptime: ComptimeLimits,
@@ -190,6 +195,11 @@ impl HostGrants {
     /// All capabilities denied; empty dload allow and search paths.
     pub fn deny_all() -> Self {
         Self::default()
+    }
+
+    /// The `--clone-budget` in effect.
+    pub fn clone_budget(&self) -> usize {
+        self.clone_budget.unwrap_or(crate::monomorphize::MAX_TOTAL_SPECIALIZATIONS)
     }
 
     /// The compile-time IO of code in `module`, with the cache's offline
