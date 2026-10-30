@@ -4954,7 +4954,7 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
                     self.word(Instruction::VBin, *kind, x, x, y);
                     x
                 }
-                VecExpr::Neg { kind, src } => {
+                VecExpr::Unary { kind, src } => {
                     let x = self.eval(src)?;
                     self.word(Instruction::VBin, *kind, x, x, 0);
                     x

@@ -77,7 +77,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
     }
     let plan = if let Some(r) = match_reduce_on(func, lp).or_else(|| match_cond_reduce_on(func, lp)) {
         // The index lane is an int lane.
-        if uses_index(&r.term) && r.ty != dense::TY_I64 {
+        if !index_int(&r.term, r.ty == dense::TY_I64) {
             return None;
         }
         if !r.stores.is_empty() {
@@ -93,7 +93,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
             if r.stores.iter().any(|st| st.index_off != at || !loads_not_behind(&st.value, at)) || !loads_not_behind(&r.term, at) {
                 return None;
             }
-            if r.stores.iter().any(|st| uses_index(&st.value) && st.ty != dense::TY_I64) {
+            if r.stores.iter().any(|st| !index_int(&st.value, st.ty == dense::TY_I64)) {
                 return None;
             }
         }
@@ -123,7 +123,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
             return None;
         }
         // The index lane is an int lane.
-        if s.stores.iter().any(|st| uses_index(&st.value) && st.ty != dense::TY_I64) {
+        if s.stores.iter().any(|st| !index_int(&st.value, st.ty == dense::TY_I64)) {
             return None;
         }
         Plan {
@@ -159,13 +159,22 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
     vals.iter().all(|&v| placeable(func, lp, v)).then_some(plan)
 }
 
-fn uses_index(op: &VOp) -> bool {
+/// Every index lane of `op` is read as an int (`int_lane`: `op` itself
+/// is), so a float tree takes the index only through a cast.
+fn index_int(op: &VOp, int_lane: bool) -> bool {
     match op {
-        VOp::Iota => true,
-        VOp::Splat { .. } | VOp::Load { .. } => false,
-        VOp::Bin { lhs, rhs, .. } => uses_index(lhs) || uses_index(rhs),
-        VOp::Neg { src, .. } | VOp::CastI2F(src) => uses_index(src),
-        VOp::Fma { a, b, c, .. } => uses_index(a) || uses_index(b) || uses_index(c),
+        VOp::Iota => int_lane,
+        VOp::Splat { .. } | VOp::Load { .. } => true,
+        VOp::Bin { kind, lhs, rhs } => {
+            let float = matches!(*kind, simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::FDIV64)
+                || (simd::FCMP..simd::FCMP + 6).contains(kind);
+            index_int(lhs, !float) && index_int(rhs, !float)
+        }
+        VOp::Unary { kind, src } => index_int(src, matches!(*kind, simd::INEG | simd::I2F)),
+        VOp::Fma { ty, a, b, c } => {
+            let int = *ty == dense::TY_I64;
+            index_int(a, int) && index_int(b, int) && index_int(c, int)
+        }
     }
 }
 
@@ -181,13 +190,13 @@ fn loads_not_behind(op: &VOp, at: Off) -> bool {
         },
         VOp::Splat { .. } | VOp::Iota => true,
         VOp::Bin { lhs, rhs, .. } => loads_not_behind(lhs, at) && loads_not_behind(rhs, at),
-        VOp::Neg { src, .. } | VOp::CastI2F(src) => loads_not_behind(src, at),
+        VOp::Unary { src, .. } => loads_not_behind(src, at),
         VOp::Fma { a, b, c, .. } => loads_not_behind(a, at) && loads_not_behind(b, at) && loads_not_behind(c, at),
     }
 }
 
-/// The values `op` reads; `None` for a shape the vector loop lacks (a cast
-/// other than of a splat).
+/// The values `op` reads; `None` for a shape the vector loop lacks (a
+/// load offset past the body word's reach).
 fn leaves(op: &VOp, out: &mut Vec<ValueId>) -> Option<()> {
     match op {
         VOp::Splat { v, .. } => out.push(*v),
@@ -204,11 +213,7 @@ fn leaves(op: &VOp, out: &mut Vec<ValueId>) -> Option<()> {
             leaves(lhs, out)?;
             leaves(rhs, out)?;
         }
-        VOp::Neg { src, .. } => leaves(src, out)?,
-        VOp::CastI2F(src) => match src.as_ref() {
-            VOp::Splat { v, .. } => out.push(*v),
-            _ => return None,
-        },
+        VOp::Unary { src, .. } => leaves(src, out)?,
         VOp::Fma { a, b, c, .. } => {
             leaves(a, out)?;
             leaves(b, out)?;
@@ -290,14 +295,20 @@ impl Place<'_, '_> {
             VOp::Iota => VecExpr::Index,
             VOp::Load { array, ty, off } => VecExpr::Load { array: self.value(*array), off: self.off(*off), ty: *ty },
             VOp::Bin { kind, lhs, rhs } => VecExpr::Bin { kind: *kind, lhs: Box::new(self.expr(lhs)), rhs: Box::new(self.expr(rhs)) },
-            VOp::Neg { kind, src } => VecExpr::Neg { kind: *kind, src: Box::new(self.expr(src)) },
-            VOp::CastI2F(src) => {
-                let VOp::Splat { v, .. } = src.as_ref() else { unreachable!("planned: a cast of a splat") };
+            // A cast of an invariant is cast once, in front of the loop.
+            VOp::Unary { kind: kind @ (simd::I2F | simd::F2I), src } if matches!(src.as_ref(), VOp::Splat { .. }) => {
+                let VOp::Splat { v, .. } = src.as_ref() else { unreachable!() };
                 let v = self.value(*v);
-                let dest = self.b.value(MirTy::F64);
-                self.b.push(self.at, MirInst::Cast { dest, kind: MirCastKind::IntToFloat, to: MirTy::F64, src: v });
-                VecExpr::Splat { v: dest, ty: dense::TY_F64 }
+                let (cast, to, ty) = if *kind == simd::I2F {
+                    (MirCastKind::IntToFloat, MirTy::F64, dense::TY_F64)
+                } else {
+                    (MirCastKind::FloatToInt, MirTy::I64, dense::TY_I64)
+                };
+                let dest = self.b.value(to);
+                self.b.push(self.at, MirInst::Cast { dest, kind: cast, to, src: v });
+                VecExpr::Splat { v: dest, ty }
             }
+            VOp::Unary { kind, src } => VecExpr::Unary { kind: *kind, src: Box::new(self.expr(src)) },
             VOp::Fma { ty, a, b, c } => VecExpr::Fma {
                 ty: *ty,
                 a: Box::new(self.expr(a)),
@@ -327,7 +338,7 @@ fn streams(op: &VecExpr, out: &mut Vec<(ValueId, ValueId)>) {
             streams(lhs, out);
             streams(rhs, out);
         }
-        VecExpr::Neg { src, .. } => streams(src, out),
+        VecExpr::Unary { src, .. } => streams(src, out),
         VecExpr::Fma { a, b, c, .. } => {
             streams(a, out);
             streams(b, out);

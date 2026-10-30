@@ -788,7 +788,9 @@ pub enum VecExpr {
     /// `array[p + off + k]`.
     Load { array: ValueId, off: ValueId, ty: u8 },
     Bin { kind: u8, lhs: Box<VecExpr>, rhs: Box<VecExpr> },
-    Neg { kind: u8, src: Box<VecExpr> },
+    /// A one-register `VBin` ([`common::simd::is_unary_kind`]): a negation
+    /// or a lane cast.
+    Unary { kind: u8, src: Box<VecExpr> },
     /// `a * b + c`, two roundings.
     Fma { ty: u8, a: Box<VecExpr>, b: Box<VecExpr>, c: Box<VecExpr> },
 }
@@ -804,7 +806,7 @@ impl VecExpr {
                 lhs.values(out);
                 rhs.values(out);
             }
-            Self::Neg { src, .. } => src.values(out),
+            Self::Unary { src, .. } => src.values(out),
             Self::Fma { a, b, c, .. } => {
                 a.values(out);
                 b.values(out);
@@ -825,7 +827,7 @@ impl VecExpr {
                 lhs.rewrite(map);
                 rhs.rewrite(map);
             }
-            Self::Neg { src, .. } => src.rewrite(map),
+            Self::Unary { src, .. } => src.rewrite(map),
             Self::Fma { a, b, c, .. } => {
                 a.rewrite(map);
                 b.rewrite(map);
@@ -839,7 +841,7 @@ impl VecExpr {
             Self::Index => true,
             Self::Splat { .. } | Self::Load { .. } => false,
             Self::Bin { lhs, rhs, .. } => lhs.uses_index() || rhs.uses_index(),
-            Self::Neg { src, .. } => src.uses_index(),
+            Self::Unary { src, .. } => src.uses_index(),
             Self::Fma { a, b, c, .. } => a.uses_index() || b.uses_index() || c.uses_index(),
         }
     }
