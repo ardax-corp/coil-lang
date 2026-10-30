@@ -1275,6 +1275,9 @@ impl Heap {
             let mut work = Vec::new();
             root.mark(&mut work);
             let mut children = Vec::new();
+            // A `drop` object reached from the root may read, when its
+            // `drop` runs, anything the walk would free: free nothing.
+            let mut reaches_drop = false;
             while let Some(obj) = work.pop() {
                 obj.for_each_reference(self, &mut |addr, precise| {
                     if precise {
@@ -1282,8 +1285,11 @@ impl Heap {
                     }
                 });
                 for addr in children.drain(..) {
-                    if let Some(child) = self.find_object_by_addr(addr)
-                        && self.early_freeable(child)
+                    let Some(child) = self.find_object_by_addr(addr) else {
+                        continue;
+                    };
+                    reaches_drop |= self.finalizer_object(child);
+                    if self.early_freeable(child)
                         && !child.is_marked()
                         && !keep(addr)
                     {
@@ -1294,6 +1300,9 @@ impl Heap {
             }
             for obj in &found {
                 obj.unmark();
+            }
+            if reaches_drop {
+                return 0;
             }
         }
         if check {
@@ -1324,6 +1333,11 @@ impl Heap {
         !self.doomed.is_empty()
     }
 
+    /// Whether `obj` is an object of a type with a `drop`.
+    fn finalizer_object(&self, obj: Object) -> bool {
+        !self.finalizer_types.is_empty() && Self::finalizer_type_of(obj).is_some_and(|t| self.has_finalizer(t))
+    }
+
     /// Whether [`Self::free_early`] may free `obj` (when nothing reaches it).
     fn early_freeable(&self, obj: Object) -> bool {
         match obj {
@@ -1334,8 +1348,10 @@ impl Heap {
             }
             Object::Array(_) => true,
             Object::Tuple(t) => !t.as_ref().elements().is_empty(),
-            Object::Enum(e) => self.finalizer_types.is_empty() && !e.as_ref().payload.is_empty(),
-            Object::Instance(_) => self.finalizer_types.is_empty(),
+            // A `drop` type's object is left to the collector, which runs
+            // its `drop`; other types free early whatever else has one.
+            Object::Enum(e) => !e.as_ref().payload.is_empty() && !self.finalizer_object(obj),
+            Object::Instance(_) => !self.finalizer_object(obj),
             _ => false,
         }
     }
@@ -5692,6 +5708,44 @@ mod tests {
         assert!(heap.find_object_by_addr(unreached.addr()).is_none());
         heap.collect(&[keep.addr(), live_weak.addr()]);
         assert_eq!(heap.weaks, vec![live_weak.addr()]);
+    }
+
+    /// One `drop` type does not stop early freeing of other types' objects;
+    /// an object of a `drop` type, or one reaching it, is left to the
+    /// collector, which runs the `drop`.
+    #[test]
+    fn early_free_is_per_drop_type() {
+        let mut heap = Heap::default();
+        heap.register_finalizer_type(7);
+        let keep = |_: u64| false;
+        let (plain, _) = heap.alloc(ObjInstance::with_type_id_and_fields(8, 1), Object::Instance);
+        assert_eq!(heap.free_early(Value::from(plain.addr()), false, false, &keep), 1);
+        assert!(heap.find_object_by_addr(plain.addr()).is_none());
+
+        let (tagged, tagged_gc) = heap.alloc(ObjEnum::new(1, EnumPayload::one(Value::from(1i64))), Object::Enum);
+        tagged_gc.payload_mut().type_id = 9;
+        assert_eq!(heap.free_early(Value::from(tagged.addr()), true, false, &keep), 1);
+
+        let (dropped, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
+        assert_eq!(heap.free_early(Value::from(dropped.addr()), true, false, &keep), 0);
+        assert!(heap.find_object_by_addr(dropped.addr()).is_some());
+
+        // A parent reaching a `drop` object keeps both: the `drop` runs
+        // later and may read what the walk would free.
+        let (child, child_gc) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(2i64))), Object::Enum);
+        child_gc.payload_mut().type_id = 7;
+        heap.note_enum_type(child, 7);
+        let mut kinds: Vec<Box<[u8]>> = vec![Box::new([]); common::type_kinds_index(10) + 1];
+        kinds[common::type_kinds_index(10)] = Box::new([common::WORD_POINTER]);
+        heap.set_class_word_kinds(std::sync::Arc::new(kinds));
+        let (parent, _) = heap.alloc(ObjInstance::with_slots(10, vec![Value::from(child.addr())]), Object::Instance);
+        let mut seen = Vec::new();
+        parent.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
+        assert_eq!(seen, vec![(child.addr(), true)]);
+        assert_eq!(heap.free_early(Value::from(parent.addr()), true, false, &keep), 0);
+        for obj in [parent, child] {
+            assert!(heap.find_object_by_addr(obj.addr()).is_some());
+        }
     }
 
     /// Objects of a `drop` type are listed from their allocation (or from

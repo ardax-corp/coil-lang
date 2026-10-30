@@ -4191,7 +4191,8 @@ impl Lower<'_> {
         }
         let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
-        let niche = if site.boxed_ret { Some(self.inp.word(ty).ok_or("call type")?) } else { None };
+        // Kept raw, a boxed niche result stays the enum object.
+        let niche = if site.boxed_ret && !raw { Some(self.inp.word(ty).ok_or("call type")?) } else { None };
         let (ret, ret_hi) = match self.inp.pair_tys.get(&id.0) {
             _ if site.boxed_ret => (MirTy::HeapRef, None),
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
@@ -4238,11 +4239,16 @@ impl Lower<'_> {
             }
             // A niche word passed in a boxed parameter: its enum object
             // (then boxed to a bare type parameter's tag).
+            // A call returning its niche result as the boxed enum object
+            // passes that object as it comes back (#2154).
             if !pair && let Some(&layout) = self.inp.niche_args.get(&arg.0) {
-                let Some(w) = self.word(arg)? else {
+                self.raw_host = self.inp.calls.get(&arg.0).is_some_and(|s| s.boxed_ret);
+                let w = self.word(arg);
+                self.raw_host = false;
+                let Some(w) = w? else {
                     return Ok(Val::Never);
                 };
-                let v = self.box_niche(layout, w)?;
+                let v = if self.b.value_ty(w) == MirTy::HeapRef { w } else { self.box_niche(layout, w)? };
                 match tag {
                     Some(tag) => {
                         let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
