@@ -44,8 +44,8 @@ pub fn enabled() -> bool {
 
 /// Whether a value of `ty` may be a class instance or array that a write
 /// can change: anything but a scalar, a string, a tuple, an enum, a
-/// function, a record, a `readonly class` or a class with a `drop`. A type
-/// parameter counts, since it may stand for one.
+/// function, a record, an opaque handle, a `readonly class` or a class
+/// with a `drop`. A type parameter counts, since it may stand for one.
 pub(super) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
     let Some(ty) = ty else { return false };
     let name = match strip_readonly(ty) {
@@ -60,7 +60,8 @@ pub(super) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
     if super::escape::no_heap(Some(&Ty::Con(name.to_string()))) || matches!(name, "string" | "Option" | "Result") {
         return false;
     }
-    if matches!(name, "Range" | "RangeInclusive") {
+    // An opaque handle (`Stream`, `Thread`, …) has no fields a write could change (#2155).
+    if matches!(name, "Range" | "RangeInclusive") || crate::typechecking::ty::is_opaque_handle(name) {
         return false;
     }
     if name == common::BUILTIN_VEC_TYPE {
