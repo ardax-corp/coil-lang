@@ -1464,18 +1464,25 @@ impl<const S: usize> Machine<S> {
                     let tag = (opcode.operand_u32() & 0xFFFF) as u16;
                     let v = self.stack.pop();
                     let addr = v.bits();
-                    let payload = if addr == 0 {
-                        Member::Value(v)
-                    } else if let Some(obj) = Self::find_object_by_addr(&self.heap, addr) {
-                        Member::Object(obj)
+                    let obj = if addr == 0 { None } else { Self::find_object_by_addr(&self.heap, addr) };
+                    // A heap enum is already one tagged object word: it
+                    // passes as itself, so a shared generic body holds an
+                    // open `Option<T>` the way its caller does, also inside
+                    // a `Vec<U>` (#2138). `UnboxValue` passes a word that is
+                    // no box through.
+                    if tag == common::ValueTag::Instance as u16 && matches!(obj, Some(Object::Enum(_))) {
+                        self.stack.push(v);
                     } else {
-                        Member::Value(v)
-                    };
-                    let boxed = ObjBoxed { tag, payload };
-                    let (object, _) = self.heap.alloc(boxed, Object::Boxed);
-                    // Root before GC: an unpushed fresh box would be swept.
-                    self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc(ip);
+                        let payload = match obj {
+                            Some(obj) => Member::Object(obj),
+                            None => Member::Value(v),
+                        };
+                        let boxed = ObjBoxed { tag, payload };
+                        let (object, _) = self.heap.alloc(boxed, Object::Boxed);
+                        // Root before GC: an unpushed fresh box would be swept.
+                        self.stack.push(Value::from(object.addr()));
+                        self.maybe_gc_after_alloc(ip);
+                    }
                 }
                 Instruction::RestoreSnapshot => {
                     let at = opcode.operand_u32() as usize;
