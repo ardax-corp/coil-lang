@@ -382,6 +382,20 @@ pub struct StackArrays {
 }
 
 /// Whether some node of `id`'s subtree satisfies `f`.
+/// A `defer` body the thunk cannot hold: a `return`, or a `break` /
+/// `continue` outside the body's own loops (the checker rejects those,
+/// E0146), a `yield`, or a nested `defer`. A loop of the body keeps its own
+/// `break` / `continue`, and a lambda is its own body (#2134).
+fn defer_body_refused(body: &HirBody, id: HirId, loops: usize) -> bool {
+    let loops = match body.expr(id).kind {
+        HirKind::Return(_) | HirKind::Yield { .. } | HirKind::Defer { .. } => return true,
+        HirKind::Break | HirKind::Continue => return loops == 0,
+        HirKind::Loop { .. } | HirKind::ForIn { .. } => loops + 1,
+        _ => loops,
+    };
+    children(body, id).into_iter().any(|k| defer_body_refused(body, k, loops))
+}
+
 fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
     f(id) || children(body, id).into_iter().any(|k| any_id(body, k, f))
 }
@@ -3106,18 +3120,7 @@ impl Walk<'_> {
                         return Err("defer-capture");
                     }
                 }
-                let exits = |e: HirId| {
-                    matches!(
-                        body.expr(e).kind,
-                        HirKind::Return(_)
-                            | HirKind::Break
-                            | HirKind::Continue
-                            | HirKind::Yield { .. }
-                            | HirKind::Defer { .. }
-                            | HirKind::Lambda { .. }
-                    )
-                };
-                if any_id(body, *inner, &exits) {
+                if defer_body_refused(body, *inner, 0) {
                     return Err("defer-body");
                 }
                 let loops = std::mem::replace(&mut self.loops, 0);
