@@ -158,6 +158,9 @@ impl TaskRec {
 pub(crate) struct ScopeRec {
     pub owner: TaskId,
     pub children: Vec<TaskId>,
+    /// Children not finished yet: [`Scheduler::children_finished`] without
+    /// scanning `children` on every finish (#2135).
+    pub unfinished: usize,
     /// The body returned; no more spawns.
     pub closed: bool,
     /// First child panic message (fails the scope).
@@ -229,6 +232,7 @@ impl Scheduler {
             ScopeRec {
                 owner: self.current,
                 children: Vec::new(),
+                unfinished: 0,
                 closed: false,
                 failed: None,
             },
@@ -237,13 +241,20 @@ impl Scheduler {
     }
 
     pub(crate) fn add_task(&mut self, coro: RefCoroutine, scope: ScopeId) -> TaskId {
+        let id = self.add_record(TaskRec::new(Some(coro), scope));
+        self.run_queue.push_back(id);
+        id
+    }
+
+    /// Register a child task record in its scope.
+    fn add_record(&mut self, rec: TaskRec) -> TaskId {
         let id = self.next_task;
         self.next_task += 1;
-        self.tasks.insert(id, TaskRec::new(Some(coro), scope));
-        if let Some(s) = self.scopes.get_mut(&scope) {
+        if let Some(s) = self.scopes.get_mut(&rec.scope) {
             s.children.push(id);
+            s.unfinished += 1;
         }
-        self.run_queue.push_back(id);
+        self.tasks.insert(id, rec);
         self.live += 1;
         id
     }
@@ -313,9 +324,16 @@ impl Scheduler {
         let Some(rec) = self.tasks.get_mut(&id) else {
             return;
         };
+        let was_finished = rec.state.finished();
         rec.state = state;
         rec.ending = None;
         self.live -= 1;
+        if !was_finished
+            && state.finished()
+            && let Some(s) = self.scopes.get_mut(&rec.scope)
+        {
+            s.unfinished -= 1;
+        }
         for scope in self.scopes_owned_by(id) {
             self.remove_scope(scope);
         }
@@ -354,11 +372,7 @@ impl Scheduler {
     }
 
     pub(crate) fn children_finished(&self, scope: ScopeId) -> bool {
-        self.scopes.get(&scope).is_none_or(|s| {
-            s.children
-                .iter()
-                .all(|c| self.tasks.get(c).is_none_or(|r| r.state.finished()))
-        })
+        self.scopes.get(&scope).is_none_or(|s| s.unfinished == 0)
     }
 
     /// Forget a finished scope and its children's records.
@@ -819,14 +833,7 @@ mod tests {
 
     /// A child task record with no coroutine, as `add_task` makes one.
     fn add_bare_task(s: &mut Scheduler, scope: ScopeId) -> TaskId {
-        let id = s.next_task;
-        s.next_task += 1;
-        s.tasks.insert(id, TaskRec::new(None, scope));
-        if let Some(sc) = s.scopes.get_mut(&scope) {
-            sc.children.push(id);
-        }
-        s.live += 1;
-        id
+        s.add_record(TaskRec::new(None, scope))
     }
 
     #[test]
