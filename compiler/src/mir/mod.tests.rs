@@ -5544,3 +5544,62 @@ fn main() {
     let ops = fn_ops(&bc, &symbols, "shift_small");
     assert!(!ops.iter().any(|b| *b.bytecode() == Instruction::VLoop), "shift_small: an arm that can trap stays scalar");
 }
+
+/// `out.push(value(i))`, plain or one push per arm, runs as a `VLoop`
+/// append.
+#[test]
+fn pipeline_vectorizes_map_push_loops() {
+    let src = r#"
+fn mul_push(Vec<int> out, Vec<int> a) {
+    let i = 0;
+    while i < a.len() {
+        out.push(a[i] * 3 + 1);
+        i = i + 1;
+    }
+}
+fn shift_bytes(Vec<byte> b, int delta) -> Vec<byte> {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out.push(((c as int) + delta) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+fn main() {
+    let a: Vec<int> = Vec::new();
+    let t: Vec<byte> = Vec::new();
+    let k = 0;
+    while k < 40 {
+        a.push(k);
+        t.push((60 + k) as byte);
+        k = k + 1;
+    }
+    let o: Vec<int> = [7];
+    mul_push(o, a);
+    if o.len() != 41 || o[0] != 7 || o[1] != 1 || o[40] != 118 {
+        panic "mul_push";
+    }
+    let u = shift_bytes(t, 32);
+    if u.len() != 40 || u[0] != 60 as byte || u[5] != 97 as byte || u[39] != 99 as byte {
+        panic "shift_bytes";
+    }
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_auto_par(false);
+    let (bc, constants) = p.compile_src(src).expect("compile map-push");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "map-push checksums");
+    let symbols = p.program_debug().fn_symbols;
+    for name in ["mul_push", "shift_bytes"] {
+        assert_vec_loop(fn_ops(&bc, &symbols, name), name);
+    }
+}
