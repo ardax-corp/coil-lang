@@ -2243,6 +2243,34 @@ mod tests {
     }
 
     #[test]
+    fn too_many_open_files_has_its_own_tag() {
+        #[cfg(unix)]
+        for code in [24, 23] {
+            // EMFILE (process limit) and ENFILE (system limit).
+            assert_eq!(
+                IoErrorTag::from_error(&io::Error::from_raw_os_error(code)),
+                IoErrorTag::TooManyOpenFiles
+            );
+        }
+        #[cfg(windows)]
+        for code in [4, 10024] {
+            // ERROR_TOO_MANY_OPEN_FILES and WSAEMFILE.
+            assert_eq!(
+                IoErrorTag::from_error(&io::Error::from_raw_os_error(code)),
+                IoErrorTag::TooManyOpenFiles
+            );
+        }
+        assert_eq!(
+            IoErrorTag::from_error(&io::Error::from(ErrorKind::NotFound)),
+            IoErrorTag::NotFound
+        );
+        let mut heap = Heap::default();
+        let v = alloc_io_error(&mut heap, IoErrorTag::TooManyOpenFiles);
+        assert_eq!(enum_tag(&heap, v), Some(11));
+        assert_eq!(BUILTIN_IO_ERROR_VARIANTS[11], "TooManyOpenFiles");
+    }
+
+    #[test]
     fn alloc_io_error_encodes_new_tags() {
         let mut heap = Heap::default();
         for (tag, expected) in [
