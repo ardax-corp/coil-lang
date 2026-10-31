@@ -36,6 +36,7 @@ pub const BUILTIN_IO_ERROR_VARIANTS: &[&str] = &[
     "TimedOut",
     "Truncated",
     "Protocol",
+    "TooManyOpenFiles",
 ];
 
 /// Built-in `TtyError` enum name (virtual `io::tty` module).

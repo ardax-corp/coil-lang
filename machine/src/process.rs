@@ -56,7 +56,7 @@ fn with_child<T>(id: i64, f: impl FnOnce(&mut Child) -> Result<T, IoErrorTag>) -
 }
 
 fn io_tag(e: std::io::Error) -> IoErrorTag {
-    IoErrorTag::from_kind(e.kind())
+    IoErrorTag::from_error(&e)
 }
 
 fn heap_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
