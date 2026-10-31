@@ -4611,7 +4611,8 @@ fn main() {
 }
 
 #[test]
-fn defer_inside_while_true_warns_e0123() {
+fn defer_inside_while_true_body_does_not_warn_e0123() {
+    // The loop body's block ends every iteration, which runs its defer.
     let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
@@ -4628,28 +4629,15 @@ fn main() {
 }
 "#,
     );
-    assert!(
-        result.is_ok(),
-        "warning-only E0123 must not fail compile_src: {:?}",
-        pipeline.messages()
-    );
-    assert!(
-        pipeline
-            .messages()
-            .iter()
-            .any(|m| m.code() == Some(compiler::ErrorCode::DeferNeverRuns)
-                && *m.kind() == reporting::MessageKind::WARNING),
-        "expected DeferNeverRuns inside while true"
-    );
+    assert!(result.is_ok(), "{:?}", pipeline.messages());
     assert!(
         !pipeline
             .messages()
             .iter()
-            .any(|m| *m.kind() == reporting::MessageKind::ERROR),
-        "E0123 should be warning-only: {:?}",
+            .any(|m| m.code() == Some(compiler::ErrorCode::DeferNeverRuns)),
+        "a loop body's defer runs each iteration: {:?}",
         pipeline.messages()
     );
-    assert!(!pipeline.had_errors());
 }
 
 
