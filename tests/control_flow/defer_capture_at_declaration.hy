@@ -95,9 +95,13 @@ fn failed(Result<int, TaskError> r) -> bool {
 
 test("a panic runs the defer with the declared value") {
     LOG = "";
-    assert!(failed(scope(fn (Scope s) {
-        let _ = s.spawn(fn () => unwinds());
-        0
-    })));
+    assert!(
+        failed(
+            scope(fn (Scope s) {
+                let _ = s.spawn(fn () => unwinds());
+                0
+            }),
+        ),
+    );
     assert!(LOG == "before");
 }
