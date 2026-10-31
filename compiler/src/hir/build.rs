@@ -1503,63 +1503,15 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
 
             E::Lambda { args, body, borrows, .. } => self.lambda(b, node, args, body, borrows),
-            E::Defer { captures, borrows, body } => {
-                // A capture is copied when the `defer` statement runs, as a
-                // lambda's: `let x' = x` before the defer, whose body reads
-                // `x'`, which nothing assigns. `use (mut x)` borrows `x`
-                // and reads it when the defer runs.
-                let span = span_of(node);
-                let mut snapshots = Vec::new();
-                let mut locals: Vec<Option<LocalId>> = Vec::with_capacity(captures.len());
-                let mut copies: Vec<(String, LocalId)> = Vec::new();
-                let mut reads: Vec<(LocalId, LocalId, HirId)> = Vec::new();
-                for c in captures {
-                    let Some(src) = b.lookup(c) else {
-                        locals.push(None);
-                        continue;
-                    };
-                    if borrows.contains(c) {
-                        locals.push(Some(src));
-                        continue;
-                    }
-                    let ty = b.body.locals[src.0 as usize].ty.clone();
-                    let read = self.synth(b, span, HirKind::Local(src), ty.clone());
-                    let copy = b.temp(c, ty);
-                    b.body.locals[copy.0 as usize].kind = LocalKind::Let;
-                    snapshots.push(self.synth(b, span, HirKind::Let { local: copy, init: Some(read) }, Some(coil_ty::unit())));
-                    copies.push((c.to_string(), copy));
-                    reads.push((src, copy, read));
-                    locals.push(Some(copy));
-                }
-                // The thunk's frame copies each capture as one word (#1758):
-                // it is never split into slots, as a lambda's capture.
-                for local in locals.iter().flatten() {
-                    b.body.locals[local.0 as usize].captured = true;
-                }
-                b.scopes.push(copies.into_iter().collect());
-                let body = self.expr(b, body);
-                b.scopes.pop();
-                // A lambda's capture has no type until a read gives it one:
-                // the body's reads of the copy may be the first.
-                for (src, copy, read) in reads {
-                    let ty = b.body.locals[src.0 as usize].ty.clone().or_else(|| b.body.locals[copy.0 as usize].ty.clone());
-                    for l in [src, copy] {
-                        let slot = &mut b.body.locals[l.0 as usize];
-                        if slot.ty.is_none() {
-                            slot.ty.clone_from(&ty);
-                        }
-                    }
-                    let e = &mut b.body.exprs[read.0 as usize];
-                    if e.ty.is_none() {
-                        e.ty = ty;
-                    }
-                }
-                let defer = self.emit_ty(b, node, HirKind::Defer { captures: locals, body }, Some(coil_ty::unit()));
-                if snapshots.is_empty() {
+            E::Defer { .. } => {
+                // A `defer` outside a block's statements: its copies and
+                // the defer in a block of their own.
+                let (mut stmts, defer) = self.defer(b, node);
+                if stmts.is_empty() {
                     return defer;
                 }
-                snapshots.push(defer);
-                self.synth(b, span, HirKind::Block { stmts: snapshots, tail: None }, Some(coil_ty::unit()))
+                stmts.push(defer);
+                self.synth(b, span_of(node), HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()))
             }
             E::Yield(value) | E::YieldFrom(value) => {
                 let from = matches!(node.1.as_ref(), E::YieldFrom(_));
@@ -1683,6 +1635,68 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         self.checker.static_slot_ty(slot).cloned()
     }
 
+    /// `defer use (..) { body }`: the `let`s copying its captures, which
+    /// go just before it in its block, and the defer itself.
+    fn defer(&mut self, b: &mut BodyBuilder, node: &Output<'_>) -> (Vec<HirId>, HirId) {
+        let Expression::Defer { captures, borrows, body } = node.1.as_ref() else {
+            unreachable!("defer called on a defer");
+        };
+        // A capture is copied when the `defer` statement runs, as a
+        // lambda's: `let x' = x` before the defer, whose body reads
+        // `x'`, which nothing assigns. `use (mut x)` borrows `x`
+        // and reads it when the defer runs.
+        let span = span_of(node);
+        let mut snapshots = Vec::new();
+        let mut locals: Vec<Option<LocalId>> = Vec::with_capacity(captures.len());
+        let mut copies: Vec<(String, LocalId)> = Vec::new();
+        let mut reads: Vec<(LocalId, LocalId, HirId)> = Vec::new();
+        for c in captures {
+            let Some(src) = b.lookup(c) else {
+                locals.push(None);
+                continue;
+            };
+            if borrows.contains(c) {
+                locals.push(Some(src));
+                continue;
+            }
+            let ty = b.body.locals[src.0 as usize].ty.clone();
+            let read = self.synth(b, span, HirKind::Local(src), ty.clone());
+            let copy = b.temp(c, ty);
+            b.body.locals[copy.0 as usize].kind = LocalKind::Let;
+            snapshots.push(self.synth(b, span, HirKind::Let { local: copy, init: Some(read) }, Some(coil_ty::unit())));
+            copies.push((c.to_string(), copy));
+            reads.push((src, copy, read));
+            locals.push(Some(copy));
+        }
+        // The thunk's frame copies each capture as one word (#1758):
+        // it is never split into slots, as a lambda's capture. Nor is the
+        // local a copy is made from: split, the copy would be a new object
+        // built from its slots, not the one it names.
+        for local in locals.iter().flatten().chain(reads.iter().map(|(src, _, _)| src)) {
+            b.body.locals[local.0 as usize].captured = true;
+        }
+        b.scopes.push(copies.into_iter().collect());
+        let body = self.expr(b, body);
+        b.scopes.pop();
+        // A lambda's capture has no type until a read gives it one:
+        // the body's reads of the copy may be the first.
+        for (src, copy, read) in reads {
+            let ty = b.body.locals[src.0 as usize].ty.clone().or_else(|| b.body.locals[copy.0 as usize].ty.clone());
+            for l in [src, copy] {
+                let slot = &mut b.body.locals[l.0 as usize];
+                if slot.ty.is_none() {
+                    slot.ty.clone_from(&ty);
+                }
+            }
+            let e = &mut b.body.exprs[read.0 as usize];
+            if e.ty.is_none() {
+                e.ty = ty;
+            }
+        }
+        let defer = self.emit_ty(b, node, HirKind::Defer { captures: locals, body }, Some(coil_ty::unit()));
+        (snapshots, defer)
+    }
+
     fn block(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>], scoped: bool) -> HirId {
         if let Some((first, rest)) = items.split_first()
             && matches!(first.1.as_ref(), Expression::RegionMark)
@@ -1694,6 +1708,18 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
         let mut stmts = Vec::with_capacity(items.len());
         for item in items {
+            // A `defer` runs at the end of this block: its capture copies
+            // are this block's statements, not a block of their own.
+            let mut inner = item;
+            while let Expression::ExprStatement(e) | Expression::Statement(e) | Expression::Expr(e) = inner.1.as_ref() {
+                inner = e;
+            }
+            if matches!(inner.1.as_ref(), Expression::Defer { .. }) {
+                let (lets, defer) = self.defer(b, inner);
+                stmts.extend(lets);
+                stmts.push(defer);
+                continue;
+            }
             stmts.push(self.expr(b, item));
         }
         if scoped {
