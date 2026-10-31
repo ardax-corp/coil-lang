@@ -15,7 +15,7 @@ fn step(int n) -> Result<int, int> {
 }
 
 fn guarded(Log log, int n) -> Result<int, int> {
-    defer use (log) {
+    defer use (mut log) {
         log.n = log.n + 1;
     }
     let a = step(n)?;

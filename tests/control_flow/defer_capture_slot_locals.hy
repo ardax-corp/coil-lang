@@ -1,7 +1,7 @@
 // A `defer` captures a local that would otherwise live in frame slots
 // rather than as one word: a class from `new`, a fixed array, an `Option`
 // or a tuple, also from a nested block (coil-lang#1758). The capture keeps
-// the local one word, and the defer reads it at the `return`.
+// the local one word; the defer reads the copy made at the `defer`.
 use tests::assert;
 
 class P {
@@ -20,7 +20,7 @@ fn mk(int a) -> P {
 fn from_call(Vec<int> log) {
     let p = mk(3);
     {
-        defer use (p, log) {
+        defer use (p, mut log) {
             log.push(p.a);
         }
     }
@@ -29,7 +29,7 @@ fn from_call(Vec<int> log) {
 fn from_new(Vec<int> log) {
     let p = new P(4, 5);
     {
-        defer use (p, log) {
+        defer use (p, mut log) {
             log.push(p.b);
         }
     }
@@ -37,7 +37,7 @@ fn from_new(Vec<int> log) {
 
 fn readonly_new(Vec<int> log) -> int {
     let q = new Q(6);
-    defer use (q, log) {
+    defer use (q, mut log) {
         log.push(q.a);
     }
     return q.a + 1;
@@ -45,7 +45,7 @@ fn readonly_new(Vec<int> log) -> int {
 
 fn late_field(Vec<int> log) {
     let p = new P(1, 2);
-    defer use (p, log) {
+    defer use (p, mut log) {
         log.push(p.a);
     }
     p.a = 8;
@@ -53,14 +53,14 @@ fn late_field(Vec<int> log) {
 
 fn array(Vec<int> log) {
     let xs = [1, 9, 3];
-    defer use (xs, log) {
+    defer use (xs, mut log) {
         log.push(xs[1]);
     }
 }
 
 fn option(Vec<int> log, int k) {
     let o = Some(k);
-    defer use (o, log) {
+    defer use (o, mut log) {
         match o {
             Some(v) => log.push(v),
             None => log.push(0),
@@ -70,7 +70,7 @@ fn option(Vec<int> log, int k) {
 
 fn tuple(Vec<int> log) {
     let t = (4, 11);
-    defer use (t, log) {
+    defer use (t, mut log) {
         log.push(t[1]);
     }
 }
@@ -85,7 +85,8 @@ test("a defer captures a class local from a call or `new`") {
     assert!(log[0] == 3);
     assert!(log[1] == 5);
     assert!(log[2] == 6);
-    assert!(log[3] == 8);
+    // Copied at the `defer`: the later `p.a = 8` writes a copy of `p`.
+    assert!(log[3] == 1);
 }
 
 test("a defer captures an array, `Option` or tuple local") {
@@ -103,9 +104,11 @@ test("a defer in a test body captures a `new` class local") {
     let log: Vec<int> = [];
     let p = new P(12, 13);
     {
-        defer use (p, log) {
+        defer use (p, mut log) {
             log.push(p.a);
         }
     }
-    assert!(log.len() == 0);
+    // The block's end runs the defer.
+    assert!(log.len() == 1);
+    assert!(log[0] == 12);
 }

@@ -1,6 +1,7 @@
-// A panic runs a body's armed `defer`s with their captures as they stand
-// at the panic: a capture assigned after the `defer`, one armed in a loop,
-// and a heap capture held only for the `defer` across a collection.
+// A panic runs a body's armed `defer`s with their captures as they stood
+// at each `defer`: a capture assigned after the `defer`, one in a loop
+// body (which runs every iteration), and a heap capture held only for the
+// `defer` across a collection.
 use tests::assert;
 use task::{scope, Scope, TaskError};
 use string::format;
@@ -97,19 +98,19 @@ fn run(unit -> int body) -> bool {
     }));
 }
 
-test("a capture assigned after its defer is read at the panic") {
+test("a capture assigned after its defer keeps its value at the panic") {
     LOG = 0;
     assert!(run(fn () => late(1)));
-    assert!(LOG == 3);
+    assert!(LOG == 1);
     LOG = 0;
     assert!(late(0) == 2);
-    assert!(LOG == 2);
+    assert!(LOG == 1);
 }
 
-test("a defer armed in a loop runs once, with the loop's value") {
+test("a loop body's defer runs every iteration and at the panic") {
     LOG = 0;
     assert!(run(fn () => looped(2)));
-    assert!(LOG == 3);
+    assert!(LOG == 123);
 }
 
 test("a heap capture survives a collection before the panic") {
@@ -118,11 +119,11 @@ test("a heap capture survives a collection before the panic") {
     assert!(LOG == 7);
 }
 
-test("armed defers run last first; an unarmed one stays out") {
+test("a nested block's defer runs at its end; the panic runs the rest") {
     LOG = 0;
     assert!(run(fn () => ordered(true, 6)));
-    assert!(LOG == 56);
+    assert!(LOG == 54);
     LOG = 0;
     assert!(run(fn () => ordered(false, 8)));
-    assert!(LOG == 8);
+    assert!(LOG == 4);
 }

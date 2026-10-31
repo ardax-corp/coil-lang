@@ -1,6 +1,7 @@
 // A panic runs the `defer`s of every frame it leaves, innermost first, with
 // captures copied at each `defer`; a `defer` whose statement never ran does not
-// run; a panic inside a `defer` stops that function's cleanup only.
+// run, and one in a nested block runs when that block ends; a panic inside a
+// `defer` stops that function's cleanup only.
 use tests::assert;
 use task::{scope, Scope, TaskError};
 
@@ -95,14 +96,14 @@ test("a panic runs the defers of the frames it leaves") {
     assert!(LOG == "a[inner 5][outer 1][main]", LOG);
 }
 
-test("a defer runs only once its statement ran") {
+test("a defer runs only once its statement ran, at its block's end") {
     LOG = "";
     f(false, false);
     say("|");
     f(true, false);
     say("|");
     assert!(outcome(fn () => f(false, true)) == "stop");
-    assert!(LOG == "yA|xyBA|A", LOG);
+    assert!(LOG == "yA|xByA|A", LOG);
 }
 
 test("a panic inside a defer keeps unwinding the callers") {
