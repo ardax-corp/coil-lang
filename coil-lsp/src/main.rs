@@ -3023,7 +3023,7 @@ fn collect_hy_files(dir: &Path, out: &mut Vec<PathBuf>) {
             .is_some_and(|n| n.starts_with('.') || n == "target");
         if path.is_dir() && !hidden {
             collect_hy_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "hy") && !out.contains(&path) {
+        } else if common::ext::is_source_path(&path) && !out.contains(&path) {
             out.push(path);
         }
     }

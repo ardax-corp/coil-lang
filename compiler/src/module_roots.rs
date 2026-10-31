@@ -26,6 +26,7 @@ fn abs_search_root(project_root: &Path, root: &Path) -> PathBuf {
 /// item name (e.g. `["a", "b"]` for `use a::b::c;`).
 /// `name` is the final segment (e.g. `"c"`).
 ///
+/// Each candidate is `<stem>.coil`, else the legacy `<stem>.hy`.
 /// Resolution tries, in order:
 /// 1. **One-item-per-file:** `<root>/<path>/<name>.hy`
 ///    (e.g. `use foo::sadge;` → `foo/sadge.hy`)
@@ -48,40 +49,40 @@ pub fn resolve_use_in_roots(
     name: &str,
 ) -> Option<PathBuf> {
     for root in roots {
-        let mut candidate = abs_search_root(project_root, root);
+        let mut dir = abs_search_root(project_root, root);
         for segment in path {
-            candidate.push(segment);
+            dir.push(segment);
         }
-        candidate.push(format!("{}.hy", name));
-        if candidate.exists() {
-            return Some(candidate);
+        if let Some(found) = source_file(&dir, name) {
+            return Some(found);
         }
     }
     if let Some(module_stem) = path.last() {
         let dir_segments = &path[..path.len() - 1];
         for root in roots {
-            let mut candidate = abs_search_root(project_root, root);
+            let mut dir = abs_search_root(project_root, root);
             for segment in dir_segments {
-                candidate.push(segment);
+                dir.push(segment);
             }
-            candidate.push(format!("{}.hy", module_stem));
-            if candidate.exists() {
-                return Some(candidate);
+            if let Some(found) = source_file(&dir, module_stem) {
+                return Some(found);
             }
         }
     }
     None
 }
 
+/// `<dir>/<stem>.coil`, else the legacy `<dir>/<stem>.hy`.
+fn source_file(dir: &Path, stem: &str) -> Option<PathBuf> {
+    common::ext::SOURCE_EXTS
+        .iter()
+        .map(|ext| dir.join(format!("{stem}.{ext}")))
+        .find(|candidate| candidate.exists())
+}
+
 /// `mod name;` → `<root>/name.hy` in each search root.
 pub fn resolve_mod_in_roots(roots: &[PathBuf], project_root: &Path, name: &str) -> Option<PathBuf> {
-    for root in roots {
-        let candidate = abs_search_root(project_root, root).join(format!("{}.hy", name));
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    roots.iter().find_map(|root| source_file(&abs_search_root(project_root, root), name))
 }
 
 /// Compute the namespace of a file given its absolute
@@ -335,6 +336,43 @@ mod tests {
         let roots = vec![PathBuf::from("src")];
         let ns = namespace_of_in_roots(&roots, &tmp, &file);
         assert_eq!(ns, None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    const OLD: &str = common::ext::LEGACY_SOURCE_EXT;
+
+    #[test]
+    fn resolve_reads_legacy_hy_files() {
+        let tmp = std::env::temp_dir().join(format!("coil_module_roots_legacy_{}", std::process::id()));
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("old")).unwrap();
+        std::fs::write(src.join("old").join(format!("item.{OLD}")), "fn item() {}\n").unwrap();
+        std::fs::write(src.join(format!("plain.{OLD}")), "fn x() {}\n").unwrap();
+
+        let roots = default_module_roots();
+        let used = resolve_use_in_roots(&roots, &tmp, &["old".into()], "item").unwrap();
+        assert!(used.ends_with(format!("src/old/item.{OLD}")), "{}", used.display());
+        let modded = resolve_mod_in_roots(&roots, &tmp, "plain").unwrap();
+        assert!(modded.ends_with(format!("src/plain.{OLD}")), "{}", modded.display());
+        assert_eq!(namespace_of_in_roots(&roots, &tmp, &used).as_deref(), Some("old::item"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_prefers_coil_over_legacy_hy() {
+        let tmp = std::env::temp_dir().join(format!("coil_module_roots_prefer_{}", std::process::id()));
+        let src = tmp.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join(format!("both.{OLD}")), "fn old() {}\n").unwrap();
+        std::fs::write(src.join("both.coil"), "fn new() {}\n").unwrap();
+
+        let roots = default_module_roots();
+        let used = resolve_use_in_roots(&roots, &tmp, &[], "both").unwrap();
+        assert!(used.ends_with("src/both.coil"), "{}", used.display());
+        let modded = resolve_mod_in_roots(&roots, &tmp, "both").unwrap();
+        assert!(modded.ends_with("src/both.coil"), "{}", modded.display());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -106,7 +106,7 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
         pipeline.set_collect_opt_stats(true);
     }
 
-    let from_archive = args.filename.ends_with(".hyc");
+    let from_archive = common::ext::is_archive_path(std::path::Path::new(&args.filename));
     if from_archive
         && (args.show_il || args.show_il_post || args.show_mir || args.show_hir || args.show_effects || args.show_ast || args.show_expand)
     {

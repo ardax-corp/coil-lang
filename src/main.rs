@@ -489,7 +489,7 @@ fn cmd_compile(
 }
 
 fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
-    if archive.ends_with(".hy") {
+    if common::ext::is_source_path(Path::new(archive)) {
         fail_and_exit(
             pipeline,
             ErrorCode::IoError,

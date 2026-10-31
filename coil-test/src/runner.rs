@@ -115,7 +115,7 @@ pub fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, out)?;
-            } else if path.extension().and_then(|e| e.to_str()) == Some("hy") {
+            } else if common::ext::is_source_path(&path) {
                 out.push(path);
             }
         }

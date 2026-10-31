@@ -43,7 +43,7 @@ fn parse_args(args: &[String]) -> Result<Option<FmtArgs>, String> {
 
 fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     if root.is_file() {
-        if root.extension().and_then(|e| e.to_str()) == Some("hy") {
+        if common::ext::is_source_path(root) {
             out.push(root.to_path_buf());
         } else {
             return Err(format!("`{}` is not a `.hy` file", root.display()));
@@ -64,7 +64,7 @@ fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
                 continue;
             }
             collect_hy_files(&child, out)?;
-        } else if child.extension().and_then(|e| e.to_str()) == Some("hy") {
+        } else if common::ext::is_source_path(&child) {
             out.push(child);
         }
     }
@@ -96,7 +96,7 @@ fn format_one(path: &Path, check: bool) -> Result<bool, String> {
         return Ok(true);
     }
     // Atomic-ish write: temp beside target then rename.
-    let tmp = path.with_extension("hy.fmt.tmp");
+    let tmp = path.with_extension("fmt.tmp");
     {
         let mut f = fs::File::create(&tmp).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         f.write_all(formatted.as_bytes())
