@@ -62,7 +62,7 @@ class Log {
 }
 
 fn with_defer(Log log, int x) -> int {
-    defer use (log) {
+    defer use (mut log) {
         log.n = log.n + 1;
     }
     let f = fn (int y) use (x) => y + x;
