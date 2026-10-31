@@ -66,3 +66,17 @@ test("Option and_then to a niche Option") {
     let o: Option<int> = Some(2);
     assert!(o.and_then(some_name).unwrap_or("") == "n", "named fn");
 }
+
+fn small(int x) -> Result<(), string> {
+    if x > 5 {
+        raise "big";
+    }
+    return;
+}
+
+test("unit Ok from the function") {
+    let a: Result<int, string> = Ok(3);
+    assert!(a.and_then(small).is_ok(), "ok");
+    let b: Result<int, string> = Ok(9);
+    assert!(b.and_then(small).is_err(), "err");
+}

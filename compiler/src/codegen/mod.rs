@@ -639,8 +639,8 @@ pub struct Compiler {
     hir_lambda_tail: Vec<compiler::emit_hir::HirLambdaTail>,
     /// Closure adapters ([`Compiler::hir_fn_adapter`]) by unboxed tags,
     /// and those still to emit after the current body.
-    hir_fn_adapters: HashMap<Vec<Option<u32>>, crate::il::Label>,
-    hir_adapter_tail: Vec<(crate::il::Label, Vec<Option<crate::typechecking::Ty>>)>,
+    hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<crate::layout::ValueLayout>), crate::il::Label>,
+    hir_adapter_tail: Vec<(crate::il::Label, compiler::emit_hir::HirFnAdapt)>,
     /// Adapters of closures shared generic bodies return
     /// ([`Compiler::hir_closure_adapter`]) by shape, and the ones to emit
     /// after the body (#1532).
