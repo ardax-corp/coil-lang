@@ -3,8 +3,21 @@
 //! `defer` or finalizer runs. An explicit `obj.drop()` is an ordinary call
 //! and unwinds like any other panic.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// `coil test` re-execs `coil-test`; `cargo test -p coil` alone does not build it.
+fn ensure_coil_test(coil: &str) {
+    let coil = PathBuf::from(coil);
+    let helper = coil_cli::sibling_bin(&coil, "coil-test");
+    let release = coil.parent().and_then(Path::file_name).is_some_and(|d| d == "release");
+    let status = Command::new("cargo")
+        .args(["build", "-q", "-p", "coil-test"])
+        .args(if release { &["--release"][..] } else { &[] })
+        .status()
+        .expect("spawn cargo build -p coil-test");
+    assert!(status.success() && helper.is_file(), "coil-test missing at {}", helper.display());
+}
 
 fn run(bin: &str, dir: &Path, name: &str, src: &str) -> (String, bool) {
     let path = dir.join(name);
@@ -75,9 +88,8 @@ fn main() {{
     // At teardown: the program finished, but the exit status still fails.
     let at_teardown = format!(
         "{PRELUDE}
-static let KEEP: Vec<Res> = [];
+static let KEEP: Res = new Res(2);
 fn main() {{
-    KEEP.push(new Res(2));
     say(\"main done\");
 }}
 "
@@ -105,6 +117,32 @@ fn main() {{
     assert!(out.contains("drop failed"), "{out}");
     assert!(!out.contains("after drop"), "{out}");
     assert!(out.contains("main defer"), "an explicit drop() panic unwinds and runs defers:\n{out}");
+
+    // Under `coil test` the case fails instead of ending the run.
+    let case_dir = dir.join("cases");
+    std::fs::create_dir_all(&case_dir).unwrap();
+    std::fs::write(
+        case_dir.join("drop_case.hy"),
+        format!(
+            "{PRELUDE}
+test(\"a drop panic fails the case\") {{
+    make(2);
+    collect();
+}}
+"
+        ),
+    )
+    .unwrap();
+    ensure_coil_test(&bin);
+    let mut cmd = Command::new(&bin);
+    cmd.arg("test");
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let out = cmd.arg(&case_dir).output().expect("coil test");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "coil test must fail the case:\n{text}");
+    assert!(text.contains("a drop panic fails the case"), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
