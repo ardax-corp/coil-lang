@@ -48,7 +48,14 @@ pub fn enabled() -> bool {
 /// with a `drop`. A type parameter counts, since it may stand for one.
 pub(super) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
     let Some(ty) = ty else { return false };
-    let name = match strip_readonly(ty) {
+    let ty = crate::typechecking::subst::apply_ty_prune(checker.subst(), ty);
+    let name = match strip_readonly(&ty) {
+        // A type parameter (#2161): its ops reach the VM only where the
+        // value is an object word. A per-type clone at a scalar type holds
+        // the scalar itself, which MIR passes through with no op; a shared
+        // body holds every `T` boxed, and the VM shares or copies only class
+        // instances and arrays.
+        Ty::Var(_) => return true,
         Ty::Con(n) => n.as_str(),
         Ty::App(head, _) => match head.as_ref() {
             Ty::Con(n) => n.as_str(),
@@ -75,6 +82,13 @@ pub(super) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
         return !checker.is_readonly_class(&key) && !checker.is_shared_class(&key) && !checker.class_has_drop(name);
     }
     checker.enum_variants(name).is_none()
+}
+
+/// Whether `ty` is a bare type parameter: a write through it copies only
+/// in the instances where it stands for a class or array, so its E0141 /
+/// E0142 warnings would be guesses.
+fn open_param(checker: &Checker, ty: Option<&Ty>) -> bool {
+    ty.is_some_and(|t| matches!(strip_readonly(&crate::typechecking::subst::apply_ty_prune(checker.subst(), t)), Ty::Var(_)))
 }
 
 /// What a call does with each argument (bit `i` for argument `i`).
@@ -873,6 +887,7 @@ impl Plan {
                 && !fresh_ctor(body, r)
                 && f.calls.get(&w.at).is_some_and(|u| u.opaque == 0)
                 && cow_ty(checker, body.expr(r).ty.as_ref())
+                && !open_param(checker, body.expr(r).ty.as_ref())
                 && f.parent.get(&w.at).is_some_and(|p| matches!(&body.expr(*p).kind, HirKind::Block { stmts, .. } if stmts.contains(&w.at)))
             {
                 let span = body.expr(w.at).span;
@@ -894,6 +909,7 @@ impl Plan {
                 && body.local(l).kind == LocalKind::Capture
                 && !body.local(l).borrow
                 && cow_ty(checker, body.local(l).ty.as_ref())
+                && !open_param(checker, body.local(l).ty.as_ref())
                 && captured.get(&l).is_none_or(|o| f.order(w.at) < f.order(o.at))
             {
                 captured.insert(l, w);
@@ -919,7 +935,7 @@ impl Plan {
         for (l, w) in firsts {
             let Some(src) = place_text(body, copied_from[&l]) else { continue };
             let name = &body.local(l).name;
-            if name.starts_with('$') {
+            if name.starts_with('$') || open_param(checker, body.local(l).ty.as_ref()) {
                 continue;
             }
             let span = body.expr(w.at).span;

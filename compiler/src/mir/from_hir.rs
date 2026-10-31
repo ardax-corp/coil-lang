@@ -923,6 +923,10 @@ fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
             // type variable (a generic callee or a closure's), as HIR
             // emission does; the callee reads nothing of it either.
             HirKind::Call { .. } => false,
+            // A copy-on-write op on a type parameter's word passes it
+            // through ([`FromHir::value`]): only a per-type clone knows
+            // whether the word is an object (#2161).
+            HirKind::Builtin { op: Builtin::Cow { .. }, .. } => false,
             HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
@@ -2806,10 +2810,16 @@ impl Lower<'_> {
             }
             // Copy-on-write share / unique: the operand's word, or a copy's.
             HirKind::Builtin { op: Builtin::Cow { unique }, args } if let [inner] = args.as_slice() => {
-                let Some(v) = self.word(*inner)? else {
-                    return Ok(Val::Never);
+                // A two-word value (a type parameter's clone at a pair
+                // type) is no object: it passes as it is.
+                let v = match self.value(*inner)? {
+                    Val::V(v) => v,
+                    other => return Ok(other),
                 };
-                if self.b.value_ty(v) != MirTy::HeapRef {
+                // A shared generic body's type parameter word may be a
+                // scalar: no op, as before #2161. Its per-type clones get
+                // the op at an object type.
+                if self.b.value_ty(v) != MirTy::HeapRef || self.expr_ty(*inner).is_some_and(|t| is_var(t) || is_var_app(t)) {
                     return Ok(Val::V(v));
                 }
                 let out = self.at_expr(id, |l| l.b.ins_cow(v, *unique).map_err(mir))?;
