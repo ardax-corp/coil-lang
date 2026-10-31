@@ -7,7 +7,7 @@ use compiler::Pipeline;
 fn temp_hy(name: &str, src: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("coil_macro_project_{name}_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("main.hy");
+    let file = dir.join("main.coil");
     std::fs::write(&file, src).unwrap();
     file
 }
@@ -40,16 +40,16 @@ fn debug_locs_for_expanded_macros_point_at_the_use_site() {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(
-        src.join("gen.hy"),
+        src.join("gen.coil"),
         "use macro::{Expr, Code};\n\nmacro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n",
     )
     .unwrap();
     let main = "use gen::{twice};\n\nfn main() {\n    let n = 21;\n    return twice!(n);\n}\n";
-    std::fs::write(src.join("main.hy"), main).unwrap();
+    std::fs::write(src.join("main.coil"), main).unwrap();
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_root(dir.clone(), vec!["src".into()]);
     pipeline
-        .compile_src_from_file(src.join("main.hy").to_str().unwrap())
+        .compile_src_from_file(src.join("main.coil").to_str().unwrap())
         .expect("compiles");
     let debug = pipeline.program_debug();
     let file_len = main.len();
@@ -58,7 +58,7 @@ fn debug_locs_for_expanded_macros_point_at_the_use_site() {
             continue;
         }
         let path = &debug.source_files[loc.file as usize];
-        if !path.ends_with("main.hy") {
+        if !path.ends_with("main.coil") {
             continue;
         }
         assert!(

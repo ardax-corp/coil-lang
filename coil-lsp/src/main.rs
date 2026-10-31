@@ -3010,7 +3010,7 @@ fn modules_declaring(state: &ServerState, from: &Path, name: &str) -> Vec<String
     modules
 }
 
-/// `.hy` files under `dir`, skipping hidden directories and `target`.
+/// `.coil` files under `dir`, skipping hidden directories and `target`.
 fn collect_hy_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -4731,7 +4731,7 @@ fn semantic_tokens(
     file: Option<PathBuf>,
     filter: Option<Range<usize>>,
 ) -> Vec<SemanticToken> {
-    let file = file.unwrap_or_else(|| PathBuf::from("untitled.hy"));
+    let file = file.unwrap_or_else(|| PathBuf::from("untitled.coil"));
     let mut tokens = scan_lexical_tokens(source);
     if let Some(typed) = typed_semantic_tokens(source, &file) {
         tokens.extend(typed);
@@ -5239,12 +5239,12 @@ fn fib(
 
     #[test]
     fn parameter_hover_in_condition_uses_binding_type() {
-        let text = include_str!("../../examples/fib.hy");
+        let text = include_str!("../../examples/fib.coil");
         // `if n <= 2` — character 7 is the binding `n` (0-based).
         let line = text
             .lines()
             .position(|l| l.contains("if n <= 2"))
-            .expect("`if n <= 2` in examples/fib.hy") as u32;
+            .expect("`if n <= 2` in examples/fib.coil") as u32;
         let document = Document {
             text: text.into(),
             version: 1,
@@ -5465,7 +5465,7 @@ fn main() {
     fn semantic_tokens_mark_macro_keywords_and_calls() {
         let source =
             "macro twice(Expr e) -> Code { return quote expr { ${e} }; }\nfn main() { twice!(1); }\n";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         let kw = token_types_at_word(source, &tokens, "macro");
         assert_eq!(kw, vec![TOKEN_KEYWORD]);
         let quote = token_types_at_word(source, &tokens, "quote");
@@ -5481,7 +5481,7 @@ fn main() {
     #[test]
     fn semantic_tokens_classify_function_declarations_and_calls() {
         let source = "fn fib(int n) -> int { return fib(n); }\n";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         let fib = token_types_at_word(source, &tokens, "fib");
         assert_eq!(fib.len(), 2);
         assert!(fib.iter().all(|token_type| *token_type == TOKEN_FUNCTION));
@@ -5496,7 +5496,7 @@ fn main() {
     return f(1);
 }
 ";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         let call_f = token_types_at_word(source, &tokens, "f");
         assert!(
             call_f.contains(&TOKEN_FUNCTION),
@@ -5507,7 +5507,7 @@ fn main() {
     #[test]
     fn semantic_tokens_classify_type_names() {
         let source = "type Id = int;\nclass Point { pub x: int }\nfn main() { return; }\n";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         assert!(token_types_at_word(source, &tokens, "Point").contains(&TOKEN_TYPE));
         assert!(token_types_at_word(source, &tokens, "Id").contains(&TOKEN_TYPE));
         assert!(token_types_at_word(source, &tokens, "int").contains(&TOKEN_TYPE));
@@ -5516,24 +5516,24 @@ fn main() {
     #[test]
     fn semantic_tokens_gen_is_keyword_only_before_fn() {
         let source = "gen fn count() -> int { yield 1; return 0; }\n";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         assert!(token_types_at_word(source, &tokens, "gen").contains(&TOKEN_KEYWORD));
 
         let source = "fn main() { let gen = 1; return; }\n";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         assert!(!token_types_at_word(source, &tokens, "gen").contains(&TOKEN_KEYWORD));
     }
 
     #[test]
     fn semantic_tokens_copy_on_write_words_are_contextual() {
         let source = "shared class Log {\n    pub n: int,\n}\n\nfn main() {\n    let v: Vec<int> = [];\n    let w = mut v;\n    let r = region { 1 };\n}\n";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         for word in ["shared", "mut", "region"] {
             assert!(token_types_at_word(source, &tokens, word).contains(&TOKEN_KEYWORD), "{word}");
         }
 
         let source = "fn main() {\n    let shared = 1;\n    let region = shared + 1;\n    let mut = region;\n}\n";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         for word in ["shared", "mut", "region"] {
             assert!(!token_types_at_word(source, &tokens, word).contains(&TOKEN_KEYWORD), "{word}");
         }
@@ -5572,7 +5572,7 @@ use io::stdout as out;
 enum Color { Red, Green }
 fn main() { return; }
 ";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         assert!(
             token_types_at_word(source, &tokens, "out").contains(&TOKEN_NAMESPACE),
             "use alias should be namespace"
@@ -5627,7 +5627,7 @@ fn main() { return; }
 static let Point = 1;
 fn main() { return Point; }
 ";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         let point = token_types_at_word(source, &tokens, "Point");
         assert!(
             !point.is_empty(),
@@ -5646,7 +5646,7 @@ fn fib(int n) -> int { return n; }
 static let f = fib;
 fn main() { return f(1); }
 ";
-        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
         let f_types = token_types_at_word(source, &tokens, "f");
         assert!(
             f_types.contains(&TOKEN_FUNCTION),
@@ -5715,22 +5715,22 @@ fn main() { return f(1); }
         write_hy_project(
             &dir,
             &[
-                ("lib.hy", "fn helper() -> int { return 1; }\n"),
+                ("lib.coil", "fn helper() -> int { return 1; }\n"),
                 (
-                    "main.hy",
+                    "main.coil",
                     "use lib::helper;\nfn main() { let x = helper(); return; }\n",
                 ),
             ],
         );
-        let (state, uris) = open_state(&dir, &[("main.hy", None)]);
-        let main = std::fs::read_to_string(dir.join("main.hy")).unwrap();
+        let (state, uris) = open_state(&dir, &[("main.coil", None)]);
+        let main = std::fs::read_to_string(dir.join("main.coil")).unwrap();
         let offset = main.find("helper()").expect("call");
         let position = byte_position(&main, offset);
-        let locations = goto_definitions(&state, &uris["main.hy"], position);
+        let locations = goto_definitions(&state, &uris["main.coil"], position);
         assert_eq!(locations.len(), 1, "{locations:?}");
         assert!(
-            locations[0].uri.to_string().contains("lib.hy"),
-            "expected unopened lib.hy, got {:?}",
+            locations[0].uri.to_string().contains("lib.coil"),
+            "expected unopened lib.coil, got {:?}",
             locations[0].uri
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -5746,16 +5746,16 @@ fn main() { return f(1); }
         write_hy_project(
             &dir,
             &[
-                ("lib.hy", "fn helper() -> int { return 1; }\n"),
+                ("lib.coil", "fn helper() -> int { return 1; }\n"),
                 (
-                    "main.hy",
+                    "main.coil",
                     "use lib::helper;\nfn main() { let x: int = helper(); return; }\n",
                 ),
             ],
         );
         let overlay = "use lib::helper;\nfn main() { let x: bool = helper(); return; }\n";
-        let (state, uris) = open_state(&dir, &[("main.hy", Some(overlay))]);
-        let diagnostics = project_diagnostics(&state, &uris["main.hy"], &state.documents[&uris["main.hy"]]);
+        let (state, uris) = open_state(&dir, &[("main.coil", Some(overlay))]);
+        let diagnostics = project_diagnostics(&state, &uris["main.coil"], &state.documents[&uris["main.coil"]]);
         assert!(
             diagnostics.iter().any(|d| d.message.contains("bool") || d.message.contains("int")),
             "expected unsaved type error, got {diagnostics:?}"
@@ -5775,20 +5775,20 @@ fn main() { return f(1); }
         write_hy_project(
             &dir,
             &[
-                ("lib.hy", "enum Switch {\n    On,\n    Off,\n}\n"),
+                ("lib.coil", "enum Switch {\n    On,\n    Off,\n}\n"),
                 (
-                    "main.hy",
+                    "main.coil",
                     "use lib::Switch;\nfn f(Switch s) -> int {\n    return match s {\n        On => 1,\n        Off => 2,\n    };\n}\nfn main() { let _ = f(Switch::On); return; }\n",
                 ),
             ],
         );
-        let (state, uris) = open_state(&dir, &[("main.hy", None)]);
-        let main = std::fs::read_to_string(dir.join("main.hy")).unwrap();
+        let (state, uris) = open_state(&dir, &[("main.coil", None)]);
+        let main = std::fs::read_to_string(dir.join("main.coil")).unwrap();
         let offset = main.find("On =>").expect("arm");
         let locations =
-            identifier_locations(&state, &uris["main.hy"], byte_position(&main, offset), true);
+            identifier_locations(&state, &uris["main.coil"], byte_position(&main, offset), true);
         assert!(
-            !(locations.len() == 1 && locations[0].uri == uris["main.hy"]),
+            !(locations.len() == 1 && locations[0].uri == uris["main.coil"]),
             "`On` resolved as a local binding of its arm: {locations:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -5798,7 +5798,7 @@ fn main() { return f(1); }
     fn rename_skips_comments_and_strings() {
         let source = "// helper leftover\nfn helper() { return; }\nfn main() { let s = \"helper\"; helper(); return; }\n";
         let mut state = ServerState::default();
-        let uri: Uri = "file:///tmp/rename.hy".parse().unwrap();
+        let uri: Uri = "file:///tmp/rename.coil".parse().unwrap();
         state.documents.insert(
             uri.clone(),
             Document {
@@ -5956,14 +5956,14 @@ fn main() {
 
     #[test]
     fn uri_percent_decodes_spaces() {
-        let uri: Uri = "file:///tmp/my%20pkg/src/lib.hy".parse().unwrap();
+        let uri: Uri = "file:///tmp/my%20pkg/src/lib.coil".parse().unwrap();
         let path = uri_path(&uri).expect("path");
-        assert!(path.ends_with("my pkg/src/lib.hy"), "{path:?}");
+        assert!(path.ends_with("my pkg/src/lib.coil"), "{path:?}");
     }
 
     fn state_with(source: &str) -> (ServerState, Uri) {
         let mut state = ServerState::default();
-        let uri: Uri = "file:///tmp/coil-lsp-test.hy".parse().unwrap();
+        let uri: Uri = "file:///tmp/coil-lsp-test.coil".parse().unwrap();
         state.documents.insert(
             uri.clone(),
             Document {
@@ -6077,8 +6077,8 @@ fn main() { let a = Area::size(new Sq(1)); }
     fn trait_project(tag: &str, src: &str) -> (PathBuf, ServerState, HashMap<String, Uri>) {
         let dir = std::env::temp_dir().join(format!("coil-lsp-trait-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        write_hy_project(&dir, &[("main.hy", src)]);
-        let (state, uris) = open_state(&dir, &[("main.hy", None)]);
+        write_hy_project(&dir, &[("main.coil", src)]);
+        let (state, uris) = open_state(&dir, &[("main.coil", None)]);
         (dir, state, uris)
     }
 
@@ -6093,7 +6093,7 @@ fn main() { let a = Area::size(new Sq(1)); }
         let src = TRAIT_QUALIFIED_SRC;
         let (dir, state, uris) = trait_project("owner", src);
         let offset = src.find("Area::size(").unwrap();
-        let locations = goto_definitions(&state, &uris["main.hy"], byte_position(src, offset));
+        let locations = goto_definitions(&state, &uris["main.coil"], byte_position(src, offset));
         assert_eq!(locations.len(), 1, "{locations:?}");
         let (start, text) = location_text(src, &locations[0]);
         assert_eq!(text, "Area");
@@ -6106,7 +6106,7 @@ fn main() { let a = Area::size(new Sq(1)); }
         let src = TRAIT_QUALIFIED_SRC;
         let (dir, state, uris) = trait_project("member", src);
         let offset = src.find("Area::size(").unwrap() + "Area::".len();
-        let locations = goto_definitions(&state, &uris["main.hy"], byte_position(src, offset));
+        let locations = goto_definitions(&state, &uris["main.coil"], byte_position(src, offset));
         assert!(!locations.is_empty(), "no definition for Area::size");
         let starts: Vec<usize> = locations.iter().map(|l| location_text(src, l).0).collect();
         let area_decl = src.find("fn size(T s)").unwrap() + "fn ".len();
@@ -6128,7 +6128,7 @@ fn main() { let a = Area::size(new Sq(1)); }
         let src = TRAIT_QUALIFIED_SRC;
         let (dir, mut state, uris) = trait_project("hover", src);
         let offset = src.find("Area::size(").unwrap() + "Area::".len();
-        let hover = project_hover(&mut state, &uris["main.hy"], byte_position(src, offset)).expect("hover");
+        let hover = project_hover(&mut state, &uris["main.coil"], byte_position(src, offset)).expect("hover");
         let HoverContents::Markup(markup) = hover.contents else { panic!("markup hover") };
         assert!(markup.value.contains("Area of a shape."), "{}", markup.value);
         assert!(!markup.value.contains("Volume of a shape."), "{}", markup.value);
@@ -6146,7 +6146,7 @@ fn main() { let a = Area::size(new Sq(1)); }
 ";
         let (dir, mut state, uris) = trait_project("hover-owner", src);
         let offset = src.find("Area::size(").unwrap();
-        let hover = project_hover(&mut state, &uris["main.hy"], byte_position(src, offset)).expect("hover");
+        let hover = project_hover(&mut state, &uris["main.coil"], byte_position(src, offset)).expect("hover");
         let HoverContents::Markup(markup) = hover.contents else { panic!("markup hover") };
         assert!(markup.value.contains("trait Area"), "{}", markup.value);
         assert!(markup.value.contains("Things with an area."), "{}", markup.value);
@@ -6166,10 +6166,10 @@ fn main() {
 ";
         let dir = std::env::temp_dir().join(format!("coil-lsp-trait-dot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        write_hy_project(&dir, &[("main.hy", src)]);
-        let (mut state, uris) = open_state(&dir, &[("main.hy", None)]);
+        write_hy_project(&dir, &[("main.coil", src)]);
+        let (mut state, uris) = open_state(&dir, &[("main.coil", None)]);
         let offset = src.find("q.size()").unwrap() + "q.".len();
-        let location = member_definition(&mut state, &uris["main.hy"], byte_position(src, offset))
+        let location = member_definition(&mut state, &uris["main.coil"], byte_position(src, offset))
             .expect("definition of q.size");
         let (start, text) = location_text(src, &location);
         assert_eq!(text, "size");

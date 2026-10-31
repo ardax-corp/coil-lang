@@ -1,0 +1,17 @@
+// ffi_mod_entry.coil — an `extern` block declared in an imported module
+// (examples/src/ffi_mod/sys.coil) and called from here, with a `Vec`
+// allocation between two calls.
+//
+// Build and grant libsum as in ffi_extern.coil:
+//
+//   coil --root examples/src --allow-dload sum examples/ffi_mod_entry.coil
+//
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+
+use io::sync::print;
+use string::format;
+use ffi_mod::sys::run_twice;
+
+fn main() {
+    let _ = print(format("%i", run_twice()));
+}

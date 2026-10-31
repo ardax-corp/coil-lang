@@ -1,6 +1,6 @@
 //! Project-wide symbol index as a [`DefId`] view over discovered modules.
 //!
-//! B5: index the use-graph (not every `.hy` under roots). `resolve_definition`
+//! B5: index the use-graph (not every `.coil` under roots). `resolve_definition`
 //! uses checker DefId tables, not "every def with this string". Roots are
 //! bound on [`Pipeline`].
 
@@ -64,7 +64,7 @@ impl ProjectIndex {
         self.pipeline.compiler().checker()
     }
 
-    /// Index modules reachable from `entry` (use-graph, not every `.hy`).
+    /// Index modules reachable from `entry` (use-graph, not every `.coil`).
     pub fn index_entry(&mut self, entry: &Path) {
         if !entry.exists() {
             return;
@@ -229,7 +229,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("coil-project-index-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("main.hy");
+        let path = dir.join("main.coil");
         let src = "fn helper() -> int { return 1; }\nfn main() { let x = helper(); }\n";
         fs::write(&path, src).unwrap();
 
@@ -260,7 +260,7 @@ mod tests {
             std::env::temp_dir().join(format!("coil-project-index-upd-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("main.hy");
+        let path = dir.join("main.coil");
 
         let mut index = ProjectIndex::new(dir.clone());
         index.upsert_file(path.clone(), "fn old() {}\n".into());
@@ -286,32 +286,32 @@ mod tests {
             &dir,
             &[
                 (
-                    "lib.hy",
+                    "lib.coil",
                     "fn helper() -> int { return 1; }\n",
                 ),
                 (
-                    "main.hy",
+                    "main.coil",
                     "use lib::helper;\nfn main() { let x = helper(); return; }\n",
                 ),
                 (
-                    "unused.hy",
+                    "unused.coil",
                     "fn helper() -> int { return 99; }\nfn never_called() { return; }\n",
                 ),
             ],
         );
 
         let mut index = ProjectIndex::with_roots(dir.clone(), vec![PathBuf::from(".")]);
-        index.index_entry(&dir.join("main.hy"));
+        index.index_entry(&dir.join("main.coil"));
 
-        let unused = dir.join("unused.hy");
+        let unused = dir.join("unused.coil");
         assert!(
             index.symbols_for(&unused).is_none(),
-            "unused.hy is not on the use-graph and must not be indexed"
+            "unused.coil is not on the use-graph and must not be indexed"
         );
-        let lib = dir.join("lib.hy");
-        let main = dir.join("main.hy");
-        assert!(index.symbols_for(&lib).is_some(), "lib.hy is imported");
-        assert!(index.symbols_for(&main).is_some(), "main.hy is entry");
+        let lib = dir.join("lib.coil");
+        let main = dir.join("main.coil");
+        assert!(index.symbols_for(&lib).is_some(), "lib.coil is imported");
+        assert!(index.symbols_for(&main).is_some(), "main.coil is entry");
 
         let main_syms = index.symbols_for(&main).unwrap();
         let refs: Vec<_> = main_syms
@@ -345,21 +345,21 @@ mod tests {
         write_project(
             &dir,
             &[
-                ("a.hy", "fn foo() -> int { return 1; }\n"),
-                ("b.hy", "fn foo() -> int { return 2; }\n"),
+                ("a.coil", "fn foo() -> int { return 1; }\n"),
+                ("b.coil", "fn foo() -> int { return 2; }\n"),
                 (
-                    "main.hy",
+                    "main.coil",
                     "use a::foo;\nuse b::foo as bfoo;\nfn main() { let x = foo(); let y = bfoo(); return; }\n",
                 ),
             ],
         );
 
         let mut index = ProjectIndex::with_roots(dir.clone(), vec![PathBuf::from(".")]);
-        index.index_entry(&dir.join("main.hy"));
+        index.index_entry(&dir.join("main.coil"));
 
-        let a = dir.join("a.hy");
-        let b = dir.join("b.hy");
-        let main = dir.join("main.hy");
+        let a = dir.join("a.coil");
+        let b = dir.join("b.coil");
+        let main = dir.join("main.coil");
         let a_defs = index.symbols_for(&a).unwrap().definitions("foo");
         let b_defs = index.symbols_for(&b).unwrap().definitions("foo");
         assert_eq!(a_defs.len(), 1);
@@ -403,11 +403,11 @@ mod tests {
         write_project(
             &dir,
             &[(
-                "main.hy",
+                "main.coil",
                 "fn helper() -> int { return 1; }\nfn main() { let x = helper(); return; }\n",
             )],
         );
-        let main = dir.join("main.hy");
+        let main = dir.join("main.coil");
         let overlay = "fn helper() -> int { return 7; }\nfn main() { let x = helper(); return; }\n";
         let mut index = ProjectIndex::with_roots(dir.clone(), vec![PathBuf::from(".")]);
         index.apply_open_file(main.clone(), overlay.to_string());
@@ -427,11 +427,11 @@ mod tests {
         write_project(
             &dir,
             &[(
-                "main.hy",
+                "main.coil",
                 "class P {\n    pub x: int,\n}\nimpl P {\n    pub fn get() -> int {\n        return self.x;\n    }\n}\nfn main() {\n    let p = new P(1);\n    let _ = p.get();\n}\n",
             )],
         );
-        let main = dir.join("main.hy");
+        let main = dir.join("main.coil");
         let mut index = ProjectIndex::with_roots(dir.clone(), vec![PathBuf::from(".")]);
         for round in 0..3 {
             let errors: Vec<String> = index

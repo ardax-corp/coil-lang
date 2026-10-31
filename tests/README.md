@@ -30,7 +30,7 @@ the part of the language it covers:
 
 Inside a corpus:
 
-- a `.hy` file with `test("…") { … }` cases runs each case; a file with only
+- a `.coil` file with `test("…") { … }` cases runs each case; a file with only
   `fn main()` runs it and compares stdout with its `// @output` header when it
   has one;
 - `compile_fail/` holds programs the compiler must reject with one of the

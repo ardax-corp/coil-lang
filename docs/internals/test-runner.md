@@ -32,7 +32,7 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 
 | Path | Expectation |
 |------|-------------|
-| any `.hy` under a `compile_fail/` segment | the compiler must reject it with one of the error codes its header declares (`// @expected E0209 — why`; several: `E0410 or E0409`). A rejection for another reason, a missing declaration, or a compiler panic is a failure |
+| any `.coil` under a `compile_fail/` segment | the compiler must reject it with one of the error codes its header declares (`// @expected E0209 — why`; several: `E0410 or E0409`). A rejection for another reason, a missing declaration, or a compiler panic is a failure |
 | a file with `test("…") { … }` / `#[test] fn` cases | each case is a reactor job: static init, then the case; it fails on `panic` or an `Err` return |
 | a file without cases | `main` runs once as a single opaque case; with a `// @output TEXT` header line its stdout must be exactly `TEXT` (escapes `\n`, `\t`, `\e`, `\\`). Header directive names are case-insensitive; see [tests/README.md](../../tests/README.md) |
 | a function with `requires` / `ensures` (in a test file, or in a project source a test file imports) | a generated `contract: f` case calls it with random arguments (`--contract-runs N`, default 100, 0 off); see [contracts](contracts.md#generated-tests) |
@@ -56,7 +56,7 @@ its code on the thread and raises a VM panic
 
 A test that needs a real exit status runs the program as a subprocess.
 
-Outside `coil test` (`coil --include-tests tests/foo.hy`), a test file
+Outside `coil test` (`coil --include-tests tests/foo.coil`), a test file
 with no `main` gets one that runs every case in one VM, prints
 `> Test "<name>" failed` for each `Err`, and panics with `tests failed` if
 any did. The compiler builds that `main` as HIR
@@ -102,13 +102,13 @@ outside the test root and `.deps/`. Dependencies under `--root` elsewhere
 
 **Naming.** `doc: <module>::<item> (<file>:<line>)`, the line of the opening
 fence. The module path is the file's path under the deepest of the test
-root, the `--root` directories and `src` that holds it (`src/io/sync.hy`
+root, the `--root` directories and `src` that holds it (`src/io/sync.coil`
 → `io::sync::println`). The cases are part of their file's `file` event under
 `--json` and are shuffled with the seed like `test` cases.
 
 **Isolation.** Each example compiles as its own program, with the run's
 roots, grants and `-O`, as an in-memory file next to the one it documents
-(`<stem>__doc_<line>.hy`, the name in its diagnostics and panic locations),
+(`<stem>__doc_<line>.coil`, the name in its diagnostics and panic locations),
 and runs as a reactor job like a file's `main`. A compile error fails the
 case with the diagnostics as its output. Doc-tests are not counted for
 `--coverage` and `coil mutate` does not run them.
@@ -163,11 +163,11 @@ summary:
 
 ```text
 running 4 files (seed 0x58a753087eda7cf7, 4 jobs)
-FAILED t/a.hy
+FAILED t/a.coil
 
 failures:
 
----- t/a.hy: fails ----
+---- t/a.coil: fails ----
 failed: one is not two
 stdout:
 out text
@@ -175,7 +175,7 @@ stderr:
 err text
 
 failed:
-    t/a.hy: fails
+    t/a.coil: fails
 
 test result: FAILED. 2 passed; 1 failed; 3 total; finished in 0.21s
 ```
@@ -184,7 +184,7 @@ To check what code prints, a test captures it instead of using a header:
 `io::capture_begin()` keeps the thread's stdout and stderr writes in memory
 and `io::capture_end()` returns them as `(stdout, stderr)` (captures nest; a
 capture left open when a case ends, say by a failed `assert!`, goes to the
-case's output). See `tests/testing/capture_output.hy`.
+case's output). See `tests/testing/capture_output.coil`.
 
 A file that does not compile shows its diagnostics in its block. `-v` /
 `--verbose` also lists passing files (`ok   <file>`) and their warnings;
@@ -285,12 +285,12 @@ On four cores the whole corpus takes ~14 s this way against ~31 s for one
 `coil test --coverage` reports line coverage of the project's own sources and
 writes an lcov tracefile (default `target/coverage/lcov.info`,
 `--coverage-out FILE`); `--coverage-per-test FILE` also writes which lines each
-test case hit (JSON: `{"tests":[{"file","name","lines":{"src/a.hy":[3,4]}}]}`).
+test case hit (JSON: `{"tests":[{"file","name","lines":{"src/a.coil":[3,4]}}]}`).
 
 ```text
 test result: ok. 721 passed; 0 failed; 721 total
 
- 57.1%      4/7      src/mathx.hy
+ 57.1%      4/7      src/mathx.coil
  57.1%      4/7      total
 coverage: lcov written to target/coverage/lcov.info
 ```
@@ -332,11 +332,11 @@ mutate: baseline run
 running 1 file (seed 0x…, 4 jobs)
 
 mutate: 8 mutants in 1 file (4 covered, 4 jobs)
-survived    src/mathx.hy:2  `<` → `<=`  [boundary]
+survived    src/mathx.coil:2  `<` → `<=`  [boundary]
 …
 
 survived (no test fails with these edits):
-    survived    src/mathx.hy:2  `<` → `<=`  [boundary]
+    survived    src/mathx.coil:2  `<` → `<=`  [boundary]
     …
 
 mutation score: 50.0% (2 killed, 0 timed out, 2 survived; 0 unviable, 4 without coverage)
@@ -344,7 +344,7 @@ mutation score: 50.0% (2 killed, 0 timed out, 2 survived; 0 unviable, 4 without 
 
 Like `coil test`, the baseline and the mutants each move a progress bar on a
 terminal; only survivors print as they finish, and again in a list before
-the score. `-v` / `--verbose` prints every mutant (`killed … (tests/clamp.hy:
+the score. `-v` / `--verbose` prints every mutant (`killed … (tests/clamp.coil:
 clamps low)`, `no coverage …`) as it finishes.
 
 1. **Baseline.** Run the suite once with line coverage, keeping each case's
@@ -436,7 +436,7 @@ Files are reported in start order, as in the text report.
 
 Each file compiles in memory with `Pipeline::set_include_tests(true)` at the
 requested `-O` level (default Standard, same as `coil compile`). Nothing is
-serialized to `.hyc`, so test-only data never touches the archive format.
+serialized to `.ccoil`, so test-only data never touches the archive format.
 
 ## Layout
 

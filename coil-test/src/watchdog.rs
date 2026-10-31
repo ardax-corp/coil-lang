@@ -249,15 +249,15 @@ mod tests {
             inner: Some(Arc::clone(&inner)),
             thread: None,
         };
-        let quick = w.watch("tests/a.hy", "quick", None, Arc::default());
+        let quick = w.watch("tests/a.coil", "quick", None, Arc::default());
         let output = Arc::new(Mutex::new(b"step 1\n".to_vec()));
-        let slow = w.watch("tests/b.hy", "slow", None, Arc::clone(&output));
+        let slow = w.watch("tests/b.coil", "slow", None, Arc::clone(&output));
         assert!(inner.stuck().is_empty());
         w.done(quick);
         std::thread::sleep(limit * 2);
         let stuck = inner.stuck();
         assert_eq!(stuck.len(), 1);
-        assert_eq!((stuck[0].0.as_str(), stuck[0].1.as_str()), ("tests/b.hy", "slow"));
+        assert_eq!((stuck[0].0.as_str(), stuck[0].1.as_str()), ("tests/b.coil", "slow"));
         assert_eq!(stuck[0].3, b"step 1\n");
         w.done(slow);
         assert!(inner.stuck().is_empty());

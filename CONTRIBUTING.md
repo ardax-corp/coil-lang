@@ -17,7 +17,7 @@ cargo build --release --workspace
 
 ### Examples
 
-Every `examples/*.hy` starts with a comment header describing the feature it
+Every `examples/*.coil` starts with a comment header describing the feature it
 shows and ends that header with its exact stdout:
 
 ```coil
@@ -65,7 +65,7 @@ Opt prove rule: [optimization-roadmap.md](docs/internals/optimization-roadmap.md
 | [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/manual/` | Tutorials, getting started, examples catalog (`/docs/manual/…`) |
 | [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/references/` | Syntax, per-API **builtin** pages, error codes (`/docs/references/…`) |
 | `docs/internals/` | Pipeline, VM, tooling (this repo) |
-| [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) | Userland API docs (`docs/` in that repo); `///` on public `.hy` |
+| [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) | Userland API docs (`docs/` in that repo); `///` on public `.coil` |
 
 User-facing docs live in coil-website until a public domain is set.
 

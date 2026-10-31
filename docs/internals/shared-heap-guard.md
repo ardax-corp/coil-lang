@@ -135,7 +135,7 @@ job is to make CI fail when that proof is wrong.
 
 Under `gc-stress`, `should_collect` is always true, so an epoch aborts at its
 first allocation safepoint and the job falls back to sequential. Allocation
-free chunks (`loop_ipa_sum.hy`, `mandelbrot_ipa.hy`, fib-shaped arms) still
+free chunks (`loop_ipa_sum.coil`, `mandelbrot_ipa.coil`, fib-shaped arms) still
 run as shared jobs under the guard; the debug-build test suite
 (`cargo test`, `coil test`) covers the allocating ones.
 

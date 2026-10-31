@@ -175,7 +175,7 @@ check, then header poison (`kind == 0` → miss). That is not a HashSet probe.
 | First `DenseIndex` / `DenseStoreIndex` of a register identity | Lazy pin fill (COI-372); later hits skip the slab while the address matches |
 | `ArrayLen`, `ArrayPush`, `Vec` host natives | Different opcodes; not rewritten |
 | Tuple `Index` | `ArrayPin` only inserts `Object::Array` (dense index may pin a tuple on that path) |
-| `examples/perf/binary_trees.hy` | Recursive `Tree` alloc + `match`, not array `Index` |
+| `examples/perf/binary_trees.coil` | Recursive `Tree` alloc + `match`, not array `Index` |
 
 [#192](https://github.com/ardax-corp/coil-lang/pull/192) reported nsieve checked
 `Index` → 0 with dispatch count unchanged and poop wall / cycle deltas within

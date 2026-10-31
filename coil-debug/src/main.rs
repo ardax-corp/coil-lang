@@ -37,7 +37,7 @@ struct DebugCli {
     /// Debug Adapter Protocol over stdio (program from the DAP launch)
     #[arg(long)]
     dap: bool,
-    /// Entry `.hy` file (omit with `--dap`)
+    /// Entry `.coil` file (omit with `--dap`)
     #[arg(value_name = "FILE")]
     file: Option<String>,
 }
@@ -70,7 +70,7 @@ fn parse_args(args: &[String]) -> Result<Option<Parsed>, String> {
         }));
     }
     let filename = match merge_entry(cli.file, cli.entry_flag.entry)? {
-        name if name.is_empty() => return Err("debug requires an entry .hy file".into()),
+        name if name.is_empty() => return Err("debug requires an entry .coil file".into()),
         name => name,
     };
     let config = ReportConfig::from_cli_flags(cli.log.log_json, cli.log.log_lsp)
@@ -141,21 +141,21 @@ mod tests {
 
     #[test]
     fn parse_dap_rejects_positional_and_batch() {
-        assert!(parse_args(&args(&["--dap", "a.hy"])).is_err());
+        assert!(parse_args(&args(&["--dap", "a.coil"])).is_err());
         assert!(parse_args(&args(&["--dap", "--batch"])).is_err());
         assert!(parse_args(&args(&["--dap", "-x", "s.txt"])).is_err());
     }
 
     #[test]
     fn parse_repl_grants() {
-        let parsed = parse_args(&args(&["a.hy", "--allow-exit", "--batch"]))
+        let parsed = parse_args(&args(&["a.coil", "--allow-exit", "--batch"]))
             .expect("repl grants")
             .expect("not help");
         match parsed {
             Parsed::Repl(_, args) => {
                 assert!(args.grants.allow_exit);
                 assert!(args.batch);
-                assert_eq!(args.filename, "a.hy");
+                assert_eq!(args.filename, "a.coil");
             }
             Parsed::Dap { .. } => panic!("expected REPL"),
         }

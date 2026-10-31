@@ -49,7 +49,7 @@ C0 answers four questions:
   that. Incremental S4 stays a **single-mutator** path.
 - Moving / compacting GC. Objects still do not move
   ([heap-identity.md](heap-identity.md)). Mapped-slot relocate stays identity.
-- Treating `--auto-par` as a runtime `.hyc` switch.
+- Treating `--auto-par` as a runtime `.ccoil` switch.
 - Dropping isolates for user `thread::spawn` / channels in C1. User spawn
   keeps today’s `PortableValue` copy + `NotSendable`. Shared-heap is an
   **auto-par / loop-chunk** path first.
@@ -188,7 +188,7 @@ next mark — not required for C1 int reduce.
 
 ### Why maps are mandatory
 
-Frame maps persist on `.hyc` / embed: S2b maps from archive **minor 14**
+Frame maps persist on `.ccoil` / embed: S2b maps from archive **minor 14**
 (E1), precise frame maps from **minor 21**, the only kind the compiler emits
 now. Shared-heap steal of heap pointers is allowed only when the
 `ThreadProgram` has **real** maps of either kind (`program_has_real_maps` /

@@ -1,4 +1,4 @@
-//! Integration tests for default `coil <file.hy>` (in-memory build-and-run).
+//! Integration tests for default `coil <file.coil>` (in-memory build-and-run).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,7 +27,7 @@ fn ensure_coil_test() {
 }
 
 fn fib_entry() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.coil")
 }
 
 fn apply_workspace_roots(cmd: &mut Command) {
@@ -90,8 +90,8 @@ fn default_run_fib_prints_55_and_no_out_hyc() {
         "expected fib(32)=2178309, stdout={stdout}"
     );
     assert!(
-        !cwd.join("out.hyc").exists(),
-        "default run must not write out.hyc"
+        !cwd.join("out.ccoil").exists(),
+        "default run must not write out.ccoil"
     );
     cleanup(&cwd);
 }
@@ -101,9 +101,9 @@ fn default_run_preserves_existing_out_hyc() {
     let bin = coil_bin();
     let entry = fib_entry();
     let cwd = temp_cwd("preserve");
-    let archive = cwd.join("out.hyc");
+    let archive = cwd.join("out.ccoil");
     let marker = b"not-a-real-archive-sentinel\n";
-    std::fs::write(&archive, marker).expect("seed out.hyc");
+    std::fs::write(&archive, marker).expect("seed out.ccoil");
 
     let out = coil_on_entry(&bin, &cwd, &entry)
         .output()
@@ -114,10 +114,10 @@ fn default_run_preserves_existing_out_hyc() {
         "default run failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let kept = std::fs::read(&archive).expect("read preserved out.hyc");
+    let kept = std::fs::read(&archive).expect("read preserved out.ccoil");
     assert_eq!(
         kept, marker,
-        "default run must not rewrite or truncate an existing out.hyc"
+        "default run must not rewrite or truncate an existing out.ccoil"
     );
     cleanup(&cwd);
 }
@@ -127,7 +127,7 @@ fn compile_writes_out_hyc_and_run_prints_55() {
     let bin = coil_bin();
     let entry = fib_entry();
     let cwd = temp_cwd("compile_run");
-    let archive = cwd.join("out.hyc");
+    let archive = cwd.join("out.ccoil");
 
     let compile = coil_compile_entry(&bin, &cwd, &entry)
         .output()
@@ -139,12 +139,12 @@ fn compile_writes_out_hyc_and_run_prints_55() {
     );
     assert!(
         archive.is_file(),
-        "coil compile must still write out.hyc by default"
+        "coil compile must still write out.ccoil by default"
     );
 
     let run = Command::new(&bin)
         .current_dir(&cwd)
-        .args(["run", "out.hyc"])
+        .args(["run", "out.ccoil"])
         .output()
         .expect("spawn coil run");
     assert!(
@@ -164,12 +164,12 @@ fn compile_writes_out_hyc_and_run_prints_55() {
 fn default_run_compile_error_exits_without_out_hyc() {
     let bin = coil_bin();
     let cwd = temp_cwd("fail");
-    let bad = cwd.join("bad.hy");
+    let bad = cwd.join("bad.coil");
     std::fs::write(
         &bad,
         "fn main() {\n    return undeclared;\n}\n",
     )
-    .expect("write bad.hy");
+    .expect("write bad.coil");
 
     let out = Command::new(&bin)
         .current_dir(&cwd)
@@ -182,8 +182,8 @@ fn default_run_compile_error_exits_without_out_hyc() {
         "default run must fail on type/compile errors"
     );
     assert!(
-        !cwd.join("out.hyc").exists(),
-        "failed default run must not write out.hyc"
+        !cwd.join("out.ccoil").exists(),
+        "failed default run must not write out.ccoil"
     );
     cleanup(&cwd);
 }
@@ -196,7 +196,7 @@ fn default_run_compile_error_exits_without_out_hyc() {
 fn default_run_static_init_reaches_main() {
     let bin = coil_bin();
     let cwd = temp_cwd("static_main");
-    let entry = cwd.join("static_main.hy");
+    let entry = cwd.join("static_main.coil");
     std::fs::write(
         &entry,
         r#"use io::{stdout};
@@ -234,7 +234,7 @@ fn main() {
     cleanup(&cwd);
 }
 
-/// `coil run` takes a `.hyc`; handed a source file it says how to run it.
+/// `coil run` takes a `.ccoil`; handed a source file it says how to run it.
 #[test]
 fn run_on_source_file_explains_itself() {
     let bin = coil_bin();
@@ -253,19 +253,19 @@ fn run_on_source_file_explains_itself() {
     cleanup(&cwd);
 }
 
-/// An `out.hyc` built from another program is none of this run's business.
+/// An `out.ccoil` built from another program is none of this run's business.
 #[test]
 fn unrelated_out_hyc_is_not_reported_stale() {
     let bin = coil_bin();
     let cwd = temp_cwd("unrelated_out");
-    let other = cwd.join("other.hy");
+    let other = cwd.join("other.coil");
     std::fs::write(&other, "fn main() {\n    let x = 1;\n}\n").unwrap();
     let st = coil_compile_entry(&bin, &cwd, &other).output().expect("compile other");
     assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
-    assert!(cwd.join("out.hyc").exists());
+    assert!(cwd.join("out.ccoil").exists());
     // A newer, different program.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let prog = cwd.join("prog.hy");
+    let prog = cwd.join("prog.coil");
     std::fs::write(&prog, "fn main() {\n    let y = 2;\n}\n").unwrap();
     let out = coil_on_entry(&bin, &cwd, &prog).output().expect("run prog");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -282,7 +282,7 @@ fn test_failure_reports_assert_message() {
     let tests = cwd.join("tests");
     std::fs::create_dir_all(&tests).unwrap();
     std::fs::write(
-        tests.join("a.hy"),
+        tests.join("a.coil"),
         "test(\"custom\") {\n    if 1 != 2 { raise \"one is not two\"; }\n}\n",
     )
     .unwrap();
@@ -295,7 +295,7 @@ fn test_failure_reports_assert_message() {
     assert!(!out.status.success());
     let stderr = stderr.replace('\\', "/");
     assert!(
-        stderr.contains("---- tests/a.hy: custom ----\nfailed: one is not two"),
+        stderr.contains("---- tests/a.coil: custom ----\nfailed: one is not two"),
         "stderr={stderr}"
     );
     cleanup(&cwd);
@@ -318,9 +318,9 @@ fn shout() {
 }
 "#;
     let cases = [
-        ("macros.hy", "use macro::{Code, Expr};\n\nmacro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n".to_string()),
-        ("plain.hy", shout.to_string()),
-        ("with_static.hy", format!("{shout}\nstatic let k: int = 4;\n")),
+        ("macros.coil", "use macro::{Code, Expr};\n\nmacro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n".to_string()),
+        ("plain.coil", shout.to_string()),
+        ("with_static.coil", format!("{shout}\nstatic let k: int = 4;\n")),
     ];
     for (name, src) in cases {
         let entry = cwd.join(name);
@@ -345,12 +345,12 @@ fn coil_test_passes_macro_provider_file() {
     let bin = coil_bin();
     let cwd = temp_cwd("test_macro_provider");
     std::fs::write(
-        cwd.join("macros.hy"),
+        cwd.join("macros.coil"),
         "use macro::{Code, Expr};\n\nmacro twice(Expr e) -> Code {\n    return quote expr { ${e} * 2 };\n}\n",
     )
     .unwrap();
     std::fs::write(
-        cwd.join("uses.hy"),
+        cwd.join("uses.coil"),
         "use macros::{twice};\n\ntest(\"twice\") {\n    if twice!(3) != 6 { raise \"twice\"; }\n}\n",
     )
     .unwrap();

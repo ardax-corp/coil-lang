@@ -38,7 +38,7 @@ fn proves_every_clause_that_holds() {
     if !solver_ready() {
         return;
     }
-    let (code, out) = run("proved.hy", &[]);
+    let (code, out) = run("proved.coil", &[]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("8 proved, 0 failed, 0 not proved"), "{out}");
     assert!(out.contains("1 of 1 index bounds checks proved"), "{out}");
@@ -51,9 +51,9 @@ fn a_broken_clause_fails_with_an_input_that_breaks_it() {
     if !solver_ready() {
         return;
     }
-    let (code, out) = run("failed.hy", &[]);
+    let (code, out) = run("failed.coil", &[]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("FAILED   wrong_max: ensures result >= a && result >= b  [failed.hy:4:5]"), "{out}");
+    assert!(out.contains("FAILED   wrong_max: ensures result >= a && result >= b  [failed.coil:4:5]"), "{out}");
     assert!(out.contains("FAILED   calls_half: call to half: requires x >= 0"), "{out}");
     // Any `x < 1` breaks it (`x - 1` traps only at `int::MIN`).
     let x: i64 = out
@@ -70,17 +70,17 @@ fn a_weak_invariant_is_not_proved_and_fails_only_when_strict() {
     if !solver_ready() {
         return;
     }
-    let (code, out) = run("unknown.hy", &[]);
+    let (code, out) = run("unknown.coil", &[]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("unknown  sum_to: invariant s >= 0"), "{out}");
     assert!(out.contains("proved   sum_to: ensures result >= 0"), "{out}");
-    let (code, _) = run("unknown.hy", &["--strict"]);
+    let (code, _) = run("unknown.coil", &["--strict"]);
     assert_eq!(code, 1);
 }
 
 #[test]
 fn a_missing_solver_is_reported() {
-    let (code, out) = run("proved.hy", &["--solver", "/nonexistent/z3"]);
+    let (code, out) = run("proved.coil", &["--solver", "/nonexistent/z3"]);
     assert_eq!(code, 1);
     assert!(out.contains("cannot run `/nonexistent/z3`"), "{out}");
 }
@@ -90,7 +90,7 @@ fn sees_into_records_tuples_classes_and_enums() {
     if !solver_ready() {
         return;
     }
-    let (code, out) = run("records.hy", &[]);
+    let (code, out) = run("records.coil", &[]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("8 proved, 0 failed, 0 not proved"), "{out}");
     assert!(out.contains("proved   add_four: call to Counter::add: requires"), "{out}");
@@ -102,7 +102,7 @@ fn a_write_through_an_alias_is_seen() {
     if !solver_ready() {
         return;
     }
-    let (code, out) = run("failed.hy", &[]);
+    let (code, out) = run("failed.coil", &[]);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("FAILED   aliased: ensures result == a"), "{out}");
     assert!(out.contains("unknown  maybe_same: ensures result == 0"), "{out}");
@@ -116,15 +116,15 @@ fn the_proof_file_lists_what_builds_may_drop() {
     let dir = std::env::temp_dir().join(format!("coil-verify-proof-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    std::fs::copy(fixtures.join("proved.hy"), dir.join("proved.hy")).unwrap();
+    std::fs::copy(fixtures.join("proved.coil"), dir.join("proved.coil")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_coil-verify"))
         .current_dir(&dir)
-        .arg("proved.hy")
+        .arg("proved.coil")
         .output()
         .expect("run coil-verify");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("wrote proved.hy.proof: builds drop 5 proved checks and 1 index bounds checks"), "{text}");
-    let proof = std::fs::read_to_string(dir.join("proved.hy.proof")).unwrap();
+    assert!(text.contains("wrote proved.coil.proof: builds drop 5 proved checks and 1 index bounds checks"), "{text}");
+    let proof = std::fs::read_to_string(dir.join("proved.coil.proof")).unwrap();
     assert!(proof.contains("complete true"), "{proof}");
     assert!(proof.contains("check count_up\t"), "{proof}");
     assert!(proof.lines().any(|l| l.starts_with("bounds last\t")), "{proof}");
@@ -136,7 +136,7 @@ fn readonly_class_fields_survive_calls_and_loops() {
     if !solver_ready() {
         return;
     }
-    let (code, out) = run("readonly.hy", &[]);
+    let (code, out) = run("readonly.coil", &[]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("5 proved, 0 failed, 4 not proved"), "{out}");
     // A field read only on one side of `&&` is still the same field after it.
@@ -152,7 +152,7 @@ fn plain_class_fields_readonly_views_and_held_vectors_are_forgotten_at_a_call() 
     if !solver_ready() {
         return;
     }
-    let (_, out) = run("readonly.hy", &[]);
+    let (_, out) = run("readonly.coil", &[]);
     assert!(out.contains("unknown  box_after_reset: ensures result >= 0"), "{out}");
     assert!(out.contains("unknown  box_after_note: ensures result >= 0"), "{out}");
     assert!(out.contains("unknown  view_after_reset: ensures result >= 0"), "{out}");
@@ -167,15 +167,15 @@ fn the_proof_file_drops_checks_over_readonly_class_fields() {
     let dir = std::env::temp_dir().join(format!("coil-verify-readonly-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    std::fs::copy(fixtures.join("readonly.hy"), dir.join("readonly.hy")).unwrap();
+    std::fs::copy(fixtures.join("readonly.coil"), dir.join("readonly.coil")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_coil-verify"))
         .current_dir(&dir)
-        .arg("readonly.hy")
+        .arg("readonly.coil")
         .output()
         .expect("run coil-verify");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("wrote readonly.hy.proof: builds drop 4 proved checks"), "{text}");
-    let proof = std::fs::read_to_string(dir.join("readonly.hy.proof")).unwrap();
+    assert!(text.contains("wrote readonly.coil.proof: builds drop 4 proved checks"), "{text}");
+    let proof = std::fs::read_to_string(dir.join("readonly.coil.proof")).unwrap();
     assert!(proof.contains("complete false"), "{proof}");
     assert!(proof.contains("check fill\t"), "{proof}");
     assert!(proof.contains("check width_after_note\t"), "{proof}");
@@ -188,12 +188,12 @@ fn lists_only_what_is_not_proved_without_verbose() {
     if !solver_ready() {
         return;
     }
-    let (code, out) = run_with("failed.hy", &[]);
+    let (code, out) = run_with("failed.coil", &[]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("FAILED   wrong_max: ensures result >= a && result >= b  [failed.hy:4:5]"), "{out}");
-    let (_, out) = run("failed.hy", &[]);
+    assert!(out.contains("FAILED   wrong_max: ensures result >= a && result >= b  [failed.coil:4:5]"), "{out}");
+    let (_, out) = run("failed.coil", &[]);
     assert!(out.contains("\nnot proved:\n    FAILED   wrong_max"), "{out}");
-    let (code, out) = run_with("proved.hy", &[]);
+    let (code, out) = run_with("proved.coil", &[]);
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("proved   "), "{out}");
     assert!(out.contains("8 proved, 0 failed, 0 not proved"), "{out}");

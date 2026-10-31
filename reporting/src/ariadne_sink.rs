@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn pretty_sink_renders_spanned_diagnostic_without_panic() {
         let mut sources = SourceMap::new();
-        let file = sources.insert("sample.hy", "let x = \"hi\";\n");
+        let file = sources.insert("sample.coil", "let x = \"hi\";\n");
         let shared = SharedBuf::new();
         let mut sink = AriadneSink::new(sources, Box::new(shared.clone()));
 
@@ -238,7 +238,7 @@ mod tests {
 
         let source = "let x: int = \"hi\";\n";
         let mut sources = SourceMap::new();
-        let file = sources.insert("sample.hy", source);
+        let file = sources.insert("sample.coil", source);
         let shared = SharedBuf::new();
         let mut sink = AriadneSink::new(sources, Box::new(shared.clone()));
 
@@ -268,7 +268,7 @@ mod tests {
     fn register_source_updates_map() {
         let shared = SharedBuf::new();
         let mut sink = AriadneSink::new(SourceMap::new(), Box::new(shared));
-        let id = sink.register_source(Path::new("a.hy"), "fn main() {}");
+        let id = sink.register_source(Path::new("a.coil"), "fn main() {}");
         assert_eq!(id.as_u32(), 0);
     }
 }

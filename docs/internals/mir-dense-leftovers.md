@@ -131,9 +131,9 @@ trivial while `slot_env` still named the old dest. `rewrite_subst` now maps
 requires `DenseBin` + native Index/StoreIndex. Cost gate unchanged.
 
 **Leftover:** other lift-then-lose helpers (straight-line Seek tax, boxed
-`InitTyped`). `s2d_inloop_escape.hy` stays fuse when reconstruct is boxed (S2l).
+`InitTyped`). `s2d_inloop_escape.coil` stays fuse when reconstruct is boxed (S2l).
 
-**Perf surface:** `examples/perf/nsieve.hy` (kept). Flagships `fib`/`tak` are
+**Perf surface:** `examples/perf/nsieve.coil` (kept). Flagships `fib`/`tak` are
 controls (archives should stay identical).
 
 **Effort:** further keep-rate is still one body at a time. No new opcode, no
@@ -162,7 +162,7 @@ escaped `self`. D2 does not unbox escaped `self`.
 **Blocker for keep:** **landed** (D2 natives). LIR still refuses HeapField
 (dense is the keep path).
 
-**Perf surface:** `examples/perf/field_hot.hy` (`hot` maps + dense-native).
+**Perf surface:** `examples/perf/field_hot.coil` (`hot` maps + dense-native).
 Printing `main` stays unmapped. Escaping `new` + `take`. Not `nsieve`.
 
 **Effort:** done.
@@ -233,7 +233,7 @@ unmapped alloc.” B6 maps CALL+`MakeEnum`. The walk was the match wall.
 **Blocker for keep:** none for boxed multi-payload match. Cost gate still
 on. Printing `main` stays fuse.
 
-**Perf surface:** flagship `binary_trees.hy` (`item_check` hot). Other
+**Perf surface:** flagship `binary_trees.coil` (`item_check` hot). Other
 boxed multi-payload enums.
 
 **Effort:** done. Regular Unpack reconstruct, not a trees opcode.

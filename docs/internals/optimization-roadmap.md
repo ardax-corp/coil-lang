@@ -82,7 +82,7 @@ overflow traps ([int-overflow.md](int-overflow.md)).
 
 Next AOT priorities below remain the main gap vs Lua on `mandelbrot` /
 `tak` / `nsieve` / `binary_trees`. Extra benches on `main`:
-`examples/perf/gc_churn.hy` ([#286](https://github.com/ardax-corp/coil-lang/pull/286)),
+`examples/perf/gc_churn.coil` ([#286](https://github.com/ardax-corp/coil-lang/pull/286)),
 integer-payload Option/Result ObjEnum churn
 ([#289](https://github.com/ardax-corp/coil-lang/pull/289)),
 hit benches for the late-August opt revival (`iv_mul_sr`, `licm_nested_chains`,
@@ -98,7 +98,7 @@ titles can oversell.
 | Area | What landed | Ceiling (do not overshoot in docs or code) |
 |------|-------------|--------------------------------------------|
 | **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + `sink_return`; `Debug` = HIR constant folding only (no scalar replacement, unroll or inlining). |
-| **try flatten** (codegen, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
+| **try flatten** (codegen, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.coil`. |
 | **CSE** (`mir/cse.rs`; stack-IL [#317](https://github.com/ardax-corp/coil-lang/pull/317) moved to HIR, then `hir::cse` folded into MIR 2026-10) | SSA numbering on MIR: a repeated pure operator / cast, and in one block a repeated field / element / length / pure-call read, reads the first value | Heap reads are killed by a store, an append or a call that may write the heap or resize. LIR bodies keep each literal (`cse_lir`). Hit: `cse_index_recompute`, `cse_cast_recompute`. |
 | **LICM** (`mir/licm.rs`; stack-IL [#315](https://github.com/ardax-corp/coil-lang/pull/315) moved to HIR, then `hir::licm` folded into MIR 2026-10) | Hoists invariant values out of natural loops on MIR; a trapping op, checked element read or pure call moves only behind a copy of the loop test, and only when it runs on every iteration | Hit: `licm_nested_chains`, `licm_lir_pure_call`. Stack-IL `strength_reduce` (`iv_mul_sr`) was removed 2026-10 (no bench effect). |
 | **Removed 2026-10** | Stack-IL `copy_prop`, `dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`, `invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`, `multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn`, `cfg_gvn`, IL `escape_analysis` | Measurement showed no bench effect. MIR InstCombine / DestProp / IV SR / GVN are separate and stay. The `escape_analysis` option now only gates HIR enum / tuple scalar replacement. |
@@ -109,7 +109,7 @@ titles can oversell.
 | **Loop inversion** (`mir/emit.rs` `rotatable_headers`, #1867) | A back edge to a header whose only code is its compare-branch repeats that compare-branch as a backward `*Jmpt` into the body, so the latch's IV bump and test fuse into one `DenseBinJmpf`; `DenseStoreIndex` peeks it, so the nsieve / `stride_store_iv` k-loop is one dispatch per iteration (was two) | Header itself stays `*Jmpf`; refused when the header has φ copies, clears or a match chain on its edges. 2026-10-25, 4-core cloud VM: `stride_store_iv` 156 → 151 instructions per iteration under callgrind, wall-clock within noise (the store itself dominates); `numeric` −9.5% instructions; `vec_scan_pure` 3.1M → 2.3M dispatches. |
 | **Inline store-loop latch** (`machine/src/dispatch.rs` `iv_add_lt_jmp`, #2012) | When `DenseStoreIndex` peeks a `DenseBinJmpf` that is `IADD64` + `BinSlotSlotJmp{f,t}` on `<`, the IV add (overflow-checked) and the compare run inline instead of through `dense::eval_bin` / `fused::eval_cmp`'s op matches | Only on that peek; the standalone `DenseBinJmpf` arm is unchanged (the same fast path there made `for_in_sum` 3.6% worse and helped nothing measured). 2026-10-25, 4-core cloud VM: `stride_store_iv` 152 → 130 instructions per iteration under callgrind, 248 → 212 ms median wall at 20000 reps; fib, numeric, for_in_*, dense_cast_bin unchanged (±0.1%, dense_cast_bin −1.2%). |
 | ~~`seek_back_edge`~~ | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Removed**: the residual `Seek` blocked MIR dense (`vec_scan` 2.5×, `mir_dense_float` 2.1×, `s2d_inloop_pack` 1.65× slower at `-O3`). |
-| ~~`iterative_optimization`~~ | Fixpoint re-runs of the IL pipeline | **Removed** (COI-130): re-running miscompiled `loops.hy` / `licm_invariants.hy`. |
+| ~~`iterative_optimization`~~ | Fixpoint re-runs of the IL pipeline | **Removed** (COI-130): re-running miscompiled `loops.coil` / `licm_invariants.coil`. |
 | **`collect_stats`** | Body tiers and HIR lowering / inlining counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
 | **Branch layout / block reorder** | Heuristic: MIR block layout puts early exits after the body (`HirPlan::cold_ok`); the stack-IL passes were removed 2026-10 | Default **on** (COI-128 / COI-129). |
 
@@ -127,7 +127,7 @@ and Linear disagree.
 
 ## Hit-bench prove rule
 
-If an opt is sound but does not fire on flagship `.hyc` (`mandelbrot`, `tak`,
+If an opt is sound but does not fire on flagship `.ccoil` (`mandelbrot`, `tak`,
 `nsieve`, `binary_trees`, `fib`), add focused `examples/perf` hit benches and
 **prove those**. Do **not** skip merge solely because flagship archives are
 identical; flagships remain controls. Skip only on hit-bench wash or regress.
@@ -139,7 +139,7 @@ compile `main` to a constant and the VM never runs the benchmark:
 
 ```bash
 ./target/release/coil compile --auto-par off --fold-calls off \
-  --root .deps/coil-stdlib/src examples/perf/mandelbrot.hy -o /tmp/m.hyc
+  --root .deps/coil-stdlib/src examples/perf/mandelbrot.coil -o /tmp/m.ccoil
 ```
 
 **MIR language islands** ([mir-islands.md](mir-islands.md)) use a stricter
@@ -151,7 +151,7 @@ Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
 `cse_index_recompute` / `cse_cast_recompute`, `dest_prop_field_alias`,
 `result_try_churn`, `mir_cse_divf`, `mir_licm_divf`, `mir_instcombine`,
 `mir_destprop`, `mir_iv_sr`, `mir_gvn_divf`, `mir_float_pipeline`,
-IPA top-site `examples/perf/fib.hy` (`--auto-par on`, COI-361 E3),
+IPA top-site `examples/perf/fib.coil` (`--auto-par on`, COI-361 E3),
 `mir_simd_axpy`, `vec_scan` (`fill` V0 / `scan` V1), `vec_axpy` (V1 FMA),
 `s2j_class_sroa`, `s2d_inloop_pack` / `pack_store` (S2k dense select),
 `s2d_inloop_escape` (S2l leftover Make* win-or-gate),
@@ -246,7 +246,7 @@ materializations move to the preheader on that proof — the `LOAD a; ArrayLen;
 STORE t` triple codegen leaves in the header of `while i < a.len()`, and the
 `CONST imm; STORE t` pair that materializes a constant addressing operand in
 `a[i] = 0`. `nsieve`'s sieve loop went from 8 words per iteration to 6 (545.6k
-→ 469.9k dispatches); `examples/perf/vec_scan.hy`, the `while i < v.len()`
+→ 469.9k dispatches); `examples/perf/vec_scan.coil`, the `while i < v.len()`
 scan/fill shape, from 6.58M to 5.01M. Safety comes from the cursor: the
 preheader store floors it at `t + 1`, and every in-loop stack height staying at
 or above the header's proves no in-loop push can reach `t`.
@@ -277,7 +277,7 @@ What is still open (full refusal table in
   hosts outside a small allowlist). Field / element writes, output writes and
   clocks keep the proof; `FORMAT` and field get/set pass too when no
   `fn drop()` in the compile can resize (finalizers run at allocation
-  safepoints). Hit: `examples/perf/vec_scan_impure.hy` (−11.2% instructions).
+  safepoints). Hit: `examples/perf/vec_scan_impure.coil` (−11.2% instructions).
   Still refused: method calls other than `len` / `capacity` (the purity walk
   keys methods by bare name, so the receiver type is unknown), direct
   `HostInvoke` at IL, `CallIndirect`, `ArrayPush` / `MakeArray`. `LEQ` /
@@ -444,7 +444,7 @@ It should not be part of the default compiler or VM build.
 
 ```mermaid
 flowchart LR
-  archive[".hyc bytecode"] --> counters["hot function / loop counters"]
+  archive[".ccoil bytecode"] --> counters["hot function / loop counters"]
   counters -->|cold| interpreter["existing VM"]
   counters -->|hot supported function| il["optimized IlFunc"]
   il --> clif["Cranelift IR"]
@@ -521,7 +521,7 @@ and come first.
    focused `examples/perf` hit bench when flagships do not fire (see
    [Hit-bench prove rule](#hit-bench-prove-rule)). A hit bench should move
    wall time or VM instructions without regressing controls; identical
-   flagship `.hyc` is not a skip. Do not revive PGO to manufacture heat.
+   flagship `.ccoil` is not a skip. Do not revive PGO to manufacture heat.
 3. **JIT prototype gate:** compile one pure numeric function, call it from the
    VM, and fall back to bytecode for one unsupported operation. Verify identical
    output, no archive/opcode changes, and code-cache cleanup.

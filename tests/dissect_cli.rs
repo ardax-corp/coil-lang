@@ -25,7 +25,7 @@ fn ensure_coil_dissect() {
 }
 
 fn fib_entry() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.coil")
 }
 
 fn apply_workspace_roots(cmd: &mut Command) {
@@ -73,8 +73,8 @@ fn dissect_fib_fn_prints_bytecode_without_out_hyc() {
         "expected recursive call, stdout={stdout}"
     );
     assert!(
-        !cwd.join("out.hyc").exists(),
-        "dissect must not write out.hyc"
+        !cwd.join("out.ccoil").exists(),
+        "dissect must not write out.ccoil"
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -136,19 +136,19 @@ fn dissect_fib_il_and_ast_sections() {
         "expected fib in IL/AST output, stdout={stdout}"
     );
     assert!(
-        !cwd.join("out.hyc").exists(),
-        "dissect --il/--ast must not write out.hyc"
+        !cwd.join("out.ccoil").exists(),
+        "dissect --il/--ast must not write out.ccoil"
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
 fn write_attach_entry(dir: &std::path::Path) -> PathBuf {
-    let entry = dir.join("attach.hy");
+    let entry = dir.join("attach.coil");
     std::fs::write(
         &entry,
         "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
     )
-    .expect("write attach.hy");
+    .expect("write attach.coil");
     entry
 }
 
@@ -189,8 +189,8 @@ fn dissect_attach_fails_without_grant_and_succeeds_with_flag() {
         "expected bytecode dump, stdout={stdout}"
     );
     assert!(
-        !cwd.join("out.hyc").exists(),
-        "dissect must not write out.hyc"
+        !cwd.join("out.ccoil").exists(),
+        "dissect must not write out.ccoil"
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -230,7 +230,7 @@ fn dissect_views_source_opt_ilpost_mir_ast() {
     let dir = std::env::temp_dir().join(format!("coil_dissect_views_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let entry = dir.join("loop.hy");
+    let entry = dir.join("loop.coil");
     std::fs::write(
         &entry,
         "fn total(int n) -> int {\n    let t = 0;\n    let i = 0;\n    while i < n {\n        t = t + i;\n        i = i + 1;\n    }\n    return t;\n}\n\nfn main() {\n    let r = total(10);\n}\n",
@@ -245,7 +245,7 @@ fn dissect_views_source_opt_ilpost_mir_ast() {
     // Some source line of `total` interleaves with its code. Which lines
     // carry code is up to codegen, so no particular line is pinned.
     assert!(
-        stdout.lines().any(|l| l.contains("loop.hy:") && l.contains(" │ ")),
+        stdout.lines().any(|l| l.contains("loop.coil:") && l.contains(" │ ")),
         "source interleave: {stdout}"
     );
     assert!(stdout.contains("=== il (optimized) ==="), "{stdout}");
@@ -269,7 +269,7 @@ fn dissect_hir_prints_typed_bodies() {
     let dir = std::env::temp_dir().join(format!("coil_dissect_hir_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let entry = dir.join("loop.hy");
+    let entry = dir.join("loop.coil");
     std::fs::write(
         &entry,
         "fn total(int n) -> int {\n    let t = 0;\n    let i = 0;\n    while i < n {\n        t += i;\n        i = i + 1;\n    }\n    return t;\n}\n\nfn main() {\n    let r = total(10);\n}\n",
@@ -290,7 +290,7 @@ fn dissect_hir_prints_typed_bodies() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A compiled `.hyc` archive dumps its bytecode without recompiling.
+/// A compiled `.ccoil` archive dumps its bytecode without recompiling.
 #[test]
 fn dissect_reads_hyc_archive() {
     ensure_coil_dissect();
@@ -298,16 +298,16 @@ fn dissect_reads_hyc_archive() {
     let dir = std::env::temp_dir().join(format!("coil_dissect_hyc_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    std::fs::write(dir.join("p.hy"), "fn main() {\n    let x = 41 + 1;\n}\n").unwrap();
+    std::fs::write(dir.join("p.coil"), "fn main() {\n    let x = 41 + 1;\n}\n").unwrap();
     let st = Command::new(&bin)
         .current_dir(&dir)
-        .args(["compile", "p.hy", "-o", "p.hyc"])
+        .args(["compile", "p.coil", "-o", "p.ccoil"])
         .output()
         .expect("compile");
     assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
     let out = Command::new(&bin)
         .current_dir(&dir)
-        .args(["dissect", "p.hyc"])
+        .args(["dissect", "p.ccoil"])
         .output()
         .expect("dissect hyc");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -320,7 +320,7 @@ fn dissect_reads_hyc_archive() {
 fn dissect_expand_prints_macro_output() {
     ensure_coil_dissect();
     let bin = coil_bin();
-    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/macros/attr_macro.hy");
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/macros/attr_macro.coil");
     let out = coil_dissect(&bin, Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))), &entry)
         .arg("--expand")
         .output()
@@ -342,15 +342,15 @@ fn dissect_expand_and_opt_stats_show_comptime() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
     std::fs::write(
-        dir.join("p.hy"),
+        dir.join("p.coil"),
         "use macro::{Code, raw};\n\ncomptime {\n    return raw(\"fn seven() -> int {\\n    return 7;\\n}\\n\");\n}\n\nfn main() {\n    let x = comptime { return 6 * 7; };\n    let y = comptime seven();\n}\n",
     )
     .unwrap();
-    let entry = dir.join("p.hy");
+    let entry = dir.join("p.coil");
     let out = coil_dissect(&bin, Some(&dir), &entry).arg("--expand").output().expect("dissect --expand");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let shown = "p.hy";
+    let shown = "p.coil";
     assert!(stdout.contains(&format!("// generated by a `comptime` block at {shown}:3:1\nfn seven()")), "{stdout}");
     assert!(stdout.contains(&format!("// the `comptime` block at {shown}:8:13, run while compiling\n")), "{stdout}");
     assert!(stdout.contains(&format!("// the value of the `comptime` at {shown}:9:13, computed while compiling\n")), "{stdout}");
@@ -374,7 +374,7 @@ fn dissect_vec_pop_returns_the_native_option_on_mir() {
     let dir = std::env::temp_dir().join(format!("coil_dissect_vec_pop_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let entry = dir.join("pop.hy");
+    let entry = dir.join("pop.coil");
     std::fs::write(
         &entry,
         "fn main() {\n    let v: Vec<int> = Vec::new();\n    v.push(1);\n    let _ = v.pop();\n}\n",

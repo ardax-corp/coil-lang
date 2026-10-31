@@ -2,7 +2,7 @@
 
     #[test]
     fn parse_classes_example() {
-        let src = include_str!("../../../examples/classes.hy");
+        let src = include_str!("../../../examples/classes.coil");
         let p = Pratt::default();
         p.parse(src).unwrap_or_else(|e| panic!("PARSE FAIL: {e:?}"));
     }

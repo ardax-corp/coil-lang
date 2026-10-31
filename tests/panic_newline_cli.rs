@@ -68,7 +68,7 @@ fn main() {
     }
 }
 ";
-    for (name, src) in [("worker_explicit.hy", worker_explicit), ("worker_runtime.hy", worker_runtime)] {
+    for (name, src) in [("worker_explicit.coil", worker_explicit), ("worker_runtime.coil", worker_runtime)] {
         let (out, _) = run_merged(&bin, &dir, name, src);
         let lines: Vec<&str> = out.lines().collect();
         assert!(
@@ -95,7 +95,7 @@ fn main() {
     return Result::Err(\"bad\");
 }
 ";
-    for (name, src) in [("main_explicit.hy", main_explicit), ("main_runtime.hy", main_runtime), ("main_err.hy", main_err)] {
+    for (name, src) in [("main_explicit.coil", main_explicit), ("main_runtime.coil", main_runtime), ("main_err.coil", main_err)] {
         let (out, ok) = run_merged(&bin, &dir, name, src);
         assert!(!ok, "{name}: expected a panic");
         assert!(out.starts_with("panic: ") && out.ends_with('\n'), "{name}: panic output must end with a newline, got {out:?}");

@@ -10,13 +10,13 @@ use std::time::{Duration, Instant};
 
 use compiler::Pipeline;
 
-/// A project dir with provider `gen.hy`; returns its `src` dir.
+/// A project dir with provider `gen.coil`; returns its `src` dir.
 fn project(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("coil_macro_scaling_{name}_{}", std::process::id()));
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(
-        src.join("gen.hy"),
+        src.join("gen.coil"),
         "use macro::{Expr, Code};\n\n\
          macro check(Expr e) -> Code {\n    return quote stmts {\n        if true != ${e} {\n            raise \"failed\";\n        }\n    };\n}\n\n\
          macro mistyped(Expr e) -> Code {\n    return quote stmts {\n        let a = 1;\n        let n: int = ${e};\n    };\n}\n",
@@ -45,7 +45,7 @@ fn many_calls(n: usize) -> String {
 
 /// Fastest of three expansions of `n` calls.
 fn expand_time(src: &Path, n: usize) -> Duration {
-    let file = src.join(format!("main{n}.hy"));
+    let file = src.join(format!("main{n}.coil"));
     std::fs::write(&file, many_calls(n)).unwrap();
     (0..3)
         .map(|_| {
@@ -79,7 +79,7 @@ fn generated_code_diagnostics_keep_their_place() {
     let src = project("diag");
     // Earlier outputs move where later ones land in the report text.
     let main = "use gen::{check, mistyped};\n\nfn main() {\n    let x = 1;\n    check!(x == 1);\n    check!(x == 1);\n    mistyped!(\"text\");\n    check!(x == 1);\n}\n";
-    let file = src.join("main.hy");
+    let file = src.join("main.coil");
     std::fs::write(&file, main).unwrap();
     let mut pipeline = pipeline_for(&src);
     let errors: Vec<_> = pipeline

@@ -3,17 +3,17 @@ name: coil-debug
 description: >-
   Troubleshoot coil programs with `coil debug` (GDB-style REPL / batch scripts):
   infinite loops, hangs, wrong values, panics, unexpected call stacks. Use when
-  a `.hy` program loops forever, hangs, panics, prints wrong output, or when the
+  a `.coil` program loops forever, hangs, panics, prints wrong output, or when the
   user asks to debug, step, breakpoint, backtrace, or inspect VM state.
 ---
 
 # coil debug troubleshooting
 
 Prefer **batch scripts** (`-x` + `--batch`) over interactive REPL when automating.
-`coil debug` compiles in memory — it never writes `out.hyc`.
+`coil debug` compiles in memory — it never writes `out.ccoil`.
 
 Full command reference: [docs/internals/debugger.md](docs/internals/debugger.md).
-For bytecode/IL dumps without running: `coil dissect <file.hy> --fn <pat>`.
+For bytecode/IL dumps without running: `coil dissect <file.coil> --fn <pat>`.
 
 ## Quick start
 
@@ -22,16 +22,16 @@ For bytecode/IL dumps without running: `coil dissect <file.hy> --fn <pat>`.
 cargo build -q
 
 # Interactive REPL
-cargo run --quiet -- debug path/to/prog.hy
+cargo run --quiet -- debug path/to/prog.coil
 
 # DAP over stdio (any DAP client: nvim-dap, etc.)
 coil debug --dap
 
 # Scripted (preferred for agents)
-cargo run --quiet -- debug path/to/prog.hy -x /tmp/coil_dbg.txt --batch
+cargo run --quiet -- debug path/to/prog.coil -x /tmp/coil_dbg.txt --batch
 
 # Grant-gated programs (same flags as compile / dissect)
-coil debug gated.hy --allow-attach -x /tmp/coil_dbg.txt --batch
+coil debug gated.coil --allow-attach -x /tmp/coil_dbg.txt --batch
 ```
 
 Use `coil dissect` for bytecode/IL/AST dumps; use `--release` for faster runs.
@@ -42,7 +42,7 @@ Use `coil dissect` for bytecode/IL/AST dumps; use `--release` for faster runs.
 |------|----------|
 | IDE debug session | `coil debug --dap` (DAP client launches adapter) |
 | Stop in a function | `break fib` / `b Foo::method` then `run` |
-| Stop at a line | `break file.hy:12` or `break 12` (entry file) |
+| Stop at a line | `break file.coil:12` or `break 12` (entry file) |
 | See how you got here | `bt` |
 | See source | `list` |
 | See bytecode | `disas` / `disas fib` |
@@ -147,7 +147,7 @@ quit
 3. After a recursive hit, `delete` before `continue` unless you intend to stop on every call.
 4. Prefer `next` for source-level progress; use `stepi` + `disas` when line info is missing.
 5. Prefer **named** locals (`print n`, `info locals`); fall back to `$N` when a name is missing.
-6. Do not rely on `out.hyc` for debug sessions; delete it only if mixing with normal `coil` runs.
+6. Do not rely on `out.ccoil` for debug sessions; delete it only if mixing with normal `coil` runs.
 7. If debug cannot set a line BP, fall back to `coil dissect <file> --fn <pat>` and break on the function entry PC symbol instead.
 
 ## Related docs

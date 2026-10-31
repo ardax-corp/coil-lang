@@ -8,7 +8,7 @@ the user's files from memory). The same build runs under any WASI host:
 rustup target add wasm32-wasip1
 cargo build --release --target wasm32-wasip1 -p coil
 node --no-turbo-fast-api-calls scripts/wasi_coil.mjs \
-    target/wasm32-wasip1/release/coil.wasm --root .deps/coil-stdlib/src hello.hy
+    target/wasm32-wasip1/release/coil.wasm --root .deps/coil-stdlib/src hello.coil
 ```
 
 `scripts/wasi_coil.mjs` preopens the current directory as `.` and the temp

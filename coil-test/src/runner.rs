@@ -39,7 +39,7 @@ pub enum Report {
 /// What to run and how to compile it.
 #[derive(Debug, Clone)]
 pub struct TestOptions {
-    /// Test root (a directory walked for `.hy` files).
+    /// Test root (a directory walked for `.coil` files).
     pub root: PathBuf,
     /// Stop after the first failed case.
     pub fail_fast: bool,
@@ -101,7 +101,7 @@ pub(crate) fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
     }
 }
 
-/// Every `.hy` file under `dir`, recursively, sorted by full path.
+/// Every `.coil` file under `dir`, recursively, sorted by full path.
 pub fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     if !dir.is_dir() {
         return Err(format!("tests directory `{}` not found", dir.display()));
@@ -125,7 +125,7 @@ pub fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     files.sort();
     if files.is_empty() {
         return Err(format!(
-            "no `.hy` test files found under `{}`",
+            "no `.coil` test files found under `{}`",
             dir.display()
         ));
     }
@@ -1150,7 +1150,7 @@ fn start_doc_case(
     let kind_failed = CaseKind::Doc { should_panic: false };
     let display = path.display().to_string();
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("doc");
-    let entry = path.with_file_name(format!("{stem}__doc_{line}.hy"));
+    let entry = path.with_file_name(format!("{stem}__doc_{line}.coil"));
     let diagnostics = Captured::default();
     let mut pipeline = run_pipeline(run.config, run.options, Box::new(diagnostics.clone()));
     pipeline.set_file_text(entry.clone(), program);
@@ -1192,9 +1192,9 @@ fn start_doc_case(
     start_case(run, dispatch, &display, name, ctx, case, kind)
 }
 
-/// The module path of `path` for doc-test names: its path without `.hy`
+/// The module path of `path` for doc-test names: its path without `.coil`
 /// under the deepest of the test root, the `--root` directories and `src`
-/// that holds it (`src/io/sync.hy` → `io::sync`).
+/// that holds it (`src/io/sync.coil` → `io::sync`).
 fn module_path(options: &TestOptions, path: &Path) -> String {
     let file = canonical(path);
     let cwd = std::env::current_dir().unwrap_or_default();

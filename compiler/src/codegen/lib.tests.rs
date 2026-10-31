@@ -327,7 +327,7 @@ fn method_call_target_relocated_after_static_init_splice() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("examples/static_singleton.hy");
+        .join("examples/static_singleton.coil");
     let mut pipeline = crate::Pipeline::new();
     // Pins the callee's own code; typed inlining would splice it.
     pipeline.set_hir_inline(false);
@@ -365,7 +365,7 @@ fn two_module_and_class_static_assignments_run() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("examples/static_minimal.hy");
+        .join("examples/static_minimal.coil");
     let mut pipeline = crate::Pipeline::new();
     pipeline.bind_workspace_language_roots();
     let (bytecode, constants) = pipeline
@@ -1648,7 +1648,7 @@ fn match_with_nested_constructor_pattern_emits_unpack_cascade() {
 #[test]
 fn compile_module_diff_matches_compile_tail_for_fib() {
     use common::Instruction;
-    let src = include_str!("../../../examples/fib.hy");
+    let src = include_str!("../../../examples/fib.coil");
     let mut ast = Pratt::default().parse(src).expect("parse fib");
 
     // `compile_module` appends IL to the shared buffer; fusion/label
@@ -4825,7 +4825,7 @@ fn main() {
     assert!(!vm.panicked(), "poke==15; opcodes={names:?}");
 }
 
-/// S2i: broadcast / pow match vec_array.hy (45 / 18) and stay heap.
+/// S2i: broadcast / pow match vec_array.coil (45 / 18) and stay heap.
 #[test]
 fn vec_array_broadcast_pow_checksums() {
     let src = r#"
@@ -6083,7 +6083,7 @@ fn main() -> Result<(), Error> { \
 /// not `CONST`. Peephole fusion adjusts `CodePtr` in `finalize_bytecode`
 /// but never rewrites `CONST`, so a stale offset would make the FFI
 /// trampoline jump to the wrong IP (regression: prints `0` instead of
-/// `42` for `examples/ffi_callback.hy`).
+/// `42` for `examples/ffi_callback.coil`).
 #[test]
 fn invoke_callback_fn_arg_emits_relocatable_code_ptr() {
     use common::Instruction;
@@ -8245,7 +8245,7 @@ fn main() {
 
 #[test]
 fn gc_churn_option_node_does_not_make_enum() {
-    let src = include_str!("../../../examples/perf/gc_churn.hy");
+    let src = include_str!("../../../examples/perf/gc_churn.coil");
     let (bc, _) = compile_src(src);
     assert!(
         !bc.iter()
@@ -8581,7 +8581,7 @@ fn main() {
 
 #[test]
 fn result_try_churn_does_not_make_enum() {
-    let src = include_str!("../../../examples/perf/result_try_churn.hy");
+    let src = include_str!("../../../examples/perf/result_try_churn.coil");
     let (bc, _) = compile_src_pipeline(src, false);
     assert!(
         !bc.iter()
@@ -8617,7 +8617,7 @@ fn result_try_churn_does_not_make_enum() {
 
 #[test]
 fn result_heap_churn_does_not_make_enum() {
-    let src = include_str!("../../../examples/perf/result_heap_churn.hy");
+    let src = include_str!("../../../examples/perf/result_heap_churn.coil");
     let (bc, _) = compile_src(src);
     assert!(
         !bc.iter()
@@ -8759,7 +8759,7 @@ fn main() {
 
 #[test]
 fn pair_int_churn_stays_two_slot() {
-    let src = include_str!("../../../examples/perf/pair_int_churn.hy");
+    let src = include_str!("../../../examples/perf/pair_int_churn.coil");
     let (bc, _) = compile_src_pipeline(src, true);
     assert!(
         bc.iter()

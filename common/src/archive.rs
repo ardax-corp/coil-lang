@@ -235,7 +235,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 /// `LockError` instead of one six-variant `ThreadError`. Major-4 archives
 /// would read the old tags as other variants, so they are not loadable.
 ///
-/// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
+/// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.ccoil`
 /// execute can restore `extern struct` layouts. rkyv schema change.
 pub const ARCHIVE_MINOR: u16 = 13;
 
@@ -427,7 +427,7 @@ pub struct ArchivedProgram {
     pub debug_locs: Vec<DebugLoc>,
     /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
     pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    /// `extern struct` C layouts (align/pad), restored on packaged / `.hyc` execute.
+    /// `extern struct` C layouts (align/pad), restored on packaged / `.ccoil` execute.
     pub struct_layouts: Vec<CStructLayout>,
     /// Compiler-analyzed operand-stack capacity (minor 13+).
     pub operand_stack_slots: u32,
@@ -605,7 +605,7 @@ pub struct ArchivedProgramV13 {
     pub operand_stack_slots: u32,
 }
 
-/// Pre-minor-13 envelope. Loader fallback so older `.hyc` stay readable.
+/// Pre-minor-13 envelope. Loader fallback so older `.ccoil` stay readable.
 #[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(compare(PartialEq))]
 pub struct ArchivedProgramV12 {
@@ -620,7 +620,7 @@ pub struct ArchivedProgramV12 {
     pub struct_layouts: Vec<CStructLayout>,
 }
 
-/// Failed `.hyc` / embed envelope access.
+/// Failed `.ccoil` / embed envelope access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveDecodeError {
     Corrupt,
@@ -959,7 +959,7 @@ pub fn resolve_archive_operand_slots(persisted: Option<u32>, bytecode: &[Byte]) 
     }
 }
 
-/// Access a `.hyc` blob. Same major + archive minor ≤ runtime; older
+/// Access a `.ccoil` blob. Same major + archive minor ≤ runtime; older
 /// envelopes without `operand_stack_slots` / S2b maps still load.
 /// Bytecode is verified before it is returned.
 pub fn decode_archived_program(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> {
@@ -1186,7 +1186,7 @@ mod tests {
                 Byte::new(Instruction::STRING).with_operand_u32(0),
                 Byte::new(Instruction::HALT),
             ],
-            source_files: vec!["main.hy".into()],
+            source_files: vec!["main.coil".into()],
             debug_locs: vec![
                 DebugLoc {
                     file: 0,
@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn archive_abi_omits_env_grants() {
-        // Exhaustive destructure: grants stay off `.hyc` (no rkyv major).
+        // Exhaustive destructure: grants stay off `.ccoil` (no rkyv major).
         let _ = |p: &ArchivedProgram| {
             let ArchivedProgram {
                 version,
@@ -1276,7 +1276,7 @@ mod tests {
             constants: vec![],
             strings: vec![],
             bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec!["main.hy".into()],
+            source_files: vec!["main.coil".into()],
             debug_locs: vec![DebugLoc::unknown()],
             fn_symbols: vec![
                 FnDebugSym {
@@ -1649,7 +1649,7 @@ mod tests {
             constants: vec![],
             strings: vec![],
             bytecode: vec![Byte::new(Instruction::HALT), Byte::new(Instruction::HALT)],
-            source_files: vec!["main.hy".into()],
+            source_files: vec!["main.coil".into()],
             debug_locs: vec![
                 DebugLoc {
                     file: 0,
@@ -1686,7 +1686,7 @@ mod tests {
             constants: vec![],
             strings: vec![],
             bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec!["main.hy".into()],
+            source_files: vec!["main.coil".into()],
             debug_locs: vec![DebugLoc {
                 file: 0,
                 start_byte: 0,
@@ -1847,7 +1847,7 @@ mod tests {
             constants: vec![],
             strings: vec![],
             bytecode: three_halts(),
-            source_files: vec!["main.hy".into()],
+            source_files: vec!["main.coil".into()],
             debug_locs: locs.clone(),
             fn_symbols: vec![crate::debug::FnDebugSym {
                 name: "main".into(),
@@ -1897,7 +1897,7 @@ mod tests {
             span_table: Vec::new(),
         };
         let debug = ProgramDebug {
-            source_files: vec!["main.hy".into()],
+            source_files: vec!["main.coil".into()],
             debug_locs: locs,
             fn_symbols: vec![crate::debug::FnDebugSym {
                 name: "main".into(),
@@ -1943,7 +1943,7 @@ mod tests {
         let debug = round_trip(&lines_only);
         assert_eq!(debug.file_line_at(2), Some((0, lines[2])));
         assert_eq!(debug.loc_at(2), None, "-g1 keeps no byte spans");
-        assert_eq!(debug.source_files, vec!["main.hy".to_string()]);
+        assert_eq!(debug.source_files, vec!["main.coil".to_string()]);
         assert_eq!(debug.fn_symbols.len(), 1);
 
         let none = program_at(crate::DebugLevel::None);

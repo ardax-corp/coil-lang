@@ -12,14 +12,14 @@ BIN="${BIN:-$CARGO_TARGET_DIR/release/coil}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-10}"
 # coil reads no coil.toml: pass the project and stdlib roots as flags.
 ROOTS=(--root "$HERE/src" --root "$ROOT/.deps/coil-stdlib/src" --root "$ROOT/../coil-stdlib/src")
-ENTRY="$HERE/src/main.hy"
+ENTRY="$HERE/src/main.coil"
 
 if [[ ! -x "$BIN" ]]; then
   echo "Building release coil…"
   cargo build --release --manifest-path "$ROOT/Cargo.toml"
 fi
 
-rm -f "$ROOT/out.hyc" "$HERE/out.hyc"
+rm -f "$ROOT/out.ccoil" "$HERE/out.ccoil"
 
 case "${1:-}" in
   --help | -h)

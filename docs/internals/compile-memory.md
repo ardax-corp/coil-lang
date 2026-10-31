@@ -17,7 +17,7 @@ subject.
   output run to tens of GB on this compiler (deep parser and checker
   recursion); the peak list does not.
 
-Inputs: spool (`spool.hy` with coil-stdlib, toml, json, process: the largest
+Inputs: spool (`spool.coil` with coil-stdlib, toml, json, process: the largest
 program at hand, ~2.7 s to compile) and coil-http's examples (stdlib + tls).
 
 ## Where the peak was

@@ -99,7 +99,7 @@ pub use ty::MirTy;
 /// Build the Mandelbrot inner iteration in typed SSA (acceptance for COI-267).
 ///
 /// Corresponds to the inner `while iter < max_iter` in
-/// `examples/perf/mandelbrot.hy` (`zr`/`zi`/`cr`/`ci` are `f64`, `iter` is
+/// `examples/perf/mandelbrot.coil` (`zr`/`zi`/`cr`/`ci` are `f64`, `iter` is
 /// language `int` → `i64`). No classes.
 #[cfg(test)]
 pub fn mandelbrot_inner_loop() -> Result<MirFunc, MirError> {

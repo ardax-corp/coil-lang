@@ -49,12 +49,12 @@ fn collect_test_files_errors_and_discovers_nested() {
     let root = unique_tmp("nested_tests");
     let nested = root.join("more");
     std::fs::create_dir_all(&nested).unwrap();
-    std::fs::write(root.join("b.hy"), b"fn main() {}").unwrap();
-    std::fs::write(nested.join("a.hy"), b"fn main() {}").unwrap();
+    std::fs::write(root.join("b.coil"), b"fn main() {}").unwrap();
+    std::fs::write(nested.join("a.coil"), b"fn main() {}").unwrap();
     std::fs::write(root.join("ignore.txt"), b"x").unwrap();
     let files = collect_test_files(&root).expect("files");
     assert_eq!(files.len(), 2);
-    assert!(files[0].ends_with("a.hy") || files[0].ends_with("b.hy"));
+    assert!(files[0].ends_with("a.coil") || files[0].ends_with("b.coil"));
     // Sorted lexicographically by full path.
     assert!(files[0] < files[1]);
     let _ = std::fs::remove_dir_all(&root);
@@ -73,14 +73,14 @@ fn needs_header_names_platform_features() {
 
 #[test]
 fn is_compile_fail_detects_path_segment() {
-    assert!(is_compile_fail(Path::new("tests/compile_fail/bad.hy")));
-    assert!(is_compile_fail(Path::new("/tmp/compile_fail/x.hy")));
+    assert!(is_compile_fail(Path::new("tests/compile_fail/bad.coil")));
+    assert!(is_compile_fail(Path::new("/tmp/compile_fail/x.coil")));
     assert!(is_compile_fail(Path::new(
-        "suite/nested/compile_fail/deep/x.hy"
+        "suite/nested/compile_fail/deep/x.coil"
     )));
-    assert!(!is_compile_fail(Path::new("tests/arithmetic.hy")));
-    assert!(!is_compile_fail(Path::new("tests/compile_fail_not/x.hy")));
-    assert!(!is_compile_fail(Path::new("tests/my_compile_fail/x.hy")));
+    assert!(!is_compile_fail(Path::new("tests/arithmetic.coil")));
+    assert!(!is_compile_fail(Path::new("tests/compile_fail_not/x.coil")));
+    assert!(!is_compile_fail(Path::new("tests/my_compile_fail/x.coil")));
 }
 
 #[test]
@@ -106,24 +106,24 @@ fn run_test_suite_compile_fail_inversion_and_mixed_tree() {
 
     // Type error under compile_fail/, with its code declared ⇒ harness pass.
     std::fs::write(
-        cf.join("bad.hy"),
+        cf.join("bad.coil"),
         "// @expected E0102 — a string is not an int.\nfn main() {\n  let x: int = \"no\";\n}\n",
     )
     .unwrap();
     // Rejected, but for another reason than the declared one ⇒ failure.
     std::fs::write(
-        cf.join("wrong_reason.hy"),
+        cf.join("wrong_reason.coil"),
         "// @expected E0209 — not what this file does.\nfn main() {\n  let x: int = \"no\";\n}\n",
     )
     .unwrap();
     // Well-typed under compile_fail/ ⇒ harness failure (inverted).
     std::fs::write(
-        cf.join("unexpected_ok.hy"),
+        cf.join("unexpected_ok.coil"),
         "fn main() {\n  let _x = 1;\n}\n",
     )
     .unwrap();
     // Normal positive case still runs.
-    std::fs::write(pos.join("ok.hy"), "test(\"ok\") {\n  if !(true) { raise \"assertion failed\"; }\n}\n").unwrap();
+    std::fs::write(pos.join("ok.coil"), "test(\"ok\") {\n  if !(true) { raise \"assertion failed\"; }\n}\n").unwrap();
 
     let SuiteResult { passed, failed, .. } =
         run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
@@ -143,9 +143,9 @@ fn run_test_suite_fail_fast_stops_after_unexpected_compile_ok() {
     std::fs::create_dir_all(&cf).unwrap();
 
     // Lexicographic order: a_ok before z_bad — fail-fast must stop after a_ok.
-    std::fs::write(cf.join("a_ok.hy"), "fn main() {\n  let _x = 1;\n}\n").unwrap();
+    std::fs::write(cf.join("a_ok.coil"), "fn main() {\n  let _x = 1;\n}\n").unwrap();
     std::fs::write(
-        cf.join("z_bad.hy"),
+        cf.join("z_bad.coil"),
         "fn main() {\n  let x: int = \"no\";\n}\n",
     )
     .unwrap();
@@ -171,7 +171,7 @@ fn harness_isolates_cases_and_continues_after_failures() {
     let root = unique_tmp("isolates_cases");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("cases.hy"),
+        root.join("cases.coil"),
         r#"
 test("soft fail") {
     if !(false) { raise "assertion failed"; }
@@ -215,7 +215,7 @@ fn every_case_gets_fresh_static_init() {
             "test(\"push {i}\") {{\n    if !(seen.len() == 0) {{ raise \"saw a previous case's write\"; }}\n    seen.push({i});\n}}\n"
         ));
     }
-    std::fs::write(root.join("statics.hy"), src).unwrap();
+    std::fs::write(root.join("statics.coil"), src).unwrap();
     let opts = TestOptions {
         order: Order::Shuffled(9),
         jobs: 1,
@@ -233,7 +233,7 @@ fn cases_can_spawn_threads_on_the_harness_reactor() {
     let root = unique_tmp("spawn_in_case");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("spawn.hy"),
+        root.join("spawn.coil"),
         r#"
 use thread::{join, spawn, ThreadError};
 fn work() -> int {
@@ -300,7 +300,7 @@ test("recv before join") {
 }
 "#;
     for i in 0..6 {
-        std::fs::write(root.join(format!("recv{i}.hy")), program).unwrap();
+        std::fs::write(root.join(format!("recv{i}.coil")), program).unwrap();
     }
     let opts = TestOptions {
         jobs: 2,
@@ -324,7 +324,7 @@ fn seeded_file_order_is_reproducible_and_complete() {
     std::fs::create_dir_all(&root).unwrap();
     for i in 0..12 {
         std::fs::write(
-            root.join(format!("t{i:02}.hy")),
+            root.join(format!("t{i:02}.coil")),
             "test(\"ok\") {\n  if !(true) { raise \"assertion failed\"; }\n}\n",
         )
         .unwrap();
@@ -363,12 +363,12 @@ fn coverage_reports_project_lines() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::write(
-        root.join("src/mathx.hy"),
+        root.join("src/mathx.coil"),
         "fn clamp(int x, int lo, int hi) -> int {\n    if x < lo {\n        return lo;\n    }\n    if x > hi {\n        return hi;\n    }\n    return x;\n}\n\nfn never_called(int x) -> int {\n    let y = x * 2;\n    return y + 1;\n}\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("tests/clamp.hy"),
+        root.join("tests/clamp.coil"),
         "use mathx::{clamp};\n\ntest(\"clamps low\") {\n    if !(clamp(-5, 0, 10) == 0) { raise \"assertion failed\"; }\n}\n\ntest(\"passes through\") {\n    if !(clamp(5, 0, 10) == 5) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
@@ -388,12 +388,12 @@ fn coverage_reports_project_lines() {
         let cov = result.coverage.expect("coverage collected");
         assert_eq!(
             cov.lcov(),
-            "TN:\nSF:src/mathx.hy\nDA:2,2\nDA:3,1\nDA:5,1\nDA:6,0\nDA:8,1\nDA:12,0\nDA:13,0\nLF:7\nLH:4\nend_of_record\n",
+            "TN:\nSF:src/mathx.coil\nDA:2,2\nDA:3,1\nDA:5,1\nDA:6,0\nDA:8,1\nDA:12,0\nDA:13,0\nLF:7\nLH:4\nend_of_record\n",
             "jobs={jobs}"
         );
         let json = cov.per_test_json().unwrap();
         assert!(
-            json.contains("\"name\":\"clamps low\",\"lines\":{\"src/mathx.hy\":[2,3]}"),
+            json.contains("\"name\":\"clamps low\",\"lines\":{\"src/mathx.coil\":[2,3]}"),
             "{json}"
         );
     }
@@ -413,12 +413,12 @@ fn coverage_keeps_a_line_folding_would_erase() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::write(
-        root.join("src/bytesx.hy"),
+        root.join("src/bytesx.coil"),
         "fn top(int k) -> int {\n    let bytes = [k as byte, 255 as byte];\n    return bytes[1] as int;\n}\n\nfn topd(int k) -> int {\n    let bytes = [k as byte, 255 as byte];\n    return (bytes[1] as int) * 3 + 1;\n}\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("tests/top.hy"),
+        root.join("tests/top.coil"),
         "use bytesx::{top, topd};\n\ntest(\"top\") {\n    if !(top(1) == 255) { raise \"assertion failed\"; }\n    if !(topd(1) == 766) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
@@ -459,7 +459,7 @@ fn cmd_test_returns_one_when_the_summary_is_failed() {
     let root = unique_tmp("cmd_test_exit");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("fail.hy"),
+        root.join("fail.coil"),
         "test(\"no\") {\n    if !(false) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
@@ -473,7 +473,7 @@ fn cmd_test_returns_zero_when_the_suite_is_green() {
     let root = unique_tmp("cmd_test_ok");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("ok.hy"),
+        root.join("ok.coil"),
         "test(\"yes\") {\n    if !(true) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
@@ -516,7 +516,7 @@ fn contract_runs_generate_a_case_per_function_with_contracts() {
     let root = unique_tmp("contract_cases");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("props.hy"),
+        root.join("props.coil"),
         r#"use io::{stdout, write};
 use string::{to_bytes};
 
@@ -593,7 +593,7 @@ fn a_source_outside_the_test_root_runs_only_its_contract_tests() {
     let src = root.join("src");
     std::fs::create_dir_all(&tests).unwrap();
     std::fs::create_dir_all(&src).unwrap();
-    let file = src.join("lib.hy");
+    let file = src.join("lib.coil");
     std::fs::write(
         &file,
         "fn twice(int x) -> int\n    ensures result == x + x\n{\n    return x * 2;\n}\n\n\
@@ -628,10 +628,10 @@ fn output_header_checks_what_main_prints() {
             "// @output {out}\nuse io::{{stdout, write}};\nuse string::to_bytes;\nfn main() {{\n    write(stdout(), to_bytes(\"a\\nb\"));\n}}\n"
         )
     };
-    std::fs::write(root.join("right.hy"), program("a\\nb")).unwrap();
-    std::fs::write(root.join("wrong.hy"), program("a b")).unwrap();
+    std::fs::write(root.join("right.coil"), program("a\\nb")).unwrap();
+    std::fs::write(root.join("wrong.coil"), program("a b")).unwrap();
     std::fs::write(
-        root.join("cases.hy"),
+        root.join("cases.coil"),
         "// @output x\ntest(\"one\") {}\ntest(\"two\") {}\n",
     )
     .unwrap();
@@ -643,9 +643,9 @@ fn output_header_checks_what_main_prints() {
             .filter(|c| c.file.ends_with(file))
             .all(|c| c.passed)
     };
-    assert!(verdict("right.hy"), "{:?}", result.cases);
-    assert!(!verdict("wrong.hy"), "{:?}", result.cases);
-    assert!(!verdict("cases.hy"), "{:?}", result.cases);
+    assert!(verdict("right.coil"), "{:?}", result.cases);
+    assert!(!verdict("wrong.coil"), "{:?}", result.cases);
+    assert!(!verdict("cases.coil"), "{:?}", result.cases);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -658,11 +658,11 @@ fn header_directives_ignore_case_and_old_spellings_fail() {
             "{header}\nuse io::{{stdout, write}};\nuse string::to_bytes;\nfn main() {{\n    write(stdout(), to_bytes(\"hi\"));\n}}\n"
         )
     };
-    std::fs::write(root.join("upper.hy"), program("// @Output: hi")).unwrap();
-    std::fs::write(root.join("old.hy"), program("// Output: hi")).unwrap();
+    std::fs::write(root.join("upper.coil"), program("// @Output: hi")).unwrap();
+    std::fs::write(root.join("old.coil"), program("// Output: hi")).unwrap();
     let result = run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
-    // `old.hy` fails on its header, before it has cases.
-    assert!(result.cases.iter().all(|c| c.passed && c.file.ends_with("upper.hy")), "{:?}", result.cases);
+    // `old.coil` fails on its header, before it has cases.
+    assert!(result.cases.iter().all(|c| c.passed && c.file.ends_with("upper.coil")), "{:?}", result.cases);
     assert_eq!((result.passed, result.failed), (1, 1));
     assert!(legacy_header("// Output: hi\n").unwrap().contains("`// @output`"));
     let _ = std::fs::remove_dir_all(&root);

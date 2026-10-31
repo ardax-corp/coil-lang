@@ -38,7 +38,7 @@ fn scratch_dir(suffix: &str) -> PathBuf {
 fn fmt_rewrites_messy_file_in_place() {
     ensure_coil_fmt();
     let cwd = scratch_dir("rewrite");
-    let path = cwd.join("messy.hy");
+    let path = cwd.join("messy.coil");
     let messy = "fn  main ( ) { return  ; }\n";
     std::fs::write(&path, messy).expect("write");
 
@@ -76,7 +76,7 @@ fn fmt_rewrites_messy_file_in_place() {
 fn fmt_check_fails_when_reformat_needed() {
     ensure_coil_fmt();
     let cwd = scratch_dir("check");
-    let path = cwd.join("messy.hy");
+    let path = cwd.join("messy.coil");
     std::fs::write(&path, "fn  main ( ) { return  ; }\n").expect("write");
     let before = std::fs::read_to_string(&path).unwrap();
 
@@ -105,8 +105,8 @@ fn fmt_walks_directory() {
     let cwd = scratch_dir("dir");
     let nested = cwd.join("pkg");
     std::fs::create_dir_all(&nested).unwrap();
-    let a = cwd.join("a.hy");
-    let b = nested.join("b.hy");
+    let a = cwd.join("a.coil");
+    let b = nested.join("b.coil");
     std::fs::write(&a, "fn  main ( ) { return  ; }\n").unwrap();
     std::fs::write(&b, "fn  g ( ) { return  ; }\n").unwrap();
 
@@ -129,7 +129,7 @@ fn fmt_walks_directory() {
 fn fmt_preserves_comments_and_docs() {
     ensure_coil_fmt();
     let cwd = scratch_dir("docs");
-    let path = cwd.join("doc.hy");
+    let path = cwd.join("doc.coil");
     let src = "\
 /// Adds one.
 fn  add ( int x ) -> int {
@@ -178,7 +178,7 @@ fn  add ( int x ) -> int {
 fn fmt_rejects_pub_on_top_level_item_like_the_compiler() {
     ensure_coil_fmt();
     let cwd = scratch_dir("pub-item");
-    let path = cwd.join("pub_item.hy");
+    let path = cwd.join("pub_item.coil");
     let src = "pub const X = 1;\n\nfn main() {\n    println(X);\n}\n";
     std::fs::write(&path, src).expect("write");
 

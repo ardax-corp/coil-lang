@@ -1,4 +1,4 @@
-//! A panic backtrace from a `.hyc` archive names its functions: `coil compile`
+//! A panic backtrace from a `.ccoil` archive names its functions: `coil compile`
 //! stores `fn_symbols` and `coil run` must load them (coil-lang#1490).
 
 use std::path::Path;
@@ -34,8 +34,8 @@ fn with_roots(cmd: &mut Command) {
 }
 
 fn run_archive(bin: &str, dir: &Path, opt: &str) -> String {
-    let src = dir.join("panic.hy");
-    let hyc = dir.join(format!("panic_O{opt}.hyc"));
+    let src = dir.join("panic.coil");
+    let hyc = dir.join(format!("panic_O{opt}.ccoil"));
     std::fs::write(&src, SRC).unwrap();
     let mut compile = coil(bin);
     compile.args(["compile", "-O", opt]);

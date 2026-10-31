@@ -35,7 +35,7 @@ fn fail_and_exit(pipeline: &mut Pipeline, code: ErrorCode, message: impl Into<St
     name = "coil-dissect",
     about = "In-memory compile and dump filtered bytecode / IL / AST",
     disable_help_subcommand = true,
-    after_help = "Pass the entry as a positional `.hy` or `--entry FILE`. A `.hyc` archive\n\
+    after_help = "Pass the entry as a positional `.coil` or `--entry FILE`. A `.ccoil` archive\n\
 dumps its bytecode instead of compiling."
 )]
 struct DissectCli {
@@ -81,7 +81,7 @@ struct DissectCli {
     /// Print the entry file after macro expansion (no bytecode)
     #[arg(long)]
     expand: bool,
-    /// Entry `.hy` file, or a compiled `.hyc` archive (bytecode only)
+    /// Entry `.coil` file, or a compiled `.ccoil` archive (bytecode only)
     #[arg(value_name = "FILE")]
     file: Option<String>,
 }
@@ -97,7 +97,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DissectArgs)>, St
         return Ok(None);
     };
     let filename = match merge_entry(cli.file, cli.entry_flag.entry)? {
-        name if name.is_empty() => return Err("dissect requires an entry .hy file".into()),
+        name if name.is_empty() => return Err("dissect requires an entry .coil file".into()),
         name => name,
     };
     let config = ReportConfig::from_cli_flags(cli.log.log_json, cli.log.log_lsp)
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn parse_host_grants_and_search_paths() {
         let (_cfg, args) = parse_args(&argv(&[
-            "a.hy",
+            "a.coil",
             "--allow-attach",
             "--allow-exit",
             "--allow-ffi-exec",
@@ -171,7 +171,7 @@ mod tests {
         ]))
         .unwrap()
         .unwrap();
-        assert_eq!(args.filename, "a.hy");
+        assert_eq!(args.filename, "a.coil");
         assert!(args.grants.allow_attach);
         assert!(args.grants.allow_exit);
         assert!(args.grants.allow_ffi_exec);
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn parse_default_denies_host_grants() {
-        let (_cfg, args) = parse_args(&argv(&["a.hy", "--fn", "main", "--il"]))
+        let (_cfg, args) = parse_args(&argv(&["a.coil", "--fn", "main", "--il"]))
             .unwrap()
             .unwrap();
         assert_eq!(args.grants, HostGrants::deny_all());
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn source_stays_on_without_no_source() {
         let (_cfg, args) = parse_args(&argv(&[
-            "a.hy",
+            "a.coil",
             "--fn",
             "total",
             "-O",
@@ -216,6 +216,6 @@ mod tests {
 
     #[test]
     fn parse_rejects_missing_dload_stem() {
-        assert!(parse_args(&argv(&["a.hy", "--allow-dload"])).is_err());
+        assert!(parse_args(&argv(&["a.coil", "--allow-dload"])).is_err());
     }
 }

@@ -1,7 +1,7 @@
 # Builtin doc stubs
 
-One `.hy` file per compiler virtual module (`io/fs.hy` is `io::fs`), plus
-`types.hy` (primitive types) and `keywords.md` (one `## word` section per
+One `.coil` file per compiler virtual module (`io/fs.coil` is `io::fs`), plus
+`types.coil` (primitive types) and `keywords.md` (one `## word` section per
 keyword). Each item is a declaration with an empty body and `///` docs; the
 files are parsed for hover docs and never compiled. `compiler/src/builtin_docs.rs`
 lists them, and a coil-lsp test checks that every builtin has docs here.

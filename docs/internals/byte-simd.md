@@ -24,7 +24,7 @@ step.
 
 ## Baseline
 
-`examples/perf/text_scan_long.hy`: a 64 KiB line with the needle at the
+`examples/perf/text_scan_long.coil`: a 64 KiB line with the needle at the
 end, and a 64 KiB line with a `,` every 1 KiB. `coil` release, x86-64
 container, ns per call:
 
@@ -204,7 +204,7 @@ four-way whitespace test (`c != 32 && c != 9 && c != 10 && c != 13`)
 built a 37-node mask, past the 24-node limit, and never scanned (on
 `string` too).
 
-`examples/perf/vec_byte_scan.hy`, `coil` release, ns per call:
+`examples/perf/vec_byte_scan.coil`, `coil` release, ns per call:
 
 | Case | main `435021f` | after |
 |------|----------------|-------|
@@ -219,7 +219,7 @@ filter on 64 KiB, within noise).
 
 | Step | PR | Change |
 |------|----|--------|
-| 0 | #1951 | This plan and `examples/perf/text_scan_long.hy` |
+| 0 | #1951 | This plan and `examples/perf/text_scan_long.coil` |
 | 1 | #1953 | `s[i]` dense: `DenseIndex` flag `HEAP_STR_BYTE`, archive minor 45; the plain loop goes from 96 to 29 ns per byte |
 | 2 | #1954 | VM byte lanes (`VLoad` `TY_U8`, `VBin` `M_*` / `B_CMP` / `BS_CMP`), `VMask`, dense `UNARY_CTZ` / `UNARY_BLSR`; `coil_simd::bytes64` (SSE2 / NEON baseline, no dispatch); archive minor 46 |
 | 3 | #1963 | MIR `byte_scan` pass: `ByteScan` / VM `VScan` (archive minor 46); find a byte 6.3 ms to 11 µs per 64 KiB |

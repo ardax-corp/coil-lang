@@ -70,12 +70,12 @@ fn a_case_past_the_wall_timeout_stops_the_run_and_names_itself() {
     let cwd = temp_cwd("pool");
     let tests = cwd.join("tests");
     std::fs::create_dir_all(&tests).unwrap();
-    std::fs::write(tests.join("quick.hy"), "test(\"quick\") {\n    let _x = 1;\n}\n").unwrap();
-    std::fs::write(tests.join("spin.hy"), SPIN).unwrap();
+    std::fs::write(tests.join("quick.coil"), "test(\"quick\") {\n    let _x = 1;\n}\n").unwrap();
+    std::fs::write(tests.join("spin.coil"), SPIN).unwrap();
 
     let (code, stderr) = run_bounded(&cwd, &["--wall-timeout", "2", "-j", "2", "--seed", "7", "tests"], Duration::from_secs(60));
     assert_eq!(code, Some(124), "stderr={stderr}");
-    assert!(stderr.contains("tests/spin.hy: spins"), "stderr={stderr}");
+    assert!(stderr.contains("tests/spin.coil: spins"), "stderr={stderr}");
     assert!(stderr.contains("--wall-timeout"), "stderr={stderr}");
     assert!(stderr.contains("--seed 0x7"), "stderr={stderr}");
     let _ = std::fs::remove_dir_all(&cwd);
@@ -87,12 +87,12 @@ fn an_inline_case_past_the_wall_timeout_stops_the_run_too() {
     let cwd = temp_cwd("inline");
     let tests = cwd.join("tests");
     std::fs::create_dir_all(&tests).unwrap();
-    std::fs::write(tests.join("spin.hy"), SPIN).unwrap();
+    std::fs::write(tests.join("spin.coil"), SPIN).unwrap();
 
     // `-j 1` runs the case on the runner thread itself.
     let (code, stderr) = run_bounded(&cwd, &["--wall-timeout", "2", "-j", "1", "tests"], Duration::from_secs(60));
     assert_eq!(code, Some(124), "stderr={stderr}");
-    assert!(stderr.contains("tests/spin.hy: spins"), "stderr={stderr}");
+    assert!(stderr.contains("tests/spin.coil: spins"), "stderr={stderr}");
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
@@ -102,7 +102,7 @@ fn the_wall_timeout_reports_as_a_json_error_event() {
     let cwd = temp_cwd("json");
     let tests = cwd.join("tests");
     std::fs::create_dir_all(&tests).unwrap();
-    std::fs::write(tests.join("spin.hy"), SPIN).unwrap();
+    std::fs::write(tests.join("spin.coil"), SPIN).unwrap();
 
     let mut child = Command::new(coil_bin())
         .current_dir(&cwd)
@@ -121,7 +121,7 @@ fn the_wall_timeout_reports_as_a_json_error_event() {
     let stdout = String::from_utf8_lossy(&out.stdout).replace("\\\\", "/").replace('\\', "/");
     assert_eq!(out.status.code(), Some(124), "stdout={stdout}");
     let error = stdout.lines().find(|l| l.contains("\"event\":\"error\"")).unwrap_or_else(|| panic!("no error event in {stdout}"));
-    assert!(error.contains("tests/spin.hy: spins"), "event={error}");
+    assert!(error.contains("tests/spin.coil: spins"), "event={error}");
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
@@ -134,7 +134,7 @@ fn a_finished_case_never_trips_the_wall_timeout() {
     // A quick case waited on long after it finished (the runner reports
     // files in start order, so a case can sit done for a while).
     for i in 0..6 {
-        std::fs::write(tests.join(format!("q{i}.hy")), "test(\"q\") {\n    let _x = 1;\n}\n").unwrap();
+        std::fs::write(tests.join(format!("q{i}.coil")), "test(\"q\") {\n    let _x = 1;\n}\n").unwrap();
     }
     let (code, stderr) = run_bounded(&cwd, &["--wall-timeout", "1", "-j", "4", "tests"], Duration::from_secs(60));
     assert_eq!(code, Some(0), "stderr={stderr}");

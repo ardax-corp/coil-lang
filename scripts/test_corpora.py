@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the `.hy` language corpora (`tests/<corpus>/`) in parallel.
+"""Run the `.coil` language corpora (`tests/<corpus>/`) in parallel.
 
 Each corpus is its own `coil test` process, so a slow corpus does not hold
 up the others and a `-j 1` run (the leak smoke) still uses every core.
@@ -38,11 +38,11 @@ EXE = ".exe" if os.name == "nt" else ""
 
 
 def corpora():
-    """Every directory under tests/ holding `.hy` files, largest first."""
+    """Every directory under tests/ holding `.coil` files, largest first."""
     found = []
     for d in sorted(TESTS.iterdir()):
         if d.is_dir():
-            n = sum(1 for _ in d.rglob("*.hy"))
+            n = sum(1 for _ in d.rglob("*.coil"))
             if n:
                 found.append((n, d.name))
     found.sort(key=lambda t: -t[0])

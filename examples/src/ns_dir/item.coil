@@ -1,0 +1,7 @@
+// Helper for tests/modules/module_resolution.coil: the only file of the
+// `ns_dir` directory (there is no `ns_dir.coil`), reached as `ns_dir::item`.
+use string::format;
+
+fn item() -> string {
+    return format("%x\n", 420);
+}

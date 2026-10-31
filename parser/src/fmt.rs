@@ -1,4 +1,4 @@
-//! Source pretty-printer for coil `.hy` files.
+//! Source pretty-printer for coil `.coil` files.
 //!
 //! Comments are parser trivia, so the formatter reads them from
 //! [`crate::comments::collect`] and reattaches them by byte position:

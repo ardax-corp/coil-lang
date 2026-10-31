@@ -3,9 +3,9 @@
 ## What it shows
 
 Playable text adventure over **stdin/stdout**: `Room` / `Dir` enums and the
-player (`world.hy`), parsing a line into a `Command` enum with
-`text::split` (`commands.hy`), save encode/decode (`save.hy`), and the
-`read_line` loop + file IO with `println(…)?` in `main.hy`.
+player (`world.coil`), parsing a line into a `Command` enum with
+`text::split` (`commands.coil`), save encode/decode (`save.coil`), and the
+`read_line` loop + file IO with `println(…)?` in `main.coil`.
 
 ## Play (interactive)
 
@@ -42,10 +42,10 @@ Expected gist: Hall → Library (take key) → inventory → Hall → Garden →
 
 | File | Role |
 |------|------|
-| `src/world.hy` | `Room`, `Dir`, `Player`, moves and the key |
-| `src/commands.hy` | `Command` enum + `parse_command` |
-| `src/save.hy` | Two-byte save encode/decode (`SaveData`) |
-| `src/main.hy` | REPL: `read_line`, `println`, save file `open` / `write_all` / `read_to_end` |
+| `src/world.coil` | `Room`, `Dir`, `Player`, moves and the key |
+| `src/commands.coil` | `Command` enum + `parse_command` |
+| `src/save.coil` | Two-byte save encode/decode (`SaveData`) |
+| `src/main.coil` | REPL: `read_line`, `println`, save file `open` / `write_all` / `read_to_end` |
 
 ## Ergonomics / gaps noticed
 

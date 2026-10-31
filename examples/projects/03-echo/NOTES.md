@@ -5,7 +5,7 @@
 Single-process TCP echo on `task::scope`: a server task (`accept_wait`, read
 one frame, echo it) and a client task (`connect`, send a frame, read the
 echo) run concurrently on one thread. Each `io::sync` wait suspends only its
-own task. Length-prefixed framing is in `protocol.hy`; the server and client
+own task. Length-prefixed framing is in `protocol.coil`; the server and client
 policies are pure helpers.
 
 ## Run
@@ -28,10 +28,10 @@ Always under `timeout` (the script wraps it).
 
 | File | Role |
 |------|------|
-| `src/protocol.hy` | `encode_frame` / `frame_len` / `payload_eq` (sibling calls) |
-| `src/server.hy` | Pure echo policy (`echo_reply`) |
-| `src/client.hy` | Pure request body |
-| `src/main.hy` | listen on port 0 → server and client tasks in one `task::scope` |
+| `src/protocol.coil` | `encode_frame` / `frame_len` / `payload_eq` (sibling calls) |
+| `src/server.coil` | Pure echo policy (`echo_reply`) |
+| `src/client.coil` | Pure request body |
+| `src/main.coil` | listen on port 0 → server and client tasks in one `task::scope` |
 
 ## Notes
 

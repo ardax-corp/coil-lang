@@ -25,39 +25,39 @@ use common::Byte;
 pub const MACRO_MODULE: &str = "macro";
 
 /// Source of the embedded `macro` module.
-pub const MACRO_SOURCE: &str = include_str!("../prelude/macro.hy");
+pub const MACRO_SOURCE: &str = include_str!("../prelude/macro.coil");
 
 /// Module path of the built-in derives (`Show`, `Eq`, …), always in scope.
 /// Not under `prelude::`, which is the compiler's virtual module.
 pub const DERIVE_MODULE: &str = "derive";
 
 /// Source of the built-in derives.
-pub const DERIVE_SOURCE: &str = include_str!("../prelude/derive.hy");
+pub const DERIVE_SOURCE: &str = include_str!("../prelude/derive.coil");
 
 /// Module path of the embedded task API (`use task::{scope, Scope, Task}`).
 pub const TASK_MODULE: &str = "task";
 
 /// Source of the embedded `task` module.
-pub const TASK_SOURCE: &str = include_str!("../prelude/task.hy");
+pub const TASK_SOURCE: &str = include_str!("../prelude/task.coil");
 
 /// Module path of the embedded child-process API (`use process::{Command, exec}`).
 pub const PROCESS_MODULE: &str = "process";
 
 /// Source of the embedded `process` module.
-pub const PROCESS_SOURCE: &str = include_str!("../prelude/process.hy");
+pub const PROCESS_SOURCE: &str = include_str!("../prelude/process.coil");
 
 /// Module path of the embedded property-test values (`use arbitrary::{Arbitrary, Gen}`).
 pub const ARBITRARY_MODULE: &str = "arbitrary";
 
 /// Source of the embedded `arbitrary` module.
-pub const ARBITRARY_SOURCE: &str = include_str!("../prelude/arbitrary.hy");
+pub const ARBITRARY_SOURCE: &str = include_str!("../prelude/arbitrary.coil");
 
 /// Module path of the always-included core prelude (`Option`, `Result`
 /// and their methods). Every program depends on it.
 pub const CORE_MODULE: &str = "core";
 
 /// Source of the embedded `core` module.
-pub const CORE_SOURCE: &str = include_str!("../prelude/core.hy");
+pub const CORE_SOURCE: &str = include_str!("../prelude/core.coil");
 
 /// An enum the core prelude marks with `#[lang(..)]`.
 #[derive(Debug)]
@@ -136,32 +136,32 @@ pub const PRELUDE_DERIVES: &[&str] = &[
 
 /// Pseudo path the embedded `macro` module is compiled from.
 pub fn macro_module_path() -> PathBuf {
-    PathBuf::from("<coil>/macro.hy")
+    PathBuf::from("<coil>/macro.coil")
 }
 
 /// Pseudo path of the built-in derive module.
 pub fn derive_module_path() -> PathBuf {
-    PathBuf::from("<coil>/derive.hy")
+    PathBuf::from("<coil>/derive.coil")
 }
 
 /// Pseudo path of the embedded task module.
 pub fn task_module_path() -> PathBuf {
-    PathBuf::from("<coil>/task.hy")
+    PathBuf::from("<coil>/task.coil")
 }
 
 /// Pseudo path of the embedded `process` module.
 pub fn process_module_path() -> PathBuf {
-    PathBuf::from("<coil>/process.hy")
+    PathBuf::from("<coil>/process.coil")
 }
 
 /// Pseudo path of the embedded `arbitrary` module.
 pub fn arbitrary_module_path() -> PathBuf {
-    PathBuf::from("<coil>/arbitrary.hy")
+    PathBuf::from("<coil>/arbitrary.coil")
 }
 
 /// Pseudo path of the core prelude module.
 pub fn core_module_path() -> PathBuf {
-    PathBuf::from("<coil>/core.hy")
+    PathBuf::from("<coil>/core.coil")
 }
 
 /// Embedded source for a pseudo path.

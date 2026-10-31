@@ -15,7 +15,7 @@ use machine::{
     wire_thread_program_with_maps,
 };
 
-/// Errors loading a `.hyc` / embedded archive blob.
+/// Errors loading a `.ccoil` / embedded archive blob.
 #[derive(Debug)]
 pub enum LoadErr {
     Missing,
@@ -44,7 +44,7 @@ pub struct LoadedArchive {
     pub static_word_kinds: Vec<u8>,
 }
 
-/// Deserialize an `ArchivedProgram` blob (from `.hyc` or an embedded slice).
+/// Deserialize an `ArchivedProgram` blob (from `.ccoil` or an embedded slice).
 pub fn load_archive_bytes(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
     let align = std::mem::align_of::<ArchivedArchivedProgram>();
     if (buffer.as_ptr() as usize).is_multiple_of(align) {
@@ -85,7 +85,7 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
     })
 }
 
-/// Load a `.hyc` file from disk.
+/// Load a `.ccoil` file from disk.
 pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
     let mut f = std::fs::File::open(path).map_err(|_| LoadErr::Missing)?;
     let mut buffer = Vec::with_capacity(1024);
@@ -98,10 +98,10 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 /// Returns `true` when a language-level `panic` aborted.
 /// `raise` is catchable (`Result.Err`); it does not set this flag (Q5).
 ///
-/// Restores [`common::CStructLayout`] from the archive (CLI `.hyc` and packaged
+/// Restores [`common::CStructLayout`] from the archive (CLI `.ccoil` and packaged
 /// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
 ///
-/// Host capability flags are **not** stored in `.hyc` and are **not** re-applied
+/// Host capability flags are **not** stored in `.ccoil` and are **not** re-applied
 /// here. If the bytecode has the op, it runs. `dload` still uses pin /
 /// trusted integrity when `dload_gate` is supplied.
 /// Minor 13+ stores the compiler stack bound. Minor 14+ stores S2b maps;

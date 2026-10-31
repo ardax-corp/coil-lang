@@ -99,13 +99,13 @@ and relocate mapped slots on collect.
   anything can collect (a loop-carried local rebound in the body). The
   loop-entry copy of a rebound header φ leaves its source register holding
   the pre-loop value, so `entry_clears` zeroes that register once per loop
-  entry. Constants root nothing and are skipped. Flagship `.hyc` are
+  entry. Constants root nothing and are skipped. Flagship `.ccoil` are
   unchanged; on `examples/perf` only `gc_frag` (one zero per inner-loop
   entry), `gc_rebuild` (one per loop entry) and `gc_churn` (one fewer frame
   word) change, and their run times stayed within noise (medians of 11:
   `gc_frag` 303–353 → 326–341 ms, `gc_rebuild` 705–800 → 687–697 ms,
   `gc_churn` 144–147 → 149–151 ms, run-to-run spread larger than the gaps).
-  `tests/memory/gc_weak_after_reassign.hy`.
+  `tests/memory/gc_weak_after_reassign.coil`.
 - **Join copies drop the branch value** (#1409). An `if`/`else` that
   assigns a heap local on both arms meets in a φ; each arm's edge copy
   that is not coalesced leaves the arm's value in its own register, so a
@@ -119,9 +119,9 @@ and relocate mapped slots on collect.
   Without those two skips `gc_churn`, `gc_frag`, `gc_int_vec`,
   `gc_rebuild` and `gc_shrink` gained a zero in their hot loop and ran
   5–15% slower (medians of 11, e.g. `gc_int_vec` 268–277 → 315–333 ms).
-  With them flagship `.hyc` and every other `examples/perf` program are
+  With them flagship `.ccoil` and every other `examples/perf` program are
   byte-identical to #1402; `gc_frag` loses one dead loop-entry zero
-  (336 → 346 ms median, within noise). `tests/memory/gc_weak_after_join.hy`.
+  (336 → 346 ms median, within noise). `tests/memory/gc_weak_after_join.coil`.
 - **Copy sources drop the value too** (#1411). A cast copies its word into
   a register of its own (`Option::Some(x)` is a cast of `x`), and so does a
   φ, so after a rebind the registers the old value was copied from still
@@ -137,12 +137,12 @@ and relocate mapped slots on collect.
   live and the walk stops, so `entry_clears` also zeroes, on each forward edge into a rebound join, the
   copy sources of the other forward edges' values; the zeros land on the
   reset arm only. On `examples/perf` only `gc_int_vec` and `gc_shrink`
-  change (two zeros on the arm taken once in 64 trips); flagship `.hyc` and
+  change (two zeros on the arm taken once in 64 trips); flagship `.ccoil` and
   every other program are byte-identical to #1409. Medians of 11,
   interleaved runs: `gc_int_vec` 272–289 → 267–285 ms (3 runs each),
   `gc_shrink` 435–485 → 443–477 ms (6 runs each), within the run-to-run
   spread.
-  `tests/memory/gc_weak_some_in_loop.hy`.
+  `tests/memory/gc_weak_some_in_loop.coil`.
 - **Copies and call arguments drop the value too** (#1625). A `match` or
   `if let` arm's binding of an `Option::Some`'s object is a cast of the
   scrutinee, which the dense tier gives a register of its own to pass to a
@@ -158,9 +158,9 @@ and relocate mapped slots on collect.
   writes as coming before the push, and `prune_clears` counts them as the
   block's writes, so a gather register the next push rewrites before
   anything can collect is not zeroed (a loop that rebinds a string it
-  formats, `examples/variadic.hy`, keeps its loop as it was). No per-call
+  formats, `examples/variadic.coil`, keeps its loop as it was). No per-call
   zero is added: the zeros sit only at the clears that already exist.
-  Flagship `.hyc` and all 223 `examples/*.hy` and `examples/perf/*.hy`
+  Flagship `.ccoil` and all 223 `examples/*.coil` and `examples/perf/*.coil`
   archives are byte-identical to #1635. On a 3M-trip hit loop of the
   pattern itself (`junk = Some(new Node(i, None))`, an arm passing `n` to a
   call, `junk = None`), the loop gains one zero (two with a three-argument
@@ -169,7 +169,7 @@ and relocate mapped slots on collect.
   436 → 476 ms with the helper inlined. The zero is `CONST 0; STORE`, two
   dispatches; a dense `DenseConst r, 0` would be one, for every dense
   clear.
-  `tests/memory/gc_weak_match_arg.hy`.
+  `tests/memory/gc_weak_match_arg.coil`.
 - **A temporary passed to a call drops too** (#1650). A word passed
   straight to a call (`weak(new Node(..))`) has no binding and so no
   `ClearWord`; its register, and the gather register a dense call copied
@@ -183,11 +183,11 @@ and relocate mapped slots on collect.
   merges a local (`MirFunc::bound_words`), and the frame keeps those
   until the local is rebound or the function returns, as HIR emission's
   slots do (a `gc::Root` held in a local guards its payload,
-  `tests/memory/gc_frame_maps_collect.hy`). Nor for a parameter, a
+  `tests/memory/gc_frame_maps_collect.coil`). Nor for a parameter, a
   constant, a box of plain words (an `Option<int>` or a pair of numbers
   boxed to pass to `weak`: nothing else can hold that box, so a weak to
   it keeps upgrading until the register is rewritten,
-  `tests/memory/gc_weak_option_arg.hy`), a register a value live past the
+  `tests/memory/gc_weak_option_arg.coil`), a register a value live past the
   call shares, or where no collection can come before the register is
   rewritten (`RewriteScan`). A call ending its block whose result the
   branch reads from the stack (`write(..)?`'s `JumpIfMatch`) gets its
@@ -198,16 +198,16 @@ and relocate mapped slots on collect.
   `CallIndirect`'s row was kept whole: an evacuation at such an
   allocation moved the object and left the register naming its old
   address, which the call's row then listed as a must-pointer (gc-stress,
-  an over-applied closure in `tests/functions/closure_over_application.hy`).
+  an over-applied closure in `tests/functions/closure_over_application.coil`).
   A `CallIndirect` row is now filtered by liveness like a `CALL`'s,
   keeping only its base word, which a partial application still uses.
   Straight-line code with calls of temporaries grows by `CONST 0; STORE`
-  per such word (125 of the 223 `examples/*.hy` and `examples/perf/*.hy`
+  per such word (125 of the 223 `examples/*.coil` and `examples/perf/*.coil`
   archives change, mostly in `main`'s output calls); a 3M-trip loop
   passing `new Node(i)` to a recursive helper (two zeros a trip, the
   argument and its gather register) ran 0.511 s against 0.512 s user,
   medians of 15 interleaved runs on a loaded host.
-  `tests/memory/gc_weak_temp_arg.hy`.
+  `tests/memory/gc_weak_temp_arg.coil`.
 - **A temporary stored into an object drops too** (#1690). The same
   zeros follow every op that stores a word into an object, whose object
   holds the word from there on: `ArrayPush` (`v.push(new Node(..))`),
@@ -234,7 +234,7 @@ and relocate mapped slots on collect.
     local's word in it, and no value live past the root shares it. A
     root that is a terminator's operand, a tail call or a compare fused
     into the branch gets none.
-  `tests/memory/gc_weak_temp_consumed.hy`.
+  `tests/memory/gc_weak_temp_consumed.coil`.
 - **A heap payload moving as an `i64` drops too** (#1769). A two-word
   enum (`Option`, `Result` or an enum of at most one payload word) passed
   by value travels as a pair, payload and tag, and a heap payload rides
@@ -253,12 +253,12 @@ and relocate mapped slots on collect.
   payload read the same way (`Option<int>` unboxed into a pair) is
   zeroed too: harmless, and its type is not known there. A pair a call
   returns (`f(make())` at `-O0`) was not covered until #1791 (below).
-  Flagship `.hyc`
+  Flagship `.ccoil`
   and every `examples/perf` archive are byte-identical to #1690; of the
-  225 `examples/*.hy` and `examples/perf/*.hy` archives that compile,
+  225 `examples/*.coil` and `examples/perf/*.coil` archives that compile,
   only `thread_reply` changes (two straight-line zeros, a received string
   and the `stdout()` handle after their last call).
-  `tests/memory/gc_weak_enum_arg.hy`.
+  `tests/memory/gc_weak_enum_arg.coil`.
 - **A rebound field and a returned pair drop too** (#1791). A class
   local that never escapes is scalar-replaced: each field gets a frame
   slot of its own (`HirMirInput::sroa` / `fields`), and `b.n = e` lowered
@@ -283,7 +283,7 @@ and relocate mapped slots on collect.
   words now: a dense call copying one into its gather window (an
   inlined `make` in `weak_in(make(i))` in a loop) left the object rooted
   there after its other registers were zeroed.
-  Of the 225 `examples/*.hy` and `examples/perf/*.hy` archives that
+  Of the 225 `examples/*.coil` and `examples/perf/*.coil` archives that
   compile, at `-O2` and `-O0`, only three change against #1769:
   `raise_try` (two straight-line zeros, a `Result` with a heap payload
   after the call that took it), `perf/s2g_escape_edges` (one straight-line
@@ -291,8 +291,8 @@ and relocate mapped slots on collect.
   `perf/match_enum_loop` (one zero a trip after `score_res(wrap_res(i))`,
   whose `Result<int, string>` may carry a string; run time within noise,
   medians of 41 interleaved runs 55.9 → 54.4 ms).
-  `tests/memory/gc_weak_field_rebind.hy`,
-  `tests/memory/gc_weak_pair_result.hy`.
+  `tests/memory/gc_weak_field_rebind.coil`,
+  `tests/memory/gc_weak_pair_result.coil`.
 - **A niche `Option` built as an argument drops too** (#1802). An
   `Option` of a heap type is one word, and `Option::Some(new Node(..))`
   is a cast of the object's word (`word.niche_opt.heapref`) that the LIR
@@ -304,13 +304,13 @@ and relocate mapped slots on collect.
   another heap or payload word back to its sources, as it does a payload
   word (`payload_sources`), with the same stops (a live value, a
   constant, a local's or a parameter's word, a register a local's word
-  shares). Of the 233 `examples/*.hy` and `examples/perf/*.hy` that
+  shares). Of the 233 `examples/*.coil` and `examples/perf/*.coil` that
   compile, at `-O2` and `-O0`, only `io_nested_host` and
   `io_nested_write` change against #1791: one straight-line zero each, of
   `open(..)`'s `Result` after the call its `?` passed the stream to
   (`read_to_end(open(..)?)`, `write_all(open(..)?, ..)`).
   Every `examples/perf` archive and listing is byte-identical.
-  `tests/memory/gc_weak_niche_option_arg.hy`.
+  `tests/memory/gc_weak_niche_option_arg.coil`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.
@@ -322,7 +322,7 @@ and relocate mapped slots on collect.
    heap words.
 2. ~~**Slot / frame maps**~~ — **S2b (this note).** Encode those roots
    for the interpreter (and later deopt) so a collect can update slots.
-   Archive **minor 14** (COI-359 E1) persists maps for `.hyc` / embed.
+   Archive **minor 14** (COI-359 E1) persists maps for `.ccoil` / embed.
    Older same-major envelopes still load with empty maps. Superseded by
    precise frame maps (minor 21+), which the compiler now emits alone.
    Shared-heap steal (C0) **refuses** a program with no frame maps —

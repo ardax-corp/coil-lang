@@ -666,10 +666,10 @@ mod tests {
     #[test]
     fn resolve_program_path_prefers_cwd_relative() {
         let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
-        let resolved = resolve_program_path("fib.hy", Some(&examples));
+        let resolved = resolve_program_path("fib.coil", Some(&examples));
         assert!(
             resolved.exists(),
-            "cwd-relative fib.hy missing: {}",
+            "cwd-relative fib.coil missing: {}",
             resolved.display()
         );
     }
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn resolve_program_path_keeps_absolute_existing() {
         let abs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples/fib.hy")
+            .join("../examples/fib.coil")
             .canonicalize()
             .unwrap();
         let resolved = resolve_program_path(abs.to_str().unwrap(), None);

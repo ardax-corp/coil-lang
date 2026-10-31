@@ -1,0 +1,133 @@
+// Operators on literals fold, identities keep their operand, and an `if`
+// on a literal keeps the branch it takes. Nothing that has an effect is
+// folded away. Folds past 32 bits and that would overflow are in
+// `constant_fold_wide.coil`.
+use tests::assert;
+
+static let calls: int = 0;
+
+fn bump(int v) -> int {
+    calls = calls + 1;
+    return v;
+}
+
+fn constants() -> int {
+    return (3 + 4) * 2 - 10 / 3 + 17 % 5 + (1 << 4) + (256 >> 2) + (6 & 3) + (6 | 1) + (6 ^ 3);
+}
+
+fn identities(int x) -> int {
+    return (x + 0) + (0 + x) + (x - 0) + (x * 1) + (1 * x) + (x / 1) + (x | 0) + (x ^ 0) + (x << 0) +
+           (x & -1);
+}
+
+fn zero_with_effect() -> int {
+    return bump(5) * 0;
+}
+
+fn steps(int x) -> int {
+    return x + 1 + 2 + 3 + (x + -4 + -5) + (x + 2 + -2);
+}
+
+fn step_stmts(int x) -> int {
+    let t = x;
+    t = t + 1;
+    t = t + 2;
+    t = t + -3;
+    t = t + 4;
+    return t;
+}
+
+fn floats(float x) -> float {
+    return x * 1.0 + 1.5 * 2.0 + x / 1.0;
+}
+
+fn picks(bool b) -> int {
+    let r = 0;
+    if true {
+        r = r + 1;
+    } else {
+        r = r + 100;
+    }
+    if false {
+        r = r + 1000;
+    }
+    if !!b && true {
+        r = r + 10;
+    }
+    if false || !false {
+        r = r + 20;
+    }
+    return r - -5;
+}
+
+test("operators on literals") {
+    assert!(constants() == 107);
+}
+
+test("identities keep the operand") {
+    assert!(identities(7) == 70);
+    assert!(identities(-3) == -30);
+}
+
+test("a call times zero still runs") {
+    calls = 0;
+    assert!(zero_with_effect() == 0);
+    assert!(calls == 1);
+}
+
+test("constant steps add once") {
+    assert!(steps(10) == 27);
+    assert!(steps(-1) == -6);
+    assert!(step_stmts(5) == 9);
+}
+
+test("float folds") {
+    assert!(floats(2.0) == 7.0);
+}
+
+test("an if on a literal keeps the branch it takes") {
+    assert!(picks(true) == 36);
+    assert!(picks(false) == 26);
+}
+
+fn self_assign(int x) -> int {
+    let y = x;
+    y = y;
+    y = y + 0;
+    return y;
+}
+
+test("x = x does nothing") {
+    assert!(self_assign(4) == 4);
+}
+
+fn known_some(int i) -> int {
+    return match Option::Some(i) {
+        Option::None => -1,
+        Option::Some(x) => x * 2,
+    };
+}
+
+fn known_default(int i) -> int {
+    return match Option::Some(i) {
+        Option::None => 0,
+        default => i + 1,
+    };
+}
+
+// The arm writes the field's local: the payload keeps the value it was built with.
+fn known_then_write(int i) -> int {
+    return match Option::Some(i) {
+        Option::Some(x) => {
+            i = i + 10;
+            x + i
+        },
+        Option::None => 0,
+    };
+}
+
+test("a match on a constructor takes its arm") {
+    assert!(known_some(5) == 10);
+    assert!(known_default(3) == 4);
+    assert!(known_then_write(1) == 12);
+}

@@ -14,13 +14,13 @@ fi
 mkdir -p "$OUT"
 
 benches=(
-  examples/perf/s2d_inloop_pack.hy
-  examples/perf/s2d_inloop_pack_store.hy
-  examples/perf/s2d_inloop_pack_arith.hy
-  examples/perf/s2d_inloop_pack_wide.hy
-  examples/perf/s2d_inloop_escape.hy
-  examples/perf/s2d_preheader_bump.hy
-  examples/perf/looping_makearray.hy
+  examples/perf/s2d_inloop_pack.coil
+  examples/perf/s2d_inloop_pack_store.coil
+  examples/perf/s2d_inloop_pack_arith.coil
+  examples/perf/s2d_inloop_pack_wide.coil
+  examples/perf/s2d_inloop_escape.coil
+  examples/perf/s2d_preheader_bump.coil
+  examples/perf/looping_makearray.coil
 )
 
 fn_for() {
@@ -55,16 +55,16 @@ ls -l "$PARENT_BIN" "$CUR_BIN" || true
 "$CUR_BIN" --version || true
 
 for path in "${benches[@]}"; do
-  name="$(basename "$path" .hy)"
+  name="$(basename "$path" .coil)"
   fn="$(fn_for "$path")"
   echo
   echo "======== $name ($fn) ========"
-  "$PARENT_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.parent.hyc"
-  "$CUR_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.tip.hyc"
-  sha256sum "$OUT/${name}.parent.hyc" "$OUT/${name}.tip.hyc"
+  "$PARENT_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.parent.ccoil"
+  "$CUR_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.tip.ccoil"
+  sha256sum "$OUT/${name}.parent.ccoil" "$OUT/${name}.tip.ccoil"
   echo "-- checksums --"
-  "$CUR_BIN" run "$OUT/${name}.parent.hyc" | tee "$OUT/${name}.parent.out"
-  "$CUR_BIN" run "$OUT/${name}.tip.hyc" | tee "$OUT/${name}.tip.out"
+  "$CUR_BIN" run "$OUT/${name}.parent.ccoil" | tee "$OUT/${name}.parent.out"
+  "$CUR_BIN" run "$OUT/${name}.tip.ccoil" | tee "$OUT/${name}.tip.out"
   if [[ -x "$DISSECT_BIN" ]]; then
     PARENT_DISSECT="${PARENT_DISSECT:-$(dirname "$PARENT_BIN")/coil-dissect}"
     if [[ -x "$PARENT_DISSECT" ]]; then
@@ -77,7 +77,7 @@ for path in "${benches[@]}"; do
     count_ops "$OUT/${name}.tip.dissect.txt"
   fi
   hyperfine -w 2 -r 8 --export-markdown "$OUT/${name}.md" \
-    "$CUR_BIN run $OUT/${name}.parent.hyc" \
-    "$CUR_BIN run $OUT/${name}.tip.hyc"
+    "$CUR_BIN run $OUT/${name}.parent.ccoil" \
+    "$CUR_BIN run $OUT/${name}.tip.ccoil"
 done
 echo "done: $OUT"

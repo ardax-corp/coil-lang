@@ -87,9 +87,9 @@ cannot cross threads (a cyclic graph) starts zeroed
 
 ## Measurements
 
-`examples/perf/const_table_crc.hy` (CRC-32 over a 4 KiB buffer, 2000
+`examples/perf/const_table_crc.coil` (CRC-32 over a 4 KiB buffer, 2000
 times, through a 256-entry module table) and
-`examples/perf/const_table_local.hy` (a 16-entry local S-box in a function
+`examples/perf/const_table_local.coil` (a 16-entry local S-box in a function
 called 4M times). Release build, `--auto-par off`, wall time of
 `coil run` on a compiled archive, best of 21 on a shared 4-core machine:
 
@@ -104,8 +104,8 @@ a thousand calls allocate it once (`perf_metrics::local_const_table_is_built_onc
 The flagships (`mandelbrot`, `tak`, `nsieve`, `binary_trees`, `fib`) and
 every other `examples/perf` bench compile to the same bytecode.
 
-Tests: `tests/collections/const_tables.hy`, `tests/modules/const_table_import.hy`,
-`tests/codegen/const_table_auto_par.hy`, `tests/codegen/perf/const_table_*.hy`;
+Tests: `tests/collections/const_tables.coil`, `tests/modules/const_table_import.coil`,
+`tests/codegen/const_table_auto_par.coil`, `tests/codegen/perf/const_table_*.coil`;
 `compiler/tests/perf_metrics.rs` (`const_table_constant_reads_fold`,
 `const_table_slot_load_leaves_the_loop`, `local_const_table_is_built_once`);
 `compiler/src/hir/tables.tests.rs`.

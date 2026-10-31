@@ -33,7 +33,7 @@ clone dropped. In a clone such a call is a ground call site: `self` takes the
 clone's type (`hir_clone_self_ty`), the callee's parameters bind from it, and
 the call goes to the sibling's clone (`hir_clone_drops_forwarded`).
 
-Test: `tests/generics/method_clone_sibling_dicts.hy`.
+Test: `tests/generics/method_clone_sibling_dicts.coil`.
 
 ## Clones of another module's generics
 

@@ -26,7 +26,7 @@ source-level MIR stepping rewrite.
   reconstruct regs at every implicit leave edge (`Call`, impure
   `HostInvoke`, alloc / format / print) and at `Return` / `Jump` Stop
   sites. Maps are compiler-internal (like S2b drafts before bind). They
-  are **not** written to `.hyc`. `complete` is false when a live SSA
+  are **not** written to `.ccoil`. `complete` is false when a live SSA
   local has no reconstruct slot (stack-only / CALL convoy TOS). A future
   native tier must refuse incomplete maps — do not resume from them.
 - Debugger-attached compiles (`Pipeline::set_debugger_attached`, used by

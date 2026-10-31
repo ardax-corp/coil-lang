@@ -143,7 +143,7 @@ fn package_fib_embedded_run_prints_55() {
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let embed = build_matching_coil_embed(Path::new(&bin));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let entry = manifest.join("examples/fib.hy");
+    let entry = manifest.join("examples/fib.coil");
     let out = std::env::temp_dir().join(format!(
         "coil_fib_pack_{}{}",
         std::process::id(),
@@ -197,7 +197,7 @@ fn package_rejects_coil_as_runner() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let entry = manifest.join("examples/fib.hy");
+    let entry = manifest.join("examples/fib.coil");
     let out = std::env::temp_dir().join(format!(
         "coil_fib_pack_full_{}{}",
         std::process::id(),
@@ -230,7 +230,7 @@ fn package_ffi_without_native_inventory_fails() {
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let embed = build_matching_coil_embed(Path::new(&bin));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let entry = manifest.join("examples/ffi_sum.hy");
+    let entry = manifest.join("examples/ffi_sum.coil");
     let out = std::env::temp_dir().join(format!(
         "coil_sum_pack_fail_{}{}",
         std::process::id(),
@@ -297,7 +297,7 @@ fn package_with_native_lock_finds_library_in_cache_or_beside_exe() {
     assert!(cc.success(), "failed to build {lib_name}");
 
     std::fs::write(
-        tmp.join("src/main.hy"),
+        tmp.join("src/main.coil"),
         r#"
 use ffi::{declare, dload, invoke};
 use ffi::types::{Int};
@@ -331,7 +331,7 @@ fn main() {
             "sum",
             "--ffi-search-path",
             "./native",
-            "src/main.hy",
+            "src/main.coil",
             "-o",
             out.to_str().unwrap(),
             "--runner",
@@ -446,7 +446,7 @@ fn package_backtrace_names_functions_unless_stripped() {
     let dir = std::env::temp_dir().join(format!("coil_pack_backtrace_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let entry = dir.join("panic.hy");
+    let entry = dir.join("panic.coil");
     std::fs::write(
         &entry,
         "fn inner(int x) -> int {
@@ -505,7 +505,7 @@ fn package_debug_levels() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("panic.hy"),
+        dir.join("panic.coil"),
         "fn inner(int x) -> int {
     if x > 2 {
         panic(\"boom: x too large\");
@@ -520,9 +520,9 @@ fn main() {
 ",
     )
     .unwrap();
-    let full = "panic: boom: x too large at panic.hy:3:8
-  in inner at panic.hy:3:8
-  in main at panic.hy:10:12";
+    let full = "panic: boom: x too large at panic.coil:3:8
+  in inner at panic.coil:3:8
+  in main at panic.coil:10:12";
     let bare = "panic: boom: x too large
   in <unknown>
   ... repeated 1 more times";
@@ -535,7 +535,7 @@ fn main() {
             package.arg("--root").arg(root);
         }
         package.args(flag);
-        package.arg("panic.hy").arg("-o").arg(&out).arg("--runner").arg(&embed);
+        package.arg("panic.coil").arg("-o").arg(&out).arg("--runner").arg(&embed);
         assert!(package.status().expect("spawn coil package").success(), "{tag}: package failed");
         sizes.push(std::fs::metadata(&out).unwrap().len());
 

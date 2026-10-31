@@ -66,7 +66,7 @@ fn check(file: &std::path::Path) -> Option<Vec<String>> {
     Some(capture.problems.into_iter().map(|p| format!("{}: {p}", file.display())).collect())
 }
 
-/// `.hy` files under `dir`, recursively, skipping `compile_fail/` directories.
+/// `.coil` files under `dir`, recursively, skipping `compile_fail/` directories.
 fn positive_hy_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read tests") {
         let path = entry.expect("dir entry").path();
@@ -74,7 +74,7 @@ fn positive_hy_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             if path.file_name().is_some_and(|n| n != "compile_fail") {
                 positive_hy_files(&path, out);
             }
-        } else if path.extension().is_some_and(|x| x == "hy") {
+        } else if path.extension().is_some_and(|x| x == "coil") {
             out.push(path);
         }
     }

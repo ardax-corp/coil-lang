@@ -50,12 +50,12 @@ Frames opened any other way keep the window only when it still covers them:
 - a `JumpIfMatch` payload wider than the reserve counts.
 
 Archive **minor 13** (COI-358 E0) stores `operand_stack_slots` on
-[`ArchivedProgram`](../../common/src/archive.rs). `coil run foo.hyc` and
+[`ArchivedProgram`](../../common/src/archive.rs). `coil run foo.ccoil` and
 `coil-embed` start from that size. Envelopes older than 4.13 still load and
 start from the Seek+CALL heuristic (`256` or `MAX_OPERAND_STACK_SLOTS`).
 
 Archive **minor 14** (COI-359 E1) stores S2b stack maps on the same envelope.
-`.hyc` / embed GC relocate matches compile-and-run. Pre-14 archives load
+`.ccoil` / embed GC relocate matches compile-and-run. Pre-14 archives load
 with empty maps (conservative stack scan), same as E0 execute. Shared-heap
 steal requires real maps ([shared-heap-sendability.md](shared-heap-sendability.md)).
 
@@ -78,7 +78,7 @@ walks the AST to pick the starting size:
    - **Tail-only** self- or sibling-cycle calls (`return f(...)` / `return g(...)`
      among an SCC) → depth `1` (matches `TailCall`,
      [#316](https://github.com/ardax-corp/coil-lang/pull/316); hit bench
-     `examples/perf/tail_sibling.hy`). Matching one- or two-word ABI, including
+     `examples/perf/tail_sibling.coil`). Matching one- or two-word ABI, including
      arity-2 immediate products.
 3. Entry measure values may be:
    - integer literals (`fib(32)`);

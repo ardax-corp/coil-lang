@@ -1,4 +1,4 @@
-//! `coil-fmt` — format `.hy` sources (single file or directory).
+//! `coil-fmt` — format `.coil` sources (single file or directory).
 //!
 //! Preserves `//` comments and `///` docs attached to declarations. Default
 //! rewrites in place; `--check` exits non-zero when reformatting would change a file.
@@ -17,7 +17,7 @@ use reporting::{Message, ReportConfig, SourceMap, create_sink};
     name = "coil-fmt",
     about = "Format coil source files",
     disable_help_subcommand = true,
-    after_help = "Directories are walked recursively for `*.hy`.\n\
+    after_help = "Directories are walked recursively for `*.coil`.\n\
 Preserves `//` comments and `///` doc comments on declarations."
 )]
 struct FmtArgs {
@@ -46,7 +46,7 @@ fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         if common::ext::is_source_path(root) {
             out.push(root.to_path_buf());
         } else {
-            return Err(format!("`{}` is not a `.hy` file", root.display()));
+            return Err(format!("`{}` is not a `.coil` file", root.display()));
         }
         return Ok(());
     }
@@ -141,7 +141,7 @@ fn main() {
         }
     }
     if files.is_empty() {
-        eprintln!("coil-fmt: no `.hy` files found");
+        eprintln!("coil-fmt: no `.coil` files found");
         exit(1);
     }
     files.sort();

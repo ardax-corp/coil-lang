@@ -21,19 +21,19 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 echo "=== 01-todo ==="
-rm -f "$ROOT/out.hyc"
-timeout "${TIMEOUT_SECS}s" "$BIN" $(roots 01-todo) "$PROJECTS/01-todo/src/main.hy"
+rm -f "$ROOT/out.ccoil"
+timeout "${TIMEOUT_SECS}s" "$BIN" $(roots 01-todo) "$PROJECTS/01-todo/src/main.coil"
 echo
 
 echo "=== 02-adventure (canned transcript) ==="
-rm -f "$ROOT/out.hyc"
-timeout "${TIMEOUT_SECS}s" "$BIN" $(roots 02-adventure) --allow-read --allow-write "$PROJECTS/02-adventure/src/main.hy" \
+rm -f "$ROOT/out.ccoil"
+timeout "${TIMEOUT_SECS}s" "$BIN" $(roots 02-adventure) --allow-read --allow-write "$PROJECTS/02-adventure/src/main.coil" \
   <"$PROJECTS/02-adventure/transcript.txt"
 echo
 
 echo "=== 03-echo ==="
-rm -f "$ROOT/out.hyc"
-timeout "${TIMEOUT_SECS}s" "$BIN" $(roots 03-echo) --allow-net "$PROJECTS/03-echo/src/main.hy"
+rm -f "$ROOT/out.ccoil"
+timeout "${TIMEOUT_SECS}s" "$BIN" $(roots 03-echo) --allow-net "$PROJECTS/03-echo/src/main.coil"
 echo
 
 echo "All showcase demos finished."

@@ -441,7 +441,7 @@ temp), and MIR lowers each mark to a host call (`gc_region_enter` 175,
 
 ### Measured (step 5)
 
-`examples/perf/region_rounds.hy`: each round builds a linked list whose nodes a vector also holds (shared,
+`examples/perf/region_rounds.coil`: each round builds a linked list whose nodes a vector also holds (shared,
 so early freeing cannot take it) and sums it; the same total work (4M
 nodes) is split into rounds of different sizes. Median of 3, wall time and
 max RSS.

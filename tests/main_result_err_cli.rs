@@ -60,16 +60,16 @@ fn main() {
 ";
     for mode in [&[][..], &["-O0"][..]] {
         for (name, src, msg) in [
-            ("try_err.hy", try_err, "main returned Err(boom)"),
-            ("raise_in_main.hy", raise_in_main, "main returned Err(direct)"),
-            ("returned.hy", returned, "main returned Err(neg)"),
+            ("try_err.coil", try_err, "main returned Err(boom)"),
+            ("raise_in_main.coil", raise_in_main, "main returned Err(direct)"),
+            ("returned.coil", returned, "main returned Err(neg)"),
         ] {
             let (success, line) = run(&bin, &dir, name, src, mode);
             assert!(!success, "{name} {mode:?}: expected a failing exit");
             assert!(line.starts_with(&format!("panic: {msg}")), "{name} {mode:?}: {line}");
         }
-        let (success, line) = run(&bin, &dir, "ok.hy", ok, mode);
-        assert!(success, "ok.hy {mode:?}: {line}");
+        let (success, line) = run(&bin, &dir, "ok.coil", ok, mode);
+        assert!(success, "ok.coil {mode:?}: {line}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -111,16 +111,16 @@ fn main() -> Result<unit, ChannelError> {
 ";
     for mode in [&[][..], &["-O0"][..]] {
         for (name, src, msg) in [
-            ("string_err.hy", string_err, "main returned Err(bad)"),
-            ("thread_err.hy", thread_err, "main returned Err(Closed)"),
-            ("enum_err.hy", enum_err, "main returned Err(E::Bad)"),
+            ("string_err.coil", string_err, "main returned Err(bad)"),
+            ("thread_err.coil", thread_err, "main returned Err(Closed)"),
+            ("enum_err.coil", enum_err, "main returned Err(E::Bad)"),
         ] {
             let (success, line) = run(&bin, &dir, name, src, mode);
             assert!(!success, "{name} {mode:?}: expected a failing exit");
             assert!(line.starts_with(&format!("panic: {msg}")), "{name} {mode:?}: {line}");
         }
-        let (success, line) = run(&bin, &dir, "ok.hy", ok, mode);
-        assert!(success, "ok.hy {mode:?}: {line}");
+        let (success, line) = run(&bin, &dir, "ok.coil", ok, mode);
+        assert!(success, "ok.coil {mode:?}: {line}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -176,12 +176,12 @@ fn main() -> Result<unit, string> {
 ";
     for mode in [&[][..], &["-O0"][..]] {
         for (name, src, at) in [
-            ("string_err.hy", string_err, "string_err.hy:3:4"),
-            ("payload_err.hy", payload_err, "payload_err.hy:7:4"),
-            ("unit_variant_err.hy", unit_variant_err, "unit_variant_err.hy:7:4"),
-            ("qualified_err.hy", qualified_err, "qualified_err.hy:2:4"),
-            ("returned_call.hy", returned_call, "returned_call.hy:6:4"),
-            ("raised.hy", raised, "raised.hy:2:4"),
+            ("string_err.coil", string_err, "string_err.coil:3:4"),
+            ("payload_err.coil", payload_err, "payload_err.coil:7:4"),
+            ("unit_variant_err.coil", unit_variant_err, "unit_variant_err.coil:7:4"),
+            ("qualified_err.coil", qualified_err, "qualified_err.coil:2:4"),
+            ("returned_call.coil", returned_call, "returned_call.coil:6:4"),
+            ("raised.coil", raised, "raised.coil:2:4"),
         ] {
             let (success, line) = run(&bin, &dir, name, src, mode);
             assert!(!success, "{name} {mode:?}: expected a failing exit");

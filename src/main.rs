@@ -87,7 +87,7 @@ pub(crate) fn fail_and_exit(
 
 fn resolve_entry_filename(filename: &str) -> Result<String, String> {
     if filename.is_empty() {
-        Err("missing input file (pass a .hy file or `--entry`)".into())
+        Err("missing input file (pass a .coil file or `--entry`)".into())
     } else {
         Ok(filename.to_string())
     }
@@ -147,7 +147,7 @@ fn write_archive(pipeline: &mut Pipeline, output: &str, bytes: &[u8]) {
     }
 }
 
-/// The `.hyc` bytes of the program `pipeline` just compiled.
+/// The `.ccoil` bytes of the program `pipeline` just compiled.
 fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants: Vec<u64>) -> Vec<u8> {
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
@@ -339,7 +339,7 @@ mod archive_staleness {
     }
 }
 
-/// Warn when a cached `.hyc` is older than sources recorded in its debug bundle.
+/// Warn when a cached `.ccoil` is older than sources recorded in its debug bundle.
 fn maybe_warn_stale_archive(
     pipeline: &mut Pipeline,
     archive: &str,
@@ -349,14 +349,14 @@ fn maybe_warn_stale_archive(
         pipeline.emit_spanless_warning(
             ErrorCode::IoError,
             format!(
-                "Bytecode archive `{archive}` may be stale (recorded sources are newer). Recompile with `coil compile … -o {archive}` or run `coil <entry.hy>` directly."
+                "Bytecode archive `{archive}` may be stale (recorded sources are newer). Recompile with `coil compile … -o {archive}` or run `coil <entry.coil>` directly."
             ),
         );
     }
 }
 
-/// Warn when a stale default `out.hyc` built **from this entry** exists
-/// beside an in-memory run. An `out.hyc` from another program is unrelated.
+/// Warn when a stale default `out.ccoil` built **from this entry** exists
+/// beside an in-memory run. An `out.ccoil` from another program is unrelated.
 fn maybe_warn_stale_default_out(pipeline: &mut Pipeline, entry: &str, debug: &ProgramDebug) {
     if !Path::new(DEFAULT_OUT).exists() {
         return;
@@ -924,9 +924,9 @@ mod tests {
     fn archive_is_stale_when_entry_not_in_source_files() {
         let dir = unique_tmp("stale_entry");
         std::fs::create_dir_all(&dir).unwrap();
-        let a = dir.join("a.hy");
-        let b = dir.join("b.hy");
-        let arch = dir.join("out.hyc");
+        let a = dir.join("a.coil");
+        let b = dir.join("b.coil");
+        let arch = dir.join("out.ccoil");
         std::fs::write(&a, b"fn main() {}").unwrap();
         std::fs::write(&b, b"fn main() {}").unwrap();
         std::fs::write(&arch, b"x").unwrap();
@@ -938,7 +938,7 @@ mod tests {
             cleanup: Vec::new(),
             table: Default::default(),
         };
-        // Running b.hy against an archive built from a.hy must rebuild.
+        // Running b.coil against an archive built from a.coil must rebuild.
         assert!(archive_is_stale(
             b.to_str().unwrap(),
             arch.to_str().unwrap(),
@@ -957,9 +957,9 @@ mod tests {
     fn archive_is_stale_when_dependency_source_newer() {
         let dir = unique_tmp("stale_dep");
         std::fs::create_dir_all(&dir).unwrap();
-        let entry = dir.join("main.hy");
-        let dep = dir.join("worker.hy");
-        let arch = dir.join("out.hyc");
+        let entry = dir.join("main.coil");
+        let dep = dir.join("worker.coil");
+        let arch = dir.join("out.ccoil");
         std::fs::write(&entry, b"fn main() {}").unwrap();
         std::fs::write(&dep, b"fn w() {}").unwrap();
         std::fs::write(&arch, b"x").unwrap();
@@ -989,8 +989,8 @@ mod tests {
     fn archive_is_stale_empty_source_files_uses_entry_mtime() {
         let dir = unique_tmp("stale_empty_sources");
         std::fs::create_dir_all(&dir).unwrap();
-        let entry = dir.join("main.hy");
-        let arch = dir.join("out.hyc");
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
         std::fs::write(&entry, b"fn main() {}").unwrap();
         std::fs::write(&arch, b"x").unwrap();
         let debug = ProgramDebug {
@@ -1021,11 +1021,11 @@ mod tests {
     fn archive_is_stale_when_recorded_source_missing() {
         let dir = unique_tmp("stale_missing_dep");
         std::fs::create_dir_all(&dir).unwrap();
-        let entry = dir.join("main.hy");
-        let arch = dir.join("out.hyc");
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
         std::fs::write(&entry, b"fn main() {}").unwrap();
         std::fs::write(&arch, b"x").unwrap();
-        let missing = dir.join("gone.hy");
+        let missing = dir.join("gone.coil");
         let debug = ProgramDebug {
             source_files: vec![
                 entry.to_string_lossy().into_owned(),
@@ -1049,9 +1049,9 @@ mod tests {
         use super::archive_staleness::recorded_sources_newer;
         let dir = unique_tmp("run_archive_sources");
         std::fs::create_dir_all(dir.join("stdlib/io")).unwrap();
-        let dep = dir.join("stdlib/io/sync.hy");
-        let entry = dir.join("main.hy");
-        let arch = dir.join("out.hyc");
+        let dep = dir.join("stdlib/io/sync.coil");
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
         std::fs::write(&dep, b"fn f() {}").unwrap();
         std::fs::write(&entry, b"fn main() {}").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -1060,7 +1060,7 @@ mod tests {
             source_files: vec![
                 dep.to_string_lossy().into_owned(),
                 entry.to_string_lossy().into_owned(),
-                dir.join("gone.hy").to_string_lossy().into_owned(),
+                dir.join("gone.coil").to_string_lossy().into_owned(),
             ],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
@@ -1083,10 +1083,10 @@ mod tests {
 
     #[test]
     fn same_source_path_rejects_unrelated_same_basename() {
-        assert!(!same_source_path("examples/foo.hy", "vendor/pkg/foo.hy"));
-        assert!(!same_source_path("main.hy", "vendor/pkg/main.hy"));
-        assert!(same_source_path("examples/foo.hy", "./examples/foo.hy"));
-        assert!(same_source_path("src/lib/io.hy", "project/src/lib/io.hy"));
+        assert!(!same_source_path("examples/foo.coil", "vendor/pkg/foo.coil"));
+        assert!(!same_source_path("main.coil", "vendor/pkg/main.coil"));
+        assert!(same_source_path("examples/foo.coil", "./examples/foo.coil"));
+        assert!(same_source_path("src/lib/io.coil", "project/src/lib/io.coil"));
     }
 
     #[test]
@@ -1094,16 +1094,16 @@ mod tests {
         let root = unique_tmp("mtime_cwd");
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
-        let file = src.join("worker.hy");
+        let file = src.join("worker.coil");
         std::fs::write(&file, b"fn f() {}").unwrap();
 
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let m = archive_source_mtime("src/worker.hy");
+        let m = archive_source_mtime("src/worker.coil");
         std::env::set_current_dir(&prev).unwrap();
         assert!(
             m.is_some(),
-            "should resolve src/worker.hy relative to cwd"
+            "should resolve src/worker.coil relative to cwd"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -120,8 +120,8 @@ fn project() -> PathBuf {
     let root = unique_tmp("project");
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
-    std::fs::write(root.join("src/mathx.hy"), MATHX).unwrap();
-    std::fs::write(root.join("tests/doc.hy"), TESTS).unwrap();
+    std::fs::write(root.join("src/mathx.coil"), MATHX).unwrap();
+    std::fs::write(root.join("tests/doc.coil"), TESTS).unwrap();
     root
 }
 
@@ -131,20 +131,20 @@ fn doc_examples_run_as_cases_with_their_verdicts() {
     let (cases, status) = run(&root, &[]);
     assert_eq!(status, Some(1), "failing examples fail the run: {cases:#?}");
     assert!(case(&cases, "double").1);
-    assert!(case(&cases, "doc: doc::passes (tests/doc.hy:9)").1);
-    let fails = case(&cases, "doc: doc::fails (tests/doc.hy:17)");
+    assert!(case(&cases, "doc: doc::passes (tests/doc.coil:9)").1);
+    let fails = case(&cases, "doc: doc::fails (tests/doc.coil:17)");
     assert!(!fails.1);
-    let broken = case(&cases, "doc: doc::broken (tests/doc.hy:24)");
+    let broken = case(&cases, "doc: doc::broken (tests/doc.coil:24)");
     assert!(!broken.1);
     assert_eq!(broken.2.as_deref(), Some("example does not compile"));
-    let calm = case(&cases, "doc: doc::calm (tests/doc.hy:31)");
+    let calm = case(&cases, "doc: doc::calm (tests/doc.coil:31)");
     assert!(!calm.1);
     assert_eq!(calm.2.as_deref(), Some("example did not panic (`should_panic`)"));
     // `no_run` passes once it compiles; `ignore` is not a case.
-    assert!(case(&cases, "doc: doc::skipped (tests/doc.hy:38)").1);
-    assert!(!cases.iter().any(|(n, _, _)| n.contains("doc.hy:42")), "{cases:#?}");
+    assert!(case(&cases, "doc: doc::skipped (tests/doc.coil:38)").1);
+    assert!(!cases.iter().any(|(n, _, _)| n.contains("doc.coil:42")), "{cases:#?}");
     // The project source the test file imports has its examples run too.
-    assert!(case(&cases, "doc: mathx::double (src/mathx.hy:3)").1);
+    assert!(case(&cases, "doc: mathx::double (src/mathx.coil:3)").1);
     assert_eq!(cases.len(), 7, "{cases:#?}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -164,7 +164,7 @@ fn doc_tests_only_reads_files_without_compiling_them() {
     let root = project();
     // Only the examples under `src`; the file itself never compiles.
     std::fs::write(
-        root.join("src/stub.hy"),
+        root.join("src/stub.coil"),
         "/// A stub.\n///\n/// ```\n/// let y = 1;\n/// ```\nfn stub() -> int {}\n",
     )
     .unwrap();
@@ -172,6 +172,6 @@ fn doc_tests_only_reads_files_without_compiling_them() {
     assert_eq!(status, Some(0), "{cases:#?}");
     let mut names: Vec<&str> = cases.iter().map(|(n, _, _)| n.as_str()).collect();
     names.sort();
-    assert_eq!(names, vec!["doc: mathx::double (src/mathx.hy:3)", "doc: stub::stub (src/stub.hy:3)"]);
+    assert_eq!(names, vec!["doc: mathx::double (src/mathx.coil:3)", "doc: stub::stub (src/stub.coil:3)"]);
     let _ = std::fs::remove_dir_all(&root);
 }

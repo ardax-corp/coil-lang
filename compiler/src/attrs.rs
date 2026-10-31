@@ -1,7 +1,7 @@
 //! Attribute expansion (`#[derive(...)]`, user `attr`, etc.).
 //!
 //! Runs before the ID pre-walk and typechecking. Every `#[derive(X)]` — the
-//! built-ins included, which live in `compiler/src/prelude/derive.hy` — and
+//! built-ins included, which live in `compiler/src/prelude/derive.coil` — and
 //! every attribute macro is recorded as a pending macro for the pipeline to
 //! run ([`crate::macros`]); this pass adds the type-name `Show` / `String`
 //! defaults and checks attribute placement. Compile-time FFI is
@@ -681,7 +681,7 @@ struct ExpandDerivesArgs<'args, 'a> {
 }
 
 /// Record a class / enum's derives as derive macros to run (built-ins live in
-/// `compiler/src/prelude/derive.hy`) and add the default `Show` the derives
+/// `compiler/src/prelude/derive.coil`) and add the default `Show` the derives
 /// and explicit impls leave uncovered.
 fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
     let ExpandDerivesArgs {
