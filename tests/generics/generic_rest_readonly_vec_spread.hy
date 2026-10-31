@@ -41,7 +41,7 @@ fn total<A, B: Reset>(A a, B... rest) -> int {
 }
 
 fn all<A, B: Reset>(A a, B... rest) {
-    for r in rest {
+    for mut r in rest {
         r.reset();
     }
 }
