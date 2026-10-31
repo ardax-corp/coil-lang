@@ -41,8 +41,12 @@ test("cell of a tuple and a cell of cells") {
     assert!(t.get()[1] == 2);
     t.set((3, 4));
     assert!(t.get() == (3, 4));
+    // `get` returns the inner cell's value: a write to it is its own (#2161).
     let outer = new Cell(new Cell(5));
-    outer.get().set(6);
+    let inner = outer.get();
+    inner.set(6);
+    assert!(outer.value.value == 5 && inner.value == 6);
+    outer.set(inner);
     assert!(outer.value.value == 6);
 }
 
