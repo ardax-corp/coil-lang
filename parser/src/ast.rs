@@ -440,10 +440,14 @@ pub enum Expression<'expr> {
     /// `defer { … }` or `defer use (a, b) { … }` — runs on enclosing function exit.
     ///
     /// - `captures` — variable names from the optional `use (a, b)` list (same
-    ///   explicit-capture rules as [`Self::Lambda`]).
+    ///   explicit-capture rules as [`Self::Lambda`]): each is copied when the
+    ///   `defer` statement runs.
+    /// - `borrows` — the captures written `use (mut x)`: borrowed, so the
+    ///   deferred block sees their value when it runs (a subset of `captures`).
     /// - `body` — the deferred block.
     Defer {
         captures: Vec<&'expr str>,
+        borrows: Vec<&'expr str>,
         body: Output<'expr>,
     },
 
@@ -1315,10 +1319,11 @@ impl<'a> Display for Expression<'a> {
                     ),
                 }
             }
-            Self::Defer { captures, body } => {
+            Self::Defer { captures, borrows, body } => {
                 write!(f, "defer")?;
                 if !captures.is_empty() {
-                    write!(f, " use ({})", captures.join(", "))?;
+                    let caps: Vec<String> = captures.iter().map(|c| if borrows.contains(c) { format!("mut {c}") } else { (*c).to_string() }).collect();
+                    write!(f, " use ({})", caps.join(", "))?;
                 }
                 write!(f, " {}", body.1)
             }

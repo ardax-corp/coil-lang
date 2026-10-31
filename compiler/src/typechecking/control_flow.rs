@@ -470,6 +470,7 @@ mod tests {
     fn analyze_fn_body_warns_defer_before_infinite_loop() {
         let defer = out(Expression::Defer {
             captures: vec![],
+            borrows: vec![],
             body: block(vec![]),
         });
         let body = block(vec![
@@ -493,6 +494,7 @@ mod tests {
     fn statement_wrapped_defer_before_while_true_warns() {
         let defer = stmt(out(Expression::Defer {
             captures: vec![],
+            borrows: vec![],
             body: block(vec![]),
         }));
         let loop_ = stmt(while_loop(Expression::Bool(true), block(vec![])));
@@ -512,6 +514,7 @@ mod tests {
     fn statement_wrapped_defer_inside_while_true_warns() {
         let defer = stmt(out(Expression::Defer {
             captures: vec![],
+            borrows: vec![],
             body: block(vec![]),
         }));
         let loop_ = stmt(while_loop(Expression::Bool(true), block(vec![defer])));
@@ -530,6 +533,7 @@ mod tests {
     fn defer_of(body: Output<'_>) -> Output<'_> {
         stmt(out(Expression::Defer {
             captures: vec![],
+            borrows: vec![],
             body,
         }))
     }
