@@ -24,6 +24,7 @@ test("IoError variants") {
     assert!(format("%v", IoError::TimedOut) == "TimedOut");
     assert!(format("%v", IoError::Truncated) == "Truncated");
     assert!(format("%v", IoError::Protocol) == "Protocol");
+    assert!(format("%v", IoError::TooManyOpenFiles) == "TooManyOpenFiles");
 }
 
 test("TtyError and StringError") {

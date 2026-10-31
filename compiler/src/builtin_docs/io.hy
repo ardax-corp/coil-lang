@@ -173,6 +173,9 @@ enum IoError {
     /// its own protocol, for example a TLS alert; the package's API says
     /// which.
     Protocol,
+    /// The process or the system has as many files and sockets open as it
+    /// may (EMFILE / ENFILE). Close streams you are done with.
+    TooManyOpenFiles,
 }
 
 /// Types that bytes can be read from; implemented for `Stream`.

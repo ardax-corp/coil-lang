@@ -1190,6 +1190,9 @@ pub struct Machine<const S: usize> {
     sched: Option<Box<crate::task::Scheduler>>,
     /// Message of a panic a child task raised (the scope reports it).
     task_panic_message: Option<String>,
+    /// A collector-run `drop` panicked under the test harness: the job stops
+    /// at the next fuel charge and runs no more finalizers.
+    finalizer_aborted: bool,
     /// Unwinder state (`vm_unwind.rs`): a panic that may run `defer`s.
     unwind: Unwind,
     /// Global static slots (`LoadStatic` / `StoreStatic`).
@@ -1342,6 +1345,7 @@ impl<const S: usize> Machine<S> {
             panic_without_location: false,
             sched: None,
             task_panic_message: None,
+            finalizer_aborted: false,
             unwind: Unwind::default(),
             statics: Vec::new(),
             program_debug: ProgramDebug::default(),
@@ -1450,6 +1454,10 @@ impl<const S: usize> Machine<S> {
     #[inline(never)]
     fn step_budget_out(&mut self, pc: usize) -> bool {
         self.fuel = 1;
+        if self.finalizer_aborted {
+            self.panicked = true;
+            return false;
+        }
         if self.heap_cap_hit {
             if self.panicked {
                 return false;
@@ -3089,13 +3097,37 @@ impl<const S: usize> Machine<S> {
     }
 
     fn run_finalizer(&mut self, self_val: Value, pc: u32) {
-        if !self.claim_finalizer(self_val) {
+        if self.finalizer_aborted || !self.claim_finalizer(self_val) {
             return;
         }
         let was_panicked = self.panicked;
         self.panicked = false;
         let _ = self.call_function(pc, &[self_val]);
+        if self.panicked {
+            self.abort_after_finalizer_panic();
+            return;
+        }
         self.panicked = was_panicked;
+    }
+
+    /// A `drop` the collector (or teardown) ran panicked: the program ends
+    /// here, without running any later code, `defer` or finalizer. The panic
+    /// was already reported. Under the test harness (`env::trap_exit`) only
+    /// the job stops: it is marked panicked, and the next fuel charge (a
+    /// call or loop back edge) ends it without unwinding.
+    #[cold]
+    #[inline(never)]
+    fn abort_after_finalizer_panic(&mut self) {
+        if !crate::env::exit_trapped() {
+            if let Some(out) = self.output.as_mut() {
+                let _ = out.flush();
+            }
+            let _ = io::stdout().flush();
+            let _ = io::stderr().flush();
+            std::process::exit(1);
+        }
+        self.finalizer_aborted = true;
+        self.fuel = 1;
     }
 
     fn register_finalizer(&mut self, type_id: u32, pc: u32) {
@@ -4080,6 +4112,7 @@ impl<const S: usize> Machine<S> {
         // different one next, where the same `type_id` names another type.
         self.finalizer_by_type.clear();
         self.finalizer_pcs.clear();
+        self.finalizer_aborted = false;
         self.gc_in_progress = false;
         self.gc_deferred = false;
         if self.heap.is_borrowed() {
