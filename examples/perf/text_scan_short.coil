@@ -1,0 +1,113 @@
+// Short-string search: the words and lines real text code works on are
+// shorter than one 64-byte scan chunk. Prints ns per call for plain Coil
+// byte loops over 54-byte lines and the stdlib `is_ascii` / `find` /
+// `split` on them. Byte-lane SIMD (docs/internals/byte-simd.md) covers the
+// tail of a scan with one padded chunk.
+use clock::mono_nanos;
+use io::{stdout, write};
+use string::{format, to_bytes};
+use text::{Pattern, Searchable, is_ascii};
+
+fn say(string s) {
+    write(stdout(), to_bytes(s));
+}
+
+/// First `b` at or after `from`, or -1.
+fn find_byte(string s, int b, int from) -> int {
+    let n = s.len();
+    let i = from;
+    while i < n {
+        if s[i] as int == b {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+/// Whether every byte is below 128, as a plain loop.
+fn all_ascii(string s) -> bool {
+    let i = 0;
+    while i < s.len() {
+        if s[i] as int >= 128 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn line(int k) -> string {
+    let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
+    let s = "";
+    let i = 0;
+    while s.len() < 50 {
+        s = s + words[(i + k) % 8] + " ";
+        i = i + 1;
+    }
+    return s + format("%i", k % 10);
+}
+
+fn main() {
+    let lines: Vec<string> = Vec::new();
+    let k = 0;
+    while k < 1000 {
+        lines.push(line(k));
+        k = k + 1;
+    }
+    let reps = 200;
+    let calls = reps * lines.len();
+
+    let t0 = mono_nanos();
+    let acc = 0;
+    let r = 0;
+    while r < reps {
+        for l in lines {
+            acc = acc + find_byte(l, 59, r % 3);
+        }
+        r = r + 1;
+    }
+    let t1 = mono_nanos();
+    r = 0;
+    while r < reps {
+        for l in lines {
+            if all_ascii(l) {
+                acc = acc + 1;
+            }
+        }
+        r = r + 1;
+    }
+    let t2 = mono_nanos();
+    r = 0;
+    while r < reps {
+        for l in lines {
+            if is_ascii(l) {
+                acc = acc + 1;
+            }
+        }
+        r = r + 1;
+    }
+    let t3 = mono_nanos();
+    r = 0;
+    while r < reps {
+        for l in lines {
+            acc = acc + (";".find_in(l, r % 3) ?? new text::Span(0, 0)).start;
+        }
+        r = r + 1;
+    }
+    let t4 = mono_nanos();
+    r = 0;
+    while r < reps {
+        for l in lines {
+            acc = acc + l.split(" ").len();
+        }
+        r = r + 1;
+    }
+    let t5 = mono_nanos();
+    say(format("lines=%i acc=%i\n", lines.len(), acc));
+    say(format("loop find_byte   %i ns\n", (t1 - t0) / calls));
+    say(format("loop all_ascii   %i ns\n", (t2 - t1) / calls));
+    say(format("stdlib is_ascii  %i ns\n", (t3 - t2) / calls));
+    say(format("stdlib find byte %i ns\n", (t4 - t3) / calls));
+    say(format("stdlib split     %i ns\n", (t5 - t4) / calls));
+}

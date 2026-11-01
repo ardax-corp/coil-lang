@@ -276,6 +276,73 @@ test("a two-byte filter at every position") {
     }
 }
 
+// A predicate that holds for byte 0: lanes past the end of a short
+// string must never count as a match.
+fn first_below(string s, byte lim) -> int {
+    let i = 0;
+    while i < s.len() {
+        if s[i] < lim {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+test("short strings: lanes past the end never match") {
+    let n = 0;
+    while n <= 70 {
+        let s = with_mark(n, -1, ",");
+        assert!(first_below(s, 1 as byte) == -1);
+        assert!(first_below(s, 120 as byte) == -1);
+        if n > 0 {
+            assert!(first_below(s, 121 as byte) == 0);
+        }
+        n = n + 1;
+    }
+}
+
+test("short strings: a bound below the length stops the scan") {
+    let s = with_mark(40, 30, ";");
+    assert!(find_upto(s, 59, 0, 30) == -1);
+    assert!(find_upto(s, 59, 0, 31) == 30);
+    assert!(find_upto(s, 59, 25, 31) == 30);
+    assert!(find_upto(s, 59, 31, 40) == -1);
+}
+
+// Reads one byte past `i`: the last iteration reads past the end.
+fn pair_past_end(string s) -> int {
+    let i = 0;
+    while i < s.len() {
+        if s[i] == 59 as byte && s[i + 1] == 59 as byte {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn short_pair_past_end() -> int {
+    return pair_past_end(with_mark(20, 19, ";"));
+}
+
+test("short strings: a read past the end still panics") {
+    assert!(pair_past_end(with_mark(19, 5, ";;")) == 5);
+    assert!(panics(short_pair_past_end));
+}
+
+test("short strings: a two-byte filter and a slice view") {
+    let s = with_mark(9, 7, ";,");
+    assert!(find_pair(s, 59 as byte, 44 as byte) == 7);
+    let base = filler(200) + "," + filler(10);
+    let view = match slice_bytes(base, 195, base.len()) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "slice",
+    };
+    assert!(find_byte(view, 44, 0) == 5);
+    assert!(find_byte(view, 44, 6) == -1);
+}
+
 // The first `needle` in `hay` at or after `start` (clamped), or `-1`.
 fn find_from(string hay, string needle, int start) -> int {
     let n = hay.len();
