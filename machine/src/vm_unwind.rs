@@ -26,8 +26,9 @@ struct Unwind {
     /// return address, not the instruction that panicked.
     resumed: bool,
     /// Generator closes under way, innermost last: the frame depth the
-    /// generator's frames start at and the closer's stack top.
-    closing: Vec<(usize, usize)>,
+    /// generator's frames start at, the closer's stack top, and whether
+    /// the closer is the collector (its execution ends with the close).
+    closing: Vec<(usize, usize, bool)>,
 }
 
 impl<const S: usize> Machine<S> {
@@ -75,8 +76,8 @@ impl<const S: usize> Machine<S> {
     /// After a panic stopped `execute`: the pad to continue at, or `None`
     /// when no frame left above the floor has one (the panic then stands).
     fn unwind_step(&mut self) -> Option<usize> {
-        if let Some(&(depth, top)) = self.unwind.closing.last() {
-            return Some(self.close_step(depth, top));
+        if let Some(&(depth, top, host)) = self.unwind.closing.last() {
+            return self.close_step(depth, top, host);
         }
         if !std::mem::take(&mut self.unwind.armed) || self.program_debug.cleanup.is_empty() {
             return None;
@@ -124,13 +125,7 @@ impl<const S: usize> Machine<S> {
             target = sub;
         }
         let coro = target.as_ref();
-        let has_pad = coro.state == CoroState::Suspended
-            && coro.started
-            && coro.saved_frames.iter().enumerate().any(|(k, &(fip, _))| {
-                let pc = if k + 1 == coro.saved_frames.len() { fip } else { fip.saturating_sub(1) };
-                common::cleanup_range_at(&self.program_debug.cleanup, pc).is_some()
-            });
-        if !has_pad {
+        if !(coro.state == CoroState::Suspended && coro.started && self.coro_has_pad(coro)) {
             let mut link = Some(gc);
             while let Some(c) = link {
                 link = c.as_ref().yield_from;
@@ -151,17 +146,38 @@ impl<const S: usize> Machine<S> {
             link = c.as_ref().delegator;
             Self::finish_coroutine(c);
         }
-        self.unwind.closing.push((depth, top));
+        self.unwind.closing.push((depth, top, false));
         self.unwind.resumed = false;
         self.panicked = true;
         TaskFlow::Unwind
     }
 
+    /// Some frame of suspended generator `coro` would run a cleanup pad.
+    fn coro_has_pad(&self, coro: &crate::memory::ObjCoroutine) -> bool {
+        let n = coro.saved_frames.len();
+        coro.saved_frames.iter().enumerate().any(|(k, &(fip, _))| {
+            let pc = if k + 1 == n { fip } else { fip.saturating_sub(1) };
+            common::cleanup_range_at(&self.program_debug.cleanup, pc).is_some()
+        })
+    }
+
+    /// List generator `gc`, just suspended, for a close by the collector
+    /// when a `defer` of it is armed.
+    fn note_suspended_coroutine(&mut self, gc: RefCoroutine) {
+        if self.program_debug.cleanup.is_empty() || gc.as_ref().closeable || !self.coro_has_pad(gc.as_ref()) {
+            return;
+        }
+        Self::with_coroutine_mut(gc, |c| c.closeable = true);
+        self.closeables = true;
+        self.heap.note_closeable(Object::Coroutine(gc));
+    }
+
     /// The next step of the innermost close: the next pad among the
     /// generator's frames (from `depth` up), or, once none is left, its
     /// frames dropped and the closer resumed past its `coro_close` with the
-    /// result word on its stack top `top`.
-    fn close_step(&mut self, depth: usize, top: usize) -> usize {
+    /// result word on its stack top `top` (`None` when the collector
+    /// closed it: that execution is over).
+    fn close_step(&mut self, depth: usize, top: usize, host: bool) -> Option<usize> {
         let exact_top = !std::mem::take(&mut self.unwind.resumed);
         self.unwind.armed = false;
         self.return_bookkeeping = true;
@@ -180,7 +196,7 @@ impl<const S: usize> Machine<S> {
                 self.stack.seek(need);
             }
             self.panicked = false;
-            return range.pad_pc as usize;
+            return Some(range.pad_pc as usize);
         }
         while self.frames.len() > depth {
             self.unwind_drop_frame();
@@ -188,8 +204,11 @@ impl<const S: usize> Machine<S> {
         self.unwind.closing.pop();
         self.panicked = false;
         self.stack.seek(top);
+        if host {
+            return None;
+        }
         self.stack.push(Value::default());
-        self.frames.get().tell()
+        Some(self.frames.get().tell())
     }
 
     /// `unwind_resume`: the pad ran; drop its frame (unless it is the floor)

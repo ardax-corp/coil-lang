@@ -1318,6 +1318,7 @@ impl<const S: usize> Machine<S> {
                         delegator: None,
                         yield_from_resume_ip: 0,
                         started: false,
+                        closeable: false,
                     };
                     let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
 

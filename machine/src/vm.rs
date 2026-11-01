@@ -1193,6 +1193,9 @@ pub struct Machine<const S: usize> {
     /// A collector-run `drop` panicked under the test harness: the job stops
     /// at the next fuel charge and runs no more finalizers.
     finalizer_aborted: bool,
+    /// Some generator suspended with a `defer` armed: the collector looks
+    /// for ones to close.
+    closeables: bool,
     /// Unwinder state (`vm_unwind.rs`): a panic that may run `defer`s.
     unwind: Unwind,
     /// Global static slots (`LoadStatic` / `StoreStatic`).
@@ -1346,6 +1349,7 @@ impl<const S: usize> Machine<S> {
             sched: None,
             task_panic_message: None,
             finalizer_aborted: false,
+            closeables: false,
             unwind: Unwind::default(),
             statics: Vec::new(),
             program_debug: ProgramDebug::default(),
@@ -2364,7 +2368,7 @@ impl<const S: usize> Machine<S> {
                     obj.mark_references(&self.heap, &mut gray);
                 }
                 for (val, pc) in queue {
-                    self.run_finalizer(val, pc);
+                    self.run_pending(val, pc);
                 }
                 self.unmark_heap();
                 self.mark_from_vm_roots();
@@ -2674,7 +2678,7 @@ impl<const S: usize> Machine<S> {
             while !self.heap.mark_quantum(usize::MAX) {}
             self.gc_in_progress = true;
             for (val, pc) in queue {
-                self.run_finalizer(val, pc);
+                self.run_pending(val, pc);
             }
             self.gc_in_progress = false;
             self.gc_remark_vm_roots();
@@ -3055,16 +3059,90 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, u32)> {
-        if self.finalizer_by_type.is_empty() {
+    /// The unmarked objects that owe a `drop` (its pc) or, for a generator
+    /// suspended with a `defer` armed, a close (`None`).
+    fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, Option<u32>)> {
+        if self.finalizer_by_type.is_empty() && !self.closeables {
             return Vec::new();
         }
         // The heap lists its finalizable objects: no walk of the heap (#1870).
         let unmarked = self.heap.unmarked_finalizable();
         unmarked
             .into_iter()
-            .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_finalizer(obj)?)))
+            .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_cleanup(obj)?)))
             .collect()
+    }
+
+    /// What `obj` still owes: its `drop` pc, or a close for a generator.
+    fn pending_cleanup(&self, obj: Object) -> Option<Option<u32>> {
+        match obj {
+            Object::Coroutine(gc) => {
+                let c = gc.as_ref();
+                (c.closeable && c.state == CoroState::Suspended).then_some(None)
+            }
+            _ => self.pending_finalizer(obj).map(Some),
+        }
+    }
+
+    fn run_pending(&mut self, val: Value, pc: Option<u32>) {
+        match pc {
+            Some(pc) => self.run_finalizer(val, pc),
+            None => self.run_coro_close(val),
+        }
+    }
+
+    /// Close a generator nothing reaches any more (the collector, or
+    /// teardown): its armed `defer`s run in a nested execution, as a
+    /// `drop` does. A panic in one aborts, as one in a `drop` does.
+    fn run_coro_close(&mut self, handle: Value) {
+        if self.finalizer_aborted {
+            return;
+        }
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        let constants: &[u64] = unsafe {
+            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+        };
+        self.bind_frame_reserve(code, constants);
+        if self.frames.len() >= crate::MAX_CALL_FRAMES {
+            return;
+        }
+        let was_panicked = self.panicked;
+        self.panicked = false;
+        let saved_sp = self.stack.tell();
+        self.nested_depth += 1;
+        self.return_bookkeeping = true;
+        // A host frame the close returns to; nothing runs in it.
+        self.frames.setup_current_and_advance(|f| {
+            f.seek(0);
+            f.set(saved_sp);
+        });
+        self.nested_frame_depths.push(self.frames.len());
+        let (mut ip, mut sp) = (0, saved_sp);
+        if let TaskFlow::Unwind = self.coro_close(handle, &mut ip, &mut sp) {
+            // Once its frames are gone the close ends this execution
+            // instead of going on in the host frame.
+            if let Some(last) = self.unwind.closing.last_mut() {
+                last.2 = true;
+            }
+            if let Some(start) = self.unwind_step() {
+                let _ = self.run_execute(code, constants, start);
+            }
+        }
+        let _ = self.pop_call_frame();
+        self.stack.seek(saved_sp);
+        self.nested_depth -= 1;
+        let _ = self.nested_frame_depths.pop();
+        self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
+        if self.panicked {
+            self.abort_after_finalizer_panic();
+            return;
+        }
+        self.panicked = was_panicked;
     }
 
     /// Drop PC for a tagged instance or enum whose finalizer has not run.
@@ -3140,17 +3218,17 @@ impl<const S: usize> Machine<S> {
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
-        if self.program_code.is_empty() || self.finalizer_by_type.is_empty() {
+        if self.program_code.is_empty() || (self.finalizer_by_type.is_empty() && !self.closeables) {
             return;
         }
         let mut queue = Vec::new();
         for obj in self.heap.objects() {
-            if let Some(pc) = self.pending_finalizer(obj) {
+            if let Some(pc) = self.pending_cleanup(obj) {
                 queue.push((Value::from(obj.addr()), pc));
             }
         }
         for (val, pc) in queue {
-            self.run_finalizer(val, pc);
+            self.run_pending(val, pc);
         }
     }
 
@@ -3923,6 +4001,7 @@ impl<const S: usize> Machine<S> {
         };
 
         self.save_coroutine_state(sub_gc, *ip, *sp, sub_base_sp, sub_frame_depth);
+        self.note_suspended_coroutine(sub_gc);
 
         // The value goes to whoever resumed the delegation chain: the
         // lowest `resume_stack` entry among the delegate and its delegators
@@ -4004,6 +4083,7 @@ impl<const S: usize> Machine<S> {
             coro.resume_ip = *ip;
             coro.state = CoroState::Suspended;
         });
+        self.note_suspended_coroutine(coro_gc);
 
         self.stack.seek(base_sp);
         while self.frames.len() > frame_depth {
@@ -4114,6 +4194,7 @@ impl<const S: usize> Machine<S> {
         self.finalizer_by_type.clear();
         self.finalizer_pcs.clear();
         self.finalizer_aborted = false;
+        self.closeables = false;
         self.gc_in_progress = false;
         self.gc_deferred = false;
         if self.heap.is_borrowed() {
