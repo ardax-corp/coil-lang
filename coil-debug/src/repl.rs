@@ -407,8 +407,8 @@ mod tests {
     #[test]
     fn parse_break_line_and_fn_shapes() {
         assert!("12".chars().all(|c| c.is_ascii_digit()));
-        let (file, line) = "fib.hy:3".rsplit_once(':').unwrap();
-        assert_eq!(file, "fib.hy");
+        let (file, line) = "fib.coil:3".rsplit_once(':').unwrap();
+        assert_eq!(file, "fib.coil");
         assert_eq!(line, "3");
     }
 }

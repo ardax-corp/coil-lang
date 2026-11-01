@@ -322,9 +322,9 @@ mod tests {
     #[test]
     fn lcov_sums_records_and_resolves_paths() {
         let base = Path::new("/nonexistent/proj");
-        let text = "TN:\nSF:src/a.hy\nDA:1,3\nDA:2,0\nLF:2\nLH:1\nend_of_record\nSF:src/a.hy\nDA:2,1\nend_of_record\n";
+        let text = "TN:\nSF:src/a.coil\nDA:1,3\nDA:2,0\nLF:2\nLH:1\nend_of_record\nSF:src/a.coil\nDA:2,1\nend_of_record\n";
         let files = parse_lcov(text, base);
-        let lines = &files[&base.join("src/a.hy")];
+        let lines = &files[&base.join("src/a.coil")];
         assert_eq!(lines.iter().map(|(l, h)| (*l, *h)).collect::<Vec<_>>(), [(1, 3), (2, 1)]);
     }
 

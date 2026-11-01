@@ -7,12 +7,12 @@ fn compile_dissect_fib_symbols_locals_and_il() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root");
-    let path = workspace_root.join("examples/fib.hy");
+    let path = workspace_root.join("examples/fib.coil");
     let mut pipeline = Pipeline::new();
     pipeline.bind_workspace_language_roots();
     let arts = pipeline
         .compile_dissect(path.to_str().unwrap(), true)
-        .expect("fib.hy should compile via compile_dissect");
+        .expect("fib.coil should compile via compile_dissect");
 
     let fib = arts
         .functions
@@ -45,12 +45,12 @@ fn compile_dissect_without_il_leaves_snapshot_none() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root");
-    let path = workspace_root.join("examples/fib.hy");
+    let path = workspace_root.join("examples/fib.coil");
     let mut pipeline = Pipeline::new();
     pipeline.bind_workspace_language_roots();
     let arts = pipeline
         .compile_dissect(path.to_str().unwrap(), false)
-        .expect("fib.hy should compile");
+        .expect("fib.coil should compile");
     assert!(arts.il.is_none());
     assert!(
         format_bytecode(&arts, None).is_ok(),
@@ -64,7 +64,7 @@ fn compile_dissect_attach_matches_compile_grant() {
     let dir = std::env::temp_dir().join(format!("coil_dissect_attach_{pid}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let entry = dir.join("main.hy");
+    let entry = dir.join("main.coil");
     std::fs::write(
         &entry,
         "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",

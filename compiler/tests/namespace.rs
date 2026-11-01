@@ -200,17 +200,17 @@ fn multiple_roots_search_in_order() {
         workspace_stdlib().display()
     );
     let files = &[
-        ("src/main.hy", "use foo::greet;\nfn main() { greet(); }\n"),
+        ("src/main.coil", "use foo::greet;\nfn main() { greet(); }\n"),
         (
-            "src/foo/greet.hy",
+            "src/foo/greet.coil",
             "use io::{stdout, write};\nuse string::{format, to_bytes};\nfn greet() { write(stdout(), to_bytes(format(\"%s\", \"from-src\"))); }\n",
         ),
         (
-            "vendor/foo/greet.hy",
+            "vendor/foo/greet.coil",
             "use io::{stdout, write};\nuse string::{format, to_bytes};\nfn greet() { write(stdout(), to_bytes(format(\"%s\", \"from-vendor\"))); }\n",
         ),
     ];
-    let (root, entry) = build_project("multiple_roots", &manifest, files, "src/main.hy");
+    let (root, entry) = build_project("multiple_roots", &manifest, files, "src/main.coil");
     let output = run_project_with_extra(&root, &entry, &[root.join("vendor")]);
     assert_eq!(output, "from-src");
 }
@@ -218,9 +218,9 @@ fn multiple_roots_search_in_order() {
 #[test]
 fn no_manifest_uses_default_src_root() {
     let files = &[
-        ("src/main.hy", "use foo::greet;\nfn main() { greet(); }\n"),
+        ("src/main.coil", "use foo::greet;\nfn main() { greet(); }\n"),
         (
-            "src/foo/greet.hy",
+            "src/foo/greet.coil",
             // No coil.toml → no stdlib root; use virtual `io::write` only.
             "use io::{stdout, write};\nuse string::{format, to_bytes};\nfn greet() { write(stdout(), to_bytes(format(\"%i\", 42))); }\n",
         ),
@@ -235,7 +235,7 @@ fn no_manifest_uses_default_src_root() {
         }
         std::fs::write(&full, content).expect("write source file");
     }
-    let entry_full = tmp.join("src/main.hy");
+    let entry_full = tmp.join("src/main.coil");
     let output = run_project(&tmp, &entry_full);
     assert_eq!(output, "42");
 }
@@ -251,7 +251,7 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
     // modules do not rewrite bare recursive calls to the FQN today.
     let files = &[
         (
-            "src/main.hy",
+            "src/main.coil",
             "use io::{stdout, write};\nuse string::{format, to_bytes};\nuse util::inc;\n\
              fn id<T>(T x) -> T { return x; }\n\
              fn fib(int n) -> int {\n\
@@ -264,11 +264,11 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
              }\n",
         ),
         (
-            "src/util/inc.hy",
+            "src/util/inc.coil",
             "fn inc(int x) -> int { return x + 1; }\n",
         ),
     ];
-    let (root, entry) = build_project("two_module_polyfn_fib", &manifest, files, "src/main.hy");
+    let (root, entry) = build_project("two_module_polyfn_fib", &manifest, files, "src/main.coil");
 
     let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
     let original_cwd = std::env::current_dir().expect("get cwd");
@@ -349,10 +349,10 @@ fn parse_fail_dependency_emits_single_diagnostic() {
 
     let manifest = manifest_src_and_stdlib();
     let files = &[
-        ("src/main.hy", "mod bad;\nfn main() {}\n"),
-        ("src/bad.hy", "@@@ not valid coil\n"),
+        ("src/main.coil", "mod bad;\nfn main() {}\n"),
+        ("src/bad.coil", "@@@ not valid coil\n"),
     ];
-    let (root, entry) = build_project("parse_fail_dep", &manifest, files, "src/main.hy");
+    let (root, entry) = build_project("parse_fail_dep", &manifest, files, "src/main.coil");
 
     let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
     let original_cwd = std::env::current_dir().expect("get cwd");
@@ -386,7 +386,7 @@ fn parse_fail_dependency_emits_single_diagnostic() {
         "parse diagnostic appears duplicated (discover+compile): hit_count={parse_hits}, out={out:?}"
     );
     assert!(
-        out.contains("bad.hy"),
+        out.contains("bad.coil"),
         "diagnostic should name the unparseable dependency: {out:?}"
     );
 }
@@ -394,10 +394,10 @@ fn parse_fail_dependency_emits_single_diagnostic() {
 #[test]
 fn bind_project_root_sets_explicit_roots_without_toml() {
     let files = &[(
-        "src/main.hy",
+        "src/main.coil",
         "use io::{stdout, write};\nuse string::{format, to_bytes};\nfn main() { write(stdout(), to_bytes(format(\"%i\", 42))); }\n",
     )];
-    let (root, entry) = build_project("bind_roots", "", files, "src/main.hy");
+    let (root, entry) = build_project("bind_roots", "", files, "src/main.coil");
 
     let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
     let original_cwd = std::env::current_dir().expect("get cwd");
@@ -429,7 +429,7 @@ fn multi_file_try_operator_pool_survives_module_link() {
     let manifest = manifest_src_and_stdlib();
     let files = [
         (
-            "src/main.hy",
+            "src/main.coil",
             r#"
 use thread::{channel, join, send, spawn, Sender, Thread};
 use pool::worker::run_jobs;
@@ -467,7 +467,7 @@ fn main() {
 "#,
         ),
         (
-            "src/pool/worker.hy",
+            "src/pool/worker.coil",
             r#"
 use thread::{recv, Receiver, ChannelError};
 use io::{stdout, write};
@@ -486,7 +486,7 @@ fn run_jobs(Receiver rx) -> Result<int, ChannelError> {
 "#,
         ),
     ];
-    let (root, entry) = build_project("try_pool", &manifest, &files, "src/main.hy");
+    let (root, entry) = build_project("try_pool", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
         let (bytecode, constants, pipeline) =
@@ -505,7 +505,7 @@ fn multi_file_io_hostinvoke_try_in_dependency() {
     let manifest = manifest_src_and_stdlib();
     let files = [
         (
-            "src/main.hy",
+            "src/main.coil",
             r#"
 use io::{stdout, write};
 
@@ -519,7 +519,7 @@ fn main() {
 "#,
         ),
         (
-            "src/helper.hy",
+            "src/helper.coil",
             r#"
 use io::{close, open, write, IoError};
 
@@ -537,7 +537,7 @@ fn write_greeting() -> Result<(), IoError> {
 "#,
         ),
     ];
-    let (root, entry) = build_project("io_host_try", &manifest, &files, "src/main.hy");
+    let (root, entry) = build_project("io_host_try", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
         let (bytecode, constants, pipeline) =
@@ -558,7 +558,7 @@ fn multi_file_io_hostinvoke_try_in_nested_dependency() {
     let manifest = manifest_src_and_stdlib();
     let files = [
         (
-            "src/main.hy",
+            "src/main.coil",
             r#"
 use facade::roundtrip;
 use io::{stdout, write};
@@ -571,7 +571,7 @@ fn main() {
 "#,
         ),
         (
-            "src/facade.hy",
+            "src/facade.coil",
             r#"
 use io::{IoError};
 use transport::write_then_read;
@@ -583,7 +583,7 @@ fn roundtrip() -> Result<(), IoError> {
 "#,
         ),
         (
-            "src/transport.hy",
+            "src/transport.coil",
             r#"
 use io::{close, open, write, IoError};
 use io::sync::{read_exact};
@@ -606,7 +606,7 @@ fn write_then_read(string path) -> Result<(), IoError> {
 "#,
         ),
     ];
-    let (root, entry) = build_project("io_host_nested", &manifest, &files, "src/main.hy");
+    let (root, entry) = build_project("io_host_nested", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
         let (bytecode, constants, pipeline) =
@@ -675,7 +675,7 @@ fn build_libsum_into(dir: &Path) -> Option<PathBuf> {
 fn run_coi233_worker_ffi_project() -> Option<String> {
     let files = [
         (
-            "src/main.hy",
+            "src/main.coil",
             r#"
 use ffi::{dload};
 use thread::{join, spawn};
@@ -711,7 +711,7 @@ fn main() {
             "coil-security-pin: not a shared library\n",
         ),
     ];
-    let (root, entry) = build_project("coi233_worker_ffi", "", &files, "src/main.hy");
+    let (root, entry) = build_project("coi233_worker_ffi", "", &files, "src/main.coil");
     let Some(libsum) = build_libsum_into(&root.join("allowed")) else {
         let _ = std::fs::remove_dir_all(&root);
         return None;
@@ -781,7 +781,7 @@ fn worker_dload_sees_parent_ffi_search_paths() {
 fn two_slot_result_address_taken_in_other_module_stays_boxed() {
     let files = [
         (
-            "src/arith.hy",
+            "src/arith.coil",
             r#"
 fn div(int a, int b) -> Result<int, int> {
     if b == 0 {
@@ -792,7 +792,7 @@ fn div(int a, int b) -> Result<int, int> {
 "#,
         ),
         (
-            "src/main.hy",
+            "src/main.coil",
             r#"
 use arith::{div};
 use io::{stdout, write};
@@ -817,7 +817,7 @@ fn main() {
         "two_slot_escape_cross_file",
         &manifest_src_and_stdlib(),
         &files,
-        "src/main.hy",
+        "src/main.coil",
     );
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
@@ -855,7 +855,7 @@ fn main() {
 fn two_slot_result_direct_cross_module_call_keeps_pair_abi() {
     let files = [
         (
-            "src/arith.hy",
+            "src/arith.coil",
             r#"
 fn div(int a, int b) -> Result<int, int> {
     if b == 0 {
@@ -866,7 +866,7 @@ fn div(int a, int b) -> Result<int, int> {
 "#,
         ),
         (
-            "src/main.hy",
+            "src/main.coil",
             r#"
 use arith::{div};
 use io::{stdout, write};
@@ -886,7 +886,7 @@ fn main() {
         "two_slot_direct_cross_file",
         &manifest_src_and_stdlib(),
         &files,
-        "src/main.hy",
+        "src/main.coil",
     );
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
@@ -936,7 +936,7 @@ fn independent_modules_link_in_the_same_order_every_compile() {
             let src = format!(
                 "class {class} {{\n    pub v: int,\n}}\n\nimpl {class} {{\n    pub static fn make() -> {class} {{\n        return new {class}({i});\n    }}\n\n    pub fn get() -> int {{\n        return self.v;\n    }}\n}}\n\nfn {n}_value() -> int {{\n    return {class}::make().get();\n}}\n"
             );
-            (format!("src/{n}.hy"), src)
+            (format!("src/{n}.coil"), src)
         })
         .collect();
     let mut main = String::new();
@@ -948,9 +948,9 @@ fn independent_modules_link_in_the_same_order_every_compile() {
         main.push_str(&format!("    total = total + {n}_value();\n"));
     }
     main.push_str("}\n");
-    files.push(("src/main.hy".to_string(), main));
+    files.push(("src/main.coil".to_string(), main));
     let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
-    let (root, entry) = build_project("module_order", "", &refs, "src/main.hy");
+    let (root, entry) = build_project("module_order", "", &refs, "src/main.coil");
 
     let compile = || {
         with_project_cwd(&root, || {
@@ -968,10 +968,10 @@ fn independent_modules_link_in_the_same_order_every_compile() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Compile `files` (entry `src/main.hy`) with `./src` as a root and return
+/// Compile `files` (entry `src/main.coil`) with `./src` as a root and return
 /// the error messages, for programs expected to fail.
 fn compile_errors(test_name: &str, files: &[(&str, &str)]) -> Vec<String> {
-    let (root, entry) = build_project(test_name, "", files, "src/main.hy");
+    let (root, entry) = build_project(test_name, "", files, "src/main.coil");
     let msgs = with_project_cwd(&root, || {
         let mut pipeline = Pipeline::with_reporter(reporting::ReportConfig::default(), Box::new(std::io::sink()));
         bind_ns_pipeline(&mut pipeline, &[root.join("src")]);
@@ -999,11 +999,11 @@ fn macro_provider_parse_error_is_reported_at_the_use_sites() {
         "macro_provider_parse_error",
         &[
             (
-                "src/mac.hy",
+                "src/mac.coil",
                 "use macro::{TypeDecl, Code, raw};\npub trait Broken\nderive Named(TypeDecl t) -> Code { return raw(\"\"); }\nderive Twice(TypeDecl t) -> Code { return raw(\"\"); }\n",
             ),
             (
-                "src/main.hy",
+                "src/main.coil",
                 "use mac::Named;\nuse mac::Twice;\n\n#[derive(Named)]\nclass A {\n    pub x: int,\n}\n\n#[derive(Twice)]\nclass B {\n    pub x: int,\n}\n\nfn main() {}\n",
             ),
         ],
@@ -1028,7 +1028,7 @@ fn two_unresolved_derives_report_unknown_derives_not_an_expansion_loop() {
     let msgs = compile_errors(
         "two_unresolved_derives",
         &[(
-            "src/main.hy",
+            "src/main.coil",
             "#[derive(Named)]\nclass A {\n    pub x: int,\n}\n\n#[derive(Twice)]\nclass B {\n    pub x: int,\n}\n\nfn main() {}\n",
         )],
     );

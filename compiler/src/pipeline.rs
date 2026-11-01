@@ -938,7 +938,7 @@ impl Pipeline {
                     return;
                 }
                 // Compiler virtual modules (`prelude`, `ffi`, …) are not
-                // `.hy` files, skip disk discovery for those paths.
+                // `.coil` files, skip disk discovery for those paths.
                 {
                     use crate::typechecking::VirtualModules;
                     let vm = VirtualModules::new();
@@ -1610,7 +1610,7 @@ impl Pipeline {
         }
 
         // Wrap the bytecode in the versioned `ArchivedProgram` envelope
-        // so that older `.hyc` files can be rejected at load time via
+        // so that older `.ccoil` files can be rejected at load time via
         // `version` mismatch (see `Pipeline::run`).
         let debug = self.program_debug_full();
         let level = self.debug_level();
@@ -1687,7 +1687,7 @@ impl Pipeline {
         // A `readonly class` derives its implied `Eq` / `Hash` there too.
         let readonly_class = src.contains("readonly class");
         if src.contains("#[") || trait_contracts || macro_call || readonly_class {
-            let path = PathBuf::from("<input>.hy");
+            let path = PathBuf::from("<input>.coil");
             self.overlays.insert(path.clone(), src.to_string());
             let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));
             self.overlays.remove(&path);
@@ -1711,7 +1711,7 @@ impl Pipeline {
         self.entry_file = None;
         self.begin_compile_opt_stats();
 
-        // Discover disk modules (`io/sync.hy` in coil-stdlib, …) referenced by `use`
+        // Discover disk modules (`io/sync.coil` in coil-stdlib, …) referenced by `use`
         // before compiling the in-memory entry, same dependency order as
         // `compile_src_from_file`, without requiring a temp file.
         self.enqueue_uses(path, src, &ast);
@@ -2604,7 +2604,7 @@ mod tests {
         let src = "fn unused(int x) -> int {\n    return x * 3;\n}\n\nfn main() {\n    let _ = 1;\n}\n";
         let dir = std::env::temp_dir().join(format!("coil_keep_fns_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("keep.hy");
+        let file = dir.join("keep.coil");
         std::fs::write(&file, src).unwrap();
         let symbols = |keep: Option<crate::KeepFnFilter>| {
             let mut p = Pipeline::new();
@@ -2617,9 +2617,9 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert!(!symbols(None).iter().any(|n| n.ends_with("unused")));
-        let kept = symbols(Some(Arc::new(|path: &str| path.ends_with("keep.hy"))));
+        let kept = symbols(Some(Arc::new(|path: &str| path.ends_with("keep.coil"))));
         assert!(kept.iter().any(|n| n.ends_with("unused")), "{kept:?}");
-        let other = symbols(Some(Arc::new(|path: &str| path.ends_with("other.hy"))));
+        let other = symbols(Some(Arc::new(|path: &str| path.ends_with("other.coil"))));
         assert!(!other.iter().any(|n| n.ends_with("unused")), "{other:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2633,10 +2633,10 @@ mod tests {
         let src = "class Box<T> {\n    pub item: T,\n}\n\nimpl Eq for Box<T: Eq> {\n    fn eq(Box<T> a, Box<T> b) -> bool {\n        return a.item == b.item;\n    }\n\n    fn ne(Box<T> a, Box<T> b) -> bool {\n        return !(a == b);\n    }\n}\n\nfn main() {\n    let a = new Box(1);\n    let b = new Box(2);\n    let c = a != b;\n}\n";
         let dir = std::env::temp_dir().join(format!("coil_keep_shared_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("keep_shared.hy");
+        let file = dir.join("keep_shared.coil");
         std::fs::write(&file, src).unwrap();
         let mut p = Pipeline::new();
-        p.set_keep_fns_in(Some(Arc::new(|path: &str| path.ends_with("keep_shared.hy"))));
+        p.set_keep_fns_in(Some(Arc::new(|path: &str| path.ends_with("keep_shared.coil"))));
         let compiled = p.compile_src_from_file(file.to_str().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(compiled.is_ok(), "{:?}", compiled.err());
@@ -3164,7 +3164,7 @@ fn main() { sum(10); }
             .parent()
             .unwrap();
         let src =
-            std::fs::read_to_string(root.join("examples/perf/vec_scan.hy")).expect("read vec_scan");
+            std::fs::read_to_string(root.join("examples/perf/vec_scan.coil")).expect("read vec_scan");
         let mut pipeline = Pipeline::new();
         pipeline.bind_workspace_language_roots();
         // `fill` and `scan` are called in a loop: inlined, their bodies go.
@@ -3227,7 +3227,7 @@ fn main() { sum(10); }
         pipeline.bind_workspace_language_roots();
         // `fill` is called in a loop: inlined, its body goes.
         pipeline.set_inline_max_cost(0);
-        let path = root.join("examples/perf/vec_scan.hy");
+        let path = root.join("examples/perf/vec_scan.coil");
         let (bytecode, constants) = pipeline
             .compile_src_from_file(path.to_str().unwrap())
             .expect("compile vec_scan from file");
@@ -3424,7 +3424,7 @@ fn main() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap();
-        let path = root.join("examples/perf/nsieve.hy");
+        let path = root.join("examples/perf/nsieve.coil");
         let mut pipeline = Pipeline::new();
         pipeline.bind_workspace_language_roots();
         let art = pipeline
@@ -3523,7 +3523,7 @@ fn main() -> int {
         // The dissect compile keeps the optimized pre-fuse IL; it reads a file.
         let dir = std::env::temp_dir().join(format!("coil_pure_scan_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("scan.hy");
+        let path = dir.join("scan.coil");
         std::fs::write(&path, src).expect("write source");
         let mut pipeline = Pipeline::new();
         let art = pipeline
@@ -4004,7 +4004,7 @@ fn main() -> int {
         let dir = std::env::temp_dir().join(format!("coil_b4_{name}_{pid}_{nanos}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let file = dir.join("main.hy");
+        let file = dir.join("main.coil");
         std::fs::write(&file, src).expect("write");
         (dir, file)
     }

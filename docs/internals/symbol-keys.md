@@ -105,7 +105,7 @@ consecutive unless another thread took ids in between. The host row's
 of a loop, removed, or run in parallel automatically, and a `pure fn`
 cannot call it (`E0413`).
 
-Tests: `tests/functions/fn_key.hy`, `tests/generics/fn_key_per_instance.hy`,
-`tests/generics/compile_fail/fn_key_generic_value.hy`, `tests/modules/fn_key_across_modules.hy`
-(with `examples/src/fn_key_mod.hy`), `tests/functions/compile_fail/fn_key_outside_function.hy`,
-`tests/host/symbol_next_id.hy`.
+Tests: `tests/functions/fn_key.coil`, `tests/generics/fn_key_per_instance.coil`,
+`tests/generics/compile_fail/fn_key_generic_value.coil`, `tests/modules/fn_key_across_modules.coil`
+(with `examples/src/fn_key_mod.coil`), `tests/functions/compile_fail/fn_key_outside_function.coil`,
+`tests/host/symbol_next_id.coil`.

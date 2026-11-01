@@ -48,7 +48,7 @@ Closures passed to `spawn` share the heap: they capture locals, classes and
 `Vec`s freely (no `PortableValue` copy, unlike `thread::spawn`).
 
 `task` is an embedded Coil module
-([`compiler/src/prelude/task.hy`](../../compiler/src/prelude/task.hy)), like
+([`compiler/src/prelude/task.coil`](../../compiler/src/prelude/task.coil)), like
 `macro`. It wraps VM natives from virtual `prelude::task`
 (HostInvoke **144–151**, archive minor 32, **153–155** `task_cancel` /
 `task_shield_enter` / `task_shield_exit`, archive minor 33, and **156–158**
@@ -233,7 +233,7 @@ functions); a partial application is not sendable.
   (coil-lang#786), and spawns its timer from a plain `gen fn` (coil-lang#787).
 - `io::drive` and `io::wait_ready` still run but no longer multiplex.
   Calling them warns `E0129` (deprecated) and points at `task::scope`.
-  Example: [`examples/task_files.hy`](../../examples/task_files.hy).
-- `task::block_on(h)` is plain library code in `task.hy`: it resumes `h`
+  Example: [`examples/task_files.coil`](../../examples/task_files.coil).
+- `task::block_on(h)` is plain library code in `task.coil`: it resumes `h`
   until `done(h)` and returns the completion value. It is not a prelude
   builtin; a bare `block_on` without `use task::block_on;` is `E0101`.

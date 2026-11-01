@@ -3695,13 +3695,13 @@
 
         let dir = std::env::temp_dir().join(format!("coil_debug_lines_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let edited = dir.join("edited.hy");
+        let edited = dir.join("edited.coil");
         // Byte 5 is inside `·`: reading this file would give a wrong line.
         std::fs::write(&edited, "// ··\n").unwrap();
         let mut vm = Machine::<8>::default();
         vm.set_program_debug(ProgramDebug {
             source_files: vec![
-                dir.join("missing.hy").display().to_string(),
+                dir.join("missing.coil").display().to_string(),
                 edited.display().to_string(),
             ],
             debug_locs: vec![
@@ -3724,7 +3724,7 @@
         assert_eq!(vm.debug_pc_line(0), Some((0, 7)));
         assert_eq!(vm.debug_pc_line(1), Some((1, 9)));
         let (path, line, column) = vm.resolve_pc_location(0).expect("location");
-        assert!(path.ends_with("missing.hy"), "{path}");
+        assert!(path.ends_with("missing.coil"), "{path}");
         assert_eq!((line, column), (7, 2));
         assert_eq!(vm.resolve_pc_location(1).map(|(_, l, c)| (l, c)), Some((9, 1)));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3737,7 +3737,7 @@
 
         let dir = std::env::temp_dir().join(format!("coil_debug_fallback_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("main.hy");
+        let file = dir.join("main.coil");
         std::fs::write(&file, "fn main() {\n    panic \"x\";\n}\n").unwrap();
         let mut vm = Machine::<8>::default();
         vm.set_program_debug(ProgramDebug {

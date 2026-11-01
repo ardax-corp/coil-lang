@@ -607,7 +607,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn index(source: &str) -> SymbolIndex {
-        SymbolIndex::from_source(PathBuf::from("test.hy"), source)
+        SymbolIndex::from_source(PathBuf::from("test.coil"), source)
     }
 
     #[test]

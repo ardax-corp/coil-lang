@@ -1,0 +1,4 @@
+// @expected E0900 — no `nowhere.coil` or `nowhere/thing.coil` under any root.
+use nowhere::thing;
+
+fn main() {}

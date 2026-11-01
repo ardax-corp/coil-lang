@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn builds_flat_objects() {
         let e = Event::new("file")
-            .str("file", "tests/a \"b\".hy")
+            .str("file", "tests/a \"b\".coil")
             .bool("ok", false)
             .num("n", 3)
             .opt_str("message", None)
@@ -93,7 +93,7 @@ mod tests {
             .finish();
         assert_eq!(
             e,
-            "{\"event\":\"file\",\"file\":\"tests/a \\\"b\\\".hy\",\"ok\":false,\"n\":3,\"message\":null,\"cases\":[{\"name\":\"t\"}]}"
+            "{\"event\":\"file\",\"file\":\"tests/a \\\"b\\\".coil\",\"ok\":false,\"n\":3,\"message\":null,\"cases\":[{\"name\":\"t\"}]}"
         );
     }
 }

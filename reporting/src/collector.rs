@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn collects_diagnostics_and_tracks_errors() {
         let mut sink = DiagnosticCollector::new();
-        let id = sink.register_source(Path::new("a.hy"), "fn main() {}\n");
+        let id = sink.register_source(Path::new("a.coil"), "fn main() {}\n");
         assert_eq!(sink.sources().text(id), Some("fn main() {}\n"));
 
         sink.emit(Diagnostic::warning("soft"));

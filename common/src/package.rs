@@ -1,4 +1,4 @@
-//! Self-contained executable packaging (append `.hyc` archive + trailer).
+//! Self-contained executable packaging (append `.ccoil` archive + trailer).
 
 use crate::opcode::{Byte, Instruction};
 
@@ -11,7 +11,7 @@ pub const PACKAGE_TRAILER_SIZE: usize = 32;
 /// [`PackageTrailer::flags`]: program bytecode uses dynamic FFI (`dload` / `extern`).
 pub const PACKAGE_FLAG_USES_FFI: u32 = 1;
 
-/// [`PackageTrailer::flags`]: a [`NativeLock`] blob sits between the `.hyc` archive and the trailer.
+/// [`PackageTrailer::flags`]: a [`NativeLock`] blob sits between the `.ccoil` archive and the trailer.
 pub const PACKAGE_FLAG_HAS_NATIVE_LOCK: u32 = 2;
 
 /// Metadata stored in the last 32 bytes of a packaged executable.
@@ -72,7 +72,7 @@ pub struct NativeLockEntry {
     pub missing: bool,
 }
 
-/// Host triple + direct native artifacts embedded beside the `.hyc` archive.
+/// Host triple + direct native artifacts embedded beside the `.ccoil` archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeLock {
     pub os: String,

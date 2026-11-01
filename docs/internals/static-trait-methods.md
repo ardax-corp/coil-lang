@@ -20,7 +20,7 @@ fn decode_as<T: FromVal>(Val v) -> Result<T, DecodeError> {
 let cfg: Config = decode_as(v)?;                  // T chosen by the expected type
 ```
 
-Runnable example: `examples/static_trait_method.hy`. Tests: `tests/traits/static_trait_methods.hy`, `tests/traits/derive_default_static.hy`, `tests/traits/compile_fail/trait_static_*.hy`, `tests/traits/compile_fail/trait_instance_method_as_static.hy`.
+Runnable example: `examples/static_trait_method.coil`. Tests: `tests/traits/static_trait_methods.coil`, `tests/traits/derive_default_static.coil`, `tests/traits/compile_fail/trait_static_*.coil`, `tests/traits/compile_fail/trait_instance_method_as_static.coil`.
 
 ## Surface (one spelling)
 
@@ -39,7 +39,7 @@ Runnable example: `examples/static_trait_method.hy`. Tests: `tests/traits/static
   - **Type parameter in scope:** `bound_method_candidates(m, Some(var))` selects the bound, the scheme's class parameter is unified with the parameter's variable, and a `BoundMethodCall { has_receiver: false, .. }` is recorded (the existing UFCS-under-a-bound shape).
   - **Concrete owner:** every single-parameter trait that declares `m` and has an instance for the owner is a candidate; more than one is an ambiguity error. The scheme's class parameter is unified with the owner type before discharge, so the constraint resolves to the owner's instance, not to the first instance that unifies.
 - **Return-type-directed resolution** (`bind_call_result_to_expected`): before a call's bounds are discharged, a still-open result type is trial-unified with the node's expected type (`expected_here`: `let x: T = f()`, `return f()`, an argument with a known parameter type). `f()?` sets the inner call's expectation to `Result<E, err>` (the fn's error type in result mode). Only a successful unification is committed; the binding site still reports its own mismatch. This applies to generic fn calls, UFCS bound calls and static calls.
-- With one matching instance and no expectation the instance is still picked (the choice is forced). With several and no expectation the existing "Ambiguous instance" error stands (`tests/traits/compile_fail/trait_static_uninferable.hy`).
+- With one matching instance and no expectation the instance is still picked (the choice is forced). With several and no expectation the existing "Ambiguous instance" error stands (`tests/traits/compile_fail/trait_static_uninferable.coil`).
 
 ## Codegen
 
@@ -65,4 +65,4 @@ Runnable example: `examples/static_trait_method.hy`. Tests: `tests/traits/static
 
 - **Typechecking:** `qualified_call_trait` takes the owner as a trait only when it names no type parameter, class, enum or primitive (so `Type::assoc_fn`, `Enum::Variant` and `T::m` keep their meaning); `module::Trait` names a trait that module declares. `infer_qualified_trait_call` then runs the function form's steps restricted to the trait: a trait-object first argument, an active bound's dictionary (`bound_method_candidates` filtered to the trait), else the ground instance the argument and expected types discharge. Errors: an unknown owner is E0202, a method the trait does not declare is E0101, no instance (or more than one with nothing to choose) is E0119, and a type parameter without the trait's bound is E0119 naming the missing bound.
 - **Lowering:** the checker records the callee name in `qualified_trait_call_at`. It is the bare method, so the HIR call is the function form's own and the bytecode is identical (`coil dissect --fn`). When a free fn, local or builtin takes the bare name, it is `Trait::m` instead, which `hir_ground_ufcs` / `hir_ground_bound_call` send to the recorded instance as they do `T::m`.
-- Tests: `tests/traits/qualified_trait_calls.hy`, `tests/traits/compile_fail/qualified_trait_*.hy`.
+- Tests: `tests/traits/qualified_trait_calls.coil`, `tests/traits/compile_fail/qualified_trait_*.coil`.

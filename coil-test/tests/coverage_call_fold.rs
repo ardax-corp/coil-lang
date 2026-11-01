@@ -18,12 +18,12 @@ fn coverage_counts_a_call_folding_would_compute() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::write(
-        root.join("src/mathx.hy"),
+        root.join("src/mathx.coil"),
         "fn clamp(int x, int lo, int hi) -> int {\n    if x < lo {\n        return lo;\n    }\n    if x > hi {\n        return hi;\n    }\n    return x;\n}\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("tests/t.hy"),
+        root.join("tests/t.coil"),
         "use mathx::clamp;\n\ntest(\"clamps low\") {\n    let low = clamp(-5, 0, 10);\n    if low != 0 { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();

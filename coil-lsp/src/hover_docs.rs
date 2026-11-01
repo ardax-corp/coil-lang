@@ -316,7 +316,7 @@ fn field_decl(field: &Output<'_>, source: &str, name: &str, at: usize) -> Option
 
 /// `use a::b::name;` for an item of `file`: the module path under the
 /// innermost search root, dropping the file name when it is the item's own
-/// (`geo/Point.hy` holds `geo::Point`).
+/// (`geo/Point.coil` holds `geo::Point`).
 fn import_line(state: &ServerState, file: &Path, name: &str) -> Option<String> {
     let root = state.workspace_root.as_ref()?;
     let module = module_roots_of(root, &state.extra_roots)

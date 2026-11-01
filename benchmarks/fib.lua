@@ -1,4 +1,4 @@
--- Plain naive fib recursion (fair cross-lang with examples/perf/fib.hy).
+-- Plain naive fib recursion (fair cross-lang with examples/perf/fib.coil).
 local function fib(n)
     if n <= 2 then
         return 1

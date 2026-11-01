@@ -21,18 +21,18 @@ fn hy_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             hy_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "hy") {
+        } else if path.extension().is_some_and(|e| e == "coil") {
             out.push(path);
         }
     }
 }
 
-/// The `.hy` files of corpus dirs that cover macros, contracts, effects,
+/// The `.coil` files of corpus dirs that cover macros, contracts, effects,
 /// patterns and parse errors (the whole corpus is slow in a debug build).
 #[test]
 fn parse_at_matches_padded_parse_on_the_corpus() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let mut files = vec![repo.join("tests/generics/multiple_bounds.hy")];
+    let mut files = vec![repo.join("tests/generics/multiple_bounds.coil")];
     for dir in ["macros", "contracts", "effects", "patterns", "syntax", "errors"] {
         hy_files(&repo.join("tests").join(dir), &mut files);
     }

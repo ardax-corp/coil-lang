@@ -38,7 +38,7 @@ impl MirInst {
     }
 }
 
-/// Compiler-internal resume map (not written to `.hyc`).
+/// Compiler-internal resume map (not written to `.ccoil`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftDeoptMap {
     pub name: String,

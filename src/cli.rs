@@ -11,7 +11,7 @@ use coil_args::{
 use compiler::{DebugLevel, EarlyFree, HostGrants, OptLevel};
 use crate::package_app::{FfiNative, parse_ffi_native};
 
-pub(crate) const DEFAULT_OUT: &str = "out.hyc";
+pub(crate) const DEFAULT_OUT: &str = "out.ccoil";
 
 const RESERVED: &[&str] = &[
     "compile", "run", "test", "package", "dissect", "debug", "fmt", "lsp", "natives", "verify",
@@ -19,7 +19,7 @@ const RESERVED: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Command {
-    /// Default: compile entry in memory and run (no out.hyc).
+    /// Default: compile entry in memory and run (no out.ccoil).
     BuildAndRun {
         filename: String,
     },
@@ -109,14 +109,14 @@ pub(crate) struct CliArgs {
     version,
     about = "Coil compiler and runtime",
     disable_help_subcommand = true,
-    after_help = "Pass the entry as a positional `.hy` or `--entry FILE`.\n\
-Program arguments follow `--`: `coil FILE -- a b` and `coil run X.hyc -- a b` run\n\
+    after_help = "Pass the entry as a positional `.coil` or `--entry FILE`.\n\
+Program arguments follow `--`: `coil FILE -- a b` and `coil run X.ccoil -- a b` run\n\
 with `env::args()` == [FILE, a, b]; coil's own flags are never visible to the program.\n\
 Default diagnostics: pretty reports on stderr.\n\
 `--root DIR` is repeatable extra `use`/`mod` search (default is `src` under cwd).\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
 `--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck.\n\
-`coil run out.hyc` and coil-embed do\n\
+`coil run out.ccoil` and coil-embed do\n\
 not re-apply allow flags; if the bytecode has the op, it runs. `--ffi-search-path` is\n\
 lookup only. `--dload-pin STEM=SHA256` / `--dload-trusted STEM` are the dload integrity.\n\
 `dload(\"c\")` stays denied even if flagged."
@@ -141,7 +141,7 @@ struct RawCli {
     /// Compile harness tests into the archive (default: omit)
     #[arg(long)]
     include_tests: bool,
-    /// Compile this `.hy` file in memory and run it (or `--entry`)
+    /// Compile this `.coil` file in memory and run it (or `--entry`)
     #[arg(value_name = "FILE")]
     file: Option<String>,
     #[command(subcommand)]
@@ -150,7 +150,7 @@ struct RawCli {
 
 #[derive(Subcommand, Debug)]
 enum RawCommand {
-    /// Compile an entry file (must define main) to a .hyc archive
+    /// Compile an entry file (must define main) to a .ccoil archive
     Compile {
         #[command(flatten)]
         log: LogFlags,
@@ -172,10 +172,10 @@ enum RawCommand {
         /// Output archive path
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<String>,
-        /// Entry `.hy` (or `--entry`)
+        /// Entry `.coil` (or `--entry`)
         file: Option<String>,
     },
-    /// Execute a previously compiled .hyc archive
+    /// Execute a previously compiled .ccoil archive
     Run {
         #[command(flatten)]
         log: LogFlags,
@@ -207,7 +207,7 @@ enum RawCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
-    /// Build a single-host executable (runner + embedded .hyc)
+    /// Build a single-host executable (runner + embedded .ccoil)
     Package {
         #[command(flatten)]
         log: LogFlags,
@@ -236,7 +236,7 @@ enum RawCommand {
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
-        /// Entry `.hy` file
+        /// Entry `.coil` file
         file: Option<String>,
     },
     /// Native lock helpers
@@ -285,7 +285,7 @@ enum RawCommand {
         /// Print the entry file after macro expansion (no bytecode)
         #[arg(long)]
         expand: bool,
-        /// Entry `.hy` file, or a compiled `.hyc` archive (bytecode only)
+        /// Entry `.coil` file, or a compiled `.ccoil` archive (bytecode only)
         file: Option<String>,
     },
     /// GDB-style debugger (REPL; --dap for IDE)
@@ -307,10 +307,10 @@ enum RawCommand {
         /// Debug Adapter Protocol over stdio
         #[arg(long)]
         dap: bool,
-        /// Entry `.hy` file (omit with `--dap`)
+        /// Entry `.coil` file (omit with `--dap`)
         file: Option<String>,
     },
-    /// Format `.hy` sources (re-execs `coil-fmt`)
+    /// Format `.coil` sources (re-execs `coil-fmt`)
     Fmt {
         /// Exit 1 if files would change (no writes)
         #[arg(long)]
@@ -458,7 +458,7 @@ fn cli_from(
 
 fn require_hy_entry(filename: &str) -> Result<(), String> {
     if filename.is_empty() {
-        Err("missing input file (pass a .hy file or `--entry`)".into())
+        Err("missing input file (pass a .coil file or `--entry`)".into())
     } else {
         Ok(())
     }
@@ -490,7 +490,7 @@ impl RawCli {
                 let filename = merge_entry(self.file, self.entry_flag.entry)?;
                 require_hy_entry(&filename)?;
                 if is_reserved(&filename) {
-                    return Err("missing input file (pass a .hy file or `--entry`)".into());
+                    return Err("missing input file (pass a .coil file or `--entry`)".into());
                 }
                 CliArgs {
                     debug_level: self.debug.level(),
@@ -694,7 +694,7 @@ impl RawCli {
                 let filename = merge_entry(file, entry_flag.entry)?;
                 require_hy_entry(&filename)?;
                 if is_reserved(&filename) {
-                    return Err("dissect requires an entry .hy file".into());
+                    return Err("dissect requires an entry .coil file".into());
                 }
                 cli_from(
                     Command::Dissect {
@@ -731,13 +731,13 @@ impl RawCli {
                 } else {
                     let filename = merge_entry(file, entry_flag.entry)?;
                     if filename.is_empty() {
-                        return Err("debug requires an entry .hy file (or use --dap)".into());
+                        return Err("debug requires an entry .coil file (or use --dap)".into());
                     }
                     if is_reserved(&filename) {
-                        return Err("debug requires an entry .hy file".into());
+                        return Err("debug requires an entry .coil file".into());
                     }
                     if dap {
-                        return Err("--dap cannot be combined with a positional .hy file".into());
+                        return Err("--dap cannot be combined with a positional .coil file".into());
                     }
                     Command::Debug {
                         filename: Some(filename),
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn parse_version_wins_over_other_args() {
-        let cli = parse_args(&args(&["compile", "a.hy", "--version"])).unwrap();
+        let cli = parse_args(&args(&["compile", "a.coil", "--version"])).unwrap();
         assert_eq!(cli.command, Command::Version);
         let cli = parse_args(&args(&["--help", "--version"])).unwrap();
         assert_eq!(cli.command, Command::Version);
@@ -794,13 +794,13 @@ mod tests {
 
     #[test]
     fn parse_fmt_paths() {
-        let cli = parse_args(&args(&["fmt", "a.hy", "src/"])).unwrap();
+        let cli = parse_args(&args(&["fmt", "a.coil", "src/"])).unwrap();
         assert_eq!(cli.command, Command::Fmt);
     }
 
     #[test]
     fn parse_fmt_with_check() {
-        let cli = parse_args(&args(&["fmt", "--check", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["fmt", "--check", "a.coil"])).unwrap();
         assert_eq!(cli.command, Command::Fmt);
     }
 
@@ -827,15 +827,15 @@ mod tests {
 
     #[test]
     fn parse_rejects_check_on_non_fmt() {
-        assert!(parse_args(&args(&["compile", "a.hy", "--check"])).is_err());
-        assert!(parse_args(&args(&["--check", "a.hy"])).is_err());
+        assert!(parse_args(&args(&["compile", "a.coil", "--check"])).is_err());
+        assert!(parse_args(&args(&["--check", "a.coil"])).is_err());
     }
 
     #[test]
     fn parse_debug_with_script_batch() {
         let cli = parse_args(&args(&[
             "debug",
-            "examples/fib.hy",
+            "examples/fib.coil",
             "-x",
             "cmds.txt",
             "--batch",
@@ -844,7 +844,7 @@ mod tests {
         assert_eq!(
             cli.command,
             Command::Debug {
-                filename: Some("examples/fib.hy".into()),
+                filename: Some("examples/fib.coil".into()),
                 script: Some("cmds.txt".into()),
                 batch: true,
                 dap: false,
@@ -870,12 +870,12 @@ mod tests {
 
     #[test]
     fn parse_debug_repl_host_grants() {
-        let cli = parse_args(&args(&["debug", "a.hy", "--allow-exit"])).unwrap();
+        let cli = parse_args(&args(&["debug", "a.coil", "--allow-exit"])).unwrap();
         assert!(cli.host_grants.allow_exit);
         assert_eq!(
             cli.command,
             Command::Debug {
-                filename: Some("a.hy".into()),
+                filename: Some("a.coil".into()),
                 script: None,
                 batch: false,
                 dap: false,
@@ -887,7 +887,7 @@ mod tests {
     fn parse_dissect_with_fn_il_ast() {
         let cli = parse_args(&args(&[
             "dissect",
-            "examples/fib.hy",
+            "examples/fib.coil",
             "--fn",
             "fib",
             "--il",
@@ -897,7 +897,7 @@ mod tests {
         assert_eq!(
             cli.command,
             Command::Dissect {
-                filename: "examples/fib.hy".into(),
+                filename: "examples/fib.coil".into(),
                 fn_pat: Some("fib".into()),
                 show_il: true,
                 show_ast: true,
@@ -910,7 +910,7 @@ mod tests {
     fn parse_host_grant_flags_on_dissect() {
         let cli = parse_args(&args(&[
             "dissect",
-            "a.hy",
+            "a.coil",
             "--allow-attach",
             "--allow-exit",
             "--allow-ffi-exec",
@@ -925,7 +925,7 @@ mod tests {
         assert_eq!(
             cli.command,
             Command::Dissect {
-                filename: "a.hy".into(),
+                filename: "a.coil".into(),
                 fn_pat: None,
                 show_il: false,
                 show_ast: false,
@@ -946,11 +946,11 @@ mod tests {
 
     #[test]
     fn parse_legacy_build_and_run() {
-        let cli = parse_args(&args(&["examples/fib.hy"])).unwrap();
+        let cli = parse_args(&args(&["examples/fib.coil"])).unwrap();
         assert_eq!(
             cli.command,
             Command::BuildAndRun {
-                filename: "examples/fib.hy".into()
+                filename: "examples/fib.coil".into()
             }
         );
         assert!(!cli.log_json);
@@ -958,11 +958,11 @@ mod tests {
 
     #[test]
     fn parse_compile_default_output() {
-        let cli = parse_args(&args(&["compile", "examples/fib.hy"])).unwrap();
+        let cli = parse_args(&args(&["compile", "examples/fib.coil"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Compile {
-                filename: "examples/fib.hy".into(),
+                filename: "examples/fib.coil".into(),
                 output: DEFAULT_OUT.into(),
             }
         );
@@ -970,46 +970,46 @@ mod tests {
 
     #[test]
     fn parse_compile_with_short_output() {
-        let cli = parse_args(&args(&["compile", "examples/fib.hy", "-o", "fib.hyc"])).unwrap();
+        let cli = parse_args(&args(&["compile", "examples/fib.coil", "-o", "fib.ccoil"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Compile {
-                filename: "examples/fib.hy".into(),
-                output: "fib.hyc".into(),
+                filename: "examples/fib.coil".into(),
+                output: "fib.ccoil".into(),
             }
         );
     }
 
     #[test]
     fn parse_compile_with_long_output_before_command() {
-        let cli = parse_args(&args(&["compile", "--output", "x.hyc", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["compile", "--output", "x.ccoil", "a.coil"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Compile {
-                filename: "a.hy".into(),
-                output: "x.hyc".into(),
+                filename: "a.coil".into(),
+                output: "x.ccoil".into(),
             }
         );
     }
 
     #[test]
     fn parse_run() {
-        let cli = parse_args(&args(&["run", "out.hyc"])).unwrap();
+        let cli = parse_args(&args(&["run", "out.ccoil"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Run {
-                archive: "out.hyc".into()
+                archive: "out.ccoil".into()
             }
         );
     }
 
     #[test]
     fn parse_package_default_output() {
-        let cli = parse_args(&args(&["package", "examples/fib.hy"])).unwrap();
+        let cli = parse_args(&args(&["package", "examples/fib.coil"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Package {
-                filename: "examples/fib.hy".into(),
+                filename: "examples/fib.coil".into(),
                 output: "fib".into(),
                 runner: None,
                 natives: Vec::new(),
@@ -1023,7 +1023,7 @@ mod tests {
     fn parse_package_with_flags() {
         let cli = parse_args(&args(&[
             "package",
-            "app.hy",
+            "app.coil",
             "-o",
             "myapp",
             "--check-native",
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(
             cli.command,
             Command::Package {
-                filename: "app.hy".into(),
+                filename: "app.coil".into(),
                 output: "myapp".into(),
                 runner: Some(PathBuf::from("/usr/bin/coil")),
                 natives: vec![FfiNative {
@@ -1090,7 +1090,7 @@ mod tests {
         let sha = "AB".repeat(32);
         let cli = parse_args(&args(&[
             "run",
-            "out.hyc",
+            "out.ccoil",
             "--dload-pin",
             &format!("tls={sha}"),
             "--dload-trusted",
@@ -1102,8 +1102,8 @@ mod tests {
             vec![("tls".to_string(), "ab".repeat(32))]
         );
         assert_eq!(cli.host_grants.dload_trusted, vec!["sum".to_string()]);
-        assert!(parse_args(&args(&["run", "out.hyc", "--dload-pin", "tls=abc"])).is_err());
-        assert!(parse_args(&args(&["run", "out.hyc", "--dload-pin", "tls"])).is_err());
+        assert!(parse_args(&args(&["run", "out.ccoil", "--dload-pin", "tls=abc"])).is_err());
+        assert!(parse_args(&args(&["run", "out.ccoil", "--dload-pin", "tls"])).is_err());
     }
 
     #[test]
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn parse_verify_forwards_every_flag_to_the_helper() {
-        for argv in [&["verify", "a.hy"][..], &["verify", "--solver", "z3", "--strict", "a.hy", "--help"]] {
+        for argv in [&["verify", "a.coil"][..], &["verify", "--solver", "z3", "--strict", "a.coil", "--help"]] {
             let cli = parse_args(&args(argv)).unwrap();
             assert_eq!(cli.command, Command::Verify, "{argv:?}");
         }
@@ -1145,15 +1145,15 @@ mod tests {
 
     #[test]
     fn parse_log_flags_with_subcommand() {
-        let cli = parse_args(&args(&["compile", "--log-json", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["compile", "--log-json", "a.coil"])).unwrap();
         assert!(cli.log_json);
         assert!(matches!(cli.command, Command::Compile { .. }));
     }
 
     #[test]
     fn parse_rejects_output_on_run_and_default() {
-        assert!(parse_args(&args(&["run", "a.hyc", "-o", "x"])).is_err());
-        assert!(parse_args(&args(&["examples/fib.hy", "-o", "x"])).is_err());
+        assert!(parse_args(&args(&["run", "a.ccoil", "-o", "x"])).is_err());
+        assert!(parse_args(&args(&["examples/fib.coil", "-o", "x"])).is_err());
     }
 
     #[test]
@@ -1164,18 +1164,18 @@ mod tests {
 
     #[test]
     fn parse_entry_flag_and_roots() {
-        let cli = parse_args(&args(&["--entry", "src/main.hy"])).unwrap();
+        let cli = parse_args(&args(&["--entry", "src/main.coil"])).unwrap();
         assert_eq!(
             cli.command,
             Command::BuildAndRun {
-                filename: "src/main.hy".into()
+                filename: "src/main.coil".into()
             }
         );
-        let cli = parse_args(&args(&["compile", "--entry", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["compile", "--entry", "a.coil"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Compile {
-                filename: "a.hy".into(),
+                filename: "a.coil".into(),
                 output: DEFAULT_OUT.into(),
             }
         );
@@ -1184,40 +1184,40 @@ mod tests {
             "examples/src",
             "--root",
             "vendor",
-            "a.hy",
+            "a.coil",
         ]))
         .unwrap();
         assert_eq!(
             cli.module_roots,
             vec![PathBuf::from("examples/src"), PathBuf::from("vendor")]
         );
-        assert!(parse_args(&args(&["--entry", "a.hy", "b.hy"])).is_err());
+        assert!(parse_args(&args(&["--entry", "a.coil", "b.coil"])).is_err());
     }
 
     #[test]
     fn parse_program_args_after_double_dash() {
-        let cli = parse_args(&args(&["--root", "lib", "a.hy", "--", "x", "--root", "-V"])).unwrap();
+        let cli = parse_args(&args(&["--root", "lib", "a.coil", "--", "x", "--root", "-V"])).unwrap();
         assert_eq!(
             cli.command,
             Command::BuildAndRun {
-                filename: "a.hy".into()
+                filename: "a.coil".into()
             }
         );
         assert_eq!(cli.module_roots, vec![PathBuf::from("lib")]);
         assert_eq!(cli.program_args, ["x", "--root", "-V"]);
 
-        let cli = parse_args(&args(&["run", "out.hyc", "--", "a", "b"])).unwrap();
+        let cli = parse_args(&args(&["run", "out.ccoil", "--", "a", "b"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Run {
-                archive: "out.hyc".into()
+                archive: "out.ccoil".into()
             }
         );
         assert_eq!(cli.program_args, ["a", "b"]);
 
-        let cli = parse_args(&args(&["a.hy", "--"])).unwrap();
+        let cli = parse_args(&args(&["a.coil", "--"])).unwrap();
         assert!(cli.program_args.is_empty());
-        let cli = parse_args(&args(&["a.hy"])).unwrap();
+        let cli = parse_args(&args(&["a.coil"])).unwrap();
         assert!(cli.program_args.is_empty());
         // Other commands keep their own `--` handling.
         let cli = parse_args(&args(&["test", "--", "x"])).unwrap();
@@ -1232,9 +1232,9 @@ mod tests {
 
     #[test]
     fn parse_rejects_fail_fast_on_non_test_commands() {
-        assert!(parse_args(&args(&["--fail-fast", "examples/fib.hy"])).is_err());
-        assert!(parse_args(&args(&["compile", "a.hy", "--fail-fast"])).is_err());
-        assert!(parse_args(&args(&["run", "out.hyc", "--fail-fast"])).is_err());
+        assert!(parse_args(&args(&["--fail-fast", "examples/fib.coil"])).is_err());
+        assert!(parse_args(&args(&["compile", "a.coil", "--fail-fast"])).is_err());
+        assert!(parse_args(&args(&["run", "out.ccoil", "--fail-fast"])).is_err());
     }
 
     #[test]
@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_unrecognized_flag() {
-        let err = parse_args(&args(&["--bogus", "a.hy"])).unwrap_err();
+        let err = parse_args(&args(&["--bogus", "a.coil"])).unwrap_err();
         assert!(
             err.contains("unrecognized") || err.contains("unexpected"),
             "{err}"
@@ -1252,14 +1252,14 @@ mod tests {
 
     #[test]
     fn parse_rejects_duplicate_output_and_missing_output_path() {
-        assert!(parse_args(&args(&["compile", "a.hy", "-o"])).is_err());
-        assert!(parse_args(&args(&["compile", "a.hy", "-o", "-x"])).is_err());
-        assert!(parse_args(&args(&["compile", "a.hy", "-o", "x", "--output", "y"])).is_err());
+        assert!(parse_args(&args(&["compile", "a.coil", "-o"])).is_err());
+        assert!(parse_args(&args(&["compile", "a.coil", "-o", "-x"])).is_err());
+        assert!(parse_args(&args(&["compile", "a.coil", "-o", "x", "--output", "y"])).is_err());
     }
 
     #[test]
     fn parse_rejects_too_many_args_and_reserved_compile_names() {
-        assert!(parse_args(&args(&["a.hy", "b.hy"])).is_err());
+        assert!(parse_args(&args(&["a.coil", "b.coil"])).is_err());
         assert!(parse_args(&args(&["compile", "compile"])).is_err());
         assert!(parse_args(&args(&["compile", "run"])).is_err());
         assert!(parse_args(&args(&["compile", "test"])).is_err());
@@ -1267,10 +1267,10 @@ mod tests {
 
     #[test]
     fn parse_accepts_both_log_flags_at_parse_time() {
-        let cli = parse_args(&args(&["compile", "--log-json", "--log-lsp", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["compile", "--log-json", "--log-lsp", "a.coil"])).unwrap();
         assert!(cli.log_json && cli.log_lsp);
 
-        let cli = parse_args(&args(&["--include-tests", "examples/fib.hy"])).unwrap();
+        let cli = parse_args(&args(&["--include-tests", "examples/fib.coil"])).unwrap();
         assert!(cli.include_tests);
         assert!(matches!(cli.command, Command::BuildAndRun { .. }));
         assert_eq!(cli.opt_level, OptLevel::Standard);
@@ -1278,43 +1278,43 @@ mod tests {
 
     #[test]
     fn parse_opt_level_flags() {
-        let cli = parse_args(&args(&["-O0", "examples/fib.hy"])).unwrap();
+        let cli = parse_args(&args(&["-O0", "examples/fib.coil"])).unwrap();
         assert_eq!(cli.opt_level, OptLevel::None);
-        let cli = parse_args(&args(&["-O", "2", "examples/fib.hy"])).unwrap();
+        let cli = parse_args(&args(&["-O", "2", "examples/fib.coil"])).unwrap();
         assert_eq!(cli.opt_level, OptLevel::Standard);
-        let cli = parse_args(&args(&["compile", "--opt-level", "aggressive", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["compile", "--opt-level", "aggressive", "a.coil"])).unwrap();
         assert_eq!(cli.opt_level, OptLevel::Aggressive);
-        let cli = parse_args(&args(&["--opt-level=size", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["--opt-level=size", "a.coil"])).unwrap();
         assert_eq!(cli.opt_level, OptLevel::Size);
-        let cli = parse_args(&args(&["-Og", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["-Og", "a.coil"])).unwrap();
         assert_eq!(cli.opt_level, OptLevel::Debug);
-        assert!(parse_args(&args(&["-O9", "a.hy"])).is_err());
-        assert!(parse_args(&args(&["-O2", "-O0", "a.hy"])).is_err());
+        assert!(parse_args(&args(&["-O9", "a.coil"])).is_err());
+        assert!(parse_args(&args(&["-O2", "-O0", "a.coil"])).is_err());
         assert!(parse_args(&args(&["--opt-level"])).is_err());
     }
 
     #[test]
     fn parse_opt_stats_flags() {
-        let cli = parse_args(&args(&["compile", "--opt-stats", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["compile", "--opt-stats", "a.coil"])).unwrap();
         assert!(cli.opt_stats && !cli.opt_stats_json);
-        let cli = parse_args(&args(&["--opt-stats-json", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["--opt-stats-json", "a.coil"])).unwrap();
         assert!(cli.opt_stats_json && !cli.opt_stats);
         let cli = parse_args(&args(&[
             "compile",
             "--opt-stats",
             "--opt-stats-json",
-            "a.hy",
+            "a.coil",
         ]))
         .unwrap();
         assert!(cli.opt_stats && cli.opt_stats_json);
-        assert!(parse_args(&args(&["run", "out.hyc", "--opt-stats-json"])).is_err());
+        assert!(parse_args(&args(&["run", "out.ccoil", "--opt-stats-json"])).is_err());
     }
 
     #[test]
     fn parse_host_grant_flags_on_run_and_default() {
         let cli = parse_args(&args(&[
             "run",
-            "out.hyc",
+            "out.ccoil",
             "--allow-attach",
             "--allow-exec",
             "--allow-exit",
@@ -1340,19 +1340,19 @@ mod tests {
             vec![PathBuf::from("./native")]
         );
 
-        let cli = parse_args(&args(&["--allow-exit", "examples/fib.hy"])).unwrap();
+        let cli = parse_args(&args(&["--allow-exit", "examples/fib.coil"])).unwrap();
         assert!(cli.host_grants.allow_exit);
         assert!(!cli.host_grants.allow_attach);
 
-        let cli = parse_args(&args(&["run", "out.hyc"])).unwrap();
+        let cli = parse_args(&args(&["run", "out.ccoil"])).unwrap();
         assert_eq!(cli.host_grants, HostGrants::deny_all());
 
-        let cli = parse_args(&args(&["compile", "--allow-dload", "c", "a.hy"])).unwrap();
+        let cli = parse_args(&args(&["compile", "--allow-dload", "c", "a.coil"])).unwrap();
         assert_eq!(cli.host_grants.allow_dload, vec!["c".to_string()]);
     }
 
     #[test]
     fn parse_rejects_parent_grant_flags_with_subcommand() {
-        assert!(parse_args(&args(&["--allow-exit", "compile", "a.hy"])).is_err());
+        assert!(parse_args(&args(&["--allow-exit", "compile", "a.coil"])).is_err());
     }
 }

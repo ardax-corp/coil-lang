@@ -2,21 +2,21 @@
 
 `coil debug` is a GDB-style debugger for coil programs. The main `coil` binary
 **re-execs** the sibling `coil-debug` helper (git-style). That helper compiles the
-entry `.hy` (and module graph) **in memory** — never writes `out.hyc` — and drives
+entry `.coil` (and module graph) **in memory** — never writes `out.ccoil` — and drives
 the VM through a stop engine gated behind an attached `DebugController`
 (`machine` feature `debugger`).
 
 ```bash
 cargo build   # coil + coil-debug (+ coil-dissect / coil-embed)
-coil debug examples/fib.hy
-coil debug examples/fib.hy -x cmds.txt --batch
-coil debug gated.hy --allow-attach -x cmds.txt --batch
+coil debug examples/fib.coil
+coil debug examples/fib.coil -x cmds.txt --batch
+coil debug gated.coil --allow-attach -x cmds.txt --batch
 # DAP mode for IDE integration (program path from launch request):
 coil debug --dap
 coil debug --dap --allow-exit
 coil-debug --dap
 # or invoke the helper directly:
-coil-debug examples/fib.hy -x cmds.txt --batch
+coil-debug examples/fib.coil -x cmds.txt --batch
 ```
 
 | Flag | Effect |
@@ -24,7 +24,7 @@ coil-debug examples/fib.hy -x cmds.txt --batch
 | (none) | Interactive `(coil) ` REPL on stdin |
 | `-x <script>` | Run commands from a file (`#` comments; one command per line) |
 | `--batch` | Non-interactive; run the whole script (or stdin if no `-x`). A failing command is reported and the script goes on, like `gdb -batch`; the exit status is non-zero if any command failed or the program panicked |
-| `--dap` | Debug Adapter Protocol over **stdio** (see below); no positional `.hy` |
+| `--dap` | Debug Adapter Protocol over **stdio** (see below); no positional `.coil` |
 | `--allow-attach` / `--allow-exit` / `--allow-ffi-exec` / `--allow-dload STEM` | Host grants at typecheck (same as `coil compile` / `coil dissect`) |
 | `--ffi-search-path DIR` | Extra FFI lookup directory (not a grant) |
 | `--root DIR` | Extra `use`/`mod` search directory |
@@ -49,7 +49,7 @@ are not shipped in this repository.
 
 | Field | Meaning |
 |-------|---------|
-| `program` | Absolute or workspace-relative path to entry `.hy` |
+| `program` | Absolute or workspace-relative path to entry `.coil` |
 | `cwd` | Optional working directory for resolving paths |
 | `stopOnEntry` | Optional; stop **before** the first bytecode insn (real VM frame) |
 | `allowAttach` / `allowExit` / `allowFfiExec` / `allowRead` / `allowWrite` / `allowNet` / `allowEnv` / `allowAll` | Optional; OR with CLI `--allow-*` |

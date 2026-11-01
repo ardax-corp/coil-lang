@@ -280,11 +280,11 @@ mod tests {
 
     #[test]
     fn renders_counts_and_cuts_to_width() {
-        let line = render("test", "files", 6, 12, 1, "tests/a.hy", 200);
-        assert_eq!(line, "test [============>           ] 6/12 files, 1 failed  tests/a.hy");
+        let line = render("test", "files", 6, 12, 1, "tests/a.coil", 200);
+        assert_eq!(line, "test [============>           ] 6/12 files, 1 failed  tests/a.coil");
         let full = render("test", "files", 12, 12, 0, "", 200);
         assert_eq!(full, "test [========================] 12/12 files");
-        let short = render("test", "files", 1, 2, 0, "a/very/long/path.hy", 30);
+        let short = render("test", "files", 1, 2, 0, "a/very/long/path.coil", 30);
         assert_eq!(short.chars().count(), 29);
         assert!(short.ends_with('…'));
     }

@@ -33,7 +33,7 @@ def sources(paths):
         if os.path.isdir(path):
             for dirpath, _, names in sorted(os.walk(path)):
                 for name in sorted(names):
-                    if name.endswith(".hy"):
+                    if name.endswith(".coil"):
                         yield os.path.join(dirpath, name)
         else:
             yield path
@@ -77,7 +77,7 @@ def run(args):
     census = {}
     failed = []
     with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, "out.hyc")
+        out = os.path.join(tmp, "out.ccoil")
         for path in sources(args.paths):
             found = bodies(args.coil, args.root, path, out)
             if found is None:
@@ -140,7 +140,7 @@ def main():
     r.add_argument("--root", action="append", default=[], help="module root (repeatable)")
     r.add_argument("-o", "--output", help="save the per-body result as JSON")
     r.add_argument("--top", type=int, default=15, help="refusal reasons to list")
-    r.add_argument("paths", nargs="+", help=".hy files or directories")
+    r.add_argument("paths", nargs="+", help=".coil files or directories")
     c = sub.add_parser("compare", help="compare two saved runs")
     c.add_argument("old")
     c.add_argument("new")

@@ -2592,7 +2592,7 @@
     fn parse_static_singleton_example_file() {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../examples/static_singleton.hy"
+            "/../examples/static_singleton.coil"
         ))
         .expect("read example");
         let result = Pratt::default().parse(&src);

@@ -80,7 +80,7 @@ fn main() {{
 }}
 "
     );
-    let (out, ok) = run(&bin, &dir, "at_collect.hy", &at_collect);
+    let (out, ok) = run(&bin, &dir, "at_collect.coil", &at_collect);
     assert!(!ok, "a panic in drop must fail the program:\n{out}");
     assert!(out.contains("drop failed"), "the panic is reported:\n{out}");
     assert!(!out.contains("after collect"), "code after the collection must not run:\n{out}");
@@ -95,7 +95,7 @@ fn main() {{
 }}
 "
     );
-    let (out, ok) = run(&bin, &dir, "at_teardown.hy", &at_teardown);
+    let (out, ok) = run(&bin, &dir, "at_teardown.coil", &at_teardown);
     assert!(out.contains("main done"), "{out}");
     assert!(out.contains("drop failed"), "the panic is reported:\n{out}");
     assert!(!ok, "a panic in a teardown drop must fail the program:\n{out}");
@@ -142,7 +142,7 @@ fn main() {{
 }}
 "
     );
-    let (out, ok) = run(&bin, &dir, "explicit.hy", &explicit);
+    let (out, ok) = run(&bin, &dir, "explicit.coil", &explicit);
     assert!(!ok, "{out}");
     assert!(out.contains("drop failed"), "{out}");
     assert!(!out.contains("after drop"), "{out}");
@@ -152,7 +152,7 @@ fn main() {{
     let case_dir = dir.join("cases");
     std::fs::create_dir_all(&case_dir).unwrap();
     std::fs::write(
-        case_dir.join("drop_case.hy"),
+        case_dir.join("drop_case.coil"),
         format!(
             "{PRELUDE}
 test(\"a drop panic fails the case\") {{

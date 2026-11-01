@@ -52,14 +52,14 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Function keys](symbol-keys.md) | `symbol::fn_key()` (compile-time per-function, per-instantiation `int` key: what it hashes, inlining, generic clones, DCE, caches) and `symbol::next_id()` (process-wide counter, HostInvoke **179**) |
 | [Stack bounds](stack-bounds.md) | Operand stack sizing, run-time growth, and the optional `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
-| [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |
+| [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.ccoil` |
 | [Superinstruction candidates](superinstructions-candidates.md) | Historical: COI-378 S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |
 | [Opcodes](opcodes.md) | Selected bytecode ops behind builtins |
 | [Dissect](dissect.md) | `coil dissect` — in-memory bytecode / IL / AST dump |
 | [Array pins](array-pin.md) | Array-handle pins: only the prologue `ArrayPin` is still emitted; `IndexPin*` / `StoreIndexPin*` are retired |
 | [Debugger](debugger.md) | `coil debug` — GDB-style REPL / batch debugger |
 | [Test runner](test-runner.md) | `coil test` — `coil-test` helper: discovery, `compile_fail/`, seeded order, reactor jobs (`-j`), line coverage (`--coverage`, lcov); `coil mutate` mutation testing |
-| [Formatter](fmt.md) | `coil fmt` — AST pretty-printer for `.hy` |
+| [Formatter](fmt.md) | `coil fmt` — AST pretty-printer for `.coil` |
 | [LSP](lsp.md) | `coil lsp` — language server |
 | [Test health report](test-health-report.md) | Historical flaky/broken-test notes |
 | [String table migration](string-table-migration.md) | Completed migration note (retired `print` keyword) |
@@ -79,6 +79,6 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | `reporting` | Diagnostics rendering (ariadne) |
 | `coil-embed` | Packaged-app runner: a small bin that calls `coil_cli::try_run_embedded`. **Not** an embed-the-VM library. |
 
-`coil package` concatenates a `.hyc` onto a runner (`coil-embed` when present, otherwise the full `coil` binary). There is no supported embed-the-VM library API yet (that needs host-catalog + archive C-layout work, later).
+`coil package` concatenates a `.ccoil` onto a runner (`coil-embed` when present, otherwise the full `coil` binary). There is no supported embed-the-VM library API yet (that needs host-catalog + archive C-layout work, later).
 
 Contributor invariants: [AGENTS.md](../../AGENTS.md).

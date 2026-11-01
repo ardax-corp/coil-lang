@@ -53,7 +53,7 @@ fn missing_helper_reports_required_binary() {
     let cwd = scratch_dir("missing");
     let isolated = isolated_coil(&cwd);
 
-    let out = run(&isolated, &["fmt", "missing.hy"]);
+    let out = run(&isolated, &["fmt", "missing.coil"]);
     assert!(
         !out.status.success(),
         "expected failure when coil-fmt is absent"

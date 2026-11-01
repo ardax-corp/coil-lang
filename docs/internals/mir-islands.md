@@ -29,7 +29,7 @@ one object story, cost gate): [opt-generalization.md](opt-generalization.md).
 **Coverage first, score-chasing never.** Islands exist so more of the
 *language* (match, classes, strings, GC coordination, effects, debugger
 boundaries) can ride typed SSA. A PR must not exist only to invent a
-microbench or bump a flagship. Identical flagship `.hyc` is OK when the
+microbench or bump a flagship. Identical flagship `.ccoil` is OK when the
 island does not fire there.
 
 **Register VM / Cranelift are later levers**, not prerequisites. Do not
@@ -118,10 +118,10 @@ env toggles.
    checksums match; wall time **flat (±5%) or better** on embed when archives
    differ. Prefer **identical numeric archives** when the island does not
    fire there.
-3. **Prove on real language surface.** Existing `.hy` tests + natural
+3. **Prove on real language surface.** Existing `.coil` tests + natural
    examples that already exercise the feature. Do **not** invent a
    synthetic hit bench whose only job is a number.
-4. **Identical flagship `.hyc` is not a skip** when the island *does* change
+4. **Identical flagship `.ccoil` is not a skip** when the island *does* change
    other bodies — report those archives too (for example I2 on
    `match_sum` / `result_*` if they change). It *is* enough when the island
    is lattice-only or docs-only.

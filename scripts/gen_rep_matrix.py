@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the value-representation matrix (`tests/representation/`).
 
-One `.hy` program per (representation, position) cell: it builds two values
+One `.coil` program per (representation, position) cell: it builds two values
 of the representation, moves each through the position (a boundary where a
 value can change hands: a generic method, a `Vec<V>` field, a closure, a
 thread, a host call, a dictionary in a shared body) and prints what ground
@@ -391,7 +391,7 @@ def cells():
 
 
 def name(rep, pos):
-    return f"{rep.key}__{pos.key}.hy"
+    return f"{rep.key}__{pos.key}.coil"
 
 
 def load_baseline():
@@ -439,7 +439,7 @@ def check(files):
     have = set()
     for d in (OUT, WRONG):
         if d.exists():
-            have |= {p for p in d.rglob("*.hy")}
+            have |= {p for p in d.rglob("*.coil")}
     stale = [p for p in files if not p.exists() or p.read_text() != files[p]]
     extra = sorted(have - set(files))
     for p in stale + extra:
@@ -449,7 +449,7 @@ def check(files):
 
 def run_cell(bin_dir, src, out, flags, env_extra):
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "cell.hy"
+        path = Path(tmp) / "cell.coil"
         path.write_text(src)
         env = dict(os.environ, **env_extra)
         try:

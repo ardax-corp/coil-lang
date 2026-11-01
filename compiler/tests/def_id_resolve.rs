@@ -28,15 +28,15 @@ fn build_project(test_name: &str, files: &[(&str, &str)], entry: &str) -> (PathB
 fn imported_fn_def_id_matches_defining_module() {
     let files = [
         (
-            "src/math.hy",
+            "src/math.coil",
             "fn add(int a, int b) -> int {\n    return a + b;\n}\n",
         ),
         (
-            "src/main.hy",
+            "src/main.coil",
             "use math::add;\nfn main() {\n    add(1, 2);\n}\n",
         ),
     ];
-    let (root, entry) = build_project("use_same_id", &files, "src/main.hy");
+    let (root, entry) = build_project("use_same_id", &files, "src/main.coil");
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
     if pipeline.compile_src_from_file(entry.to_str().unwrap()).is_err() {
@@ -67,15 +67,15 @@ fn imported_fn_def_id_matches_defining_module() {
 fn imported_one_item_per_file_def_id_matches_defining_module() {
     let files = [
         (
-            "src/foo/sadge.hy",
+            "src/foo/sadge.coil",
             "fn sadge() {}\n",
         ),
         (
-            "src/main.hy",
+            "src/main.coil",
             "use foo::sadge;\nfn main() {\n    sadge();\n}\n",
         ),
     ];
-    let (root, entry) = build_project("use_file_per_item", &files, "src/main.hy");
+    let (root, entry) = build_project("use_file_per_item", &files, "src/main.coil");
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
     if pipeline.compile_src_from_file(entry.to_str().unwrap()).is_err() {
@@ -100,13 +100,13 @@ fn imported_one_item_per_file_def_id_matches_defining_module() {
 #[test]
 fn imported_alias_one_item_per_file_def_id_matches_defining_module() {
     let files = [
-        ("src/foo/sadge.hy", "fn sadge() {}\n"),
+        ("src/foo/sadge.coil", "fn sadge() {}\n"),
         (
-            "src/main.hy",
+            "src/main.coil",
             "use foo::sadge as f;\nfn main() {\n    f();\n}\n",
         ),
     ];
-    let (root, entry) = build_project("use_file_per_item_alias", &files, "src/main.hy");
+    let (root, entry) = build_project("use_file_per_item_alias", &files, "src/main.coil");
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
     if pipeline.compile_src_from_file(entry.to_str().unwrap()).is_err() {

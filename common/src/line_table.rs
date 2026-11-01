@@ -17,7 +17,7 @@ pub enum DebugLevel {
     /// message and bare `in <unknown>` frames.
     None,
     /// Function names and the line table (file, line, column per run): a
-    /// backtrace reads `in inner at x.hy:3:8`. No byte spans.
+    /// backtrace reads `in inner at x.coil:3:8`. No byte spans.
     Lines,
     /// Lines plus byte spans, which the debugger and coverage need.
     #[default]

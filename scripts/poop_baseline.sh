@@ -17,11 +17,11 @@ DURATION_MS="${DURATION_MS:-6000}"
 OUT_DIR="${OUT_DIR:-/tmp/coil_poop_baseline}"
 
 BENCHES=(
-    examples/perf/mandelbrot.hy
-    examples/perf/tak.hy
-    examples/perf/nsieve.hy
-    examples/perf/binary_trees.hy
-    examples/perf/fib.hy
+    examples/perf/mandelbrot.coil
+    examples/perf/tak.coil
+    examples/perf/nsieve.coil
+    examples/perf/binary_trees.coil
+    examples/perf/fib.coil
 )
 
 if ! command -v poop >/dev/null 2>&1; then
@@ -34,14 +34,14 @@ RUSTC_WRAPPER= cargo build --release --quiet
 
 mkdir -p "$OUT_DIR"
 for path in "${BENCHES[@]}"; do
-    name="$(basename "$path" .hy)"
-    hyc="$OUT_DIR/${name}.hyc"
+    name="$(basename "$path" .coil)"
+    hyc="$OUT_DIR/${name}.ccoil"
     echo "== compile ${path} -> ${hyc} =="
     if [[ "$name" == "fib" ]]; then
         "$BIN" compile --auto-par off "$path" -o "$hyc" >/dev/null
     else
         "$BIN" compile "$path" -o "$hyc" >/dev/null
     fi
-    echo "== poop -d ${DURATION_MS} coil run ${name}.hyc =="
+    echo "== poop -d ${DURATION_MS} coil run ${name}.ccoil =="
     poop -d "$DURATION_MS" "$BIN run $hyc"
 done

@@ -31,7 +31,7 @@ fn dead_store_keeps_its_overflow_trap() {
     let dir = std::env::temp_dir().join(format!("coil_dead_store_trap_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = dir.join("main.hy");
+    let src = dir.join("main.coil");
     std::fs::write(&src, SRC).unwrap();
 
     for mode in [&["-O", "0"][..], &["-O", "2"][..]] {
@@ -43,7 +43,7 @@ fn dead_store_keeps_its_overflow_trap() {
         let out = cmd.arg(&src).output().expect("coil run");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{mode:?}: expected an overflow panic; stderr: {stderr}");
-        assert!(stderr.contains("integer overflow") && stderr.contains("main.hy:17:"), "{mode:?}: stderr: {stderr}");
+        assert!(stderr.contains("integer overflow") && stderr.contains("main.coil:17:"), "{mode:?}: stderr: {stderr}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

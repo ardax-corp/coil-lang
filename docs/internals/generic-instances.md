@@ -18,7 +18,7 @@ fn log<T: Describe>(T x) { … }
 log(new Box(3));                             // dictionary built from the instance and its context
 ```
 
-Tests: `tests/traits/generic_trait_instance.hy`, `tests/traits/bounded_generic_instance.hy`, `tests/traits/compile_fail/generic_instance_overlap.hy`, `tests/traits/compile_fail/bounded_instance_*.hy`; parser: `typeclass_impl_bounded_generic_head`.
+Tests: `tests/traits/generic_trait_instance.coil`, `tests/traits/bounded_generic_instance.coil`, `tests/traits/compile_fail/generic_instance_overlap.coil`, `tests/traits/compile_fail/bounded_instance_*.coil`; parser: `typeclass_impl_bounded_generic_head`.
 
 ## Spelling
 

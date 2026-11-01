@@ -62,7 +62,7 @@ fn coil_test_refuses_a_stale_coil_test() {
 #[test]
 fn coil_fmt_refuses_a_stale_coil_fmt() {
     let helper = build_helper(&coil_bin(), "coil-fmt");
-    let out = coil_with_fake_id(&["fmt", "missing.hy"]);
+    let out = coil_with_fake_id(&["fmt", "missing.coil"]);
     assert_refused(&out, &helper, "coil-fmt");
 }
 

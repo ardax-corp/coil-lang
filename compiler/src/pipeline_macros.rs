@@ -89,7 +89,7 @@ enum Round {
 
 /// Name of the pseudo entry file of an expansion program.
 fn expansion_entry_path() -> PathBuf {
-    PathBuf::from("<coil>/expand.hy")
+    PathBuf::from("<coil>/expand.coil")
 }
 
 impl Pipeline {
@@ -1152,7 +1152,7 @@ impl Pipeline {
         Some(BlockProgram { text, body_at, body: range })
     }
 
-    /// `err` with each `<coil>/expand.hy:LINE:COL` in `block`'s body (a
+    /// `err` with each `<coil>/expand.coil:LINE:COL` in `block`'s body (a
     /// panic's, a backtrace's) written as the place in `file`.
     fn block_positions(&self, file: &Path, block: &BlockProgram, err: &str) -> String {
         let report = self.ast_cache.get(file).map(|c| c.report_source()).unwrap_or_default();
@@ -1962,7 +1962,7 @@ struct SubProgram {
     comptime: crate::ComptimeLimits,
     comptime_io: crate::ComptimeGrants,
     comptime_cache: crate::comptime_cache::CacheConfig,
-    /// Source of `<coil>/expand.hy`.
+    /// Source of `<coil>/expand.coil`.
     text: String,
     /// Macro function of `__coil_run_i`, by `i`.
     entries: Vec<String>,
@@ -2072,7 +2072,7 @@ impl SubProgram {
 }
 
 /// Why an expansion program did not compile: a summary, and the errors in
-/// its entry file (`<coil>/expand.hy`) as reported there.
+/// its entry file (`<coil>/expand.coil`) as reported there.
 struct CompileFailure {
     summary: String,
     entry_errors: Vec<Message>,

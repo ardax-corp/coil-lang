@@ -15,5 +15,5 @@ if [[ ! -x "$BIN" ]]; then
   cargo build --release --manifest-path "$ROOT/Cargo.toml"
 fi
 
-rm -f "$ROOT/out.hyc" "$HERE/out.hyc"
-timeout "${TIMEOUT_SECS}s" "$BIN" "${ROOTS[@]}" "$HERE/src/main.hy"
+rm -f "$ROOT/out.ccoil" "$HERE/out.ccoil"
+timeout "${TIMEOUT_SECS}s" "$BIN" "${ROOTS[@]}" "$HERE/src/main.coil"

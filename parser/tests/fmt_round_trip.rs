@@ -1,7 +1,7 @@
 //! `coil fmt` must not change what a program means, and formatting its own
 //! output must change nothing (#1873).
 //!
-//! For every `.hy` file the CI `coil fmt --check` job covers (`examples`,
+//! For every `.coil` file the CI `coil fmt --check` job covers (`examples`,
 //! `tests`, `compiler/src/prelude`, `comptime/tests`, and the `compile_fail/`
 //! files that parse), and for a copy of each with the indentation of every
 //! line removed:
@@ -105,14 +105,14 @@ fn fmt_is_idempotent_and_keeps_the_ast_on_the_corpus() {
     );
 }
 
-/// `.hy` files under `dir`, recursively, `compile_fail/` included.
+/// `.coil` files under `dir`, recursively, `compile_fail/` included.
 fn hy_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
     for entry in entries {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
             hy_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "hy") {
+        } else if path.extension().is_some_and(|e| e == "coil") {
             out.push(path);
         }
     }

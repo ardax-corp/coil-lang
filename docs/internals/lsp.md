@@ -25,7 +25,7 @@ These requests are implemented and covered by `coil-lsp` scenario tests:
 | Per-file diagnostics | Every file in the project typecheck gets its own list (an imported file's parse error lands on that file; its importers skip cascade errors until it parses). Files that become clean are cleared. Nothing is rendered to stderr |
 | Protocol | Unsupported requests get `MethodNotFound`; malformed params get `InvalidParams`. A failing notification is logged, never fatal |
 | Project overlays | Unsaved buffers overlay disk via `Pipeline::set_file_text`; `ProjectIndex` is refreshed on each change |
-| Multi-file navigation | Goto-definition uses the use-graph `ProjectIndex` and can land in **unopened** imported `.hy` files |
+| Multi-file navigation | Goto-definition uses the use-graph `ProjectIndex` and can land in **unopened** imported `.coil` files |
 | Hover | Types from the project checker (cross-file, `let x = e` shows the type of `e`, `let x: T` shows `T`), `///` docs including at the definition site in another file, parameter docs, virtual-module stubs, `macro` / `derive` / `attr` docs. Unparsable buffers fall back to the single-file / last-good path |
 | Completion | Keywords, decls, inferred types, function snippets, mid-edit sanitize / last-good fallback; `Enum.Case` after `.`; virtual exports after `::` |
 | Member completion | `recv.` / `recv.pre` / `self.field.` list the receiver class's fields, then methods (`Checker::class_members`). The receiver is typed from a copy of the buffer with the half-typed access removed; `self` is the enclosing `impl` owner |

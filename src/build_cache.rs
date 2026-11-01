@@ -59,7 +59,7 @@ pub fn key(entry: &Path, options: &str) -> Option<String> {
 
 /// The cached archive for `key`, if every file it lists is unchanged.
 pub fn load(dir: &Path, key: &str) -> Option<Vec<u8>> {
-    let path = dir.join(format!("{key}.hyc"));
+    let path = dir.join(format!("{key}.{}", common::ext::ARCHIVE_EXT));
     let bytes = std::fs::read(&path).ok()?;
     let (deps, archive) = decode(&bytes)?;
     if deps.iter().any(|(p, digest)| path_digest(p) != *digest) {
@@ -111,7 +111,7 @@ pub fn store(dir: &Path, key: &str, inputs: &[PathBuf], archive: &[u8]) -> std::
     out.extend_from_slice(archive);
     let tmp = dir.join(format!("{key}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &out)?;
-    if let Err(e) = std::fs::rename(&tmp, dir.join(format!("{key}.hyc"))) {
+    if let Err(e) = std::fs::rename(&tmp, dir.join(format!("{key}.{}", common::ext::ARCHIVE_EXT))) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -146,11 +146,22 @@ fn take_u32(bytes: &[u8]) -> Option<(u32, &[u8])> {
 /// Drop the least recently used entries past [`MAX_ENTRIES`].
 fn prune(dir: &Path) {
     let Ok(read) = std::fs::read_dir(dir) else { return };
-    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = read
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "hyc"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-        .collect();
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for path in read.filter_map(|e| e.ok()).map(|e| e.path()) {
+        match path.extension().and_then(|x| x.to_str()) {
+            // Entries from before the `.ccoil` rename: a build of this coil
+            // never reads them (the key covers the compiler build).
+            Some(common::ext::LEGACY_ARCHIVE_EXT) => {
+                let _ = std::fs::remove_file(&path);
+            }
+            Some(common::ext::ARCHIVE_EXT) => {
+                if let Some(t) = path.metadata().ok().and_then(|m| m.modified().ok()) {
+                    entries.push((t, path));
+                }
+            }
+            _ => {}
+        }
+    }
     if entries.len() <= MAX_ENTRIES {
         return;
     }
@@ -188,14 +199,14 @@ mod tests {
     #[test]
     fn hit_until_an_input_changes() {
         let d = tmp("hit");
-        let src = d.join("a.hy");
+        let src = d.join("a.coil");
         std::fs::write(&src, "fn main() {}").unwrap();
         let cache = d.join("cache");
         let inputs = inputs(&src, std::slice::from_ref(&src), &[]);
         store(&cache, "k", &inputs, b"archive").unwrap();
         assert_eq!(load(&cache, "k").as_deref(), Some(b"archive".as_slice()));
         // A new file beside a source can change what `use` finds.
-        std::fs::write(d.join("b.hy"), "").unwrap();
+        std::fs::write(d.join("b.coil"), "").unwrap();
         assert_eq!(load(&cache, "k"), None);
         store(&cache, "k", &inputs, b"archive").unwrap();
         std::fs::write(&src, "fn main() { }").unwrap();
@@ -206,27 +217,39 @@ mod tests {
     #[test]
     fn key_follows_the_entry_bytes_and_options() {
         let d = tmp("key");
-        let src = d.join("a.hy");
+        let src = d.join("a.coil");
         std::fs::write(&src, "fn main() {}").unwrap();
         let k1 = key(&src, "o").unwrap();
         assert_eq!(key(&src, "o").unwrap(), k1);
         assert_ne!(key(&src, "p").unwrap(), k1);
         std::fs::write(&src, "fn main() { }").unwrap();
         assert_ne!(key(&src, "o").unwrap(), k1);
-        assert_eq!(key(&d.join("missing.hy"), "o"), None);
+        assert_eq!(key(&d.join("missing.coil"), "o"), None);
     }
 
     #[test]
     fn prune_keeps_the_newest() {
         let d = tmp("prune");
         for i in 0..MAX_ENTRIES + 3 {
-            std::fs::write(d.join(format!("{i:04}.hyc")), "").unwrap();
+            std::fs::write(d.join(format!("{i:04}.ccoil")), "").unwrap();
             let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + i as u64);
-            std::fs::File::options().append(true).open(d.join(format!("{i:04}.hyc"))).unwrap().set_modified(t).unwrap();
+            std::fs::File::options().append(true).open(d.join(format!("{i:04}.ccoil"))).unwrap().set_modified(t).unwrap();
         }
         prune(&d);
-        assert!(!d.join("0000.hyc").exists() && !d.join("0002.hyc").exists());
-        assert!(d.join("0003.hyc").exists());
+        assert!(!d.join("0000.ccoil").exists() && !d.join("0002.ccoil").exists());
+        assert!(d.join("0003.ccoil").exists());
         assert_eq!(std::fs::read_dir(&d).unwrap().count(), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn prune_drops_legacy_entries() {
+        let d = tmp("prune-legacy");
+        let legacy = d.join(format!("old.{}", common::ext::LEGACY_ARCHIVE_EXT));
+        let current = d.join(format!("new.{}", common::ext::ARCHIVE_EXT));
+        std::fs::write(&legacy, "").unwrap();
+        std::fs::write(&current, "").unwrap();
+        prune(&d);
+        assert!(!legacy.exists());
+        assert!(current.exists());
     }
 }

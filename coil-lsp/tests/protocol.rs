@@ -146,11 +146,11 @@ const CLASS_SOURCE: &str = "class P {\n    pub x: int,\n}\n\nimpl P {\n    pub f
 
 #[test]
 fn unknown_request_gets_method_not_found() {
-    let dir = project("unknown", &[("src/main.hy", CLASS_SOURCE)]);
+    let dir = project("unknown", &[("src/main.coil", CLASS_SOURCE)]);
     let mut client = Client::spawn(&dir);
     let reply = client.request(
         "textDocument/nonexistent",
-        json!({ "textDocument": { "uri": uri(&dir.join("src/main.hy")) } }),
+        json!({ "textDocument": { "uri": uri(&dir.join("src/main.coil")) } }),
     );
     assert_eq!(reply["error"]["code"], json!(-32601), "reply={reply}");
     // The server is still alive and answering.
@@ -160,8 +160,8 @@ fn unknown_request_gets_method_not_found() {
 
 #[test]
 fn edits_do_not_produce_duplicate_decl_errors() {
-    let dir = project("dupes", &[("src/main.hy", CLASS_SOURCE)]);
-    let main = uri(&dir.join("src/main.hy"));
+    let dir = project("dupes", &[("src/main.coil", CLASS_SOURCE)]);
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     client.notify(
         "textDocument/didOpen",
@@ -188,14 +188,14 @@ fn imported_parse_error_is_reported_on_that_file() {
     let dir = project(
         "import-parse",
         &[
-            ("src/main.hy", "use util::{helper};\n\nfn main() {\n    let _ = helper(1);\n}\n"),
-            ("src/util.hy", "fn helper(int a) -> int {\n    return a +;\n}\n"),
+            ("src/main.coil", "use util::{helper};\n\nfn main() {\n    let _ = helper(1);\n}\n"),
+            ("src/util.coil", "fn helper(int a) -> int {\n    return a +;\n}\n"),
         ],
     );
-    let main = uri(&dir.join("src/main.hy"));
-    let util = uri(&dir.join("src/util.hy"));
+    let main = uri(&dir.join("src/main.coil"));
+    let util = uri(&dir.join("src/util.coil"));
     let mut client = Client::spawn(&dir);
-    let text = std::fs::read_to_string(dir.join("src/main.hy")).unwrap();
+    let text = std::fs::read_to_string(dir.join("src/main.coil")).unwrap();
     client.notify(
         "textDocument/didOpen",
         json!({ "textDocument": { "uri": main, "languageId": "coil", "version": 1, "text": text } }),
@@ -204,11 +204,11 @@ fn imported_parse_error_is_reported_on_that_file() {
     let util_diags = client.diagnostics_for(&util);
     assert!(
         util_diags.iter().any(|messages| !messages.is_empty()),
-        "util.hy parse error not published: {util_diags:?}"
+        "util.coil parse error not published: {util_diags:?}"
     );
     // No cascade ("non-class type", unknown function) in the importer.
     for messages in client.diagnostics_for(&main) {
-        assert!(messages.is_empty(), "cascade in main.hy: {messages:?}");
+        assert!(messages.is_empty(), "cascade in main.coil: {messages:?}");
     }
 }
 
@@ -221,16 +221,16 @@ fn dependency_classes_and_enums_resolve() {
     let main = "use shapes::{Box, Fault};\n\nfn describe(Fault f) -> int {\n    return match f {\n        Fault::Bad { line } => line,\n        Fault::Worse { line } => line + 1,\n    };\n}\n\nfn main() {\n    let b = Box::make(3);\n    let _ = describe(Fault::Bad { line: b.width() });\n}\n";
     let dir = project(
         "dep-types",
-        &[(".deps/shapes/src/shapes.hy", shapes), ("src/main.hy", main)],
+        &[(".deps/shapes/src/shapes.coil", shapes), ("src/main.coil", main)],
     );
-    let main_uri = uri(&dir.join("src/main.hy"));
+    let main_uri = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main_uri, main);
     client.request("shutdown", Value::Null);
     let published = client.diagnostics_for(&main_uri);
-    assert!(!published.is_empty(), "no diagnostics published for main.hy");
+    assert!(!published.is_empty(), "no diagnostics published for main.coil");
     for messages in published {
-        assert!(messages.is_empty(), "false diagnostics in main.hy: {messages:?}");
+        assert!(messages.is_empty(), "false diagnostics in main.coil: {messages:?}");
     }
 }
 
@@ -242,8 +242,8 @@ fn command_line_roots_and_grants_reach_diagnostics() {
     // FFI process-exec is gated at typecheck, so the editor sees it; the
     // host-call gates (`env::exit`, …) run after codegen and do not.
     let main = "use ffi::{declare};\nuse ffi::types::{Int, Ptr};\nuse geo::{Point};\n\nfn main() {\n    let p = Point::at(2);\n    let _ = declare(0, \"system\", (Ptr,), Int);\n    let _ = p.x;\n}\n";
-    let dir = project("cli-roots", &[("vendor/geo.hy", geo), ("src/main.hy", main)]);
-    let main_uri = uri(&dir.join("src/main.hy"));
+    let dir = project("cli-roots", &[("vendor/geo.coil", geo), ("src/main.coil", main)]);
+    let main_uri = uri(&dir.join("src/main.coil"));
     let last = |args: &[&str]| -> Vec<String> {
         let mut client = Client::spawn_with(&dir, args);
         open(&mut client, &main_uri, main);
@@ -273,8 +273,8 @@ fn command_line_roots_and_grants_reach_diagnostics() {
 fn comptime_io_is_replayed_from_the_cache() {
     let provider = "use macro::{Expr, Code, lit};\nuse env::var;\n\nmacro env_text(Expr name) -> Code {\n    return lit(var(name.src()).ok() ?? \"\");\n}\n";
     let main = "use gen::{env_text};\n\nfn main() {\n    let n: int = env_text!(CT_VALUE).len();\n}\n";
-    let dir = project("comptime-replay", &[("src/main.hy", main), ("src/gen.hy", provider)]);
-    let main_uri = uri(&dir.join("src/main.hy"));
+    let dir = project("comptime-replay", &[("src/main.coil", main), ("src/gen.coil", provider)]);
+    let main_uri = uri(&dir.join("src/main.coil"));
     let flags = ["--comptime-cache", "cache", "--comptime-env", "CT_VALUE"];
     let last = || -> Vec<String> {
         let params = json!({ "rootUri": uri(&dir), "capabilities": {} });
@@ -295,9 +295,9 @@ fn comptime_io_is_replayed_from_the_cache() {
         .current_dir(&dir)
         .env("CT_VALUE", "one")
         .env("XDG_CACHE_HOME", dir.join("user-cache"))
-        .args(["compile", "-o", "main.hyc"])
+        .args(["compile", "-o", "main.ccoil"])
         .args(flags)
-        .arg("src/main.hy")
+        .arg("src/main.coil")
         .output()
         .unwrap_or_else(|e| panic!("run {} (build `coil` too): {e}", coil.display()));
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
@@ -312,9 +312,9 @@ fn workspace_flag_sets_the_project_directory() {
     let main = "use util::{helper};\n\nfn main() {\n    let _ = helper(1);\n}\n";
     let dir = project(
         "workspace-flag",
-        &[("src/main.hy", main), ("src/util.hy", "fn helper(int a) -> int {\n    return a;\n}\n")],
+        &[("src/main.coil", main), ("src/util.coil", "fn helper(int a) -> int {\n    return a;\n}\n")],
     );
-    let main_uri = uri(&dir.join("src/main.hy"));
+    let main_uri = uri(&dir.join("src/main.coil"));
     let parent_uri = uri(dir.parent().unwrap());
     for params in [
         json!({ "rootUri": null, "capabilities": {} }),
@@ -378,8 +378,8 @@ fn position_of(text: &str, needle: &str, delta: usize) -> Value {
 #[test]
 fn member_completion_lists_fields_and_methods() {
     let text = CLASS_SOURCE.replace("let _ = p.get();", "let _ = p.g");
-    let dir = project("member-completion", &[("src/main.hy", &text)]);
-    let main = uri(&dir.join("src/main.hy"));
+    let dir = project("member-completion", &[("src/main.coil", &text)]);
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, &text);
     let response = client.request(
@@ -414,8 +414,8 @@ fn member_completion_lists_fields_and_methods() {
 
 #[test]
 fn member_goto_definition_finds_method_and_field() {
-    let dir = project("member-goto", &[("src/main.hy", CLASS_SOURCE)]);
-    let main = uri(&dir.join("src/main.hy"));
+    let dir = project("member-goto", &[("src/main.coil", CLASS_SOURCE)]);
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, CLASS_SOURCE);
     let response = client.request(
@@ -436,8 +436,8 @@ fn member_goto_definition_finds_method_and_field() {
 #[test]
 fn inlay_hints_show_let_types_and_parameter_names() {
     let text = "fn area(int width, int height) -> int {\n    return width * height;\n}\n\nfn main() {\n    let height = 3;\n    let a = area(2, height);\n    let _ = a;\n}\n";
-    let dir = project("inlay", &[("src/main.hy", text)]);
-    let main = uri(&dir.join("src/main.hy"));
+    let dir = project("inlay", &[("src/main.coil", text)]);
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, text);
     let response = client.request(
@@ -506,12 +506,12 @@ fn code_action_imports_unknown_function() {
     let dir = project(
         "action-import",
         &[
-            ("src/main.hy", main_text),
-            ("src/util.hy", "fn other() -> int {\n    return 2;\n}\n"),
-            ("src/geo.hy", "fn helper(int a) -> int {\n    return a;\n}\n"),
+            ("src/main.coil", main_text),
+            ("src/util.coil", "fn other() -> int {\n    return 2;\n}\n"),
+            ("src/geo.coil", "fn helper(int a) -> int {\n    return a;\n}\n"),
         ],
     );
-    let main = uri(&dir.join("src/main.hy"));
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, main_text);
     let actions = code_actions(&mut client, &main, position_of(main_text, "helper", 0));
@@ -528,8 +528,8 @@ fn code_action_imports_unknown_function() {
 #[test]
 fn code_action_adds_default_arm_to_statement_match() {
     let text = "enum Color {\n    Red,\n    Green,\n}\n\nfn main() {\n    let c = Color::Red;\n    match c {\n        Color::Red => {},\n    };\n}\n";
-    let dir = project("action-default", &[("src/main.hy", text)]);
-    let main = uri(&dir.join("src/main.hy"));
+    let dir = project("action-default", &[("src/main.coil", text)]);
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, text);
     let actions = code_actions(&mut client, &main, position_of(text, "match c", 0));
@@ -546,8 +546,8 @@ fn code_action_adds_default_arm_to_statement_match() {
 #[test]
 fn code_action_adds_inferred_type_annotation() {
     let text = "fn main() {\n    let total = 1 + 2;\n    let _ = total;\n}\n";
-    let dir = project("action-annotate", &[("src/main.hy", text)]);
-    let main = uri(&dir.join("src/main.hy"));
+    let dir = project("action-annotate", &[("src/main.coil", text)]);
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, text);
     let actions = code_actions(&mut client, &main, position_of(text, "total =", 2));
@@ -559,8 +559,8 @@ fn code_action_adds_inferred_type_annotation() {
 #[test]
 fn incremental_edits_are_applied_and_rechecked() {
     let text = "fn main() {\n    let a: int = 1;\n    let _ = a;\n}\n";
-    let dir = project("incremental", &[("src/main.hy", text)]);
-    let main = uri(&dir.join("src/main.hy"));
+    let dir = project("incremental", &[("src/main.coil", text)]);
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, text);
     // `1` → `"one"`, one keystroke-sized change after another.
@@ -597,9 +597,9 @@ fn code_action_expands_macros_and_diagnostics_see_generated_code() {
     let main_text = "use gen::{Answer};\n\n#[derive(Answer)]\nclass C {\n    pub x: int,\n}\n\nfn main() {\n    let _ = C::answer();\n}\n";
     let dir = project(
         "action-expand",
-        &[("src/main.hy", main_text), ("src/gen.hy", provider)],
+        &[("src/main.coil", main_text), ("src/gen.coil", provider)],
     );
-    let main = uri(&dir.join("src/main.hy"));
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, main_text);
     // The generated `answer()` typechecks: no diagnostics on main.
@@ -628,9 +628,9 @@ fn code_action_expands_function_macro_calls() {
     let main_text = "use gen::{twice};\n\nfn main() {\n    let x = twice!(21);\n}\n";
     let dir = project(
         "action-expand-fn-macro",
-        &[("src/main.hy", main_text), ("src/gen.hy", provider)],
+        &[("src/main.coil", main_text), ("src/gen.coil", provider)],
     );
-    let main = uri(&dir.join("src/main.hy"));
+    let main = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main, main_text);
     client.request("coil/sync", Value::Null);
@@ -658,8 +658,8 @@ fn hover_text(client: &mut Client, uri: &str, text: &str, needle: &str, delta: u
 fn hover_shows_signatures_docs_and_import_rows() {
     let util = "/// Doubles `a`.\n///\n/// ```\n/// # use tests::assert;\n/// assert!(twice(2) == 4);\n/// ```\nfn twice(int a) -> int {\n    return a * 2;\n}\n";
     let main = "use io::{stdout};\nuse util::{twice};\n\nfn main() {\n    let v: Vec<int> = Vec::new();\n    v.push(twice(1));\n    let s: string = \"x\";\n    for x in v {\n        let _ = x;\n    }\n    let _ = stdout();\n    let _ = Option::Some(1);\n}\n";
-    let dir = project("hover-docs", &[("src/main.hy", main), ("src/util.hy", util)]);
-    let main_uri = uri(&dir.join("src/main.hy"));
+    let dir = project("hover-docs", &[("src/main.coil", main), ("src/util.coil", util)]);
+    let main_uri = uri(&dir.join("src/main.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &main_uri, main);
     let mut hover = |needle: &str, delta: usize| hover_text(&mut client, &main_uri, main, needle, delta);
@@ -699,7 +699,7 @@ const COVERED_SOURCE: &str = "/// Clamp `x` to `lo..=hi`.\nfn clamp(int x, int l
 const COVERED_TEST: &str = "use mathx::{clamp, Acc};\n\ntest(\"clamps low\") {\n    let a = new Acc(1);\n    if clamp(-1, 0, 5) + a.add(0) != 1 {\n        panic(\"bad\");\n    }\n}\n";
 
 /// `coil test --coverage` on the two files above (line 26 is past the end).
-const COVERED_LCOV: &str = "TN:\nSF:src/mathx.hy\nDA:3,1\nDA:4,1\nDA:6,0\nDA:7,0\nDA:9,0\nDA:13,0\nDA:14,0\nDA:23,3\nDA:26,0\nLF:9\nLH:3\nend_of_record\n";
+const COVERED_LCOV: &str = "TN:\nSF:src/mathx.coil\nDA:3,1\nDA:4,1\nDA:6,0\nDA:7,0\nDA:9,0\nDA:13,0\nDA:14,0\nDA:23,3\nDA:26,0\nLF:9\nLH:3\nend_of_record\n";
 
 fn code_lens_titles(client: &mut Client, uri: &str) -> Vec<String> {
     let reply = client.request("textDocument/codeLens", json!({ "textDocument": { "uri": uri } }));
@@ -739,13 +739,13 @@ fn coverage_shows_as_hints_lenses_and_hover() {
     let dir = project(
         "coverage",
         &[
-            ("src/mathx.hy", COVERED_SOURCE),
-            ("tests/clamp.hy", COVERED_TEST),
+            ("src/mathx.coil", COVERED_SOURCE),
+            ("tests/clamp.coil", COVERED_TEST),
             ("target/coverage/lcov.info", COVERED_LCOV),
         ],
     );
-    let src_uri = uri(&dir.join("src/mathx.hy"));
-    let test_uri = uri(&dir.join("tests/clamp.hy"));
+    let src_uri = uri(&dir.join("src/mathx.coil"));
+    let test_uri = uri(&dir.join("tests/clamp.coil"));
     let mut client = Client::spawn(&dir);
     open(&mut client, &src_uri, COVERED_SOURCE);
 
@@ -791,8 +791,8 @@ fn coverage_shows_as_hints_lenses_and_hover() {
 /// request, and clients that support it are asked to refresh lenses.
 #[test]
 fn coverage_tracefile_is_watched() {
-    let dir = project("coverage-watch", &[("src/mathx.hy", COVERED_SOURCE)]);
-    let src_uri = uri(&dir.join("src/mathx.hy"));
+    let dir = project("coverage-watch", &[("src/mathx.coil", COVERED_SOURCE)]);
+    let src_uri = uri(&dir.join("src/mathx.coil"));
     let mut client = Client::spawn_init(
         &[],
         json!({
@@ -824,9 +824,9 @@ fn coverage_tracefile_is_watched() {
 fn coverage_can_be_turned_off() {
     let dir = project(
         "coverage-off",
-        &[("src/mathx.hy", COVERED_SOURCE), ("target/coverage/lcov.info", COVERED_LCOV)],
+        &[("src/mathx.coil", COVERED_SOURCE), ("target/coverage/lcov.info", COVERED_LCOV)],
     );
-    let src_uri = uri(&dir.join("src/mathx.hy"));
+    let src_uri = uri(&dir.join("src/mathx.coil"));
     let mut client = Client::spawn_init(
         &[],
         json!({ "rootUri": uri(&dir), "capabilities": {}, "initializationOptions": { "coverage": false } }),

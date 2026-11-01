@@ -6578,7 +6578,7 @@ impl Compiler {
         Some((native_id, meta))
     }
 
-    /// The `main` of a test file with none (standalone `coil tests/foo.hy`):
+    /// The `main` of a test file with none (standalone `coil tests/foo.coil`):
     /// runs every test case in one VM, printing `> Test "<name>" failed` for
     /// each case that returns `Err`, then panics with `"tests failed"` if
     /// any did. Built as HIR ([`crate::hir::synth`]) and lowered like any

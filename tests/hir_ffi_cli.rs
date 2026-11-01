@@ -17,7 +17,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         .arg(tmp)
         .arg(src)
         .arg("-o")
-        .arg(tmp.join("main.hyc"))
+        .arg(tmp.join("main.ccoil"))
         .output()
         .expect("coil compile");
     let why_err = String::from_utf8_lossy(&why.stderr);
@@ -30,7 +30,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         .arg(tmp)
         .arg(src)
         .arg("-o")
-        .arg(tmp.join("main.hyc"))
+        .arg(tmp.join("main.ccoil"))
         .output()
         .expect("coil compile --opt-stats");
     let stats_out = String::from_utf8_lossy(&stats.stdout).into_owned() + &String::from_utf8_lossy(&stats.stderr);
@@ -89,7 +89,7 @@ fn hir_lowers_and_runs_ffi_calls() {
 
     // Nested calls put the library and function statics under other
     // operands; a `ptr` result moves through a local and a parameter.
-    let src = tmp.join("main.hy");
+    let src = tmp.join("main.coil");
     std::fs::write(
         &src,
         r#"
@@ -120,7 +120,7 @@ fn main() {
 
     // Dynamic FFI: a signature's tags are constants, a function named in
     // the argument tuple is its code pointer.
-    let dynamic = tmp.join("dynamic.hy");
+    let dynamic = tmp.join("dynamic.coil");
     std::fs::write(
         &dynamic,
         r#"
@@ -166,7 +166,7 @@ fn main() {
 
     // A `Vec<T>` extern param is a pointer to the elements; a fixed
     // `[T; N]` passes the same way, as `[T]` params took it (#890).
-    let arrays = tmp.join("arrays.hy");
+    let arrays = tmp.join("arrays.coil");
     std::fs::write(
         &arrays,
         r#"
@@ -196,7 +196,7 @@ fn main() {
     // without writing it back. The argument string is a temporary, so only
     // the VM's in-flight argument roots keep it alive while the callback
     // allocates enough to collect.
-    let const_bytes = tmp.join("const_bytes.hy");
+    let const_bytes = tmp.join("const_bytes.coil");
     std::fs::write(
         &const_bytes,
         r#"
@@ -258,7 +258,7 @@ fn main() {
 
     // A module `const` set at startup or a `static let` in an `invoke` tuple
     // is a value, not a callback (#868).
-    let globals = tmp.join("globals.hy");
+    let globals = tmp.join("globals.coil");
     std::fs::write(
         &globals,
         r#"
@@ -296,7 +296,7 @@ fn main() {
 
     // A class's `ptr` field is a one-word scalar slot: `new` stores it, a
     // method and `drop` read it, and an assignment replaces it (#1507).
-    let ptr_field = tmp.join("ptr_field.hy");
+    let ptr_field = tmp.join("ptr_field.coil");
     std::fs::write(
         &ptr_field,
         r#"
@@ -347,7 +347,7 @@ fn main() {
     // A void `extern` call leaves the operand stack as it found it: more
     // calls than the stack has slots, in `main`'s loop and in a callee the
     // loop calls, a `(ptr, int, int)` shape and a no-argument one (#1638).
-    let void_calls = tmp.join("void_calls.hy");
+    let void_calls = tmp.join("void_calls.coil");
     std::fs::write(
         &void_calls,
         r#"
@@ -424,7 +424,7 @@ fn extern_byte_buffer_params() {
         .expect("cc");
     assert!(status.success(), "failed to build {}", so.display());
 
-    let src = tmp.join("bytes.hy");
+    let src = tmp.join("bytes.coil");
     std::fs::write(
         &src,
         r#"
@@ -464,7 +464,7 @@ fn main() {
     .unwrap();
     check(&bin, &tmp, &src);
 
-    let ro = tmp.join("readonly.hy");
+    let ro = tmp.join("readonly.coil");
     std::fs::write(
         &ro,
         r#"
@@ -487,7 +487,7 @@ fn main() {
         .arg(&tmp)
         .arg(&ro)
         .arg("-o")
-        .arg(tmp.join("ro.hyc"))
+        .arg(tmp.join("ro.ccoil"))
         .output()
         .expect("coil compile");
     let err = String::from_utf8_lossy(&out.stderr);
@@ -529,7 +529,7 @@ fn invoke_through_static_fn_id() {
         .expect("cc");
     assert!(status.success(), "failed to build {}", so.display());
 
-    let src = tmp.join("static_id.hy");
+    let src = tmp.join("static_id.coil");
     std::fs::write(
         &src,
         r#"

@@ -43,20 +43,20 @@ fn run(root: &std::path::Path, extra: &[&str]) -> (String, Option<i32>) {
 fn failures_come_last_with_their_streams() {
     let root = unique_tmp("streams");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("noisy.hy"), NOISY).unwrap();
-    std::fs::write(root.join("quiet.hy"), "test(\"ok\") {}\n").unwrap();
+    std::fs::write(root.join("noisy.coil"), NOISY).unwrap();
+    std::fs::write(root.join("quiet.coil"), "test(\"ok\") {}\n").unwrap();
     let (err, code) = run(&root, &[]);
     assert_eq!(code, Some(1), "{err}");
-    let want = "noisy.hy: fails ----\nfailed: one is not two\nstdout:\non stdout\nstderr:\non stderr";
+    let want = "noisy.coil: fails ----\nfailed: one is not two\nstdout:\non stdout\nstderr:\non stderr";
     assert!(err.contains(want), "expected {want:?} in: {err}");
     assert!(!err.contains("quiet unless asked"), "{err}");
-    assert!(!err.contains("quiet.hy"), "a passing file is listed without --verbose: {err}");
+    assert!(!err.contains("quiet.coil"), "a passing file is listed without --verbose: {err}");
     let failures = err.find("\nfailures:").expect("failures section");
     assert!(err[failures..].contains("\nfailed:\n    "), "{err}");
     assert!(err.contains("test result: FAILED. 2 passed; 1 failed; 3 total"), "{err}");
 
     let (err, _) = run(&root, &["--verbose", "--show-output"]);
-    assert!(err.contains("quiet.hy"), "{err}");
-    assert!(err.contains("noisy.hy: passes (output) ----\nstdout:\nquiet unless asked"), "{err}");
+    assert!(err.contains("quiet.coil"), "{err}");
+    assert!(err.contains("noisy.coil: passes (output) ----\nstdout:\nquiet unless asked"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }

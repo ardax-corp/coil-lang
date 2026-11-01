@@ -65,7 +65,7 @@ struct VerifyCli {
     /// Also list proved and skipped checks (default: only failed and not proved)
     #[arg(short = 'v', long)]
     verbose: bool,
-    /// Entry `.hy` file
+    /// Entry `.coil` file
     #[arg(value_name = "FILE")]
     file: Option<String>,
 }
@@ -109,7 +109,7 @@ fn main() {
     let filename = match merge_entry(cli.file.clone(), cli.entry_flag.entry.clone()) {
         Ok(name) if !name.is_empty() => name,
         Ok(_) => {
-            print_cli_error("verify requires an entry .hy file");
+            print_cli_error("verify requires an entry .coil file");
             exit(1);
         }
         Err(msg) => {

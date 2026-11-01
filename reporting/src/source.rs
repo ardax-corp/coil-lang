@@ -78,8 +78,8 @@ mod tests {
     #[test]
     fn insert_returns_stable_id_on_reinsert() {
         let mut map = SourceMap::new();
-        let a = map.insert("a.hy", "fn main() {}");
-        let b = map.insert("a.hy", "fn main() { }");
+        let a = map.insert("a.coil", "fn main() {}");
+        let b = map.insert("a.coil", "fn main() { }");
         assert_eq!(a, b);
         assert_eq!(map.text(a), Some("fn main() { }"));
         assert_eq!(map.len(), 1);
@@ -88,8 +88,8 @@ mod tests {
     #[test]
     fn distinct_paths_get_distinct_ids() {
         let mut map = SourceMap::new();
-        let a = map.insert("a.hy", "a");
-        let b = map.insert("b.hy", "b");
+        let a = map.insert("a.coil", "a");
+        let b = map.insert("b.coil", "b");
         assert_ne!(a, b);
         assert_eq!(map.len(), 2);
     }

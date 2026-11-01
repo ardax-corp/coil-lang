@@ -1,15 +1,15 @@
 ---
 name: coil-language
 description: >-
-  Write and reason about coil programs (.hy): syntax, HM types, modules, virtual
+  Write and reason about coil programs (.coil): syntax, HM types, modules, virtual
   builtins, coroutines, FFI, and tests. Use when authoring or editing coil source,
-  explaining coil syntax, debugging type errors, or when the user mentions .hy files,
+  explaining coil syntax, debugging type errors, or when the user mentions .coil files,
   coil language features.
 ---
 
 # coil language
 
-coil is a **statically typed** scripting language with Hindley–Milner inference. Sources are `.hy`; the CLI compiles to versioned `.hyc` archives (`compile` / `run`) or runs in memory (default).
+coil is a **statically typed** scripting language with Hindley–Milner inference. Sources are `.coil`; the CLI compiles to versioned `.ccoil` archives (`compile` / `run`) or runs in memory (default).
 
 **Do not invent stdlib APIs** — userland helpers live in
 [coil-stdlib](https://github.com/ardax-corp/coil-stdlib)
@@ -22,17 +22,17 @@ Compiler builtins live in virtual modules; see [not-builtins](https://github.com
 
 ```bash
 cargo build --workspace
-cargo run -- examples/fib.hy          # in-memory compile + run (no out.hyc)
-cargo run -- compile examples/fib.hy    # writes out.hyc (or -o path)
-cargo run -- test                     # discover **/*.hy under ./tests
-cargo build --bin coil && ./target/debug/coil test path/to/file.hy  # the tests you touched; CI runs the full corpus and leak smoke
+cargo run -- examples/fib.coil          # in-memory compile + run (no out.ccoil)
+cargo run -- compile examples/fib.coil    # writes out.ccoil (or -o path)
+cargo run -- test                     # discover **/*.coil under ./tests
+cargo build --bin coil && ./target/debug/coil test path/to/file.coil  # the tests you touched; CI runs the full corpus and leak smoke
 ```
 
 | Goal | Command |
 |------|---------|
-| Run one file | `cargo run -- path/to/file.hy` |
-| Compile only | `cargo run -- compile file.hy [-o path]` (default `out.hyc`) |
-| Run archive | `cargo run -- run out.hyc` |
+| Run one file | `cargo run -- path/to/file.coil` |
+| Compile only | `cargo run -- compile file.coil [-o path]` (default `out.ccoil`) |
+| Run archive | `cargo run -- run out.ccoil` |
 | Project tests | `cargo run -- test [path] [--fail-fast]` |
 
 `coil compile` always recompiles; `coil run` never recompiles. Default mode always recompiles in memory — no stale bytecode cache.
@@ -126,12 +126,12 @@ Module search roots come from `--root DIR` (repeatable); `coil` reads no `coil.t
 
 | Topic | File |
 |-------|------|
-| Fibonacci smoke | `examples/fib.hy` |
-| Option/Result | `examples/option.hy`, `examples/result.hy` |
-| Modules | `examples/modules.hy` |
-| Coroutines | `examples/coro.hy` |
-| FFI | `examples/ffi_extern.hy` (extern block), `examples/ffi_sum.hy` (`dload`) |
-| GC `fn drop()` | `examples/finalizer.hy` |
+| Fibonacci smoke | `examples/fib.coil` |
+| Option/Result | `examples/option.coil`, `examples/result.coil` |
+| Modules | `examples/modules.coil` |
+| Coroutines | `examples/coro.coil` |
+| FFI | `examples/ffi_extern.coil` (extern block), `examples/ffi_sum.coil` (`dload`) |
+| GC `fn drop()` | `examples/finalizer.coil` |
 | Full catalog | [examples](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/examples.md) (`/docs/manual/examples`) |
 
 Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/getting-started.md) (`/docs/manual/getting-started`) → chapters 01–11.
@@ -142,7 +142,7 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 2. **Assuming stdlib** — no `sort` or HTTP in the VM; add [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) ([modules](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)) for collections/IO adapters/`num` constants; HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool. IEEE `sqrt`/`atan`/… are prelude math; `PI`/`E`/`TAU` are `num`.
 3. **Missing `use`** — `io`/`string` are not auto-imported.
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `--ffi-search-path` dirs, system; `dload` needs `--allow-dload` plus `--dload-pin` / `--dload-trusted`.
-5. **Stale `out.hyc`** — only from `coil compile`; delete before `coil run` if sources changed.
+5. **Stale `out.ccoil`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md) (`/docs/references/error-codes`).
 7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two-slot on direct `CALL`/`RETURN` ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`.
 8. **`raise` is not abort** — `raise` returns `Result::Err` and can be swallowed. Default `coil` / `coil run` / `coil-embed` exit 1 only on `panic`. Checksum boards must `panic`.

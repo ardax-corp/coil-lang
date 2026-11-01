@@ -1,15 +1,15 @@
 # Formatter (`coil fmt`)
 
 `coil fmt` re-execs the sibling `coil-fmt` helper (git-style). That helper parses
-`.hy` sources and pretty-prints from the AST (hardcoded 4-space indent).
+`.coil` sources and pretty-prints from the AST (hardcoded 4-space indent).
 
 ```bash
 cargo build   # coil + coil-fmt (+ other helpers)
-coil fmt path/to/file.hy
+coil fmt path/to/file.coil
 coil fmt src/
 coil fmt --check .
 # or invoke the helper directly:
-coil-fmt --check examples/fib.hy
+coil-fmt --check examples/fib.coil
 ```
 
 CI runs `coil-fmt --check` over `examples` and `tests`. Walking a
@@ -23,7 +23,7 @@ programs (a `compile_fail` file named on the command line is still checked).
 | default | Rewrite files in place |
 | `--check` | Report paths that would change; exit `1` if any; no writes |
 
-Directories are walked recursively for `*.hy`. Non-`.hy` files given explicitly are rejected.
+Directories are walked recursively for `*.coil`. Non-`.coil` files given explicitly are rejected.
 
 ## Line wrapping
 

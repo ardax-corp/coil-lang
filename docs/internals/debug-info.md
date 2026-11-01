@@ -1,4 +1,4 @@
-# Debug line table (`.hyc`)
+# Debug line table (`.ccoil`)
 
 Compiled programs carry a **debug line table** inside the versioned
 `ArchivedProgram` envelope. This is separate from the in-memory
@@ -32,8 +32,8 @@ statement); ops that already have a narrower location (a nested statement,
 
 ## Function symbols
 
-`coil compile` writes `fn_symbols` into the `.hyc`, and the loader
-(`coil_cli::load_archive_bytes`, shared by `coil run x.hyc`, packaged
+`coil compile` writes `fn_symbols` into the `.ccoil`, and the loader
+(`coil_cli::load_archive_bytes`, shared by `coil run x.ccoil`, packaged
 binaries and `coil dissect`) restores them into `ProgramDebug`, so a backtrace
 from an archive names its frames like one from source (`in inner at …`, not
 `in <unknown> at …`; coil-lang#1490). `coil package` keeps them too;
@@ -43,31 +43,31 @@ from an archive names its frames like one from source (`in inner at …`, not
 
 Size: each entry is an rkyv `ArchivedString` (8 bytes, names of up to 8 bytes
 stored inline) plus a `u32` pc, so 12 bytes plus the name bytes past 8. The
-`.hyc` size did not change with #1490 (it already carried the symbols). The
+`.ccoil` size did not change with #1490 (it already carried the symbols). The
 payload `coil package` embeds grew by:
 
 | Program (default `-O`) | Payload before | After | Growth |
 |------------------------|---------------:|------:|-------:|
-| `tests/testing/doc_tests.hy` | 22,496 B | 26,660 B | +4,164 B (+18.5%) |
-| `tests/traits/trait_method_bound_dispatch.hy` | 35,800 B | 36,332 B | +532 B (+1.5%) |
-| `tests/contracts/contract_failure_messages.hy` | 15,080 B | 15,484 B | +404 B (+2.7%) |
-| `examples/derive_show_eq.hy` | 13,652 B | 13,908 B | +256 B (+1.9%) |
+| `tests/testing/doc_tests.coil` | 22,496 B | 26,660 B | +4,164 B (+18.5%) |
+| `tests/traits/trait_method_bound_dispatch.coil` | 35,800 B | 36,332 B | +532 B (+1.5%) |
+| `tests/contracts/contract_failure_messages.coil` | 15,080 B | 15,484 B | +404 B (+2.7%) |
+| `examples/derive_show_eq.coil` | 13,652 B | 13,908 B | +256 B (+1.9%) |
 
-Most programs grow by 1–3%; `doc_tests.hy` is an outlier because it has many
+Most programs grow by 1–3%; `doc_tests.coil` is an outlier because it has many
 small functions with long qualified names. `--strip-debug` payloads are
-unchanged (e.g. `doc_tests.hy` 9,400 B). Against the ~1.4 MB `coil-embed`
+unchanged (e.g. `doc_tests.coil` 9,400 B). Against the ~1.4 MB `coil-embed`
 runner every packaged binary grows by well under 1%.
 
 ## Debug levels (`-g0` / `-g1` / `-g2`)
 
 `coil`, `coil compile`, `coil package` and `coil test` take `-g LEVEL`
 (coil-lang#1491). `Pipeline::program_debug` applies it
-(`ProgramDebug::with_level`), so the in-memory run, the `.hyc` and the
+(`ProgramDebug::with_level`), so the in-memory run, the `.ccoil` and the
 packaged payload all keep the same thing:
 
 | Level | Keeps | Panic output |
 |-------|-------|--------------|
-| `-g2` | `source_files`, `fn_symbols`, line runs, span runs | `panic: m at x.hy:3:8` / `  in inner at x.hy:3:8` |
+| `-g2` | `source_files`, `fn_symbols`, line runs, span runs | `panic: m at x.coil:3:8` / `  in inner at x.coil:3:8` |
 | `-g1` | `source_files`, `fn_symbols`, line runs | the same (lines and columns come from the line runs) |
 | `-g0` | nothing (only `cleanup_ranges`) | `panic: m` / `  in <unknown>` |
 
@@ -102,8 +102,8 @@ reads (and falls back to the sources for lines before minor 30).
 
 ### Size (coil-lang#1491)
 
-`.hyc` bytes, before (dense tables, minor 39, `coil compile` at `b1b08919`)
-and after at each level. spool is `spool.hy` with coil-stdlib, coil-toml and
+`.ccoil` bytes, before (dense tables, minor 39, `coil compile` at `b1b08919`)
+and after at each level. spool is `spool.coil` with coil-stdlib, coil-toml and
 coil-json (the revisions spool pins); the examples are compiled with
 `--root examples/src --root ../coil-stdlib/src`.
 
@@ -112,8 +112,8 @@ coil-json (the revisions spool pins); the examples are compiled with
 | spool `-O0` | 1,142,808 | 630,456 (−44.8%) | 584,616 (−48.8%) | 525,292 (−54.0%) |
 | spool `-O2` | 1,253,884 | 667,968 (−46.7%) | 620,908 (−50.5%) | 563,340 (−55.1%) |
 | spool `-Os` | 1,229,804 | 661,032 (−46.2%) | 614,788 (−50.0%) | 557,432 (−54.7%) |
-| `examples/task_files.hy` `-O2` | 14,112 | 7,060 (−50.0%) | 6,496 (−54.0%) | 5,672 (−59.8%) |
-| `examples/derive_show_eq.hy` `-O2` | 13,928 | 8,436 (−39.4%) | 8,064 (−42.1%) | 7,388 (−47.0%) |
+| `examples/task_files.coil` `-O2` | 14,112 | 7,060 (−50.0%) | 6,496 (−54.0%) | 5,672 (−59.8%) |
+| `examples/derive_show_eq.coil` `-O2` | 13,928 | 8,436 (−39.4%) | 8,064 (−42.1%) | 7,388 (−47.0%) |
 
 For spool at `-O2` the run tables cost 47 KB of span runs at `-g2` and 58 KB
 of line runs plus function names and paths at `-g1`, against 690 KB for the
@@ -125,7 +125,7 @@ too, so a plain `coil compile -Os` of spool writes 614,788 B.
 
 ## Archive version
 
-Archive version is packed `major.minor`. Older `.hyc` files without `strings`,
+Archive version is packed `major.minor`. Older `.ccoil` files without `strings`,
 `source_files`, or `debug_locs` are rejected at load time.
 
 ## Runtime `panic` output

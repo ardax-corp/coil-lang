@@ -1,6 +1,6 @@
 //! What users see when a macro goes wrong. Fixtures live in
-//! `tests/macros/compile_fail/macro_*.hy` (so `coil test` also checks they fail);
-//! providers in `examples/src/derive_macros*.hy`.
+//! `tests/macros/compile_fail/macro_*.coil` (so `coil test` also checks they fail);
+//! providers in `examples/src/derive_macros*.coil`.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
-/// Compile `tests/macros/compile_fail/<name>.hy`; return rendered diagnostics.
+/// Compile `tests/macros/compile_fail/<name>.coil`; return rendered diagnostics.
 fn compile_fail(name: &str) -> String {
     compile_fail_with(name, compiler::ComptimeLimits::default())
 }
@@ -41,7 +41,7 @@ fn compile_fail_with(name: &str, limits: compiler::ComptimeLimits) -> String {
         ..Default::default()
     });
     pipeline.bind_project_root(repo(), vec![PathBuf::from("examples/src")]);
-    let file = repo().join("tests/macros/compile_fail").join(format!("{name}.hy"));
+    let file = repo().join("tests/macros/compile_fail").join(format!("{name}.coil"));
     let result = pipeline.compile_src_from_file(file.to_str().unwrap());
     let _ = pipeline.finish_reporting();
     let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
@@ -220,9 +220,9 @@ fn attribute_macro_body_diagnostics_point_at_the_statement() {
     let out = compile_fail(name);
     for n in [
         "[E0136] unused `Result` value",
-        &format!("{name}.hy:13:5 ]"),
+        &format!("{name}.coil:13:5 ]"),
         "[E0102] Type mismatch: expected `int`, found `string`",
-        &format!("{name}.hy:14:5 ]"),
+        &format!("{name}.coil:14:5 ]"),
     ] {
         assert!(out.contains(n), "{name}: missing `{n}` in:\n{out}");
     }

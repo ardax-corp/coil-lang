@@ -260,14 +260,14 @@ mod tests {
 
     fn job() -> MutantJob {
         MutantJob {
-            overlay_keys: vec!["src/a.hy".into(), "/abs/src/a.hy".into()],
+            overlay_keys: vec!["src/a.coil".into(), "/abs/src/a.coil".into()],
             patched: "fn f() -> int {\n    return 1:2;\n}\n".into(),
             files: vec![
                 (
-                    "tests/a.hy".into(),
+                    "tests/a.coil".into(),
                     vec![("one: two".into(), 10), ("".into(), 0)],
                 ),
-                ("tests/b.hy".into(), vec![]),
+                ("tests/b.coil".into(), vec![]),
             ],
         }
     }
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn verdicts_round_trip_and_crashes_kill() {
         for v in [
-            (Status::Killed, Some("tests/a.hy: one".to_string())),
+            (Status::Killed, Some("tests/a.coil: one".to_string())),
             (Status::TimedOut, Some("t".to_string())),
             (Status::Survived, None),
             (Status::Unviable, None),
@@ -297,7 +297,7 @@ mod tests {
                 classify_exit(segv, "", &job()),
                 (
                     Status::Killed,
-                    Some("tests/a.hy: one: two, worker crashed".to_string())
+                    Some("tests/a.coil: one: two, worker crashed".to_string())
                 )
             );
             let reported = ExitStatus::from_raw(0);

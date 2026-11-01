@@ -1199,9 +1199,9 @@ mod tests {
 
     fn fib_path() -> String {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples/fib.hy")
+            .join("../examples/fib.coil")
             .canonicalize()
-            .expect("examples/fib.hy")
+            .expect("examples/fib.coil")
             .display()
             .to_string()
     }
@@ -1390,28 +1390,28 @@ mod tests {
     #[test]
     fn source_matches_basename_and_suffix() {
         assert!(source_matches(
-            &Some("examples/fib.hy".into()),
-            "examples/fib.hy"
+            &Some("examples/fib.coil".into()),
+            "examples/fib.coil"
         ));
         assert!(source_matches(
-            &Some("/abs/examples/fib.hy".into()),
-            "fib.hy"
+            &Some("/abs/examples/fib.coil".into()),
+            "fib.coil"
         ));
         assert!(source_matches(
-            &Some("fib.hy".into()),
-            "/workspace/examples/fib.hy"
+            &Some("fib.coil".into()),
+            "/workspace/examples/fib.coil"
         ));
-        assert!(!source_matches(&None, "fib.hy"));
-        assert!(!source_matches(&Some("other.hy".into()), "fib.hy"));
+        assert!(!source_matches(&None, "fib.coil"));
+        assert!(!source_matches(&Some("other.coil".into()), "fib.coil"));
     }
 
     #[test]
     fn resolve_path_joins_base_dir() {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
-        let resolved = resolve_path("fib.hy", Some(&base));
+        let resolved = resolve_path("fib.coil", Some(&base));
         assert!(
             resolved.exists(),
-            "expected fib.hy under examples, got {}",
+            "expected fib.coil under examples, got {}",
             resolved.display()
         );
     }
@@ -1482,7 +1482,7 @@ mod tests {
             "list should snap to nearest loc, err={listed:?}"
         );
         let (path, line, rows) = listed.unwrap();
-        assert!(path.to_string_lossy().contains("fib.hy"), "path={path:?}");
+        assert!(path.to_string_lossy().contains("fib.coil"), "path={path:?}");
         assert!(line >= 1);
         assert!(rows.iter().any(|(_, mark, _)| *mark));
     }
@@ -1507,7 +1507,7 @@ fn main() {
 "#;
         let dir = std::env::temp_dir().join(format!("coil_dbg_i7_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let path = dir.join("hot.hy");
+        let path = dir.join("hot.coil");
         fs::write(&path, src).unwrap();
         let mut session = compile_entry(path.to_str().unwrap(), HostGrants::deny_all())
             .expect("compile debugger-attached hot");
@@ -1550,7 +1550,7 @@ fn main() {
     fn host_grants_apply_to_debug_compile() {
         let dir = std::env::temp_dir().join(format!("coil_dbg_grant_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let path = dir.join("attach.hy");
+        let path = dir.join("attach.coil");
         fs::write(
             &path,
             "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",

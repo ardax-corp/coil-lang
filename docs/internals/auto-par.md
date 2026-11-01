@@ -336,7 +336,7 @@ there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
 
 Shared-heap spawn is always on. Debugger-attached runs and programs without stack maps still fall back to isolate `PortableValue` spawn.
 
-`.hyc` / embed execute sizes each isolate operand stack from the persisted
+`.ccoil` / embed execute sizes each isolate operand stack from the persisted
 compiler bound (archive minor 13). Pre-13 archives still use the Seek+CALL
 heuristic; that is not an IPA policy change. Minor 14 stores S2b maps so
 archive/embed GC relocate matches compile-and-run; older maps stay empty.

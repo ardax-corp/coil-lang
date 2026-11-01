@@ -29,10 +29,10 @@ fn uncalled_shared_generic_bodies_compile_without_main() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let snippets = [
-        ("payload.hy", "fn pair<T>(T x) -> Option<(T, T)> {\n    return Option::Some((x, x));\n}\n"),
-        ("aggregate.hy", "fn scale<T: Num>((T, T) v, T s) -> (T, T) {\n    return v * s;\n}\n"),
+        ("payload.coil", "fn pair<T>(T x) -> Option<(T, T)> {\n    return Option::Some((x, x));\n}\n"),
+        ("aggregate.coil", "fn scale<T: Num>((T, T) v, T s) -> (T, T) {\n    return v * s;\n}\n"),
         (
-            "derived.hy",
+            "derived.coil",
             "#[derive(Eq, Show)]\nclass Box<T> {\n    pub item: T,\n}\n\nfn same<T: Eq>(Box<T> a, Box<T> b) -> bool {\n    return a == b;\n}\n",
         ),
     ];
@@ -45,17 +45,17 @@ fn uncalled_shared_generic_bodies_compile_without_main() {
     // The in-tree test-only files the issue lists.
     let ws = Path::new(env!("CARGO_MANIFEST_DIR"));
     for rel in [
-        "tests/generics/generic_option_return_free.hy",
-        "tests/generics/generic_class_returns.hy",
-        "tests/generics/generic_nested_types.hy",
-        "tests/generics/generic_elementwise.hy",
-        "tests/traits/derive_generic_types.hy",
-        "tests/traits/generic_instance_operators.hy",
+        "tests/generics/generic_option_return_free.coil",
+        "tests/generics/generic_class_returns.coil",
+        "tests/generics/generic_nested_types.coil",
+        "tests/generics/generic_elementwise.coil",
+        "tests/traits/derive_generic_types.coil",
+        "tests/traits/generic_instance_operators.coil",
     ] {
         files.push(ws.join(rel));
     }
 
-    let out = dir.join("out.hyc");
+    let out = dir.join("out.ccoil");
     let mut failures = Vec::new();
     for file in &files {
         for mode in [&[][..], &["-O0"][..]] {

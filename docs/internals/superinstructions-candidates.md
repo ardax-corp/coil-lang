@@ -47,7 +47,7 @@ IL; print `main` stays fuse-IL. Note also
 |----|--------|--------------|-------------------|-------|--------|
 | **S1** | COI-377 | Dense cmp/bin → jmp | `mandelbrot` inner: `DenseBin×3 ; BinSlotSlotJmpf GTF`. Headers: `DenseMove* ; BinSlotSlotJmpf GT` (no `DenseCmp`). `emit_br_cond` reconstructs stack cmp so fuse-select already made `*Jmpf` (1 dispatch). | dense emit | **Done (ISA pack).** Two-word `DenseBinJmpf` (archive **minor 17**): first `dense_abc` on the opcode, payload word is the fused `*Jmpf` (same stream-width lesson as `DenseBin2`). Real 2→1 on the inner mag + GTF. Outer y/x headers stay 1-op `BinSlotSlotJmpf`. **Not** `DenseCmp`+jmp. `fib` bytecode unchanged; keep `unlikely(is_hot)`. |
 | **S2** | COI-381 | 2-wide `DenseBin` pack | `mandelbrot` has **18** `DenseBin`. Inner latch is `DenseBin×6 ; DenseMove ; JMP`. | dense emit | **Done (ISA pack).** Two-word `DenseBin2` (archive **minor 16**): first `dense_abc` on the opcode, payload word is the second `DenseBin` (chosen over a pool descriptor so the second packing stays in the instruction stream). Sequential IEEE; `mir/emit.rs` `pack_chained_dense_bin`. Inner latch `DenseBin×6` → three `DenseBin2`. **Not** X4 VM peek, **not** `FloatChainStore`. `fib` bytecode is unchanged; default table peek of `is_hot` must keep the giant match as fall-through (`unlikely(is_hot)`). |
-| **S3** | COI-380 | `DenseCast`+`DenseBin` | Three `DenseCast` sites, all **x/y headers** (`DenseCast ; DenseBin×3`), not the innermost `iter` loop. | dense-streak VM peek | **Done (peek, no opcode).** After S2 the header is `DenseCast ; DenseBin2 ; DenseBin`. Table/hotmatch consume the trailing `DenseBin`/`DenseBin2` in the `DenseCast` handler; X4 also takes leftover `DenseBin` after that `DenseBin2`. Bytecode unchanged; no archive bump; not ALWAYS_HOT growth. Giant match stays split. Flagship wall is header-noise — prove on `examples/perf/dense_cast_bin.hy`. `fib` has no this shape; keep `unlikely(is_hot)`. |
+| **S3** | COI-380 | `DenseCast`+`DenseBin` | Three `DenseCast` sites, all **x/y headers** (`DenseCast ; DenseBin×3`), not the innermost `iter` loop. | dense-streak VM peek | **Done (peek, no opcode).** After S2 the header is `DenseCast ; DenseBin2 ; DenseBin`. Table/hotmatch consume the trailing `DenseBin`/`DenseBin2` in the `DenseCast` handler; X4 also takes leftover `DenseBin` after that `DenseBin2`. Bytecode unchanged; no archive bump; not ALWAYS_HOT growth. Giant match stays split. Flagship wall is header-noise — prove on `examples/perf/dense_cast_bin.coil`. `fib` has no this shape; keep `unlikely(is_hot)`. |
 | **S4** | COI-379 | `DenseIndex` + imm cmp + jmpf | `nsieve` p-loop: `DenseIndex ; BinSlotImmJmpf EQ` (`flags[p] == 1`). | dense emit | **Done (ISA pack).** Two-word `DenseIndexJmpf` (archive **minor 18**): first `dense_abc` on the opcode, payload word is the fused `*Jmpf` (same stream-width as `DenseBinJmpf`). Real 2→1 on the p-loop `flags[p] == 1`. Stacks with COI-372 last-addr `Object` cache. Index stays dense-native (not `IndexPin`). `fib` bytecode unchanged; keep `unlikely(is_hot)`. |
 | **S5** | COI-382 | Index/StoreIndex stride pair | Inner k-loop is **`DenseMove ; DenseStoreIndex ; DenseBin ; JMP`** — store of 0 with `k = k + p`. **No** `DenseIndex` in that loop. | dense-streak VM peek | **Done (peek, no opcode).** Table/hotmatch consume trailing `DenseBin`/`DenseBin2` then `JMP` in the `DenseStoreIndex` handler (one dispatch for store + IV bump + latch). Bytecode unchanged (`DenseMove` stays its own op). No archive bump; not ALWAYS_HOT growth. Giant match stays three-dispatch on store/bin/jmp. `fib` has no this shape; keep `unlikely(is_hot)`. Not consecutive Index+Store of the same cell. |
 | **S6** | COI-383 | `DenseMove` coalesce | `mandelbrot` **9** `DenseMove` (φ / latch copies). Pairs: `DenseMove ; DenseMove ; BinSlotSlotJmpf`. | MIR destprop / dense emit | **Done (peep, no opcode).** Sink φ incomings past last use of the dest, then the existing latch overwrite aliases `i = i+1` / mandelbrot `tr`→`zr`. Identity `DenseMove` drop. No new opcode; LOAD/STORE cost 2 vs `DenseMove` 1 unchanged. Nested-accumulator interference coalesce was unsound (SROA pack checksum) and is not shipped. |
@@ -66,9 +66,9 @@ kept dense / vectorize / fuse-IL. No `try_specialize_body` change.
 | Extra | Shape | Hit | Layer | Why it is independent |
 |-------|-------|-----|-------|------------------------|
 | **X1** | Vectorize remainder `i += 1`: `DenseConst` into scratch instead of `CONST ; STORE ; DenseBin` | `sum` / `scan` / `fill` scalar tails (`artifacts/.../for_in_sum.fn.txt`, `vec_scan.*.fn.txt`) | `mir/vectorize.rs` `emit_const_i64` → `emit.rs` `emit_const` (`DenseConst`) | **Done (emit, no opcode).** Remainder IV bump is `DenseConst ; DenseBin` (X2 peeks a trailing `JMP` in the dense streak). Existing `DenseConst` only; no specialize-keep; print `main` / FORMAT unchanged. |
-| **X2** | `DenseBin ; JMP` latch coalescing | mandelbrot / nsieve / SIMD tails | dense-streak VM peek | **Done (no new opcode).** A second `Instruction` discriminant (~1.12–1.17× fib execute/LTO tax on identical `.hyc`) was reverted. Bytecode stays `DenseBin ; JMP` / `DenseBin2 ; JMP`. Default table and hotmatch peek the trailing `JMP` after `DenseBin`/`DenseBin2` (one dispatch on the latch). Giant match is byte-identical to main (two dispatches). Not S1, not S2, not X4 (X4 would peek adjacent `DenseBin`). `fib` has no this shape; keep `unlikely(is_hot)` / `.rodata` `ALWAYS_HOT`. Print `main` / FORMAT unchanged. |
+| **X2** | `DenseBin ; JMP` latch coalescing | mandelbrot / nsieve / SIMD tails | dense-streak VM peek | **Done (no new opcode).** A second `Instruction` discriminant (~1.12–1.17× fib execute/LTO tax on identical `.ccoil`) was reverted. Bytecode stays `DenseBin ; JMP` / `DenseBin2 ; JMP`. Default table and hotmatch peek the trailing `JMP` after `DenseBin`/`DenseBin2` (one dispatch on the latch). Giant match is byte-identical to main (two dispatches). Not S1, not S2, not X4 (X4 would peek adjacent `DenseBin`). `fib` has no this shape; keep `unlikely(is_hot)` / `.rodata` `ALWAYS_HOT`. Print `main` / FORMAT unchanged. |
 | **X3** | `MakeEnum ; RETURN` fuse (one-word heap) | `bottom_up` (`MakeEnum ; RETURN` twice) | IL peep — `MakeEnum` is **typed** `IlOp`, `Return` is typed | **Done (fuse-select).** `MakeEnumReturn` (archive **minor 19**): same packing as `MakeEnum`. Two sites on `bottom_up` (Leaf arity-0, Node arity-2). Reuses `is_one_word_return` (no two-word RETURN). Not ALWAYS_HOT — alloc+return stays on the giant match like `MakeEnum`/`RETURN` (`unlikely(is_hot)`). Print `main` / FORMAT unchanged. |
-| **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/dispatch.rs` dense-streak peek | **Cancel (A/B on main after S2).** Peek leftover `DenseBin` after `DenseBin2` only (odd-length residue / headers). Dissect **does** fire: mandelbrot y/x headers `DenseCast ; DenseBin2 ; leftover DenseBin`; inner latch `DenseBin2 ; leftover IADD ; JMP`. No unpacked `DenseBin; DenseBin` (S2). Fat LTO `--auto-par off` hyperfine vs `main` (same `.hyc`): mandelbrot 20.4±2.9 vs 20.7±2.4 ms (**wash**); fib 60.4±1.5 vs 60.9±2.2 (**flat**, no discriminant tax); nsieve 2.3 vs 2.3 (**wash**). `dense_cast_bin` hit ~1.08× then washed on a second run. Do **not** merge for flagship walls. Giant match does not peek. No archive bump. |
+| **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/dispatch.rs` dense-streak peek | **Cancel (A/B on main after S2).** Peek leftover `DenseBin` after `DenseBin2` only (odd-length residue / headers). Dissect **does** fire: mandelbrot y/x headers `DenseCast ; DenseBin2 ; leftover DenseBin`; inner latch `DenseBin2 ; leftover IADD ; JMP`. No unpacked `DenseBin; DenseBin` (S2). Fat LTO `--auto-par off` hyperfine vs `main` (same `.ccoil`): mandelbrot 20.4±2.9 vs 20.7±2.4 ms (**wash**); fib 60.4±1.5 vs 60.9±2.2 (**flat**, no discriminant tax); nsieve 2.3 vs 2.3 (**wash**). `dense_cast_bin` hit ~1.08× then washed on a second run. Do **not** merge for flagship walls. Giant match does not peek. No archive bump. |
 
 Not ready without a gate (still not specialize-keep):
 
@@ -166,28 +166,28 @@ entry tax. New packed opcodes must not be added to `hard_refuse` /
 ## Method / checksums
 
 Release `coil` / `coil-dissect`, `--auto-par off`,
-`--root .deps/coil-stdlib/src`. No `coil dissect file.hyc`; dissect is
+`--root .deps/coil-stdlib/src`. No `coil dissect file.ccoil`; dissect is
 in-memory on the same `Pipeline`. `--opt-stats` is IL-pass counters only.
 
 | Bench | Checksum | Hot body | Path |
 |-------|----------|----------|------|
-| `examples/perf/mandelbrot.hy` | `625885` | `mandelbrot` | dense + fused `*Jmpf` |
-| `examples/perf/fib.hy` | `2178309` | `fib` | fuse-IL + B2 CALL convoy |
-| `examples/perf/tak.hy` | `7` | `tak` | fuse-IL + packed `LOAD` + `TailCall` |
-| `examples/perf/nsieve.hy` | `1900` | `nsieve` | dense-native Index/Store + `*Jmpf` |
-| `examples/perf/binary_trees.hy` | `135854` | `item_check`, `bottom_up` | fuse-IL |
-| `examples/perf/dense_cast_bin.hy` | `2000001000000` | `hot` | dense i2f + DenseBin (S3 peek) |
-| `examples/perf/stride_store_iv.hy` | `1` | `hot` | stride `DenseStoreIndex` + IV bump (S5 peek) |
-| `examples/perf/for_in_sum.hy` | `12884115456` | `sum` | `VLoad`/`VReduce` + scalar tail |
-| `examples/perf/vec_scan.hy` | `536739840` | `scan`, `fill` | `V*` + scalar tail |
+| `examples/perf/mandelbrot.coil` | `625885` | `mandelbrot` | dense + fused `*Jmpf` |
+| `examples/perf/fib.coil` | `2178309` | `fib` | fuse-IL + B2 CALL convoy |
+| `examples/perf/tak.coil` | `7` | `tak` | fuse-IL + packed `LOAD` + `TailCall` |
+| `examples/perf/nsieve.coil` | `1900` | `nsieve` | dense-native Index/Store + `*Jmpf` |
+| `examples/perf/binary_trees.coil` | `135854` | `item_check`, `bottom_up` | fuse-IL |
+| `examples/perf/dense_cast_bin.coil` | `2000001000000` | `hot` | dense i2f + DenseBin (S3 peek) |
+| `examples/perf/stride_store_iv.coil` | `1` | `hot` | stride `DenseStoreIndex` + IV bump (S5 peek) |
+| `examples/perf/for_in_sum.coil` | `12884115456` | `sum` | `VLoad`/`VReduce` + scalar tail |
+| `examples/perf/vec_scan.coil` | `536739840` | `scan`, `fill` | `V*` + scalar tail |
 
 ```bash
 BIN=./target/release/coil
 DISSECT=./target/release/coil-dissect
 R=(--root .deps/coil-stdlib/src)
-$BIN compile --auto-par off "${R[@]}" examples/perf/mandelbrot.hy -o /tmp/m.hyc
-$DISSECT "${R[@]}" examples/perf/mandelbrot.hy --fn mandelbrot
-$BIN run /tmp/m.hyc
+$BIN compile --auto-par off "${R[@]}" examples/perf/mandelbrot.coil -o /tmp/m.ccoil
+$DISSECT "${R[@]}" examples/perf/mandelbrot.coil --fn mandelbrot
+$BIN run /tmp/m.ccoil
 ```
 
 Dumps: `artifacts/superinstructions/dissect/*.fn.txt`.

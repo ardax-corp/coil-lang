@@ -33,18 +33,18 @@ fn coil_debug_bin() -> PathBuf {
 fn fib_entry() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("examples/fib.hy")
+        .join("examples/fib.coil")
         .canonicalize()
-        .expect("examples/fib.hy")
+        .expect("examples/fib.coil")
 }
 
-/// 1-based line of `examples/fib.hy` holding `needle` (tests must not
+/// 1-based line of `examples/fib.coil` holding `needle` (tests must not
 /// hardcode line numbers: the example's header can change).
 fn fib_line(needle: &str) -> usize {
-    let src = std::fs::read_to_string(fib_entry()).expect("read examples/fib.hy");
+    let src = std::fs::read_to_string(fib_entry()).expect("read examples/fib.coil");
     src.lines()
         .position(|l| l.contains(needle))
-        .unwrap_or_else(|| panic!("`{needle}` not in examples/fib.hy"))
+        .unwrap_or_else(|| panic!("`{needle}` not in examples/fib.coil"))
         + 1
 }
 
@@ -388,7 +388,7 @@ fn dap_launch_compile_failure_case() {
     assert_eq!(init.get("success"), Some(&serde_json::json!(true)));
     let _ = client.wait_for_event("initialized");
 
-    let missing = cwd.join("definitely_missing_coil_prog_zz.hy");
+    let missing = cwd.join("definitely_missing_coil_prog_zz.coil");
     let launch = client.request(
         "launch",
         serde_json::json!({
@@ -477,7 +477,7 @@ fn dap_stop_on_entry_has_stack_and_step_case() {
 fn dap_launch_allow_attach_grant_case() {
     let dir = case_dir("coil_dap_grant");
     let _ = std::fs::create_dir_all(&dir);
-    let gated = dir.join("gated.hy");
+    let gated = dir.join("gated.coil");
     std::fs::write(
         &gated,
         "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
@@ -558,7 +558,7 @@ fn dap_panic_stops_for_inspection_case() {
     let dir = case_dir("coil-dap-panic");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let prog = dir.join("panics.hy");
+    let prog = dir.join("panics.coil");
     std::fs::write(
         &prog,
         "fn inner(int n) -> int {\n    if n > 2 {\n        panic \"boom\";\n    }\n    return n;\n}\n\nfn outer(int n) -> int {\n    return inner(n + 1) + 1;\n}\n\nfn main() {\n    let _ = outer(5);\n}\n",
@@ -597,7 +597,7 @@ fn locals_at_line(case: &str, src: &str, line: u32) -> Vec<(String, String)> {
     let dir = case_dir(case);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let prog = dir.join("locals.hy");
+    let prog = dir.join("locals.coil");
     std::fs::write(&prog, src).unwrap();
     let mut client = DapClient::spawn(&dir);
     initialize_and_launch(&mut client, prog.to_str().unwrap(), dir.to_str().unwrap(), false);
@@ -699,7 +699,7 @@ fn dap_tasks_are_threads_case() {
     let dir = case_dir("coil-dap-tasks");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let prog = dir.join("tasks.hy");
+    let prog = dir.join("tasks.coil");
     std::fs::write(
         &prog,
         "use task::{scope, Scope};\n\nfn napper() -> int {\n    task::sleep(50);\n    return 1;\n}\n\nfn worker() -> int {\n    let x = 7;\n    return x;\n}\n\nfn main() {\n    let _ = scope(fn (Scope s) {\n        s.spawn(fn () => napper());\n        s.spawn(fn () => worker());\n        0\n    });\n}\n",

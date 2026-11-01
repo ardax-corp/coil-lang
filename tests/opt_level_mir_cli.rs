@@ -39,9 +39,9 @@ fn release_flag(coil: &std::path::Path) -> &'static [&'static str] {
     }
 }
 
-/// `coil dissect <level> --fn mandelbrot` of `examples/perf/mandelbrot.hy`.
+/// `coil dissect <level> --fn mandelbrot` of `examples/perf/mandelbrot.coil`.
 fn dissect_mandelbrot(level: &str) -> String {
-    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/perf/mandelbrot.hy");
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/perf/mandelbrot.coil");
     let mut cmd = Command::new(coil_bin());
     cmd.arg("dissect").arg(level);
     for root in compiler::Pipeline::workspace_language_extra_roots() {

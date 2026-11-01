@@ -845,7 +845,7 @@ impl Checker {
             BUILTIN_RESULT_VARIANTS,
         };
 
-        // Declared in the core prelude (`prelude/core.hy`) as
+        // Declared in the core prelude (`prelude/core.coil`) as
         // `#[lang(option)]` / `#[lang(result)]` enums. Natives and layouts
         // rely on the names and the tag order, so the declarations must match.
         for decl in crate::macros::core_lang_enums() {
@@ -2486,7 +2486,7 @@ impl Checker {
     /// Consume the next pre-order id for `node` and resolve it to the node's
     /// own id. Writing facts under the raw counter id lands them on another
     /// node once the counter drifts (it typed `lcm`'s int `a` as the float
-    /// param of a later function in coil-stdlib `num.hy`).
+    /// param of a later function in coil-stdlib `num.coil`).
     fn next_walk_id(&mut self, node: &Output) -> NodeId {
         let seq_id = self.ids.ids().get(self.next_id_idx).copied();
         self.next_id_idx += 1;
@@ -4237,7 +4237,7 @@ impl Checker {
             format!("{module_ns}::{name}")
         };
         // A checked module that declares no `name`, and no one-item file
-        // `module_ns/name.hy` (#1851).
+        // `module_ns/name.coil` (#1851).
         if let Some(names) = self.module_item_names.get(&module_ns)
             && !names.contains(name)
             && !self.module_item_names.contains_key(&fqn)

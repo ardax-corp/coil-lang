@@ -1,6 +1,6 @@
 //! Compiler-provided virtual modules (`prelude`, `ffi`, …).
 //!
-//! These are not `.hy` files on disk. `use` resolves against this
+//! These are not `.coil` files on disk. `use` resolves against this
 //! registry before falling back to search-root path
 //! discovery, and every file gets an implicit prelude import.
 
