@@ -27,7 +27,9 @@
 //! collection is under way), so a free never needs more than the escape
 //! facts. An object whose `drop` keeps nothing of `self` has its `drop` run
 //! at the free (RAII step 6), so a value the block or `return` yields is
-//! computed before the free. The tracing GC
+//! computed before the free. A `defer` reads only what it captures and a
+//! captured local is never freed, so a body with a `defer` is rewritten
+//! like any other (RAII step 7). The tracing GC
 //! stays the backstop for everything else.
 
 use std::collections::HashMap;
@@ -49,11 +51,6 @@ pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, loo
     // A lambda's captures are read from `module`; a body spliced from
     // another module may name lambdas it does not hold.
     if body.exprs.iter().any(|x| matches!(x.kind, HirKind::Lambda { body: i } if i >= module.bodies.len())) {
-        return None;
-    }
-    // `defer` bodies run on every exit and lower against the block layout
-    // as built.
-    if body.exprs.iter().any(|x| matches!(x.kind, HirKind::Defer { .. })) {
         return None;
     }
     let mut e = Escape::new(module, body, lookup);
