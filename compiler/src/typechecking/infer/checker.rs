@@ -213,6 +213,8 @@ impl Checker {
             const_class_fields: HashMap::new(),
             readonly_classes: HashSet::new(),
             shared_classes: HashSet::new(),
+            view_classes: HashSet::new(),
+            borrow_fields: HashMap::new(),
             impl_owner: None,
             enums: BTreeMap::new(),
             enum_tags: BTreeMap::new(),
@@ -1817,6 +1819,8 @@ impl Checker {
         self.const_class_fields.retain(|k, _| k.contains("::"));
         self.readonly_classes.retain(|k| k.contains("::"));
         self.shared_classes.retain(|k| k.contains("::"));
+        self.view_classes.retain(|k| k.contains("::"));
+        self.borrow_fields.retain(|k, _| k.contains("::"));
         self.generics
             .generic_type_ctors
             .retain(|k, _| k.contains("::"));
@@ -4356,7 +4360,11 @@ impl Checker {
                     Some("pass one argument per class field, in declaration order".to_string()),
                 );
             } else {
-                for (arg, fty) in provided.iter().zip(field_tys.iter()) {
+                for (k, (arg, fty)) in provided.iter().zip(field_tys.iter()).enumerate() {
+                    if let Some((_, name, _)) = fields.get(k) {
+                        let name = name.clone();
+                        self.check_borrow_arg(&class_name, &name, arg);
+                    }
                     let aty = self.infer(arg);
                     // Coerce like a function argument (#1079): an array
                     // literal builds a `Vec<T>` field.
@@ -4442,6 +4450,7 @@ impl Checker {
             match slot {
                 Some(k) => {
                     filled[k] = true;
+                    self.check_borrow_arg(class_name, names[k], value);
                     self.coerce_or_unify(&field_tys[k], &aty, Some(value), &value.0.into_range(), "constructor argument");
                 }
                 None if !matches!(arg.1.as_ref(), Expression::NamedArg(..)) => {
@@ -16208,26 +16217,59 @@ impl Checker {
     /// Record this module's `readonly class` keys before any body is
     /// typed, so a use ahead of the declaration sees the class as immutable.
     fn pre_register_readonly_classes(&mut self, ast: &Output) {
-        fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<(&'a str, bool)>) {
+        type Views<'a> = Vec<(&'a str, bool, Vec<(&'a str, Range<usize>)>, Range<usize>)>;
+        fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<(&'a str, bool)>, views: &mut Views<'a>) {
             match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
-                Expression::Class { name, readonly, attrs, .. } => {
+                Expression::Class { name, readonly, attrs, fields, .. } => {
                     if *readonly {
                         out.push((name, false));
                     }
                     if attrs.iter().any(|a| a.name == "shared") {
                         out.push((name, true));
                     }
+                    let view = attrs.iter().any(|a| a.name == "view");
+                    let borrows: Vec<(&'a str, Range<usize>)> = fields
+                        .iter()
+                        .filter_map(|f| match f.1.as_ref() {
+                            Expression::Field { attrs, name, .. } if attrs.iter().any(|a| a.name == "mut") => match name.1.as_ref() {
+                                Expression::Identifier(n) => Some((*n, f.0.into_range())),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                        .collect();
+                    if view || !borrows.is_empty() {
+                        views.push((name, view, borrows, node.0.into_range()));
+                    }
                 }
                 Expression::Program(children) | Expression::Fragment(children) => {
                     for child in children {
-                        walk(child, out);
+                        walk(child, out, views);
                     }
                 }
                 _ => {}
             }
         }
         let mut names = Vec::new();
-        walk(ast, &mut names);
+        let mut views = Vec::new();
+        walk(ast, &mut names, &mut views);
+        for (name, view, borrows, _) in views {
+            let key = self.qualify_module_name(name);
+            if !view {
+                for (field, at) in &borrows {
+                    let mut m = Message::error(
+                        ErrorCode::MisplacedMut,
+                        format!("`mut {field}` borrows, so only a `view class` may declare it"),
+                        at.clone(),
+                    );
+                    m.with_help(format!("declare `view class {name}`, or drop the `mut` to store a copy"));
+                    self.messages.push(m);
+                }
+                continue;
+            }
+            self.view_classes.insert(key.clone());
+            self.borrow_fields.insert(key, borrows.iter().map(|(f, _)| f.to_string()).collect());
+        }
         for (name, shared) in names {
             let key = self.qualify_module_name(name);
             if shared {
@@ -16269,6 +16311,44 @@ impl Checker {
     /// Whether class `key` was declared `shared class`.
     pub fn is_shared_class(&self, key: &str) -> bool {
         self.shared_classes.contains(key)
+    }
+
+    /// Whether class `key` was declared `view class`.
+    pub fn is_view_class(&self, key: &str) -> bool {
+        self.view_classes.contains(key)
+    }
+
+    /// Whether field `field` of class `key` is a `mut` (borrow) field.
+    pub fn is_borrow_field(&self, key: &str, field: &str) -> bool {
+        self.borrow_fields.get(key).is_some_and(|f| f.contains(field))
+    }
+
+    /// E0150 at a constructor argument: a `mut` field takes `mut place`,
+    /// and any other field takes a value.
+    fn check_borrow_arg(&mut self, class: &str, field: &str, value: &Output) {
+        let is_mut = matches!(
+            unwrap_expr_wrappers(value).1.as_ref(),
+            Expression::Call { name, args: Some(a) } if matches!(name.1.as_ref(), Expression::Identifier("__mut")) && a.len() == 1
+        );
+        let borrow = self.is_borrow_field(class, field);
+        let short = class.rsplit("::").next().unwrap_or(class);
+        if borrow && !is_mut {
+            let mut m = Message::error(
+                ErrorCode::MisplacedMut,
+                format!("field `{field}` of `{short}` is a borrow: it takes `mut place`"),
+                value.0.into_range(),
+            );
+            m.with_help("write `mut` before the place the view borrows, as in `new View(mut self, …)`".to_string());
+            self.messages.push(m);
+        } else if !borrow && is_mut {
+            let mut m = Message::error(
+                ErrorCode::MisplacedMut,
+                format!("`mut` here borrows nothing: field `{field}` of `{short}` is not a `mut` field"),
+                value.0.into_range(),
+            );
+            m.with_help("drop the `mut` to store a copy, or make the class a `view class` with `mut` fields".to_string());
+            self.messages.push(m);
+        }
     }
 
     /// Names of the classes and enums this module declares at the top level.

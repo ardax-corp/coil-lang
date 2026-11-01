@@ -337,6 +337,19 @@ impl BodyBuilder {
                     HirKind::ForIn { iterable, .. } if self.mut_marks.contains(iterable) => {
                         consumed.insert(*iterable);
                     }
+                    // `new View(mut place, …)`: the checker matched each
+                    // `mut` argument with a view class's `mut` field.
+                    HirKind::Make { args, .. } => {
+                        for &a in args {
+                            let v = match &self.body.exprs[a.0 as usize].kind {
+                                HirKind::Named { value, .. } => *value,
+                                _ => a,
+                            };
+                            if self.mut_marks.contains(&v) {
+                                consumed.insert(v);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
