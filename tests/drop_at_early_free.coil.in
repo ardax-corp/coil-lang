@@ -1,0 +1,188 @@
+// A `drop` that keeps nothing of `self` runs where the compiler frees its
+// object early: at the end of the block that holds it, before the code
+// after the block. A block-end free gives back the object itself, so what
+// it holds is dropped by the collector. A `drop` that keeps `self` is left
+// to the collector. A panic in a `drop` run at a free unwinds from there
+// like any call. A `defer` elsewhere in the function does not stop a free;
+// a local the `defer` captures is left to the collector.
+use tests::assert;
+use gc::collect;
+use task::{scope, Scope, TaskError};
+
+static let LOG: string = "";
+
+fn say(string s) {
+    LOG = LOG + s;
+}
+
+class Res {
+    pub name: string,
+}
+
+impl Res {
+    fn drop() {
+        say("[" + self.name + "]");
+    }
+}
+
+class Pair {
+    pub name: string,
+    pub inner: Res,
+}
+
+impl Pair {
+    fn drop() {
+        say("<" + self.name + ">");
+    }
+}
+
+static let KEPT: Option<Keeper> = Option::None;
+
+class Keeper {
+    pub n: int,
+}
+
+impl Keeper {
+    fn drop() {
+        say("(keep)");
+        KEPT = Option::Some(self);
+    }
+}
+
+fn scoped() {
+    {
+        let r = new Res("a");
+        say(r.name.len().show());
+    }
+    say("|");
+}
+
+test("a drop runs at the end of the block that holds its object") {
+    LOG = "";
+    scoped();
+    assert!(LOG == "1[a]|", LOG);
+}
+
+fn nested() {
+    {
+        let p = new Pair("p", new Res("r"));
+        say((p.name.len() + p.inner.name.len()).show());
+    }
+    say("|");
+}
+
+test("the free runs the parent's drop, the collector the held object's") {
+    LOG = "";
+    nested();
+    assert!(LOG == "2<p>|", LOG);
+    collect();
+    assert!(LOG == "2<p>|[r]", LOG);
+}
+
+fn keeps() {
+    {
+        let k = new Keeper(1);
+        say(k.n.show());
+    }
+    say("|");
+}
+
+test("a drop that keeps self is left to the collector") {
+    LOG = "";
+    keeps();
+    assert!(LOG == "1|", LOG);
+    collect();
+    assert!(LOG == "1|(keep)", LOG);
+}
+
+class Loud {
+    pub n: int,
+}
+
+impl Loud {
+    fn drop() {
+        say("[loud]");
+        panic "in drop";
+    }
+}
+
+fn loud_block() {
+    {
+        let l = new Loud(1);
+        say(l.n.show());
+    }
+    say("unreached");
+}
+
+fn loud() -> int {
+    defer {
+        say("[defer]");
+    }
+    loud_block();
+    return 0;
+}
+
+fn failed(Result<int, TaskError> r) -> bool {
+    return match r {
+        Result::Err(TaskError::Panicked(m)) => m == "in drop",
+        default => false,
+    };
+}
+
+test("a panic in a drop run at an early free unwinds from the free") {
+    LOG = "";
+    assert!(
+        failed(
+            scope(fn (Scope s) {
+                let _ = s.spawn(fn () => loud());
+                0
+            }),
+        ),
+    );
+    assert!(LOG == "1[loud][defer]", LOG);
+}
+
+fn with_defer() {
+    defer {
+        say("d");
+    }
+    {
+        let r = new Res("a");
+        say(r.name.len().show());
+    }
+    say("|");
+}
+
+test("a defer in the function does not stop a block-end free") {
+    LOG = "";
+    with_defer();
+    assert!(LOG == "1[a]|d", LOG);
+}
+
+fn returns_with_defer() -> int {
+    defer {
+        say("d");
+    }
+    let r = new Res("ab");
+    return r.name.len();
+}
+
+test("a free before a return runs before the function's defers") {
+    LOG = "";
+    assert!(returns_with_defer() == 2);
+    assert!(LOG == "[ab]d", LOG);
+}
+
+fn defer_reads() {
+    let r = new Res("b");
+    defer use (r) {
+        say(r.name);
+    }
+    say(r.name.len().show());
+}
+
+test("a local a defer captures stays alive until the defer has run") {
+    LOG = "";
+    defer_reads();
+    assert!(LOG == "1b", LOG);
+}

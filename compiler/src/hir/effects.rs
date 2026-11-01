@@ -246,12 +246,27 @@ impl ProgramEffects {
         self.by_name.get(name).copied()
     }
 
+    /// Whether `Owner::drop` keeps nothing of `self` past its return: an
+    /// early free may run it and then free the object. `owner` is the class
+    /// key, bare or module-qualified. `false` when no summary was recorded.
+    pub fn drop_keeps_nothing(&self, owner: &str) -> bool {
+        let key = format!("{owner}::drop");
+        let suffix = format!("::{key}");
+        let found = self.by_name.get(key.as_str()).copied().or_else(|| {
+            let mut hits = self.by_name.iter().filter(|(n, _)| n.ends_with(&suffix));
+            let first = hits.next().map(|(_, s)| *s);
+            // Two modules' classes of one short name: do not guess.
+            if hits.next().is_some() { None } else { first }
+        });
+        found.is_some_and(|s| s.escapes & 1 == 0 && s.keeps & 1 == 0 && s.opaque_args & 1 == 0)
+    }
+
     /// `body` (as the HIR optimizer left it) with early frees of the
     /// objects nothing else reaches ([`early_free`]), when it has any.
     /// `host` names the host native a call node runs, as planned.
     pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
         let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
-        early_free::rewrite(module, body, &lookup, host)
+        early_free::rewrite(checker, module, body, &lookup, host)
     }
 
     /// `body` with its copy-on-write ops ([`cow`]), when it needs any.

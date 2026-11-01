@@ -136,6 +136,8 @@ pub fn build_standard_host_natives(
     push_wiring(&mut out, &mut register_id, crate::symbol::SYMBOL_WIRING, "symbol");
     // Append-only after symbol: the `process` module (major 6 minor 10).
     push_wiring(&mut out, &mut register_id, crate::process::PROCESS_WIRING, "process");
+    // Append-only after process: `coro_close` (major 6 minor 14), run by the VM.
+    push_task_natives(&mut out, &mut register_id, common::CORO_CLOSE_ID..=common::CORO_CLOSE_ID);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -1399,8 +1401,12 @@ mod tests {
             Some(common::PROCESS_SPAWN_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(188).map(String::as_str),
             Some(common::PROCESS_RELEASE_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::CORO_CLOSE_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1764,6 +1770,10 @@ mod tests {
             registrations.get(end + 52).map(|(n, _)| n.as_str()),
             Some(common::PROCESS_RELEASE_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 53);
+        assert_eq!(
+            registrations.get(end + 53).map(|(n, _)| n.as_str()),
+            Some(common::CORO_CLOSE_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 54);
     }
 }

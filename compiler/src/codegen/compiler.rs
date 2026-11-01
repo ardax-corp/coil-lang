@@ -7749,6 +7749,17 @@ impl Compiler {
             self.program_effects.record(hir, &self.checker, module, &summaries);
             self.program_effects.record_mutations(mutations);
         }
+        // E0148: local streams a body opens and never closes or hands on.
+        if let Some(hir) = self.hir_module.as_ref() {
+            let mut seen = HashSet::new();
+            for b in &hir.bodies {
+                for m in crate::hir::stream_lint::check(&self.checker, hir, b) {
+                    if seen.insert(m.range().clone()) {
+                        self.messages.push(m);
+                    }
+                }
+            }
+        }
         // Copy-on-write: share and unique ops in every body, before typed
         // inlining splices any of them.
         if crate::hir::effects::cow::enabled()
@@ -8186,7 +8197,12 @@ impl Compiler {
             let Some(label) = self.fn_entry_labels.get(&fqn).copied() else {
                 continue;
             };
-            let type_id = self.checker.class_type_id(&owner);
+            let mut type_id = self.checker.class_type_id(&owner);
+            // A `drop` that keeps nothing of `self` may run where the object
+            // is freed early.
+            if type_id < common::EARLY_DROP_FLAG && self.program_effects.drop_keeps_nothing(&owner) {
+                type_id |= common::EARLY_DROP_FLAG;
+            }
             self.bytecode
                 .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
             self.bytecode

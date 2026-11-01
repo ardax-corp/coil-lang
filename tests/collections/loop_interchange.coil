@@ -52,7 +52,7 @@ fn run_short() -> int {
     // cells 1, 4 and 7 of column 1, and panics at 10.
     let a = ramp(10);
     let b = zeros(10);
-    defer use (b) {
+    defer use (mut b) {
         let _ = println(format("short %v %v %v", b[2], b[9], b[7]));
     }
     cols(a, b, 4, 3);

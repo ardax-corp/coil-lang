@@ -9,7 +9,7 @@ class Log {
 
 fn branch(Log log, bool on) -> int {
     if on {
-        defer use (log) {
+        defer use (mut log) {
             log.n = log.n + 1;
         }
         return 1;
@@ -20,7 +20,7 @@ fn branch(Log log, bool on) -> int {
 fn looped(Log log, int n) -> int {
     let total = 0;
     for i in 0..n {
-        defer use (log) {
+        defer use (mut log) {
             log.n = log.n + 10;
         }
         total = total + i;
@@ -32,7 +32,7 @@ fn early(Log log, int x) -> int {
     if x < 0 {
         return -1;
     }
-    defer use (log) {
+    defer use (mut log) {
         log.n = log.n + 100;
     }
     return x;
@@ -48,7 +48,7 @@ test("defer on a branch") {
 test("defer in a loop") {
     let log = new Log(0);
     assert!(looped(log, 3) == 3);
-    assert!(log.n >= 10);
+    assert!(log.n == 30);
 }
 
 test("defer after an early return") {

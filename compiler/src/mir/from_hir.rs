@@ -576,6 +576,9 @@ pub struct HirMirInput<'a> {
     pub packs: &'a HashMap<u32, Vec<HirDictOp>>,
     /// The `unwind_resume` native a `defer`'s cleanup pad ends in.
     pub unwind_native: Option<u16>,
+    /// The `coro_close` native a `for` loop over a generator calls when
+    /// it is left early.
+    pub coro_close_native: Option<u16>,
     /// Field reads and writes on records: the field's slot (records are
     /// slotted objects, their fields sorted by name) and word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
@@ -649,6 +652,19 @@ struct Loop {
     cont_used: bool,
     /// Where `break` goes, made at the first one.
     exit: Option<BlockId>,
+    /// How many `defer`s were open at the loop: a `break` or `continue`
+    /// runs the ones its body opened since.
+    defers: usize,
+}
+
+/// What leaving a block early has to do, innermost last.
+#[derive(Clone, Copy)]
+enum Open {
+    /// A `defer`: its armed flag and body.
+    Defer(LocalId, HirId),
+    /// A `for` loop over a generator: close the generator (a `break` out
+    /// of it, or a `return` from its body).
+    Coro(ValueId),
 }
 
 struct Lower<'a> {
@@ -707,10 +723,14 @@ struct Lower<'a> {
     raw_host: bool,
     /// Each `defer`'s armed flag local, by its node; cleared at entry.
     defer_flags: HashMap<u32, LocalId>,
-    /// The `defer`s lowered so far, in source order: flag and body. A
-    /// `return` runs these (HIR emission registers its thunks as it meets
-    /// them, so an earlier `return` runs none of the later ones).
-    defers: Vec<(LocalId, HirId)>,
+    /// The open `defer`s, in source order: flag and body. A `defer` runs
+    /// at the end of its block, so a block's own are dropped from here as
+    /// it ends; a `return` runs all of these, a `break` or `continue` those
+    /// its loop body opened.
+    defers: Vec<Open>,
+    /// Every `defer` lowered, in source order, for the unwind pad: it runs
+    /// the armed ones, and one whose block ended is disarmed.
+    lowered_defers: Vec<(LocalId, HirId)>,
     /// `let`s in a `defer` body, which HIR emission slots in the thunk's
     /// own frame: a temp each.
     defer_locals: HashMap<u32, LocalId>,
@@ -1134,6 +1154,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         raw_host: false,
         defer_flags: HashMap::new(),
         defers: Vec::new(),
+        lowered_defers: Vec::new(),
         defer_locals: HashMap::new(),
         pins: HashMap::new(),
         pad: None,
@@ -1207,7 +1228,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let order = lower.layout();
     let spec = std::mem::take(&mut lower.spec);
     let pad = lower.pad.take();
-    let defers = std::mem::take(&mut lower.defers);
+    let defers = std::mem::take(&mut lower.lowered_defers);
     let defer_locals = std::mem::take(&mut lower.defer_locals);
     let boxed: HashSet<u32> = lower.boxes.keys().copied().collect();
     let unpacked = inp.packs.keys().any(|k| !lower.packed.contains(k));
@@ -1290,6 +1311,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         raw_host: false,
         defer_flags: HashMap::new(),
         defers: Vec::new(),
+        lowered_defers: Vec::new(),
         defer_locals: parts.defer_locals,
         pins: HashMap::new(),
         pad: None,
@@ -1697,12 +1719,25 @@ impl Lower<'_> {
         Ok(())
     }
 
-    /// Each armed `defer` lowered so far, last first: disarm it and run
-    /// its body inline, its captures read as they are now (as the thunk's
-    /// frame copies them at the return).
+    /// Each open armed `defer`, last first: disarm it and run its body
+    /// inline (a `return`).
     fn run_defers(&mut self) -> Result<(), Refusal> {
-        for k in (0..self.defers.len()).rev() {
-            let (flag, body) = self.defers[k];
+        self.run_defers_from(0)
+    }
+
+    /// The open armed `defer`s from the `start`th on, last first: disarm
+    /// each and run its body inline. The armed flag guards a `defer` that
+    /// a path to here did not reach.
+    fn run_defers_from(&mut self, start: usize) -> Result<(), Refusal> {
+        for k in (start..self.defers.len()).rev() {
+            let (flag, body) = match self.defers[k] {
+                Open::Defer(flag, body) => (flag, body),
+                Open::Coro(h) => {
+                    let native = self.inp.coro_close_native.ok_or("coro close native")?;
+                    self.b.ins_host_invoke(native, vec![h]).map_err(mir)?;
+                    continue;
+                }
+            };
             let armed = self.b.use_local(flag, MirTy::Bool).map_err(mir)?;
             let (run, skip) = (self.b.create_block(), self.b.create_block());
             self.b.branch(armed, run, skip).map_err(mir)?;
@@ -2475,6 +2510,45 @@ impl Lower<'_> {
         }
     }
 
+    /// A block's statements, then its tail's value.
+    fn block_body(&mut self, id: HirId, stmts: &[HirId], tail: Option<HirId>, returned: bool) -> Result<Val, Refusal> {
+        for &stmt in stmts {
+            if !self.stmt(stmt)? {
+                return Ok(Val::Never);
+            }
+        }
+        // A `()` block's host-call tail is dropped (`main`'s
+        // `write(..)`): its result stays raw.
+        if let Some(t) = tail
+            && self.expr_ty(id).is_some_and(is_unit)
+            && (self.host_pair(t) || self.boxed_call(t))
+        {
+            self.raw_host = true;
+        }
+        match &tail {
+            // The body's own tail is a statement to HIR emission, and
+            // so is a `return`, `break` or `continue` ending a nested
+            // block (an `if` arm's `return lo;`); any other nested
+            // tail has its statement's location.
+            Some(t)
+                if !self.b.pending_loc.is_known()
+                    || matches!(self.hir.expr(*t).kind, HirKind::Return(_) | HirKind::Break | HirKind::Continue) =>
+            {
+                self.at_stmt(*t, |l| {
+                    l.box_before(*t)?;
+                    l.ret_tail = returned;
+                    l.value(*t)
+                })
+            }
+            Some(t) => {
+                self.box_before(*t)?;
+                self.ret_tail = returned;
+                self.value(*t)
+            }
+            None => Ok(Val::Unit),
+        }
+    }
+
     /// Lower `id` for its effect.
     fn effect(&mut self, id: HirId) -> Result<bool, Refusal> {
         // A statement `yield` leaves nothing: a send lands only where a
@@ -2685,12 +2759,14 @@ impl Lower<'_> {
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
             HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
-            // Arm the flag; each later `return` runs the body if armed.
+            // Arm the flag; the end of the block, or a `return`, `break`
+            // or `continue` leaving it, runs the body if armed.
             HirKind::Defer { body, .. } => {
                 let flag = *self.defer_flags.get(&id.0).ok_or("defer")?;
                 let on = self.b.ins_const(MirConst::Bool(true)).map_err(mir)?;
                 self.b.def_local(flag, on).map_err(mir)?;
-                self.defers.push((flag, *body));
+                self.defers.push(Open::Defer(flag, *body));
+                self.lowered_defers.push((flag, *body));
                 Ok(Val::Unit)
             }
             // `PRINT` of a string (the test-runner `main`'s failure line).
@@ -2908,41 +2984,19 @@ impl Lower<'_> {
                 Ok(Val::V(out))
             }
             HirKind::Block { stmts, tail } => {
-                for &stmt in stmts {
-                    if !self.stmt(stmt)? {
-                        return Ok(Val::Never);
+                // The `defer`s this block opens run at its end, after its
+                // value (every path leaving it early ran them already).
+                let open = self.defers.len();
+                let val = self.block_body(id, stmts, *tail, returned);
+                if self.defers.len() > open {
+                    if matches!(val, Ok(Val::Never)) {
+                        self.defers.truncate(open);
+                    } else if val.is_ok() {
+                        self.run_defers_from(open)?;
+                        self.defers.truncate(open);
                     }
                 }
-                // A `()` block's host-call tail is dropped (`main`'s
-                // `write(..)`): its result stays raw.
-                if let Some(t) = *tail
-                    && self.expr_ty(id).is_some_and(is_unit)
-                    && (self.host_pair(t) || self.boxed_call(t))
-                {
-                    self.raw_host = true;
-                }
-                match tail {
-                    // The body's own tail is a statement to HIR emission, and
-                    // so is a `return`, `break` or `continue` ending a nested
-                    // block (an `if` arm's `return lo;`); any other nested
-                    // tail has its statement's location.
-                    Some(t)
-                        if !self.b.pending_loc.is_known()
-                            || matches!(self.hir.expr(*t).kind, HirKind::Return(_) | HirKind::Break | HirKind::Continue) =>
-                    {
-                        self.at_stmt(*t, |l| {
-                            l.box_before(*t)?;
-                            l.ret_tail = returned;
-                            l.value(*t)
-                        })
-                    }
-                    Some(t) => {
-                        self.box_before(*t)?;
-                        self.ret_tail = returned;
-                        self.value(*t)
-                    }
-                    None => Ok(Val::Unit),
-                }
+                val
             }
             HirKind::Let { local, init: Some(init) } if self.inp.stacks.contains_key(&local.0) || self.inp.sroa.contains_key(&local.0) => {
                 self.fill_slots(*local, *init)
@@ -3436,6 +3490,7 @@ impl Lower<'_> {
                     cont: head,
                     cont_used: false,
                     exit: None,
+                    defers: self.defers.len(),
                 });
                 let live = self.effect(*body);
                 let done = self.loops.pop().expect("loop pushed above");
@@ -3450,6 +3505,8 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::Break => {
+                let open = self.loops.last().ok_or("break outside loop")?.defers;
+                self.run_defers_from(open)?;
                 let exit = match self.loops.last().ok_or("break outside loop")?.exit {
                     Some(exit) => exit,
                     None => {
@@ -3468,6 +3525,8 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::Continue => {
+                let open = self.loops.last().ok_or("continue outside loop")?.defers;
+                self.run_defers_from(open)?;
                 let lp = self.loops.last_mut().ok_or("continue outside loop")?;
                 lp.cont_used = true;
                 let cont = lp.cont;
@@ -3637,15 +3696,35 @@ impl Lower<'_> {
         let done = self.b.ins_done_coro(h).map_err(mir)?;
         self.b.branch(done, exit, body_b).map_err(mir)?;
         self.switch(body_b);
+        // A loop over a generator it made (not one a local or field holds,
+        // which a later `resume` may go on with) closes it when left
+        // early: a `break` before it leaves (the loop's `defers` mark is
+        // above the close), a `return` with the open defers. A `continue`
+        // does not.
+        let owned = !matches!(self.hir.expr(iterable).kind, HirKind::Local(_) | HirKind::Field { .. } | HirKind::Index { .. });
+        let open = self.defers.len();
+        if owned {
+            self.defers.push(Open::Coro(h));
+        }
         self.loops.push(Loop {
             cont: head,
             cont_used: false,
-            exit: Some(exit),
+            exit: None,
+            defers: self.defers.len(),
         });
         let live = self.effect(body);
-        self.loops.pop();
+        let lp = self.loops.pop().expect("loop pushed above");
+        self.defers.truncate(open);
         if live? {
             self.jump(head)?;
+        }
+        if let Some(brk) = lp.exit {
+            self.switch(brk);
+            if owned {
+                let native = self.inp.coro_close_native.ok_or("coro close native")?;
+                self.b.ins_host_invoke(native, vec![h]).map_err(mir)?;
+            }
+            self.jump(exit)?;
         }
         self.switch(exit);
         Ok(Val::Unit)
@@ -3726,6 +3805,7 @@ impl Lower<'_> {
             cont: head,
             cont_used: false,
             exit: Some(exit),
+            defers: self.defers.len(),
         });
         let live = self.effect(body);
         self.loops.pop();
@@ -3745,6 +3825,7 @@ impl Lower<'_> {
             cont: step.unwrap_or(head),
             cont_used: false,
             exit: Some(exit),
+            defers: self.defers.len(),
         });
         let live = self.effect(body);
         let done = self.loops.pop().expect("loop pushed above");

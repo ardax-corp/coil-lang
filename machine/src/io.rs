@@ -37,6 +37,15 @@ thread_local! {
         const { RefCell::new(None) };
     /// `io::capture_begin()` frames, innermost last: `(stdout, stderr)`.
     static CAPTURES: RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+    /// A native on this thread just failed with `TooManyOpenFiles`.
+    static FD_EXHAUSTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a native failed with `TooManyOpenFiles` since the last call;
+/// clears it. The VM collects (freeing the descriptors of streams nothing
+/// reaches) and tries an `open` / `accept` once more.
+pub fn take_fd_exhausted() -> bool {
+    FD_EXHAUSTED.with(|f| f.replace(false))
 }
 
 /// Keep this thread's stdout and stderr writes from here on, until the
@@ -211,6 +220,7 @@ impl IoErrorTag {
     /// Map an OS error; descriptor exhaustion has no `ErrorKind` of its own.
     pub fn from_error(err: &io::Error) -> Self {
         if is_too_many_open_files(err) {
+            FD_EXHAUSTED.with(|f| f.set(true));
             return Self::TooManyOpenFiles;
         }
         Self::from_kind(err.kind())

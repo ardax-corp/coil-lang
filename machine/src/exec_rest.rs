@@ -570,6 +570,10 @@ impl<const S: usize> Machine<S> {
                                 TaskFlow::Switched => {
                                     return dispatch::RestExit::resume(ip, sp);
                                 }
+                                // A generator close unwinds its frames.
+                                TaskFlow::Unwind => {
+                                    return dispatch::RestExit::done(false);
+                                }
                                 TaskFlow::Panic(msg) => {
                                     return dispatch::RestExit::done(
                                         self.runtime_panic(&msg, ip.saturating_sub(1)),
@@ -602,9 +606,20 @@ impl<const S: usize> Machine<S> {
                             if unlikely(park_tasks) {
                                 crate::task::set_task_waiter(self.task_waiter());
                             }
-                            let invoked = crate::host_enum::with_host_enum_layout(layout, || {
+                            let opens_fd = fn_id == common::IO_OPEN_ID as usize
+                                || fn_id == common::TCP_ACCEPT_ID as usize;
+                            if unlikely(opens_fd) {
+                                let _ = crate::io::take_fd_exhausted();
+                            }
+                            let mut invoked = crate::host_enum::with_host_enum_layout(layout, || {
                                 native.invoke(&mut self.heap, args)
                             });
+                            if unlikely(opens_fd && crate::io::take_fd_exhausted()) {
+                                // Streams nothing reaches may hold the
+                                // descriptors: collect and try once more.
+                                let args = self.stack.top_window(consume)[1..].to_vec();
+                                invoked = self.retry_after_fd_collect(ip, fn_id, args, layout);
+                            }
                             if unlikely(park_tasks) {
                                 crate::task::set_task_waiter(None);
                             }
@@ -656,7 +671,7 @@ impl<const S: usize> Machine<S> {
                                     return dispatch::RestExit::done(self.runtime_panic(&msg, ip.saturating_sub(1)));
                                 }
                                 Err(e) => {
-                                    let name = native.name();
+                                    let name = self.natives.get_by_id(fn_id).map_or("?", |n| n.name()).to_string();
                     return dispatch::RestExit::done(self.runtime_panic(
                                         &format!("HostInvoke failed for `{name}`: {e}"),
                                         ip.saturating_sub(1),
@@ -1313,6 +1328,8 @@ impl<const S: usize> Machine<S> {
                         yield_from: None,
                         delegator: None,
                         yield_from_resume_ip: 0,
+                        started: false,
+                        closeable: false,
                     };
                     let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
 

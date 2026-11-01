@@ -10,7 +10,7 @@ fn find(Log log, int stop) -> int {
     for i in 0..5 {
         for j in 0..5 {
             if j == stop {
-                defer use (log) {
+                defer use (mut log) {
                     log.n = log.n * 10 + 1;
                 }
                 return i * 10 + j;
@@ -25,7 +25,7 @@ fn three_deep(Log log, int stop) -> int {
         for b in 0..3 {
             for c in 0..3 {
                 if a + b + c == stop {
-                    defer use (log) {
+                    defer use (mut log) {
                         log.n = log.n * 10 + 2;
                     }
                     return a * 100 + b * 10 + c;

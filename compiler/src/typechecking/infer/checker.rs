@@ -3483,7 +3483,7 @@ impl Checker {
             Expression::Declare(args) => self.infer_ffi_declare(args, range),
             Expression::Invoke(args) => self.infer_ffi_invoke(args, range),
 
-            Expression::Defer { captures, body } => {
+            Expression::Defer { captures, body, .. } => {
                 // A defer runs while its function is leaving: it cannot
                 // choose another exit.
                 let exits = crate::typechecking::control_flow::defer_body_exits(body);

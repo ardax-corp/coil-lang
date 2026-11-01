@@ -161,7 +161,7 @@ fn gen(int n) -> P {
 
 fn deferred(Vec<int> log) {
     let p = mk(3);
-    defer use (p, log) {
+    defer use (p, mut log) {
         log.push(p.a);
     }
     log.push(0);

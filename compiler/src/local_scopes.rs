@@ -219,7 +219,7 @@ impl<'s> Resolver<'s, '_> {
                 self.walk(body);
                 self.leave_isolated();
             }
-            Expression::Defer { captures, body } => {
+            Expression::Defer { captures, body, .. } => {
                 self.enter_isolated(captures, span);
                 self.walk(body);
                 self.leave_isolated();

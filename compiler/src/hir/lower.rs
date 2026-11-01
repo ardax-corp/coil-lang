@@ -2887,8 +2887,9 @@ impl Walk<'_> {
                 // those into slots and builds the object once, at the escape
                 // ([`class_boxes`]). A reassigned one is an object from the
                 // start: after `q = p` its field writes must reach `p`'s
-                // object (#1556).
+                // object (#1556). A captured one is never split either.
                 if sroa_class(body, self.checker, *init).is_some()
+                    && !body.local(*local).captured
                     && !only_field_base(body, *local)
                     && writes_field_of(body, *local)
                     && !reassigned(body, *local)

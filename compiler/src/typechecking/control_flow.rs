@@ -20,75 +20,30 @@ pub struct CfAnalysis {
 pub fn analyze_fn_body(body: &Output<'_>, lookup: &dyn Fn(&str) -> Option<ConstVal>) -> CfAnalysis {
     let mut out = CfAnalysis::default();
     let mut pending_defers: Vec<Range<usize>> = Vec::new();
-    out.always_exits = walk(body, lookup, &mut pending_defers, &mut out.messages, false);
-    defers_in_loops(body, lookup, None, &mut out.messages);
+    out.always_exits = walk(body, lookup, &mut pending_defers, &mut out.messages);
     out
-}
-
-/// Warn on a `defer` the next iteration of an enclosing loop can reach
-/// again. Each `defer` statement is armed once per call, so it runs once,
-/// at function exit, not per iteration. A `defer` followed in its block by
-/// an exit (`return`, `raise`, `panic`, `break`) is reached at most once.
-fn defers_in_loops(
-    expr: &Output<'_>,
-    lookup: &dyn Fn(&str) -> Option<ConstVal>,
-    loop_span: Option<&Range<usize>>,
-    messages: &mut Vec<Message>,
-) {
-    match expr.1.as_ref() {
-        Expression::Lambda { .. } | Expression::Function { .. } => {}
-        Expression::Loop { .. } | Expression::WhileLet { .. } => {
-            // Label the loop head (`while c`, `for x in xs`), not its body.
-            let mut span = expr.0.into_range();
-            if let Expression::Loop { iterable, .. } = expr.1.as_ref() {
-                span.end = iterable.0.into_range().end.max(span.start);
-            }
-            // A non-terminating loop already reports its defers (E0123).
-            let around = (!is_infinite_loop(expr, lookup)).then_some(&span);
-            expr.1
-                .for_each_child(&mut |c| defers_in_loops(c, lookup, around, messages));
-        }
-        Expression::Defer { body, .. } => defers_in_loops(body, lookup, None, messages),
-        Expression::Block(children) => {
-            for (i, child) in children.iter().enumerate() {
-                if let Some(loop_span) = loop_span
-                    && matches!(peel_stmt(child).1.as_ref(), Expression::Defer { .. })
-                    && !children[i + 1..].iter().any(|later| {
-                        matches!(peel_stmt(later).1.as_ref(), Expression::Break)
-                            || walk(later, lookup, &mut Vec::new(), &mut Vec::new(), false)
-                    })
-                {
-                    warn_defer_in_loop(messages, peel_stmt(child).0.into_range(), loop_span.clone());
-                }
-                defers_in_loops(child, lookup, loop_span, messages);
-            }
-        }
-        _ => expr.1.for_each_child(&mut |c| defers_in_loops(c, lookup, loop_span, messages)),
-    }
 }
 
 /// True when `expr` never transfers control to a following sibling.
 #[allow(dead_code)] // unit tests; production uses analyze_fn_body
 pub fn always_exits(expr: &Output<'_>, lookup: &dyn Fn(&str) -> Option<ConstVal>) -> bool {
-    walk(expr, lookup, &mut Vec::new(), &mut Vec::new(), false)
+    walk(expr, lookup, &mut Vec::new(), &mut Vec::new())
 }
 
 /// Walk `expr`. Returns whether it always exits the enclosing function.
 ///
-/// `inside_infinite` is true when nested under a proven non-terminating loop.
 fn walk(
     expr: &Output<'_>,
     lookup: &dyn Fn(&str) -> Option<ConstVal>,
     pending_defers: &mut Vec<Range<usize>>,
     messages: &mut Vec<Message>,
-    inside_infinite: bool,
 ) -> bool {
     match expr.1.as_ref() {
         Expression::Statement(inner)
         | Expression::Expr(inner)
         | Expression::ExprStatement(inner)
         | Expression::Group(inner) => {
-            walk(inner, lookup, pending_defers, messages, inside_infinite)
+            walk(inner, lookup, pending_defers, messages)
         }
 
         Expression::Return(_)
@@ -97,6 +52,9 @@ fn walk(
         | Expression::Panic(_) => true,
 
         Expression::Block(children) => {
+            // A `defer` runs when its block ends: past the block, an
+            // infinite loop does not keep it from running.
+            let open = pending_defers.len();
             let mut exited = false;
             let mut i = 0;
             while i < children.len() {
@@ -108,7 +66,7 @@ fn walk(
                         children[i - 1].0.into_range(),
                     );
                     // Still walk for nested defer warnings / typecheck later.
-                    let _ = walk(child, lookup, pending_defers, messages, inside_infinite);
+                    let _ = walk(child, lookup, pending_defers, messages);
                     i += 1;
                     continue;
                 }
@@ -118,20 +76,15 @@ fn walk(
                 let peeled = peel_stmt(child);
                 match peeled.1.as_ref() {
                     Expression::Defer { .. } => {
-                        let span = peeled.0.into_range();
-                        if inside_infinite {
-                            warn_defer_never(messages, span.clone(), None);
-                        } else {
-                            pending_defers.push(span);
-                        }
-                        let _ = walk(child, lookup, pending_defers, messages, inside_infinite);
+                        pending_defers.push(peeled.0.into_range());
+                        let _ = walk(child, lookup, pending_defers, messages);
                     }
                     _ => {
                         let child_exits =
-                            walk(child, lookup, pending_defers, messages, inside_infinite);
+                            walk(child, lookup, pending_defers, messages);
                         if is_infinite_loop(child, lookup) {
                             for d in pending_defers.drain(..) {
-                                warn_defer_never(messages, d, Some(child.0.into_range()));
+                                warn_defer_never(messages, d, child.0.into_range());
                             }
                             exited = true;
                         } else if child_exits {
@@ -141,6 +94,7 @@ fn walk(
                 }
                 i += 1;
             }
+            pending_defers.truncate(open.min(pending_defers.len()));
             exited
         }
 
@@ -149,7 +103,7 @@ fn walk(
             if let Some(c) = cond {
                 let _ = c;
             }
-            walk(body, lookup, pending_defers, messages, inside_infinite)
+            walk(body, lookup, pending_defers, messages)
         }
 
         Expression::If(branches) => {
@@ -160,7 +114,7 @@ fn walk(
                     if cond.is_none() {
                         has_else = true;
                     }
-                    if !walk(body, lookup, pending_defers, messages, inside_infinite) {
+                    if !walk(body, lookup, pending_defers, messages) {
                         all_exit = false;
                     }
                 } else {
@@ -175,7 +129,7 @@ fn walk(
                 return false;
             }
             arms.iter()
-                .all(|arm| walk(&arm.body, lookup, pending_defers, messages, inside_infinite))
+                .all(|arm| walk(&arm.body, lookup, pending_defers, messages))
         }
 
         Expression::IfLet {
@@ -186,13 +140,11 @@ fn walk(
                 lookup,
                 pending_defers,
                 messages,
-                inside_infinite,
             ) && walk(
                 &else_arm.body,
                 lookup,
                 pending_defers,
                 messages,
-                inside_infinite,
             )
         }
 
@@ -204,14 +156,12 @@ fn walk(
                 lookup,
                 pending_defers,
                 messages,
-                inside_infinite,
             );
             walk(
                 &on_miss.body,
                 lookup,
                 pending_defers,
                 messages,
-                inside_infinite,
             );
             false
         }
@@ -225,7 +175,7 @@ fn walk(
         } => {
             // for-in never proven infinite.
             if identifier.is_some() || pattern.is_some() {
-                walk(body, lookup, pending_defers, messages, inside_infinite);
+                walk(body, lookup, pending_defers, messages);
                 return false;
             }
             // while cond { body }
@@ -235,14 +185,13 @@ fn walk(
                 lookup,
                 pending_defers,
                 messages,
-                inside_infinite || infinite,
             );
             infinite
         }
 
         Expression::Defer { body, .. } => {
             // Body of defer is a separate thunk; not function-exit for the outer fn.
-            let _ = walk(body, lookup, &mut Vec::new(), messages, false);
+            let _ = walk(body, lookup, &mut Vec::new(), messages);
             false
         }
 
@@ -344,46 +293,16 @@ fn warn_unreachable(messages: &mut Vec<Message>, dead: Range<usize>, cause: Rang
     messages.push(msg);
 }
 
-fn warn_defer_in_loop(messages: &mut Vec<Message>, defer_span: Range<usize>, loop_span: Range<usize>) {
+fn warn_defer_never(messages: &mut Vec<Message>, defer_span: Range<usize>, loop_span: Range<usize>) {
     let mut msg = Message::warn(
-        ErrorCode::DeferInLoop,
-        "`defer` inside a loop runs once, when the function exits".to_string(),
+        ErrorCode::DeferNeverRuns,
+        "defer will never run".to_string(),
         defer_span,
     );
     msg.push(Label::new(
-        "later iterations reach the `defer` again but do not queue it again".to_string(),
+        "its block never ends: this loop does not terminate".to_string(),
         loop_span,
     ));
-    msg.with_help(
-        "a `defer` belongs to its function, not to the loop body: for cleanup per iteration, \
-         move the body into a function with its own `defer`; for cleanup once, put the `defer` \
-         before the loop"
-            .to_string(),
-    );
-    messages.push(msg);
-}
-
-fn warn_defer_never(
-    messages: &mut Vec<Message>,
-    defer_span: Range<usize>,
-    loop_span: Option<Range<usize>>,
-) {
-    let mut msg = Message::warn(
-        ErrorCode::DeferNeverRuns,
-        "defer will never run on function exit".to_string(),
-        defer_span,
-    );
-    if let Some(loop_span) = loop_span {
-        msg.push(Label::new(
-            "dominated by this non-terminating loop".to_string(),
-            loop_span,
-        ));
-    } else {
-        msg.with_help(
-            "this defer is inside a non-terminating loop and never runs when the function exits"
-                .to_string(),
-        );
-    }
     messages.push(msg);
 }
 
@@ -470,6 +389,7 @@ mod tests {
     fn analyze_fn_body_warns_defer_before_infinite_loop() {
         let defer = out(Expression::Defer {
             captures: vec![],
+            borrows: vec![],
             body: block(vec![]),
         });
         let body = block(vec![
@@ -493,6 +413,7 @@ mod tests {
     fn statement_wrapped_defer_before_while_true_warns() {
         let defer = stmt(out(Expression::Defer {
             captures: vec![],
+            borrows: vec![],
             body: block(vec![]),
         }));
         let loop_ = stmt(while_loop(Expression::Bool(true), block(vec![])));
@@ -508,76 +429,42 @@ mod tests {
         );
     }
 
-    #[test]
-    fn statement_wrapped_defer_inside_while_true_warns() {
-        let defer = stmt(out(Expression::Defer {
-            captures: vec![],
-            body: block(vec![]),
-        }));
-        let loop_ = stmt(while_loop(Expression::Bool(true), block(vec![defer])));
-        let body = block(vec![loop_]);
-        let cf = analyze_fn_body(&body, &|_| None);
-        assert!(cf.always_exits);
-        assert!(
-            cf.messages
-                .iter()
-                .any(|m| m.code() == Some(ErrorCode::DeferNeverRuns)),
-            "Statement-wrapped defer inside infinite while must warn; msgs={:?}",
-            cf.messages.iter().map(|m| m.message()).collect::<Vec<_>>()
-        );
-    }
-
     fn defer_of(body: Output<'_>) -> Output<'_> {
         stmt(out(Expression::Defer {
             captures: vec![],
+            borrows: vec![],
             body,
         }))
     }
 
-    fn warns_defer_in_loop(body: &Output<'_>) -> bool {
+    fn never_runs(body: &Output<'_>) -> bool {
         analyze_fn_body(body, &|_| None)
             .messages
             .iter()
-            .any(|m| m.code() == Some(ErrorCode::DeferInLoop))
+            .any(|m| m.code() == Some(ErrorCode::DeferNeverRuns))
     }
 
     #[test]
-    fn defer_reached_again_by_the_loop_warns() {
-        let loop_body = block(vec![defer_of(block(vec![])), stmt(out(Expression::Integer(1)))]);
-        let body = block(vec![stmt(while_loop(Expression::Bool(false), loop_body))]);
-        assert!(warns_defer_in_loop(&body));
-    }
-
-    #[test]
-    fn defer_followed_by_an_exit_does_not_warn() {
-        for exit in [
-            Expression::Return(out(Expression::Integer(1))),
-            Expression::Panic(out(Expression::String("x"))),
-            Expression::Break,
-        ] {
-            let loop_body = block(vec![defer_of(block(vec![])), stmt(out(exit))]);
-            let body = block(vec![stmt(while_loop(Expression::Bool(false), loop_body))]);
-            assert!(!warns_defer_in_loop(&body));
-        }
-    }
-
-    #[test]
-    fn defer_in_a_non_terminating_loop_warns_only_never_runs() {
+    fn defer_inside_a_while_true_body_runs_each_iteration() {
         let body = block(vec![stmt(while_loop(
             Expression::Bool(true),
             block(vec![defer_of(block(vec![]))]),
         ))]);
-        assert!(!warns_defer_in_loop(&body));
+        assert!(!never_runs(&body));
     }
 
     #[test]
-    fn defer_outside_a_loop_does_not_warn() {
-        let body = block(vec![defer_of(block(vec![]))]);
-        assert!(!warns_defer_in_loop(&body));
-        // A loop inside the defer body is not around the defer.
-        let inner = while_loop(Expression::Bool(false), block(vec![]));
-        let body = block(vec![defer_of(block(vec![stmt(inner)]))]);
-        assert!(!warns_defer_in_loop(&body));
+    fn defer_of_an_ended_block_does_not_warn() {
+        let inner = out(Expression::Block(vec![defer_of(block(vec![]))]));
+        let body = block(vec![stmt(inner), stmt(while_loop(Expression::Bool(true), block(vec![])))]);
+        assert!(!never_runs(&body));
+    }
+
+    #[test]
+    fn defer_before_an_infinite_loop_in_an_inner_block_warns() {
+        let inner = out(Expression::Block(vec![stmt(while_loop(Expression::Bool(true), block(vec![])))]));
+        let body = block(vec![defer_of(block(vec![])), stmt(inner)]);
+        assert!(never_runs(&body));
     }
 
     #[test]

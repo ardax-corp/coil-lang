@@ -1,5 +1,5 @@
-// `defer` bodies run as thunks at each later `return`, last first, with
-// their captures read from the frame at that moment.
+// `defer` bodies run at each later `return`, last first. A capture is
+// copied at its `defer`; `use (mut log)` borrows `log`, so writes reach it.
 use tests::assert;
 
 class Log {
@@ -11,10 +11,10 @@ fn push(Log log, int d) {
 }
 
 fn lifo(Log log) {
-    defer use (log) {
+    defer use (mut log) {
         push(log, 1);
     }
-    defer use (log) {
+    defer use (mut log) {
         push(log, 2);
     }
     push(log, 3);
@@ -22,13 +22,13 @@ fn lifo(Log log) {
 }
 
 fn early(Log log, int k) -> int {
-    defer use (log) {
+    defer use (mut log) {
         push(log, 1);
     }
     if k == 0 {
         return 0;
     }
-    defer use (log, k) {
+    defer use (mut log, k) {
         push(log, k);
     }
     push(log, 9);
@@ -37,7 +37,7 @@ fn early(Log log, int k) -> int {
 
 fn late_value(Log log) -> int {
     let k = 1;
-    defer use (log, k) {
+    defer use (mut log, k) {
         push(log, k);
     }
     k = 7;
@@ -45,7 +45,7 @@ fn late_value(Log log) -> int {
 }
 
 fn falls_through(Log log) {
-    defer use (log) {
+    defer use (mut log) {
         let d = 4;
         push(log, d);
     }
@@ -67,10 +67,10 @@ test("an early return runs only the defers before it") {
     assert!(log2.n == 961);
 }
 
-test("a capture reads its value at the return") {
+test("a capture keeps its value at the defer") {
     let log = new Log(0);
     assert!(late_value(log) == 7);
-    assert!(log.n == 7);
+    assert!(log.n == 1);
 }
 
 test("defers run on fall-through") {
