@@ -18,7 +18,7 @@ use reporting::{ErrorCode, Message};
 
 use crate::macros::{CallPosition, MacroDecl, MacroKind, PendingMacro};
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh", "shared"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh", "shared", "view"];
 
 /// Result of attribute expansion before typechecking.
 #[derive(Default, Clone)]
@@ -236,6 +236,10 @@ fn member_attr_names(members: &[Output<'_>]) -> Vec<String> {
             _ => continue,
         };
         for a in attrs {
+            // `mut name: T` (a view class's borrow field) is the language's.
+            if a.name == "mut" {
+                continue;
+            }
             if !out.iter().any(|n: &String| n == a.name) {
                 out.push(a.name.to_string());
             }
@@ -351,6 +355,13 @@ fn validate_attrs<'x, 'a>(
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
                 format!("`#[derive]` applies to a class or enum, not a {}", target),
+                span.into_range(),
+            ));
+        }
+        if attr.name == "view" && target != "class" {
+            messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!("`view` applies to a class, not a {}", target),
                 span.into_range(),
             ));
         }

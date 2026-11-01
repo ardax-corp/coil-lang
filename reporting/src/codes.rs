@@ -116,6 +116,9 @@ pub enum ErrorCode {
     /// `mut` where it borrows nothing: outside a `let` / `for` binding, or
     /// of a value that is copied (a scalar).
     MisplacedMut,
+    /// A view value stored, captured, nested in another type or returned
+    /// where it would outlive the borrows it holds.
+    ViewEscape,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -241,6 +244,7 @@ impl ErrorCode {
             Self::UnclosedStream => "E0148",
             Self::BorrowConflict => "E0149",
             Self::MisplacedMut => "E0150",
+            Self::ViewEscape => "E0151",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -348,6 +352,7 @@ impl ErrorCode {
             Self::UnclosedStream => "local `Stream` is never closed",
             Self::BorrowConflict => "borrowed object shared or replaced while the borrow lives",
             Self::MisplacedMut => "`mut` borrows nothing here",
+            Self::ViewEscape => "view value outlives its borrows",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -463,6 +468,7 @@ mod tests {
             | UnclosedStream
             | BorrowConflict
             | MisplacedMut
+            | ViewEscape
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -560,6 +566,7 @@ mod tests {
             UnclosedStream,
             BorrowConflict,
             MisplacedMut,
+            ViewEscape,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

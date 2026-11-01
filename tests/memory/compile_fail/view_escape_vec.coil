@@ -1,0 +1,18 @@
+// @expected E0151 — a view held inside a Vec.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+}
+
+class Box {
+    pub b: Option<Bump>,
+}
+
+fn main() {
+    let k = new Counter(1);
+    let all = [new Bump(mut k)];
+    let _ = all.len();
+}

@@ -2876,6 +2876,7 @@ impl Compiler {
             .collect();
         let unbuilt = |(mut b, s): (HirBody, Vec<_>)| {
             Self::hir_drop_dead_lets(&mut b, &lambdas);
+            Self::hir_spliced_copies(&mut b, &self.checker);
             (b, s)
         };
         let (mut body, mut spliced) = inline::inline_calls(hir, callee_of, growth, true, opaque).map(unbuilt)?;
@@ -2908,6 +2909,262 @@ impl Compiler {
                 None
             }
         }
+    }
+
+    /// Tidy the copies splicing leaves behind, so a spliced view (or other
+    /// class value a method returns as `self`) stays in frame slots:
+    ///
+    /// - an unread `let x = y`, or `let x = { ..; y }` (a discarded result,
+    ///   `let _ = c.slot(i).add(1)`), keeps only its statements, when
+    ///   dropping the copy changes nothing: `x` is not captured, not a
+    ///   borrow and has no `fn drop()`;
+    /// - a view copied into another name reads its source instead;
+    /// - a view whose fields are only read dissolves into its arguments
+    ///   ([`Self::hir_dissolve_views`]).
+    ///
+    /// Without this, the whole use of the spliced receiver would build it
+    /// as an object on every call.
+    fn hir_spliced_copies(body: &mut HirBody, checker: &crate::typechecking::infer::Checker) {
+        let Some(root) = body.root else {
+            return;
+        };
+        let mut read = HashSet::new();
+        let mut todo = vec![root];
+        while let Some(e) = todo.pop() {
+            if let HirKind::Local(l) = &body.expr(e).kind {
+                read.insert(*l);
+            }
+            todo.extend(crate::hir::lower::children(body, e));
+        }
+        // A view copied into another name is the same borrow: when neither
+        // name is reassigned and no plain field of either is written, the
+        // copy reads its source instead (a chained `c.slot(i).add(1).add(2)`
+        // passes the first `add`'s `self` on as the second's).
+        let assigned: HashSet<LocalId> = body
+            .exprs
+            .iter()
+            .filter_map(|e| match e.kind {
+                HirKind::Assign { place, .. } => match body.expr(place).kind {
+                    HirKind::Local(l) => Some(l),
+                    HirKind::Field { base, .. } => match body.expr(base).kind {
+                        HirKind::Local(l) => Some(l),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let mut forward: HashMap<LocalId, LocalId> = HashMap::new();
+        for e in &body.exprs {
+            let HirKind::Let { local, init: Some(init) } = e.kind else {
+                continue;
+            };
+            let source = match &body.expr(init).kind {
+                HirKind::Local(y) => *y,
+                HirKind::Block { tail: Some(t), .. } => match body.expr(*t).kind {
+                    HirKind::Local(y) => y,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let l = body.local(local);
+            if source != local
+                && read.contains(&local)
+                && !l.captured
+                && !l.borrow
+                && !body.local(source).captured
+                && !assigned.contains(&local)
+                && !assigned.contains(&source)
+                && crate::hir::view_lint::is_view_ty(checker, l.ty.as_ref())
+            {
+                forward.insert(local, source);
+            }
+        }
+        let resolve = |mut l: LocalId| {
+            while let Some(&s) = forward.get(&l) {
+                l = s;
+            }
+            l
+        };
+        if !forward.is_empty() {
+            for e in &mut body.exprs {
+                match &mut e.kind {
+                    HirKind::Local(l) => *l = resolve(*l),
+                    // The source lives on to the copy's last clear.
+                    HirKind::Clear(cleared) => {
+                        cleared.retain(|c| !forward.values().any(|s| s == c));
+                        for c in cleared.iter_mut() {
+                            *c = resolve(*c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for l in forward.keys() {
+                read.remove(l);
+            }
+        }
+        Self::hir_dissolve_views(body, checker, &assigned);
+        let unit = Some(crate::typechecking::ty::unit());
+        for i in 0..body.exprs.len() {
+            let HirKind::Let { local, init: Some(init) } = body.exprs[i].kind else {
+                continue;
+            };
+            let l = body.local(local);
+            let forwarded = forward.contains_key(&local);
+            if !forwarded && (read.contains(&local) || l.captured || l.borrow || Self::hir_ty_has_drop(checker, l.ty.as_ref())) {
+                continue;
+            }
+            let kind = match body.expr(init).kind.clone() {
+                // `let x = y`: nothing left.
+                HirKind::Local(_) => HirKind::Lit(Lit::Unit),
+                // `let x = { ..; y }`: the statements, as a unit block.
+                HirKind::Block { stmts, tail: Some(t) } if matches!(body.expr(t).kind, HirKind::Local(_)) => {
+                    for id in [t, init] {
+                        let e = &mut body.exprs[id.0 as usize];
+                        e.kind = HirKind::Lit(Lit::Unit);
+                        e.ty = unit.clone();
+                        e.layout = crate::layout::Layout::Word;
+                        e.node = None;
+                    }
+                    HirKind::Block { stmts, tail: None }
+                }
+                _ => continue,
+            };
+            let e = &mut body.exprs[i];
+            e.kind = kind;
+            e.ty = unit.clone();
+            e.layout = crate::layout::Layout::Word;
+            e.node = None;
+        }
+    }
+
+    /// A spliced `let v = new View(a, b)` whose fields are only read, each
+    /// from a local nothing reassigns (or a literal): every `v.f` reads its
+    /// argument instead and the `let` goes. `v.c.vals[i] = ..` through a
+    /// view is then `c.vals[i] = ..`, the code with no view at all.
+    fn hir_dissolve_views(body: &mut HirBody, checker: &crate::typechecking::infer::Checker, assigned: &HashSet<LocalId>) {
+        let bases: HashSet<u32> = body
+            .exprs
+            .iter()
+            .filter_map(|e| match e.kind {
+                HirKind::Field { base, .. } => Some(base.0),
+                _ => None,
+            })
+            .collect();
+        let mut dissolve: HashMap<LocalId, (usize, HashMap<String, HirKind>)> = HashMap::new();
+        'lets: for (i, e) in body.exprs.iter().enumerate() {
+            let HirKind::Let { local, init: Some(init) } = e.kind else {
+                continue;
+            };
+            let HirKind::Make { kind: crate::hir::MakeKind::Class(class), args } = &body.expr(init).kind else {
+                continue;
+            };
+            let l = body.local(local);
+            let Some(key) = crate::hir::view_lint::view_key(checker, l.ty.as_ref()) else {
+                continue;
+            };
+            if l.captured || l.borrow || assigned.contains(&local) || checker.resolve_class_key(class).as_deref() != Some(key.as_str()) {
+                continue;
+            }
+            let fields = checker.class_fields(&key).unwrap_or_default();
+            let mut values = HashMap::new();
+            let mut next = 0usize;
+            for &a in args {
+                let (name, v) = match &body.expr(a).kind {
+                    HirKind::Named { name, value } => (Some(name.clone()), *value),
+                    _ => {
+                        next += 1;
+                        (fields.get(next - 1).map(|(n, _)| n.clone()), a)
+                    }
+                };
+                let kind = body.expr(v).kind.clone();
+                let ok = match &kind {
+                    HirKind::Local(s) => !assigned.contains(s) && !body.local(*s).captured,
+                    HirKind::Lit(_) => true,
+                    _ => false,
+                };
+                let Some(name) = name else { continue 'lets };
+                if !ok {
+                    continue 'lets;
+                }
+                values.insert(name, kind);
+            }
+            if values.len() != fields.len() {
+                continue;
+            }
+            // Only ever the base of a field read.
+            let whole = body
+                .exprs
+                .iter()
+                .enumerate()
+                .any(|(k, x)| x.kind == HirKind::Local(local) && !bases.contains(&(k as u32)));
+            if !whole {
+                dissolve.insert(local, (i, values));
+            }
+        }
+        if dissolve.is_empty() {
+            return;
+        }
+        for k in 0..body.exprs.len() {
+            let HirKind::Field { base, name } = &body.exprs[k].kind else {
+                continue;
+            };
+            if let HirKind::Local(v) = body.expr(*base).kind
+                && let Some((_, values)) = dissolve.get(&v)
+                && let Some(kind) = values.get(name)
+            {
+                let base = *base;
+                body.exprs[k].kind = kind.clone();
+                body.exprs[k].node = None;
+                let b = &mut body.exprs[base.0 as usize];
+                b.kind = HirKind::Lit(Lit::Unit);
+                b.ty = Some(crate::typechecking::ty::unit());
+                b.node = None;
+            }
+        }
+        for (local, (i, _)) in &dissolve {
+            // The `new` and its arguments go too: arena scans (field-only
+            // bases, assigned locals) must not see them.
+            if let HirKind::Let { init: Some(init), .. } = body.exprs[*i].kind {
+                let mut todo = vec![init];
+                while let Some(x) = todo.pop() {
+                    todo.extend(crate::hir::lower::children(body, x));
+                    let e = &mut body.exprs[x.0 as usize];
+                    e.kind = HirKind::Lit(Lit::Unit);
+                    e.ty = Some(crate::typechecking::ty::unit());
+                    e.layout = crate::layout::Layout::Word;
+                    e.node = None;
+                }
+            }
+            let e = &mut body.exprs[*i];
+            e.kind = HirKind::Lit(Lit::Unit);
+            e.ty = Some(crate::typechecking::ty::unit());
+            e.layout = crate::layout::Layout::Word;
+            e.node = None;
+            for x in &mut body.exprs {
+                if let HirKind::Clear(cleared) = &mut x.kind {
+                    cleared.retain(|c| c != local);
+                }
+            }
+        }
+    }
+
+    /// Whether `ty` is (or may be) a class with `fn drop()`.
+    fn hir_ty_has_drop(checker: &crate::typechecking::infer::Checker, ty: Option<&Ty>) -> bool {
+        let Some(ty) = ty else { return true };
+        let ty = crate::typechecking::subst::apply_ty_prune(checker.subst(), ty);
+        let name = match crate::typechecking::ty::strip_readonly(&ty) {
+            Ty::Con(n) => n.clone(),
+            Ty::App(head, _) => match head.as_ref() {
+                Ty::Con(n) => n.clone(),
+                _ => return true,
+            },
+            Ty::Var(_) => return true,
+            _ => return false,
+        };
+        checker.resolve_class_key(&name).is_some_and(|k| checker.class_has_drop(&k))
     }
 
     /// Drop the `let` (and clears) of each of `locals` that `body` no

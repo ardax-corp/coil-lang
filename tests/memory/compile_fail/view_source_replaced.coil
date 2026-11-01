@@ -1,0 +1,28 @@
+// @expected E0149 — the borrowed place is replaced while the view lives.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+}
+
+impl Counter {
+    pub fn bump() -> Bump {
+        return new Bump(mut self);
+    }
+}
+
+impl Bump {
+    pub fn go() {
+        self.c.n += 1;
+    }
+}
+
+fn main() {
+    let k = new Counter(1);
+    let b = k.bump();
+    k = new Counter(10);
+    b.go();
+    let _ = k.n;
+}

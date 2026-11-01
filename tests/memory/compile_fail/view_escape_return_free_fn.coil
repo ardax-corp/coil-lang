@@ -1,0 +1,21 @@
+// @expected E0151 — a free function returning a view of its local.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+}
+
+class Box {
+    pub b: Option<Bump>,
+}
+
+fn make() -> Bump {
+    let k = new Counter(1);
+    return new Bump(mut k);
+}
+
+fn main() {
+    let _ = make();
+}

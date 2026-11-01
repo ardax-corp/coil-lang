@@ -1,0 +1,15 @@
+// @expected E0150 — `mut` passed to a view's plain field borrows nothing.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+    by: Counter,
+}
+
+fn main() {
+    let k = new Counter(1);
+    let j = new Counter(2);
+    let _ = new Bump(mut k, mut j);
+}

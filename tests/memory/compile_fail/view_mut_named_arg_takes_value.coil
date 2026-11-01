@@ -1,0 +1,14 @@
+// @expected E0150 — a named argument for a `mut` field takes `mut place`.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+    by: int,
+}
+
+fn main() {
+    let k = new Counter(1);
+    let _ = new Bump(by: 10, c: k);
+}

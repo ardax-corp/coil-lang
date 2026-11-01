@@ -1,0 +1,30 @@
+// A `view class` declares `mut` fields, each filled with `mut place` at
+// construction; positional and named arguments both take it.
+use tests::assert;
+
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+    pub by: int,
+}
+
+impl Bump {
+    pub fn step() -> int {
+        return self.c.n + self.by;
+    }
+}
+
+test("a view constructs from a `mut` place") {
+    let k = new Counter(1);
+    let b = new Bump(mut k, 10);
+    assert!(b.step() == 11);
+}
+
+test("named arguments fill a `mut` field") {
+    let k = new Counter(2);
+    let b = new Bump(by: 3, c: mut k);
+    assert!(b.step() == 5);
+}

@@ -1,0 +1,12 @@
+// @expected E0150 — a `mut` (borrow) field only in a `view class`.
+class Counter {
+    pub n: int,
+}
+
+class Bump {
+    mut c: Counter,
+}
+
+fn main() {
+    let _ = new Counter(1);
+}

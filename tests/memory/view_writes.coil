@@ -1,0 +1,125 @@
+// A view's `mut` field borrows the place it was given: writes through the
+// view land in that place's object, through a chain of calls and when the
+// view is built over `mut self` by a method of the borrowed object.
+use tests::assert;
+
+class Counter {
+    pub n: int,
+}
+
+class Holder {
+    pub c: Counter,
+}
+
+view class Bump {
+    mut c: Counter,
+    by: int,
+}
+
+impl Counter {
+    pub fn bump(int by) -> Bump {
+        return new Bump(mut self, by);
+    }
+}
+
+impl Bump {
+    pub fn go() -> Bump {
+        self.c.n += self.by;
+        return self;
+    }
+
+    pub fn value() -> int {
+        return self.c.n;
+    }
+}
+
+test("a write through a view lands in the source") {
+    let k = new Counter(1);
+    let b = new Bump(mut k, 10);
+    let _ = b.go();
+    assert!(k.n == 11);
+}
+
+test("a chain of view calls writes the source each time") {
+    let k = new Counter(0);
+    assert!(k.bump(2).go().go().value() == 4);
+    assert!(k.n == 4);
+}
+
+test("a view over a field writes that field's object") {
+    let h = new Holder(new Counter(5));
+    let _ = new Bump(mut h.c, 1).go();
+    assert!(h.c.n == 6);
+}
+
+test("a name shared before the view keeps the old value") {
+    let k = new Counter(1);
+    let old = k;
+    let _ = k.bump(1).go();
+    assert!(k.n == 2);
+    assert!(old.n == 1);
+}
+
+test("the source is shared after the view's last use") {
+    let k = new Counter(1);
+    let b = k.bump(5);
+    let _ = b.go();
+    let copy = k;
+    k.n = 0;
+    assert!(copy.n == 6);
+}
+
+class Tally {
+    pub keys: Vec<string>,
+    pub counts: Vec<int>,
+}
+
+view class TallyEntry {
+    mut t: Tally,
+    key: string,
+    at: int,
+}
+
+impl Tally {
+    pub fn entry(string key) -> TallyEntry {
+        let i = 0;
+        while i < self.keys.len() {
+            if self.keys[i] == key {
+                return new TallyEntry(mut self, key, i);
+            }
+            i += 1;
+        }
+        return new TallyEntry(mut self, key, -1);
+    }
+}
+
+impl TallyEntry {
+    pub fn and_update_with(int -> int f) -> TallyEntry {
+        if self.at >= 0 {
+            self.t.counts[self.at] = f(self.t.counts[self.at]);
+        }
+        return self;
+    }
+
+    pub fn or_insert(int v) -> int {
+        if self.at >= 0 {
+            return self.t.counts[self.at];
+        }
+        self.t.keys.push(self.key);
+        self.t.counts.push(v);
+        return v;
+    }
+}
+
+test("an entry-style view counts words") {
+    let keys: Vec<string> = [];
+    let counts: Vec<int> = [];
+    let t = new Tally(keys, counts);
+    for w in ["a", "b", "a", "c", "a", "b"] {
+        let _ = t.entry(w).and_update_with(fn (int c) => c + 1).or_insert(1);
+    }
+    assert!(t.keys.len() == 3);
+    assert!(t.counts[0] == 3);
+    assert!(t.counts[1] == 2);
+    assert!(t.counts[2] == 1);
+}

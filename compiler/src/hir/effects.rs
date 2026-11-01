@@ -2183,6 +2183,13 @@ impl Cx<'_> {
                 }
                 _ => {}
             },
+            // `new View(mut place, …)`: the view writes the place's object.
+            HirKind::Make { .. } => {
+                for a in crate::hir::view_lint::borrow_args(self.checker, body, id) {
+                    let bits = self.roots(w, a);
+                    self.mutate(w, bits, None, || "borrows it in a view".to_string());
+                }
+            }
             HirKind::Append { base, value } if !self.is_private(w, *base) => {
                 let bits = self.roots(w, *base);
                 self.mutate(w, bits, None, || "appends to an array".to_string());

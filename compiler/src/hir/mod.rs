@@ -33,6 +33,7 @@ pub mod tuple_sroa;
 pub mod readonly_sroa;
 pub mod tables;
 pub(crate) mod stream_lint;
+pub(crate) mod view_lint;
 
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::id::NodeId;
