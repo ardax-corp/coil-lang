@@ -1,10 +1,10 @@
 # Compilation and execution pipeline
 
-How a `.hy` program becomes running bytecode on the VM.
+How a `.coil` program becomes running bytecode on the VM.
 
 ## Stages
 
-1. **Parse** — the Pratt parser in `parser/` reads `.hy` source into an AST.
+1. **Parse** — the Pratt parser in `parser/` reads `.coil` source into an AST.
    Derives (built-in ones included) and attribute macros run in the VM right after
    discovery and splice their output before typechecking ([Macros](macros.md));
    `compiler/src/attrs.rs` records them and checks built-in attributes.
@@ -16,11 +16,11 @@ How a `.hy` program becomes running bytecode on the VM.
    - **LIR**: MIR SROA/CSE, then `mir::emit_lir` writes VM stack ops (`IlOp`) from the SSA. This is what most bodies run.
 
    A `defer` body (pinned) takes LIR with its cleanup pad. The bodies are concatenated and lowered once by `il::lower`: fuse-select with **label / abs-jump barriers** (plus `*Return` join-on-window[0]), assign PCs once, encode `Vec<Byte>`. No optimization pass rewrites the stack ops; the IL is only the encoding step. Enabled fuse patterns: const fold, `BinSlotImm` / `BinSlotSlot` (including const-left commute `CONST; LOAD; int-bin`, COI-384), `CmpJmpf` / `LogNotJmpf` / `BinSlotImmJmpf` / `BinSlotSlotJmpf`, `BinSlotImmStore` / `BinSlotSlotStore` (the latter takes float ops as well as int — archive minor 2), packed multi-slot `LOAD`/`STORE` (`n≤3`), `LoadReturnSlot` / `ConstReturnImm` / `BinReturn`. CALL/TailCall/MakeCoro/CodePtr use `IlOp::Entry`; production abs JMP is rejected in lower. Inlining happens only in the HIR. GC frame maps for dense and LIR bodies are built from their MIR ([mir-stack-maps.md](mir-stack-maps.md)). Compiler-made glue (instance-clone and dictionary-adapter thunks, stream `Read`/`Write` shims, static and FFI initializers) is still written as stack IL directly in `codegen/compiler.rs`.
-6. **Archive** — `coil compile` wraps bytecode in a versioned `ArchivedProgram` envelope (packed `major.minor` in `common/src/archive.rs`) and writes `out.hyc` (or `-o`). Default `coil file.hy` compiles and runs **in memory** and does not read or write `out.hyc`. See [Debug line table](debug-info.md). **Policy:** `.hyc` does not record grants (no rkyv major for grants). Host grants come from CLI flags / `Pipeline` `HostGrants` at **compile**. Ungranted host calls **fail the compile** ([Capabilities](#capabilities)); granted programs still emit the real `HostInvoke` / `FfiLoad`. **The artifact is the grant:** `coil run out.hyc` and packaged `coil-embed` do **not** re-apply allow flags; if the bytecode has the op, it runs. `dload` still checks native sha256 (`--dload-pin`) / `--dload-trusted` integrity and treats `--ffi-search-path` dirs as locators. `dload("c")` stays denied even if flagged. Non-const `dload` paths are a compile error.
-7. **Execute** — the VM in `machine/` runs `main` (or each `test("…")` case under `coil test`), from the in-memory compile or from a loaded `.hyc`.
+6. **Archive** — `coil compile` wraps bytecode in a versioned `ArchivedProgram` envelope (packed `major.minor` in `common/src/archive.rs`) and writes `out.ccoil` (or `-o`). Default `coil file.coil` compiles and runs **in memory** and does not read or write `out.ccoil`. See [Debug line table](debug-info.md). **Policy:** `.ccoil` does not record grants (no rkyv major for grants). Host grants come from CLI flags / `Pipeline` `HostGrants` at **compile**. Ungranted host calls **fail the compile** ([Capabilities](#capabilities)); granted programs still emit the real `HostInvoke` / `FfiLoad`. **The artifact is the grant:** `coil run out.ccoil` and packaged `coil-embed` do **not** re-apply allow flags; if the bytecode has the op, it runs. `dload` still checks native sha256 (`--dload-pin`) / `--dload-trusted` integrity and treats `--ffi-search-path` dirs as locators. `dload("c")` stays denied even if flagged. Non-const `dload` paths are a compile error.
+7. **Execute** — the VM in `machine/` runs `main` (or each `test("…")` case under `coil test`), from the in-memory compile or from a loaded `.ccoil`.
 
 ```
-AST + types → HIR (inline, HIR passes) → layout plan → MIR (SSA) → dense or LIR stack ops → fuse-select / PCs → Vec<Byte> → .hyc → VM
+AST + types → HIR (inline, HIR passes) → layout plan → MIR (SSA) → dense or LIR stack ops → fuse-select / PCs → Vec<Byte> → .ccoil → VM
 ```
 
 Where each former stack-IL pass went, and the fuse-select contract: [`compiler/src/il/opt/README.md`](../../compiler/src/il/opt/README.md).
@@ -76,7 +76,7 @@ Iterative optimization (COI-130) was removed: re-running the pipeline miscompile
 
 Optimization statistics (COI-131) are **off** by default (`collect_stats` / CLI `--opt-stats` and `--opt-stats-json`). When enabled, it records each body's final tier (dense / LIR, with the dense refusal reasons) and HIR lowering and inlining counters (typed-inlining call sites increment `functions_inlined`). Human text or a single JSON object is printed to stderr after a source compile. Collection clones the op buffer only while the flag is on.
 
-The IL is **compile-time only**. The archive version is recorded only in `common/src/archive.rs` ([older minors](archive-history.md)). If an optimization is sound but flagship `.hyc` do not change, prove it on focused `examples/perf` hit benches ([roadmap](optimization-roadmap.md#hit-bench-prove-rule)).
+The IL is **compile-time only**. The archive version is recorded only in `common/src/archive.rs` ([older minors](archive-history.md)). If an optimization is sound but flagship `.ccoil` do not change, prove it on focused `examples/perf` hit benches ([roadmap](optimization-roadmap.md#hit-bench-prove-rule)).
 
 ## Capabilities
 
@@ -120,11 +120,11 @@ library. A packaged app looks for each library in the
 natives cache, beside the executable and in `lib/` there; getting it there is
 the user's job.
 
-## Archives (`out.hyc`)
+## Archives (`out.ccoil`)
 
-Default `coil file.hy` compiles and runs in memory. It does **not** read or write `out.hyc` (integration tests assert this). An existing `out.hyc` beside the entry is left untouched; if it looks stale the CLI may warn, but the in-memory compile still runs.
+Default `coil file.coil` compiles and runs in memory. It does **not** read or write `out.ccoil` (integration tests assert this). An existing `out.ccoil` beside the entry is left untouched; if it looks stale the CLI may warn, but the in-memory compile still runs.
 
-`coil compile [file.hy]` writes `out.hyc` (or `-o`). `coil run out.hyc` loads that archive and **warns** when recorded sources are newer; it does **not** rebuild. Missing / corrupt / incompatible archives fail instead of compiling from source.
+`coil compile [file.coil]` writes `out.ccoil` (or `-o`). `coil run out.ccoil` loads that archive and **warns** when recorded sources are newer; it does **not** rebuild. Missing / corrupt / incompatible archives fail instead of compiling from source.
 
 Incrementality (fingerprint-based reuse of a compile) is a later design, not current CLI behavior.
 

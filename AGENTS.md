@@ -1,25 +1,25 @@
 # coil — AGENTS
 
-coil: statically typed `.hy` → typecheck → HIR (optimizations) → MIR (every body) → dense or LIR bytecode → `.hyc` archive → custom VM.
+coil: statically typed `.coil` → typecheck → HIR (optimizations) → MIR (every body) → dense or LIR bytecode → `.ccoil` archive → custom VM.
 
 | Need | Read |
 |------|------|
-| Write / edit `.hy` | `.claude/skills/coil-language` · [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/` (`/docs/…`) |
+| Write / edit `.coil` | `.claude/skills/coil-language` · [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/` (`/docs/…`) |
 | Compiler, VM, pipeline | `.claude/skills/coil-contributor` · `docs/internals/` |
 | Hangs, panics, breakpoints | `.claude/skills/coil-debug` · `docs/internals/debugger.md` |
 | Known gaps / workarounds | `docs/internals/limitations.md` |
 
 ## Working agreement
 
-- **Verify locally, let CI run the suites.** Before pushing: a release build, the tests nearest the change (`cargo test -p <crate> <filter>`, `coil test <file>.hy`; add `--features vm-wire` when touching compiler behaviour, see Commands), clippy and the fmt check below. Don't run the full workspace suite, the leak smoke or GC stress locally as a gate; push and fix what CI reports.
+- **Verify locally, let CI run the suites.** Before pushing: a release build, the tests nearest the change (`cargo test -p <crate> <filter>`, `coil test <file>.coil`; add `--features vm-wire` when touching compiler behaviour, see Commands), clippy and the fmt check below. Don't run the full workspace suite, the leak smoke or GC stress locally as a gate; push and fix what CI reports.
 - **Before push:** `cargo clippy --workspace --lib --tests --bins -- -D warnings` and `cargo build -p coil-fmt && ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests` (CI's `fmt` job also checks `compile_fail/` and `scripts/rep_matrix_known_wrong`).
 - **Bug fixes:** the first commit adds a test that reproduces the issue, then the fix commits. Commit in small, granular steps (conventional commits, only related files staged); PRs are squash-merged.
-- **Bugs found along the way:** don't widen the PR. File an issue in `ardax-corp/coil-lang` (search for duplicates first) with a minimal `.hy` repro, exact commands and output, expected vs actual, commit sha and a suspected cause; link it from the PR if related. Fix it in place only when the current change can't land without it.
+- **Bugs found along the way:** don't widen the PR. File an issue in `ardax-corp/coil-lang` (search for duplicates first) with a minimal `.coil` repro, exact commands and output, expected vs actual, commit sha and a suspected cause; link it from the PR if related. Fix it in place only when the current change can't land without it.
 - **PRs:** issues live on GitHub. Independent changes may go out as parallel PRs; stacked or conflicting ones one at a time. Merge your own PR once CI is green, except macOS jobs, which may still be queued (a macOS job that actually failed still needs a look). Cross-repo chains merge upstream first: coil-lang → coil-stdlib → libs → coil-website. A red check that is a known, already-filed flake does not block: comment naming the issue and merge.
 - **Large features:** a long-lived `feature/<name>` branch with one PR per plan step; local verification gates the step PRs, and full CI runs on the final squash-merged PR into `main`. Draft a plan for large language changes and get it agreed before implementing.
 - **Parallel work:** scoped sub-agents on disjoint modules are fine without asking.
 - **Tests never pin emitted bytecode** (hashes, goldens, exact op lines). Assert behaviour; opcode presence/absence checks only where the opt is the point.
-- **Perf changes:** prove on a bench the rewrite changes. Flagships (`mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib`) must be built with `--fold-calls off`, or comptime call folding turns `main` into a constant. If an opt is sound but the flagship `.hyc` are identical, add focused `examples/perf` hit benches and prove those; skip only on hit-bench wash/regress (rule: `docs/internals/optimization-roadmap.md`, "Hit-bench prove rule"). Use `--release` for benchmarks.
+- **Perf changes:** prove on a bench the rewrite changes. Flagships (`mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib`) must be built with `--fold-calls off`, or comptime call folding turns `main` into a constant. If an opt is sound but the flagship `.ccoil` are identical, add focused `examples/perf` hit benches and prove those; skip only on hit-bench wash/regress (rule: `docs/internals/optimization-roadmap.md`, "Hit-bench prove rule"). Use `--release` for benchmarks.
 
 ## Style and direction
 
@@ -28,7 +28,7 @@ coil: statically typed `.hy` → typecheck → HIR (optimizations) → MIR (ever
 - **Method-based APIs**: prefer inherent/`impl` methods over free functions for type-tied operations (stdlib, new language surface, codegen fixes). Virtual-module host primitives (`io::read`) stay free functions.
 - Language features: full HM integration; update coil-website user docs (`src/content/docs/`) and `docs/internals/` here when needed; minimal runnable example.
 - Prefer compiler virtual modules over userland for core interpreter machinery; extracted features (regex, TLS, HTTP, collections) live in their own repos (`ardax-corp/coil-regex`, `coil-tls`, `coil-http`, `coil-stdlib`). Their demos, native builds and integration tests stay in those repos, not in coil-lang `compiler/tests` or CI.
-- Prefer `.hy` language tests (`tests/<domain>/`, `coil test`) over Rust VM bytecode tests when coverage overlaps; remove duplicates.
+- Prefer `.coil` language tests (`tests/<domain>/`, `coil test`) over Rust VM bytecode tests when coverage overlaps; remove duplicates.
 - IL inspection: `coil dissect`, not verbose debug-build dumps.
 - `coil fmt`: preserve `//` and `///`; wrap long lines; trailing commas on multi-line lists.
 
@@ -53,7 +53,7 @@ Codegen / match / `STORE`: `.claude/skills/coil-contributor/reference.md`.
 
 - Full suite: `cargo test --workspace --lib --tests --bins` (use `--lib --tests --bins`, not `--all-targets`: Criterion benches abort on test argv). Default features are empty and the tooling crates unify `dissect` / `debugger` / `coverage`, so feature variants build the same thing; one run covers them.
 - VM-wire suites (`required-features = ["vm-wire"]`, skipped silently otherwise): `cargo test -p compiler --features vm-wire --tests`.
-- `.hy` corpus: `./target/debug/coil test` (or a path).
+- `.coil` corpus: `./target/debug/coil test` (or a path).
 - Leak smoke and GC stress: the `harness` matrix in `.github/workflows/ci.yml` (`scripts/test_corpora.py`; leak smoke is `-j 1 --limit-as-kb <code size + 128 MiB>`, GC stress is `coil-test` built with `--features gc-stress --target-dir target/gc-stress`, release cells only since #2131).
 - Soft CPU baseline: `./scripts/poop_baseline.sh`.
 - Under cargo the reactor runs one worker (`COIL_MAX_WORKER_THREADS=1` in `.cargo/config.toml`); override it when profiling auto-par.

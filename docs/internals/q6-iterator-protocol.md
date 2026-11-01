@@ -65,26 +65,26 @@ dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
 
 ## Prove
 
-- `examples/perf/for_in_sum.hy` — `sum` helper is the island (`VReduce` /
+- `examples/perf/for_in_sum.coil` — `sum` helper is the island (`VReduce` /
   dense Index). `main` stays format + fill (I4).
-- `examples/perf/for_in_range.hy` — literal range helper is dense counted
+- `examples/perf/for_in_range.coil` — literal range helper is dense counted
   i64.
-- `examples/perf/for_in_range_value.hy` — first-class `let r = 0..n`
+- `examples/perf/for_in_range_value.coil` — first-class `let r = 0..n`
   helper is the same dense counted i64 (B5).
-- `examples/perf/for_in_range_param.hy` — `Range<int>` parameter helper
+- `examples/perf/for_in_range_param.coil` — `Range<int>` parameter helper
   is the same dense counted i64 (C2).
-- `examples/perf/for_in_range_ret.hy` — returned `Range<int>` bind is
+- `examples/perf/for_in_range_ret.coil` — returned `Range<int>` bind is
   the same dense counted i64 (C2).
-- `examples/perf/for_in_range_field.hy` — class-field Range helper is
+- `examples/perf/for_in_range_field.coil` — class-field Range helper is
   the same dense counted i64 (C2b rung 1).
-- `examples/perf/for_in_range_array.hy` — array-held Range helper is
+- `examples/perf/for_in_range_array.coil` — array-held Range helper is
   the same dense counted i64 (C2b rung 1).
 
-- `examples/perf/for_in_iter.hy` — user `Iterator::next` helper is two-slot
+- `examples/perf/for_in_iter.coil` — user `Iterator::next` helper is two-slot
   Option tag JMP + CALL (dense when cost ≤ fuse; C2b rung 2).
-- `examples/perf/for_in_iter_range.hy` — `into_iter` → `Range<int>` helper
+- `examples/perf/for_in_iter_range.coil` — `into_iter` → `Range<int>` helper
   is the same dense counted i64 (C2b rung 2).
-- `examples/perf/for_in_coro.hy` — coro for-in helper is `ResumeCoro` /
+- `examples/perf/for_in_coro.coil` — coro for-in helper is `ResumeCoro` /
   `DoneCoro` (dense or LIR when cost ≤ fuse; C2b rung 4).
 
 Flagships do not need this island.

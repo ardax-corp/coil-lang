@@ -246,7 +246,7 @@ fn run_dispatch(
 
 #[test]
 fn perf_tak_direct_calls_no_call_indirect() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/tak.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/tak.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "tak", bc.len());
     let call_indirect = count_opcodes_in(&bc, start, end, Instruction::CallIndirect);
@@ -292,7 +292,7 @@ fn perf_tak_direct_calls_no_call_indirect() {
 
 #[test]
 fn perf_tak_dispatch_regression() {
-    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/tak.hy");
+    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/tak.coil");
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
     // tak(18,12,6) is deep recursion; peels skip base-case frames.
     // Measured ~1.5–3M dispatches on debug Machine; keep headroom.
@@ -304,7 +304,7 @@ fn perf_tak_dispatch_regression() {
 
 #[test]
 fn perf_numeric_uses_bin_slot_imm_jmpf_for_loop() {
-    let (bc, _, _, _, _) = compile("examples/perf/numeric.hy");
+    let (bc, _, _, _, _) = compile("examples/perf/numeric.coil");
     assert!(
         count_opcodes(&bc, Instruction::BinSlotImmJmpf) >= 1,
         "numeric loop should fuse compare+branch"
@@ -313,7 +313,7 @@ fn perf_numeric_uses_bin_slot_imm_jmpf_for_loop() {
 
 #[test]
 fn perf_operators_loop_inverts_not_into_bin_slot_jmpf() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/operators_loop.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/operators_loop.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "main", bc.len());
     let main = &bc[start..end];
@@ -337,7 +337,7 @@ fn perf_operators_loop_inverts_not_into_bin_slot_jmpf() {
 
 #[test]
 fn perf_numeric_dispatch_regression() {
-    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/numeric.hy");
+    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/numeric.coil");
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
     // Release of VM perf pass: loop compare+branch fused; expect well under 80k.
     assert!(
@@ -348,7 +348,7 @@ fn perf_numeric_dispatch_regression() {
 
 #[test]
 fn perf_match_sum_emits_jump_if_match() {
-    let (bc, _, _, _, _) = compile("examples/perf/match_sum.hy");
+    let (bc, _, _, _, _) = compile("examples/perf/match_sum.coil");
     assert!(
         count_opcodes(&bc, Instruction::JumpIfMatch) >= 1,
         "match_sum should emit match dispatch"
@@ -357,7 +357,7 @@ fn perf_match_sum_emits_jump_if_match() {
 
 #[test]
 fn perf_dense_cast_bin_header_shape() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/dense_cast_bin.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/dense_cast_bin.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "hot", bc.len());
     let body = &bc[start..end];
@@ -385,7 +385,7 @@ fn perf_dense_cast_bin_header_shape() {
 
 #[test]
 fn perf_stride_store_iv_k_loop_shape() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/stride_store_iv.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/stride_store_iv.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "hot", bc.len());
     let body = &bc[start..end];
@@ -408,7 +408,7 @@ fn perf_stride_store_iv_k_loop_shape() {
 
 #[test]
 fn perf_mandelbrot_dispatch_regression() {
-    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/mandelbrot.hy");
+    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/mandelbrot.coil");
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
     // Nested float loops (size=160, max_iter=50) + write_all.
     // Measured ~12M dispatches on debug Machine; keep headroom for stdlib churn.
@@ -420,7 +420,7 @@ fn perf_mandelbrot_dispatch_regression() {
 
 #[test]
 fn perf_mandelbrot_tree_shakes_unused_builtin_thunks() {
-    let (_bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
+    let (_bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
     assert!(
@@ -444,7 +444,7 @@ fn perf_mandelbrot_tree_shakes_unused_builtin_thunks() {
 #[test]
 fn perf_field_hot_reuses_repeated_string_keys() {
     // Reads the methods' own bodies, which typed inlining splices into `hot`.
-    let (bc, _, _, _, pipeline) = compile_tuned("examples/perf/field_hot.hy", |p| p.set_hir_inline(false));
+    let (bc, _, _, _, pipeline) = compile_tuned("examples/perf/field_hot.coil", |p| p.set_hir_inline(false));
     let syms = pipeline.program_debug().fn_symbols;
     // Field keys "x"/"y" are shared by both methods, `hot` and `main`: each
     // key is interned once, however many sites read it.
@@ -487,7 +487,7 @@ fn perf_field_hot_reuses_repeated_string_keys() {
 
 #[test]
 fn perf_for_in_array_uses_single_array_len() {
-    let (bc, pool, _, _, pipeline) = compile("examples/for_in_array.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/for_in_array.coil");
     // Loop hoist computes the length in the preheader, never per iteration.
     // Linked `io::sync` helpers have their own ArrayLen ops, so look at `main`.
     let syms = pipeline.program_debug().fn_symbols;
@@ -503,7 +503,7 @@ fn perf_for_in_array_uses_single_array_len() {
 
 #[test]
 fn perf_indexed_sum_hoists_array_len_once() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/indexed_sum.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/indexed_sum.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "sum", bc.len());
     let is_len = |b: &Byte| matches!(*b.bytecode(), Instruction::ArrayLen | Instruction::DenseArrayLen);
@@ -537,7 +537,7 @@ fn perf_indexed_sum_hoists_array_len_once() {
 
 #[test]
 fn perf_nsieve_proves_fill_bounded_index() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/nsieve.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/nsieve.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "nsieve", bc.len());
     // Proven p-loop Index and stride StoreIndex rewrite to pinned unchecked forms.
@@ -584,7 +584,7 @@ fn perf_nsieve_proves_fill_bounded_index() {
 
 #[test]
 fn perf_bool_guard_inverts_into_jmpt() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/bool_guard.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/bool_guard.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "count_until", bc.len());
     // `if stop { break }` is one dispatch: fuse-IL collapses JMPF-over-JMP
@@ -610,7 +610,7 @@ fn perf_bool_guard_inverts_into_jmpt() {
 /// `times_at`'s int counter compiled as `CONST 1; ADDF`.
 #[test]
 fn perf_nbody_int_counter_is_not_float_add() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/nbody.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/nbody.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "times_at", bc.len());
     let int_const_addf = bc[start..end].windows(2).any(|w| {
@@ -624,7 +624,7 @@ fn perf_nbody_int_counter_is_not_float_add() {
 #[test]
 fn perf_mandelbrot_inverts_escape_into_const_jmpt() {
     // Escape `if mag > 4 { break }` inverts fused *Jmpf; JMP into *Jmpt (COI-87).
-    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
     assert_eq!(
@@ -645,7 +645,7 @@ fn perf_mandelbrot_inverts_escape_into_const_jmpt() {
 #[test]
 fn perf_mandelbrot_squares_fuse_into_bin_slot_slot() {
     // `zr * zr` / `zi * zi`: GVN's `Load; Dup` still fuses as a slot/slot binop.
-    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
     assert_eq!(
@@ -681,7 +681,7 @@ fn perf_mandelbrot_squares_fuse_into_bin_slot_slot() {
 
 #[test]
 fn perf_mandelbrot_uses_bin_slot_slot_float_arith() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
     let bin_slot = count_opcodes_in(&bc, start, end, Instruction::BinSlotSlot)
@@ -708,7 +708,7 @@ fn perf_mandelbrot_hoists_invariant_ci_out_of_x_loop() {
     // between the x-loop header and the iter-loop header.
     // Use from_file so module resolution matches `coil dissect` / production.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let path = root.join("examples/perf/mandelbrot.hy");
+    let path = root.join("examples/perf/mandelbrot.coil");
     let mut pipeline = compiler::Pipeline::new();
     pipeline.bind_workspace_language_roots();
     let (bc, _) = pipeline
@@ -748,7 +748,7 @@ fn perf_mandelbrot_hoists_invariant_ci_out_of_x_loop() {
 
 #[test]
 fn perf_mandelbrot_slot_promote_drops_ci_temp_copy() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
     let bin_slot = count_opcodes_in(&bc, start, end, Instruction::BinSlotSlot)
@@ -1163,7 +1163,7 @@ fn perf_phase0_mandelbrot_shape_inventory() {
     //   would_be_jmpt_after_invert=0 (escape inverted to BinSlotSlotConstJmpt).
     // cast_spill / FloatChainStore are retired; cr/ci float chains stay unfused.
     //   unary / pool-imm / packing_holes / BinSlot→branch miss = 0.
-    let (h, g) = compile_fn_inventory("examples/perf/mandelbrot.hy", "mandelbrot");
+    let (h, g) = compile_fn_inventory("examples/perf/mandelbrot.coil", "mandelbrot");
 
     assert!(
         h.fused_bin_slot_total() + h.dense_bin >= 1,
@@ -1207,7 +1207,7 @@ fn perf_phase0_tak_shape_inventory() {
     // No-self-peel: the three inner self-calls are left unpeeled (the peel cost
     // more than the frame), so the join temps never enter the frame at all and
     // `slot_promote_at` clears the reload run: LOAD=3 STORE=0, 13 words.
-    let (h, g) = compile_fn_inventory("examples/perf/tak.hy", "tak");
+    let (h, g) = compile_fn_inventory("examples/perf/tak.coil", "tak");
 
     assert!(
         h.fused_jmpf_total() + h.fused_jmpt_total() >= 1,
@@ -1270,7 +1270,7 @@ fn perf_phase0_numeric_shape_inventory() {
     // 6.2: `acc = acc + i` runs 8 lanes at a time in a `VLoop`; the loop
     // left is the scalar tail of the last few lanes, rotated (its entry
     // test before it, a fused `*Jmpt` back edge).
-    let (bc, pool, _, _, pipeline) = compile("examples/perf/numeric.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/perf/numeric.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "__coil_par_loop_1", bc.len());
     assert_eq!(
@@ -1325,7 +1325,7 @@ fn perf_phase0_nsieve_shape_inventory() {
     //   gaps:   index=1 store_index=1; slot_move=0; packing_holes=0
     // Phase 4: Index/StoreIndex remain the dominant ledger rows; no *Jmpt /
     //   float-chain / unary near-misses in `nsieve`.
-    let (h, g) = compile_fn_inventory("examples/perf/nsieve.hy", "nsieve");
+    let (h, g) = compile_fn_inventory("examples/perf/nsieve.coil", "nsieve");
 
     assert!(
         h.fused_jmpf_total() + h.jmpf >= 3,
@@ -1370,7 +1370,7 @@ fn perf_phase0_nsieve_shape_inventory() {
 
 #[test]
 fn perf_phase0_nsieve_dispatch_regression() {
-    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/nsieve.hy");
+    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/nsieve.coil");
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
     // n=1<<14 sieve + write_all; measured multi-million on debug Machine.
     assert!(
@@ -1400,7 +1400,7 @@ fn perf_phase0_nsieve_dispatch_regression() {
 /// single-slot, against 13 already-fused `BinSlot*` words and zero calls.
 #[test]
 fn aot_p1_mandelbrot_residual_load_store_inventory() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
     let shape = load_store_shape(&bc, start, end);
@@ -1438,7 +1438,7 @@ fn aot_p1_mandelbrot_residual_load_store_inventory() {
 /// over 9 slots, 3 single-slot STOREs).
 #[test]
 fn aot_p1_p4_tak_residual_load_store_and_call_density() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/tak.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/tak.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "tak", bc.len());
     let shape = load_store_shape(&bc, start, end);
@@ -1483,7 +1483,7 @@ fn aot_p1_p4_tak_residual_load_store_and_call_density() {
 /// innermost body is down to 6 words.
 #[test]
 fn aot_p2_nsieve_index_shape_inventory() {
-    let (bc, pool, _, _, pipeline) = compile("examples/perf/nsieve.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/perf/nsieve.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "nsieve", bc.len());
     let index = count_opcodes_in(&bc, start, end, Instruction::Index);
@@ -1551,7 +1551,7 @@ fn aot_p2_nsieve_index_shape_inventory() {
 /// moves to the preheader — including in `fill`, where the loop writes elements.
 #[test]
 fn aot_p2_len_loop_hoists_invariant_array_len() {
-    let (bc, pool, _, _, pipeline) = compile("examples/perf/vec_scan.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/perf/vec_scan.coil");
     let syms = pipeline.program_debug().fn_symbols;
     for (name, index, store_index) in [("scan", 1usize, 0usize), ("fill", 0, 1)] {
         let (start, end) = fn_pc_range(&syms, name, bc.len());
@@ -1580,7 +1580,7 @@ fn aot_p2_len_loop_hoists_invariant_array_len() {
 
 #[test]
 fn aot_p2_vec_scan_dispatch_regression() {
-    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan.hy");
+    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan.coil");
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
     eprintln!("[P2] vec_scan dispatches={dispatches}");
     // 64 rounds over a 4096-element Vec, both loops hoisted (~5.0M).
@@ -1596,7 +1596,7 @@ fn aot_p2_vec_scan_dispatch_regression() {
 #[test]
 fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     let (bc, pool, strings, statics, pipeline) =
-        compile_tuned("examples/perf/vec_scan_pure.hy", |p| p.set_inline_max_cost(0));
+        compile_tuned("examples/perf/vec_scan_pure.coil", |p| p.set_inline_max_cost(0));
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "scan", bc.len());
     let (inner_start, inner_end) = innermost_loop_range(&bc, &pool, start, end);
@@ -1638,7 +1638,7 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
 #[test]
 fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
     let (bc, pool, strings, statics, pipeline) =
-        compile_tuned("examples/perf/vec_scan_impure.hy", |p| p.set_inline_max_cost(0));
+        compile_tuned("examples/perf/vec_scan_impure.coil", |p| p.set_inline_max_cost(0));
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "scan", bc.len());
     let (inner_start, inner_end) = innermost_loop_range(&bc, &pool, start, end);
@@ -1662,7 +1662,7 @@ fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
 
 #[test]
 fn aot_p2_nsieve_dispatch_regression() {
-    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/nsieve.hy");
+    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/nsieve.coil");
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
     eprintln!("[P2] nsieve dispatches={dispatches}");
     // ~470k with the sieve loop's operand materialization hoisted.
@@ -1676,7 +1676,7 @@ fn aot_p2_nsieve_dispatch_regression() {
 /// per level and `item_check` unpacks without re-allocating.
 #[test]
 fn aot_p3_binary_trees_make_enum_inventory() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/binary_trees.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/binary_trees.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let mut total_enums = 0usize;
     let mut total_tuples = 0usize;
@@ -1762,7 +1762,7 @@ fn mir_weighted_census() {
     let mut files: Vec<_> = std::fs::read_dir(root.join("examples/perf"))
         .expect("examples/perf")
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "hy"))
+        .filter(|p| p.extension().is_some_and(|x| x == "coil"))
         .collect();
     files.sort();
 
@@ -1861,7 +1861,7 @@ fn mir_weighted_census() {
 fn host_result_match_has_no_dead_spill() {
     // The LIR tier: dense still spills the scrutinee once (#2120).
     let (bc, _, _, _, pipeline) =
-        compile_tuned("examples/perf/host_try.hy", |p| p.compiler_mut().set_mir_dense(false));
+        compile_tuned("examples/perf/host_try.coil", |p| p.compiler_mut().set_mir_dense(false));
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "main", bc.len());
     let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
@@ -1882,7 +1882,7 @@ fn host_result_match_has_no_dead_spill() {
 /// thunk to the shared body, which takes the dictionary.)
 #[test]
 fn ground_dictionary_is_built_once() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/dict_once.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/dict_once.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "dict_lib::larger$inst$Score", bc.len());
     let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
@@ -1897,7 +1897,7 @@ fn ground_dictionary_is_built_once() {
 /// arguments, no dictionaries, no calls through them.
 #[test]
 fn foreign_method_clone_is_specialized() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_clone.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_clone.coil");
     let syms = pipeline.program_debug().fn_symbols;
     for name in ["dict_lib::Tally::add$inst$int", "dict_lib::Tally::find$inst$int"] {
         let (start, end) = fn_pc_range(&syms, name, bc.len());
@@ -1913,7 +1913,7 @@ fn foreign_method_clone_is_specialized() {
 /// cloned too: no boxed arguments, no dictionaries.
 #[test]
 fn foreign_fn_clone_is_specialized() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_fn_clone.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_fn_clone.coil");
     let syms = pipeline.program_debug().fn_symbols;
     for name in ["dict_lib::largest$inst$int", "dict_lib::larger$inst$int"] {
         let (start, end) = fn_pc_range(&syms, name, bc.len());
@@ -1947,7 +1947,7 @@ fn is_bit_op(b: &Byte) -> bool {
 /// constants that meet once `mask(-1)` inlines fold at compile time.
 #[test]
 fn lir_body_folds_constants_after_inlining() {
-    let (bc, constants, _, _, pipeline) = compile("examples/perf/mir_lir_fold.hy");
+    let (bc, constants, _, _, pipeline) = compile("examples/perf/mir_lir_fold.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "check", bc.len());
     let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
@@ -2252,12 +2252,12 @@ fn main() {
     }
 }
 
-/// #1561: `examples/perf/const_table_crc.hy` reads its module table with a
+/// #1561: `examples/perf/const_table_crc.coil` reads its module table with a
 /// variable index in a loop: the table's slot is loaded once, outside the
 /// loop, which reads one element per byte.
 #[test]
 fn const_table_slot_load_leaves_the_loop() {
-    let (bc, pool, _, _, pipeline) = compile("examples/perf/const_table_crc.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/perf/const_table_crc.coil");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "crc32", bc.len());
     let (loop_start, loop_end) = innermost_loop_range(&bc, &pool, start, end);

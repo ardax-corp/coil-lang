@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn lsp_ndjson_spanned_and_spanless() {
         let mut sources = SourceMap::new();
-        let file = sources.insert("test.hy", "let x = 1;\n");
+        let file = sources.insert("test.coil", "let x = 1;\n");
         let shared = SharedBuf::new();
         let mut sink = LspSink::new(sources, Box::new(shared.clone()));
 

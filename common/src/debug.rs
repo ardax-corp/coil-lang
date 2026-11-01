@@ -1,4 +1,4 @@
-//! Per-instruction debug locations shipped in `.hyc` archives.
+//! Per-instruction debug locations shipped in `.ccoil` archives.
 
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn resolve_lines_records_line_and_column_per_loc() {
         let mut debug = ProgramDebug {
-            source_files: vec!["a.hy".into(), "missing.hy".into()],
+            source_files: vec!["a.coil".into(), "missing.coil".into()],
             debug_locs: vec![
                 // `x` on line 2: "fn f() {\n  · x"
                 DebugLoc {
@@ -228,7 +228,7 @@ mod tests {
             ],
             ..ProgramDebug::default()
         };
-        debug.resolve_lines(|file| (file == "a.hy").then(|| "fn f() {\n  · x\n}".to_string()));
+        debug.resolve_lines(|file| (file == "a.coil").then(|| "fn f() {\n  · x\n}".to_string()));
         assert_eq!(debug.line_at(0), Some(DebugLine { line: 2, column: 4 }));
         assert_eq!(debug.line_at(1), None, "unknown loc");
         assert_eq!(debug.line_at(2), None, "source not available");

@@ -16,7 +16,7 @@ try dense, keep it when reconstruct is Make*-free inside loops.
 
 ## Where the 18% came from
 
-Not the landed `examples/perf/looping_makearray.hy` preheader `bump`. PR #365 /
+Not the landed `examples/perf/looping_makearray.coil` preheader `bump`. PR #365 /
 agent `bc-488328c4` first put an in-loop `pack` in that path, N=`2000000`:
 
 ```hy
@@ -37,7 +37,7 @@ Computed `i % 3` stops mem_fwd from DCE'ing the alloc. Original hyperfine
 **340.3 ± 5.2 ms** (**1.18×**), checksum **`2000000999999`**. After the
 regress they rewrote the file to preheader `bump` (~+11%).
 
-This branch restores `pack` as `examples/perf/s2d_inloop_pack.hy`. After
+This branch restores `pack` as `examples/perf/s2d_inloop_pack.coil`. After
 S2f–S2k the landed `pack` is Make-free dense select; the table below is
 the **historical** residual-dense vs fuse-IL A/B (override removed).
 
@@ -48,9 +48,9 @@ Commands (this host, tip `cursor/s2d-inloop-make-tax-6ad5`, parent compiler
 PARENT=/tmp/coil-s3b/target/release/coil   # a5cd908
 CUR=./target/release/coil
 R=(--root .deps/coil-stdlib/src)
-"$PARENT" compile "${R[@]}" examples/perf/s2d_inloop_pack.hy -o pack.parent.hyc
-"$CUR" compile "${R[@]}" examples/perf/s2d_inloop_pack.hy -o pack.tip.hyc
-hyperfine -w 2 -r 8 "$CUR run pack.parent.hyc" "$CUR run pack.tip.hyc"
+"$PARENT" compile "${R[@]}" examples/perf/s2d_inloop_pack.coil -o pack.parent.ccoil
+"$CUR" compile "${R[@]}" examples/perf/s2d_inloop_pack.coil -o pack.tip.ccoil
+hyperfine -w 2 -r 8 "$CUR run pack.parent.ccoil" "$CUR run pack.tip.ccoil"
 ```
 
 ## Reproduced numbers (same VM = current release `coil run`)
@@ -133,7 +133,7 @@ Two Seeks per Index+Make trip on `pack`.
 | Skip GcBarrier dest copy when regs alias | Drops LOAD/STORE pair after MakeArray | Must keep maps if dest ≠ obj |
 | Dense cost gate (like LIR) | Avoids shipping a slower body | Does not make dense *faster* |
 | MIR→LIR instead of dense | Unlikely: cost gate already prefers fuse | Same spill pattern in `emit_lir` if it won |
-| Escape / stack SROA of `[i,i+1,i+2]` | Could delete the alloc (huge) | Known miscompile on `vec_array.hy`; computed index |
+| Escape / stack SROA of `[i,i+1,i+2]` | Could delete the alloc (huge) | Known miscompile on `vec_array.coil`; computed index |
 | Hoist/batch Make outside loop | Only if semantics allow (not this kernel) | Different program |
 | Flagship Make* | `nsieve` is `Vec.push`, not Make* | Do not twist flagships for the bench |
 
@@ -213,7 +213,7 @@ S2f:
   a runtime `0 <= k < N` check) and still SROA; the cold arm is heap
   `Index` / `StoreIndex` so OOB panics. Leftover IL `MakeArray` + `xs[k]`
   stays a heap object (checked Index).
-- **S2i (COI-319):** observed/escape + computed elems (`vec_array.hy`) stay
+- **S2i (COI-319):** observed/escape + computed elems (`vec_array.coil`) stay
   a heap object with sound `Index` / `StoreIndex`. Zip/broadcast operands
   that are literals or stack-array locals load slots (S2f); the result is
   not slot-SROA'd. Remaining refuse: grow dest, private after escape,
@@ -223,7 +223,7 @@ S2f:
 - **S2j (COI-320) / Q2 (COI-324):** unique named `let p = new C(...)`
   field-SROA into consecutive slots. Identity boxes **once** and reuses
   that instance (not a fresh `InitTyped` per edge). Still heap-from-`new`:
-  `fn drop()`, parameters, arity 0 or > 32. Hit: `s2j_class_sroa.hy`.
+  `fn drop()`, parameters, arity 0 or > 32. Hit: `s2j_class_sroa.coil`.
 - **S2k (COI-321):** proven `i % N` load/store select (`pack` / `pack_store`
   / `bump`) may emit dense. Latch coalesce only aliases `i` with `i+1`
   when the increment is *in* the latch (CSE of `xs[1] = i+1` must not
@@ -264,7 +264,7 @@ Parent `pack_store` / `bump` return **0** (Index rematerializes zeros;
 `raise` hid it). Tip: `pack(6)==15`, `pack(2e6)==1999999000000`,
 `bump()==200000`. Do not use coil `n*(n-1)/2` at this magnitude.
 
-Flagship `.hyc` sha256 identical: `mandelbrot` / `tak` / `nsieve` /
+Flagship `.ccoil` sha256 identical: `mandelbrot` / `tak` / `nsieve` /
 `binary_trees` / `fib`.
 
 ## S2l leftover in-loop Make* (COI-322)
@@ -281,7 +281,7 @@ Win-or-gate (only path):
 2. If the reconstruct still has Make* inside a loop, stay fuse-IL.
    An op-count ≤ fuse still boxed slower on the leftover kernel.
 
-Hit: `examples/perf/s2d_inloop_escape.hy` (`pack(n)` = `n²`; N=2e6
+Hit: `examples/perf/s2d_inloop_escape.coil` (`pack(n)` = `n²`; N=2e6
 checksum `4000000000000`). Same `coil run`, `--auto-par off`,
 hyperfine -w 2 -r 8.
 
@@ -303,7 +303,7 @@ frame slots (no LOAD/StorePop). CALL / HostInvoke gather with
 Make* when the reconstruct is native **and** `emit_cost` ≤ fuse-IL;
 boxed residuals still refuse.
 
-Flagship `.hyc` sha256 identical vs parent `8ce0156f`: `mandelbrot` /
+Flagship `.ccoil` sha256 identical vs parent `8ce0156f`: `mandelbrot` /
 `tak` / `nsieve` / `binary_trees` / `fib`. Checksums 625885 / 7 / 1900 /
 135854 / 2178309. SROA pack archives also identical (Make-free before
 this gate).

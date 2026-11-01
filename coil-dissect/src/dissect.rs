@@ -43,7 +43,7 @@ pub struct DissectArgs {
     pub include_tests: bool,
 }
 
-/// Bytecode of a compiled `.hyc` archive (function names from its debug
+/// Bytecode of a compiled `.ccoil` archive (function names from its debug
 /// symbols; no IL / MIR / AST).
 fn archive_artifacts(path: &str) -> Result<DissectArtifacts, String> {
     let bytes = fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))?;
@@ -106,14 +106,14 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
         pipeline.set_collect_opt_stats(true);
     }
 
-    let from_archive = args.filename.ends_with(".hyc");
+    let from_archive = common::ext::is_archive_path(std::path::Path::new(&args.filename));
     if from_archive
         && (args.show_il || args.show_il_post || args.show_mir || args.show_hir || args.show_effects || args.show_ast || args.show_expand)
     {
         fail_and_exit(
             &mut pipeline,
             ErrorCode::InvalidCliFlags,
-            "--il / --hir / --effects / --mir / --ast / --expand need a `.hy` source, not a `.hyc` archive",
+            "--il / --hir / --effects / --mir / --ast / --expand need a `.coil` source, not a `.ccoil` archive",
         );
     }
     if args.show_expand {

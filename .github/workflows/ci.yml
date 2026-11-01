@@ -103,7 +103,7 @@ jobs:
           cargo clippy --workspace --lib --tests --bins -- -D warnings
 
 
-  # `.hy` sources must be `coil fmt`-clean. `compile_fail/` directories hold
+  # `.coil` sources must be `coil fmt`-clean. `compile_fail/` directories hold
   # deliberately broken programs; `coil fmt` skips them when walking. The embedded prelude
   # (`compiler/src/prelude`) and the comptime fixtures are. A `compile_fail/` test is
   # checked too unless it expects a parse error (E0001, or E0208 for a duplicate field),
@@ -132,7 +132,7 @@ jobs:
           cargo build -p coil-fmt
           ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
           # `grep -L` exits 1 when it lists nothing; only coil-fmt's status counts.
-          find tests -path '*/compile_fail/*.hy' -print0 \
+          find tests -path '*/compile_fail/*.coil' -print0 \
             | { xargs -0 grep -LZE '^// @expected .*E0(001|208)\b' || true; } \
             | xargs -0 ./target/debug/coil-fmt --check
           # Empty once every known-wrong cell is fixed, and git keeps no empty dirs.
@@ -315,7 +315,7 @@ jobs:
           cargo test -p compiler --features vm-wire \
             --test pipeline --test perf_metrics --test namespace
 
-  # The `.hy` harness binaries, built once per OS and build mode (debug and
+  # The `.coil` harness binaries, built once per OS and build mode (debug and
   # release: the same corpus must pass in both, so a build-mode difference
   # such as an optimizer or overflow-check bug shows up) and cached by
   # rust-cache. Every `harness` cell below downloads them instead of
@@ -381,7 +381,7 @@ jobs:
           retention-days: 1
 
 
-  # The `.hy` corpora under each compiler / VM setting and build mode, one
+  # The `.coil` corpora under each compiler / VM setting and build mode, one
   # cell each so debug and release run side by side.
   # `scripts/test_corpora.py` runs each `tests/<corpus>` as its own process,
   # in parallel.
@@ -475,7 +475,7 @@ jobs:
             # Generics too: uninlined calls through `forall` parameters
             # pass dictionaries the default level folds away (#1530).
             # A full cycle per allocation makes allocation-heavy cases cost
-            # minutes each (heap_churn_checksums.hy, bare_unit_case_in_pure_fn.hy:
+            # minutes each (heap_churn_checksums.coil, bare_unit_case_in_pure_fn.coil:
             # 3 to 4 minutes alone on one core), so the per-case wall limit
             # is wider than the default 600 s.
             gc-stress)
@@ -561,9 +561,9 @@ jobs:
       - name: Dissect (wasm)
         run: |
           mkdir -p target/wasm-dissect
-          printf 'fn sq(int x) -> int {\n    return x * x;\n}\n\nfn main() {\n    sq(7);\n}\n' > target/wasm-dissect/main.hy
+          printf 'fn sq(int x) -> int {\n    return x * x;\n}\n\nfn main() {\n    sq(7);\n}\n' > target/wasm-dissect/main.coil
           node --no-warnings --no-turbo-fast-api-calls scripts/wasi_coil.mjs \
-            target/wasm32-wasip1/release/coil.wasm dissect target/wasm-dissect/main.hy \
+            target/wasm32-wasip1/release/coil.wasm dissect target/wasm-dissect/main.coil \
             -O0 --fn sq --hir --root .deps/coil-stdlib/src > target/wasm-dissect/out.txt
           cat target/wasm-dissect/out.txt
           grep -q '=== hir ===' target/wasm-dissect/out.txt

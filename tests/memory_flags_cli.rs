@@ -30,10 +30,10 @@ fn ensure_coil_dissect() {
     });
 }
 
-/// `coil` on `examples/perf/binary_trees.hy` with `args` before the entry
+/// `coil` on `examples/perf/binary_trees.coil` with `args` before the entry
 /// and `tail` after it.
 fn coil(args: &[&str], tail: &[&str]) -> std::process::Output {
-    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/perf/binary_trees.hy");
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/perf/binary_trees.coil");
     let mut cmd = Command::new(coil_bin());
     cmd.args(args);
     for root in compiler::Pipeline::workspace_language_extra_roots() {

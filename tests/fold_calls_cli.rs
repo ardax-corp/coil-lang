@@ -37,10 +37,10 @@ fn release_flag(coil: &std::path::Path) -> &'static [&'static str] {
     }
 }
 
-/// `coil dissect --fn main examples/perf/mandelbrot.hy` plus `extra` flags;
+/// `coil dissect --fn main examples/perf/mandelbrot.coil` plus `extra` flags;
 /// stdout on success.
 fn dissect_mandelbrot_main(extra: &[&str]) -> String {
-    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/perf/mandelbrot.hy");
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/perf/mandelbrot.coil");
     let mut cmd = Command::new(coil_bin());
     cmd.arg("dissect");
     for root in compiler::Pipeline::workspace_language_extra_roots() {
@@ -101,7 +101,7 @@ fn fold_calls_rejects_other_values() {
             "dissect",
             "--fold-calls",
             "maybe",
-            "examples/perf/mandelbrot.hy",
+            "examples/perf/mandelbrot.coil",
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -128,14 +128,14 @@ fn fib_program(call: &str) -> String {
 fn compile_stderr(name: &str, src: &str, extra: &[&str]) -> String {
     let dir = std::env::temp_dir().join(format!("coil-fold-notice-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let entry = dir.join("main.hy");
-    std::fs::write(&entry, src).expect("write main.hy");
+    let entry = dir.join("main.coil");
+    std::fs::write(&entry, src).expect("write main.coil");
     let mut cmd = Command::new(coil_bin());
     cmd.arg("compile");
     for root in compiler::Pipeline::workspace_language_extra_roots() {
         cmd.arg("--root").arg(root);
     }
-    cmd.args(extra).arg(&entry).arg("-o").arg(dir.join("main.hyc"));
+    cmd.args(extra).arg(&entry).arg("-o").arg(dir.join("main.ccoil"));
     let out = cmd.output().expect("spawn coil compile");
     let _ = std::fs::remove_dir_all(&dir);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();

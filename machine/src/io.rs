@@ -1,7 +1,7 @@
 //! Host-backed non-blocking IO streams (files, stdio, TCP).
 //!
 //! Streams are always non-blocking at the OS level. Blocking adapters are
-//! Coil userland (coil-stdlib `io/sync.hy`) over L0 + `await_*`. Attached
+//! Coil userland (coil-stdlib `io/sync.coil`) over L0 + `await_*`. Attached
 //! package IO (`Stream.attach`) parks handshake waits on
 //! [`reactor_wait_fd_no_help`].
 

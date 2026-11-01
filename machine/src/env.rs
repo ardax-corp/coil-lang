@@ -108,7 +108,7 @@ fn parse_name(heap: &Heap, v: Value) -> Result<String, EnvErrorTag> {
 }
 
 /// The program's argv when the host process is not the program itself
-/// (`coil file.hy -- a b`, `coil run x.hyc -- a b`). Unset in a packaged
+/// (`coil file.coil -- a b`, `coil run x.ccoil -- a b`). Unset in a packaged
 /// app, whose own argv is the program's.
 static PROGRAM_ARGS: OnceLock<Vec<String>> = OnceLock::new();
 

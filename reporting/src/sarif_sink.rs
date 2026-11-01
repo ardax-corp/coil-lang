@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn sarif_spanned_message_shaped_diagnostic() {
         let mut sources = SourceMap::new();
-        let file = sources.insert("test.hy", "let x = 1;\n");
+        let file = sources.insert("test.coil", "let x = 1;\n");
 
         let mut msg = Message::error(ErrorCode::TypeMismatch, "Type mismatch".into(), 4..5);
         msg.with_help("expected int".into());

@@ -41,7 +41,7 @@ fn overflow_trap_runs_before_a_later_inlined_call() {
     let dir = std::env::temp_dir().join(format!("coil_inline_trap_order_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let src = dir.join("main.hy");
+    let src = dir.join("main.coil");
     std::fs::write(&src, SRC).unwrap();
 
     for mode in [&[][..], &["-O", "0"][..]] {

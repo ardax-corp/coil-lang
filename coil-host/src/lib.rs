@@ -86,7 +86,7 @@ pub fn bind_cli_roots(pipeline: &mut Pipeline, extra: Vec<PathBuf>) {
     pipeline.bind_project_roots_with_default(dir, extra);
 }
 
-/// Inputs for [`execute_pipeline`]: an in-memory compile, never a `.hyc` round trip.
+/// Inputs for [`execute_pipeline`]: an in-memory compile, never a `.ccoil` round trip.
 pub struct ExecutePipelineArgs<'a> {
     pub pipeline: &'a Pipeline,
     pub bytecode: &'a [Byte],

@@ -155,7 +155,7 @@ impl CompileProfileFlags {
 /// Host capabilities and `dload` integrity. Default deny.
 ///
 /// Capabilities are checked at **compile** (`E0406`–`E0411`, `E0414`).
-/// `coil run out.hyc` and coil-embed do not re-apply these flags; the artifact
+/// `coil run out.ccoil` and coil-embed do not re-apply these flags; the artifact
 /// is the grant. `--ffi-search-path` is lookup, not a dload grant.
 /// `dload("c")` stays denied even with `--allow-dload c`.
 #[derive(Args, Clone, Debug, Default)]
@@ -407,10 +407,10 @@ impl RootFlags {
     }
 }
 
-/// `--entry` as an alternative to a positional `.hy` file.
+/// `--entry` as an alternative to a positional `.coil` file.
 #[derive(Args, Clone, Debug, Default)]
 pub struct EntryFlag {
-    /// Entry `.hy` (instead of the positional file)
+    /// Entry `.coil` (instead of the positional file)
     #[arg(long = "entry", value_name = "FILE")]
     pub entry: Option<String>,
 }

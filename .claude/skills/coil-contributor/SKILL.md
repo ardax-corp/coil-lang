@@ -9,7 +9,7 @@ description: >-
 
 # coil contributor
 
-coil is a Rust workspace: parse → HM typecheck → HIR (inlining + optimization passes) → MIR for every body → dense or LIR stack ops → fuse-select → `.hyc` archive → VM.
+coil is a Rust workspace: parse → HM typecheck → HIR (inlining + optimization passes) → MIR for every body → dense or LIR stack ops → fuse-select → `.ccoil` archive → VM.
 
 Read [AGENTS.md](AGENTS.md) for user preferences and global invariants — this skill covers **where to change code** and **verification**.
 
@@ -23,8 +23,8 @@ coil/
 ├── machine/      # VM, heap/GC, FFI, host natives (HostInvoke)
 ├── coil-simd/    # Stable std::arch SIMD kernels (packed LA, bytes)
 ├── src/main.rs   # CLI: run, compile, test, debug, dissect
-├── examples/     # Runnable .hy demos
-├── tests/        # Integration .hy tests (coil test)
+├── examples/     # Runnable .coil demos
+├── tests/        # Integration .coil tests (coil test)
 └── docs/         # Contributor internals (user docs: coil-website)
 ```
 
@@ -68,7 +68,7 @@ Local checks before pushing (CI runs the full suites; don't duplicate them):
 cargo build --release
 cargo test -p <crate> <filter>                  # unit tests nearest the change
 cargo test -p compiler --features vm-wire --tests   # when touching compiler behaviour
-./target/release/coil test path/to/touched.hy   # .hy tests you added or changed
+./target/release/coil test path/to/touched.coil   # .coil tests you added or changed
 cargo clippy --workspace --lib --tests --bins -- -D warnings   # lint gate; Gc::payload_mut allows mut_from_ref
 cargo build -p coil-fmt && ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
 ./scripts/poop_baseline.sh       # perf work only: before/after
@@ -79,7 +79,7 @@ Full-suite commands (what CI runs) are listed in AGENTS.md "Commands".
 | Work type | Extra check |
 |-----------|-------------|
 | VM / alloc | valgrind memcheck on debug build |
-| Perf | `./scripts/poop_baseline.sh` (precompiled `coil run` on mandelbrot/tak/nsieve/binary_trees). If an opt does not fire on those flagships, add `examples/perf` hit benches and prove those — identical flagship `.hyc` is not a skip. Prefer alloc reduction over new opcodes. **No PGO.** |
+| Perf | `./scripts/poop_baseline.sh` (precompiled `coil run` on mandelbrot/tak/nsieve/binary_trees). If an opt does not fire on those flagships, add `examples/perf` hit benches and prove those — identical flagship `.ccoil` is not a skip. Prefer alloc reduction over new opcodes. **No PGO.** |
 | Debug info | `coil debug`, `coil dissect` |
 | Formatting | `coil fmt` |
 | Packaged apps | `coil package` defaults to `coil-embed` runner |
@@ -111,9 +111,9 @@ Prefer compiler builtins over userland for core type machinery.
 
 | Tool | Use |
 |------|-----|
-| `coil dissect file.hy --fn pat` | IL/bytecode dump without running |
-| `coil debug file.hy -x script --batch` | VM debugger (see coil-debug skill) |
-| `coil fmt [--check] path` | Pretty-print `.hy` (AST; keeps `//` / `///` comments) |
+| `coil dissect file.coil --fn pat` | IL/bytecode dump without running |
+| `coil debug file.coil -x script --batch` | VM debugger (see coil-debug skill) |
+| `coil fmt [--check] path` | Pretty-print `.coil` (AST; keeps `//` / `///` comments) |
 | `poop` | Instruction/HW counter baselines |
 | `valgrind` | Leaks, callgrind |
 | `heaptrack` | Allocation tracing |
@@ -123,4 +123,4 @@ Prefer compiler builtins over userland for core type machinery.
 - Opcode list: [docs/internals/opcodes.md](docs/internals/opcodes.md)
 - Debug line table: [docs/internals/debug-info.md](docs/internals/debug-info.md)
 - Crate/file detail: [reference.md](reference.md)
-- Writing `.hy` programs: **coil-language** skill
+- Writing `.coil` programs: **coil-language** skill

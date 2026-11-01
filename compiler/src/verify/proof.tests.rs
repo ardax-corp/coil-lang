@@ -29,7 +29,7 @@ fn a_damaged_proof_is_ignored() {
 
 #[test]
 fn the_proof_sits_next_to_the_file() {
-    assert_eq!(path_for(Path::new("src/main.hy")), PathBuf::from("src/main.hy.proof"));
+    assert_eq!(path_for(Path::new("src/main.coil")), PathBuf::from("src/main.coil.proof"));
 }
 
 const SRC: &str = "fn clamp(int x) -> int ensures result >= 0 { if x < 0 { return 0; } return x; }

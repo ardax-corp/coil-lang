@@ -1,18 +1,18 @@
 # Dissect
 
 `coil dissect` re-execs the sibling `coil-dissect` helper (git-style). That helper
-compiles a `.hy` entry (and its module graph) **in memory** — it never writes
-`out.hyc` — and prints a filtered view of the result for DX (`compiler` feature
+compiles a `.coil` entry (and its module graph) **in memory** — it never writes
+`out.ccoil` — and prints a filtered view of the result for DX (`compiler` feature
 `dissect`).
 
 ```bash
 cargo build   # coil + coil-dissect (+ other helpers)
-coil dissect examples/fib.hy --fn fib
-coil dissect examples/fib.hy --fn fib --il
-coil dissect examples/fib.hy --ast
-coil dissect gated.hy --allow-attach --fn main
+coil dissect examples/fib.coil --fn fib
+coil dissect examples/fib.coil --fn fib --il
+coil dissect examples/fib.coil --ast
+coil dissect gated.coil --allow-attach --fn main
 # or:
-coil-dissect examples/fib.hy --fn fib --il
+coil-dissect examples/fib.coil --fn fib --il
 ```
 
 | Flag | Effect |
@@ -30,7 +30,7 @@ coil-dissect examples/fib.hy --fn fib --il
 | `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print body tiers, HIR counters and compile-time work) |
 | `--ast` | Also pretty-print the entry-file AST (as `coil fmt` writes it) |
 | `--root DIR` | Extra `use`/`mod` search directory (repeatable; default `src`) |
-| `--entry FILE` | Entry `.hy` instead of the positional file |
+| `--entry FILE` | Entry `.coil` instead of the positional file |
 | `--allow-read` / `--allow-write` | Allow reachable file reads / writes (`io::open`, `io::fs::*`; default deny) |
 | `--allow-net` | Allow reachable sockets (`io::net::tcp::*`, `udp_*`; default deny) |
 | `--allow-env` | Allow reachable environment / working-directory calls (`env::var`, …; default deny) |
@@ -44,7 +44,7 @@ coil-dissect examples/fib.hy --fn fib --il
 
 Host grants match `coil` compile/run (`HostGrantFlags` → `Pipeline` `HostGrants`). They are CLI-only. Dissect compiles in memory; gated calls without a flag fail the compile (`E0406`–`E0411`, `E0414`) the same as `coil compile` ([pipeline.md](pipeline.md#capabilities)). `--ffi-search-path` is lookup only.
 
-A `.hyc` archive as the entry (`coil dissect out.hyc`) dumps its bytecode
+A `.ccoil` archive as the entry (`coil dissect out.ccoil`) dumps its bytecode
 without compiling; `--il` / `--il-post` / `--hir` / `--effects` / `--mir` / `--ast` need a source.
 Archives may not record function symbols, in which case the listing is one
 `<program>` section.

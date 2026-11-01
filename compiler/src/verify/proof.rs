@@ -1,4 +1,4 @@
-//! `foo.hy.proof`: what `coil verify` proved about `foo.hy`, for builds to
+//! `foo.coil.proof`: what `coil verify` proved about `foo.coil`, for builds to
 //! drop the checks it covers.
 //!
 //! The file names the compiler version and a hash of the source it was
@@ -132,7 +132,7 @@ impl Proof {
     }
 }
 
-/// `foo.hy` → `foo.hy.proof`.
+/// `foo.coil` → `foo.coil.proof`.
 pub fn path_for(entry: &Path) -> PathBuf {
     let mut name = entry.as_os_str().to_owned();
     name.push(".proof");

@@ -5,7 +5,7 @@ release `coil` / `coil-dissect`, `--auto-par off`,
 `--root .deps/coil-stdlib/src`. See
 `docs/internals/superinstructions-candidates.md`.
 
-Checksums (`coil run` of compiled `.hyc`):
+Checksums (`coil run` of compiled `.ccoil`):
 
 | Bench | Checksum |
 |-------|----------|

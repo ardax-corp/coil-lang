@@ -48,15 +48,15 @@ Commands: `look`, `go north|south|east|west`, `take` / `take key`,
 Manual equivalent (no scripts):
 
 ```bash
-rm -f out.hyc
+rm -f out.ccoil
 cargo run --release -- --root examples/projects/01-todo/src --root ../coil-stdlib/src \
-  examples/projects/01-todo/src/main.hy
+  examples/projects/01-todo/src/main.coil
 timeout 10s cargo run --release -- --allow-read --allow-write \
   --root examples/projects/02-adventure/src --root ../coil-stdlib/src \
-  examples/projects/02-adventure/src/main.hy < examples/projects/02-adventure/transcript.txt
+  examples/projects/02-adventure/src/main.coil < examples/projects/02-adventure/transcript.txt
 timeout 10s cargo run --release -- --allow-net \
   --root examples/projects/03-echo/src --root ../coil-stdlib/src \
-  examples/projects/03-echo/src/main.hy
+  examples/projects/03-echo/src/main.coil
 ```
 
 ## Per-project unit tests
@@ -76,9 +76,9 @@ ergonomics (no `coil test --project …` yet).
 
 | Project | Modules |
 |---------|---------|
-| `01-todo` | `board.hy` + `main.hy` |
-| `02-adventure` | `world.hy` + `commands.hy` + `save.hy` + `main.hy` |
-| `03-echo` | `protocol.hy` + `server.hy` + `client.hy` + `main.hy` |
+| `01-todo` | `board.coil` + `main.coil` |
+| `02-adventure` | `world.coil` + `commands.coil` + `save.coil` + `main.coil` |
+| `03-echo` | `protocol.coil` + `server.coil` + `client.coil` + `main.coil` |
 
 ## Rolled-up language / tooling gaps
 
@@ -86,7 +86,7 @@ See each project's `NOTES.md` for detail. Highlights:
 
 1. No `read_line` builtin; adventure uses `read_to_end` + `\n` split (Ctrl+D / pipe).
 2. Prefer `let s = stdin(); read_to_end(s)` — nested `read_to_end(stdin())` was a
-   HostInvoke arg-order bug (fixed; regression: `examples/io_nested_host.hy`).
+   HostInvoke arg-order bug (fixed; regression: `examples/io_nested_host.coil`).
 3. Avoid `x < 0` for EOF/sentinels; use `==` / positive sentinels.
 4. Test harness is CWD-`./tests` only; pipe adventure transcripts under `timeout`.
 5. Multi-file IO HostInvoke + `?` in a dependency is supported (regression:

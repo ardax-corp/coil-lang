@@ -160,8 +160,8 @@ caused it.
 
 ### `arbitrary`
 
-`compiler/src/prelude/arbitrary.hy` is embedded as module `arbitrary`
-(`<coil>/arbitrary.hy`, like `task`):
+`compiler/src/prelude/arbitrary.coil` is embedded as module `arbitrary`
+(`<coil>/arbitrary.coil`, like `task`):
 
 | Item | Meaning |
 |------|---------|
@@ -234,7 +234,7 @@ the test root runs only its `contract: ` cases, never its `main` or its own
 
 `coil mutate`'s baseline is a `coil test` run, so the generated cases cover
 project lines like any test and a mutant that breaks an `ensures` is killed
-by them (`killed … (src/mathx.hy: contract: twice)`). Clauses themselves
+by them (`killed … (src/mathx.coil: contract: twice)`). Clauses themselves
 are never mutated: the site walker does not visit them.
 
 ## Static verification
@@ -248,10 +248,10 @@ encode.rs`) for an external solver: `z3 -in` on PATH by default,
 can never fail.
 
 ```text
-proved   clamp: ensures result >= lo && result <= hi  [a.hy:5:5]
-FAILED   calls_half: call to half: requires x >= 0  [a.hy:15:12]
+proved   clamp: ensures result >= lo && result <= hi  [a.coil:5:5]
+FAILED   calls_half: call to half: requires x >= 0  [a.coil:15:12]
          counterexample: x = 0
-unknown  sum_to: invariant s >= 0  [a.hy:9:17] (possible counterexample n = 1)
+unknown  sum_to: invariant s >= 0  [a.coil:9:17] (possible counterexample n = 1)
 ```
 
 Only failed and not-proved checks are listed, then the summary; `-v` /
@@ -318,7 +318,7 @@ share their operands and do not copy them.
     usual, and so are the fields of an ordinary object one holds. A
     `readonly C` parameter of an ordinary class is not frozen: the caller
     may hold a writable alias of it.
-    `coil-verify/tests/fixtures/readonly.hy` has the cases.
+    `coil-verify/tests/fixtures/readonly.coil` has the cases.
   - Floats and anything else are fresh constants.
 - Own `requires`: the function's own checks end their failing path without
   a goal, so they are assumptions.
@@ -353,7 +353,7 @@ caller's `call to f: requires c.x > 0` after `new C(1)` is not proved).
 
 ### Readonly class fields: measurements (#1560)
 
-`coil-verify/tests/fixtures/readonly.hy`: 0 of 9 goals proved before, 5
+`coil-verify/tests/fixtures/readonly.coil`: 0 of 9 goals proved before, 5
 after, and the proof drops 4 checks (two `ensures` across a call, the
 loop's `ensures` and its invariant). Of the 5, `span` (a field read only
 on the right of `&&` in its `requires`) needed the generation fix alone;

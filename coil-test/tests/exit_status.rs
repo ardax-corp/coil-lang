@@ -26,7 +26,7 @@ fn process_exits_one_when_summary_says_failed() {
     let root = unique_tmp("fail");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("fail.hy"),
+        root.join("fail.coil"),
         "test(\"no\") {\n    if !(false) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
@@ -50,7 +50,7 @@ fn process_exits_zero_when_summary_says_ok() {
     let root = unique_tmp("ok");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("ok.hy"),
+        root.join("ok.coil"),
         "test(\"yes\") {\n    if !(true) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
@@ -79,12 +79,12 @@ fn exit_zero_in_a_case_fails_that_case_and_the_run_continues() {
     let root = unique_tmp("exit_case");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("a_exits.hy"),
+        root.join("a_exits.coil"),
         "use env::exit;\n\ntest(\"exits\") {\n    exit(0);\n}\n\ntest(\"after exit\") {\n    if !(true) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("b_later.hy"),
+        root.join("b_later.coil"),
         "test(\"later file\") {\n    if !(true) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
@@ -109,7 +109,7 @@ fn exit_code_of_a_case_is_not_the_harness_status() {
     let root = unique_tmp("exit_code");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("exits.hy"),
+        root.join("exits.coil"),
         "use env::exit;\n\ntest(\"exits 3\") {\n    exit(3);\n}\n",
     )
     .unwrap();
@@ -127,17 +127,17 @@ fn exit_from_main_passes_on_zero_and_fails_otherwise() {
     let root = unique_tmp("exit_main");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("a_zero.hy"),
+        root.join("a_zero.coil"),
         "use env::exit;\n\nfn main() {\n    let _ = 1;\n    exit(0);\n}\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("b_two.hy"),
+        root.join("b_two.coil"),
         "use env::exit;\n\nfn main() {\n    exit(2);\n}\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("c_later.hy"),
+        root.join("c_later.coil"),
         "test(\"later file\") {\n    if !(true) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();

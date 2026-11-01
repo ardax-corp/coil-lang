@@ -197,8 +197,8 @@ pub fn item_names(ast: &Output, out: &mut std::collections::HashSet<String>) {
 /// DefId for `use path::name`.
 ///
 /// Two disk layouts share the same `use` syntax:
-/// - item-in-module: `foo.hy` + `fn sadge` → module `foo`, name `sadge`
-/// - one-item-per-file: `foo/sadge.hy` + `fn sadge` → module `foo::sadge`, name `sadge`
+/// - item-in-module: `foo.coil` + `fn sadge` → module `foo`, name `sadge`
+/// - one-item-per-file: `foo/sadge.coil` + `fn sadge` → module `foo::sadge`, name `sadge`
 ///
 /// Brace `use foo::{sadge}` is the first; bare `use foo::sadge` is often the
 /// second. Prefer the defining module that actually interned the name.

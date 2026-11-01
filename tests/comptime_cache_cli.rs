@@ -28,7 +28,7 @@ impl Project {
         std::fs::write(path, text).unwrap();
     }
 
-    /// Build and run `main.hy` with `flags` and `CT_VALUE=value`: success,
+    /// Build and run `main.coil` with `flags` and `CT_VALUE=value`: success,
     /// stdout, stderr.
     fn run(&self, value: &str, flags: &[&str]) -> (bool, String, String) {
         let mut cmd = Command::new(&self.bin);
@@ -38,7 +38,7 @@ impl Project {
         for root in compiler::Pipeline::workspace_language_extra_roots() {
             cmd.arg("--root").arg(root);
         }
-        let out = cmd.arg(Path::new("main.hy")).output().expect("coil run");
+        let out = cmd.arg(Path::new("main.coil")).output().expect("coil run");
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         (out.status.success(), text(&out.stdout), text(&out.stderr))
     }
@@ -50,7 +50,7 @@ const PRINT: &str = "use io::{stdout, write};\nuse string::to_bytes;\n";
 fn an_environment_read_is_kept_until_refreshed() {
     let p = Project::new("env");
     p.write(
-        "main.hy",
+        "main.coil",
         &format!("use env::var;\n{PRINT}\nconst V = var(\"CT_VALUE\").ok() ?? \"none\";\n\nfn main() {{\n    write(stdout(), to_bytes(V));\n}}\n"),
     );
     assert_eq!(p.run("one", &[]).1, "one");
@@ -74,7 +74,7 @@ fn an_environment_read_is_kept_until_refreshed() {
 fn a_changed_file_is_read_again() {
     let p = Project::new("file");
     p.write(
-        "main.hy",
+        "main.coil",
         &format!(
             "use io::file::read_text;\nuse env::var;\n{PRINT}\nconst V = (read_text(\"data/v.txt\").ok() ?? \"\") + (var(\"CT_VALUE\").ok() ?? \"\");\n\nfn main() {{\n    write(stdout(), to_bytes(V));\n}}\n"
         ),
@@ -95,11 +95,11 @@ fn a_changed_file_is_read_again() {
 fn a_macro_result_is_cached() {
     let p = Project::new("macro");
     p.write(
-        "gen.hy",
+        "gen.coil",
         "use macro::{Expr, Code, lit};\nuse env::var;\n\nmacro env_text(Expr name) -> Code {\n    return lit(var(name.src()).ok() ?? \"\");\n}\n",
     );
     p.write(
-        "main.hy",
+        "main.coil",
         &format!("use gen::env_text;\n{PRINT}\nfn main() {{\n    write(stdout(), to_bytes(env_text!(CT_VALUE)));\n}}\n"),
     );
     assert_eq!(p.run("one", &[]).1, "one");
@@ -113,20 +113,20 @@ fn a_macro_result_is_cached() {
 #[test]
 fn a_cached_class_value_survives_new_types() {
     let p = Project::new("types");
-    p.write("m/a.hy", "class A1 {\n    pub x: int,\n}\n");
+    p.write("m/a.coil", "class A1 {\n    pub x: int,\n}\n");
     p.write(
-        "m/b.hy",
+        "m/b.coil",
         "use env::var;\n\nclass P {\n    pub name: string,\n    pub n: int,\n}\n\nconst X = new P(var(\"CT_VALUE\").ok() ?? \"none\", 7);\n",
     );
     p.write(
-        "main.hy",
+        "main.coil",
         &format!(
             "use m::a::A1;\nuse m::b::X;\nuse string::format;\n{PRINT}\nfn main() {{\n    let a = new A1(1);\n    write(stdout(), to_bytes(format(\"%s %i\", X.name, X.n + a.x)));\n}}\n"
         ),
     );
     assert_eq!(p.run("one", &[]).1, "one 8");
     // A class declared earlier moves `P`'s type id; the cached value follows.
-    p.write("m/a.hy", "class A0 {\n    pub y: int,\n}\n\nclass A1 {\n    pub x: int,\n}\n");
+    p.write("m/a.coil", "class A0 {\n    pub y: int,\n}\n\nclass A1 {\n    pub x: int,\n}\n");
     let (ok, out, err) = p.run("two", &[]);
     assert!(ok, "{err}");
     assert_eq!(out, "one 8");
@@ -136,10 +136,10 @@ fn a_cached_class_value_survives_new_types() {
 fn a_macro_program_from_the_user_cache_runs_the_same() {
     let p = Project::new("program");
     p.write(
-        "gen.hy",
+        "gen.coil",
         "use macro::{Expr, Code, lit};\n\nmacro shout(Expr e) -> Code {\n    if e.src() == \"boom\" {\n        panic \"no booms\";\n    }\n    return lit(e.src() + \"!\");\n}\n",
     );
-    p.write("main.hy", &format!("use gen::shout;\n{PRINT}\nfn main() {{\n    write(stdout(), to_bytes(shout!(hey)));\n}}\n"));
+    p.write("main.coil", &format!("use gen::shout;\n{PRINT}\nfn main() {{\n    write(stdout(), to_bytes(shout!(hey)));\n}}\n"));
     let first = p.run("", &[]);
     let programs = p.dir.join("user-cache").join("coil").join("macro-programs");
     assert!(std::fs::read_dir(&programs).is_ok_and(|mut d| d.next().is_some()), "no program kept");
@@ -147,7 +147,7 @@ fn a_macro_program_from_the_user_cache_runs_the_same() {
     assert_eq!(p.run("", &[]), first, "from the cache");
 
     // A panic names the same place either way.
-    p.write("main.hy", &format!("use gen::shout;\n{PRINT}\nfn main() {{\n    write(stdout(), to_bytes(shout!(boom)));\n}}\n"));
+    p.write("main.coil", &format!("use gen::shout;\n{PRINT}\nfn main() {{\n    write(stdout(), to_bytes(shout!(boom)));\n}}\n"));
     let cold = p.run("", &[]);
     assert!(!cold.0 && cold.2.contains("no booms"), "{}", cold.2);
     assert_eq!(p.run("", &[]), cold);
@@ -157,7 +157,7 @@ fn a_macro_program_from_the_user_cache_runs_the_same() {
 fn a_block_result_is_cached() {
     let p = Project::new("block");
     p.write(
-        "gen.hy",
+        "gen.coil",
         "use macro::{Code, raw};\n\nfn value_fn(string v) -> Code {\n    return raw(\"fn value() -> string {\\n    return \\\"\" + v + \"\\\";\\n}\\n\");\n}\n",
     );
     let main = |extra: &str| {
@@ -165,12 +165,12 @@ fn a_block_result_is_cached() {
             "use env::var;\nuse gen::value_fn;\n{PRINT}\ncomptime {{\n    return value_fn(var(\"CT_VALUE\").ok() ?? \"none\");\n}}\n\nfn main() {{\n    write(stdout(), to_bytes(value(){extra}));\n}}\n"
         )
     };
-    p.write("main.hy", &main(""));
+    p.write("main.coil", &main(""));
     let (ok, out, err) = p.run("one", &[]);
     assert!(ok, "{err}");
     assert_eq!(out, "one");
     // The block does not depend on the rest of its file.
-    p.write("main.hy", &main(" + \"!\""));
+    p.write("main.coil", &main(" + \"!\""));
     assert_eq!(p.run("two", &[]).1, "one!", "the cached output");
     let (_, out, err) = p.run("two", &["--comptime-refresh"]);
     assert_eq!(out, "two!");
@@ -225,7 +225,7 @@ fn main() {{
 fn a_network_read_is_granted_and_cached() {
     let p = Project::new("net");
     let port = serve(Some("from the network"));
-    p.write("main.hy", &fetch_source(port));
+    p.write("main.coil", &fetch_source(port));
     let (ok, _, err) = p.run("", &[]);
     assert!(!ok && err.contains("--comptime-net"), "{err}");
     let net = ["--comptime-net", "127.0.0.1"];
@@ -235,7 +235,7 @@ fn a_network_read_is_granted_and_cached() {
     assert_eq!(p.run("", &["--comptime-net", "127.0.0.1", "--comptime-offline"]).1, "from the network");
 
     let other = Project::new("net_other");
-    other.write("main.hy", &fetch_source(port));
+    other.write("main.coil", &fetch_source(port));
     let (ok, _, err) = other.run("", &["--comptime-net", "localhost"]);
     assert!(!ok && err.contains(&format!("--comptime-net 127.0.0.1:{port}")), "{err}");
     let (ok, _, err) = other.run("", &["--comptime-net", "127.0.0.1", "--comptime-offline"]);
@@ -245,7 +245,7 @@ fn a_network_read_is_granted_and_cached() {
 #[test]
 fn a_silent_server_runs_into_the_timeout() {
     let p = Project::new("net_silent");
-    p.write("main.hy", &fetch_source(serve(None)));
+    p.write("main.coil", &fetch_source(serve(None)));
     let started = std::time::Instant::now();
     let (ok, _, err) = p.run("", &["--comptime-net", "127.0.0.1", "--comptime-timeout", "1"]);
     assert!(!ok && err.contains("ran out of time") && err.contains("--comptime-timeout"), "{err}");

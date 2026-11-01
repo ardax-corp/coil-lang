@@ -18,7 +18,7 @@ fn failed_try_reports_the_shown_error_or_none() {
     let root = unique_tmp("test_try");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("cases.hy"),
+        root.join("cases.coil"),
         r#"use io::open;
 
 test("io") {
@@ -40,8 +40,8 @@ test("none") {
             .expect("spawn coil-test");
         let err = String::from_utf8_lossy(&out.stderr);
         for want in [
-            "cases.hy: io ----\nfailed: `?` got Err(NotFound)",
-            "cases.hy: none ----\nfailed: `?` got None",
+            "cases.coil: io ----\nfailed: `?` got Err(NotFound)",
+            "cases.coil: none ----\nfailed: `?` got None",
         ] {
             assert!(err.contains(want), "expected {want:?} in stderr: {err}");
         }

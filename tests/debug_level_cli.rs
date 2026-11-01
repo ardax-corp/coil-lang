@@ -1,6 +1,6 @@
 //! Debug info levels on `coil compile` (coil-lang#1491): `-g2` keeps byte
 //! spans, `-g1` keeps function names and the compact line table, `-g0` keeps
-//! neither. A panic from the `.hyc` prints what its level recorded.
+//! neither. A panic from the `.ccoil` prints what its level recorded.
 
 use std::path::Path;
 use std::process::Command;
@@ -40,17 +40,17 @@ fn setup(name: &str) -> (String, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("coil_debug_level_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("panic.hy"), SRC).unwrap();
+    std::fs::write(dir.join("panic.coil"), SRC).unwrap();
     (bin, dir)
 }
 
-/// Compile `panic.hy` with `flags`; the archive's path.
+/// Compile `panic.coil` with `flags`; the archive's path.
 fn compile(bin: &str, dir: &Path, tag: &str, flags: &[&str]) -> std::path::PathBuf {
-    let hyc = dir.join(format!("panic_{tag}.hyc"));
+    let hyc = dir.join(format!("panic_{tag}.ccoil"));
     let mut cmd = coil(bin);
     cmd.current_dir(dir).arg("compile").args(flags);
     with_roots(&mut cmd);
-    let out = cmd.arg("panic.hy").arg("-o").arg(&hyc).output().expect("coil compile");
+    let out = cmd.arg("panic.coil").arg("-o").arg(&hyc).output().expect("coil compile");
     assert!(out.status.success(), "compile {flags:?}: {}", String::from_utf8_lossy(&out.stderr));
     hyc
 }
@@ -62,10 +62,10 @@ fn run_archive(bin: &str, dir: &Path, hyc: &Path) -> String {
 }
 
 /// At `-O0` (no inlining) every frame is on the stack.
-const FULL: &str = "panic: boom: x too large at panic.hy:3:8
-  in inner at panic.hy:3:8
-  in outer at panic.hy:9:11
-  in main at panic.hy:14:12";
+const FULL: &str = "panic: boom: x too large at panic.coil:3:8
+  in inner at panic.coil:3:8
+  in outer at panic.coil:9:11
+  in main at panic.coil:14:12";
 
 const BARE: &str = "panic: boom: x too large
   in <unknown>
@@ -89,8 +89,8 @@ fn hyc_panic_output_at_each_debug_level() {
             assert_eq!(bare, BARE, "-O0 -g0");
         } else {
             // `outer` is inlined: fewer frames, same shape.
-            assert!(full.starts_with("panic: boom: x too large at panic.hy:3:8\n  in inner at panic.hy:3:8\n"), "{full}");
-            assert!(full.contains("in main at panic.hy:"), "{full}");
+            assert!(full.starts_with("panic: boom: x too large at panic.coil:3:8\n  in inner at panic.coil:3:8\n"), "{full}");
+            assert!(full.contains("in main at panic.coil:"), "{full}");
             assert!(bare.starts_with("panic: boom: x too large\n  in <unknown>"), "{bare}");
             assert!(!bare.contains(" at "), "{bare}");
         }
@@ -114,10 +114,10 @@ fn strip_debug_is_g0_and_size_defaults_to_g1() {
     let os_g1 = compile(&bin, &dir, "Os_g1", &["-Os", "-g1"]);
     assert_eq!(std::fs::read(&os).unwrap(), std::fs::read(&os_g1).unwrap(), "-Os defaults to -g1");
     let out = run_archive(&bin, &dir, &os);
-    assert!(out.contains("in inner at panic.hy:3:8"), "{out}");
+    assert!(out.contains("in inner at panic.coil:3:8"), "{out}");
 
     let mut cmd = coil(&bin);
-    cmd.current_dir(&dir).args(["compile", "--strip-debug", "-g2", "panic.hy"]);
+    cmd.current_dir(&dir).args(["compile", "--strip-debug", "-g2", "panic.coil"]);
     let out = cmd.output().expect("coil compile");
     assert!(!out.status.success(), "--strip-debug with -g2 must be rejected");
     let _ = std::fs::remove_dir_all(&dir);
@@ -130,7 +130,7 @@ fn default_run_takes_a_debug_level() {
         let mut cmd = coil(&bin);
         cmd.current_dir(&dir).args(["-O", "0", flag]);
         with_roots(&mut cmd);
-        let out = cmd.arg("panic.hy").output().expect("coil run");
+        let out = cmd.arg("panic.coil").output().expect("coil run");
         assert!(!out.status.success(), "{flag}: expected a panic");
         assert_eq!(String::from_utf8_lossy(&out.stderr).trim_end(), want, "{flag}");
     }

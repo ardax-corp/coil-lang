@@ -14,7 +14,7 @@ reject it.
 
 ## Where it stands (main `a0f9a69`, release, `COIL_AUTO_PAR=0`)
 
-Probe: `simd-expansion/probes/p11_new_shapes.hy` (project files).
+Probe: `simd-expansion/probes/p11_new_shapes.coil` (project files).
 
 | Shape | Example | Now | Taken by |
 |---|---|---|---|
@@ -77,14 +77,14 @@ do not have these loops), per the hit-bench rule in
 
 ## Progress
 
-| Step | PR | Hit bench (`vec_lanes.hy`, 8192 elements) |
+| Step | PR | Hit bench (`vec_lanes.coil`, 8192 elements) |
 |---|---|---|
 | 1 lane casts | #2137 | trunc map 172.8 → 38.5 µs, int-to-float map 154.5 → 49.7 µs |
 | 2 selects | #2140 | abs 170 → 76 µs, clamp 178 → 72 µs |
 | 3 byte maps | #2142 | ASCII lower case on `Vec<byte>` 279 → 101 µs |
 | 4 map-push | #2143 | `out.push(a[i] * 3 + 1)` 284 → 69 µs, `shift_ascii` shape on `Vec<byte>` 504 → 127 µs |
-| 5 copy from a string | #2145 | `out.push(s[i])` over 1 MiB: 32 ms → about 0.15 ms (`vec_bulk.hy`) |
-| 6 copy until a byte | #2146 | 1 MiB up to a quote: 41 ms → about 0.3 ms (`vec_bulk.hy`) |
+| 5 copy from a string | #2145 | `out.push(s[i])` over 1 MiB: 32 ms → about 0.15 ms (`vec_bulk.coil`) |
+| 6 copy until a byte | #2146 | 1 MiB up to a quote: 41 ms → about 0.3 ms (`vec_bulk.coil`) |
 | 7 `shift_ascii` (string source maps, archive 6.13) | #2150 | `shift_str` 530 → 120 µs, `lower_str` 390 → 115 µs; `text::shift_ascii` over 1 MiB 80 → 15 ms |
 
 Step 3 also fixed `VLoop` lane loads from a packed `Vec<byte>`, which

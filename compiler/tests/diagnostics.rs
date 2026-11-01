@@ -353,7 +353,7 @@ fn has_e0127(src: &str) -> bool {
 
 // #916: the checker accepts a generic fn with a nested type parameter read
 // as a value; codegen reports E0127 only where no clone can stand in for it
-// (tests/generics/compile_fail/generic_fn_value_copied.hy).
+// (tests/generics/compile_fail/generic_fn_value_copied.coil).
 #[test]
 fn generic_fn_value_with_nested_type_param_passes_checker() {
     assert!(!has_e0127(

@@ -35,16 +35,16 @@ fn ensure_helper(name: &str) {
 }
 
 fn fib_entry() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.coil")
 }
 
-/// 1-based line of `examples/fib.hy` holding `needle` (tests must not
+/// 1-based line of `examples/fib.coil` holding `needle` (tests must not
 /// hardcode line numbers: the example's header can change).
 fn fib_line(needle: &str) -> usize {
-    let src = std::fs::read_to_string(fib_entry()).expect("read examples/fib.hy");
+    let src = std::fs::read_to_string(fib_entry()).expect("read examples/fib.coil");
     src.lines()
         .position(|l| l.contains(needle))
-        .unwrap_or_else(|| panic!("`{needle}` not in examples/fib.hy"))
+        .unwrap_or_else(|| panic!("`{needle}` not in examples/fib.coil"))
         + 1
 }
 
@@ -96,7 +96,7 @@ fn debug_batch_line_breakpoint_bt_and_next() {
         &format!("break {line}\nrun\nbt\ndelete\nnext\ncontinue\nquit\n"),
         "line_bp",
     );
-    let at = format!("fib.hy:{line}");
+    let at = format!("fib.coil:{line}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -146,8 +146,8 @@ fn debug_batch_fib_break_bt_continue() {
         "expected normal exit, stdout={stdout}"
     );
     assert!(
-        !cwd.join("out.hyc").exists(),
-        "debug must not write out.hyc"
+        !cwd.join("out.ccoil").exists(),
+        "debug must not write out.ccoil"
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -255,7 +255,7 @@ fn debug_batch_repl_surface_step_list_print_restart() {
         );
     }
     assert!(
-        stdout.contains("fib.hy") || stdout.contains('>'),
+        stdout.contains("fib.coil") || stdout.contains('>'),
         "expected list/source, stdout={stdout}"
     );
     let _ = std::fs::remove_dir_all(&cwd);
@@ -278,7 +278,7 @@ fn debug_allow_attach_applies() {
     let cwd = std::env::temp_dir().join(format!("coil_debug_grant_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).expect("temp cwd");
-    let entry = cwd.join("attach.hy");
+    let entry = cwd.join("attach.coil");
     std::fs::write(
         &entry,
         "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
@@ -322,7 +322,7 @@ fn debug_program(src: &str, script: &str, suffix: &str) -> (std::process::Output
     let dir = std::env::temp_dir().join(format!("coil_debug_src_{suffix}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let entry = dir.join("prog.hy");
+    let entry = dir.join("prog.coil");
     std::fs::write(&entry, src).expect("write prog");
     let (out, _cwd) = run_debug_script_on(&entry, script, suffix, &[]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -339,7 +339,7 @@ fn debug_panic_stop_keeps_frames() {
     assert!(!out.status.success(), "a panic exits non-zero, stdout={stdout}");
     let frames: Vec<&str> = stdout.lines().filter(|l| l.starts_with('#')).collect();
     assert_eq!(frames.len(), 3, "inner, outer, main: {stdout}");
-    assert!(frames[0].starts_with("#0  inner") && frames[0].contains("prog.hy:3"), "{stdout}");
+    assert!(frames[0].starts_with("#0  inner") && frames[0].contains("prog.coil:3"), "{stdout}");
     assert!(frames[2].starts_with("#2  main"), "{stdout}");
     assert!(stdout.contains("n ($0) = 6"), "locals of the panicking frame: {stdout}");
 }

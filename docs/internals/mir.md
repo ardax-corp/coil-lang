@@ -167,17 +167,17 @@ one or more back-edges) and cost-gated straight-line bodies emit:
 - Fuse-select `LOAD`/`LOAD`/`cmp`/`JMPF` (→ `BinSlotSlotJmpf`) and `RETURN`
   at control and **Value ABI** edges
 
-Nested / multi-header float-mul loops (flagship `mandelbrot.hy`) are in
-scope for dense. The hit bench `examples/perf/mir_dense_float.hy`
+Nested / multi-header float-mul loops (flagship `mandelbrot.coil`) are in
+scope for dense. The hit bench `examples/perf/mir_dense_float.coil`
 (`escape`) remains the single-header kernel.
 
 CALL still places args as `Value` words in slots `0..arity`. Dense ops
 reinterpret those bits as `i64`/`f64`. RETURN loads one word back onto the
 stack. Dense emit **refuses** two-word returns.
 
-Float `+`/`-`/`/` loops specialize (COI-287 W1; hit `mir_dense_addf.hy` is
+Float `+`/`-`/`/` loops specialize (COI-287 W1; hit `mir_dense_addf.coil` is
 `+`/`-` only — `DIVF` already qualified). Counted i64 loops specialize
-(COI-288 W2; hit `mir_dense_i64.hy`). Refuse inventory:
+(COI-288 W2; hit `mir_dense_i64.coil`). Refuse inventory:
 [specialize-refuse.md](specialize-refuse.md).
 
 ## P2 — MIR CSE (COI-269)
@@ -190,7 +190,7 @@ across blocks, and in one block repeated element / field / length /
 pure-call reads. LIR bodies run it as `cse_lir`, which keeps literals in
 place, plus MIR LICM (the stack-IL passes, InstCombine included, were
 removed 2026-10). Hit
-benches: `examples/perf/mir_cse_divf.hy`, `mir_gvn_divf.hy`.
+benches: `examples/perf/mir_cse_divf.coil`, `mir_gvn_divf.coil`.
 
 ## P6 — MIR LICM + widen specialize (COI-280)
 
@@ -202,7 +202,7 @@ test instead, so a loop that never runs never traps. Lengths and
 element or field reads move only out of loops that cannot resize or
 write that kind of heap word (`effects::may_resize` / `writes_elements` /
 `writes_fields`). A second CSE run
-merges hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
+merges hoisted consts. Hit bench: `examples/perf/mir_licm_divf.coil`.
 
 The heap summary has two kinds (#1559): elements (`StoreIndex`, which
 the VM applies only to `Object::Array`) and fields (`HeapFieldStore`,
@@ -213,7 +213,7 @@ a `Field` key only on a field store and an `Index` key only on an
 element store. A store still kills every read of its own kind, whatever
 object it names, so aliases stay sound; calls, natives and appends that
 may run effects count as both. The `apply` loop of
-`examples/perf/licm_field_past_element_store.hy`
+`examples/perf/licm_field_past_element_store.coil`
 (`out[i] = xs[i] * c.scale + c.bias`) now loads both fields in the
 preheader. With both fields
 invariant the loop also takes the vectorizer (`VLoad` / `VFma` /
@@ -262,7 +262,7 @@ succeed. Straight-line bodies lift and keep only when emit cost ≤ fuse-IL
 Infer’s dense gate is `has_float_arith` (`ADDF`/`SUBF`/`MULF`/`DIVF`, plus
 float `INC`/`DEC`), not `MULF`/`DIVF` only. Add-only and sub-only float
 loops emit `DenseBin`. `DIVF` already qualified before W1. Hit bench:
-`examples/perf/mir_dense_addf.hy`.
+`examples/perf/mir_dense_addf.coil`.
 
 ## W2 — counted i64 (COI-288)
 
@@ -270,7 +270,7 @@ Infer’s dense gate also accepts i64 `+`/`-`/`*`/`/`/`%` (and int `INC`/`DEC`)
 on a back-edge body that is otherwise numeric (multi-word `RETURN` still
 refuses). Heap index and one-word `CALL` may lift (A2 / Q7). Compare-only
 stays fuse-IL. Hit bench:
-`examples/perf/mir_dense_i64.hy`.
+`examples/perf/mir_dense_i64.coil`.
 
 ## W3 — cost-gated straight-line (COI-289 / A3)
 
@@ -278,7 +278,7 @@ A no-back-edge numeric body may lift. Keep only when reconstruct cost ≤
 opted fuse-IL (`Seek` weighted by frame size). Dense `Seek` + Value ABI is
 a per-CALL tax that loops amortize; tiny helpers stay fuse-IL. There is
 no `work_ops ≥ 8` infer refuse.
-Hit bench: `examples/perf/mir_dense_straight.hy`.
+Hit bench: `examples/perf/mir_dense_straight.coil`.
 
 ## W4 — HostInvoke inside dense (COI-290 / A3)
 
@@ -333,7 +333,7 @@ like W4 HostInvoke (typed SSA args). Emit is `LOAD` args → `Entry` →
 frame base and keeps caller slots below `callee_sp`; no new opcode.
 
 Non-dense callees still refuse (W4 HostInvoke allowlist unchanged).
-Hit bench: `examples/perf/mir_dense_call.hy`.
+Hit bench: `examples/perf/mir_dense_call.coil`.
 
 ## P7 — MIR InstCombine (COI-281)
 
@@ -350,7 +350,7 @@ Proving set (P11 float peeps live in the same pass):
 - const-cond `br` → `jump`
 - P11 float peeps (same pass): see below
 
-Hit bench: `examples/perf/mir_instcombine.hy`.
+Hit bench: `examples/perf/mir_instcombine.coil`.
 
 **LIR bodies (#1434).** The dense attempt is gated on `has_numeric_arith`
 (`+ - * / %` only), so a body whose only arithmetic is bitwise ops or
@@ -363,7 +363,7 @@ reads `x` twice). When it changes the body, `from_hir::tidy` drops the
 blocks a folded branch leaves unreachable (emit_lir's liveness is slow
 over them: 800 dead blocks took 2.8 s). Folding puts literal operands on
 trapping ops, so emit_lir keeps a may-trap op in order against memory
-writes (#856; `tests/codegen/overflow_trap_order_lir.hy`). A coverage
+writes (#856; `tests/codegen/overflow_trap_order_lir.coil`). A coverage
 compile (`Pipeline::set_keep_fns_in`) skips the LIR fold
 (`MirFunc::keep_lines`): coverage counts a line by the code it emits, and a
 line whose value folds into a later one would read as uncoverable, so
@@ -372,12 +372,12 @@ compile refuses dense (`dense: coverage`, #1494): its MIR passes fold a
 line's constants into the next line just the same, so every body takes
 LIR there. Coverage runs pay for that in speed, not in what they count.
 
-Hit bench `examples/perf/mir_lir_fold.hy` (`mix`: bit ops of `mask(-1)`
+Hit bench `examples/perf/mir_lir_fold.coil` (`mix`: bit ops of `mask(-1)`
 called 2M times from a dense loop; release, `--auto-par off`, 15
 interleaved runs, 2026-10-19; auto-par on gives the same, the loop stays
 sequential):
 
-| | median | min | `.hyc` bytes |
+| | median | min | `.ccoil` bytes |
 |---|---|---|---|
 | before (main 8ee3aae4) | 1.884 s | 1.699 s | 7084 |
 | after | 1.124 s | 0.944 s | 5804 |
@@ -393,7 +393,7 @@ drops `phi(x, x)` at construction; InstCombine can make both arms the same
 `ValueId` (`a + 0` / `a * 1` → `a`). Uses see the source. Disagreeing φs,
 type mismatch, and self-only φs stay. No dead-block rewrite (dense emit
 fallthrough) and no new opcodes. A following CSE can share the forwarded
-uses. Hit bench: `examples/perf/mir_destprop.hy`.
+uses. Hit bench: `examples/perf/mir_destprop.coil`.
 
 Disagreeing latch copies are not DestProp. COI-383 **S6** sinks the
 incoming def past the last use of the φ dest so dense emit’s latch
@@ -411,7 +411,7 @@ integer-valued const (IEEE-exact while the product stays in the
 mantissa). Non-const float factors stay, so mandelbrot
 `(x as float) * (2/size)` is unchanged. Quadratic `i*i` and IL-style
 host barriers do not apply (dense numeric subset only). A following CSE
-cleans unused casts. Hit bench: `examples/perf/mir_iv_sr.hy`.
+cleans unused casts. Hit bench: `examples/perf/mir_iv_sr.coil`.
 
 ## P10 — MIR cross-block GVN / PRE (COI-284)
 
@@ -420,7 +420,7 @@ same-block) and hoists a pure expr onto a fork when **every** successor
 computes it and the operands already dominate the fork. Integer
 `Div`/`Rem` stay in their arms (zero-trip / untaken-path trap). No
 join-φ PRE, no speculative one-arm hoist, no new opcodes. Hit bench:
-`examples/perf/mir_gvn_divf.hy`.
+`examples/perf/mir_gvn_divf.coil`.
 
 ## P11 — MIR float pipeline (COI-285)
 
@@ -442,7 +442,7 @@ InstCombine’s typed peeps add **IEEE-safe** float rewrites only. There is
 
 FMA / recip do **not** fire on mandelbrot (`2.0 * zr * zi + ci` stays
 two ops after `*2` → `+`; `2/size` is not a power-of-two after the
-outer `2.0 *`). Hit bench: `examples/perf/mir_float_pipeline.hy`.
+outer `2.0 *`). Hit bench: `examples/perf/mir_float_pipeline.coil`.
 
 ## P12 — MIR → coil-simd HostInvoke (COI-286)
 
@@ -457,7 +457,7 @@ workspace `coil-simd` crate (AVX2/SSE2/AVX-512/NEON + scalar). Terms use
 mul-then-add, no FMA; the sum left-folds `(s + a*x) + y`. Nested /
 data-dependent loops (flagship mandelbrot, `mir_dense_float` escape)
 stay on `DenseBin`. Const trip count `< 8` refuses. Hit bench:
-`examples/perf/mir_simd_axpy.hy`.
+`examples/perf/mir_simd_axpy.coil`.
 
 `ardax-corp/coil-simd` is not a separate GitHub package; kernels stay
 in-tree (same crate already used by `packed_la`).
@@ -474,7 +474,7 @@ impure `CALL` / HostInvoke, explicit `Deopt`, heap words in vregs,
 gather/scatter, loop-carried reductions (V1). Dense+Index mix stays
 fuse-IL. P12 HostInvoke packs are unchanged.
 
-Prove: `fill` in `examples/perf/vec_scan.hy` (`v[i] = i`). Flagships
+Prove: `fill` in `examples/perf/vec_scan.coil` (`v[i] = i`). Flagships
 stay dense / fuse-IL.
 
 ## S5b V1 — SIMD reductions + conservative FMA (COI-311)
@@ -503,8 +503,8 @@ is still refused: the lowering has no φ. A step other than `+ 1`, a
 call inside a body, `match`, and `Deopt` are still refused.
 P12 HostInvoke packs stay first.
 
-Prove: `scan` in `examples/perf/vec_scan.hy`; saxpy store in
-`examples/perf/vec_axpy.hy`.
+Prove: `scan` in `examples/perf/vec_scan.coil`; saxpy store in
+`examples/perf/vec_axpy.coil`.
 
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
@@ -554,7 +554,7 @@ body dense does not keep. `emit_lir` keeps single-use return/cmp values on
 the stack and `DUP`s a TOS that is also the first word of `k, k+1`. Int
 `slot ⊕ imm` bins emit `BinSlotImm`. LIR runs MIR CSE (`cse_lir`) and
 LICM, then SROA when the body allocates.
-Hit bench: `examples/perf/result_int_churn.hy`.
+Hit bench: `examples/perf/result_int_churn.coil`.
 
 Emit is linear in a body's size (#1393): each block's fused compare
 (`term_cmp_dests`) and preds are computed once per function, and the GC
@@ -700,8 +700,8 @@ Host Option / `Result<(),E>` / heap-heap Result still pack once at
 
 ## Acceptance
 
-`mir::mandelbrot_inner_loop` is typed SSA. `tests/codegen/dense_float.hy`
-and `examples/perf/mir_dense_float.hy` (`escape`) execute via `DenseBin`.
-Flagship `mandelbrot.hy` (three nested loops) is eligible for dense.
+`mir::mandelbrot_inner_loop` is typed SSA. `tests/codegen/dense_float.coil`
+and `examples/perf/mir_dense_float.coil` (`escape`) execute via `DenseBin`.
+Flagship `mandelbrot.coil` (three nested loops) is eligible for dense.
 `Result<int,int>` / `Option<int>` leafs lower through MIR→LIR with the
-shipped two-slot ABI (`tests/errors/result_int_two_slot.hy`).
+shipped two-slot ABI (`tests/errors/result_int_two_slot.coil`).

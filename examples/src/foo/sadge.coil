@@ -1,0 +1,14 @@
+// examples/src/foo/sadge.coil — namespace demo
+//
+// This file is at `examples/src/foo/sadge.coil`. Its
+// namespace is `foo::sadge` (path relative to the
+// `src` root, with `.coil` stripped and `/` replaced
+// with `::`). Its top-level function `sadge()` has
+// the fully qualified name `foo::sadge::sadge`.
+
+use io::sync::println;
+use string::format;
+
+fn sadge() {
+    let _ = println(format("%x", 420));
+}

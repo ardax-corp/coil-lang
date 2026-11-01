@@ -1,4 +1,4 @@
-//! End-to-end golden tests for `.hy` example programs.
+//! End-to-end golden tests for `.coil` example programs.
 
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -452,7 +452,7 @@ fn run_example_multifile(path: &str) -> String {
     run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
 }
 
-/// Every `examples/*.hy` ends its header with `// @output <exact stdout>`
+/// Every `examples/*.coil` ends its header with `// @output <exact stdout>`
 /// (escaped) or `// @output (not checked: <why>)`. Run each one and compare,
 /// so an example cannot break or drift from what it documents (#614).
 #[test]
@@ -464,7 +464,7 @@ fn examples_print_their_documented_output() {
         .expect("read examples/")
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".hy"))
+        .filter(|n| n.ends_with(".coil"))
         .collect();
     names.sort();
     let mut failures = Vec::new();
@@ -558,7 +558,7 @@ fn example_panic_loc_archive_has_source_files() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root");
-    let path = workspace_root.join("examples/panic_loc.hy");
+    let path = workspace_root.join("examples/panic_loc.coil");
     let mut pipeline = test_pipeline();
     let (bytecode, _constants) = pipeline
         .compile_src_from_file(path.to_str().unwrap())
@@ -568,8 +568,8 @@ fn example_panic_loc_archive_has_source_files() {
         debug
             .source_files
             .iter()
-            .any(|p| p.contains("panic_loc.hy")),
-        "expected panic_loc.hy in source_files: {:?}",
+            .any(|p| p.contains("panic_loc.coil")),
+        "expected panic_loc.coil in source_files: {:?}",
         debug.source_files
     );
     assert_eq!(debug.debug_locs.len(), bytecode.len());
@@ -920,7 +920,7 @@ fn example_ffi_sum_via_dlopen_prints_42() {
         .expect("compiler crate must have a parent (workspace root)");
 
     // Absolute dload path avoids cwd races in parallel tests.
-    let full = workspace_root.join("examples/ffi_sum.hy");
+    let full = workspace_root.join("examples/ffi_sum.coil");
     let lib_abs = libsum.canonicalize().unwrap_or_else(|_| libsum.clone());
     let mut src = std::fs::read_to_string(&full)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", full.display(), e));
@@ -1158,7 +1158,7 @@ impl DloadFlags<'_> {
 /// A wrong pin: no library hashes to all `a`s.
 const WRONG_PIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/// A fresh project directory holding `main.hy`.
+/// A fresh project directory holding `main.coil`.
 fn dload_project(test_name: &str, src: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
@@ -1168,8 +1168,8 @@ fn dload_project(test_name: &str, src: &str) -> (std::path::PathBuf, std::path::
     let dir = std::env::temp_dir().join(format!("coil_dload_{test_name}_{pid}_{nanos}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir dload project");
-    let entry = dir.join("main.hy");
-    std::fs::write(&entry, src).expect("write main.hy");
+    let entry = dir.join("main.coil");
+    std::fs::write(&entry, src).expect("write main.coil");
     (dir, entry)
 }
 
@@ -1627,7 +1627,7 @@ fn example_ffi_array_sum_prints_15() {
         ffi_soft_skip(&format!("{} not built", libsum.display()));
         return;
     }
-    let output = run_ffi_example_with_lib("examples/ffi_array.hy", &libsum);
+    let output = run_ffi_example_with_lib("examples/ffi_array.coil", &libsum);
     assert_eq!(output, "15");
 }
 
@@ -1639,7 +1639,7 @@ fn example_ffi_callback_prints_42() {
         ffi_soft_skip(&format!("{} not built", libsum.display()));
         return;
     }
-    let output = run_ffi_example_with_lib("examples/ffi_callback.hy", &libsum);
+    let output = run_ffi_example_with_lib("examples/ffi_callback.coil", &libsum);
     assert_eq!(output, "42");
 }
 
@@ -1651,7 +1651,7 @@ fn example_ffi_struct_return_prints_34() {
         ffi_soft_skip(&format!("{} not built", libsum.display()));
         return;
     }
-    let output = run_ffi_example_with_lib("examples/ffi_struct_ret.hy", &libsum);
+    let output = run_ffi_example_with_lib("examples/ffi_struct_ret.coil", &libsum);
     assert_eq!(output, "34");
 }
 
@@ -1663,7 +1663,7 @@ fn example_ffi_callback_return_prints_1() {
         ffi_soft_skip(&format!("{} not built", libsum.display()));
         return;
     }
-    let output = run_ffi_example_with_lib("examples/ffi_callback_ret.hy", &libsum);
+    let output = run_ffi_example_with_lib("examples/ffi_callback_ret.coil", &libsum);
     assert_eq!(output, "1");
 }
 
@@ -1675,7 +1675,7 @@ fn example_ffi_extern_prints_42() {
         ffi_soft_skip(&format!("{} not built", libsum.display()));
         return;
     }
-    let output = run_ffi_example_with_lib("examples/ffi_extern.hy", &libsum);
+    let output = run_ffi_example_with_lib("examples/ffi_extern.coil", &libsum);
     assert_eq!(output, "42");
 }
 
@@ -1687,7 +1687,7 @@ fn example_ffi_varargs_prints_60() {
         ffi_soft_skip(&format!("{} not built", libsum.display()));
         return;
     }
-    let output = run_ffi_example_with_lib("examples/ffi_varargs.hy", &libsum);
+    let output = run_ffi_example_with_lib("examples/ffi_varargs.coil", &libsum);
     assert_eq!(output, "60");
 }
 
@@ -1699,7 +1699,7 @@ fn example_perf_mandelbrot_ipa_emits_chunk_worker() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root");
-    let full = workspace_root.join("examples/perf/mandelbrot_ipa.hy");
+    let full = workspace_root.join("examples/perf/mandelbrot_ipa.coil");
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src_from_file(full.to_str().unwrap())
@@ -4140,7 +4140,7 @@ fn main() {
 
 #[test]
 fn b6_vec_push_maps_and_nsieve_checksum() {
-    let src = include_str!("../../examples/perf/nsieve.hy");
+    let src = include_str!("../../examples/perf/nsieve.coil");
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile nsieve");
     assert!(
@@ -4916,7 +4916,7 @@ fn compile_src_from_file_succeeds_with_only_warnings() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("coil_coi18_{pid}_{nanos}"));
     std::fs::create_dir_all(&dir).expect("mkdir");
-    let src_path = dir.join("warn_only.hy");
+    let src_path = dir.join("warn_only.coil");
     std::fs::write(
         &src_path,
         r#"
@@ -4926,7 +4926,7 @@ fn main() {
 }
 "#,
     )
-    .expect("write warn_only.hy");
+    .expect("write warn_only.coil");
 
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_roots_with_default(dir.clone(), Vec::<std::path::PathBuf>::new());
@@ -4963,7 +4963,7 @@ fn example_ffi_mod_entry_prints_10() {
         ffi_soft_skip(&format!("{} not built", libsum.display()));
         return;
     }
-    let output = run_ffi_example_with_lib("examples/ffi_mod_entry.hy", &libsum);
+    let output = run_ffi_example_with_lib("examples/ffi_mod_entry.coil", &libsum);
     assert_eq!(output, "10");
 }
 
@@ -5101,7 +5101,7 @@ fn tests_are_entry_points_for_capabilities() {
 }
 
 /// Compile and run with contract checks at `level`, from a file so panics
-/// name their locations (`contracts.hy:LINE:COL`).
+/// name their locations (`contracts.coil:LINE:COL`).
 fn run_contracts_src(src: &str, level: compiler::ContractLevel) -> String {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -5111,7 +5111,7 @@ fn run_contracts_src(src: &str, level: compiler::ContractLevel) -> String {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let file = dir.join("contracts.hy");
+    let file = dir.join("contracts.coil");
     std::fs::write(&file, src).expect("write source");
     let mut pipeline = test_pipeline();
     pipeline.set_contracts(level);
@@ -5215,7 +5215,7 @@ fn a_failed_requires_blames_the_caller() {
         "got {out:?}"
     );
     // The call site's line (main's last statement), not the clause's.
-    assert!(out.contains("contracts.hy:77:"), "got {out:?}");
+    assert!(out.contains("contracts.coil:77:"), "got {out:?}");
     let out = contracts_case("c.bump(0);", compiler::ContractLevel::All);
     assert!(out.contains("requires by > 0 in Counter::bump, called from "), "got {out:?}");
 }
@@ -5389,7 +5389,7 @@ fn main() {
     // The trait's `ensures`, reported at the impl method.
     let out = run_contracts_src(&src.replace("CASE", "show(2);"), All);
     assert!(
-        out.contains("contract violated: ensures result >= 0 in Area for int::area at ") && out.contains("contracts.hy:10:4"),
+        out.contains("contract violated: ensures result >= 0 in Area for int::area at ") && out.contains("contracts.coil:10:4"),
         "got {out:?}"
     );
     // The impl's own `ensures` is checked too.
@@ -5409,7 +5409,7 @@ fn main() {
 fn missing_module_reports_no_internal_lowering_error() {
     let dir = std::env::temp_dir().join(format!("coil-890-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let entry = dir.join("main.hy");
+    let entry = dir.join("main.coil");
     std::fs::write(&entry, "use nothere::x;\nfn main() {\n    x();\n}\n").expect("write entry");
     let mut pipeline = test_pipeline();
     assert!(pipeline.compile_src_from_file(entry.to_str().expect("utf-8")).is_err());

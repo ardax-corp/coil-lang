@@ -10,74 +10,74 @@ BIN="${BIN:-$CARGO_TARGET_DIR/release/coil}"
 MEM_LIMIT_KB="${MEM_LIMIT_KB:-65536}"
 
 declare -A EXPECTED=(
-    ["examples/fib.hy"]="2178309"
-    ["examples/option.hy"]="42"
-    ["examples/result.hy"]="420-1"
-    ["examples/tree.hy"]="6"
-    ["examples/mixed.hy"]=$'0\n25\n12\n2'
-    ["examples/record.hy"]="169512"
-    ["examples/let_test.hy"]="51020"
-    ["examples/chained.hy"]="427"
-    ["examples/dict.hy"]="4210042"
-    ["examples/aliases.hy"]="347"
-    ["examples/fizbuz.hy"]="FIZBUZFIZFIZBUZFIZFIZBUZ"
-    ["examples/operators.hy"]="801125428falsetrue3"
-    ["examples/perf/numeric.hy"]="1999000"
-    ["examples/perf/array_mut.hy"]="2000"
-    ["examples/perf/dict_hot.hy"]="6000"
-    ["examples/perf/operators_loop.hy"]="149912"
-    ["examples/perf/coro_ping.hy"]="124750"
-    ["examples/perf/mandelbrot.hy"]="625885"
-    ["examples/perf/tak.hy"]="7"
-    ["examples/perf/nsieve.hy"]="1900"
-    ["examples/perf/binary_trees.hy"]="135854"
-    ["examples/perf/fib.hy"]="2178309"
-    ["examples/perf/bool_guard.hy"]="45"
-    ["examples/inline_wrapped_call.hy"]="13"
-    ["examples/perf/gc_churn.hy"]="62499500000"
-    ["examples/perf/option_int_churn.hy"]="84000000"
-    ["examples/perf/result_int_churn.hy"]="38000000"
-    ["examples/perf/result_heap_churn.hy"]="130000000"
-    ["examples/perf/host_result_unit_churn.hy"]="18000000"
-    ["examples/perf/result_try_churn.hy"]="136000000"
-    ["examples/perf/pair_int_churn.hy"]="200000000"
-    ["examples/perf/iv_mul_sr.hy"]="31499989500000"
-    ["examples/perf/licm_nested_chains.hy"]="64012000000"
-    ["examples/perf/licm_lir_pure_call.hy"]="157207000000"
-    ["examples/perf/tail_sibling.hy"]="202500000"
-    ["examples/perf/cse_index_recompute.hy"]="504000000"
-    ["examples/perf/cse_cast_recompute.hy"]="1999998000000"
-    ["examples/perf/dest_prop_field_alias.hy"]="40000000"
-    ["examples/perf/nested_match.hy"]="11250000"
-    ["examples/perf/int_match.hy"]="77470488"
+    ["examples/fib.coil"]="2178309"
+    ["examples/option.coil"]="42"
+    ["examples/result.coil"]="420-1"
+    ["examples/tree.coil"]="6"
+    ["examples/mixed.coil"]=$'0\n25\n12\n2'
+    ["examples/record.coil"]="169512"
+    ["examples/let_test.coil"]="51020"
+    ["examples/chained.coil"]="427"
+    ["examples/dict.coil"]="4210042"
+    ["examples/aliases.coil"]="347"
+    ["examples/fizbuz.coil"]="FIZBUZFIZFIZBUZFIZFIZBUZ"
+    ["examples/operators.coil"]="801125428falsetrue3"
+    ["examples/perf/numeric.coil"]="1999000"
+    ["examples/perf/array_mut.coil"]="2000"
+    ["examples/perf/dict_hot.coil"]="6000"
+    ["examples/perf/operators_loop.coil"]="149912"
+    ["examples/perf/coro_ping.coil"]="124750"
+    ["examples/perf/mandelbrot.coil"]="625885"
+    ["examples/perf/tak.coil"]="7"
+    ["examples/perf/nsieve.coil"]="1900"
+    ["examples/perf/binary_trees.coil"]="135854"
+    ["examples/perf/fib.coil"]="2178309"
+    ["examples/perf/bool_guard.coil"]="45"
+    ["examples/inline_wrapped_call.coil"]="13"
+    ["examples/perf/gc_churn.coil"]="62499500000"
+    ["examples/perf/option_int_churn.coil"]="84000000"
+    ["examples/perf/result_int_churn.coil"]="38000000"
+    ["examples/perf/result_heap_churn.coil"]="130000000"
+    ["examples/perf/host_result_unit_churn.coil"]="18000000"
+    ["examples/perf/result_try_churn.coil"]="136000000"
+    ["examples/perf/pair_int_churn.coil"]="200000000"
+    ["examples/perf/iv_mul_sr.coil"]="31499989500000"
+    ["examples/perf/licm_nested_chains.coil"]="64012000000"
+    ["examples/perf/licm_lir_pure_call.coil"]="157207000000"
+    ["examples/perf/tail_sibling.coil"]="202500000"
+    ["examples/perf/cse_index_recompute.coil"]="504000000"
+    ["examples/perf/cse_cast_recompute.coil"]="1999998000000"
+    ["examples/perf/dest_prop_field_alias.coil"]="40000000"
+    ["examples/perf/nested_match.coil"]="11250000"
+    ["examples/perf/int_match.coil"]="77470488"
 )
 
 # CPU-focused subset for poop / quick timing (no FFI, no modules).
 CPU_BENCH=(
-    examples/perf/mandelbrot.hy
-    examples/perf/tak.hy
-    examples/perf/nsieve.hy
-    examples/perf/binary_trees.hy
-    examples/perf/fib.hy
-    examples/perf/numeric.hy
-    examples/perf/operators_loop.hy
-    examples/perf/match_sum.hy
-    examples/perf/gc_churn.hy
-    examples/perf/option_int_churn.hy
-    examples/perf/result_int_churn.hy
-    examples/perf/result_heap_churn.hy
-    examples/perf/host_result_unit_churn.hy
-    examples/perf/result_try_churn.hy
-    examples/perf/pair_int_churn.hy
-    examples/perf/iv_mul_sr.hy
-    examples/perf/licm_nested_chains.hy
-    examples/perf/licm_lir_pure_call.hy
-    examples/perf/tail_sibling.hy
-    examples/perf/cse_index_recompute.hy
-    examples/perf/cse_cast_recompute.hy
-    examples/perf/dest_prop_field_alias.hy
-    examples/perf/nested_match.hy
-    examples/perf/int_match.hy
+    examples/perf/mandelbrot.coil
+    examples/perf/tak.coil
+    examples/perf/nsieve.coil
+    examples/perf/binary_trees.coil
+    examples/perf/fib.coil
+    examples/perf/numeric.coil
+    examples/perf/operators_loop.coil
+    examples/perf/match_sum.coil
+    examples/perf/gc_churn.coil
+    examples/perf/option_int_churn.coil
+    examples/perf/result_int_churn.coil
+    examples/perf/result_heap_churn.coil
+    examples/perf/host_result_unit_churn.coil
+    examples/perf/result_try_churn.coil
+    examples/perf/pair_int_churn.coil
+    examples/perf/iv_mul_sr.coil
+    examples/perf/licm_nested_chains.coil
+    examples/perf/licm_lir_pure_call.coil
+    examples/perf/tail_sibling.coil
+    examples/perf/cse_index_recompute.coil
+    examples/perf/cse_cast_recompute.coil
+    examples/perf/dest_prop_field_alias.coil
+    examples/perf/nested_match.coil
+    examples/perf/int_match.coil
 )
 
 CROSS_LANG=(
@@ -90,7 +90,7 @@ CROSS_LANG=(
 
 run_example() {
     local path="$1"
-    rm -f out.hyc
+    rm -f out.ccoil
     ulimit -v "$MEM_LIMIT_KB"
     "$BIN" "$path"
 }
@@ -127,11 +127,11 @@ if command -v poop >/dev/null 2>&1; then
     mkdir -p "$POOP_DIR"
     for name in "${CROSS_LANG[@]}"; do
         echo "-- $name"
-        hyc="$POOP_DIR/${name}.hyc"
+        hyc="$POOP_DIR/${name}.ccoil"
         if [[ "$name" == "fib" ]]; then
-            "$BIN" compile --auto-par off "examples/perf/${name}.hy" -o "$hyc" >/dev/null
+            "$BIN" compile --auto-par off "examples/perf/${name}.coil" -o "$hyc" >/dev/null
         else
-            "$BIN" compile "examples/perf/${name}.hy" -o "$hyc" >/dev/null
+            "$BIN" compile "examples/perf/${name}.coil" -o "$hyc" >/dev/null
         fi
         cmds=("$BIN run $hyc" "lua benchmarks/${name}.lua")
         if command -v node >/dev/null 2>&1; then
@@ -142,8 +142,8 @@ if command -v poop >/dev/null 2>&1; then
     echo
     echo "== poop CPU bench subset (precompiled) =="
     for path in "${CPU_BENCH[@]}"; do
-        name="$(basename "$path" .hy)"
-        hyc="$POOP_DIR/${name}.hyc"
+        name="$(basename "$path" .coil)"
+        hyc="$POOP_DIR/${name}.ccoil"
         echo "-- $path"
         if [[ "$name" == "fib" ]]; then
             "$BIN" compile --auto-par off "$path" -o "$hyc" >/dev/null
@@ -166,8 +166,8 @@ if command -v valgrind >/dev/null 2>&1; then
     echo "== callgrind on mandelbrot (archive) =="
     POOP_DIR="${POOP_DIR:-/tmp/coil_vm_bench}"
     mkdir -p "$POOP_DIR"
-    hyc="$POOP_DIR/mandelbrot.hyc"
-    "$BIN" compile examples/perf/mandelbrot.hy -o "$hyc" >/dev/null
+    hyc="$POOP_DIR/mandelbrot.ccoil"
+    "$BIN" compile examples/perf/mandelbrot.coil -o "$hyc" >/dev/null
     rm -f callgrind.out.*
     valgrind --tool=callgrind --callgrind-out-file=callgrind.out "$BIN" run "$hyc" >/dev/null 2>&1 || true
     if command -v callgrind_annotate >/dev/null 2>&1; then

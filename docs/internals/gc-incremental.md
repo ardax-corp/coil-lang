@@ -40,7 +40,7 @@ Objects do not move during mark or sweep. Evacuation runs between cycles
 
 After a sweep cycle the slab gives back pages of chunks idle for a whole
 release window (see [heap-identity.md](heap-identity.md)). RSS drops after a
-peak without moving anything: `examples/perf/gc_shrink.hy` goes from ~96 MB
+peak without moving anything: `examples/perf/gc_shrink.coil` goes from ~96 MB
 to ~40 MB resident while it keeps running. Build with `--features gc-stats`
 for a per-mark census (RSS, mapped / released slab, live bytes, reclaim by
 unmap vs compaction, precise vs ambiguous roots and interior references) —
@@ -53,7 +53,7 @@ the flag clears when a mark scans every element and none lies in the slab
 range, and any element write sets it again (one byte, no compare — every
 write goes through the `ObjArray` API; `elements` is private). A live
 `Vec<int>` is therefore scanned once, not every collection
-(`examples/perf/gc_int_vec.hy`: −7% instructions). Not type-based, so boxed
+(`examples/perf/gc_int_vec.coil`: −7% instructions). Not type-based, so boxed
 values from generic shared bodies are safe. Cost: the flag test on every
 element store (+2.6% instructions on the tight `stride_store_iv` loop,
 `nsieve` neutral). For a moving collector a clear array pins nothing.

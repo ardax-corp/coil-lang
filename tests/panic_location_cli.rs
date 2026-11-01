@@ -74,14 +74,14 @@ fn main() {
 }
 ";
     for mode in [&["-O", "0"][..], &["-O", "2"][..]] {
-        let line = panic_line(&bin, &dir, "contract.hy", contract, mode);
-        assert!(line.contains("contract violated") && line.contains("contract.hy:3:"), "{mode:?}: {line}");
-        let line = panic_line(&bin, &dir, "forwarded.hy", forwarded, mode);
-        assert!(line.contains("integer overflow") && line.contains("forwarded.hy:5:"), "{mode:?}: {line}");
-        let line = panic_line(&bin, &dir, "inlined.hy", inlined, mode);
-        assert!(line.contains("integer overflow") && line.contains("inlined.hy:8:"), "{mode:?}: {line}");
-        let line = panic_line(&bin, &dir, "string_index.hy", string_index, mode);
-        assert!(line.contains("index out of bounds") && line.contains("string_index.hy:8:4"), "{mode:?}: {line}");
+        let line = panic_line(&bin, &dir, "contract.coil", contract, mode);
+        assert!(line.contains("contract violated") && line.contains("contract.coil:3:"), "{mode:?}: {line}");
+        let line = panic_line(&bin, &dir, "forwarded.coil", forwarded, mode);
+        assert!(line.contains("integer overflow") && line.contains("forwarded.coil:5:"), "{mode:?}: {line}");
+        let line = panic_line(&bin, &dir, "inlined.coil", inlined, mode);
+        assert!(line.contains("integer overflow") && line.contains("inlined.coil:8:"), "{mode:?}: {line}");
+        let line = panic_line(&bin, &dir, "string_index.coil", string_index, mode);
+        assert!(line.contains("index out of bounds") && line.contains("string_index.coil:8:4"), "{mode:?}: {line}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

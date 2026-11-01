@@ -78,43 +78,43 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 
 | Body | File | Outcome | Reason |
 |------|------|---------|--------|
-| `mandelbrot` | `mandelbrot.hy` | dense | nested `*` |
-| `escape` | `mir_dense_float.hy` | dense | `*` kernel |
-| `hot` | `mir_dense_addf.hy` / `*_divf` / `mir_instcombine` / `mir_destprop` / `mir_iv_sr` / `mir_float_pipeline` | dense | float arith |
-| `pack` | `mir_simd_axpy.hy` | HostInvoke 136 | P12 pack |
-| `hot` | `mir_dense_i64.hy` | dense | counted i64 |
-| `hot` | `mir_dense_straight.hy` | dense | straight-line wins cost |
-| `hot` / `kernel` | `mir_dense_call.hy` | dense + dense `CALL` | one-word CALL |
-| `main` / `iv_mul` / `nested` | `numeric.hy` / `iv_mul_sr.hy` / `licm_nested_chains.hy` | dense | counted i64 |
-| `eval_a` | `nbody.hy` | dense | straight-line wins cost |
-| `times_a` / `times_at` | `nbody.hy` | dense + open CALL + Index | S3 / A2 |
-| `sum` / `fill` / `scan` / `axpy` | `indexed_sum.hy` / `vec_scan.hy` / `vec_axpy.hy` | `V*` / dense Index | S5 |
-| `sum` | `for_in_sum.hy` | `VReduce` / dense Index | **Q6** counted array |
-| `main` | `for_in_sum.hy` | fuse-IL | format + `Vec.push` (cost / grow; Q9 R3 maps format; dense still refuses) |
-| `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
-| `range_sum` | `for_in_range_value.hy` | dense counted i64 | **B5** first-class range local |
-| `range_sum` | `for_in_range_param.hy` | dense counted i64 | **C2** Range parameter |
-| `range_sum` | `for_in_range_ret.hy` | dense counted i64 | **C2** returned Range |
-| `range_sum` | `for_in_range_field.hy` | dense counted i64 | **C2b** heap-field Range |
-| `range_sum` | `for_in_range_array.hy` | dense counted i64 | **C2b** array-held Range |
-| `iter_sum` | `for_in_iter.hy` | dense or fuse-IL two-slot CALL+tag JMP | **C2b** user `Iterator::next`; cost gate |
-| `range_sum` | `for_in_iter_range.hy` | dense counted i64 | **C2b** `into_iter` → Range |
-| `coro_sum` | `for_in_coro.hy` | dense or LIR `ResumeCoro` / `DoneCoro` | **C2b** coro for-in; cost gate |
-| `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
-| `hot` | `field_hot.hy` | dense + maps | **D2** `DenseFieldLoad` / `DenseMakeObject`; cost gate; `main` prints |
-| `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
-| sibling `TailCall` (even/odd) | `tail_sibling.hy` | dense or fuse-IL | **B7** stack-arg `TailCall` + cost gate |
-| self two-slot `CALL` / `RETURN` | `self_two_slot.hy` / `option_self_call.hy` | dense, LIR, or fuse-IL | **C1** dest + `dest_hi`; cost gate vs fuse |
-| `nsieve` | `nsieve.hy` | dense | **D0** native `DenseArrayPush` + Index/StoreIndex; cost gate still on |
-| `binary_trees` | `binary_trees.hy` | `item_check` dense/LIR or fuse-IL; `main` fuse | **D3** Unpack arity 2; heap alloc + print `main` |
-| `option_local_match` / in-frame two-slot match + arith | `option_local_match.hy` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
+| `mandelbrot` | `mandelbrot.coil` | dense | nested `*` |
+| `escape` | `mir_dense_float.coil` | dense | `*` kernel |
+| `hot` | `mir_dense_addf.coil` / `*_divf` / `mir_instcombine` / `mir_destprop` / `mir_iv_sr` / `mir_float_pipeline` | dense | float arith |
+| `pack` | `mir_simd_axpy.coil` | HostInvoke 136 | P12 pack |
+| `hot` | `mir_dense_i64.coil` | dense | counted i64 |
+| `hot` | `mir_dense_straight.coil` | dense | straight-line wins cost |
+| `hot` / `kernel` | `mir_dense_call.coil` | dense + dense `CALL` | one-word CALL |
+| `main` / `iv_mul` / `nested` | `numeric.coil` / `iv_mul_sr.coil` / `licm_nested_chains.coil` | dense | counted i64 |
+| `eval_a` | `nbody.coil` | dense | straight-line wins cost |
+| `times_a` / `times_at` | `nbody.coil` | dense + open CALL + Index | S3 / A2 |
+| `sum` / `fill` / `scan` / `axpy` | `indexed_sum.coil` / `vec_scan.coil` / `vec_axpy.coil` | `V*` / dense Index | S5 |
+| `sum` | `for_in_sum.coil` | `VReduce` / dense Index | **Q6** counted array |
+| `main` | `for_in_sum.coil` | fuse-IL | format + `Vec.push` (cost / grow; Q9 R3 maps format; dense still refuses) |
+| `range_sum` | `for_in_range.coil` | dense counted i64 | **Q6** literal range |
+| `range_sum` | `for_in_range_value.coil` | dense counted i64 | **B5** first-class range local |
+| `range_sum` | `for_in_range_param.coil` | dense counted i64 | **C2** Range parameter |
+| `range_sum` | `for_in_range_ret.coil` | dense counted i64 | **C2** returned Range |
+| `range_sum` | `for_in_range_field.coil` | dense counted i64 | **C2b** heap-field Range |
+| `range_sum` | `for_in_range_array.coil` | dense counted i64 | **C2b** array-held Range |
+| `iter_sum` | `for_in_iter.coil` | dense or fuse-IL two-slot CALL+tag JMP | **C2b** user `Iterator::next`; cost gate |
+| `range_sum` | `for_in_iter_range.coil` | dense counted i64 | **C2b** `into_iter` → Range |
+| `coro_sum` | `for_in_coro.coil` | dense or LIR `ResumeCoro` / `DoneCoro` | **C2b** coro for-in; cost gate |
+| `main` | `operators_loop.coil` | fuse-IL | `Pow` / bitwise |
+| `hot` | `field_hot.coil` | dense + maps | **D2** `DenseFieldLoad` / `DenseMakeObject`; cost gate; `main` prints |
+| `tak` / `fib` | `tak.coil` / `fib.coil` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
+| sibling `TailCall` (even/odd) | `tail_sibling.coil` | dense or fuse-IL | **B7** stack-arg `TailCall` + cost gate |
+| self two-slot `CALL` / `RETURN` | `self_two_slot.coil` / `option_self_call.coil` | dense, LIR, or fuse-IL | **C1** dest + `dest_hi`; cost gate vs fuse |
+| `nsieve` | `nsieve.coil` | dense | **D0** native `DenseArrayPush` + Index/StoreIndex; cost gate still on |
+| `binary_trees` | `binary_trees.coil` | `item_check` dense/LIR or fuse-IL; `main` fuse | **D3** Unpack arity 2; heap alloc + print `main` |
+| `option_local_match` / in-frame two-slot match + arith | `option_local_match.coil` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
 | `*_churn` / `option_int_churn` / `result_int_churn` | several | dense, LIR, or fuse-IL | **B3** two-slot helper `CALL` / `RETURN`; cost gate vs fuse |
-| `hot` / match+call | `option_match_call.hy` | dense or LIR | **B3** two-slot CALL + Q8 `Br` |
+| `hot` / match+call | `option_match_call.coil` | dense or LIR | **B3** two-slot CALL + Q8 `Br` |
 | `match_*` boxed enum | several | dense, LIR, or fuse-IL | **I2** unary; **D3** multi-payload `Unpack`; cost gate |
-| `array_mut` | `array_mut.hy` | fuse-IL | `main` + write / format (Q9 R3 maps format; does not densify) |
-| `bump` | `looping_makearray.hy` | dense or SROA | mapped preheader or slot SROA |
-| `pack` | `s2d_inloop_pack_store.hy` | dense SROA | computed-index select |
-| `pack` | `s2d_inloop_escape.hy` | dense-native or fuse-IL | A2 + cost gate |
+| `array_mut` | `array_mut.coil` | fuse-IL | `main` + write / format (Q9 R3 maps format; does not densify) |
+| `bump` | `looping_makearray.coil` | dense or SROA | mapped preheader or slot SROA |
+| `pack` | `s2d_inloop_pack_store.coil` | dense SROA | computed-index select |
+| `pack` | `s2d_inloop_escape.coil` | dense-native or fuse-IL | A2 + cost gate |
 | `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | heap / host / `new` |
 
 S2f scalarizes `[T; N]` when the index is proven (`i % N`; **Q4**).

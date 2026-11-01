@@ -4671,7 +4671,7 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// Run compiler-produced bytecode (archived layout, no `.hyc` round-trip).
+    /// Run compiler-produced bytecode (archived layout, no `.ccoil` round-trip).
     pub fn run_raw(
         &mut self,
         code: &[RawByte],

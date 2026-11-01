@@ -89,7 +89,7 @@ beat Rust/`memcmp` slice equality.
   scalar order however the arrays alias: every read before the first
   store, one store offset `S`, no read at an offset below `S`. VM glue
   in `machine/src/simd.rs` calls `coil_simd::lanes` only.
-  `examples/perf/vec_reduce.hy`, 8192 elements, release, ns per call
+  `examples/perf/vec_reduce.coil`, 8192 elements, release, ns per call
   (main `435021f` → after): `sum` (the function is only the loop, which
   the old whole-function vectoriser took) 22 300 → 5 150, the same sum
   after an early return 66 900 → 5 150, `dot` 36 300 → 23 900, a
@@ -124,7 +124,7 @@ beat Rust/`memcmp` slice equality.
   word computes each distinct node once (`emit::vec_loop_body`) and
   reuses a register after its last reader, falling back to the tree
   when that still needs more than the eight registers.
-  `examples/perf/vec_lanes.hy`, 8192 elements: abs 170 → 76 µs, clamp
+  `examples/perf/vec_lanes.coil`, 8192 elements: abs 170 → 76 µs, clamp
   with a store per arm 178 → 72 µs.
 - Archive 6.11 also runs a counted loop whose body is one
   `out.push(value(i))`, or a push in each arm of an `if` (a select of the
@@ -134,7 +134,7 @@ beat Rust/`memcmp` slice equality.
   the pushes before it. The guard also checks `out` is none of the
   arrays the body reads nor the bound's array, and the invariant ranges
   an arm's ranged add rests on (`(c as int) + delta` with `delta` in
-  range). `vec_lanes.hy`: `out.push(a[i] * 3 + 1)` 284 → 69 µs, the
+  range). `vec_lanes.coil`: `out.push(a[i] * 3 + 1)` 284 → 69 µs, the
   `shift_ascii` shape on `Vec<byte>` 504 → 127 µs.
 - Archive 6.13 lets a map-push or store map read a `string`
   (`vectorize::string_reads`, #2150): each `s[i + k]` is a block of its
@@ -143,7 +143,7 @@ beat Rust/`memcmp` slice equality.
   guard puts every lane in `0 ..= s.len()`, so no read in those lanes
   takes its panic branch; each read must be one of the loads the guard
   checks. Covers `text::shift_ascii` and `ascii::to_lower` / `to_upper`.
-  `vec_lanes.hy`, 8192 bytes: `shift_str` about 530 → 120 µs,
+  `vec_lanes.coil`, 8192 bytes: `shift_str` about 530 → 120 µs,
   `lower_str` (a store per arm) about 390 → 115 µs; `shift_ascii` over
   1 MiB about 80 → 15 ms.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
@@ -164,7 +164,7 @@ beat Rust/`memcmp` slice equality.
   with its values. A failed guard runs the loop as written (its
   out-of-range panic included). `vec_extend_range` appends nothing when
   `out` is `src`, so a loop that grows what it reads stays scalar. A
-  packed byte range is one `memcpy`. `examples/perf/vec_bulk.hy`,
+  packed byte range is one `memcpy`. `examples/perf/vec_bulk.coil`,
   release, ns per call (main `435021f` → after): copy 1 MiB of bytes
   17 400 000 → 280 000, fill 1 MiB 7 500 000 → 208 000, copy 128 Ki ints
   2 156 000 → 267 000.
@@ -182,7 +182,7 @@ beat Rust/`memcmp` slice equality.
   it), then one `vec_extend_range` of the run, and the loop entered at
   the stop, where it leaves through its own `break`. The test may only
   read `src[i]`, compare and mask, and the guard keeps the reads in
-  range (`0 <= i0 < n <= src.len()`). `vec_bulk.hy`: copy 1 MiB up to a
+  range (`0 <= i0 < n <= src.len()`). `vec_bulk.coil`: copy 1 MiB up to a
   quote 41 000 000 → about 300 000 (`feature/simd-lanes` step 6).
 
 Matrix `*` remains matmul; Hadamard `*` on bare tuples/arrays uses

@@ -24,12 +24,12 @@ Optional reactor dump (measured when `COIL_PAR_STATS` was read by release
 builds; it is now read only by `machine`'s unit tests):
 
 ```bash
-COIL_PAR_STATS=1 COIL_MAX_WORKER_THREADS=4 ./target/release/coil run fib.par.hyc
+COIL_PAR_STATS=1 COIL_MAX_WORKER_THREADS=4 ./target/release/coil run fib.par.ccoil
 # coil par-stats workers=… submitted=… steal_ok=… steal_empty=… steal_retry=…
 # idle_waits=… join_helps=… join_timeouts=… join_parks=…
 ```
 
-Fair sequential `.hyc`: `--auto-par off` at **compile**. Runtime
+Fair sequential `.ccoil`: `--auto-par off` at **compile**. Runtime
 `--auto-par` does not rewrite an archive. `scripts/poop_baseline.sh` already
 compiles `fib` with `--auto-par off`; mandelbrot/nsieve/tak/binary_trees do not
 emit IPA either (identical bytecode with the flag on).
@@ -55,7 +55,7 @@ loop_ipa_sum `2666646666700000`.
 
 | Config | mean wall | notes |
 |---|---|---|
-| mandelbrot seq / par archives | 18.6 ± 1.4 / 18.5 ± 0.7 ms | wash (same `.hyc`) |
+| mandelbrot seq / par archives | 18.6 ± 1.4 / 18.5 ± 0.7 ms | wash (same `.ccoil`) |
 | mandelbrot `COIL_THREADED_DISPATCH=0` | 17.6 ± 0.2 ms | giant match ~1.06× vs default table |
 | nsieve seq / par | 2.3 / 2.3 ms | wash |
 | fib sequential archive | **56.9 ± 0.5 ms** | CALL kernel, reactor never starts |

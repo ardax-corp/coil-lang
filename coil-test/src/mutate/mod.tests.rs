@@ -4,19 +4,19 @@ use compiler::{HostGrants, OptLevel};
 
 #[test]
 fn globs() {
-    assert!(glob_match("src/*.hy", "src/a.hy"));
-    assert!(!glob_match("src/*.hy", "src/x/a.hy"));
-    assert!(glob_match("src/**/*.hy", "src/x/y/a.hy"));
-    assert!(glob_match("src/**/*.hy", "src/a.hy"));
+    assert!(glob_match("src/*.coil", "src/a.coil"));
+    assert!(!glob_match("src/*.coil", "src/x/a.coil"));
+    assert!(glob_match("src/**/*.coil", "src/x/y/a.coil"));
+    assert!(glob_match("src/**/*.coil", "src/a.coil"));
     assert!(glob_match("**", "anything/at/all"));
-    assert!(glob_match("src/?.hy", "src/a.hy"));
-    assert!(!glob_match("src/?.hy", "src/ab.hy"));
-    assert!(!glob_match("lib/*.hy", "src/a.hy"));
+    assert!(glob_match("src/?.coil", "src/a.coil"));
+    assert!(!glob_match("src/?.coil", "src/ab.coil"));
+    assert!(!glob_match("lib/*.coil", "src/a.coil"));
 }
 
 fn result(status: Status) -> MutantResult {
     MutantResult {
-        file: "src/a.hy".into(),
+        file: "src/a.coil".into(),
         line: 1,
         operator: Operator::Arith,
         original: "+".into(),
@@ -47,7 +47,7 @@ fn score_counts_timeouts_as_kills_and_skips_unscored() {
     ));
     assert_eq!(
         mutant_event(&report.mutants[0]).finish(),
-        "{\"event\":\"mutant\",\"file\":\"src/a.hy\",\"line\":1,\"operator\":\"arith\",\"from\":\"+\",\"to\":\"-\",\"status\":\"killed\",\"killed_by\":null}"
+        "{\"event\":\"mutant\",\"file\":\"src/a.coil\",\"line\":1,\"operator\":\"arith\",\"from\":\"+\",\"to\":\"-\",\"status\":\"killed\",\"killed_by\":null}"
     );
     assert!(
         mutant_event(&report.mutants[5])
@@ -119,8 +119,8 @@ fn weak_suite_end_to_end() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
-    std::fs::write(root.join("src/mathx.hy"), MATHX).unwrap();
-    std::fs::write(root.join("tests/mathx.hy"), TESTS).unwrap();
+    std::fs::write(root.join("src/mathx.coil"), MATHX).unwrap();
+    std::fs::write(root.join("tests/mathx.coil"), TESTS).unwrap();
     let options = |jobs: usize| MutateOptions {
         test: TestOptions {
             root: root.join("tests"),
@@ -170,19 +170,19 @@ fn weak_suite_end_to_end() {
     };
     let serial = run_mutate(ReportConfig::default(), &options(1)).expect("mutate runs");
     let expected = [
-        "src/mathx.hy:2 x < lo -> !(x < lo) killed",
-        "src/mathx.hy:2 < -> <= survived",
-        "src/mathx.hy:5 x > hi -> !(x > hi) killed",
-        "src/mathx.hy:5 > -> >= survived",
-        "src/mathx.hy:12 0 -> 1 survived",
-        "src/mathx.hy:13 i < n -> !(i < n) killed",
-        "src/mathx.hy:13 < -> <= killed",
-        "src/mathx.hy:14 + -> - timeout",
-        "src/mathx.hy:14 1 -> 0 timeout",
-        "src/mathx.hy:20 255 -> 256 unviable",
-        "src/mathx.hy:21 1 -> 0 killed",
-        "src/mathx.hy:25 * -> / no coverage",
-        "src/mathx.hy:25 2 -> 3 no coverage",
+        "src/mathx.coil:2 x < lo -> !(x < lo) killed",
+        "src/mathx.coil:2 < -> <= survived",
+        "src/mathx.coil:5 x > hi -> !(x > hi) killed",
+        "src/mathx.coil:5 > -> >= survived",
+        "src/mathx.coil:12 0 -> 1 survived",
+        "src/mathx.coil:13 i < n -> !(i < n) killed",
+        "src/mathx.coil:13 < -> <= killed",
+        "src/mathx.coil:14 + -> - timeout",
+        "src/mathx.coil:14 1 -> 0 timeout",
+        "src/mathx.coil:20 255 -> 256 unviable",
+        "src/mathx.coil:21 1 -> 0 killed",
+        "src/mathx.coil:25 * -> / no coverage",
+        "src/mathx.coil:25 2 -> 3 no coverage",
     ];
     assert_eq!(table(&serial), expected);
     let parallel = run_mutate(ReportConfig::default(), &options(3)).expect("mutate runs");
@@ -204,7 +204,7 @@ fn weak_suite_end_to_end() {
             .is_empty()
     );
     std::fs::write(
-        root.join("tests/red.hy"),
+        root.join("tests/red.coil"),
         "test(\"red\") {\n    if !(false) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();

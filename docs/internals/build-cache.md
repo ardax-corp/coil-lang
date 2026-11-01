@@ -12,7 +12,7 @@ Measured on a program that uses `collections::map::HashMap` (release build,
 ## Where
 
 `build/` in the user cache root (`$XDG_CACHE_HOME/coil`, else `~/.cache/coil`), next to the comptime result
-cache. One file per entry, `<key>.hyc`: a list of inputs with their sha256,
+cache. One file per entry, `<key>.ccoil`: a list of inputs with their sha256,
 then the archive. Entries are written to a temporary file and renamed, so a
 concurrent run sees a whole entry or none. At most 256 entries are kept, and
 the least recently used go first.
@@ -40,7 +40,7 @@ was stored; a hit needs every one unchanged:
   stdlib modules it uses);
 - the directory of each of them, and each module root, as their sorted
   entry names: a new file there can change which file a `use` finds;
-- the entry's proof file (`FILE.hy.proof`), present or not.
+- the entry's proof file (`FILE.coil.proof`), present or not.
 
 A file added to a directory that holds sources therefore misses once. That
 includes an output written beside the source, such as a new `-o` file.

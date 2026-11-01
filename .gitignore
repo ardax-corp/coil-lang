@@ -3,6 +3,7 @@ tmp/
 flamegraph.svg
 perf.*
 callgrind.out*
+out.ccoil
 out.hyc
 *.so
 *.o

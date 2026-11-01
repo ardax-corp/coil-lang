@@ -157,19 +157,19 @@ mod tests {
         let mut b = cases.clone();
         Order::Shuffled(7).order_cases(
             Path::new("tests"),
-            Path::new("tests/positive/x.hy"),
+            Path::new("tests/positive/x.coil"),
             &mut a,
         );
         Order::Shuffled(7).order_cases(
             &PathBuf::from("/abs/tests"),
-            &PathBuf::from("/abs/tests/positive/x.hy"),
+            &PathBuf::from("/abs/tests/positive/x.coil"),
             &mut b,
         );
         assert_eq!(a, b);
         let mut c = cases.clone();
         Order::Shuffled(7).order_cases(
             Path::new("tests"),
-            Path::new("tests/positive/y.hy"),
+            Path::new("tests/positive/y.coil"),
             &mut c,
         );
         assert_ne!(a, c);

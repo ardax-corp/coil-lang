@@ -26,7 +26,7 @@ macro bump(Expr e) -> Code {
 fn project(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("coil_macro_vm_reuse_{name}_{}", std::process::id()));
     std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join("src/gen.hy"), PROVIDER).unwrap();
+    std::fs::write(dir.join("src/gen.coil"), PROVIDER).unwrap();
     dir
 }
 
@@ -54,11 +54,11 @@ fn compile(dir: &Path, file: &str, body: &str) -> Result<(), String> {
 fn a_failing_macro_call_does_not_poison_later_calls() {
     comptime::install();
     let dir = project("poison");
-    compile(&dir, "ok1.hy", "    let a: int = bump!(1);\n").expect("first call expands");
-    assert!(compile(&dir, "panics.hy", "    let a: int = bump!(0);\n").is_err(), "a panicking macro fails the build");
-    compile(&dir, "ok2.hy", "    let a: int = bump!(2);\n").expect("a call after a panic expands");
-    assert!(compile(&dir, "spins.hy", "    let a: int = bump!(99);\n").is_err(), "a runaway macro fails the build");
-    compile(&dir, "ok3.hy", "    let a: int = bump!(3);\n").expect("a call after a runaway expands");
+    compile(&dir, "ok1.coil", "    let a: int = bump!(1);\n").expect("first call expands");
+    assert!(compile(&dir, "panics.coil", "    let a: int = bump!(0);\n").is_err(), "a panicking macro fails the build");
+    compile(&dir, "ok2.coil", "    let a: int = bump!(2);\n").expect("a call after a panic expands");
+    assert!(compile(&dir, "spins.coil", "    let a: int = bump!(99);\n").is_err(), "a runaway macro fails the build");
+    compile(&dir, "ok3.coil", "    let a: int = bump!(3);\n").expect("a call after a runaway expands");
 }
 
 #[test]
@@ -66,5 +66,5 @@ fn many_calls_on_one_vm_expand_alike() {
     comptime::install();
     let dir = project("many");
     let body: String = (100..400).map(|i| format!("    let a{i}: int = bump!({i});\n")).collect();
-    compile(&dir, "many.hy", &body).expect("300 calls expand");
+    compile(&dir, "many.coil", &body).expect("300 calls expand");
 }

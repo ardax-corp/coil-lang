@@ -1,6 +1,6 @@
 # coil
 
-Statically typed scripting language with explicit generics and constraint-based inference. Source files use the `.hy` extension; compiled archives are `.hyc`.
+Statically typed scripting language with explicit generics and constraint-based inference. Source files use the `.coil` extension; compiled archives are `.ccoil`.
 
 Documentation, the tutorial and the language reference live at [coil-lang.dev](https://coil-lang.dev).
 
@@ -30,7 +30,7 @@ cd coil-lang
 # Optional: userland stdlib for `io::sync` and showcase projects
 git clone git@github.com:ardax-corp/coil-stdlib.git ../coil-stdlib
 cargo build
-cargo run -- examples/fib.hy    # prints 2178309
+cargo run -- examples/fib.coil    # prints 2178309
 ```
 
 ## Documentation

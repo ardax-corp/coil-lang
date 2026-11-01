@@ -286,7 +286,7 @@ impl Coverage {
         out
     }
 
-    /// `{"tests":[{"file":…,"name":…,"lines":{"src/a.hy":[3,4]}}]}`.
+    /// `{"tests":[{"file":…,"name":…,"lines":{"src/a.coil":[3,4]}}]}`.
     pub fn per_test_json(&self) -> Option<String> {
         let tests = self.per_test.as_ref()?;
         let mut out = String::from("{\"tests\":[");
@@ -391,11 +391,11 @@ mod tests {
     #[test]
     fn lines_sum_across_cases_and_exclude_tests_and_deps() {
         let cwd = scratch("sum");
-        std::fs::write(cwd.join("a.hy"), "l1\nl2\nl3\nl4\n").unwrap();
+        std::fs::write(cwd.join("a.coil"), "l1\nl2\nl3\nl4\n").unwrap();
         std::fs::create_dir_all(cwd.join(".deps")).unwrap();
-        std::fs::write(cwd.join(".deps/b.hy"), "x\n").unwrap();
+        std::fs::write(cwd.join(".deps/b.coil"), "x\n").unwrap();
         let debug = ProgramDebug {
-            source_files: vec!["a.hy".into(), ".deps/b.hy".into()],
+            source_files: vec!["a.coil".into(), ".deps/b.coil".into()],
             // pc0 line1, pc1 line2, pc2 line3 (test body), pc3 dep, pc4 unknown, pc5 line4
             debug_locs: vec![
                 loc(0, 0),
@@ -427,17 +427,17 @@ mod tests {
         let exclude = test_fn_ranges(&debug, [2]);
         assert_eq!(exclude, vec![2..3]);
         let prog = cov.register_program(&debug, &exclude);
-        cov.record(&prog, &[1, 0, 5, 7, 1, 0], "t.hy", "one");
-        cov.record(&prog, &[2, 0, 0, 0, 0, 0], "t.hy", "two");
+        cov.record(&prog, &[1, 0, 5, 7, 1, 0], "t.coil", "one");
+        cov.record(&prog, &[2, 0, 0, 0, 0, 0], "t.coil", "two");
         assert_eq!(
             cov.lcov(),
-            "TN:\nSF:a.hy\nDA:1,3\nDA:2,0\nDA:4,0\nLF:3\nLH:1\nend_of_record\n"
+            "TN:\nSF:a.coil\nDA:1,3\nDA:2,0\nDA:4,0\nLF:3\nLH:1\nend_of_record\n"
         );
         assert!(cov.summary().contains("33.3%"));
         let json = cov.per_test_json().unwrap();
         assert_eq!(
             json,
-            "{\"tests\":[{\"file\":\"t.hy\",\"name\":\"one\",\"lines\":{\"a.hy\":[1]}},{\"file\":\"t.hy\",\"name\":\"two\",\"lines\":{\"a.hy\":[1]}}]}\n"
+            "{\"tests\":[{\"file\":\"t.coil\",\"name\":\"one\",\"lines\":{\"a.coil\":[1]}},{\"file\":\"t.coil\",\"name\":\"two\",\"lines\":{\"a.coil\":[1]}}]}\n"
         );
         let _ = std::fs::remove_dir_all(&cwd);
     }
@@ -446,9 +446,9 @@ mod tests {
     #[test]
     fn inlined_copies_in_test_bodies_count() {
         let cwd = scratch("inline");
-        std::fs::write(cwd.join("a.hy"), "helper\ntest\n").unwrap();
+        std::fs::write(cwd.join("a.coil"), "helper\ntest\n").unwrap();
         let debug = ProgramDebug {
-            source_files: vec!["a.hy".into()],
+            source_files: vec!["a.coil".into()],
             // pc0 helper (line1), pc1 test body (line2), pc2 inlined helper (line1)
             debug_locs: vec![loc(0, 0), loc(0, 7), loc(0, 0)],
             fn_symbols: vec![
@@ -467,10 +467,10 @@ mod tests {
         };
         let mut cov = Coverage::new(cwd.clone(), false);
         let prog = cov.register_program(&debug, &test_fn_ranges(&debug, [1]));
-        cov.record(&prog, &[0, 1, 1], "t.hy", "t");
+        cov.record(&prog, &[0, 1, 1], "t.coil", "t");
         assert_eq!(
             cov.lcov(),
-            "TN:\nSF:a.hy\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
+            "TN:\nSF:a.coil\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
         );
         let _ = std::fs::remove_dir_all(&cwd);
     }
@@ -478,12 +478,12 @@ mod tests {
     #[test]
     fn project_filter_rejects_outside_and_deps() {
         let cwd = scratch("filter");
-        std::fs::write(cwd.join("in.hy"), "").unwrap();
+        std::fs::write(cwd.join("in.coil"), "").unwrap();
         std::fs::create_dir_all(cwd.join(".deps/pkg")).unwrap();
-        std::fs::write(cwd.join(".deps/pkg/x.hy"), "").unwrap();
-        assert!(is_project_source("in.hy", &cwd));
-        assert!(!is_project_source(".deps/pkg/x.hy", &cwd));
-        assert!(!is_project_source("missing.hy", &cwd));
+        std::fs::write(cwd.join(".deps/pkg/x.coil"), "").unwrap();
+        assert!(is_project_source("in.coil", &cwd));
+        assert!(!is_project_source(".deps/pkg/x.coil", &cwd));
+        assert!(!is_project_source("missing.coil", &cwd));
         assert!(!is_project_source("/etc/hostname", &cwd));
         let _ = std::fs::remove_dir_all(&cwd);
     }

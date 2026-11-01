@@ -165,8 +165,8 @@ fn parse_pos(int n) {
 }
 ```
 
-Runnable contrast: [`examples/panic.hy`](../../examples/panic.hy) vs
-[`examples/raise_try.hy`](../../examples/raise_try.hy).
+Runnable contrast: [`examples/panic.coil`](../../examples/panic.coil) vs
+[`examples/raise_try.coil`](../../examples/raise_try.coil).
 
 ## Q6–Q9 — Roadmap commits (not permanent refuse)
 

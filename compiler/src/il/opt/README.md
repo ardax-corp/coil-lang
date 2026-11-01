@@ -15,7 +15,7 @@ This directory keeps the [`OptimizeOptions`] switches, the [`OptLevel`]
 presets that set them, and the `--opt-stats` counters ([`OptStats`]: body
 tiers, HIR lowering and inlining).
 
-**Hit-bench prove:** a change that is sound but leaves the flagship `.hyc`
+**Hit-bench prove:** a change that is sound but leaves the flagship `.ccoil`
 unchanged gets focused `examples/perf` benches, and is proved on those; do not
 skip a merge because `mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib`
 are identical. Skip only on a hit-bench wash or regression. See

@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn from_message_maps_kind_range_help_code_and_labels() {
         let mut map = SourceMap::new();
-        let file = map.insert("test.hy", "let x = 1;\n");
+        let file = map.insert("test.coil", "let x = 1;\n");
 
         let mut msg = Message::error(ErrorCode::TypeMismatch, "Type mismatch".into(), 4..5);
         msg.with_help("expected int".into());
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn from_message_synthesizes_primary_label_when_labels_empty() {
         let mut map = SourceMap::new();
-        let file = map.insert("test.hy", "let x: int = \"hi\";\n");
+        let file = map.insert("test.coil", "let x: int = \"hi\";\n");
 
         let msg = Message::error(
             ErrorCode::TypeMismatch,
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn from_message_skips_synthetic_label_for_empty_range() {
         let mut map = SourceMap::new();
-        let file = map.insert("test.hy", "x\n");
+        let file = map.insert("test.coil", "x\n");
 
         let msg = Message::error(ErrorCode::IoError, "no source".into(), 0..0);
         let diag = Diagnostic::from_message(&msg, file);
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn from_message_promotes_first_label_when_primary_range_empty() {
         let mut map = SourceMap::new();
-        let file = map.insert("test.hy", "let x: int = \"hi\";\n");
+        let file = map.insert("test.coil", "let x: int = \"hi\";\n");
 
         let mut msg = Message::error(ErrorCode::ParseError, "Parse error".into(), 0..0);
         msg.push(Label::new("expected `;`".into(), 13..17));

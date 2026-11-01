@@ -7,6 +7,7 @@ mod caps;
 mod debug;
 mod line_table;
 mod effects;
+pub mod ext;
 mod ffi;
 mod frame_bound;
 mod host;
