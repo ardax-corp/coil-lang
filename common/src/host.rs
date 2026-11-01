@@ -40,6 +40,8 @@ const ENV: EffectFlags = fx(EffectFlags::ENV | R);
 const EXEC: EffectFlags = fx(EffectFlags::EXEC | R);
 const HOST: EffectFlags = fx(EffectFlags::HOST);
 const HOST_R: EffectFlags = fx(EffectFlags::HOST | R);
+/// Reads nondeterministic host state into a fresh object (`entropy::bytes`).
+const HOST_ALLOC: EffectFlags = fx(EffectFlags::HOST | EffectFlags::ALLOC);
 const THREAD_R: EffectFlags = fx(EffectFlags::THREAD | R);
 const GC_R: EffectFlags = fx(EffectFlags::GC | R);
 const HEAP_R: EffectFlags = fx(EffectFlags::HEAP_MUT | R);
@@ -1396,6 +1398,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: SUSPEND,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "entropy_bytes",
+        arity: 1,
+        id: 190,
+        effects: HOST_ALLOC,
+        caps: NO_CAP,
+    },
 ];
 
 /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
@@ -1551,6 +1560,10 @@ pub const TCP_ACCEPT_ID: u16 = 15;
 /// `HostOp::Task`): runs its armed `defer`s. Compiler-emitted only.
 pub const CORO_CLOSE_ID: u16 = 189;
 pub const CORO_CLOSE_NATIVE: &str = "coro_close";
+/// `entropy::bytes(n)` (archive 6.15): `n` fresh bytes from the OS CSPRNG.
+/// No capability: like the clock, it reads host state and touches nothing.
+pub const ENTROPY_BYTES_ID: u16 = 190;
+pub const ENTROPY_BYTES_NATIVE: &str = "entropy_bytes";
 
 /// Set on the `type_id` argument of `gc_register_finalizer` when the
 /// type's `drop` keeps nothing of `self` (the compiler's escape facts):
@@ -1606,8 +1619,9 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 190);
+    assert!(HOST_NATIVES.len() == 191);
     assert!(HOST_NATIVES[CORO_CLOSE_ID as usize].id == CORO_CLOSE_ID);
+    assert!(HOST_NATIVES[ENTROPY_BYTES_ID as usize].id == ENTROPY_BYTES_ID);
     assert!(HOST_NATIVES[IO_OPEN_ID as usize].id == IO_OPEN_ID);
     assert!(HOST_NATIVES[TCP_ACCEPT_ID as usize].id == TCP_ACCEPT_ID);
     assert!(HOST_NATIVES[PROCESS_SPAWN_ID as usize].id == PROCESS_SPAWN_ID);

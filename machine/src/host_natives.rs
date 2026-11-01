@@ -138,6 +138,8 @@ pub fn build_standard_host_natives(
     push_wiring(&mut out, &mut register_id, crate::process::PROCESS_WIRING, "process");
     // Append-only after process: `coro_close` (major 6 minor 14), run by the VM.
     push_task_natives(&mut out, &mut register_id, common::CORO_CLOSE_ID..=common::CORO_CLOSE_ID);
+    // Append-only after coro_close: `entropy::bytes` (major 6 minor 15).
+    push_entropy(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -608,6 +610,19 @@ fn push_wiring(
             Ok(Some(host(heap, args)))
         })));
     }
+}
+
+/// `entropy_bytes`: a negative count or a failed OS source is a Coil panic.
+fn push_entropy(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    let name = common::ENTROPY_BYTES_NATIVE;
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int)
+        .unwrap_or_else(|_| panic!("entropy native signature"));
+    register_id(name, out.len());
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        crate::entropy::host_bytes(heap, args)
+            .map(Some)
+            .map_err(FfiError::Panic)
+    })));
 }
 
 fn push_math_libm(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
@@ -1405,8 +1420,12 @@ mod tests {
             Some(common::PROCESS_RELEASE_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(189).map(String::as_str),
             Some(common::CORO_CLOSE_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::ENTROPY_BYTES_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1774,6 +1793,10 @@ mod tests {
             registrations.get(end + 53).map(|(n, _)| n.as_str()),
             Some(common::CORO_CLOSE_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 54);
+        assert_eq!(
+            registrations.get(end + 54).map(|(n, _)| n.as_str()),
+            Some(common::ENTROPY_BYTES_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 55);
     }
 }
