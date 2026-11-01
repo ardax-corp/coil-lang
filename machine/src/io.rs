@@ -171,7 +171,7 @@ fn with_output_redirect<T>(f: impl FnOnce(&mut (dyn Write + Send)) -> T) -> Opti
 fn write_captured_stdout(bytes: &[u8]) -> Option<Result<usize, IoErrorTag>> {
     if let Some(result) = with_output_redirect(|out| match out.write(bytes) {
         Ok(n) => Ok(n),
-        Err(e) => Err(IoErrorTag::from_kind(e.kind())),
+        Err(e) => Err(IoErrorTag::from_error(&e)),
     }) {
         return Some(result);
     }
@@ -203,9 +203,19 @@ pub enum IoErrorTag {
     /// An attached package stream reported a protocol failure (a TLS
     /// certificate, handshake or alert); the package says which.
     Protocol = 10,
+    /// EMFILE / ENFILE: no descriptor left for this process or the system.
+    TooManyOpenFiles = 11,
 }
 
 impl IoErrorTag {
+    /// Map an OS error; descriptor exhaustion has no `ErrorKind` of its own.
+    pub fn from_error(err: &io::Error) -> Self {
+        if is_too_many_open_files(err) {
+            return Self::TooManyOpenFiles;
+        }
+        Self::from_kind(err.kind())
+    }
+
     pub fn from_kind(kind: ErrorKind) -> Self {
         match kind {
             ErrorKind::WouldBlock => Self::WouldBlock,
@@ -255,6 +265,26 @@ impl IoErrorTag {
             "Protocol" | "Certificate" | "Handshake" => Self::Protocol,
             _ => Self::Other,
         }
+    }
+}
+
+/// EMFILE / ENFILE (POSIX), ERROR_TOO_MANY_OPEN_FILES / WSAEMFILE (Windows).
+fn is_too_many_open_files(err: &io::Error) -> bool {
+    let Some(code) = err.raw_os_error() else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        code == libc::EMFILE || code == libc::ENFILE
+    }
+    #[cfg(windows)]
+    {
+        code == 4 || code == 10024
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = code;
+        false
     }
 }
 
@@ -383,18 +413,18 @@ pub fn alloc_stream(heap: &mut Heap, handle: NativeHandle, kind: StreamKind) -> 
 
 pub fn stream_stdin(heap: &mut Heap) -> Result<Value, IoErrorTag> {
     // Dup so closing the Stream does not close process stdin.
-    let handle = NativeHandle::dup_stdin().map_err(|e| IoErrorTag::from_kind(e.kind()))?;
-    alloc_stream(heap, handle, StreamKind::Stdin).map_err(|e| IoErrorTag::from_kind(e.kind()))
+    let handle = NativeHandle::dup_stdin().map_err(|e| IoErrorTag::from_error(&e))?;
+    alloc_stream(heap, handle, StreamKind::Stdin).map_err(|e| IoErrorTag::from_error(&e))
 }
 
 pub fn stream_stdout(heap: &mut Heap) -> Result<Value, IoErrorTag> {
-    let handle = NativeHandle::dup_stdout().map_err(|e| IoErrorTag::from_kind(e.kind()))?;
-    alloc_stream(heap, handle, StreamKind::Stdout).map_err(|e| IoErrorTag::from_kind(e.kind()))
+    let handle = NativeHandle::dup_stdout().map_err(|e| IoErrorTag::from_error(&e))?;
+    alloc_stream(heap, handle, StreamKind::Stdout).map_err(|e| IoErrorTag::from_error(&e))
 }
 
 pub fn stream_stderr(heap: &mut Heap) -> Result<Value, IoErrorTag> {
-    let handle = NativeHandle::dup_stderr().map_err(|e| IoErrorTag::from_kind(e.kind()))?;
-    alloc_stream(heap, handle, StreamKind::Stderr).map_err(|e| IoErrorTag::from_kind(e.kind()))
+    let handle = NativeHandle::dup_stderr().map_err(|e| IoErrorTag::from_error(&e))?;
+    alloc_stream(heap, handle, StreamKind::Stderr).map_err(|e| IoErrorTag::from_error(&e))
 }
 
 /// A standard stream a `thread::spawn` worker read from a static of its
@@ -467,8 +497,8 @@ owns it over a channel";
 
 pub fn stream_open(heap: &mut Heap, path: &str, mode: &str) -> Result<Value, IoErrorTag> {
     let handle =
-        NativeHandle::open_file(path, mode).map_err(|e| IoErrorTag::from_kind(e.kind()))?;
-    alloc_stream(heap, handle, StreamKind::File).map_err(|e| IoErrorTag::from_kind(e.kind()))
+        NativeHandle::open_file(path, mode).map_err(|e| IoErrorTag::from_error(&e))?;
+    alloc_stream(heap, handle, StreamKind::File).map_err(|e| IoErrorTag::from_error(&e))
 }
 
 pub(crate) fn peel_one_boxed(heap: &Heap, v: Value) -> Value {
@@ -560,7 +590,7 @@ fn stream_read_into(
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
                 Err(IoErrorTag::WouldBlock)
             }
-            Err(e) => Err(IoErrorTag::from_kind(e.kind())),
+            Err(e) => Err(IoErrorTag::from_error(&e)),
         }
     })??;
 
@@ -642,7 +672,7 @@ fn stream_write_bytes(heap: &mut Heap, stream: Value, bytes: &[u8]) -> Result<us
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
                 Err(IoErrorTag::WouldBlock)
             }
-            Err(e) => Err(IoErrorTag::from_kind(e.kind())),
+            Err(e) => Err(IoErrorTag::from_error(&e)),
         }
     })?
 }
@@ -884,7 +914,7 @@ pub fn tcp_connect_timeout(
 ) -> Result<Value, IoErrorTag> {
     let stream = connect_socket(host, port, ms)?;
     alloc_stream(heap, NativeHandle::Tcp(stream), StreamKind::Tcp)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))
+        .map_err(|e| IoErrorTag::from_error(&e))
 }
 
 /// The connect address when `host` is an IP literal (`[…]` allowed for
@@ -917,7 +947,7 @@ pub(crate) fn connect_addrs(host: &str, port: i64) -> Result<Vec<SocketAddr>, Io
         .unwrap_or(host);
     let addrs: Vec<SocketAddr> = (bare, port as u16)
         .to_socket_addrs()
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?
+        .map_err(|e| IoErrorTag::from_error(&e))?
         .collect();
     if addrs.is_empty() {
         return Err(IoErrorTag::NotFound);
@@ -931,7 +961,7 @@ pub(crate) fn connect_addrs(host: &str, port: i64) -> Result<Vec<SocketAddr>, Io
 #[cfg(unix)]
 pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    let os_err = || IoErrorTag::from_kind(io::Error::last_os_error().kind());
+    let os_err = || IoErrorTag::from_error(&io::Error::last_os_error());
     let domain = match addr {
         SocketAddr::V4(_) => libc::AF_INET,
         SocketAddr::V6(_) => libc::AF_INET6,
@@ -949,7 +979,7 @@ pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
     }
     stream
         .set_nonblocking(true)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     // SAFETY: all-zero is a valid `sockaddr_in` / `sockaddr_in6`.
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let len = match addr {
@@ -991,7 +1021,7 @@ pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
     if rc < 0 {
         let err = io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::EINPROGRESS) {
-            return Err(IoErrorTag::from_kind(err.kind()));
+            return Err(IoErrorTag::from_error(&err));
         }
     }
     Ok(stream)
@@ -1058,7 +1088,7 @@ pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
     let stream = unsafe { TcpStream::from_raw_socket(sock as _) };
     stream
         .set_nonblocking(true)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     let rc = match addr {
         SocketAddr::V4(a) => {
             let sin = SockaddrIn {
@@ -1113,7 +1143,7 @@ fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream, IoErrorTa
         let mut connected = None;
         for addr in addrs {
             let attempt = match deadline {
-                None => TcpStream::connect(addr).map_err(|e| IoErrorTag::from_kind(e.kind())),
+                None => TcpStream::connect(addr).map_err(|e| IoErrorTag::from_error(&e)),
                 Some(end) => {
                     let now = Instant::now();
                     if now >= end {
@@ -1123,7 +1153,7 @@ fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream, IoErrorTa
                             if e.kind() == ErrorKind::TimedOut {
                                 IoErrorTag::TimedOut
                             } else {
-                                IoErrorTag::from_kind(e.kind())
+                                IoErrorTag::from_error(&e)
                             }
                         })
                     }
@@ -1146,28 +1176,28 @@ fn connect_socket(host: &str, port: i64, ms: i64) -> Result<TcpStream, IoErrorTa
     };
     stream
         .set_nonblocking(true)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     Ok(stream)
 }
 
 /// A connected socket as a `Stream`.
 pub(crate) fn alloc_tcp_stream(heap: &mut Heap, stream: TcpStream) -> Result<Value, IoErrorTag> {
     alloc_stream(heap, NativeHandle::Tcp(stream), StreamKind::Tcp)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))
+        .map_err(|e| IoErrorTag::from_error(&e))
 }
 
 pub fn tcp_listen(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoErrorTag> {
     let addr = resolve_socket_addr(host, port)?;
-    let listener = TcpListener::bind(addr).map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    let listener = TcpListener::bind(addr).map_err(|e| IoErrorTag::from_error(&e))?;
     listener
         .set_nonblocking(true)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     alloc_stream(
         heap,
         NativeHandle::Listener(listener),
         StreamKind::TcpListener,
     )
-    .map_err(|e| IoErrorTag::from_kind(e.kind()))
+    .map_err(|e| IoErrorTag::from_error(&e))
 }
 
 /// Non-blocking accept. `WouldBlock` if nothing pending.
@@ -1187,14 +1217,14 @@ pub fn tcp_accept(heap: &mut Heap, listener: Value) -> Result<Value, IoErrorTag>
         match listener_sock.accept() {
             Ok((stream, _)) => Ok(stream),
             Err(e) if e.kind() == ErrorKind::WouldBlock => Err(IoErrorTag::WouldBlock),
-            Err(e) => Err(IoErrorTag::from_kind(e.kind())),
+            Err(e) => Err(IoErrorTag::from_error(&e)),
         }
     })??;
     stream
         .set_nonblocking(true)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     alloc_stream(heap, NativeHandle::Tcp(stream), StreamKind::Tcp)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))
+        .map_err(|e| IoErrorTag::from_error(&e))
 }
 
 /// Block until a connection is accepted.
@@ -1261,7 +1291,7 @@ fn tcp_stream_addr(
             let sock = handle.as_listener_mut().ok_or(IoErrorTag::InvalidInput)?;
             sock.local_addr()
                 .map(format_socket_addr)
-                .map_err(|e| IoErrorTag::from_kind(e.kind()))
+                .map_err(|e| IoErrorTag::from_error(&e))
         } else {
             let sock = handle.as_tcp_mut().ok_or(IoErrorTag::InvalidInput)?;
             let addr = if peer {
@@ -1270,7 +1300,7 @@ fn tcp_stream_addr(
                 sock.local_addr()
             };
             addr.map(format_socket_addr)
-                .map_err(|e| IoErrorTag::from_kind(e.kind()))
+                .map_err(|e| IoErrorTag::from_error(&e))
         }
     })?
 }
@@ -1311,7 +1341,7 @@ pub fn tcp_set_nodelay(heap: &mut Heap, stream: Value, enabled: bool) -> Result<
             .and_then(NativeHandle::as_tcp_mut)
             .ok_or(IoErrorTag::InvalidInput)?;
         sock.set_nodelay(enabled)
-            .map_err(|e| IoErrorTag::from_kind(e.kind()))
+            .map_err(|e| IoErrorTag::from_error(&e))
     })?
 }
 
@@ -1338,7 +1368,7 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
             .and_then(NativeHandle::as_tcp_mut)
             .ok_or(IoErrorTag::InvalidInput)?;
         sock.shutdown(mode)
-            .map_err(|e| IoErrorTag::from_kind(e.kind()))
+            .map_err(|e| IoErrorTag::from_error(&e))
     })?
 }
 
@@ -1375,7 +1405,7 @@ fn resolve_socket_addr(host: &str, port: i64) -> Result<SocketAddr, IoErrorTag> 
     }
     let mut addrs = (bare, port)
         .to_socket_addrs()
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     addrs.next().ok_or(IoErrorTag::NotFound)
 }
 
@@ -1387,11 +1417,11 @@ fn parse_socket_addr(host: &str, port: i64) -> Result<SocketAddr, IoErrorTag> {
 /// use [`udp_local_port`] to read the assigned port.
 pub fn udp_bind(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoErrorTag> {
     let addr = parse_socket_addr(host, port)?;
-    let sock = UdpSocket::bind(addr).map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    let sock = UdpSocket::bind(addr).map_err(|e| IoErrorTag::from_error(&e))?;
     sock.set_nonblocking(true)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     alloc_stream(heap, NativeHandle::Udp(sock), StreamKind::Udp)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))
+        .map_err(|e| IoErrorTag::from_error(&e))
 }
 
 /// Create a connected non-blocking UDP socket toward `(host, port)`.
@@ -1402,13 +1432,13 @@ pub fn udp_bind(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoError
 pub fn udp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoErrorTag> {
     let peer = parse_socket_addr(host, port)?;
     // Ephemeral local bind, then connect for a default peer.
-    let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+    let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| IoErrorTag::from_error(&e))?;
     sock.connect(peer)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     sock.set_nonblocking(true)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))?;
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     alloc_stream(heap, NativeHandle::Udp(sock), StreamKind::Udp)
-        .map_err(|e| IoErrorTag::from_kind(e.kind()))
+        .map_err(|e| IoErrorTag::from_error(&e))
 }
 
 /// Local UDP port (after bind / connect).
@@ -1421,7 +1451,7 @@ pub fn udp_local_port(heap: &mut Heap, stream: Value) -> Result<i64, IoErrorTag>
             .ok_or(IoErrorTag::AlreadyClosed)?;
         sock.local_addr()
             .map(|a| a.port() as i64)
-            .map_err(|e| IoErrorTag::from_kind(e.kind()))
+            .map_err(|e| IoErrorTag::from_error(&e))
     })?
 }
 
@@ -1446,7 +1476,7 @@ pub fn udp_send_to(
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
                 Err(IoErrorTag::WouldBlock)
             }
-            Err(e) => Err(IoErrorTag::from_kind(e.kind())),
+            Err(e) => Err(IoErrorTag::from_error(&e)),
         }
     })?
 }
@@ -1491,7 +1521,7 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
                 {
                     Err(IoErrorTag::WouldBlock)
                 }
-                Err(e) => Err(IoErrorTag::from_kind(e.kind())),
+                Err(e) => Err(IoErrorTag::from_error(&e)),
             }
         },
     )??;
@@ -2243,6 +2273,33 @@ mod tests {
     }
 
     #[test]
+    fn too_many_open_files_has_its_own_tag() {
+        #[cfg(unix)]
+        for code in [libc::EMFILE, libc::ENFILE] {
+            assert_eq!(
+                IoErrorTag::from_error(&io::Error::from_raw_os_error(code)),
+                IoErrorTag::TooManyOpenFiles
+            );
+        }
+        #[cfg(windows)]
+        for code in [4, 10024] {
+            // ERROR_TOO_MANY_OPEN_FILES and WSAEMFILE.
+            assert_eq!(
+                IoErrorTag::from_error(&io::Error::from_raw_os_error(code)),
+                IoErrorTag::TooManyOpenFiles
+            );
+        }
+        assert_eq!(
+            IoErrorTag::from_error(&io::Error::from(ErrorKind::NotFound)),
+            IoErrorTag::NotFound
+        );
+        let mut heap = Heap::default();
+        let v = alloc_io_error(&mut heap, IoErrorTag::TooManyOpenFiles);
+        assert_eq!(enum_tag(&heap, v), Some(11));
+        assert_eq!(BUILTIN_IO_ERROR_VARIANTS[11], "TooManyOpenFiles");
+    }
+
+    #[test]
     fn alloc_io_error_encodes_new_tags() {
         let mut heap = Heap::default();
         for (tag, expected) in [
@@ -2253,7 +2310,7 @@ mod tests {
             let v = alloc_io_error(&mut heap, tag);
             assert_eq!(enum_tag(&heap, v), Some(expected));
         }
-        assert_eq!(BUILTIN_IO_ERROR_VARIANTS.len(), 11);
+        assert_eq!(BUILTIN_IO_ERROR_VARIANTS.len(), 12);
         assert_eq!(BUILTIN_IO_ERROR_VARIANTS[8], "TimedOut");
         assert_eq!(BUILTIN_IO_ERROR_VARIANTS[10], "Protocol");
     }
