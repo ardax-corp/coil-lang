@@ -56,6 +56,9 @@ pub const CLOCK_MODULE: &str = "clock";
 /// Per-function keys and a process-wide id counter (`fn_key`, `next_id`).
 pub const SYMBOL_MODULE: &str = "symbol";
 
+/// Bytes from the OS CSPRNG (`bytes`).
+pub const ENTROPY_MODULE: &str = "entropy";
+
 /// Task scheduler natives behind the embedded `task` module (`task::scope`, …).
 /// Not meant for direct use: the `task` module wraps them.
 pub const PRELUDE_TASK_MODULE: &str = "prelude::task";
@@ -920,6 +923,14 @@ impl VirtualModules {
                     registry: common::SYMBOL_NEXT_ID_NATIVE,
                 },
             ],
+        );
+
+        modules.insert(
+            ENTROPY_MODULE,
+            vec![BuiltinExport::HostFn {
+                surface: "bytes",
+                registry: common::ENTROPY_BYTES_NATIVE,
+            }],
         );
 
         modules.insert(
