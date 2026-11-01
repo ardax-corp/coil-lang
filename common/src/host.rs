@@ -1552,6 +1552,14 @@ pub const TCP_ACCEPT_ID: u16 = 15;
 pub const CORO_CLOSE_ID: u16 = 189;
 pub const CORO_CLOSE_NATIVE: &str = "coro_close";
 
+/// Set on the `type_id` argument of `gc_register_finalizer` when the
+/// type's `drop` keeps nothing of `self` (the compiler's escape facts):
+/// the VM may run it where an object of the type is freed early, then free
+/// the object. An archive without it leaves every `drop` to the collector.
+/// The argument is a 16-bit `CONST` immediate: a type id at or above the
+/// flag is never flagged.
+pub const EARLY_DROP_FLAG: u32 = 1 << 15;
+
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
 pub const CLOCK_WALL_NANOS_NATIVE: &str = "clock_wall_nanos";
