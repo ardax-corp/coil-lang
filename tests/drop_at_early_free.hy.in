@@ -1,8 +1,9 @@
 // A `drop` that keeps nothing of `self` runs where the compiler frees its
 // object early: at the end of the block that holds it, before the code
-// after the block, a parent's before what it holds. A `drop` that keeps
-// `self` is left to the collector. A panic in a `drop` run there unwinds
-// from the free like any call.
+// after the block. A block-end free gives back the object itself, so what
+// it holds is dropped by the collector. A `drop` that keeps `self` is left
+// to the collector. A panic in a `drop` run at a free unwinds from there
+// like any call.
 use tests::assert;
 use gc::collect;
 use task::{scope, Scope, TaskError};
@@ -50,7 +51,7 @@ impl Keeper {
 fn scoped() {
     {
         let r = new Res("a");
-        say(r.name);
+        say(r.name.len().show());
     }
     say("|");
 }
@@ -58,21 +59,23 @@ fn scoped() {
 test("a drop runs at the end of the block that holds its object") {
     LOG = "";
     scoped();
-    assert!(LOG == "a[a]|", LOG);
+    assert!(LOG == "1[a]|", LOG);
 }
 
 fn nested() {
     {
         let p = new Pair("p", new Res("r"));
-        say(p.name + p.inner.name);
+        say((p.name.len() + p.inner.name.len()).show());
     }
     say("|");
 }
 
-test("a parent's drop runs before the drop of what it holds") {
+test("the free runs the parent's drop, the collector the held object's") {
     LOG = "";
     nested();
-    assert!(LOG == "pr<p>[r]|", LOG);
+    assert!(LOG == "2<p>|", LOG);
+    collect();
+    assert!(LOG == "2<p>|[r]", LOG);
 }
 
 fn keeps() {
@@ -102,15 +105,19 @@ impl Loud {
     }
 }
 
-fn loud() -> int {
-    defer {
-        say("[defer]");
-    }
+fn loud_block() {
     {
         let l = new Loud(1);
         say(l.n.show());
     }
     say("unreached");
+}
+
+fn loud() -> int {
+    defer {
+        say("[defer]");
+    }
+    loud_block();
     return 0;
 }
 
