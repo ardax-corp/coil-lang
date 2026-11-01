@@ -1389,6 +1389,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HOST,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "coro_close",
+        arity: 1,
+        id: 189,
+        effects: SUSPEND,
+        caps: NO_CAP,
+    },
 ];
 
 /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
@@ -1535,6 +1542,10 @@ pub const PROCESS_SIGNAL_NATIVE: &str = "process_signal";
 pub const PROCESS_PID_NATIVE: &str = "process_pid";
 pub const PROCESS_RELEASE_ID: u16 = 188;
 pub const PROCESS_RELEASE_NATIVE: &str = "process_release";
+/// Closes a generator a `for` loop leaves early (archive 6.14,
+/// `HostOp::Task`): runs its armed `defer`s. Compiler-emitted only.
+pub const CORO_CLOSE_ID: u16 = 189;
+pub const CORO_CLOSE_NATIVE: &str = "coro_close";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1582,7 +1593,8 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 189);
+    assert!(HOST_NATIVES.len() == 190);
+    assert!(HOST_NATIVES[CORO_CLOSE_ID as usize].id == CORO_CLOSE_ID);
     assert!(HOST_NATIVES[PROCESS_SPAWN_ID as usize].id == PROCESS_SPAWN_ID);
     assert!(HOST_NATIVES[PROCESS_RELEASE_ID as usize].id == PROCESS_RELEASE_ID);
     assert!(HOST_NATIVES[SYMBOL_NEXT_ID_ID as usize].id == SYMBOL_NEXT_ID_ID);

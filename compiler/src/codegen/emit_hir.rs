@@ -1882,8 +1882,11 @@ impl Compiler {
         };
         // A `defer`'s cleanup pad ends in `unwind_resume`.
         let unwind_native = self.native_id("unwind_resume").and_then(|n| u16::try_from(n).ok());
+        // A `for` loop left early closes the generator it runs over.
+        let coro_close_native = self.native_id(common::CORO_CLOSE_NATIVE).and_then(|n| u16::try_from(n).ok());
         Ok(crate::mir::HirMirInput {
             unwind_native,
+            coro_close_native,
             slots: &frame.slots,
             pair_locals,
             pair_tys,

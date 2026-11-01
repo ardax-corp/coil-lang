@@ -25,12 +25,17 @@ struct Unwind {
     /// `unwind_resume` just dropped a frame: the top frame's saved ip is a
     /// return address, not the instruction that panicked.
     resumed: bool,
+    /// Generator closes under way, innermost last: the frame depth the
+    /// generator's frames start at and the closer's stack top.
+    closing: Vec<(usize, usize)>,
 }
 
 impl<const S: usize> Machine<S> {
     /// A panic at the top frame's saved ip may run `defer`s.
     #[inline]
     fn arm_unwind(&mut self, message: &str) {
+        // A panic in a `defer` a close runs goes on to the closer.
+        self.unwind.closing.clear();
         self.unwind.armed =
             message != STACK_OVERFLOW && message != STEP_BUDGET_EXHAUSTED && message != HEAP_CAP_EXCEEDED;
         self.unwind.resumed = false;
@@ -70,6 +75,9 @@ impl<const S: usize> Machine<S> {
     /// After a panic stopped `execute`: the pad to continue at, or `None`
     /// when no frame left above the floor has one (the panic then stands).
     fn unwind_step(&mut self) -> Option<usize> {
+        if let Some(&(depth, top)) = self.unwind.closing.last() {
+            return Some(self.close_step(depth, top));
+        }
         if !std::mem::take(&mut self.unwind.armed) || self.program_debug.cleanup.is_empty() {
             return None;
         }
@@ -99,6 +107,89 @@ impl<const S: usize> Machine<S> {
         }
         self.panicked = false;
         Some(range.pad_pc as usize)
+    }
+
+    /// `coro_close(h)`: a `for` loop over generator `h` left early. A
+    /// generator suspended at a `yield` with a `defer` armed runs it, as a
+    /// cancel unwinds a task: its frames go back on the stack and unwind,
+    /// then the closer goes on past the call. Any other generator is just
+    /// marked done.
+    fn coro_close(&mut self, handle: Value, ip: &mut usize, sp: &mut usize) -> TaskFlow {
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits()) else {
+            return TaskFlow::Value(Value::default());
+        };
+        // A delegating generator is suspended in its innermost delegate.
+        let mut target = gc;
+        while let Some(sub) = target.as_ref().yield_from {
+            target = sub;
+        }
+        let coro = target.as_ref();
+        let has_pad = coro.state == CoroState::Suspended
+            && coro.started
+            && coro.saved_frames.iter().enumerate().any(|(k, &(fip, _))| {
+                let pc = if k + 1 == coro.saved_frames.len() { fip } else { fip.saturating_sub(1) };
+                common::cleanup_range_at(&self.program_debug.cleanup, pc).is_some()
+            });
+        if !has_pad {
+            let mut link = Some(gc);
+            while let Some(c) = link {
+                link = c.as_ref().yield_from;
+                Self::finish_coroutine(c);
+            }
+            return TaskFlow::Value(Value::default());
+        }
+        let top = self.stack.tell();
+        if !self.resume_coroutine(ip, sp, target, Value::default(), &[], false) {
+            return TaskFlow::Panic(STACK_OVERFLOW.to_string());
+        }
+        let depth = self.resume_stack.last().map_or(self.frames.len(), |c| c.frame_depth);
+        self.frames.get_mut().seek(*ip);
+        // The delegators above it are done too; their frames are not on
+        // the stack.
+        let mut link = target.as_ref().delegator;
+        while let Some(c) = link {
+            link = c.as_ref().delegator;
+            Self::finish_coroutine(c);
+        }
+        self.unwind.closing.push((depth, top));
+        self.unwind.resumed = false;
+        self.panicked = true;
+        TaskFlow::Unwind
+    }
+
+    /// The next step of the innermost close: the next pad among the
+    /// generator's frames (from `depth` up), or, once none is left, its
+    /// frames dropped and the closer resumed past its `coro_close` with the
+    /// result word on its stack top `top`.
+    fn close_step(&mut self, depth: usize, top: usize) -> usize {
+        let exact_top = !std::mem::take(&mut self.unwind.resumed);
+        self.unwind.armed = false;
+        self.return_bookkeeping = true;
+        let len = self.frames.len();
+        let found = (depth..len).rev().find_map(|i| {
+            let pc = self.unwind_pc(i, exact_top);
+            common::cleanup_range_at(&self.program_debug.cleanup, pc).map(|r| (i, *r))
+        });
+        if let Some((index, range)) = found {
+            while self.frames.len() > index + 1 {
+                self.unwind_drop_frame();
+            }
+            let base = self.frames.get().get();
+            let need = base + range.frame_words as usize;
+            if self.stack.tell() < need && self.reserve_operand_from(need) {
+                self.stack.seek(need);
+            }
+            self.panicked = false;
+            return range.pad_pc as usize;
+        }
+        while self.frames.len() > depth {
+            self.unwind_drop_frame();
+        }
+        self.unwind.closing.pop();
+        self.panicked = false;
+        self.stack.seek(top);
+        self.stack.push(Value::default());
+        self.frames.get().tell()
     }
 
     /// `unwind_resume`: the pad ran; drop its frame (unless it is the floor)
