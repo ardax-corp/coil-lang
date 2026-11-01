@@ -13,9 +13,6 @@
 //! len)` into the same buffer instead of a copy, so `rest = slice(rest, i,
 //! rest.len())` loops are linear. A view only pins a buffer at most
 //! [`VIEW_RETAIN_MAX`] times its own length; smaller slices are copied.
-//! A slice of at most [`INLINE_MAX`] bytes (a word `split` cuts) is held
-//! in the string itself ([`StrData::Inline`]): no buffer to allocate or
-//! free.
 //!
 //! Soundness: bytes below `used` are never written again, and every string
 //! that shares a buffer has `start + len <= used`, so a reader's `&str` never
@@ -140,17 +137,10 @@ impl Drop for SharedBuf {
     }
 }
 
-/// Bytes a [`StrData::Inline`] string holds: what fits beside the tag in
-/// the size the other variants already take.
-pub const INLINE_MAX: usize = 38;
-
 /// UTF-8 content of an `ObjString`.
 pub enum StrData {
     /// Exact-size string (literals, `format`, decoded bytes).
     Owned(String),
-    /// A short string in place, with no buffer of its own (short slices:
-    /// the words `split` cuts).
-    Inline { len: u8, bytes: [u8; INLINE_MAX] },
     /// `[start, start + len)` of a growable buffer (concat results and
     /// slices of them). `accounted` is the part of the buffer this string is
     /// charged for in heap accounting.
@@ -167,8 +157,6 @@ impl StrData {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Owned(s) => s,
-            // SAFETY: `bytes[..len]` was copied from a `&str`.
-            Self::Inline { len, bytes } => unsafe { str::from_utf8_unchecked(bytes.get_unchecked(..*len as usize)) },
             Self::Shared { buf, start, len, .. } => {
                 // SAFETY: `[start, start + len)` was written before this
                 // string existed, is never written again, and is valid UTF-8
@@ -188,7 +176,6 @@ impl StrData {
     pub fn accounted_bytes(&self) -> usize {
         match self {
             Self::Owned(s) => s.len(),
-            Self::Inline { .. } => 0,
             Self::Shared { accounted, .. } => *accounted,
         }
     }
@@ -225,11 +212,6 @@ impl StrData {
     /// so slices of the slice are views.
     pub fn slice(&self, from: usize, to: usize) -> Option<Self> {
         let part = self.as_str().get(from..to)?;
-        if part.len() <= INLINE_MAX {
-            let mut bytes = [0u8; INLINE_MAX];
-            bytes[..part.len()].copy_from_slice(part.as_bytes());
-            return Some(Self::Inline { len: part.len() as u8, bytes });
-        }
         if part.len() < VIEW_MIN_LEN {
             return Some(Self::Owned(part.to_owned()));
         }
@@ -373,7 +355,7 @@ mod tests {
     fn buf_of(s: &StrData) -> *mut Header {
         match s {
             StrData::Shared { buf, .. } => buf.0.as_ptr(),
-            StrData::Owned(_) | StrData::Inline { .. } => panic!("expected shared"),
+            StrData::Owned(_) => panic!("expected shared"),
         }
     }
 
@@ -394,7 +376,7 @@ mod tests {
     #[test]
     fn short_or_small_share_slices_copy() {
         let a = shared(&"z".repeat(1000));
-        assert!(matches!(a.slice(0, 10).unwrap(), StrData::Inline { .. }));
+        assert!(matches!(a.slice(0, 10).unwrap(), StrData::Owned(_)));
         // 100 bytes of a 2000-byte buffer would pin 20x its size: copy it.
         let b = a.slice(0, 100).unwrap();
         assert_ne!(buf_of(&a), buf_of(&b));
@@ -406,24 +388,6 @@ mod tests {
         let q = p.slice(10, 200).unwrap();
         assert_eq!(buf_of(&p), buf_of(&q));
         assert_eq!(q.as_str(), &"w".repeat(190));
-    }
-
-    #[test]
-    fn short_slices_are_inline() {
-        let text = "é".repeat(30);
-        let a = shared(&text);
-        for (from, to) in [(0, 0), (2, 4), (0, INLINE_MAX), (2, 2 + INLINE_MAX)] {
-            let s = a.slice(from, to).unwrap();
-            assert!(matches!(s, StrData::Inline { .. }), "{from}..{to}");
-            assert_eq!(s.as_str(), &text[from..to]);
-            assert_eq!(s.accounted_bytes(), 0);
-        }
-        assert!(!matches!(a.slice(0, INLINE_MAX + 2).unwrap(), StrData::Inline { .. }));
-        // An inline string concats and slices like any other.
-        let w = a.slice(0, 4).unwrap();
-        assert_eq!(w.concat("!").as_str(), "éé!");
-        assert_eq!(w.slice(2, 4).unwrap().as_str(), "é");
-        assert!(w.slice(1, 4).is_none(), "inside a UTF-8 sequence");
     }
 
     #[test]
