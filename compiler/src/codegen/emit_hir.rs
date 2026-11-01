@@ -4313,7 +4313,7 @@ impl Compiler {
         }
         if shared.pair.is_some()
             || shared.instance.is_some()
-            || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty() || g.adapt.iter().any(Option::is_some))
+            || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty())
             || self.coroutine_fns.contains(key)
         {
             return None;
@@ -4514,7 +4514,10 @@ impl Compiler {
             .collect();
         let shared_ret = if unbox.is_some() { ValueLayout::Boxed } else { plan.shared_ret };
         let calls = HashMap::from([(plan.shared.clone(), (shared_params, shared_ret))]);
-        self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, ..compiler::SynthCallee::default() });
+        // A function argument is wrapped as the call site would wrap it for
+        // the shared body (#2182).
+        let adapt = plan.generic.as_ref().map(|g| g.adapt.clone()).unwrap_or_default();
+        self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, adapt, ..compiler::SynthCallee::default() });
         self.emit_synth_fn(name, &hir, calls, true);
         self.hir_synth_callees.clear();
         // The adapters its call wraps a function argument in (#2163).

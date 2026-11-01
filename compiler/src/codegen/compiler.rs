@@ -60,6 +60,9 @@ pub(super) struct SynthCallee {
     /// The `format` builtin, whatever the name resolves to in the module
     /// being compiled.
     pub format: bool,
+    /// Per argument: the adapter a function value is wrapped in for the
+    /// callee's shared body (a method clone's thunk, #2182).
+    pub adapt: Vec<Option<emit_hir::HirFnAdapt>>,
 }
 
 /// One step of building trait dictionaries, a stack program over words:

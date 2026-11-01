@@ -1486,7 +1486,10 @@ impl Compiler {
         // A shared body (not a clone at ground types) reads an open enum
         // result of a function argument as its object (#2163).
         let open = if call.mono || call.builtin.is_some() { vec![None; args.len()] } else { self.hir_open_ret_adapts(hir, &call.key, args) };
-        let generic = call.generic.as_deref().map(|g| g.adapt.clone()).unwrap_or_default();
+        // A compiler-made body's call as it planned it (a method clone's
+        // thunk calling the shared body, #2182).
+        let synth = || self.hir_synth_calls.as_ref().and(self.hir_synth_callees.get(&call.key)).map(|c| c.adapt.clone());
+        let generic = call.generic.as_deref().map(|g| g.adapt.clone()).or_else(synth).unwrap_or_default();
         if generic.is_empty() && open.iter().all(Option::is_none) {
             return Vec::new();
         }
