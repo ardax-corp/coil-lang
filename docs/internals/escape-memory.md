@@ -119,8 +119,10 @@ objects rooted, then frees. A `drop` of an unflagged type, or a pending one
 the walk reaches but cannot free, makes the free give back nothing. A panic
 in such a `drop` unwinds from the `FreeEarly`. Block-end frees stay shallow,
 so a `drop` object a freed object holds is left to the collector, and a
-value the block or a `return` yields is computed before the free. Bodies
-with a `defer` get no early frees yet.
+value the block or a `return` yields is computed before the free. A
+`defer` stops no free (step 7, #2178): it reads only what it captures, and
+a captured local is never freed, so a free before a `return` runs before
+the function's defers.
 
 ## Early freeing (step 2)
 
@@ -166,10 +168,9 @@ nothing, or the object now in that slot. Once something was freed early,
 typed `Member::Object` handles are resolved the same way before marking,
 and gc-stress builds accept a freed slot in a pointer word.
 
-Bodies that stay as they are: coroutines, bodies with `defer`, bodies
-spliced from another module, and any body whose rewritten form does not
-plan. `let _ = …` locals and locals a lambda or `defer` captures are never
-freed.
+Bodies that stay as they are: coroutines, bodies spliced from another
+module, and any body whose rewritten form does not plan. `let _ = …`
+locals and locals a lambda or `defer` captures are never freed.
 
 Two holes the corpus found in the step 1 facts are closed here: a callee
 that changes what an argument reaches may store anything there, so a fresh
