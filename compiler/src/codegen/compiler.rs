@@ -7827,6 +7827,33 @@ impl Compiler {
         if let Some(hir) = self.hir_module.as_ref() {
             let mut seen = HashSet::new();
             for b in &hir.bodies {
+                // E0150: a `mut` that borrows nothing.
+                for (span, scalar) in &b.stray_muts {
+                    if !seen.insert(span.0..span.1) {
+                        continue;
+                    }
+                    let m = match scalar {
+                        None => {
+                            let mut m = Message::error(
+                                ErrorCode::MisplacedMut,
+                                "`mut` here borrows nothing: only a `let` or `for` binding takes a borrow".to_string(),
+                                span.0..span.1,
+                            );
+                            m.with_help("write `let x = mut place` and use `x`, or drop the `mut` to pass a copy".to_string());
+                            m
+                        }
+                        Some(ty) => {
+                            let mut m = Message::error(
+                                ErrorCode::MisplacedMut,
+                                format!("`mut` of a `{ty}` binds a copy: a borrow names an object, and `{ty}` values are copied"),
+                                span.0..span.1,
+                            );
+                            m.with_help("drop the `mut` and assign the new value back to the place".to_string());
+                            m
+                        }
+                    };
+                    self.messages.push(m);
+                }
                 for m in crate::hir::stream_lint::check(&self.checker, hir, b) {
                     if seen.insert(m.range().clone()) {
                         self.messages.push(m);

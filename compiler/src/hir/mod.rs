@@ -147,6 +147,9 @@ pub struct HirBody {
     /// the body's key name: the shared body panics there, and a mono clone
     /// (`Compiler::hir_instance`) writes the key of its instance instead.
     pub fn_key_sites: Vec<(HirId, String)>,
+    /// `mut e` that borrows nothing (E0150): outside a `let` / `for`
+    /// binding (`None`), or binding a scalar, which is copied (its type).
+    pub stray_muts: Vec<(Span, Option<String>)>,
 }
 
 impl HirBody {

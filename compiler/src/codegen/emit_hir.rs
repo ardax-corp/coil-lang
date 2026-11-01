@@ -3579,6 +3579,7 @@ impl Compiler {
             root: body.root,
             aliased_fn_values: body.aliased_fn_values.clone(),
             fn_key_sites: Vec::new(),
+            stray_muts: Vec::new(),
         }
     }
 
