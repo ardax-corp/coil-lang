@@ -79,7 +79,7 @@ beat Rust/`memcmp` slice equality.
   every read and write of lanes `i0 .. n` is in range; `VLoop` runs the
   8-lane blocks with its body words (`VLoad` / `VStore` / `VBin` /
   `VFma` / `VReduce`) decoded once and no dispatch per block, and since
-  archive 6.15 the last lanes too (a block cut short at `n`; before, the
+  archive 6.16 the last lanes too (a block cut short at `n`; before, the
   scalar loop took them, a dozen dispatched ops per lane). A body of
   lane-wise words only (no `VFma` / `VReduce`) runs up to 64 lanes per
   block (`machine::vm::VloopWide`, `simd::eval_vbin_wide`), so each body

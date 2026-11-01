@@ -554,7 +554,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     };
     b.func.block_mut(skip).term = Some(Terminator::Jump { dest: join });
 
-    // F: every lane; `VLoop` cuts its last block at `n` (archive 6.15).
+    // F: every lane; `VLoop` cuts its last block at `n` (archive 6.16).
     let end = n;
     let acc = match &plan.shape {
         Shape::Reduce { acc, .. } | Shape::Push { acc, .. } => Some(*acc),
