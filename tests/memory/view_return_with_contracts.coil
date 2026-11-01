@@ -1,0 +1,35 @@
+// A method of a class with an invariant returns its result through a
+// temporary while the contracts are checked: a view built over `mut self`
+// is still returnable from it.
+use tests::assert;
+
+class Counter
+    invariant self.n >= 0
+{
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+}
+
+impl Counter {
+    pub fn bump() -> Bump
+        ensures self.n >= 0
+    {
+        return new Bump(mut self);
+    }
+}
+
+impl Bump {
+    pub fn go() -> Bump {
+        self.c.n += 1;
+        return self;
+    }
+}
+
+test("a view returned by a method with contracts writes its object") {
+    let k = new Counter(0);
+    let _ = k.bump().go().go();
+    assert!(k.n == 2);
+}
