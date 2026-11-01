@@ -1,0 +1,30 @@
+// Many short vector loops whose length is not a multiple of 8: a float
+// dot product over 100 lanes, 4 of them in the short last block, which
+// runs as one padded block rather than lane by lane.
+use string::{format, to_bytes};
+use io::{stdout, write};
+
+fn dot(Vec<float> a, Vec<float> b) -> float {
+    let s = 0.0;
+    let j = 0;
+    while j < a.len() {
+        s = s + a[j] * b[j];
+        j = j + 1;
+    }
+    return s;
+}
+
+fn main() {
+    let a: Vec<float> = Vec::new();
+    let b: Vec<float> = Vec::new();
+    for i in 0..100 {
+        a.push((i as float) * 0.5);
+        b.push(1.0 / ((i + 1) as float));
+    }
+    let t = 0.0;
+    for r in 0..20000 {
+        b[r % 100] = b[r % 100] + 0.25;
+        t = t + dot(a, b);
+    }
+    let _ = write(stdout(), to_bytes(format("%f\n", t)));
+}

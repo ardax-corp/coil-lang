@@ -1,0 +1,277 @@
+// A `VLoop`'s last block of fewer than 8 lanes runs as one block whose
+// missing lanes repeat its last lane, and only its own lanes store, append
+// and fold. Folds (sum, float sum, product, max, min, a conditional count)
+// and a map over every length up to 40 match the scalar loop; a division
+// that traps in the short block stores the lanes before it.
+// @output folds ok\nmap ok\nstored 11\n
+use io::sync::println;
+use string::format;
+use thread::{join, spawn};
+
+shared class Out {
+    pub b: Vec<int>,
+}
+
+fn ints(int n) -> Vec<int> {
+    let a: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        a.push((i * 37) % 23 - 11);
+        i = i + 1;
+    }
+    return a;
+}
+
+fn floats(int n) -> Vec<float> {
+    let a: Vec<float> = Vec::new();
+    let i = 0;
+    while i < n {
+        a.push((i as float) * 0.75 - 3.0);
+        i = i + 1;
+    }
+    return a;
+}
+
+fn sum(Vec<int> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + a[i] * 3;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn sum_scalar(Vec<int> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + black_box(a[i] * 3);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn fsum(Vec<float> a) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < a.len() {
+        s = s + a[i] * 2.0;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn fsum_scalar(Vec<float> a) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < a.len() {
+        s = s + black_box(a[i] * 2.0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn product(Vec<int> a) -> int {
+    let p = 1;
+    let i = 0;
+    while i < a.len() {
+        p = p * (a[i] % 3 + 2);
+        i = i + 1;
+    }
+    return p;
+}
+
+fn product_scalar(Vec<int> a) -> int {
+    let p = 1;
+    let i = 0;
+    while i < a.len() {
+        p = p * black_box(a[i] % 3 + 2);
+        i = i + 1;
+    }
+    return p;
+}
+
+fn largest(Vec<int> a) -> int {
+    let m = -1000;
+    let i = 0;
+    while i < a.len() {
+        if a[i] > m {
+            m = a[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+fn largest_scalar(Vec<int> a) -> int {
+    let m = -1000;
+    let i = 0;
+    while i < a.len() {
+        let x = black_box(a[i]);
+        if x > m {
+            m = x;
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+fn smallest(Vec<int> a) -> int {
+    let m = 1000;
+    let i = 0;
+    while i < a.len() {
+        if a[i] < m {
+            m = a[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+fn smallest_scalar(Vec<int> a) -> int {
+    let m = 1000;
+    let i = 0;
+    while i < a.len() {
+        let x = black_box(a[i]);
+        if x < m {
+            m = x;
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+fn positives(Vec<int> a) -> int {
+    let n = 0;
+    let i = 0;
+    while i < a.len() {
+        if a[i] > 0 {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn positives_scalar(Vec<int> a) -> int {
+    let n = 0;
+    let i = 0;
+    while i < a.len() {
+        if black_box(a[i]) > 0 {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn map(Vec<int> a, Vec<int> b) {
+    let i = 0;
+    while i < a.len() {
+        b[i] = a[i] * 5 - 7;
+        i = i + 1;
+    }
+}
+
+fn map_scalar(Vec<int> a, Vec<int> b) {
+    let i = 0;
+    while i < a.len() {
+        b[i] = black_box(a[i] * 5 - 7);
+        i = i + 1;
+    }
+}
+
+fn divide(Vec<int> a, Vec<int> b) {
+    let i = 0;
+    while i < a.len() {
+        b[i] = 100 / a[i];
+        i = i + 1;
+    }
+}
+
+fn check_folds() {
+    let n = 0;
+    while n <= 40 {
+        let a = ints(n);
+        let f = floats(n);
+        if sum(a) != sum_scalar(a) ||
+           fsum(f) != fsum_scalar(f) ||
+           product(a) != product_scalar(a) ||
+           largest(a) != largest_scalar(a) ||
+           smallest(a) != smallest_scalar(a) ||
+           positives(a) != positives_scalar(a) {
+            let _ = println(format("folds differ at %i", n));
+            return;
+        }
+        n = n + 1;
+    }
+    let _ = println("folds ok");
+}
+
+fn check_map() {
+    let n = 0;
+    while n <= 40 {
+        let a = ints(n);
+        let b: Vec<int> = Vec::new();
+        let c: Vec<int> = Vec::new();
+        let i = 0;
+        while i < n + 3 {
+            b.push(99);
+            c.push(99);
+            i = i + 1;
+        }
+        map(a, b);
+        map_scalar(a, c);
+        let j = 0;
+        while j < n + 3 {
+            if b[j] != c[j] {
+                let _ = println(format("map differs at %i lane %i", n, j));
+                return;
+            }
+            j = j + 1;
+        }
+        n = n + 1;
+    }
+    let _ = println("map ok");
+}
+
+// 13 lanes: one full block, then a short block of 5 whose lane 11 divides
+// by zero. Lanes 0 .. 10 store; lane 11 and after do not.
+fn run_divide() {
+    let o = new Out(Vec::new());
+    let a: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 13 {
+        o.b.push(0);
+        a.push(if i == 11 {
+            0
+        } else {
+            i + 1
+        });
+        i = i + 1;
+    }
+    defer use (o) {
+        // A `while` loop: `for … in` in a defer run by a panic miscounts (#2201).
+        let n = 0;
+        let j = 0;
+        while j < o.b.len() {
+            if o.b[j] != 0 {
+                n = n + 1;
+            }
+            j = j + 1;
+        }
+        let _ = println(format("stored %i", n));
+    }
+    divide(a, o.b);
+}
+
+fn main() {
+    check_folds();
+    check_map();
+    let t = match spawn(fn () => run_divide()) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    let _ = join(t);
+}
