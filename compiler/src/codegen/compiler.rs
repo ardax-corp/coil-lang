@@ -8197,7 +8197,12 @@ impl Compiler {
             let Some(label) = self.fn_entry_labels.get(&fqn).copied() else {
                 continue;
             };
-            let type_id = self.checker.class_type_id(&owner);
+            let mut type_id = self.checker.class_type_id(&owner);
+            // A `drop` that keeps nothing of `self` may run where the object
+            // is freed early.
+            if type_id < common::EARLY_DROP_FLAG && self.program_effects.drop_keeps_nothing(&owner) {
+                type_id |= common::EARLY_DROP_FLAG;
+            }
             self.bytecode
                 .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
             self.bytecode

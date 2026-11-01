@@ -23,19 +23,23 @@
 //!
 //! Each free is a `Builtin::FreeEarly` of the local, then a `Clear` of it.
 //! The VM skips what it cannot free safely (interned strings, shared unit
-//! variants, objects with a `drop`, anything while a collection is under
-//! way), so a free never needs more than the escape facts. The tracing GC
+//! variants, objects whose `drop` may keep `self`, anything while a
+//! collection is under way), so a free never needs more than the escape
+//! facts. An object whose `drop` keeps nothing of `self` has its `drop` run
+//! at the free (RAII step 6), so a value the block or `return` yields is
+//! computed before the free. The tracing GC
 //! stays the backstop for everything else.
 
 use std::collections::HashMap;
 
 use super::escape::{leaf, no_heap, result_exprs, CallLookup, Escape, Src};
-use super::{is_vec, BinOp, Builtin, Callee, HirBody, HirId, HirKind, HirModule, LocalId, LocalKind, MakeKind, VEC_MUTATORS};
+use super::{is_vec, BinOp, Builtin, Callee, HirBody, HirId, HirKind, HirModule, LocalId, LocalKind, VEC_MUTATORS};
 use crate::hir::{HirExpr, HirFlags, HirLocal, IndexKind, Span};
+use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{self, Ty};
 
 /// `body` with early frees added, or `None` when it has no place for one.
-pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
+pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
     if body.is_coro || body.root.is_none() {
         return None;
     }
@@ -69,7 +73,7 @@ pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_
     let parents = parents(body);
     let temps = call_temps(body, &mut e);
     let linear = linear_locals(body, &mut e, &parents, stored);
-    let locals = block_locals(body, &mut e, kept, &linear);
+    let locals = block_locals(checker, body, &mut e, kept, &linear);
     let chains = concat_temps(body, &mut e, &parents);
     let scrutinees = match_temps(body, &mut e, &parents, kept);
     let takes = take_calls(body, &mut e, &parents, stored, host);
@@ -330,7 +334,7 @@ fn vec_mutator(body: &HirBody, callee: &Callee, args: &[HirId]) -> bool {
 
 /// `(block, local)` for every `let` local whose object nothing else
 /// reaches, with the block that declares it.
-fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &HashMap<LocalId, (Src, bool)>) -> Vec<(HirId, LocalId)> {
+fn block_locals(checker: &Checker, body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &HashMap<LocalId, (Src, bool)>) -> Vec<(HirId, LocalId)> {
     let parents = parents(body);
     // Each local's `let`s, and every node that names it.
     let mut lets: HashMap<LocalId, Vec<HirId>> = HashMap::new();
@@ -381,8 +385,9 @@ fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &Hash
         }
         // A class local read only through its fields lives in frame slots
         // (lowering's SROA); freeing it would make it a whole-object use.
+        // A class with a `drop` stays an object, and its free runs the `drop`.
         if let HirKind::Let { init: Some(i), .. } = body.expr(*decl).kind
-            && matches!(body.expr(i).kind, HirKind::Make { kind: MakeKind::Class(_), .. })
+            && crate::hir::lower::sroa_class(body, checker, i).is_some()
             && uses.get(&l).is_none_or(|us| us.iter().all(|u| bases.contains(u)))
         {
             continue;
@@ -920,7 +925,7 @@ fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
         return;
     }
     let tail = match tail {
-        Some(t) if reads(body, t, local) => {
+        Some(t) if computes(body, t, local) => {
             let ty = body.expr(t).ty.clone();
             let r = temp(body, ty.clone());
             let keep = push(body, HirKind::Let { local: r, init: Some(t) }, Some(ty::unit()), span);
@@ -941,7 +946,7 @@ fn free_before_return(body: &mut HirBody, ret: HirId, local: LocalId) {
     let span = body.expr(ret).span;
     let mut stmts = Vec::new();
     let value = match value {
-        Some(v) if reads(body, v, local) => {
+        Some(v) if computes(body, v, local) => {
             let ty = body.expr(v).ty.clone();
             let r = temp(body, ty.clone());
             stmts.push(push(body, HirKind::Let { local: r, init: Some(v) }, Some(ty::unit()), span));
@@ -957,14 +962,14 @@ fn free_before_return(body: &mut HirBody, ret: HirId, local: LocalId) {
     x.node = None;
 }
 
-/// Whether the subtree at `id` reads `local`.
-fn reads(body: &HirBody, id: HirId, local: LocalId) -> bool {
-    let mut work = vec![id];
-    while let Some(at) = work.pop() {
-        if matches!(body.expr(at).kind, HirKind::Local(l) if l == local) {
-            return true;
-        }
-        work.extend(super::super::lower::children(body, at));
+/// Whether the value at `id` must be computed before `local` is freed: it
+/// reads `local`, or it is more than a literal or another local's read (a
+/// `drop` the free runs comes after the value, as a `defer` does).
+fn computes(body: &HirBody, id: HirId, local: LocalId) -> bool {
+    match body.expr(id).kind {
+        HirKind::Lit(_) => false,
+        HirKind::Local(l) => l == local,
+        _ => true,
     }
-    false
 }
+
