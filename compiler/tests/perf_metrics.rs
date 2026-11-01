@@ -2309,3 +2309,31 @@ fn main() {
     let allocs = machine::alloc_count();
     assert!(allocs < 100, "the table should be built once, not per call: {allocs} allocations");
 }
+
+/// #2182: a bounded `impl` method taking a function over the class
+/// parameter (`V -> V f`) is called through its clone at the call's
+/// types, as the same method in an unbounded `impl` is, not through the
+/// shared body with dictionaries.
+#[test]
+fn bounded_method_with_fn_param_takes_its_clone() {
+    let src = "
+class Box<V> { pub v: V, }
+impl Box<V: Eq> {
+    pub fn apply_eq(V -> V f) -> V { self.v = f(self.v); return self.v; }
+}
+fn main() {
+    let b = new Box(1);
+    if b.apply_eq(fn (int c) => c + 1) != 2 { panic(\"apply_eq\"); }
+}
+";
+    let (bc, pipeline) = compile_src_at(src, compiler::OptLevel::None);
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "main", bc.len());
+    let (clone, _) = fn_pc_range(&syms, "Box::apply_eq$inst$int", bc.len());
+    let calls: Vec<usize> = bc[start..end]
+        .iter()
+        .filter(|b| *b.bytecode() == Instruction::CALL)
+        .map(|b| (b.operand_u32() & 0xFF_FFFF) as usize)
+        .collect();
+    assert!(calls.contains(&clone), "`main` should call `Box::apply_eq$inst$int` (pc {clone}); calls {calls:?}");
+}
