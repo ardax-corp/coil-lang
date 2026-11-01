@@ -1,0 +1,24 @@
+// Doc stubs for the builtin `entropy` module (hover docs; never compiled).
+
+/// Returns `n` bytes from the operating system's cryptographically secure
+/// random source.
+///
+/// Use it for keys, tokens, nonces, salts and random UUIDs. Every call
+/// returns fresh bytes; nothing is seeded or cached in the process. It needs
+/// no `--allow-*` grant. For a fast, repeatable sequence (simulations,
+/// tests), seed the stdlib `random::Rng` instead, for example from a few of
+/// these bytes.
+///
+/// A negative `n` panics, and so does an OS source that fails (it never
+/// falls back to a weaker one).
+///
+/// # Examples
+///
+/// ```
+/// use entropy::{bytes};
+/// # use tests::assert;
+/// let key = bytes(32);
+/// assert!(key.len() == 32);
+/// assert!(bytes(0).len() == 0);
+/// ```
+fn bytes(int n) -> Vec<byte> {}
