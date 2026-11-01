@@ -1,0 +1,16 @@
+// @expected E0149 — sharing the object that holds the borrowed field while `c` lives (#2191).
+class Config {
+    pub port: int,
+}
+
+class App {
+    pub config: Config,
+}
+
+fn main() {
+    let a = new App(new Config(1));
+    let c = mut a.config;
+    let b = a;
+    c.port = 80;
+    let _ = b.config.port;
+}

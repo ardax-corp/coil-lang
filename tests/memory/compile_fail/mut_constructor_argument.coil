@@ -1,0 +1,14 @@
+// @expected E0150 — a `mut` argument to a constructor has no effect (#2191).
+class Box {
+    pub x: int,
+}
+
+class Holder {
+    pub b: Box,
+}
+
+fn main() {
+    let n = new Box(1);
+    let h = new Holder(mut n);
+    let _ = h.b.x;
+}
