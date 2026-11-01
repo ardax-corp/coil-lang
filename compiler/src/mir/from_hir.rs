@@ -576,6 +576,9 @@ pub struct HirMirInput<'a> {
     pub packs: &'a HashMap<u32, Vec<HirDictOp>>,
     /// The `unwind_resume` native a `defer`'s cleanup pad ends in.
     pub unwind_native: Option<u16>,
+    /// The `coro_close` native a `for` loop over a generator calls when
+    /// it is left early.
+    pub coro_close_native: Option<u16>,
     /// Field reads and writes on records: the field's slot (records are
     /// slotted objects, their fields sorted by name) and word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
@@ -654,6 +657,16 @@ struct Loop {
     defers: usize,
 }
 
+/// What leaving a block early has to do, innermost last.
+#[derive(Clone, Copy)]
+enum Open {
+    /// A `defer`: its armed flag and body.
+    Defer(LocalId, HirId),
+    /// A `for` loop over a generator: close the generator (a `break` out
+    /// of it, or a `return` from its body).
+    Coro(ValueId),
+}
+
 struct Lower<'a> {
     hir: &'a HirBody,
     inp: &'a HirMirInput<'a>,
@@ -714,7 +727,7 @@ struct Lower<'a> {
     /// at the end of its block, so a block's own are dropped from here as
     /// it ends; a `return` runs all of these, a `break` or `continue` those
     /// its loop body opened.
-    defers: Vec<(LocalId, HirId)>,
+    defers: Vec<Open>,
     /// Every `defer` lowered, in source order, for the unwind pad: it runs
     /// the armed ones, and one whose block ended is disarmed.
     lowered_defers: Vec<(LocalId, HirId)>,
@@ -1717,7 +1730,14 @@ impl Lower<'_> {
     /// a path to here did not reach.
     fn run_defers_from(&mut self, start: usize) -> Result<(), Refusal> {
         for k in (start..self.defers.len()).rev() {
-            let (flag, body) = self.defers[k];
+            let (flag, body) = match self.defers[k] {
+                Open::Defer(flag, body) => (flag, body),
+                Open::Coro(h) => {
+                    let native = self.inp.coro_close_native.ok_or("coro close native")?;
+                    self.b.ins_host_invoke(native, vec![h]).map_err(mir)?;
+                    continue;
+                }
+            };
             let armed = self.b.use_local(flag, MirTy::Bool).map_err(mir)?;
             let (run, skip) = (self.b.create_block(), self.b.create_block());
             self.b.branch(armed, run, skip).map_err(mir)?;
@@ -2745,7 +2765,7 @@ impl Lower<'_> {
                 let flag = *self.defer_flags.get(&id.0).ok_or("defer")?;
                 let on = self.b.ins_const(MirConst::Bool(true)).map_err(mir)?;
                 self.b.def_local(flag, on).map_err(mir)?;
-                self.defers.push((flag, *body));
+                self.defers.push(Open::Defer(flag, *body));
                 self.lowered_defers.push((flag, *body));
                 Ok(Val::Unit)
             }
@@ -3676,16 +3696,35 @@ impl Lower<'_> {
         let done = self.b.ins_done_coro(h).map_err(mir)?;
         self.b.branch(done, exit, body_b).map_err(mir)?;
         self.switch(body_b);
+        // A loop over a generator it made (not one a local or field holds,
+        // which a later `resume` may go on with) closes it when left
+        // early: a `break` before it leaves (the loop's `defers` mark is
+        // above the close), a `return` with the open defers. A `continue`
+        // does not.
+        let owned = !matches!(self.hir.expr(iterable).kind, HirKind::Local(_) | HirKind::Field { .. } | HirKind::Index { .. });
+        let open = self.defers.len();
+        if owned {
+            self.defers.push(Open::Coro(h));
+        }
         self.loops.push(Loop {
             cont: head,
             cont_used: false,
-            exit: Some(exit),
+            exit: None,
             defers: self.defers.len(),
         });
         let live = self.effect(body);
-        self.loops.pop();
+        let lp = self.loops.pop().expect("loop pushed above");
+        self.defers.truncate(open);
         if live? {
             self.jump(head)?;
+        }
+        if let Some(brk) = lp.exit {
+            self.switch(brk);
+            if owned {
+                let native = self.inp.coro_close_native.ok_or("coro close native")?;
+                self.b.ins_host_invoke(native, vec![h]).map_err(mir)?;
+            }
+            self.jump(exit)?;
         }
         self.switch(exit);
         Ok(Val::Unit)
