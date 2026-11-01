@@ -3,7 +3,8 @@
 // after the block. A block-end free gives back the object itself, so what
 // it holds is dropped by the collector. A `drop` that keeps `self` is left
 // to the collector. A panic in a `drop` run at a free unwinds from there
-// like any call.
+// like any call. A `defer` elsewhere in the function does not stop a free;
+// a local the `defer` captures is left to the collector.
 use tests::assert;
 use gc::collect;
 use task::{scope, Scope, TaskError};
@@ -139,4 +140,49 @@ test("a panic in a drop run at an early free unwinds from the free") {
         ),
     );
     assert!(LOG == "1[loud][defer]", LOG);
+}
+
+fn with_defer() {
+    defer {
+        say("d");
+    }
+    {
+        let r = new Res("a");
+        say(r.name.len().show());
+    }
+    say("|");
+}
+
+test("a defer in the function does not stop a block-end free") {
+    LOG = "";
+    with_defer();
+    assert!(LOG == "1[a]|d", LOG);
+}
+
+fn returns_with_defer() -> int {
+    defer {
+        say("d");
+    }
+    let r = new Res("ab");
+    return r.name.len();
+}
+
+test("a free before a return runs before the function's defers") {
+    LOG = "";
+    assert!(returns_with_defer() == 2);
+    assert!(LOG == "[ab]d", LOG);
+}
+
+fn defer_reads() {
+    let r = new Res("b");
+    defer use (r) {
+        say(r.name);
+    }
+    say(r.name.len().show());
+}
+
+test("a local a defer captures stays alive until the defer has run") {
+    LOG = "";
+    defer_reads();
+    assert!(LOG == "1b", LOG);
 }
