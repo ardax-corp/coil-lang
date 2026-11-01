@@ -1,0 +1,48 @@
+// Another module's generic class methods, cloned at this module's types
+// and spliced into its bodies (cross-module inlining): values at `int` and
+// `string`, a helper of that module, field writes, and a panic inside the
+// spliced code unwinding through a `defer`. The thread's `b` is a copy
+// (copy-on-write), so its reads do not count in `main`'s.
+// @output 326 3 b z\nhits 2\nhits 2\npanicked\n
+use io::sync::println;
+use string::format;
+use thread::{join, spawn};
+use xm_bag::{Bag, bag};
+
+fn total(Bag<int> b, int n) -> int {
+    let t = 0;
+    let i = 0;
+    while i < n {
+        t = t + b.at_or(i, 10);
+        if b.has(i) {
+            t = t + 100;
+        }
+        i = i + 1;
+    }
+    return t;
+}
+
+fn overrun(Bag<int> b) {
+    defer use (b) {
+        let _ = println(format("hits %i", b.hits()));
+    }
+    let _ = b.at(5);
+}
+
+fn main() {
+    let b = bag([1, 2, 3]);
+    let s = bag(["a", "b"]);
+    let _ = println(format("%i %i %s %s", total(b, 5), b.len(), s.at_or(1, "z"), s.at_or(7, "z")));
+    let _ = b.at(0);
+    let _ = b.at(2);
+    let _ = println(format("hits %i", b.hits()));
+    let t = match spawn(fn () use (b) => overrun(b)) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    let what = match join(t) {
+        Result::Ok(_) => "no panic",
+        Result::Err(_) => "panicked",
+    };
+    let _ = println(what);
+}
