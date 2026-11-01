@@ -111,6 +111,11 @@ pub enum ErrorCode {
     DeferInLoop,
     /// A local `Stream` the body opens is never closed or handed on.
     UnclosedStream,
+    /// A `mut` borrow's source is shared or replaced while the borrow lives.
+    BorrowConflict,
+    /// `mut` where it borrows nothing: outside a `let` / `for` binding, or
+    /// of a value that is copied (a scalar).
+    MisplacedMut,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -234,6 +239,8 @@ impl ErrorCode {
             Self::ExitInDefer => "E0146",
             Self::DeferInLoop => "E0147",
             Self::UnclosedStream => "E0148",
+            Self::BorrowConflict => "E0149",
+            Self::MisplacedMut => "E0150",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -339,6 +346,8 @@ impl ErrorCode {
             Self::ExitInDefer => "`defer` body leaves its block",
             Self::DeferInLoop => "`defer` inside a loop runs once",
             Self::UnclosedStream => "local `Stream` is never closed",
+            Self::BorrowConflict => "borrowed object shared or replaced while the borrow lives",
+            Self::MisplacedMut => "`mut` borrows nothing here",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -452,6 +461,8 @@ mod tests {
             | ExitInDefer
             | DeferInLoop
             | UnclosedStream
+            | BorrowConflict
+            | MisplacedMut
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -547,6 +558,8 @@ mod tests {
             ExitInDefer,
             DeferInLoop,
             UnclosedStream,
+            BorrowConflict,
+            MisplacedMut,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

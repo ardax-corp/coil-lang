@@ -1,0 +1,16 @@
+// @expected E0149 — replacing the borrowed place's root while `e` lives (#2191).
+class Box {
+    pub x: int,
+}
+
+class Holder {
+    pub b: Box,
+}
+
+fn main() {
+    let h = new Holder(new Box(1));
+    let e = mut h.b;
+    h = new Holder(new Box(100));
+    e.x = 9;
+    let _ = h.b.x;
+}

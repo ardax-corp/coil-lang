@@ -233,6 +233,7 @@ impl BodyBuilder {
                 root: None,
                 aliased_fn_values: Vec::new(),
                 fn_key_sites: Vec::new(),
+                stray_muts: Vec::new(),
             },
             scopes: vec![HashMap::new()],
             outer: Vec::new(),
@@ -327,9 +328,54 @@ impl BodyBuilder {
                     _ => {}
                 }
             }
-            for l in borrows {
-                self.body.locals[l.0 as usize].borrow = true;
+            let mut consumed: HashSet<HirId> = HashSet::new();
+            for e in &self.body.exprs {
+                match &e.kind {
+                    HirKind::Let { init: Some(v), .. } if self.mut_marks.contains(v) => {
+                        consumed.insert(*v);
+                    }
+                    HirKind::ForIn { iterable, .. } if self.mut_marks.contains(iterable) => {
+                        consumed.insert(*iterable);
+                    }
+                    _ => {}
+                }
             }
+            // E0150: a `mut` nothing binds, as in `new Holder(mut n)`.
+            let mut stray: Vec<(Span, Option<String>)> = self
+                .mut_marks
+                .iter()
+                .filter(|v| !consumed.contains(v))
+                .map(|v| (self.body.exprs[v.0 as usize].span, None))
+                .collect();
+            for l in borrows {
+                let local = &mut self.body.locals[l.0 as usize];
+                local.borrow = true;
+                // E0150: a borrow of a scalar binds a copy.
+                if let Some(ty) = &local.ty
+                    && matches!(
+                        crate::typechecking::ty::strip_readonly(ty),
+                        Ty::Con(n) if matches!(n.as_str(), "int" | "float" | "bool" | "byte" | "char" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64")
+                    )
+                {
+                    let ty = ty.to_string();
+                    let at = self.body.exprs.iter().find_map(|e| match &e.kind {
+                        HirKind::Let { local: x, init: Some(v) } if *x == l => Some(self.body.exprs[v.0 as usize].span),
+                        HirKind::ForIn { iterable, .. } if consumed.contains(iterable) => {
+                            let mut binds = Vec::new();
+                            if let HirKind::ForIn { pat, .. } = &e.kind {
+                                super::effects::pat_binds(pat, &mut binds);
+                            }
+                            binds.contains(&l).then(|| self.body.exprs[iterable.0 as usize].span)
+                        }
+                        _ => None,
+                    });
+                    if let Some(at) = at {
+                        stray.push((at, Some(ty)));
+                    }
+                }
+            }
+            stray.sort_by_key(|(s, _)| (s.0, s.1));
+            self.body.stray_muts = stray;
         }
         self.body
     }

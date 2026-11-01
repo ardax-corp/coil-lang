@@ -1,0 +1,12 @@
+// @expected E0149 — the borrowed object gets a second name while `c` lives (#2191).
+class Box {
+    pub x: int,
+}
+
+fn main() {
+    let m = new Box(1);
+    let c = mut m;
+    let m2 = m;
+    c.x = 5;
+    let _ = m2.x;
+}

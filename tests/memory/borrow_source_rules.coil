@@ -1,0 +1,58 @@
+// A `mut` borrow names its source's object until its last use: the source
+// can be read and written meanwhile, and shared or replaced once the borrow
+// is done (#2191).
+use tests::assert;
+
+class Box {
+    pub x: int,
+}
+
+class Holder {
+    pub b: Box,
+}
+
+test("the source is read and written while a borrow lives") {
+    let m = new Box(1);
+    let c = mut m;
+    m.x = 2;
+    c.x += 1;
+    assert!(m.x == 3);
+    assert!(c.x == 3);
+}
+
+test("sharing the source after the borrow's last use keeps a copy") {
+    let m = new Box(1);
+    let c = mut m;
+    c.x = 5;
+    let m2 = m;
+    m.x = 6;
+    assert!(m2.x == 5);
+    assert!(m.x == 6);
+}
+
+test("replacing the root after the borrow's last use") {
+    let h = new Holder(new Box(1));
+    let e = mut h.b;
+    e.x = 9;
+    assert!(h.b.x == 9);
+    h = new Holder(new Box(100));
+    assert!(h.b.x == 100);
+}
+
+test("sharing a field below the borrowed object copies on write") {
+    let h = new Holder(new Box(1));
+    let c = mut h;
+    let b = h.b;
+    c.b.x = 7;
+    assert!(h.b.x == 7);
+    assert!(b.x == 1);
+}
+
+test("a loop borrow writes each element in place") {
+    let v = [new Box(1), new Box(2)];
+    for mut b in v {
+        b.x *= 10;
+    }
+    assert!(v[0].x == 10);
+    assert!(v[1].x == 20);
+}
