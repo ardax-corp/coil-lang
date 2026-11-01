@@ -1232,7 +1232,7 @@ impl<'m> Enc<'m> {
             _ => {}
         }
         // Unknown: any sequence it was handed, or any receiver, may change.
-        if matches!(callee, Callee::Method { .. } | Callee::Value(_)) || vals.iter().any(|v| matches!(v, V::Seq { .. } | V::Obj(_))) {
+        if matches!(callee, Callee::Method { .. } | Callee::Value(_) | Callee::Resolved(_)) || vals.iter().any(|v| matches!(v, V::Seq { .. } | V::Obj(_))) {
             self.havoc_heap(&mut st);
         }
         let v = self.invent(ty, &mut st);

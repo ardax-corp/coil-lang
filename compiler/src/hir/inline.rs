@@ -548,7 +548,7 @@ impl Inliner<'_> {
             HirKind::Lit(_) | HirKind::Local(_) => Ok(()),
             HirKind::Call { .. } if (self.opaque)(e) => Err(()),
             HirKind::Call { callee, args }
-                if matches!(callee, Callee::Named { .. } | Callee::Method { .. })
+                if matches!(callee, Callee::Named { .. } | Callee::Method { .. } | Callee::Resolved(_))
                     || matches!(callee, Callee::Value(v) if matches!(b.expr(*v).kind, HirKind::Local(_))) =>
             {
                 // A call's own arguments are bound in order ahead of the
@@ -617,7 +617,7 @@ impl Inliner<'_> {
         let at = |x: HirId, zero: bool| self.in_place_site(x, callee_of, zero);
         match &b.expr(s).kind {
             HirKind::Call { callee, args }
-                if (matches!(callee, Callee::Named { .. } | Callee::Method { .. })
+                if (matches!(callee, Callee::Named { .. } | Callee::Method { .. } | Callee::Resolved(_))
                     || matches!(callee, Callee::Value(v) if matches!(b.expr(*v).kind, HirKind::Local(_))))
                     && (s.0 as usize) < self.original
                 && let Some((callee, shape)) = callee_of(s)

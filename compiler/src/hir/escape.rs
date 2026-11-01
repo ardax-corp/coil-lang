@@ -89,6 +89,7 @@ pub(super) fn summarize(cx: &Cx<'_>, w: &Walk<'_>) -> (u64, u64, bool) {
         Callee::Named { name, def, .. } => Some(cx.named(w, name, *def)),
         Callee::Method { name } => cx.method(w, *args.first()?, name).map(|(s, _)| s),
         Callee::Value(f) => cx.fn_value(w, *f),
+        Callee::Resolved(_) => None,
     };
     let mut e = Escape::new(cx.module, body, &lookup);
     e.solve_locals();
@@ -652,6 +653,7 @@ pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLook
                             let name = match callee {
                                 Callee::Named { name, .. } | Callee::Method { name } => name.rsplit("::").next().unwrap_or(name).to_string(),
                                 Callee::Value(_) => "a function value".to_string(),
+                                Callee::Resolved(r) => r.key.rsplit("::").next().unwrap_or(&r.key).to_string(),
                             };
                             push(id, format!("is passed to `{name}`, which keeps it"));
                         }

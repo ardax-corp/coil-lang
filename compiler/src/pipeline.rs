@@ -1519,7 +1519,23 @@ impl Pipeline {
                 .expect("parse_expand_check_file filled cache");
             compiler.set_source_text(cached.source());
             let ast = cached.ast_mut().expect("parsed");
-            let bytecode = compiler.compile_prepared_module(namespace.as_str(), ast);
+            let begun = compiler.compile_prepared_module_begin(namespace.as_str(), ast);
+            // The other modules' method clones this one calls compile
+            // first, for its typed inlining to splice.
+            if begun {
+                self.emit_foreign_clones();
+            }
+            let compiler = self.compiler.get_mut().expect("compiler initialized");
+            let cached = self
+                .ast_cache
+                .get_mut(&file)
+                .expect("parse_expand_check_file filled cache");
+            let ast = cached.ast_mut().expect("parsed");
+            let bytecode = if begun {
+                compiler.compile_prepared_module_finish(namespace.as_str(), ast)
+            } else {
+                Vec::new()
+            };
             let seq = compiler.program_seq();
             if !compiler.may_clone_from(seq) {
                 cached.release_tree();

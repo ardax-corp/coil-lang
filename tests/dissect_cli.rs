@@ -406,3 +406,18 @@ fn release_flag(coil: &std::path::Path) -> &'static [&'static str] {
         _ => &[],
     }
 }
+
+/// Cross-module inlining: `total` calls another module's generic class
+/// methods at `int` (`Bag::at_or`, `Bag::has`), whose clones are spliced
+/// into it, so its code calls neither.
+#[test]
+fn dissect_cross_module_clones_are_spliced() {
+    ensure_coil_dissect();
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/modules/cross_module_clone_inline.coil");
+    let out = coil_dissect(&coil_bin(), None, &entry).args(["-A", "--no-build-cache", "--fn", "total"]).output().expect("run coil dissect");
+    assert!(out.status.success(), "dissect failed: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("total"), "no `total` in the dump:\n{text}");
+    let calls: Vec<&str> = text.lines().filter(|l| l.contains("CALL") && (l.contains("at_or$inst") || l.contains("has$inst"))).collect();
+    assert!(calls.is_empty(), "`total` still calls the clones: {calls:?}");
+}

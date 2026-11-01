@@ -2050,6 +2050,47 @@ impl Compiler {
         }
     }
 
+    /// Before a module's bodies are emitted: plan each plain function body
+    /// once to learn which other modules' method clones it calls, and
+    /// queue those to compile first ([`Self::emit_foreign_clones`]), so
+    /// their resolved bodies are there when this module's bodies inline.
+    /// Planning here only fills `method_clone_plans`; its results are
+    /// dropped.
+    fn queue_early_foreign_clones(&mut self) {
+        if !self.inline_cost.inline_across_modules || !self.opt_options.hir_inline_heap || self.debugger_attached {
+            return;
+        }
+        self.hir_plan_bodies_for_clones();
+        // This module's own methods register as its bodies compile: every
+        // clone source known now is an earlier module's.
+        let foreign: Vec<String> = self
+            .method_clone_plans
+            .borrow()
+            .iter()
+            .filter(|(key, plan)| {
+                !self.inst_clones.values().any(|n| n == *key)
+                    && self.inst_clone_srcs.get(&plan.src).is_some_and(|src| src.method_of.is_some())
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in foreign {
+            self.hir_request_method_clone_pub(&key);
+        }
+        // Other modules' clones go to their contexts now; this module's
+        // own stay queued for its compile.
+        let queued = std::mem::take(&mut self.inst_clone_queue);
+        for req in queued {
+            let src = &self.inst_clone_srcs[&req.src];
+            let foreign = src.method_of.is_some()
+                && self.module_ctxs.get(&src.program).is_some_and(|ctx| ctx.knows_tys(&req.lookup) && ctx.layout_safe(src.span));
+            if foreign {
+                self.foreign_clone_queue.push(req);
+            } else {
+                self.inst_clone_queue.push_back(req);
+            }
+        }
+    }
+
     /// Clones of other modules' methods no module context is left for:
     /// the thunks calling their shared bodies.
     fn emit_foreign_clone_thunks(&mut self) {
@@ -7622,6 +7663,21 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
         prepared: bool,
     ) {
+        if self.compile_unfused_begin(module, ast, prepared) {
+            self.compile_unfused_finish(module, ast);
+        }
+    }
+
+    /// The first half of [`Self::compile_unfused`]: check, HIR and its
+    /// module-wide passes. `false` when the module stops there (the checker
+    /// rejected it). Its namespace to restore is kept for
+    /// [`Self::compile_unfused_finish`].
+    fn compile_unfused_begin<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+        prepared: bool,
+    ) -> bool {
         // No context left to compile an earlier module's queued clones in.
         self.emit_foreign_clone_thunks();
         let ns = self.namespace.clone();
@@ -7676,7 +7732,7 @@ impl Compiler {
                 .iter()
                 .any(|m| *m.kind() == reporting::MessageKind::ERROR)
             {
-                return;
+                return false;
             }
         } else {
             self.checker.set_current_module(module);
@@ -7790,6 +7846,15 @@ impl Compiler {
             }
             self.hir_module = Some(hir);
         }
+        self.module_outer_namespace = Some(ns);
+        true
+    }
+
+    /// The second half of [`Self::compile_unfused`]: function bodies,
+    /// thunks, and the context kept for later modules' clones.
+    fn compile_unfused_finish<'compiler>(&mut self, module: &str, ast: &mut (SimpleSpan, Box<Expression<'compiler>>)) {
+        let ns = self.module_outer_namespace.take().unwrap_or_default();
+        let bare_cases = self.checker.bare_cases().clone();
         if self.auto_par && self.opt_options.auto_par {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
@@ -8779,6 +8844,50 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) -> Vec<Byte> {
         self.compile_module_inner(module, ast, true)
+    }
+
+    /// [`Self::compile_prepared_module`] in two calls, so the caller can
+    /// compile the clones of other modules' methods this module calls in
+    /// between ([`Self::emit_foreign_clones`]): their bodies, kept with
+    /// their calls resolved, are then there for this module's typed
+    /// inlining to splice. `false` when the module stops at its check.
+    pub fn compile_prepared_module_begin<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+    ) -> bool {
+        let mut ok = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ok = self.compile_unfused_begin(module, ast, true);
+        }));
+        Self::rethrow_unless_recursion_limit(result);
+        if ok {
+            self.queue_early_foreign_clones();
+        }
+        ok
+    }
+
+    /// The rest of a module [`Self::compile_prepared_module_begin`] began.
+    pub fn compile_prepared_module_finish<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+    ) -> Vec<Byte> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.compile_unfused_finish(module, ast);
+        }));
+        Self::rethrow_unless_recursion_limit(result);
+        Vec::new()
+    }
+
+    /// Only our own recursion-limit signal is swallowed (its message is
+    /// already recorded in `do_compile`); any other panic is a real bug.
+    fn rethrow_unless_recursion_limit(result: std::thread::Result<()>) {
+        if let Err(payload) = result
+            && payload.downcast_ref::<super::CodegenRecursionLimitExceeded>().is_none()
+        {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     fn compile_module_inner<'compiler>(

@@ -9252,3 +9252,147 @@ fn a_callee_with_a_long_loop_keeps_its_call() {
     let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
     assert_eq!(calls, 1);
 }
+
+/// Calls in their `Callee::Resolved` form (cross-module inlining) plan as
+/// the named and method calls they came from: free functions, statics,
+/// methods, a mono clone, two-slot `Option<int>` results and recursion.
+#[test]
+fn resolved_callees_plan_as_their_named_calls() {
+    let src = r#"
+class Counter {
+    pub n: int,
+}
+
+impl Counter {
+    pub fn bump(int by) -> int {
+        self.n = self.n + by;
+        return self.n;
+    }
+    pub static fn make(int n) -> Counter {
+        return new Counter(n);
+    }
+}
+
+fn add(int a, int b) -> int {
+    return a + b;
+}
+
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Option::Some(x / 2);
+    }
+    return Option::None;
+}
+
+fn fib(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn first<T>(Vec<T> v) -> T {
+    return v[0];
+}
+
+fn label(string s) -> string {
+    return s + "!";
+}
+
+fn main() {
+    let c = Counter::make(1);
+    let total = 0;
+    let i = 0;
+    while i < 10 {
+        total = add(total, c.bump(i));
+        i = i + 1;
+    }
+    if total != 175 {
+        panic "add / bump";
+    }
+    let h = half(14) ?? 0;
+    if h != 7 || (half(3) ?? -1) != -1 {
+        panic "half";
+    }
+    if fib(15) != 610 {
+        panic "fib";
+    }
+    if first([4, 5]) != 4 || first(["a", "b"]) != "a" {
+        panic "first";
+    }
+    if label("hi") != "hi!" {
+        panic "label";
+    }
+}
+"#;
+    super::emit_hir::RESOLVED_REPLAN_CHECK.with(|c| c.set(Some(0)));
+    run_src_ok(src);
+    let checked = super::emit_hir::RESOLVED_REPLAN_CHECK.with(|c| c.replace(None)).unwrap_or(0);
+    assert!(checked >= 8, "only {checked} calls were checked in resolved form");
+}
+
+/// A generic class's method clones are kept with their calls resolved
+/// and their types qualified (cross-module inlining): a body that only
+/// calls, reads fields and indexes is kept; one holding a lambda is not.
+#[test]
+fn method_clones_keep_resolved_bodies() {
+    use crate::hir::HirKind;
+    let src = r#"
+class Bag<T> {
+    pub items: Vec<T>,
+}
+
+impl Bag<T> {
+    pub fn add(T x) {
+        self.items.push(x);
+    }
+    pub fn at_or(int i, T d) -> T {
+        if i < self.items.len() {
+            return self.items[i];
+        }
+        return d;
+    }
+    pub fn count_if(T -> bool keep) -> int {
+        let n = 0;
+        for x in self.items {
+            if keep(x) {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+}
+
+fn main() {
+    let b: Bag<int> = new Bag(Vec::new());
+    b.add(3);
+    b.add(4);
+    if b.at_or(1, 0) != 4 || b.at_or(9, -1) != -1 {
+        panic "at_or";
+    }
+    if b.count_if(fn (int x) => x > 3) != 1 {
+        panic "count_if";
+    }
+}
+"#;
+    let mut pipeline = crate::Pipeline::new();
+    if pipeline.compile_src(src).is_err() {
+        panic!("compile failed: {:?}", pipeline.messages().iter().map(|m| m.message()).collect::<Vec<_>>());
+    }
+    let kept = &pipeline.compiler().hir_resolved_clones;
+    let key = |m: &str| kept.keys().find(|k| k.starts_with(&format!("Bag::{m}$"))).cloned();
+    let add = key("add").unwrap_or_else(|| panic!("Bag::add not kept: {:?}", kept.keys().collect::<Vec<_>>()));
+    let at_or = key("at_or").expect("Bag::at_or kept");
+    let resolved = |k: &str| kept[k].exprs.iter().filter(|e| matches!(e.kind, HirKind::Call { callee: crate::hir::Callee::Resolved(_), .. })).count();
+    assert!(resolved(&add) >= 1, "Bag::add keeps its push call resolved");
+    for k in [&add, &at_or] {
+        let b = &kept[k];
+        assert!(b.exprs.iter().all(|e| e.node.is_none()), "{k} keeps node ids");
+        assert!(
+            b.exprs.iter().all(|e| !matches!(e.kind, HirKind::Call { callee: crate::hir::Callee::Named { .. } | crate::hir::Callee::Method { .. }, .. })
+                || matches!(&e.kind, HirKind::Call { callee: crate::hir::Callee::Method { name }, .. } if name == "len")),
+            "{k} keeps an unresolved call"
+        );
+    }
+    assert!(key("count_if").is_none(), "a body calling a function value is not kept");
+}

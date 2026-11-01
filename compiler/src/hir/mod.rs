@@ -334,6 +334,23 @@ pub enum Callee {
     Method { name: String },
     /// A function value.
     Value(HirId),
+    /// A call another module's context already planned (cross-module
+    /// inlining): codegen takes its key and ABI verbatim, with no sidecar
+    /// lookups, overloads or dictionaries. Analyses know nothing of the
+    /// callee and treat it as an unknown function.
+    Resolved(Box<ResolvedCall>),
+}
+
+/// A [`Callee::Resolved`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedCall {
+    /// The function table key the call goes to (for printing and
+    /// diagnostics).
+    pub key: String,
+    /// Its plan, by index in codegen's table of resolved call plans: the
+    /// ABI, receiver boxing and instance dictionaries, all of it fixed
+    /// by types, none of it read from a frame or sidecar.
+    pub plan: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
