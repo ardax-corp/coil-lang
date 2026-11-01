@@ -1916,6 +1916,10 @@ fn foreign_fn_clone_is_specialized() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_fn_clone.coil");
     let syms = pipeline.program_debug().fn_symbols;
     for name in ["dict_lib::largest$inst$int", "dict_lib::larger$inst$int"] {
+        // `larger`'s clone may be inlined into `largest`'s (#2183).
+        if name.ends_with("larger$inst$int") && !syms.iter().any(|s| s.name == name) {
+            continue;
+        }
         let (start, end) = fn_pc_range(&syms, name, bc.len());
         let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
         for op in [Instruction::BoxValue, Instruction::MakeTuple, Instruction::CallIndirect] {
@@ -2336,4 +2340,29 @@ fn main() {
         .map(|b| (b.operand_u32() & 0xFF_FFFF) as usize)
         .collect();
     assert!(calls.contains(&clone), "`main` should call `Box::apply_eq$inst$int` (pc {clone}); calls {calls:?}");
+}
+
+/// #2183: a generic class's method calling another one of its methods, and
+/// the builtin `Hash` thunk for `string`, inline at ground types: a ground
+/// call of the outer method leaves no call, only `hash_string`'s
+/// `HostInvoke`.
+#[test]
+fn generic_class_method_clones_inline() {
+    let src = "
+class Box<V> { pub v: V, }
+impl Box<V: Hash> {
+    fn mix() -> int { let h = self.v.hash(); return h ^ (h >> 16); }
+    pub fn slot() -> int { return self.mix() & 7; }
+}
+fn main() {
+    let b = new Box(\"abc\");
+    if b.slot() < 0 { panic(\"slot\"); }
+}
+";
+    let (bc, pipeline) = compile_src_at(src, compiler::OptLevel::Standard);
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "main", bc.len());
+    let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+    assert!(!ops.contains(&Instruction::CALL), "`slot`, `mix` and the hash thunk should inline into `main`; ops={ops:?}");
+    assert!(ops.contains(&Instruction::HostInvoke), "the string hash should be its `HostInvoke`; ops={ops:?}");
 }
