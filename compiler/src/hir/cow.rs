@@ -1451,12 +1451,22 @@ impl Plan {
             }
         }
         for &step in &chain[1..] {
-            if cow_ty(checker, out.expr(step).ty.as_ref()) {
+            if cow_ty(checker, out.expr(step).ty.as_ref()) && !borrow_field(checker, out, step) {
                 stmts.push(unique_stmt(out, step, span));
             }
         }
         stmts
     }
+}
+
+/// Whether `place` is a view's `mut` field: the object it borrows was made
+/// unique when the view was built, and nothing shares it while the view
+/// lives (E0149), so a write through it needs no copy check.
+fn borrow_field(checker: &Checker, body: &HirBody, place: HirId) -> bool {
+    let HirKind::Field { base, name } = &body.expr(place).kind else {
+        return false;
+    };
+    crate::hir::view_lint::view_key(checker, body.expr(*base).ty.as_ref()).is_some_and(|key| checker.is_borrow_field(&key, name))
 }
 
 /// `place = unique(place)` for a place made of locals, fields, elements

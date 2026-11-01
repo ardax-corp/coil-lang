@@ -1,0 +1,45 @@
+// A view method chain in a hot loop: `c.slot(i).add(1)` builds a view over
+// `mut self` and writes through it. Once `slot` and `add` splice, the view
+// is a fresh object whose fields are only read, so it is scalar-replaced:
+// no allocation and no call per iteration.
+use string::format;
+use io::{stdout, write};
+use string::to_bytes;
+
+class Counts {
+    pub vals: Vec<int>,
+}
+
+view class Slot {
+    mut c: Counts,
+    i: int,
+}
+
+impl Counts {
+    pub fn slot(int i) -> Slot {
+        return new Slot(mut self, i);
+    }
+}
+
+impl Slot {
+    pub fn add(int d) -> Slot {
+        self.c.vals[self.i] = self.c.vals[self.i] + d;
+        return self;
+    }
+}
+
+fn main() {
+    let vals: Vec<int> = Vec::new();
+    for _ in 0..64 {
+        vals.push(0);
+    }
+    let c = new Counts(vals);
+    for r in 0..3000000 {
+        let _ = c.slot(r % 64).add(1).add(r % 3);
+    }
+    let t = 0;
+    for v in c.vals {
+        t = t + v;
+    }
+    let _ = write(stdout(), to_bytes(format("%i\n", t)));
+}
