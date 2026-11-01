@@ -2516,7 +2516,7 @@ impl Walk<'_> {
             } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0]),
             HirKind::Call { callee, args } if let Some(kind) = ffi_builtin(self.checker, callee) => self.ffi_call(id, kind, args),
             HirKind::Call {
-                callee: Callee::Named { .. },
+                callee: Callee::Named { .. } | Callee::Resolved(_),
                 args,
             } => {
                 if self.class(id).is_none() {

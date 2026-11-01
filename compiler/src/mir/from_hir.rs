@@ -4274,6 +4274,7 @@ impl Lower<'_> {
         let Some(site) = self.inp.calls.get(&id.0) else {
             return Err(match &self.hir.expr(id).kind {
                 HirKind::Call { callee: Callee::Named { name, .. } | Callee::Method { name }, .. } => format!("call `{name}`"),
+                HirKind::Call { callee: Callee::Resolved(r), .. } => format!("call `{}`", r.key),
                 _ => "call value".to_string(),
             });
         };

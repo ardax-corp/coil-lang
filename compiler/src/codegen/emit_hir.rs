@@ -55,8 +55,17 @@ impl Rep {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// While `Some`, every planned body is planned again with its calls
+    /// in [`Callee::Resolved`] form and checked against the first plan;
+    /// the count is of the calls checked.
+    pub(super) static RESOLVED_REPLAN_CHECK: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// A planned direct call.
-struct HirCall {
+#[derive(Clone)]
+pub(in crate::codegen) struct HirCall {
     key: String,
     /// The callee returns the two words of this kind.
     pair: Option<PairKind>,
@@ -103,7 +112,7 @@ pub(super) enum HirOwnDict {
 /// clone's thunk, when its body does not lower, makes that call.
 #[derive(Clone)]
 pub(crate) struct MethodClonePlan {
-    src: String,
+    pub(super) src: String,
     lookup: Vec<Ty>,
     /// The clone's parameter and result layouts, and their types.
     params: Vec<ValueLayout>,
@@ -473,6 +482,202 @@ impl Compiler {
     /// are folded ([`inline::single_exit`]). Spliced elsewhere, its nodes
     /// take the call site's span, so no span-keyed sidecar fact of this
     /// module is looked up in the caller's.
+    /// A clone's body, as `emit` planned it, in the form another module's
+    /// inliner splices: each call [`Callee::Resolved`], each type closed
+    /// and its class names qualified, no node ids. `None` when the body
+    /// reads anything its own frame, sidecar or module decides: globals,
+    /// lambdas, user operators, function values, builtins other than
+    /// `panic` and copy-on-write, dictionaries, `defer`, coroutines.
+    fn hir_resolved_clone_body(&self, body: &HirBody, emit: &HirEmit) -> Option<HirBody> {
+        use crate::hir::inline;
+        let plan = &emit.plan;
+        if body.is_coro
+            || !body.captures.is_empty()
+            || body.result_mode
+            || !plan.ops.is_empty()
+            || !plan.fn_refs.is_empty()
+            || !plan.polyfns.is_empty()
+            || !plan.lambdas.is_empty()
+            || !plan.statics.is_empty()
+            || !plan.consts.is_empty()
+            || !plan.par_loops.is_empty()
+            || !emit.par_tail.is_empty()
+        {
+            return None;
+        }
+        let mut out = body.clone();
+        for (i, e) in body.exprs.iter().enumerate() {
+            match &e.kind {
+                HirKind::Lit(_)
+                | HirKind::Local(_)
+                | HirKind::Field { .. }
+                | HirKind::Index { .. }
+                | HirKind::Logic { .. }
+                | HirKind::Cast { .. }
+                | HirKind::Block { .. }
+                | HirKind::Let { .. }
+                | HirKind::Assign { .. }
+                | HirKind::If { .. }
+                | HirKind::Loop { .. }
+                | HirKind::Break
+                | HirKind::Continue
+                | HirKind::Return(_)
+                | HirKind::Clear(_)
+                | HirKind::Builtin {
+                    op: crate::hir::Builtin::Panic | crate::hir::Builtin::Cow { .. },
+                    ..
+                } => {}
+                HirKind::Bin { op, .. } if !matches!(op, BinOp::Overloaded(_)) => {}
+                HirKind::Un { .. } => {}
+                HirKind::Make { kind, .. } => {
+                    let kind = match kind {
+                        MakeKind::Class(name) => MakeKind::Class(self.checker.resolve_class_key(name)?),
+                        MakeKind::Variant { enum_name, .. } if !matches!(enum_name.as_str(), "Option" | "Result") => return None,
+                        k => k.clone(),
+                    };
+                    let HirKind::Make { kind: slot, .. } = &mut out.exprs[i].kind else { unreachable!() };
+                    *slot = kind;
+                }
+                // On `Option` / `Result` / a primitive: no pattern names
+                // a class of this module.
+                HirKind::Match { scrutinee, .. } => {
+                    let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(body, *scrutinee)?);
+                    let core = match crate::typechecking::ty::strip_readonly(&ty) {
+                        Ty::App(head, _) => matches!(&**head, Ty::Con(n) if n == "Option" || n == "Result"),
+                        t => lower::primitive(t).is_some(),
+                    };
+                    if !core {
+                        return None;
+                    }
+                }
+                HirKind::Call { .. } if plan.lens.contains_key(&(i as u32)) => {}
+                HirKind::Call {
+                    callee: Callee::Named { .. } | Callee::Method { .. } | Callee::Resolved(_),
+                    ..
+                } => {
+                    let r = self.hir_resolved_callee(plan.calls.get(&(i as u32))?)?;
+                    let HirKind::Call { callee, .. } = &mut out.exprs[i].kind else { unreachable!() };
+                    *callee = Callee::Resolved(Box::new(r));
+                }
+                _ => return None,
+            }
+        }
+        // A field read keeps its class's own type parameters (`Vec<K>`):
+        // closed from the object's type arguments.
+        // A generic class's method clone types `self` as the bare class:
+        // its type arguments are the clone's.
+        let self_app = self
+            .inst_clone_fallback
+            .as_ref()
+            .filter(|(src, _)| src.method_of.as_ref().is_some_and(|m| !m.free))
+            .and_then(|(src, req)| {
+                let fqn = self.checker.resolve_class_key(&src.class)?;
+                let n = self.checker.generics().generic_type_ctors.get(&fqn)?.len();
+                Some((fqn.clone(), Ty::App(Box::new(Ty::Con(fqn)), req.lookup.get(..n)?.to_vec())))
+            });
+        if let Some((fqn, app)) = &self_app {
+            let retype = |t: &mut Option<Ty>| {
+                let bare = match t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t)) {
+                    Some(Ty::Con(c)) => self.checker.resolve_class_key(&c).as_ref() == Some(fqn),
+                    _ => false,
+                };
+                if bare {
+                    *t = Some(app.clone());
+                }
+            };
+            out.exprs.iter_mut().for_each(|e| retype(&mut e.ty));
+            out.locals.iter_mut().for_each(|l| retype(&mut l.ty));
+        }
+        // A copy-on-write op, a local's read and its `let` take the
+        // closed type of what they pass through.
+        let open = |t: &Option<Ty>| t.as_ref().is_none_or(|t| Self::ty_has_var(&apply_ty_prune(self.checker.subst(), t)));
+        let closed = |t: &Option<Ty>| t.as_ref().filter(|t| !Self::ty_has_var(&apply_ty_prune(self.checker.subst(), t))).cloned();
+        for _ in 0..8 {
+            let mut changed = false;
+            for i in 0..out.exprs.len() {
+                let at = match &out.exprs[i].kind {
+                    _ if !open(&out.exprs[i].ty) => continue,
+                    HirKind::Field { base, name } => {
+                        let Some(Ty::App(head, args)) = out.expr(*base).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t)) else { continue };
+                        let Ty::Con(class) = head.as_ref() else { continue };
+                        let Some(fty) = self.hir_class_fields(class).and_then(|f| f.into_iter().find(|(n, _)| n == name).map(|(_, t)| t)) else {
+                            continue;
+                        };
+                        close_params(&fty, &args).filter(|t| !Self::ty_has_var(t))
+                    }
+                    HirKind::Builtin { op: crate::hir::Builtin::Cow { .. }, args } if args.len() == 1 => closed(&out.expr(args[0]).ty),
+                    HirKind::Local(l) => closed(&out.local(*l).ty),
+                    _ => None,
+                };
+                if let Some(at) = at {
+                    out.exprs[i].ty = Some(at);
+                    changed = true;
+                }
+            }
+            for i in 0..out.exprs.len() {
+                if let HirKind::Let { local, init: Some(init) } = out.exprs[i].kind
+                    && open(&out.local(local).ty)
+                    && let Some(at) = closed(&out.expr(init).ty)
+                {
+                    out.locals[local.0 as usize].ty = Some(at);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Closed types, with this module's class names qualified so the
+        // caller's checker reads the same classes.
+        let close = |t: &Option<Ty>| -> Option<Option<Ty>> {
+            let Some(t) = t else { return Some(None) };
+            let t = self.hir_qualified_ty(&apply_ty_prune(self.checker.subst(), t))?;
+            (!Self::ty_has_var(&t)).then_some(Some(t))
+        };
+        for o in out.exprs.iter_mut() {
+            o.ty = close(&o.ty)?;
+            o.node = None;
+        }
+        for l in out.locals.iter_mut() {
+            l.ty = close(&l.ty)?;
+        }
+        out.ret = close(&out.ret)?;
+        let out = match inline::inlinable(&out, usize::MAX) {
+            Err("return") => inline::single_exit(&out)?,
+            _ => out,
+        };
+        Some(out)
+    }
+
+    /// `ty` with each class name this module's checker knows by another
+    /// key (its own classes by their bare name) renamed to that key.
+    /// `None` when it holds a type variable or a type named by its shape
+    /// (an enum's variants, a constructor, an existential).
+    fn hir_qualified_ty(&self, ty: &Ty) -> Option<Ty> {
+        let name = |n: &str| self.checker.resolve_class_key(n).unwrap_or_else(|| n.to_string());
+        Some(match ty {
+            Ty::Con(n) => Ty::Con(name(n)),
+            Ty::App(head, args) => Ty::App(Box::new(self.hir_qualified_ty(head)?), args.iter().map(|a| self.hir_qualified_ty(a)).collect::<Option<_>>()?),
+            Ty::Fun(a, b) => Ty::Fun(Box::new(self.hir_qualified_ty(a)?), Box::new(self.hir_qualified_ty(b)?)),
+            Ty::Tuple(items) => Ty::Tuple(items.iter().map(|a| self.hir_qualified_ty(a)).collect::<Option<_>>()?),
+            Ty::Readonly(inner) => Ty::Readonly(Box::new(self.hir_qualified_ty(inner)?)),
+            Ty::Array { element, length } => Ty::Array {
+                element: Box::new(self.hir_qualified_ty(element)?),
+                length: *length,
+            },
+            Ty::Record { fields } => Ty::Record {
+                fields: fields.iter().map(|(f, t)| Some((f.clone(), self.hir_qualified_ty(t)?))).collect::<Option<_>>()?,
+            },
+            Ty::Constructor { owner, tag, arity } => Ty::Constructor {
+                owner: Box::new(self.hir_qualified_ty(owner)?),
+                tag: *tag,
+                arity: *arity,
+            },
+            Ty::Var(_) | Ty::Existential { .. } | Ty::Sum { .. } => return None,
+            other => other.clone(),
+        })
+    }
+
     fn hir_portable_body(&self, body: &HirBody) -> Option<(String, HirBody)> {
         use crate::hir::{BodyKind, inline};
         if body.kind != BodyKind::Function || body.is_generic || body.is_coro || !body.captures.is_empty() || body.result_mode {
@@ -1047,6 +1252,15 @@ impl Compiler {
             self.hir_core_methods.insert(key.to_string(), body);
         }
         let hir = inlined.as_ref().unwrap_or(hir);
+        // Any module may splice this clone, as planned here, its calls
+        // resolved in this module's context.
+        if self.compiling_mono_clone
+            && let Ok(emit) = &plan
+            && let Some(key) = self.current_function_table_key.clone()
+            && let Some(body) = self.hir_resolved_clone_body(hir, emit)
+        {
+            self.hir_resolved_clones.insert(key, body);
+        }
         // Another module may splice this body, as inlined here.
         if !self.namespace.is_empty()
             && plan.is_ok()
@@ -2356,6 +2570,48 @@ impl Compiler {
             if self.hir_existential_pack(hir, id).is_some() {
                 return Err("existential-pack".to_string());
             }
+            // A method or mono clone kept with its calls resolved
+            // ([`Self::hir_resolved_clone_body`]), from any module: its
+            // nodes take the call's span, under the cross-module budget.
+            if self.inline_cost.inline_across_modules
+                && let Some(callee) = self.hir_resolved_clones.get(&call.key)
+            {
+                let HirKind::Call { args, .. } = &hir.expr(id).kind else {
+                    return Err("not-call".to_string());
+                };
+                let recursive = callee
+                    .exprs
+                    .iter()
+                    .any(|e| matches!(&e.kind, HirKind::Call { callee: Callee::Resolved(r), .. } if r.key == call.key));
+                // The call passes and takes each word in the layout the body
+                // binds and returns it in: no boxed receiver or argument, no
+                // dictionaries, no conversion of the result.
+                let boxes = call.instance.as_deref().is_some_and(|i| {
+                    i.recv_box.is_some() || i.ground.as_ref().is_some_and(|g| g.boxed.iter().any(Option::is_some))
+                });
+                let natural = |t: &Option<Ty>| t.as_ref().map(|t| self.value_layout(t));
+                let same_abi = call.pair.is_none()
+                    && natural(&callee.ret) == Some(call.ret)
+                    && callee.params.iter().zip(&call.params).all(|(&p, &l)| natural(&callee.local(p).ty) == Some(l));
+                if callee.params.len() != args.len()
+                    || call.params.len() != args.len()
+                    || recursive
+                    || boxes
+                    || !same_abi
+                    || call.builtin.is_some()
+                    || call.generic.is_some()
+                    || !call.own_dicts.is_empty()
+                    || self.coroutine_fns.contains(&call.key)
+                {
+                    return Err(format!("resolved `{}`", call.key));
+                }
+                let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
+                if size > self.inline_cost.max_cross_module_inline_cost {
+                    return Err("cost".to_string());
+                }
+                let shape = inline::inlinable(callee, budget)?.with_foreign(true);
+                return Ok((callee, shape));
+            }
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
@@ -3341,7 +3597,39 @@ impl Compiler {
     /// any refusal here is the fallback reason.
     fn plan_hir_body(&self, hir: &HirBody) -> Result<HirEmit, &'static str> {
         let ret = self.hir_body_ret(hir)?;
-        self.plan_hir_body_ret(hir, ret)
+        let emit = self.plan_hir_body_ret(hir, ret)?;
+        #[cfg(test)]
+        self.check_resolved_replan(hir, &emit);
+        Ok(emit)
+    }
+
+    /// Test hook ([`RESOLVED_REPLAN_CHECK`]): `hir` with its calls in
+    /// [`Callee::Resolved`] form plans each of them as `emit` did.
+    #[cfg(test)]
+    fn check_resolved_replan(&self, hir: &HirBody, emit: &HirEmit) {
+        if !RESOLVED_REPLAN_CHECK.with(|c| c.get().is_some()) {
+            return;
+        }
+        let (resolved, n) = self.hir_resolved_calls(hir, emit);
+        if n == 0 {
+            return;
+        }
+        let again = self
+            .plan_hir_body_ret(&resolved, emit.plan.ret.clone())
+            .unwrap_or_else(|why| panic!("{}: resolved calls refused: {why}", hir.name));
+        for (id, call) in &emit.plan.calls {
+            if !matches!(resolved.expr(HirId(*id)).kind, HirKind::Call { callee: Callee::Resolved(_), .. }) {
+                continue;
+            }
+            let got = &again.plan.calls[id];
+            assert!(
+                got.key == call.key && got.params == call.params && got.ret == call.ret && got.pair == call.pair && got.method == call.method,
+                "{}: call {id} to {} planned differently when resolved",
+                hir.name,
+                call.key
+            );
+        }
+        RESOLVED_REPLAN_CHECK.with(|c| c.set(c.get().map(|k| k + n)));
     }
 
     /// Plan each anonymous `fn` in `hir`, as `do_compile`'s `Lambda`: an
@@ -3668,6 +3956,15 @@ impl Compiler {
                 let call = self.hir_builtin_thunk_call(hir, HirId(i as u32), call);
                 emit.plan.calls.insert(i as u32, call);
             }
+            if let HirKind::Call {
+                callee: Callee::Resolved(r),
+                args,
+            } = &expr.kind
+            {
+                let call = self.resolved_hir_call(r, args.len())?;
+                Self::hir_ret_adapt_check(&call)?;
+                emit.plan.calls.insert(i as u32, call);
+            }
         }
         self.plan_hir_local_layouts(hir, &mut emit)?;
         let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
@@ -3835,6 +4132,82 @@ impl Compiler {
     /// constructor (#1738). So the recorded variant must be the callee.
     fn is_bare_construct_call(&self, name: &str, start: usize, end: usize) -> bool {
         self.checker.bare_construct_at(start, end).is_some_and(|(_, variant)| variant == name)
+    }
+
+    /// A [`Callee::Resolved`] call's plan, as the module it was resolved
+    /// in planned it ([`Self::hir_resolved_callee`]), read from no sidecar.
+    fn resolved_hir_call(&self, r: &crate::hir::ResolvedCall, argc: usize) -> Result<HirCall, &'static str> {
+        let call = self.resolved_plans.borrow().get(r.plan as usize).cloned().ok_or("callee-resolved")?;
+        if call.params.len() != argc {
+            return Err("callee-arity");
+        }
+        if call.pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
+            return Err("callee-pair");
+        }
+        if call.builtin.is_none() && !self.functions.contains_key(&call.key) && !self.fn_entry_labels.contains_key(&call.key) {
+            return Err("callee-unknown");
+        }
+        Ok(call)
+    }
+
+    /// `hir` with each planned call that [`Self::hir_resolved_callee`]
+    /// takes rewritten to its [`Callee::Resolved`] form, and how many were.
+    #[cfg(test)]
+    fn hir_resolved_calls(&self, hir: &HirBody, emit: &HirEmit) -> (HirBody, usize) {
+        let mut out = hir.clone();
+        let mut n = 0;
+        for (&id, call) in &emit.plan.calls {
+            if emit.plan.lens.contains_key(&id) {
+                continue;
+            }
+            let Some(r) = self.hir_resolved_callee(call) else { continue };
+            if let HirKind::Call { callee, .. } = &mut out.exprs[id as usize].kind
+                && !matches!(callee, Callee::Value(_))
+            {
+                *callee = Callee::Resolved(Box::new(r));
+                n += 1;
+            }
+        }
+        (out, n)
+    }
+
+    /// The [`Callee::Resolved`] form of a planned call, its plan kept in
+    /// [`Compiler::resolved_plans`] with its types qualified. `None` when
+    /// the plan reads this body's frame or checker: a shared generic
+    /// body's dictionaries, a frame dictionary, a builtin other than a
+    /// host native.
+    fn hir_resolved_callee(&self, call: &HirCall) -> Option<crate::hir::ResolvedCall> {
+        if !matches!(call.builtin, None | Some(HirBuiltin::Host(_)))
+            || call.generic.is_some()
+            || call.own_dicts.iter().any(|d| matches!(d, HirOwnDict::Frame(_)))
+        {
+            return None;
+        }
+        let q = |t: &Ty| self.hir_qualified_ty(&apply_ty_prune(self.checker.subst(), t)).filter(|t| !Self::ty_has_var(t));
+        let mut plan = call.clone();
+        plan.mono = false;
+        plan.mono_of = None;
+        if let Some(inst) = plan.instance.as_deref_mut() {
+            inst.args = inst.args.iter().map(q).collect::<Option<_>>()?;
+            inst.recv_box = match &inst.recv_box {
+                Some(t) => Some(q(t)?),
+                None => None,
+            };
+            if let Some(g) = inst.ground.as_mut() {
+                g.boxed = g.boxed.iter().map(|b| b.as_ref().map(q).map_or(Some(None), |t| t.map(Some))).collect::<Option<_>>()?;
+            }
+        }
+        for d in &mut plan.own_dicts {
+            if let HirOwnDict::Ground { lookup, .. } = d {
+                *lookup = lookup.iter().map(q).collect::<Option<_>>()?;
+            }
+        }
+        let mut plans = self.resolved_plans.borrow_mut();
+        plans.push(plan);
+        Some(crate::hir::ResolvedCall {
+            key: call.key.clone(),
+            plan: (plans.len() - 1) as u32,
+        })
     }
 
     /// The table key and ABI of a direct call to `name`, or why it is not a
@@ -4546,6 +4919,35 @@ impl Compiler {
 
     /// The call of an inherent method clone planned as `key`: the clone
     /// made now ([`Compiler::instance_clone`]), its entry ready to call.
+    pub(super) fn hir_request_method_clone_pub(&mut self, key: &str) {
+        self.hir_request_method_clone(key);
+    }
+
+    /// Plan each plain (non-generic, non-method) function body of the
+    /// module being compiled in a frame of its parameters, for the method
+    /// clones its calls record ([`Self::queue_early_foreign_clones`]).
+    pub(super) fn hir_plan_bodies_for_clones(&mut self) {
+        let Some(module) = self.hir_module.take() else {
+            return;
+        };
+        for body in &module.bodies {
+            if body.kind != crate::hir::BodyKind::Function || body.is_generic || body.is_coro || !body.captures.is_empty() || body.root.is_none() {
+                continue;
+            }
+            if lower::refusal(body, &self.checker).is_some() {
+                continue;
+            }
+            let prev = std::mem::take(&mut self.context.variables);
+            for &param in &body.params {
+                self.context.variables.intern(body.local(param).name.clone());
+            }
+            let ret = Rep::Word(body.ret.as_ref().map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
+            let _ = self.plan_hir_body_ret(body, ret);
+            self.context.variables = prev;
+        }
+        self.hir_module = Some(module);
+    }
+
     fn hir_request_method_clone(&mut self, key: &str) {
         let Some(plan) = self.method_clone_plans.borrow().get(key).cloned() else {
             return;

@@ -53,6 +53,17 @@ their own layout and bounds resolve statically.
   `foreign_clone_queue`; after each module the pipeline calls
   `emit_foreign_clones`, which swaps that module's context in and compiles
   the clones from its AST (`ast_cache`) and HIR.
+- **Cross-module inlining.** At `-O2` with heap inlining on, the module is
+  compiled in two halves (`compile_prepared_module_begin` / `_finish`).
+  After the first half, `queue_early_foreign_clones` requests the method
+  clones its plain bodies call and the pipeline compiles them before the
+  module's bodies are lowered. A clone that plans keeps its HIR body in
+  `hir_resolved_clones` (`hir_resolved_clone_body`: names qualified, types
+  closed, its calls turned into `Callee::Resolved`, whose plans live in
+  `resolved_plans`). `hir_inline_replan` then splices a kept body like a
+  same-module callee when the call needs no boxing, keeps the clone's ABI
+  and fits `max_cross_module_inline_cost`
+  (`examples/perf/foreign_clone_hot.coil`).
 - **Free functions.** A generic free function is a clone source like a
   static method with its own type parameters (`note_fn_clone_src`). Its own
   module's calls keep their mono clones; calls from another module or from

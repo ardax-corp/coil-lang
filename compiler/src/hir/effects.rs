@@ -299,6 +299,7 @@ impl ProgramEffects {
                 HirKind::Global { name, def } => self.named_summary(checker, module_path, name, *def),
                 _ => None,
             },
+            Callee::Resolved(_) => None,
         }
     }
 
@@ -854,6 +855,7 @@ impl<'a> ModuleEffects<'a> {
                 Callee::Named { name, def, .. } => Some(self.cx.named(&w, name, *def)),
                 Callee::Method { name } => self.cx.method(&w, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.cx.fn_value(&w, *f),
+                Callee::Resolved(_) => None,
             };
             for leak in escape::region_leaks(self.cx.module, body, &lookup) {
                 let mut msg = Message::error(
@@ -1695,6 +1697,7 @@ impl Cx<'_> {
                 Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
                 Callee::Method { name } => self.method(&w, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.fn_value(&w, *f),
+                Callee::Resolved(_) => None,
             };
             let k = cow::keeps(self.module, body, &lookup);
             if std::env::var("COIL_COW_TRACE").is_ok() {
@@ -2376,6 +2379,11 @@ impl Cx<'_> {
                         self.call_mutates(w, at, "a function value", by_type, None, None, args, false);
                     }
                 }
+            }
+            // Planned in another module's context: nothing is known of it.
+            Callee::Resolved(r) => {
+                self.note(w, at, UNKNOWN.bits(), || format!("calls `{}`, planned in another module", r.key));
+                self.call_mutates(w, at, &r.key, u64::MAX, None, None, args, false);
             }
         }
     }

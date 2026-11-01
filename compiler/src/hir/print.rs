@@ -229,6 +229,7 @@ impl Printer<'_> {
                         self.line(depth, id, format!("call {name}{ov}"));
                     }
                     Callee::Method { name } => self.line(depth, id, format!("call .{name}")),
+                    Callee::Resolved(r) => self.line(depth, id, format!("call resolved {}", r.key)),
                     Callee::Value(f) => {
                         self.line(depth, id, "call value".to_string());
                         self.node(*f, d);
