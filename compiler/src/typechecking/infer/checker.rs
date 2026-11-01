@@ -1300,6 +1300,7 @@ impl Checker {
 
             "clock_wall_nanos" | "clock_mono_nanos" | "symbol_next_id" => fun(&[], int()),
             "clock_sleep_ms" => fun(&[int()], unit_ty()),
+            common::ENTROPY_BYTES_NATIVE => fun(&[int()], vec_app_ty(byte())),
             "io_capture_begin" => fun(&[], unit_ty()),
             "io_capture_end" => fun(&[], tuple_ty(vec![string(), string()])),
 

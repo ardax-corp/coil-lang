@@ -43,7 +43,7 @@ Every runnable program needs `fn main()` **unless** the file only has `test("…
 
 Implicit imports (no `use` needed): prelude (`prelude`, `prelude::ops`, `prelude::math`) — injected by the compiler, not written in source. `prelude::math` holds only the linear-algebra helpers (`dot`, `cross`, `matmul`, `matrix`, `intersect`, `diff`). Float functions (`sin` … `tanh`, `sqrt`, `floor`, `ceil`, `exp`, `ln`, `atan2`, …) are [coil-stdlib `math`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md), userland Coil: write `use math::{sin, sqrt};` (a bare `sin(x)` is E0101). Powers and float remainder are `**` and `%`. Named `PI` / `E` / `TAU` are coil-stdlib `num` (`const`), not natives.
 
-Explicit `use` for: `io`, `string`, `ffi`, `thread`, `env`, `process`, `gc`, `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms`). Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
+Explicit `use` for: `io`, `string`, `ffi`, `thread`, `env`, `process`, `gc`, `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms`), `entropy` (`bytes(n)`, OS CSPRNG). Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
 ```coil
 use io::sync::println;
@@ -95,6 +95,7 @@ userland modules. Prelude is auto-injected.
 | `env` | `use env::{args, var, set_var, exit};` | process environment |
 | `process` | `use process::{Command, Stdio, exec};` | run programs (no shell): `Command` setters, `spawn` / `status` / `output`, child pipes are `Stream`s; needs `--allow-exec` |
 | `clock` | `use clock::{wall_nanos, mono_nanos, sleep_ms};` | virtual HostInvoke **121–123** (not `dload`) |
+| `entropy` | `use entropy::{bytes};` | virtual HostInvoke **190**: `bytes(n) -> Vec<byte>` from the OS CSPRNG, no grant |
 | `time` | `use time::{…}` via [coil-time](https://github.com/ardax-corp/coil-time) | pure Coil calendar/format package; not a virtual module |
 | `gc` | `use gc::{root, weak, collect};` | `Root` / `Weak` pins; class `fn drop()` runs at collect / teardown |
 
