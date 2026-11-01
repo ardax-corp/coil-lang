@@ -1539,8 +1539,12 @@ impl<'s> Formatter<'s> {
             } => {
                 self.fmt_docs(docs);
                 let shared = attrs.iter().any(|a| a.name == "shared");
-                let others: Vec<Attribute<'_>> = attrs.iter().filter(|a| a.name != "shared").cloned().collect();
+                let view = attrs.iter().any(|a| a.name == "view");
+                let others: Vec<Attribute<'_>> = attrs.iter().filter(|a| a.name != "shared" && a.name != "view").cloned().collect();
                 self.fmt_attrs(&others);
+                if view {
+                    self.push_str("view ");
+                }
                 if shared {
                     self.push_str("shared ");
                 }
@@ -1570,8 +1574,13 @@ impl<'s> Formatter<'s> {
                 init,
             } => {
                 self.fmt_docs(docs);
-                self.fmt_member_attrs(attrs);
+                let borrow = attrs.iter().any(|a| a.name == "mut");
+                let others: Vec<Attribute<'_>> = attrs.iter().filter(|a| a.name != "mut").cloned().collect();
+                self.fmt_member_attrs(&others);
                 self.fmt_visibility(*visibility);
+                if borrow {
+                    self.push_str("mut ");
+                }
                 self.fmt_field_modifier(*modifier);
                 self.fmt_output(name);
                 self.push_str(": ");

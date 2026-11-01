@@ -546,6 +546,10 @@ pub struct Checker {
     /// `shared class` keys: identity types copy-on-write never copies
     /// (resources, channels, `Ref<T>`).
     shared_classes: HashSet<String>,
+    /// `view class` keys: classes whose `mut` fields hold borrows.
+    view_classes: HashSet<String>,
+    /// Each view class's `mut` (borrow) field names.
+    borrow_fields: HashMap<String, HashSet<String>>,
 
     /// Owner class while typechecking an `impl` block (`self` exception for readonly).
     impl_owner: Option<String>,
