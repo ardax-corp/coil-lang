@@ -9,7 +9,7 @@ class Trace {
 }
 
 fn inner(Trace t, int n) -> int {
-    defer use (t) {
+    defer use (mut t) {
         t.text = t.text + "i";
     }
     if n > 0 {
@@ -19,7 +19,7 @@ fn inner(Trace t, int n) -> int {
 }
 
 fn outer(Trace t, int n) -> int {
-    defer use (t) {
+    defer use (mut t) {
         t.text = t.text + "o";
     }
     let v = inner(t, n);

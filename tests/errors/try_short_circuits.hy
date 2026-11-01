@@ -17,7 +17,7 @@ fn step(Log log, int n) -> Result<int, string> {
 }
 
 fn run(Log log, int a, int b, int c) -> Result<int, string> {
-    defer use (log) {
+    defer use (mut log) {
         log.deferred = log.deferred + 1;
     }
     let x = step(log, a)?;

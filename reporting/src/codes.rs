@@ -106,8 +106,8 @@ pub enum ErrorCode {
     /// `return`, `raise`, `?`, or a `break` / `continue` that would leave
     /// the body, inside a `defer`.
     ExitInDefer,
-    /// A `defer` the next loop iteration can reach again: it runs once, at
-    /// function exit.
+    /// Retired: a `defer` runs at the end of its block, so one in a loop
+    /// body runs every iteration.
     DeferInLoop,
 
     DuplicateEnum,
