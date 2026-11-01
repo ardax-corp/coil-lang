@@ -40,7 +40,7 @@ fn main() {{
 ",
         target.display()
     );
-    let path = dir.join("leak.hy");
+    let path = dir.join("leak.coil");
     std::fs::write(&path, src).unwrap();
     let mut roots = String::new();
     for root in compiler::Pipeline::workspace_language_extra_roots() {

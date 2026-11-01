@@ -124,7 +124,7 @@ fn main() {{
 }}
 "
     );
-    let (out, ok) = run(&bin, &dir, "gen_close.hy", &gen_close);
+    let (out, ok) = run(&bin, &dir, "gen_close.coil", &gen_close);
     assert!(!ok, "a panic in a collector-run generator close must fail the program:\n{out}");
     assert!(out.contains("close failed"), "the panic is reported:\n{out}");
     assert!(!out.contains("after collect"), "code after the collection must not run:\n{out}");

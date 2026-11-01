@@ -1,5 +1,5 @@
 //! A `drop` that keeps nothing of `self` runs where the compiler frees its
-//! object early (`tests/drop_at_early_free.hy.in`). The corpus runs at
+//! object early (`tests/drop_at_early_free.coil.in`). The corpus runs at
 //! levels with early freeing off, so this runs it with `--early-free on`.
 
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ fn drop_runs_at_early_free() {
     let dir = std::env::temp_dir().join(format!("coil_drop_early_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("drop_at_early_free.hy"), include_str!("drop_at_early_free.hy.in")).unwrap();
+    std::fs::write(dir.join("drop_at_early_free.coil"), include_str!("drop_at_early_free.coil.in")).unwrap();
     ensure_coil_test(&bin);
     for level in ["0", "2"] {
         let mut cmd = Command::new(&bin);
