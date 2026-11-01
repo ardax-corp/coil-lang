@@ -1,0 +1,56 @@
+// Methods of a generic class calling each other, and the `Hash` thunk of
+// `string`, inline at ground types into the class's clones and into plain
+// callers; each result is still the called method's (#2183).
+use tests::assert;
+
+class Table<K> {
+    pub keys: Vec<K>,
+}
+
+impl Table<K: Hash + Eq> {
+    fn mix(K k) -> int {
+        let h = k.hash();
+        return h ^ (h >> 16);
+    }
+
+    pub fn slot(K k) -> int {
+        return self.mix(k) & 7;
+    }
+
+    pub fn find(K k) -> int {
+        let i = 0;
+        while i < self.keys.len() {
+            if self.keys[i] == k {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
+    pub fn add(K k) -> int {
+        let at = self.find(k);
+        if at >= 0 {
+            return at;
+        }
+        self.keys.push(k);
+        return self.keys.len() - 1;
+    }
+}
+
+test("string keys") {
+    let t = new Table(Vec::new());
+    assert!(t.add("a") == 0, "first");
+    assert!(t.add("b") == 1, "second");
+    assert!(t.add("a") == 0, "again");
+    assert!(t.find("c") == 0 - 1, "missing");
+    assert!(t.slot("abc") == (("abc".hash() ^ ("abc".hash() >> 16)) & 7), "slot is the hash fold");
+}
+
+test("int keys") {
+    let t = new Table(Vec::new());
+    assert!(t.add(5) == 0, "first");
+    assert!(t.add(9) == 1, "second");
+    assert!(t.find(9) == 1, "found");
+    assert!(t.slot(3) == ((3 ^ (3 >> 16)) & 7), "int hash");
+}

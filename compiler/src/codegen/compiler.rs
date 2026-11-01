@@ -60,6 +60,9 @@ pub(super) struct SynthCallee {
     /// The `format` builtin, whatever the name resolves to in the module
     /// being compiled.
     pub format: bool,
+    /// Per argument: the adapter a function value is wrapped in for the
+    /// callee's shared body (a method clone's thunk, #2182).
+    pub adapt: Vec<Option<emit_hir::HirFnAdapt>>,
 }
 
 /// One step of building trait dictionaries, a stack program over words:
@@ -1662,6 +1665,21 @@ impl Compiler {
             chain,
         });
         Some(name)
+    }
+
+    /// Whether the clone of `fqn` at `lookup` is compiled from its body, as
+    /// [`Self::emit_instance_clones`] decides, rather than as a thunk that
+    /// calls the shared entry: another module's method when that module
+    /// knows the types. This program's own clone is taken to lower (its
+    /// HIR module is out while a body plans).
+    pub(super) fn inst_clone_has_body(&self, fqn: &str, lookup: &[Ty]) -> bool {
+        let Some(src) = self.inst_clone_srcs.get(fqn) else {
+            return false;
+        };
+        src.program == self.program_seq
+            || self.module_ctxs.get(&src.program).is_some_and(|ctx| {
+                ctx.knows_tys(lookup) && (ctx.layout_safe(src.span) || self.checker.enum_variants(&src.class).is_some())
+            })
     }
 
     /// Whether a new clone of `fqn` would repeat a clone source already on

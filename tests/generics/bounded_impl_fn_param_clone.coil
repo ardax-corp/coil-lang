@@ -1,0 +1,53 @@
+// A bounded `impl Box<V: Eq>` method taking a function over `V` (`V -> V f`)
+// is called through its clone at the call's types, with a lambda, a
+// capturing lambda, a named function and a function local, at a scalar, a
+// string, a niche `Option` and a float `V` (#2182).
+use tests::assert;
+
+class Box<V> {
+    pub v: V,
+}
+
+impl Box<V: Eq> {
+    pub fn apply_eq(V -> V f) -> V {
+        self.v = f(self.v);
+        return self.v;
+    }
+
+    pub fn upsert(V init, V -> V f) -> V {
+        if self.v == init {
+            self.v = f(init);
+        } else {
+            self.v = f(self.v);
+        }
+        return self.v;
+    }
+}
+
+fn twice(int c) -> int {
+    return c * 2;
+}
+
+test("int with a lambda, a named fn and a capture") {
+    let b = new Box(1);
+    assert!(b.apply_eq(fn (int c) => c + 1) == 2, "lambda");
+    assert!(b.apply_eq(twice) == 4, "named fn");
+    let k = 10;
+    assert!(b.upsert(4, fn (int c) use (k) => c + k) == 14, "capture, hit");
+    assert!(b.upsert(4, fn (int c) use (k) => c + k) == 24, "capture, miss");
+}
+
+test("string with a lambda and a function local") {
+    let s = new Box("ab");
+    assert!(s.apply_eq(fn (string x) => x + "!") == "ab!", "lambda");
+    let f = fn (string x) => x + "?";
+    assert!(s.upsert("ab!", f) == "ab!?", "local");
+}
+
+test("niche Option and float") {
+    let o = new Box(Option::Some(3));
+    let r = o.apply_eq(fn (Option<int> x) => x.map(fn (int y) => y + 1));
+    assert!((r ?? 0) == 4, "option");
+    let fl = new Box(1.5);
+    assert!(fl.apply_eq(fn (float x) => x * 2.0) == 3.0, "float");
+}
