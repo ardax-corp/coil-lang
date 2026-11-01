@@ -1,0 +1,22 @@
+// @expected E0151 — a closure capturing a view.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+}
+
+class Box {
+    pub b: Option<Bump>,
+}
+
+fn main() {
+    let k = new Counter(1);
+    let v = new Bump(mut k);
+    let f = fn () use (v) {
+        let w = v;
+        return 1;
+    };
+    let _ = f();
+}

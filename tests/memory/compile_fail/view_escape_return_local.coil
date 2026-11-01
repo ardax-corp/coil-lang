@@ -1,0 +1,24 @@
+// @expected E0151 — a method returning a view of a local instead of self.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+}
+
+class Box {
+    pub b: Option<Bump>,
+}
+
+impl Counter {
+    pub fn bump_tmp() -> Bump {
+        let other = new Counter(0);
+        return new Bump(mut other);
+    }
+}
+
+fn main() {
+    let k = new Counter(1);
+    let _ = k.bump_tmp();
+}
