@@ -2253,6 +2253,20 @@ impl Compiler {
                 }
             })
             .collect();
+        // Inherent method clone callees (`Box::mix$inst$string`), as the
+        // method's body at the clone's types (#2183).
+        let method_clones: HashMap<u32, crate::hir::HirBody> = emit
+            .plan
+            .calls
+            .iter()
+            .filter_map(|(&id, call)| {
+                let inst = self.hir_method_clone_body(module, &call.key)?;
+                match inline::inlinable(&inst, budget) {
+                    Err("return") => inline::single_exit(&inst).map(|b| (id, b)),
+                    _ => Some((id, inst)),
+                }
+            })
+            .collect();
         // Core prelude methods, as their generic body at the call's types.
         let core_insts: HashMap<u32, crate::hir::HirBody> = emit
             .plan
@@ -2358,7 +2372,8 @@ impl Compiler {
             {
                 return Err(format!("call-kind {what}"));
             }
-            let callee = match core.or_else(|| instances.get(&id.0)).or_else(|| specialized.get(&id.0)) {
+            let clone = method_clones.get(&id.0);
+            let callee = match core.or(clone).or_else(|| instances.get(&id.0)).or_else(|| specialized.get(&id.0)) {
                 Some(inst) => inst,
                 None if call.instance.is_some() => {
                     let index = *module.instance_fns.get(&call.key).ok_or_else(|| format!("no instance body `{}`", call.key))?;
@@ -2445,7 +2460,10 @@ impl Compiler {
             if calls.iter().any(reaches_back) {
                 return Err("recursive".to_string());
             }
+            // A generic class's method inlines as its clone's body at
+            // ground types; its shared body reads boxed fields.
             if core.is_none()
+                && clone.is_none()
                 && callee.kind == BodyKind::Method
                 && let Some(owner) = callee.name.rsplit("::").nth(1)
                 && lower::is_generic_class(&self.checker, owner)
@@ -2569,8 +2587,12 @@ impl Compiler {
             }
             found.ok()
         };
+        // A body with no dictionaries plans a spliced clone body as the
+        // clone would (`hir_ground_splice`).
+        let ground_splice = !self.compiling_mono_clone && !hir.is_generic && !method_clones.is_empty();
         let plan = |this: &mut Self, body: &HirBody| {
-            lower::refusal(body, &this.checker)
+            let was = this.hir_ground_splice.replace(ground_splice);
+            let planned = lower::refusal(body, &this.checker)
                 .map_or_else(|| this.plan_hir_body(body), Err)
                 .and_then(|mut emit| this.plan_hir_lambdas(module, body, &mut emit).map(|()| emit))
                 .and_then(|emit| {
@@ -2580,7 +2602,9 @@ impl Compiler {
                         id as usize >= hir.exprs.len() && call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var))
                     });
                     if open { Err("inline-open-instance") } else { Ok(emit) }
-                })
+                });
+            this.hir_ground_splice.set(was);
+            planned
         };
         let opaque = |id: HirId| emit.plan.lens.contains_key(&id.0);
         // A lambda local whose calls were all spliced is no longer built.
@@ -3130,6 +3154,71 @@ impl Compiler {
         out
     }
 
+    /// A ground call of the builtin `Hash` instance thunk for `string`
+    /// (`Hash__string__hash`: the string's word, then `hash_string`) as the
+    /// `HostInvoke` the thunk makes, so no frame is pushed per hash and the
+    /// call needs no body to inline (#2183). A string is a heap word, which
+    /// the ground call passes as it is. Any other call as planned.
+    fn hir_builtin_thunk_call(&self, hir: &HirBody, id: HirId, call: HirCall) -> HirCall {
+        let plain = call.generic.is_none()
+            && call.own_dicts.is_empty()
+            && call.instance.as_ref().is_some_and(|i| i.ground.is_some());
+        if !plain || call.key != crate::typechecking::generics::Generics::builtin_instance_fqn("Hash", "string", "hash") {
+            return call;
+        }
+        let HirKind::Call { args, .. } = &hir.expr(id).kind else {
+            return call;
+        };
+        let string = |&a: &HirId| {
+            Self::hir_ty(hir, a).is_some_and(|t| {
+                matches!(crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)), Ty::Con(n) if n == crate::typechecking::ty::STRING)
+            })
+        };
+        let Some(native) = self.native_id("hash_string").filter(|_| matches!(args.as_slice(), [a] if string(a))) else {
+            return call;
+        };
+        self.hir_builtin_abi(hir, id, HirBuiltin::Host(native)).unwrap_or(call)
+    }
+
+    /// The body of inherent method clone `key` ([`Self::hir_method_clone`]),
+    /// for typed inlining: its method's HIR at the clone's types, when the
+    /// method is this program's and every type there is ground.
+    fn hir_method_clone_body(&self, module: &crate::hir::HirModule, key: &str) -> Option<HirBody> {
+        let plans = self.method_clone_plans.borrow();
+        let plan = plans.get(key)?;
+        let src = self.inst_clone_srcs.get(&plan.src).filter(|s| s.program == self.program_seq && s.method_of.is_some())?;
+        let index = *self.hir_fns.get(&src.span)?;
+        let generic = module.bodies.get(index)?;
+        // `T::m(..)` resolves `T` by the clone being compiled, which is not
+        // this method's.
+        let names = &src.method_of.as_ref()?.names;
+        let by_param = generic.exprs.iter().any(|e| {
+            matches!(&e.kind, HirKind::Call { callee: Callee::Named { name, .. }, .. }
+                if name.split_once("::").is_some_and(|(owner, _)| names.iter().any(|n| n == owner)))
+        });
+        if by_param {
+            return None;
+        }
+        let vars = self.inst_clone_vars(&src.head, &plan.lookup)?;
+        let mut inst = self.hir_inline_instance(generic, &vars)?;
+        // `self` is typed by its class alone (`Box`): at the clone's type
+        // arguments (`Box<string>`) here, as `hir_clone_self_ty` types it
+        // in the clone, so its calls' dictionaries are looked up by them.
+        if src.method_of.as_ref().is_some_and(|m| !m.is_static)
+            && let (Some(&me), Some(self_ty)) = (inst.params.first(), plan.param_tys.first())
+            && let Some(Ty::Con(class)) = inst.local(me).ty.clone()
+            && matches!(self_ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if *n == class))
+        {
+            inst.locals[me.0 as usize].ty = Some(self_ty.clone());
+            for e in inst.exprs.iter_mut() {
+                if matches!(e.kind, HirKind::Local(l) if l == me) && matches!(&e.ty, Some(Ty::Con(n)) if *n == class) {
+                    e.ty = Some(self_ty.clone());
+                }
+            }
+        }
+        Some(inst)
+    }
+
     /// A generic body's HIR at one call's types, for typed inlining: `None`
     /// unless every local and node type is ground there.
     fn hir_inline_instance(&self, generic: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Option<HirBody> {
@@ -3566,6 +3655,7 @@ impl Compiler {
             {
                 let call = self.resolve_hir_callee(hir, HirId(i as u32), name, args.len())?;
                 Self::hir_ret_adapt_check(&call)?;
+                let call = self.hir_builtin_thunk_call(hir, HirId(i as u32), call);
                 emit.plan.calls.insert(i as u32, call);
             }
             if let HirKind::Call {
@@ -3575,6 +3665,7 @@ impl Compiler {
             {
                 let call = self.resolve_hir_method(hir, HirId(i as u32), name, args)?;
                 Self::hir_ret_adapt_check(&call)?;
+                let call = self.hir_builtin_thunk_call(hir, HirId(i as u32), call);
                 emit.plan.calls.insert(i as u32, call);
             }
         }
@@ -5053,7 +5144,7 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
-        if !self.compiling_mono_clone {
+        if !self.compiling_mono_clone && !self.hir_ground_splice.get() {
             return Err("callee-trait");
         }
         // `T::m(..)` in a clone: `T` is concrete here, so its instance is
@@ -6273,7 +6364,7 @@ impl Compiler {
     /// call its generic body forwards `forwarded` from takes ground
     /// dictionaries like any ground call site.
     fn hir_clone_drops_forwarded(&self, forwarded: &[usize]) -> bool {
-        self.compiling_mono_clone && forwarded.iter().all(|i| self.lookup_slot(&format!("__dict{i}")).is_none())
+        (self.compiling_mono_clone || self.hir_ground_splice.get()) && forwarded.iter().all(|i| self.lookup_slot(&format!("__dict{i}")).is_none())
     }
 
     /// The receiver type of the method clone being compiled, at its
