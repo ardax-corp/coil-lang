@@ -9252,3 +9252,81 @@ fn a_callee_with_a_long_loop_keeps_its_call() {
     let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
     assert_eq!(calls, 1);
 }
+
+/// Calls in their `Callee::Resolved` form (cross-module inlining) plan as
+/// the named and method calls they came from: free functions, statics,
+/// methods, a mono clone, two-slot `Option<int>` results and recursion.
+#[test]
+fn resolved_callees_plan_as_their_named_calls() {
+    let src = r#"
+class Counter {
+    pub n: int,
+}
+
+impl Counter {
+    pub fn bump(int by) -> int {
+        self.n = self.n + by;
+        return self.n;
+    }
+    pub static fn make(int n) -> Counter {
+        return new Counter(n);
+    }
+}
+
+fn add(int a, int b) -> int {
+    return a + b;
+}
+
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Option::Some(x / 2);
+    }
+    return Option::None;
+}
+
+fn fib(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn first<T>(Vec<T> v) -> T {
+    return v[0];
+}
+
+fn label(string s) -> string {
+    return s + "!";
+}
+
+fn main() {
+    let c = Counter::make(1);
+    let total = 0;
+    let i = 0;
+    while i < 10 {
+        total = add(total, c.bump(i));
+        i = i + 1;
+    }
+    if total != 175 {
+        panic "add / bump";
+    }
+    let h = half(14) ?? 0;
+    if h != 7 || (half(3) ?? -1) != -1 {
+        panic "half";
+    }
+    if fib(15) != 610 {
+        panic "fib";
+    }
+    if first([4, 5]) != 4 || first(["a", "b"]) != "a" {
+        panic "first";
+    }
+    if label("hi") != "hi!" {
+        panic "label";
+    }
+}
+"#;
+    super::emit_hir::RESOLVED_REPLAN_CHECK.with(|c| c.set(Some(0)));
+    run_src_ok(src);
+    let checked = super::emit_hir::RESOLVED_REPLAN_CHECK.with(|c| c.replace(None)).unwrap_or(0);
+    assert!(checked >= 8, "only {checked} calls were checked in resolved form");
+}

@@ -55,6 +55,14 @@ impl Rep {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// While `Some`, every planned body is planned again with its calls
+    /// in [`Callee::Resolved`] form and checked against the first plan;
+    /// the count is of the calls checked.
+    pub(super) static RESOLVED_REPLAN_CHECK: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// A planned direct call.
 struct HirCall {
     key: String,
@@ -3246,7 +3254,39 @@ impl Compiler {
     /// any refusal here is the fallback reason.
     fn plan_hir_body(&self, hir: &HirBody) -> Result<HirEmit, &'static str> {
         let ret = self.hir_body_ret(hir)?;
-        self.plan_hir_body_ret(hir, ret)
+        let emit = self.plan_hir_body_ret(hir, ret)?;
+        #[cfg(test)]
+        self.check_resolved_replan(hir, &emit);
+        Ok(emit)
+    }
+
+    /// Test hook ([`RESOLVED_REPLAN_CHECK`]): `hir` with its calls in
+    /// [`Callee::Resolved`] form plans each of them as `emit` did.
+    #[cfg(test)]
+    fn check_resolved_replan(&self, hir: &HirBody, emit: &HirEmit) {
+        if !RESOLVED_REPLAN_CHECK.with(|c| c.get().is_some()) {
+            return;
+        }
+        let (resolved, n) = Self::hir_resolved_calls(hir, emit);
+        if n == 0 {
+            return;
+        }
+        let again = self
+            .plan_hir_body_ret(&resolved, emit.plan.ret.clone())
+            .unwrap_or_else(|why| panic!("{}: resolved calls refused: {why}", hir.name));
+        for (id, call) in &emit.plan.calls {
+            if !matches!(resolved.expr(HirId(*id)).kind, HirKind::Call { callee: Callee::Resolved(_), .. }) {
+                continue;
+            }
+            let got = &again.plan.calls[id];
+            assert!(
+                got.key == call.key && got.params == call.params && got.ret == call.ret && got.pair == call.pair && got.method == call.method,
+                "{}: call {id} to {} planned differently when resolved",
+                hir.name,
+                call.key
+            );
+        }
+        RESOLVED_REPLAN_CHECK.with(|c| c.set(c.get().map(|k| k + n)));
     }
 
     /// Plan each anonymous `fn` in `hir`, as `do_compile`'s `Lambda`: an
@@ -3571,6 +3611,15 @@ impl Compiler {
                 Self::hir_ret_adapt_check(&call)?;
                 emit.plan.calls.insert(i as u32, call);
             }
+            if let HirKind::Call {
+                callee: Callee::Resolved(r),
+                args,
+            } = &expr.kind
+            {
+                let call = self.resolved_hir_call(r, args.len())?;
+                Self::hir_ret_adapt_check(&call)?;
+                emit.plan.calls.insert(i as u32, call);
+            }
         }
         self.plan_hir_local_layouts(hir, &mut emit)?;
         let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
@@ -3744,6 +3793,74 @@ impl Compiler {
     /// plain `CALL` to a user function. The special forms are checked in
     /// `compile_call_expr`'s order, so a name those claim is never lowered
     /// as a user call.
+    /// A [`Callee::Resolved`] call's plan: its key and ABI as another
+    /// module's context planned them, read from no sidecar.
+    fn resolved_hir_call(&self, r: &crate::hir::ResolvedCall, argc: usize) -> Result<HirCall, &'static str> {
+        if r.params.len() != argc {
+            return Err("callee-arity");
+        }
+        if r.pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
+            return Err("callee-pair");
+        }
+        if !self.functions.contains_key(&r.key) && !self.fn_entry_labels.contains_key(&r.key) {
+            return Err("callee-unknown");
+        }
+        Ok(HirCall {
+            key: r.key.clone(),
+            pair: r.pair.clone(),
+            params: r.params.clone(),
+            ret: r.ret,
+            method: r.method,
+            mono: false,
+            builtin: None,
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+            mono_of: None,
+            own_dicts: Vec::new(),
+        })
+    }
+
+    /// `hir` with each planned call that [`Self::hir_resolved_callee`]
+    /// takes rewritten to its [`Callee::Resolved`] form, and how many were.
+    #[cfg_attr(not(test), expect(dead_code, reason = "capturing a foreign clone's body (cross-module inlining step 2) calls it"))]
+    fn hir_resolved_calls(hir: &HirBody, emit: &HirEmit) -> (HirBody, usize) {
+        let mut out = hir.clone();
+        let mut n = 0;
+        for (&id, call) in &emit.plan.calls {
+            if emit.plan.lens.contains_key(&id) {
+                continue;
+            }
+            let Some(r) = Self::hir_resolved_callee(call) else { continue };
+            if let HirKind::Call { callee, .. } = &mut out.exprs[id as usize].kind
+                && !matches!(callee, Callee::Value(_))
+            {
+                *callee = Callee::Resolved(Box::new(r));
+                n += 1;
+            }
+        }
+        (out, n)
+    }
+
+    /// The [`Callee::Resolved`] form of a planned call: `None` when its
+    /// plan reads anything a resolved call cannot carry (dictionaries, a
+    /// builtin, a generic body, unboxed ranges).
+    #[cfg_attr(not(test), expect(dead_code, reason = "capturing a foreign clone's body (cross-module inlining step 2) calls it"))]
+    fn hir_resolved_callee(call: &HirCall) -> Option<crate::hir::ResolvedCall> {
+        let plain = call.builtin.is_none()
+            && call.generic.is_none()
+            && call.instance.is_none()
+            && call.own_dicts.is_empty()
+            && call.ranges.iter().all(Option::is_none);
+        plain.then(|| crate::hir::ResolvedCall {
+            key: call.key.clone(),
+            params: call.params.clone(),
+            ret: call.ret,
+            pair: call.pair.clone(),
+            method: call.method,
+        })
+    }
+
     fn resolve_hir_callee(
         &self,
         hir: &HirBody,

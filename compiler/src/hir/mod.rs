@@ -334,6 +334,26 @@ pub enum Callee {
     Method { name: String },
     /// A function value.
     Value(HirId),
+    /// A call another module's context already planned (cross-module
+    /// inlining): codegen takes its key and ABI verbatim, with no sidecar
+    /// lookups, overloads or dictionaries. Analyses know nothing of the
+    /// callee and treat it as an unknown function.
+    Resolved(Box<ResolvedCall>),
+}
+
+/// The plan of a [`Callee::Resolved`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedCall {
+    /// The function table key the call goes to.
+    pub key: String,
+    /// One-word layout of each argument.
+    pub params: Vec<crate::layout::ValueLayout>,
+    /// One-word layout of the result (when not a pair).
+    pub ret: crate::layout::ValueLayout,
+    /// The callee returns the two words of this kind.
+    pub pair: Option<crate::layout::PairKind>,
+    /// Planned as `recv.m(args)`: never inlined or a tail call.
+    pub method: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
