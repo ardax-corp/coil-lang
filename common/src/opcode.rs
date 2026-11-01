@@ -503,9 +503,10 @@ pub enum Instruction {
     /// slot, `[15:8]` from slot, `[7:0]` to slot. The next `n` words are
     /// its body: numeric `VLoad` / `VStore` (whose index slot holds an
     /// offset from the block position), `VBin`, `VFma` and `VReduce`. For
-    /// `p = from, from + 8, ..` while `p < to` (`to - from` is a multiple
-    /// of 8): with `LOOP_POS`, `dest = p`; then the body runs on lanes
-    /// `p ..= p + 7`. A load or store out of range, or a lane that traps,
+    /// `p = from, from + 8, ..` while `p < to`: with `LOOP_POS`, `dest =
+    /// p`; then the body runs on lanes `p ..= p + 7`, or `p .. to` for a
+    /// last block shorter than 8 (archive 6.16; before it `to - from` was
+    /// a multiple of 8). A load or store out of range, or a lane that traps,
     /// panics. Execution resumes past the body.
     VLoop,
     /// Early free (archive 6.4): pop a heap word the compiler proved dead
