@@ -3091,6 +3091,33 @@ impl<const S: usize> Machine<S> {
         }
     }
 
+    /// `open` / `accept` ran out of file descriptors: collect (a freed
+    /// stream closes its descriptor; a `drop` may close one) and run the
+    /// native again with the same arguments, rooted across the collection.
+    #[cold]
+    #[inline(never)]
+    fn retry_after_fd_collect(
+        &mut self,
+        ip: usize,
+        fn_id: usize,
+        args: Vec<Value>,
+        layout: crate::host_enum::HostEnumLayout,
+    ) -> Result<Option<Value>, crate::FfiError> {
+        let roots_len = self.ffi_arg_roots.len();
+        self.ffi_arg_roots.extend_from_slice(&args);
+        if unlikely(!self.stack_maps.is_empty()) {
+            self.gc_ip = ip;
+        }
+        self.gc_top_ip = Some(ip);
+        self.gc_collect();
+        self.gc_top_ip = None;
+        self.ffi_arg_roots.truncate(roots_len);
+        let Some(native) = self.natives.get_by_id(fn_id) else {
+            return Err(crate::FfiError::Panic(format!("HostInvoke: unknown native id {fn_id}")));
+        };
+        crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.heap, &args))
+    }
+
     /// Close a generator nothing reaches any more (the collector, or
     /// teardown): its armed `defer`s run in a nested execution, as a
     /// `drop` does. A panic in one aborts, as one in a `drop` does.

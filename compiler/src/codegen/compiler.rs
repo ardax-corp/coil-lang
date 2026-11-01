@@ -7749,6 +7749,17 @@ impl Compiler {
             self.program_effects.record(hir, &self.checker, module, &summaries);
             self.program_effects.record_mutations(mutations);
         }
+        // E0148: local streams a body opens and never closes or hands on.
+        if let Some(hir) = self.hir_module.as_ref() {
+            let mut seen = HashSet::new();
+            for b in &hir.bodies {
+                for m in crate::hir::stream_lint::check(&self.checker, hir, b) {
+                    if seen.insert(m.range().clone()) {
+                        self.messages.push(m);
+                    }
+                }
+            }
+        }
         // Copy-on-write: share and unique ops in every body, before typed
         // inlining splices any of them.
         if crate::hir::effects::cow::enabled()

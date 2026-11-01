@@ -109,6 +109,8 @@ pub enum ErrorCode {
     /// Retired: a `defer` runs at the end of its block, so one in a loop
     /// body runs every iteration.
     DeferInLoop,
+    /// A local `Stream` the body opens is never closed or handed on.
+    UnclosedStream,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -231,6 +233,7 @@ impl ErrorCode {
             Self::KeyedGenericFnValue => "E0145",
             Self::ExitInDefer => "E0146",
             Self::DeferInLoop => "E0147",
+            Self::UnclosedStream => "E0148",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -335,6 +338,7 @@ impl ErrorCode {
             Self::KeyedGenericFnValue => "generic function using `fn_key()` used as a value",
             Self::ExitInDefer => "`defer` body leaves its block",
             Self::DeferInLoop => "`defer` inside a loop runs once",
+            Self::UnclosedStream => "local `Stream` is never closed",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -447,6 +451,7 @@ mod tests {
             | KeyedGenericFnValue
             | ExitInDefer
             | DeferInLoop
+            | UnclosedStream
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -541,6 +546,7 @@ mod tests {
             KeyedGenericFnValue,
             ExitInDefer,
             DeferInLoop,
+            UnclosedStream,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

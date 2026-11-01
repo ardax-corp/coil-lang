@@ -1542,6 +1542,11 @@ pub const PROCESS_SIGNAL_NATIVE: &str = "process_signal";
 pub const PROCESS_PID_NATIVE: &str = "process_pid";
 pub const PROCESS_RELEASE_ID: u16 = 188;
 pub const PROCESS_RELEASE_NATIVE: &str = "process_release";
+/// `io::open` (frozen row 3): on `TooManyOpenFiles` the VM collects and
+/// tries once more, as for [`TCP_ACCEPT_ID`].
+pub const IO_OPEN_ID: u16 = 3;
+/// `tcp_accept` (frozen row 15).
+pub const TCP_ACCEPT_ID: u16 = 15;
 /// Closes a generator a `for` loop leaves early (archive 6.14,
 /// `HostOp::Task`): runs its armed `defer`s. Compiler-emitted only.
 pub const CORO_CLOSE_ID: u16 = 189;
@@ -1595,6 +1600,8 @@ pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 const _: () = {
     assert!(HOST_NATIVES.len() == 190);
     assert!(HOST_NATIVES[CORO_CLOSE_ID as usize].id == CORO_CLOSE_ID);
+    assert!(HOST_NATIVES[IO_OPEN_ID as usize].id == IO_OPEN_ID);
+    assert!(HOST_NATIVES[TCP_ACCEPT_ID as usize].id == TCP_ACCEPT_ID);
     assert!(HOST_NATIVES[PROCESS_SPAWN_ID as usize].id == PROCESS_SPAWN_ID);
     assert!(HOST_NATIVES[PROCESS_RELEASE_ID as usize].id == PROCESS_RELEASE_ID);
     assert!(HOST_NATIVES[SYMBOL_NEXT_ID_ID as usize].id == SYMBOL_NEXT_ID_ID);
