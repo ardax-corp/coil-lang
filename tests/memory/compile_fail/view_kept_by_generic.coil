@@ -1,0 +1,23 @@
+// @expected E0151 — a generic function keeps a view in the closure it returns (#2198).
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    pub mut c: Counter,
+}
+
+fn later<T>(T x) -> unit -> T {
+    return fn () use (x) {
+        return x;
+    };
+}
+
+fn main() {
+    let k = new Counter(1);
+    let get = later(new Bump(mut k));
+    let k2 = k;
+    let b = get();
+    b.c.n = 5;
+    let _ = k2.n;
+}
