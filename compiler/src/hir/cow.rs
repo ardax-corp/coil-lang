@@ -79,7 +79,9 @@ pub(super) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
             return false;
         }
         let key = checker.resolve_class_key(name).unwrap_or_else(|| name.to_string());
-        return !checker.is_readonly_class(&key) && !checker.is_shared_class(&key) && !checker.class_has_drop(name);
+        // A view is the borrow it holds: never shared or copied, and it
+        // cannot outlive the place it borrows (E0151).
+        return !checker.is_readonly_class(&key) && !checker.is_shared_class(&key) && !checker.is_view_class(&key) && !checker.class_has_drop(name);
     }
     checker.enum_variants(name).is_none()
 }
@@ -144,6 +146,8 @@ struct Facts<'b> {
     reassigned: HashSet<LocalId>,
     /// Assignments to a `use (mut x)` capture (#2072).
     capture_assigns: Vec<HirId>,
+    /// Places a `new View(…)` borrows into a `mut` field: never shared.
+    borrow_args: HashSet<HirId>,
 }
 
 /// The body with its copy-on-write ops, when it needs any, and warnings
@@ -197,6 +201,7 @@ impl<'b> Facts<'b> {
             defer_captured: HashSet::new(),
             reassigned: HashSet::new(),
             capture_assigns: Vec::new(),
+            borrow_args: HashSet::new(),
         };
         // Evaluation order: children in the order `children` lists them.
         let mut next = 0u32;
@@ -257,8 +262,26 @@ impl<'b> Facts<'b> {
                 _ => {}
             },
             HirKind::Append { base, .. } => self.writes.push(Write { at: id, path: *base }),
+            // `new View(mut place, …)`: the view writes the place's object
+            // in place, so it is made unique here, as for a write.
+            HirKind::Make { .. } => {
+                for a in crate::hir::view_lint::borrow_args(checker, body, id) {
+                    self.writes.push(Write { at: id, path: a });
+                    self.borrow_args.insert(a);
+                }
+            }
             HirKind::Call { callee, args } => {
-                let used = arg_use(body, lookup, callee, args);
+                let mut used = arg_use(body, lookup, callee, args);
+                // A call that returns a view borrows its receiver (E0151
+                // lets only a method of the borrowed object return one): the
+                // receiver is written through the view, never shared.
+                if crate::hir::view_lint::is_view_ty(checker, body.expr(id).ty.as_ref())
+                    && args.first().is_some_and(|&r| cow_ty(checker, body.expr(r).ty.as_ref()))
+                {
+                    used.kept &= !1;
+                    used.opaque &= !1;
+                    used.written |= 1;
+                }
                 if std::env::var("COIL_COW_TRACE").is_ok() {
                     eprintln!("cow:   {callee:?} written={:b} kept={:b} summary={:?}", used.written, used.kept, lookup(callee, args).map(|s| (s.mutates, s.keeps, s.returns)));
                 }
@@ -741,7 +764,10 @@ impl Plan {
                 HirKind::Append { value, .. } => plan.store(body, f, *value, &cow, &inout, &borrowed),
                 HirKind::Make { kind, args } if !matches!(kind, MakeKind::Range { .. }) => {
                     for &a in args {
-                        plan.store(body, f, named_value(body, a), &cow, &inout, &borrowed);
+                        let v = named_value(body, a);
+                        if !f.borrow_args.contains(&v) {
+                            plan.store(body, f, v, &cow, &inout, &borrowed);
+                        }
                     }
                 }
                 HirKind::Call { args, .. } => {
@@ -858,23 +884,87 @@ impl Plan {
     /// borrow would write an orphan). A share of a place below the borrowed
     /// object is fine: the borrow's write makes that child unique first.
     fn check_borrows(&mut self, checker: &Checker, body: &HirBody, f: &Facts<'_>) {
-        let mut borrows: Vec<(LocalId, HirId, HirId)> = Vec::new();
+        struct Borrow {
+            name: String,
+            root: LocalId,
+            path: Vec<Option<String>>,
+            text: String,
+            span: (u32, u32),
+            /// The borrowing expression: nothing inside it conflicts.
+            within: Option<HirId>,
+        }
+        let mut borrows: Vec<Borrow> = Vec::new();
+        let mut add = |name: &str, src: HirId, span: (u32, u32), within: Option<HirId>| {
+            if let (Some((root, path)), Some(text)) = (place_path(body, f, src), place_text(body, src)) {
+                borrows.push(Borrow { name: name.to_string(), root, path, text, span, within });
+            }
+        };
         for (&l, inits) in &f.inits {
-            if body.local(l).borrow && cow_ty(checker, body.local(l).ty.as_ref()) {
-                for &v in inits {
-                    borrows.push((l, v, f.parent.get(&v).copied().unwrap_or(v)));
+            let local = body.local(l);
+            let view = crate::hir::view_lint::is_view_ty(checker, local.ty.as_ref());
+            if !(local.borrow && cow_ty(checker, local.ty.as_ref())) && !view {
+                continue;
+            }
+            for &v in inits {
+                let from = f.parent.get(&v).copied().unwrap_or(v);
+                let span = f.live_span(l, from);
+                if !view {
+                    add(&local.name, v, span, Some(v));
+                    continue;
+                }
+                // A view borrows the places its `mut` fields were given, or
+                // (from a method) the object the method was called on.
+                let mut at = v;
+                loop {
+                    match &body.expr(at).kind {
+                        HirKind::Make { .. } => {
+                            for a in crate::hir::view_lint::borrow_args(checker, body, at) {
+                                add(&local.name, a, span, Some(v));
+                            }
+                            break;
+                        }
+                        HirKind::Call { args, .. } if !args.is_empty() => {
+                            let r = args[0];
+                            if crate::hir::view_lint::is_view_ty(checker, body.expr(r).ty.as_ref()) && matches!(body.expr(r).kind, HirKind::Call { .. } | HirKind::Make { .. }) {
+                                at = r;
+                                continue;
+                            }
+                            add(&local.name, r, span, Some(v));
+                            break;
+                        }
+                        _ => break,
+                    }
                 }
             }
         }
         for (&l, &(src, binder)) in &f.bound {
             if body.local(l).borrow && cow_ty(checker, body.local(l).ty.as_ref()) {
-                borrows.push((l, src, binder));
+                add(&body.local(l).name, src, f.live_span(l, binder), Some(src));
+            }
+        }
+        // In a view's own method, each `mut` field is the borrowed object
+        // for the whole body.
+        if let Some(&p) = body.params.first()
+            && body.kind == crate::hir::BodyKind::Method
+            && body.local(p).name == "self"
+            && let Some(key) = crate::hir::view_lint::view_key(checker, body.local(p).ty.as_ref())
+        {
+            for (field, _) in checker.class_fields(&key).unwrap_or_default() {
+                if checker.is_borrow_field(&key, &field) {
+                    borrows.push(Borrow {
+                        name: "self".to_string(),
+                        root: p,
+                        path: vec![Some(field.clone())],
+                        text: format!("self.{field}"),
+                        span: (0, u32::MAX - 1),
+                        within: None,
+                    });
+                }
             }
         }
         if borrows.is_empty() {
             return;
         }
-        borrows.sort_by_key(|&(_, v, _)| f.order(v));
         // Every point that gives a place's object a second name, shared
         // or moved: stores, and bindings other than borrows.
         let mut shares: Vec<(HirId, HirId)> = self.stored.iter().map(|&v| (v, v)).collect();
@@ -888,19 +978,18 @@ impl Plan {
                 shares.push((src, binder));
             }
         }
-        let mut seen: HashSet<(HirId, HirId)> = HashSet::new();
-        for &(b, src, from) in &borrows {
-            let Some((root, path)) = place_path(body, f, src) else { continue };
-            let (start, end) = f.live_span(b, from);
+        shares.sort_by_key(|&(v, _)| f.order(v));
+        let mut seen: HashSet<(HirId, String)> = HashSet::new();
+        for b in &borrows {
+            let (start, end) = b.span;
             let live = |at: HirId| {
                 let o = f.order(at);
-                o != u32::MAX && o > start && o <= end && !f.contains(src, at)
+                o != u32::MAX && o > start && o <= end && !b.within.is_some_and(|w| f.contains(w, at))
             };
-            let covers = |v: HirId| place_path(body, f, v).is_some_and(|(r, p)| r == root && prefix_of(&p, &path));
-            let bname = body.local(b).name.clone();
-            let Some(stext) = place_text(body, src) else { continue };
+            let covers = |v: HirId| place_path(body, f, v).is_some_and(|(r, p)| r == b.root && prefix_of(&p, &b.path));
+            let (bname, stext) = (&b.name, &b.text);
             for &(v, at) in &shares {
-                if live(at) && covers(v) && seen.insert((v, src)) {
+                if live(at) && covers(v) && !f.borrow_args.contains(&v) && seen.insert((v, stext.clone())) {
                     let span = body.expr(v).span;
                     let vtext = place_text(body, v).unwrap_or_else(|| stext.clone());
                     let mut m = Message::error(
@@ -914,7 +1003,7 @@ impl Plan {
             }
             for &(capture_at, l) in &self.share_before {
                 let at = capture_at.1;
-                if l == root && path.iter().all(Option::is_some) && live(at) && seen.insert((at, src)) {
+                if l == b.root && b.path.iter().all(Option::is_some) && live(at) && seen.insert((at, stext.clone())) {
                     let span = body.expr(at).span;
                     let name = &body.local(l).name;
                     let mut m = Message::error(
@@ -929,7 +1018,7 @@ impl Plan {
             for (i, e) in body.exprs.iter().enumerate() {
                 let id = HirId(i as u32);
                 let HirKind::Assign { place, .. } = &e.kind else { continue };
-                if live(id) && covers(*place) && seen.insert((id, src)) {
+                if live(id) && covers(*place) && seen.insert((id, stext.clone())) {
                     let span = e.span;
                     let ptext = place_text(body, *place).unwrap_or_else(|| stext.clone());
                     let mut m = Message::error(
