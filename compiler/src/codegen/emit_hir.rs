@@ -112,7 +112,7 @@ pub(super) enum HirOwnDict {
 /// clone's thunk, when its body does not lower, makes that call.
 #[derive(Clone)]
 pub(crate) struct MethodClonePlan {
-    src: String,
+    pub(super) src: String,
     lookup: Vec<Ty>,
     /// The clone's parameter and result layouts, and their types.
     params: Vec<ValueLayout>,
@@ -2550,6 +2550,48 @@ impl Compiler {
             if self.hir_existential_pack(hir, id).is_some() {
                 return Err("existential-pack".to_string());
             }
+            // A method or mono clone kept with its calls resolved
+            // ([`Self::hir_resolved_clone_body`]), from any module: its
+            // nodes take the call's span, under the cross-module budget.
+            if self.inline_cost.inline_across_modules
+                && let Some(callee) = self.hir_resolved_clones.get(&call.key)
+            {
+                let HirKind::Call { args, .. } = &hir.expr(id).kind else {
+                    return Err("not-call".to_string());
+                };
+                let recursive = callee
+                    .exprs
+                    .iter()
+                    .any(|e| matches!(&e.kind, HirKind::Call { callee: Callee::Resolved(r), .. } if r.key == call.key));
+                // The call passes and takes each word in the layout the body
+                // binds and returns it in: no boxed receiver or argument, no
+                // dictionaries, no conversion of the result.
+                let boxes = call.instance.as_deref().is_some_and(|i| {
+                    i.recv_box.is_some() || i.ground.as_ref().is_some_and(|g| g.boxed.iter().any(Option::is_some))
+                });
+                let natural = |t: &Option<Ty>| t.as_ref().map(|t| self.value_layout(t));
+                let same_abi = call.pair.is_none()
+                    && natural(&callee.ret) == Some(call.ret)
+                    && callee.params.iter().zip(&call.params).all(|(&p, &l)| natural(&callee.local(p).ty) == Some(l));
+                if callee.params.len() != args.len()
+                    || call.params.len() != args.len()
+                    || recursive
+                    || boxes
+                    || !same_abi
+                    || call.builtin.is_some()
+                    || call.generic.is_some()
+                    || !call.own_dicts.is_empty()
+                    || self.coroutine_fns.contains(&call.key)
+                {
+                    return Err(format!("resolved `{}`", call.key));
+                }
+                let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
+                if size > self.inline_cost.max_cross_module_inline_cost {
+                    return Err("cost".to_string());
+                }
+                let shape = inline::inlinable(callee, budget)?.with_foreign(true);
+                return Ok((callee, shape));
+            }
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
@@ -4773,6 +4815,35 @@ impl Compiler {
 
     /// The call of an inherent method clone planned as `key`: the clone
     /// made now ([`Compiler::instance_clone`]), its entry ready to call.
+    pub(super) fn hir_request_method_clone_pub(&mut self, key: &str) {
+        self.hir_request_method_clone(key);
+    }
+
+    /// Plan each plain (non-generic, non-method) function body of the
+    /// module being compiled in a frame of its parameters, for the method
+    /// clones its calls record ([`Self::queue_early_foreign_clones`]).
+    pub(super) fn hir_plan_bodies_for_clones(&mut self) {
+        let Some(module) = self.hir_module.take() else {
+            return;
+        };
+        for body in &module.bodies {
+            if body.kind != crate::hir::BodyKind::Function || body.is_generic || body.is_coro || !body.captures.is_empty() || body.root.is_none() {
+                continue;
+            }
+            if lower::refusal(body, &self.checker).is_some() {
+                continue;
+            }
+            let prev = std::mem::take(&mut self.context.variables);
+            for &param in &body.params {
+                self.context.variables.intern(body.local(param).name.clone());
+            }
+            let ret = Rep::Word(body.ret.as_ref().map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
+            let _ = self.plan_hir_body_ret(body, ret);
+            self.context.variables = prev;
+        }
+        self.hir_module = Some(module);
+    }
+
     fn hir_request_method_clone(&mut self, key: &str) {
         let Some(plan) = self.method_clone_plans.borrow().get(key).cloned() else {
             return;

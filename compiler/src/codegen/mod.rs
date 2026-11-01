@@ -718,6 +718,9 @@ pub struct Compiler {
     /// form and every type closed and qualified: callees any module's
     /// typed inlining may splice ([`Compiler::hir_resolved_clone_body`]).
     hir_resolved_clones: HashMap<String, crate::hir::HirBody>,
+    /// The namespace to restore once the module being compiled ends,
+    /// between the halves of `compile_unfused`.
+    module_outer_namespace: Option<String>,
     /// The plans of [`crate::hir::Callee::Resolved`] calls, by their
     /// `plan` index, shared by every module's context.
     resolved_plans: std::cell::RefCell<Vec<compiler::emit_hir::HirCall>>,
@@ -895,6 +898,7 @@ impl Default for Compiler {
             hir_fn_names: HashMap::new(),
             hir_portable: HashMap::new(),
             hir_resolved_clones: HashMap::new(),
+            module_outer_namespace: None,
             resolved_plans: std::cell::RefCell::new(Vec::new()),
             hir_core_methods: HashMap::new(),
         }
