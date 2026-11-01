@@ -77,9 +77,16 @@ beat Rust/`memcmp` slice equality.
   (`VBin` `SELECT`, archive 6.11, below), and `VFma`
   (mul-then-add, two IEEE roundings). A guard in front of the loop checks
   every read and write of lanes `i0 .. n` is in range; `VLoop` runs the
-  whole 8-lane blocks with its body words (`VLoad` / `VStore` / `VBin` /
-  `VFma` / `VReduce`) decoded once and no dispatch per block, and the
-  scalar loop takes the last lanes. A failed guard runs the loop as
+  8-lane blocks with its body words (`VLoad` / `VStore` / `VBin` /
+  `VFma` / `VReduce`) decoded once and no dispatch per block, and since
+  archive 6.15 the last lanes too (a block cut short at `n`; before, the
+  scalar loop took them, a dozen dispatched ops per lane). A body of
+  lane-wise words only (no `VFma` / `VReduce`) runs up to 64 lanes per
+  block (`machine::vm::VloopWide`, `simd::eval_vbin_wide`), so each body
+  word is decoded and dispatched once per 64 lanes instead of per 8; a
+  wide block that traps stores nothing and runs again 8 lanes at a time.
+  Word count's `to_lower` (lines of ~42 bytes): 20.2k → 12.3k
+  instructions per line on top of reading the lines. A failed guard runs the loop as
   written. `VReduce` folds left (float sums keep their order; an int
   fold traps on the first partial that overflows). A loop may store and
   fold in one body (`feature/locality` step 2): the stores run before the

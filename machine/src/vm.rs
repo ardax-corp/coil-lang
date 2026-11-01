@@ -529,8 +529,9 @@ enum VloopOp {
 }
 
 /// `VLoop` (see [`Instruction::VLoop`]): the body over lanes `p ..= p + 7`
-/// for `p = from, from + 8, ..` below `to`, with `dest = p` first when
-/// `pos`. The arrays are resolved once: nothing in the body allocates,
+/// for `p = from, from + 8, ..` below `to` (the last block stops at `to`),
+/// with `dest = p` first when `pos`. A body of lane-wise words runs up to
+/// 64 lanes at once ([`VloopWide`]). The arrays are resolved once: nothing in the body allocates,
 /// and the only resize is an append (`STORE_PUSH`) to an array the body
 /// does not read (the compiler guards that). `Err` on a malformed body, a lane out of range or a trap.
 #[allow(clippy::too_many_arguments)]
@@ -545,18 +546,43 @@ pub(crate) fn vloop(
     to: i64,
     pos: bool,
 ) -> Result<(), &'static str> {
-    let mut pushed = Vec::new();
-    let ran = vloop_run(heap, stack, sp, regs, body, dest, from, to, pos, &mut pushed);
+    // One scratch per thread: a `VLoop` runs once per call of its
+    // function, often over a few dozen lanes, so its buffers (4 KiB of
+    // wide registers among them) are not allocated per run.
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<Option<Box<VloopScratch>>> = const { std::cell::RefCell::new(None) };
+    }
+    let mut scratch = SCRATCH.with(|s| s.borrow_mut().take()).unwrap_or_else(|| Box::new(VloopScratch::new()));
+    let ran = vloop_run(heap, stack, sp, regs, body, dest, from, to, pos, &mut scratch);
     // The arrays a body appended to grew: count their storage once.
-    for obj in pushed {
+    for obj in scratch.pushed.drain(..) {
         if let Object::Array(mut gc) = obj {
             heap.account_array(gc.as_mut());
         }
     }
+    SCRATCH.with(|s| *s.borrow_mut() = Some(scratch));
     ran
 }
 
-/// [`vloop`]'s loop; `pushed` gets the arrays the body appends to.
+/// [`vloop`]'s buffers, kept between runs.
+struct VloopScratch {
+    ops: Vec<VloopOp>,
+    /// The arrays the body appends to.
+    pushed: Vec<Object>,
+    /// An 8-lane block's held-back stores and appends (`None`: an append).
+    pending: Vec<(Option<Object>, Option<i64>, [u64; common::simd::LANES])>,
+    /// The fold slots as an 8-lane block found them.
+    saved: Vec<(usize, Value)>,
+    wide: VloopWide,
+}
+
+impl VloopScratch {
+    fn new() -> Self {
+        Self { ops: Vec::new(), pushed: Vec::new(), pending: Vec::new(), saved: Vec::new(), wide: VloopWide::new() }
+    }
+}
+
+/// [`vloop`]'s loop; `scratch.pushed` gets the arrays the body appends to.
 #[allow(clippy::too_many_arguments)]
 fn vloop_run(
     heap: &Heap,
@@ -568,14 +594,14 @@ fn vloop_run(
     from: i64,
     to: i64,
     pos: bool,
-    pushed: &mut Vec<Object>,
+    scratch: &mut VloopScratch,
 ) -> Result<(), &'static str> {
     use common::simd;
     const BAD: &str = "VLoop: malformed body";
     const OOB: &str = "VLoop out of bounds";
     use VloopOp as Op;
     let lanes = simd::LANES as i64;
-    if from > to || (to - from) % lanes != 0 {
+    if from > to {
         return Err(BAD);
     }
     if from == to {
@@ -605,7 +631,8 @@ fn vloop_run(
             _ => Err(OOB),
         }
     };
-    let mut ops = Vec::with_capacity(body.len());
+    let VloopScratch { ops, pushed, pending, saved, wide } = scratch;
+    ops.clear();
     for word in body {
         let (kind, d, a, b) = word.dense_abc_parts();
         if d >= simd::NREGS && !matches!(*word.bytecode(), Instruction::VReduce) {
@@ -640,22 +667,46 @@ fn vloop_run(
     // would. The compiler only takes bodies whose reads come before their
     // stores, so deferring a block's stores changes no value it reads.
     // `None` for an append.
-    let mut pending: Vec<(Option<Object>, Option<i64>, [u64; simd::LANES])> = Vec::new();
-    let mut saved: Vec<(usize, Value)> = Vec::new();
+    // A body of lane-wise words (no fold, no fma) runs up to 64 lanes per
+    // dispatch of each word. A wide block that traps stores nothing and
+    // runs again 8 lanes at a time below, which finds the trapping lane.
+    let wide_ok = ops.iter().all(|op| matches!(op, Op::Load { .. } | Op::Store { .. } | Op::Push { .. } | Op::Bin { .. } | Op::Sel { .. }));
+    let mut narrow_until = from;
     let mut p = from;
     while p < to {
+        if wide_ok && p >= narrow_until {
+            let n = ((to - p) as usize).min(crate::simd::WIDE);
+            if pos {
+                stack[sp + dest] = Value::from(p);
+            }
+            if wide.run(stack, sp, ops, p, n)? {
+                wide.commit(p)?;
+                // The position as the last 8-lane block leaves it.
+                if pos {
+                    stack[sp + dest] = Value::from(p + (n as i64 - 1) / lanes * lanes);
+                }
+                p += n as i64;
+                continue;
+            }
+            narrow_until = p + n as i64;
+        }
         if pos {
             stack[sp + dest] = Value::from(p);
         }
+        if to - p < lanes {
+            // The last lanes, fewer than a block: one at a time.
+            vloop_lanes(stack, sp, regs, ops, p, (to - p) as usize)?;
+            break;
+        }
         pending.clear();
         saved.clear();
-        for op in &ops {
+        for op in ops.iter() {
             if let Op::Reduce { slot, .. } = *op {
                 saved.push((slot, stack[sp + slot]));
             }
         }
         let mut trapped = false;
-        for op in &ops {
+        for op in ops.iter() {
             match *op {
                 Op::Load { reg, obj: Some(Object::Array(gc)), off } => {
                     if !vload_lanes(gc.as_ref(), &mut regs[reg], p + off) {
@@ -697,12 +748,12 @@ fn vloop_run(
             }
         }
         if trapped {
-            for &(slot, v) in &saved {
+            for &(slot, v) in saved.iter() {
                 stack[sp + slot] = v;
             }
-            vloop_lanes(stack, sp, regs, &ops, p)?;
+            vloop_lanes(stack, sp, regs, ops, p, simd::LANES)?;
         } else {
-            for (obj, off, lanes) in &pending {
+            for (obj, off, lanes) in pending.iter() {
                 let Some(Object::Array(mut gc)) = *obj else {
                     return Err(BAD);
                 };
@@ -719,6 +770,141 @@ fn vloop_run(
         p += lanes;
     }
     Ok(())
+}
+
+/// A `VLoop` block of up to [`crate::simd::WIDE`] lanes: the registers,
+/// and the stores and appends it holds back until the block ran whole.
+struct VloopWide {
+    regs: [[u64; crate::simd::WIDE]; common::simd::NREGS],
+    /// A `VBin`'s result before it lands in its register.
+    out: [u64; crate::simd::WIDE],
+    /// `(array, Some(off) | None for an append)`, in body order; the
+    /// lanes of the `i`th are `lanes[i * n .. (i + 1) * n]`.
+    pending: Vec<(Option<Object>, Option<i64>)>,
+    lanes: Vec<u64>,
+    n: usize,
+}
+
+impl VloopWide {
+    fn new() -> Self {
+        Self {
+            regs: [[0; crate::simd::WIDE]; common::simd::NREGS],
+            out: [0; crate::simd::WIDE],
+            pending: Vec::new(),
+            lanes: Vec::new(),
+            n: 0,
+        }
+    }
+
+    /// The lane-wise body `ops` over lanes `p .. p + n` (`n` a multiple of
+    /// 8; every load in range, checked by the caller); `Ok(false)` on a
+    /// trap, with nothing stored.
+    fn run(&mut self, stack: &Stack<Value>, sp: usize, ops: &[VloopOp], p: i64, n: usize) -> Result<bool, &'static str> {
+        use common::simd;
+        const OOB: &str = "VLoop out of bounds";
+        const WIDE: usize = crate::simd::WIDE;
+        self.pending.clear();
+        self.lanes.clear();
+        self.n = n;
+        let regs = &mut self.regs;
+        for op in ops {
+            match *op {
+                VloopOp::Load { reg, obj, off } => {
+                    let base = usize::try_from(p + off).map_err(|_| OOB)?;
+                    let out = &mut regs[reg][..n];
+                    match obj {
+                        Some(Object::Array(gc)) => {
+                            let arr = gc.as_ref();
+                            if base + n > arr.len() {
+                                return Err(OOB);
+                            }
+                            if let Some(src) = arr.bytes() {
+                                out.iter_mut().zip(&src[base..base + n]).for_each(|(o, &b)| *o = u64::from(b));
+                            } else if let Some(src) = arr.words() {
+                                out.iter_mut().zip(&src[base..base + n]).for_each(|(o, w)| *o = w.bits());
+                            } else {
+                                out.iter_mut().zip(arr.iter().skip(base)).for_each(|(o, w)| *o = w.bits());
+                            }
+                        }
+                        Some(Object::String(gc)) => {
+                            let src = gc.as_ref().data.as_str().as_bytes().get(base..base + n).ok_or(OOB)?;
+                            out.iter_mut().zip(src).for_each(|(o, &b)| *o = u64::from(b));
+                        }
+                        _ => return Err(OOB),
+                    }
+                }
+                VloopOp::Store { reg, obj, off } => {
+                    self.pending.push((obj, Some(off)));
+                    self.lanes.extend_from_slice(&regs[reg][..n]);
+                }
+                VloopOp::Push { reg, obj } => {
+                    self.pending.push((obj, None));
+                    self.lanes.extend_from_slice(&regs[reg][..n]);
+                }
+                VloopOp::Bin { kind, dest, a, b } => {
+                    let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
+                    let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
+                    let out = &mut self.out;
+                    const Z: [u64; WIDE] = [0; WIDE];
+                    let z = &Z;
+                    let no_lhs = splat || matches!(kind, simd::IOTA_I64 | simd::IOTA_F64);
+                    let no_rhs = no_lhs || simd::is_unary_kind(kind);
+                    let lhs = if no_lhs { z } else { &regs[a % simd::NREGS] };
+                    let rhs = if no_rhs { z } else { &regs[b % simd::NREGS] };
+                    if crate::simd::eval_vbin_wide(kind, lhs, rhs, scalar, n, out).is_err() {
+                        return Ok(false);
+                    }
+                    regs[dest][..n].copy_from_slice(&out[..n]);
+                }
+                VloopOp::Sel { dest, a, b } => {
+                    let out = &mut self.out;
+                    for (o, (&m, (&x, &y))) in out[..n].iter_mut().zip(regs[dest].iter().zip(regs[a].iter().zip(&regs[b]))) {
+                        *o = if m != 0 { x } else { y };
+                    }
+                    regs[dest][..n].copy_from_slice(&out[..n]);
+                }
+                VloopOp::Fma { .. } | VloopOp::Reduce { .. } => return Err("VLoop: malformed body"),
+            }
+        }
+        Ok(true)
+    }
+
+    /// The block's held-back stores and appends, in body order.
+    fn commit(&mut self, p: i64) -> Result<(), &'static str> {
+        const OOB: &str = "VLoop out of bounds";
+        let n = self.n;
+        for (&(obj, off), lanes) in self.pending.iter().zip(self.lanes.chunks_exact(n)) {
+            let Some(Object::Array(mut gc)) = obj else {
+                return Err("VLoop: malformed body");
+            };
+            let arr = gc.as_mut();
+            match off {
+                Some(off) => {
+                    let base = usize::try_from(p + off).map_err(|_| OOB)?;
+                    if base + n > arr.len() {
+                        return Err(OOB);
+                    }
+                    for (i, &lane) in lanes.iter().enumerate() {
+                        // SAFETY: `base + n <= len` checked above; lanes are numeric.
+                        unsafe { arr.set_numeric_unchecked(base + i, Value::from(lane)) };
+                    }
+                }
+                None => {
+                    if let Some(bytes) = arr.bytes_mut()
+                        && lanes.iter().all(|&l| l <= u64::from(u8::MAX))
+                    {
+                        bytes.extend(lanes.iter().map(|&l| l as u8));
+                    } else {
+                        arr.reserve(n);
+                        for &lane in lanes {
+                            arr.push(Value::from(lane));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One `VBin` of a `VLoop` body over whole vector registers.
@@ -741,8 +927,8 @@ fn vbin_block(
     crate::simd::eval_vbin(kind, &lhs, &rhs, scalar)
 }
 
-/// The block at `p` of a `VLoop` body, one lane at a time in scalar
-/// order: each register holds lane `j`'s value in every lane, a store
+/// The first `count` lanes (at most 8) of the block at `p` of a `VLoop`
+/// body, one lane at a time in scalar order: each register holds lane `j`'s value in every lane, a store
 /// writes element `p + j + off`, a fold takes lane `j` alone. `Err` is the
 /// trap of the first lane that traps, after the lanes before it stored
 /// and folded.
@@ -752,10 +938,11 @@ fn vloop_lanes(
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
     ops: &[VloopOp],
     p: i64,
+    count: usize,
 ) -> Result<(), &'static str> {
     use common::simd;
     const OOB: &str = "VLoop out of bounds";
-    for j in 0..simd::LANES as i64 {
+    for j in 0..count as i64 {
         for op in ops {
             match *op {
                 VloopOp::Load { reg, obj, off } => {
