@@ -10,18 +10,24 @@ fn coil_bin() -> String {
 }
 
 fn ensure_coil_dissect() {
-    let coil = PathBuf::from(coil_bin());
-    let helper = coil_cli::sibling_bin(&coil, "coil-dissect");
-    let release: &[&str] = match coil.parent().and_then(std::path::Path::file_name) {
-        Some(dir) if dir == "release" => &["--release"],
-        _ => &[],
-    };
-    let status = Command::new("cargo")
-        .args(["build", "-q", "-p", "coil-dissect"])
-        .args(release)
-        .status()
-        .expect("spawn cargo build -p coil-dissect");
-    assert!(status.success() && helper.is_file(), "coil-dissect missing at {}", helper.display());
+    // Once per test binary: tests run in parallel, and a second
+    // `cargo build` can relink the helper while another test runs it
+    // (#2116).
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    BUILT.call_once(|| {
+        let coil = PathBuf::from(coil_bin());
+        let helper = coil_cli::sibling_bin(&coil, "coil-dissect");
+        let release: &[&str] = match coil.parent().and_then(std::path::Path::file_name) {
+            Some(dir) if dir == "release" => &["--release"],
+            _ => &[],
+        };
+        let status = Command::new("cargo")
+            .args(["build", "-q", "-p", "coil-dissect"])
+            .args(release)
+            .status()
+            .expect("spawn cargo build -p coil-dissect");
+        assert!(status.success() && helper.is_file(), "coil-dissect missing at {}", helper.display());
+    });
 }
 
 /// `coil` on `examples/perf/binary_trees.coil` with `args` before the entry

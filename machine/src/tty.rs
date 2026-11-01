@@ -262,7 +262,7 @@ mod os {
     }
 
     fn last_error() -> IoErrorTag {
-        IoErrorTag::from_kind(std::io::Error::last_os_error().kind())
+        IoErrorTag::from_error(&std::io::Error::last_os_error())
     }
 
     pub fn is_tty(fd: Raw) -> bool {
@@ -492,7 +492,7 @@ mod os {
             if e.kind() == std::io::ErrorKind::Interrupted {
                 return Ok(Wait::TimedOut);
             }
-            return Err(IoErrorTag::from_kind(e.kind()));
+            return Err(IoErrorTag::from_error(&e));
         }
         if rc == 0 {
             return Ok(Wait::TimedOut);
@@ -667,7 +667,7 @@ mod os {
             m |= ENABLE_PROCESSED_INPUT;
         }
         if unsafe { SetConsoleMode(input, m) } == 0 {
-            return Err(IoErrorTag::from_kind(std::io::Error::last_os_error().kind()).into());
+            return Err(IoErrorTag::from_error(&std::io::Error::last_os_error()).into());
         }
         if let Some(out_mode) = out_mode {
             let _ = unsafe {
@@ -701,7 +701,7 @@ mod os {
         if restore(&mut saved) {
             Ok(())
         } else {
-            Err(IoErrorTag::from_kind(std::io::Error::last_os_error().kind()))
+            Err(IoErrorTag::from_error(&std::io::Error::last_os_error()))
         }
     }
 
@@ -752,7 +752,7 @@ mod os {
     fn console_has_key(h: Handle) -> Result<bool, IoErrorTag> {
         let mut n = 0u32;
         if unsafe { GetNumberOfConsoleInputEvents(h, &mut n) } == 0 {
-            return Err(IoErrorTag::from_kind(std::io::Error::last_os_error().kind()));
+            return Err(IoErrorTag::from_error(&std::io::Error::last_os_error()));
         }
         if n == 0 {
             return Ok(false);
@@ -760,7 +760,7 @@ mod os {
         let mut recs = vec![InputRecord { event_type: 0, _pad: 0, event: [0; 4] }; n as usize];
         let mut got = 0u32;
         if unsafe { PeekConsoleInputW(h, recs.as_mut_ptr(), n, &mut got) } == 0 {
-            return Err(IoErrorTag::from_kind(std::io::Error::last_os_error().kind()));
+            return Err(IoErrorTag::from_error(&std::io::Error::last_os_error()));
         }
         // KEY_EVENT_RECORD: bKeyDown (BOOL) first, then repeat/vk/scan,
         // then the UTF-16 char in the low half of the third word. Window

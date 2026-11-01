@@ -451,7 +451,7 @@ fn poll_one_ms(
                 if err.kind() == ErrorKind::Interrupted {
                     continue;
                 }
-                return Err(IoErrorTag::from_kind(err.kind()));
+                return Err(IoErrorTag::from_error(&err));
             }
             return Ok(rc > 0);
         }
@@ -471,7 +471,7 @@ fn poll_one_ms(
                     if err.kind() == ErrorKind::Interrupted {
                         continue;
                     }
-                    return Err(IoErrorTag::from_kind(err.kind()));
+                    return Err(IoErrorTag::from_error(&err));
                 }
                 return Ok(rc > 0);
             }

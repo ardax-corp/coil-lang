@@ -752,7 +752,7 @@ pub(crate) fn connect_in_task(host: &str, port: i64, ms: i64) -> Option<Option<C
             match probe {
                 Ok(()) => match sock.take_error() {
                     Ok(None) => return Some(Some(Ok(sock))),
-                    Ok(Some(e)) | Err(e) => p.last_err = IoErrorTag::from_kind(e.kind()),
+                    Ok(Some(e)) | Err(e) => p.last_err = IoErrorTag::from_error(&e),
                 },
                 Err(IoErrorTag::TimedOut) if !expired => {
                     let timeout = p
@@ -796,7 +796,7 @@ pub(crate) fn connect_in_task(host: &str, port: i64, ms: i64) -> Option<Option<C
             };
             match attempt.and_then(|s| s.set_nonblocking(true).map(|()| s)) {
                 Ok(sock) => p.sock = Some(sock),
-                Err(e) => p.last_err = IoErrorTag::from_kind(e.kind()),
+                Err(e) => p.last_err = IoErrorTag::from_error(&e),
             }
         }
     }

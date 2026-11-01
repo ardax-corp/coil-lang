@@ -14,7 +14,7 @@ use crate::io::{
 use crate::memory::{Heap, ObjArray, ObjInstance, Object};
 
 fn io_err(e: std::io::Error) -> IoErrorTag {
-    IoErrorTag::from_kind(e.kind())
+    IoErrorTag::from_error(&e)
 }
 
 fn as_result_bool(heap: &mut Heap, r: Result<bool, IoErrorTag>) -> Value {
@@ -354,6 +354,7 @@ mod tests {
             8 => Some(IoErrorTag::TimedOut),
             9 => Some(IoErrorTag::Truncated),
             10 => Some(IoErrorTag::Protocol),
+            11 => Some(IoErrorTag::TooManyOpenFiles),
             _ => None,
         }
     }

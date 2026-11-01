@@ -1283,7 +1283,7 @@ impl Compiler {
                         boxed_ret,
                         dicts,
                         boxes,
-                        adapt: self.hir_mir_adapters(hir, call.generic.as_deref(), args),
+                        adapt: self.hir_mir_adapters(hir, call, args),
                         unbox,
                         ret_adapt: self.hir_mir_ret_adapter(call),
                         ret_items: Self::hir_mir_ret_items(call),
@@ -1341,7 +1341,7 @@ impl Compiler {
                     }
                 }
             }
-            let adapt = self.hir_mir_adapters(hir, call.generic.as_deref(), args);
+            let adapt = self.hir_mir_adapters(hir, call, args);
             let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
             // A `TailCall`'s callee returns for this function, so in this
             // function's words, whatever the call's own rep.
@@ -1482,14 +1482,31 @@ impl Compiler {
 
     /// Each argument's closure adapter: a function value the generic
     /// callee calls with boxed arguments. A lambda literal unboxes them itself.
-    fn hir_mir_adapters(&mut self, hir: &HirBody, generic: Option<&HirGeneric>, args: &[HirId]) -> Vec<Option<(crate::il::Label, u32)>> {
-        let Some(g) = generic else {
+    fn hir_mir_adapters(&mut self, hir: &HirBody, call: &HirCall, args: &[HirId]) -> Vec<Option<(crate::il::Label, u32)>> {
+        // A shared body (not a clone at ground types) reads an open enum
+        // result of a function argument as its object (#2163).
+        let open = if call.mono || call.builtin.is_some() { vec![None; args.len()] } else { self.hir_open_ret_adapts(hir, &call.key, args) };
+        let generic = call.generic.as_deref().map(|g| g.adapt.clone()).unwrap_or_default();
+        if generic.is_empty() && open.iter().all(Option::is_none) {
             return Vec::new();
-        };
+        }
+        let adapts: Vec<Option<super::emit_hir::HirFnAdapt>> = (0..args.len())
+            .map(|i| match (generic.get(i).cloned().flatten(), open.get(i).cloned().flatten()) {
+                (Some(g), _) if g.ret.is_some() => Some(g),
+                (Some(g), Some(o)) if g.unbox.len() == o.unbox.len() => Some(super::emit_hir::HirFnAdapt { ret: o.ret, ..g }),
+                (g, o) => g.or(o),
+            })
+            .collect();
         args.iter()
-            .zip(&g.adapt)
-            .map(|(&arg, unbox)| match unbox {
-                Some(unbox) if !matches!(hir.expr(arg).kind, HirKind::Lambda { .. }) => Some(self.hir_fn_adapter(unbox)),
+            .zip(&adapts)
+            .map(|(&arg, adapt)| match adapt {
+                Some(adapt) if !matches!(hir.expr(arg).kind, HirKind::Lambda { .. }) => Some(self.hir_fn_adapter(adapt)),
+                // A lambda literal unboxes its own parameters; its niche
+                // result is still boxed by an adapter.
+                Some(adapt) if adapt.ret.is_some() => {
+                    let only_ret = super::emit_hir::HirFnAdapt { unbox: vec![None; adapt.unbox.len()], ret: adapt.ret };
+                    Some(self.hir_fn_adapter(&only_ret))
+                }
                 _ => None,
             })
             .collect()

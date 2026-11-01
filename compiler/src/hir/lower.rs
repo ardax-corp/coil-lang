@@ -713,8 +713,11 @@ pub fn class_boxes(body: &HirBody, checker: &Checker) -> HashMap<u32, Vec<u32>> 
             else {
                 continue;
             };
+            // A captured local is never kept in frame slots
+            // ([`sroa_local`]), so it has no box point either.
             if sroa_class(body, checker, init).is_none()
                 || body.local(local).kind != LocalKind::Let
+                || body.local(local).captured
                 || only_field_base(body, local)
                 || !writes_field_of(body, local)
                 || reassigned(body, local)

@@ -243,6 +243,11 @@ pub fn trap_exit(on: bool) {
     EXIT_TRAPPED.store(on, Ordering::SeqCst);
 }
 
+/// Whether a harness asked for [`trap_exit`]: the process must not end.
+pub fn exit_trapped() -> bool {
+    EXIT_TRAPPED.load(Ordering::SeqCst)
+}
+
 /// Take the exit code a trapped `env::exit` recorded on this thread.
 pub fn take_exit_request() -> Option<i32> {
     EXIT_REQUEST.with(Cell::take)
