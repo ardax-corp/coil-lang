@@ -1,0 +1,19 @@
+// @expected E0149 — a view's own method gives the borrowed object a second name.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+}
+
+impl Bump {
+    pub fn leak() -> Counter {
+        return self.c;
+    }
+}
+
+fn main() {
+    let k = new Counter(1);
+    let _ = new Bump(mut k).leak();
+}

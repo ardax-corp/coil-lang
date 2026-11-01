@@ -60,6 +60,43 @@ fn named_value(body: &HirBody, a: HirId) -> HirId {
     }
 }
 
+/// The values `new View(…)` node `id` passes to its view class's `mut`
+/// fields: the places the view borrows. Empty for anything else.
+pub(crate) fn borrow_args(checker: &Checker, body: &HirBody, id: HirId) -> Vec<HirId> {
+    let HirKind::Make { kind: MakeKind::Class(class), args } = &body.expr(id).kind else { return Vec::new() };
+    let key = checker.resolve_class_key(class).unwrap_or_else(|| class.clone());
+    if !checker.is_view_class(&key) {
+        return Vec::new();
+    }
+    let fields = checker.class_fields(&key).unwrap_or_default();
+    let mut next = 0usize;
+    let mut out = Vec::new();
+    for &a in args {
+        let (field, value) = match &body.expr(a).kind {
+            HirKind::Named { name, value } => (Some(name.clone()), *value),
+            _ => {
+                let f = fields.get(next).map(|(n, _)| n.clone());
+                next += 1;
+                (f, a)
+            }
+        };
+        if field.is_some_and(|f| checker.is_borrow_field(&key, &f)) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// Whether `ty` is a view class instance.
+pub(crate) fn is_view_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
+    view_of(checker, ty).is_some()
+}
+
+/// The view class key of `ty`, when it is a view class instance.
+pub(crate) fn view_key(checker: &Checker, ty: Option<&Ty>) -> Option<String> {
+    view_of(checker, ty)
+}
+
 /// Whether `v` is the place `self` or a place below it.
 fn rooted_at_self(body: &HirBody, v: HirId) -> bool {
     match &body.expr(v).kind {
@@ -77,22 +114,7 @@ fn returnable(checker: &Checker, body: &HirBody, v: HirId) -> bool {
         return false;
     }
     match &body.expr(v).kind {
-        HirKind::Make { kind: MakeKind::Class(class), args } => {
-            let key = checker.resolve_class_key(class).unwrap_or_else(|| class.clone());
-            let fields = checker.class_fields(&key).unwrap_or_default();
-            let mut next = 0usize;
-            args.iter().all(|&a| {
-                let (field, value) = match &body.expr(a).kind {
-                    HirKind::Named { name, value } => (Some(name.clone()), *value),
-                    _ => {
-                        let f = fields.get(next).map(|(n, _)| n.clone());
-                        next += 1;
-                        (f, a)
-                    }
-                };
-                !field.is_some_and(|f| checker.is_borrow_field(&key, &f)) || rooted_at_self(body, value)
-            })
-        }
+        HirKind::Make { kind: MakeKind::Class(_), .. } => borrow_args(checker, body, v).iter().all(|&a| rooted_at_self(body, a)),
         HirKind::Local(_) => rooted_at_self(body, v),
         HirKind::Call { args, .. } => args.first().is_some_and(|&r| rooted_at_self(body, r)),
         HirKind::Block { tail: Some(t), .. } => returnable(checker, body, *t),
