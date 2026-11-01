@@ -1,0 +1,80 @@
+// Views in spliced code: once a view method inlines, the view is its
+// fields and its copies are the same borrow. Writes still land in the
+// source through discarded results, chains, copies and loops.
+use tests::assert;
+
+class Counts {
+    pub vals: Vec<int>,
+}
+
+view class Slot {
+    mut c: Counts,
+    i: int,
+}
+
+impl Counts {
+    pub fn slot(int i) -> Slot {
+        return new Slot(mut self, i);
+    }
+}
+
+impl Slot {
+    pub fn add(int d) -> Slot {
+        self.c.vals[self.i] = self.c.vals[self.i] + d;
+        return self;
+    }
+
+    pub fn get() -> int {
+        return self.c.vals[self.i];
+    }
+}
+
+fn counts(int n) -> Counts {
+    let vals: Vec<int> = Vec::new();
+    for _ in 0..n {
+        vals.push(0);
+    }
+    return new Counts(vals);
+}
+
+test("a discarded view result still writes") {
+    let c = counts(4);
+    let _ = c.slot(1).add(3);
+    assert!(c.vals[1] == 3);
+}
+
+test("a chain writes once per call") {
+    let c = counts(4);
+    let _ = c.slot(2).add(1).add(2).add(3);
+    assert!(c.vals[2] == 6);
+}
+
+test("a view copy is the same borrow") {
+    let c = counts(4);
+    let v = c.slot(0);
+    let w = v;
+    let _ = w.add(5);
+    let _ = v.add(1);
+    assert!(v.get() == 6 && w.get() == 6);
+    assert!(c.vals[0] == 6);
+}
+
+test("views in a loop write every slot") {
+    let c = counts(8);
+    for r in 0..800 {
+        let _ = c.slot(r % 8).add(1).add(r % 2);
+    }
+    let t = 0;
+    for v in c.vals {
+        t = t + v;
+    }
+    assert!(t == 1200);
+}
+
+test("a shared copy taken before the views keeps its values") {
+    let c = counts(2);
+    let before = c.vals;
+    let _ = c.slot(0).add(7);
+    assert!(c.vals[0] == 7);
+    assert!(before[0] == 0);
+}
