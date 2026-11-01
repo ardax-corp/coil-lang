@@ -135,8 +135,12 @@ fn set_cwd(string path) -> Result<unit, EnvError> {}
 
 /// Ends the process at once with exit status `code`.
 ///
-/// Does not return. Needs `--allow-exit`; without the grant the program does
-/// not compile (error `E0407`).
+/// Does not return, and runs no cleanup: the pending `defer` blocks of every
+/// function on the stack, and the `fn drop()` of objects still alive, are
+/// skipped. To end the program with its cleanup, return from `main` instead.
+///
+/// Needs `--allow-exit`; without the grant the program does not compile
+/// (error `E0407`).
 ///
 /// # Examples
 ///

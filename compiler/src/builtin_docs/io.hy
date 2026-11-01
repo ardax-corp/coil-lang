@@ -174,7 +174,9 @@ enum IoError {
     /// which.
     Protocol,
     /// The process or the system has as many files and sockets open as it
-    /// may (EMFILE / ENFILE). Close streams you are done with.
+    /// may (EMFILE / ENFILE). `open` and `accept` first collect once, which
+    /// closes the streams nothing reaches, and try again; this is the error
+    /// when that did not free a descriptor. Close streams you are done with.
     TooManyOpenFiles,
 }
 
@@ -343,6 +345,10 @@ fn capture_end() -> (string, string) {}
 /// A program that reaches `open` compiles only with the matching grant: a
 /// literal `"r"` needs `--allow-read`, `"w"` and `"a"` need `--allow-write`,
 /// `"rw"` and a mode computed at run time need both.
+///
+/// Close the stream with `close` when you are done, often with
+/// `defer use (s) { let _ = close(s); }` right after the open. The compiler
+/// warns (`E0148`) about a local stream that is never closed or handed on.
 ///
 /// # Examples
 ///
