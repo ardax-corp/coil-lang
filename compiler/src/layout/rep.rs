@@ -348,7 +348,7 @@ pub fn bind_params(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
 }
 
 /// One-word representation of a value of some type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueLayout {
     /// Immediate, heap object, or boxed `ObjEnum` — no special encoding.
     Boxed,

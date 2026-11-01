@@ -65,6 +65,12 @@ words:
   code is the niche word (`hir_field_rep`'s bare-niche case).
 - Dictionary, closure and `PolyFn` adapters box a niche word as itself
   (`Box(tag)` keeps it; `Unbox` passes it back).
+- A ground function passed where the shared body takes a function whose
+  result is an open `Option` / `Result` (`T -> Result<U, E>` in
+  `Result::and_then`) returns its niche word, but the body reads that
+  result as the enum object. The call wraps the argument in a fn adapter
+  that boxes the word (`HirFnAdapt::ret`, `hir_open_ret_adapts`), a lambda
+  literal included.
 - `hir_method_clone` clones niche types too: the per-type clone is a cost
   decision (speed), never a correctness one.
 
