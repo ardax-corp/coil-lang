@@ -570,6 +570,10 @@ impl<const S: usize> Machine<S> {
                                 TaskFlow::Switched => {
                                     return dispatch::RestExit::resume(ip, sp);
                                 }
+                                // A generator close unwinds its frames.
+                                TaskFlow::Unwind => {
+                                    return dispatch::RestExit::done(false);
+                                }
                                 TaskFlow::Panic(msg) => {
                                     return dispatch::RestExit::done(
                                         self.runtime_panic(&msg, ip.saturating_sub(1)),
@@ -1313,6 +1317,7 @@ impl<const S: usize> Machine<S> {
                         yield_from: None,
                         delegator: None,
                         yield_from_resume_ip: 0,
+                        started: false,
                     };
                     let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
 

@@ -10,6 +10,8 @@ enum TaskFlow {
     /// The current task suspended; `ip` / `sp` now belong to the next one.
     Switched,
     Panic(String),
+    /// A generator close set up its unwind: the unwinder takes over.
+    Unwind,
 }
 
 impl<const S: usize> Machine<S> {
@@ -62,6 +64,7 @@ impl<const S: usize> Machine<S> {
                 TaskFlow::Value(Value::default())
             }
             15 => TaskFlow::Panic(self.contract_failure(args.first().copied().unwrap_or_default())),
+            45 => self.coro_close(args.first().copied().unwrap_or_default(), ip, sp),
             _ => TaskFlow::Panic(format!("HostInvoke: unknown task native id {fn_id}")),
         }
     }

@@ -3840,6 +3840,8 @@ pub struct ObjCoroutine {
     pub delegator: Option<RefCoroutine>,
     /// Outer continuation IP when the delegate completes.
     pub yield_from_resume_ip: usize,
+    /// The body has run: a close has `defer`s to run only after this.
+    pub started: bool,
 }
 
 /// Heap-allocated boxed value for the generics runtime.

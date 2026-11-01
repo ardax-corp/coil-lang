@@ -3871,6 +3871,7 @@ impl<const S: usize> Machine<S> {
 
         Self::with_coroutine_mut(gc, |c| {
             c.pending_send = send_val;
+            c.started = true;
         });
 
         self.return_bookkeeping = true;
