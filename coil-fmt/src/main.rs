@@ -2,6 +2,7 @@
 //!
 //! Preserves `//` comments and `///` docs attached to declarations. Default
 //! rewrites in place; `--check` exits non-zero when reformatting would change a file.
+//! A legacy `.hy` source is written to its `.coil` name and the `.hy` removed.
 
 use std::fs;
 use std::io::Write;
@@ -17,7 +18,9 @@ use reporting::{Message, ReportConfig, SourceMap, create_sink};
     name = "coil-fmt",
     about = "Format coil source files",
     disable_help_subcommand = true,
-    after_help = "Directories are walked recursively for `*.coil`.\n\
+    after_help = "Directories are walked recursively for `*.coil` (and legacy `*.hy`).\n\
+A legacy `.hy` file is written to the `.coil` name beside it and the old file removed;\n\
+`--check` reports it as a change.\n\
 Preserves `//` comments and `///` doc comments on declarations."
 )]
 struct FmtArgs {
@@ -41,7 +44,7 @@ fn parse_args(args: &[String]) -> Result<Option<FmtArgs>, String> {
     }
 }
 
-fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_sources(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     if root.is_file() {
         if common::ext::is_source_path(root) {
             out.push(root.to_path_buf());
@@ -63,7 +66,7 @@ fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
             if child.file_name().is_some_and(|n| n == "compile_fail") {
                 continue;
             }
-            collect_hy_files(&child, out)?;
+            collect_sources(&child, out)?;
         } else if common::ext::is_source_path(&child) {
             out.push(child);
         }
@@ -79,7 +82,31 @@ fn emit_parse_error(path: &Path, src: &str, message: &Message) {
     let _ = sink.finish();
 }
 
+/// Where `path` is written: a legacy `.hy` source moves to the `.coil` name
+/// beside it, anything else stays put.
+fn target_path(path: &Path) -> PathBuf {
+    if path
+        .extension()
+        .is_some_and(|e| e == common::ext::LEGACY_SOURCE_EXT)
+    {
+        path.with_extension(common::ext::SOURCE_EXT)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Format `path`; a legacy `.hy` file is written to its `.coil` name and the
+/// old file removed. Returns whether anything changed (or would, with `check`).
 fn format_one(path: &Path, check: bool) -> Result<bool, String> {
+    let target = target_path(path);
+    let moving = target != path;
+    if moving && target.exists() {
+        return Err(format!(
+            "{} already exists; not moving {} onto it",
+            target.display(),
+            path.display()
+        ));
+    }
     let src = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let formatted = match format_source(&src) {
         Ok(s) => s,
@@ -88,26 +115,37 @@ fn format_one(path: &Path, check: bool) -> Result<bool, String> {
             return Err(format!("{}: parse error", path.display()));
         }
     };
-    if formatted == src {
+    let reformat = formatted != src;
+    if !reformat && !moving {
         return Ok(false);
     }
     if check {
-        eprintln!("would reformat {}", path.display());
+        if moving {
+            eprintln!("would rename {} -> {}", path.display(), target.display());
+        }
+        if reformat {
+            eprintln!("would reformat {}", path.display());
+        }
         return Ok(true);
     }
     // Atomic-ish write: temp beside target then rename.
-    let tmp = path.with_extension("fmt.tmp");
+    let tmp = target.with_extension("fmt.tmp");
     {
         let mut f = fs::File::create(&tmp).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         f.write_all(formatted.as_bytes())
             .map_err(|e| format!("write {}: {e}", tmp.display()))?;
         f.sync_all().ok();
     }
-    fs::rename(&tmp, path).map_err(|e| {
+    fs::rename(&tmp, &target).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        format!("rename {} -> {}: {e}", tmp.display(), path.display())
+        format!("rename {} -> {}: {e}", tmp.display(), target.display())
     })?;
-    eprintln!("formatted {}", path.display());
+    if moving {
+        fs::remove_file(path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+        eprintln!("formatted {} -> {}", path.display(), target.display());
+    } else {
+        eprintln!("formatted {}", path.display());
+    }
     Ok(true)
 }
 
@@ -135,7 +173,7 @@ fn main() {
 
     let mut files = Vec::new();
     for p in &args.paths {
-        if let Err(e) = collect_hy_files(p, &mut files) {
+        if let Err(e) = collect_sources(p, &mut files) {
             eprintln!("coil-fmt: {e}");
             exit(1);
         }
@@ -213,7 +251,10 @@ mod tests {
         let dir = scratch("check");
         let old = dir.join("c").with_extension(LEGACY_SOURCE_EXT);
         fs::write(&old, format_source(MESSY).unwrap()).unwrap();
-        assert!(format_one(&old, true).unwrap(), "a legacy name needs a change");
+        assert!(
+            format_one(&old, true).unwrap(),
+            "a legacy name needs a change"
+        );
         assert!(old.exists());
         assert!(!dir.join("c.coil").exists());
         let _ = fs::remove_dir_all(&dir);
@@ -238,7 +279,10 @@ mod tests {
         let path = dir.join("e.coil");
         fs::write(&path, MESSY).unwrap();
         assert!(format_one(&path, false).unwrap());
-        assert_eq!(fs::read_to_string(&path).unwrap(), format_source(MESSY).unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format_source(MESSY).unwrap()
+        );
         assert!(!format_one(&path, false).unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
