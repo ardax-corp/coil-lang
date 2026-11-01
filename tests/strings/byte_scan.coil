@@ -308,6 +308,11 @@ test("short strings: a bound below the length stops the scan") {
     assert!(find_upto(s, 59, 0, 31) == 30);
     assert!(find_upto(s, 59, 25, 31) == 30);
     assert!(find_upto(s, 59, 31, 40) == -1);
+    // One and two lanes left, the match in the last one.
+    let t = with_mark(40, 39, ";");
+    assert!(find_upto(t, 59, 39, 40) == 39);
+    assert!(find_upto(t, 59, 38, 40) == 39);
+    assert!(find_upto(t, 59, 38, 39) == -1);
 }
 
 // Reads one byte past `i`: the last iteration reads past the end.
