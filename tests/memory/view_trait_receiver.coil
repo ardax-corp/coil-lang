@@ -1,0 +1,48 @@
+// A trait method's receiver is the borrowed object too: `impl Slots for
+// Vec<T>` returns a view over `mut xs`, its first parameter, as an
+// inherent method would over `mut self`.
+use tests::assert;
+
+view class Slot<T> {
+    mut xs: Vec<T>,
+    i: int,
+}
+
+trait Slots<V> {
+    type Item;
+
+    fn slot(V xs, int i) -> Slot<Item> {}
+}
+
+impl Slots for Vec<T> {
+    type Item = T;
+
+    pub fn slot(Vec<T> xs, int i) -> Slot<T> {
+        return new Slot(mut xs, i);
+    }
+}
+
+impl Slot<T> {
+    pub fn set(T v) -> Slot<T> {
+        self.xs[self.i] = v;
+        return self;
+    }
+
+    pub fn get() -> T {
+        return self.xs[self.i];
+    }
+}
+
+test("a view from a trait method writes the receiver") {
+    let v: Vec<int> = [1, 2, 3];
+    let _ = v.slot(1).set(9);
+    assert!(v[1] == 9);
+    assert!(v.slot(1).get() == 9);
+}
+
+test("a copy taken before the view keeps its values") {
+    let v: Vec<int> = [1, 2, 3];
+    let before = v;
+    let _ = v.slot(0).set(7).set(8);
+    assert!(v[0] == 8 && before[0] == 1);
+}
