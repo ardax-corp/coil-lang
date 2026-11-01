@@ -10,20 +10,26 @@ fn coil_bin() -> String {
 }
 
 fn ensure_coil_dissect() {
-    let coil = PathBuf::from(coil_bin());
-    let helper = coil_cli::sibling_bin(&coil, "coil-dissect");
-    // Build even when present: a helper left from other sources is one
-    // `coil` refuses to run (#1598), and cargo makes a fresh one a no-op.
-    let status = Command::new("cargo")
-        .args(["build", "-q", "-p", "coil-dissect"])
-        .args(release_flag(&coil))
-        .status()
-        .expect("spawn cargo build -p coil-dissect");
-    assert!(
-        status.success() && helper.is_file(),
-        "coil-dissect missing at {}",
-        helper.display()
-    );
+    // Once per test binary: tests run in parallel, and a second
+    // `cargo build` can relink the helper while another test runs it
+    // (#2116).
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    BUILT.call_once(|| {
+        let coil = PathBuf::from(coil_bin());
+        let helper = coil_cli::sibling_bin(&coil, "coil-dissect");
+        // Build even when present: a helper left from other sources is one
+        // `coil` refuses to run (#1598), and cargo makes a fresh one a no-op.
+        let status = Command::new("cargo")
+            .args(["build", "-q", "-p", "coil-dissect"])
+            .args(release_flag(&coil))
+            .status()
+            .expect("spawn cargo build -p coil-dissect");
+        assert!(
+            status.success() && helper.is_file(),
+            "coil-dissect missing at {}",
+            helper.display()
+        );
+    });
 }
 
 fn release_flag(coil: &std::path::Path) -> &'static [&'static str] {

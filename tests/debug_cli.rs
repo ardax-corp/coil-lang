@@ -8,6 +8,14 @@ fn coil_bin() -> String {
 }
 
 fn ensure_helper(name: &str) {
+    // Once per helper and test binary: tests run in parallel, and a second
+    // `cargo build` can relink the helper while another test runs it
+    // (#2116).
+    static BUILT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut built = BUILT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if built.iter().any(|b| b == name) {
+        return;
+    }
     let coil = PathBuf::from(coil_bin());
     let helper = coil_cli::sibling_bin(&coil, name);
     // Build even when present: a helper left from other sources is one
@@ -23,6 +31,7 @@ fn ensure_helper(name: &str) {
         "{name} missing at {} (cargo build -p {pkg})",
         helper.display()
     );
+    built.push(name.to_string());
 }
 
 fn fib_entry() -> PathBuf {
