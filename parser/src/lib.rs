@@ -2832,10 +2832,12 @@ impl<'pratt> Pratt<'pratt> {
             .collect::<Vec<_>>()
     }
 
-    /// `[shared] [readonly] class Name { [pub] field: Type, ... }`
+    /// `[view | shared] [readonly] class Name { [pub] [mut] field: Type, ... }`
     ///
     /// `shared` is kept as the attribute `shared`: an identity type that
-    /// copy-on-write never copies.
+    /// copy-on-write never copies. `view` is kept as the attribute `view`: a
+    /// class whose `mut` fields hold borrows, so its values are held to the
+    /// borrows' scope.
     ///
     /// Fields are private by default; `pub` makes them public.
     fn class(
@@ -2844,7 +2846,7 @@ impl<'pratt> Pratt<'pratt> {
     {
         self.docs_prefix()
             .then(self.attr_list())
-            .then(keyword!("shared").or_not())
+            .then(choice((keyword!("view").to("view"), keyword!("shared").to("shared"))).or_not())
             .then(keyword!("readonly").or_not())
             .then_ignore(keyword!("class"))
             .then(text::ident().padded_by(trivia()))
@@ -2873,9 +2875,9 @@ impl<'pratt> Pratt<'pratt> {
                         fields
                     }),
             )
-            .map_with(|(((((((docs, mut attrs), shared), readonly), name), type_params), invariants), fields), e| {
-                if shared.is_some() {
-                    attrs.push(Attribute { name: "shared", args: AttrArgs::Empty });
+            .map_with(|(((((((docs, mut attrs), kind), readonly), name), type_params), invariants), fields), e| {
+                if let Some(kind) = kind {
+                    attrs.push(Attribute { name: kind, args: AttrArgs::Empty });
                 }
                 (
                     e.span(),
@@ -2900,6 +2902,7 @@ impl<'pratt> Pratt<'pratt> {
         self.docs_prefix()
             .then(self.attr_list())
             .then(keyword!("pub").or_not())
+            .then(keyword!("mut").or_not())
             .then(
                 choice((
                     just("static").padded_by(trivia()).to(FieldModifier::Static),
@@ -2911,7 +2914,12 @@ impl<'pratt> Pratt<'pratt> {
             .then_ignore(op!(":").labelled("':' before field type"))
             .then(self.type_annotation().labelled("field type"))
             .then(op!("=").ignore_then(self.expr()).or_not())
-            .map_with(|((((((docs, attrs), vis), modifier), name), ty), init), e| {
+            .map_with(|(((((((docs, mut attrs), vis), borrow), modifier), name), ty), init), e| {
+                // `mut name: T`: a borrow field of a `view class`, kept as
+                // the attribute `mut`.
+                if borrow.is_some() {
+                    attrs.push(Attribute { name: "mut", args: AttrArgs::Empty });
+                }
                 let visibility = if vis.is_some() {
                     Visibility::Public
                 } else {
