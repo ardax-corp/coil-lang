@@ -10,8 +10,8 @@
 //! - a type that holds one inside another (`Option<Entry>`, `Vec<Entry>`);
 //! - a capture by a lambda (which a task or thread may run later);
 //! - a return from anything but a method of the borrowed object (a view
-//!   built from `mut self`, `self` in a view's own method, or another such
-//!   call on `self`).
+//!   built from `mut self` or a trait method's `mut` receiver, `self` in a
+//!   view's own method, or another such call on `self`).
 
 use std::collections::HashSet;
 
@@ -97,10 +97,12 @@ pub(crate) fn view_key(checker: &Checker, ty: Option<&Ty>) -> Option<String> {
     view_of(checker, ty)
 }
 
-/// Whether `v` is the place `self` or a place below it.
+/// Whether `v` is the method's receiver or a place below it: `self`, or a
+/// trait method's first parameter (`fn slot(Vec<T> xs, int i)` on
+/// `impl Slots for Vec<T>`, called as `v.slot(i)`).
 fn rooted_at_self(body: &HirBody, v: HirId) -> bool {
     match &body.expr(v).kind {
-        HirKind::Local(l) => body.local(*l).kind == LocalKind::Param && body.local(*l).name == "self",
+        HirKind::Local(l) => body.local(*l).kind == LocalKind::Param && (body.local(*l).name == "self" || body.params.first() == Some(l)),
         HirKind::Field { base, .. } | HirKind::Index { base, .. } => rooted_at_self(body, *base),
         _ => false,
     }
