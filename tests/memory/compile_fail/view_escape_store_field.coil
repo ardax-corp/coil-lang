@@ -1,0 +1,25 @@
+// @expected E0151 — a view stored in a field of another object.
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+}
+
+class Box {
+    pub b: Option<Bump>,
+}
+
+class Holder {
+    pub n: int,
+}
+
+static let kept: int = 0;
+
+fn main() {
+    let k = new Counter(1);
+    let v = new Bump(mut k);
+    let h = new Box(Option::Some(v));
+    let _ = h;
+}

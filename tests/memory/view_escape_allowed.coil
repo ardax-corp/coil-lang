@@ -1,0 +1,48 @@
+// What a view value may do: be a temporary in a chain, be bound with
+// `let`, be passed as an argument, and be returned by a method of the
+// object it borrows (built over `mut self`, or `self` from its own method).
+use tests::assert;
+
+class Counter {
+    pub n: int,
+}
+
+view class Bump {
+    mut c: Counter,
+    pub by: int,
+}
+
+impl Counter {
+    pub fn bump(int by) -> Bump {
+        return new Bump(mut self, by);
+    }
+
+    pub fn bump_twice(int by) -> Bump {
+        return self.bump(by * 2);
+    }
+}
+
+impl Bump {
+    pub fn same() -> Bump {
+        return self;
+    }
+
+    pub fn amount() -> int {
+        return self.by;
+    }
+}
+
+fn amount_of(Bump b) -> int {
+    return b.amount();
+}
+
+test("a view is a temporary in a call chain") {
+    let k = new Counter(1);
+    assert!(k.bump(3).same().amount() == 3);
+}
+
+test("a view is bound with let and passed as an argument") {
+    let k = new Counter(1);
+    let b = k.bump_twice(2);
+    assert!(amount_of(b) == 4);
+}
