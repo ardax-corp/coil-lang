@@ -152,6 +152,30 @@ execution started from (the program entry, a native callback, or the task's
 own coroutine). Stack overflow and the step budget do not unwind.
 Implementation: [`machine/src/vm_unwind.rs`](../../machine/src/vm_unwind.rs).
 
+A `defer` belongs to its block (RAII plan, `feature/raii`). MIR lowering
+(`compiler/src/mir/from_hir.rs`) keeps a stack of open cleanups per body:
+a block runs its own armed defers at its end, after its tail value, and a
+`return`, `break` or `continue` runs those of every block it leaves. The
+pad still covers the whole function for unwinding, calling only the thunks
+whose flag is still armed. Captures are copied into locals where the
+`defer` statement runs (`use (mut x)` names the local itself).
+
+A `for` loop over a generator it made itself (not a local, field or index)
+closes it when it leaves early: `coro_close` (HostInvoke **189**,
+`HostOp::Task`, archive 6.14) unwinds the suspended coroutine from its
+`yield`, running its armed defers, and marks it done. The loop's `break`
+and `return` paths call it; a panic that leaves the loop closes it through
+the unwinder (`Unwind.closing`). A suspended generator with an armed defer
+is also put on the heap's finalizable list (`Heap::note_closeable`): the
+collector, and teardown at exit, close the ones nothing reaches
+(`run_coro_close`). As with a `drop`, a panic there aborts the program.
+
+Leaked streams: an `open` or `accept` that fails with `TooManyOpenFiles`
+roots its arguments, runs `gc_collect` (which closes the unreachable
+streams) and calls the native once more (`retry_after_fd_collect` in
+`machine/src/vm.rs`). The compiler's `E0148` (`compiler/src/hir/stream_lint.rs`)
+warns about a local stream that is never closed or handed on.
+
 When every task waits on another task (a join cycle) and no IO or timer can
 wake one, the waiting `join` / scope end panics with `task deadlock`.
 
