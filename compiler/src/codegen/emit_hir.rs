@@ -2216,6 +2216,12 @@ impl Compiler {
         growth: usize,
     ) -> Option<(HirBody, HirEmit)> {
         use crate::hir::{BodyKind, inline};
+        if std::env::var_os("COIL_XM_SPIKE").is_some() {
+            let keys: Vec<String> = emit.plan.calls.values().map(|c| c.key.clone()).collect();
+            for key in keys {
+                self.spike_resolve_foreign(&key);
+            }
+        }
         // The module path a body's names resolve in.
         let home = |b: &HirBody| {
             let mut s = b.name.as_str();
@@ -3183,12 +3189,49 @@ impl Compiler {
     /// The body of inherent method clone `key` ([`Self::hir_method_clone`]),
     /// for typed inlining: its method's HIR at the clone's types, when the
     /// method is this program's and every type there is ground.
+    fn spike_resolve_foreign(&mut self, key: &str) {
+        let src_program = {
+            let plans = self.method_clone_plans.borrow();
+            let Some(plan) = plans.get(key) else { return };
+            let Some(src) = self.inst_clone_srcs.get(&plan.src) else { return };
+            src.program
+        };
+        if src_program == self.program_seq {
+            return;
+        }
+        let Some(mut ctx) = self.module_ctxs.remove(&src_program) else {
+            eprintln!("spike {key}: no ctx");
+            return;
+        };
+        self.swap_module_ctx_pub(&mut ctx, true);
+        let module = self.hir_module.take();
+        match &module {
+            None => eprintln!("spike {key}: foreign ctx has no HIR module"),
+            Some(m) => match self.hir_method_clone_body(m, key) {
+                None => eprintln!("spike {key}: no instance body"),
+                Some(inst) => match self.plan_hir_body(&inst) {
+                    Err(e) => eprintln!("spike {key}: plan refused: {e}"),
+                    Ok(emit) => {
+                        let mut calls: Vec<_> = emit.plan.calls.iter().map(|(id, c)| (*id, c.key.clone(), c.builtin.is_some(), c.generic.is_some(), c.own_dicts.len())).collect();
+                        calls.sort();
+                        eprintln!("spike {key}: planned, {} nodes, calls {:?}", inst.exprs.len(), calls);
+                    }
+                },
+            },
+        }
+        self.hir_module = module;
+        self.swap_module_ctx_pub(&mut ctx, false);
+        self.module_ctxs.insert(src_program, ctx);
+    }
+
     fn hir_method_clone_body(&self, module: &crate::hir::HirModule, key: &str) -> Option<HirBody> {
         let plans = self.method_clone_plans.borrow();
+        let spike = std::env::var_os("COIL_XM_SPIKE").is_some();
+        let why = |w: &str| { if spike { eprintln!("spike-why {key}: {w}"); } };
         let plan = plans.get(key)?;
-        let src = self.inst_clone_srcs.get(&plan.src).filter(|s| s.program == self.program_seq && s.method_of.is_some())?;
-        let index = *self.hir_fns.get(&src.span)?;
-        let generic = module.bodies.get(index)?;
+        let Some(src) = self.inst_clone_srcs.get(&plan.src).filter(|s| s.program == self.program_seq && s.method_of.is_some()) else { why("src"); return None; };
+        let Some(&index) = self.hir_fns.get(&src.span) else { why("hir_fns span"); return None; };
+        let Some(generic) = module.bodies.get(index) else { why("bodies index"); return None; };
         // `T::m(..)` resolves `T` by the clone being compiled, which is not
         // this method's.
         let names = &src.method_of.as_ref()?.names;
@@ -3197,25 +3240,62 @@ impl Compiler {
                 if name.split_once("::").is_some_and(|(owner, _)| names.iter().any(|n| n == owner)))
         });
         if by_param {
+            why("by_param");
             return None;
         }
-        let vars = self.inst_clone_vars(&src.head, &plan.lookup)?;
-        let mut inst = self.hir_inline_instance(generic, &vars)?;
+        let Some(vars) = self.inst_clone_vars(&src.head, &plan.lookup) else { why("vars"); return None; };
+        let mut inst = self.hir_instance(generic, &vars);
         // `self` is typed by its class alone (`Box`): at the clone's type
         // arguments (`Box<string>`) here, as `hir_clone_self_ty` types it
         // in the clone, so its calls' dictionaries are looked up by them.
+        if spike {
+            eprintln!("spike-why {key}: self local {:?} static {:?}", inst.params.first().map(|&me| inst.local(me).ty.clone()), src.method_of.as_ref().map(|m| m.is_static));
+        }
         if src.method_of.as_ref().is_some_and(|m| !m.is_static)
             && let (Some(&me), Some(self_ty)) = (inst.params.first(), plan.param_tys.first())
             && let Some(Ty::Con(class)) = inst.local(me).ty.clone()
-            && matches!(self_ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if *n == class))
+            && matches!(self_ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if *n == class || n.rsplit("::").next() == Some(class.as_str())))
         {
             inst.locals[me.0 as usize].ty = Some(self_ty.clone());
             for e in inst.exprs.iter_mut() {
-                if matches!(e.kind, HirKind::Local(l) if l == me) && matches!(&e.ty, Some(Ty::Con(n)) if *n == class) {
+                if matches!(e.kind, HirKind::Local(l) if l == me)
+                    && matches!(&e.ty, Some(Ty::Con(n)) if *n == class || n.rsplit("::").next() == Some(class.as_str()))
+                {
                     e.ty = Some(self_ty.clone());
                 }
             }
         }
+        // A field read's type at its object's type arguments: the class's
+        // declared field types are in the class's own parameters.
+        for _ in 0..4 {
+            let mut changed = false;
+            for i in 0..inst.exprs.len() {
+                let HirKind::Field { base, name } = &inst.exprs[i].kind else { continue };
+                if inst.exprs[i].ty.as_ref().is_none_or(crate::layout::ty_is_closed) {
+                    continue;
+                }
+                let Some(Ty::App(head, args)) = inst.expr(*base).ty.clone() else { continue };
+                let Ty::Con(class) = head.as_ref() else { continue };
+                let Some(fty) = self.hir_class_fields(class).and_then(|f| f.into_iter().find(|(n, _)| n == name).map(|(_, t)| t)) else { continue };
+                if let Some(at) = close_params(&fty, &args).filter(crate::layout::ty_is_closed) {
+                    inst.exprs[i].ty = Some(at);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let closed = |t: &Option<Ty>| t.as_ref().is_none_or(crate::layout::ty_is_closed);
+        if !inst.locals.iter().all(|l| closed(&l.ty)) || !inst.exprs.iter().all(|e| closed(&e.ty)) || !closed(&inst.ret) {
+            if spike {
+                let open: Vec<String> = inst.exprs.iter().filter(|e| !closed(&e.ty)).map(|e| { let b = if let HirKind::Field { base, .. } = &e.kind { format!("{:?}: {:?}", inst.expr(*base).kind, inst.expr(*base).ty) } else { String::new() }; format!("E {:?} : {:?} base {b}", e.kind, e.ty) }).take(2).collect();
+                eprintln!("spike-why {key}: param_tys {:?}", plan.param_tys);
+                eprintln!("spike-why {key}: not closed after fields: {open:?}");
+            }
+            return None;
+        }
+        inst.ret_layout = inst.ret.as_ref().map_or(crate::layout::Layout::Word, |t| crate::layout::of(&self.checker, t));
         Some(inst)
     }
 

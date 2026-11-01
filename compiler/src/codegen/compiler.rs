@@ -2116,6 +2116,10 @@ impl Compiler {
     /// Swap `ctx` with this compiler's module context. Entering (`enter`),
     /// `ctx`'s checker takes the program-wide state (substitution, type
     /// variable counter, static slots) first; leaving, it hands it back.
+    pub(super) fn swap_module_ctx_pub(&mut self, ctx: &mut ModuleCtx, enter: bool) {
+        self.swap_module_ctx(ctx, enter);
+    }
+
     fn swap_module_ctx(&mut self, ctx: &mut ModuleCtx, enter: bool) {
         if enter {
             ctx.checker.swap_program_state(&mut self.checker);
