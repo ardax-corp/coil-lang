@@ -874,8 +874,42 @@ impl Plan {
         plan.inout = inout;
         plan.defer_captured = f.defer_captured.clone();
         plan.check_borrows(checker, body, f);
+        plan.check_kept_views(checker, body, f);
         plan.note_copies(checker, body, f, &copied_from);
         plan
+    }
+
+    /// E0151 (#2198): a view handed to a callee that keeps it (stores it,
+    /// captures it in a closure it returns, …) outlives its borrow, though
+    /// the callee only sees a `T`. A view's own method that returns a view
+    /// keeps its receiver by design: that is the call chain E0151 allows.
+    fn check_kept_views(&mut self, checker: &Checker, body: &HirBody, f: &Facts<'_>) {
+        let mut calls: Vec<(&HirId, &ArgUse)> = f.calls.iter().collect();
+        calls.sort_by_key(|(id, _)| id.0);
+        for (&id, used) in calls {
+            let HirKind::Call { args, .. } = &body.expr(id).kind else {
+                continue;
+            };
+            let returns_view = crate::hir::view_lint::is_view_ty(checker, body.expr(id).ty.as_ref());
+            for (i, &a) in args.iter().enumerate().take(64) {
+                let v = named_value(body, a);
+                if used.kept & (1 << i) == 0 || (i == 0 && returns_view) {
+                    continue;
+                }
+                let Some(view) = crate::hir::view_lint::view_key(checker, body.expr(v).ty.as_ref()) else {
+                    continue;
+                };
+                let short = view.rsplit("::").next().unwrap_or(&view);
+                let span = body.expr(v).span;
+                let mut m = Message::error(
+                    ErrorCode::ViewEscape,
+                    format!("this call keeps the `{short}` view past the call, where it would outlive what it borrows"),
+                    span.0..span.1,
+                );
+                m.with_help("a view is the borrow it holds: pass it only to calls that use it and let it go".to_string());
+                self.notes.push(m);
+            }
+        }
     }
 
     /// E0149 (#2191): a borrow writes its object in place, so while it
