@@ -141,6 +141,19 @@ struct HirGround {
     boxed: Vec<Option<Ty>>,
 }
 
+/// How a ground function value passed to a shared generic body is
+/// wrapped ([`HirGeneric::adapt`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct HirFnAdapt {
+    /// Per parameter: the type to unbox it as (a bare type parameter the
+    /// body passes boxed).
+    pub(crate) unbox: Vec<Option<Ty>>,
+    /// The niche layout of the function's result where the body reads it
+    /// as an open `Option` / `Result`, its boxed enum object: the adapter
+    /// boxes the word.
+    pub(crate) ret: Option<ValueLayout>,
+}
+
 /// The shared-body ABI of a call to a bounded generic, as `compile_call_expr`.
 #[derive(Clone)]
 struct HirGeneric {
@@ -155,8 +168,9 @@ struct HirGeneric {
     unbox: Option<Ty>,
     /// Per argument: a ground closure passed where the callee takes a
     /// function over bare type parameters gets those arguments boxed, so
-    /// it is wrapped to unbox each one (`Some(ty)`) before the call (#699).
-    adapt: Vec<Option<Vec<Option<Ty>>>>,
+    /// it is wrapped to unbox each one (`Some(ty)`) before the call (#699),
+    /// and its niche result boxed where the callee reads an open enum.
+    adapt: Vec<Option<HirFnAdapt>>,
     /// The enclosing body's dictionaries (`__dictN`) the call forwards
     /// ahead of its own, as `forwarded_dicts_at` lists them.
     forwarded: Vec<usize>,
@@ -1272,9 +1286,10 @@ impl Compiler {
             }
             for (&arg, adapt) in args.iter().zip(&g.adapt) {
                 if let Some(adapt) = adapt
+                    && adapt.unbox.iter().any(Option::is_some)
                     && matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
                 {
-                    unbox.insert(arg.0, adapt.clone());
+                    unbox.insert(arg.0, adapt.unbox.clone());
                 }
             }
         }
@@ -4502,6 +4517,8 @@ impl Compiler {
         self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, ..compiler::SynthCallee::default() });
         self.emit_synth_fn(name, &hir, calls, true);
         self.hir_synth_callees.clear();
+        // The adapters its call wraps a function argument in (#2163).
+        self.flush_hir_lambdas();
     }
 
     /// The table key and ABI of `recv.method(args)` (`args[0]` is the
@@ -6273,7 +6290,7 @@ impl Compiler {
         ty: &Ty,
         bounds: &[crate::typechecking::ty::TyVarId],
         open: &impl Fn(&Ty) -> bool,
-    ) -> Option<Vec<Option<Ty>>> {
+    ) -> Option<HirFnAdapt> {
         let (mut p, mut t) = (param, ty);
         let mut unbox = Vec::new();
         while let (Ty::Fun(pa, pr), Ty::Fun(ta, tr)) = (p, t) {
@@ -6282,7 +6299,58 @@ impl Compiler {
             unbox.push((bare && !open(&ta) && Self::ty_to_value_tag(&ta).is_some()).then_some(ta));
             (p, t) = (pr, tr);
         }
-        unbox.iter().any(Option::is_some).then_some(unbox)
+        // A result the body reads as an open `Option` / `Result` (its
+        // payload a type parameter) is that enum's object there, so a
+        // niche word from a ground function is boxed first (#2163).
+        let quantified = crate::typechecking::ty::ftv_ty(p).iter().any(|v| bounds.contains(v));
+        let ret = if quantified && !matches!(p, Ty::Var(_)) && !unbox.is_empty() {
+            let t = apply_ty_prune(self.checker.subst(), t);
+            Some(self.value_layout(&t)).filter(|l| *l != ValueLayout::Boxed && !open(&t))
+        } else {
+            None
+        };
+        (unbox.iter().any(Option::is_some) || ret.is_some()).then_some(HirFnAdapt { unbox, ret })
+    }
+
+    /// Per argument of a call to `key`'s shared body: the adapter a ground
+    /// function value needs where the callee's parameter is a function whose
+    /// result is an open `Option` / `Result` (`T -> Result<U, E>`), which
+    /// the body reads as its enum object, while the argument returns a
+    /// niche word (#2163). `None` where none is needed.
+    pub(super) fn hir_open_ret_adapts(&self, hir: &HirBody, key: &str, args: &[HirId]) -> Vec<Option<HirFnAdapt>> {
+        let none = vec![None; args.len()];
+        let Some(scheme) = self.checker.env().lookup(key) else {
+            return none;
+        };
+        let mut params = Vec::new();
+        let mut cur = &scheme.ty;
+        while let Ty::Fun(p, r) = cur {
+            params.push(p.as_ref());
+            cur = r;
+        }
+        if params.len() < args.len() {
+            return none;
+        }
+        let skip = params.len() - args.len();
+        args.iter()
+            .zip(&params[skip..])
+            .map(|(&arg, &param)| {
+                let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+                let (mut p, mut t) = (param, crate::typechecking::ty::strip_readonly(&ty).clone());
+                let mut arity = 0;
+                while let (Ty::Fun(_, pr), Ty::Fun(_, tr)) = (p, t.clone()) {
+                    arity += 1;
+                    p = pr;
+                    t = apply_ty_prune(self.checker.subst(), &tr);
+                }
+                if arity == 0 || matches!(p, Ty::Var(_)) || crate::typechecking::ty::ftv_ty(p).is_empty() {
+                    return None;
+                }
+                let layout = self.value_layout(&t);
+                (layout != ValueLayout::Boxed && crate::layout::ty_is_closed(&t))
+                    .then(|| HirFnAdapt { unbox: vec![None; arity], ret: Some(layout) })
+            })
+            .collect()
     }
 
     /// The adapter the closure a shared generic body returns needs at the
@@ -6452,15 +6520,16 @@ impl Compiler {
     /// and calls the function value it captures, and its `MakeFn` operand
     /// (one capture). One per shape, emitted after the body being compiled
     /// ([`Self::flush_hir_lambdas`]).
-    pub(super) fn hir_fn_adapter(&mut self, unbox: &[Option<Ty>]) -> (IlLabel, u32) {
-        let tags: Vec<Option<u32>> = unbox.iter().map(|t| t.as_ref().and_then(Self::ty_to_value_tag).map(|t| t as u32)).collect();
-        let operand = make_fn_operand(1, 0, unbox.len() as u32, false);
-        if let Some(&label) = self.hir_fn_adapters.get(&tags) {
+    pub(super) fn hir_fn_adapter(&mut self, adapt: &HirFnAdapt) -> (IlLabel, u32) {
+        let tags: Vec<Option<u32>> = adapt.unbox.iter().map(|t| t.as_ref().and_then(Self::ty_to_value_tag).map(|t| t as u32)).collect();
+        let operand = make_fn_operand(1, 0, adapt.unbox.len() as u32, false);
+        let key = (tags, adapt.ret);
+        if let Some(&label) = self.hir_fn_adapters.get(&key) {
             return (label, operand);
         }
         let label = self.bytecode.fresh_label();
-        self.hir_fn_adapters.insert(tags, label);
-        self.hir_adapter_tail.push((label, unbox.to_vec()));
+        self.hir_fn_adapters.insert(key, label);
+        self.hir_adapter_tail.push((label, adapt.clone()));
         (label, operand)
     }
 
@@ -6630,29 +6699,30 @@ impl Compiler {
     /// its frame the wrapped function (the capture), then the arguments.
     /// Its direct MIR is built here, as it has no HIR; the stack IL only
     /// keeps its function record non-empty.
-    fn hir_fn_adapter_fn(&mut self, label: IlLabel, unbox: &[Option<Ty>]) {
+    fn hir_fn_adapter_fn(&mut self, label: IlLabel, adapt: &HirFnAdapt) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_fn_adapter_{}", self.loop_par_helpers);
         let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
         self.bytecode.push_return();
-        let arity = 1 + unbox.len() as u32;
+        let arity = 1 + adapt.unbox.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
-        match Self::fn_adapter_mir(&name, unbox) {
+        match Self::fn_adapter_mir(&name, adapt) {
             Ok(func) => self.bytecode.set_last_func_hir_mir(func),
             Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
         }
     }
 
     /// [`Self::hir_fn_adapter_fn`]'s direct MIR. An argument it does not
-    /// unbox, and the result, are words it only moves.
-    fn fn_adapter_mir(name: &str, unbox: &[Option<Ty>]) -> Result<crate::mir::MirFunc, String> {
+    /// unbox, and a result it does not box, are words it only moves.
+    fn fn_adapter_mir(name: &str, adapt: &HirFnAdapt) -> Result<crate::mir::MirFunc, String> {
         use crate::mir::MirTy;
         let err = |e: crate::mir::MirError| format!("mir: {e}");
+        let unbox = &adapt.unbox;
         let mut b = crate::mir::MirBuilder::new(name.to_string());
-        b.set_ret_ty(MirTy::I64);
+        b.set_ret_ty(if adapt.ret.is_some() { MirTy::HeapRef } else { MirTy::I64 });
         let f = b.add_param(MirTy::HeapRef).map_err(err)?;
         let mut args = Vec::with_capacity(unbox.len());
         for ty in unbox {
@@ -6667,9 +6737,57 @@ impl Compiler {
                 None => p,
             });
         }
-        let r = b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
-        b.ret(Some(r)).map_err(err)?;
+        let Some(layout) = adapt.ret else {
+            let r = b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
+            b.ret(Some(r)).map_err(err)?;
+            return b.finish().map_err(err);
+        };
+        let word = if layout == ValueLayout::NicheResult { MirTy::NicheRes } else { MirTy::NicheOpt };
+        let w = b.ins_call_indirect(f, args, word).map_err(err)?;
+        Self::box_niche_ret(&mut b, layout, w)?;
         b.finish().map_err(err)
+    }
+
+    /// Return niche word `w` of `layout` boxed to its `ObjEnum`: the first
+    /// variant (`None`, `Ok`) when it is zero or, for a niche `Result`,
+    /// its low bit is clear; else the second with the payload's word.
+    fn box_niche_ret(b: &mut crate::mir::MirBuilder, layout: ValueLayout, w: crate::mir::ValueId) -> Result<(), String> {
+        use crate::mir::{MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirTy};
+        let err = |e: crate::mir::MirError| format!("mir: {e}");
+        let make = |b: &mut crate::mir::MirBuilder, tag: u32, payload: Vec<crate::mir::ValueId>| {
+            let obj = b.ins_alloc(MirAllocKind::Enum { tag }, payload)?;
+            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
+        };
+        let zero = b.ins_const(MirConst::I64(0)).map_err(err)?;
+        let second = if layout == ValueLayout::NicheResult {
+            let one = b.ins_const(MirConst::I64(1)).map_err(err)?;
+            let bit = b.ins_binop(MirBinOp::BitAnd, w, one).map_err(err)?;
+            b.ins_cmp(MirCmpOp::Ne, bit, zero).map_err(err)?
+        } else {
+            b.ins_cmp(MirCmpOp::Ne, w, zero).map_err(err)?
+        };
+        let (hit, fall) = (b.create_block(), b.create_block());
+        b.branch(second, hit, fall).map_err(err)?;
+        b.switch_to_block(fall);
+        let first = match layout {
+            ValueLayout::NicheOption => make(b, 0, Vec::new()).map_err(err)?,
+            ValueLayout::NicheUnitResult => make(b, 0, vec![zero]).map_err(err)?,
+            _ => {
+                let p = b.ins_cast(MirCastKind::Word, MirTy::HeapRef, w).map_err(err)?;
+                make(b, 0, vec![p]).map_err(err)?
+            }
+        };
+        b.ret(Some(first)).map_err(err)?;
+        b.switch_to_block(hit);
+        let payload = if layout == ValueLayout::NicheResult {
+            let one = b.ins_const(MirConst::I64(1)).map_err(err)?;
+            b.ins_binop(MirBinOp::Xor, w, one).map_err(err)?
+        } else {
+            w
+        };
+        let p = b.ins_cast(MirCastKind::Word, MirTy::HeapRef, payload).map_err(err)?;
+        let obj = make(b, 1, vec![p]).map_err(err)?;
+        b.ret(Some(obj)).map_err(err)
     }
 
     /// The frame's dictionary slot and `show` method slot for a `%v` of a
@@ -9067,8 +9185,8 @@ impl Compiler {
             for lam in std::mem::take(&mut self.hir_lambda_tail) {
                 self.hir_lambda_fn(lam);
             }
-            for (label, unbox) in std::mem::take(&mut self.hir_adapter_tail) {
-                self.hir_fn_adapter_fn(label, &unbox);
+            for (label, adapt) in std::mem::take(&mut self.hir_adapter_tail) {
+                self.hir_fn_adapter_fn(label, &adapt);
             }
             for (label, adapt) in std::mem::take(&mut self.hir_closure_adapter_tail) {
                 self.hir_closure_adapter_fn(label, &adapt);

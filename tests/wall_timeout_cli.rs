@@ -13,15 +13,21 @@ fn coil_bin() -> String {
 
 /// `coil test` re-execs `coil-test`; `cargo test -p coil` alone does not build it.
 fn ensure_coil_test() {
-    let coil = PathBuf::from(coil_bin());
-    let helper = coil_cli::sibling_bin(&coil, "coil-test");
-    let release = coil.parent().and_then(Path::file_name).is_some_and(|d| d == "release");
-    let status = Command::new("cargo")
-        .args(["build", "-q", "-p", "coil-test"])
-        .args(if release { &["--release"][..] } else { &[] })
-        .status()
-        .expect("spawn cargo build -p coil-test");
-    assert!(status.success() && helper.is_file(), "coil-test missing at {}", helper.display());
+    // Once per test binary: tests run in parallel, and a second
+    // `cargo build` can relink the helper while another test runs it
+    // (#2116).
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    BUILT.call_once(|| {
+        let coil = PathBuf::from(coil_bin());
+        let helper = coil_cli::sibling_bin(&coil, "coil-test");
+        let release = coil.parent().and_then(Path::file_name).is_some_and(|d| d == "release");
+        let status = Command::new("cargo")
+            .args(["build", "-q", "-p", "coil-test"])
+            .args(if release { &["--release"][..] } else { &[] })
+            .status()
+            .expect("spawn cargo build -p coil-test");
+        assert!(status.success() && helper.is_file(), "coil-test missing at {}", helper.display());
+    });
 }
 
 fn temp_cwd(label: &str) -> PathBuf {
