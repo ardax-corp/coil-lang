@@ -168,3 +168,78 @@ fn main() {
         exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::ext::{LEGACY_SOURCE_EXT, SOURCE_EXT};
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("coil-fmt-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const MESSY: &str = "fn main(){let x=1;}\n";
+
+    #[test]
+    fn legacy_file_is_formatted_into_coil_file() {
+        let dir = scratch("move");
+        let old = dir.join("a").with_extension(LEGACY_SOURCE_EXT);
+        fs::write(&old, MESSY).unwrap();
+        assert!(format_one(&old, false).unwrap());
+        let new = dir.join("a").with_extension(SOURCE_EXT);
+        assert!(!old.exists(), "legacy file should be gone");
+        let out = fs::read_to_string(&new).unwrap();
+        assert_eq!(out, format_source(MESSY).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn already_formatted_legacy_file_is_still_renamed() {
+        let dir = scratch("clean");
+        let old = dir.join("b").with_extension(LEGACY_SOURCE_EXT);
+        let clean = format_source(MESSY).unwrap();
+        fs::write(&old, &clean).unwrap();
+        assert!(format_one(&old, false).unwrap());
+        assert!(!old.exists());
+        assert_eq!(fs::read_to_string(dir.join("b.coil")).unwrap(), clean);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_reports_legacy_file_without_touching_it() {
+        let dir = scratch("check");
+        let old = dir.join("c").with_extension(LEGACY_SOURCE_EXT);
+        fs::write(&old, format_source(MESSY).unwrap()).unwrap();
+        assert!(format_one(&old, true).unwrap(), "a legacy name needs a change");
+        assert!(old.exists());
+        assert!(!dir.join("c.coil").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_file_is_not_moved_over_an_existing_coil_file() {
+        let dir = scratch("clash");
+        let old = dir.join("d").with_extension(LEGACY_SOURCE_EXT);
+        let new = dir.join("d.coil");
+        fs::write(&old, MESSY).unwrap();
+        fs::write(&new, "fn kept() {}\n").unwrap();
+        assert!(format_one(&old, false).is_err());
+        assert_eq!(fs::read_to_string(&old).unwrap(), MESSY);
+        assert_eq!(fs::read_to_string(&new).unwrap(), "fn kept() {}\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn coil_file_is_formatted_in_place() {
+        let dir = scratch("inplace");
+        let path = dir.join("e.coil");
+        fs::write(&path, MESSY).unwrap();
+        assert!(format_one(&path, false).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), format_source(MESSY).unwrap());
+        assert!(!format_one(&path, false).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
