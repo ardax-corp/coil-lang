@@ -1916,6 +1916,10 @@ fn foreign_fn_clone_is_specialized() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_fn_clone.coil");
     let syms = pipeline.program_debug().fn_symbols;
     for name in ["dict_lib::largest$inst$int", "dict_lib::larger$inst$int"] {
+        // `larger`'s clone may be inlined into `largest`'s (#2183).
+        if name.ends_with("larger$inst$int") && !syms.iter().any(|s| s.name == name) {
+            continue;
+        }
         let (start, end) = fn_pc_range(&syms, name, bc.len());
         let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
         for op in [Instruction::BoxValue, Instruction::MakeTuple, Instruction::CallIndirect] {
@@ -2308,4 +2312,57 @@ fn main() {
     run_dispatch(bytecode, constants, strings, slots, &pipeline);
     let allocs = machine::alloc_count();
     assert!(allocs < 100, "the table should be built once, not per call: {allocs} allocations");
+}
+
+/// #2182: a bounded `impl` method taking a function over the class
+/// parameter (`V -> V f`) is called through its clone at the call's
+/// types, as the same method in an unbounded `impl` is, not through the
+/// shared body with dictionaries.
+#[test]
+fn bounded_method_with_fn_param_takes_its_clone() {
+    let src = "
+class Box<V> { pub v: V, }
+impl Box<V: Eq> {
+    pub fn apply_eq(V -> V f) -> V { self.v = f(self.v); return self.v; }
+}
+fn main() {
+    let b = new Box(1);
+    if b.apply_eq(fn (int c) => c + 1) != 2 { panic(\"apply_eq\"); }
+}
+";
+    let (bc, pipeline) = compile_src_at(src, compiler::OptLevel::None);
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "main", bc.len());
+    let (clone, _) = fn_pc_range(&syms, "Box::apply_eq$inst$int", bc.len());
+    let calls: Vec<usize> = bc[start..end]
+        .iter()
+        .filter(|b| *b.bytecode() == Instruction::CALL)
+        .map(|b| (b.operand_u32() & 0xFF_FFFF) as usize)
+        .collect();
+    assert!(calls.contains(&clone), "`main` should call `Box::apply_eq$inst$int` (pc {clone}); calls {calls:?}");
+}
+
+/// #2183: a generic class's method calling another one of its methods, and
+/// the builtin `Hash` thunk for `string`, inline at ground types: a ground
+/// call of the outer method leaves no call, only `hash_string`'s
+/// `HostInvoke`.
+#[test]
+fn generic_class_method_clones_inline() {
+    let src = "
+class Box<V> { pub v: V, }
+impl Box<V: Hash> {
+    fn mix() -> int { let h = self.v.hash(); return h ^ (h >> 16); }
+    pub fn slot() -> int { return self.mix() & 7; }
+}
+fn main() {
+    let b = new Box(\"abc\");
+    if b.slot() < 0 { panic(\"slot\"); }
+}
+";
+    let (bc, pipeline) = compile_src_at(src, compiler::OptLevel::Standard);
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "main", bc.len());
+    let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+    assert!(!ops.contains(&Instruction::CALL), "`slot`, `mix` and the hash thunk should inline into `main`; ops={ops:?}");
+    assert!(ops.contains(&Instruction::HostInvoke), "the string hash should be its `HostInvoke`; ops={ops:?}");
 }
