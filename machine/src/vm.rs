@@ -869,8 +869,13 @@ pub(crate) fn vscan(
     let hi = i128::from(bound) - i128::from(!inclusive) - (simd::BYTE_LANES as i128 - 1);
     // Backward, the lowest `p` whose lane `p - 63` passes the bound.
     let lo = i128::from(bound) + i128::from(!inclusive) + (simd::BYTE_LANES as i128 - 1);
-    // Fewer than 64 lanes left (a short inner loop): nothing to decode.
-    if if backward { i128::from(from) < lo } else { i128::from(from) > hi } {
+    // Fewer than 64 lanes left (a short inner loop): backward has nothing to
+    // decode; forward still runs one padded chunk (the tail below).
+    let last = i128::from(bound) - i128::from(!inclusive);
+    if backward && i128::from(from) < lo {
+        return Ok(from);
+    }
+    if !backward && i128::from(from) > last {
         return Ok(from);
     }
     let mut slots = [const { std::mem::MaybeUninit::<Op>::uninit() }; simd::SCAN_MAX_BODY];
@@ -965,110 +970,165 @@ pub(crate) fn vscan(
         }
         return Ok(p);
     }
-    // One string against a byte (find a byte, split): a tight loop.
-    if let [Op::Load { reg, src: Src::Bytes(ptr, len), off }, Op::Bin(crate::simd::ByteOp::CmpK { pred, dest: 0, b, k })] = *ops
-        && b == reg
-    {
-        // SAFETY: the bytes stay where they were resolved; nothing allocates.
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
-        return Ok(crate::simd::scan_byte(bytes, from, off, hi, pred, k));
-    }
-    // Two bytes of one string (a needle's first two): another tight loop.
-    use crate::simd::ByteOp::{CmpK, Logic};
-    if let [
-        Op::Load { reg: ra, src: Src::Bytes(pa, la), off: oa },
-        Op::Load { reg: rb, src: Src::Bytes(pb, lb), off: ob },
-        Op::Bin(CmpK { pred: simd_eq_a, dest: 0, b: xa, k: ka }),
-        Op::Bin(CmpK { pred: simd_eq_b, dest: db, b: xb, k: kb }),
-        Op::Bin(Logic { kind: simd::M_AND, dest: 0, a: 0, b: lb2 }),
-    ] = *ops
-        && (pa, la) == (pb, lb)
-        && xa == ra
-        && xb == rb
-        && db == lb2
-        && db != 0
-        && simd_eq_a == common::dense::CMP_EQ
-        && simd_eq_b == common::dense::CMP_EQ
-    {
-        // SAFETY: as above.
-        let bytes = unsafe { std::slice::from_raw_parts(pa, la) };
-        return Ok(crate::simd::scan_pair(bytes, from, (oa, ka), (ob, kb), hi));
-    }
-    // Every stream in place: range-check once, then load unchecked.
-    if ops.iter().all(|op| !matches!(op, Op::Load { src: Src::Other(..), .. })) {
-        let mut hi = hi;
+    // The forward lanes the chunk loop leaves (fewer than 64, or a stop):
+    // one zero-padded chunk from `p`, masked to the lanes inside the loop
+    // bound and every load's array. A `p` returned as a match matches again
+    // at lane 0, so this never skips one.
+    let scan_tail = |regs: &mut [[u64; simd::LANES]; simd::NREGS], p: i64| -> i64 {
+        if i128::from(p) > last {
+            return p;
+        }
+        let mut lanes = (last - i128::from(p) + 1).min(simd::BYTE_LANES as i128) as i64;
         for op in ops {
-            if let Op::Load { src: Src::Bytes(_, len), off, .. } = *op {
-                if i128::from(from) + i128::from(off) < 0 {
-                    return Ok(from);
+            match *op {
+                Op::Load { src: Src::Bytes(_, len), off, .. } => {
+                    let Some(at) = p.checked_add(off) else { return p };
+                    if at < 0 {
+                        return p;
+                    }
+                    lanes = lanes.min(len as i64 - at);
                 }
-                hi = hi.min(len as i128 - simd::BYTE_LANES as i128 - i128::from(off));
+                Op::Load { .. } => return p,
+                Op::Bin(_) => {}
             }
+        }
+        if lanes <= 0 {
+            return p;
+        }
+        for op in ops {
+            match *op {
+                Op::Load { reg, src: Src::Bytes(ptr, len), off } => {
+                    let at = (p + off) as usize;
+                    let n = (len - at).min(simd::BYTE_LANES);
+                    let mut buf = [0u8; simd::BYTE_LANES];
+                    // SAFETY: `at + n <= len`; the scan does not allocate.
+                    buf[..n].copy_from_slice(unsafe { std::slice::from_raw_parts(ptr.add(at), n) });
+                    *crate::simd::as_bytes_mut(&mut regs[reg]) = buf;
+                }
+                Op::Load { .. } => {}
+                Op::Bin(op) => op.run(regs),
+            }
+        }
+        let mut m = crate::simd::movemask(&regs[0]) as u64;
+        if lanes < 64 {
+            m &= (1u64 << lanes) - 1;
+        }
+        if m != 0 { p + i64::from(m.trailing_zeros()) } else { p + lanes }
+    };
+    // The chunk loops; their result is a match, a stop, or the first `p` no
+    // full chunk covers.
+    let main = (|| -> Result<i64, &'static str> {
+        // One string against a byte (find a byte, split): a tight loop.
+        if let [Op::Load { reg, src: Src::Bytes(ptr, len), off }, Op::Bin(crate::simd::ByteOp::CmpK { pred, dest: 0, b, k })] = *ops
+            && b == reg
+        {
+            // SAFETY: the bytes stay where they were resolved; nothing allocates.
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+            return Ok(crate::simd::scan_byte(bytes, from, off, hi, pred, k));
+        }
+        // Two bytes of one string (a needle's first two): another tight loop.
+        use crate::simd::ByteOp::{CmpK, Logic};
+        if let [
+            Op::Load { reg: ra, src: Src::Bytes(pa, la), off: oa },
+            Op::Load { reg: rb, src: Src::Bytes(pb, lb), off: ob },
+            Op::Bin(CmpK { pred: simd_eq_a, dest: 0, b: xa, k: ka }),
+            Op::Bin(CmpK { pred: simd_eq_b, dest: db, b: xb, k: kb }),
+            Op::Bin(Logic { kind: simd::M_AND, dest: 0, a: 0, b: lb2 }),
+        ] = *ops
+            && (pa, la) == (pb, lb)
+            && xa == ra
+            && xb == rb
+            && db == lb2
+            && db != 0
+            && simd_eq_a == common::dense::CMP_EQ
+            && simd_eq_b == common::dense::CMP_EQ
+        {
+            // SAFETY: as above.
+            let bytes = unsafe { std::slice::from_raw_parts(pa, la) };
+            return Ok(crate::simd::scan_pair(bytes, from, (oa, ka), (ob, kb), hi));
+        }
+        // Every stream in place: range-check once, then load unchecked.
+        if ops.iter().all(|op| !matches!(op, Op::Load { src: Src::Other(..), .. })) {
+            let mut hi = hi;
+            for op in ops {
+                if let Op::Load { src: Src::Bytes(_, len), off, .. } = *op {
+                    if i128::from(from) + i128::from(off) < 0 {
+                        return Ok(from);
+                    }
+                    hi = hi.min(len as i128 - simd::BYTE_LANES as i128 - i128::from(off));
+                }
+            }
+            let mut p = from;
+            while i128::from(p) <= hi {
+                for op in ops {
+                    match *op {
+                        Op::Load { reg, src: Src::Bytes(ptr, _), off } => {
+                            // SAFETY: `0 <= p + off` and `p + off + 64 <= len` by `hi`.
+                            let lanes = unsafe { &*(ptr.add((p + off) as usize) as *const [u8; simd::BYTE_LANES]) };
+                            *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
+                        }
+                        Op::Load { .. } => {}
+                        Op::Bin(op) => op.run(regs),
+                    }
+                }
+                let m = crate::simd::movemask(&regs[0]);
+                if m != 0 {
+                    return Ok(p + i64::from(m.trailing_zeros()));
+                }
+                p += simd::BYTE_LANES as i64;
+            }
+            return Ok(p);
         }
         let mut p = from;
         while i128::from(p) <= hi {
             for op in ops {
                 match *op {
-                    Op::Load { reg, src: Src::Bytes(ptr, _), off } => {
-                        // SAFETY: `0 <= p + off` and `p + off + 64 <= len` by `hi`.
-                        let lanes = unsafe { &*(ptr.add((p + off) as usize) as *const [u8; simd::BYTE_LANES]) };
-                        *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
+                    Op::Load { reg, src, off } => {
+                        // A load leaving its array ends the scan: the scalar loop
+                        // takes those lanes.
+                        let Some(idx) = p.checked_add(off) else {
+                            return Ok(p);
+                        };
+                        match src {
+                            Src::Bytes(ptr, len) => {
+                                let Ok(i) = usize::try_from(idx) else {
+                                    return Ok(p);
+                                };
+                                if i.saturating_add(simd::BYTE_LANES) > len {
+                                    return Ok(p);
+                                }
+                                // SAFETY: in bounds above; the scan does not allocate,
+                                // so the bytes stay where they were resolved.
+                                let lanes = unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
+                                *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
+                            }
+                            Src::Other(obj, addr) => {
+                                if !vload_bytes_into(heap, obj, &mut regs[reg], addr, idx) {
+                                    return Ok(p);
+                                }
+                            }
+                        }
                     }
-                    Op::Load { .. } => {}
                     Op::Bin(op) => op.run(regs),
                 }
             }
             let m = crate::simd::movemask(&regs[0]);
             if m != 0 {
-                return Ok(p + i64::from(m.trailing_zeros()));
+                return Ok(p.saturating_add(i64::from(m.trailing_zeros())));
             }
-            p += simd::BYTE_LANES as i64;
+            let Some(next) = p.checked_add(simd::BYTE_LANES as i64) else {
+                break;
+            };
+            p = next;
         }
-        return Ok(p);
+        Ok(p)
+    })()?;
+    // A full chunk could still start at `main`: it is a match or a stop the
+    // scalar loop takes; only past `hi` are there lanes no chunk covered.
+    if i128::from(main) <= hi {
+        return Ok(main);
     }
-    let mut p = from;
-    while i128::from(p) <= hi {
-        for op in ops {
-            match *op {
-                Op::Load { reg, src, off } => {
-                    // A load leaving its array ends the scan: the scalar loop
-                    // takes those lanes.
-                    let Some(idx) = p.checked_add(off) else {
-                        return Ok(p);
-                    };
-                    match src {
-                        Src::Bytes(ptr, len) => {
-                            let Ok(i) = usize::try_from(idx) else {
-                                return Ok(p);
-                            };
-                            if i.saturating_add(simd::BYTE_LANES) > len {
-                                return Ok(p);
-                            }
-                            // SAFETY: in bounds above; the scan does not allocate,
-                            // so the bytes stay where they were resolved.
-                            let lanes = unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
-                            *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
-                        }
-                        Src::Other(obj, addr) => {
-                            if !vload_bytes_into(heap, obj, &mut regs[reg], addr, idx) {
-                                return Ok(p);
-                            }
-                        }
-                    }
-                }
-                Op::Bin(op) => op.run(regs),
-            }
-        }
-        let m = crate::simd::movemask(&regs[0]);
-        if m != 0 {
-            return Ok(p.saturating_add(i64::from(m.trailing_zeros())));
-        }
-        let Some(next) = p.checked_add(simd::BYTE_LANES as i64) else {
-            break;
-        };
-        p = next;
-    }
-    Ok(p)
+    Ok(scan_tail(regs, main))
 }
 
 /// The array, tuple or string a dense index op names. The last one is
