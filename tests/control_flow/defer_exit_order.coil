@@ -1,6 +1,6 @@
 // `defer` bodies with direct MIR: each exit runs the armed defers lowered
-// before it, last first, captures read at the exit; a defer armed in a
-// loop runs once.
+// before it, last first, captures copied at each defer; a defer in a loop
+// body runs at the end of every iteration.
 use tests::assert;
 
 class Log {
@@ -14,7 +14,7 @@ fn push(Log log, int d) {
 fn in_loop(Log log, int stop) -> int {
     let i = 0;
     while i < 5 {
-        defer use (log, i) {
+        defer use (mut log, i) {
             let shown = i + 1;
             push(log, shown);
         }
@@ -27,11 +27,11 @@ fn in_loop(Log log, int stop) -> int {
 }
 
 fn guarded(Log log) -> Option<int> {
-    defer use (log) {
+    defer use (mut log) {
         push(log, 2);
     }
     let start = 3;
-    defer use (log, start) {
+    defer use (mut log, start) {
         push(log, start);
     }
     let v = Option::Some(start)?;
@@ -40,7 +40,7 @@ fn guarded(Log log) -> Option<int> {
 }
 
 fn missing(Log log, Option<int> o) -> Option<int> {
-    defer use (log) {
+    defer use (mut log) {
         push(log, 5);
     }
     let v = o?;
@@ -48,13 +48,13 @@ fn missing(Log log, Option<int> o) -> Option<int> {
     return Option::Some(v * 2);
 }
 
-test("a defer armed in a loop runs once, with the capture at the exit") {
+test("a loop body's defer runs every iteration, and at a return") {
     let log = new Log(0);
     assert!(in_loop(log, 2) == 2);
-    assert!(log.n == 3);
+    assert!(log.n == 123);
     let log2 = new Log(0);
     assert!(in_loop(log2, 9) == -1);
-    assert!(log2.n == 6);
+    assert!(log2.n == 12345);
 }
 
 test("defers run last first on a fall-through and a ? exit") {

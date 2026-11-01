@@ -164,6 +164,19 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
+/// Major 6 / minor 16: a `VLoop` runs every lane up to `to`, which need
+/// not be a whole number of 8-lane blocks past `from`: the compiler hands
+/// it the loop's last lanes instead of leaving them to the scalar loop.
+/// Older runtimes reject the range as malformed.
+///
+/// Major 6 / minor 15: HostInvoke `entropy_bytes` (id 190,
+/// `entropy::bytes(n)`): `n` bytes from the OS CSPRNG. Older runtimes do
+/// not know the id.
+///
+/// Major 6 / minor 14: HostInvoke `coro_close` (id 189, `HostOp::Task`):
+/// a `for` loop over a generator that it leaves early runs the
+/// generator's armed `defer`s. Older runtimes do not know the id.
+///
 /// Major 6 / minor 13: a `VLoad` in a `VLoop` body reads a `string`'s
 /// bytes as int lanes, so a map-push or store map over `s[i]` runs as a
 /// `VLoop` (#2150). Older runtimes reject the body as malformed.
@@ -237,7 +250,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.ccoil`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 13;
+pub const ARCHIVE_MINOR: u16 = 16;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1314,9 +1327,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
-        assert_eq!(ARCHIVE_MINOR, 13);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 13));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.13");
+        assert_eq!(ARCHIVE_MINOR, 16);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 16));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.16");
     }
 
     #[test]

@@ -246,12 +246,27 @@ impl ProgramEffects {
         self.by_name.get(name).copied()
     }
 
+    /// Whether `Owner::drop` keeps nothing of `self` past its return: an
+    /// early free may run it and then free the object. `owner` is the class
+    /// key, bare or module-qualified. `false` when no summary was recorded.
+    pub fn drop_keeps_nothing(&self, owner: &str) -> bool {
+        let key = format!("{owner}::drop");
+        let suffix = format!("::{key}");
+        let found = self.by_name.get(key.as_str()).copied().or_else(|| {
+            let mut hits = self.by_name.iter().filter(|(n, _)| n.ends_with(&suffix));
+            let first = hits.next().map(|(_, s)| *s);
+            // Two modules' classes of one short name: do not guess.
+            if hits.next().is_some() { None } else { first }
+        });
+        found.is_some_and(|s| s.escapes & 1 == 0 && s.keeps & 1 == 0 && s.opaque_args & 1 == 0)
+    }
+
     /// `body` (as the HIR optimizer left it) with early frees of the
     /// objects nothing else reaches ([`early_free`]), when it has any.
     /// `host` names the host native a call node runs, as planned.
     pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
         let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
-        early_free::rewrite(module, body, &lookup, host)
+        early_free::rewrite(checker, module, body, &lookup, host)
     }
 
     /// `body` with its copy-on-write ops ([`cow`]), when it needs any.
@@ -284,6 +299,7 @@ impl ProgramEffects {
                 HirKind::Global { name, def } => self.named_summary(checker, module_path, name, *def),
                 _ => None,
             },
+            Callee::Resolved(_) => None,
         }
     }
 
@@ -839,6 +855,7 @@ impl<'a> ModuleEffects<'a> {
                 Callee::Named { name, def, .. } => Some(self.cx.named(&w, name, *def)),
                 Callee::Method { name } => self.cx.method(&w, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.cx.fn_value(&w, *f),
+                Callee::Resolved(_) => None,
             };
             for leak in escape::region_leaks(self.cx.module, body, &lookup) {
                 let mut msg = Message::error(
@@ -1680,6 +1697,7 @@ impl Cx<'_> {
                 Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
                 Callee::Method { name } => self.method(&w, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.fn_value(&w, *f),
+                Callee::Resolved(_) => None,
             };
             let k = cow::keeps(self.module, body, &lookup);
             if std::env::var("COIL_COW_TRACE").is_ok() {
@@ -2361,6 +2379,11 @@ impl Cx<'_> {
                         self.call_mutates(w, at, "a function value", by_type, None, None, args, false);
                     }
                 }
+            }
+            // Planned in another module's context: nothing is known of it.
+            Callee::Resolved(r) => {
+                self.note(w, at, UNKNOWN.bits(), || format!("calls `{}`, planned in another module", r.key));
+                self.call_mutates(w, at, &r.key, u64::MAX, None, None, args, false);
             }
         }
     }

@@ -971,6 +971,7 @@ dependencies = [
  "coil-simd",
  "common",
  "crossbeam-deque",
+ "getrandom 0.3.4",
  "libc",
  "libffi",
  "libloading",

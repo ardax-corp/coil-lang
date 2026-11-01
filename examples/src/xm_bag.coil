@@ -1,0 +1,48 @@
+// A generic class whose method clones another module splices
+// (`tests/modules/cross_module_clone_inline.coil`).
+
+/// Items with a count of the reads through `at`.
+class Bag<T> {
+    pub items: Vec<T>,
+    hits: int,
+}
+
+impl Bag<T> {
+    /// The number of items.
+    pub fn len() -> int {
+        return self.items.len();
+    }
+
+    /// The item at `i`; panics when `i` is out of range.
+    pub fn at(int i) -> T {
+        self.hits = self.hits + 1;
+        return self.items[i];
+    }
+
+    /// The item at `i`, or `d` when `i` is out of range.
+    pub fn at_or(int i, T d) -> T {
+        if i >= 0 && i < self.items.len() {
+            return self.items[i];
+        }
+        return d;
+    }
+
+    /// Whether `i` is an index of an item.
+    pub fn has(int i) -> bool {
+        return in_range(i, self.items.len());
+    }
+
+    /// How many reads went through `at`.
+    pub fn hits() -> int {
+        return self.hits;
+    }
+}
+
+fn in_range(int i, int n) -> bool {
+    return i >= 0 && i < n;
+}
+
+/// A bag of `items`.
+fn bag<T>(Vec<T> items) -> Bag<T> {
+    return new Bag(items, 0);
+}

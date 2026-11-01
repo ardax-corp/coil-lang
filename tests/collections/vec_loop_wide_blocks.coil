@@ -1,0 +1,221 @@
+// `VLoop` bodies run up to 64 lanes per block (`machine::vm::VloopWide`)
+// and the loop's last lanes, a block cut short (archive 6.16). Maps,
+// map-pushes and sums over lengths around the 8- and 64-lane edges match
+// the scalar loop, and a block that panics stores what the scalar loop
+// would have before the panic: in the first wide block, a later one, and
+// the short last block.
+// @output lower ok\nmap ok\nsum ok\nmap 50\nmap scalar 50\nmap 130\nmap scalar 130\nmap 201\nmap scalar 201\n
+use io::sync::println;
+use string::{format, to_bytes};
+use thread::{join, spawn};
+
+const BIG = 4611686018427387904;
+
+shared class Out {
+    pub b: Vec<int>,
+}
+
+fn lower(string s) -> Vec<byte> {
+    let b = to_bytes(s);
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c >= 65 && c <= 90 {
+            out.push(((c as int) + 32) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn lower_scalar(string s) -> Vec<byte> {
+    let b = to_bytes(s);
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < b.len() {
+        let c = black_box(b[i]);
+        if c >= 65 && c <= 90 {
+            out.push(((c as int) + 32) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn same_bytes(Vec<byte> a, Vec<byte> b) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn map(Vec<int> a, Vec<int> b) {
+    let i = 0;
+    while i < a.len() {
+        b[i] = a[i] * 2 + 1;
+        i = i + 1;
+    }
+}
+
+fn map_scalar(Vec<int> a, Vec<int> b) {
+    let i = 0;
+    while i < a.len() {
+        b[i] = black_box(a[i] * 2 + 1);
+        i = i + 1;
+    }
+}
+
+fn sum(Vec<int> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + a[i] * 3;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn sum_scalar(Vec<int> a) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        s = s + black_box(a[i] * 3);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn check_sum() {
+    let n = 0;
+    while n < 100 {
+        let a = ints(n, -1);
+        if sum(a) != sum_scalar(a) {
+            let _ = println(format("sum differs at %i", n));
+            return;
+        }
+        n = n + 1;
+    }
+    let _ = println("sum ok");
+}
+
+fn ints(int n, int big_at) -> Vec<int> {
+    let a: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        a.push(if i == big_at {
+            BIG
+        } else {
+            i - 100
+        });
+        i = i + 1;
+    }
+    return a;
+}
+
+fn stored(Vec<int> b) -> int {
+    let n = 0;
+    for v in b {
+        if v != 0 {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn check_lower() {
+    let s = "";
+    let n = 0;
+    while n < 200 {
+        let a = lower(s);
+        let b = lower_scalar(s);
+        if !same_bytes(a, b) {
+            let _ = println(format("lower differs at %i", n));
+            return;
+        }
+        s = s + (if n % 3 == 0 {
+            "Q"
+        } else if n % 3 == 1 {
+            "z"
+        } else {
+            "["
+        });
+        n = n + 1;
+    }
+    let _ = println("lower ok");
+}
+
+fn check_map() {
+    let n = 0;
+    while n < 200 {
+        let a = ints(n, -1);
+        let b = ints(n, -1);
+        let c = ints(n, -1);
+        map(a, b);
+        map_scalar(a, c);
+        let i = 0;
+        while i < n {
+            if b[i] != c[i] {
+                let _ = println(format("map differs at %i", n));
+                return;
+            }
+            i = i + 1;
+        }
+        n = n + 1;
+    }
+    let _ = println("map ok");
+}
+
+fn run(int big_at, bool scalar) {
+    let o = new Out(Vec::new());
+    let i = 0;
+    while i < 203 {
+        o.b.push(0);
+        i = i + 1;
+    }
+    defer use (o, scalar) {
+        let name = if scalar {
+            "map scalar"
+        } else {
+            "map"
+        };
+        let _ = println(format("%s %i", name, stored(o.b)));
+    }
+    // Element 100 maps to 1: every store before the panic is non-zero.
+    if scalar {
+        map_scalar(ints(203, big_at), o.b);
+    } else {
+        map(ints(203, big_at), o.b);
+    }
+}
+
+fn main() {
+    check_lower();
+    check_map();
+    check_sum();
+    for f in [
+        fn () => run(50, false),
+        fn () => run(50, true),
+        fn () => run(130, false),
+        fn () => run(130, true),
+        fn () => run(201, false),
+        fn () => run(201, true),
+    ] {
+        let t = match spawn(f) {
+            Result::Ok(t) => t,
+            Result::Err(_) => panic "spawn failed",
+        };
+        let _ = join(t);
+    }
+}

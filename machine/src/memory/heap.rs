@@ -242,6 +242,9 @@ pub struct Heap {
     /// Class / enum `type_id`s with a `drop` (the VM's finalizer registry),
     /// one bit per id: every allocation asks while any is registered.
     finalizer_types: Vec<u64>,
+    /// The [`Self::finalizer_types`] whose `drop` keeps nothing of `self`
+    /// (the compiler's escape facts): an early free may run it at the free.
+    early_drop_types: Vec<u64>,
     /// Class `type_id`s that are identities, never copied on write
     /// (`shared class`, `Ref<T>`), one bit per id. Classes with a `drop`
     /// are identities too.
@@ -337,6 +340,7 @@ impl Default for Heap {
             class_kinds: std::sync::Arc::default(),
             weaks: Vec::new(),
             finalizer_types: Vec::new(),
+            early_drop_types: Vec::new(),
             identity_types: Vec::new(),
             cow_copies: 0,
             finalizable: Vec::new(),
@@ -725,9 +729,26 @@ impl Heap {
             .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
     }
 
+    /// Note that `type_id`'s `drop` may run where an object of it is freed
+    /// early ([`Self::early_drops`]).
+    pub fn register_early_drop_type(&mut self, type_id: u32) {
+        let word = type_id as usize / 64;
+        if self.early_drop_types.len() <= word {
+            self.early_drop_types.resize(word + 1, 0);
+        }
+        self.early_drop_types[word] |= 1 << (type_id % 64);
+    }
+
+    fn early_drop_type(&self, type_id: u32) -> bool {
+        self.early_drop_types
+            .get(type_id as usize / 64)
+            .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
+    }
+
     /// Forget every finalizer type (a VM reset).
     pub fn clear_finalizer_types(&mut self) {
         self.finalizer_types.clear();
+        self.early_drop_types.clear();
         self.finalizable.clear();
         self.identity_types.clear();
     }
@@ -862,6 +883,12 @@ impl Heap {
         self.cow_copies
     }
 
+    /// A generator suspended with a `defer` armed: it owes a close, which
+    /// the collector (or teardown) runs once nothing reaches it.
+    pub fn note_closeable(&mut self, object: Object) {
+        self.finalizable.push(object.addr());
+    }
+
     /// An enum typed after its allocation (`TagEnumType`).
     pub fn note_enum_type(&mut self, object: Object, type_id: u32) {
         if self.has_finalizer(type_id) {
@@ -887,6 +914,14 @@ impl Heap {
             let (type_id, finalized) = match obj {
                 Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
                 Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                // A closeable generator stays listed until it is done.
+                Object::Coroutine(gc) => {
+                    let open = gc.as_ref().closeable && gc.as_ref().state == CoroState::Suspended;
+                    if open && !obj.is_marked() {
+                        out.push(obj);
+                    }
+                    return open;
+                }
                 _ => return false,
             };
             if finalized || !self.has_finalizer(type_id) {
@@ -1242,68 +1277,22 @@ impl Heap {
     /// step 2). `deep` also frees every object it reaches through precise
     /// pointer words. `keep` names objects the VM still holds itself (frame
     /// pins); those and anything this cannot free safely stay for the GC:
-    /// interned strings, the shared unit variants and `()`, objects with
-    /// a `drop`, handles, and everything while a cycle or a steal epoch is
+    /// interned strings, the shared unit variants and `()`, objects whose
+    /// `drop` has not run (the VM runs it first when [`Self::early_drops`]
+    /// lists it), handles, and everything while a cycle or a steal epoch is
     /// open. `check` frees nothing and records the objects instead, which
     /// the next mark must not reach. Returns how many objects it freed.
     /// [`Self::early_freed`] lists the addresses it freed.
     pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool) -> usize {
         self.early_freed.clear();
-        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
-            return 0;
-        }
-        let Some(root) = self.find_object_by_addr(v.heap_addr()) else {
+        let Some((found, reaches_drop, _)) = self.early_walk(v, deep, keep) else {
             return 0;
         };
-        if !self.early_freeable(root) || keep(root.addr()) {
+        // A `drop` that has not run yet keeps its object (and what reaches
+        // it: the `drop` may read anything the walk would free) for the
+        // collector; [`Self::early_drops`] lets the VM run it first.
+        if reaches_drop {
             return 0;
-        }
-        if !deep {
-            // One object: no walk, no list.
-            if check {
-                self.doomed.push(root.addr());
-                return 0;
-            }
-            self.freed_early = true;
-            self.early_freed.push(root.addr());
-            unsafe { self.dealloc(root) };
-            return 1;
-        }
-        let mut found = vec![root];
-        {
-            // Every mark bit is clear while idle: a set bit means visited.
-            let mut work = Vec::new();
-            root.mark(&mut work);
-            let mut children = Vec::new();
-            // A `drop` object reached from the root may read, when its
-            // `drop` runs, anything the walk would free: free nothing.
-            let mut reaches_drop = false;
-            while let Some(obj) = work.pop() {
-                obj.for_each_reference(self, &mut |addr, precise| {
-                    if precise {
-                        children.push(addr);
-                    }
-                });
-                for addr in children.drain(..) {
-                    let Some(child) = self.find_object_by_addr(addr) else {
-                        continue;
-                    };
-                    reaches_drop |= self.finalizer_object(child);
-                    if self.early_freeable(child)
-                        && !child.is_marked()
-                        && !keep(addr)
-                    {
-                        child.mark(&mut work);
-                        found.push(child);
-                    }
-                }
-            }
-            for obj in &found {
-                obj.unmark();
-            }
-            if reaches_drop {
-                return 0;
-            }
         }
         if check {
             self.doomed.extend(found.iter().map(Object::addr));
@@ -1315,6 +1304,94 @@ impl Heap {
             unsafe { self.dealloc(obj) };
         }
         found.len()
+    }
+
+    /// The objects an early free of `v` would give back once their `drop`s
+    /// ran, in walk order (the root first, a parent before what it
+    /// reaches): `None` when the free would free nothing, or when one of
+    /// them has a `drop` that may not run there. Empty when no `drop` is
+    /// pending. The VM runs these `drop`s, then calls [`Self::free_early`].
+    pub fn early_drops(&mut self, v: Value, deep: bool, keep: &dyn Fn(u64) -> bool) -> Option<Vec<Object>> {
+        if self.finalizer_types.is_empty() {
+            return Some(Vec::new());
+        }
+        let (found, reaches_drop, blocked) = self.early_walk(v, deep, keep)?;
+        if !reaches_drop {
+            return Some(Vec::new());
+        }
+        if blocked {
+            return None;
+        }
+        let mut drops = Vec::new();
+        for obj in found {
+            if self.pending_drop(obj) {
+                if !Self::finalizer_type_of(obj).is_some_and(|t| self.early_drop_type(t)) {
+                    return None;
+                }
+                drops.push(obj);
+            }
+        }
+        Some(drops)
+    }
+
+    /// The objects an early free of `v` gives back, whether a pending
+    /// `drop` object is among them or reached from them, and whether one
+    /// it reaches stays behind (shared or kept). `None` when it
+    /// frees nothing (a collection is under way, the root is kept or not
+    /// freeable). A pending `drop` object is walked like any other.
+    fn early_walk(&mut self, v: Value, deep: bool, keep: &dyn Fn(u64) -> bool) -> Option<(Vec<Object>, bool, bool)> {
+        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+            return None;
+        }
+        let root = self.find_object_by_addr(v.heap_addr())?;
+        if !self.early_freeable(root) || keep(root.addr()) {
+            return None;
+        }
+        let mut reaches_drop = self.pending_drop(root);
+        if !deep {
+            return Some((vec![root], reaches_drop, false));
+        }
+        let mut blocked = false;
+        let mut found = vec![root];
+        // Every mark bit is clear while idle: a set bit means visited.
+        let mut work = Vec::new();
+        root.mark(&mut work);
+        let mut children = Vec::new();
+        let mut i = 0;
+        while i < found.len() {
+            // Walk in `found` order (breadth first): a parent comes before
+            // what it reaches, so its `drop` runs first.
+            let obj = found[i];
+            i += 1;
+            work.clear();
+            obj.for_each_reference(self, &mut |addr, precise| {
+                if precise {
+                    children.push(addr);
+                }
+            });
+            for addr in children.drain(..) {
+                let Some(child) = self.find_object_by_addr(addr) else {
+                    continue;
+                };
+                if child.is_marked() {
+                    continue;
+                }
+                let pending = self.pending_drop(child);
+                reaches_drop |= pending;
+                if self.early_freeable(child) && !keep(addr) {
+                    child.mark(&mut work);
+                    found.push(child);
+                } else if pending {
+                    // A `drop` the free leaves pending reads what it
+                    // reaches when it runs.
+                    blocked = true;
+                }
+            }
+        }
+        for obj in &found {
+            obj.unmark();
+        }
+        Some((found, reaches_drop, blocked))
     }
 
     /// The addresses the last [`Self::free_early`] gave back.
@@ -1338,6 +1415,16 @@ impl Heap {
         !self.finalizer_types.is_empty() && Self::finalizer_type_of(obj).is_some_and(|t| self.has_finalizer(t))
     }
 
+    /// Whether `obj` has a `drop` that has not run yet.
+    fn pending_drop(&self, obj: Object) -> bool {
+        self.finalizer_object(obj)
+            && match obj {
+                Object::Instance(gc) => !gc.as_ref().finalized,
+                Object::Enum(gc) => !gc.as_ref().finalized,
+                _ => false,
+            }
+    }
+
     /// Whether [`Self::free_early`] may free `obj` (when nothing reaches it).
     fn early_freeable(&self, obj: Object) -> bool {
         match obj {
@@ -1348,10 +1435,10 @@ impl Heap {
             }
             Object::Array(_) => true,
             Object::Tuple(t) => !t.as_ref().elements().is_empty(),
-            // A `drop` type's object is left to the collector, which runs
-            // its `drop`; other types free early whatever else has one.
-            Object::Enum(e) => !e.as_ref().payload.is_empty() && !self.finalizer_object(obj),
-            Object::Instance(_) => !self.finalizer_object(obj),
+            // An object whose `drop` is pending is walked; [`Self::free_early`]
+            // leaves it to the collector unless its `drop` already ran.
+            Object::Enum(e) => !e.as_ref().payload.is_empty(),
+            Object::Instance(_) => true,
             _ => false,
         }
     }
@@ -3840,6 +3927,11 @@ pub struct ObjCoroutine {
     pub delegator: Option<RefCoroutine>,
     /// Outer continuation IP when the delegate completes.
     pub yield_from_resume_ip: usize,
+    /// The body has run: a close has `defer`s to run only after this.
+    pub started: bool,
+    /// Listed for a close by the collector: it suspended with a `defer`
+    /// armed ([`Heap::note_closeable`]).
+    pub closeable: bool,
 }
 
 /// Heap-allocated boxed value for the generics runtime.
@@ -5746,6 +5838,26 @@ mod tests {
         for obj in [parent, child] {
             assert!(heap.find_object_by_addr(obj.addr()).is_some());
         }
+    }
+
+    /// A `drop` that may run at an early free is listed parent first; once
+    /// it has run (the object is finalized) the free gives the object back.
+    #[test]
+    fn early_drops_lists_pending_drops_in_walk_order() {
+        let mut heap = Heap::default();
+        heap.register_finalizer_type(7);
+        let keep = |_: u64| false;
+        let (late, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
+        assert!(heap.early_drops(Value::from(late.addr()), false, &keep).is_none(), "not an early drop type");
+        heap.register_early_drop_type(7);
+        let drops = heap.early_drops(Value::from(late.addr()), false, &keep).expect("listed");
+        assert_eq!(drops.iter().map(|o| o.addr()).collect::<Vec<_>>(), vec![late.addr()]);
+        assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 0, "its drop has not run");
+        if let Object::Instance(gc) = late {
+            gc.payload_mut().finalized = true;
+        }
+        assert!(heap.early_drops(Value::from(late.addr()), false, &keep).is_some_and(|d| d.is_empty()));
+        assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 1);
     }
 
     /// Objects of a `drop` type are listed from their allocation (or from

@@ -1,0 +1,90 @@
+// `entropy::bytes(n)` returns `n` bytes from the OS CSPRNG: the right
+// length, different on every call, and spread over all byte values. A
+// negative count panics.
+use tests::assert;
+use entropy::bytes;
+use task::{scope, Scope, TaskError};
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    let r = scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    });
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+fn count(int n) -> int {
+    return bytes(n).len();
+}
+
+fn same(Vec<byte> a, Vec<byte> b) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+test("returns exactly n bytes") {
+    assert!(bytes(0).len() == 0);
+    assert!(bytes(1).len() == 1);
+    assert!(bytes(16).len() == 16);
+    assert!(bytes(4096).len() == 4096);
+}
+
+test("two calls differ") {
+    // 2^-256 chance of a false failure.
+    assert!(!same(bytes(32), bytes(32)));
+}
+
+test("a call in a loop is not hoisted") {
+    let first = bytes(16);
+    let i = 0;
+    let repeats = 0;
+    while i < 8 {
+        if same(bytes(16), first) {
+            repeats += 1;
+        }
+        i += 1;
+    }
+    assert!(repeats == 0);
+}
+
+test("bytes cover the whole range") {
+    // 64 KiB of uniform bytes: each of the 256 values is expected 256 times;
+    // missing one has probability about 256 * e^-256.
+    let seen: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 256 {
+        seen.push(0);
+        k += 1;
+    }
+    let buf = bytes(65536);
+    let i = 0;
+    while i < buf.len() {
+        let v = buf[i] as int;
+        seen[v] = seen[v] + 1;
+        i += 1;
+    }
+    let j = 0;
+    while j < 256 {
+        assert!(seen[j] > 100 && seen[j] < 450);
+        j += 1;
+    }
+}
+
+test("a negative count panics") {
+    assert!(outcome(fn () => count(-1)) == "entropy::bytes: negative count -1");
+    assert!(outcome(fn () => count(3)) == "ok");
+}

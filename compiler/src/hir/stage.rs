@@ -414,7 +414,7 @@ fn reaches(body: &HirBody, e: HirId, target: HirId) -> Result<bool, Option<HirId
     match &body.expr(e).kind {
         HirKind::Lit(_) | HirKind::Local(_) => Ok(false),
         HirKind::Call {
-            callee: Callee::Named { .. } | Callee::Method { .. },
+            callee: Callee::Named { .. } | Callee::Method { .. } | Callee::Resolved(_),
             args,
         } => match seq(args)? {
             true => Ok(true),

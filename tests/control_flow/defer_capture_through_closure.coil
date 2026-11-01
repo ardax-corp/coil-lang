@@ -1,4 +1,4 @@
-// A `defer use (p)` of a class parameter, with its function reached
+// A `defer use (mut p)` of a class parameter, with its function reached
 // through a closure or a spawned task (#783).
 use tests::assert;
 use task::{scope, Scope};
@@ -8,7 +8,7 @@ class Log {
 }
 
 fn fails(Log log) -> int {
-    defer use (log) {
+    defer use (mut log) {
         log.n = log.n + 1;
     }
     return 0;

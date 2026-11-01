@@ -1174,13 +1174,16 @@ impl<'s> Formatter<'s> {
                 self.push_str(";");
             }
 
-            Expression::Defer { captures, body } => {
+            Expression::Defer { captures, borrows, body } => {
                 self.push_str("defer");
                 if !captures.is_empty() {
                     self.push_str(" use (");
                     for (i, c) in captures.iter().enumerate() {
                         if i > 0 {
                             self.push_str(", ");
+                        }
+                        if borrows.contains(c) {
+                            self.push_str("mut ");
                         }
                         self.push_str(c);
                     }

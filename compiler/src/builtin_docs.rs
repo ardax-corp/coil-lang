@@ -22,6 +22,7 @@ pub const MODULE_SOURCES: &[(&str, &str)] = &[
     ("env", include_str!("builtin_docs/env.coil")),
     ("clock", include_str!("builtin_docs/clock.coil")),
     ("symbol", include_str!("builtin_docs/symbol.coil")),
+    ("entropy", include_str!("builtin_docs/entropy.coil")),
     ("ffi", include_str!("builtin_docs/ffi.coil")),
     ("ffi::types", include_str!("builtin_docs/ffi/types.coil")),
 ];

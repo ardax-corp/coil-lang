@@ -7,11 +7,11 @@
 //! ```text
 //! P:  ok = i0 < n && every read and write of lanes i0 .. n is in range
 //!     br ok, F, E
-//! F:  e = i0 + ((n - i0) & -8)
-//!     s1 = vecloop i0 .. e    (the reduce or the stores, 8 lanes a time)
+//! F:  s1 = vecloop i0 .. n    (the reduce or the stores, 8 lanes a time,
+//!                              the last block cut at `n`)
 //! E:  (empty: the φ copies of the skip, so `P` branches without them)
-//! J:  i' = φ(i0 from E, e from F), s' = φ(s0 from E, s1 from F)
-//! H:  the old loop, entered at i' for the last few lanes
+//! J:  i' = φ(i0 from E, n from F), s' = φ(s0 from E, s1 from F)
+//! H:  the old loop, entered at i' (done at once after `F`)
 //! ```
 //!
 //! A failed guard runs the loop as written, panic and all. Stores keep
@@ -554,15 +554,8 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     };
     b.func.block_mut(skip).term = Some(Terminator::Jump { dest: join });
 
-    // F: the whole blocks of lanes. `i0 >= -k` and `n <= len - k`, so
-    // `n - i0` does not overflow.
-    let span = b.value(MirTy::I64);
-    b.push(fast, MirInst::Bin { dest: span, op: MirBinOp::Sub, ty: MirTy::I64, lhs: n, rhs: i0 });
-    let mask = b.konst(fast, MirConst::I64(-(simd::LANES as i64)));
-    let whole = b.value(MirTy::I64);
-    b.push(fast, MirInst::Bin { dest: whole, op: MirBinOp::BitAnd, ty: MirTy::I64, lhs: span, rhs: mask });
-    let end = b.value(MirTy::I64);
-    b.push(fast, MirInst::Bin { dest: end, op: MirBinOp::Add, ty: MirTy::I64, lhs: i0, rhs: whole });
+    // F: every lane; `VLoop` cuts its last block at `n` (archive 6.16).
+    let end = n;
     let acc = match &plan.shape {
         Shape::Reduce { acc, .. } | Shape::Push { acc, .. } => Some(*acc),
         Shape::Store { .. } => None,

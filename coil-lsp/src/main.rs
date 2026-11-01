@@ -2354,6 +2354,9 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("clock", "mono_nanos") => {
             "Monotonic clock reading in nanoseconds (HostInvoke `clock_mono_nanos`).".into()
         }
+        ("entropy", "bytes") => {
+            "Returns `n` bytes from the OS CSPRNG (HostInvoke `entropy_bytes`).".into()
+        }
         ("io", "capture_begin") => {
             "Keeps this thread's stdout and stderr writes in memory until `capture_end()`.".into()
         }

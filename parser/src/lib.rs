@@ -1820,23 +1820,29 @@ impl<'pratt> Pratt<'pratt> {
         stmt: T,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
+        // `use (a, mut b)`: `mut` borrows the capture instead of copying it.
         let captures = keyword!("use")
             .ignore_then(
-                text::ident()
-                    .padded_by(trivia())
+                keyword!("mut")
+                    .or_not()
+                    .then(text::ident().padded_by(trivia()))
                     .separated_by(op!(','))
                     .allow_trailing()
                     .collect::<Vec<_>>()
                     .delimited_by(op!("("), op!(")")),
             )
             .or_not()
-            .map(|opt| opt.unwrap_or_default());
+            .map(|opt| {
+                let list = opt.unwrap_or_default();
+                let borrows: Vec<&str> = list.iter().filter(|(m, _)| m.is_some()).map(|(_, n)| *n).collect();
+                (list.into_iter().map(|(_, n)| n).collect::<Vec<_>>(), borrows)
+            });
 
         keyword!("defer")
             .ignore_then(captures)
             .then(self.block(stmt))
-            .map_with(|(captures, body), e| {
-                (e.span(), Box::new(Expression::Defer { captures, body }))
+            .map_with(|((captures, borrows), body), e| {
+                (e.span(), Box::new(Expression::Defer { captures, borrows, body }))
             })
     }
 

@@ -529,8 +529,9 @@ enum VloopOp {
 }
 
 /// `VLoop` (see [`Instruction::VLoop`]): the body over lanes `p ..= p + 7`
-/// for `p = from, from + 8, ..` below `to`, with `dest = p` first when
-/// `pos`. The arrays are resolved once: nothing in the body allocates,
+/// for `p = from, from + 8, ..` below `to` (the last block stops at `to`),
+/// with `dest = p` first when `pos`. A body of lane-wise words runs up to
+/// 64 lanes at once ([`VloopWide`]). The arrays are resolved once: nothing in the body allocates,
 /// and the only resize is an append (`STORE_PUSH`) to an array the body
 /// does not read (the compiler guards that). `Err` on a malformed body, a lane out of range or a trap.
 #[allow(clippy::too_many_arguments)]
@@ -545,18 +546,43 @@ pub(crate) fn vloop(
     to: i64,
     pos: bool,
 ) -> Result<(), &'static str> {
-    let mut pushed = Vec::new();
-    let ran = vloop_run(heap, stack, sp, regs, body, dest, from, to, pos, &mut pushed);
+    // One scratch per thread: a `VLoop` runs once per call of its
+    // function, often over a few dozen lanes, so its buffers (4 KiB of
+    // wide registers among them) are not allocated per run.
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<Option<Box<VloopScratch>>> = const { std::cell::RefCell::new(None) };
+    }
+    let mut scratch = SCRATCH.with(|s| s.borrow_mut().take()).unwrap_or_else(|| Box::new(VloopScratch::new()));
+    let ran = vloop_run(heap, stack, sp, regs, body, dest, from, to, pos, &mut scratch);
     // The arrays a body appended to grew: count their storage once.
-    for obj in pushed {
+    for obj in scratch.pushed.drain(..) {
         if let Object::Array(mut gc) = obj {
             heap.account_array(gc.as_mut());
         }
     }
+    SCRATCH.with(|s| *s.borrow_mut() = Some(scratch));
     ran
 }
 
-/// [`vloop`]'s loop; `pushed` gets the arrays the body appends to.
+/// [`vloop`]'s buffers, kept between runs.
+struct VloopScratch {
+    ops: Vec<VloopOp>,
+    /// The arrays the body appends to.
+    pushed: Vec<Object>,
+    /// An 8-lane block's held-back stores and appends (`None`: an append).
+    pending: Vec<(Option<Object>, Option<i64>, [u64; common::simd::LANES])>,
+    /// The fold slots as an 8-lane block found them.
+    saved: Vec<(usize, Value)>,
+    wide: VloopWide,
+}
+
+impl VloopScratch {
+    fn new() -> Self {
+        Self { ops: Vec::new(), pushed: Vec::new(), pending: Vec::new(), saved: Vec::new(), wide: VloopWide::new() }
+    }
+}
+
+/// [`vloop`]'s loop; `scratch.pushed` gets the arrays the body appends to.
 #[allow(clippy::too_many_arguments)]
 fn vloop_run(
     heap: &Heap,
@@ -568,14 +594,14 @@ fn vloop_run(
     from: i64,
     to: i64,
     pos: bool,
-    pushed: &mut Vec<Object>,
+    scratch: &mut VloopScratch,
 ) -> Result<(), &'static str> {
     use common::simd;
     const BAD: &str = "VLoop: malformed body";
     const OOB: &str = "VLoop out of bounds";
     use VloopOp as Op;
     let lanes = simd::LANES as i64;
-    if from > to || (to - from) % lanes != 0 {
+    if from > to {
         return Err(BAD);
     }
     if from == to {
@@ -605,7 +631,8 @@ fn vloop_run(
             _ => Err(OOB),
         }
     };
-    let mut ops = Vec::with_capacity(body.len());
+    let VloopScratch { ops, pushed, pending, saved, wide } = scratch;
+    ops.clear();
     for word in body {
         let (kind, d, a, b) = word.dense_abc_parts();
         if d >= simd::NREGS && !matches!(*word.bytecode(), Instruction::VReduce) {
@@ -640,22 +667,46 @@ fn vloop_run(
     // would. The compiler only takes bodies whose reads come before their
     // stores, so deferring a block's stores changes no value it reads.
     // `None` for an append.
-    let mut pending: Vec<(Option<Object>, Option<i64>, [u64; simd::LANES])> = Vec::new();
-    let mut saved: Vec<(usize, Value)> = Vec::new();
+    // A body of lane-wise words (no fold, no fma) runs up to 64 lanes per
+    // dispatch of each word. A wide block that traps stores nothing and
+    // runs again 8 lanes at a time below, which finds the trapping lane.
+    let wide_ok = ops.iter().all(|op| matches!(op, Op::Load { .. } | Op::Store { .. } | Op::Push { .. } | Op::Bin { .. } | Op::Sel { .. }));
+    let mut narrow_until = from;
     let mut p = from;
     while p < to {
+        if wide_ok && p >= narrow_until {
+            let n = ((to - p) as usize).min(crate::simd::WIDE);
+            if pos {
+                stack[sp + dest] = Value::from(p);
+            }
+            if wide.run(stack, sp, ops, p, n)? {
+                wide.commit(p)?;
+                // The position as the last 8-lane block leaves it.
+                if pos {
+                    stack[sp + dest] = Value::from(p + (n as i64 - 1) / lanes * lanes);
+                }
+                p += n as i64;
+                continue;
+            }
+            narrow_until = p + n as i64;
+        }
         if pos {
             stack[sp + dest] = Value::from(p);
         }
+        if to - p < lanes {
+            // The last lanes, fewer than a block: one at a time.
+            vloop_lanes(stack, sp, regs, ops, p, (to - p) as usize)?;
+            break;
+        }
         pending.clear();
         saved.clear();
-        for op in &ops {
+        for op in ops.iter() {
             if let Op::Reduce { slot, .. } = *op {
                 saved.push((slot, stack[sp + slot]));
             }
         }
         let mut trapped = false;
-        for op in &ops {
+        for op in ops.iter() {
             match *op {
                 Op::Load { reg, obj: Some(Object::Array(gc)), off } => {
                     if !vload_lanes(gc.as_ref(), &mut regs[reg], p + off) {
@@ -697,12 +748,12 @@ fn vloop_run(
             }
         }
         if trapped {
-            for &(slot, v) in &saved {
+            for &(slot, v) in saved.iter() {
                 stack[sp + slot] = v;
             }
-            vloop_lanes(stack, sp, regs, &ops, p)?;
+            vloop_lanes(stack, sp, regs, ops, p, simd::LANES)?;
         } else {
-            for (obj, off, lanes) in &pending {
+            for (obj, off, lanes) in pending.iter() {
                 let Some(Object::Array(mut gc)) = *obj else {
                     return Err(BAD);
                 };
@@ -719,6 +770,141 @@ fn vloop_run(
         p += lanes;
     }
     Ok(())
+}
+
+/// A `VLoop` block of up to [`crate::simd::WIDE`] lanes: the registers,
+/// and the stores and appends it holds back until the block ran whole.
+struct VloopWide {
+    regs: [[u64; crate::simd::WIDE]; common::simd::NREGS],
+    /// A `VBin`'s result before it lands in its register.
+    out: [u64; crate::simd::WIDE],
+    /// `(array, Some(off) | None for an append)`, in body order; the
+    /// lanes of the `i`th are `lanes[i * n .. (i + 1) * n]`.
+    pending: Vec<(Option<Object>, Option<i64>)>,
+    lanes: Vec<u64>,
+    n: usize,
+}
+
+impl VloopWide {
+    fn new() -> Self {
+        Self {
+            regs: [[0; crate::simd::WIDE]; common::simd::NREGS],
+            out: [0; crate::simd::WIDE],
+            pending: Vec::new(),
+            lanes: Vec::new(),
+            n: 0,
+        }
+    }
+
+    /// The lane-wise body `ops` over lanes `p .. p + n` (`n` a multiple of
+    /// 8; every load in range, checked by the caller); `Ok(false)` on a
+    /// trap, with nothing stored.
+    fn run(&mut self, stack: &Stack<Value>, sp: usize, ops: &[VloopOp], p: i64, n: usize) -> Result<bool, &'static str> {
+        use common::simd;
+        const OOB: &str = "VLoop out of bounds";
+        const WIDE: usize = crate::simd::WIDE;
+        self.pending.clear();
+        self.lanes.clear();
+        self.n = n;
+        let regs = &mut self.regs;
+        for op in ops {
+            match *op {
+                VloopOp::Load { reg, obj, off } => {
+                    let base = usize::try_from(p + off).map_err(|_| OOB)?;
+                    let out = &mut regs[reg][..n];
+                    match obj {
+                        Some(Object::Array(gc)) => {
+                            let arr = gc.as_ref();
+                            if base + n > arr.len() {
+                                return Err(OOB);
+                            }
+                            if let Some(src) = arr.bytes() {
+                                out.iter_mut().zip(&src[base..base + n]).for_each(|(o, &b)| *o = u64::from(b));
+                            } else if let Some(src) = arr.words() {
+                                out.iter_mut().zip(&src[base..base + n]).for_each(|(o, w)| *o = w.bits());
+                            } else {
+                                out.iter_mut().zip(arr.iter().skip(base)).for_each(|(o, w)| *o = w.bits());
+                            }
+                        }
+                        Some(Object::String(gc)) => {
+                            let src = gc.as_ref().data.as_str().as_bytes().get(base..base + n).ok_or(OOB)?;
+                            out.iter_mut().zip(src).for_each(|(o, &b)| *o = u64::from(b));
+                        }
+                        _ => return Err(OOB),
+                    }
+                }
+                VloopOp::Store { reg, obj, off } => {
+                    self.pending.push((obj, Some(off)));
+                    self.lanes.extend_from_slice(&regs[reg][..n]);
+                }
+                VloopOp::Push { reg, obj } => {
+                    self.pending.push((obj, None));
+                    self.lanes.extend_from_slice(&regs[reg][..n]);
+                }
+                VloopOp::Bin { kind, dest, a, b } => {
+                    let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
+                    let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
+                    let out = &mut self.out;
+                    const Z: [u64; WIDE] = [0; WIDE];
+                    let z = &Z;
+                    let no_lhs = splat || matches!(kind, simd::IOTA_I64 | simd::IOTA_F64);
+                    let no_rhs = no_lhs || simd::is_unary_kind(kind);
+                    let lhs = if no_lhs { z } else { &regs[a % simd::NREGS] };
+                    let rhs = if no_rhs { z } else { &regs[b % simd::NREGS] };
+                    if crate::simd::eval_vbin_wide(kind, lhs, rhs, scalar, n, out).is_err() {
+                        return Ok(false);
+                    }
+                    regs[dest][..n].copy_from_slice(&out[..n]);
+                }
+                VloopOp::Sel { dest, a, b } => {
+                    let out = &mut self.out;
+                    for (o, (&m, (&x, &y))) in out[..n].iter_mut().zip(regs[dest].iter().zip(regs[a].iter().zip(&regs[b]))) {
+                        *o = if m != 0 { x } else { y };
+                    }
+                    regs[dest][..n].copy_from_slice(&out[..n]);
+                }
+                VloopOp::Fma { .. } | VloopOp::Reduce { .. } => return Err("VLoop: malformed body"),
+            }
+        }
+        Ok(true)
+    }
+
+    /// The block's held-back stores and appends, in body order.
+    fn commit(&mut self, p: i64) -> Result<(), &'static str> {
+        const OOB: &str = "VLoop out of bounds";
+        let n = self.n;
+        for (&(obj, off), lanes) in self.pending.iter().zip(self.lanes.chunks_exact(n)) {
+            let Some(Object::Array(mut gc)) = obj else {
+                return Err("VLoop: malformed body");
+            };
+            let arr = gc.as_mut();
+            match off {
+                Some(off) => {
+                    let base = usize::try_from(p + off).map_err(|_| OOB)?;
+                    if base + n > arr.len() {
+                        return Err(OOB);
+                    }
+                    for (i, &lane) in lanes.iter().enumerate() {
+                        // SAFETY: `base + n <= len` checked above; lanes are numeric.
+                        unsafe { arr.set_numeric_unchecked(base + i, Value::from(lane)) };
+                    }
+                }
+                None => {
+                    if let Some(bytes) = arr.bytes_mut()
+                        && lanes.iter().all(|&l| l <= u64::from(u8::MAX))
+                    {
+                        bytes.extend(lanes.iter().map(|&l| l as u8));
+                    } else {
+                        arr.reserve(n);
+                        for &lane in lanes {
+                            arr.push(Value::from(lane));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One `VBin` of a `VLoop` body over whole vector registers.
@@ -741,8 +927,8 @@ fn vbin_block(
     crate::simd::eval_vbin(kind, &lhs, &rhs, scalar)
 }
 
-/// The block at `p` of a `VLoop` body, one lane at a time in scalar
-/// order: each register holds lane `j`'s value in every lane, a store
+/// The first `count` lanes (at most 8) of the block at `p` of a `VLoop`
+/// body, one lane at a time in scalar order: each register holds lane `j`'s value in every lane, a store
 /// writes element `p + j + off`, a fold takes lane `j` alone. `Err` is the
 /// trap of the first lane that traps, after the lanes before it stored
 /// and folded.
@@ -752,10 +938,11 @@ fn vloop_lanes(
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
     ops: &[VloopOp],
     p: i64,
+    count: usize,
 ) -> Result<(), &'static str> {
     use common::simd;
     const OOB: &str = "VLoop out of bounds";
-    for j in 0..simd::LANES as i64 {
+    for j in 0..count as i64 {
         for op in ops {
             match *op {
                 VloopOp::Load { reg, obj, off } => {
@@ -1258,6 +1445,9 @@ pub struct Machine<const S: usize> {
     /// A collector-run `drop` panicked under the test harness: the job stops
     /// at the next fuel charge and runs no more finalizers.
     finalizer_aborted: bool,
+    /// Some generator suspended with a `defer` armed: the collector looks
+    /// for ones to close.
+    closeables: bool,
     /// Unwinder state (`vm_unwind.rs`): a panic that may run `defer`s.
     unwind: Unwind,
     /// Global static slots (`LoadStatic` / `StoreStatic`).
@@ -1411,6 +1601,7 @@ impl<const S: usize> Machine<S> {
             sched: None,
             task_panic_message: None,
             finalizer_aborted: false,
+            closeables: false,
             unwind: Unwind::default(),
             statics: Vec::new(),
             program_debug: ProgramDebug::default(),
@@ -2159,8 +2350,50 @@ impl<const S: usize> Machine<S> {
     /// index's pin and the dense object cache forget a freed address. `--early-free off` turns it
     /// off; `--early-free check` frees nothing and aborts when the next
     /// mark still reaches an object it would have freed.
-    pub(crate) fn free_early(&mut self, v: Value, deep: bool) {
+    ///
+    /// An object whose type's `drop` keeps nothing of `self` has its `drop`
+    /// run here first, a parent's before what it reaches, as an ordinary
+    /// call: a panic in one unwinds from the free (`false`), and the free
+    /// then frees nothing.
+    pub(crate) fn free_early(&mut self, v: Value, deep: bool) -> bool {
+        if !self.finalizer_by_type.is_empty() && crate::memory::early_free_mode() == crate::memory::EarlyFreeMode::Free {
+            let pins = &self.frame_pins;
+            let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
+            let Some(drops) = self.heap.early_drops(v, deep, &keep) else {
+                return true;
+            };
+            if !drops.is_empty() && !self.run_early_drops(v, &drops) {
+                return false;
+            }
+        }
         free_early_in(&mut self.heap, &mut self.frame_pins, &mut self.dense_obj_addr, &mut self.dense_obj, v, deep);
+        true
+    }
+
+    /// Run the `drop`s of objects an early free gives back, rooted while
+    /// they run (nothing else reaches them). `false`: one panicked, and the
+    /// panic is armed to unwind from the free.
+    #[cold]
+    #[inline(never)]
+    fn run_early_drops(&mut self, v: Value, drops: &[crate::memory::Object]) -> bool {
+        let roots_len = self.ffi_arg_roots.len();
+        self.ffi_arg_roots.push(v);
+        self.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
+        let mut ok = true;
+        for obj in drops {
+            let Some(pc) = self.pending_finalizer(*obj) else { continue };
+            let val = Value::from(obj.addr());
+            if self.finalizer_aborted || !self.claim_finalizer(val) {
+                continue;
+            }
+            let _ = self.call_function(pc, &[val]);
+            if self.panicked {
+                ok = false;
+                break;
+            }
+        }
+        self.ffi_arg_roots.truncate(roots_len);
+        ok
     }
 
     #[inline]
@@ -2429,7 +2662,7 @@ impl<const S: usize> Machine<S> {
                     obj.mark_references(&self.heap, &mut gray);
                 }
                 for (val, pc) in queue {
-                    self.run_finalizer(val, pc);
+                    self.run_pending(val, pc);
                 }
                 self.unmark_heap();
                 self.mark_from_vm_roots();
@@ -2739,7 +2972,7 @@ impl<const S: usize> Machine<S> {
             while !self.heap.mark_quantum(usize::MAX) {}
             self.gc_in_progress = true;
             for (val, pc) in queue {
-                self.run_finalizer(val, pc);
+                self.run_pending(val, pc);
             }
             self.gc_in_progress = false;
             self.gc_remark_vm_roots();
@@ -3120,16 +3353,117 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, u32)> {
-        if self.finalizer_by_type.is_empty() {
+    /// The unmarked objects that owe a `drop` (its pc) or, for a generator
+    /// suspended with a `defer` armed, a close (`None`).
+    fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, Option<u32>)> {
+        if self.finalizer_by_type.is_empty() && !self.closeables {
             return Vec::new();
         }
         // The heap lists its finalizable objects: no walk of the heap (#1870).
         let unmarked = self.heap.unmarked_finalizable();
         unmarked
             .into_iter()
-            .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_finalizer(obj)?)))
+            .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_cleanup(obj)?)))
             .collect()
+    }
+
+    /// What `obj` still owes: its `drop` pc, or a close for a generator.
+    fn pending_cleanup(&self, obj: Object) -> Option<Option<u32>> {
+        match obj {
+            Object::Coroutine(gc) => {
+                let c = gc.as_ref();
+                (c.closeable && c.state == CoroState::Suspended).then_some(None)
+            }
+            _ => self.pending_finalizer(obj).map(Some),
+        }
+    }
+
+    fn run_pending(&mut self, val: Value, pc: Option<u32>) {
+        match pc {
+            Some(pc) => self.run_finalizer(val, pc),
+            None => self.run_coro_close(val),
+        }
+    }
+
+    /// `open` / `accept` ran out of file descriptors: collect (a freed
+    /// stream closes its descriptor; a `drop` may close one) and run the
+    /// native again with the same arguments, rooted across the collection.
+    #[cold]
+    #[inline(never)]
+    fn retry_after_fd_collect(
+        &mut self,
+        ip: usize,
+        fn_id: usize,
+        args: Vec<Value>,
+        layout: crate::host_enum::HostEnumLayout,
+    ) -> Result<Option<Value>, crate::FfiError> {
+        let roots_len = self.ffi_arg_roots.len();
+        self.ffi_arg_roots.extend_from_slice(&args);
+        if unlikely(!self.stack_maps.is_empty()) {
+            self.gc_ip = ip;
+        }
+        self.gc_top_ip = Some(ip);
+        self.gc_collect();
+        self.gc_top_ip = None;
+        self.ffi_arg_roots.truncate(roots_len);
+        let Some(native) = self.natives.get_by_id(fn_id) else {
+            return Err(crate::FfiError::Panic(format!("HostInvoke: unknown native id {fn_id}")));
+        };
+        crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.heap, &args))
+    }
+
+    /// Close a generator nothing reaches any more (the collector, or
+    /// teardown): its armed `defer`s run in a nested execution, as a
+    /// `drop` does. A panic in one aborts, as one in a `drop` does.
+    fn run_coro_close(&mut self, handle: Value) {
+        if self.finalizer_aborted {
+            return;
+        }
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        let constants: &[u64] = unsafe {
+            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+        };
+        self.bind_frame_reserve(code, constants);
+        if self.frames.len() >= crate::MAX_CALL_FRAMES {
+            return;
+        }
+        let was_panicked = self.panicked;
+        self.panicked = false;
+        let saved_sp = self.stack.tell();
+        self.nested_depth += 1;
+        self.return_bookkeeping = true;
+        // A host frame the close returns to; nothing runs in it.
+        self.frames.setup_current_and_advance(|f| {
+            f.seek(0);
+            f.set(saved_sp);
+        });
+        self.nested_frame_depths.push(self.frames.len());
+        let (mut ip, mut sp) = (0, saved_sp);
+        if let TaskFlow::Unwind = self.coro_close(handle, &mut ip, &mut sp) {
+            // Once its frames are gone the close ends this execution
+            // instead of going on in the host frame.
+            if let Some(last) = self.unwind.closing.last_mut() {
+                last.2 = true;
+            }
+            if let Some(start) = self.unwind_step() {
+                let _ = self.run_execute(code, constants, start);
+            }
+        }
+        let _ = self.pop_call_frame();
+        self.stack.seek(saved_sp);
+        self.nested_depth -= 1;
+        let _ = self.nested_frame_depths.pop();
+        self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
+        if self.panicked {
+            self.abort_after_finalizer_panic();
+            return;
+        }
+        self.panicked = was_panicked;
     }
 
     /// Drop PC for a tagged instance or enum whose finalizer has not run.
@@ -3196,8 +3530,13 @@ impl<const S: usize> Machine<S> {
     }
 
     fn register_finalizer(&mut self, type_id: u32, pc: u32) {
+        let early = type_id & common::EARLY_DROP_FLAG != 0;
+        let type_id = type_id & !common::EARLY_DROP_FLAG;
         if type_id == 0 {
             return;
+        }
+        if early {
+            self.heap.register_early_drop_type(type_id);
         }
         self.finalizer_by_type.insert(type_id, pc);
         self.finalizer_pcs.insert(pc);
@@ -3205,17 +3544,17 @@ impl<const S: usize> Machine<S> {
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
-        if self.program_code.is_empty() || self.finalizer_by_type.is_empty() {
+        if self.program_code.is_empty() || (self.finalizer_by_type.is_empty() && !self.closeables) {
             return;
         }
         let mut queue = Vec::new();
         for obj in self.heap.objects() {
-            if let Some(pc) = self.pending_finalizer(obj) {
+            if let Some(pc) = self.pending_cleanup(obj) {
                 queue.push((Value::from(obj.addr()), pc));
             }
         }
         for (val, pc) in queue {
-            self.run_finalizer(val, pc);
+            self.run_pending(val, pc);
         }
     }
 
@@ -3936,6 +4275,7 @@ impl<const S: usize> Machine<S> {
 
         Self::with_coroutine_mut(gc, |c| {
             c.pending_send = send_val;
+            c.started = true;
         });
 
         self.return_bookkeeping = true;
@@ -3987,6 +4327,7 @@ impl<const S: usize> Machine<S> {
         };
 
         self.save_coroutine_state(sub_gc, *ip, *sp, sub_base_sp, sub_frame_depth);
+        self.note_suspended_coroutine(sub_gc);
 
         // The value goes to whoever resumed the delegation chain: the
         // lowest `resume_stack` entry among the delegate and its delegators
@@ -4068,6 +4409,7 @@ impl<const S: usize> Machine<S> {
             coro.resume_ip = *ip;
             coro.state = CoroState::Suspended;
         });
+        self.note_suspended_coroutine(coro_gc);
 
         self.stack.seek(base_sp);
         while self.frames.len() > frame_depth {
@@ -4178,6 +4520,7 @@ impl<const S: usize> Machine<S> {
         self.finalizer_by_type.clear();
         self.finalizer_pcs.clear();
         self.finalizer_aborted = false;
+        self.closeables = false;
         self.gc_in_progress = false;
         self.gc_deferred = false;
         if self.heap.is_borrowed() {
@@ -5440,7 +5783,10 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::FreeEarly => {
                     let v = self.stack.pop();
-                    self.free_early(v, opcode.operand_u32() & 1 != 0);
+                    if unlikely(!self.free_early(v, opcode.operand_u32() & 1 != 0)) {
+                        self.rearm_unwind_after_early_drop(ip.saturating_sub(1));
+                        return false;
+                    }
                 }
                 Instruction::Cow if opcode.operand_u32() & common::dense::COW_FIELD != 0 => {
                     // `obj.f = unique(obj.f)` in place: the field is written

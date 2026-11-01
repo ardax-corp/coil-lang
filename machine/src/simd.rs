@@ -372,6 +372,76 @@ pub fn movemask(reg: &[u64; LANES]) -> i64 {
     bytes64::movemask(as_bytes(reg)) as i64
 }
 
+/// Lanes a `VLoop` block runs at once when its body allows it
+/// ([`eval_vbin_wide`]): the dispatch of each body word is paid once per
+/// up to 64 lanes instead of once per 8.
+pub const WIDE: usize = simd::BYTE_LANES;
+
+/// [`eval_vbin`] over the first `n` lanes of wide registers (at most
+/// [`WIDE`]) into `out`. Int lanes trap as the
+/// scalar ops would; the trap is reported for the block, and the caller
+/// runs it again 8 lanes at a time to find the lane (the lanes after `n`
+/// in `out` are left as they were).
+pub fn eval_vbin_wide(kind: u8, lhs: &[u64; WIDE], rhs: &[u64; WIDE], scalar: Value, n: usize, out: &mut [u64; WIDE]) -> Result<(), IntTrap> {
+    debug_assert!(n <= WIDE);
+    let (a, b, o) = (&lhs[..n], &rhs[..n], &mut out[..n]);
+    match kind {
+        simd::IADD64 | simd::ISUB64 | simd::IMUL64 => {
+            // One loop per op; an overflow in any lane traps the block.
+            fn each(o: &mut [u64], a: &[u64], b: &[u64], f: impl Fn(i64, i64) -> (i64, bool)) -> bool {
+                let mut over = false;
+                for (o, (&x, &y)) in o.iter_mut().zip(a.iter().zip(b)) {
+                    let (v, f) = f(x as i64, y as i64);
+                    *o = v as u64;
+                    over |= f;
+                }
+                over
+            }
+            let over = match kind {
+                simd::IADD64 => each(o, a, b, i64::overflowing_add),
+                simd::ISUB64 => each(o, a, b, i64::overflowing_sub),
+                _ => each(o, a, b, i64::overflowing_mul),
+            };
+            if over {
+                return Err(IntTrap::Overflow);
+            }
+        }
+        simd::IAND64 => o.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (x, y))| *o = x & y),
+        simd::IOR64 => o.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (x, y))| *o = x | y),
+        simd::IXOR64 => o.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (x, y))| *o = x ^ y),
+        k if (simd::ICMP..simd::ICMP + 6).contains(&k) => {
+            // One loop per predicate: the compare is not chosen per lane.
+            fn each(o: &mut [u64], a: &[u64], b: &[u64], f: impl Fn(i64, i64) -> bool) {
+                for (o, (&x, &y)) in o.iter_mut().zip(a.iter().zip(b)) {
+                    *o = u64::from(f(x as i64, y as i64));
+                }
+            }
+            match k - simd::ICMP {
+                dense::CMP_LT => each(o, a, b, |x, y| x < y),
+                dense::CMP_LE => each(o, a, b, |x, y| x <= y),
+                dense::CMP_GT => each(o, a, b, |x, y| x > y),
+                dense::CMP_GE => each(o, a, b, |x, y| x >= y),
+                dense::CMP_EQ => each(o, a, b, |x, y| x == y),
+                _ => each(o, a, b, |x, y| x != y),
+            }
+        }
+        simd::SPLAT_I64 => o.fill(scalar.as_int() as u64),
+        simd::SPLAT_F64 => o.fill(scalar.as_float().to_bits()),
+        simd::IOTA_I64 => o.iter_mut().enumerate().for_each(|(i, o)| *o = i as u64),
+        simd::IOTA_F64 => o.iter_mut().enumerate().for_each(|(i, o)| *o = (i as f64).to_bits()),
+        _ => {
+            for c in (0..n).step_by(LANES) {
+                let k = (n - c).min(LANES);
+                // A short last chunk repeats its last lane, which gives
+                // (or traps) as that lane does: no trap of its own.
+                let chunk = |src: &[u64; WIDE]| -> [u64; LANES] { std::array::from_fn(|i| src[c + i.min(k - 1)]) };
+                out[c..c + k].copy_from_slice(&eval_vbin(kind, &chunk(lhs), &chunk(rhs), scalar)?[..k]);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod byte_tests {
     use super::*;

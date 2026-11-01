@@ -547,6 +547,11 @@ pub struct Compiler {
     /// Each planned inherent method clone, by name: its source, types and
     /// the shared call it stands for (its thunk, when it does not lower).
     method_clone_plans: std::cell::RefCell<HashMap<String, compiler::emit_hir::MethodClonePlan>>,
+    /// Set while a body with no dictionaries of its own plans the ground
+    /// method clone bodies spliced into it: their bound calls resolve to
+    /// ground instances and their forwarded dictionaries are dropped, as
+    /// in the clone itself (#2183).
+    hir_ground_splice: std::cell::Cell<bool>,
     /// Checker type variable → concrete type, per mono clone being compiled
     /// (the source function's type parameters), for open dictionary goals.
     mono_var_tys: Vec<HashMap<crate::typechecking::ty::TyVarId, Ty>>,
@@ -713,6 +718,17 @@ pub struct Compiler {
     /// with their calls named by key: callees another module's typed
     /// inlining may splice ([`Compiler::hir_portable_body`]).
     hir_portable: HashMap<String, crate::hir::HirBody>,
+    /// Method and mono clone bodies compiled so far, by clone key, as
+    /// they were planned, with every call in [`crate::hir::Callee::Resolved`]
+    /// form and every type closed and qualified: callees any module's
+    /// typed inlining may splice ([`Compiler::hir_resolved_clone_body`]).
+    hir_resolved_clones: HashMap<String, crate::hir::HirBody>,
+    /// The namespace to restore once the module being compiled ends,
+    /// between the halves of `compile_unfused`.
+    module_outer_namespace: Option<String>,
+    /// The plans of [`crate::hir::Callee::Resolved`] calls, by their
+    /// `plan` index, shared by every module's context.
+    resolved_plans: std::cell::RefCell<Vec<compiler::emit_hir::HirCall>>,
     /// The core prelude's `Option` / `Result` method bodies, generic, as
     /// another module's inliner instantiates them at a call's types
     /// ([`Compiler::hir_core_method_body`]).
@@ -816,6 +832,7 @@ impl Default for Compiler {
             inst_clone_labels: Vec::new(),
             planned_method_clones: Default::default(),
             method_clone_plans: Default::default(),
+            hir_ground_splice: Default::default(),
             mono_var_tys: Vec::new(),
             static_init: CodeBuf::new(),
             comptime_consts: Vec::new(),
@@ -886,6 +903,9 @@ impl Default for Compiler {
             hir_mir_unbox: Vec::new(),
             hir_fn_names: HashMap::new(),
             hir_portable: HashMap::new(),
+            hir_resolved_clones: HashMap::new(),
+            module_outer_namespace: None,
+            resolved_plans: std::cell::RefCell::new(Vec::new()),
             hir_core_methods: HashMap::new(),
         }
     }
