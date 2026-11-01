@@ -1667,6 +1667,21 @@ impl Compiler {
         Some(name)
     }
 
+    /// Whether the clone of `fqn` at `lookup` is compiled from its body, as
+    /// [`Self::emit_instance_clones`] decides, rather than as a thunk that
+    /// calls the shared entry: another module's method when that module
+    /// knows the types. This program's own clone is taken to lower (its
+    /// HIR module is out while a body plans).
+    pub(super) fn inst_clone_has_body(&self, fqn: &str, lookup: &[Ty]) -> bool {
+        let Some(src) = self.inst_clone_srcs.get(fqn) else {
+            return false;
+        };
+        src.program == self.program_seq
+            || self.module_ctxs.get(&src.program).is_some_and(|ctx| {
+                ctx.knows_tys(lookup) && (ctx.layout_safe(src.span) || self.checker.enum_variants(&src.class).is_some())
+            })
+    }
+
     /// Whether a new clone of `fqn` would repeat a clone source already on
     /// the chain of the clone being compiled: polymorphic recursion
     /// (`Nest<T>::depth` calling `Nest<Nest<T>>::depth`).

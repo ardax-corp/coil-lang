@@ -4503,6 +4503,13 @@ impl Compiler {
         } else {
             return None;
         };
+        // A function argument the shared call wraps in an adapter is
+        // wrapped again by a thunk clone, a second call per call of it: such
+        // a call keeps the shared body unless the clone has its own.
+        let adapts = shared.generic.as_ref().is_some_and(|g| g.adapt.iter().any(Option::is_some));
+        if adapts && !self.inst_clone_has_body(key, &lookup_tys) {
+            return None;
+        }
         if !self.method_clone_room(key, &lookup_tys) {
             return None;
         }
