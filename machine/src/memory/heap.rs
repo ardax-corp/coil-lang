@@ -862,6 +862,12 @@ impl Heap {
         self.cow_copies
     }
 
+    /// A generator suspended with a `defer` armed: it owes a close, which
+    /// the collector (or teardown) runs once nothing reaches it.
+    pub fn note_closeable(&mut self, object: Object) {
+        self.finalizable.push(object.addr());
+    }
+
     /// An enum typed after its allocation (`TagEnumType`).
     pub fn note_enum_type(&mut self, object: Object, type_id: u32) {
         if self.has_finalizer(type_id) {
@@ -887,6 +893,14 @@ impl Heap {
             let (type_id, finalized) = match obj {
                 Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
                 Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                // A closeable generator stays listed until it is done.
+                Object::Coroutine(gc) => {
+                    let open = gc.as_ref().closeable && gc.as_ref().state == CoroState::Suspended;
+                    if open && !obj.is_marked() {
+                        out.push(obj);
+                    }
+                    return open;
+                }
                 _ => return false,
             };
             if finalized || !self.has_finalizer(type_id) {
@@ -3842,6 +3856,9 @@ pub struct ObjCoroutine {
     pub yield_from_resume_ip: usize,
     /// The body has run: a close has `defer`s to run only after this.
     pub started: bool,
+    /// Listed for a close by the collector: it suspended with a `defer`
+    /// armed ([`Heap::note_closeable`]).
+    pub closeable: bool,
 }
 
 /// Heap-allocated boxed value for the generics runtime.
