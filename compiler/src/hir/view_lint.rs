@@ -117,7 +117,22 @@ fn returnable(checker: &Checker, body: &HirBody, v: HirId) -> bool {
     }
     match &body.expr(v).kind {
         HirKind::Make { kind: MakeKind::Class(_), .. } => borrow_args(checker, body, v).iter().all(|&a| rooted_at_self(body, a)),
-        HirKind::Local(_) => rooted_at_self(body, v),
+        // A local bound once to a returnable view: the result temporary a
+        // method with contracts (`ensures`, a class `invariant`) returns.
+        HirKind::Local(l) => {
+            rooted_at_self(body, v)
+                || (body.local(*l).kind != LocalKind::Param && {
+                    let mut inits = body.exprs.iter().filter_map(|e| match e.kind {
+                        HirKind::Let { local, init: Some(i) } if local == *l => Some(i),
+                        HirKind::Assign { place, value } if body.expr(place).kind == HirKind::Local(*l) => Some(value),
+                        _ => None,
+                    });
+                    match (inits.next(), inits.next()) {
+                        (Some(i), None) => returnable(checker, body, i),
+                        _ => false,
+                    }
+                })
+        }
         HirKind::Call { args, .. } => args.first().is_some_and(|&r| rooted_at_self(body, r)),
         HirKind::Block { tail: Some(t), .. } => returnable(checker, body, *t),
         HirKind::If { then, els: Some(e), .. } => returnable(checker, body, *then) && returnable(checker, body, *e),
