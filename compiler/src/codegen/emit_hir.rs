@@ -1579,6 +1579,12 @@ impl Compiler {
                                 field_word(t).filter(|_| crate::layout::value_layout(checker, t) == ValueLayout::Boxed)
                             })
                             .or_else(|| word(&self.hir_class_ty_args_at(made?, t)?))
+                            // A class parameter's boxed enum at the made type's
+                            // arguments (`Option<Option<string>>`): its heap word.
+                            .or_else(|| {
+                                let at = self.hir_param_field_at(made?, t)?;
+                                field_word(&at).filter(|_| crate::layout::value_layout(checker, &at) == ValueLayout::Boxed)
+                            })
                             // A two-word field's slot holds its box, as
                             // `new` stores it (`Rep::Word` of a boxed layout).
                             .or_else(|| {
