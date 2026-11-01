@@ -829,6 +829,9 @@ fn fold_identity(ty: u8, fold: u8) -> u64 {
     }
 }
 
+/// Fewest lanes the forward tail of [`vscan`] runs a padded chunk for.
+const TAIL_MIN_LANES: i64 = 2;
+
 /// `VScan` (see [`Instruction::VScan`]): from `p = from` in steps of 64,
 /// while lanes `p ..= p + 63` pass `< bound` (`<= bound` when
 /// `inclusive`) and every load lies inside its array, the first `p`
@@ -875,7 +878,7 @@ pub(crate) fn vscan(
     if backward && i128::from(from) < lo {
         return Ok(from);
     }
-    if !backward && i128::from(from) > last {
+    if !backward && i128::from(from) > last - i128::from(TAIL_MIN_LANES - 1) {
         return Ok(from);
     }
     let mut slots = [const { std::mem::MaybeUninit::<Op>::uninit() }; simd::SCAN_MAX_BODY];
@@ -992,7 +995,9 @@ pub(crate) fn vscan(
                 Op::Bin(_) => {}
             }
         }
-        if lanes <= 0 {
+        // A lane or two (`match_at` of a one-byte needle) costs the scalar
+        // loop less than a padded chunk does.
+        if lanes < TAIL_MIN_LANES {
             return p;
         }
         for op in ops {
