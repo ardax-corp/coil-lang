@@ -600,6 +600,8 @@ struct Plan {
     notes: Vec<Message>,
     /// Values to share: (node, eager copy).
     share: Vec<(HirId, bool)>,
+    /// Places stored where they outlive the read, shared or moved.
+    stored: Vec<HirId>,
     /// Locals to share as a statement right after the node that binds
     /// them (pattern bindings) or before a node (captures).
     share_after: Vec<(HirId, LocalId)>,
@@ -845,8 +847,101 @@ impl Plan {
         }
         plan.inout = inout;
         plan.defer_captured = f.defer_captured.clone();
+        plan.check_borrows(checker, body, f);
         plan.note_copies(checker, body, f, &copied_from);
         plan
+    }
+
+    /// E0149 (#2191): a borrow writes its object in place, so while it
+    /// lives nothing may give that object a second name (a share of the
+    /// borrowed place or of a place holding it) or replace the place (the
+    /// borrow would write an orphan). A share of a place below the borrowed
+    /// object is fine: the borrow's write makes that child unique first.
+    fn check_borrows(&mut self, checker: &Checker, body: &HirBody, f: &Facts<'_>) {
+        let mut borrows: Vec<(LocalId, HirId, HirId)> = Vec::new();
+        for (&l, inits) in &f.inits {
+            if body.local(l).borrow && cow_ty(checker, body.local(l).ty.as_ref()) {
+                for &v in inits {
+                    borrows.push((l, v, f.parent.get(&v).copied().unwrap_or(v)));
+                }
+            }
+        }
+        for (&l, &(src, binder)) in &f.bound {
+            if body.local(l).borrow && cow_ty(checker, body.local(l).ty.as_ref()) {
+                borrows.push((l, src, binder));
+            }
+        }
+        if borrows.is_empty() {
+            return;
+        }
+        borrows.sort_by_key(|&(_, v, _)| f.order(v));
+        // Every point that gives a place's object a second name, shared
+        // or moved: stores, and bindings other than borrows.
+        let mut shares: Vec<(HirId, HirId)> = self.stored.iter().map(|&v| (v, v)).collect();
+        for (&l, inits) in &f.inits {
+            if !body.local(l).borrow {
+                shares.extend(inits.iter().map(|&v| (v, v)));
+            }
+        }
+        for (&l, &(src, binder)) in &f.bound {
+            if !body.local(l).borrow {
+                shares.push((src, binder));
+            }
+        }
+        let mut seen: HashSet<(HirId, HirId)> = HashSet::new();
+        for &(b, src, from) in &borrows {
+            let Some((root, path)) = place_path(body, f, src) else { continue };
+            let (start, end) = f.live_span(b, from);
+            let live = |at: HirId| {
+                let o = f.order(at);
+                o != u32::MAX && o > start && o <= end && !f.contains(src, at)
+            };
+            let covers = |v: HirId| place_path(body, f, v).is_some_and(|(r, p)| r == root && prefix_of(&p, &path));
+            let bname = body.local(b).name.clone();
+            let Some(stext) = place_text(body, src) else { continue };
+            for &(v, at) in &shares {
+                if live(at) && covers(v) && seen.insert((v, src)) {
+                    let span = body.expr(v).span;
+                    let vtext = place_text(body, v).unwrap_or_else(|| stext.clone());
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("`{vtext}` gets a second name while `{bname}` borrows `{stext}`: writes through `{bname}` would show through both"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("use `{bname}` for the last time before this, or hold the shared state in a `Ref<T>`"));
+                    self.notes.push(m);
+                }
+            }
+            for &(capture_at, l) in &self.share_before {
+                let at = capture_at.1;
+                if l == root && path.iter().all(Option::is_some) && live(at) && seen.insert((at, src)) {
+                    let span = body.expr(at).span;
+                    let name = &body.local(l).name;
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("this closure captures `{name}` while `{bname}` borrows `{stext}`: writes through `{bname}` would show in the closure's copy"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("use `{bname}` for the last time before the closure, or capture with `use (mut {name})`"));
+                    self.notes.push(m);
+                }
+            }
+            for (i, e) in body.exprs.iter().enumerate() {
+                let id = HirId(i as u32);
+                let HirKind::Assign { place, .. } = &e.kind else { continue };
+                if live(id) && covers(*place) && seen.insert((id, src)) {
+                    let span = e.span;
+                    let ptext = place_text(body, *place).unwrap_or_else(|| stext.clone());
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("`{ptext}` is replaced while `{bname}` borrows `{stext}`: writes through `{bname}` would go to the old object"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("use `{bname}` for the last time before this, or borrow again after it"));
+                    self.notes.push(m);
+                }
+            }
+        }
     }
 
     /// E0141 where a write copies an object a binding shares with its
@@ -980,16 +1075,52 @@ impl Plan {
                 HirKind::If { then, els, .. } => work.extend(std::iter::once(*then).chain(*els)),
                 HirKind::Match { arms, .. } => work.extend(arms.iter().map(|a| a.body)),
                 HirKind::Local(l) if cow(at) => {
+                    self.stored.push(at);
                     if !borrowed.contains(l) && f.last_read(*l, at) && owned(f, body, *l, inout) {
                         continue;
                     }
                     self.share_value(body, f, at, inout);
                 }
-                HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } if cow(at) => self.share_value(body, f, at, inout),
+                HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } if cow(at) => {
+                    self.stored.push(at);
+                    self.share_value(body, f, at, inout);
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// A place as its root local and the steps below it: a field name, or
+/// `None` for an element (any index).
+fn place_path(body: &HirBody, f: &Facts<'_>, v: HirId) -> Option<(LocalId, Vec<Option<String>>)> {
+    let _ = f;
+    let mut steps = Vec::new();
+    let mut at = v;
+    loop {
+        match &body.expr(at).kind {
+            HirKind::Field { base, name } => {
+                steps.push(Some(name.clone()));
+                at = *base;
+            }
+            HirKind::Index { base, kind: IndexKind::Array, .. } => {
+                steps.push(None);
+                at = *base;
+            }
+            HirKind::Builtin { op: Builtin::Cow { .. }, args } if args.len() == 1 => at = args[0],
+            HirKind::Local(l) => {
+                steps.reverse();
+                return Some((*l, steps));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether place steps `a` lead to `b` or to an object holding it.
+/// Elements match any index.
+fn prefix_of(a: &[Option<String>], b: &[Option<String>]) -> bool {
+    a.len() <= b.len() && a.iter().zip(b).all(|(x, y)| x.is_none() || y.is_none() || x == y)
 }
 
 /// Whether `x` is bound from a place rooted at `root` (directly or
