@@ -29,6 +29,9 @@ struct Unwind {
     /// generator's frames start at, the closer's stack top, and whether
     /// the closer is the collector (its execution ends with the close).
     closing: Vec<(usize, usize, bool)>,
+    /// The message of the last panic armed, for one that crosses a nested
+    /// execution (a `drop` an early free runs).
+    message: String,
 }
 
 impl<const S: usize> Machine<S> {
@@ -40,6 +43,28 @@ impl<const S: usize> Machine<S> {
         self.unwind.armed =
             message != STACK_OVERFLOW && message != STEP_BUDGET_EXHAUSTED && message != HEAP_CAP_EXCEEDED;
         self.unwind.resumed = false;
+        message.clone_into(&mut self.unwind.message);
+    }
+
+    /// A `drop` an early free ran panicked in its nested execution: go on
+    /// unwinding from the free at `at`, in the frames that called it.
+    #[cold]
+    #[inline(never)]
+    fn rearm_unwind_after_early_drop(&mut self, at: usize) {
+        if !self.frames.is_empty() {
+            self.frames.get_mut().seek(at);
+        }
+        let message = std::mem::take(&mut self.unwind.message);
+        self.unwind.armed = !self.finalizer_aborted
+            && message != STACK_OVERFLOW
+            && message != STEP_BUDGET_EXHAUSTED
+            && message != HEAP_CAP_EXCEEDED;
+        self.unwind.resumed = false;
+        if self.task_panic_is_caught() {
+            self.task_panic_message = Some(message.clone());
+        }
+        self.unwind.message = message;
+        self.panicked = true;
     }
 
     /// Lowest `frames.len()` this execution may unwind to: the frame at

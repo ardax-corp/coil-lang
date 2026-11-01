@@ -2098,8 +2098,50 @@ impl<const S: usize> Machine<S> {
     /// index's pin and the dense object cache forget a freed address. `--early-free off` turns it
     /// off; `--early-free check` frees nothing and aborts when the next
     /// mark still reaches an object it would have freed.
-    pub(crate) fn free_early(&mut self, v: Value, deep: bool) {
+    ///
+    /// An object whose type's `drop` keeps nothing of `self` has its `drop`
+    /// run here first, a parent's before what it reaches, as an ordinary
+    /// call: a panic in one unwinds from the free (`false`), and the free
+    /// then frees nothing.
+    pub(crate) fn free_early(&mut self, v: Value, deep: bool) -> bool {
+        if !self.finalizer_by_type.is_empty() && crate::memory::early_free_mode() == crate::memory::EarlyFreeMode::Free {
+            let pins = &self.frame_pins;
+            let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
+            let Some(drops) = self.heap.early_drops(v, deep, &keep) else {
+                return true;
+            };
+            if !drops.is_empty() && !self.run_early_drops(v, &drops) {
+                return false;
+            }
+        }
         free_early_in(&mut self.heap, &mut self.frame_pins, &mut self.dense_obj_addr, &mut self.dense_obj, v, deep);
+        true
+    }
+
+    /// Run the `drop`s of objects an early free gives back, rooted while
+    /// they run (nothing else reaches them). `false`: one panicked, and the
+    /// panic is armed to unwind from the free.
+    #[cold]
+    #[inline(never)]
+    fn run_early_drops(&mut self, v: Value, drops: &[crate::memory::Object]) -> bool {
+        let roots_len = self.ffi_arg_roots.len();
+        self.ffi_arg_roots.push(v);
+        self.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
+        let mut ok = true;
+        for obj in drops {
+            let Some(pc) = self.pending_finalizer(*obj) else { continue };
+            let val = Value::from(obj.addr());
+            if self.finalizer_aborted || !self.claim_finalizer(val) {
+                continue;
+            }
+            let _ = self.call_function(pc, &[val]);
+            if self.panicked {
+                ok = false;
+                break;
+            }
+        }
+        self.ffi_arg_roots.truncate(roots_len);
+        ok
     }
 
     #[inline]
@@ -3236,8 +3278,13 @@ impl<const S: usize> Machine<S> {
     }
 
     fn register_finalizer(&mut self, type_id: u32, pc: u32) {
+        let early = type_id & common::EARLY_DROP_FLAG != 0;
+        let type_id = type_id & !common::EARLY_DROP_FLAG;
         if type_id == 0 {
             return;
+        }
+        if early {
+            self.heap.register_early_drop_type(type_id);
         }
         self.finalizer_by_type.insert(type_id, pc);
         self.finalizer_pcs.insert(pc);
@@ -5484,7 +5531,10 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::FreeEarly => {
                     let v = self.stack.pop();
-                    self.free_early(v, opcode.operand_u32() & 1 != 0);
+                    if unlikely(!self.free_early(v, opcode.operand_u32() & 1 != 0)) {
+                        self.rearm_unwind_after_early_drop(ip.saturating_sub(1));
+                        return false;
+                    }
                 }
                 Instruction::Cow if opcode.operand_u32() & common::dense::COW_FIELD != 0 => {
                     // `obj.f = unique(obj.f)` in place: the field is written
