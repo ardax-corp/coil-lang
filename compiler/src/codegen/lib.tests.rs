@@ -9376,6 +9376,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Same-module calls would splice the generic bodies and leave no clone.
+    pipeline.set_inline_max_cost(0);
     if pipeline.compile_src(src).is_err() {
         panic!("compile failed: {:?}", pipeline.messages().iter().map(|m| m.message()).collect::<Vec<_>>());
     }
