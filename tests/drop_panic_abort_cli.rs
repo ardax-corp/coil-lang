@@ -1,7 +1,8 @@
 //! A panic inside a `fn drop()` the collector runs ends the program at once:
 //! the message is printed, the exit status is non-zero, and no later code,
 //! `defer` or finalizer runs. An explicit `obj.drop()` is an ordinary call
-//! and unwinds like any other panic.
+//! and unwinds like any other panic. A generator close the collector runs
+//! follows the same rule.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -98,6 +99,35 @@ fn main() {{
     assert!(out.contains("main done"), "{out}");
     assert!(out.contains("drop failed"), "the panic is reported:\n{out}");
     assert!(!ok, "a panic in a teardown drop must fail the program:\n{out}");
+
+    // A generator the collector closes follows the same rule: a panic in
+    // its `defer` ends the program.
+    let gen_close = format!(
+        "{PRELUDE}
+gen fn bad() {{
+    defer {{
+        panic \"close failed\";
+    }}
+    yield 1;
+    return 0;
+}}
+
+fn abandon() {{
+    let h = bad();
+    let _ = resume h;
+}}
+
+fn main() {{
+    abandon();
+    collect();
+    say(\"after collect\");
+}}
+"
+    );
+    let (out, ok) = run(&bin, &dir, "gen_close.hy", &gen_close);
+    assert!(!ok, "a panic in a collector-run generator close must fail the program:\n{out}");
+    assert!(out.contains("close failed"), "the panic is reported:\n{out}");
+    assert!(!out.contains("after collect"), "code after the collection must not run:\n{out}");
 
     // An explicit `drop()` call is an ordinary call: its panic unwinds.
     let explicit = format!(
