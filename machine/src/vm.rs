@@ -694,8 +694,12 @@ fn vloop_run(
             stack[sp + dest] = Value::from(p);
         }
         if to - p < lanes {
-            // The last lanes, fewer than a block: one at a time.
-            vloop_lanes(stack, sp, regs, ops, p, (to - p) as usize)?;
+            // The last lanes, fewer than a block: one padded block, or one
+            // lane at a time when it traps.
+            let m = (to - p) as usize;
+            if !vloop_short_block(stack, sp, regs, ops, p, m, pending, saved)? {
+                vloop_lanes(stack, sp, regs, ops, p, m)?;
+            }
             break;
         }
         pending.clear();
@@ -905,6 +909,121 @@ impl VloopWide {
         }
         Ok(())
     }
+}
+
+/// The last `m` lanes (fewer than 8) of a `VLoop` at `p` as one block:
+/// the missing lanes repeat lane `m - 1`, and only the block's own lanes
+/// store, append and fold. `Ok(false)` on a trap (in a real lane or a
+/// repeat), with nothing stored and the folds as they were, so the caller
+/// runs the lanes one at a time.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn vloop_short_block(
+    stack: &mut Stack<Value>,
+    sp: usize,
+    regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
+    ops: &[VloopOp],
+    p: i64,
+    m: usize,
+    pending: &mut Vec<(Option<Object>, Option<i64>, [u64; common::simd::LANES])>,
+    saved: &mut Vec<(usize, Value)>,
+) -> Result<bool, &'static str> {
+    use common::simd;
+    const OOB: &str = "VLoop out of bounds";
+    pending.clear();
+    saved.clear();
+    let mut trapped = false;
+    for op in ops {
+        match *op {
+            VloopOp::Load { reg, obj, off } => {
+                let base = usize::try_from(p + off).map_err(|_| OOB)?;
+                let out = &mut regs[reg];
+                match obj {
+                    Some(Object::Array(gc)) => {
+                        let arr = gc.as_ref();
+                        if base + m > arr.len() {
+                            return Err(OOB);
+                        }
+                        for (i, o) in out[..m].iter_mut().enumerate() {
+                            *o = arr.get(base + i).ok_or(OOB)?.bits();
+                        }
+                    }
+                    Some(Object::String(gc)) => {
+                        let src = gc.as_ref().data.as_str().as_bytes().get(base..base + m).ok_or(OOB)?;
+                        for (o, &b) in out.iter_mut().zip(src) {
+                            *o = u64::from(b);
+                        }
+                    }
+                    _ => return Err(OOB),
+                }
+                let last = out[m - 1];
+                out[m..].fill(last);
+            }
+            // Held back until the block ran whole, as in a full block.
+            VloopOp::Store { reg, obj, off } => pending.push((obj, Some(off), regs[reg])),
+            VloopOp::Push { reg, obj } => pending.push((obj, None, regs[reg])),
+            VloopOp::Bin { kind, dest, a, b } => match vbin_block(stack, sp, regs, kind, a, b) {
+                Ok(out) => regs[dest] = out,
+                Err(_) => {
+                    trapped = true;
+                    break;
+                }
+            },
+            VloopOp::Sel { dest, a, b } => regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b]),
+            VloopOp::Fma { ty, dest, a, b } => match crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]) {
+                Ok(out) => regs[dest] = out,
+                Err(_) => {
+                    trapped = true;
+                    break;
+                }
+            },
+            VloopOp::Reduce { ty, slot, src, fold } => {
+                let mut lanes = regs[src];
+                // min / max keep a repeated lane; the other folds take
+                // their identity there.
+                let pad = if fold >= simd::REDUCE_TAKE { lanes[m - 1] } else { fold_identity(ty, fold) };
+                lanes[m..].fill(pad);
+                saved.push((slot, stack[sp + slot]));
+                match crate::simd::eval_vreduce(ty, stack[sp + slot], &lanes, fold) {
+                    Ok(v) => stack[sp + slot] = v,
+                    Err(_) => {
+                        trapped = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if trapped {
+        for &(slot, v) in saved.iter().rev() {
+            stack[sp + slot] = v;
+        }
+        return Ok(false);
+    }
+    for (obj, off, lanes) in pending.iter() {
+        let Some(Object::Array(mut gc)) = *obj else {
+            return Err("VLoop: malformed body");
+        };
+        let arr = gc.as_mut();
+        match off {
+            Some(off) => {
+                let base = usize::try_from(p + off).map_err(|_| OOB)?;
+                if base + m > arr.len() {
+                    return Err(OOB);
+                }
+                for (i, &lane) in lanes[..m].iter().enumerate() {
+                    // SAFETY: `base + m <= len` checked above; lanes are numeric.
+                    unsafe { arr.set_numeric_unchecked(base + i, Value::from(lane)) };
+                }
+            }
+            None => {
+                for &lane in &lanes[..m] {
+                    arr.push(Value::from(lane));
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// One `VBin` of a `VLoop` body over whole vector registers.
