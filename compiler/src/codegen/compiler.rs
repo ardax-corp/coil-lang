@@ -7854,6 +7854,12 @@ impl Compiler {
                     };
                     self.messages.push(m);
                 }
+                // E0151: view values that outlive their borrows.
+                for m in crate::hir::view_lint::check(&self.checker, b) {
+                    if seen.insert(m.range().clone()) {
+                        self.messages.push(m);
+                    }
+                }
                 for m in crate::hir::stream_lint::check(&self.checker, hir, b) {
                     if seen.insert(m.range().clone()) {
                         self.messages.push(m);
