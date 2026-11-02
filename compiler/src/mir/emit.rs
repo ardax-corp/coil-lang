@@ -1624,7 +1624,7 @@ pub(super) fn arg_clears(
             }
             MirInst::Alloc {
                 dest,
-                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple | MirAllocKind::Boxed { .. },
+                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple,
                 elems,
                 ..
             } if elems.iter().all(|e| !heapish(*e)) => {
@@ -3341,14 +3341,6 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             emit_dense_push(out, &[*msg], regs, scratch, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
         }
-        MirInst::Unbox { dest, src, tag } => {
-            emit_dense_push(out, &[*src], regs, scratch, loc)?;
-            out.push(IlOp::UnboxValue { tag: *tag, loc });
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
-        }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             // `DenseCmp` compares words; VM `EQ` compares strings by content.
             emit_dense_push(out, &[*lhs, *rhs], regs, scratch, loc)?;
@@ -4152,7 +4144,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
                 MirInst::Cow { field: Some(_), .. } => 0,
-                MirInst::Stringify { .. } | MirInst::Cow { .. } | MirInst::Unbox { .. } | MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } => 1,
+                MirInst::Stringify { .. } | MirInst::Cow { .. } | MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } => 1,
                 MirInst::StrEq { .. } => 2,
                 _ => 0,
             };
@@ -4659,7 +4651,6 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
         }
         MirAllocKind::Object { .. } | MirAllocKind::DropEnum { .. } => Ok(None),
         MirAllocKind::Coro { .. }
-        | MirAllocKind::Boxed { .. }
         | MirAllocKind::Fn { .. }
         | MirAllocKind::PolyFn { .. }
         | MirAllocKind::PolyFnCapture { .. } => Ok(None),
@@ -4825,7 +4816,6 @@ fn il_for_alloc_op(kind: MirAllocKind, arity: u32, kinds: u8, loc: DebugLoc) -> 
             loc,
             ret_words: 1,
         }),
-        MirAllocKind::Boxed { tag } => Ok(IlOp::BoxValue { tag, loc }),
         MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. } => Err(LowerError::Refused("function value alloc".into())),
     }
 }

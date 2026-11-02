@@ -285,7 +285,6 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
                 MirAllocKind::DropEnum { tag, type_id } => write!(f, " {tag}, {type_id}")?,
                 MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
-                MirAllocKind::Boxed { tag } => write!(f, " {tag}")?,
                 MirAllocKind::Fn { target, operand, mask } => {
                     write!(f, " {}, {operand}", target.0)?;
                     // A partial application's fill mask (none: no filled
@@ -343,7 +342,6 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::Stringify { dest, src, tag: Some(tag) } => write!(f, "{dest} = stringify.typed {tag}, {src}"),
         MirInst::Cow { dest, src, unique, field: None } => write!(f, "{dest} = cow.{} {src}", if *unique { "unique" } else { "share" }),
         MirInst::Cow { dest, src, field: Some(i), .. } => write!(f, "{dest} = cow.unique_field {src} {i}"),
-        MirInst::Unbox { dest, src, tag } => write!(f, "{dest} = unbox.{} {tag}, {src}", func.ty(*dest)),
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             write!(f, "{dest} = {} {lhs}, {rhs}", if *ne { "strne" } else { "streq" })
         }
@@ -868,9 +866,6 @@ impl<'a> Parser<'a> {
                 "coro" => MirAllocKind::Coro {
                     target: crate::il::Label(self.uint()? as u32),
                 },
-                "boxed" => MirAllocKind::Boxed {
-                    tag: self.uint()? as u32,
-                },
                 "fn" => {
                     let target = crate::il::Label(self.uint()? as u32);
                     self.expect(',')?;
@@ -956,14 +951,6 @@ impl<'a> Parser<'a> {
             }
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::Format { dest, fmt, args });
-        }
-        if let Some(rest) = op.strip_prefix("unbox.") {
-            let ty = MirTy::parse(rest).ok_or_else(|| ParseError(op.clone()))?;
-            let tag = self.uint()? as u32;
-            self.expect(',')?;
-            let src = self.value()?;
-            ensure_ty(types, dest, ty);
-            return Ok(MirInst::Unbox { dest, src, tag });
         }
         if op == "cow.share" || op == "cow.unique" {
             let src = self.value()?;
@@ -1301,23 +1288,6 @@ mod tests {
         g.verify().unwrap();
         let again = parse_func(&g.to_string()).unwrap();
         assert_eq!(again, g);
-    }
-
-    #[test]
-    fn unbox_round_trips_and_emits_unbox_value() {
-        let src = r#"
-func @unbox(v0: heapref) -> i64 {
-bb0:
-    v1 = unbox.i64 0, v0
-    return v1
-}
-"#;
-        let f = parse_func(src).unwrap();
-        f.verify().unwrap();
-        assert_eq!(parse_func(&f.to_string()).unwrap(), f);
-        let mut pool = Vec::new();
-        let lir = crate::mir::emit_lir::emit_lir(&f, None, &mut pool, false).unwrap();
-        assert!(lir.iter().any(|op| matches!(op, crate::il::IlOp::UnboxValue { tag: 0, .. })));
     }
 
     #[test]

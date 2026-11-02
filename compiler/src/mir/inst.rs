@@ -724,15 +724,6 @@ pub enum MirInst {
         unique: bool,
         field: Option<u32>,
     },
-    /// `UnboxValue tag`: the payload of `src` when it is a box of `tag`
-    /// (the default word for another box); any other word as it is. A
-    /// dictionary entry's argument comes boxed. Reads only the immutable
-    /// box, never allocates.
-    Unbox {
-        dest: ValueId,
-        src: ValueId,
-        tag: u32,
-    },
     /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
@@ -992,11 +983,6 @@ pub enum MirAllocKind {
     Coro {
         target: crate::il::Label,
     },
-    /// `BoxValue` (`tag`): one word into a boxed carrier, as an operator
-    /// instance method takes its operands.
-    Boxed {
-        tag: u32,
-    },
     /// `MakeFn`: a function value of the code at `target`, elems its
     /// captures then its filled parameters (the `Const mask` fill mask and
     /// `CodePtr` pushed after them). `operand` is the packed `MakeFn`
@@ -1031,7 +1017,6 @@ impl MirAllocKind {
             Self::Enum { .. } => "enum",
             Self::DropEnum { .. } => "dropenum",
             Self::Coro { .. } => "coro",
-            Self::Boxed { .. } => "boxed",
             Self::Fn { .. } => "fn",
             Self::PolyFn { .. } => "polyfn",
             Self::PolyFnCapture { .. } => "polyfncap",
@@ -1128,7 +1113,6 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::Cow { dest, .. }
-            | Self::Unbox { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1203,7 +1187,7 @@ impl MirInst {
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1288,7 +1272,7 @@ impl MirInst {
                 }
             }
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => {}
-            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {

@@ -33,7 +33,7 @@ pub struct GateFacts {
 pub fn refuses_alloc(inst: &MirInst) -> bool {
     match inst {
         MirInst::Alloc { kind, .. } => {
-            !matches!(kind, MirAllocKind::Boxed { .. } | MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. })
+            !matches!(kind, MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. })
         }
         MirInst::ArrayPush { .. } | MirInst::Stringify { .. } | MirInst::Cow { .. } => true,
         MirInst::Format { args, .. } => !args.is_empty(),
@@ -174,18 +174,5 @@ bb3:
         let post = "    v12 = call.i64 7 v2\n    v10 = alloc.array v12\n    v11 = gcbarrier.safepoint v10\n";
         let facts = GateFacts::of(&looped("", post, "v11"));
         assert!(facts.has_alloc && !facts.post_loop_alloc_return);
-    }
-
-    #[test]
-    fn boxed_value_is_no_alloc_and_no_wall() {
-        let text = "func @f(v0: heapref) -> heapref {
-bb0:
-    v1 = alloc.boxed 3, v0
-    v2 = gcbarrier.safepoint v1
-    return v2
-}";
-        let f = parse_func(text).expect(text);
-        assert_eq!(GateFacts::of(&f), GateFacts::default());
-        assert_eq!(fuse_lir_wall(&f, false), None);
     }
 }

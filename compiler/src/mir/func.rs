@@ -297,8 +297,7 @@ impl MirFunc {
                 MirInst::Alloc {
                     kind: super::inst::MirAllocKind::Fn { .. }
                         | super::inst::MirAllocKind::PolyFn { .. }
-                        | super::inst::MirAllocKind::PolyFnCapture { .. }
-                        | super::inst::MirAllocKind::Boxed { .. },
+                        | super::inst::MirAllocKind::PolyFnCapture { .. },
                     ..
                 }
             )
@@ -990,11 +989,6 @@ impl MirFunc {
                 }
                 if !self.ty(*src).is_specialized() {
                     return Err(format!("{dest} Stringify src type"));
-                }
-            }
-            MirInst::Unbox { dest, src, .. } => {
-                if !self.ty(*dest).is_specialized() || !self.ty(*src).is_specialized() {
-                    return Err(format!("{dest} Unbox type"));
                 }
             }
             MirInst::StrEq { dest, lhs, rhs, .. } => {
