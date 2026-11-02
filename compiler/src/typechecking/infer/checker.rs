@@ -964,17 +964,27 @@ impl Checker {
         );
     }
 
-    /// Pre-register the `thread` module's unit error enums (`ThreadError`,
-    /// `ChannelError`, `LockError`).
+    /// Pre-register the `thread` module's error enums (`ThreadError`,
+    /// `ChannelError`, `LockError`). All variants are unit but
+    /// `ThreadError::Panicked(string)`.
     fn register_builtin_thread_error(&mut self) {
         for (name, variants) in common::BUILTIN_THREAD_ERROR_ENUMS {
             let name = name.to_string();
             let variant_names: Vec<String> = variants.iter().map(|s| s.to_string()).collect();
-            let payloads = variant_names
-                .iter()
-                .map(|_| EnumVariantPayloadTy::Unit)
+            let panicked = |i: usize| {
+                name == common::BUILTIN_THREAD_ERROR_ENUM
+                    && i as u32 == common::BUILTIN_THREAD_ERROR_PANICKED_TAG
+            };
+            let payloads = (0..variant_names.len())
+                .map(|i| {
+                    if panicked(i) {
+                        EnumVariantPayloadTy::Tuple(vec![string()])
+                    } else {
+                        EnumVariantPayloadTy::Unit
+                    }
+                })
                 .collect();
-            let arities = vec![0; variant_names.len()];
+            let arities = (0..variant_names.len()).map(|i| usize::from(panicked(i))).collect();
             let mut tag_map = BTreeMap::new();
             for (i, vn) in variant_names.iter().enumerate() {
                 tag_map.insert(vn.clone(), i as u32);

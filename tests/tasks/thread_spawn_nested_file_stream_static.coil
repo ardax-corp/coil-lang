@@ -52,7 +52,7 @@ test("a file stream in a static class field panics in a worker, the rest copies"
     });
     assert!(
         match joined(log_line) {
-            Result::Err(ThreadError::JoinFailed) => true,
+            Result::Err(ThreadError::Panicked(_)) => true,
             default => false,
         },
     );

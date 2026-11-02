@@ -173,6 +173,9 @@ pub enum ThreadErrorTag {
     Disconnected,
     /// The thread cannot be joined or detached.
     JoinFailed,
+    /// The joined thread panicked; its message is in its [`JoinState`] and
+    /// reaches `ThreadError::Panicked` through [`set_join_panic`].
+    Panicked,
     /// A value cannot cross threads.
     NotSendable,
     /// A readers-writer lock was poisoned.
@@ -189,7 +192,8 @@ pub enum ThreadErrorTag {
 /// The `thread` error enum a native reports through.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ErrorSet {
-    /// `ThreadError { JoinFailed, NotSendable }`: spawn, join, detach.
+    /// `ThreadError { JoinFailed, NotSendable, Panicked(string) }`: spawn,
+    /// join, detach.
     Thread,
     /// `ChannelError { Closed, Empty, Full }`: channel operations.
     Channel,
@@ -214,6 +218,7 @@ impl ThreadErrorTag {
         };
         match (set, self) {
             (ErrorSet::Thread, T::NotSendable) => 1,
+            (ErrorSet::Thread, T::Panicked) => common::BUILTIN_THREAD_ERROR_PANICKED_TAG,
             (ErrorSet::Thread, _) => 0,
             (ErrorSet::Channel, T::Disconnected) => 0,
             (ErrorSet::Channel, T::WouldBlock) => 1,
@@ -233,6 +238,17 @@ thread_local! {
     /// A failure a `thread` native reports as a Coil panic, set by
     /// [`ThreadErrorTag::tag_in`].
     static PENDING_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// The message of the thread the last `join` found panicked, for the
+    /// `ThreadError::Panicked` [`alloc_thread_error`] builds.
+    static JOIN_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Hand a joined thread's panic message to the next `Panicked` error built.
+fn set_join_panic(message: String) {
+    JOIN_PANIC.with(|p| *p.borrow_mut() = Some(message));
 }
 
 /// Take the panic message the last `thread` native left, if any.
@@ -384,12 +400,15 @@ pub struct JoinState {
 /// Join-state payload (result slot).
 pub(crate) struct JoinStateInner {
     pub result: Option<Result<PortableValue, ThreadErrorTag>>,
+    /// The worker's panic message when `result` is
+    /// `Err(ThreadErrorTag::Panicked)`.
+    pub panic_message: Option<String>,
 }
 
 impl JoinState {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Mutex::new(JoinStateInner { result: None }),
+            inner: Mutex::new(JoinStateInner { result: None, panic_message: None }),
             finished: Condvar::new(),
             join_handle: Mutex::new(None),
             detached: AtomicBool::new(false),
@@ -411,8 +430,19 @@ impl JoinState {
     }
 
     pub(crate) fn store_result(&self, result: Result<PortableValue, ThreadErrorTag>) {
+        self.store_result_with_panic(result, None);
+    }
+
+    /// Like [`Self::store_result`], keeping the worker's panic message for
+    /// `join` to report as `ThreadError::Panicked`.
+    pub(crate) fn store_result_with_panic(
+        &self,
+        result: Result<PortableValue, ThreadErrorTag>,
+        panic_message: Option<String>,
+    ) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.result = Some(result);
+        g.panic_message = panic_message;
         self.done.store(true, Ordering::SeqCst);
         self.finished.notify_all();
         drop(g);
@@ -455,6 +485,12 @@ impl JoinState {
     /// True once the job stored its result (taken since or not).
     pub(crate) fn is_done(&self) -> bool {
         self.done.load(Ordering::SeqCst)
+    }
+
+    /// Take the worker's panic message (set with its `Panicked` result).
+    pub(crate) fn take_panic_message(&self) -> Option<String> {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.panic_message.take()
     }
 
     /// Non-blocking take when the worker has finished.
@@ -902,6 +938,12 @@ pub(crate) fn host_io_wait_ready() -> usize {
 /// Allocate the `set` error enum variant for `tag` on the heap.
 pub fn alloc_thread_error(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -> Value {
     let _ = common::BUILTIN_THREAD_ERROR_ENUMS;
+    if (set, tag) == (ErrorSet::Thread, ThreadErrorTag::Panicked) {
+        let message = JOIN_PANIC.with(|p| p.borrow_mut().take()).unwrap_or_default();
+        let gc = heap.intern(message);
+        let message = Value::from(gc.as_ptr() as *mut u8 as u64);
+        return alloc_enum(heap, tag.tag_in(set), vec![message]);
+    }
     alloc_enum(heap, tag.tag_in(set), vec![])
 }
 
@@ -1547,6 +1589,9 @@ fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag
     };
     if let Some(h) = state.join_handle.lock().unwrap().take() {
         let _ = h.join();
+    }
+    if let Err(ThreadErrorTag::Panicked) = joined {
+        set_join_panic(state.take_panic_message().unwrap_or_default());
     }
     if shared {
         match joined {
