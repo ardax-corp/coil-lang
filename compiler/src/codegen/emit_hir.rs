@@ -543,14 +543,17 @@ impl Compiler {
         self.hot_fns.extend(names);
     }
 
+    /// Whether `key` is a hot function, or a clone of one, and not cold.
+    pub(super) fn is_hot_fn(&self, key: &str) -> bool {
+        !self.hot_fns.is_empty()
+            && !self.is_cold_fn(key)
+            && (self.hot_fns.contains(key) || key.split_once("$inst$").is_some_and(|(base, _)| self.hot_fns.contains(base)))
+    }
+
     /// Whether `body` is hot: `#[hot]`, or made hot by a hot caller or
     /// class sibling ([`Self::note_hot_fns`]). An explicit `#[cold]` wins.
     pub(super) fn is_hot_body(&self, body: &HirBody) -> bool {
-        !body.hints.cold
-            && (body.hints.hot
-                || !self.hot_fns.is_empty()
-                    && (self.hot_fns.contains(&body.name)
-                        || body.name.split_once("$inst$").is_some_and(|(base, _)| self.hot_fns.contains(base))))
+        !body.hints.cold && (body.hints.hot || self.is_hot_fn(&body.name))
     }
 
     /// Warn once per function that an `#[inline]` call of it stays a call

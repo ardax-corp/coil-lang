@@ -213,6 +213,10 @@ struct GenericFnSig {
     /// shared body has no key, so every ground call gets its clone, past
     /// the clone budget.
     keyed: bool,
+    /// `#[hot]`, or called by name from a hot function, and not `#[cold]`:
+    /// every ground call gets its clone, past the clone budget
+    /// (`docs/internals/opt-hints.md`).
+    hot: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -243,6 +247,7 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
     collect_escaped_generic_refs(ast, &sigs, false, &mut escaped);
     collect_generic_fn_aliases(ast, checker, &mut sigs);
     mark_keyed(checker, &mut sigs);
+    mark_hot(ast, &mut sigs);
 
     let mut candidates = Vec::new();
     collect_candidates(ast, checker, &|e| ground_ty(checker, e), &sigs, &mut intern, &mut candidates);
@@ -288,12 +293,12 @@ fn collect_transitive(
         }
     }
     while let Some((spec, chain)) = work.pop() {
-        if seen.len() > budget {
-            break;
-        }
         let Some(sig) = sigs.get(&spec.fn_name) else {
             continue;
         };
+        if seen.len() > budget && !sig.hot {
+            continue;
+        }
         let Some(params) = checker.fn_param_tys(&spec.fn_name) else {
             continue;
         };
@@ -454,6 +459,7 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
         alias: false,
         calls: BTreeSet::new(),
         keyed: false,
+        hot: false,
     }
 }
 
@@ -496,6 +502,31 @@ fn mark_keyed(checker: &Checker, sigs: &mut HashMap<String, GenericFnSig>) {
     }
 }
 
+/// Mark the generic functions that are hot: `#[hot]` ones, and ones a
+/// `#[hot]` function (generic or not) calls by name. A `#[cold]` one
+/// stays cold.
+fn mark_hot(ast: &Output, sigs: &mut HashMap<String, GenericFnSig>) {
+    fn walk(node: &Output, hot: &mut BTreeSet<String>, cold: &mut BTreeSet<String>) {
+        if let Expression::Function { attrs, name, body, .. } = node.1.as_ref() {
+            if attrs.iter().any(|a| a.name == "cold") {
+                cold.insert((*name).to_string());
+            } else if attrs.iter().any(|a| a.name == "hot") {
+                hot.insert((*name).to_string());
+                if let Some(body) = body {
+                    call_names(body, hot);
+                }
+            }
+        }
+        walk_children(node, &mut |child| walk(child, hot, cold));
+    }
+    let (mut hot, mut cold) = (BTreeSet::new(), BTreeSet::new());
+    walk(ast, &mut hot, &mut cold);
+    for (name, sig) in sigs.iter_mut() {
+        let bare = name.rsplit("::").next().unwrap_or(name);
+        sig.hot = !cold.contains(bare) && (hot.contains(name.as_str()) || hot.contains(bare));
+    }
+}
+
 fn type_param_ref_index(ty: &Output, type_params: &[String]) -> Option<usize> {
     match ty.1.as_ref() {
         Expression::Identifier(name) | Expression::Type(name) => {
@@ -522,7 +553,7 @@ fn collect_candidates(
             out.push(MonoCandidate {
                 span: node.0,
                 specialization,
-                value: sig.alias || sig.keyed,
+                value: sig.alias || sig.keyed || sig.hot,
                 recursive: false,
             });
         }
