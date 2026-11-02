@@ -1,0 +1,53 @@
+// Doc stubs for the builtin `key_index` module (hover docs; never compiled).
+//
+// These are the natives under the stdlib `collections::KeyIndex`. Use that
+// type: it keeps the three `Vec<int>`s these take in step.
+//
+// An index maps keys to slot numbers 0, 1, 2, ... in insertion order. It
+// holds no keys: the caller keeps them, and anything stored with them, in
+// its own `Vec`s indexed by slot. It keeps a `table` (probe cells), the
+// `hashes` of each slot's key and a `live` flag per slot (1 or 0).
+
+/// An empty table with room for `n` entries before it grows.
+fn table(int n) -> Vec<int> {}
+
+/// The next live slot whose hash is `h`, in probe order after slot
+/// `after` (`-1` starts at the first), or `-1` when there is none.
+///
+/// The index does not compare keys: the caller checks each candidate
+/// slot's key with `==` and asks again after it on a mismatch.
+fn probe(Vec<int> table, Vec<int> hashes, int h, int after) -> int {}
+
+/// Adds a slot for a key with hash `h` and returns it. The caller has
+/// checked, with `probe`, that the key is not there yet. The table grows
+/// when it would pass half full.
+fn insert(Vec<int> table, Vec<int> hashes, Vec<int> live, int h) -> int {}
+
+/// Marks `slot` removed: `probe` no longer returns it and its `live` flag
+/// is 0. Other slots keep their numbers. False when `slot` was not live.
+fn remove(Vec<int> table, Vec<int> hashes, Vec<int> live, int slot) -> bool {}
+
+/// Drops the elements of `v` whose slot is removed, keeping the order of
+/// the rest, and returns the new length. Call it on each `Vec` the caller
+/// keeps by slot, then `compact`. Returns `-1` and changes nothing when
+/// `v` is not as long as `live`.
+fn retain<T>(Vec<T> v, Vec<int> live) -> int {}
+
+/// Drops the removed slots and renumbers the rest in order, as `retain`
+/// did to the caller's `Vec`s. Returns the live count.
+fn compact(Vec<int> table, Vec<int> hashes, Vec<int> live) -> int {}
+
+/// Removes every slot. The table keeps its size.
+fn clear(Vec<int> table, Vec<int> hashes, Vec<int> live) {}
+
+/// How `find` may compare keys of `k`'s type: `1` when `==` on it compares
+/// words (`int`), `2` when it compares string contents (`string`), `0`
+/// otherwise (the caller compares with `probe`). The compiler turns the
+/// call into that constant wherever the type is known, so a branch on it
+/// costs nothing in a specialized body.
+fn eq_mode<K>(K k) -> int {}
+
+/// The live slot whose hash is `h` and whose key in `keys` equals `k`, or
+/// `-1`. `mode` is what `eq_mode(k)` gave: `find` compares the keys
+/// itself, in one call. With mode `0` it finds nothing.
+fn find<K>(Vec<int> table, Vec<int> hashes, Vec<K> keys, int h, K k, int mode) -> int {}

@@ -1,0 +1,237 @@
+// The `key_index` natives under a small index class: candidates by hash,
+// `==` decides, removal keeps slot numbers, `retain` + `compact` renumber
+// in order, and a copied index is its own (copy-on-write). `int` and
+// `string` keys find in one call (`eq_mode`, `find`).
+use tests::assert;
+use text::Text;
+use key_index::{table, probe, insert, remove, retain, compact, clear, find, eq_mode};
+
+class Index<K> {
+    pub table: Vec<int>,
+    pub hashes: Vec<int>,
+    pub live: Vec<int>,
+    pub keys: Vec<K>,
+}
+
+impl Index<K> {
+    pub static fn new() -> Index<K> {
+        let keys: Vec<K> = Vec::new();
+        return new Index(table(0), Vec::new(), Vec::new(), keys);
+    }
+}
+
+impl Index<K: Eq + Hash> {
+    pub fn find(K k) -> int {
+        let h = k.hash();
+        let mode = eq_mode(k);
+        if mode > 0 {
+            return find(self.table, self.hashes, self.keys, h, k, mode);
+        }
+        let s = probe(self.table, self.hashes, h, -1);
+        while s >= 0 {
+            if self.keys[s] == k {
+                return s;
+            }
+            s = probe(self.table, self.hashes, h, s);
+        }
+        return -1;
+    }
+
+    pub fn add(K k) -> int {
+        let s = self.find(k);
+        if s >= 0 {
+            return s;
+        }
+        self.keys.push(k);
+        return insert(self.table, self.hashes, self.live, k.hash());
+    }
+
+    pub fn drop_key(K k) -> bool {
+        let s = self.find(k);
+        return s >= 0 && remove(self.table, self.hashes, self.live, s);
+    }
+
+    pub fn compact() -> int {
+        let _ = retain(self.keys, self.live);
+        return compact(self.table, self.hashes, self.live);
+    }
+}
+
+// All keys hash alike: every lookup walks the candidates with `==`.
+#[derive(Eq)]
+class Clash {
+    pub name: string,
+}
+
+impl Hash for Clash {
+    pub fn hash(Clash c) -> int {
+        return 7;
+    }
+}
+
+// `==` ignores case, so the hash must too.
+class Word {
+    pub text: string,
+}
+
+impl Eq for Word {
+    pub fn eq(Word a, Word b) -> bool {
+        return a.text.to_lower() == b.text.to_lower();
+    }
+}
+
+impl Hash for Word {
+    pub fn hash(Word w) -> int {
+        return w.text.to_lower().hash();
+    }
+}
+
+test("string keys get slots in insertion order") {
+    let ix: Index<string> = Index::new();
+    assert!(ix.add("b") == 0);
+    assert!(ix.add("a") == 1);
+    assert!(ix.add("b") == 0);
+    assert!(ix.find("a") == 1);
+    assert!(ix.find("c") == -1);
+    let i = 0;
+    while i < 5000 {
+        assert!(ix.add("k" + i.show()) == i + 2);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 5000 {
+        assert!(ix.find("k" + i.show()) == i + 2);
+        i = i + 1;
+    }
+    assert!(ix.find("k5000") == -1);
+}
+
+test("int and tuple keys") {
+    let ix: Index<int> = Index::new();
+    let t: Index<(int, string)> = Index::new();
+    let i = 0;
+    while i < 1000 {
+        assert!(ix.add(i * 7919) == i);
+        assert!(t.add((i, "x")) == i);
+        i = i + 1;
+    }
+    assert!(ix.find(7919 * 10) == 10);
+    assert!(ix.find(1) == -1);
+    assert!(t.find((10, "x")) == 10);
+    assert!(t.find((10, "y")) == -1);
+}
+
+test("keys with one hash are told apart by ==") {
+    let ix: Index<Clash> = Index::new();
+    let i = 0;
+    while i < 50 {
+        assert!(ix.add(new Clash("c" + i.show())) == i);
+        i = i + 1;
+    }
+    assert!(ix.find(new Clash("c37")) == 37);
+    assert!(ix.find(new Clash("nope")) == -1);
+    assert!(ix.drop_key(new Clash("c3")));
+    assert!(ix.find(new Clash("c3")) == -1);
+    assert!(ix.find(new Clash("c4")) == 4);
+}
+
+test("a hand-written Eq decides") {
+    let ix: Index<Word> = Index::new();
+    assert!(ix.add(new Word("Apple")) == 0);
+    assert!(ix.add(new Word("APPLE")) == 0);
+    assert!(ix.add(new Word("pear")) == 1);
+    assert!(ix.find(new Word("apple")) == 0);
+}
+
+test("remove keeps the other slots, compact renumbers in order") {
+    let ix: Index<string> = Index::new();
+    let names = ["a", "b", "c", "d", "e", "f"];
+    for n in names {
+        let _ = ix.add(n);
+    }
+    assert!(ix.drop_key("b"));
+    assert!(ix.drop_key("e"));
+    assert!(!ix.drop_key("e"));
+    assert!(ix.find("f") == 5);
+    assert!(ix.live[1] == 0 && ix.live[0] == 1);
+    assert!(ix.compact() == 4);
+    assert!(ix.keys.len() == 4);
+    assert!(ix.keys[0] == "a" && ix.keys[1] == "c" && ix.keys[2] == "d" && ix.keys[3] == "f");
+    assert!(ix.find("a") == 0 && ix.find("c") == 1 && ix.find("d") == 2 && ix.find("f") == 3);
+    assert!(ix.find("b") == -1);
+    assert!(ix.add("b") == 4);
+}
+
+test("many removes and re-adds") {
+    let ix: Index<int> = Index::new();
+    let round = 0;
+    while round < 20 {
+        let i = 0;
+        while i < 300 {
+            let _ = ix.add(i);
+            i = i + 1;
+        }
+        i = 0;
+        while i < 300 {
+            assert!(ix.drop_key(i));
+            i = i + 1;
+        }
+        let _ = ix.compact();
+        assert!(ix.keys.len() == 0);
+        round = round + 1;
+    }
+    assert!(ix.add(5) == 0);
+}
+
+test("clear empties the index") {
+    let ix: Index<string> = Index::new();
+    let _ = ix.add("a");
+    let _ = ix.add("b");
+    clear(ix.table, ix.hashes, ix.live);
+    ix.keys.clear();
+    assert!(ix.find("a") == -1);
+    assert!(ix.add("b") == 0);
+}
+
+test("a copied index is its own") {
+    let a: Index<string> = Index::new();
+    let _ = a.add("x");
+    let b = a;
+    let _ = b.add("y");
+    assert!(b.find("y") == 1);
+    assert!(a.find("y") == -1);
+    assert!(a.hashes.len() == 1);
+    assert!(a.find("x") == 0);
+}
+
+test("retain refuses a Vec of another length") {
+    let ix: Index<string> = Index::new();
+    let _ = ix.add("a");
+    let other = Vec::from([1, 2, 3]);
+    assert!(retain(other, ix.live) == -1);
+    assert!(other.len() == 3);
+}
+
+test("eq_mode: words for int, contents for string, == for the rest") {
+    assert!(eq_mode(3) == 1);
+    assert!(eq_mode("a") == 2);
+    assert!(eq_mode(readonly "a") == 2);
+    assert!(eq_mode((1, "a")) == 0);
+    assert!(eq_mode(new Word("a")) == 0);
+    assert!(eq_mode(1.5) == 0);
+    assert!(eq_mode(true) == 0);
+}
+
+test("find compares string contents, and finds nothing in mode 0") {
+    let ix: Index<string> = Index::new();
+    let _ = ix.add("ab");
+    let _ = ix.add("cd");
+    // A string built at run time is another object with the same contents.
+    let k = "c" + "d".to_lower();
+    assert!(find(ix.table, ix.hashes, ix.keys, k.hash(), k, 2) == 1);
+    assert!(find(ix.table, ix.hashes, ix.keys, k.hash(), k, 0) == -1);
+    assert!(find(ix.table, ix.hashes, ix.keys, "zz".hash(), "zz", 2) == -1);
+    assert!(ix.drop_key("ab"));
+    assert!(ix.find("ab") == -1);
+    assert!(ix.find("cd") == 1);
+}

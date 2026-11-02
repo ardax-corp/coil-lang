@@ -54,6 +54,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Function keys](symbol-keys.md) | `symbol::fn_key()` (compile-time per-function, per-instantiation `int` key: what it hashes, inlining, generic clones, DCE, caches) and `symbol::next_id()` (process-wide counter, HostInvoke **179**) |
 | [Stack bounds](stack-bounds.md) | Operand stack sizing, run-time growth, and the optional `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
+| [Key index](key-index.md) | `key_index::*` natives (HostInvoke 191–199): insertion-ordered hash index over `Vec`s for any `Hash + Eq` key; `find` / `eq_mode` for `int` and `string` keys |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.ccoil` |
 | [Superinstruction candidates](superinstructions-candidates.md) | Historical: COI-378 S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |
 | [Opcodes](opcodes.md) | Selected bytecode ops behind builtins |

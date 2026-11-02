@@ -1908,6 +1908,27 @@ fn foreign_method_clone_is_specialized() {
     }
 }
 
+/// A foreign clone's own call to a third module's generic class method
+/// (`tally_bag::Bag<int>::put` calling `dict_lib::Tally<int>::add`) runs a
+/// clone compiled from that module's body too, not a thunk boxing into
+/// the shared one.
+#[test]
+fn nested_foreign_method_clone_is_specialized() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_clone_nested.coil");
+    let syms = pipeline.program_debug().fn_symbols;
+    for name in ["dict_lib::Tally::add$inst$int", "dict_lib::Tally::count$inst$int"] {
+        // A clone may be inlined into its caller's.
+        if !syms.iter().any(|s| s.name == name) {
+            continue;
+        }
+        let (start, end) = fn_pc_range(&syms, name, bc.len());
+        let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+        for op in [Instruction::BoxValue, Instruction::MakeTuple, Instruction::CallIndirect] {
+            assert!(!ops.contains(&op), "{name} should not box or take dictionaries; ops={ops:?}");
+        }
+    }
+}
+
 /// A body that calls a function of its own module (declared after it)
 /// still gets another module's method clones spliced: they compile before
 /// it, so `main` calls neither `Bag<int>::at_or` nor `Bag<int>::len`.

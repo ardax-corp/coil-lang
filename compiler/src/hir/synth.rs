@@ -196,8 +196,7 @@ pub fn builtin_enum_show(checker: &Checker, name: &str, enum_name: &str, variant
     let mut b = Synth::new(checker, name, coil_ty::string());
     let this = b.local("self", ty.clone(), LocalKind::Param);
     let word = b.read(this);
-    let tag = common::ValueTag::Instance as u32;
-    let scrutinee = b.builtin(Builtin::Unbox { tag }, vec![word], ty);
+    let scrutinee = b.builtin(Builtin::Retype, vec![word], ty);
     let mut arms = Vec::with_capacity(variants.len() + 1);
     for (i, variant) in variants.iter().enumerate() {
         // A one-field variant (`TtyError::Io(e)`) shows as `Io(<e>)`.
@@ -228,19 +227,19 @@ pub fn builtin_enum_show(checker: &Checker, name: &str, enum_name: &str, variant
 }
 
 /// A builtin instance method's body (`Add__int__add`, `Hash__string__hash`,
-/// …) over `params`: each parameter of its type, read unboxed with its tag
-/// when it has one (a dictionary passes it boxed), then `op` on them, then
-/// returned, boxed with `box_tag` when given. A boxed result is read as an
-/// `int` word. A trailing dictionary argument is never read.
+/// …) over `params`: each parameter of its type, retyped from the word a
+/// dictionary passes where marked, then `op` on them, then returned,
+/// retyped to an `int` word when `word_ret`. A trailing dictionary
+/// argument is never read.
 pub fn builtin_entry(
     checker: &Checker,
     name: &str,
-    params: &[(Ty, Option<u32>)],
+    params: &[(Ty, bool)],
     ret: Ty,
-    box_tag: Option<u32>,
+    word_ret: bool,
     op: impl FnOnce(&mut Synth, Vec<HirId>) -> HirId,
 ) -> HirBody {
-    let ret = if box_tag.is_some() { coil_ty::int() } else { ret };
+    let ret = if word_ret { coil_ty::int() } else { ret };
     let mut b = Synth::new(checker, name, ret);
     let locals: Vec<_> = params
         .iter()
@@ -250,17 +249,14 @@ pub fn builtin_entry(
     let args = locals
         .into_iter()
         .zip(params)
-        .map(|(local, (ty, tag))| {
+        .map(|(local, &(ref ty, retype))| {
             let word = b.read(local);
-            match tag {
-                Some(tag) => b.builtin(Builtin::Unbox { tag: *tag }, vec![word], ty.clone()),
-                None => word,
-            }
+            if retype { b.builtin(Builtin::Retype, vec![word], ty.clone()) } else { word }
         })
         .collect();
     let mut value = op(&mut b, args);
-    if let Some(tag) = box_tag {
-        value = b.builtin(Builtin::Box { tag }, vec![value], coil_ty::int());
+    if word_ret {
+        value = b.builtin(Builtin::Retype, vec![value], coil_ty::int());
     }
     let ret = b.ret(value);
     let root = b.block(vec![ret], None, coil_ty::never());

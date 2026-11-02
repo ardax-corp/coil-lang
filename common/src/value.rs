@@ -41,6 +41,20 @@ impl ValueTag {
     }
 }
 
+/// `STRINGIFY` operand for an immediate of static type `tag` (`Int`,
+/// `Float`, `Bool`, `Unit`): `1 + tag`. Operand `0` (archives before major
+/// 6 / minor 17, and values with no static scalar type) inspects the word:
+/// a box by its tag, a heap string as itself, anything else as an `int`.
+pub const fn stringify_operand(tag: ValueTag) -> u32 {
+    1 + tag as u32
+}
+
+/// The scalar type a `STRINGIFY` operand names, or `None` for operand `0`.
+pub fn stringify_tag(operand: u32) -> Option<ValueTag> {
+    let raw = operand.checked_sub(1)?;
+    ValueTag::from_u16(u16::try_from(raw).ok()?)
+}
+
 /// `UnboxValue` operand that unwraps a boxed word whatever its tag: a shared
 /// generic body normalizes a type parameter's value to its raw word without
 /// knowing the instance's type.
