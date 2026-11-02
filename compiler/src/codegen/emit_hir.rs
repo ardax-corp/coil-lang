@@ -8006,7 +8006,7 @@ impl Compiler {
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
+            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -9035,7 +9035,7 @@ impl Compiler {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
             HirKind::Builtin {
-                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
+                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify { .. } | Builtin::Relayout,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             // A copy-on-write op passes its operand's word through.

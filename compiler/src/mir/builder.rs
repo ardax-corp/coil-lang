@@ -1138,7 +1138,9 @@ impl MirBuilder {
         Ok(dest)
     }
 
-    pub fn ins_stringify(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+    /// `STRINGIFY` of `src`, an immediate of static scalar type `tag`
+    /// (`ValueTag`) or, with `None`, a word the VM inspects.
+    pub fn ins_stringify(&mut self, src: ValueId, tag: Option<u32>) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() {
             return Err(MirError::msg("Stringify type".to_string()));
         }
@@ -1146,6 +1148,7 @@ impl MirBuilder {
         self.push(MirInst::Stringify {
             dest,
             src: self.resolve(src),
+            tag,
         })?;
         self.snapshot_slots(dest);
         Ok(dest)

@@ -361,6 +361,10 @@ fn format_operands(
             format!("has_send={}", (byte.operand_u32() & 1) != 0)
         }
         Instruction::DynCmp => format!("kind={}", byte.operand_u32() & 0xFF),
+        Instruction::STRINGIFY => match common::stringify_tag(byte.operand_u32()) {
+            Some(tag) => format!("{tag:?}"),
+            None => String::new(),
+        },
         Instruction::DenseBin | Instruction::DenseBin2 => {
             let (kind, dest, a, b) = byte.dense_abc_parts();
             format!(

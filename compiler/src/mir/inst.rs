@@ -705,6 +705,9 @@ pub enum MirInst {
     Stringify {
         dest: ValueId,
         src: ValueId,
+        /// The immediate's static scalar type (`ValueTag`), or `None` to
+        /// inspect the word (`common::stringify_operand`).
+        tag: Option<u32>,
     },
     /// The `Cow` instruction: copy-on-write share (`unique: false`) or
     /// unique of `src`'s object. Dest is `src`'s word, or a copy's for

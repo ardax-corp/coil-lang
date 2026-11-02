@@ -4435,16 +4435,12 @@ impl Compiler {
             });
         }
 
-        // Show thunks: accept a boxed, raw or heap-string argument at slot 0,
-        // ignore the trailing dictionary, and return an ObjString via STRINGIFY.
-        // An immediate is re-boxed with its tag first: a shared generic body
-        // passes raw words (#802), and STRINGIFY reads a float or bool by tag.
+        // Show thunks: take the raw word (an immediate or a heap string) at
+        // slot 0, ignore the trailing dictionary, and return an ObjString via
+        // STRINGIFY. An immediate's static type rides on the op, so it is
+        // never boxed to tell a float or bool from an int.
         let show = |b: &mut crate::hir::synth::Synth, word, tag: Option<ValueTag>| {
-            let word = match tag {
-                Some(tag) => b.builtin(Builtin::Box { tag: tag as u32 }, vec![word], coil_ty::int()),
-                None => word,
-            };
-            b.builtin(Builtin::Stringify, vec![word], coil_ty::string())
+            b.builtin(Builtin::Stringify { tag: tag.map(|t| t as u32) }, vec![word], coil_ty::string())
         };
         for (ty, tag) in [
             ("int", Some(ValueTag::Int)),

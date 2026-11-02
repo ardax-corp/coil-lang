@@ -417,6 +417,16 @@ fn emit_panic_pads(
 }
 
 /// Named-let remap and deopt draft, after the same register assign as emit.
+/// The `STRINGIFY` byte for an immediate of static scalar type `tag`
+/// (`ValueTag`), or the inspecting form for `None`.
+pub(super) fn stringify_byte(tag: Option<u32>) -> Byte {
+    let byte = Byte::new(Instruction::STRINGIFY);
+    match tag.and_then(|t| common::ValueTag::from_u16(u16::try_from(t).ok()?)) {
+        Some(tag) => byte.with_operand_u32(common::stringify_operand(tag)),
+        None => byte,
+    }
+}
+
 pub(super) fn dense_sidecars(func: &MirFunc, entry_label: Option<Label>) -> super::emit_lir::LirSidecars {
     let mut func = func.clone();
     sink_phi_incomings(&mut func);
@@ -3311,9 +3321,9 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
-        MirInst::Stringify { dest, src } => {
+        MirInst::Stringify { dest, src, tag } => {
             emit_dense_push(out, &[*src], regs, scratch, loc)?;
-            out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            out.push(IlOp::from_plain_byte(stringify_byte(*tag), loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,

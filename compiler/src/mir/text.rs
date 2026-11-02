@@ -339,7 +339,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::Stringify { dest, src } => write!(f, "{dest} = stringify {src}"),
+        MirInst::Stringify { dest, src, tag: None } => write!(f, "{dest} = stringify {src}"),
+        MirInst::Stringify { dest, src, tag: Some(tag) } => write!(f, "{dest} = stringify.typed {tag}, {src}"),
         MirInst::Cow { dest, src, unique, field: None } => write!(f, "{dest} = cow.{} {src}", if *unique { "unique" } else { "share" }),
         MirInst::Cow { dest, src, field: Some(i), .. } => write!(f, "{dest} = cow.unique_field {src} {i}"),
         MirInst::Unbox { dest, src, tag } => write!(f, "{dest} = unbox.{} {tag}, {src}", func.ty(*dest)),
@@ -975,10 +976,17 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::Cow { dest, src, unique: true, field: Some(i as u32) });
         }
-        if op == "stringify" {
+        if op == "stringify" || op == "stringify.typed" {
+            let tag = if op == "stringify.typed" {
+                let tag = self.uint()? as u32;
+                self.expect(',')?;
+                Some(tag)
+            } else {
+                None
+            };
             let src = self.value()?;
             ensure_ty(types, dest, MirTy::HeapRef);
-            return Ok(MirInst::Stringify { dest, src });
+            return Ok(MirInst::Stringify { dest, src, tag });
         }
         if op == "streq" || op == "strne" {
             let lhs = self.value()?;

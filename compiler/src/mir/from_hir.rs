@@ -2906,11 +2906,12 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
             }
             // A primitive's text (compiler-made bodies).
-            HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {
+            HirKind::Builtin { op: Builtin::Stringify { tag }, args } if let [inner] = args.as_slice() => {
                 let Some(v) = self.word(*inner)? else {
                     return Ok(Val::Never);
                 };
-                let s = self.at_expr(id, |l| l.b.ins_stringify(v).map_err(mir))?;
+                let tag = *tag;
+                let s = self.at_expr(id, |l| l.b.ins_stringify(v, tag).map_err(mir))?;
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![s]).map_err(mir)?))
             }
             // `typeof e`: the type name HIR emission interned; `e` is not
@@ -5848,7 +5849,7 @@ impl Lower<'_> {
                 return Ok(self.at_expr(id, |l| l.b.ins_call(*target, vec![v], &abi).map_err(mir))?.0);
             }
             HirShow::Stringify => {
-                let s = self.at_expr(id, |l| l.b.ins_stringify(v).map_err(mir))?;
+                let s = self.at_expr(id, |l| l.b.ins_stringify(v, None).map_err(mir))?;
                 return self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![s]).map_err(mir);
             }
             &HirShow::Bound { dict, method } => {
