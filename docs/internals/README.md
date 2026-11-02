@@ -44,6 +44,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [GC evacuation](gc-evacuation.md) | Mostly-copying evacuation of sparse chunks (always on; `COIL_GC_COMPACT=0` off in unit tests); precise refs rewritten, ambiguous ones pin |
 | [SIMD](simd.md) | `coil-simd` — packed LA + V0/V1 `V*` opcode backend |
 | [Auto-par](auto-par.md) | Purity + parameterized AlwaysPar IPA (COI-366 F1 hop/grain); F2 broader admission (COI-368); loop IPA (COI-362 E4); C1/C2 shared-heap spawn (E6/E7); [branch-miss notes](auto-par-branch-misses.md) |
+| [Optimizer hints](opt-hints.md) | `#[inline]` / `#[cold]` / `#[hot]`: surface, precedence, cold inference, `feature/opt-hints` steps (no PGO) |
 | [Par lock hints](par-lock-hints.md) | F3 (COI-369): userland locks + E0805 call-bag escape hints (no compiler locks) |
 | [Shared-heap sendability](shared-heap-sendability.md) | COI-363 C0 whitelist; C1 loop steal (E6); C2 expression IPA without PortableValue copy (E7) |
 | [Shared-heap guard](shared-heap-guard.md) | #1892: debug / gc-stress check that a shared-heap job writes only objects allocated in its epoch (header epoch stamp, per-thread job scope); mutation-path inventory; what release relies on |
