@@ -7348,16 +7348,13 @@ impl Compiler {
     /// object first), the closure called, and its result unboxed (a niche
     /// `Option` back to its niche word).
     fn closure_adapter_mir(name: &str, adapt: &HirClosureAdapt) -> Result<crate::mir::MirFunc, String> {
-        use crate::mir::{MirAllocKind, MirCastKind, MirConst, MirGcKind, MirTy};
+        use crate::mir::{MirCastKind, MirConst, MirTy};
         let err = |e: crate::mir::MirError| format!("mir: {e}");
         let mut b = crate::mir::MirBuilder::new(name.to_string());
         b.set_ret_ty(adapt.ret.ty);
         let f = b.add_param(MirTy::HeapRef).map_err(err)?;
         let params = adapt.args.iter().map(|w| b.add_param(w.ty)).collect::<Result<Vec<_>, _>>().map_err(err)?;
-        let boxed = |b: &mut crate::mir::MirBuilder, tag: u32, v| {
-            let obj = b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v])?;
-            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
-        };
+        let boxed = |b: &mut crate::mir::MirBuilder, tag: u32, v| b.ins_box(v, tag);
         let mut args = Vec::with_capacity(params.len());
         for (w, p) in adapt.args.iter().zip(params) {
             args.push(match w.conv {
@@ -8015,7 +8012,7 @@ impl Compiler {
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
+            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -9044,7 +9041,7 @@ impl Compiler {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
             HirKind::Builtin {
-                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
+                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify { .. } | Builtin::Relayout,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             // A copy-on-write op passes its operand's word through.

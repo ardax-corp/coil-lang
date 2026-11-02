@@ -396,8 +396,10 @@ pub enum Builtin {
     /// boxed value's.
     Box { tag: u32 },
     /// `STRINGIFY` of a word (compiler-made bodies only: a primitive's
-    /// `Show::show`), reading a float or bool by its box's tag.
-    Stringify,
+    /// `Show::show`). `tag` is the static scalar type (`ValueTag`) of an
+    /// immediate, formatted as it is; `None` inspects the word (a box by
+    /// its tag, a heap string as itself).
+    Stringify { tag: Option<u32> },
     /// The same `Option` / `Result` value in its node type's layout, from
     /// its operand type's (compiler-made bodies only: a thunk between a
     /// dictionary's boxed enum and a method's niche word). A niche word

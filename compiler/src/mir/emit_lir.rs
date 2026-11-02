@@ -1651,19 +1651,9 @@ fn emit_stored(
                 });
             }
         }
-        MirInst::Stringify { dest, src } => {
+        MirInst::Stringify { dest, src, tag } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
-            if plan.need_slot[dest.index()] {
-                out.push(IlOp::StorePop {
-                    slot: u32::from(regs[dest.index()]),
-                    loc,
-                });
-            }
-        }
-        MirInst::Unbox { dest, src, tag } => {
-            emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            out.push(IlOp::UnboxValue { tag: *tag, loc });
+            out.push(IlOp::from_plain_byte(super::emit::stringify_byte(*tag), loc));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
@@ -2291,20 +2281,15 @@ fn emit_stack(
             ));
             Ok(())
         }
-        MirInst::Stringify { src, .. } => {
+        MirInst::Stringify { src, tag, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            out.push(IlOp::from_plain_byte(super::emit::stringify_byte(*tag), loc));
             Ok(())
         }
         MirInst::Cow { src, field: Some(index), .. } => emit_cow_field_stack(out, *src, *index, func, plan, regs, pool, loc),
         MirInst::Cow { src, unique, field: None, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(u32::from(*unique)), loc));
-            Ok(())
-        }
-        MirInst::Unbox { src, tag, .. } => {
-            emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            out.push(IlOp::UnboxValue { tag: *tag, loc });
             Ok(())
         }
         MirInst::StrEq { lhs, rhs, ne, .. } => {
