@@ -1846,7 +1846,7 @@ impl Compiler {
                         Some(_) => req.src.rsplit("::").next().unwrap_or(&req.src).to_string(),
                         None => req.src.clone(),
                     };
-                    self.compile_function_output_with_name(method, req.name.clone(), &[], 0, Some(&mode_src));
+                    self.compile_function_output_with_name(method, req.name.clone(), 0, Some(&mode_src));
                     self.inst_clone_fallback = None;
                     self.mono_var_tys.pop();
                     self.mono_type_param_tys.pop();
@@ -5262,7 +5262,6 @@ impl Compiler {
         &mut self,
         method: &Output<'compiler>,
         qualified: String,
-        argument_unbox_tys: &[Option<Ty>],
         dict_arity: usize,
         source: Option<&str>,
     ) {
@@ -5330,11 +5329,6 @@ impl Compiler {
         let mut a = self.do_compile(args);
         self.bytecode.append(&mut a);
         self.emit_sidecar_array_pins(args);
-        for (slot, ty) in argument_unbox_tys.iter().enumerate() {
-            if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
-                self.hir_entry_unbox.push((slot as u32, tag as u32));
-            }
-        }
         for dict_idx in 0..dict_arity {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
@@ -5347,9 +5341,7 @@ impl Compiler {
             }
         }
         let entry_sp = self.context.variables.len() as u32;
-        // Direct MIR unboxes the boxed arguments on entry
-        // (`hir_entry_unbox`) and loads the context dictionaries
-        // (`hir_entry_ctx`).
+        // Direct MIR loads the context dictionaries (`hir_entry_ctx`).
         self.hir_entry_sp = Some(entry_sp);
         // Bounded generic instance method: `__dict0` is the instance's own
         // dictionary, whose tail holds the context dictionaries.
@@ -7308,7 +7300,7 @@ impl Compiler {
                                     );
                                 self.note_inst_clone_compiled(&fqn);
                                 self.pending_own_dicts = self.own_dict_layout(name, method_name, 1);
-                                self.compile_function_output_with_name(method, fqn, &[], 1, None);
+                                self.compile_function_output_with_name(method, fqn, 1, None);
                             } else {
                                 self.consume_function_signature_output(method);
                             }
@@ -7351,16 +7343,11 @@ impl Compiler {
                             let is_coro = Self::is_coro_with_body(method);
                             // A raw method takes neither boxed arguments nor a dictionary.
                             let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
-                            let unbox_tys = if raw {
-                                Vec::new()
-                            } else {
-                                self.instance_method_unbox_tys(class, method_name, &arg_tys)
-                            };
                             self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                             self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
                             self.pending_own_dicts = self.own_dict_layout(class, method_name, 1 + self.instance_context_len(&fqn));
                             self.note_inst_clone_compiled(&fqn);
-                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, usize::from(!raw), None);
+                            self.compile_function_output_with_name(method, fqn.clone(), usize::from(!raw), None);
                             self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                         }
                         Expression::Method(_, body) => {
@@ -7375,11 +7362,6 @@ impl Compiler {
                                 let fqn = format!("{}__{}__{}", class, ty_part, method_name);
                                 let is_coro = Self::is_coro_with_body(body);
                                 let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
-                                let unbox_tys = if raw {
-                                    Vec::new()
-                                } else {
-                                    self.instance_method_unbox_tys(class, method_name, &arg_tys)
-                                };
                                 self.pin_trait_method_pair_return(
                                     class,
                                     method_name,
@@ -7393,7 +7375,6 @@ impl Compiler {
                                 self.compile_function_output_with_name(
                                     body,
                                     fqn.clone(),
-                                    &unbox_tys,
                                     usize::from(!raw),
                                     None,
                                 );

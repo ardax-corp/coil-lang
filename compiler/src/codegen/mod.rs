@@ -697,12 +697,6 @@ pub struct Compiler {
     hir_entry_ctx: Vec<(u32, u32, u32)>,
     /// The context dictionaries of the body being lowered.
     hir_mir_ctx: Vec<(u32, u32, u32)>,
-    /// Arguments a function's prologue unboxes in place (an instance
-    /// method's boxed arguments): each one's slot and `UnboxValue` tag.
-    /// Set by the prologue for the next body.
-    hir_entry_unbox: Vec<(u32, u32)>,
-    /// Those of the body being lowered.
-    hir_mir_unbox: Vec<(u32, u32)>,
     /// HIR of the module being compiled.
     hir_module: Option<crate::hir::HirModule>,
     /// Function body index in [`Self::hir_module`] by declaration span.
@@ -904,8 +898,6 @@ impl Default for Compiler {
             hir_lambda_dicts: None,
             hir_entry_ctx: Vec::new(),
             hir_mir_ctx: Vec::new(),
-            hir_entry_unbox: Vec::new(),
-            hir_mir_unbox: Vec::new(),
             hir_fn_names: HashMap::new(),
             hir_portable: HashMap::new(),
             hir_resolved_clones: HashMap::new(),

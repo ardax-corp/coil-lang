@@ -70,13 +70,6 @@ pub(super) struct HirMirTables {
     /// Trait methods on a bare-class existential pack
     /// (`HirBuiltin::Existential`): the method's dictionary slot, by call.
     pub(super) existential_calls: HashMap<u32, u32>,
-    /// Calls and dictionary operators typed a bare type parameter in a
-    /// shared generic body, whose result MIR unboxes
-    /// (`UNBOX_ANY_TAG`).
-    pub(super) unbox_any: HashSet<u32>,
-    /// A shared generic body's parameters typed a bare type parameter,
-    /// which its prologue unboxes (`UNBOX_ANY_TAG`).
-    pub(super) open_params: Vec<LocalId>,
     /// Parallel loops the plan moved into their own fork-join functions,
     /// by loop: the direct MIR lowering's calls.
     pub(super) par_loops: HashMap<u32, crate::mir::HirParLoop>,
@@ -147,10 +140,6 @@ impl Compiler {
             self.hir_mir_walk(hir, emit, root, &mut tables);
         }
         tables.frame = self.hir_mir_frame(hir, emit);
-        // As `lower_hir_body`'s prologue unboxes them.
-        if self.hir_shared_generic() {
-            tables.open_params = hir.params.iter().copied().filter(|&p| self.hir_open_ty(hir.local(p).ty.as_ref())).collect();
-        }
         tables
     }
 
@@ -488,15 +477,6 @@ impl Compiler {
             }
         }
         let e = hir.expr(id);
-        // A call's or dictionary operator's result unboxed.
-        let produced = match e.kind {
-            HirKind::Call { .. } => true,
-            HirKind::Bin { .. } | HirKind::Un { .. } => matches!(emit.plan.ops.get(&id.0), Some(HirOp::Bound { .. })),
-            _ => false,
-        };
-        if produced && self.hir_open_ty(e.ty.as_ref()) && self.hir_shared_generic() {
-            t.unbox_any.insert(id.0);
-        }
         // A bound type parameter's operator or method through one of this
         // body's dictionary parameters; a call's ground niche `Option` /
         // `Result` result the adapter returns boxed converts to its own

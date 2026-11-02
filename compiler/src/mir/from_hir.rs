@@ -487,16 +487,6 @@ pub struct HirMirInput<'a> {
     /// prologue loads them: each one's frame slot, then the slot of the
     /// dictionary parameter it is read from and its index there.
     pub ctx_dicts: &'a [(u32, u32, u32)],
-    /// Arguments the prologue unboxes in place (an instance method's
-    /// boxed arguments): each one's slot and `UnboxValue` tag.
-    pub param_unboxes: &'a [(u32, u32)],
-    /// Calls and dictionary operators typed a bare type parameter in a
-    /// shared generic body: HIR emission unboxes their result
-    /// (`UNBOX_ANY_TAG`), which may come back boxed.
-    pub unbox_any: &'a HashSet<u32>,
-    /// Parameters typed a bare type parameter of a shared generic body:
-    /// its prologue unboxes each (`UNBOX_ANY_TAG`), as the caller boxed it.
-    pub open_params: &'a [HirLocal],
     /// `x.len()` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Whether a function, by its HIR callee name, is pure: it writes no
@@ -1101,15 +1091,6 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             dict_params.insert(slot, b.add_param(MirTy::HeapRef).map_err(mir)?);
         }
     }
-    // Arguments the caller passed boxed: unboxed in place, as the
-    // prologue unboxes them.
-    for &(slot, tag) in inp.param_unboxes {
-        let &v = b.func().params.get(slot as usize).ok_or("unboxed param slot")?;
-        let ty = b.value_ty(v);
-        let boxed = b.use_local(LocalId(slot), ty).map_err(mir)?;
-        let raw = b.ins_unbox(boxed, tag, ty).map_err(mir)?;
-        b.def_local(LocalId(slot), raw).map_err(mir)?;
-    }
     // An instance method's context dictionaries: each read out of its own
     // dictionary at entry, as the prologue loads them into their slots.
     for &(slot, own, index) in inp.ctx_dicts {
@@ -1117,17 +1098,6 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         let at = b.ins_const(MirConst::I64(i64::from(index))).map_err(mir)?;
         let dict = b.ins_index(own, at, MirTy::HeapRef, false).map_err(mir)?;
         dict_params.insert(slot, dict);
-    }
-    // A shared generic body's open parameters come boxed: the prologue
-    // unboxes each in place, as HIR emission's.
-    for &param in inp.open_params {
-        let slot = inp.slots.get(param.0 as usize).copied().flatten().ok_or("param slot")?;
-        if inp.pair_locals.contains_key(&param.0) {
-            return Err("open param pair".into());
-        }
-        let v = b.use_local(LocalId(slot), MirTy::I64).map_err(mir)?;
-        let raw = b.ins_unbox(v, common::UNBOX_ANY_TAG, MirTy::I64).map_err(mir)?;
-        b.def_local(LocalId(slot), raw).map_err(mir)?;
     }
     let cur = b.entry();
     let mut lower = Lower {
@@ -2614,15 +2584,7 @@ impl Lower<'_> {
     /// Lower `id` for its value, packed as a bare-class existential where
     /// HIR emission packs it.
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
-        let mut val = self.value_unpacked(id)?;
-        // A result typed a bare type parameter may come back boxed.
-        if self.inp.unbox_any.contains(&id.0) {
-            val = match val {
-                Val::V(v) => Val::V(self.b.ins_unbox(v, common::UNBOX_ANY_TAG, MirTy::I64).map_err(mir)?),
-                Val::Never => Val::Never,
-                _ => return Err("unbox any value".into()),
-            };
-        }
+        let val = self.value_unpacked(id)?;
         let Some(ops) = self.inp.packs.get(&id.0) else {
             return Ok(val);
         };
