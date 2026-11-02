@@ -99,3 +99,37 @@ test("a write through a generic static trait call reaches the argument") {
     }
     assert!(seed.len() == 3);
 }
+
+fn first_of(Vec<Vec<int>> outer, Vec<int> vs) -> Vec<int> {
+    vs.push(outer.len());
+    return vs;
+}
+
+test("an element assigned back from a call at another index stays separate") {
+    let a: Vec<Vec<int>> = [[1], [2]];
+    let i = 0;
+    let j = 1;
+    a[j] = same(a[i]);
+    a[j].push(9);
+    assert!(a[0].len() == 1 && a[1].len() == 2);
+}
+
+test("an element assigned back from a call stays separate from an earlier copy") {
+    let a: Vec<Vec<int>> = [[1], [2]];
+    let old = a[0];
+    a[0] = add(a[0]);
+    a[0].push(4);
+    assert!(old.len() == 1);
+    assert!(a[0].len() == 3);
+}
+
+test("a field assigned back from a call that also reads the root stays separate") {
+    let a: Vec<Vec<int>> = [[1]];
+    a[0] = first_of(a, a[0]);
+    assert!(a[0].len() == 2 && a[0][1] == 1);
+    let b = new Bag([5]);
+    let kept = b.items;
+    b.items = add(b.items);
+    b.items.push(6);
+    assert!(kept.len() == 1 && b.items.len() == 3);
+}
