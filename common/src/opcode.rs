@@ -68,6 +68,9 @@ pub enum Instruction {
     // Built-ins
     PRINT,
     FORMAT,
+    /// Pop a word, push its text. Operand `0` inspects the word (a box by
+    /// its tag, a heap string, else an `int`); `1 + ValueTag` formats an
+    /// immediate of that static type (`common::stringify_operand`).
     STRINGIFY,
     NATIVE,
     INIT,

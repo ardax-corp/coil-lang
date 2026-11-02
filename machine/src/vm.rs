@@ -2637,6 +2637,16 @@ impl<const S: usize> Machine<S> {
     }
 
     /// Convert a runtime value to a display string (Show / `%v` / STRINGIFY).
+    /// `STRINGIFY` of an immediate whose static type the compiler named.
+    pub(crate) fn stringify_immediate(tag: ValueTag, v: Value) -> String {
+        match tag {
+            ValueTag::Float => format!("{:?}", v.as_float()),
+            ValueTag::Bool => if v.as_int() != 0 { "true" } else { "false" }.into(),
+            ValueTag::Unit => "()".into(),
+            _ => v.as_int().to_string(),
+        }
+    }
+
     fn stringify_value(heap: &Heap, v: Value) -> String {
         let addr = v.bits();
         if v.is_zero() {

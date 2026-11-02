@@ -164,6 +164,11 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
+/// Major 6 / minor 17: `STRINGIFY` operand `1 + ValueTag` formats an
+/// immediate of that static type, so `Show` of an `int`, `float`, `bool`
+/// or `()` needs no box. Older runtimes ignore the operand and print a raw
+/// float or bool as an `int`.
+///
 /// Major 6 / minor 16: a `VLoop` runs every lane up to `to`, which need
 /// not be a whole number of 8-lane blocks past `from`: the compiler hands
 /// it the loop's last lanes instead of leaving them to the scalar loop.
@@ -250,7 +255,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.ccoil`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 16;
+pub const ARCHIVE_MINOR: u16 = 17;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1327,9 +1332,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
-        assert_eq!(ARCHIVE_MINOR, 16);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 16));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.16");
+        assert_eq!(ARCHIVE_MINOR, 17);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 17));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.17");
     }
 
     #[test]
