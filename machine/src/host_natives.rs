@@ -1292,6 +1292,20 @@ mod tests {
     }
 
     /// Auto-par specializations spawn N-ary recursive calls; the host native
+    /// The compiler emits `DenseHostCall` for every native
+    /// `common::DIRECT_HOST_NATIVES` names, so each must have a direct
+    /// function (else every call takes the cold generic fallback).
+    #[test]
+    fn every_compiler_direct_native_has_a_direct_function() {
+        let natives = build_standard_host_natives(|_, _| {});
+        for name in common::DIRECT_HOST_NATIVES {
+            let id = common::host_native_id(name).unwrap_or_else(|| panic!("`{name}` is not a standard native"));
+            assert!(common::host_native_is_direct(id), "`{name}`");
+            assert!(natives[id].direct().is_some(), "`{name}` (id {id}) has no direct function");
+        }
+        assert!(natives[common::CLOCK_SLEEP_MS_ID as usize].direct().is_none(), "sleep suspends a task");
+    }
+
     /// must accept 1..=1+MAX args and still reject garbage beyond that.
     #[test]
     fn thread_spawn_arity_range_covers_max_thread_spawn_args() {
