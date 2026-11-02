@@ -1563,7 +1563,8 @@ fn main() {
     let jmpf_ops = |slice: &[common::Byte]| -> Vec<u8> {
         slice
             .iter()
-            .filter(|b| *b.bytecode() == Instruction::BinSlotSlotJmpf)
+            // The loop test may branch either way round.
+            .filter(|b| matches!(*b.bytecode(), Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt))
             .map(|b| b.bin_slot_slot_jmpf_parts().0)
             .collect()
     };
