@@ -59,6 +59,11 @@ pub const SYMBOL_MODULE: &str = "symbol";
 /// Bytes from the OS CSPRNG (`bytes`).
 pub const ENTROPY_MODULE: &str = "entropy";
 
+/// The key index natives collections keyed by any `Hash + Eq` type build
+/// on (`table`, `probe`, `insert`, …). The stdlib `collections::KeyIndex`
+/// wraps them.
+pub const KEY_INDEX_MODULE: &str = "key_index";
+
 /// Task scheduler natives behind the embedded `task` module (`task::scope`, …).
 /// Not meant for direct use: the `task` module wraps them.
 pub const PRELUDE_TASK_MODULE: &str = "prelude::task";
@@ -931,6 +936,21 @@ impl VirtualModules {
                 surface: "bytes",
                 registry: common::ENTROPY_BYTES_NATIVE,
             }],
+        );
+
+        modules.insert(
+            KEY_INDEX_MODULE,
+            host_exports(&[
+                ("table", common::KEY_INDEX_TABLE_NATIVE),
+                ("probe", common::KEY_INDEX_PROBE_NATIVE),
+                ("insert", common::KEY_INDEX_INSERT_NATIVE),
+                ("remove", common::KEY_INDEX_REMOVE_NATIVE),
+                ("compact", common::KEY_INDEX_COMPACT_NATIVE),
+                ("retain", common::KEY_INDEX_RETAIN_NATIVE),
+                ("clear", common::KEY_INDEX_CLEAR_NATIVE),
+                ("find", common::KEY_INDEX_FIND_NATIVE),
+                ("eq_mode", common::KEY_INDEX_EQ_MODE_NATIVE),
+            ]),
         );
 
         modules.insert(

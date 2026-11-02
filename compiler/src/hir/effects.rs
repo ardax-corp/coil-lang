@@ -341,8 +341,16 @@ impl ProgramEffects {
         };
         let flags = classify_host_name(&short);
         // Only a known native: anything else is a user function this view
-        // cannot see.
-        (!flags.contains(EffectFlags::UNKNOWN) || escape::is_listed_host(&short)).then(|| escape::host_summary(&short, Summary::of(flags)))
+        // cannot see. One that writes the heap may write any argument (as
+        // [`Cx::named`] has it), so copy-on-write makes a `Vec` it is
+        // handed unique first.
+        (!flags.contains(EffectFlags::UNKNOWN) || escape::is_listed_host(&short)).then(|| {
+            let mut s = escape::host_summary(&short, Summary::of(flags));
+            if flags.contains(EffectFlags::HEAP_MUT) {
+                s.mutates = u64::MAX;
+            }
+            s
+        })
     }
 
     /// [`Summary::fields`] of a call of the user function or method
@@ -2235,7 +2243,7 @@ impl Cx<'_> {
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
-                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } | Builtin::Cow { .. } => {}
+                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::FreeEarly { .. } | Builtin::Cow { .. } => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
                 // Runs a minor collection: no effect a caller can see.
                 Builtin::Region { .. } => self.note_hidden(w, id, EffectFlags::GC, || "has a `region`".into()),

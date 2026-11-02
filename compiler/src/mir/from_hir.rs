@@ -60,8 +60,9 @@ enum Val {
 #[derive(Clone, Debug)]
 pub enum HirShow {
     /// A plain one-word `CALL` of the value's `show` entry: on the value
-    /// itself for a raw entry, else on it boxed (`BoxValue` of `boxed`).
-    Call { target: Label, boxed: Option<u32> },
+    /// itself for a raw entry, else on its word (`word`, a `float` / `bool`
+    /// as its bits).
+    Call { target: Label, word: bool },
     /// `STRINGIFY` (a type with no `Show` instance).
     Stringify,
     /// A bound type parameter's `show` through one of the body's
@@ -91,12 +92,12 @@ pub struct HirCallSite {
     pub boxed_ret: bool,
     /// The call site's instance dictionaries, passed after the arguments.
     pub dicts: Vec<HirDictOp>,
-    /// Each argument's `BoxValue` tag, where a shared generic takes it as
-    /// a bare type parameter (empty: none boxed).
-    pub boxes: Vec<Option<u32>>,
-    /// The result's `UnboxValue` tag, where a shared generic returns a
-    /// bare type parameter.
-    pub unbox: Option<u32>,
+    /// Each argument a shared generic takes as a bare type parameter,
+    /// passed as its word (empty: none).
+    pub words: Vec<bool>,
+    /// A shared generic returns a bare type parameter: the result is read
+    /// back from its word.
+    pub word_ret: bool,
     /// Each argument's closure adapter, where the callee calls the
     /// function value with boxed arguments: `MakeFn` of the adapter's
     /// entry (the label, then the operand) over the value (empty: none).
@@ -162,8 +163,8 @@ pub enum HirDictOp {
     Null,
     /// `MakeTuple` of the top `n` words: a dictionary.
     Tuple(u32),
-    /// `BoxValue` (`tag`) of the top word: an existential pack's value.
-    Box(u32),
+    /// The top value as its word: an existential pack's value.
+    Word,
     /// Element `n` of the top word, a dictionary: a method's code pointer
     /// in it.
     Field(u32),
@@ -213,14 +214,14 @@ pub struct HirFnValue {
 }
 
 /// A call through a `PolyFn` local as HIR emission made it: each argument
-/// boxed to its `BoxValue` tag (`None`: passed as it is), the call site's
-/// instance dictionaries, then `CallIndirect`, then the result unboxed
-/// from tag `unbox` when the function returns a bare type parameter.
+/// a bare type parameter takes passed as its word (`words`), the call
+/// site's instance dictionaries, then `CallIndirect`, then the result read
+/// back from its word when the function returns a bare type parameter.
 #[derive(Clone, Debug)]
 pub struct HirPolyCall {
-    pub boxes: Vec<Option<u32>>,
+    pub words: Vec<bool>,
     pub dicts: Vec<HirDictOp>,
-    pub unbox: Option<u32>,
+    pub word_ret: bool,
     /// The closure result's adapter from the shared body's boxed ABI, as
     /// [`HirCallSite::ret_adapt`] (#1589).
     pub ret_adapt: Option<(Label, u32)>,
@@ -231,8 +232,6 @@ pub struct HirPolyCall {
 #[derive(Clone, Debug)]
 pub struct HirOpCall {
     pub site: HirCallSite,
-    /// The `BoxValue` tag of the operand type.
-    pub tag: u32,
     /// A shift count passes as its plain `int` (#883).
     pub shift: bool,
 }
@@ -487,16 +486,6 @@ pub struct HirMirInput<'a> {
     /// prologue loads them: each one's frame slot, then the slot of the
     /// dictionary parameter it is read from and its index there.
     pub ctx_dicts: &'a [(u32, u32, u32)],
-    /// Arguments the prologue unboxes in place (an instance method's
-    /// boxed arguments): each one's slot and `UnboxValue` tag.
-    pub param_unboxes: &'a [(u32, u32)],
-    /// Calls and dictionary operators typed a bare type parameter in a
-    /// shared generic body: HIR emission unboxes their result
-    /// (`UNBOX_ANY_TAG`), which may come back boxed.
-    pub unbox_any: &'a HashSet<u32>,
-    /// Parameters typed a bare type parameter of a shared generic body:
-    /// its prologue unboxes each (`UNBOX_ANY_TAG`), as the caller boxed it.
-    pub open_params: &'a [HirLocal],
     /// `x.len()` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Whether a function, by its HIR callee name, is pure: it writes no
@@ -1104,15 +1093,6 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             dict_params.insert(slot, b.add_param(MirTy::HeapRef).map_err(mir)?);
         }
     }
-    // Arguments the caller passed boxed: unboxed in place, as the
-    // prologue unboxes them.
-    for &(slot, tag) in inp.param_unboxes {
-        let &v = b.func().params.get(slot as usize).ok_or("unboxed param slot")?;
-        let ty = b.value_ty(v);
-        let boxed = b.use_local(LocalId(slot), ty).map_err(mir)?;
-        let raw = b.ins_unbox(boxed, tag, ty).map_err(mir)?;
-        b.def_local(LocalId(slot), raw).map_err(mir)?;
-    }
     // An instance method's context dictionaries: each read out of its own
     // dictionary at entry, as the prologue loads them into their slots.
     for &(slot, own, index) in inp.ctx_dicts {
@@ -1120,17 +1100,6 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         let at = b.ins_const(MirConst::I64(i64::from(index))).map_err(mir)?;
         let dict = b.ins_index(own, at, MirTy::HeapRef, false).map_err(mir)?;
         dict_params.insert(slot, dict);
-    }
-    // A shared generic body's open parameters come boxed: the prologue
-    // unboxes each in place, as HIR emission's.
-    for &param in inp.open_params {
-        let slot = inp.slots.get(param.0 as usize).copied().flatten().ok_or("param slot")?;
-        if inp.pair_locals.contains_key(&param.0) {
-            return Err("open param pair".into());
-        }
-        let v = b.use_local(LocalId(slot), MirTy::I64).map_err(mir)?;
-        let raw = b.ins_unbox(v, common::UNBOX_ANY_TAG, MirTy::I64).map_err(mir)?;
-        b.def_local(LocalId(slot), raw).map_err(mir)?;
     }
     let cur = b.entry();
     let mut lower = Lower {
@@ -2617,15 +2586,7 @@ impl Lower<'_> {
     /// Lower `id` for its value, packed as a bare-class existential where
     /// HIR emission packs it.
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
-        let mut val = self.value_unpacked(id)?;
-        // A result typed a bare type parameter may come back boxed.
-        if self.inp.unbox_any.contains(&id.0) {
-            val = match val {
-                Val::V(v) => Val::V(self.b.ins_unbox(v, common::UNBOX_ANY_TAG, MirTy::I64).map_err(mir)?),
-                Val::Never => Val::Never,
-                _ => return Err("unbox any value".into()),
-            };
-        }
+        let val = self.value_unpacked(id)?;
         let Some(ops) = self.inp.packs.get(&id.0) else {
             return Ok(val);
         };
@@ -2844,30 +2805,15 @@ impl Lower<'_> {
                 })
             }
             // `readonly e`: `e`'s value.
-            // A dictionary entry's argument, unboxed (compiler-made bodies).
-            HirKind::Builtin { op: Builtin::Unbox { tag }, args } if let [inner] = args.as_slice() => {
-                let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("unbox type")?;
-                let Some(src) = self.word(*inner)? else {
-                    return Ok(Val::Never);
-                };
-                Ok(Val::V(self.b.ins_unbox(src, *tag, ty).map_err(mir)?))
-            }
-            // A dictionary entry's result, boxed (compiler-made bodies): the
-            // box, read as the node's word.
-            HirKind::Builtin { op: Builtin::Box { tag }, args } if let [inner] = args.as_slice() => {
-                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("box type")?;
+            // A dictionary entry's argument or result (compiler-made
+            // bodies): the same bits read as the node's type.
+            HirKind::Builtin { op: Builtin::Retype, args } if let [inner] = args.as_slice() => {
+                let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("retype type")?;
                 let Some(v) = self.word(*inner)? else {
                     return Ok(Val::Never);
                 };
-                let boxed = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag: *tag }, vec![v]).map_err(mir))?;
-                let boxed = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?;
-                if ty == MirTy::HeapRef {
-                    return Ok(Val::V(boxed));
-                }
-                if !MirCastKind::Word.allows(MirTy::HeapRef, ty) {
-                    return Err("box type".into());
-                }
-                Ok(Val::V(self.b.ins_cast(MirCastKind::Word, ty, boxed).map_err(mir)?))
+                let word = self.b.ins_word(v).map_err(mir)?;
+                Ok(Val::V(self.b.ins_word_as(word, ty).map_err(|_| "retype type")?))
             }
             // An `Option` / `Result` in another layout (compiler-made
             // bodies): a niche word boxed, or an enum object's niche word.
@@ -2909,11 +2855,12 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
             }
             // A primitive's text (compiler-made bodies).
-            HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {
+            HirKind::Builtin { op: Builtin::Stringify { tag }, args } if let [inner] = args.as_slice() => {
                 let Some(v) = self.word(*inner)? else {
                     return Ok(Val::Never);
                 };
-                let s = self.at_expr(id, |l| l.b.ins_stringify(v).map_err(mir))?;
+                let tag = *tag;
+                let s = self.at_expr(id, |l| l.b.ins_stringify(v, tag).map_err(mir))?;
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![s]).map_err(mir)?))
             }
             // `typeof e`: the type name HIR emission interned; `e` is not
@@ -4306,12 +4253,12 @@ impl Lower<'_> {
             None if self.inp.word(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some() => (MirTy::HeapRef, None),
             _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
-        if site.unbox.is_some() && (site.pair_ret || site.coro || unit || ret_hi.is_some()) {
+        if site.word_ret && (site.pair_ret || site.coro || unit || ret_hi.is_some()) {
             return Err("call unbox shape".into());
         }
         let mut words = Vec::with_capacity(args.len());
         for (i, (&arg, &pair)) in args.iter().zip(&site.pair_args).enumerate() {
-            let tag = site.boxes.get(i).copied().flatten();
+            let word = site.words.get(i).copied().unwrap_or(false);
             // A two-word type not passed as a pair goes boxed.
             let boxed = !pair
                 && self.expr_ty(arg).is_some_and(|t| {
@@ -4333,8 +4280,8 @@ impl Lower<'_> {
             if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
-            if tag.is_some() && pair {
-                return Err("call argument box".into());
+            if word && pair {
+                return Err("call argument word".into());
             }
             // A niche word passed in a boxed parameter: its enum object
             // (then boxed to a bare type parameter's tag).
@@ -4348,20 +4295,12 @@ impl Lower<'_> {
                     return Ok(Val::Never);
                 };
                 let v = if self.b.value_ty(w) == MirTy::HeapRef { w } else { self.box_niche(layout, w)? };
-                match tag {
-                    Some(tag) => {
-                        let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                        words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
-                    }
-                    None => words.push(v),
-                }
+                words.push(v);
                 continue;
             }
             match (self.value(arg)?, pair) {
                 (Val::Never, _) => return Ok(Val::Never),
                 (Val::V(v), false) if boxed && self.b.value_ty(v) != MirTy::HeapRef => return Err("call argument boxed".into()),
-                // A bare type parameter of a shared generic: the word boxed
-                // to its tag, as HIR emission's `BoxValue`.
                 (Val::V(v), false) if let Some(&Some((target, operand))) = site.adapt.get(i) => {
                     if self.b.value_ty(v) != MirTy::HeapRef {
                         return Err("call argument adapter".into());
@@ -4369,9 +4308,10 @@ impl Lower<'_> {
                     let f = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![v]).map_err(mir))?;
                     words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?);
                 }
-                (Val::V(v), false) if let Some(tag) = tag => {
-                    let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                    words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                // A bare type parameter of a shared generic: the value's
+                // own word (a `float` / `bool` as its bits).
+                (Val::V(v), false) if word => {
+                    words.push(self.b.ins_word(v).map_err(mir)?);
                 }
                 (Val::V(v), false) => words.push(v),
                 (Val::Pair(lo, hi), false) if boxed => {
@@ -4379,15 +4319,7 @@ impl Lower<'_> {
                     let Val::V(v) = self.box_pair_val(&ty, lo, hi)? else {
                         return Ok(Val::Never);
                     };
-                    // A bare type parameter: the enum object boxed to its
-                    // tag, as HIR emission's `BoxValue` after the boxing.
-                    match tag {
-                        Some(tag) => {
-                            let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                            words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
-                        }
-                        None => words.push(v),
-                    }
+                    words.push(v);
                 }
                 (Val::Pair(lo, hi), true) => words.extend([lo, hi]),
                 // A boxed value the callee takes as a pair.
@@ -4416,19 +4348,19 @@ impl Lower<'_> {
         }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
-            ret: if site.unbox.is_some() { MirTy::HeapRef } else { ret },
+            ret: if site.word_ret { MirTy::HeapRef } else { ret },
             ret_hi,
         };
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
         // A planned tail call: its callee may take this frame when the
         // call's result is what the body returns.
-        if self.inp.tail_calls.contains(&id.0) && site.unbox.is_none() && niche.is_none() && site.ret_items.is_none() {
+        if self.inp.tail_calls.contains(&id.0) && !site.word_ret && niche.is_none() && site.ret_items.is_none() {
             self.b.allow_tail_call(site.target);
         }
         if let HirKind::Call { callee: Callee::Named { name, def, .. }, .. } = &self.hir.expr(id).kind {
             // A pure function's one scalar word: an operator that may trap.
             if (self.inp.pure_fn)(name)
-                && site.unbox.is_none()
+                && !site.word_ret
                 && site.dicts.is_empty()
                 && niche.is_none()
                 && dest_hi.is_none()
@@ -4444,7 +4376,7 @@ impl Lower<'_> {
         // A shared generic body's object holding its type parameters'
         // values boxed, rebuilt with them unboxed (#1549).
         let dest = match &site.ret_items {
-            Some(items) if site.unbox.is_none() && site.ret_adapt.is_none() && dest_hi.is_none() && self.b.value_ty(dest) == MirTy::HeapRef => {
+            Some(items) if !site.word_ret && site.ret_adapt.is_none() && dest_hi.is_none() && self.b.value_ty(dest) == MirTy::HeapRef => {
                 match self.at_expr(id, |l| l.unbox_ret_items(dest, items))? {
                     Val::V(v) => v,
                     _ => return Err("call result items".into()),
@@ -4456,20 +4388,20 @@ impl Lower<'_> {
         // A shared generic body's closure, adapted to the call's ground
         // type (#1532).
         if let Some((target, operand)) = site.ret_adapt {
-            if site.unbox.is_some() || niche.is_some() || dest_hi.is_some() || ret != MirTy::HeapRef {
+            if site.word_ret || niche.is_some() || dest_hi.is_some() || ret != MirTy::HeapRef {
                 return Err("call result adapter".into());
             }
             let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest]).map_err(mir))?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?));
         }
-        // A bare type parameter result comes back boxed; a niche one as
-        // its boxed enum object (#1565).
-        if let Some(tag) = site.unbox {
+        // A bare type parameter result comes back as its word; a niche
+        // one as its enum object (#1565).
+        if site.word_ret {
             if let Some(want) = niche {
-                let obj = self.b.ins_unbox(dest, tag, MirTy::HeapRef).map_err(mir)?;
+                let obj = self.b.ins_word_as(dest, MirTy::HeapRef).map_err(mir)?;
                 return self.unbox_niche(obj, want);
             }
-            return Ok(Val::V(self.b.ins_unbox(dest, tag, ret).map_err(mir)?));
+            return Ok(Val::V(self.b.ins_word_as(dest, ret).map_err(mir)?));
         }
         if let Some(want) = niche {
             return self.unbox_niche(dest, want);
@@ -4487,9 +4419,8 @@ impl Lower<'_> {
     /// Shared generic body result `obj` rebuilt with the items `items`
     /// marks unboxed ([`HirRetItems`], #1549).
     fn unbox_ret_items(&mut self, obj: ValueId, items: &HirRetItems) -> Result<Val, Refusal> {
-        let any = common::UNBOX_ANY_TAG;
         let item = |l: &mut Self, it: &HirRetItem, v: ValueId| -> Result<ValueId, Refusal> {
-            if it.unbox { l.b.ins_unbox(v, any, it.ty).map_err(mir) } else { Ok(v) }
+            if it.unbox { l.b.ins_word_as(v, it.ty).map_err(mir) } else { Ok(v) }
         };
         let read_ty = |it: &HirRetItem| if it.unbox { MirTy::HeapRef } else { it.ty };
         match items {
@@ -4549,10 +4480,9 @@ impl Lower<'_> {
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).map_err(mir)?);
                 }
                 HirDictOp::Load(slot) => stack.push(*self.dict_params.get(&slot).ok_or("dictionary parameter")?),
-                HirDictOp::Box(tag) => {
-                    let v = stack.pop().ok_or("dictionary box")?;
-                    let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
-                    stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                HirDictOp::Word => {
+                    let v = stack.pop().ok_or("dictionary word")?;
+                    stack.push(self.b.ins_word(v).map_err(mir)?);
                 }
                 HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
                 HirDictOp::Field(n) => {
@@ -4917,7 +4847,7 @@ impl Lower<'_> {
     /// function returns a bare type parameter.
     fn call_poly(&mut self, id: HirId, f: HirId, args: &[HirId], p: &HirPolyCall) -> Result<Val, Refusal> {
         self.raw_host = false;
-        if p.boxes.len() != args.len() {
+        if p.words.len() != args.len() {
             return Err("polyfn call shape".into());
         }
         let ty = self.expr_ty(id).ok_or("call type")?;
@@ -4936,25 +4866,15 @@ impl Lower<'_> {
             self.inp.word(ty).ok_or_else(|| format!("call value type {}", ty_kind(ty)))?
         };
         let mut words = Vec::with_capacity(args.len());
-        for (&arg, &tag) in args.iter().zip(&p.boxes) {
-            // A `()` runs for its effect: boxed to a bare type parameter
-            // as the word a dictionary adapter moves it as, else the empty
+        for (&arg, &as_word) in args.iter().zip(&p.words) {
+            // A `()` runs for its effect: to a bare type parameter the
+            // word a dictionary adapter moves it as, else the empty
             // tuple object a plain call passes (#1450).
             if self.expr_ty(arg).is_some_and(|t| is_unit(t) && self.inp.word(t).is_none()) {
                 if !self.effect(arg)? {
                     return Ok(Val::Never);
                 }
-                let v = match tag {
-                    Some(_) => self.b.ins_const(MirConst::I64(0)).map_err(mir)?,
-                    None => self.unit_object()?,
-                };
-                let v = match tag {
-                    Some(tag) => {
-                        let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?
-                    }
-                    None => v,
-                };
+                let v = if as_word { self.b.ins_const(MirConst::I64(0)).map_err(mir)? } else { self.unit_object()? };
                 words.push(v);
                 continue;
             }
@@ -4964,14 +4884,8 @@ impl Lower<'_> {
             let Some(v) = v else {
                 return Ok(Val::Never);
             };
-            // A niche enum goes to a bare type parameter as its own word.
-            let v = match tag {
-                Some(tag) => {
-                    let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                    self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?
-                }
-                None => v,
-            };
+            // A bare type parameter takes the value's own word.
+            let v = if as_word { self.b.ins_word(v).map_err(mir)? } else { v };
             words.push(v);
         }
         let dicts = p.dicts.len() as u32;
@@ -4989,16 +4903,12 @@ impl Lower<'_> {
         if self.b.value_ty(callee) != MirTy::HeapRef {
             return Err("call value callee".into());
         }
-        let ret = if p.unbox.is_some() { MirTy::HeapRef } else { word };
+        let ret = if p.word_ret { MirTy::HeapRef } else { word };
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect_dicts(callee, words, dicts, ret).map_err(mir))?;
-        let dest = match p.unbox {
-            // A niche enum for a bare type parameter comes back as its own
-            // word boxed.
-            Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
-            None => dest,
-        };
+        // A bare type parameter's result comes back as its word.
+        let dest = if p.word_ret { self.b.ins_word_as(dest, word).map_err(mir)? } else { dest };
         if let Some((target, operand)) = p.ret_adapt {
-            if p.unbox.is_some() || ret != MirTy::HeapRef {
+            if p.word_ret || ret != MirTy::HeapRef {
                 return Err("call result adapter".into());
             }
             let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest]).map_err(mir))?;
@@ -5039,8 +4949,7 @@ impl Lower<'_> {
             if self.b.value_ty(v) != MirTy::HeapRef {
                 return Err("operator operand boxed".into());
             }
-            let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag: call.tag }, vec![v]).map_err(mir)?;
-            words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+            words.push(self.b.ins_word(v).map_err(mir)?);
         }
         // The instance's dictionary, after the operands (#1661).
         if !site.dicts.is_empty() {
@@ -5833,15 +5742,13 @@ impl Lower<'_> {
     /// tuple's or record's items shown and formatted.
     fn show(&mut self, id: HirId, v: ValueId, show: &HirShow) -> Result<ValueId, Refusal> {
         let (fmt, items) = match show {
-            HirShow::Call { target, boxed } => {
-                // Only a heap carrier boxes here, as an operator's operand.
-                let v = match *boxed {
-                    None => v,
-                    Some(_) if self.b.value_ty(v) != MirTy::HeapRef => return Err("show boxed word".into()),
-                    Some(tag) => {
-                        let obj = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
-                        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?
-                    }
+            HirShow::Call { target, word } => {
+                // Only a heap carrier goes as a word here, as an operator's
+                // operand.
+                let v = match *word {
+                    false => v,
+                    true if self.b.value_ty(v) != MirTy::HeapRef => return Err("show word".into()),
+                    true => self.b.ins_word(v).map_err(mir)?,
                 };
                 let abi = DenseAbi {
                     params: vec![self.b.value_ty(v)],
@@ -5851,7 +5758,7 @@ impl Lower<'_> {
                 return Ok(self.at_expr(id, |l| l.b.ins_call(*target, vec![v], &abi).map_err(mir))?.0);
             }
             HirShow::Stringify => {
-                let s = self.at_expr(id, |l| l.b.ins_stringify(v).map_err(mir))?;
+                let s = self.at_expr(id, |l| l.b.ins_stringify(v, None).map_err(mir))?;
                 return self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![s]).map_err(mir);
             }
             &HirShow::Bound { dict, method } => {

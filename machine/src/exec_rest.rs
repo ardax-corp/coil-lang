@@ -291,7 +291,10 @@ impl<const S: usize> Machine<S> {
                     // Accepts a boxed value (preferred), a heap string, or a
                     // raw immediate (treated as int).
                     let v = self.stack.pop();
-                    let text = Self::stringify_value(&self.heap, v);
+                    let text = match common::stringify_tag(opcode.operand_u32()) {
+                        Some(tag) => Self::stringify_immediate(tag, v),
+                        None => Self::stringify_value(&self.heap, v),
+                    };
                     self.push_new_string(text, ip);
                 }
                 Instruction::PRINT => {

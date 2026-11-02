@@ -16,11 +16,14 @@ Plan for `HashMap`, `HashSet`, `List`, and `TreeMap` in the standard library.
 
 **Do not add** map/set/list opcodes or a heap `Object::HashMap`. That would be benchmark-shaped surface area; AGENTS prefers alloc reduction and `HostInvoke` over new opcodes unless the pattern is universal.
 
+The one native piece is the **key index** ([key-index.md](key-index.md), `key_index::*`, HostInvoke 191–199): probing over plain `Vec<int>`s, no new object kind, usable by any collection keyed by a `Hash + Eq` type. Keys and payloads stay in userland `Vec`s.
+
 ## Userland (this change)
 
 | Type | Module | Representation |
 |------|--------|----------------|
-| `HashMap<K,V>` | `collections::map` | Separate chaining: `heads: Vec<int>` + parallel `keys` / `vals` / `next` / `live` Vecs |
+| `KeyIndex<K>` | `collections::index` | Keys by slot in a `Vec<K>` plus the `key_index` table / hashes / live Vecs |
+| `HashMap<K,V>` | `collections::map` | `KeyIndex<K>` + `vals: Vec<V>` by slot |
 | `HashSet<T>` | `collections::set` | `HashMap<T, bool>` wrapper |
 | `List<T>` | `collections::list` | Mutable singly-linked `Node` class (`Option<Node<T>>`) |
 | `TreeMap<K,V>` | `collections::tree` | Mutable BST via parallel Vecs + child indices |
@@ -45,8 +48,7 @@ shape (COI-92) — not a single boxed ABI.
 
 ## Future (only if measured)
 
-- `HostInvoke` batch helpers (e.g. rehash) if userland grow shows up in profiles.
-- Native open-addressing table as an opaque heap object — only with a cross-cutting need (serde, runtime internals), not for microbenchmarks.
+- A native deep compare for tuple / enum keys (`eq_mode` 0 today), if tuple-keyed maps show up in profiles.
 
 ## API shape
 

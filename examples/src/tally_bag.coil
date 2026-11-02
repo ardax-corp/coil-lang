@@ -1,0 +1,26 @@
+// A generic class in one module holding another module's generic class: a
+// caller's ground calls get per-type clones of both, each compiled under
+// its own module (examples/perf/foreign_clone_nested.coil).
+use dict_lib::Tally;
+
+class Bag<K> {
+    tally: Tally<K>,
+    adds: int,
+}
+
+impl Bag<K> {
+    pub static fn new() -> Bag<K> {
+        return new Bag(Tally::new(), 0);
+    }
+}
+
+impl Bag<K: Eq> {
+    pub fn put(K k) {
+        self.tally.add(k);
+        self.adds = self.adds + 1;
+    }
+
+    pub fn count(K k) -> int {
+        return self.tally.count(k);
+    }
+}
