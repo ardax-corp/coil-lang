@@ -221,6 +221,27 @@ mod tests {
     }
 
     #[test]
+    fn direct_natives_are_listed_by_id_and_invoke_the_same_function() {
+        fn twice(_heap: &mut Heap, args: &[Value]) -> Value {
+            Value::from(args[0].as_int() * 2)
+        }
+        let sig = FfiSignature::from_parts("twice", vec![FfiType::Int], FfiType::Int).unwrap();
+        let mut reg = Natives::new();
+        let plain = reg.register(Arc::new(HostClosureFn::unary_i64("plain", |x| x)));
+        let direct = reg.register(Arc::new(HostClosureFn::new_direct(sig.clone(), twice)));
+        let special = reg.register(Arc::new(HostClosureFn::new_direct(sig, twice).with_host_op(HostOp::Collect)));
+        assert!(reg.direct_by_id(plain).is_none());
+        assert!(reg.direct_by_id(special).is_none(), "a special host op never runs as a plain call");
+        assert!(reg.direct_by_id(99).is_none());
+        let mut heap = Heap::default();
+        let args = [Value::from(21_i64)];
+        let f = reg.direct_by_id(direct).expect("direct native");
+        assert_eq!(f(&mut heap, &args).as_int(), 42);
+        let via_invoke = reg.get_by_id(direct).unwrap().invoke(&mut heap, &args).unwrap().unwrap();
+        assert_eq!(via_invoke.as_int(), 42);
+    }
+
+    #[test]
     fn registry_assigns_stable_ids() {
         let mut reg = Natives::new();
         let id0 = reg.register(Arc::new(HostClosureFn::unary_i64("a", |x| x)));
