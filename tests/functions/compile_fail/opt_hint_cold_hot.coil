@@ -1,0 +1,10 @@
+// @expected E0806 — a function cannot be both `#[cold]` and `#[hot]`.
+#[hot]
+#[cold]
+fn f(int x) -> int {
+    return x;
+}
+
+fn main() {
+    f(1);
+}

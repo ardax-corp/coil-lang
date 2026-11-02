@@ -1,0 +1,9 @@
+// @expected E0119 — `#[inline]` takes no arguments.
+#[inline(always)]
+fn f(int x) -> int {
+    return x;
+}
+
+fn main() {
+    f(1);
+}

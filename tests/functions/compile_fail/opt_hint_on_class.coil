@@ -1,0 +1,10 @@
+// @expected E0119 — `#[hot]` applies to a function or method, not a class.
+#[hot]
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let c = new C(1);
+    print(c.x);
+}
