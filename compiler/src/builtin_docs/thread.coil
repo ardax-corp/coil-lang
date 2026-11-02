@@ -136,7 +136,7 @@ class RwLock<T> {}
 ///
 /// Channel functions report a `ChannelError` and lock functions a
 /// `LockError` instead. It implements `Show`, so `format("%v", e)` gives the
-/// variant name.
+/// variant name (`Panicked(<message>)` for a panic).
 ///
 /// # Examples
 ///
@@ -161,14 +161,16 @@ class RwLock<T> {}
 /// }
 /// ```
 enum ThreadError {
-    /// The thread cannot be joined: it was already joined or detached, or it
-    /// panicked instead of returning a value.
+    /// The thread cannot be joined: it was already joined or detached.
     JoinFailed,
     /// A `spawn` argument or capture cannot cross to another thread: it is or
     /// contains a stream, a `Thread`, a coroutine, a `gc` handle, a partially
     /// applied function, or a cycle. The typechecker rejects most of these,
     /// so this is left for values of a generic type.
     NotSendable,
+    /// The thread panicked instead of returning a value; the payload is the
+    /// panic message, as in `task::TaskError::Panicked`.
+    Panicked(string),
 }
 
 /// Why a channel operation failed.
@@ -277,8 +279,8 @@ fn spawn<A, B>(A -> B f, A arg) -> Result<Thread<B>, ThreadError> {}
 /// Waits for the thread to finish and returns the value its function returned.
 ///
 /// Returns `Err(ThreadError::JoinFailed)` if the thread was already joined
-/// or detached, or if its function panicked (the panic message is printed to
-/// stderr). Inside a `task::scope`, only the joining task waits; other tasks
+/// or detached, and `Err(ThreadError::Panicked(message))` if its function
+/// panicked (the panic is also printed to stderr). Inside a `task::scope`, only the joining task waits; other tasks
 /// keep running.
 ///
 /// # Examples

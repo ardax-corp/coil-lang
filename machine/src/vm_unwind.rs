@@ -37,6 +37,12 @@ struct Unwind {
 impl<const S: usize> Machine<S> {
     /// A panic at the top frame's saved ip may run `defer`s.
     #[inline]
+    /// Take the message of the last panic armed (empty when none was):
+    /// a panicked `thread` job's, for `ThreadError::Panicked`.
+    pub(crate) fn take_panic_message(&mut self) -> String {
+        std::mem::take(&mut self.unwind.message)
+    }
+
     fn arm_unwind(&mut self, message: &str) {
         // A panic in a `defer` a close runs goes on to the closer.
         self.unwind.closing.clear();

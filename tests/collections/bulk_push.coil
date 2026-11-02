@@ -200,7 +200,7 @@ fn panics(() -> int f) -> bool {
         Result::Err(_) => panic "spawn failed",
     };
     return match join(t) {
-        Result::Err(ThreadError::JoinFailed) => true,
+        Result::Err(ThreadError::Panicked(_)) => true,
         default => false,
     };
 }

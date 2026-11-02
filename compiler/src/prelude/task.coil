@@ -426,7 +426,8 @@ impl Channel<T> {
 ///
 /// # Errors
 ///
-/// The `ThreadError` from starting or joining the thread.
+/// The `ThreadError` from starting or joining the thread:
+/// `ThreadError::Panicked(message)` when `work` panicked.
 fn blocking<T>(unit -> T work) -> Result<T, ThreadError> {
     let t = thread_spawn(work)?;
     return thread_join(t);
