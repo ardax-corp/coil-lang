@@ -83,6 +83,17 @@ pub fn with_host_enum_layout<T>(layout: HostEnumLayout, f: impl FnOnce() -> T) -
     })
 }
 
+/// [`with_host_enum_layout`], skipping the set and restore when `layout` is
+/// already current (the common case: most natives run under `Boxed`).
+#[inline(always)]
+pub fn in_host_enum_layout<T>(layout: HostEnumLayout, f: impl FnOnce() -> T) -> T {
+    if HOST_ENUM_LAYOUT.with(Cell::get) == layout.as_u32() {
+        f()
+    } else {
+        with_host_enum_layout(layout, f)
+    }
+}
+
 /// Layout the current HostInvoke asked the native to construct.
 pub fn current_host_enum_layout() -> HostEnumLayout {
     HOST_ENUM_LAYOUT.with(|cell| HostEnumLayout::from_u32(cell.get()))

@@ -1671,6 +1671,39 @@ pub fn host_native_id(name: &str) -> Option<usize> {
         .map(|e| e.id as usize)
 }
 
+/// Natives the compiler may call with [`crate::Instruction::DenseHostCall`]:
+/// plain functions of their arguments that always return a value and never
+/// park, open descriptors or switch tasks. The VM registers each of them
+/// with a direct function (`NativeFn::direct`; a machine test checks it).
+pub const DIRECT_HOST_NATIVES: &[&str] = &[
+    "ord",
+    "char",
+    "hash_string",
+    "black_box",
+    "string_byte_at",
+    "string_slice_bytes",
+    "string_find_from",
+    "string_rfind",
+    "string_match_at",
+    "vec_with_capacity",
+    "vec_capacity",
+    "vec_reserve",
+    "vec_clear",
+    "vec_pop",
+    "vec_remove",
+    "vec_from_array",
+    "vec_extend_range",
+    "vec_fill",
+    "symbol_next_id",
+];
+
+/// Whether standard native `id` is in [`DIRECT_HOST_NATIVES`].
+pub fn host_native_is_direct(id: usize) -> bool {
+    HOST_NATIVES
+        .get(id)
+        .is_some_and(|n| n.id as usize == id && DIRECT_HOST_NATIVES.contains(&n.name))
+}
+
 /// `(name, id)` pairs for compiler `register_native_id`.
 pub fn host_native_ids() -> impl Iterator<Item = (&'static str, usize)> {
     HOST_NATIVES.iter().map(|e| (e.name, e.id as usize))
