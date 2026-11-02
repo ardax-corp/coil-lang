@@ -93,3 +93,19 @@ test("a literal result that fits stays a byte") {
     let v: Vec<byte> = [b, b - 1];
     assert!(v[1] + 1 == b);
 }
+
+// #2097: a range bound takes the same rule as an operand.
+test("a literal range bound next to a byte bound is a byte") {
+    let b = to_bytes("a")[0];
+    let above = 0;
+    for x in b..=255 {
+        above += 1;
+        assert!(x >= b);
+    }
+    assert!(above == 159);
+    let below = 0;
+    for x in 0..b {
+        below += 1;
+    }
+    assert!(below == 97);
+}

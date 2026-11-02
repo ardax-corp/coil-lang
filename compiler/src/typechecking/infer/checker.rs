@@ -7138,24 +7138,9 @@ impl Checker {
     ) -> Ty {
         let st = self.infer(start);
         let et = self.infer(end);
-        let sp = apply_ty_prune(&self.subst, &st);
-        let ep = apply_ty_prune(&self.subst, &et);
-        // Coerce int literals under a `byte` peer (same as annotated `byte` lets).
-        if Self::is_byte_ty(&sp) && Self::byte_literal_coercion(end).is_ok() {
-            let _ = self.unify(
-                &et,
-                &crate::typechecking::ty::byte(),
-                &end.0.into_range(),
-                "range end",
-            );
-        } else if Self::is_byte_ty(&ep) && Self::byte_literal_coercion(start).is_ok() {
-            let _ = self.unify(
-                &st,
-                &crate::typechecking::ty::byte(),
-                &start.0.into_range(),
-                "range start",
-            );
-        }
+        // An int literal next to a `byte` bound types as `byte` (#2097), as
+        // an operand of a binary operator does (#2093).
+        let (st, et) = self.coerce_byte_literal_operands(start, end, st, et);
         let elem = self.unify(&st, &et, &range, "range bounds");
         if !self.require_ord_for_range(&elem, &range) {
             return if inclusive {
