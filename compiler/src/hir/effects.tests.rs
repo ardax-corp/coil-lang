@@ -1145,3 +1145,30 @@ fn fields_name_what_a_body_and_its_callees_touch() {
     assert_eq!(of(&m, &out, "same").fields, ALL_FIELDS, "`==` may read every field");
     assert_ne!(of(&m, &out, "apply").latent, 0, "a call of its parameter: any field at the call site");
 }
+
+#[test]
+fn a_returned_parameter_is_returned_not_kept() {
+    // #2206: copy-on-write tells "may be the result" apart from "stored
+    // past the call", so a caller can skip the share when it moves the
+    // argument.
+    let src = "
+class Box {
+    pub items: Vec<int>,
+}
+fn add(Vec<int> vs) -> Vec<int> {
+    vs.push(1);
+    return vs;
+}
+fn stash(Box b, Vec<int> vs) -> Vec<int> {
+    b.items = vs;
+    return vs;
+}
+";
+    let (m, out) = summaries(src);
+    let add = of(&m, &out, "add");
+    assert_eq!(add.keeps, 0, "{add:?}");
+    assert_eq!(add.returns_arg, 1, "{add:?}");
+    let stash = of(&m, &out, "stash");
+    assert_eq!(stash.keeps, 0b10, "{stash:?}");
+    assert_eq!(stash.returns_arg, 0b10, "{stash:?}");
+}

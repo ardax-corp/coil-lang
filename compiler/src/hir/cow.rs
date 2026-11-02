@@ -100,6 +100,9 @@ struct ArgUse {
     written: u64,
     /// The callee may keep the argument past the call.
     kept: u64,
+    /// The result may be the argument itself (#2206): the caller shares it
+    /// unless the argument is moved into the call.
+    returned: u64,
     /// Arguments that reach code not known here: code that shares what it
     /// stores (so `kept` is clear), but a caller's fresh object passed
     /// there may be kept all the same.
@@ -440,13 +443,14 @@ fn named_value(body: &HirBody, a: HirId) -> HirId {
 /// the call: it stores the parameter (or a local that holds it) into a
 /// field, an element, a new object, a callee that keeps it, a closure or
 /// its result. What it stores from inside the object it shares itself.
-/// Second: the parameters it hands, as themselves, to code not known
+/// Second: the parameters that may be its result, as themselves (#2206).
+/// Third: the parameters it hands, as themselves, to code not known
 /// here, which may keep them.
-pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64) {
+pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64, u64) {
     if body.is_coro {
-        return (u64::MAX, u64::MAX);
+        return (u64::MAX, u64::MAX, u64::MAX);
     }
-    let Some(root) = body.root else { return (0, 0) };
+    let Some(root) = body.root else { return (0, 0, 0) };
     // What each local may hold of the parameters, through `let x = p`.
     let mut holds: HashMap<LocalId, u64> = HashMap::new();
     for (i, &p) in body.params.iter().enumerate().take(64) {
@@ -475,6 +479,15 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                 HirKind::Named { value, .. } => work.push(*value),
                 HirKind::Builtin { op: Builtin::Cow { .. }, args } => work.extend(args.iter().copied()),
                 HirKind::Local(l) => bits |= holds.get(l).copied().unwrap_or(0),
+                // The result may be an argument the callee hands back.
+                HirKind::Call { callee, args } => {
+                    let used = arg_use(body, lookup, callee, args);
+                    for (j, &a) in args.iter().enumerate().take(64) {
+                        if used.returned & (1 << j) != 0 {
+                            work.push(named_value(body, a));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -495,6 +508,7 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
         }
     }
     let mut kept = 0u64;
+    let mut returned = 0u64;
     let mut opaque = 0u64;
     for (i, e) in body.exprs.iter().enumerate() {
         let id = HirId(i as u32);
@@ -520,7 +534,8 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                     }
                 }
             }
-            HirKind::Return(Some(v)) | HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => kept |= of(&holds, *v),
+            HirKind::Return(Some(v)) => returned |= of(&holds, *v),
+            HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => kept |= of(&holds, *v),
             HirKind::Lambda { body: inner } => {
                 for (o, _) in &module.bodies[*inner].captures {
                     kept |= holds.get(o).copied().unwrap_or(0);
@@ -534,16 +549,16 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
     }
     if body.ret.is_some() {
         for v in super::escape::result_exprs(body, root) {
-            kept |= of(&holds, v);
+            returned |= of(&holds, v);
         }
     }
-    (kept, opaque)
+    (kept, returned, opaque)
 }
 
 /// What the callee of `callee(args)` does with each argument.
 fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[HirId]) -> ArgUse {
     let all = if args.len() >= 64 { u64::MAX } else { (1u64 << args.len()) - 1 };
-    let unknown = ArgUse { written: all, kept: 0, opaque: all };
+    let unknown = ArgUse { written: all, kept: 0, returned: all, opaque: all };
     let positional = args.iter().all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
     // A fixed array's methods are structural reads, like a `Vec`'s `len`.
     let recv_vec = matches!(callee, Callee::Method { .. })
@@ -581,7 +596,7 @@ fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[Hir
     };
     if !positional {
         let any = |bits: u64| if bits != 0 { all } else { 0 };
-        return ArgUse { written: any(s.mutates), kept: any(s.keeps), opaque: any(s.opaque_args) };
+        return ArgUse { written: any(s.mutates), kept: any(s.keeps), returned: any(s.returns_arg | s.opaque_args), opaque: any(s.opaque_args) };
     }
     from_summary(&s)
 }
@@ -612,8 +627,10 @@ fn host_use(body: &HirBody, short: &str, args: &[HirId], all: u64) -> ArgUse {
 
 /// A callee shares what it returns from a place (its `return` is a
 /// store), so returning part of an argument does not keep the argument.
+/// A returned parameter itself is the caller's to share (#2206); code not
+/// known here may hand back what it is given.
 fn from_summary(s: &Summary) -> ArgUse {
-    ArgUse { written: s.mutates, kept: s.keeps, opaque: s.opaque_args }
+    ArgUse { written: s.mutates, kept: s.keeps, returned: s.returns_arg | s.opaque_args, opaque: s.opaque_args }
 }
 
 /// Where the rewrite puts ops.
@@ -771,14 +788,36 @@ impl Plan {
                     }
                 }
                 HirKind::Call { args, .. } => {
-                    let kept = f.calls.get(&id).map_or(0, |u| u.kept);
+                    let u = f.calls.get(&id).copied().unwrap_or_default();
+                    let mut copy_result = false;
                     for (j, &a) in args.iter().enumerate().take(64) {
-                        if kept & (1 << j) != 0 {
-                            plan.store(body, f, named_value(body, a), &cow, &inout, &borrowed);
+                        let bit = 1u64 << j;
+                        let v = named_value(body, a);
+                        if u.kept & bit != 0 {
+                            plan.store(body, f, v, &cow, &inout, &borrowed);
+                        } else if u.returned & bit != 0
+                            && cow(id)
+                            && cow(v)
+                            && !moved_into_call(f, body, id, v, &inout, &borrowed)
+                        {
+                            // The result may be this argument while its
+                            // place lives on (#2206). One the callee writes
+                            // gets the eager copy the callee used to make.
+                            // A result that is not a COW value cannot be it.
+                            // Opaque code may write the argument as well.
+                            if (u.written | u.opaque) & bit != 0 {
+                                copy_result = true;
+                            } else {
+                                plan.store(body, f, v, &cow, &inout, &borrowed);
+                            }
                         }
                     }
+                    if copy_result {
+                        plan.share.push((id, true));
+                    }
                 }
-                HirKind::Return(Some(v)) | HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => {
+                HirKind::Return(Some(v)) => plan.store_result(body, f, *v, &cow, &inout, &borrowed),
+                HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => {
                     plan.store(body, f, *v, &cow, &inout, &borrowed)
                 }
                 HirKind::Lambda { .. } => {
@@ -802,7 +841,7 @@ impl Plan {
         if let Some(root) = body.root {
             for v in super::escape::result_exprs(body, root) {
                 if body.ret.is_some() {
-                    plan.store(body, f, v, &cow, &inout, &borrowed);
+                    plan.store_result(body, f, v, &cow, &inout, &borrowed);
                 }
             }
         }
@@ -827,7 +866,7 @@ impl Plan {
                 args.iter()
                     .enumerate()
                     .take(64)
-                    .filter(move |(j, _)| (u.opaque | u.kept) & (1 << j) != 0)
+                    .filter(move |(j, _)| (u.opaque | u.kept | u.returned) & (1 << j) != 0)
                     .filter_map(|(_, &a)| match body.expr(named_value(body, a)).kind {
                         HirKind::Local(l) => Some(l),
                         _ => None,
@@ -1187,6 +1226,29 @@ impl Plan {
         self.share.push((v, eager));
     }
 
+    /// `v` is the body's result. A parameter handed back as itself is the
+    /// caller's to share (its summary's `returns_arg`, #2206): the caller
+    /// knows whether the argument's place lives on. Anything else is a
+    /// store, as for [`Self::store`].
+    #[allow(clippy::too_many_arguments)]
+    fn store_result(&mut self, body: &HirBody, f: &Facts<'_>, v: HirId, cow: &dyn Fn(HirId) -> bool, inout: &HashSet<LocalId>, borrowed: &HashSet<LocalId>) {
+        if body.is_coro {
+            return self.store(body, f, v, cow, inout, borrowed);
+        }
+        let mut work = vec![v];
+        while let Some(at) = work.pop() {
+            match &body.expr(at).kind {
+                HirKind::Block { tail: Some(t), .. } => work.push(*t),
+                HirKind::If { then, els, .. } => work.extend(std::iter::once(*then).chain(*els)),
+                HirKind::Match { arms, .. } => work.extend(arms.iter().map(|a| a.body)),
+                HirKind::Local(l) if cow(at) && body.local(*l).kind == LocalKind::Param && !body.local(*l).borrow => {
+                    self.stored.push(at);
+                }
+                _ => self.store(body, f, at, cow, inout, borrowed),
+            }
+        }
+    }
+
     /// `v` is stored where it outlives this read: share it unless it is a
     /// fresh value or the last read of a local that owns its object.
     #[allow(clippy::too_many_arguments)]
@@ -1212,6 +1274,27 @@ impl Plan {
             }
         }
     }
+}
+
+/// Whether argument `v` of `call` is moved into it (#2206): its place is
+/// not read again while the result may name its object. Either the last
+/// read of a local that owns its object, or `l = f(.., l, ..)` with `l`
+/// read once in the call: the assignment overwrites the place with the
+/// result before anything reads it.
+fn moved_into_call(f: &Facts<'_>, body: &HirBody, call: HirId, v: HirId, inout: &HashSet<LocalId>, borrowed: &HashSet<LocalId>) -> bool {
+    let HirKind::Local(l) = body.expr(v).kind else { return false };
+    let local = body.local(l);
+    if borrowed.contains(&l) || local.borrow || local.kind == LocalKind::Capture || f.captured.contains(&l) {
+        return false;
+    }
+    if f.last_read(l, v) && owned(f, body, l, inout) {
+        return true;
+    }
+    let assigned_back = matches!(
+        f.parent.get(&call).map(|p| &body.expr(*p).kind),
+        Some(HirKind::Assign { place, value }) if *value == call && matches!(body.expr(*place).kind, HirKind::Local(x) if x == l)
+    );
+    assigned_back && f.reads.get(&l).is_some_and(|rs| rs.iter().filter(|&&r| f.contains(call, r)).count() == 1)
 }
 
 /// A place as its root local and the steps below it: a field name, or
