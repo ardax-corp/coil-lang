@@ -111,3 +111,27 @@ test("a loop in a defer body runs while a panic unwinds") {
     });
     assert!(LOG == "u0u1u2", LOG);
 }
+
+// coil-lang#2201: the cleanup pad lowers a `defer` body again; a local of
+// the body and the loop's counter must not share a variable there.
+fn counts_on_unwind(Vec<int> b) -> int {
+    defer use (b) {
+        let n = 0;
+        for v in b {
+            if v != 0 {
+                n = n + 1;
+            }
+        }
+        say("c" + n.show());
+    }
+    panic "unwind";
+}
+
+test("a local updated in a defer body's loop keeps its value while a panic unwinds") {
+    LOG = "";
+    let _ = scope(fn (Scope s) {
+        let _ = s.spawn(fn () => counts_on_unwind([1, 0, 2]));
+        0
+    });
+    assert!(LOG == "c2", LOG);
+}
