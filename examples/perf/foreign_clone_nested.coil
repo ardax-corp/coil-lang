@@ -1,0 +1,14 @@
+// A ground call to another module's generic class method whose body calls a
+// third module's generic class method: both get per-type clones, each
+// compiled under its own module, with no boxing or dictionaries.
+use tally_bag::Bag;
+use string::{format, to_bytes};
+use io::{stdout, write};
+
+fn main() {
+    let b: Bag<int> = Bag::new();
+    for i in 0..300 {
+        b.put(i % 7);
+    }
+    let _ = write(stdout(), to_bytes(format("%i %i\n", b.count(3), b.count(9))));
+}
