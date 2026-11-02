@@ -850,6 +850,10 @@ impl Pipeline {
         for (i, job) in jobs.iter().enumerate() {
             let Some(dir) = dir.as_ref().filter(|_| results[i].is_none()) else { continue };
             let Some(key) = self.job_cache_key(job) else { continue };
+            // Which entry a build looks up, for tests that plant one.
+            if std::env::var_os("COIL_COMPTIME_CACHE_TRACE").is_some() {
+                eprintln!("comptime cache: {key}");
+            }
             if let Some(entry) = cc::load(dir, &key).filter(cc::still_valid)
                 && let cc::Value::Text(text) = &entry.value
             {
