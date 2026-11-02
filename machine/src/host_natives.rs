@@ -1443,8 +1443,12 @@ mod tests {
             Some(common::KEY_INDEX_TABLE_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(197).map(String::as_str),
             Some(common::KEY_INDEX_CLEAR_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::KEY_INDEX_EQ_MODE_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1820,6 +1824,10 @@ mod tests {
             registrations.get(end + 61).map(|(n, _)| n.as_str()),
             Some(common::KEY_INDEX_CLEAR_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 62);
+        assert_eq!(
+            registrations.get(end + 63).map(|(n, _)| n.as_str()),
+            Some(common::KEY_INDEX_EQ_MODE_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 64);
     }
 }

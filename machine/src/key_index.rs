@@ -13,7 +13,9 @@
 //! - `live`: `1` while the slot holds an entry, `0` once it is removed.
 //!
 //! Equality stays with the caller: [`host_probe`] returns the slots whose
-//! hash matches, and the caller's `==` decides. Slots never move on their
+//! hash matches, and the caller's `==` decides. For keys whose `==` the VM
+//! runs itself (`int`, `string`: what `eq_mode` answers), [`host_find`]
+//! compares them too and finds a key in one call. Slots never move on their
 //! own: only [`host_compact`], which the owner calls after it compacts its
 //! own `Vec`s with [`host_retain`], renumbers them.
 //!
@@ -116,6 +118,61 @@ fn probe(table: &[Value], hashes: &[Value], cap: usize, h: i64, after: i64) -> i
         i = (i + 1) & mask;
     }
     -1
+}
+
+/// `key_index::find(table, hashes, keys, h, k, mode) -> int`: the live
+/// slot whose hash is `h` and whose key in `keys` equals `k`, or `-1`.
+/// `mode` says how keys compare ([`common::KEY_EQ_WORD`] or
+/// [`common::KEY_EQ_STRING`], what `eq_mode` gave the caller); any other
+/// mode finds nothing, so the caller compares with `probe` itself.
+pub fn host_find(heap: &mut Heap, args: &[Value]) -> Value {
+    let arg = |i: usize| args.get(i).copied().unwrap_or(Value::from(0i64));
+    let (Some(tg), Some(hg), Some(kg)) = (array(heap, arg(0)), array(heap, arg(1)), array(heap, arg(2))) else {
+        return Value::from(-1i64);
+    };
+    let (Some(table), Some(hashes), Some(keys)) = (tg.as_ref().words(), hg.as_ref().words(), kg.as_ref().words()) else {
+        return Value::from(-1i64);
+    };
+    let Some(cap) = cells(table) else {
+        return Value::from(-1i64);
+    };
+    let (h, k, mode) = (arg(3).as_int(), arg(4), arg(5).as_int());
+    let same = |x: Value| match mode {
+        common::KEY_EQ_WORD => x.bits() == k.bits(),
+        common::KEY_EQ_STRING => x.bits() == k.bits() || string_eq(heap, x, k),
+        _ => false,
+    };
+    let mask = cap - 1;
+    let mut i = home(h, mask);
+    for _ in 0..cap {
+        let e = table[i].as_int();
+        if e == EMPTY {
+            return Value::from(-1i64);
+        }
+        if e > 0 {
+            let s = (e - 1) as usize;
+            if hashes.get(s).is_some_and(|x| x.as_int() == h) && keys.get(s).is_some_and(|&x| same(x)) {
+                return Value::from(s as i64);
+            }
+        }
+        i = (i + 1) & mask;
+    }
+    Value::from(-1i64)
+}
+
+/// Whether `a` and `b` are strings with the same contents.
+fn string_eq(heap: &Heap, a: Value, b: Value) -> bool {
+    match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
+        (Some(Object::String(ga)), Some(Object::String(gb))) => ga.as_ref().data == gb.as_ref().data,
+        _ => false,
+    }
+}
+
+/// `key_index::eq_mode(k) -> int`: the compiler folds every call it plans,
+/// as `KEY_EQ_COIL` in a body generic in `k`'s type, which is what this
+/// answers for a call it did not.
+pub fn host_eq_mode(_heap: &mut Heap, _args: &[Value]) -> Value {
+    Value::from(common::KEY_EQ_COIL)
 }
 
 /// Put slot `s` (hash `h`) in the first empty or removed cell of its probe
@@ -333,6 +390,8 @@ pub const KEY_INDEX_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     (common::KEY_INDEX_COMPACT_NATIVE, 3, host_compact),
     (common::KEY_INDEX_RETAIN_NATIVE, 2, host_retain),
     (common::KEY_INDEX_CLEAR_NATIVE, 3, host_clear),
+    (common::KEY_INDEX_FIND_NATIVE, 6, host_find),
+    (common::KEY_INDEX_EQ_MODE_NATIVE, 1, host_eq_mode),
 ];
 
 #[cfg(test)]
