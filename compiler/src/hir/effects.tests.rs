@@ -1145,3 +1145,54 @@ fn fields_name_what_a_body_and_its_callees_touch() {
     assert_eq!(of(&m, &out, "same").fields, ALL_FIELDS, "`==` may read every field");
     assert_ne!(of(&m, &out, "apply").latent, 0, "a call of its parameter: any field at the call site");
 }
+
+#[test]
+fn a_returned_parameter_is_returned_not_kept() {
+    // #2206: copy-on-write tells "may be the result" apart from "stored
+    // past the call", so a caller can skip the share when it moves the
+    // argument.
+    let src = "
+class Box {
+    pub items: Vec<int>,
+}
+fn add(Vec<int> vs) -> Vec<int> {
+    vs.push(1);
+    return vs;
+}
+fn stash(Box b, Vec<int> vs) -> Vec<int> {
+    b.items = vs;
+    return vs;
+}
+";
+    let (m, out) = summaries(src);
+    let add = of(&m, &out, "add");
+    assert_eq!(add.keeps, 0, "{add:?}");
+    assert_eq!(add.returns_arg, 1, "{add:?}");
+    let stash = of(&m, &out, "stash");
+    assert_eq!(stash.keeps, 0b10, "{stash:?}");
+    assert_eq!(stash.returns_arg, 0b10, "{stash:?}");
+}
+
+#[test]
+fn a_returned_field_is_returned_inner() {
+    // #2206: a parameter's field or element comes back unshared, and the
+    // caller shares it where it keeps it.
+    let src = "
+class Box {
+    pub items: Vec<int>,
+}
+fn items_of(int n, Box b) -> Vec<int> {
+    return b.items;
+}
+fn fresh(Box b) -> Vec<int> {
+    let v: Vec<int> = Vec::new();
+    return v;
+}
+";
+    let (m, out) = summaries(src);
+    let items_of = of(&m, &out, "items_of");
+    assert_eq!(items_of.returns_inner, 0b10, "{items_of:?}");
+    assert_eq!(items_of.returns_arg, 0, "{items_of:?}");
+    let fresh = of(&m, &out, "fresh");
+    assert_eq!(fresh.returns_inner, 0, "{fresh:?}");
+}

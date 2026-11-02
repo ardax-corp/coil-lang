@@ -74,6 +74,15 @@ pub struct Summary {
     /// itself (not only what it reaches) after it returns, other than
     /// through its result: what copy-on-write must share at the call.
     pub keeps: u64,
+    /// Bit `i`: the result may be the object passed as parameter `i`
+    /// itself: what copy-on-write shares at the call unless the argument
+    /// is moved (#2206). Narrower than [`Self::returns`], which also counts
+    /// what the parameter reaches.
+    pub returns_arg: u64,
+    /// Bit `i`: the result may be an object held inside parameter `i` (a
+    /// field or element returned without a share): the caller shares the
+    /// result unless it only reads it (#2206).
+    pub returns_inner: u64,
     /// Bit `i`: the call hands parameter `i` itself to code not known here
     /// (a trait method, a closure), which may keep it all the same.
     pub opaque_args: u64,
@@ -155,6 +164,9 @@ impl Summary {
             param_only: 0,
             escapes: u64::MAX,
             keeps: 0,
+            // Unknown code is covered by `opaque_args`, as for `keeps`.
+            returns_arg: 0,
+            returns_inner: 0,
             opaque_args: if flags.contains(EffectFlags::UNKNOWN) { u64::MAX } else { 0 },
             returns: u64::MAX,
             shared_ret: true,
@@ -1699,7 +1711,7 @@ impl Cx<'_> {
     fn body(&self, index: usize, summaries: &[Summary]) -> Summary {
         let w = self.walk(index, summaries, false);
         let (escapes, returns, shared_ret) = escape::summarize(self, &w);
-        let (keeps, opaque_args) = {
+        let (keeps, returns_arg, opaque_args, returns_inner) = {
             let body = &self.module.bodies[index];
             let lookup = |callee: &Callee, args: &[HirId]| match callee {
                 Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
@@ -1709,13 +1721,15 @@ impl Cx<'_> {
             };
             let k = cow::keeps(self.module, body, &lookup);
             if std::env::var("COIL_COW_TRACE").is_ok() {
-                eprintln!("keeps {} = {:b} opaque {:b}", body.name, k.0, k.1);
+                eprintln!("keeps {} = {:b} returns {:b} opaque {:b}", body.name, k.0, k.1, k.2);
             }
             k
         };
         Summary {
             escapes,
             keeps,
+            returns_arg,
+            returns_inner,
             opaque_args,
             returns,
             shared_ret,
@@ -2594,6 +2608,9 @@ impl Cx<'_> {
             param_only: 0,
             escapes: u64::MAX,
             keeps: 0,
+            // Unknown code is covered by `opaque_args`, as for `keeps`.
+            returns_arg: 0,
+            returns_inner: 0,
             opaque_args: u64::MAX,
             returns: u64::MAX,
             shared_ret: true,
@@ -2871,6 +2888,8 @@ impl Cx<'_> {
                     param_only: o.param_only & s.param_only,
                     escapes: o.escapes | s.escapes,
                     keeps: o.keeps | s.keeps,
+                    returns_arg: o.returns_arg | s.returns_arg,
+                    returns_inner: o.returns_inner | s.returns_inner,
                     opaque_args: o.opaque_args | s.opaque_args,
                     returns: o.returns | s.returns,
                     shared_ret: o.shared_ret || s.shared_ret,

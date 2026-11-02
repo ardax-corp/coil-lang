@@ -63,6 +63,13 @@ pub struct MirBuilder {
     /// ([`Self::note_slot_field`]): `(note, slot, bit)`.
     field_notes: Vec<(u32, u32, u64)>,
     next_note: u32,
+    /// Bumped by every [`Self::def_local`]: the write a read sees.
+    def_count: u32,
+    /// Each local's last [`Self::def_local`] number.
+    def_gen: HashMap<LocalId, u32>,
+    /// The local and write number each [`Self::use_local`] value was read
+    /// from ([`Self::read_origin`]).
+    origins: HashMap<ValueId, (LocalId, u32)>,
 }
 
 impl MirBuilder {
@@ -84,6 +91,9 @@ impl MirBuilder {
             bound: Vec::new(),
             field_notes: Vec::new(),
             next_note: 0,
+            def_count: 0,
+            def_gen: HashMap::new(),
+            origins: HashMap::new(),
         }
     }
 
@@ -183,6 +193,8 @@ impl MirBuilder {
             self.func.word_slots.insert(local);
         }
         self.write_variable(local, b, val);
+        self.def_count += 1;
+        self.def_gen.insert(local, self.def_count);
         if let Some(home) = home {
             self.ins_home_store(home, val)?;
         }
@@ -218,7 +230,17 @@ impl MirBuilder {
     /// Read a source local, inserting φs at sealed / incomplete joins.
     pub fn use_local(&mut self, local: LocalId, ty: MirTy) -> Result<ValueId, MirError> {
         let b = self.cur()?;
-        Ok(self.read_variable(local, ty, b))
+        let v = self.read_variable(local, ty, b);
+        let generation = self.def_gen.get(&local).copied().unwrap_or(0);
+        self.origins.insert(v, (local, generation));
+        Ok(v)
+    }
+
+    /// The local and write a [`Self::use_local`] value was read from: two
+    /// reads of one local with no [`Self::def_local`] of it between hold
+    /// the same value, whatever SSA ids the reads got.
+    pub fn read_origin(&self, v: ValueId) -> Option<(LocalId, u32)> {
+        self.origins.get(&v).copied()
     }
 
     /// Field ops need a heapref object.
@@ -985,6 +1007,34 @@ impl MirBuilder {
             todo.extend(self.preds[b.index()].iter().copied());
         }
         true
+    }
+
+    /// Whether block `def` dominates the current block: every path from
+    /// the entry to it passes `def`, over the predecessors known so far.
+    /// A loop head's back edges come later, but they come from inside the
+    /// loop, which the head's other predecessors already decide (the
+    /// source is structured: no edge enters a loop but at its head).
+    pub fn dominates_current(&self, def: BlockId) -> bool {
+        let Ok(start) = self.cur() else {
+            return false;
+        };
+        let mut seen = vec![false; self.func.blocks.len()];
+        let mut todo = vec![start];
+        while let Some(b) = todo.pop() {
+            if b == def || std::mem::replace(&mut seen[b.index()], true) {
+                continue;
+            }
+            if self.preds[b.index()].is_empty() {
+                return false;
+            }
+            todo.extend(self.preds[b.index()].iter().copied());
+        }
+        true
+    }
+
+    /// `v` after φ / copy substitution.
+    pub fn resolved(&self, v: ValueId) -> ValueId {
+        self.resolve(v)
     }
 
     /// In-place grow (B6). Dest is `heapref`. Pair with [`Self::ins_gc_barrier`].
