@@ -317,7 +317,9 @@ fn format_ty_renamed(ty: &Ty, rename: &mut HashMap<TyVarId, String>, next: &mut 
                 .map(|(name, ty)| format!("{}: {}", name, format_ty_renamed(ty, rename, next)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{{ {} }}", inner)
+            // A record type has no spelling in source (#2095): `record`
+            // keeps the braces from reading as one.
+            format!("record {{ {} }}", inner)
         }
         Ty::Readonly(inner) => format!("readonly {}", format_ty_renamed(inner, rename, next)),
         Ty::Existential { class } => class.clone(),
