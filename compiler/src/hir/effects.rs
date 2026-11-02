@@ -341,8 +341,16 @@ impl ProgramEffects {
         };
         let flags = classify_host_name(&short);
         // Only a known native: anything else is a user function this view
-        // cannot see.
-        (!flags.contains(EffectFlags::UNKNOWN) || escape::is_listed_host(&short)).then(|| escape::host_summary(&short, Summary::of(flags)))
+        // cannot see. One that writes the heap may write any argument (as
+        // [`Cx::named`] has it), so copy-on-write makes a `Vec` it is
+        // handed unique first.
+        (!flags.contains(EffectFlags::UNKNOWN) || escape::is_listed_host(&short)).then(|| {
+            let mut s = escape::host_summary(&short, Summary::of(flags));
+            if flags.contains(EffectFlags::HEAP_MUT) {
+                s.mutates = u64::MAX;
+            }
+            s
+        })
     }
 
     /// [`Summary::fields`] of a call of the user function or method

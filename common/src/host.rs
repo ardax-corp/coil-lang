@@ -1405,6 +1405,55 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HOST_ALLOC,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "key_index_table",
+        arity: 1,
+        id: 191,
+        effects: TEXT_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "key_index_probe",
+        arity: 4,
+        id: 192,
+        effects: HOST_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "key_index_insert",
+        arity: 4,
+        id: 193,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "key_index_remove",
+        arity: 4,
+        id: 194,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "key_index_compact",
+        arity: 3,
+        id: 195,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "key_index_retain",
+        arity: 2,
+        id: 196,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "key_index_clear",
+        arity: 3,
+        id: 197,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
 ];
 
 /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
@@ -1564,6 +1613,19 @@ pub const CORO_CLOSE_NATIVE: &str = "coro_close";
 /// No capability: like the clock, it reads host state and touches nothing.
 pub const ENTROPY_BYTES_ID: u16 = 190;
 pub const ENTROPY_BYTES_NATIVE: &str = "entropy_bytes";
+/// The key index natives (archive 6.18, `key_index::*`): an
+/// insertion-ordered hash index over parallel `Vec`s that any collection
+/// keyed by a `Hash + Eq` type builds on. See
+/// `docs/internals/key-index.md`.
+pub const KEY_INDEX_TABLE_ID: u16 = 191;
+pub const KEY_INDEX_TABLE_NATIVE: &str = "key_index_table";
+pub const KEY_INDEX_PROBE_NATIVE: &str = "key_index_probe";
+pub const KEY_INDEX_INSERT_NATIVE: &str = "key_index_insert";
+pub const KEY_INDEX_REMOVE_NATIVE: &str = "key_index_remove";
+pub const KEY_INDEX_COMPACT_NATIVE: &str = "key_index_compact";
+pub const KEY_INDEX_RETAIN_NATIVE: &str = "key_index_retain";
+pub const KEY_INDEX_CLEAR_ID: u16 = 197;
+pub const KEY_INDEX_CLEAR_NATIVE: &str = "key_index_clear";
 
 /// Set on the `type_id` argument of `gc_register_finalizer` when the
 /// type's `drop` keeps nothing of `self` (the compiler's escape facts):
@@ -1619,8 +1681,10 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 191);
+    assert!(HOST_NATIVES.len() == 198);
     assert!(HOST_NATIVES[CORO_CLOSE_ID as usize].id == CORO_CLOSE_ID);
+    assert!(HOST_NATIVES[KEY_INDEX_TABLE_ID as usize].id == KEY_INDEX_TABLE_ID);
+    assert!(HOST_NATIVES[KEY_INDEX_CLEAR_ID as usize].id == KEY_INDEX_CLEAR_ID);
     assert!(HOST_NATIVES[ENTROPY_BYTES_ID as usize].id == ENTROPY_BYTES_ID);
     assert!(HOST_NATIVES[IO_OPEN_ID as usize].id == IO_OPEN_ID);
     assert!(HOST_NATIVES[TCP_ACCEPT_ID as usize].id == TCP_ACCEPT_ID);
@@ -1695,6 +1759,13 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "vec_extend_range",
     "vec_fill",
     "symbol_next_id",
+    "key_index_table",
+    "key_index_probe",
+    "key_index_insert",
+    "key_index_remove",
+    "key_index_compact",
+    "key_index_retain",
+    "key_index_clear",
 ];
 
 /// Whether standard native `id` is in [`DIRECT_HOST_NATIVES`].

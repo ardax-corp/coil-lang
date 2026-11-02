@@ -140,6 +140,8 @@ pub fn build_standard_host_natives(
     push_task_natives(&mut out, &mut register_id, common::CORO_CLOSE_ID..=common::CORO_CLOSE_ID);
     // Append-only after coro_close: `entropy::bytes` (major 6 minor 15).
     push_entropy(&mut out, &mut register_id);
+    // Append-only after entropy: `key_index::*` (major 6 minor 18).
+    push_wiring(&mut out, &mut register_id, crate::key_index::KEY_INDEX_WIRING, "key_index");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -1433,8 +1435,16 @@ mod tests {
             Some(common::CORO_CLOSE_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(190).map(String::as_str),
             Some(common::ENTROPY_BYTES_NATIVE)
+        );
+        assert_eq!(
+            names.get(191).map(String::as_str),
+            Some(common::KEY_INDEX_TABLE_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::KEY_INDEX_CLEAR_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1806,6 +1816,10 @@ mod tests {
             registrations.get(end + 54).map(|(n, _)| n.as_str()),
             Some(common::ENTROPY_BYTES_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 55);
+        assert_eq!(
+            registrations.get(end + 61).map(|(n, _)| n.as_str()),
+            Some(common::KEY_INDEX_CLEAR_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 62);
     }
 }
