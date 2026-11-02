@@ -2938,6 +2938,22 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 )));
                 return Ok(());
             }
+            // A plain native runs in register form: no stack traffic, and
+            // a dense loop keeps running across it (archive 6.17).
+            if common::host_native_is_direct(usize::from(*native_id))
+                && super::host_allow::dense_host_layout_ok(*layout)
+                && let Ok(arity) = u8::try_from(args.len())
+            {
+                let slots: Vec<u8> = args.iter().map(|a| regs[a.index()]).collect();
+                let base = if slots.is_empty() { 0 } else { gather_base(out, &slots, scratch, loc)? };
+                let idx = intern_pool(pool, common::pack_dense_host_call(*native_id, base, arity))?;
+                out.push(byte(Byte::new(Instruction::DenseHostCall).with_dense_host_call(
+                    regs[dest.index()],
+                    *layout,
+                    idx,
+                )));
+                return Ok(());
+            }
             // ABI edge: native id + DensePush args + HostInvoke + StorePop dest.
             out.push(IlOp::Const {
                 imm: i32::from(*native_id),
