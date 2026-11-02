@@ -1311,31 +1311,32 @@ fn place_moved_into_call(f: &Facts<'_>, body: &HirBody, call: HirId, v: HirId, b
         let local = body.local(l);
         !borrowed.contains(&l) && !local.borrow && local.kind != LocalKind::Capture && !f.captured.contains(&l)
     };
-    let mut root = None;
-    if !same_place(body, *place, v, &plain, &mut root) {
+    let mut roots = Vec::new();
+    if !same_place(body, *place, v, &plain, &mut roots) {
         return false;
     }
-    let Some(root) = root else { return false };
-    f.reads.get(&root).is_some_and(|rs| rs.iter().filter(|&&r| f.contains(call, r)).count() == 1)
+    // Nothing else in the call reads the root or an index: the argument
+    // is the only way the call sees them.
+    roots.iter().all(|l| f.reads.get(l).is_none_or(|rs| rs.iter().all(|&r| !f.contains(call, r) || f.contains(v, r))))
 }
 
 /// Whether `a` and `b` name the same place through the same field names
-/// and equal indices, rooted at one plain local (stored in `root`).
-fn same_place(body: &HirBody, a: HirId, b: HirId, plain: &dyn Fn(LocalId) -> bool, root: &mut Option<LocalId>) -> bool {
-    let index_eq = |x: HirId, y: HirId| match (&body.expr(x).kind, &body.expr(y).kind) {
-        (HirKind::Lit(Lit::Int(i)), HirKind::Lit(Lit::Int(j))) => i == j,
-        (HirKind::Local(i), HirKind::Local(j)) => i == j && plain(*i),
-        _ => false,
-    };
+/// and equal indices (literals, or the same place again), every local in
+/// them plain; the locals go to `roots`.
+fn same_place(body: &HirBody, a: HirId, b: HirId, plain: &dyn Fn(LocalId) -> bool, roots: &mut Vec<LocalId>) -> bool {
     match (&body.expr(a).kind, &body.expr(b).kind) {
-        (HirKind::Field { base: ab, name: an }, HirKind::Field { base: bb, name: bn }) => an == bn && same_place(body, *ab, *bb, plain, root),
+        (HirKind::Field { base: ab, name: an }, HirKind::Field { base: bb, name: bn }) => an == bn && same_place(body, *ab, *bb, plain, roots),
         (HirKind::Index { base: ab, index: ai, kind: IndexKind::Array }, HirKind::Index { base: bb, index: bi, kind: IndexKind::Array }) => {
-            index_eq(*ai, *bi) && same_place(body, *ab, *bb, plain, root)
+            let index_eq = match (&body.expr(*ai).kind, &body.expr(*bi).kind) {
+                (HirKind::Lit(Lit::Int(i)), HirKind::Lit(Lit::Int(j))) => i == j,
+                _ => same_place(body, *ai, *bi, plain, roots),
+            };
+            index_eq && same_place(body, *ab, *bb, plain, roots)
         }
-        (HirKind::Builtin { op: Builtin::Cow { .. }, args }, _) if args.len() == 1 => same_place(body, args[0], b, plain, root),
-        (_, HirKind::Builtin { op: Builtin::Cow { .. }, args }) if args.len() == 1 => same_place(body, a, args[0], plain, root),
+        (HirKind::Builtin { op: Builtin::Cow { .. }, args }, _) if args.len() == 1 => same_place(body, args[0], b, plain, roots),
+        (_, HirKind::Builtin { op: Builtin::Cow { .. }, args }) if args.len() == 1 => same_place(body, a, args[0], plain, roots),
         (HirKind::Local(x), HirKind::Local(y)) if x == y && plain(*x) => {
-            *root = Some(*x);
+            roots.push(*x);
             true
         }
         _ => false,
