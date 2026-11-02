@@ -9571,6 +9571,48 @@ fn hot_hint_spreads_to_class_methods() {
     assert!(!tagged.functions.contains_key("Acc::big"), "`Acc::big` should be hot through its `#[hot]` sibling and spliced");
 }
 
+/// A compile under `--clone-budget 1`.
+fn budget_one(c: &mut Compiler) {
+    let mut grants = crate::HostGrants::deny_all();
+    grants.clone_budget = Some(1);
+    c.set_host_grants(grants, Vec::new());
+}
+
+/// A `#[hot]` generic function gets a clone per type past the clone budget.
+#[test]
+fn hot_generic_fn_clones_past_the_budget() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn pick<T>(T a, T b, bool first) -> T {{ if first {{ return a; }} return b; }} \
+             fn main() -> int {{ let s = pick(\"x\", \"yz\", false); let f = pick(1.5, 2.5, true); \
+               let b = pick(true, false, true); return pick(1, 2, false) + s.len() + (if b {{ 1 }} else {{ 0 }}) + (if f > 1.0 {{ 1 }} else {{ 0 }}); }}"
+        )
+    };
+    let caps = |c: &Compiler| c.messages.iter().filter(|m| m.code() == Some(reporting::ErrorCode::MonomorphizeCap)).count();
+    let (_, plain) = compile_src_compiler(&src(""), budget_one);
+    assert!(caps(&plain) > 0, "the fixture should hit the clone budget: {:?}", plain.messages);
+    let (_, hot) = compile_src_compiler(&src("#[hot]"), budget_one);
+    assert_eq!(caps(&hot), 0, "`#[hot]` `pick` should clone past the budget: {:?}", hot.messages);
+}
+
+/// A `#[hot]` method of a generic class gets a clone per type past the
+/// clone budget, and its class's other methods with it.
+#[test]
+fn hot_method_clones_past_the_budget() {
+    let src = |tag: &str| {
+        "class Cell<T> { pub v: T, } \
+         impl Cell<T> { TAG pub fn get() -> T { let i = 0; while i < 3 { i = i + 1; } return self.v; } pub fn put(T x) { let i = 0; while i < 3 { i = i + 1; } self.v = x; } } \
+         fn main() -> int { let a = new Cell(1); let b = new Cell(\"s\"); let c = new Cell(2.5); \
+           a.put(3); b.put(\"tt\"); c.put(1.0); return a.get() + b.get().len() + (if c.get() > 0.5 { 1 } else { 0 }); }"
+            .replace("TAG", tag)
+    };
+    let clones = |c: &Compiler| c.functions.keys().filter(|k| k.contains("$inst$")).count();
+    let (_, plain) = compile_src_compiler(&src(""), budget_one);
+    let (_, hot) = compile_src_compiler(&src("#[hot]"), budget_one);
+    assert!(clones(&plain) <= 1, "the fixture should hit the clone budget: {:?}", plain.functions.keys().collect::<Vec<_>>());
+    assert!(clones(&hot) >= 6, "`#[hot]` `get` and its sibling `put` should clone at every type: {:?}", hot.functions.keys().collect::<Vec<_>>());
+}
+
 /// An `#[inline]` function that recurses stays a call, and says so once.
 #[test]
 fn inline_hint_on_a_recursive_function_warns() {
