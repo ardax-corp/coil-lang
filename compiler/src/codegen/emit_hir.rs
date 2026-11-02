@@ -221,9 +221,9 @@ struct HirAdaptWord {
 enum HirAdaptConv {
     /// The same word on both sides.
     Same,
-    /// A bare type parameter's value: `BoxValue` of this tag on the way
-    /// in, `UnboxValue` on the way out.
-    Box(u32),
+    /// A bare type parameter's value: its word on the way in, read back
+    /// from the word on the way out (a `float` / `bool` as its bits).
+    Word,
 }
 
 /// Builtin calls the lowering emits inline, as `compile_call_expr` does.
@@ -289,9 +289,6 @@ pub(in crate::codegen) struct HirLambdaTail {
     body: HirBody,
     emit: HirEmit,
     label: IlLabel,
-    /// Parameters to `UnboxValue` on entry: a lambda literal passed where
-    /// a generic callee boxes its arguments (#699).
-    unbox: Option<Vec<Option<Ty>>>,
     /// The dictionaries it captures ([`HirLambda::dicts`]).
     dicts: Vec<(String, u32)>,
 }
@@ -1049,7 +1046,6 @@ impl Compiler {
         self.planned_method_clones.borrow_mut().clear();
         let entry_sp = self.hir_entry_sp.take();
         self.hir_mir_ctx = std::mem::take(&mut self.hir_entry_ctx);
-        self.hir_mir_unbox = std::mem::take(&mut self.hir_entry_unbox);
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
             self.hir_refusal = Some("no-hir-body");
             return false;
@@ -1330,7 +1326,7 @@ impl Compiler {
                 } else if let Some(entry) = entry_sp {
                     self.hir_lower_mir(hir, &mut emit, Some(entry))
                 } else {
-                    self.queue_hir_lambdas(hir, &mut emit);
+                    self.queue_hir_lambdas(&mut emit);
                     Self::queue_hir_par_loops(&mut emit);
                     self.hir_mir_why = Some("converted or shared generic entry".into());
                     None
@@ -1368,7 +1364,6 @@ impl Compiler {
     ) -> bool {
         self.hir_refusal = None;
         self.hir_mir_ctx.clear();
-        self.hir_mir_unbox.clear();
         let prev_calls = self.hir_synth_calls.replace(calls);
         let module = self.hir_module.take();
         // The frame starts with the parameters, as a declared function's.
@@ -1439,7 +1434,7 @@ impl Compiler {
     /// `hir` lowered straight to MIR, when this phase covers it: plain
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
     fn hir_lower_mir(&mut self, hir: &HirBody, emit: &mut HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
-        self.queue_hir_lambdas(hir, emit);
+        self.queue_hir_lambdas(emit);
         Self::queue_hir_par_loops(emit);
         let emit = &*emit;
         // A lambda's captured dictionaries sit below its parameters.
@@ -1485,30 +1480,8 @@ impl Compiler {
     }
 
     /// Queue each lambda planned in `hir` to be emitted as a function of
-    /// its own after the body ([`Self::flush_hir_lambdas`]), each with the
-    /// parameters it unboxes on entry when it is passed where a generic
-    /// callee boxes its arguments (#699).
-    fn queue_hir_lambdas(&mut self, hir: &HirBody, emit: &mut HirEmit) {
-        let mut unbox: HashMap<u32, Vec<Option<Ty>>> = HashMap::new();
-        for (&id, call) in &emit.plan.calls {
-            let (Some(g), Some(e)) = (&call.generic, hir.exprs.get(id as usize)) else {
-                continue;
-            };
-            let HirKind::Call { args, .. } = &e.kind else {
-                continue;
-            };
-            if call.method {
-                continue;
-            }
-            for (&arg, adapt) in args.iter().zip(&g.adapt) {
-                if let Some(adapt) = adapt
-                    && adapt.unbox.iter().any(Option::is_some)
-                    && matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
-                {
-                    unbox.insert(arg.0, adapt.unbox.clone());
-                }
-            }
-        }
+    /// its own after the body ([`Self::flush_hir_lambdas`]).
+    fn queue_hir_lambdas(&mut self, emit: &mut HirEmit) {
         let mut ids: Vec<u32> = emit.plan.lambdas.keys().copied().collect();
         ids.sort_unstable();
         for id in ids {
@@ -1518,7 +1491,6 @@ impl Compiler {
                     body: lam.body.clone(),
                     emit: code,
                     label: lam.label,
-                    unbox: unbox.remove(&id),
                     dicts: lam.dicts.clone(),
                 };
                 self.hir_lambda_tail.push(tail);
@@ -2152,9 +2124,6 @@ impl Compiler {
             bound_calls: &tables.bound_calls,
             existential_calls: &tables.existential_calls,
             ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx } else { &[] },
-            param_unboxes: &self.hir_mir_unbox,
-            unbox_any: &tables.unbox_any,
-            open_params: &tables.open_params,
             lens: &emit.plan.lens,
             alloc_steady: self.alloc_steady,
             pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),
@@ -5270,7 +5239,7 @@ impl Compiler {
         use crate::hir::synth::Synth;
         use crate::typechecking::ty::int;
         let plan = self.method_clone_plans.borrow().get(name).cloned().expect("a planned method clone");
-        let tag = |ty: Option<&Ty>| ty.and_then(Self::ty_to_value_tag).map(|t| t as u32);
+        let word = |ty: Option<&Ty>| ty.and_then(Self::ty_to_value_tag).is_some();
         let mut dicts = Vec::new();
         if let Some(g) = &plan.generic {
             self.plan_call_site_dicts(&mut dicts, &g.lookup, &g.arg_tys, Some(&g.ret_ty));
@@ -5280,14 +5249,14 @@ impl Compiler {
         for (slot, own_ty) in plan.param_tys.iter().enumerate() {
             let local = b.local(&format!("arg{slot}"), own_ty.clone(), LocalKind::Param);
             let mut arg = b.read(local);
-            let boxed = tag(plan.generic.as_ref().and_then(|g| g.boxed.get(slot)?.as_ref()));
+            let as_word = word(plan.generic.as_ref().and_then(|g| g.boxed.get(slot)?.as_ref()));
             let shared_ty = plan.shared_tys[slot].clone();
             if plan.params[slot] != plan.shared_params[slot] {
-                let ty = if boxed.is_some() { int() } else { shared_ty.clone() };
+                let ty = if as_word { int() } else { shared_ty.clone() };
                 arg = b.builtin(Builtin::Relayout, vec![arg], ty);
             }
-            if let Some(tag) = boxed {
-                arg = b.builtin(Builtin::Box { tag }, vec![arg], shared_ty);
+            if as_word {
+                arg = b.builtin(Builtin::Retype, vec![arg], shared_ty);
             }
             args.push(arg);
         }
@@ -5299,9 +5268,9 @@ impl Compiler {
             None => plan.ret_ty.clone(),
         };
         let mut value = b.call(&plan.shared, args, call_ty);
-        if let Some(tag) = tag(unbox.as_ref()) {
+        if word(unbox.as_ref()) {
             let ty = if convert { int() } else { plan.ret_ty.clone() };
-            value = b.builtin(Builtin::Unbox { tag }, vec![value], ty);
+            value = b.builtin(Builtin::Retype, vec![value], ty);
         }
         if convert {
             value = b.builtin(Builtin::Relayout, vec![value], plan.ret_ty.clone());
@@ -7248,7 +7217,7 @@ impl Compiler {
             let ty = apply_ty_prune(self.checker.subst(), vars.get(&v).ok_or("callee-generic")?);
             match self.hir_adapt_conv(&Ty::Var(v), &ty, bounds)? {
                 HirAdaptConv::Same => {}
-                HirAdaptConv::Box(_) if !self.hir_adapt_two_words(&ty) => {
+                HirAdaptConv::Word if !self.hir_adapt_two_words(&ty) => {
                     boxed.insert(v, ty);
                 }
                 _ => return Err("callee-generic"),
@@ -7263,7 +7232,7 @@ impl Compiler {
 
     /// How one word of a shared body's closure, typed `scheme` in the
     /// callee and `ground` at the call, converts (#1532): a bare type
-    /// parameter's value boxes as the call boxes an argument, an open one
+    /// parameter's value goes as its word, as a call passes an argument, an open one
     /// or a function stays the word it is. A type parameter nested in an
     /// `Option`, tuple or container is held as the shared body keeps it,
     /// which a ground reader cannot take unless it is open or a function.
@@ -7290,11 +7259,8 @@ impl Compiler {
             return Err("callee-generic");
         }
         // A two-word value crosses a closure call as its object.
-        if self.hir_adapt_two_words(ground) {
-            return Self::ty_to_value_tag(ground).map(|tag| HirAdaptConv::Box(tag as u32)).ok_or("callee-generic");
-        }
-        // A niche word boxes as itself (rep(ground T)), as any other word.
-        Self::ty_to_value_tag(ground).map(|tag| HirAdaptConv::Box(tag as u32)).ok_or("callee-generic")
+        // A niche word goes as itself (rep(ground T)), as any other word.
+        Self::ty_to_value_tag(ground).map(|_| HirAdaptConv::Word).ok_or("callee-generic")
     }
 
     /// A value of two words where it is held (a range, a pair enum).
@@ -7390,15 +7356,13 @@ impl Compiler {
         b.set_ret_ty(adapt.ret.ty);
         let f = b.add_param(MirTy::HeapRef).map_err(err)?;
         let params = adapt.args.iter().map(|w| b.add_param(w.ty)).collect::<Result<Vec<_>, _>>().map_err(err)?;
-        let boxed = |b: &mut crate::mir::MirBuilder, tag: u32, v| b.ins_box(v, tag);
         let mut args = Vec::with_capacity(params.len());
         for (w, p) in adapt.args.iter().zip(params) {
             args.push(match w.conv {
                 HirAdaptConv::Same => p,
-                HirAdaptConv::Box(tag) => boxed(&mut b, tag, p).map_err(err)?,
+                HirAdaptConv::Word => b.ins_word(p).map_err(err)?,
             });
         }
-        let any = common::UNBOX_ANY_TAG;
         if let Some(items) = &adapt.ret_items {
             let r = b.ins_call_indirect(f, args, MirTy::HeapRef).map_err(err)?;
             let obj = Self::closure_adapter_items(&mut b, r, items)?;
@@ -7438,9 +7402,9 @@ impl Compiler {
                 let r = b.ins_call_indirect(f, args, adapt.ret.ty).map_err(err)?;
                 b.ret(Some(r)).map_err(err)?;
             }
-            HirAdaptConv::Box(_) => {
+            HirAdaptConv::Word => {
                 let r = b.ins_call_indirect(f, args, MirTy::HeapRef).map_err(err)?;
-                let v = b.ins_unbox(r, any, adapt.ret.ty).map_err(err)?;
+                let v = b.ins_word_as(r, adapt.ret.ty).map_err(err)?;
                 b.ret(Some(v)).map_err(err)?;
             }
         }
@@ -7456,9 +7420,8 @@ impl Compiler {
     ) -> Result<crate::mir::ValueId, String> {
         use crate::mir::{HirRetItem, HirRetItems, MirAllocKind, MirConst, MirGcKind, MirTy};
         let err = |e: crate::mir::MirError| format!("mir: {e}");
-        let any = common::UNBOX_ANY_TAG;
         let read_ty = |it: &HirRetItem| if it.unbox { MirTy::HeapRef } else { it.ty };
-        let item = |b: &mut crate::mir::MirBuilder, it: &HirRetItem, v| if it.unbox { b.ins_unbox(v, any, it.ty).map_err(err) } else { Ok(v) };
+        let item = |b: &mut crate::mir::MirBuilder, it: &HirRetItem, v| if it.unbox { b.ins_word_as(v, it.ty).map_err(err) } else { Ok(v) };
         match items {
             HirRetItems::Tuple { items, kinds } => {
                 let mut words = Vec::with_capacity(items.len());
@@ -7541,10 +7504,7 @@ impl Compiler {
                 _ => MirTy::I64,
             };
             let p = b.add_param(if tag.is_some() { MirTy::HeapRef } else { MirTy::I64 }).map_err(err)?;
-            args.push(match tag {
-                Some(tag) => b.ins_unbox(p, tag as u32, word).map_err(err)?,
-                None => p,
-            });
+            args.push(if tag.is_some() { b.ins_word_as(p, word).map_err(err)? } else { p });
         }
         let Some(layout) = adapt.ret else {
             let r = b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
@@ -8048,7 +8008,7 @@ impl Compiler {
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
+            HirKind::Builtin { op: Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -9077,7 +9037,7 @@ impl Compiler {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
             HirKind::Builtin {
-                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify { .. } | Builtin::Relayout,
+                op: Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             // A copy-on-write op passes its operand's word through.
@@ -9691,11 +9651,6 @@ impl Compiler {
         (*natural == BOXED && matches!(own, ValueLayout::NicheOption | ValueLayout::NicheUnitResult | ValueLayout::NicheResult)).then_some(true)
     }
 
-    /// Whether `ty` is a bare type variable.
-    pub(super) fn hir_open_ty(&self, ty: Option<&Ty>) -> bool {
-        ty.is_some_and(|ty| matches!(apply_ty_prune(self.checker.subst(), ty), Ty::Var(_)))
-    }
-
     /// The checker's existential pack recipe for `id`, when `id` is the
     /// packed value itself (a wrapper sharing its span has another type).
     pub(super) fn hir_existential_pack(&self, hir: &HirBody, id: HirId) -> Option<crate::typechecking::infer::ExistentialPack> {
@@ -10008,7 +9963,7 @@ impl Compiler {
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {
-        let HirLambdaTail { body, mut emit, label, unbox, dicts } = lam;
+        let HirLambdaTail { body, mut emit, label, dicts } = lam;
         // A lambda spliced into several bodies is a function per copy.
         let mut name = body.name.clone();
         let mut k = 1;
@@ -10020,7 +9975,6 @@ impl Compiler {
         let prev_key = self.current_function_table_key.replace(name.clone());
         let prev_two_word = self.compiling_two_word_enum.take();
         let prev_keys = std::mem::take(&mut self.field_key_slots);
-        let prev_unbox = std::mem::take(&mut self.hir_mir_unbox);
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
         let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
@@ -10031,12 +9985,6 @@ impl Compiler {
         for (&param, &slot) in body.params.iter().zip(&slots[ncap..]) {
             let pname = body.local(param).name.clone();
             self.record_debug_param(&pname, slot);
-        }
-        // Direct MIR unboxes the parameters a generic callee boxed.
-        for (ty, &slot) in unbox.iter().flatten().zip(&slots[ncap..]) {
-            if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
-                self.hir_mir_unbox.push((slot, tag as u32));
-            }
         }
         let root = body.root.expect("planned lambda body");
         self.hir_plan_par_loops(&body, &mut emit, root);
@@ -10068,7 +10016,6 @@ impl Compiler {
             self.bytecode.set_last_func_pinned();
         }
         self.hir_mir_ctx = prev_ctx;
-        self.hir_mir_unbox = prev_unbox;
         self.field_key_slots = prev_keys;
         self.compiling_two_word_enum = prev_two_word;
         self.current_function_table_key = prev_key;
