@@ -3826,6 +3826,7 @@ impl Compiler {
             captures: body.captures.clone(),
             declared: body.declared.clone(),
             stated_escape: body.stated_escape.clone(),
+            hints: body.hints,
             contract_spans: body.contract_spans.clone(),
             locals: body
                 .locals
