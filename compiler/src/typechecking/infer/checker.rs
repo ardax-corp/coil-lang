@@ -267,6 +267,7 @@ impl Checker {
             variadic_call_arg_tags: HashMap::new(),
             fn_result_mode: None,
             in_test_case: false,
+            open_unused_results: Vec::new(),
             module_consts: HashMap::new(),
             macro_imports: HashSet::new(),
             test_try_sites: HashMap::new(),
@@ -963,17 +964,27 @@ impl Checker {
         );
     }
 
-    /// Pre-register the `thread` module's unit error enums (`ThreadError`,
-    /// `ChannelError`, `LockError`).
+    /// Pre-register the `thread` module's error enums (`ThreadError`,
+    /// `ChannelError`, `LockError`). All variants are unit but
+    /// `ThreadError::Panicked(string)`.
     fn register_builtin_thread_error(&mut self) {
         for (name, variants) in common::BUILTIN_THREAD_ERROR_ENUMS {
             let name = name.to_string();
             let variant_names: Vec<String> = variants.iter().map(|s| s.to_string()).collect();
-            let payloads = variant_names
-                .iter()
-                .map(|_| EnumVariantPayloadTy::Unit)
+            let panicked = |i: usize| {
+                name == common::BUILTIN_THREAD_ERROR_ENUM
+                    && i as u32 == common::BUILTIN_THREAD_ERROR_PANICKED_TAG
+            };
+            let payloads = (0..variant_names.len())
+                .map(|i| {
+                    if panicked(i) {
+                        EnumVariantPayloadTy::Tuple(vec![string()])
+                    } else {
+                        EnumVariantPayloadTy::Unit
+                    }
+                })
                 .collect();
-            let arities = vec![0; variant_names.len()];
+            let arities = (0..variant_names.len()).map(|i| usize::from(panicked(i))).collect();
             let mut tag_map = BTreeMap::new();
             for (i, vn) in variant_names.iter().enumerate() {
                 tag_map.insert(vn.clone(), i as u32);
@@ -1645,7 +1656,9 @@ impl Checker {
         self.rejected_builtin_type_decls.clear();
         self.unknown_type_names.clear();
         self.type_param_names_seen.clear();
+        self.open_unused_results.clear();
         let ty = self.check_program_body(ast);
+        self.report_open_unused_results();
         self.drop_reserved_type_name_cascades(first_message);
         self.report_unknown_type_names(first_message);
         ty
@@ -7171,24 +7184,9 @@ impl Checker {
     ) -> Ty {
         let st = self.infer(start);
         let et = self.infer(end);
-        let sp = apply_ty_prune(&self.subst, &st);
-        let ep = apply_ty_prune(&self.subst, &et);
-        // Coerce int literals under a `byte` peer (same as annotated `byte` lets).
-        if Self::is_byte_ty(&sp) && Self::byte_literal_coercion(end).is_ok() {
-            let _ = self.unify(
-                &et,
-                &crate::typechecking::ty::byte(),
-                &end.0.into_range(),
-                "range end",
-            );
-        } else if Self::is_byte_ty(&ep) && Self::byte_literal_coercion(start).is_ok() {
-            let _ = self.unify(
-                &st,
-                &crate::typechecking::ty::byte(),
-                &start.0.into_range(),
-                "range start",
-            );
-        }
+        // An int literal next to a `byte` bound types as `byte` (#2097), as
+        // an operand of a binary operator does (#2093).
+        let (st, et) = self.coerce_byte_literal_operands(start, end, st, et);
         let elem = self.unify(&st, &et, &range, "range bounds");
         if !self.require_ord_for_range(&elem, &range) {
             return if inclusive {
@@ -7546,14 +7544,44 @@ impl Checker {
             return;
         }
         let ty = apply_ty_prune(&self.subst, ty);
-        if !is_result_ty(&ty) {
+        if matches!(ty, Ty::Var(_)) {
+            let callee = match unwrap_expr_wrappers(stmt).1.as_ref() {
+                Expression::Call { name, .. } => match name.1.as_ref() {
+                    Expression::Identifier(n) => Some((*n).to_string()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            self.open_unused_results.push((ty, callee, stmt.0.into_range(), self.in_test_case));
             return;
         }
-        let msg = if self.in_test_case {
+        self.report_unused_result(&ty, stmt.0.into_range(), self.in_test_case);
+    }
+
+    /// The open statement values [`Self::warn_unused_result`] put off, now
+    /// that every body of the module is checked.
+    fn report_open_unused_results(&mut self) {
+        for (ty, callee, range, in_test) in std::mem::take(&mut self.open_unused_results) {
+            let ty = apply_ty_prune(&self.subst, &ty);
+            // The call's type was taken before the callee's body made it a
+            // Result-mode function, and stays open.
+            let ty = match callee {
+                Some(name) if matches!(ty, Ty::Var(_)) && self.fn_is_result_mode(&name) => result_ty(ty, string()),
+                _ => ty,
+            };
+            self.report_unused_result(&ty, range, in_test);
+        }
+    }
+
+    fn report_unused_result(&mut self, ty: &Ty, range: Range<usize>, in_test: bool) {
+        if !is_result_ty(ty) {
+            return;
+        }
+        let msg = if in_test {
             let mut msg = Message::error(
                 ErrorCode::UnusedResult,
                 "unused `Result` value in a test: an error it holds is dropped and the test still passes".to_string(),
-                stmt.0.into_range(),
+                range,
             );
             msg.with_help("write `…?;` to fail the test on an error, or `let _ = …;` to discard it on purpose".to_string());
             msg
@@ -7561,7 +7589,7 @@ impl Checker {
             let mut msg = Message::warn(
                 ErrorCode::UnusedResult,
                 "unused `Result` value: an error it holds is dropped".to_string(),
-                stmt.0.into_range(),
+                range,
             );
             msg.with_help("handle it with `?` or `match`, or write `let _ = …;` to discard it on purpose".to_string());
             msg

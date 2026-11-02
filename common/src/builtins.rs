@@ -56,7 +56,11 @@ pub const BUILTIN_STRING_ERROR_VARIANTS: &[&str] = &["InvalidUtf8", "NotCharBoun
 pub const BUILTIN_THREAD_ERROR_ENUM: &str = "ThreadError";
 
 /// `ThreadError` variants in tag order.
-pub const BUILTIN_THREAD_ERROR_VARIANTS: &[&str] = &["JoinFailed", "NotSendable"];
+/// `Panicked(string)` carries the worker's panic message.
+pub const BUILTIN_THREAD_ERROR_VARIANTS: &[&str] = &["JoinFailed", "NotSendable", "Panicked"];
+
+/// The [`BUILTIN_THREAD_ERROR_VARIANTS`] tag of `ThreadError::Panicked(string)`.
+pub const BUILTIN_THREAD_ERROR_PANICKED_TAG: u32 = 2;
 
 /// Built-in `ChannelError` enum name (virtual `thread` module), shared by
 /// `thread` channels and `task::Channel`.

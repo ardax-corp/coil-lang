@@ -674,7 +674,7 @@ fn optional_access_on_result_prints_result_type() {
         .find(|m| m.message().contains("`?.` requires Option"))
         .unwrap_or_else(|| panic!("no `?.` diagnostic: {msgs:?}"));
     assert!(
-        msg.message().contains("found `Result<{ v: int }, a>`"),
+        msg.message().contains("found `Result<record { v: int }, a>`"),
         "got: {}",
         msg.message()
     );

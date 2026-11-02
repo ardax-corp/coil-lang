@@ -1929,6 +1929,27 @@ fn nested_foreign_method_clone_is_specialized() {
     }
 }
 
+/// A body that calls a function of its own module (declared after it)
+/// still gets another module's method clones spliced: they compile before
+/// it, so `main` calls neither `Bag<int>::at_or` nor `Bag<int>::len`.
+#[test]
+fn foreign_clones_inline_into_a_body_calling_its_own_module() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_clone_local_call.coil");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "main", bc.len());
+    let clones: Vec<usize> = syms
+        .iter()
+        .filter(|s| s.name.starts_with("xm_bag::Bag::") && s.name.contains("$inst$"))
+        .map(|s| s.entry_pc as usize)
+        .collect();
+    let calls: Vec<usize> = bc[start..end]
+        .iter()
+        .filter(|b| *b.bytecode() == Instruction::CALL)
+        .map(|b| (b.operand_u32() & 0xFF_FFFF) as usize)
+        .collect();
+    assert!(!calls.iter().any(|c| clones.contains(c)), "`main` should splice the Bag clones; calls {calls:?}, clones {clones:?}");
+}
+
 /// A ground call to another module's generic free function runs a clone
 /// compiled from that module's body, and the generic function it calls is
 /// cloned too: no boxed arguments, no dictionaries.

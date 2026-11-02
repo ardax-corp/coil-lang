@@ -547,6 +547,10 @@ pub struct Compiler {
     /// Each planned inherent method clone, by name: its source, types and
     /// the shared call it stands for (its thunk, when it does not lower).
     method_clone_plans: std::cell::RefCell<HashMap<String, compiler::emit_hir::MethodClonePlan>>,
+    /// Set while [`Compiler::hir_plan_bodies_for_clones`] plans this
+    /// module's bodies ahead of their emission: a call of one of its own
+    /// functions, whose entry is not reserved yet, plans as known.
+    planning_for_clones: bool,
     /// Set while a body with no dictionaries of its own plans the ground
     /// method clone bodies spliced into it: their bound calls resolve to
     /// ground instances and their forwarded dictionaries are dropped, as
@@ -832,6 +836,7 @@ impl Default for Compiler {
             inst_clone_labels: Vec::new(),
             planned_method_clones: Default::default(),
             method_clone_plans: Default::default(),
+            planning_for_clones: false,
             hir_ground_splice: Default::default(),
             mono_var_tys: Vec::new(),
             static_init: CodeBuf::new(),

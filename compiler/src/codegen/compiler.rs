@@ -8907,9 +8907,29 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) -> bool {
+        self.compile_module_begin_inner(module, ast, true)
+    }
+
+    /// [`Self::compile_module`] in two calls, as
+    /// [`Self::compile_prepared_module_begin`] for a module not yet
+    /// checked; [`Self::compile_prepared_module_finish`] ends it.
+    pub fn compile_module_begin<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+    ) -> bool {
+        self.compile_module_begin_inner(module, ast, false)
+    }
+
+    fn compile_module_begin_inner<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+        prepared: bool,
+    ) -> bool {
         let mut ok = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ok = self.compile_unfused_begin(module, ast, true);
+            ok = self.compile_unfused_begin(module, ast, prepared);
         }));
         Self::rethrow_unless_recursion_limit(result);
         if ok {

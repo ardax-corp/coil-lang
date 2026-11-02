@@ -252,3 +252,48 @@ fn a_silent_server_runs_into_the_timeout() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
 }
 
+
+/// A cached block result is the output of code an older compiler accepted;
+/// a compiler that rejects the block reports its errors instead of reusing
+/// that output (#2026). The test plants the entry another block left under
+/// the rejected block's key, as a compiler upgrade would leave it.
+#[test]
+fn a_cached_block_result_is_checked_by_this_compiler() {
+    let p = Project::new("block_recheck");
+    let main = |body: &str| {
+        format!("use env::var;\nuse macro::{{Code, raw}};\n{PRINT}\ncomptime {{\n{body}\n}}\n\nfn main() {{\n    write(stdout(), to_bytes(value()));\n}}\n")
+    };
+    let good = "    let v = var(\"CT_VALUE\").ok() ?? \"none\";\n    return raw(\"fn value() -> string {\\n    return \\\"\" + v + \"\\\";\\n}\\n\");";
+    p.write("main.coil", &main(good));
+    let (ok, out, err) = p.run("one", &[]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "one");
+    let cache = p.dir.join("cache");
+    let entries: Vec<PathBuf> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "entry"))
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    // `??` on a Result is E0115: this compiler rejects the block.
+    let bad = "    let v = var(\"CT_VALUE\") ?? \"none\";\n    return raw(\"fn value() -> string {\\n    return \\\"\" + v + \"\\\";\\n}\\n\");";
+    p.write("main.coil", &main(bad));
+    let mut cmd = Command::new(&p.bin);
+    cmd.current_dir(&p.dir).env("CT_VALUE", "one").env("XDG_CACHE_HOME", p.dir.join("user-cache")).env("COIL_COMPTIME_CACHE_TRACE", "1");
+    cmd.args(["--root", ".", "--comptime-cache", "cache", "--comptime-env", "CT_VALUE"]);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let out = cmd.arg("main.coil").output().expect("coil run");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "{stderr}");
+    let key = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("comptime cache: "))
+        .unwrap_or_else(|| panic!("no key traced: {stderr}"))
+        .to_string();
+    std::fs::copy(&entries[0], cache.join(format!("{key}.entry"))).unwrap();
+    let (ok, out, err) = p.run("one", &[]);
+    assert!(!ok, "the planted output was reused: {out}");
+    assert!(err.contains("E0115"), "{err}");
+}

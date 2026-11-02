@@ -317,7 +317,9 @@ fn format_ty_renamed(ty: &Ty, rename: &mut HashMap<TyVarId, String>, next: &mut 
                 .map(|(name, ty)| format!("{}: {}", name, format_ty_renamed(ty, rename, next)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{{ {} }}", inner)
+            // A record type has no spelling in source (#2095): `record`
+            // keeps the braces from reading as one.
+            format!("record {{ {} }}", inner)
         }
         Ty::Readonly(inner) => format!("readonly {}", format_ty_renamed(inner, rename, next)),
         Ty::Existential { class } => class.clone(),
@@ -554,6 +556,14 @@ mod tests {
     fn display_var() {
         assert_eq!(format!("{}", Ty::Var(TyVarId(0))), "t0");
         assert_eq!(format!("{}", Ty::Var(TyVarId(42))), "t42");
+    }
+
+    /// A record type has no source spelling, so a diagnostic must not
+    /// print it as `{ x: int }`, which reads like a writable type (#2095).
+    #[test]
+    fn diag_record_type_is_marked_as_a_record() {
+        let ty = Ty::Record { fields: vec![("x".into(), int()), ("y".into(), string())] };
+        assert_eq!(format_ty_for_diag(&Subst::empty(), &ty), "record { x: int, y: string }");
     }
 
     #[test]

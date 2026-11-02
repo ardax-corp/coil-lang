@@ -742,6 +742,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     // thread; a VM waiting here in a join reads its own statics by the ones
     // it had (#2053).
     let outer_static_kinds = crate::vm::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
+    let mut panic_message = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.install_natives(&natives);
         vm.set_thread_program(Arc::clone(&program));
@@ -789,9 +790,15 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         for a in args {
             child_args.push(spawn_arg_to_value(vm.heap_mut(), a)?);
         }
+        // A reused worker VM still holds its last job's panic message.
+        let _ = vm.take_panic_message();
         let ret = vm.call_function(entry, &child_args);
-        if vm.panicked() || epoch.as_ref().is_some_and(|e| e.is_aborted()) {
+        if epoch.as_ref().is_some_and(|e| e.is_aborted()) {
             return Err(ThreadErrorTag::JoinFailed);
+        }
+        if vm.panicked() {
+            panic_message = Some(vm.take_panic_message());
+            return Err(ThreadErrorTag::Panicked);
         }
         if shared {
             Ok(PortableValue::Immediate(ret.bits()))
@@ -819,7 +826,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         // Before the joiner can see the result and close the epoch.
         vm.heap_mut().flush_epoch_batch();
     }
-    state.store_result(stored);
+    state.store_result_with_panic(stored, panic_message);
     reactor.inflight.fetch_sub(1, Ordering::SeqCst);
     reactor.notify();
     if shared {
