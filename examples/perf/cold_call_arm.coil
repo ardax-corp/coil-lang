@@ -1,0 +1,30 @@
+// Hit bench (opt hints step 2): a branch that calls a `#[cold]` function and
+// falls through. It goes after the body, and the loop runs straight on.
+use io::sync::print;
+
+#[cold]
+fn repair(Vec<int> xs, int i) -> int {
+    let fixed = 0;
+    for j in 0..i {
+        fixed = fixed + xs[j];
+    }
+    return fixed;
+}
+
+fn main() {
+    let xs: Vec<int> = Vec::with_capacity(1000);
+    for i in 0..1000 {
+        xs.push(i % 7);
+    }
+    let total = 0;
+    for r in 0..2000 {
+        for i in 0..1000 {
+            let x = xs[i];
+            if x < 0 {
+                x = repair(xs, i);
+            }
+            total = total + x;
+        }
+    }
+    let _ = print(total.show());
+}

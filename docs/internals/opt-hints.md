@@ -42,13 +42,27 @@ There are no growth guesses: "the grow path is rare" holds for a `Vec` push but 
 |-------|-------|
 | Placement, arguments, E0806 | `compiler/src/attrs.rs` (`check_opt_hints`) |
 | The hints of a body | `HirBody::hints` (`hir::OptHints`), set in `hir::build`, kept on mono clones |
+| Functions that never return, failing arms | `hir::cold` (`fails`, `diverging_bodies`) |
+| Cold functions of the program | `Compiler::cold_fns` (by table key, filled as each module's HIR is built: `#[cold]` or never returning, `exit` counted), `cold_labels` (their entries, recorded in `named_entry_target`) |
+| Layout | `HirMirInput::cold_calls`; `mir::from_hir` `cold_arm` / `calls_cold` mark the arm's blocks cold, `layout` puts them after the body |
+
+### Layout
+
+An `if` or `match` arm is laid out after the body when it only returns or fails (a panic, after any statements), or when it calls a cold function, even one it falls through from. A branch whose one edge carries φ copies runs them inline on that edge and jumps away on the other (`mir::emit`, `Terminator::Br`), so the hot edge takes no jump to reach its copies.
+
+Hit benches (callgrind, release):
+
+| Bench | Before | After |
+|-------|--------|-------|
+| `examples/perf/cold_failure_arm.coil` | 1.634G | 1.578G (−3.4%) |
+| `examples/perf/cold_call_arm.coil` | 909.8M | 829.8M (−8.8%) |
 
 ## Steps
 
 | Step | Status |
 |------|--------|
 | 1. Attributes: parse, check, carry on `HirBody` | done |
-| 2. Cold inference and layout | |
+| 2. Cold inference and layout | done |
 | 3. `#[inline]` / `#[cold]` in the same-module and cross-module inliners and clone planning; the `#[inline]` warning | |
 | 4. Partial inlining: cut cold regions into helpers before the inline cost check | |
 | 5. `#[hot]`: clones outside the budget, 4x limit, spread to callees and `impl` siblings | |

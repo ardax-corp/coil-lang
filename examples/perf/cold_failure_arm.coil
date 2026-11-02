@@ -1,0 +1,31 @@
+// Hit bench (opt hints step 2): a check that builds its error message before
+// it panics. The failing arm is cold and goes after the body.
+use io::sync::print;
+
+fn check(Vec<int> xs, int i) -> int {
+    let x = xs[i];
+    if x < 0 {
+        let msg = "negative value " + x.show() + " at " + i.show();
+        panic msg;
+    }
+    return x;
+}
+
+fn main() {
+    let xs: Vec<int> = Vec::with_capacity(1000);
+    for i in 0..1000 {
+        xs.push(i % 7);
+    }
+    let total = 0;
+    for r in 0..2000 {
+        for i in 0..1000 {
+            let x = xs[i];
+            if x < 0 {
+                let msg = "negative value " + x.show() + " at " + i.show();
+                panic msg;
+            }
+            total = total + x + check(xs, i);
+        }
+    }
+    let _ = print(total.show());
+}
