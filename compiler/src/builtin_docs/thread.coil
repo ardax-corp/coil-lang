@@ -279,8 +279,8 @@ fn spawn<A, B>(A -> B f, A arg) -> Result<Thread<B>, ThreadError> {}
 /// Waits for the thread to finish and returns the value its function returned.
 ///
 /// Returns `Err(ThreadError::JoinFailed)` if the thread was already joined
-/// or detached, or if its function panicked (the panic message is printed to
-/// stderr). Inside a `task::scope`, only the joining task waits; other tasks
+/// or detached, and `Err(ThreadError::Panicked(message))` if its function
+/// panicked (the panic is also printed to stderr). Inside a `task::scope`, only the joining task waits; other tasks
 /// keep running.
 ///
 /// # Examples
