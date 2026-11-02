@@ -87,6 +87,17 @@ pub struct DeclaredEffects {
 }
 
 /// What a [`HirBody`] was built from.
+/// Optimizer hints a function states (`docs/internals/opt-hints.md`). They
+/// change speed only: `#[inline]` splices the function into direct callers,
+/// `#[cold]` marks calls to it rare, `#[hot]` specializes it past the clone
+/// budget. Checked in `attrs` (`#[cold]` stands alone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OptHints {
+    pub inline: bool,
+    pub cold: bool,
+    pub hot: bool,
+}
+
 /// Escape facts a function states: `#[noescape(a, b)]` names parameters
 /// the call never keeps or hands back, `#[fresh]` says its result is fresh.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -134,6 +145,8 @@ pub struct HirBody {
     /// Escape facts the function states (`#[noescape(..)]`, `#[fresh]`),
     /// checked against the inferred ones.
     pub stated_escape: Option<StatedEscape>,
+    /// `#[inline]` / `#[cold]` / `#[hot]` on the function.
+    pub hints: OptHints,
     /// The function's `requires` / `ensures` clauses: what runs inside one
     /// must have no visible effect.
     pub contract_spans: Vec<Span>,

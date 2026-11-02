@@ -3,6 +3,7 @@
 //! build shows up here as a readable diff.
 
 use super::*;
+use crate::hir::OptHints;
 use crate::hir::print::body_to_string;
 
 fn hir_of(src: &str, body: &str) -> String {
@@ -175,4 +176,27 @@ fn an_overload_takes_its_own_signature() {
     let hir = hir_of(src, "p");
     let head = hir.lines().next().unwrap_or("");
     assert_eq!(head, "Function p(a%0: float, b%1: float) -> float", "{hir}");
+}
+
+#[test]
+fn opt_hints_are_carried_on_function_and_method_bodies() {
+    let src: &'static str = Box::leak(
+        "#[inline]\nfn a(int x) -> int { return x; }\n\
+         #[cold]\nfn b(int x) -> int { return x; }\n\
+         fn c(int x) -> int { return x; }\n\
+         class K { pub n: int, }\n\
+         impl K {\n    #[hot]\n    pub fn d() -> int { return self.n; }\n}\n"
+            .to_string()
+            .into_boxed_str(),
+    );
+    let ast = parser::Pratt::default().parse(src).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let hints = |name: &str| module.bodies.iter().find(|b| b.name == name).map(|b| b.hints).expect(name);
+    assert_eq!(hints("a"), OptHints { inline: true, ..Default::default() });
+    assert_eq!(hints("b"), OptHints { cold: true, ..Default::default() });
+    assert_eq!(hints("c"), OptHints::default());
+    assert_eq!(hints("K::d"), OptHints { hot: true, ..Default::default() });
 }
