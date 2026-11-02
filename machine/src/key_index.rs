@@ -70,8 +70,10 @@ fn cells(table: &[Value]) -> Option<usize> {
 /// `key_index::table(n) -> Vec<int>`: an empty table with room for `n`
 /// entries before it grows.
 pub fn host_table(heap: &mut Heap, args: &[Value]) -> Value {
-    let n = args.first().map_or(0, |v| v.as_int()).max(0) as usize;
-    let cap = cap_for(n.min(1 << 40));
+    // A presize past 2^28 entries is not honoured (it would overflow
+    // `cap_for` on a 32-bit `usize`, wasm32); the table grows as it fills.
+    let n = args.first().map_or(0, |v| v.as_int()).clamp(0, 1 << 28) as usize;
+    let cap = cap_for(n);
     let mut cells = vec![Value::from(EMPTY); cap + 1];
     cells[cap] = Value::from(0i64);
     let (obj, _) = heap.alloc(ObjArray::new(cells), Object::Array);
