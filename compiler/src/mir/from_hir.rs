@@ -1230,6 +1230,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let pad = lower.pad.take();
     let defers = std::mem::take(&mut lower.lowered_defers);
     let defer_locals = std::mem::take(&mut lower.defer_locals);
+    let next_temp = lower.next_temp;
     let boxed: HashSet<u32> = lower.boxes.keys().copied().collect();
     let unpacked = inp.packs.keys().any(|k| !lower.packed.contains(k));
     let mut func = lower.b.finish().map_err(mir)?;
@@ -1244,7 +1245,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     // A pad is an extra: a body without one stays pinned to HIR emission.
     if let (Some(pad), Some(native)) = (pad, inp.unwind_native)
         && !pad.caps.keys().any(|l| boxed.contains(l))
-        && let Ok(cleanup) = lower_pad(hir, inp, PadParts { defers: &defers, defer_locals, homes: &pad, home_tys: &func.homes, native })
+        && let Ok(cleanup) = lower_pad(hir, inp, PadParts { defers: &defers, defer_locals, next_temp, homes: &pad, home_tys: &func.homes, native })
     {
         func.cleanup = Some(Box::new(cleanup));
     }
@@ -1268,6 +1269,9 @@ struct PadParts<'p> {
     /// The body's `defer`s, in the order they were lowered.
     defers: &'p [(LocalId, HirId)],
     defer_locals: HashMap<u32, LocalId>,
+    /// The body's next temporary: `defer_locals` are temporaries of the
+    /// body, so the pad's own (a `for` loop's counter) start past them.
+    next_temp: u32,
     homes: &'p PadHomes,
     /// The body's homes' word types.
     home_tys: &'p [MirTy],
@@ -1302,7 +1306,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         stmt_matches: HashSet::new(),
         discard_arms: HashSet::new(),
         arm_tys: HashMap::new(),
-        next_temp: TEMP_BASE,
+        next_temp: parts.next_temp,
         boxes: HashMap::new(),
         unniche: HashMap::new(),
         spec: HashSet::new(),
