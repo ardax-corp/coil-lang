@@ -1,26 +1,28 @@
 # Optimizer hints: `#[inline]`, `#[cold]`, `#[hot]`
 
-Three function attributes steer the optimizers where they cannot tell on their own. Each changes speed only: a program behaves the same with or without them. The compiler infers cold code where the program makes it clear. It never infers hot, and nothing here measures a run (no PGO, #301).
+Function attributes steer the optimizers where they cannot tell on their own. Each changes speed only: a program behaves the same with or without them. The compiler infers cold code where the program makes it clear. It never infers hot, and nothing here measures a run (no PGO, #301).
 
 Branch: `feature/opt-hints`, one PR per step. Plan agreed 2026-11-02.
 
 ## Surface
 
-On a function or a method (inherent, trait impl or trait default), without arguments:
+On a function or a method (inherent, trait impl or trait default). Limits are multiples of the level's inline cost limit (100 at `-O2`, `max_inline_cost`; the cross-module one likewise), so each tier changes what inlines:
 
 | Attribute | Meaning | What the compiler does |
 |-----------|---------|------------------------|
-| `#[inline]` | Splice this function in wherever it is called directly | Inlines past the cost limits, loop bodies included. It refuses only what cannot be inlined (recursion, coroutines, function values), with a warning that says why |
+| `#[inline]` | Inline this function where it is worth it | Best effort: a 5x cost limit (500). The long-loop refusals still hold, and nothing is reported when it stays a call |
+| `#[inline(always)]` | Splice this function in wherever it is called directly | No cost limit, loop bodies included. It refuses only what cannot be inlined (recursion, coroutines, function values), with a warning that says why (**E0807** `InlineRefused`) |
+| `#[inline(never)]` | Keep calls to this function | Never inlined, even from a hot body; unlike `#[cold]` its calls are not laid out after the body or cut out. For code size, stack traces and benchmarks |
 | `#[cold]` | Calls to this function are rare | Never inlined. A branch that calls it is laid out after the body, and is cut out into a helper when its caller is inlined or specialized (partial inlining) |
-| `#[hot]` | This function is on a hot path | Always gets a per-type clone, outside `--clone-budget`. Calls inside it use a 4x inline limit (400). Its direct callees and the other methods of its `impl` block are treated as hot too |
+| `#[hot]` | This function is on a hot path | Always gets a per-type clone, outside `--clone-budget`, and inlines under a 10x limit (1000). Calls inside it use a 4x limit (400). Its direct callees and the other methods of its `impl` block are treated as hot too, at 4x |
 
-`#[cold]` cannot be combined with `#[inline]` or `#[hot]` (**E0806** `ConflictingOptHints`). A hint on a class or enum, or with arguments, is E0119.
+`#[cold]` cannot be combined with `#[inline]`, `#[inline(always)]` or `#[hot]`, and `#[inline(never)]` with any of those three (**E0806** `ConflictingOptHints`); `#[cold]` with `#[inline(never)]` is allowed. A hint on a class or enum, or with any other argument, is E0119.
 
 ### Precedence
 
 Highest first:
 
-1. A tag on the item itself. `#[cold]` on a callee of a hot item keeps it cold.
+1. A tag on the item itself: `#[inline(never)]`, then `#[cold]`, `#[inline(always)]`, `#[hot]`, `#[inline]`. `#[cold]` on a callee of a hot item keeps it cold.
 2. Hot inherited from a hot caller (direct callees only) or a hot `impl` sibling.
 3. Inference.
 
@@ -46,7 +48,7 @@ There are no growth guesses: "the grow path is rare" holds for a `Vec` push but 
 | Cold functions of the program | `Compiler::cold_fns` (by table key, filled as each module's HIR is built: `#[cold]` or never returning, `exit` counted), `cold_labels` (their entries, recorded in `named_entry_target`) |
 | Hot functions | `Compiler::hot_fns` (by table key, filled as each module's HIR is built, `note_hot_fns`): `#[hot]` functions and methods, the other methods of a `#[hot]` method's class, and what a hot body calls by name (`f(..)`, or `x.m(..)` naming a method of its own class), less cold ones. `is_hot_body` / `is_hot_fn` (clones by their base name; an explicit `#[cold]` wins) |
 | Hot clones | Free generic functions: `monomorphize::mark_hot` (`#[hot]`, and generic functions a `#[hot]` one calls by name) makes each ground call's clone a must, past `--clone-budget`, as keyed ones are. Generic class methods: `instance_clone` / `method_clone_room` let a hot method's clone past the budget, into `HOT_CLONE_ROOM` (256) extra entry labels per program |
-| Inliners | `Compiler::hir_inline_replan`: in a hot body every call, and anywhere a hot callee, inlines under `HOT_INLINE_COST` (400, same- and cross-module); `budget_of` lifts the cost limit (same- and cross-module) and the long-loop and invariant-loop refusals for an `#[inline]` callee; `callee_of` refuses a cold callee; `note_inline_refused` warns E0807 once per `#[inline]` function of the module that stays a call |
+| Inliners | `Compiler::hir_inline_replan`: `factor` picks a callee's multiple of the level's limit (`HOT_FACTOR` 10 for `#[hot]`, `INLINE_FACTOR` 5 for `#[inline]`, `HOT_SPREAD_FACTOR` 4 for a callee hot by spreading; a hot body's own calls take 4x); `budget_of` / `over_cross` apply it same- and cross-module and `#[inline(always)]` lifts it, with the long-loop and invariant-loop refusals; `callee_of` refuses an `#[inline(never)]` or cold callee; `note_inline_refused` warns E0807 once per `#[inline(always)]` function of the module that stays a call |
 | Partial inlining | `hir::outline` (`outline`, `cut`): a statement `if` arm that is plain (no loop, closure, `defer`, `break` / `continue`), has no `return`, holds at least `MIN_NODES` (4) nodes and fails or calls a cold function becomes a call of a helper `{callee}$cold{k}`. Its free locals are the parameters; it may assign one of them by name, which the helper returns (`x = helper(..)`). An arm that writes through a free local (a field, an element, or a copy-on-write `unique` before a mutating call), borrows or captures one, or holds a fixed array, tuple, record or open type keeps its place. The helper is `#[cold]`. `Compiler::hir_outline_cold` cuts the callee at the call (once per site, the call's span on a foreign callee's nodes), checks the helper's arguments and result are words and registers its signature (`outlined`), which `resolve_hir_callee` answers for its calls; the replan's `fit` tries the cut when the whole callee is over its cost limit or holds a panic (a `construct` `inline::inlinable` refuses), same- and cross-module. `outlined_plan` plans each helper as its own function before the caller's replan is accepted, else that callee is not cut again (`outline_refused`); `queue_outlined` / `flush_outlined` emit the helpers a body calls once each, after the body, lowered to direct MIR as a par worker's body is |
 | Layout | `HirMirInput::cold_calls`; `mir::from_hir` `cold_arm` / `calls_cold` mark the arm's blocks cold, `layout` puts them after the body |
 
@@ -77,3 +79,4 @@ Hit benches (callgrind, release; step 2 rows for layout, step 3 for `#[inline]`)
 | 4. Partial inlining: cut cold regions into helpers before the inline cost check | done. A callee that holds a panic did not inline before at any size; a failing arm cut out lets its rest inline. It alone leaves `HashMap.insert` a call (640.5M both); the `#[hot]` tag is what moves it (step 6) |
 | 5. `#[hot]`: clones outside the budget, 4x limit, spread to callees and `impl` siblings | done. Siblings are the other methods of the class, from every `impl` block of it; callees are those a hot body names, not every function it reaches |
 | 6. Stdlib pass: tags only where a bench moves | done, no tags. `#[hot]` on `HashMap.insert` / `get_or` / `upsert` (or on `KeyIndex.find_hashed`): an int insert loop −3.6% (607.3M → 585.6M), a get loop and a string upsert loop flat; word count (1 MB of `gen_words.py` output) flat with `upsert` and −1.6% with `get_or` + `insert`, for 2.3% more code. Inlining a map method into every caller is not worth that outside a microbench, so the stdlib carries no hints |
+| 7. `#[inline(always)]` / `#[inline(never)]`; tiers as multiples of the level's limit: `#[inline]` 5x best effort, `#[hot]` 10x, hot by spreading 4x | done |

@@ -184,6 +184,8 @@ fn opt_hints_are_carried_on_function_and_method_bodies() {
         "#[inline]\nfn a(int x) -> int { return x; }\n\
          #[cold]\nfn b(int x) -> int { return x; }\n\
          fn c(int x) -> int { return x; }\n\
+         #[inline(always)]\nfn e(int x) -> int { return x; }\n\
+         #[inline(never)]\nfn f(int x) -> int { return x; }\n\
          class K { pub n: int, }\n\
          impl K {\n    #[hot]\n    pub fn d() -> int { return self.n; }\n}\n"
             .to_string()
@@ -198,5 +200,7 @@ fn opt_hints_are_carried_on_function_and_method_bodies() {
     assert_eq!(hints("a"), OptHints { inline: true, ..Default::default() });
     assert_eq!(hints("b"), OptHints { cold: true, ..Default::default() });
     assert_eq!(hints("c"), OptHints::default());
+    assert_eq!(hints("e"), OptHints { always: true, ..Default::default() });
+    assert_eq!(hints("f"), OptHints { never: true, ..Default::default() });
     assert_eq!(hints("K::d"), OptHints { hot: true, ..Default::default() });
 }

@@ -1,0 +1,10 @@
+// @expected E0806 — a function cannot be both `#[inline(never)]` and `#[hot]`.
+#[inline(never)]
+#[hot]
+fn f(int x) -> int {
+    return x;
+}
+
+fn main() {
+    f(1);
+}

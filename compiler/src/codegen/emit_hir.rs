@@ -46,9 +46,12 @@ pub(crate) struct Outlined {
     ret: ValueLayout,
 }
 
-/// Inline cost limit for calls in a hot body and for a hot callee: 4x the
-/// default (`docs/internals/opt-hints.md`).
-const HOT_INLINE_COST: usize = 400;
+/// Inline cost limits, as multiples of the level's limit
+/// (`docs/internals/opt-hints.md`): a call in a hot body, and a callee hot
+/// by spreading, 4x; an `#[inline]` callee 5x; a `#[hot]` one 10x.
+const HOT_SPREAD_FACTOR: usize = 4;
+const INLINE_FACTOR: usize = 5;
+const HOT_FACTOR: usize = 10;
 
 /// Where a field lives: a class slot or a record's (`LoadField` /
 /// `SetField` slot form). A record's slots are its fields sorted by name.
@@ -562,7 +565,7 @@ impl Compiler {
         !body.hints.cold && (body.hints.hot || self.is_hot_fn(&body.name))
     }
 
-    /// Warn once per function that an `#[inline]` call of it stays a call
+    /// Warn once per function that an `#[inline(always)]` call of it stays a call
     /// (E0807): it recurses, is a coroutine, or holds what a splice cannot.
     fn note_inline_refused(&mut self, span: crate::hir::Span, name: String, reason: String) {
         if !self.inline_refused.insert(name.clone()) {
@@ -576,8 +579,8 @@ impl Compiler {
             "return" => "it returns from more than one place that cannot be folded".to_string(),
             other => other.to_string(),
         };
-        let mut msg = Message::warn(ErrorCode::InlineRefused, format!("`#[inline]` function `{name}` is not inlined: {why}"), span.0..span.1);
-        msg.with_help("remove `#[inline]`, or restructure the function".to_string());
+        let mut msg = Message::warn(ErrorCode::InlineRefused, format!("`#[inline(always)]` function `{name}` is not inlined: {why}"), span.0..span.1);
+        msg.with_help("use a best-effort `#[inline]`, or restructure the function".to_string());
         self.messages.push(msg);
     }
 
@@ -2649,23 +2652,32 @@ impl Compiler {
             s.to_string()
         };
         let here = home(hir);
-        // A hot body's calls, and a hot callee anywhere, inline under
-        // [`HOT_INLINE_COST`]; `#[inline]` lifts the cost limits
-        // (`docs/internals/opt-hints.md`).
+        // Cost limits by hint, as multiples of the level's: a hot body's
+        // calls and a callee hot by spreading 4x, `#[inline]` 5x, `#[hot]`
+        // 10x; `#[inline(always)]` lifts them (`docs/internals/opt-hints.md`).
+        let base = self.inline_cost.max_inline_cost;
+        let cross_base = match self.inline_cost.max_cross_module_inline_cost {
+            0 => base,
+            c => c,
+        };
         let hot_here = self.is_hot_body(hir);
-        let budget = if hot_here { self.inline_cost.max_inline_cost.max(HOT_INLINE_COST) } else { self.inline_cost.max_inline_cost };
-        let cross_budget = if hot_here { HOT_INLINE_COST } else { self.inline_cost.max_cross_module_inline_cost };
-        let budget_of = |b: &HirBody| {
-            if b.hints.inline {
-                usize::MAX
+        let budget = if hot_here { base * HOT_SPREAD_FACTOR } else { base };
+        let cross_budget = if hot_here { cross_base * HOT_SPREAD_FACTOR } else { self.inline_cost.max_cross_module_inline_cost };
+        let factor = |b: &HirBody| {
+            if b.hints.hot && !b.hints.cold {
+                HOT_FACTOR
+            } else if b.hints.inline {
+                INLINE_FACTOR
             } else if self.is_hot_body(b) {
-                budget.max(HOT_INLINE_COST)
+                HOT_SPREAD_FACTOR
             } else {
-                budget
+                1
             }
         };
+        let budget_of = |b: &HirBody| if b.hints.always { usize::MAX } else { budget.max(base * factor(b)) };
         let over_cross = |b: &HirBody, size: usize| {
-            !b.hints.inline && size > if self.is_hot_body(b) { HOT_INLINE_COST } else { cross_budget }
+            let limit = if factor(b) > 1 { cross_budget.max(cross_base * factor(b)) } else { cross_budget };
+            !b.hints.always && size > limit
         };
         // Callees with guard returns, folded to a single exit.
         let folded: HashMap<usize, crate::hir::HirBody> = emit
@@ -3071,12 +3083,12 @@ impl Compiler {
                             Some(HirKind::Lit(crate::hir::Lit::Int(k))) if *k <= inline::SHORT_TRIPS)
                     })
                 });
-                if !short && !callee.hints.inline {
+                if !short && !callee.hints.always {
                     return Err("long loop".to_string());
                 }
             }
             if shape.looping()
-                && !callee.hints.inline
+                && !callee.hints.always
                 && crate::il::pure_call::name_in(&self.pure_fns, &callee.name)
                 && args.iter().all(|&a| inline::invariant_expr(hir, a, &invariant))
             {
@@ -3086,22 +3098,33 @@ impl Compiler {
         };
         // Unit tests only: `COIL_HIR_INLINE_WHY` names each refused site.
         let why = cfg!(test) && std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
-        // A cold callee (`#[cold]`, or one that never returns) keeps its
-        // call. An `#[inline]` callee of this module that cannot be spliced
-        // is reported once, with why (E0807).
+        // A cold callee (`#[cold]`, or one that never returns) and an
+        // `#[inline(never)]` one keep their calls. An `#[inline(always)]`
+        // callee of this module that cannot be spliced is reported once,
+        // with why (E0807).
         let refused_inline: std::cell::RefCell<Vec<(crate::hir::Span, String, String)>> = Default::default();
         let callee_of = |id: HirId| {
             let found = callee_for(id).and_then(|(callee, shape)| {
-                let cold = callee.hints.cold || emit.plan.calls.get(&id.0).is_some_and(|c| self.is_cold_fn(&c.key));
-                if cold { Err("cold".to_string()) } else { Ok((callee, shape)) }
+                let planned = emit.plan.calls.get(&id.0);
+                let never = callee.hints.never
+                    || planned.and_then(|c| self.hir_fn_body(&c.key)).is_some_and(|i| module.bodies[i].hints.never);
+                let cold = callee.hints.cold || planned.is_some_and(|c| self.is_cold_fn(&c.key));
+                if never {
+                    Err("never".to_string())
+                } else if cold {
+                    Err("cold".to_string())
+                } else {
+                    Ok((callee, shape))
+                }
             });
             if let Err(reason) = &found {
                 if why {
                     eprintln!("hir inline `{}` site {}: {reason}", hir.name, id.0);
                 }
                 if let Some(index) = emit.plan.calls.get(&id.0).and_then(|c| self.hir_fn_body(&c.key))
-                    && module.bodies[index].hints.inline
+                    && module.bodies[index].hints.always
                     && reason != "cold"
+                    && reason != "never"
                 {
                     let b = &module.bodies[index];
                     refused_inline.borrow_mut().push((b.span, b.name.clone(), reason.clone()));

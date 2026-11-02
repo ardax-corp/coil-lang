@@ -90,12 +90,15 @@ pub struct DeclaredEffects {
 
 /// What a [`HirBody`] was built from.
 /// Optimizer hints a function states (`docs/internals/opt-hints.md`). They
-/// change speed only: `#[inline]` splices the function into direct callers,
-/// `#[cold]` marks calls to it rare, `#[hot]` specializes it past the clone
-/// budget. Checked in `attrs` (`#[cold]` stands alone).
+/// change speed only: `#[inline]` raises the function's inline limit (best
+/// effort), `#[inline(always)]` lifts it, `#[inline(never)]` keeps its
+/// calls, `#[cold]` marks calls to it rare, `#[hot]` raises its limit
+/// further and specializes it past the clone budget. Checked in `attrs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OptHints {
     pub inline: bool,
+    pub always: bool,
+    pub never: bool,
     pub cold: bool,
     pub hot: bool,
 }
