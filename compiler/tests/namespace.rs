@@ -1043,3 +1043,106 @@ fn two_unresolved_derives_report_unknown_derives_not_an_expansion_loop() {
         );
     }
 }
+
+/// Another module's `entry(k).and_modify(f).or_insert(v)` chain on a view
+/// class splices whole into the caller: no view object is built and no
+/// view method, `and_modify` (which calls its function parameter) among
+/// them, keeps a call (#2238).
+#[test]
+fn cross_module_entry_chain_dissolves_the_view() {
+    let files = [
+        (
+            "src/counts.coil",
+            r#"
+class Counts<V> {
+    pub keys: Vec<int>,
+    pub vals: Vec<V>,
+}
+
+view class Slot<V> {
+    mut map: Counts<V>,
+    key: int,
+    slot: int,
+}
+
+impl Counts<V> {
+    pub fn find(int k) -> int {
+        let i = 0;
+        while i < self.keys.len() {
+            if self.keys[i] == k {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    pub fn entry(int k) -> Slot<V> {
+        return new Slot(mut self, k, self.find(k));
+    }
+}
+
+impl Slot<V> {
+    pub fn and_modify(V -> V f) -> Slot<V> {
+        if self.slot >= 0 {
+            self.map.vals[self.slot] = f(self.map.vals[self.slot]);
+        }
+        return self;
+    }
+
+    pub fn or_insert(V v) -> V {
+        if self.slot >= 0 {
+            return self.map.vals[self.slot];
+        }
+        self.map.keys.push(self.key);
+        self.map.vals.push(v);
+        return v;
+    }
+}
+"#,
+        ),
+        (
+            "src/main.coil",
+            r#"
+use counts::{Counts};
+
+fn main() {
+    let c: Counts<int> = new Counts(Vec::new(), Vec::new());
+    let i = 0;
+    let s = 0;
+    while i < 50 {
+        s = s + c.entry(i % 7).and_modify(fn (int n) => n + 1).or_insert(1);
+        i = i + 1;
+    }
+    if s != 1029 {
+        panic "sum";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("entry_chain_cross_file", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+            Ok(pair) => pair,
+            Err(_) => {
+                for msg in pipeline.messages() {
+                    eprintln!("PIPELINE ERROR: {}", msg.message());
+                }
+                panic!("compile failed");
+            }
+        };
+        let start = pipeline.function_offset("main").expect("main");
+        let end = pipeline.compiler().function_end(start);
+        let main: Vec<_> = bytecode[start..end].iter().map(|b| *b.bytecode()).collect();
+        // `new Counts(..)` is the one object; the calls left are its two
+        // `Vec::new()` and `find`, whose loop keeps its call.
+        let makes = main.iter().filter(|o| matches!(o, common::Instruction::DenseMakeObject | common::Instruction::InitTyped)).count();
+        let calls = main.iter().filter(|o| matches!(o, common::Instruction::CALL)).count();
+        assert_eq!(makes, 1, "`main` builds the view: {main:?}");
+        assert!(calls <= 3, "`main` keeps view method calls: {main:?}");
+        let _ = run_bytecode(bytecode, constants, &pipeline);
+    });
+}
