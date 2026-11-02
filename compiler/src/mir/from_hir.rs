@@ -625,6 +625,9 @@ pub struct HirMirInput<'a> {
     pub pinned_for: HashSet<u32>,
     /// Whether early exits move out of line.
     pub cold_ok: bool,
+    /// Calls of cold functions (`#[cold]`, or never returning): an arm
+    /// that makes one is laid out after the body.
+    pub cold_calls: HashSet<u32>,
     /// Source file of the body, for statement locations.
     pub file: Option<u32>,
     /// Frame words at entry when trailing dictionary parameters follow
@@ -6888,7 +6891,7 @@ impl Lower<'_> {
         }
         // A last arm that only exits (`?`'s `Err(e) => return Err(e)`) is cold.
         if let Some(start) = last_start
-            && lower::cold_exit(self.hir, arms[last].body)
+            && self.cold_arm(arms[last].body)
         {
             self.mark_cold(start);
         }
@@ -7228,7 +7231,7 @@ impl Lower<'_> {
         let start = self.order.len();
         self.switch(fall);
         self.niche_arm(first, w, false, tail, &mut out)?;
-        if lower::cold_exit(self.hir, first.body) {
+        if self.cold_arm(first.body) {
             self.mark_cold(start);
         }
         self.switch(hit);
@@ -7443,7 +7446,7 @@ impl Lower<'_> {
             }
         }
         if let Some(start) = last_start
-            && lower::cold_exit(self.hir, arms[last].body)
+            && self.cold_arm(arms[last].body)
         {
             self.mark_cold(start);
         }
@@ -7593,6 +7596,28 @@ impl Lower<'_> {
         Ok(if hi.is_empty() { Val::V(lo) } else { Val::Pair(lo, phi(hi)?) })
     }
 
+    /// An arm to lay out after the body: one that only exits or fails
+    /// ([`lower::cold_exit`]), or one that calls a cold function.
+    fn cold_arm(&self, id: HirId) -> bool {
+        lower::cold_exit(self.hir, id) || self.calls_cold(id)
+    }
+
+    /// Whether `id`'s subtree calls a cold function (`#[cold]`, or one
+    /// that never returns).
+    fn calls_cold(&self, id: HirId) -> bool {
+        if self.inp.cold_calls.is_empty() {
+            return false;
+        }
+        let mut stack = vec![id];
+        while let Some(at) = stack.pop() {
+            if self.inp.cold_calls.contains(&at.0) {
+                return true;
+            }
+            stack.extend(lower::children(self.hir, at));
+        }
+        false
+    }
+
     /// Lay out the blocks lowering started since `order[start]` after the
     /// body; a range nested in one already marked goes with it.
     fn mark_cold(&mut self, start: usize) {
@@ -7682,8 +7707,11 @@ impl Lower<'_> {
             };
             // The arm a statement `if` leaves by (`then` without an `else`,
             // else the `else`) is cold when it only exits.
+            // An arm that calls a cold function is cold either way.
             let exit_arm = if els.is_some() { arm == els } else { arm == Some(then) };
-            if matches!(val, Val::Never) && exit_arm && arm.is_some_and(|a| lower::cold_exit(self.hir, a)) {
+            if (matches!(val, Val::Never) && exit_arm && arm.is_some_and(|a| self.cold_arm(a)))
+                || arm.is_some_and(|a| self.calls_cold(a))
+            {
                 self.mark_cold(start);
             }
             if !matches!(val, Val::Never) {
@@ -7705,11 +7733,14 @@ impl Lower<'_> {
         let start = self.order.len();
         self.switch(then_b);
         if matches!(self.arm_value(then, false)?, Val::Never) {
-            if lower::cold_exit(self.hir, then) {
+            if self.cold_arm(then) {
                 self.mark_cold(start);
             }
         } else {
             self.jump(join)?;
+            if self.calls_cold(then) {
+                self.mark_cold(start);
+            }
         }
         self.switch(join);
         Ok(Val::Unit)

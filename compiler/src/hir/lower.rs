@@ -1132,10 +1132,17 @@ pub(crate) fn exits(body: &HirBody, id: HirId) -> bool {
     }
 }
 
-/// An `if` arm that always returns, with no loop, closure, `defer`,
+/// An arm that always returns or fails ([`super::cold::fails`]: a panic,
+/// with or without statements before it), with no loop, closure, `defer`,
 /// coroutine step or `break` / `continue` in it: lowering may lay it out
 /// after the body as a cold early exit.
 pub(crate) fn cold_exit(body: &HirBody, id: HirId) -> bool {
+    plain(body, id) && (exits(body, id) || super::cold::fails(body, id, &|_| false))
+}
+
+/// No loop, closure, `defer`, coroutine step or `break` / `continue` in
+/// `id`'s subtree.
+pub(crate) fn plain(body: &HirBody, id: HirId) -> bool {
     let mut plain = true;
     visit(body, id, &mut |e| {
         plain &= !matches!(
@@ -1151,7 +1158,7 @@ pub(crate) fn cold_exit(body: &HirBody, id: HirId) -> bool {
                 | HirKind::Unsupported(_)
         );
     });
-    plain && exits(body, id)
+    plain
 }
 
 /// The direct subexpressions of `id`.

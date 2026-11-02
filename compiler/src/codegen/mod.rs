@@ -718,6 +718,11 @@ pub struct Compiler {
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
+    /// Functions and methods of the modules built so far that are cold:
+    /// `#[cold]`, or never returning ([`crate::hir::cold`]), by table key.
+    cold_fns: HashSet<String>,
+    /// Entry labels of [`Self::cold_fns`] calls resolved to.
+    cold_labels: HashSet<crate::il::Label>,
     /// Scalar function bodies of modules compiled so far, by table key,
     /// with their calls named by key: callees another module's typed
     /// inlining may splice ([`Compiler::hir_portable_body`]).
@@ -907,6 +912,8 @@ impl Default for Compiler {
             hir_entry_unbox: Vec::new(),
             hir_mir_unbox: Vec::new(),
             hir_fn_names: HashMap::new(),
+            cold_fns: HashSet::new(),
+            cold_labels: HashSet::new(),
             hir_portable: HashMap::new(),
             hir_resolved_clones: HashMap::new(),
             module_outer_namespace: None,

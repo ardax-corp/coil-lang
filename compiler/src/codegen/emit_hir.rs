@@ -472,7 +472,40 @@ impl Compiler {
             }
         }
 
+        self.note_cold_fns(&hir);
         self.hir_module = Some(hir);
+    }
+
+    /// Add `hir`'s cold functions to [`Self::cold_fns`]: `#[cold]` ones,
+    /// and ones that never return, a call to `exit` or to a cold function
+    /// of an earlier module included.
+    fn note_cold_fns(&mut self, hir: &crate::hir::HirModule) {
+        use crate::hir::BodyKind;
+        let checker = &self.checker;
+        let earlier = &self.cold_fns;
+        let known = |name: &str| earlier.contains(name) || checker.host_fn_in_scope(name) == Some("env_exit");
+        let diverging = crate::hir::cold::diverging_bodies(hir, &known);
+        let mut cold = Vec::new();
+        for (i, body) in hir.bodies.iter().enumerate() {
+            if !matches!(body.kind, BodyKind::Function | BodyKind::Method) || !(body.hints.cold || diverging.contains(&i)) {
+                continue;
+            }
+            cold.push(body.name.clone());
+            if body.kind == BodyKind::Function
+                && self.checker.is_overloaded(&body.name)
+                && let Some((id, fixed, rest)) = self.checker.overload_decl_at(body.span.0, body.span.1)
+            {
+                cold.push(overload_fn_key(&body.name, fixed, rest, id));
+            }
+        }
+        cold.extend(hir.instance_fns.iter().filter(|&(_, &i)| hir.bodies[i].hints.cold || diverging.contains(&i)).map(|(k, _)| k.clone()));
+        self.cold_fns.extend(cold);
+    }
+
+    /// Whether `key` is a cold function, or a clone of one.
+    pub(super) fn is_cold_fn(&self, key: &str) -> bool {
+        !self.cold_fns.is_empty()
+            && (self.cold_fns.contains(key) || key.split_once("$inst$").is_some_and(|(base, _)| self.cold_fns.contains(base)))
     }
 
     /// `body` as another module's inliner can splice it, under its table
@@ -2254,6 +2287,11 @@ impl Compiler {
             hosts,
             pinned_for,
             cold_ok: emit.plan.cold_ok,
+            cold_calls: if emit.plan.cold_ok && !self.cold_labels.is_empty() {
+                tables.calls.iter().filter(|(_, s)| self.cold_labels.contains(&s.target)).map(|(&i, _)| i).collect()
+            } else {
+                HashSet::new()
+            },
             file,
             entry_words,
             lambda_dicts: self.hir_lambda_dicts.filter(|&(_, n)| n > 0),
