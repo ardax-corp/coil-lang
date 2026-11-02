@@ -3262,6 +3262,37 @@ fn cross_module_tiny_add_is_inlined() {
     );
 }
 
+/// A callee of middling size (over the old limit of 50) inlines across
+/// modules: a `HashMap` method's clone is about this big.
+#[test]
+fn cross_module_mid_fn_is_inlined() {
+    let util = "fn mid(int a, int b) -> int {\n\
+             let t0 = a + b;\n\
+             let t1 = t0 + a;\n\
+             let t2 = t1 + b;\n\
+             let t3 = t2 + a;\n\
+             let t4 = t3 + b;\n\
+             let t5 = t4 + a;\n\
+             let t6 = t5 + b;\n\
+             let t7 = t6 + a;\n\
+             let t8 = t7 + b;\n\
+             let t9 = t8 + a;\n\
+             let t10 = t9 + b;\n\
+             let t11 = t10 + a;\n\
+             return t11;\n\
+         }";
+    let entry = "use util::mid;\nfn run() -> int { return mid(1, 2); }";
+    let inlined = compile_util_then_entry(util, entry, |_| {});
+    let kept = compile_util_then_entry(util, entry, |c| {
+        c.inline_cost.inline_across_modules = false;
+    });
+    assert!(
+        count_calls(&kept) > count_calls(&inlined),
+        "a mid-size cross-module fn should inline; opcodes={:?}",
+        inlined.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+    );
+}
+
 #[test]
 fn cross_module_large_fn_keeps_call() {
     let util = "fn bulky(int a, int b) -> int {\n\
@@ -3277,7 +3308,25 @@ fn cross_module_large_fn_keeps_call() {
              let t9 = t8 + a;\n\
              let t10 = t9 + b;\n\
              let t11 = t10 + a;\n\
-             return t11;\n\
+             let t12 = t11 + b;\n\
+             let t13 = t12 + a;\n\
+             let t14 = t13 + b;\n\
+             let t15 = t14 + a;\n\
+             let t16 = t15 + b;\n\
+             let t17 = t16 + a;\n\
+             let t18 = t17 + b;\n\
+             let t19 = t18 + a;\n\
+             let t20 = t19 + b;\n\
+             let t21 = t20 + a;\n\
+             let t22 = t21 + b;\n\
+             let t23 = t22 + a;\n\
+             let t24 = t23 + b;\n\
+             let t25 = t24 + a;\n\
+             let t26 = t25 + b;\n\
+             let t27 = t26 + a;\n\
+             let t28 = t27 + b;\n\
+             let t29 = t28 + a;\n\
+             return t29;\n\
          }";
     let entry = "use util::bulky;\nfn run() -> int { return bulky(1, 2); }";
     let default_bc = compile_util_then_entry(util, entry, |_| {});
