@@ -9461,3 +9461,57 @@ fn main() {
     }
     assert!(key("count_if").is_none(), "a body calling a function value is not kept");
 }
+
+/// A callee body well over the inline cost limit (100): 80 `let`s.
+fn over_limit_body() -> String {
+    let mut body = String::from("{ let v0 = x + 1; ");
+    for k in 1..80 {
+        body.push_str(&format!("let v{k} = v{} % 1000 + {k}; ", k - 1));
+    }
+    body.push_str("return v79; }");
+    body
+}
+
+/// `#[inline]` splices a callee past the cost limit; without it the call stays.
+#[test]
+fn inline_hint_inlines_past_the_cost_limit() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn big(int x) -> int {} \
+             fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = (s + big(i)) % 1000; i = i + 1; }} return s; }}",
+            over_limit_body()
+        )
+    };
+    let (_, untagged) = compile_src_compiler(&src(""), |_| {});
+    assert!(untagged.functions.contains_key("big"), "the fixture should be over the inline limit");
+    let (_, tagged) = compile_src_compiler(&src("#[inline]"), |_| {});
+    assert!(!tagged.functions.contains_key("big"), "`#[inline]` `big` should be spliced into `main` and shaken");
+}
+
+/// `#[cold]` keeps the call of a callee small enough to inline.
+#[test]
+fn cold_hint_keeps_the_call() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn small(int x) -> int {{ return x + 1; }} \
+             fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = s + small(i); i = i + 1; }} return s; }}"
+        )
+    };
+    let (_, untagged) = compile_src_compiler(&src(""), |_| {});
+    assert!(!untagged.functions.contains_key("small"), "the fixture should inline without a tag");
+    let (_, tagged) = compile_src_compiler(&src("#[cold]"), |_| {});
+    assert!(tagged.functions.contains_key("small"), "`#[cold]` `small` should keep its call");
+}
+
+/// An `#[inline]` function that recurses stays a call, and says so once.
+#[test]
+fn inline_hint_on_a_recursive_function_warns() {
+    let (_, compiler) = compile_src_compiler(
+        "#[inline] fn fact(int n) -> int { if n <= 1 { return 1; } return n * fact(n - 1); } \
+         fn main() -> int { return fact(5) + fact(6); }",
+        |_| {},
+    );
+    let warns: Vec<_> = compiler.messages.iter().filter(|m| m.code() == Some(reporting::ErrorCode::InlineRefused)).collect();
+    assert_eq!(warns.len(), 1, "{:?}", compiler.messages);
+    assert!(warns[0].message().contains("fact"), "{:?}", warns[0].message());
+}
