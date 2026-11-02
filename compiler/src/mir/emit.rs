@@ -417,6 +417,16 @@ fn emit_panic_pads(
 }
 
 /// Named-let remap and deopt draft, after the same register assign as emit.
+/// The `STRINGIFY` byte for an immediate of static scalar type `tag`
+/// (`ValueTag`), or the inspecting form for `None`.
+pub(super) fn stringify_byte(tag: Option<u32>) -> Byte {
+    let byte = Byte::new(Instruction::STRINGIFY);
+    match tag.and_then(|t| common::ValueTag::from_u16(u16::try_from(t).ok()?)) {
+        Some(tag) => byte.with_operand_u32(common::stringify_operand(tag)),
+        None => byte,
+    }
+}
+
 pub(super) fn dense_sidecars(func: &MirFunc, entry_label: Option<Label>) -> super::emit_lir::LirSidecars {
     let mut func = func.clone();
     sink_phi_incomings(&mut func);
@@ -1614,7 +1624,7 @@ pub(super) fn arg_clears(
             }
             MirInst::Alloc {
                 dest,
-                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple | MirAllocKind::Boxed { .. },
+                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple,
                 elems,
                 ..
             } if elems.iter().all(|e| !heapish(*e)) => {
@@ -2938,6 +2948,22 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 )));
                 return Ok(());
             }
+            // A plain native runs in register form: no stack traffic, and
+            // a dense loop keeps running across it (archive 6.17).
+            if common::host_native_is_direct(usize::from(*native_id))
+                && super::host_allow::dense_host_layout_ok(*layout)
+                && let Ok(arity) = u8::try_from(args.len())
+            {
+                let slots: Vec<u8> = args.iter().map(|a| regs[a.index()]).collect();
+                let base = if slots.is_empty() { 0 } else { gather_base(out, &slots, scratch, loc)? };
+                let idx = intern_pool(pool, common::pack_dense_host_call(*native_id, base, arity))?;
+                out.push(byte(Byte::new(Instruction::DenseHostCall).with_dense_host_call(
+                    regs[dest.index()],
+                    *layout,
+                    idx,
+                )));
+                return Ok(());
+            }
             // ABI edge: native id + DensePush args + HostInvoke + StorePop dest.
             out.push(IlOp::Const {
                 imm: i32::from(*native_id),
@@ -3311,9 +3337,9 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
-        MirInst::Stringify { dest, src } => {
+        MirInst::Stringify { dest, src, tag } => {
             emit_dense_push(out, &[*src], regs, scratch, loc)?;
-            out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            out.push(IlOp::from_plain_byte(stringify_byte(*tag), loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -3330,14 +3356,6 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
         MirInst::Panic { msg, .. } => {
             emit_dense_push(out, &[*msg], regs, scratch, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
-        }
-        MirInst::Unbox { dest, src, tag } => {
-            emit_dense_push(out, &[*src], regs, scratch, loc)?;
-            out.push(IlOp::UnboxValue { tag: *tag, loc });
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
         }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             // `DenseCmp` compares words; VM `EQ` compares strings by content.
@@ -4142,7 +4160,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
                 MirInst::Cow { field: Some(_), .. } => 0,
-                MirInst::Stringify { .. } | MirInst::Cow { .. } | MirInst::Unbox { .. } | MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } => 1,
+                MirInst::Stringify { .. } | MirInst::Cow { .. } | MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } => 1,
                 MirInst::StrEq { .. } => 2,
                 _ => 0,
             };
@@ -4649,7 +4667,6 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
         }
         MirAllocKind::Object { .. } | MirAllocKind::DropEnum { .. } => Ok(None),
         MirAllocKind::Coro { .. }
-        | MirAllocKind::Boxed { .. }
         | MirAllocKind::Fn { .. }
         | MirAllocKind::PolyFn { .. }
         | MirAllocKind::PolyFnCapture { .. } => Ok(None),
@@ -4815,7 +4832,6 @@ fn il_for_alloc_op(kind: MirAllocKind, arity: u32, kinds: u8, loc: DebugLoc) -> 
             loc,
             ret_words: 1,
         }),
-        MirAllocKind::Boxed { tag } => Ok(IlOp::BoxValue { tag, loc }),
         MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. } => Err(LowerError::Refused("function value alloc".into())),
     }
 }

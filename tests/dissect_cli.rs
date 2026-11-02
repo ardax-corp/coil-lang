@@ -394,7 +394,10 @@ fn dissect_vec_pop_returns_the_native_option_on_mir() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let body = stdout.split(";; fn Vec::pop").nth(1).expect("Vec::pop body");
     let body = body.split(";; fn ").next().unwrap_or(body);
-    assert!(body.contains("HostInvoke"), "{stdout}");
+    assert!(
+        body.contains("HostInvoke") || body.contains("DenseHostCall"),
+        "{stdout}"
+    );
     assert!(!body.contains("MakeEnum"), "Vec::pop rebuilds the Option: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -68,6 +68,9 @@ pub enum Instruction {
     // Built-ins
     PRINT,
     FORMAT,
+    /// Pop a word, push its text. Operand `0` inspects the word (a box by
+    /// its tag, a heap string, else an `int`); `1 + ValueTag` formats an
+    /// immediate of that static type (`common::stringify_operand`).
     STRINGIFY,
     NATIVE,
     INIT,
@@ -527,6 +530,13 @@ pub enum Instruction {
     IEQ,
     /// `int` / `bool` `!=` (archive 6.7), the negation of [`Self::IEQ`].
     INEQ,
+    /// Register-form host call (archive 6.17): `dest = native(base..base+arity)`
+    /// with no operand-stack traffic, so a dense loop keeps running across
+    /// it. Operand `[31:24]` dest, `[17:16]` enum layout (`HOST_ENUM_LAYOUT_*`),
+    /// `[15:0]` pool index of [`pack_dense_host_call`]. Emitted only for a
+    /// native [`crate::host_native_is_direct`] names; an allocation and
+    /// safepoint.
+    DenseHostCall,
 }
 
 impl From<u8> for Instruction {
@@ -547,6 +557,11 @@ impl From<Instruction> for u8 {
 /// Pool entry of a [`Instruction::DenseMakeK`]: `base | arity << 8 | kinds << 16`.
 pub const fn pack_dense_make_k(base: u8, arity: u8, kinds: u8) -> u64 {
     (base as u64) | ((arity as u64) << 8) | ((kinds as u64) << 16)
+}
+
+/// Pool entry of a [`Instruction::DenseHostCall`]: `native_id | base << 16 | arity << 24`.
+pub const fn pack_dense_host_call(native_id: u16, base: u8, arity: u8) -> u64 {
+    (native_id as u64) | ((base as u64) << 16) | ((arity as u64) << 24)
 }
 
 pub const fn pack_init_typed(type_id: u32, field_count: u32) -> u32 {
@@ -910,7 +925,7 @@ pub const fn set_field_slot_index(operand: u32) -> Option<u32> {
 
 impl Instruction {
     /// The last appended variant: every discriminant up to it decodes.
-    pub const LAST: Self = Self::INEQ;
+    pub const LAST: Self = Self::DenseHostCall;
 
     /// Stable mnemonic for disassembly / DX tooling (always available).
     pub fn mnemonic(self) -> &'static str {
@@ -1097,6 +1112,7 @@ impl Instruction {
             Self::Cow => "Cow",
             Self::IEQ => "IEQ",
             Self::INEQ => "INEQ",
+            Self::DenseHostCall => "DenseHostCall",
         }
     }
 }
@@ -1270,6 +1286,27 @@ impl Byte {
     /// [`pack_dense_make_k`].
     pub fn with_dense_make_k(self, kind: u8, dest: u8, pool_idx: u16) -> Self {
         self.with_operand_u32((u32::from(kind) << 24) | (u32::from(dest) << 16) | u32::from(pool_idx))
+    }
+
+    /// `DenseHostCall`: `(dest, layout, native_id, base, arity)` from the
+    /// operand and its pool entry (`None` if the index is out of range).
+    #[inline(always)]
+    pub fn dense_host_call_parts(&self, pool: &[u64]) -> Option<(usize, u32, usize, usize, usize)> {
+        let op = self.operands;
+        let entry = *pool.get((op & 0xFFFF) as usize)?;
+        Some((
+            (op >> 24) as usize,
+            (op >> 16) & 0x3,
+            (entry & 0xFFFF) as usize,
+            ((entry >> 16) & 0xFF) as usize,
+            ((entry >> 24) & 0xFF) as usize,
+        ))
+    }
+
+    /// `DenseHostCall` operand: `dest`, enum `layout`, and the pool index of
+    /// [`pack_dense_host_call`].
+    pub fn with_dense_host_call(self, dest: u8, layout: u8, pool_idx: u16) -> Self {
+        self.with_operand_u32((u32::from(dest) << 24) | (u32::from(layout & 0x3) << 16) | u32::from(pool_idx))
     }
 
     /// `MakeEnumK` / `MakeEnumReturnK` operand (`arity` ≤ 255).
@@ -1632,6 +1669,20 @@ impl Byte {
 }
 
 impl ArchivedByte {
+    /// [`Byte::dense_host_call_parts`] on an archived word.
+    #[inline(always)]
+    pub fn dense_host_call_parts(&self, pool: &[u64]) -> Option<(usize, u32, usize, usize, usize)> {
+        let op = self.operand_u32();
+        let entry = *pool.get((op & 0xFFFF) as usize)?;
+        Some((
+            (op >> 24) as usize,
+            (op >> 16) & 0x3,
+            (entry & 0xFFFF) as usize,
+            ((entry >> 16) & 0xFF) as usize,
+            ((entry >> 24) & 0xFF) as usize,
+        ))
+    }
+
     pub const POOL_FLAG: u32 = Byte::POOL_FLAG;
 
     pub fn new(bytecode: ArchivedInstruction) -> Self {

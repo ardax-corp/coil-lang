@@ -40,6 +40,12 @@ pub trait NativeFn: Send + Sync {
     fn host_op(&self) -> HostOp {
         HostOp::Ordinary
     }
+    /// The plain function behind a native that always returns a value and
+    /// never parks, opens descriptors or switches tasks. The VM calls it
+    /// straight from the dispatch loop instead of through [`Self::invoke`].
+    fn direct(&self) -> Option<crate::HostValueFn> {
+        None
+    }
 }
 
 pub struct HostClosureFn {
@@ -48,6 +54,7 @@ pub struct HostClosureFn {
     arity_range: Option<(usize, usize)>,
     host_op: HostOp,
     func: HostClosure,
+    direct: Option<crate::HostValueFn>,
 }
 
 impl HostClosureFn {
@@ -60,7 +67,17 @@ impl HostClosureFn {
             arity_range: None,
             host_op: HostOp::Ordinary,
             func: Arc::new(func),
+            direct: None,
         }
+    }
+
+    /// A native that is a plain [`crate::HostValueFn`]: it always returns a
+    /// value, and never parks, opens descriptors or switches tasks, so the
+    /// VM may call it directly ([`NativeFn::direct`]).
+    pub fn new_direct(signature: FfiSignature, func: crate::HostValueFn) -> Self {
+        let mut native = Self::new(signature, move |heap, args| Ok(Some(func(heap, args))));
+        native.direct = Some(func);
+        native
     }
 
     pub fn with_host_op(mut self, host_op: HostOp) -> Self {
@@ -83,6 +100,7 @@ impl HostClosureFn {
             arity_range: Some((min_args, max_args)),
             host_op: HostOp::Ordinary,
             func: Arc::new(func),
+            direct: None,
         }
     }
 
@@ -110,6 +128,11 @@ impl NativeFn for HostClosureFn {
         self.host_op
     }
 
+    fn direct(&self) -> Option<crate::HostValueFn> {
+        // A special host op runs in the VM, never as a plain call.
+        if self.host_op == HostOp::Ordinary { self.direct } else { None }
+    }
+
     fn invoke(&self, heap: &mut Heap, args: &[Value]) -> Result<Option<Value>, FfiError> {
         let ok = if let Some((min, max)) = self.arity_range {
             args.len() >= min && args.len() <= max
@@ -133,6 +156,8 @@ impl NativeFn for HostClosureFn {
 pub struct Natives {
     by_name: Arc<std::collections::HashMap<String, Arc<dyn NativeFn>>>,
     by_id: Arc<Vec<Arc<dyn NativeFn>>>,
+    /// [`NativeFn::direct`] of each id, read by the dispatch loop.
+    direct: Arc<Vec<Option<crate::HostValueFn>>>,
 }
 
 impl Natives {
@@ -149,6 +174,7 @@ impl Natives {
             by_name.reserve(192);
         }
         by_name.insert(name, Arc::clone(&native));
+        Arc::make_mut(&mut self.direct).push(native.direct());
         Arc::make_mut(&mut self.by_id).push(native);
         id
     }
@@ -159,6 +185,12 @@ impl Natives {
 
     pub fn get_by_id(&self, id: usize) -> Option<&dyn NativeFn> {
         self.by_id.get(id).map(|n| n.as_ref())
+    }
+
+    /// The direct function of native `id` ([`NativeFn::direct`]), if any.
+    #[inline(always)]
+    pub fn direct_by_id(&self, id: usize) -> Option<crate::HostValueFn> {
+        self.direct.get(id).copied().flatten()
     }
 
     pub fn len(&self) -> usize {
@@ -186,6 +218,27 @@ mod tests {
         let args = [Value::from(21_i64)];
         let ret = native.invoke(&mut heap, &args).unwrap().unwrap();
         assert_eq!(ret.as_int(), 42);
+    }
+
+    #[test]
+    fn direct_natives_are_listed_by_id_and_invoke_the_same_function() {
+        fn twice(_heap: &mut Heap, args: &[Value]) -> Value {
+            Value::from(args[0].as_int() * 2)
+        }
+        let sig = FfiSignature::from_parts("twice", vec![FfiType::Int], FfiType::Int).unwrap();
+        let mut reg = Natives::new();
+        let plain = reg.register(Arc::new(HostClosureFn::unary_i64("plain", |x| x)));
+        let direct = reg.register(Arc::new(HostClosureFn::new_direct(sig.clone(), twice)));
+        let special = reg.register(Arc::new(HostClosureFn::new_direct(sig, twice).with_host_op(HostOp::Collect)));
+        assert!(reg.direct_by_id(plain).is_none());
+        assert!(reg.direct_by_id(special).is_none(), "a special host op never runs as a plain call");
+        assert!(reg.direct_by_id(99).is_none());
+        let mut heap = Heap::default();
+        let args = [Value::from(21_i64)];
+        let f = reg.direct_by_id(direct).expect("direct native");
+        assert_eq!(f(&mut heap, &args).as_int(), 42);
+        let via_invoke = reg.get_by_id(direct).unwrap().invoke(&mut heap, &args).unwrap().unwrap();
+        assert_eq!(via_invoke.as_int(), 42);
     }
 
     #[test]

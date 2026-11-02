@@ -4435,16 +4435,12 @@ impl Compiler {
             });
         }
 
-        // Show thunks: accept a boxed, raw or heap-string argument at slot 0,
-        // ignore the trailing dictionary, and return an ObjString via STRINGIFY.
-        // An immediate is re-boxed with its tag first: a shared generic body
-        // passes raw words (#802), and STRINGIFY reads a float or bool by tag.
+        // Show thunks: take the raw word (an immediate or a heap string) at
+        // slot 0, ignore the trailing dictionary, and return an ObjString via
+        // STRINGIFY. An immediate's static type rides on the op, so it is
+        // never boxed to tell a float or bool from an int.
         let show = |b: &mut crate::hir::synth::Synth, word, tag: Option<ValueTag>| {
-            let word = match tag {
-                Some(tag) => b.builtin(Builtin::Box { tag: tag as u32 }, vec![word], coil_ty::int()),
-                None => word,
-            };
-            b.builtin(Builtin::Stringify, vec![word], coil_ty::string())
+            b.builtin(Builtin::Stringify { tag: tag.map(|t| t as u32) }, vec![word], coil_ty::string())
         };
         for (ty, tag) in [
             ("int", Some(ValueTag::Int)),
@@ -8907,9 +8903,29 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) -> bool {
+        self.compile_module_begin_inner(module, ast, true)
+    }
+
+    /// [`Self::compile_module`] in two calls, as
+    /// [`Self::compile_prepared_module_begin`] for a module not yet
+    /// checked; [`Self::compile_prepared_module_finish`] ends it.
+    pub fn compile_module_begin<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+    ) -> bool {
+        self.compile_module_begin_inner(module, ast, false)
+    }
+
+    fn compile_module_begin_inner<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+        prepared: bool,
+    ) -> bool {
         let mut ok = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ok = self.compile_unfused_begin(module, ast, true);
+            ok = self.compile_unfused_begin(module, ast, prepared);
         }));
         Self::rethrow_unless_recursion_limit(result);
         if ok {

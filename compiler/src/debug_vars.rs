@@ -446,6 +446,7 @@ fn writes_of(b: &Byte, constants: &[u64]) -> Option<Vec<u32>> {
         }
         DenseMake => vec![b.dense_abc_parts().1 as u32],
         DenseMakeK => vec![b.dense_make_k_parts(constants)?.1 as u32],
+        DenseHostCall => vec![b.dense_host_call_parts(constants)?.0 as u32],
         DenseMakeObject => vec![common::dense::unpack_make_object(b.operand_u32()).0 as u32],
         DenseConst => vec![b.dense_const_parts().1 as u32],
         DenseMove | DenseArrayLen => vec![b.dense_move_parts().0 as u32],

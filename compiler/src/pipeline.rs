@@ -1743,7 +1743,12 @@ impl Pipeline {
         self.compiler_lazy_mut().set_source_file(path);
         self.compiler_lazy_mut().set_source_text(src);
         self.compiler_lazy_mut().set_pending_finalizers(false);
-        self.compiler_lazy_mut().compile_module("", &mut ast);
+        // As `compile_file`: the other modules' method clones this one
+        // calls compile first, for its typed inlining to splice.
+        if self.compiler_lazy_mut().compile_module_begin("", &mut ast) {
+            self.emit_foreign_clones();
+            self.compiler_lazy_mut().compile_prepared_module_finish("", &mut ast);
+        }
         self.emit_foreign_clones();
 
         // Register source and drain typecheck / codegen diagnostics via the sink.

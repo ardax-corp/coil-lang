@@ -2,11 +2,12 @@
 
 GitHub: #1416, #1417, #1419. Status: **implemented**.
 
-A generic body shared by every instance takes its type arguments boxed and
-its trait bounds as dictionaries (tuples of method code pointers). In
-`HashMap<int, int>` and `sort(Vec<int>)` that meant a box per argument and a
-fresh dictionary tuple on every call. Three changes take that away for
-ground calls.
+A generic body shared by every instance takes its trait bounds as
+dictionaries (tuples of method code pointers). Until 2026-11 it also took
+its type arguments boxed; now they cross in their own word (layout.md,
+"No boxes at generic edges"). In `HashMap<int, int>` and `sort(Vec<int>)`
+that meant a box per argument and a fresh dictionary tuple on every call.
+Three changes take the dictionary cost away for ground calls.
 
 ## Ground dictionaries once (#1417)
 
@@ -62,7 +63,7 @@ their own layout and bounds resolve statically.
   closed, its calls turned into `Callee::Resolved`, whose plans live in
   `resolved_plans`). `hir_inline_replan` then splices a kept body like a
   same-module callee when the call needs no boxing, keeps the clone's ABI
-  and fits `max_cross_module_inline_cost`
+  and fits `max_cross_module_inline_cost` (100: every node 1, a call 25)
   (`examples/perf/foreign_clone_hot.coil`).
 - **Free functions.** A generic free function is a clone source like a
   static method with its own type parameters (`note_fn_clone_src`). Its own

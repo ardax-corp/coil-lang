@@ -5023,28 +5023,6 @@ bb0:
     assert!(lir.iter().any(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::FORMAT)));
 }
 
-/// A boxed carrier (`BoxValue`, an operator instance method's operand) is
-/// no LIR wall for a fused body: the S2b map binds its real allocation
-/// sites and leaves the box to the precise frame map, as its fuse IL does.
-#[test]
-fn lir_takes_fused_body_with_boxed_value() {
-    let text = "func @add(v0: i64, v1: i64) -> i64 {
-bb0:
-    v2 = alloc.boxed 3, v0
-    v3 = gcbarrier.safepoint v2
-    v4 = alloc.boxed 3, v1
-    v5 = gcbarrier.safepoint v4
-    v6 = call.i64 9 v3, v5
-    return v6
-}";
-    let f = parse_func(text).expect(text);
-    f.verify().unwrap();
-    let labels = super::specialize::BodyLabels { first: Some(Label(0)), head: vec![Label(0)] };
-    let draft = super::fuse_fallback(&labels, "add", &[], &f, &crate::il::opt::OptimizeOptions::default());
-    let lir = draft.ops().expect("LIR takes a boxed fused body");
-    assert_eq!(lir.iter().filter(|op| matches!(op, IlOp::BoxValue { .. })).count(), 2);
-}
-
 /// The LIR tier reuses the dense gates' LIR of a body (N10): against a pool
 /// that grew since, it gives the ops and pool a fresh lowering would.
 #[test]

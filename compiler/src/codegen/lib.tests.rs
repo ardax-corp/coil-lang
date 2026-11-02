@@ -730,7 +730,7 @@ fn bare_yield_from_statement_does_not_emit_trailing_pop() {
 #[test]
 fn float_arithmetic_emits_float_opcode() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("1.0 + 2.0;");
+    let (bc, _pool) = compile_src_lir("1.0 + 2.0;");
     // Find the binary operator instruction. The bytecode is
     // initialised with CALL/JMP/HALT, then operand code, then the
     // operator. We search for the LAST ADDF / ADD.
@@ -751,7 +751,7 @@ fn float_arithmetic_emits_float_opcode() {
 #[test]
 fn float_unary_minus_emits_negf_not_neg() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn n(float x) -> float { return -x; }");
+    let (bc, _pool) = compile_src_lir("fn n(float x) -> float { return -x; }");
     // The builtin `Neg` thunks (both lanes) come first; `n`'s is the last.
     let last_neg = bc
         .iter()
@@ -3262,6 +3262,37 @@ fn cross_module_tiny_add_is_inlined() {
     );
 }
 
+/// A callee of middling size (over the old limit of 50) inlines across
+/// modules: a `HashMap` method's clone is about this big.
+#[test]
+fn cross_module_mid_fn_is_inlined() {
+    let util = "fn mid(int a, int b) -> int {\n\
+             let t0 = a + b;\n\
+             let t1 = t0 + a;\n\
+             let t2 = t1 + b;\n\
+             let t3 = t2 + a;\n\
+             let t4 = t3 + b;\n\
+             let t5 = t4 + a;\n\
+             let t6 = t5 + b;\n\
+             let t7 = t6 + a;\n\
+             let t8 = t7 + b;\n\
+             let t9 = t8 + a;\n\
+             let t10 = t9 + b;\n\
+             let t11 = t10 + a;\n\
+             return t11;\n\
+         }";
+    let entry = "use util::mid;\nfn run() -> int { return mid(1, 2); }";
+    let inlined = compile_util_then_entry(util, entry, |_| {});
+    let kept = compile_util_then_entry(util, entry, |c| {
+        c.inline_cost.inline_across_modules = false;
+    });
+    assert!(
+        count_calls(&kept) > count_calls(&inlined),
+        "a mid-size cross-module fn should inline; opcodes={:?}",
+        inlined.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+    );
+}
+
 #[test]
 fn cross_module_large_fn_keeps_call() {
     let util = "fn bulky(int a, int b) -> int {\n\
@@ -3277,7 +3308,25 @@ fn cross_module_large_fn_keeps_call() {
              let t9 = t8 + a;\n\
              let t10 = t9 + b;\n\
              let t11 = t10 + a;\n\
-             return t11;\n\
+             let t12 = t11 + b;\n\
+             let t13 = t12 + a;\n\
+             let t14 = t13 + b;\n\
+             let t15 = t14 + a;\n\
+             let t16 = t15 + b;\n\
+             let t17 = t16 + a;\n\
+             let t18 = t17 + b;\n\
+             let t19 = t18 + a;\n\
+             let t20 = t19 + b;\n\
+             let t21 = t20 + a;\n\
+             let t22 = t21 + b;\n\
+             let t23 = t22 + a;\n\
+             let t24 = t23 + b;\n\
+             let t25 = t24 + a;\n\
+             let t26 = t25 + b;\n\
+             let t27 = t26 + a;\n\
+             let t28 = t27 + b;\n\
+             let t29 = t28 + a;\n\
+             return t29;\n\
          }";
     let entry = "use util::bulky;\nfn run() -> int { return bulky(1, 2); }";
     let default_bc = compile_util_then_entry(util, entry, |_| {});
@@ -5486,31 +5535,21 @@ fn multiparam_constrained_escape_emits_capture_with_slot_count() {
     );
 }
 
-/// Codegen test B3-2: escaped unbounded `id<T>` keeps the shared
-/// `BoxValue` ABI. Ground `id(42)` monomorphizes to a direct CALL (see
+/// Escaped unbounded `id<T>` (a `PolyFn`): the int argument and result
+/// cross the shared body in their own word, never boxed (the
+/// representation rule, docs/internals/layout.md). Ground `id(42)`
+/// monomorphizes to a direct CALL (see
 /// `unbounded_generic_helper_emits_direct_call`).
 #[test]
-fn generic_call_with_concrete_arg_emits_box_value() {
+fn escaped_poly_fn_passes_words_unboxed() {
     use common::Instruction;
     let (bc, _pool) =
         compile_src("fn id<T>(T x) -> T { return x; } fn main() { let f = id; f(42); }");
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::BoxValue)),
-        "expected BoxValue for concrete int arg passed through escaped PolyFn id<T>; bytecode opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    let box_ops: Vec<u32> = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::BoxValue))
-        .map(|b| b.operand_u32())
-        .collect();
-    assert!(
-        box_ops.contains(&(common::ValueTag::Int as u32)),
-        "BoxValue operand should be ValueTag::Int ({}), got: {:?}",
-        common::ValueTag::Int as u32,
-        box_ops
-    );
+    let ops: Vec<_> = bc.iter().map(|b| *b.bytecode()).collect();
+    assert!(ops.contains(&Instruction::CallIndirect), "expected the PolyFn call; opcodes: {ops:?}");
+    for op in [Instruction::BoxValue, Instruction::UnboxValue] {
+        assert!(!ops.contains(&op), "a generic edge must not box or unbox; opcodes: {ops:?}");
+    }
 }
 
 /// Ground `id(42)` specializes to a native CALL (no BoxValue / CallIndirect).
@@ -5540,37 +5579,6 @@ fn unbounded_generic_helper_emits_direct_call() {
             .any(|b| matches!(b.bytecode(), Instruction::UnboxValue)),
         "specialized id<int> must not unbox; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-}
-
-/// Escaped `let f = id; f(42)` still boxes at the PolyFn boundary.
-#[test]
-fn generic_call_emits_box_and_unbox() {
-    use common::Instruction;
-    let (bc, _pool) =
-        compile_src("fn id<T>(T x) -> T { return x; } fn main() { let f = id; f(42); }");
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::BoxValue)),
-        "expected BoxValue for concrete int arg to escaped PolyFn id<T>; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::UnboxValue)),
-        "expected UnboxValue after escaped PolyFn returns concrete int; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    let unbox_ops: Vec<u32> = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::UnboxValue))
-        .map(|b| b.operand_u32() & 0xFFFF)
-        .collect();
-    assert!(
-        unbox_ops.contains(&(common::ValueTag::Int as u32)),
-        "UnboxValue operand should be ValueTag::Int ({}), got: {:?}",
-        common::ValueTag::Int as u32,
-        unbox_ops
     );
 }
 
@@ -7391,11 +7399,11 @@ fn main() {
     );
     let hosts: Vec<_> = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+        .filter(|b| is_host_call(b))
         .collect();
     assert!(
         hosts.iter().any(|b| {
-            common::host_invoke_enum_layout(b.operand_u32())
+            host_call_layout(b)
                 == common::HOST_ENUM_LAYOUT_OPTION_NICHE
         }),
         "heap Vec::pop must ask the host for OptionNiche; operands={:?}",
@@ -7430,15 +7438,15 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
+            .any(is_host_call),
         "Vec::pop of int should still HostInvoke; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
     assert!(
         bc.iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+            .filter(|b| is_host_call(b))
             .all(|b| {
-                common::host_invoke_enum_layout(b.operand_u32()) == common::HOST_ENUM_LAYOUT_BOXED
+                host_call_layout(b) == common::HOST_ENUM_LAYOUT_BOXED
             }),
         "int Vec::pop stays boxed at the host edge; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
@@ -7663,6 +7671,20 @@ fn main() {
     );
 }
 
+/// A stack (`HostInvoke`) or register (`DenseHostCall`) host call.
+fn is_host_call(b: &Byte) -> bool {
+    matches!(b.bytecode(), Instruction::HostInvoke | Instruction::DenseHostCall)
+}
+
+/// The enum layout a host call asks the native for (`HOST_ENUM_LAYOUT_*`).
+fn host_call_layout(b: &Byte) -> u32 {
+    if matches!(b.bytecode(), Instruction::DenseHostCall) {
+        (b.operand_u32() >> 16) & 0x3
+    } else {
+        common::host_invoke_enum_layout(b.operand_u32())
+    }
+}
+
 fn host_niche_immediately_unwraps(bc: &[Byte]) -> bool {
     bc.windows(2).any(|w| {
         matches!(w[0].bytecode(), Instruction::HostInvoke)
@@ -7735,8 +7757,8 @@ fn main() {
     );
     assert!(
         bc.iter().any(|b| {
-            matches!(b.bytecode(), Instruction::HostInvoke)
-                && common::host_invoke_enum_layout(b.operand_u32())
+            is_host_call(b)
+                && host_call_layout(b)
                     == common::HOST_ENUM_LAYOUT_OPTION_NICHE
         }),
         "expected OptionNiche HostInvoke",
@@ -7762,8 +7784,8 @@ fn main() {
     let boxed_hosts = bc
         .iter()
         .filter(|b| {
-            matches!(b.bytecode(), Instruction::HostInvoke)
-                && common::host_invoke_enum_layout(b.operand_u32())
+            is_host_call(b)
+                && host_call_layout(b)
                     == common::HOST_ENUM_LAYOUT_BOXED
         })
         .count();
@@ -7776,9 +7798,9 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+            .filter(|b| is_host_call(b))
             .all(|b| {
-                common::host_invoke_enum_layout(b.operand_u32()) == common::HOST_ENUM_LAYOUT_BOXED
+                host_call_layout(b) == common::HOST_ENUM_LAYOUT_BOXED
             }),
         "int Vec::pop must not stamp niche bits; opcodes={:?}",
         bc.iter()

@@ -4383,6 +4383,13 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether function `key` has an entry to call: reserved, or, while
+    /// [`Self::hir_plan_bodies_for_clones`] plans this module before its
+    /// entries are reserved, one of its own functions.
+    fn hir_entry_known(&self, key: &str) -> bool {
+        self.fn_entry_labels.contains_key(key) || (self.planning_for_clones && self.hir_fn_names.contains_key(key))
+    }
+
     /// Whether a call of `name` at this span is bare constructor sugar
     /// (`Bad(s)` for `ParseError::Bad`). The checker records the sugar by
     /// span, and a compiler-made call can share its span: `main`'s
@@ -4546,7 +4553,7 @@ impl Compiler {
         if (forwards && overload.is_some()) || (partial.is_some() && overload.is_some()) {
             return Err("callee-overload");
         }
-        let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+        let known = |k: &str| self.functions.contains_key(k) || self.hir_entry_known(k);
         if let Some((fixed, rest, id)) = overload {
             return self.resolve_hir_overload(hir, call, name, (fixed, rest), id);
         }
@@ -5188,6 +5195,7 @@ impl Compiler {
         let Some(module) = self.hir_module.take() else {
             return;
         };
+        self.planning_for_clones = true;
         for body in &module.bodies {
             if body.kind != crate::hir::BodyKind::Function || body.is_generic || body.is_coro || !body.captures.is_empty() || body.root.is_none() {
                 continue;
@@ -5203,6 +5211,7 @@ impl Compiler {
             let _ = self.plan_hir_body_ret(body, ret);
             self.context.variables = prev;
         }
+        self.planning_for_clones = false;
         self.hir_module = Some(module);
     }
 
@@ -6450,7 +6459,7 @@ impl Compiler {
             // signature too, so it agrees with the definition.
             // A rest pack is one more argument, as above.
             None if key == lookup
-                && self.fn_entry_labels.contains_key(&key)
+                && self.hir_entry_known(&key)
                 && (!self.checker.fn_has_rest(&lookup) || (self_layout.is_none() && !open))
                 && self
                     .checker
@@ -7339,16 +7348,13 @@ impl Compiler {
     /// object first), the closure called, and its result unboxed (a niche
     /// `Option` back to its niche word).
     fn closure_adapter_mir(name: &str, adapt: &HirClosureAdapt) -> Result<crate::mir::MirFunc, String> {
-        use crate::mir::{MirAllocKind, MirCastKind, MirConst, MirGcKind, MirTy};
+        use crate::mir::{MirCastKind, MirConst, MirTy};
         let err = |e: crate::mir::MirError| format!("mir: {e}");
         let mut b = crate::mir::MirBuilder::new(name.to_string());
         b.set_ret_ty(adapt.ret.ty);
         let f = b.add_param(MirTy::HeapRef).map_err(err)?;
         let params = adapt.args.iter().map(|w| b.add_param(w.ty)).collect::<Result<Vec<_>, _>>().map_err(err)?;
-        let boxed = |b: &mut crate::mir::MirBuilder, tag: u32, v| {
-            let obj = b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v])?;
-            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
-        };
+        let boxed = |b: &mut crate::mir::MirBuilder, tag: u32, v| b.ins_box(v, tag);
         let mut args = Vec::with_capacity(params.len());
         for (w, p) in adapt.args.iter().zip(params) {
             args.push(match w.conv {
@@ -8006,7 +8012,7 @@ impl Compiler {
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
+            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -9035,7 +9041,7 @@ impl Compiler {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
             HirKind::Builtin {
-                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
+                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify { .. } | Builtin::Relayout,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             // A copy-on-write op passes its operand's word through.

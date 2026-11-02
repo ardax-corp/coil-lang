@@ -289,6 +289,10 @@ fn format_operands(
             let o = byte.operand_u32();
             format!("kind={} dest={} pool_idx={}", o >> 24, (o >> 16) & 0xFF, o & 0xFFFF)
         }
+        Instruction::DenseHostCall => {
+            let o = byte.operand_u32();
+            format!("dest={} layout={} pool_idx={}", o >> 24, (o >> 16) & 0x3, o & 0xFFFF)
+        }
         Instruction::HostInvoke | Instruction::FfiInvoke => {
             format!("arity={}", byte.operand_u32() & 0xFFFF)
         }
@@ -361,6 +365,10 @@ fn format_operands(
             format!("has_send={}", (byte.operand_u32() & 1) != 0)
         }
         Instruction::DynCmp => format!("kind={}", byte.operand_u32() & 0xFF),
+        Instruction::STRINGIFY => match common::stringify_tag(byte.operand_u32()) {
+            Some(tag) => format!("{tag:?}"),
+            None => String::new(),
+        },
         Instruction::DenseBin | Instruction::DenseBin2 => {
             let (kind, dest, a, b) = byte.dense_abc_parts();
             format!(

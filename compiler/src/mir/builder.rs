@@ -1138,7 +1138,9 @@ impl MirBuilder {
         Ok(dest)
     }
 
-    pub fn ins_stringify(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+    /// `STRINGIFY` of `src`, an immediate of static scalar type `tag`
+    /// (`ValueTag`) or, with `None`, a word the VM inspects.
+    pub fn ins_stringify(&mut self, src: ValueId, tag: Option<u32>) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() {
             return Err(MirError::msg("Stringify type".to_string()));
         }
@@ -1146,23 +1148,49 @@ impl MirBuilder {
         self.push(MirInst::Stringify {
             dest,
             src: self.resolve(src),
+            tag,
         })?;
         self.snapshot_slots(dest);
         Ok(dest)
     }
 
-    /// `UnboxValue tag` of `src` ([`MirInst::Unbox`]), read as `ty`.
-    pub fn ins_unbox(&mut self, src: ValueId, tag: u32, ty: MirTy) -> Result<ValueId, MirError> {
+    /// A word that crossed a generic edge (a shared body's bare type
+    /// parameter, a dictionary or closure adapter's argument or result),
+    /// read as `ty`. Words cross those edges in their own representation
+    /// (`rep(T)`, docs/internals/layout.md), never boxed, so this is the
+    /// same bits retyped. `_tag` names the static type the edge carries.
+    pub fn ins_unbox(&mut self, src: ValueId, _tag: u32, ty: MirTy) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() || !ty.is_specialized() {
             return Err(MirError::msg("Unbox type".to_string()));
         }
-        let dest = self.alloc(ty);
-        self.push(MirInst::Unbox {
-            dest,
-            src: self.resolve(src),
-            tag,
-        })?;
-        Ok(dest)
+        self.ins_word_as(src, ty)
+    }
+
+    /// `v` as the word a generic edge passes for a value of static type
+    /// `_tag`: a heap or `i64` word as it is, a `float` or `bool` as its
+    /// `i64` bits. No box is made (see [`Self::ins_unbox`]).
+    pub fn ins_box(&mut self, v: ValueId, _tag: u32) -> Result<ValueId, MirError> {
+        match self.resolve_ty(v) {
+            MirTy::F64 | MirTy::Bool => self.ins_cast(MirCastKind::Word, MirTy::I64, v),
+            _ => Ok(self.resolve(v)),
+        }
+    }
+
+    /// `v`'s bits as type `ty` ([`MirCastKind::Word`], through `i64`
+    /// where no direct cast exists).
+    pub fn ins_word_as(&mut self, v: ValueId, ty: MirTy) -> Result<ValueId, MirError> {
+        let from = self.resolve_ty(v);
+        if from == ty {
+            return Ok(self.resolve(v));
+        }
+        if MirCastKind::Word.allows(from, ty) {
+            return self.ins_cast(MirCastKind::Word, ty, v);
+        }
+        if MirCastKind::Word.allows(from, MirTy::I64) && MirCastKind::Word.allows(MirTy::I64, ty) {
+            let w = self.ins_cast(MirCastKind::Word, MirTy::I64, v)?;
+            return self.ins_cast(MirCastKind::Word, ty, w);
+        }
+        Err(MirError::msg(format!("word {from} as {ty}")))
     }
 
     /// String `==` / `!=` by content ([`MirInst::StrEq`]).

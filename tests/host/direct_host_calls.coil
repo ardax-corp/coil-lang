@@ -1,0 +1,83 @@
+// Plain natives (`common::DIRECT_HOST_NATIVES`) run as register-form
+// `DenseHostCall`s inside dense loops. These loops call them many times,
+// including ones that allocate (string slices) so the garbage collector
+// runs between calls, and check every result against a second way of
+// computing it.
+use tests::assert;
+use string::{slice_bytes, format};
+
+fn hash_sum<T: Hash>(Vec<T> xs) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < xs.len() {
+        acc = acc + (xs[i].hash() & 1023);
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn slice_or_empty(string s, int from, int to) -> string {
+    return match slice_bytes(s, from, to) {
+        Result::Ok(t) => t,
+        Result::Err(_) => "",
+    };
+}
+
+test("hash in a dense loop matches a hash per call") {
+    let words: Vec<string> = Vec::new();
+    let i = 0;
+    while i < 2000 {
+        words.push(format("w%i", i % 37));
+        i = i + 1;
+    }
+    let expect = 0;
+    let j = 0;
+    while j < words.len() {
+        expect = expect + (words[j].hash() & 1023);
+        j = j + 1;
+    }
+    assert!(hash_sum(words) == expect);
+    assert!("abc".hash() == ("a" + "bc").hash());
+}
+
+test("allocating slices in a loop survive collections") {
+    let base = "0123456789abcdefghijklmnopqrstuvwxyz";
+    let pieces: Vec<string> = Vec::new();
+    let i = 0;
+    while i < 20000 {
+        let from = i % 30;
+        pieces.push(slice_or_empty(base, from, from + 5));
+        i = i + 1;
+    }
+    let k = 0;
+    while k < pieces.len() {
+        let from = k % 30;
+        assert!(pieces[k].len() == 5);
+        assert!(pieces[k][0] == base[from]);
+        assert!(pieces[k][4] == base[from + 4]);
+        k = k + 1;
+    }
+    assert!(slice_or_empty(base, 40, 41) == "");
+}
+
+fn round_trip(int i) -> Result<int, string> {
+    let s = char(i as byte)?;
+    let b = ord(s)?;
+    return Result::Ok(b as int);
+}
+
+test("ord and char round-trip in a loop") {
+    let i = 32;
+    let n = 0;
+    while i < 127 {
+        let back = match round_trip(i) {
+            Result::Ok(b) => b,
+            Result::Err(_) => -1,
+        };
+        if back == i {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    assert!(n == 95);
+}

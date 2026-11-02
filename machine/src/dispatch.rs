@@ -28,6 +28,10 @@ struct HotExtra<'a> {
     dense_obj_addr: &'a mut u64,
     dense_obj: &'a mut Option<Object>,
     vregs: &'a mut [[u64; common::simd::LANES]; common::simd::NREGS],
+    natives: &'a crate::ffi::Natives,
+    /// Set when a `DenseHostCall` allocated: the streak stops right after
+    /// it and the giant match runs the allocation safepoint.
+    host_alloc: &'a mut bool,
 }
 
 /// Outcome of a call helper of [`super::Machine::exec_rest`].
@@ -132,6 +136,7 @@ const ALWAYS_HOT: [u64; 4] = {
     b = or_hot(b, Instruction::LogNotJmpf);
     b = or_hot(b, Instruction::LogNotJmpt);
     b = or_hot(b, Instruction::BinSlotSlotStore);
+    b = or_hot(b, Instruction::DenseHostCall);
     // Byte lanes (`byte_scan`): a skip-ahead loop stays in the streak.
     b = or_hot(b, Instruction::VLoad);
     b = or_hot(b, Instruction::VBin);
@@ -620,6 +625,52 @@ pub(super) fn dense_store_index(args: DenseStoreIndexArgs<'_>) -> Result<(), Den
         return Err(DenseFail::StoreNonArray);
     }
     Ok(())
+}
+
+/// Run a `DenseHostCall` whose native has a direct function
+/// ([`crate::ffi::NativeFn::direct`]): `Some(allocated)` once `dest` holds
+/// the result, `None` (nothing run) when the native has none or the pool
+/// entry is missing; the giant match then runs it.
+#[inline(always)]
+pub(super) fn dense_host_call_direct(
+    stack: &mut Stack<Value>,
+    sp: usize,
+    opcode: &Byte,
+    constants: &[u64],
+    heap: &mut Heap,
+    natives: &crate::ffi::Natives,
+    stack_cap: usize,
+) -> Option<bool> {
+    let (dest, layout, id, base, arity) = opcode.dense_host_call_parts(constants)?;
+    let f = natives.direct_by_id(id)?;
+    promise!(sp + dest < stack_cap);
+    if arity > 0 {
+        promise!(sp + base + arity - 1 < stack_cap);
+    }
+    let live_before = heap.live_object_count();
+    let args = &stack[sp + base..sp + base + arity];
+    let layout = crate::host_enum::HostEnumLayout::from_u32(layout);
+    let v = crate::host_enum::in_host_enum_layout(layout, || f(heap, args));
+    stack[sp + dest] = v;
+    Some(heap.live_object_count() > live_before)
+}
+
+/// [`dense_host_call_direct`] inside a streak. Outlined so the call does
+/// not cost the streak loop registers on paths that never make one.
+#[inline(never)]
+fn dense_host_call_in_streak(ctx: &mut HotCtx<'_, '_>, opcode: &Byte) {
+    match dense_host_call_direct(ctx.stack, ctx.sp, opcode, ctx.constants, ctx.heap, ctx.extra.natives, ctx.stack_cap) {
+        Some(false) => {}
+        Some(true) => {
+            // Done; the giant match runs the allocation safepoint.
+            *ctx.extra.host_alloc = true;
+            ctx.panic_msg = Some(STREAK_YIELD);
+        }
+        None => {
+            ctx.ip -= 1;
+            ctx.panic_msg = Some(STREAK_YIELD);
+        }
+    }
 }
 
 /// Not a panic: a streak op handing itself back to the giant match
@@ -1302,6 +1353,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
                 ctx.panic_msg = Some("index out of bounds");
             }
         }
+        Instruction::DenseHostCall => dense_host_call_in_streak(ctx, &opcode),
         Instruction::DenseArrayPush => {
             if !dense_array_push(ctx, &opcode) {
                 // Back to the push: the giant match grows the array and
@@ -1384,6 +1436,8 @@ pub(super) struct ConsumeAlwaysHotStreakArgs<'a> {
     pub dense_obj_addr: &'a mut u64,
     pub dense_obj: &'a mut Option<Object>,
     pub vregs: &'a mut [[u64; common::simd::LANES]; common::simd::NREGS],
+    pub natives: &'a crate::ffi::Natives,
+    pub host_alloc: &'a mut bool,
     pub fuel: &'a mut u64,
     pub stack_cap: usize,
 }
@@ -1409,6 +1463,8 @@ pub(super) fn consume_always_hot_streak(
         dense_obj_addr,
         dense_obj,
         vregs,
+        natives,
+        host_alloc,
         fuel,
         stack_cap,
     } = args;
@@ -1423,6 +1479,8 @@ pub(super) fn consume_always_hot_streak(
         dense_obj_addr,
         dense_obj,
         vregs,
+        natives,
+        host_alloc,
     };
     let mut ctx = HotCtx {
         stack,
@@ -1512,10 +1570,14 @@ mod tests {
             if is_always_hot(op) {
                 continue;
             }
+            let natives = crate::ffi::Natives::new();
+            let mut host_alloc = false;
             let mut extra = HotExtra {
                 dense_obj_addr: &mut dense_obj_addr,
                 dense_obj: &mut dense_obj,
                 vregs: &mut vregs,
+                natives: &natives,
+                host_alloc: &mut host_alloc,
             };
             let mut ctx = HotCtx {
                 stack: &mut stack,

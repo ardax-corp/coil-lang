@@ -384,9 +384,7 @@ fn push_string_bytes(
             .expect("string byte native signature");
         let id = out.len();
         register_id(name, id);
-        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-            Ok(Some(host(heap, args)))
-        })));
+        out.push(Arc::new(HostClosureFn::new_direct(sig, host)));
     }
 }
 
@@ -426,7 +424,7 @@ fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("black_box signature");
     let id = out.len();
     register_id(name, id);
-    out.push(Arc::new(HostClosureFn::new(sig, |_heap, args| Ok(Some(args[0])))));
+    out.push(Arc::new(HostClosureFn::new_direct(sig, |_heap, args| args[0])));
 }
 
 /// `values_eq_shaped(a, b, shape) -> bool`: `==` on an aggregate whose
@@ -606,9 +604,12 @@ fn push_wiring(
             })));
             continue;
         }
-        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-            Ok(Some(host(heap, args)))
-        })));
+        if common::host_native_id(name) == Some(common::CLOCK_SLEEP_MS_ID as usize) {
+            // Inside a scope the VM suspends the task instead of calling it.
+            out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| Ok(Some(host(heap, args))))));
+            continue;
+        }
+        out.push(Arc::new(HostClosureFn::new_direct(sig, host)));
     }
 }
 
@@ -660,17 +661,13 @@ fn push_prelude_char_ord(
         .expect("ord signature");
     let ord_id = out.len();
     register_id("ord", ord_id);
-    out.push(Arc::new(HostClosureFn::new(ord_sig, |heap, args| {
-        Ok(Some(prelude_ord(heap, args)))
-    })));
+    out.push(Arc::new(HostClosureFn::new_direct(ord_sig, prelude_ord)));
 
     let char_sig = FfiSignature::from_parts("char".to_string(), vec![FfiType::Int], FfiType::Int)
         .expect("char signature");
     let char_id = out.len();
     register_id("char", char_id);
-    out.push(Arc::new(HostClosureFn::new(char_sig, |heap, args| {
-        Ok(Some(prelude_char(heap, args)))
-    })));
+    out.push(Arc::new(HostClosureFn::new_direct(char_sig, prelude_char)));
 
     let hash_sig = FfiSignature::from_parts(
         "hash_string".to_string(),
@@ -680,9 +677,7 @@ fn push_prelude_char_ord(
     .expect("hash_string signature");
     let hash_id = out.len();
     register_id("hash_string", hash_id);
-    out.push(Arc::new(HostClosureFn::new(hash_sig, |heap, args| {
-        Ok(Some(prelude_hash_string(heap, args)))
-    })));
+    out.push(Arc::new(HostClosureFn::new_direct(hash_sig, prelude_hash_string)));
 }
 
 fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
@@ -1297,6 +1292,20 @@ mod tests {
     }
 
     /// Auto-par specializations spawn N-ary recursive calls; the host native
+    /// The compiler emits `DenseHostCall` for every native
+    /// `common::DIRECT_HOST_NATIVES` names, so each must have a direct
+    /// function (else every call takes the cold generic fallback).
+    #[test]
+    fn every_compiler_direct_native_has_a_direct_function() {
+        let natives = build_standard_host_natives(|_, _| {});
+        for name in common::DIRECT_HOST_NATIVES {
+            let id = common::host_native_id(name).unwrap_or_else(|| panic!("`{name}` is not a standard native"));
+            assert!(common::host_native_is_direct(id), "`{name}`");
+            assert!(natives[id].direct().is_some(), "`{name}` (id {id}) has no direct function");
+        }
+        assert!(natives[common::CLOCK_SLEEP_MS_ID as usize].direct().is_none(), "sleep suspends a task");
+    }
+
     /// must accept 1..=1+MAX args and still reject garbage beyond that.
     #[test]
     fn thread_spawn_arity_range_covers_max_thread_spawn_args() {

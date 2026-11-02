@@ -1252,7 +1252,6 @@ fn region_has_barrier_inst(_func: &MirFunc, inst: &MirInst) -> bool {
                 | MirInst::Format { .. }
                 | MirInst::Stringify { .. }
                 | MirInst::Cow { .. }
-                | MirInst::Unbox { .. }
         )
 }
 

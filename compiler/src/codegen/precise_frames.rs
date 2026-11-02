@@ -236,6 +236,10 @@ pub(super) fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
             let (_, dest, arity, base, _) = b.dense_make_k_parts(constants)?;
             max(&[dest, base + arity.max(1) - 1])
         }
+        DenseHostCall => {
+            let (dest, _, _, base, arity) = b.dense_host_call_parts(constants)?;
+            max(&[dest, base + arity.max(1) - 1])
+        }
         DenseMakeObject => one(common::dense::unpack_make_object(b.operand_u32()).0 as usize),
         DenseConst => one(b.dense_const_parts().1),
         DenseMove => {
@@ -347,6 +351,10 @@ fn slot_effect(b: &Byte, constants: &[u64]) -> Option<SlotEffect> {
         }
         DenseMakeK => {
             let (_, dest, arity, base, _) = b.dense_make_k_parts(constants)?;
+            return uses(std::iter::once(dest).chain(base..base + arity).collect());
+        }
+        DenseHostCall => {
+            let (dest, _, _, base, arity) = b.dense_host_call_parts(constants)?;
             return uses(std::iter::once(dest).chain(base..base + arity).collect());
         }
         DenseMakeObject => return uses(vec![common::dense::unpack_make_object(b.operand_u32()).0 as usize]),
@@ -1690,6 +1698,13 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         DenseMakeObject => {
             let (dest, _, _) = common::dense::unpack_make_object(b.operand_u32());
             record_dense_alloc(st, &mut step, dest as usize)?;
+        }
+        // As `HostInvoke`: the result may be an object the native made, and
+        // the call is a safepoint once `dest` holds it.
+        DenseHostCall => {
+            let (dest, _, _, _, _) = b.dense_host_call_parts(constants)?;
+            st.set_copy(dest, true, false)?;
+            step.record = Some(st.heap_slots(st.hi, true));
         }
         DenseBin2 | DenseBinJmpf | DenseIndexJmpf => {
             if pc + 2 > end {
