@@ -96,6 +96,7 @@ userland modules. Prelude is auto-injected.
 | `process` | `use process::{Command, Stdio, exec};` | run programs (no shell): `Command` setters, `spawn` / `status` / `output`, child pipes are `Stream`s; needs `--allow-exec` |
 | `clock` | `use clock::{wall_nanos, mono_nanos, sleep_ms};` | virtual HostInvoke **121–123** (not `dload`) |
 | `entropy` | `use entropy::{bytes};` | virtual HostInvoke **190**: `bytes(n) -> Vec<byte>` from the OS CSPRNG, no grant |
+| `key_index` | `use key_index::{table, probe, insert, find, eq_mode};` | virtual HostInvoke **191–199**: insertion-ordered hash index over `Vec<int>`s for any `Hash + Eq` key; usually through stdlib `collections::index::KeyIndex` / `HashMap` ([key-index.md](../../../docs/internals/key-index.md)) |
 | `time` | `use time::{…}` via [coil-time](https://github.com/ardax-corp/coil-time) | pure Coil calendar/format package; not a virtual module |
 | `gc` | `use gc::{root, weak, collect};` | `Root` / `Weak` pins; class `fn drop()` runs at collect / teardown |
 
