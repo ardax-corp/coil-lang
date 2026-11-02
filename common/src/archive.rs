@@ -1332,8 +1332,8 @@ mod tests {
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
         assert_eq!(ARCHIVE_MINOR, 17);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 16));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.16");
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 17));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.17");
     }
 
     #[test]
