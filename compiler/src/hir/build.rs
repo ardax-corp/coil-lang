@@ -115,10 +115,22 @@ fn proved_bounds(module: &mut HirModule) {
     });
 }
 
-/// `#[inline]` / `#[cold]` / `#[hot]` on a function.
+/// `#[inline]` / `#[inline(always)]` / `#[inline(never)]` / `#[cold]` /
+/// `#[hot]` on a function.
 fn opt_hints(attrs: &[parser::ast::Attribute<'_>]) -> super::OptHints {
+    use parser::ast::AttrArgs;
     let has = |name: &str| attrs.iter().any(|a| a.name == name);
-    super::OptHints { inline: has("inline"), cold: has("cold"), hot: has("hot") }
+    let inline = |arg: Option<&str>| {
+        attrs.iter().any(|a| {
+            a.name == "inline"
+                && match (&a.args, arg) {
+                    (AttrArgs::Empty, None) => true,
+                    (AttrArgs::Idents(ids), Some(arg)) => ids.as_slice() == [arg],
+                    _ => false,
+                }
+        })
+    };
+    super::OptHints { inline: inline(None), always: inline(Some("always")), never: inline(Some("never")), cold: has("cold"), hot: has("hot") }
 }
 
 /// `#[noescape(a, b)]` / `#[fresh]` on a function.

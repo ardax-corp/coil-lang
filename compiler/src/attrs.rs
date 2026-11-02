@@ -409,8 +409,16 @@ fn validate_attrs<'x, 'a>(
 }
 
 /// `#[inline]` / `#[cold]` / `#[hot]`: on a function or method, without
-/// arguments, and `#[cold]` alone.
+/// arguments but `#[inline(always)]` / `#[inline(never)]`. `#[cold]` goes
+/// with `#[inline(never)]` only, and `#[inline(never)]` with nothing that
+/// asks for inlining.
 fn check_opt_hints(attrs: &[Attribute<'_>], target: &str, messages: &mut Vec<Message>, span: SimpleSpan) {
+    fn inline_arg(a: &Attribute<'_>) -> Option<&'static str> {
+        match &a.args {
+            AttrArgs::Idents(ids) if a.name == "inline" && ids.len() == 1 => ["always", "never"].into_iter().find(|&k| k == ids[0]),
+            _ => None,
+        }
+    }
     for attr in attrs {
         if OPT_HINTS.contains(&attr.name) {
             if target != "function" {
@@ -419,7 +427,13 @@ fn check_opt_hints(attrs: &[Attribute<'_>], target: &str, messages: &mut Vec<Mes
                     format!("`#[{}]` applies to a function or method, not a {}", attr.name, target),
                     span.into_range(),
                 ));
-            } else if attr.args != AttrArgs::Empty {
+            } else if attr.name == "inline" && attr.args != AttrArgs::Empty && inline_arg(attr).is_none() {
+                messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    "`#[inline]` takes `always` or `never`: `#[inline(always)]`, `#[inline(never)]`".to_string(),
+                    span.into_range(),
+                ));
+            } else if attr.name != "inline" && attr.args != AttrArgs::Empty {
                 messages.push(Message::error(
                     ErrorCode::GenericTypeError,
                     format!("`#[{}]` takes no arguments", attr.name),
@@ -428,16 +442,23 @@ fn check_opt_hints(attrs: &[Attribute<'_>], target: &str, messages: &mut Vec<Mes
             }
         }
     }
-    if target == "function"
-        && attrs.iter().any(|a| a.name == "cold")
-        && let Some(other) = attrs.iter().find(|a| a.name == "inline" || a.name == "hot")
-    {
-        let mut msg = Message::error(
-            ErrorCode::ConflictingOptHints,
-            format!("a function cannot be both `#[cold]` and `#[{}]`", other.name),
-            span.into_range(),
-        );
-        msg.with_help("keep the one that holds: `#[cold]` for a rarely called function".to_string());
+    if target != "function" {
+        return;
+    }
+    // The spelling of each hint, as written.
+    let spell = |a: &Attribute<'_>| inline_arg(a).map_or_else(|| format!("#[{}]", a.name), |arg| format!("#[inline({arg})]"));
+    let never = attrs.iter().find(|a| inline_arg(a) == Some("never"));
+    let wants = |a: &&Attribute<'_>| (a.name == "inline" && inline_arg(a) != Some("never")) || a.name == "hot";
+    let conflict = if let Some(never) = never {
+        attrs.iter().find(wants).map(|other| (spell(never), spell(other), "`#[inline(never)]` to keep the calls"))
+    } else if let Some(cold) = attrs.iter().find(|a| a.name == "cold") {
+        attrs.iter().find(wants).map(|other| (spell(cold), spell(other), "`#[cold]` for a rarely called function"))
+    } else {
+        None
+    };
+    if let Some((first, other, keep)) = conflict {
+        let mut msg = Message::error(ErrorCode::ConflictingOptHints, format!("a function cannot be both `{first}` and `{other}`"), span.into_range());
+        msg.with_help(format!("keep the one that holds: {keep}"));
         messages.push(msg);
     }
 }
