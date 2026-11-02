@@ -1,0 +1,20 @@
+// `show` of each scalar type prints by its static type, in ground code and
+// through a shared generic body's `Show` dictionary: a float stays a
+// float and a bool a bool without being boxed for the VM to read.
+// @flags --clone-budget 0
+// @output 7 2.5 true () 255\n-3 0.0 false\n7|2.5|true|255|\n
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn shown<T: Show>(T x) -> string {
+    return x.show() + "|";
+}
+
+fn main() {
+    let b: byte = 255;
+    let line = 7.show() + " " + 2.5.show() + " " + true.show() + " " + ().show() + " " + b.show() +
+               "\n";
+    let _ = write(stdout(), to_bytes(line));
+    let _ = write(stdout(), to_bytes(format("%v %v %v\n", -3, 0.0, false)));
+    let _ = write(stdout(), to_bytes(shown(7) + shown(2.5) + shown(true) + shown(b) + "\n"));
+}
