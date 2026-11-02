@@ -7391,11 +7391,11 @@ fn main() {
     );
     let hosts: Vec<_> = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+        .filter(|b| is_host_call(b))
         .collect();
     assert!(
         hosts.iter().any(|b| {
-            common::host_invoke_enum_layout(b.operand_u32())
+            host_call_layout(b)
                 == common::HOST_ENUM_LAYOUT_OPTION_NICHE
         }),
         "heap Vec::pop must ask the host for OptionNiche; operands={:?}",
@@ -7430,15 +7430,15 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
+            .any(is_host_call),
         "Vec::pop of int should still HostInvoke; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
     assert!(
         bc.iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+            .filter(|b| is_host_call(b))
             .all(|b| {
-                common::host_invoke_enum_layout(b.operand_u32()) == common::HOST_ENUM_LAYOUT_BOXED
+                host_call_layout(b) == common::HOST_ENUM_LAYOUT_BOXED
             }),
         "int Vec::pop stays boxed at the host edge; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
@@ -7663,6 +7663,20 @@ fn main() {
     );
 }
 
+/// A stack (`HostInvoke`) or register (`DenseHostCall`) host call.
+fn is_host_call(b: &Byte) -> bool {
+    matches!(b.bytecode(), Instruction::HostInvoke | Instruction::DenseHostCall)
+}
+
+/// The enum layout a host call asks the native for (`HOST_ENUM_LAYOUT_*`).
+fn host_call_layout(b: &Byte) -> u32 {
+    if matches!(b.bytecode(), Instruction::DenseHostCall) {
+        (b.operand_u32() >> 16) & 0x3
+    } else {
+        common::host_invoke_enum_layout(b.operand_u32())
+    }
+}
+
 fn host_niche_immediately_unwraps(bc: &[Byte]) -> bool {
     bc.windows(2).any(|w| {
         matches!(w[0].bytecode(), Instruction::HostInvoke)
@@ -7735,8 +7749,8 @@ fn main() {
     );
     assert!(
         bc.iter().any(|b| {
-            matches!(b.bytecode(), Instruction::HostInvoke)
-                && common::host_invoke_enum_layout(b.operand_u32())
+            is_host_call(b)
+                && host_call_layout(b)
                     == common::HOST_ENUM_LAYOUT_OPTION_NICHE
         }),
         "expected OptionNiche HostInvoke",
@@ -7762,8 +7776,8 @@ fn main() {
     let boxed_hosts = bc
         .iter()
         .filter(|b| {
-            matches!(b.bytecode(), Instruction::HostInvoke)
-                && common::host_invoke_enum_layout(b.operand_u32())
+            is_host_call(b)
+                && host_call_layout(b)
                     == common::HOST_ENUM_LAYOUT_BOXED
         })
         .count();
@@ -7776,9 +7790,9 @@ fn main() {
     );
     assert!(
         bc.iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+            .filter(|b| is_host_call(b))
             .all(|b| {
-                common::host_invoke_enum_layout(b.operand_u32()) == common::HOST_ENUM_LAYOUT_BOXED
+                host_call_layout(b) == common::HOST_ENUM_LAYOUT_BOXED
             }),
         "int Vec::pop must not stamp niche bits; opcodes={:?}",
         bc.iter()
