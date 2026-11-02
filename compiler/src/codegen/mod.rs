@@ -717,7 +717,7 @@ pub struct Compiler {
     cold_fns: HashSet<String>,
     /// Entry labels of [`Self::cold_fns`] calls resolved to.
     cold_labels: HashSet<crate::il::Label>,
-    /// `#[inline]` functions already reported as not inlined (E0807).
+    /// `#[inline(always)]` functions already reported as not inlined (E0807).
     inline_refused: HashSet<String>,
     /// Hot functions of the program by table key: `#[hot]`, and those a
     /// hot one makes hot (`Compiler::note_hot_fns`).
