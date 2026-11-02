@@ -429,6 +429,7 @@ impl JoinState {
         self.shared_epoch.is_some()
     }
 
+    #[cfg(test)]
     pub(crate) fn store_result(&self, result: Result<PortableValue, ThreadErrorTag>) {
         self.store_result_with_panic(result, None);
     }
