@@ -7,8 +7,9 @@ pub struct InlineCostOptions {
     pub max_inline_cost: usize,
     /// Splice small callees from previously compiled modules (COI-125).
     pub inline_across_modules: bool,
-    /// Stricter budget than [`Self::max_inline_cost`] for cross-module
-    /// callees, weighing every node and a call as 25.
+    /// Budget for cross-module callees, weighing every node (a read too)
+    /// and a call as 25: stricter than [`Self::max_inline_cost`] at the
+    /// same number. 100 takes a `HashMap` lookup's clone.
     pub max_cross_module_inline_cost: usize,
 }
 
@@ -17,7 +18,7 @@ impl Default for InlineCostOptions {
         Self {
             max_inline_cost: 100,
             inline_across_modules: true,
-            max_cross_module_inline_cost: 50,
+            max_cross_module_inline_cost: 100,
         }
     }
 }
