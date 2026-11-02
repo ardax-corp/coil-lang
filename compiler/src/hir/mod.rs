@@ -21,6 +21,7 @@ pub mod check;
 pub mod effects;
 pub mod enum_sroa;
 pub mod inline;
+pub mod outline;
 pub mod lower;
 pub mod match_tree;
 pub mod print;
