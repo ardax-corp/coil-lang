@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use super::escape::CallLookup;
 use super::{is_vec, pat_binds, Summary, VEC_MUTATORS};
 use crate::hir::lower::{children, pure_index};
-use crate::hir::{Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirModule, HirPat, IndexKind, LocalId, LocalKind, MakeKind, Span};
+use crate::hir::{Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirModule, HirPat, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span};
 use crate::typechecking::infer::{Checker, ForInKind};
 use reporting::{ErrorCode, Message};
 use crate::typechecking::ty::{self as ty, Ty, strip_readonly};
@@ -1282,7 +1282,7 @@ impl Plan {
 /// read once in the call: the assignment overwrites the place with the
 /// result before anything reads it.
 fn moved_into_call(f: &Facts<'_>, body: &HirBody, call: HirId, v: HirId, inout: &HashSet<LocalId>, borrowed: &HashSet<LocalId>) -> bool {
-    let HirKind::Local(l) = body.expr(v).kind else { return false };
+    let HirKind::Local(l) = body.expr(v).kind else { return place_moved_into_call(f, body, call, v, borrowed) };
     let local = body.local(l);
     if borrowed.contains(&l) || local.borrow || local.kind == LocalKind::Capture || f.captured.contains(&l) {
         return false;
@@ -1295,6 +1295,51 @@ fn moved_into_call(f: &Facts<'_>, body: &HirBody, call: HirId, v: HirId, inout: 
         Some(HirKind::Assign { place, value }) if *value == call && matches!(body.expr(*place).kind, HirKind::Local(x) if x == l)
     );
     assigned_back && f.reads.get(&l).is_some_and(|rs| rs.iter().filter(|&&r| f.contains(call, r)).count() == 1)
+}
+
+/// Whether argument `v` is a field or element place the call's result is
+/// assigned straight back to (`self.f = g(self.f)`, `a[i] = h(a[i])`,
+/// #2206): the old value is dead once the call returns, so it moves in.
+/// The root may not be borrowed, captured or read elsewhere in the call,
+/// and an index must be a literal or a plain local the call cannot change.
+fn place_moved_into_call(f: &Facts<'_>, body: &HirBody, call: HirId, v: HirId, borrowed: &HashSet<LocalId>) -> bool {
+    let Some(HirKind::Assign { place, value }) = f.parent.get(&call).map(|p| &body.expr(*p).kind) else { return false };
+    if *value != call || !matches!(body.expr(v).kind, HirKind::Field { .. } | HirKind::Index { .. }) {
+        return false;
+    }
+    let plain = |l: LocalId| {
+        let local = body.local(l);
+        !borrowed.contains(&l) && !local.borrow && local.kind != LocalKind::Capture && !f.captured.contains(&l)
+    };
+    let mut root = None;
+    if !same_place(body, *place, v, &plain, &mut root) {
+        return false;
+    }
+    let Some(root) = root else { return false };
+    f.reads.get(&root).is_some_and(|rs| rs.iter().filter(|&&r| f.contains(call, r)).count() == 1)
+}
+
+/// Whether `a` and `b` name the same place through the same field names
+/// and equal indices, rooted at one plain local (stored in `root`).
+fn same_place(body: &HirBody, a: HirId, b: HirId, plain: &dyn Fn(LocalId) -> bool, root: &mut Option<LocalId>) -> bool {
+    let index_eq = |x: HirId, y: HirId| match (&body.expr(x).kind, &body.expr(y).kind) {
+        (HirKind::Lit(Lit::Int(i)), HirKind::Lit(Lit::Int(j))) => i == j,
+        (HirKind::Local(i), HirKind::Local(j)) => i == j && plain(*i),
+        _ => false,
+    };
+    match (&body.expr(a).kind, &body.expr(b).kind) {
+        (HirKind::Field { base: ab, name: an }, HirKind::Field { base: bb, name: bn }) => an == bn && same_place(body, *ab, *bb, plain, root),
+        (HirKind::Index { base: ab, index: ai, kind: IndexKind::Array }, HirKind::Index { base: bb, index: bi, kind: IndexKind::Array }) => {
+            index_eq(*ai, *bi) && same_place(body, *ab, *bb, plain, root)
+        }
+        (HirKind::Builtin { op: Builtin::Cow { .. }, args }, _) if args.len() == 1 => same_place(body, args[0], b, plain, root),
+        (_, HirKind::Builtin { op: Builtin::Cow { .. }, args }) if args.len() == 1 => same_place(body, a, args[0], plain, root),
+        (HirKind::Local(x), HirKind::Local(y)) if x == y && plain(*x) => {
+            *root = Some(*x);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// A place as its root local and the steps below it: a field name, or
