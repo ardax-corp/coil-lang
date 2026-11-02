@@ -1154,22 +1154,13 @@ impl MirBuilder {
         Ok(dest)
     }
 
-    /// A word that crossed a generic edge (a shared body's bare type
-    /// parameter, a dictionary or closure adapter's argument or result),
-    /// read as `ty`. Words cross those edges in their own representation
-    /// (`rep(T)`, docs/internals/layout.md), never boxed, so this is the
-    /// same bits retyped. `_tag` names the static type the edge carries.
-    pub fn ins_unbox(&mut self, src: ValueId, _tag: u32, ty: MirTy) -> Result<ValueId, MirError> {
-        if !self.resolve_ty(src).is_specialized() || !ty.is_specialized() {
-            return Err(MirError::msg("Unbox type".to_string()));
-        }
-        self.ins_word_as(src, ty)
-    }
-
-    /// `v` as the word a generic edge passes for a value of static type
-    /// `_tag`: a heap or `i64` word as it is, a `float` or `bool` as its
-    /// `i64` bits. No box is made (see [`Self::ins_unbox`]).
-    pub fn ins_box(&mut self, v: ValueId, _tag: u32) -> Result<ValueId, MirError> {
+    /// `v` as the word a generic edge passes (a shared body's bare type
+    /// parameter, a dictionary or closure adapter's argument or result):
+    /// a heap or `i64` word as it is, a `float` or `bool` as its `i64`
+    /// bits. Words cross those edges in their own representation
+    /// (`rep(T)`, docs/internals/layout.md), never boxed; the other side
+    /// reads them back with [`Self::ins_word_as`].
+    pub fn ins_word(&mut self, v: ValueId) -> Result<ValueId, MirError> {
         match self.resolve_ty(v) {
             MirTy::F64 | MirTy::Bool => self.ins_cast(MirCastKind::Word, MirTy::I64, v),
             _ => Ok(self.resolve(v)),

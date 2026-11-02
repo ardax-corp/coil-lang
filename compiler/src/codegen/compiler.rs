@@ -81,8 +81,8 @@ pub(super) enum DictStep {
     Null,
     /// A tuple of the top `n` words.
     Tuple(u32),
-    /// The top word boxed with this value tag.
-    Box(u32),
+    /// The top value as its word (a `float` / `bool` as its bits).
+    Word,
     /// Element `n` of the top word, a dictionary: a method's code pointer
     /// in it (a subclass bound's `Eq` methods, #1694).
     Field(u32),
@@ -2386,19 +2386,19 @@ impl Compiler {
             let open = open.get(slot).cloned().unwrap_or_else(crate::typechecking::ty::int);
             let own = crate::typechecking::subst::apply_ty(&inst, &open);
             let target = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten()).filter(|&l| l != ValueLayout::Boxed);
-            let tag = unbox.get(slot).cloned().flatten().and_then(|ty| Some((Self::ty_to_value_tag(&ty)? as u32, ty)));
+            let tag = unbox.get(slot).cloned().flatten().and_then(|ty| Some((Self::ty_to_value_tag(&ty)?, ty)));
             // A dictionary passes an `Option` / `Result` boxed, and a bare
-            // type parameter's word boxed: each as the method takes it.
+            // type parameter as its word: each as the method takes it.
             let arg = if target.is_some() {
                 let local = b.local(&format!("arg{slot}"), open.clone(), LocalKind::Param);
                 let word = b.read(local);
                 b.builtin(Builtin::Relayout, vec![word], own)
             } else if let Some((tag, ty)) = tag {
                 // A `()` moves as the word it is.
-                let ty = if tag == ValueTag::Unit as u32 { crate::typechecking::ty::int() } else { ty };
+                let ty = if tag == ValueTag::Unit { crate::typechecking::ty::int() } else { ty };
                 let local = b.local(&format!("arg{slot}"), ty.clone(), LocalKind::Param);
                 let word = b.read(local);
-                b.builtin(Builtin::Unbox { tag }, vec![word], ty)
+                b.builtin(Builtin::Retype, vec![word], ty)
             } else {
                 let local = b.local(&format!("arg{slot}"), own, LocalKind::Param);
                 b.read(local)
@@ -2423,8 +2423,8 @@ impl Compiler {
         let mut value = b.call(fqn, args, pair_ret.unwrap_or(ret));
         if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
-        } else if let Some(tag) = ret_box {
-            value = b.builtin(Builtin::Box { tag: tag as u32 }, vec![value], crate::typechecking::ty::int());
+        } else if ret_box.is_some() {
+            value = b.builtin(Builtin::Retype, vec![value], crate::typechecking::ty::int());
         }
         let ret = b.ret(value);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
@@ -3553,14 +3553,14 @@ impl Compiler {
     }
 
     /// A value packed as a bare-class existential: run on the value's
-    /// word, it boxes it and pairs it with its instance's dictionary.
+    /// word, it pairs it with its instance's dictionary.
     fn plan_existential_pack(
         &mut self,
         out: &mut Vec<DictStep>,
         pack: &crate::typechecking::infer::ExistentialPack,
     ) {
-        if let Some(tag) = Self::ty_to_value_tag(&pack.value_ty) {
-            out.push(DictStep::Box(tag as u32));
+        if Self::ty_to_value_tag(&pack.value_ty).is_some() {
+            out.push(DictStep::Word);
         }
         if self.plan_instance_dict(out, &pack.class, std::slice::from_ref(&pack.value_ty)) {
             out.push(DictStep::Tuple(2));
@@ -3572,7 +3572,7 @@ impl Compiler {
     /// value is always a boxed `ObjEnum` on the generic side, while concrete
     /// code may use a pointer niche (COI-92) for the same type once `T` is
     /// known. `None` for fully concrete types and for a bare `T` (that
-    /// boundary is `BoxValue` / `UnboxValue`).
+    /// boundary passes the value's own word).
     pub(super) fn generic_enum_layout(&self, ty: &Ty) -> Option<ValueLayout> {
         let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
         let is_enum = crate::typechecking::ty::is_option_ty(&ty)
@@ -4328,14 +4328,12 @@ impl Compiler {
 
         let prim = |name: &str| Ty::Con(name.to_string());
         let (int, float, boolean, string) = (coil_ty::int(), coil_ty::float(), coil_ty::boolean(), coil_ty::string());
-        let tag_of = |tag: ValueTag| Some(tag as u32);
 
-        // `a op b` on the unboxed arguments; arithmetic boxes its result,
-        // a comparison returns its `bool` as it is.
-        for (ty, tag, arithmetic, comparisons) in [
+        // `a op b` on the arguments; arithmetic returns its result as a
+        // word, a comparison its `bool` as it is.
+        for (ty, arithmetic, comparisons) in [
             (
                 &int,
-                ValueTag::Int,
                 [
                     ("Add", "add", BinOp::IntAdd),
                     ("Sub", "sub", BinOp::IntSub),
@@ -4355,7 +4353,6 @@ impl Compiler {
             ),
             (
                 &float,
-                ValueTag::Float,
                 [
                     ("Add", "add", BinOp::FloatAdd),
                     ("Sub", "sub", BinOp::FloatSub),
@@ -4375,20 +4372,20 @@ impl Compiler {
             ),
         ] {
             let name = coil_ty::strip_readonly(ty).to_string();
-            let params = [(ty.clone(), tag_of(tag)), (ty.clone(), tag_of(tag))];
+            let params = [(ty.clone(), true), (ty.clone(), true)];
             for (class, method, op) in arithmetic {
                 let fqn = Generics::builtin_instance_fqn(class, &name, method);
-                self.emit_boxing_builtin_entry(&fqn, &params, ty.clone(), tag_of(tag), |b, a| b.bin(op, a[0], a[1], ty.clone()));
+                self.emit_boxing_builtin_entry(&fqn, &params, ty.clone(), true, |b, a| b.bin(op, a[0], a[1], ty.clone()));
             }
             for (class, method, op) in comparisons {
                 let fqn = Generics::builtin_instance_fqn(class, &name, method);
-                self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+                self.emit_builtin_entry(&fqn, &params, boolean.clone(), false, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
         // Bitwise traits over the int lane (`byte` shares its tag, and its
         // words: no byte wrap, as `int`).
         for ty in ["int", "byte"] {
-            let params = [(int.clone(), tag_of(ValueTag::Int)), (int.clone(), tag_of(ValueTag::Int))];
+            let params = [(int.clone(), true), (int.clone(), true)];
             for (class, method, op) in [
                 ("Shl", "shl", BinOp::Shl),
                 ("Shr", "shr", BinOp::Shr),
@@ -4397,40 +4394,40 @@ impl Compiler {
                 ("BitXor", "bitxor", BinOp::BitXor),
             ] {
                 let fqn = Generics::builtin_instance_fqn(class, ty, method);
-                self.emit_boxing_builtin_entry(&fqn, &params, int.clone(), tag_of(ValueTag::Int), |b, a| b.bin(op, a[0], a[1], int.clone()));
+                self.emit_boxing_builtin_entry(&fqn, &params, int.clone(), true, |b, a| b.bin(op, a[0], a[1], int.clone()));
             }
         }
         // `Neg` / `BitNot` take one operand (plus the ignored trailing dictionary).
-        for (class, method, ty, tag, op) in [
-            ("Neg", "neg", &int, ValueTag::Int, UnOp::Neg),
-            ("Neg", "neg", &float, ValueTag::Float, UnOp::Neg),
-            ("BitNot", "bitnot", &int, ValueTag::Int, UnOp::BitNot),
+        for (class, method, ty, op) in [
+            ("Neg", "neg", &int, UnOp::Neg),
+            ("Neg", "neg", &float, UnOp::Neg),
+            ("BitNot", "bitnot", &int, UnOp::BitNot),
         ] {
             let fqn = Generics::builtin_instance_fqn(class, &ty.to_string(), method);
-            self.emit_boxing_builtin_entry(&fqn, &[(ty.clone(), tag_of(tag))], ty.clone(), tag_of(tag), |b, a| {
+            self.emit_boxing_builtin_entry(&fqn, &[(ty.clone(), true)], ty.clone(), true, |b, a| {
                 b.push(HirKind::Un { op, operand: a[0] }, ty.clone())
             });
         }
         // `byte` compares as its int word.
-        for (ty, word, tag) in [("string", &string, ValueTag::String), ("bool", &boolean, ValueTag::Bool), ("byte", &int, ValueTag::Int)] {
-            let params = [(word.clone(), tag_of(tag)), (word.clone(), tag_of(tag))];
+        for (ty, word) in [("string", &string), ("bool", &boolean), ("byte", &int)] {
+            let params = [(word.clone(), true), (word.clone(), true)];
             for (method, op) in [("eq", BinOp::Eq), ("ne", BinOp::Ne)] {
                 let fqn = Generics::builtin_instance_fqn("Eq", ty, method);
-                self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+                self.emit_builtin_entry(&fqn, &params, boolean.clone(), false, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
         // `string` orders by its UTF-8 bytes (coil-stdlib#48).
-        let params = [(string.clone(), tag_of(ValueTag::String)), (string.clone(), tag_of(ValueTag::String))];
+        let params = [(string.clone(), true), (string.clone(), true)];
         for (class, method, op) in [("Lt", "lt", BinOp::Lt), ("Le", "le", BinOp::Le), ("Gt", "gt", BinOp::Gt), ("Ge", "ge", BinOp::Ge)] {
             let fqn = Generics::builtin_instance_fqn(class, "string", method);
-            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), false, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
         }
         // `()` is always `()` (#1450): its operands, taken as the `Show`
         // thunk takes a unit, are never read.
-        let params = [(int.clone(), tag_of(ValueTag::Unit)), (int.clone(), tag_of(ValueTag::Unit))];
+        let params = [(int.clone(), true), (int.clone(), true)];
         for (method, equal) in [("eq", true), ("ne", false)] {
             let fqn = Generics::builtin_instance_fqn("Eq", "unit", method);
-            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, _| {
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), false, |b, _| {
                 b.push(HirKind::Lit(Lit::Bool(equal)), boolean.clone())
             });
         }
@@ -4464,12 +4461,12 @@ impl Compiler {
             // `$dict` adapter. STRINGIFY reads a heap string as it is.
             let adapter = if ty != "unit" {
                 self.note_raw_builtin_thunk(&fqn);
-                self.emit_builtin_entry(&fqn, &[(word.clone(), None)], string.clone(), None, |b, a| show(b, a[0], tag));
+                self.emit_builtin_entry(&fqn, &[(word.clone(), false)], string.clone(), false, |b, a| show(b, a[0], tag));
                 Self::dict_adapter_name(&fqn)
             } else {
                 fqn
             };
-            self.emit_builtin_entry(&adapter, &[(word.clone(), tag.map(|t| t as u32))], string.clone(), None, |b, a| {
+            self.emit_builtin_entry(&adapter, &[(word.clone(), tag.is_some())], string.clone(), false, |b, a| {
                 show(b, a[0], tag)
             });
         }
@@ -4528,31 +4525,26 @@ impl Compiler {
             }
         }
 
-        // Length__string__len: unbox (dict ABI) then its byte length.
+        // Length__string__len: its byte length.
         self.emit_builtin_entry(
             &Generics::builtin_instance_fqn("Length", "string", "len"),
-            &[(string.clone(), tag_of(ValueTag::String))],
+            &[(string.clone(), true)],
             int.clone(),
-            None,
+            false,
             |b, a| b.push(crate::hir::HirKind::Call { callee: crate::hir::Callee::Method { name: "len".to_string() }, args: vec![a[0]] }, int.clone()),
         );
 
-        // Hash thunks: int/byte/bool identity after unbox; float via Value bits; string HostInvoke hash_string.
-        for (ty, word, tag) in [
-            ("int", &int, ValueTag::Int),
-            ("byte", &int, ValueTag::Int),
-            ("bool", &boolean, ValueTag::Bool),
-            ("float", &float, ValueTag::Float),
-        ] {
+        // Hash thunks: int/byte/bool/float hash as their own word; string HostInvoke hash_string.
+        for (ty, word) in [("int", &int), ("byte", &int), ("bool", &boolean), ("float", &float)] {
             let fqn = Generics::builtin_instance_fqn("Hash", ty, "hash");
             if self.functions.contains_key(&fqn) {
                 continue;
             }
             // Raw, as the Show thunks: the raw word is its own hash.
             self.note_raw_builtin_thunk(&fqn);
-            self.emit_builtin_entry(&fqn, &[(word.clone(), None)], word.clone(), None, |_, a| a[0]);
+            self.emit_builtin_entry(&fqn, &[(word.clone(), false)], word.clone(), false, |_, a| a[0]);
             let adapter = Self::dict_adapter_name(&fqn);
-            self.emit_builtin_entry(&adapter, &[(word.clone(), tag_of(tag))], word.clone(), None, |_, a| a[0]);
+            self.emit_builtin_entry(&adapter, &[(word.clone(), true)], word.clone(), false, |_, a| a[0]);
         }
         // Default thunks (`static fn default()`): the primitive's zero value,
         // raw like the Hash results; a dictionary call's trailing dictionary
@@ -4565,16 +4557,16 @@ impl Compiler {
             ("string", Lit::Str(String::new()), &string),
         ] {
             let fqn = Generics::builtin_instance_fqn("Default", ty, "default");
-            self.emit_builtin_entry(&fqn, &[], word.clone(), None, |b, _| b.push(HirKind::Lit(value), word.clone()));
+            self.emit_builtin_entry(&fqn, &[], word.clone(), false, |b, _| b.push(HirKind::Lit(value), word.clone()));
         }
-        self.emit_builtin_entry(&Generics::builtin_instance_fqn("Hash", "unit", "hash"), &[], int.clone(), None, |b, _| b.int(0));
+        self.emit_builtin_entry(&Generics::builtin_instance_fqn("Hash", "unit", "hash"), &[], int.clone(), false, |b, _| b.int(0));
         let fqn = Generics::builtin_instance_fqn("Hash", "string", "hash");
         if self.native_id("hash_string").is_some() && !self.functions.contains_key(&fqn) {
             // Raw, as the Show thunks: the string's own word, then the
             // `$dict` adapter for a boxed one.
             self.note_raw_builtin_thunk(&fqn);
-            for (name, tag) in [(fqn.clone(), None), (Self::dict_adapter_name(&fqn), tag_of(ValueTag::String))] {
-                self.emit_builtin_entry(&name, &[(string.clone(), tag)], int.clone(), None, |b, a| {
+            for (name, tag) in [(fqn.clone(), false), (Self::dict_adapter_name(&fqn), true)] {
+                self.emit_builtin_entry(&name, &[(string.clone(), tag)], int.clone(), false, |b, a| {
                     b.call("hash_string", vec![a[0]], int.clone())
                 });
             }
@@ -4590,10 +4582,10 @@ impl Compiler {
             if self.native_id(method).is_none() {
                 continue;
             }
-            let params = [(coil_ty::stream_ty(), tag_of(ValueTag::Instance)), (bytes.clone(), tag_of(ValueTag::Array))];
+            let params = [(coil_ty::stream_ty(), true), (bytes.clone(), true)];
             let ret = coil_ty::result_app_ty(ok, io_err.clone());
             self.hir_synth_callees.insert(method.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
-            self.emit_builtin_entry(&fqn, &params, ret.clone(), None, |b, a| b.call(method, a, ret));
+            self.emit_builtin_entry(&fqn, &params, ret.clone(), false, |b, a| b.call(method, a, ret));
             self.hir_synth_callees.clear();
         }
 
@@ -4608,8 +4600,8 @@ impl Compiler {
         ] {
             let fqn = into_primitive_fqn(from, to);
             let to_ty = prim(to);
-            let box_tag = (from_tag != to_tag).then_some(to_tag as u32);
-            self.emit_boxing_builtin_entry(&fqn, &[(prim(from), tag_of(from_tag))], to_ty.clone(), box_tag, |b, a| {
+            let word_ret = from_tag != to_tag;
+            self.emit_boxing_builtin_entry(&fqn, &[(prim(from), true)], to_ty.clone(), word_ret, |b, a| {
                 b.push(HirKind::Cast { value: a[0] }, to_ty.clone())
             });
         }
@@ -4620,12 +4612,12 @@ impl Compiler {
     fn emit_builtin_entry(
         &mut self,
         fqn: &str,
-        params: &[(Ty, Option<u32>)],
+        params: &[(Ty, bool)],
         ret: Ty,
-        box_tag: Option<u32>,
+        word_ret: bool,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
-        self.emit_builtin_body(fqn, params, ret, box_tag, true, op);
+        self.emit_builtin_body(fqn, params, ret, word_ret, true, op);
     }
 
     /// A builtin entry whose dictionary ABI boxes its result (`box_tag`):
@@ -4635,19 +4627,19 @@ impl Compiler {
     fn emit_boxing_builtin_entry(
         &mut self,
         fqn: &str,
-        params: &[(Ty, Option<u32>)],
+        params: &[(Ty, bool)],
         ret: Ty,
-        box_tag: Option<u32>,
+        word_ret: bool,
         op: impl Fn(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
-        if box_tag.is_none() || self.functions.contains_key(fqn) {
-            self.emit_builtin_entry(fqn, params, ret, box_tag, op);
+        if !word_ret || self.functions.contains_key(fqn) {
+            self.emit_builtin_entry(fqn, params, ret, word_ret, op);
             return;
         }
         self.note_raw_builtin_thunk(fqn);
-        let raw_params: Vec<(Ty, Option<u32>)> = params.iter().map(|(t, _)| (t.clone(), None)).collect();
-        self.emit_builtin_entry(fqn, &raw_params, ret.clone(), None, &op);
-        self.emit_builtin_entry(&Self::dict_adapter_name(fqn), params, ret, box_tag, op);
+        let raw_params: Vec<(Ty, bool)> = params.iter().map(|(t, _)| (t.clone(), false)).collect();
+        self.emit_builtin_entry(fqn, &raw_params, ret.clone(), false, &op);
+        self.emit_builtin_entry(&Self::dict_adapter_name(fqn), params, ret, word_ret, op);
     }
 
     /// [`Self::emit_builtin_entry`]'s body for a method called by name
@@ -4655,26 +4647,26 @@ impl Compiler {
     fn emit_builtin_method(
         &mut self,
         fqn: &str,
-        params: &[(Ty, Option<u32>)],
+        params: &[(Ty, bool)],
         ret: Ty,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
-        self.emit_builtin_body(fqn, params, ret, None, false, op);
+        self.emit_builtin_body(fqn, params, ret, false, false, op);
     }
 
     fn emit_builtin_body(
         &mut self,
         fqn: &str,
-        params: &[(Ty, Option<u32>)],
+        params: &[(Ty, bool)],
         ret: Ty,
-        box_tag: Option<u32>,
+        word_ret: bool,
         dict_entry: bool,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
         if self.functions.contains_key(fqn) {
             return;
         }
-        let hir = crate::hir::synth::builtin_entry(&self.checker, fqn, params, ret, box_tag, op);
+        let hir = crate::hir::synth::builtin_entry(&self.checker, fqn, params, ret, word_ret, op);
         self.emit_synth_fn(fqn, &hir, HashMap::new(), dict_entry);
     }
 
@@ -4726,7 +4718,7 @@ impl Compiler {
             if compiler.native_id(native).is_none() {
                 return;
             }
-            let params: Vec<_> = params.iter().map(|t| (t.clone(), None)).collect();
+            let params: Vec<_> = params.iter().map(|t| (t.clone(), false)).collect();
             let fqn = format!("{owner}::{name}");
             compiler.emit_builtin_method(&fqn, &params, ret.clone(), |b, a| b.call(native, a, ret.clone()));
         };
@@ -4761,7 +4753,7 @@ impl Compiler {
             {
                 let vec_ty = vec.clone();
                 let made_ty = made_ty.clone();
-                self.emit_builtin_method(&fqn, &[(int.clone(), None)], vec.clone(), |b, a| {
+                self.emit_builtin_method(&fqn, &[(int.clone(), false)], vec.clone(), |b, a| {
                     let out = b.local("out", made_ty.clone(), crate::hir::LocalKind::Let);
                     let empty = b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, made_ty);
                     let init = b.let_(out, empty);
@@ -4778,12 +4770,12 @@ impl Compiler {
         // fn push(x): inlined `ArrayPush` (`v.push(x)` on the `Vec`, which
         // resolves to this entry, reserved first).
         self.reserve_function_entry(format!("{owner}::push"));
-        self.emit_builtin_method(&format!("{owner}::push"), &[(vec.clone(), None), (int.clone(), None)], unit.clone(), |b, a| {
+        self.emit_builtin_method(&format!("{owner}::push"), &[(vec.clone(), false), (int.clone(), false)], unit.clone(), |b, a| {
             let callee = crate::hir::Callee::Method { name: "push".to_string() };
             b.push(HirKind::Call { callee, args: a }, unit.clone())
         });
         // fn len(): `ArrayLen`.
-        self.emit_builtin_method(&format!("{owner}::len"), &[(vec.clone(), None)], int.clone(), |b, a| {
+        self.emit_builtin_method(&format!("{owner}::len"), &[(vec.clone(), false)], int.clone(), |b, a| {
             b.push(HirKind::Call { callee: crate::hir::Callee::Method { name: "len".to_string() }, args: a }, int.clone())
         });
         host(self, "capacity", "vec_capacity", std::slice::from_ref(&vec), &int);
@@ -8040,28 +8032,28 @@ impl Compiler {
                     self.emit_eq_any(&fqn, m == "ne");
                     continue;
                 }
-                let Some(tag) = Self::ty_to_value_tag(&ty) else {
+                if Self::ty_to_value_tag(&ty).is_none() {
                     continue;
-                };
+                }
                 let adapter = Self::dict_adapter_name(&fqn);
                 let boolean = crate::typechecking::ty::boolean();
-                for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
+                for (name, tag) in [(fqn, false), (adapter, true)] {
                     match (method.as_str(), &ty) {
                         ("show", Ty::Array { element, .. }) => {
                             let element = (**element).clone();
-                            self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                            self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), false, |b, a| {
                                 crate::hir::synth::array_show(b, a[0], element)
                             })
                         }
                         // A `Vec` shows as an array does (#1848).
                         ("show", Ty::App(..)) if let Some(element) = crate::typechecking::ty::vec_element_ty(&ty) => {
                             let element = element.clone();
-                            self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                            self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), false, |b, a| {
                                 crate::hir::synth::array_show(b, a[0], element)
                             })
                         }
-                        ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
-                        ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                        ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag),
+                        ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), false, |b, a| {
                             let fmt = b.str("%v");
                             b.call("format", vec![fmt, a[0]], string.clone())
                         }),
@@ -8069,7 +8061,7 @@ impl Compiler {
                         ("eq" | "ne", _) => {
                             let sym = if method == "eq" { "==" } else { "!=" };
                             let params = [(ty.clone(), tag), (ty.clone(), tag)];
-                            self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
+                            self.emit_builtin_entry(&name, &params, boolean.clone(), false, |b, a| {
                                 b.bin(crate::hir::BinOp::Overloaded(sym), a[0], a[1], boolean.clone())
                             })
                         }
@@ -8077,7 +8069,7 @@ impl Compiler {
                         ("lt" | "le" | "gt" | "ge", Ty::Tuple(items)) => {
                             let items = items.clone();
                             let params = [(ty.clone(), tag), (ty.clone(), tag)];
-                            self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
+                            self.emit_builtin_entry(&name, &params, boolean.clone(), false, |b, a| {
                                 crate::hir::synth::tuple_order(b, a[0], a[1], &items, &method)
                             })
                         }
@@ -8085,7 +8077,7 @@ impl Compiler {
                         // The structural length read, as `x.len()` (#1536).
                         // A shape's (`Vec<a>`, #1542) reads it at any element
                         // type: its entry takes the shape at `int`.
-                        ("len", _) => self.emit_builtin_entry(&name, &[(Self::structural_shape_at_int(&ty), tag)], int.clone(), None, |b, a| {
+                        ("len", _) => self.emit_builtin_entry(&name, &[(Self::structural_shape_at_int(&ty), tag)], int.clone(), false, |b, a| {
                             b.push(
                                 crate::hir::HirKind::Call {
                                     callee: crate::hir::Callee::Method { name: "len".to_string() },
@@ -8159,7 +8151,7 @@ impl Compiler {
         // The tuple comes boxed, as a dictionary passes it.
         let arg = b.local("arg0", ty.clone(), LocalKind::Param);
         let word = b.read(arg);
-        let t = b.builtin(crate::hir::Builtin::Unbox { tag: ValueTag::Tuple as u32 }, vec![word], ty);
+        let t = b.builtin(crate::hir::Builtin::Retype, vec![word], ty);
         let fmt = b.str("%v");
         let shown = b.call("format", vec![fmt, t], string);
         let ret = b.ret(shown);
@@ -8195,10 +8187,9 @@ impl Compiler {
         };
         let mut b = Synth::new(&self.checker, name, string.clone());
         let value = if adapter {
-            let tag = ValueTag::Instance as u32;
             let arg = b.local("arg0", ty.clone(), LocalKind::Param);
             let word = b.read(arg);
-            b.builtin(Builtin::Unbox { tag }, vec![word], ty.clone())
+            b.builtin(Builtin::Retype, vec![word], ty.clone())
         } else {
             let arg = b.local("arg0", ty.clone(), LocalKind::Param);
             b.read(arg)
@@ -8236,7 +8227,7 @@ impl Compiler {
     /// items' hashes combined as a derived `Hash` combines fields, each
     /// through the item type's own ground instance (a `()` item hashes to
     /// `0`).
-    fn emit_structural_hash(&mut self, name: &str, ty: &Ty, tag: Option<u32>) {
+    fn emit_structural_hash(&mut self, name: &str, ty: &Ty, retype: bool) {
         let items: Vec<Ty> = match ty {
             Ty::Tuple(items) => items.clone(),
             Ty::Array { element, .. } => vec![(**element).clone()],
@@ -8265,7 +8256,7 @@ impl Compiler {
             targets.push(Some(fqn));
         }
         let int = crate::typechecking::ty::int();
-        let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), tag)], int.clone(), None, |b, a| {
+        let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), retype)], int.clone(), false, |b, a| {
             crate::hir::synth::structural_hash(b, a[0], &items, &targets)
         });
         self.emit_synth_fn(name, &hir, calls, true);

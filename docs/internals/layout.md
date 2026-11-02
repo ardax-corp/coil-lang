@@ -48,10 +48,13 @@ two-slot pair is two scalars, which no frame map roots.
 
 **No boxes at generic edges.** A word crosses a shared generic body, a
 dictionary entry, a closure or `PolyFn` adapter and a clone thunk as it
-is: `rep(ground T)`. HIR still marks those edges (`Builtin::Box` /
-`Builtin::Unbox`, `HirCallSite::boxes`, the prologue's open parameters),
-but MIR lowers them to the same bits retyped (`MirBuilder::ins_box` /
-`ins_unbox`), so the compiler emits no `BoxValue` / `UnboxValue`. Those
+is: `rep(ground T)`. Where the static type changes at the edge, HIR
+marks it with `Builtin::Retype` (dictionary entries and thunks) or a
+word flag (`HirCallSite::words` / `word_ret`, `HirPolyCall`,
+`HirAdaptConv::Word`, `HirDictOp::Word`), and MIR lowers it to the same
+bits retyped (`MirBuilder::ins_word` / `ins_word_as`: only a `float` or
+`bool` changes MIR type), so the compiler emits no `BoxValue` /
+`UnboxValue`. Those
 ops stay in the VM for older archives only, where they are
 representation-agnostic: boxing keeps an object as itself and unboxing
 passes a word that is no box through. `Show` of a scalar passes its type

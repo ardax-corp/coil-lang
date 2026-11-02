@@ -286,7 +286,7 @@ impl Compiler {
             return;
         };
         let boolean = coil_ty::boolean();
-        let params = [(ty.clone(), None), (ty.clone(), None)];
+        let params = [(ty.clone(), false), (ty.clone(), false)];
         self.emit_builtin_method(fqn, &params, boolean.clone(), |b, _| {
             // Each use reads the parameter afresh: a node has one parent.
             let (a, c) = (b.body.params[0], b.body.params[1]);
@@ -534,9 +534,9 @@ impl Compiler {
         let int = coil_ty::int();
         let boolean = coil_ty::boolean();
         let native = common::VALUES_EQ_SHAPED_NATIVE;
-        let params = [(int.clone(), Some(common::UNBOX_ANY_TAG)), (int.clone(), Some(common::UNBOX_ANY_TAG))];
+        let params = [(int.clone(), true), (int.clone(), true)];
         let had = self.hir_synth_callees.insert(native.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
-        self.emit_builtin_entry(fqn, &params, boolean.clone(), None, |b, a| {
+        self.emit_builtin_entry(fqn, &params, boolean.clone(), false, |b, a| {
             // No shape: `values_eq`.
             let none = b.int(0);
             let eq = b.call(native, vec![a[0], a[1], none], int.clone());
