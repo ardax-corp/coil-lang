@@ -1,0 +1,75 @@
+// @output 3 3\n5 5 - 1 - 3\n7 9\n11 11\n
+//
+// A two-word `Option<int>` boxed for a `Vec` push is boxed once and the
+// object reused while the local is unchanged; a rewrite (later in a loop,
+// on one branch) boxes again, and a box on one branch is not reused after
+// the join.
+use io::sync::println;
+use string::format;
+
+fn say(Option<int> v) -> string {
+    return match v {
+        Some(n) => format("%i", n),
+        None => "-",
+    };
+}
+
+fn show(Vec<Option<int>> a) -> string {
+    let out = "";
+    for v in a {
+        if out != "" {
+            out = out + " ";
+        }
+        out = out + say(v);
+    }
+    return out;
+}
+
+fn pick(int i) -> Option<int> {
+    if i % 2 == 0 {
+        return None;
+    }
+    return Some(i);
+}
+
+fn main() {
+    // Two pushes of one value.
+    let a: Vec<Option<int>> = Vec::new();
+    let x = pick(3);
+    a.push(x);
+    a.push(x);
+    let _ = println(show(a));
+
+    // Boxed before a loop that rewrites it after its use.
+    let b: Vec<Option<int>> = Vec::new();
+    let y = pick(5);
+    b.push(y);
+    let i = 0;
+    while i < 4 {
+        b.push(y);
+        y = pick(i);
+        i = i + 1;
+    }
+    b.push(y);
+    let _ = println(show(b));
+
+    // Rewritten on one branch between two uses.
+    let c: Vec<Option<int>> = Vec::new();
+    let z = pick(7);
+    c.push(z);
+    if a.len() == 2 {
+        z = pick(9);
+    }
+    c.push(z);
+    let _ = println(show(c));
+
+    // Boxed on one branch only, then used after the join.
+    let d: Vec<Option<int>> = Vec::new();
+    let w = pick(11);
+    if a.len() == 3 {
+        d.push(w);
+    }
+    d.push(w);
+    d.push(w);
+    let _ = println(show(d));
+}
