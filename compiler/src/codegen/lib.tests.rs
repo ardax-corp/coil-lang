@@ -9584,3 +9584,26 @@ fn inline_hint_on_a_recursive_function_warns() {
     assert_eq!(warns.len(), 1, "{:?}", compiler.messages);
     assert!(warns[0].message().contains("fact"), "{:?}", warns[0].message());
 }
+
+/// A callee whose failing arm builds a panic message: the arm is cut out
+/// into a cold helper and the rest is spliced into the caller.
+fn partial_fixture(arm: &str) -> String {
+    format!(
+        "fn at(int x, int n) -> int {{ if x >= n {{ {arm} }} return x * 3 + 1; }} \
+         fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = (s + at(i, 64)) % 1000; i = i + 1; }} return s; }}"
+    )
+}
+
+#[test]
+fn partial_inlining_cuts_out_a_failing_arm() {
+    let msg = "let m = \"index \" + x.show() + \" out of \" + n.show(); panic(m);";
+    let (_, cut) = compile_src_compiler(&partial_fixture(msg), |_| {});
+    assert!(!cut.functions.contains_key("at"), "the rest of `at` should be spliced into `main` and shaken");
+    assert!(cut.functions.contains_key("at$cold0"), "the failing arm should be its own helper");
+}
+
+#[test]
+fn partial_inlining_leaves_a_warm_callee_whole() {
+    let (_, warm) = compile_src_compiler(&partial_fixture("let y = x * 2; let z = y + n; x = z % 7;"), |_| {});
+    assert!(!warm.functions.keys().any(|k| k.contains("$cold")), "an arm that is not cold stays in place");
+}
