@@ -1314,6 +1314,39 @@ impl Checker {
             "clock_wall_nanos" | "clock_mono_nanos" | "symbol_next_id" => fun(&[], int()),
             "clock_sleep_ms" => fun(&[int()], unit_ty()),
             common::ENTROPY_BYTES_NATIVE => fun(&[int()], vec_app_ty(byte())),
+            common::KEY_INDEX_TABLE_NATIVE => fun(&[int()], vec_app_ty(int())),
+            common::KEY_INDEX_PROBE_NATIVE => fun(&[vec_app_ty(int()), vec_app_ty(int()), int(), int()], int()),
+            common::KEY_INDEX_INSERT_NATIVE => {
+                fun(&[vec_app_ty(int()), vec_app_ty(int()), vec_app_ty(int()), int()], int())
+            }
+            common::KEY_INDEX_REMOVE_NATIVE => {
+                fun(&[vec_app_ty(int()), vec_app_ty(int()), vec_app_ty(int()), int()], boolean())
+            }
+            common::KEY_INDEX_COMPACT_NATIVE => {
+                fun(&[vec_app_ty(int()), vec_app_ty(int()), vec_app_ty(int())], int())
+            }
+            common::KEY_INDEX_CLEAR_NATIVE => {
+                fun(&[vec_app_ty(int()), vec_app_ty(int()), vec_app_ty(int())], unit_ty())
+            }
+            common::KEY_INDEX_FIND_NATIVE => {
+                // (table, hashes, keys, h, k, mode) -> slot; any key type.
+                let t = self.counter.fresh();
+                let k = Ty::Var(t);
+                return Scheme::poly(
+                    vec![t],
+                    vec![],
+                    fun(&[vec_app_ty(int()), vec_app_ty(int()), vec_app_ty(k.clone()), int(), k, int()], int()),
+                );
+            }
+            common::KEY_INDEX_EQ_MODE_NATIVE => {
+                let t = self.counter.fresh();
+                return Scheme::poly(vec![t], vec![], fun(&[Ty::Var(t)], int()));
+            }
+            common::KEY_INDEX_RETAIN_NATIVE => {
+                // (v, live) -> new length; `v` holds any element type.
+                let t = self.counter.fresh();
+                return Scheme::poly(vec![t], vec![], fun(&[vec_app_ty(Ty::Var(t)), vec_app_ty(int())], int()));
+            }
             "io_capture_begin" => fun(&[], unit_ty()),
             "io_capture_end" => fun(&[], tuple_ty(vec![string(), string()])),
 

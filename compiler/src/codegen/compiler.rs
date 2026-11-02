@@ -1990,16 +1990,16 @@ impl Compiler {
         }
     }
 
-    /// Programs whose methods a finished module queued clones of
-    /// ([`Self::emit_foreign_clones`] compiles them).
+    /// Programs whose ASTs [`Self::emit_foreign_clones`] may need: none
+    /// when no clone is queued, else every program kept for clones, since
+    /// a queued clone's body may ask for clones of a third module's
+    /// methods (`Bag<int>::put` calling `Tally<int>::add`).
     pub fn foreign_clone_programs(&self) -> Vec<usize> {
-        let mut seqs: Vec<usize> = self
-            .foreign_clone_queue
-            .iter()
-            .filter_map(|req| self.inst_clone_srcs.get(&req.src).map(|s| s.program))
-            .collect();
+        if self.foreign_clone_queue.is_empty() {
+            return Vec::new();
+        }
+        let mut seqs: Vec<usize> = self.module_ctxs.keys().copied().collect();
         seqs.sort_unstable();
-        seqs.dedup();
         seqs
     }
 
