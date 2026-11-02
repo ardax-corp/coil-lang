@@ -9503,6 +9503,74 @@ fn cold_hint_keeps_the_call() {
     assert!(tagged.functions.contains_key("small"), "`#[cold]` `small` should keep its call");
 }
 
+/// A body of `n` dependent `let`s over `x`, returning the last.
+fn lets_body(n: usize) -> String {
+    let mut body = String::from("{ let v0 = x + 1; ");
+    for k in 1..n {
+        body.push_str(&format!("let v{k} = v{} % 1000 + {k}; ", k - 1));
+    }
+    body.push_str(&format!("return v{}; }}", n - 1));
+    body
+}
+
+/// A loop in `main` calling `big`, tagged `tag`, with a body of `n` lets.
+fn hot_fixture(tag: &str, n: usize) -> String {
+    format!(
+        "{tag} fn big(int x) -> int {} \
+         fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = (s + big(i)) % 1000; i = i + 1; }} return s; }}",
+        lets_body(n)
+    )
+}
+
+/// `#[hot]` inlines a callee over the default limit, up to the hot limit.
+#[test]
+fn hot_hint_inlines_past_the_default_limit() {
+    let (_, untagged) = compile_src_compiler(&hot_fixture("", 40), |_| {});
+    assert!(untagged.functions.contains_key("big"), "the fixture should be over the default inline limit");
+    let (_, tagged) = compile_src_compiler(&hot_fixture("#[hot]", 40), |_| {});
+    assert!(!tagged.functions.contains_key("big"), "`#[hot]` `big` should be spliced into `main` and shaken");
+    let (_, huge) = compile_src_compiler(&hot_fixture("#[hot]", 200), |_| {});
+    assert!(huge.functions.contains_key("big"), "a `#[hot]` callee over the hot limit should keep its call");
+}
+
+/// A hot body's calls inline under the hot limit, but an explicit `#[cold]`
+/// callee keeps its call.
+#[test]
+fn hot_caller_inlines_its_callees_but_not_cold_ones() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn big(int x) -> int {} \
+             #[hot] fn run(int n) -> int {{ let s = 0; let i = 0; while i < n {{ s = (s + big(i)) % 1000; i = i + 1; }} return s; }} \
+             fn main() -> int {{ return run(50) + run(60); }}",
+            lets_body(40)
+        )
+    };
+    let (_, plain) = compile_src_compiler(&src(""), |_| {});
+    assert!(!plain.functions.contains_key("big"), "`big` should be spliced into hot `run`");
+    let (_, cold) = compile_src_compiler(&src("#[cold]"), |_| {});
+    assert!(cold.functions.contains_key("big"), "`#[cold]` `big` should keep its call in hot `run`");
+}
+
+/// The other methods of a `#[hot]` method's class are hot too.
+#[test]
+fn hot_hint_spreads_to_class_methods() {
+    let src = |tag: &str| {
+        format!(
+            "class Acc {{ pub base: int, }} \
+             impl Acc {{ \
+               {tag} pub fn tiny(int x) -> int {{ return x + self.base; }} \
+               pub fn big(int x) -> int {} }} \
+             fn main() -> int {{ let a = new Acc(1); let s = 0; let i = 0; \
+               while i < 50 {{ s = (s + a.big(i) + a.tiny(i)) % 1000; i = i + 1; }} return s; }}",
+            lets_body(40)
+        )
+    };
+    let (_, untagged) = compile_src_compiler(&src(""), |_| {});
+    assert!(untagged.functions.contains_key("Acc::big"), "the fixture should be over the default inline limit: {:?}", untagged.functions.keys().collect::<Vec<_>>());
+    let (_, tagged) = compile_src_compiler(&src("#[hot]"), |_| {});
+    assert!(!tagged.functions.contains_key("Acc::big"), "`Acc::big` should be hot through its `#[hot]` sibling and spliced");
+}
+
 /// An `#[inline]` function that recurses stays a call, and says so once.
 #[test]
 fn inline_hint_on_a_recursive_function_warns() {
