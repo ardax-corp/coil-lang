@@ -1,0 +1,23 @@
+// A body calling one of its own module's functions also gets another
+// module's method clones spliced: the clones compile before it even though
+// its module's entries are not reserved yet.
+use xm_bag::bag;
+use string::{format, to_bytes};
+use io::{stdout, write};
+
+fn main() {
+    let items: Vec<int> = Vec::new();
+    for i in 0..1000 {
+        items.push(i * 2);
+    }
+    let b = bag(items);
+    let t = 0;
+    for j in 0..1000 {
+        t = step(t) + b.at_or(j, 0) + b.len();
+    }
+    let _ = write(stdout(), to_bytes(format("%i\n", t)));
+}
+
+fn step(int t) -> int {
+    return t + 1;
+}

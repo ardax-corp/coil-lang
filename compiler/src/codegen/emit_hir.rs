@@ -4384,6 +4384,13 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether function `key` has an entry to call: reserved, or, while
+    /// [`Self::hir_plan_bodies_for_clones`] plans this module before its
+    /// entries are reserved, one of its own functions.
+    fn hir_entry_known(&self, key: &str) -> bool {
+        self.fn_entry_labels.contains_key(key) || (self.planning_for_clones && self.hir_fn_names.contains_key(key))
+    }
+
     /// Whether a call of `name` at this span is bare constructor sugar
     /// (`Bad(s)` for `ParseError::Bad`). The checker records the sugar by
     /// span, and a compiler-made call can share its span: `main`'s
@@ -4547,7 +4554,7 @@ impl Compiler {
         if (forwards && overload.is_some()) || (partial.is_some() && overload.is_some()) {
             return Err("callee-overload");
         }
-        let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
+        let known = |k: &str| self.functions.contains_key(k) || self.hir_entry_known(k);
         if let Some((fixed, rest, id)) = overload {
             return self.resolve_hir_overload(hir, call, name, (fixed, rest), id);
         }
@@ -5189,6 +5196,7 @@ impl Compiler {
         let Some(module) = self.hir_module.take() else {
             return;
         };
+        self.planning_for_clones = true;
         for body in &module.bodies {
             if body.kind != crate::hir::BodyKind::Function || body.is_generic || body.is_coro || !body.captures.is_empty() || body.root.is_none() {
                 continue;
@@ -5204,6 +5212,7 @@ impl Compiler {
             let _ = self.plan_hir_body_ret(body, ret);
             self.context.variables = prev;
         }
+        self.planning_for_clones = false;
         self.hir_module = Some(module);
     }
 
@@ -6451,7 +6460,7 @@ impl Compiler {
             // signature too, so it agrees with the definition.
             // A rest pack is one more argument, as above.
             None if key == lookup
-                && self.fn_entry_labels.contains_key(&key)
+                && self.hir_entry_known(&key)
                 && (!self.checker.fn_has_rest(&lookup) || (self_layout.is_none() && !open))
                 && self
                     .checker

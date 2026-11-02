@@ -1503,6 +1503,8 @@ pub struct Machine<const S: usize> {
     dense_obj: Option<Object>,
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
+    /// A dense streak's `DenseHostCall` allocated: run the safepoint.
+    streak_host_alloc: bool,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
     userland_libraries: std::collections::HashMap<u64, Object, AddrHashBuilder>,
     resume_stack: Vec<ResumeCtx>,
@@ -1695,6 +1697,7 @@ impl<const S: usize> Machine<S> {
             stack: Stack::with_capacity(cap),
             output: None,
             natives: crate::ffi::Natives::new(),
+            streak_host_alloc: false,
             libraries: std::collections::HashMap::new(),
             userland_libraries: std::collections::HashMap::default(),
             resume_stack: Vec::new(),
@@ -5321,11 +5324,18 @@ impl<const S: usize> Machine<S> {
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
                         vregs: &mut self.vregs,
+                        natives: &self.natives,
+                        host_alloc: &mut self.streak_host_alloc,
                         fuel: &mut self.fuel,
                         stack_cap,
                     },
                 ) {
                     return self.hot_streak_panic(msg, ip.saturating_sub(1));
+                }
+                if unlikely(self.streak_host_alloc) {
+                    // A `DenseHostCall` allocated and stopped the streak.
+                    self.streak_host_alloc = false;
+                    self.maybe_gc_after_alloc(ip);
                 }
                 if unlikely(!self.frame_pins.is_empty()) {
                     self.return_bookkeeping = true;
@@ -5952,6 +5962,41 @@ impl<const S: usize> Machine<S> {
                         self.stack.push(v);
                     }
                 }
+                Instruction::CONST => {
+                    let op = opcode.operand_u32();
+                    let raw = if unlikely(op & Byte::POOL_FLAG != 0) {
+                        let pool_idx = (op & !Byte::POOL_FLAG) as usize;
+                        promise!(pool_idx < constants.len());
+                        unsafe { *constants.get_unchecked(pool_idx) }
+                    } else {
+                        op as i32 as i64 as u64
+                    };
+                    self.stack.push(Value::from(raw));
+                }
+                Instruction::DenseHostCall => {
+                    if let Err(msg) = self.dense_host_call(ip, sp, opcode, constants, stack_cap) {
+                        return self.runtime_panic(&msg, ip.saturating_sub(1));
+                    }
+                }
+                Instruction::HostInvoke if self.natives.direct_by_id(self.host_invoke_id(opcode)).is_some() => {
+                    // A plain native ([`crate::ffi::NativeFn::direct`]): call
+                    // it here, without the generic path's host-op, task and
+                    // descriptor checks in `exec_rest`.
+                    let op = opcode.operand_u32();
+                    let consume = (op & 0xFFFF) as usize + 1;
+                    let tell = self.stack.tell();
+                    let f = self.natives.direct_by_id(self.host_invoke_id(opcode)).expect("checked by the guard");
+                    let layout = crate::host_enum::HostEnumLayout::from_operand(op);
+                    let live_before = self.heap.live_object_count();
+                    let heap = &mut self.heap;
+                    let args = &self.stack.top_window(consume)[1..];
+                    let v = crate::host_enum::in_host_enum_layout(layout, || f(heap, args));
+                    self.stack.seek(tell - consume);
+                    self.stack.push(v);
+                    if self.heap.live_object_count() > live_before {
+                        self.maybe_gc_after_alloc(ip);
+                    }
+                }
                 _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
                     Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
                     Err(paused) => return paused,
@@ -5959,6 +6004,51 @@ impl<const S: usize> Machine<S> {
             }
         }
         false
+    }
+}
+
+impl<const N: usize> Machine<N> {
+    /// `DenseHostCall` from the giant match (outlined: most code never makes
+    /// one), with its allocation safepoint.
+    #[inline(never)]
+    fn dense_host_call(&mut self, ip: usize, sp: usize, opcode: &Byte, constants: &[u64], stack_cap: usize) -> Result<(), String> {
+        match dispatch::dense_host_call_direct(&mut self.stack, sp, opcode, constants, &mut self.heap, &self.natives, stack_cap) {
+            Some(false) => {}
+            Some(true) => self.maybe_gc_after_alloc(ip),
+            None => {
+                self.dense_host_call_generic(sp, opcode, constants, stack_cap)?;
+                self.maybe_gc_after_alloc(ip);
+            }
+        }
+        Ok(())
+    }
+
+    /// A `DenseHostCall` whose native has no direct function (an older
+    /// registry or an embedder's): the generic call, without parking.
+    #[cold]
+    fn dense_host_call_generic(&mut self, sp: usize, opcode: &Byte, constants: &[u64], stack_cap: usize) -> Result<(), String> {
+        let (dest, layout, id, base, arity) =
+            opcode.dense_host_call_parts(constants).ok_or_else(|| "DenseHostCall pool".to_string())?;
+        promise!(sp + dest < stack_cap);
+        let native = self.natives.get_by_id(id).ok_or_else(|| format!("DenseHostCall: unknown native id {id}"))?;
+        let args = self.stack[sp + base..sp + base + arity].to_vec();
+        let layout = crate::host_enum::HostEnumLayout::from_u32(layout);
+        let v = match crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.heap, &args)) {
+            Ok(v) => v.unwrap_or_default(),
+            Err(crate::FfiError::Panic(msg)) => return Err(msg),
+            Err(e) => return Err(format!("HostInvoke failed for `{}`: {e}", native.name())),
+        };
+        self.stack[sp + dest] = v;
+        Ok(())
+    }
+
+    /// The native id of a `HostInvoke`: the word under its arguments.
+    #[inline(always)]
+    fn host_invoke_id(&self, opcode: &Byte) -> usize {
+        let consume = (opcode.operand_u32() & 0xFFFF) as usize + 1;
+        let tell = self.stack.tell();
+        promise!(tell >= consume);
+        self.stack.top_window(consume)[0].as_int() as usize
     }
 }
 

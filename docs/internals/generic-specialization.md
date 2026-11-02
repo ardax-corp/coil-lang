@@ -62,7 +62,7 @@ their own layout and bounds resolve statically.
   closed, its calls turned into `Callee::Resolved`, whose plans live in
   `resolved_plans`). `hir_inline_replan` then splices a kept body like a
   same-module callee when the call needs no boxing, keeps the clone's ABI
-  and fits `max_cross_module_inline_cost`
+  and fits `max_cross_module_inline_cost` (100: every node 1, a call 25)
   (`examples/perf/foreign_clone_hot.coil`).
 - **Free functions.** A generic free function is a clone source like a
   static method with its own type parameters (`note_fn_clone_src`). Its own
