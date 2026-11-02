@@ -191,6 +191,9 @@ pub fn verify_bytecode(
             DenseMakeK => {
                 pool((operand & 0xFFFF) as usize, "DenseMakeK")?;
             }
+            DenseHostCall => {
+                pool((operand & 0xFFFF) as usize, "DenseHostCall")?;
+            }
             _ => {}
         }
     }
