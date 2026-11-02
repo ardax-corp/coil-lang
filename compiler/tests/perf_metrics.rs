@@ -2365,8 +2365,8 @@ fn main() {
 
 /// #2183: a generic class's method calling another one of its methods, and
 /// the builtin `Hash` thunk for `string`, inline at ground types: a ground
-/// call of the outer method leaves no call, only `hash_string`'s
-/// `HostInvoke`.
+/// call of the outer method leaves no call, only `hash_string`'s host
+/// call (`HostInvoke`, or `DenseHostCall` in a dense body).
 #[test]
 fn generic_class_method_clones_inline() {
     let src = "
@@ -2385,5 +2385,8 @@ fn main() {
     let (start, end) = fn_pc_range(&syms, "main", bc.len());
     let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
     assert!(!ops.contains(&Instruction::CALL), "`slot`, `mix` and the hash thunk should inline into `main`; ops={ops:?}");
-    assert!(ops.contains(&Instruction::HostInvoke), "the string hash should be its `HostInvoke`; ops={ops:?}");
+    assert!(
+        ops.contains(&Instruction::HostInvoke) || ops.contains(&Instruction::DenseHostCall),
+        "the string hash should be its host call; ops={ops:?}"
+    );
 }

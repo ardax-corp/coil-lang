@@ -311,6 +311,11 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
         DenseMakeObject => {
             s.slots = hi(&[crate::dense::unpack_make_object(b.operand_u32()).0 as usize]);
         }
+        DenseHostCall => {
+            if let Some((dest, _, _, base, arity)) = b.dense_host_call_parts(pool) {
+                s.slots = hi(&[dest, base + arity.max(1) - 1]);
+            }
+        }
         DenseConst => s.slots = hi(&[b.dense_const_parts().1]),
         DenseMove | DenseArrayLen => {
             let (d, x) = b.dense_move_parts();
