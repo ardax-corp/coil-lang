@@ -502,6 +502,25 @@ impl Compiler {
         self.cold_fns.extend(cold);
     }
 
+    /// Warn once per function that an `#[inline]` call of it stays a call
+    /// (E0807): it recurses, is a coroutine, or holds what a splice cannot.
+    fn note_inline_refused(&mut self, span: crate::hir::Span, name: String, reason: String) {
+        if !self.inline_refused.insert(name.clone()) {
+            return;
+        }
+        let why = match reason.as_str() {
+            "recursive" => "it calls itself".to_string(),
+            r if r.starts_with("callee") => "its body or result cannot be spliced here".to_string(),
+            "body" => "it is generic, a coroutine or a closure".to_string(),
+            r if r.starts_with("call-kind") => format!("its calls go through a shared or special entry ({})", &r["call-kind ".len()..]),
+            "return" => "it returns from more than one place that cannot be folded".to_string(),
+            other => other.to_string(),
+        };
+        let mut msg = Message::warn(ErrorCode::InlineRefused, format!("`#[inline]` function `{name}` is not inlined: {why}"), span.0..span.1);
+        msg.with_help("remove `#[inline]`, or restructure the function".to_string());
+        self.messages.push(msg);
+    }
+
     /// Whether `key` is a cold function, or a clone of one.
     pub(super) fn is_cold_fn(&self, key: &str) -> bool {
         !self.cold_fns.is_empty()
@@ -2478,6 +2497,8 @@ impl Compiler {
         };
         let here = home(hir);
         let budget = self.inline_cost.max_inline_cost;
+        // `#[inline]` lifts the cost limits (`docs/internals/opt-hints.md`).
+        let budget_of = |b: &HirBody| if b.hints.inline { usize::MAX } else { budget };
         // Callees with guard returns, folded to a single exit.
         let folded: HashMap<usize, crate::hir::HirBody> = emit
             .plan
@@ -2487,7 +2508,7 @@ impl Compiler {
                 Some(_) => module.instance_fns.get(&call.key).copied(),
                 None => self.hir_fn_body(&call.key),
             })
-            .filter(|&index| inline::inlinable(&module.bodies[index], budget).err() == Some("return"))
+            .filter(|&index| inline::inlinable(&module.bodies[index], budget_of(&module.bodies[index])).err() == Some("return"))
             .filter_map(|index| Some((index, inline::single_exit(&module.bodies[index])?)))
             .collect();
         // Mono clone callees, as their generic body at the call's types.
@@ -2499,7 +2520,7 @@ impl Compiler {
                 let (name, map) = call.mono_of.as_deref()?;
                 let index = self.hir_fn_names.get(name.as_str()).copied().flatten()?;
                 let inst = self.hir_inline_instance(&module.bodies[index], map)?;
-                match inline::inlinable(&inst, budget) {
+                match inline::inlinable(&inst, budget_of(&inst)) {
                     Err("return") => inline::single_exit(&inst).map(|b| (id, b)),
                     _ => Some((id, inst)),
                 }
@@ -2513,7 +2534,7 @@ impl Compiler {
             .iter()
             .filter_map(|(&id, call)| {
                 let inst = self.hir_method_clone_body(module, &call.key)?;
-                match inline::inlinable(&inst, budget) {
+                match inline::inlinable(&inst, budget_of(&inst)) {
                     Err("return") => inline::single_exit(&inst).map(|b| (id, b)),
                     _ => Some((id, inst)),
                 }
@@ -2644,10 +2665,10 @@ impl Compiler {
                     return Err(format!("resolved `{}`", call.key));
                 }
                 let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
-                if size > self.inline_cost.max_cross_module_inline_cost {
+                if size > self.inline_cost.max_cross_module_inline_cost && !callee.hints.inline {
                     return Err("cost".to_string());
                 }
-                let shape = inline::inlinable(callee, budget)?.with_foreign(true);
+                let shape = inline::inlinable(callee, budget_of(callee))?.with_foreign(true);
                 return Ok((callee, shape));
             }
             let core = core_insts.get(&id.0);
@@ -2702,10 +2723,10 @@ impl Compiler {
                         // The stricter cross-module budget weighs every node
                         // (a read too) and a call as 25, as the IL's op count.
                         let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
-                        if size > self.inline_cost.max_cross_module_inline_cost {
+                        if size > self.inline_cost.max_cross_module_inline_cost && !callee.hints.inline {
                             return Err("cost".to_string());
                         }
-                        let shape = inline::inlinable(callee, budget)?.with_foreign(true);
+                        let shape = inline::inlinable(callee, budget_of(callee))?.with_foreign(true);
                         return Ok((callee, shape));
                     }
                     let index = self.hir_fn_body(&call.key).ok_or("ambiguous")?;
@@ -2843,7 +2864,7 @@ impl Compiler {
                 }
             }
             let inert = self.hir_loop_inert(callee, &heap);
-            let shape = inline::inlinable(callee, budget)?
+            let shape = inline::inlinable(callee, budget_of(callee))?
                 .with_heap_result(!scalar(&hir.expr(id).ty))
                 .with_heap_locals(heap)
                 .with_loop_inert(inert)
@@ -2860,11 +2881,12 @@ impl Compiler {
                             Some(HirKind::Lit(crate::hir::Lit::Int(k))) if *k <= inline::SHORT_TRIPS)
                     })
                 });
-                if !short {
+                if !short && !callee.hints.inline {
                     return Err("long loop".to_string());
                 }
             }
             if shape.looping()
+                && !callee.hints.inline
                 && crate::il::pure_call::name_in(&self.pure_fns, &callee.name)
                 && args.iter().all(|&a| inline::invariant_expr(hir, a, &invariant))
             {
@@ -2874,10 +2896,26 @@ impl Compiler {
         };
         // Unit tests only: `COIL_HIR_INLINE_WHY` names each refused site.
         let why = cfg!(test) && std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
+        // A cold callee (`#[cold]`, or one that never returns) keeps its
+        // call. An `#[inline]` callee of this module that cannot be spliced
+        // is reported once, with why (E0807).
+        let refused_inline: std::cell::RefCell<Vec<(crate::hir::Span, String, String)>> = Default::default();
         let callee_of = |id: HirId| {
-            let found = callee_for(id);
-            if why && let Err(reason) = &found {
-                eprintln!("hir inline `{}` site {}: {reason}", hir.name, id.0);
+            let found = callee_for(id).and_then(|(callee, shape)| {
+                let cold = callee.hints.cold || emit.plan.calls.get(&id.0).is_some_and(|c| self.is_cold_fn(&c.key));
+                if cold { Err("cold".to_string()) } else { Ok((callee, shape)) }
+            });
+            if let Err(reason) = &found {
+                if why {
+                    eprintln!("hir inline `{}` site {}: {reason}", hir.name, id.0);
+                }
+                if let Some(index) = emit.plan.calls.get(&id.0).and_then(|c| self.hir_fn_body(&c.key))
+                    && module.bodies[index].hints.inline
+                    && reason != "cold"
+                {
+                    let b = &module.bodies[index];
+                    refused_inline.borrow_mut().push((b.span, b.name.clone(), reason.clone()));
+                }
             }
             found.ok()
         };
@@ -2917,10 +2955,14 @@ impl Compiler {
             Self::hir_spliced_copies(&mut b, &self.checker);
             (b, s)
         };
-        let (mut body, mut spliced) = inline::inline_calls(hir, callee_of, growth, true, opaque).map(unbuilt)?;
+        let inlined = inline::inline_calls(hir, callee_of, growth, true, opaque).map(unbuilt);
         // A call spliced in place may sit where its `let`s cannot lower:
         // then only the hoisted sites.
-        let hoisted = inline::inline_calls(hir, callee_of, growth, false, opaque).map(unbuilt);
+        let hoisted = inlined.as_ref().and_then(|_| inline::inline_calls(hir, callee_of, growth, false, opaque).map(unbuilt));
+        for (span, name, reason) in refused_inline.into_inner() {
+            self.note_inline_refused(span, name, reason);
+        }
+        let (mut body, mut spliced) = inlined?;
         let mut replanned = plan(self, &body);
         if replanned.is_err()
             && let Some((b, s)) = hoisted

@@ -44,18 +44,20 @@ There are no growth guesses: "the grow path is rare" holds for a `Vec` push but 
 | The hints of a body | `HirBody::hints` (`hir::OptHints`), set in `hir::build`, kept on mono clones |
 | Functions that never return, failing arms | `hir::cold` (`fails`, `diverging_bodies`) |
 | Cold functions of the program | `Compiler::cold_fns` (by table key, filled as each module's HIR is built: `#[cold]` or never returning, `exit` counted), `cold_labels` (their entries, recorded in `named_entry_target`) |
+| Inliners | `Compiler::hir_inline_replan`: `budget_of` lifts the cost limit (same- and cross-module) and the long-loop and invariant-loop refusals for an `#[inline]` callee; `callee_of` refuses a cold callee; `note_inline_refused` warns E0807 once per `#[inline]` function of the module that stays a call |
 | Layout | `HirMirInput::cold_calls`; `mir::from_hir` `cold_arm` / `calls_cold` mark the arm's blocks cold, `layout` puts them after the body |
 
 ### Layout
 
 An `if` or `match` arm is laid out after the body when it only returns or fails (a panic, after any statements), or when it calls a cold function, even one it falls through from. A branch whose one edge carries φ copies runs them inline on that edge and jumps away on the other (`mir::emit`, `Terminator::Br`), so the hot edge takes no jump to reach its copies.
 
-Hit benches (callgrind, release):
+Hit benches (callgrind, release; step 2 rows for layout, step 3 for `#[inline]`):
 
 | Bench | Before | After |
 |-------|--------|-------|
 | `examples/perf/cold_failure_arm.coil` | 1.634G | 1.578G (−3.4%) |
 | `examples/perf/cold_call_arm.coil` | 909.8M | 829.8M (−8.8%) |
+| `examples/perf/inline_hint_over_limit.coil` (step 3) | 2.667G | 1.772G (−33.6%) |
 
 ## Steps
 
@@ -63,7 +65,7 @@ Hit benches (callgrind, release):
 |------|--------|
 | 1. Attributes: parse, check, carry on `HirBody` | done |
 | 2. Cold inference and layout | done |
-| 3. `#[inline]` / `#[cold]` in the same-module and cross-module inliners and clone planning; the `#[inline]` warning | |
+| 3. `#[inline]` / `#[cold]` in the same-module and cross-module inliners; the `#[inline]` warning (**E0807** `InlineRefused`) | done. Clone planning is unchanged: a cold generic function still gets its clones, so its call keeps the ground ABI |
 | 4. Partial inlining: cut cold regions into helpers before the inline cost check | |
 | 5. `#[hot]`: clones outside the budget, 4x limit, spread to callees and `impl` siblings | |
 | 6. Stdlib pass: tags only where a bench moves | |

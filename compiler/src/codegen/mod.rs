@@ -723,6 +723,8 @@ pub struct Compiler {
     cold_fns: HashSet<String>,
     /// Entry labels of [`Self::cold_fns`] calls resolved to.
     cold_labels: HashSet<crate::il::Label>,
+    /// `#[inline]` functions already reported as not inlined (E0807).
+    inline_refused: HashSet<String>,
     /// Scalar function bodies of modules compiled so far, by table key,
     /// with their calls named by key: callees another module's typed
     /// inlining may splice ([`Compiler::hir_portable_body`]).
@@ -914,6 +916,7 @@ impl Default for Compiler {
             hir_fn_names: HashMap::new(),
             cold_fns: HashSet::new(),
             cold_labels: HashSet::new(),
+            inline_refused: HashSet::new(),
             hir_portable: HashMap::new(),
             hir_resolved_clones: HashMap::new(),
             module_outer_namespace: None,
