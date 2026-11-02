@@ -1,4 +1,4 @@
-//! The key index natives (`key_index::*`, archive 6.18): an
+//! The key index natives (`key_index::*`, archive 6.19): an
 //! insertion-ordered hash index that maps keys to dense slot numbers.
 //!
 //! The index owns no keys. A collection keeps them, and any payload, in
@@ -382,7 +382,7 @@ pub fn host_clear(heap: &mut Heap, args: &[Value]) -> Value {
     Value::from(0i64)
 }
 
-/// HostInvoke wiring for `key_index::*` (archive 6.18), after
+/// HostInvoke wiring for `key_index::*` (archive 6.19), after
 /// `entropy_bytes`.
 pub const KEY_INDEX_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     (common::KEY_INDEX_TABLE_NATIVE, 1, host_table),

@@ -1,6 +1,6 @@
 # Key index natives
 
-`key_index::*` (HostInvoke 191–199, archive 6.18) is an insertion-ordered hash index that a collection keyed by any `Hash + Eq` type builds on. `collections::index::KeyIndex<K>` in coil-stdlib wraps it, and `HashMap` / `HashSet` sit on `KeyIndex`. coil-json drives the natives directly for its member index.
+`key_index::*` (HostInvoke 191–199, archive 6.19) is an insertion-ordered hash index that a collection keyed by any `Hash + Eq` type builds on. `collections::index::KeyIndex<K>` in coil-stdlib wraps it, and `HashMap` / `HashSet` sit on `KeyIndex`. coil-json drives the natives directly for its member index.
 
 Source: `machine/src/key_index.rs`, signatures and docs in `compiler/src/builtin_docs/key_index.coil`.
 

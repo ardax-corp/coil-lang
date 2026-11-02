@@ -2,11 +2,12 @@
 
 GitHub: #1416, #1417, #1419. Status: **implemented**.
 
-A generic body shared by every instance takes its type arguments boxed and
-its trait bounds as dictionaries (tuples of method code pointers). In
-`HashMap<int, int>` and `sort(Vec<int>)` that meant a box per argument and a
-fresh dictionary tuple on every call. Three changes take that away for
-ground calls.
+A generic body shared by every instance takes its trait bounds as
+dictionaries (tuples of method code pointers). Until 2026-11 it also took
+its type arguments boxed; now they cross in their own word (layout.md,
+"No boxes at generic edges"). In `HashMap<int, int>` and `sort(Vec<int>)`
+that meant a box per argument and a fresh dictionary tuple on every call.
+Three changes take the dictionary cost away for ground calls.
 
 ## Ground dictionaries once (#1417)
 

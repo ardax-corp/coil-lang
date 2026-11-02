@@ -1627,7 +1627,7 @@ pub const CORO_CLOSE_NATIVE: &str = "coro_close";
 /// No capability: like the clock, it reads host state and touches nothing.
 pub const ENTROPY_BYTES_ID: u16 = 190;
 pub const ENTROPY_BYTES_NATIVE: &str = "entropy_bytes";
-/// The key index natives (archive 6.18, `key_index::*`): an
+/// The key index natives (archive 6.19, `key_index::*`): an
 /// insertion-ordered hash index over parallel `Vec`s that any collection
 /// keyed by a `Hash + Eq` type builds on. See
 /// `docs/internals/key-index.md`.

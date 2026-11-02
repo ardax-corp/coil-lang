@@ -46,11 +46,16 @@ Result). No pair or niche opcode is emitted (`ReturnPair`, `PairToHeap`,
 `find_object_by_addr`, and `values_eq` compares the stripped words. A
 two-slot pair is two scalars, which no frame map roots.
 
-**VM.** `BoxValue` / `UnboxValue` are representation-agnostic for one-word
-values: boxing a niche word keeps the word (`0` and `pointer | 1` are kept
-as values), and unboxing a non-boxed word passes it through. That is what
-lets a shared body and a dictionary agree on `rep(ground T)` without a
-per-context conversion.
+**No boxes at generic edges.** A word crosses a shared generic body, a
+dictionary entry, a closure or `PolyFn` adapter and a clone thunk as it
+is: `rep(ground T)`. HIR still marks those edges (`Builtin::Box` /
+`Builtin::Unbox`, `HirCallSite::boxes`, the prologue's open parameters),
+but MIR lowers them to the same bits retyped (`MirBuilder::ins_box` /
+`ins_unbox`), so the compiler emits no `BoxValue` / `UnboxValue`. Those
+ops stay in the VM for older archives only, where they are
+representation-agnostic: boxing keeps an object as itself and unboxing
+passes a word that is no box through. `Show` of a scalar passes its type
+on `STRINGIFY`'s operand instead of boxing for the tag.
 
 ## Shared generic bodies
 
@@ -63,8 +68,7 @@ words:
   type, so the call site passes the word unchanged.
 - A bare `V` field, `Vec<V>` element or `HashMap` value read from ground
   code is the niche word (`hir_field_rep`'s bare-niche case).
-- Dictionary, closure and `PolyFn` adapters box a niche word as itself
-  (`Box(tag)` keeps it; `Unbox` passes it back).
+- Dictionary, closure and `PolyFn` adapters pass a niche word as itself.
 - A ground function passed where the shared body takes a function whose
   result is an open `Option` / `Result` (`T -> Result<U, E>` in
   `Result::and_then`) returns its niche word, but the body reads that
@@ -131,14 +135,6 @@ from `value_layout` of the invoke's result type: `1` for
 `Result<int, _>` and `Result<Option<int>, _>` stay boxed. Host natives are
 never two-slot producers. Cross-module `Result<Path, IoError>` keeps
 virtual-error tags for layout (COI-404).
-
-## Debug check
-
-Builds with `debug_assertions` or the `gc-stress` feature panic on an
-`UnboxValue` whose boxed tag is not the one the unboxer expects
-(`UnboxValue: boxed tag … where tag … is expected`, `machine/src/exec_rest.rs`).
-Release builds keep returning the default value. The gc-stress CI run is
-what catches a boxed-vs-niche mix-up that slipped past the matrix.
 
 ## Representation matrix
 
