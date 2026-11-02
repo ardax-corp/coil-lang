@@ -5952,6 +5952,36 @@ impl<const S: usize> Machine<S> {
                         self.stack.push(v);
                     }
                 }
+                Instruction::CONST => {
+                    let op = opcode.operand_u32();
+                    let raw = if unlikely(op & Byte::POOL_FLAG != 0) {
+                        let pool_idx = (op & !Byte::POOL_FLAG) as usize;
+                        promise!(pool_idx < constants.len());
+                        unsafe { *constants.get_unchecked(pool_idx) }
+                    } else {
+                        op as i32 as i64 as u64
+                    };
+                    self.stack.push(Value::from(raw));
+                }
+                Instruction::HostInvoke if self.natives.direct_by_id(self.host_invoke_id(opcode)).is_some() => {
+                    // A plain native ([`crate::ffi::NativeFn::direct`]): call
+                    // it here, without the generic path's host-op, task and
+                    // descriptor checks in `exec_rest`.
+                    let op = opcode.operand_u32();
+                    let consume = (op & 0xFFFF) as usize + 1;
+                    let tell = self.stack.tell();
+                    let f = self.natives.direct_by_id(self.host_invoke_id(opcode)).expect("checked by the guard");
+                    let layout = crate::host_enum::HostEnumLayout::from_operand(op);
+                    let live_before = self.heap.live_object_count();
+                    let heap = &mut self.heap;
+                    let args = &self.stack.top_window(consume)[1..];
+                    let v = crate::host_enum::in_host_enum_layout(layout, || f(heap, args));
+                    self.stack.seek(tell - consume);
+                    self.stack.push(v);
+                    if self.heap.live_object_count() > live_before {
+                        self.maybe_gc_after_alloc(ip);
+                    }
+                }
                 _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
                     Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
                     Err(paused) => return paused,
@@ -5959,6 +5989,17 @@ impl<const S: usize> Machine<S> {
             }
         }
         false
+    }
+}
+
+impl<const N: usize> Machine<N> {
+    /// The native id of a `HostInvoke`: the word under its arguments.
+    #[inline(always)]
+    fn host_invoke_id(&self, opcode: &Byte) -> usize {
+        let consume = (opcode.operand_u32() & 0xFFFF) as usize + 1;
+        let tell = self.stack.tell();
+        promise!(tell >= consume);
+        self.stack.top_window(consume)[0].as_int() as usize
     }
 }
 

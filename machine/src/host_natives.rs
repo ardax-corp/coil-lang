@@ -384,9 +384,7 @@ fn push_string_bytes(
             .expect("string byte native signature");
         let id = out.len();
         register_id(name, id);
-        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-            Ok(Some(host(heap, args)))
-        })));
+        out.push(Arc::new(HostClosureFn::new_direct(sig, host)));
     }
 }
 
@@ -426,7 +424,7 @@ fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("black_box signature");
     let id = out.len();
     register_id(name, id);
-    out.push(Arc::new(HostClosureFn::new(sig, |_heap, args| Ok(Some(args[0])))));
+    out.push(Arc::new(HostClosureFn::new_direct(sig, |_heap, args| args[0])));
 }
 
 /// `values_eq_shaped(a, b, shape) -> bool`: `==` on an aggregate whose
@@ -606,9 +604,12 @@ fn push_wiring(
             })));
             continue;
         }
-        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-            Ok(Some(host(heap, args)))
-        })));
+        if common::host_native_id(name) == Some(common::CLOCK_SLEEP_MS_ID as usize) {
+            // Inside a scope the VM suspends the task instead of calling it.
+            out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| Ok(Some(host(heap, args))))));
+            continue;
+        }
+        out.push(Arc::new(HostClosureFn::new_direct(sig, host)));
     }
 }
 
@@ -660,17 +661,13 @@ fn push_prelude_char_ord(
         .expect("ord signature");
     let ord_id = out.len();
     register_id("ord", ord_id);
-    out.push(Arc::new(HostClosureFn::new(ord_sig, |heap, args| {
-        Ok(Some(prelude_ord(heap, args)))
-    })));
+    out.push(Arc::new(HostClosureFn::new_direct(ord_sig, prelude_ord)));
 
     let char_sig = FfiSignature::from_parts("char".to_string(), vec![FfiType::Int], FfiType::Int)
         .expect("char signature");
     let char_id = out.len();
     register_id("char", char_id);
-    out.push(Arc::new(HostClosureFn::new(char_sig, |heap, args| {
-        Ok(Some(prelude_char(heap, args)))
-    })));
+    out.push(Arc::new(HostClosureFn::new_direct(char_sig, prelude_char)));
 
     let hash_sig = FfiSignature::from_parts(
         "hash_string".to_string(),
@@ -680,9 +677,7 @@ fn push_prelude_char_ord(
     .expect("hash_string signature");
     let hash_id = out.len();
     register_id("hash_string", hash_id);
-    out.push(Arc::new(HostClosureFn::new(hash_sig, |heap, args| {
-        Ok(Some(prelude_hash_string(heap, args)))
-    })));
+    out.push(Arc::new(HostClosureFn::new_direct(hash_sig, prelude_hash_string)));
 }
 
 fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
