@@ -1,5 +1,5 @@
-// @expected E0119 — `#[inline]` takes no arguments.
-#[inline(always)]
+// @expected E0119 — `#[inline]` takes `always` or `never`.
+#[inline(sometimes)]
 fn f(int x) -> int {
     return x;
 }
