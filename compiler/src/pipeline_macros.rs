@@ -847,6 +847,7 @@ impl Pipeline {
         let dir = config.resolved_dir();
         let mut disk_keys: Vec<Option<String>> = vec![None; jobs.len()];
         let mut old: Vec<Option<String>> = vec![None; jobs.len()];
+        let mut hits: Vec<(usize, Vec<crate::macros::ComptimeAccess>)> = Vec::new();
         for (i, job) in jobs.iter().enumerate() {
             let Some(dir) = dir.as_ref().filter(|_| results[i].is_none()) else { continue };
             let Some(key) = self.job_cache_key(job) else { continue };
@@ -861,10 +862,19 @@ impl Pipeline {
                     old[i] = Some(text.clone());
                 } else {
                     results[i] = Some(Ok(text.clone()));
-                    remember_output(keys[i], text, &entry.accesses);
+                    hits.push((i, entry.accesses.clone()));
                 }
             }
             disk_keys[i] = Some(key);
+        }
+        let from_disk: Vec<usize> = hits.iter().map(|(i, _)| *i).collect();
+        for (i, err) in self.check_cached_programs(jobs, &from_disk) {
+            results[i] = Some(Err(err));
+        }
+        for (i, accesses) in &hits {
+            if let Some(Ok(text)) = &results[*i] {
+                remember_output(keys[*i], text, accesses);
+            }
         }
         let todo: Vec<usize> = (0..jobs.len()).filter(|&i| results[i].is_none()).collect();
         let reused = jobs.len() - todo.len();
@@ -969,11 +979,60 @@ impl Pipeline {
                 .map(|&i| (i, (Err("this build has no compile-time macro host".to_string()), Vec::new())))
                 .collect();
         };
+        let mut results: Vec<(usize, crate::macros::MacroRun)> = Vec::with_capacity(todo.len());
+        for (key, ctx, idx) in self.expansion_programs(&host, jobs, todo) {
+            let host = host.clone();
+            let limits = self.host_grants.comptime;
+            // A macro does the IO its provider module was granted; a block,
+            // its own module's.
+            let module = jobs[idx[0]].provider_module.clone();
+            let io = self.host_grants.comptime_io_for(&module);
+            // A nested compile plus a VM run is deeper than Windows' 1 MiB
+            // main thread stack; continue on a fresh segment when little is left.
+            let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
+                let program = match compiled_program(key, ctx) {
+                    Ok(p) => p,
+                    Err(e) => return Err(e),
+                };
+                let mut calls = Vec::with_capacity(idx.len());
+                for &i in &idx {
+                    match program.offsets.get(&jobs[i].decl.fn_name) {
+                        Some(&o) => calls.push((o, jobs[i].input.clone())),
+                        None => {
+                            let e = format!("`{}` is not a macro of `{module}`", jobs[i].decl.name);
+                            return Ok(vec![(Err(e), Vec::new()); idx.len()]);
+                        }
+                    }
+                }
+                Ok(host.run(&program.expansion, &calls, &limits, &io))
+            });
+            let outs = match outs {
+                Ok(outs) => outs,
+                Err(failure) => {
+                    let summary = match &jobs[idx[0]].block {
+                        Some(block) => self.report_block_errors(&jobs[idx[0]], block, failure),
+                        None => failure.summary,
+                    };
+                    vec![(Err(summary), Vec::new()); idx.len()]
+                }
+            };
+            results.extend(idx.iter().copied().zip(outs));
+        }
+        results
+    }
+
+    /// The expansion programs the jobs `todo` run in: one per provider
+    /// module, and one per `comptime` block, each with the jobs it serves.
+    fn expansion_programs(
+        &self,
+        host: &std::sync::Arc<dyn crate::macros::MacroHost>,
+        jobs: &[Job],
+        todo: &[usize],
+    ) -> Vec<(u64, SubProgram, Vec<usize>)> {
         // One program per provider module with every macro it declares, so
         // `coil test` / the LSP reuse it across files and rounds (compiling
         // the provider costs the same with fewer wrappers). A `comptime`
         // block is a program of its own.
-        let mut results: Vec<(usize, crate::macros::MacroRun)> = Vec::with_capacity(todo.len());
         let mut groups: Vec<((String, PathBuf), Vec<usize>)> = Vec::new();
         let mut programs: Vec<(u64, SubProgram, Vec<usize>)> = Vec::new();
         for &i in todo {
@@ -988,7 +1047,7 @@ impl Pipeline {
                     k.finish()
                 });
                 let what = "this `comptime` block".to_string();
-                let sub = self.sub_program(&host, block.text.clone(), vec![job.decl.fn_name.clone()], what, disk_key, &[i], jobs);
+                let sub = self.sub_program(host, block.text.clone(), vec![job.decl.fn_name.clone()], what, disk_key, &[i], jobs);
                 programs.push((key, sub, vec![i]));
                 continue;
             }
@@ -1052,48 +1111,33 @@ impl Pipeline {
                 k.finish()
             });
             let what = format!("the macro module `{module}`");
-            let sub = self.sub_program(&host, text, entries, what, disk_key, &idx, jobs);
+            let sub = self.sub_program(host, text, entries, what, disk_key, &idx, jobs);
             programs.push((key, sub, idx));
         }
-        for (key, ctx, idx) in programs {
-            let host = host.clone();
-            let limits = self.host_grants.comptime;
-            // A macro does the IO its provider module was granted; a block,
-            // its own module's.
-            let module = jobs[idx[0]].provider_module.clone();
-            let io = self.host_grants.comptime_io_for(&module);
-            // A nested compile plus a VM run is deeper than Windows' 1 MiB
-            // main thread stack; continue on a fresh segment when little is left.
-            let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
-                let program = match compiled_program(key, ctx) {
-                    Ok(p) => p,
-                    Err(e) => return Err(e),
+        programs
+    }
+
+    /// Compile (or load from the program cache) the programs of jobs whose
+    /// output came from the result cache, which keys on the code and not
+    /// on the compiler: code this compiler rejects reports its errors
+    /// instead of reusing the cached output (#2026). The program cache
+    /// keys on the compiler build, so a hit from this build costs a read.
+    fn check_cached_programs(&mut self, jobs: &[Job], cached: &[usize]) -> Vec<(usize, String)> {
+        let Some(host) = self.macro_host.clone() else {
+            return Vec::new();
+        };
+        let mut failed = Vec::new();
+        for (key, ctx, idx) in self.expansion_programs(&host, jobs, cached) {
+            let compiled = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || compiled_program(key, ctx).map(|_| ()));
+            if let Err(failure) = compiled {
+                let summary = match &jobs[idx[0]].block {
+                    Some(block) => self.report_block_errors(&jobs[idx[0]], block, failure),
+                    None => failure.summary,
                 };
-                let mut calls = Vec::with_capacity(idx.len());
-                for &i in &idx {
-                    match program.offsets.get(&jobs[i].decl.fn_name) {
-                        Some(&o) => calls.push((o, jobs[i].input.clone())),
-                        None => {
-                            let e = format!("`{}` is not a macro of `{module}`", jobs[i].decl.name);
-                            return Ok(vec![(Err(e), Vec::new()); idx.len()]);
-                        }
-                    }
-                }
-                Ok(host.run(&program.expansion, &calls, &limits, &io))
-            });
-            let outs = match outs {
-                Ok(outs) => outs,
-                Err(failure) => {
-                    let summary = match &jobs[idx[0]].block {
-                        Some(block) => self.report_block_errors(&jobs[idx[0]], block, failure),
-                        None => failure.summary,
-                    };
-                    vec![(Err(summary), Vec::new()); idx.len()]
-                }
-            };
-            results.extend(idx.iter().copied().zip(outs));
+                failed.extend(idx.iter().map(|&i| (i, summary.clone())));
+            }
         }
-        results
+        failed
     }
 
     /// What compiling an expansion program for the jobs `idx` needs.
