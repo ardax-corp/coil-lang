@@ -1,0 +1,42 @@
+// A thread that panics joins as `ThreadError::Panicked` with its message,
+// as `task::join` reports `TaskError::Panicked` (#2165).
+use tests::assert;
+use thread::{join, spawn, ThreadError};
+use task::blocking;
+use string::format;
+
+fn boom() -> int {
+    panic "thread boom";
+}
+
+fn fine() -> int {
+    return 7;
+}
+
+test("join reports a worker panic with its message") {
+    let t = spawn(boom)?;
+    let message = match join(t) {
+        Result::Err(ThreadError::Panicked(m)) => m,
+        Result::Err(e) => "other: " + e.show(),
+        Result::Ok(_) => "ok",
+    };
+    assert!(message == "thread boom");
+}
+
+test("a joined thread still fails a second join with JoinFailed") {
+    let t = spawn(fine)?;
+    assert!(join(t)? == 7);
+    let again = match join(t) {
+        Result::Err(ThreadError::JoinFailed) => true,
+        default => false,
+    };
+    assert!(again);
+}
+
+test("task::blocking reports the panic too") {
+    let shown = match blocking(boom) {
+        Result::Err(e) => format("%v", e),
+        Result::Ok(_) => "ok",
+    };
+    assert!(shown == "Panicked(thread boom)");
+}
