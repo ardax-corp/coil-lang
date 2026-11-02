@@ -71,3 +71,53 @@ fn main() {{
     let n = copies("lambda", &src);
     assert!(n < 4, "{n} copies for {N} calls");
 }
+
+#[test]
+fn reassigning_a_field_from_a_call_copies_nothing() {
+    let src = format!(
+        "
+fn add(Vec<int> vs) -> Vec<int> {{
+    vs.push(1);
+    return vs;
+}}
+class Bag {{
+    pub items: Vec<int>,
+}}
+fn main() {{
+    let b = new Bag(Vec::new());
+    let i = 0;
+    while i < {N} {{
+        b.items = add(b.items);
+        i = i + 1;
+    }}
+    if b.items.len() != {N} {{ panic \"wrong length\"; }}
+}}
+"
+    );
+    let n = copies("field", &src);
+    assert!(n < 4, "{n} copies for {N} calls");
+}
+
+#[test]
+fn reassigning_an_element_from_a_call_copies_nothing() {
+    let src = format!(
+        "
+fn add(Vec<int> vs) -> Vec<int> {{
+    vs.push(1);
+    return vs;
+}}
+fn main() {{
+    let a: Vec<Vec<int>> = [Vec::new(), Vec::new()];
+    let i = 0;
+    let k = 1;
+    while i < {N} {{
+        a[k] = add(a[k]);
+        i = i + 1;
+    }}
+    if a[1].len() != {N} || a[0].len() != 0 {{ panic \"wrong length\"; }}
+}}
+"
+    );
+    let n = copies("element", &src);
+    assert!(n < 4, "{n} copies for {N} calls");
+}
