@@ -440,13 +440,14 @@ fn named_value(body: &HirBody, a: HirId) -> HirId {
 /// the call: it stores the parameter (or a local that holds it) into a
 /// field, an element, a new object, a callee that keeps it, a closure or
 /// its result. What it stores from inside the object it shares itself.
-/// Second: the parameters it hands, as themselves, to code not known
+/// Second: the parameters that may be its result, as themselves (#2206).
+/// Third: the parameters it hands, as themselves, to code not known
 /// here, which may keep them.
-pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64) {
+pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64, u64) {
     if body.is_coro {
-        return (u64::MAX, u64::MAX);
+        return (u64::MAX, u64::MAX, u64::MAX);
     }
-    let Some(root) = body.root else { return (0, 0) };
+    let Some(root) = body.root else { return (0, 0, 0) };
     // What each local may hold of the parameters, through `let x = p`.
     let mut holds: HashMap<LocalId, u64> = HashMap::new();
     for (i, &p) in body.params.iter().enumerate().take(64) {
@@ -495,6 +496,7 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
         }
     }
     let mut kept = 0u64;
+    let mut returned = 0u64;
     let mut opaque = 0u64;
     for (i, e) in body.exprs.iter().enumerate() {
         let id = HirId(i as u32);
@@ -520,7 +522,8 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                     }
                 }
             }
-            HirKind::Return(Some(v)) | HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => kept |= of(&holds, *v),
+            HirKind::Return(Some(v)) => returned |= of(&holds, *v),
+            HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => kept |= of(&holds, *v),
             HirKind::Lambda { body: inner } => {
                 for (o, _) in &module.bodies[*inner].captures {
                     kept |= holds.get(o).copied().unwrap_or(0);
@@ -534,10 +537,10 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
     }
     if body.ret.is_some() {
         for v in super::escape::result_exprs(body, root) {
-            kept |= of(&holds, v);
+            returned |= of(&holds, v);
         }
     }
-    (kept, opaque)
+    (kept, returned, opaque)
 }
 
 /// What the callee of `callee(args)` does with each argument.
@@ -581,7 +584,7 @@ fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[Hir
     };
     if !positional {
         let any = |bits: u64| if bits != 0 { all } else { 0 };
-        return ArgUse { written: any(s.mutates), kept: any(s.keeps), opaque: any(s.opaque_args) };
+        return ArgUse { written: any(s.mutates), kept: any(s.keeps | s.returns_arg), opaque: any(s.opaque_args) };
     }
     from_summary(&s)
 }
@@ -613,7 +616,7 @@ fn host_use(body: &HirBody, short: &str, args: &[HirId], all: u64) -> ArgUse {
 /// A callee shares what it returns from a place (its `return` is a
 /// store), so returning part of an argument does not keep the argument.
 fn from_summary(s: &Summary) -> ArgUse {
-    ArgUse { written: s.mutates, kept: s.keeps, opaque: s.opaque_args }
+    ArgUse { written: s.mutates, kept: s.keeps | s.returns_arg, opaque: s.opaque_args }
 }
 
 /// Where the rewrite puts ops.
