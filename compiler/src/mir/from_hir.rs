@@ -646,6 +646,26 @@ struct Loop {
     defers: usize,
 }
 
+/// One word of a boxed pair ([`Lower::pair_boxes`]): a value, or the
+/// write of a local it was read from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PairWord {
+    Value(ValueId),
+    Read(LocalId, u32),
+}
+
+/// An enum object boxed from a pair's words ([`Lower::pair_boxes`]).
+struct PairBox {
+    lo: PairWord,
+    hi: PairWord,
+    ty: Ty,
+    /// The innermost loop the box was made in, by its `continue` target.
+    in_loop: Option<BlockId>,
+    /// The block the object is known in.
+    block: BlockId,
+    obj: ValueId,
+}
+
 /// What leaving a block early has to do, innermost last.
 #[derive(Clone, Copy)]
 enum Open {
@@ -696,6 +716,10 @@ struct Lower<'a> {
     /// Stack arrays boxed so far, in source order: the local holding each
     /// one's heap array.
     boxes: HashMap<u32, LocalId>,
+    /// Enum objects made from a two-word pair so far. A later box of the
+    /// same words where one dominates reuses its object (enum objects are
+    /// immutable).
+    pair_boxes: Vec<PairBox>,
     /// Payloads read from a niche word: the word, and whether it was an
     /// untagged `Err`. Making the same variant again gives the word back.
     unniche: HashMap<ValueId, (ValueId, bool)>,
@@ -1116,6 +1140,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         arm_tys: HashMap::new(),
         next_temp: TEMP_BASE,
         boxes: HashMap::new(),
+        pair_boxes: Vec::new(),
         unniche: HashMap::new(),
         spec: HashSet::new(),
         word_src: HashMap::new(),
@@ -1277,6 +1302,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         arm_tys: HashMap::new(),
         next_temp: parts.next_temp,
         boxes: HashMap::new(),
+        pair_boxes: Vec::new(),
         unniche: HashMap::new(),
         spec: HashSet::new(),
         word_src: HashMap::new(),
@@ -2463,7 +2489,25 @@ impl Lower<'_> {
             self.b.ins_heap_field_store(obj, hi, 1).map_err(mir)?;
             return Ok(Val::V(obj));
         }
-        self.box_pair(ty, lo, hi)
+        // The same words boxed before, where that box dominates and in the
+        // same loop (a loop could rewrite the local after this point and
+        // come back here without passing the box): its object.
+        let key = |l: &Self, v: ValueId| l.b.read_origin(v).map_or(PairWord::Value(l.b.resolved(v)), |(local, n)| PairWord::Read(local, n));
+        let (lo_key, hi_key) = (key(self, lo), key(self, hi));
+        let in_loop = self.loops.last().map(|l| l.cont);
+        let found = self
+            .pair_boxes
+            .iter()
+            .find(|p| p.lo == lo_key && p.hi == hi_key && p.in_loop == in_loop && &p.ty == ty && self.b.dominates_current(p.block))
+            .map(|p| p.obj);
+        if let Some(obj) = found {
+            return Ok(Val::V(self.b.resolved(obj)));
+        }
+        let boxed = self.box_pair(ty, lo, hi)?;
+        if let Val::V(obj) = boxed {
+            self.pair_boxes.push(PairBox { lo: lo_key, hi: hi_key, ty: ty.clone(), in_loop, block: self.cur, obj });
+        }
+        Ok(boxed)
     }
 
     /// `id`'s word; refuses `()` and `Never` is passed up as `None`. A
