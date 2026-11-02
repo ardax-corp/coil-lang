@@ -1069,6 +1069,8 @@ impl Compiler {
             return false;
         }
         let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
+        let moded = self.hir_fold_key_eq_modes(hir);
+        let hir = moded.as_ref().unwrap_or(hir);
         // A generic fn with a nested type parameter read as a value that the
         // HIR could not alias: if the body is refused, that read is why (#916).
         *self.generic_fn_value_refusal.borrow_mut() = hir.exprs.iter().enumerate().find_map(|(i, e)| match &e.kind {
@@ -3745,6 +3747,40 @@ impl Compiler {
             .as_ref()
             .map_or(crate::layout::Layout::Word, |t| crate::layout::of(&self.checker, t));
         Some(inst)
+    }
+
+    /// `key_index::eq_mode(k)` as the constant it stands for
+    /// (`common::KEY_EQ_*`): `int` keys compare words, `string` keys
+    /// contents, any other type (and a type this body is generic in)
+    /// through its own `==`. The branch a caller takes on it then folds
+    /// away.
+    fn hir_fold_key_eq_modes(&self, hir: &HirBody) -> Option<HirBody> {
+        use crate::typechecking::ty::{INT, STRING, ftv_ty, strip_readonly};
+        let mut out: Option<HirBody> = None;
+        for (i, e) in hir.exprs.iter().enumerate() {
+            let HirKind::Call { callee: crate::hir::Callee::Named { name, .. }, args } = &e.kind else {
+                continue;
+            };
+            let [a] = args.as_slice() else {
+                continue;
+            };
+            if self.checker.host_fn_in_scope(name) != Some(common::KEY_INDEX_EQ_MODE_NATIVE)
+                || !matches!(hir.expr(*a).kind, HirKind::Local(_) | HirKind::Lit(_))
+            {
+                continue;
+            }
+            let Some(ty) = Self::hir_ty(hir, *a).map(|t| apply_ty_prune(self.checker.subst(), t)) else {
+                continue;
+            };
+            let mode = match strip_readonly(&ty) {
+                _ if !ftv_ty(&ty).is_empty() => common::KEY_EQ_COIL,
+                Ty::Con(n) if n == INT => common::KEY_EQ_WORD,
+                Ty::Con(n) if n == STRING => common::KEY_EQ_STRING,
+                _ => common::KEY_EQ_COIL,
+            };
+            out.get_or_insert_with(|| hir.clone()).exprs[i].kind = HirKind::Lit(crate::hir::Lit::Int(mode));
+        }
+        out
     }
 
     pub(super) fn hir_instance(&self, body: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> HirBody {
