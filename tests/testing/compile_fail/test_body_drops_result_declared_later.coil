@@ -1,0 +1,12 @@
+// @expected E0136 — a dropped `Result` in a `test` body is an error even
+// when the helper that `raise`s is declared after the test: its Result mode
+// is known only once its body is checked (#2111).
+use tests::assert;
+
+test("a dropped helper Err from a later helper") {
+    helper();
+}
+
+fn helper() {
+    assert!(1 == 2, "inner");
+}
