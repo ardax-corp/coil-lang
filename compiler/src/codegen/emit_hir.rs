@@ -37,6 +37,9 @@ enum Rep {
 const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
 /// Typed inlining rounds: the calls a round splices in inline in the next.
 const HIR_INLINE_ROUNDS: usize = 3;
+/// Inline cost limit for calls in a hot body and for a hot callee: 4x the
+/// default (`docs/internals/opt-hints.md`).
+const HOT_INLINE_COST: usize = 400;
 
 /// Where a field lives: a class slot or a record's (`LoadField` /
 /// `SetField` slot form). A record's slots are its fields sorted by name.
@@ -473,6 +476,7 @@ impl Compiler {
         }
 
         self.note_cold_fns(&hir);
+        self.note_hot_fns(&hir);
         self.hir_module = Some(hir);
     }
 
@@ -500,6 +504,53 @@ impl Compiler {
         }
         cold.extend(hir.instance_fns.iter().filter(|&(_, &i)| hir.bodies[i].hints.cold || diverging.contains(&i)).map(|(k, _)| k.clone()));
         self.cold_fns.extend(cold);
+    }
+
+    /// Add `hir`'s hot functions to [`Self::hot_fns`]: `#[hot]` ones, the
+    /// other methods of a `#[hot]` method's class, and the functions a hot
+    /// body calls by name (and its class's methods it calls on `self` or
+    /// another receiver by name). A cold function (`#[cold]`, or one that
+    /// never returns) stays cold.
+    fn note_hot_fns(&mut self, hir: &crate::hir::HirModule) {
+        use crate::hir::{BodyKind, Callee, HirKind};
+        fn owner(b: &HirBody) -> Option<&str> {
+            (b.kind == BodyKind::Method).then(|| b.name.rsplit_once("::").map_or("", |(o, _)| o))
+        }
+        let tagged: Vec<&HirBody> =
+            hir.bodies.iter().filter(|b| b.hints.hot && matches!(b.kind, BodyKind::Function | BodyKind::Method)).collect();
+        if tagged.is_empty() {
+            return;
+        }
+        let hot_owners: HashSet<&str> = tagged.iter().filter_map(|b| owner(b)).collect();
+        let mut hot: Vec<&HirBody> = tagged.clone();
+        hot.extend(hir.bodies.iter().filter(|b| owner(b).is_some_and(|o| hot_owners.contains(o))));
+        let mut names: Vec<String> = Vec::new();
+        for b in &hot {
+            names.push(b.name.clone());
+            for e in &b.exprs {
+                match &e.kind {
+                    HirKind::Call { callee: Callee::Named { name, .. }, .. } => names.push(name.clone()),
+                    HirKind::Call { callee: Callee::Method { name }, .. } => {
+                        if let Some(o) = owner(b) {
+                            names.push(format!("{o}::{name}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        names.retain(|n| !self.is_cold_fn(n));
+        self.hot_fns.extend(names);
+    }
+
+    /// Whether `body` is hot: `#[hot]`, or made hot by a hot caller or
+    /// class sibling ([`Self::note_hot_fns`]). An explicit `#[cold]` wins.
+    pub(super) fn is_hot_body(&self, body: &HirBody) -> bool {
+        !body.hints.cold
+            && (body.hints.hot
+                || !self.hot_fns.is_empty()
+                    && (self.hot_fns.contains(&body.name)
+                        || body.name.split_once("$inst$").is_some_and(|(base, _)| self.hot_fns.contains(base))))
     }
 
     /// Warn once per function that an `#[inline]` call of it stays a call
@@ -2496,9 +2547,24 @@ impl Compiler {
             s.to_string()
         };
         let here = home(hir);
-        let budget = self.inline_cost.max_inline_cost;
-        // `#[inline]` lifts the cost limits (`docs/internals/opt-hints.md`).
-        let budget_of = |b: &HirBody| if b.hints.inline { usize::MAX } else { budget };
+        // A hot body's calls, and a hot callee anywhere, inline under
+        // [`HOT_INLINE_COST`]; `#[inline]` lifts the cost limits
+        // (`docs/internals/opt-hints.md`).
+        let hot_here = self.is_hot_body(hir);
+        let budget = if hot_here { self.inline_cost.max_inline_cost.max(HOT_INLINE_COST) } else { self.inline_cost.max_inline_cost };
+        let cross_budget = if hot_here { HOT_INLINE_COST } else { self.inline_cost.max_cross_module_inline_cost };
+        let budget_of = |b: &HirBody| {
+            if b.hints.inline {
+                usize::MAX
+            } else if self.is_hot_body(b) {
+                budget.max(HOT_INLINE_COST)
+            } else {
+                budget
+            }
+        };
+        let over_cross = |b: &HirBody, size: usize| {
+            !b.hints.inline && size > if self.is_hot_body(b) { HOT_INLINE_COST } else { cross_budget }
+        };
         // Callees with guard returns, folded to a single exit.
         let folded: HashMap<usize, crate::hir::HirBody> = emit
             .plan
@@ -2665,7 +2731,7 @@ impl Compiler {
                     return Err(format!("resolved `{}`", call.key));
                 }
                 let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
-                if size > self.inline_cost.max_cross_module_inline_cost && !callee.hints.inline {
+                if over_cross(callee, size) {
                     return Err("cost".to_string());
                 }
                 let shape = inline::inlinable(callee, budget_of(callee))?.with_foreign(true);
@@ -2723,7 +2789,7 @@ impl Compiler {
                         // The stricter cross-module budget weighs every node
                         // (a read too) and a call as 25, as the IL's op count.
                         let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
-                        if size > self.inline_cost.max_cross_module_inline_cost && !callee.hints.inline {
+                        if over_cross(callee, size) {
                             return Err("cost".to_string());
                         }
                         let shape = inline::inlinable(callee, budget_of(callee))?.with_foreign(true);
