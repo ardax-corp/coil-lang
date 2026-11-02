@@ -16,6 +16,7 @@
 //! flags, so a consumer never asks the checker again.
 
 pub mod build;
+pub mod cold;
 pub mod check;
 pub mod effects;
 pub mod enum_sroa;
