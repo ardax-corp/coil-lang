@@ -7339,16 +7339,13 @@ impl Compiler {
     /// object first), the closure called, and its result unboxed (a niche
     /// `Option` back to its niche word).
     fn closure_adapter_mir(name: &str, adapt: &HirClosureAdapt) -> Result<crate::mir::MirFunc, String> {
-        use crate::mir::{MirAllocKind, MirCastKind, MirConst, MirGcKind, MirTy};
+        use crate::mir::{MirCastKind, MirConst, MirTy};
         let err = |e: crate::mir::MirError| format!("mir: {e}");
         let mut b = crate::mir::MirBuilder::new(name.to_string());
         b.set_ret_ty(adapt.ret.ty);
         let f = b.add_param(MirTy::HeapRef).map_err(err)?;
         let params = adapt.args.iter().map(|w| b.add_param(w.ty)).collect::<Result<Vec<_>, _>>().map_err(err)?;
-        let boxed = |b: &mut crate::mir::MirBuilder, tag: u32, v| {
-            let obj = b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v])?;
-            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
-        };
+        let boxed = |b: &mut crate::mir::MirBuilder, tag: u32, v| b.ins_box(v, tag);
         let mut args = Vec::with_capacity(params.len());
         for (w, p) in adapt.args.iter().zip(params) {
             args.push(match w.conv {

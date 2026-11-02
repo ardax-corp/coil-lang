@@ -2856,15 +2856,8 @@ impl Lower<'_> {
                 let Some(v) = self.word(*inner)? else {
                     return Ok(Val::Never);
                 };
-                let boxed = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag: *tag }, vec![v]).map_err(mir))?;
-                let boxed = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?;
-                if ty == MirTy::HeapRef {
-                    return Ok(Val::V(boxed));
-                }
-                if !MirCastKind::Word.allows(MirTy::HeapRef, ty) {
-                    return Err("box type".into());
-                }
-                Ok(Val::V(self.b.ins_cast(MirCastKind::Word, ty, boxed).map_err(mir)?))
+                let word = self.b.ins_box(v, *tag).map_err(mir)?;
+                Ok(Val::V(self.b.ins_word_as(word, ty).map_err(|_| "box type")?))
             }
             // An `Option` / `Result` in another layout (compiler-made
             // bodies): a niche word boxed, or an enum object's niche word.
@@ -4348,8 +4341,7 @@ impl Lower<'_> {
                 let v = if self.b.value_ty(w) == MirTy::HeapRef { w } else { self.box_niche(layout, w)? };
                 match tag {
                     Some(tag) => {
-                        let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                        words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                        words.push(self.b.ins_box(v, tag).map_err(mir)?);
                     }
                     None => words.push(v),
                 }
@@ -4368,8 +4360,7 @@ impl Lower<'_> {
                     words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?);
                 }
                 (Val::V(v), false) if let Some(tag) = tag => {
-                    let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                    words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                    words.push(self.b.ins_box(v, tag).map_err(mir)?);
                 }
                 (Val::V(v), false) => words.push(v),
                 (Val::Pair(lo, hi), false) if boxed => {
@@ -4381,8 +4372,7 @@ impl Lower<'_> {
                     // tag, as HIR emission's `BoxValue` after the boxing.
                     match tag {
                         Some(tag) => {
-                            let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                            words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                            words.push(self.b.ins_box(v, tag).map_err(mir)?);
                         }
                         None => words.push(v),
                     }
@@ -4549,8 +4539,7 @@ impl Lower<'_> {
                 HirDictOp::Load(slot) => stack.push(*self.dict_params.get(&slot).ok_or("dictionary parameter")?),
                 HirDictOp::Box(tag) => {
                     let v = stack.pop().ok_or("dictionary box")?;
-                    let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
-                    stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                    stack.push(self.b.ins_box(v, tag).map_err(mir)?);
                 }
                 HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
                 HirDictOp::Field(n) => {
@@ -4948,8 +4937,7 @@ impl Lower<'_> {
                 };
                 let v = match tag {
                     Some(tag) => {
-                        let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?
+                        self.b.ins_box(v, tag).map_err(mir)?
                     }
                     None => v,
                 };
@@ -4965,8 +4953,7 @@ impl Lower<'_> {
             // A niche enum goes to a bare type parameter as its own word.
             let v = match tag {
                 Some(tag) => {
-                    let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
-                    self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?
+                    self.b.ins_box(v, tag).map_err(mir)?
                 }
                 None => v,
             };
@@ -5037,8 +5024,7 @@ impl Lower<'_> {
             if self.b.value_ty(v) != MirTy::HeapRef {
                 return Err("operator operand boxed".into());
             }
-            let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag: call.tag }, vec![v]).map_err(mir)?;
-            words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+            words.push(self.b.ins_box(v, call.tag).map_err(mir)?);
         }
         // The instance's dictionary, after the operands (#1661).
         if !site.dicts.is_empty() {
@@ -5837,8 +5823,7 @@ impl Lower<'_> {
                     None => v,
                     Some(_) if self.b.value_ty(v) != MirTy::HeapRef => return Err("show boxed word".into()),
                     Some(tag) => {
-                        let obj = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
-                        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?
+                        self.b.ins_box(v, tag).map_err(mir)?
                     }
                 };
                 let abi = DenseAbi {

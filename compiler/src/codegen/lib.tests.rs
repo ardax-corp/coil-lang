@@ -730,7 +730,7 @@ fn bare_yield_from_statement_does_not_emit_trailing_pop() {
 #[test]
 fn float_arithmetic_emits_float_opcode() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("1.0 + 2.0;");
+    let (bc, _pool) = compile_src_lir("1.0 + 2.0;");
     // Find the binary operator instruction. The bytecode is
     // initialised with CALL/JMP/HALT, then operand code, then the
     // operator. We search for the LAST ADDF / ADD.
@@ -751,7 +751,7 @@ fn float_arithmetic_emits_float_opcode() {
 #[test]
 fn float_unary_minus_emits_negf_not_neg() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn n(float x) -> float { return -x; }");
+    let (bc, _pool) = compile_src_lir("fn n(float x) -> float { return -x; }");
     // The builtin `Neg` thunks (both lanes) come first; `n`'s is the last.
     let last_neg = bc
         .iter()
@@ -5486,31 +5486,21 @@ fn multiparam_constrained_escape_emits_capture_with_slot_count() {
     );
 }
 
-/// Codegen test B3-2: escaped unbounded `id<T>` keeps the shared
-/// `BoxValue` ABI. Ground `id(42)` monomorphizes to a direct CALL (see
+/// Escaped unbounded `id<T>` (a `PolyFn`): the int argument and result
+/// cross the shared body in their own word, never boxed (the
+/// representation rule, docs/internals/layout.md). Ground `id(42)`
+/// monomorphizes to a direct CALL (see
 /// `unbounded_generic_helper_emits_direct_call`).
 #[test]
-fn generic_call_with_concrete_arg_emits_box_value() {
+fn escaped_poly_fn_passes_words_unboxed() {
     use common::Instruction;
     let (bc, _pool) =
         compile_src("fn id<T>(T x) -> T { return x; } fn main() { let f = id; f(42); }");
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::BoxValue)),
-        "expected BoxValue for concrete int arg passed through escaped PolyFn id<T>; bytecode opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    let box_ops: Vec<u32> = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::BoxValue))
-        .map(|b| b.operand_u32())
-        .collect();
-    assert!(
-        box_ops.contains(&(common::ValueTag::Int as u32)),
-        "BoxValue operand should be ValueTag::Int ({}), got: {:?}",
-        common::ValueTag::Int as u32,
-        box_ops
-    );
+    let ops: Vec<_> = bc.iter().map(|b| *b.bytecode()).collect();
+    assert!(ops.contains(&Instruction::CallIndirect), "expected the PolyFn call; opcodes: {ops:?}");
+    for op in [Instruction::BoxValue, Instruction::UnboxValue] {
+        assert!(!ops.contains(&op), "a generic edge must not box or unbox; opcodes: {ops:?}");
+    }
 }
 
 /// Ground `id(42)` specializes to a native CALL (no BoxValue / CallIndirect).
@@ -5540,37 +5530,6 @@ fn unbounded_generic_helper_emits_direct_call() {
             .any(|b| matches!(b.bytecode(), Instruction::UnboxValue)),
         "specialized id<int> must not unbox; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-}
-
-/// Escaped `let f = id; f(42)` still boxes at the PolyFn boundary.
-#[test]
-fn generic_call_emits_box_and_unbox() {
-    use common::Instruction;
-    let (bc, _pool) =
-        compile_src("fn id<T>(T x) -> T { return x; } fn main() { let f = id; f(42); }");
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::BoxValue)),
-        "expected BoxValue for concrete int arg to escaped PolyFn id<T>; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::UnboxValue)),
-        "expected UnboxValue after escaped PolyFn returns concrete int; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-    let unbox_ops: Vec<u32> = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::UnboxValue))
-        .map(|b| b.operand_u32() & 0xFFFF)
-        .collect();
-    assert!(
-        unbox_ops.contains(&(common::ValueTag::Int as u32)),
-        "UnboxValue operand should be ValueTag::Int ({}), got: {:?}",
-        common::ValueTag::Int as u32,
-        unbox_ops
     );
 }
 
