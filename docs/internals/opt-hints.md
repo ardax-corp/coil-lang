@@ -44,7 +44,9 @@ There are no growth guesses: "the grow path is rare" holds for a `Vec` push but 
 | The hints of a body | `HirBody::hints` (`hir::OptHints`), set in `hir::build`, kept on mono clones |
 | Functions that never return, failing arms | `hir::cold` (`fails`, `diverging_bodies`) |
 | Cold functions of the program | `Compiler::cold_fns` (by table key, filled as each module's HIR is built: `#[cold]` or never returning, `exit` counted), `cold_labels` (their entries, recorded in `named_entry_target`) |
-| Inliners | `Compiler::hir_inline_replan`: `budget_of` lifts the cost limit (same- and cross-module) and the long-loop and invariant-loop refusals for an `#[inline]` callee; `callee_of` refuses a cold callee; `note_inline_refused` warns E0807 once per `#[inline]` function of the module that stays a call |
+| Hot functions | `Compiler::hot_fns` (by table key, filled as each module's HIR is built, `note_hot_fns`): `#[hot]` functions and methods, the other methods of a `#[hot]` method's class, and what a hot body calls by name (`f(..)`, or `x.m(..)` naming a method of its own class), less cold ones. `is_hot_body` / `is_hot_fn` (clones by their base name; an explicit `#[cold]` wins) |
+| Hot clones | Free generic functions: `monomorphize::mark_hot` (`#[hot]`, and generic functions a `#[hot]` one calls by name) makes each ground call's clone a must, past `--clone-budget`, as keyed ones are. Generic class methods: `instance_clone` / `method_clone_room` let a hot method's clone past the budget, into `HOT_CLONE_ROOM` (256) extra entry labels per program |
+| Inliners | `Compiler::hir_inline_replan`: in a hot body every call, and anywhere a hot callee, inlines under `HOT_INLINE_COST` (400, same- and cross-module); `budget_of` lifts the cost limit (same- and cross-module) and the long-loop and invariant-loop refusals for an `#[inline]` callee; `callee_of` refuses a cold callee; `note_inline_refused` warns E0807 once per `#[inline]` function of the module that stays a call |
 | Layout | `HirMirInput::cold_calls`; `mir::from_hir` `cold_arm` / `calls_cold` mark the arm's blocks cold, `layout` puts them after the body |
 
 ### Layout
@@ -58,6 +60,10 @@ Hit benches (callgrind, release; step 2 rows for layout, step 3 for `#[inline]`)
 | `examples/perf/cold_failure_arm.coil` | 1.634G | 1.578G (−3.4%) |
 | `examples/perf/cold_call_arm.coil` | 909.8M | 829.8M (−8.8%) |
 | `examples/perf/inline_hint_over_limit.coil` (step 3) | 2.667G | 1.772G (−33.6%) |
+| `examples/perf/hot_hint_inline.coil` (step 5) | 2.667G | 1.772G (−33.6%) |
+| `examples/perf/hot_hint_clone.coil` (step 5, `--clone-budget 1`) | 1.086G | 627.4M (−42.2%) |
+
+`hot_hint_clone.coil` at the default budget is neutral (627.3M both): its clones exist anyway. A stdlib `HashMap.insert` tagged `#[hot]` (step 6 decides the tag) takes an int insert loop from 641.3M to 561.9M (−12.4%), and at `--clone-budget 1` from 1.140G to 561.9M.
 
 ## Steps
 
@@ -67,5 +73,5 @@ Hit benches (callgrind, release; step 2 rows for layout, step 3 for `#[inline]`)
 | 2. Cold inference and layout | done |
 | 3. `#[inline]` / `#[cold]` in the same-module and cross-module inliners; the `#[inline]` warning (**E0807** `InlineRefused`) | done. Clone planning is unchanged: a cold generic function still gets its clones, so its call keeps the ground ABI |
 | 4. Partial inlining: cut cold regions into helpers before the inline cost check | |
-| 5. `#[hot]`: clones outside the budget, 4x limit, spread to callees and `impl` siblings | |
+| 5. `#[hot]`: clones outside the budget, 4x limit, spread to callees and `impl` siblings | done. Siblings are the other methods of the class, from every `impl` block of it; callees are those a hot body names, not every function it reaches |
 | 6. Stdlib pass: tags only where a bench moves | |

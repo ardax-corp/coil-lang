@@ -1600,8 +1600,10 @@ impl Compiler {
         }
         // Instance types may grow without end (`Show<Tree<Box<T>>>` from
         // `Show<Tree<T>>`): a method already on this clone's chain takes the
-        // shared body, as does any clone past `--clone-budget`.
-        if self.inst_clones.len() >= self.checker.host_grants().clone_budget() || self.inst_clone_recursive(fqn) {
+        // shared body, as does any clone past `--clone-budget` but a hot
+        // method's (`#[hot]`, `docs/internals/opt-hints.md`).
+        let past_budget = self.inst_clones.len() >= self.checker.host_grants().clone_budget() && !self.is_hot_fn(fqn);
+        if past_budget || self.inst_clone_recursive(fqn) {
             return None;
         }
         let chain = self.inst_clone_chain(fqn);
@@ -1715,7 +1717,7 @@ impl Compiler {
         if planned.contains(&key) {
             return true;
         }
-        let room = self.inst_clones.len() + planned.len() < self.checker.host_grants().clone_budget()
+        let room = (self.inst_clones.len() + planned.len() < self.checker.host_grants().clone_budget() || self.is_hot_fn(fqn))
             && !self.inst_clone_recursive(fqn)
             && planned.len() < self.inst_clone_labels.len();
         if room {
@@ -1731,7 +1733,9 @@ impl Compiler {
         if self.inst_clone_srcs.is_empty() {
             return;
         }
-        let want = 2 * self.checker.host_grants().clone_budget().saturating_sub(self.inst_clones.len());
+        // Hot methods' clones go past the budget, into [`HOT_CLONE_ROOM`]
+        // more per program.
+        let want = 2 * (self.checker.host_grants().clone_budget().saturating_sub(self.inst_clones.len()) + HOT_CLONE_ROOM);
         while self.inst_clone_labels.len() < want {
             let label = self.bytecode.fresh_label();
             self.inst_clone_labels.push(label);
@@ -9196,6 +9200,10 @@ impl Compiler {
 /// Natives whose result is a handle the running process opens (a standard
 /// stream, a library or symbol): a `const` of one is computed when the
 /// program starts.
+/// Method clones of hot methods a program may make past `--clone-budget`
+/// (entry labels reserved for them at program start).
+const HOT_CLONE_ROOM: usize = 256;
+
 const STARTUP_HANDLE_NATIVES: [&str; 5] = ["stdout", "stderr", "stdin", "dload", "declare"];
 
 /// E0134 for each `const` whose initializer has effects: it is
