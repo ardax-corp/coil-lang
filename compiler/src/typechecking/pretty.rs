@@ -556,6 +556,14 @@ mod tests {
         assert_eq!(format!("{}", Ty::Var(TyVarId(42))), "t42");
     }
 
+    /// A record type has no source spelling, so a diagnostic must not
+    /// print it as `{ x: int }`, which reads like a writable type (#2095).
+    #[test]
+    fn diag_record_type_is_marked_as_a_record() {
+        let ty = Ty::Record { fields: vec![("x".into(), int()), ("y".into(), string())] };
+        assert_eq!(format_ty_for_diag(&Subst::empty(), &ty), "record { x: int, y: string }");
+    }
+
     #[test]
     fn diag_types_in_one_message_share_one_naming() {
         let names = HashMap::from([(TyVarId(7), "T".to_string())]);
