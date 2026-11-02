@@ -1,9 +1,10 @@
 // The `key_index` natives under a small index class: candidates by hash,
 // `==` decides, removal keeps slot numbers, `retain` + `compact` renumber
-// in order, and a copied index is its own (copy-on-write).
+// in order, and a copied index is its own (copy-on-write). `int` and
+// `string` keys find in one call (`eq_mode`, `find`).
 use tests::assert;
 use text::Text;
-use key_index::{table, probe, insert, remove, retain, compact, clear};
+use key_index::{table, probe, insert, remove, retain, compact, clear, find, eq_mode};
 
 class Index<K> {
     pub table: Vec<int>,
@@ -22,6 +23,10 @@ impl Index<K> {
 impl Index<K: Eq + Hash> {
     pub fn find(K k) -> int {
         let h = k.hash();
+        let mode = eq_mode(k);
+        if mode > 0 {
+            return find(self.table, self.hashes, self.keys, h, k, mode);
+        }
         let s = probe(self.table, self.hashes, h, -1);
         while s >= 0 {
             if self.keys[s] == k {
@@ -205,4 +210,28 @@ test("retain refuses a Vec of another length") {
     let other = Vec::from([1, 2, 3]);
     assert!(retain(other, ix.live) == -1);
     assert!(other.len() == 3);
+}
+
+test("eq_mode: words for int, contents for string, == for the rest") {
+    assert!(eq_mode(3) == 1);
+    assert!(eq_mode("a") == 2);
+    assert!(eq_mode(readonly "a") == 2);
+    assert!(eq_mode((1, "a")) == 0);
+    assert!(eq_mode(new Word("a")) == 0);
+    assert!(eq_mode(1.5) == 0);
+    assert!(eq_mode(true) == 0);
+}
+
+test("find compares string contents, and finds nothing in mode 0") {
+    let ix: Index<string> = Index::new();
+    let _ = ix.add("ab");
+    let _ = ix.add("cd");
+    // A string built at run time is another object with the same contents.
+    let k = "c" + "d".to_lower();
+    assert!(find(ix.table, ix.hashes, ix.keys, k.hash(), k, 2) == 1);
+    assert!(find(ix.table, ix.hashes, ix.keys, k.hash(), k, 0) == -1);
+    assert!(find(ix.table, ix.hashes, ix.keys, "zz".hash(), "zz", 2) == -1);
+    assert!(ix.drop_key("ab"));
+    assert!(ix.find("ab") == -1);
+    assert!(ix.find("cd") == 1);
 }

@@ -164,7 +164,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
-/// Major 6 / minor 18: HostInvoke `key_index_*` (ids 191–197,
+/// Major 6 / minor 18: HostInvoke `key_index_*` (ids 191–199,
 /// `key_index::*`): the insertion-ordered hash index natives collections
 /// keyed by any `Hash + Eq` type build on. Older runtimes do not know the
 /// ids.

@@ -948,6 +948,8 @@ impl VirtualModules {
                 ("compact", common::KEY_INDEX_COMPACT_NATIVE),
                 ("retain", common::KEY_INDEX_RETAIN_NATIVE),
                 ("clear", common::KEY_INDEX_CLEAR_NATIVE),
+                ("find", common::KEY_INDEX_FIND_NATIVE),
+                ("eq_mode", common::KEY_INDEX_EQ_MODE_NATIVE),
             ]),
         );
 
