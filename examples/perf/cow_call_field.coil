@@ -1,0 +1,29 @@
+// CPU: copy-on-write across `self.f = g(self.f)` (#2206): a field updated
+// through a function that returns its argument moves in and out.
+use io::sync::print;
+use string::format;
+
+fn add(Vec<int> vs, int x) -> Vec<int> {
+    vs.push(x);
+    return vs;
+}
+
+class Log {
+    pub items: Vec<int>,
+}
+
+impl Log {
+    pub fn record(int x) {
+        self.items = add(self.items, x);
+    }
+}
+
+fn main() {
+    let log = new Log(Vec::new());
+    let i = 0;
+    while i < 20000 {
+        log.record(i);
+        i = i + 1;
+    }
+    let _ = print(format("%i\n", log.items.len()));
+}

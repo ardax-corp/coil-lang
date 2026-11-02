@@ -706,6 +706,8 @@ pub(super) fn host_summary(name: &str, mut s: Summary) -> Summary {
     if FRESH_HOSTS.contains(&short) {
         s.escapes = 0;
         s.returns = 0;
+        s.returns_arg = 0;
+        s.returns_inner = 0;
         s.shared_ret = false;
     } else if NON_RETAINING_HOSTS.contains(&short)
         || (!s.flags.contains(common::EffectFlags::UNKNOWN) && !s.flags.contains(common::EffectFlags::HEAP_MUT) && !s.flags.contains(common::EffectFlags::HOST))

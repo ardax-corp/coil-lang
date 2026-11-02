@@ -1,0 +1,94 @@
+// A callee returns a parameter's field or element without sharing it
+// (#2206): the caller shares the result wherever it keeps it, so a later
+// write through the result never reaches the argument's object.
+use tests::assert;
+
+class Bag {
+    pub items: Vec<int>,
+}
+
+class Shelf {
+    pub bags: Vec<Bag>,
+}
+
+fn items_of(Bag b) -> Vec<int> {
+    return b.items;
+}
+
+fn first_items(Shelf s) -> Vec<int> {
+    return s.bags[0].items;
+}
+
+fn wrap(Bag b) -> Vec<int> {
+    return items_of(b);
+}
+
+fn pick(Bag a, Bag b, bool left) -> Vec<int> {
+    if left {
+        return a.items;
+    }
+    return b.items;
+}
+
+impl Bag {
+    pub fn get() -> Vec<int> {
+        return self.items;
+    }
+}
+
+test("a returned field bound to a local is separate") {
+    let b = new Bag([1]);
+    let x = items_of(b);
+    x.push(2);
+    assert!(b.items.len() == 1 && x.len() == 2);
+    let y = b.get();
+    y.push(3);
+    assert!(b.items.len() == 1 && y.len() == 2);
+}
+
+test("a returned element's field is separate") {
+    let s = new Shelf([new Bag([1])]);
+    let x = first_items(s);
+    x.push(2);
+    assert!(s.bags[0].items.len() == 1);
+}
+
+test("a field returned through a wrapper or a branch is separate") {
+    let a = new Bag([1]);
+    let b = new Bag([2]);
+    let x = wrap(a);
+    x.push(5);
+    assert!(a.items.len() == 1);
+    let y = pick(a, b, false);
+    y.push(6);
+    assert!(b.items.len() == 1 && y.len() == 2);
+}
+
+test("a field returned through a function value is separate") {
+    let b = new Bag([1]);
+    let f = items_of;
+    let x = f(b);
+    x.push(2);
+    assert!(b.items.len() == 1 && x.len() == 2);
+}
+
+test("a returned field stored in another object is separate") {
+    let a = new Bag([1]);
+    let c = new Bag(Vec::new());
+    c.items = items_of(a);
+    c.items.push(2);
+    assert!(a.items.len() == 1 && c.items.len() == 2);
+    let v: Vec<Vec<int>> = [];
+    v.push(items_of(a));
+    v[0].push(3);
+    assert!(a.items.len() == 1);
+}
+
+test("a returned field only read or dropped leaves the argument intact") {
+    let a = new Bag([1, 2]);
+    assert!(items_of(a).len() == 2);
+    let _ = items_of(a);
+    items_of(a);
+    a.items.push(3);
+    assert!(a.items.len() == 3);
+}

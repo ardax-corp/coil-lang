@@ -9423,7 +9423,7 @@ impl Compiler {
             HirKind::Builtin { op: Builtin::Region { .. }, .. } => Ok(()),
             // A share as a statement: its operand's word, then dropped.
             HirKind::Builtin { op: Builtin::Cow { .. }, args } => {
-                let want = self.hir_natural(hir, emit, args[0]).ok_or("cow-shape")?;
+                let want = self.hir_natural(hir, emit, args[0]).or_else(|| self.hir_natural(hir, emit, id)).ok_or("cow-shape")?;
                 self.hir_check_value(hir, emit, args[0], &want)
             }
             HirKind::Builtin { op: Builtin::FreeEarly { .. }, args } => match self.hir_natural(hir, emit, args[0]) {
