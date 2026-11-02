@@ -4,6 +4,7 @@ mod arith;
 pub mod char_ord;
 pub mod clock;
 pub mod entropy;
+pub mod key_index;
 pub mod symbol;
 #[cfg(any(test, feature = "debugger"))]
 pub mod debug;
