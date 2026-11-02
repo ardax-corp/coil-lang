@@ -160,3 +160,37 @@ fn main() {{
     let n = copies("entry", &src);
     assert!(n < 4, "{n} copies for {N} calls");
 }
+
+#[test]
+fn a_generic_trait_call_result_that_is_only_read_copies_nothing() {
+    let src = format!(
+        "
+trait Pieces<P> {{
+    fn pieces(P self, string s) -> Vec<string> {{}}
+}}
+impl Pieces for string {{
+    fn pieces(string self, string s) -> Vec<string> {{
+        let v: Vec<string> = Vec::new();
+        v.push(s);
+        v.push(self);
+        return v;
+    }}
+}}
+fn split_with<P: Pieces>(P p, string s) -> Vec<string> {{
+    return p.pieces(s + \"!\");
+}}
+fn main() {{
+    let n = 0;
+    let i = 0;
+    while i < {N} {{
+        let parts = split_with(\" \", \"a b\");
+        n = n + parts.len();
+        i = i + 1;
+    }}
+    if n != 2 * {N} {{ panic \"wrong length\"; }}
+}}
+"
+    );
+    let n = copies("generic", &src);
+    assert!(n < 4, "{n} copies for {N} calls");
+}

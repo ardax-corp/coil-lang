@@ -855,6 +855,7 @@ impl Plan {
                 HirKind::Call { args, .. } => {
                     let u = f.calls.get(&id).copied().unwrap_or_default();
                     let mut copy_result = false;
+                    let mut share_result = false;
                     for (j, &a) in args.iter().enumerate().take(64) {
                         let bit = 1u64 << j;
                         let v = named_value(body, a);
@@ -869,8 +870,12 @@ impl Plan {
                             // place lives on (#2206). One the callee writes
                             // gets the eager copy the callee used to make.
                             // A result that is not a COW value cannot be it.
-                            // Opaque code may write the argument as well.
-                            if (u.written | u.opaque) & bit != 0 {
+                            // Opaque code may write the argument as well,
+                            // and is assumed to: its result is shared after
+                            // the call instead (writes it made are done).
+                            if u.opaque & bit != 0 {
+                                share_result = true;
+                            } else if u.written & bit != 0 {
                                 copy_result = true;
                             } else {
                                 plan.store(body, f, v, &cow, &inout, &borrowed);
@@ -882,9 +887,11 @@ impl Plan {
                     // only reads it or that argument is moved in.
                     let inside = args.iter().enumerate().take(64).any(|(j, &a)| {
                         let v = named_value(body, a);
-                        u.inner & (1u64 << j) != 0 && !(cow(v) && moved_into_call(f, body, id, v, &inout, &borrowed))
+                        u.inner & (1u64 << j) != 0
+                            && may_hold_objects(body.expr(v).ty.as_ref())
+                            && !(cow(v) && moved_into_call(f, body, id, v, &inout, &borrowed))
                     });
-                    if !copy_result && inside && cow(id) && !read_only_result(f, body, id) {
+                    if !copy_result && (inside || share_result) && cow(id) && !read_only_result(f, body, id) {
                         plan.share.push((id, false));
                     }
                     if copy_result {
@@ -1354,6 +1361,23 @@ impl Plan {
     }
 }
 
+/// Whether a value of `ty` can hold objects a callee could return from
+/// inside it: not a scalar, a `string` or a function.
+fn may_hold_objects(ty: Option<&Ty>) -> bool {
+    match ty.map(strip_readonly) {
+        Some(Ty::Con(n)) if n == "string" => false,
+        Some(Ty::Fun(..)) => false,
+        t => !super::escape::no_heap(t),
+    }
+}
+
+/// Whether `v` may read a named place. A call's result, a new object or
+/// a literal is a temporary no other name reaches: fresh, or shared where
+/// it was made.
+fn is_place(body: &HirBody, v: HirId) -> bool {
+    !matches!(body.expr(v).kind, HirKind::Call { .. } | HirKind::Make { .. } | HirKind::Lit(_))
+}
+
 /// Whether a call's result is only read where it is made: dropped as a
 /// statement or by `let _`, or an operand of an operator.
 fn read_only_result(f: &Facts<'_>, body: &HirBody, call: HirId) -> bool {
@@ -1373,6 +1397,10 @@ fn read_only_result(f: &Facts<'_>, body: &HirBody, call: HirId) -> bool {
 /// read once in the call: the assignment overwrites the place with the
 /// result before anything reads it.
 fn moved_into_call(f: &Facts<'_>, body: &HirBody, call: HirId, v: HirId, inout: &HashSet<LocalId>, borrowed: &HashSet<LocalId>) -> bool {
+    // A temporary has no other name to read it after the call.
+    if !is_place(body, v) {
+        return true;
+    }
     let HirKind::Local(l) = body.expr(v).kind else { return place_moved_into_call(f, body, call, v, borrowed) };
     let local = body.local(l);
     if borrowed.contains(&l) || local.borrow || local.kind == LocalKind::Capture || f.captured.contains(&l) {

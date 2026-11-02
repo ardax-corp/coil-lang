@@ -1,0 +1,40 @@
+// CPU: copy-on-write in an entry-style update chain (#2206): a view
+// writes a slot through `and_modify(f)`, then `or_insert` returns the
+// stored value, which the caller drops.
+use io::sync::print;
+use string::format;
+
+fn push_one(Vec<int> v) -> Vec<int> {
+    v.push(1);
+    return v;
+}
+
+class Table {
+    pub vals: Vec<Vec<int>>,
+}
+
+view class Slot {
+    mut table: Table,
+    at: int,
+}
+
+impl Slot {
+    pub fn and_modify(Vec<int> -> Vec<int> f) -> Slot {
+        self.table.vals[self.at] = f(self.table.vals[self.at]);
+        return self;
+    }
+
+    pub fn or_insert(Vec<int> init) -> Vec<int> {
+        return self.table.vals[self.at];
+    }
+}
+
+fn main() {
+    let t = new Table([Vec::new(), Vec::new(), Vec::new(), Vec::new()]);
+    let i = 0;
+    while i < 20000 {
+        let _ = new Slot(mut t, i % 4).and_modify(push_one).or_insert(Vec::new());
+        i = i + 1;
+    }
+    let _ = print(format("%i\n", t.vals[0].len()));
+}
