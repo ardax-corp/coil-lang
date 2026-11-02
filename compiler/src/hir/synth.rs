@@ -41,6 +41,7 @@ impl<'a> Synth<'a> {
                 captures: Vec::new(),
                 declared: None,
                 stated_escape: None,
+                hints: Default::default(),
                 contract_spans: Vec::new(),
                 locals: Vec::new(),
                 exprs: Vec::new(),

@@ -182,6 +182,8 @@ pub enum ErrorCode {
     MonomorphizeCap,
     /// Auto-par / call-bag refused on a shared escape; lock this resource (F3).
     ParLockHint,
+    /// `#[cold]` together with `#[inline]` or `#[hot]` on one function.
+    ConflictingOptHints,
 
     IoError,
     ArchiveVersionMismatch,
@@ -285,6 +287,7 @@ impl ErrorCode {
             Self::StackDepthExceeded => "E0803",
             Self::MonomorphizeCap => "E0804",
             Self::ParLockHint => "E0805",
+            Self::ConflictingOptHints => "E0806",
             Self::IoError => "E0900",
             Self::ArchiveVersionMismatch => "E0901",
             Self::InvalidCliFlags => "E0902",
@@ -393,6 +396,7 @@ impl ErrorCode {
             Self::StackDepthExceeded => "stack depth exceeds VM limit",
             Self::MonomorphizeCap => "generic call uses the shared body (polymorphic recursion or clone budget)",
             Self::ParLockHint => "parallelization hint: lock a shared escape",
+            Self::ConflictingOptHints => "`#[cold]` cannot be combined with `#[inline]` or `#[hot]`",
             Self::IoError => "I/O error",
             Self::ArchiveVersionMismatch => "bytecode archive version mismatch",
             Self::InvalidCliFlags => "invalid CLI flags",
@@ -509,6 +513,7 @@ mod tests {
             | StackDepthExceeded
             | MonomorphizeCap
             | ParLockHint
+            | ConflictingOptHints
             | IoError
             | ArchiveVersionMismatch
             | InvalidCliFlags
@@ -607,6 +612,7 @@ mod tests {
             StackDepthExceeded,
             MonomorphizeCap,
             ParLockHint,
+            ConflictingOptHints,
             IoError,
             ArchiveVersionMismatch,
             InvalidCliFlags,

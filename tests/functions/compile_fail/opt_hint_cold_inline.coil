@@ -1,0 +1,10 @@
+// @expected E0806 — a function cannot be both `#[cold]` and `#[inline]`.
+#[cold]
+#[inline]
+fn f(int x) -> int {
+    return x;
+}
+
+fn main() {
+    f(1);
+}

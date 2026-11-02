@@ -115,6 +115,12 @@ fn proved_bounds(module: &mut HirModule) {
     });
 }
 
+/// `#[inline]` / `#[cold]` / `#[hot]` on a function.
+fn opt_hints(attrs: &[parser::ast::Attribute<'_>]) -> super::OptHints {
+    let has = |name: &str| attrs.iter().any(|a| a.name == name);
+    super::OptHints { inline: has("inline"), cold: has("cold"), hot: has("hot") }
+}
+
 /// `#[noescape(a, b)]` / `#[fresh]` on a function.
 fn stated_escape(attrs: &[parser::ast::Attribute<'_>], span: super::Span) -> Option<super::StatedEscape> {
     use parser::ast::{AttrArgs, AttrLit};
@@ -227,6 +233,7 @@ impl BodyBuilder {
                 captures: Vec::new(),
                 declared: None,
                 stated_escape: None,
+                hints: Default::default(),
                 contract_spans: Vec::new(),
                 locals: Vec::new(),
                 exprs: Vec::new(),
@@ -774,6 +781,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         b.body.is_coro = *is_coro;
         b.body.declared = effects.as_ref().map(declared_effects);
         b.body.stated_escape = stated_escape(attrs, span_of(node));
+        b.body.hints = opt_hints(attrs);
         b.body.contract_spans = contracts.iter().map(|c| (c.span.start, c.span.end)).collect();
         b.body.is_generic = !type_params.is_empty();
         // A trait's default method body has only the trait method's scheme.

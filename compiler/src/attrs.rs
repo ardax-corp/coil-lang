@@ -18,7 +18,10 @@ use reporting::{ErrorCode, Message};
 
 use crate::macros::{CallPosition, MacroDecl, MacroKind, PendingMacro};
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh", "shared", "view"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh", "shared", "view", "inline", "cold", "hot"];
+
+/// Optimizer hints: speed only, never behaviour (`docs/internals/opt-hints.md`).
+const OPT_HINTS: &[&str] = &["inline", "cold", "hot"];
 
 /// Result of attribute expansion before typechecking.
 #[derive(Default, Clone)]
@@ -401,7 +404,42 @@ fn validate_attrs<'x, 'a>(
             }
         }
     }
+    check_opt_hints(attrs, target, messages, span);
     unknown
+}
+
+/// `#[inline]` / `#[cold]` / `#[hot]`: on a function or method, without
+/// arguments, and `#[cold]` alone.
+fn check_opt_hints(attrs: &[Attribute<'_>], target: &str, messages: &mut Vec<Message>, span: SimpleSpan) {
+    for attr in attrs {
+        if OPT_HINTS.contains(&attr.name) {
+            if target != "function" {
+                messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("`#[{}]` applies to a function or method, not a {}", attr.name, target),
+                    span.into_range(),
+                ));
+            } else if attr.args != AttrArgs::Empty {
+                messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("`#[{}]` takes no arguments", attr.name),
+                    span.into_range(),
+                ));
+            }
+        }
+    }
+    if target == "function"
+        && attrs.iter().any(|a| a.name == "cold")
+        && let Some(other) = attrs.iter().find(|a| a.name == "inline" || a.name == "hot")
+    {
+        let mut msg = Message::error(
+            ErrorCode::ConflictingOptHints,
+            format!("a function cannot be both `#[cold]` and `#[{}]`", other.name),
+            span.into_range(),
+        );
+        msg.with_help("keep the one that holds: `#[cold]` for a rarely called function".to_string());
+        messages.push(msg);
+    }
 }
 
 fn unwrap_disc_expr<'e, 'a>(expr: &'a Expression<'e>) -> &'a Expression<'e> {
@@ -522,6 +560,19 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                     && let Some(a) = validate_attrs(attrs, "function", &mut messages, span, false).first()
                 {
                     pending.push(pending_attr(a.name, &a.args, method.0, Some(owner)));
+                }
+            }
+        }
+
+        // Optimizer hints on trait impl and default methods.
+        if let Expression::TypeClassImpl { methods, .. } | Expression::TypeClass { methods, .. } = decls[i].1.as_ref() {
+            for method in methods {
+                let func = match method.1.as_ref() {
+                    Expression::Method(_, f) => f,
+                    _ => method,
+                };
+                if let Expression::Function { attrs, .. } = func.1.as_ref() {
+                    check_opt_hints(attrs, "function", &mut messages, method.0);
                 }
             }
         }
