@@ -722,6 +722,16 @@ pub struct Compiler {
     /// Hot functions of the program by table key: `#[hot]`, and those a
     /// hot one makes hot (`Compiler::note_hot_fns`).
     hot_fns: HashSet<String>,
+    /// Helpers partial inlining cut out of callees (`hir::outline`), by
+    /// name: their bodies and call signatures, those still to emit, and
+    /// those emitted.
+    outlined: std::cell::RefCell<HashMap<String, compiler::emit_hir::Outlined>>,
+    outlined_queue: Vec<String>,
+    outlined_emitted: HashSet<String>,
+    /// Helpers that plan as functions of their own, and the callees whose
+    /// helpers do not (those inline whole or not at all).
+    outlined_planned: HashSet<String>,
+    outline_refused: HashSet<String>,
     /// Scalar function bodies of modules compiled so far, by table key,
     /// with their calls named by key: callees another module's typed
     /// inlining may splice ([`Compiler::hir_portable_body`]).
@@ -913,6 +923,11 @@ impl Default for Compiler {
             cold_labels: HashSet::new(),
             inline_refused: HashSet::new(),
             hot_fns: HashSet::new(),
+            outlined: Default::default(),
+            outlined_queue: Vec::new(),
+            outlined_emitted: HashSet::new(),
+            outlined_planned: HashSet::new(),
+            outline_refused: HashSet::new(),
             hir_portable: HashMap::new(),
             hir_resolved_clones: HashMap::new(),
             module_outer_namespace: None,

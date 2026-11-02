@@ -37,6 +37,15 @@ enum Rep {
 const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
 /// Typed inlining rounds: the calls a round splices in inline in the next.
 const HIR_INLINE_ROUNDS: usize = 3;
+/// A helper partial inlining cut out of a callee ([`crate::hir::outline`]):
+/// its body, and the word layouts its calls pass and take.
+#[derive(Debug, Clone)]
+pub(crate) struct Outlined {
+    body: HirBody,
+    params: Vec<ValueLayout>,
+    ret: ValueLayout,
+}
+
 /// Inline cost limit for calls in a hot body and for a hot callee: 4x the
 /// default (`docs/internals/opt-hints.md`).
 const HOT_INLINE_COST: usize = 400;
@@ -576,6 +585,125 @@ impl Compiler {
     pub(super) fn is_cold_fn(&self, key: &str) -> bool {
         !self.cold_fns.is_empty()
             && (self.cold_fns.contains(key) || key.split_once("$inst$").is_some_and(|(base, _)| self.cold_fns.contains(base)))
+            || self.outlined.borrow().contains_key(key)
+    }
+
+    /// `callee` with its cold arms cut out into helpers (partial inlining,
+    /// [`crate::hir::outline`]), when it has any and each helper plans. A
+    /// foreign callee's helper nodes take the call's span, as its spliced
+    /// nodes do. The helpers' signatures are known from here on; a helper
+    /// is emitted once a body that calls it is ([`Self::queue_outlined`]).
+    fn hir_outline_cold(&self, callee: &HirBody, foreign: Option<crate::hir::Span>) -> Option<HirBody> {
+        use crate::hir::Callee;
+        if self.outline_refused.contains(&callee.name) {
+            return None;
+        }
+        let cold_call = |id: HirId| match &callee.expr(id).kind {
+            HirKind::Call { callee: Callee::Named { name, .. }, .. } => self.is_cold_fn(name),
+            HirKind::Call { callee: Callee::Resolved(r), .. } => self.is_cold_fn(&r.key),
+            _ => false,
+        };
+        let diverging = |name: &str| self.is_cold_fn(name);
+        let name = |k: usize| format!("{}$cold{k}", callee.name);
+        let (body, helpers) = crate::hir::outline::outline(callee, &cold_call, &diverging, &name)?;
+        let mut made = Vec::new();
+        for mut h in helpers {
+            if let Some(span) = foreign {
+                for e in &mut h.body.exprs {
+                    e.span = span;
+                    e.node = None;
+                }
+            }
+            let word = |l: &crate::layout::Layout| matches!(l, crate::layout::Layout::Word);
+            let words = h.body.exprs.iter().filter(|e| matches!(e.kind, HirKind::Local(l) if h.body.params.contains(&l))).all(|e| word(&e.layout));
+            if !words || !word(&h.body.ret_layout) {
+                return None;
+            }
+            let params = h.params.iter().map(|t| self.value_layout(t)).collect();
+            let ret = self.value_layout(&h.ret);
+            made.push(Outlined { body: h.body, params, ret });
+        }
+        let mut outlined = self.outlined.borrow_mut();
+        for h in made {
+            outlined.entry(h.body.name.clone()).or_insert(h);
+        }
+        Some(body)
+    }
+
+    /// Whether the helpers `body` calls each plan as a function of their
+    /// own, as [`Self::flush_outlined`] emits them. A callee whose helper
+    /// does not is not cut again.
+    fn outlined_plan(&mut self, body: &HirBody) -> bool {
+        for name in self.outlined_calls(body) {
+            if self.outlined_planned.contains(&name) {
+                continue;
+            }
+            let w = self.outlined.borrow()[&name].body.clone();
+            let frame = self.par_frame_enter();
+            for &p in &w.params {
+                self.context.variables.intern(w.local(p).name.clone());
+            }
+            let planned = self.plan_hir_body(&w).is_ok();
+            self.par_frame_exit(frame);
+            if !planned {
+                let callee = name.rsplit_once("$cold").map_or(name.as_str(), |(c, _)| c);
+                self.outline_refused.insert(callee.to_string());
+                return false;
+            }
+            self.outlined_planned.insert(name);
+        }
+        true
+    }
+
+    /// The partial-inlining helpers `body` calls.
+    fn outlined_calls(&self, body: &HirBody) -> Vec<String> {
+        use crate::hir::Callee;
+        let outlined = self.outlined.borrow();
+        body.exprs
+            .iter()
+            .filter_map(|e| match &e.kind {
+                HirKind::Call { callee: Callee::Named { name, .. }, .. } if outlined.contains_key(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Queue for emission the helpers `body` calls that are not emitted
+    /// yet, reserving their entries.
+    fn queue_outlined(&mut self, body: &HirBody) {
+        for name in self.outlined_calls(body) {
+            if self.outlined_emitted.insert(name.clone()) {
+                self.reserve_function_entry(name.clone());
+                self.outlined_queue.push(name);
+            }
+        }
+    }
+
+    /// Emit the queued partial-inlining helpers, each a function of its own
+    /// lowered to direct MIR. A helper's own calls of other helpers queue
+    /// those too.
+    pub(super) fn flush_outlined(&mut self) {
+        while let Some(name) = self.outlined_queue.pop() {
+            let w = self.outlined.borrow()[&name].body.clone();
+            let frame = self.par_frame_enter();
+            for &p in &w.params {
+                self.context.variables.intern(w.local(p).name.clone());
+            }
+            let Ok(mut emit) = self.plan_hir_body(&w) else {
+                panic!("internal error: outlined cold arm `{name}` does not plan");
+            };
+            let (entry, label) = self.bind_function_entry(name.clone());
+            let arity = w.params.len() as u32;
+            self.fn_arities.insert(name.clone(), (arity, false));
+            emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached;
+            self.bytecode.push_return();
+            self.hir_mir = self.hir_lower_mir(&w, &mut emit, None);
+            assert!(self.hir_mir.is_some(), "internal error: outlined cold arm `{name}` without direct MIR");
+            self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
+            self.attach_hir_mir();
+            self.par_frame_exit(frame);
+            self.queue_outlined(&w);
+        }
     }
 
     /// `body` as another module's inliner can splice it, under its table
@@ -2656,6 +2784,35 @@ impl Compiler {
             })
             .collect();
         let invariant = inline::invariant_locals(hir);
+        // Partial inlining: a callee over its cost limit, with its cold
+        // arms cut out into helpers ([`Self::hir_outline_cold`]).
+        let partial_cells: Vec<std::cell::OnceCell<Option<HirBody>>> = (0..hir.exprs.len()).map(|_| std::cell::OnceCell::new()).collect();
+        let partial = |id: HirId, callee: &HirBody, foreign: bool| -> Option<&HirBody> {
+            let span = foreign.then(|| hir.expr(id).span);
+            partial_cells.get(id.0 as usize)?.get_or_init(|| self.hir_outline_cold(callee, span)).as_ref()
+        };
+        let cross_size = |b: &HirBody| -> usize { b.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum() };
+        // `callee` as it inlines at `id`: whole when it fits, else with its
+        // cold arms cut out, when that makes it fit. Over the cost limit, a
+        // panic (a `construct` [`inline::inlinable`] refuses) or, `cross`,
+        // over the cross-module limit.
+        // One lifetime for the callee and its cut, the replan's own.
+        fn same<'b, F: Fn(HirId, &'b HirBody, bool, bool) -> Result<(&'b HirBody, inline::Shape), String>>(f: F) -> F {
+            f
+        }
+        let fit = same(|id: HirId, callee, foreign: bool, cross: bool| {
+            if !(cross && over_cross(callee, cross_size(callee))) {
+                match inline::inlinable(callee, budget_of(callee)) {
+                    Err("cost" | "construct") if callee.exprs.len() >= crate::hir::outline::MIN_NODES => {}
+                    found => return Ok((callee, found?)),
+                }
+            }
+            let cut = partial(id, callee, foreign).ok_or("cost")?;
+            if cross && over_cross(cut, cross_size(cut)) {
+                return Err("cost".to_string());
+            }
+            Ok((cut, inline::inlinable(cut, budget_of(cut))?))
+        });
         let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
             if let Some(lambda) = lambda_calls.get(&id.0) {
                 return self.hir_lambda_shape(hir, id, lambda, budget).map(|shape| (lambda, shape));
@@ -2704,12 +2861,8 @@ impl Compiler {
                 {
                     return Err(format!("resolved `{}`", call.key));
                 }
-                let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
-                if over_cross(callee, size) {
-                    return Err("cost".to_string());
-                }
-                let shape = inline::inlinable(callee, budget_of(callee))?.with_foreign(true);
-                return Ok((callee, shape));
+                let (callee, shape) = fit(id, callee, true, true)?;
+                return Ok((callee, shape.with_foreign(true)));
             }
             let core = core_insts.get(&id.0);
             let kind = [
@@ -2762,12 +2915,8 @@ impl Compiler {
                         }
                         // The stricter cross-module budget weighs every node
                         // (a read too) and a call as 25, as the IL's op count.
-                        let size: usize = callee.exprs.iter().map(|e| if matches!(e.kind, HirKind::Call { .. }) { 25 } else { 1 }).sum();
-                        if over_cross(callee, size) {
-                            return Err("cost".to_string());
-                        }
-                        let shape = inline::inlinable(callee, budget_of(callee))?.with_foreign(true);
-                        return Ok((callee, shape));
+                        let (callee, shape) = fit(id, callee, true, true)?;
+                        return Ok((callee, shape.with_foreign(true)));
                     }
                     let index = self.hir_fn_body(&call.key).ok_or("ambiguous")?;
                     folded.get(&index).unwrap_or(&module.bodies[index])
@@ -2904,7 +3053,8 @@ impl Compiler {
                 }
             }
             let inert = self.hir_loop_inert(callee, &heap);
-            let shape = inline::inlinable(callee, budget_of(callee))?
+            let (callee, shape) = fit(id, callee, core.is_some(), false)?;
+            let shape = shape
                 .with_heap_result(!scalar(&hir.expr(id).ty))
                 .with_heap_locals(heap)
                 .with_loop_inert(inert)
@@ -2963,6 +3113,9 @@ impl Compiler {
         // clone would (`hir_ground_splice`).
         let ground_splice = !self.compiling_mono_clone && !hir.is_generic && !method_clones.is_empty();
         let plan = |this: &mut Self, body: &HirBody| {
+            if !this.outlined_plan(body) {
+                return Err("outlined-plan");
+            }
             let was = this.hir_ground_splice.replace(ground_splice);
             let planned = lower::refusal(body, &this.checker)
                 .map_or_else(|| this.plan_hir_body(body), Err)
@@ -3014,6 +3167,7 @@ impl Compiler {
         match replanned {
             Ok(emit) => {
                 crate::il::opt::note_hir_inlined(sites);
+                self.queue_outlined(&body);
                 for (name, (start, end)) in spliced {
                     // Another module's body is scalar code with no host call.
                     if !self.hir_fn_names.contains_key(&name) {
@@ -4641,6 +4795,26 @@ impl Compiler {
         name: &str,
         argc: usize,
     ) -> Result<HirCall, &'static str> {
+        // A partial-inlining helper ([`Self::hir_outline_cold`]).
+        if let Some(h) = self.outlined.borrow().get(name) {
+            if h.params.len() != argc {
+                return Err("callee-arity");
+            }
+            return Ok(HirCall {
+                key: name.to_string(),
+                pair: None,
+                params: h.params.clone(),
+                ret: h.ret,
+                method: false,
+                mono: false,
+                builtin: None,
+                generic: None,
+                instance: None,
+                ranges: Vec::new(),
+                mono_of: None,
+                own_dicts: Vec::new(),
+            });
+        }
         // A compiler-made body's call of a host native by its name.
         if self.hir_synth_calls.is_some()
             && self.hir_synth_callees.get(name).is_some_and(|c| c.host)
@@ -10182,6 +10356,7 @@ impl Compiler {
     /// fork-join function over it, each its own function record.
     pub(super) fn flush_hir_par_tail(&mut self) {
         self.flush_hir_lambdas();
+        self.flush_outlined();
         let Some(tail) = self.hir_par_tail.take() else { return };
         let HirParTail { hir, mut emit } = *tail;
         // A worker emitted from this body's plan may move out parallel
