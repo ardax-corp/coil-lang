@@ -121,3 +121,42 @@ fn main() {{
     let n = copies("element", &src);
     assert!(n < 4, "{n} copies for {N} calls");
 }
+
+#[test]
+fn an_entry_style_update_chain_copies_nothing() {
+    let src = format!(
+        "
+fn push_one(Vec<int> v) -> Vec<int> {{
+    v.push(1);
+    return v;
+}}
+class Store {{
+    pub vals: Vec<Vec<int>>,
+}}
+view class Slot {{
+    mut store: Store,
+    at: int,
+}}
+impl Slot {{
+    pub fn and_modify(Vec<int> -> Vec<int> f) -> Slot {{
+        self.store.vals[self.at] = f(self.store.vals[self.at]);
+        return self;
+    }}
+    pub fn or_insert(Vec<int> init) -> Vec<int> {{
+        return self.store.vals[self.at];
+    }}
+}}
+fn main() {{
+    let s = new Store([Vec::new(), Vec::new()]);
+    let i = 0;
+    while i < {N} {{
+        let _ = new Slot(mut s, i % 2).and_modify(push_one).or_insert(Vec::new());
+        i = i + 1;
+    }}
+    if s.vals[0].len() != {N} / 2 {{ panic \"wrong length\"; }}
+}}
+"
+    );
+    let n = copies("entry", &src);
+    assert!(n < 4, "{n} copies for {N} calls");
+}

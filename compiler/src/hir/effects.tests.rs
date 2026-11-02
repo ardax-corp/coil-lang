@@ -1172,3 +1172,27 @@ fn stash(Box b, Vec<int> vs) -> Vec<int> {
     assert_eq!(stash.keeps, 0b10, "{stash:?}");
     assert_eq!(stash.returns_arg, 0b10, "{stash:?}");
 }
+
+#[test]
+fn a_returned_field_is_returned_inner() {
+    // #2206: a parameter's field or element comes back unshared, and the
+    // caller shares it where it keeps it.
+    let src = "
+class Box {
+    pub items: Vec<int>,
+}
+fn items_of(int n, Box b) -> Vec<int> {
+    return b.items;
+}
+fn fresh(Box b) -> Vec<int> {
+    let v: Vec<int> = Vec::new();
+    return v;
+}
+";
+    let (m, out) = summaries(src);
+    let items_of = of(&m, &out, "items_of");
+    assert_eq!(items_of.returns_inner, 0b10, "{items_of:?}");
+    assert_eq!(items_of.returns_arg, 0, "{items_of:?}");
+    let fresh = of(&m, &out, "fresh");
+    assert_eq!(fresh.returns_inner, 0, "{fresh:?}");
+}

@@ -107,6 +107,10 @@ struct ArgUse {
     /// stores (so `kept` is clear), but a caller's fresh object passed
     /// there may be kept all the same.
     opaque: u64,
+    /// The result may be an object held inside the argument, a field or
+    /// element the callee returned without sharing (#2206): the caller
+    /// shares the result unless it only reads it.
+    inner: u64,
 }
 
 /// A write through a place, before node `at` runs.
@@ -446,11 +450,11 @@ fn named_value(body: &HirBody, a: HirId) -> HirId {
 /// Second: the parameters that may be its result, as themselves (#2206).
 /// Third: the parameters it hands, as themselves, to code not known
 /// here, which may keep them.
-pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64, u64) {
+pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64, u64, u64) {
     if body.is_coro {
-        return (u64::MAX, u64::MAX, u64::MAX);
+        return (u64::MAX, u64::MAX, u64::MAX, 0);
     }
-    let Some(root) = body.root else { return (0, 0, 0) };
+    let Some(root) = body.root else { return (0, 0, 0, 0) };
     // What each local may hold of the parameters, through `let x = p`.
     let mut holds: HashMap<LocalId, u64> = HashMap::new();
     for (i, &p) in body.params.iter().enumerate().take(64) {
@@ -510,6 +514,7 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
     let mut kept = 0u64;
     let mut returned = 0u64;
     let mut opaque = 0u64;
+    let mut inner = 0u64;
     for (i, e) in body.exprs.iter().enumerate() {
         let id = HirId(i as u32);
         match &e.kind {
@@ -534,7 +539,10 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                     }
                 }
             }
-            HirKind::Return(Some(v)) => returned |= of(&holds, *v),
+            HirKind::Return(Some(v)) => {
+                returned |= of(&holds, *v);
+                inner |= inner_params(body, *v);
+            }
             HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => kept |= of(&holds, *v),
             HirKind::Lambda { body: inner } => {
                 for (o, _) in &module.bodies[*inner].captures {
@@ -550,15 +558,60 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
     if body.ret.is_some() {
         for v in super::escape::result_exprs(body, root) {
             returned |= of(&holds, v);
+            inner |= inner_params(body, v);
         }
     }
-    (kept, returned, opaque)
+    (kept, returned, opaque, inner)
+}
+
+/// The parameter whose field or element `v` reads (through `p.f`,
+/// `p.xs[i]`, …), if any: what a `return v` hands back unshared (#2206).
+fn inner_param(body: &HirBody, v: HirId) -> Option<usize> {
+    let mut at = v;
+    let mut steps = 0;
+    loop {
+        match &body.expr(at).kind {
+            HirKind::Field { base, .. } | HirKind::Index { base, kind: IndexKind::Array, .. } => {
+                steps += 1;
+                at = *base;
+            }
+            HirKind::Builtin { op: Builtin::Cow { .. }, args } if args.len() == 1 => at = args[0],
+            HirKind::Local(l) if steps > 0 => {
+                let local = body.local(*l);
+                if local.kind != LocalKind::Param || local.borrow {
+                    return None;
+                }
+                return body.params.iter().position(|p| p == l).filter(|&i| i < 64);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The parameters whose fields or elements a returned `v` may be, through
+/// block tails and branches.
+fn inner_params(body: &HirBody, v: HirId) -> u64 {
+    let mut bits = 0;
+    let mut work = vec![v];
+    while let Some(at) = work.pop() {
+        match &body.expr(at).kind {
+            HirKind::Block { tail: Some(t), .. } => work.push(*t),
+            HirKind::If { then, els, .. } => work.extend(std::iter::once(*then).chain(*els)),
+            HirKind::Match { arms, .. } => work.extend(arms.iter().map(|a| a.body)),
+            _ => {
+                if let Some(i) = inner_param(body, at) {
+                    bits |= 1 << i;
+                }
+            }
+        }
+    }
+    bits
 }
 
 /// What the callee of `callee(args)` does with each argument.
 fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[HirId]) -> ArgUse {
     let all = if args.len() >= 64 { u64::MAX } else { (1u64 << args.len()) - 1 };
-    let unknown = ArgUse { written: all, kept: 0, returned: all, opaque: all };
+    let unknown = ArgUse { written: all, kept: 0, returned: all, opaque: all, inner: all };
     let positional = args.iter().all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
     // A fixed array's methods are structural reads, like a `Vec`'s `len`.
     let recv_vec = matches!(callee, Callee::Method { .. })
@@ -596,7 +649,13 @@ fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[Hir
     };
     if !positional {
         let any = |bits: u64| if bits != 0 { all } else { 0 };
-        return ArgUse { written: any(s.mutates), kept: any(s.keeps), returned: any(s.returns_arg | s.opaque_args), opaque: any(s.opaque_args) };
+        return ArgUse {
+            written: any(s.mutates),
+            kept: any(s.keeps),
+            returned: any(s.returns_arg | s.opaque_args),
+            opaque: any(s.opaque_args),
+            inner: any(s.returns_inner | s.opaque_args),
+        };
     }
     from_summary(&s)
 }
@@ -630,7 +689,13 @@ fn host_use(body: &HirBody, short: &str, args: &[HirId], all: u64) -> ArgUse {
 /// A returned parameter itself is the caller's to share (#2206); code not
 /// known here may hand back what it is given.
 fn from_summary(s: &Summary) -> ArgUse {
-    ArgUse { written: s.mutates, kept: s.keeps, returned: s.returns_arg | s.opaque_args, opaque: s.opaque_args }
+    ArgUse {
+        written: s.mutates,
+        kept: s.keeps,
+        returned: s.returns_arg | s.opaque_args,
+        opaque: s.opaque_args,
+        inner: s.returns_inner | s.opaque_args,
+    }
 }
 
 /// Where the rewrite puts ops.
@@ -811,6 +876,16 @@ impl Plan {
                                 plan.store(body, f, v, &cow, &inout, &borrowed);
                             }
                         }
+                    }
+                    // The result may be an object inside an argument the
+                    // callee handed back unshared: share it unless this
+                    // only reads it or that argument is moved in.
+                    let inside = args.iter().enumerate().take(64).any(|(j, &a)| {
+                        let v = named_value(body, a);
+                        u.inner & (1u64 << j) != 0 && !(cow(v) && moved_into_call(f, body, id, v, &inout, &borrowed))
+                    });
+                    if !copy_result && inside && cow(id) && !read_only_result(f, body, id) {
+                        plan.share.push((id, false));
                     }
                     if copy_result {
                         plan.share.push((id, true));
@@ -1244,6 +1319,9 @@ impl Plan {
                 HirKind::Local(l) if cow(at) && body.local(*l).kind == LocalKind::Param && !body.local(*l).borrow => {
                     self.stored.push(at);
                 }
+                // A parameter's field or element: the caller shares the
+                // result where it keeps it (the summary's `returns_inner`).
+                _ if cow(at) && inner_param(body, at).is_some() => self.stored.push(at),
                 _ => self.store(body, f, at, cow, inout, borrowed),
             }
         }
@@ -1273,6 +1351,19 @@ impl Plan {
                 _ => {}
             }
         }
+    }
+}
+
+/// Whether a call's result is only read where it is made: dropped as a
+/// statement or by `let _`, or an operand of an operator.
+fn read_only_result(f: &Facts<'_>, body: &HirBody, call: HirId) -> bool {
+    let Some(&p) = f.parent.get(&call) else { return false };
+    match &body.expr(p).kind {
+        HirKind::Block { stmts, .. } => stmts.contains(&call),
+        HirKind::LetPat { pat: HirPat::Wild, .. } => true,
+        HirKind::Let { local, .. } => body.local(*local).name == "_",
+        HirKind::Bin { .. } | HirKind::Un { .. } => true,
+        _ => false,
     }
 }
 
