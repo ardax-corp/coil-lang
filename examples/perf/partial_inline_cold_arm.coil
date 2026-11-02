@@ -1,0 +1,28 @@
+// Hit bench (opt hints step 4): a small function whose bounds check builds
+// a long panic message. The message arm puts it over the inline limit;
+// partial inlining cuts the arm out into a helper and inlines the rest.
+use io::sync::print;
+
+fn at(Vec<int> xs, int i) -> int {
+    if i < 0 || i >= xs.len() {
+        let m = "index " + i.show() + " out of " + xs.len().show() + " in a Vec of " + xs.show();
+        panic m;
+    }
+    return xs[i] * 3 + 1;
+}
+
+fn main() {
+    let xs: Vec<int> = [];
+    let k = 0;
+    while k < 64 {
+        xs.push(k * 7 % 13);
+        k = k + 1;
+    }
+    let acc = 0;
+    let i = 0;
+    while i < 400000 {
+        acc = (acc + at(xs, i & 63)) % 1000003;
+        i = i + 1;
+    }
+    let _ = print(acc.show());
+}

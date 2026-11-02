@@ -1,0 +1,80 @@
+// Partial inlining cuts a callee's cold arms out into helpers so the rest
+// inlines: the arm still runs as written when it is taken, a local it
+// assigns keeps the new value, and a failing arm still panics with its
+// message.
+use tests::assert;
+use task::{scope, Scope, TaskError};
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+fn at(Vec<int> xs, int i) -> int {
+    if i < 0 || i >= xs.len() {
+        let m = "index " + i.show() + " out of " + xs.len().show() + " in " + xs.show();
+        panic m;
+    }
+    return xs[i] * 2;
+}
+
+#[cold]
+fn grown(int cap) -> int {
+    return cap * 2 + 1;
+}
+
+class Buf {
+    pub cap: int,
+    pub grows: int,
+}
+
+impl Buf {
+    pub fn reserve(int need) -> int {
+        let cap = self.cap;
+        if need > cap {
+            let more = grown(cap);
+            cap = more;
+        }
+        if cap != self.cap {
+            self.grows = self.grows + 1;
+            self.cap = cap;
+        }
+        return cap - need;
+    }
+}
+
+test("a failing arm cut out still panics with its message") {
+    let xs: Vec<int> = [1, 2, 3];
+    let s = 0;
+    let i = 0;
+    while i < 3 {
+        s = s + at(xs, i);
+        i = i + 1;
+    }
+    assert!(s == 12);
+    assert!(outcome(fn () use (xs) => at(xs, 3)) == "index 3 out of 3 in [1, 2, 3]");
+    assert!(outcome(fn () use (xs) => at(xs, -1)) == "index -1 out of 3 in [1, 2, 3]");
+}
+
+test("an arm calling a cold function keeps what it assigns") {
+    let b = new Buf(4, 0);
+    let spare = 0;
+    let need = 0;
+    while need < 20 {
+        spare = spare + b.reserve(need);
+        need = need + 1;
+    }
+    assert!(b.cap == 19);
+    assert!(b.grows == 2);
+    assert!(spare == 65);
+}
