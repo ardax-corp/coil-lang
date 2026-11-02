@@ -1,0 +1,71 @@
+// A callee may hand back the object it was given (#2206): wherever the
+// argument's place is still read after the call, the two names stay
+// separate values after the call, and a later write through one is never
+// seen through the other. (The callee's own write reaches the argument: a
+// parameter a body writes is the caller's place.)
+use tests::assert;
+
+fn add(Vec<int> vs) -> Vec<int> {
+    vs.push(1);
+    return vs;
+}
+
+fn same(Vec<int> vs) -> Vec<int> {
+    return vs;
+}
+
+fn apply(Vec<int> vs, Vec<int> -> Vec<int> f) -> Vec<int> {
+    return f(vs);
+}
+
+class Bag {
+    pub items: Vec<int>,
+}
+
+test("a written argument and the result are separate") {
+    let v: Vec<int> = [7];
+    let w = add(v);
+    w.push(2);
+    v.push(3);
+    assert!(v.len() == 3 && v[2] == 3);
+    assert!(w.len() == 3 && w[2] == 2);
+}
+
+test("a returned argument and the result are separate") {
+    let v: Vec<int> = [7];
+    let w = same(v);
+    w.push(2);
+    assert!(v.len() == 1);
+    v.push(3);
+    assert!(w.len() == 2 && w[1] == 2);
+}
+
+test("through a function value") {
+    let v: Vec<int> = [7];
+    let w = apply(v, same);
+    w.push(2);
+    assert!(v.len() == 1);
+    let u = apply(v, add);
+    assert!(v.len() == 2 && u.len() == 2);
+    u.push(5);
+    assert!(v.len() == 2 && u.len() == 3);
+}
+
+test("reassigning a field from a call keeps other names apart") {
+    let b = new Bag([1]);
+    let kept = b.items;
+    b.items = add(b.items);
+    assert!(b.items.len() == 2);
+    assert!(kept.len() == 1);
+}
+
+test("reassigning a local from a call in a loop") {
+    let v: Vec<int> = [];
+    let snapshot = v;
+    let i = 0;
+    while i < 5 {
+        v = add(v);
+        i = i + 1;
+    }
+    assert!(v.len() == 5 && snapshot.len() == 0);
+}
