@@ -267,6 +267,7 @@ impl Checker {
             variadic_call_arg_tags: HashMap::new(),
             fn_result_mode: None,
             in_test_case: false,
+            open_unused_results: Vec::new(),
             module_consts: HashMap::new(),
             macro_imports: HashSet::new(),
             test_try_sites: HashMap::new(),
@@ -1612,7 +1613,9 @@ impl Checker {
         self.rejected_builtin_type_decls.clear();
         self.unknown_type_names.clear();
         self.type_param_names_seen.clear();
+        self.open_unused_results.clear();
         let ty = self.check_program_body(ast);
+        self.report_open_unused_results();
         self.drop_reserved_type_name_cascades(first_message);
         self.report_unknown_type_names(first_message);
         ty
@@ -7498,14 +7501,44 @@ impl Checker {
             return;
         }
         let ty = apply_ty_prune(&self.subst, ty);
-        if !is_result_ty(&ty) {
+        if matches!(ty, Ty::Var(_)) {
+            let callee = match unwrap_expr_wrappers(stmt).1.as_ref() {
+                Expression::Call { name, .. } => match name.1.as_ref() {
+                    Expression::Identifier(n) => Some((*n).to_string()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            self.open_unused_results.push((ty, callee, stmt.0.into_range(), self.in_test_case));
             return;
         }
-        let msg = if self.in_test_case {
+        self.report_unused_result(&ty, stmt.0.into_range(), self.in_test_case);
+    }
+
+    /// The open statement values [`Self::warn_unused_result`] put off, now
+    /// that every body of the module is checked.
+    fn report_open_unused_results(&mut self) {
+        for (ty, callee, range, in_test) in std::mem::take(&mut self.open_unused_results) {
+            let ty = apply_ty_prune(&self.subst, &ty);
+            // The call's type was taken before the callee's body made it a
+            // Result-mode function, and stays open.
+            let ty = match callee {
+                Some(name) if matches!(ty, Ty::Var(_)) && self.fn_is_result_mode(&name) => result_ty(ty, string()),
+                _ => ty,
+            };
+            self.report_unused_result(&ty, range, in_test);
+        }
+    }
+
+    fn report_unused_result(&mut self, ty: &Ty, range: Range<usize>, in_test: bool) {
+        if !is_result_ty(ty) {
+            return;
+        }
+        let msg = if in_test {
             let mut msg = Message::error(
                 ErrorCode::UnusedResult,
                 "unused `Result` value in a test: an error it holds is dropped and the test still passes".to_string(),
-                stmt.0.into_range(),
+                range,
             );
             msg.with_help("write `…?;` to fail the test on an error, or `let _ = …;` to discard it on purpose".to_string());
             msg
@@ -7513,7 +7546,7 @@ impl Checker {
             let mut msg = Message::warn(
                 ErrorCode::UnusedResult,
                 "unused `Result` value: an error it holds is dropped".to_string(),
-                stmt.0.into_range(),
+                range,
             );
             msg.with_help("handle it with `?` or `match`, or write `let _ = …;` to discard it on purpose".to_string());
             msg

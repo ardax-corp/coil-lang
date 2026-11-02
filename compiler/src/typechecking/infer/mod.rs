@@ -730,6 +730,12 @@ pub struct Checker {
     /// Inside a `test("…") { … }` body (not a nested function or lambda):
     /// `?` there may unwrap any showable error or an `Option` (#628).
     in_test_case: bool,
+    /// Expression statements whose value was still an open type when they
+    /// were checked, with the function a plain call names and whether each
+    /// is in a test body: a call to a
+    /// function declared later learns it returns a `Result` only once that
+    /// function's body is checked (#2111). Read at the end of the module.
+    open_unused_results: Vec<(Ty, Option<String>, Range<usize>, bool)>,
     /// Module-level `const`s of other modules, by `module::NAME` (#1207).
     module_consts: HashMap<String, Ty>,
     /// Local names this module's `use`s import that name a macro of the
