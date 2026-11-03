@@ -772,3 +772,18 @@ fn native_code_resumes_generators_as_the_vm_does() {
     let twice = format!("{defs}fn main() {{ let _ = println(format(\"%i\", twice())); }}\n");
     let _ = same_as_vm("native_resume_done", &twice);
 }
+
+#[test]
+fn a_contract_failing_under_a_task_fiber_blames_the_caller() {
+    // `blame` runs on its task's fiber and calls `half` on the VM: the
+    // failed `requires` names the call site, as on the VM.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, TaskError}};\n\
+         fn half(int n) -> int\n    requires n >= 0, \"negative\"\n{{\n    return n / 2;\n}}\n\
+         #[inline(never)]\nfn blame(int n) -> int {{ let _ = println(\"in\"); return half(n) + 1; }}\n\
+         fn main() {{\n  let r = scope(fn (Scope s) {{ let _ = s.spawn(fn () => blame(-4)); 0 }});\n\
+           let _ = println(match r {{ Result::Ok(_) => \"ok\", Result::Err(TaskError::Panicked(m)) => m, Result::Err(_) => \"other\" }});\n}}\n"
+    );
+    let stats = same_as_vm("contract_on_fiber", &src);
+    assert!(compiled(&stats, "blame"), "stats: {stats}");
+}
