@@ -23,7 +23,7 @@ pub use mir::{start_mir_capture, take_mir_capture};
 pub mod native_mir {
     pub use crate::il::Label;
     pub use crate::mir::{
-        BlockId, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy,
+        BlockId, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirGcKind, MirInst, MirTy,
         MirUnaryOp, NativeBody, Terminator, ValueId, native_capture_active, start_native_capture,
         take_native_capture,
     };

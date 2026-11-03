@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use compiler::native_mir::{
-    BlockId, Label, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy,
+    BlockId, Label, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFunc, MirGcKind, MirInst, MirTy,
     MirUnaryOp, NativeBody, Terminator, ValueId,
 };
 
@@ -116,6 +116,8 @@ const I_LEN: u8 = 10;
 const I_FIELD: u8 = 11;
 const I_STORE_INDEX: u8 = 12;
 const I_SET_FIELD: u8 = 13;
+const I_COW: u8 = 14;
+const I_GC_BARRIER: u8 = 15;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -287,6 +289,18 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*value);
             w.u32(*index);
         }
+        MirInst::Cow { dest, src, unique, field } => {
+            w.u8(I_COW);
+            w.v(*dest);
+            w.v(*src);
+            w.u8(*unique as u8);
+            w.u32(field.unwrap_or(u32::MAX));
+        }
+        MirInst::GcBarrier { dest, .. } => {
+            // Native code only needs the pairing, which order gives.
+            w.u8(I_GC_BARRIER);
+            w.v(*dest);
+        }
         // `plan` admits nothing else, and `func` drops `Deopt`.
         _ => unreachable!("native section: instruction outside the numeric tier"),
     }
@@ -434,6 +448,12 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             unchecked: r.u8()? != 0,
         },
         I_SET_FIELD => MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()? },
+        I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: Vec::new() },
+        I_COW => {
+            let (dest, src, unique) = (r.v()?, r.v()?, r.u8()? != 0);
+            let field = Some(r.u32()?).filter(|&f| f != u32::MAX);
+            MirInst::Cow { dest, src, unique, field }
+        }
         t => return Err(format!("native MIR: bad instruction {t}")),
     })
 }

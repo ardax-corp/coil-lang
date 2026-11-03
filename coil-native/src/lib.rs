@@ -90,6 +90,8 @@ fn jit_once(
     jb.symbol("coil_native_set_field", machine::native::coil_native_set_field as *const u8);
     jb.symbol("coil_native_view", machine::native::coil_native_view as *const u8);
     jb.symbol("coil_native_undo_grow", machine::native::coil_native_undo_grow as *const u8);
+    jb.symbol("coil_native_cow", machine::native::coil_native_cow as *const u8);
+    jb.symbol("coil_native_cow_field", machine::native::coil_native_cow_field as *const u8);
     let mut module = JITModule::new(jb);
 
     let ids = declare(&mut module, bodies, &plan.compile)?;
@@ -227,6 +229,32 @@ fn ty_of(f: &MirFunc, v: ValueId) -> MirTy {
     f.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
 }
 
+/// Each `GcBarrier`'s object: the dest of the allocating instruction right
+/// before it in its block, as the VM's emission pairs them. Native code
+/// never collects during a call, so the barrier only names that word.
+fn barrier_pairs(f: &MirFunc) -> HashMap<ValueId, ValueId> {
+    let mut out = HashMap::new();
+    for b in &f.blocks {
+        let mut pending = None;
+        for inst in &b.insts {
+            match inst {
+                MirInst::Alloc { dest, .. }
+                | MirInst::ArrayPush { dest, .. }
+                | MirInst::Format { dest, .. }
+                | MirInst::Stringify { dest, .. }
+                | MirInst::Cow { dest, .. } => pending = Some(*dest),
+                MirInst::GcBarrier { dest, .. } => {
+                    if let Some(obj) = pending.take() {
+                        out.entry(*dest).or_insert(obj);
+                    }
+                }
+                _ => pending = None,
+            }
+        }
+    }
+    out
+}
+
 /// The callees of `f` when its body is in the numeric tier.
 fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>, String> {
     if let Some(why) = f.emit_refusal {
@@ -251,6 +279,7 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
         other => return Err(format!("return type {other:?}")),
     }
     let mut callees = Vec::new();
+    let pairs = barrier_pairs(f);
     let need = |v: &ValueId| -> Result<(), String> {
         let t = ty_of(f, *v);
         if numeric(t) { Ok(()) } else { Err(format!("value type {t:?}")) }
@@ -323,6 +352,20 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                     need_heap(object)?;
                     need(value)?;
                 }
+                MirInst::GcBarrier { dest, .. } => {
+                    need(dest)?;
+                    if !pairs.contains_key(dest) {
+                        return Err("GcBarrier without an allocation".into());
+                    }
+                }
+                MirInst::Cow { dest, src, field, .. } => {
+                    need(dest)?;
+                    if field.is_some() {
+                        need_heap(src)?;
+                    } else {
+                        need(src)?;
+                    }
+                }
                 MirInst::Phi { dest, args, .. } => {
                     need(dest)?;
                     for (_, v) in args {
@@ -380,6 +423,9 @@ struct Ids {
     set_field: FuncId,
     view: FuncId,
     undo_grow: FuncId,
+    /// Copy-on-write (these allocate, never collect).
+    cow: FuncId,
+    cow_field: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -436,7 +482,9 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let mut s1v = module.make_signature();
     s1v.params.push(AbiParam::new(types::I64));
     let undo_grow = module.declare_function("coil_native_undo_grow", Linkage::Import, &s1v).map_err(e)?;
-    Ok(Ids { imp, entry, fmod, powf, index, len, field, store_index, set_field, view, undo_grow })
+    let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
+    let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
+    Ok(Ids { imp, entry, fmod, powf, index, len, field, store_index, set_field, view, undo_grow, cow, cow_field })
 }
 
 // ---------------------------------------------------------------------------
@@ -498,12 +546,16 @@ struct Lower<'a> {
     set_field: FuncRef,
     view: FuncRef,
     undo_grow: FuncRef,
+    cow: FuncRef,
+    cow_field: FuncRef,
     /// Arrays this body indexes: `(ok, pointer, length)` of their element
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
     views: HashMap<ValueId, (Variable, Variable, Variable)>,
     /// Array values this body stores into.
     stored: HashSet<ValueId>,
+    /// `GcBarrier` dest -> the object it names ([`barrier_pairs`]).
+    barriers: HashMap<ValueId, ValueId>,
     /// Two words `coil_native_view` writes to.
     view_slot: cranelift_codegen::ir::StackSlot,
     by_label: &'a HashMap<Label, usize>,
@@ -536,6 +588,8 @@ impl<'a> Lower<'a> {
         let set_field = module.declare_func_in_func(ids.set_field, func);
         let view = module.declare_func_in_func(ids.view, func);
         let undo_grow = module.declare_func_in_func(ids.undo_grow, func);
+        let cow = module.declare_func_in_func(ids.cow, func);
+        let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -560,8 +614,11 @@ impl<'a> Lower<'a> {
             set_field,
             view,
             undo_grow,
+            cow,
+            cow_field,
             views: HashMap::new(),
             stored: HashSet::new(),
+            barriers: HashMap::new(),
             view_slot,
             by_label,
             vars: Vec::new(),
@@ -614,6 +671,7 @@ impl<'a> Lower<'a> {
     }
 
     fn body(&mut self, f: &MirFunc) -> Result<(), String> {
+        self.barriers = barrier_pairs(f);
         for blk in &f.blocks {
             for inst in &blk.insts {
                 let array = match inst {
@@ -865,6 +923,31 @@ impl<'a> Lower<'a> {
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag);
                 self.set(f, *dest, w);
+            }
+            MirInst::GcBarrier { dest, .. } => {
+                let obj = *self.barriers.get(dest).ok_or("GcBarrier without an allocation")?;
+                let w = self.get(f, obj);
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::Cow { dest, src, unique, field } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let call = match field {
+                    Some(i) => {
+                        let i = self.b.ins().iconst(types::I64, i64::from(*i));
+                        self.b.ins().call(self.cow_field, &[self.ctx, s, i])
+                    }
+                    None => {
+                        let u = self.b.ins().iconst(types::I64, i64::from(*unique));
+                        self.b.ins().call(self.cow, &[self.ctx, s, u])
+                    }
+                };
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
             }
             other => return Err(format!("instruction {}", inst_name(other))),
         }
