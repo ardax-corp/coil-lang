@@ -956,7 +956,7 @@ fn assign_needed(func: &MirFunc, plan: &mut EmitPlan) -> Result<(Vec<u8>, u8, bo
 /// counting a `ClearWord` or `Deopt` naming it and a tree operand read
 /// where its consumer is emitted.
 fn assign_shared(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::HashSet;
     let n = func.types.len();
     let slot = |v: ValueId| plan.need_slot.get(v.index()).copied().unwrap_or(false);
     let fused: HashSet<ValueId> = plan.cmp_dests.iter().flatten().copied().collect();
@@ -980,131 +980,7 @@ fn assign_shared(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), Lower
         let d = inst.dest();
         !slot(d) && (plan.tree.get(d.index()).copied().unwrap_or(false) || fused.contains(&d))
     };
-    let phi_dests = |b: &super::func::MirBlock| -> Vec<ValueId> {
-        b.insts.iter().take_while(|i| i.is_phi()).map(|i| i.dest()).collect()
-    };
-    let nb = func.blocks.len();
-    let mut live_in: Vec<HashSet<ValueId>> = vec![HashSet::new(); nb];
-    let live_out = |bi: usize, live_in: &[HashSet<ValueId>]| -> HashSet<ValueId> {
-        let mut live = HashSet::new();
-        let Some(term) = &func.blocks[bi].term else {
-            return live;
-        };
-        let me = func.blocks[bi].id;
-        for s in term.succs() {
-            let Some(succ) = func.blocks.get(s.index()) else {
-                continue;
-            };
-            live.extend(live_in[s.index()].iter().copied());
-            for inst in succ.insts.iter().take_while(|i| i.is_phi()) {
-                if let MirInst::Phi { args, .. } = inst {
-                    let mut out = Vec::new();
-                    for &(_, v) in args.iter().filter(|(p, _)| *p == me) {
-                        read(v, &mut out);
-                    }
-                    live.extend(out);
-                }
-            }
-        }
-        live
-    };
-    // One backward walk of block `bi`; `edge` records an interference.
-    let walk = |bi: usize, live_in: &[HashSet<ValueId>], edge: &mut dyn FnMut(ValueId, ValueId)| -> HashSet<ValueId> {
-        let block = &func.blocks[bi];
-        let mut live = live_out(bi, live_in);
-        let def = |defs: &[ValueId], uses: &[ValueId], live: &mut HashSet<ValueId>, edge: &mut dyn FnMut(ValueId, ValueId)| {
-            for &d in defs {
-                for &o in live.iter().chain(uses).chain(defs) {
-                    if o != d {
-                        edge(d, o);
-                    }
-                }
-            }
-            for d in defs {
-                live.remove(d);
-            }
-            live.extend(uses.iter().copied());
-        };
-        if let Some(term) = &block.term {
-            let (defs, used): (Vec<ValueId>, Vec<ValueId>) = match term {
-                Terminator::JumpIfMatch { scrutinee, payloads, .. } => {
-                    (payloads.iter().copied().filter(|&v| slot(v)).collect(), vec![*scrutinee])
-                }
-                other => (Vec::new(), term_uses(other)),
-            };
-            let mut uses = Vec::new();
-            for v in used {
-                read(v, &mut uses);
-            }
-            def(&defs, &uses, &mut live, edge);
-        }
-        for inst in block.insts.iter().rev() {
-            if inst.is_phi() || inline_def(inst) {
-                continue;
-            }
-            let defs: Vec<ValueId> = inst.dests().filter(|&d| slot(d)).collect();
-            let mut uses = Vec::new();
-            for o in inst.operands() {
-                read(o, &mut uses);
-            }
-            def(&defs, &uses, &mut live, edge);
-        }
-        let phis = phi_dests(block);
-        for &d in &phis {
-            if slot(d) {
-                for &o in live.iter().chain(&phis) {
-                    if o != d && slot(o) {
-                        edge(d, o);
-                    }
-                }
-            }
-        }
-        for d in &phis {
-            live.remove(d);
-        }
-        live
-    };
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bi in (0..nb).rev() {
-            let live = walk(bi, &live_in, &mut |_, _| {});
-            if live != live_in[bi] {
-                live_in[bi] = live;
-                changed = true;
-            }
-        }
-    }
-    let mut adj: Vec<BTreeSet<ValueId>> = vec![BTreeSet::new(); n];
-    {
-        let mut edge = |a: ValueId, b: ValueId| {
-            if a.index() < n && b.index() < n {
-                adj[a.index()].insert(b);
-                adj[b.index()].insert(a);
-            }
-        };
-        for bi in 0..nb {
-            let _ = walk(bi, &live_in, &mut edge);
-        }
-        // A φ is written on each incoming edge, over what that edge keeps.
-        for block in &func.blocks {
-            for inst in block.insts.iter().take_while(|i| i.is_phi()) {
-                let MirInst::Phi { dest, args, .. } = inst else { continue };
-                if !slot(*dest) {
-                    continue;
-                }
-                for &(pred, _) in args {
-                    if pred.index() < nb {
-                        for o in live_out(pred.index(), &live_in) {
-                            if o != *dest {
-                                edge(*dest, o);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let adj = super::emit_common::interference(func, &slot, &read, &inline_def);
     let opaque = super::gc::live_opaque_words(func);
     let heap = |v: ValueId| func.types.get(v.index()).is_some_and(|t| t.is_heap_word()) || opaque.contains(&v);
     let mut reg = vec![0u8; n];
