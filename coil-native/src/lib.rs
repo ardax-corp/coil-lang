@@ -395,7 +395,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
                 || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
-                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. }
+                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. }
                     )
                 })
         })
@@ -472,7 +472,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
 /// (in a program with `drop`s) or collection that may run `drop`s.
 fn runs_vm_code(inst: &MirInst, drops: bool) -> bool {
     match inst {
-        MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } => true,
+        MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } => true,
         MirInst::FreeEarly { .. } => drops,
         MirInst::HostInvoke { native_id, .. } => {
             machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.via_vm)
@@ -532,6 +532,7 @@ fn allocates(inst: &MirInst) -> bool {
             | MirInst::ResumeCoro { .. }
             | MirInst::FreeEarly { .. }
             | MirInst::Yield { .. }
+            | MirInst::Ffi { .. }
     )
 }
 
@@ -873,6 +874,16 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need_scalar(dest)?;
                         need(handle)?;
                     }
+                    // Through its stub on the VM (`coil_native_ffi`).
+                    MirInst::Ffi { dest, args, .. } => {
+                        need(dest)?;
+                        for a in args {
+                            need(a)?;
+                        }
+                        if args.len() > 16 {
+                            return Err("FFI op of more than 16 words".into());
+                        }
+                    }
                     // A generator body: it runs on a fiber of its own and a
                     // yield suspends it (`machine::native_gen`).
                     MirInst::Yield { dest, value, from, .. } => {
@@ -1019,6 +1030,7 @@ struct Ids {
     print: FuncId,
     /// Direct host natives (commit the call).
     host: FuncId,
+    ffi: FuncId,
     /// Calls to bodies on the VM (commit the call).
     call_vm: FuncId,
     call_value: FuncId,
@@ -1112,6 +1124,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     let unwind = module.declare_function("coil_native_unwind", Linkage::Import, &s3v).map_err(e)?;
     let print = module.declare_function("coil_native_print", Linkage::Import, &s2).map_err(e)?;
     let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
+    let ffi = module.declare_function("coil_native_ffi", Linkage::Import, &s5).map_err(e)?;
     let call_vm = module.declare_function("coil_native_call_vm", Linkage::Import, &s4).map_err(e)?;
     let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
     let resume = module.declare_function("coil_native_resume", Linkage::Import, &s4).map_err(e)?;
@@ -1155,6 +1168,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
         unwind,
         print,
         host,
+        ffi,
         call_vm,
         call_value,
         resume,
@@ -1242,6 +1256,7 @@ struct Lower<'a> {
     unwind: FuncRef,
     print: FuncRef,
     host: FuncRef,
+    ffi: FuncRef,
     call_vm: FuncRef,
     call_value: FuncRef,
     resume: FuncRef,
@@ -1338,6 +1353,7 @@ impl<'a> Lower<'a> {
         let unwind = module.declare_func_in_func(ids.unwind, func);
         let print = module.declare_func_in_func(ids.print, func);
         let host = module.declare_func_in_func(ids.host, func);
+        let ffi = module.declare_func_in_func(ids.ffi, func);
         let call_vm = module.declare_func_in_func(ids.call_vm, func);
         let call_value = module.declare_func_in_func(ids.call_value, func);
         let resume = module.declare_func_in_func(ids.resume, func);
@@ -1391,6 +1407,7 @@ impl<'a> Lower<'a> {
             unwind,
             print,
             host,
+            ffi,
             call_vm,
         call_value,
         resume,
@@ -1950,6 +1967,23 @@ impl<'a> Lower<'a> {
                 self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
                 self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::Ffi { dest, op, operand, args } => {
+                let o = self.b.ins().iconst(types::I64, i64::from(op.instruction() as u8));
+                let x = self.b.ins().iconst(types::I64, i64::from(*operand));
+                let p = self.words_slot(f, args);
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let roots = self.push_roots(f);
+                let prev = self.push_call();
+                let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
+                let w = self.b.inst_results(call)[0];
+                self.pop_call(prev);
+                self.pop_roots(f, roots);
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
+                self.drop_views();
+                self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
             MirInst::Yield { dest, value, .. } => {

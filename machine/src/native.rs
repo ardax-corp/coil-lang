@@ -229,6 +229,9 @@ pub struct NativeHost {
     /// through its stub ([`host_stubs`]), as `call` runs a body; `None`
     /// when the machine has no stub for it (nothing ran).
     pub host: HostViaVmFn,
+    /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
+    /// byte) with its operand on `args` through its stub, as `host` does.
+    pub ffi: HostViaVmFn,
 }
 
 /// [`NativeHost::host`]: machine, context, native id, layout, arguments,
@@ -236,7 +239,7 @@ pub struct NativeHost {
 pub type HostViaVmFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64, &[common::Value], &mut bool) -> Option<u64>;
 
 impl NativeHost {
-    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, resume: |_, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true, host: |_, _, _, _, _, _| None };
+    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, resume: |_, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true, host: |_, _, _, _, _, _| None, ffi: |_, _, _, _, _, _| None };
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
@@ -1639,7 +1642,8 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         return freed;
     }
     if direct_host_natives().get(id as usize).is_some_and(|h| h.via_vm) {
-        return unsafe { host_via_vm(ctx, id, layout, args, n) };
+        let host = unsafe { (*ctx).host.host };
+        return unsafe { host_via_vm(ctx, host, id, layout, args, n) };
     }
     let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
         return unsafe { bail(ctx) };
@@ -1741,13 +1745,31 @@ impl Drop for GenFiber {
     }
 }
 
+/// An FFI op from native code (`MirInst::Ffi`): opcode byte `op` with
+/// `operand` on the `n` words at `args`, through its stub in a nested VM
+/// execution ([`NativeHost::ffi`]), as [`coil_native_host`] runs a host
+/// call that needs the VM.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: u64, args: *const u64, n: u64) -> u64 {
+    let ffi = unsafe { (*ctx).host.ffi };
+    unsafe { host_via_vm(ctx, ffi, op, operand, args, n) }
+}
+
+/// The opcodes of FFI ops, which get a stub per operand the program uses.
+pub(crate) fn is_ffi_op(op: common::Instruction) -> bool {
+    matches!(op, common::Instruction::FfiLoad | common::Instruction::DeclareFFI | common::Instruction::FfiInvoke)
+}
+
 /// [`coil_native_host`] of a native that needs the VM: its stub runs in a
 /// nested VM execution ([`NativeHost::host`]), as [`coil_native_call_vm`]
 /// runs a body, with the same commit and panic rules.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
-unsafe fn host_via_vm(ctx: *mut NativeCtx, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
+unsafe fn host_via_vm(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
     let Some(words) = buf.get_mut(..n as usize) else {
@@ -1764,7 +1786,7 @@ unsafe fn host_via_vm(ctx: *mut NativeCtx, id: u64, layout: u64, args: *const u6
     c.vm_calls += 1;
     c.gc_epoch += 1;
     let mut panicked = false;
-    let (machine, host) = (c.machine, c.host.host);
+    let machine = c.machine;
     // SAFETY: `machine` is the live machine `host` was made for.
     let out = unsafe { host(machine, ctx, id, layout, words, &mut panicked) };
     let c = unsafe { &mut *ctx };
@@ -1949,6 +1971,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_resume", coil_native_resume as *const u8),
         ("coil_native_coro_done", coil_native_coro_done as *const u8),
         ("coil_native_yield", coil_native_yield as *const u8),
+        ("coil_native_ffi", coil_native_ffi as *const u8),
         ("coil_native_defer", coil_native_defer as *const u8),
         ("coil_native_claim", coil_native_claim as *const u8),
         ("coil_native_collect", coil_native_collect as *const u8),
@@ -1957,4 +1980,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 33;
+const HELPERS: usize = 34;

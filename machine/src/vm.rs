@@ -1587,6 +1587,8 @@ pub struct Machine<const S: usize> {
     gen_running: Vec<Value>,
     /// The frame depth of the running host-call stub, or `0`.
     host_stub_frame: usize,
+    /// FFI op stubs past the host-call stubs, by opcode byte and operand.
+    ffi_stubs: std::collections::HashMap<(u8, u32), usize>,
     /// How a fiber's suspension point suspends its task (block, result slot).
     fiber_park_request: Option<(Option<crate::task::Block>, bool)>,
     /// The wake a parked fiber's suspension point gets when it resumes.
@@ -1779,6 +1781,7 @@ impl<const S: usize> Machine<S> {
             fiber_stacks: Vec::new(),
             gen_running: Vec::new(),
             host_stub_frame: 0,
+            ffi_stubs: std::collections::HashMap::new(),
             fiber_park_request: None,
             fiber_wake: None,
             fiber_cancel: false,
@@ -1850,7 +1853,23 @@ impl<const S: usize> Machine<S> {
             return;
         };
         if self.program_code.len() == base {
-            Arc::make_mut(&mut self.program_code).extend(crate::native::host_stubs());
+            let mut stubs = crate::native::host_stubs();
+            // A stub per FFI op and operand the program uses.
+            let mut seen = std::collections::HashSet::new();
+            for b in self.program_code.iter() {
+                let op = *b.bytecode();
+                if crate::native::is_ffi_op(op) && seen.insert((op as u8, b.operand_u32())) {
+                    stubs.push(RawByte::new(op).with_operand_u32(b.operand_u32()));
+                    stubs.push(RawByte::new(common::Instruction::RETURN));
+                }
+            }
+            Arc::make_mut(&mut self.program_code).extend(stubs);
+        }
+        self.ffi_stubs.clear();
+        let first = base + crate::native::HOST_STUBS_LEN;
+        for pc in (first..self.program_code.len()).step_by(2) {
+            let b = &self.program_code[pc];
+            self.ffi_stubs.insert((*b.bytecode() as u8, b.operand_u32()), pc);
         }
     }
 
@@ -1864,7 +1883,7 @@ impl<const S: usize> Machine<S> {
     /// Whether `ip` lies in the host-call stubs: a frame there runs no code
     /// of its own (its caller is native code).
     fn in_host_stub(&self, ip: usize) -> bool {
-        self.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < t.code.code_len() + crate::native::HOST_STUBS_LEN)
+        self.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
     }
 
     /// The installed native code, for a machine that runs this program.
@@ -2000,6 +2019,7 @@ impl<const S: usize> Machine<S> {
                 gc: Self::native_gc,
                 free: Self::native_free,
                 host: Self::native_host_vm,
+                ffi: Self::native_ffi_vm,
             },
         }
     }
@@ -2114,6 +2134,29 @@ impl<const S: usize> Machine<S> {
         vm.native_roots.push((ctx, vm.frames.len()));
         let saved = std::mem::replace(&mut vm.host_stub_frame, vm.frames.len() + 1);
         let out = vm.native_reenter(|vm| vm.call_function(pc as u32, &words[..=args.len()]));
+        vm.host_stub_frame = saved;
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        Some(out.bits())
+    }
+
+    /// [`crate::native::NativeHost::ffi`]: the FFI op `op` (`operand`)
+    /// through its stub, as [`Self::native_host_vm`].
+    unsafe fn native_ffi_vm(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        op: u64,
+        operand: u64,
+        args: &[Value],
+        panicked: &mut bool,
+    ) -> Option<u64> {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let pc = *vm.ffi_stubs.get(&(op as u8, operand as u32))?;
+        vm.nested_return_hi = Value::default();
+        vm.native_roots.push((ctx, vm.frames.len()));
+        let saved = std::mem::replace(&mut vm.host_stub_frame, vm.frames.len() + 1);
+        let out = vm.native_reenter(|vm| vm.call_function(pc as u32, args));
         vm.host_stub_frame = saved;
         vm.native_roots.pop();
         *panicked = vm.panicked;

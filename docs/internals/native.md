@@ -208,7 +208,10 @@ and a panic in it is located at the native call site
 (`Machine::in_host_stub`). The `task_*` host ops (scope, spawn, join, ...)
 go the same way: a scope native code opens through a stub lives at that
 nesting level, and its switches happen in the stub executions, as in a VM
-body native code called. A failed `requires` (`contract_fail`) in a stub
+body native code called. FFI ops (`FfiLoad`, `DeclareFFI`, `FfiInvoke`) get a stub per opcode and
+operand the program uses (found by scanning its code), which
+`coil_native_ffi` calls the same way (`NativeHost::ffi`). A failed
+`requires` (`contract_fail`) in a stub
 names the native function's caller (`host_stub_caller_location`).
 
 ### Function values and indirect calls
