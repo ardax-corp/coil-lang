@@ -148,12 +148,19 @@ pub fn build_standard_host_natives(
         "runtime host table length must match common::HOST_NATIVES"
     );
     for native in &mut out {
-        if STREAM_FIRST_NATIVES.contains(&native.name()) {
+        if stream_first(native.name()) {
             *native = Arc::new(UnsentStreamGuard(Arc::clone(native)));
         }
     }
     out
 }
+
+/// Whether native `name` takes a `Stream` first, which it checks is not
+/// unsent ([`UnsentStreamGuard`]).
+pub fn stream_first(name: &str) -> bool {
+    STREAM_FIRST_NATIVES.contains(&name)
+}
+
 
 /// Natives whose first argument is a `Stream`.
 const STREAM_FIRST_NATIVES: &[&str] = &[
@@ -192,6 +199,10 @@ impl NativeFn for UnsentStreamGuard {
 
     fn host_op(&self) -> HostOp {
         self.0.host_op()
+    }
+
+    fn guarded_direct(&self) -> Option<crate::HostValueFn> {
+        self.0.direct()
     }
 
     fn invoke(&self, heap: &mut crate::Heap, args: &[Value]) -> Result<Option<Value>, FfiError> {
@@ -739,9 +750,10 @@ fn push_io_write_from(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
     .expect("write_from signature");
     let id = out.len();
     register_id("write_from", id);
-    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+    // Never parks (a full pipe answers `WouldBlock`): a direct native.
+    out.push(Arc::new(HostClosureFn::new_direct(sig, |heap, args| {
         let r = stream_write_from(heap, args[0], args[1], args[2].as_int());
-        Ok(Some(as_result_int(heap, r)))
+        as_result_int(heap, r)
     })));
 }
 
@@ -881,6 +893,17 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
             .expect("io native arity/signature");
         let id = out.len();
         register_id(&name, id);
+        // The stdio handles are plain lookups: direct natives.
+        let direct: Option<crate::HostValueFn> = match kind {
+            IoKind::Stdin => Some(|heap, _| stream_stdin(heap).unwrap_or_default()),
+            IoKind::Stdout => Some(|heap, _| stream_stdout(heap).unwrap_or_default()),
+            IoKind::Stderr => Some(|heap, _| stream_stderr(heap).unwrap_or_default()),
+            _ => None,
+        };
+        if let Some(f) = direct {
+            out.push(Arc::new(HostClosureFn::new_direct(sig, f)));
+            continue;
+        }
         out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
             let v = match kind {
                 // Stdio handles are `() -> Stream` (not Result).
