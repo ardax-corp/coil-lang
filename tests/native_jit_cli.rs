@@ -452,3 +452,19 @@ fn stores_after_a_commit_outgrow_the_undo_log() {
     let stats = same_as_vm("undo_after_commit", &src);
     assert!(compiled(&stats, "fill"), "stats: {stats}");
 }
+
+#[test]
+fn tasks_that_wait_under_native_code_still_switch() {
+    // `put` compiles and calls `send`, which suspends the task on a full
+    // channel: the scheduler must still switch to the receiver.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, Channel}};\n\
+         #[inline(never)]\nfn put(Channel<int> ch, int v) {{ match ch.send(v) {{ Result::Ok(_) => {{}}, Result::Err(_) => panic \"closed\", }} }}\n\
+         fn main() {{\n  let ch: Channel<int> = task::channel(1);\n\
+           let r = scope(fn (Scope s) use (ch) {{ s.spawn(fn () use (ch) {{ let i = 0; while i < 20 {{ put(ch, i); i = i + 1; }} ch.close(); 0 }}); let t = 0; let done = false;\n\
+             while !done {{ match ch.recv() {{ Result::Ok(v) => {{ t = t + v; }}, Result::Err(_) => {{ done = true; }}, }} }} return t; }});\n\
+           let _ = println(format(\"%i\", match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}));\n}}\n"
+    );
+    let stats = same_as_vm("tasks_under_native", &src);
+    assert!(compiled(&stats, "put"), "stats: {stats}");
+}
