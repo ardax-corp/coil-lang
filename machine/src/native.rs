@@ -425,6 +425,9 @@ pub struct NativeEntry {
     /// Bytecode PC of the function's entry (its `CALL` target).
     pub pc: u32,
     pub arity: u16,
+    /// The leading parameters the body reads: a `CALL` of at least this
+    /// many words (and at most `arity`) enters it, the rest passed as `0`.
+    pub reads: u16,
     /// Result words: `1`, or `2` for a two-slot return (`lo`, then `hi`
     /// in [`NativeCtx::ret_hi`]), as the VM's `RETURN` pushes them.
     pub ret_words: u8,

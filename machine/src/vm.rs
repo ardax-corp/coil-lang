@@ -1825,20 +1825,23 @@ impl<const S: usize> Machine<S> {
         }
         table.quiet_above = usize::MAX;
         let entry = table.lookup(target)?;
-        if entry.arity as usize != arity {
+        // A `CALL` passes its own arity: words a body's MIR parameters
+        // name but it never reads pass as `0`; extra words are dropped.
+        if arity < entry.reads as usize {
             return None;
         }
         let mut words = [0u64; 16];
-        if arity > words.len() {
+        let params = entry.arity as usize;
+        if params > words.len() {
             return None;
         }
-        for (i, w) in words.iter_mut().take(arity).enumerate() {
+        for (i, w) in words.iter_mut().take(arity.min(params)).enumerate() {
             *w = self.stack[base + i].bits();
         }
         let env = self.native_env();
         // Native code never collects; a VM call it makes may, with the
         // native frames' heap words pinned (`native_vm_call`).
-        let out = crate::native::call(&entry, &words[..arity], &env);
+        let out = crate::native::call(&entry, &words[..params], &env);
         let table = self.native.as_deref_mut()?;
         match out {
             crate::native::NativeOutcome::Done(r) => {

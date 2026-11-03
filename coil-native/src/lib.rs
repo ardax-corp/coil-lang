@@ -195,7 +195,8 @@ fn jit_once(
         // SAFETY: `build_entry` gave this function the `NativeEntryFn` ABI.
         let entry: NativeEntryFn = unsafe { std::mem::transmute::<*const u8, NativeEntryFn>(ptr) };
         let ret_words = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, ret_words, entry });
+        let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, reads, ret_words, entry });
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
@@ -248,6 +249,10 @@ struct Plan {
     /// Bodies that may run VM code ([`runs_vm_code`], a VM call, or a
     /// call of such a body): calls of them link a `NativeCtx::calls` record.
     vm_reach: HashSet<usize>,
+    /// How many leading parameters each compiled body reads
+    /// ([`used_params`]): a call may pass fewer words, as the VM's `CALL`
+    /// arity may differ from the body's MIR parameters.
+    used_params: HashMap<usize, usize>,
     /// Bodies that may be a type's `drop` (a call claims its finalizer).
     drops: HashSet<usize>,
 }
@@ -385,9 +390,10 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         }
         vm_reach.extend(more);
     }
+    let used_params = compile_used_params(bodies, ok.keys());
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs, drops, vm_reach }
+    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs, drops, vm_reach, used_params }
 }
 
 /// An instruction that may run VM code: a function value's call, a free
@@ -400,6 +406,37 @@ fn runs_vm_code(inst: &MirInst) -> bool {
         }
         _ => false,
     }
+}
+
+/// [`used_params`] of each of `bodies` at `which`.
+fn compile_used_params<'a>(bodies: &[NativeBody], which: impl Iterator<Item = &'a usize>) -> HashMap<usize, usize> {
+    which.map(|&i| (i, used_params(&bodies[i].mir))).collect()
+}
+
+/// One past the last parameter `f` reads. A `CALL` passes the words its
+/// arity says, which a body's MIR parameters may outnumber (an unread
+/// trait-method parameter) or fall short of: native code passes zero for
+/// the unread ones and drops the extra words, as the VM's frame ignores
+/// them.
+fn used_params(f: &MirFunc) -> usize {
+    let mut used: HashSet<ValueId> = HashSet::new();
+    for b in &f.blocks {
+        for inst in &b.insts {
+            used.extend(inst.operands());
+        }
+        match &b.term {
+            Some(Terminator::Br { cond, .. }) => {
+                used.insert(*cond);
+            }
+            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
+                used.insert(*scrutinee);
+                used.extend(payloads.iter().copied());
+            }
+            Some(Terminator::Return { lo, hi }) => used.extend(lo.iter().chain(hi.iter()).copied()),
+            _ => {}
+        }
+    }
+    f.params.iter().rposition(|p| used.contains(p)).map_or(0, |i| i + 1)
 }
 
 /// An instruction whose helper may allocate.
@@ -2152,12 +2189,16 @@ impl<'a> Lower<'a> {
         let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
         let sig = self.b.func.dfg.ext_funcs[fref].signature;
         let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
-        if params.len() != args.len() + 1 {
-            return Err(format!("call of {} words to a body of {}", args.len(), params.len() - 1));
+        let used = self.plan.used_params.get(&callee).copied().unwrap_or(params.len() - 1);
+        if args.len() < used {
+            return Err(format!("call of {} words to a body that reads {used}", args.len()));
         }
         let mut vals = vec![self.ctx];
-        for (a, &want) in args.iter().zip(&params[1..]) {
-            let x = self.get(f, *a);
+        for (i, &want) in params[1..].iter().enumerate() {
+            let x = match args.get(i) {
+                Some(a) => self.get(f, *a),
+                None => self.b.ins().iconst(types::I64, 0),
+            };
             vals.push(self.coerce(x, want));
         }
         let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
