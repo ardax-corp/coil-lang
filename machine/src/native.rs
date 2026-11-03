@@ -93,7 +93,27 @@ pub struct NativeCtx {
     /// Bumped by every point where a collection may have run (a safepoint
     /// collection, a VM call): native code then reloads its rooted words.
     pub gc_epoch: u64,
+    /// Cleanup pads of the frames a committed panic unwound, innermost
+    /// first ([`coil_native_defer`]): the VM runs them once it reported
+    /// the panic, as it runs its own frames' pads.
+    pub pads: *mut Vec<NativePad>,
 }
+
+/// A `defer` cleanup pad: called with its frame's homes.
+pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u64) -> u64;
+
+/// The pad of one native frame a panic unwound, with a copy of its homes
+/// laid out as a masked root record (`[next, n | ROOTS_MASKED, mask,
+/// words...]`, see [`NativeCtx::roots`]): a collection while pads run
+/// keeps (and may move) the heap words among them.
+pub struct NativePad {
+    pub func: NativePadFn,
+    pub homes: Vec<u64>,
+}
+
+/// Set in a root record's count: the next word is a mask of which words
+/// are heap words (the rest are scalars to skip).
+pub const ROOTS_MASKED: u64 = 1 << 63;
 
 /// Byte offset of [`NativeCtx::gc_epoch`].
 pub const NATIVE_CTX_GC_EPOCH: i32 = std::mem::offset_of!(NativeCtx, gc_epoch) as i32;
@@ -115,8 +135,17 @@ impl NativeCtx {
             // SAFETY: native code links only live records of its frames.
             unsafe {
                 let n = *at.add(1);
-                for i in 0..n as usize {
-                    visit(at.add(2 + i));
+                if n & ROOTS_MASKED != 0 {
+                    let mask = *at.add(2);
+                    for i in 0..(n & !ROOTS_MASKED).min(64) as usize {
+                        if mask & (1 << i) != 0 {
+                            visit(at.add(3 + i));
+                        }
+                    }
+                } else {
+                    for i in 0..n as usize {
+                        visit(at.add(2 + i));
+                    }
                 }
                 at = *at as *mut u64;
             }
@@ -149,6 +178,10 @@ pub struct NativeHost {
     /// `u32` of them instance dictionaries, as `CallIndirect` does; same
     /// result and panic rules as `call`.
     pub call_value: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, &[common::Value], u32, &mut bool) -> u64,
+    /// Before a call of the body at `pc` on `word`: `1` when `pc` is no
+    /// `drop`; else, as the VM's `CALL` claims a finalizer, `2` when this
+    /// call claimed it and `0` when it ran already (skip the call).
+    pub claim: unsafe fn(*mut std::ffi::c_void, u32, u64) -> u64,
     /// Collect, with the context's roots pinned.
     pub collect: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx),
     /// `FreeEarly` now (no finalizers).
@@ -156,7 +189,7 @@ pub struct NativeHost {
 }
 
 impl NativeHost {
-    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, collect: |_, _| {}, free: |_, _, _| {} };
+    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, free: |_, _, _| {} };
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
@@ -228,6 +261,9 @@ pub const UNDO_STATIC: u64 = 4;
 /// (`[addr | UNDO_BORN, 0, 0]`): a bail marks it finalized, so the
 /// discarded object owes no `drop` (the VM's re-run makes its own).
 pub const UNDO_BORN: u64 = 3;
+/// [`UndoEntry`] target bits of a `drop` the call claimed
+/// (`[addr | UNDO_CLAIM, 0, 0]`): a bail gives the claim back.
+pub const UNDO_CLAIM: u64 = 5;
 
 /// Byte offset of [`NativeCtx::bail`].
 pub const NATIVE_CTX_BAIL: i32 = 0;
@@ -271,6 +307,7 @@ impl NativeCtx {
             roots: 0,
             gc_due: 0,
             gc_epoch: 0,
+            pads: std::ptr::null_mut(),
         }
     }
 
@@ -285,10 +322,11 @@ impl NativeCtx {
             // SAFETY: entries below `undo_len` were written.
             let [target, index, old] = unsafe { *self.undo_buf.add(i) };
             let old = common::Value::from(old);
-            if target & 7 == UNDO_BORN {
+            if target & 7 == UNDO_BORN || target & 7 == UNDO_CLAIM {
+                let finalized = target & 7 == UNDO_BORN;
                 match object(target & !7) {
-                    Some(crate::memory::Object::Instance(mut gc)) => gc.as_mut().finalized = true,
-                    Some(crate::memory::Object::Enum(mut gc)) => gc.as_mut().finalized = true,
+                    Some(crate::memory::Object::Instance(mut gc)) => gc.as_mut().finalized = finalized,
+                    Some(crate::memory::Object::Enum(mut gc)) => gc.as_mut().finalized = finalized,
                     _ => {}
                 }
             } else if target == UNDO_STATIC {
@@ -453,6 +491,8 @@ pub(crate) struct NativePanic {
     pub(crate) trace: Vec<u32>,
     /// The text of a [`TRAP_MESSAGE`] panic.
     pub(crate) message: String,
+    /// The unwound frames' cleanup pads, innermost first.
+    pub(crate) pads: Vec<NativePad>,
 }
 
 impl NativePanic {
@@ -503,6 +543,8 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     ctx.trace = &mut trace;
     let mut message = String::new();
     ctx.message = &mut message;
+    let mut pads = Vec::new();
+    ctx.pads = &mut pads;
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
@@ -512,7 +554,7 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
             NativeOutcome::Done(NativeResult { lo: out, hi, allocated: ctx.allocs != 0 || ctx.vm_calls != 0, frees })
         }
         // Its effects stay, as a VM panic's do.
-        BAIL_PANIC => NativeOutcome::Panicked(NativePanic { code: ctx.trap, trace, message }),
+        BAIL_PANIC => NativeOutcome::Panicked(NativePanic { code: ctx.trap, trace, message, pads }),
         _ => {
             ctx.undo();
             NativeOutcome::Bailed
@@ -1329,6 +1371,87 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         unsafe { note_alloc(ctx, heap) };
     }
     v.bits()
+}
+
+/// A frame with `defer`s on its way out: after a committed panic, keep its
+/// cleanup pad `func` and a copy of its `n` homes at `homes` (`mask`: the
+/// heap words among them) for the VM to run ([`NativeCtx::pads`]). A
+/// bail before the commit runs nothing: the VM runs the call again.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
+pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, mask: u64) {
+    let c = unsafe { &mut *ctx };
+    if c.bail != BAIL_PANIC || c.pads.is_null() || func == 0 {
+        return;
+    }
+    let mut rec = vec![0, n.min(64) | ROOTS_MASKED, mask];
+    // SAFETY: `homes` holds `n` words.
+    rec.extend((0..n.min(64) as usize).map(|i| unsafe { *homes.add(i) }));
+    // SAFETY: the backend passes a function with the `NativePadFn` ABI.
+    let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
+    unsafe { (*c.pads).push(NativePad { func, homes: rec }) };
+}
+
+/// Run the cleanup pads of a native panic, innermost first, on `env`'s
+/// machine (committed: whatever they do is for good). Each pad's homes,
+/// and those of the pads still to run, are roots meanwhile.
+pub(crate) fn run_pads(mut pads: Vec<NativePad>, env: &NativeEnv) {
+    let marker = 0u8;
+    let sp = std::ptr::addr_of!(marker) as u64;
+    // Link every record: the chain is innermost-last so each pad's own
+    // homes stay listed while it runs.
+    for i in 1..pads.len() {
+        let next = pads[i - 1].homes.as_mut_ptr() as u64;
+        pads[i].homes[0] = next;
+    }
+    for i in 0..pads.len() {
+        let mut undo = Vec::new();
+        let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo, env.heap);
+        if let Some(left) = stacker::remaining_stack() {
+            ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
+        }
+        ctx.machine = env.machine;
+        ctx.host = env.host;
+        ctx.strings = env.strings;
+        ctx.string_cache = env.string_cache;
+        ctx.strings_len = env.strings_len as u64;
+        let mut frees = Vec::new();
+        ctx.frees = &mut frees;
+        ctx.has_finalizers = u64::from(env.has_finalizers);
+        ctx.statics = env.statics;
+        ctx.statics_len = env.statics_len as u64;
+        let mut trace = Vec::new();
+        ctx.trace = &mut trace;
+        let mut message = String::new();
+        ctx.message = &mut message;
+        ctx.committed = 1;
+        // The last record links all before it.
+        let last = pads.len() - 1;
+        ctx.roots = pads[last].homes.as_mut_ptr() as u64;
+        let homes = pads[i].homes[3..].as_ptr();
+        // SAFETY: the backend compiled `func` as this frame's pad.
+        let _ = unsafe { (pads[i].func)(&mut ctx, homes) };
+    }
+}
+
+/// Before native code calls the body at `pc` on `word`: whether to make
+/// the call (`0`: a `drop` that ran already, as the VM's `CALL` skips it).
+/// A claim before the commit is logged, so a bail gives it back.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+pub unsafe extern "C" fn coil_native_claim(ctx: *mut NativeCtx, pc: u64, word: u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    if c.machine.is_null() {
+        return 1;
+    }
+    // SAFETY: `machine` is the live machine `host` was made for.
+    let got = unsafe { (c.host.claim)(c.machine, pc as u32, word) };
+    if got == 2 && c.committed == 0 {
+        unsafe { log(ctx, [word | UNDO_CLAIM, 0, 0]) };
+    }
+    u64::from(got != 0)
 }
 
 /// `Panic` of the string `msg`: before a commit, bail (the VM's run panics);

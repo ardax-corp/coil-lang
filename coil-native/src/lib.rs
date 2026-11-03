@@ -35,6 +35,8 @@ struct Roots {
     prev: cranelift_codegen::ir::Value,
     slot: cranelift_codegen::ir::StackSlot,
     words: Vec<ValueId>,
+    /// Heap homes listed after `words`, written back with them.
+    homes: Vec<u16>,
     /// `NativeCtx::gc_epoch` when it was linked.
     epoch: cranelift_codegen::ir::Value,
 }
@@ -117,6 +119,8 @@ fn jit_once(
     jb.symbol("coil_native_host", machine::native::coil_native_host as *const u8);
     jb.symbol("coil_native_call_vm", machine::native::coil_native_call_vm as *const u8);
     jb.symbol("coil_native_call_value", machine::native::coil_native_call_value as *const u8);
+    jb.symbol("coil_native_defer", machine::native::coil_native_defer as *const u8);
+    jb.symbol("coil_native_claim", machine::native::coil_native_claim as *const u8);
     jb.symbol("coil_native_collect", machine::native::coil_native_collect as *const u8);
     jb.symbol("coil_native_panic", machine::native::coil_native_panic as *const u8);
     let mut module = JITModule::new(jb);
@@ -147,6 +151,26 @@ fn jit_once(
             return Ok(Attempt::Without(i, format!("cranelift: {e:?}")));
         }
         module.clear_context(&mut ctx);
+
+        if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
+            ctx.func.signature = entry_signature(&module);
+            let lowered = {
+                let mut lower = Lower::new(&mut module, &mut ctx.func, &mut fbc, &ids, &plan, &mut sites, None);
+                lower.is_pad = true;
+                let r = lower.body(pad);
+                if r.is_ok() {
+                    lower.b.finalize(fcfg);
+                }
+                r
+            };
+            if let Err(why) = lowered {
+                return Ok(Attempt::Without(i, format!("cleanup pad: {why}")));
+            }
+            if let Err(e) = module.define_function(pad_id, &mut ctx) {
+                return Ok(Attempt::Without(i, format!("cranelift pad: {e:?}")));
+            }
+            module.clear_context(&mut ctx);
+        }
 
         ctx.func.signature = entry_signature(&module);
         build_entry(&mut module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
@@ -206,6 +230,8 @@ struct Plan {
     may_gc: HashSet<usize>,
     /// Entry PCs of the bodies by label, for function values.
     pcs: HashMap<Label, u32>,
+    /// Bodies that may be a type's `drop` (a call claims its finalizer).
+    drops: HashSet<usize>,
 }
 
 fn plan(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Plan {
@@ -314,7 +340,13 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         .iter()
         .filter_map(|(&l, &i)| Some((l, *entry_pcs.get(&bodies[i].name)?)))
         .collect();
-    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs }
+    let drops = bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.name.ends_with("::drop") && b.mir.params.len() == 1)
+        .map(|(i, _)| i)
+        .collect();
+    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs, drops }
 }
 
 /// An instruction whose helper may allocate.
@@ -390,14 +422,22 @@ fn barrier_pairs(f: &MirFunc) -> HashMap<ValueId, ValueId> {
 
 /// The callees of `f` when its body is in the numeric tier.
 fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>, String> {
+    eligible_in(f, by_label, false)
+}
+
+/// [`eligible`] of a body, or of a cleanup pad (`pad`).
+fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Result<Vec<usize>, String> {
     if let Some(why) = f.emit_refusal {
         return Err(format!("no emission: {why}"));
     }
     if f.opaque_words {
         return Err("opaque words".into());
     }
-    if f.cleanup.is_some() {
-        return Err("defer".into());
+    if f.homes.len() > 64 {
+        return Err("more than 64 defer homes".into());
+    }
+    if let Some(t) = f.homes.iter().find(|t| !numeric(**t)) {
+        return Err(format!("defer home of {t:?}"));
     }
     if f.params.len() > 16 {
         return Err("more than 16 parameters".into());
@@ -578,6 +618,19 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         }
                     }
                     MirInst::String { dest, .. } => need(dest)?,
+                    MirInst::HomeLoad { dest, home } => {
+                        need(dest)?;
+                        if usize::from(*home) >= f.homes.len() {
+                            return Err("home out of range".into());
+                        }
+                    }
+                    MirInst::HomeStore { dest, home, value } => {
+                        need(dest)?;
+                        need(value)?;
+                        if usize::from(*home) >= f.homes.len() {
+                            return Err("home out of range".into());
+                        }
+                    }
                     MirInst::LoadStatic { dest, .. } => need(dest)?,
                     MirInst::StoreStatic { dest, value, .. } => {
                         need(dest)?;
@@ -602,6 +655,10 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         }
                     }
                     MirInst::Panic { msg, .. } => need(msg)?,
+                    // A cleanup pad's end (lowered to nothing).
+                    MirInst::HostInvoke { dest, native_id, .. } if pad && *native_id == common::UNWIND_RESUME_ID => {
+                        need(dest)?;
+                    }
                     MirInst::HostInvoke { dest, native_id, args, .. } => {
                         need(dest)?;
                         for a in args {
@@ -664,6 +721,13 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
             None => return Err("block without terminator".into()),
         }
     }
+    // A body with `defer`s compiles with its cleanup pad, or not at all.
+    if let Some(cleanup) = &f.cleanup {
+        if pad || cleanup.cleanup.is_some() {
+            return Err("defer pad shape".into());
+        }
+        callees.extend(eligible_in(cleanup, by_label, true).map_err(|why| format!("defer pad: {why}"))?);
+    }
     Ok(callees)
 }
 
@@ -680,6 +744,10 @@ struct Ids {
     imp: HashMap<usize, FuncId>,
     /// VM entry: `(ctx, *const u64) -> u64`.
     entry: HashMap<usize, FuncId>,
+    /// Cleanup pad of a body with `defer`s: `(ctx, *const u64 homes) -> u64`.
+    pad: HashMap<usize, FuncId>,
+    defer: FuncId,
+    claim: FuncId,
     fmod: FuncId,
     powf: FuncId,
     /// Heap reads (`machine::native::coil_native_*`).
@@ -753,11 +821,15 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let e = |e: cranelift_module::ModuleError| e.to_string();
     let mut imp = HashMap::new();
     let mut entry = HashMap::new();
+    let mut pad = HashMap::new();
     for &i in compile {
         let sig = impl_signature(module, &bodies[i].mir);
         imp.insert(i, module.declare_function(&format!("coil_impl_{i}"), Linkage::Local, &sig).map_err(e)?);
         let esig = entry_signature(module);
         entry.insert(i, module.declare_function(&format!("coil_entry_{i}"), Linkage::Local, &esig).map_err(e)?);
+        if bodies[i].mir.cleanup.is_some() {
+            pad.insert(i, module.declare_function(&format!("coil_pad_{i}"), Linkage::Local, &esig).map_err(e)?);
+        }
     }
     let mut f2 = module.make_signature();
     f2.params.push(AbiParam::new(types::F64));
@@ -799,6 +871,10 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
     let call_vm = module.declare_function("coil_native_call_vm", Linkage::Import, &s4).map_err(e)?;
     let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
+    let mut s5v = module.make_signature();
+    s5v.params.extend((0..5).map(|_| AbiParam::new(types::I64)));
+    let defer = module.declare_function("coil_native_defer", Linkage::Import, &s5v).map_err(e)?;
+    let claim = module.declare_function("coil_native_claim", Linkage::Import, &s3).map_err(e)?;
     let mut s1v2 = module.make_signature();
     s1v2.params.push(AbiParam::new(types::I64));
     let collect = module.declare_function("coil_native_collect", Linkage::Import, &s1v2).map_err(e)?;
@@ -806,6 +882,9 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     Ok(Ids {
         imp,
         entry,
+        pad,
+        defer,
+        claim,
         fmod,
         powf,
         index,
@@ -918,6 +997,19 @@ struct Lower<'a> {
     panic: FuncRef,
     /// This body's index into the plan's bodies.
     body_index: Option<usize>,
+    /// Lowering a cleanup pad: its homes are behind its second parameter.
+    is_pad: bool,
+    /// Where the homes live: this frame's slot (`[next, n, words...]` is
+    /// not needed: they are copied out at a panic), or the pad's pointer.
+    homes_slot: Option<cranelift_codegen::ir::StackSlot>,
+    homes_ptr: Option<cranelift_codegen::ir::Value>,
+    /// Homes holding heap words, rooted with the body's heap values.
+    heap_homes: Vec<u16>,
+    defer: FuncRef,
+    claim: FuncRef,
+    /// This body's cleanup pad.
+    pad_fn: Option<FuncRef>,
+    pad_refs: HashMap<usize, FuncRef>,
     /// Panic sites of every body so far; this body's ops name theirs by
     /// index ([`Self::site`]).
     sites: &'a mut Vec<NativeSite>,
@@ -990,6 +1082,9 @@ impl<'a> Lower<'a> {
         let call_value = module.declare_func_in_func(ids.call_value, func);
         let collect = module.declare_func_in_func(ids.collect, func);
         let panic = module.declare_func_in_func(ids.panic, func);
+        let defer = module.declare_func_in_func(ids.defer, func);
+        let claim = module.declare_func_in_func(ids.claim, func);
+        let pad_refs = ids.pad.iter().map(|(&i, &id)| (i, module.declare_func_in_func(id, func))).collect();
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -1037,6 +1132,14 @@ impl<'a> Lower<'a> {
             collect,
             panic,
             body_index: None,
+            is_pad: false,
+            homes_slot: None,
+            homes_ptr: None,
+            heap_homes: Vec::new(),
+            defer,
+            claim,
+            pad_fn: None,
+            pad_refs,
             sites,
             entry_pc,
             cur_loc: None,
@@ -1099,35 +1202,42 @@ impl<'a> Lower<'a> {
             .map(ValueId)
             .filter(|&v| heap_word(ty_of(f, v)))
             .collect();
-        if words.is_empty() {
+        let homes = if self.homes_slot.is_some() { self.heap_homes.clone() } else { Vec::new() };
+        if words.is_empty() && homes.is_empty() {
             return None;
         }
+        let total = words.len() + homes.len();
         let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            ((words.len() + 2) * 8) as u32,
+            ((total + 2) * 8) as u32,
             3,
         ));
         let t = MemFlagsData::trusted();
         let prev = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ROOTS);
         self.b.ins().stack_store(types::I64, prev, slot, 0);
-        let n = self.b.ins().iconst(types::I64, words.len() as i64);
+        let n = self.b.ins().iconst(types::I64, total as i64);
         self.b.ins().stack_store(types::I64, n, slot, 8);
         for (i, v) in words.iter().enumerate() {
             let x = self.get(f, *v);
             let x = self.coerce(x, types::I64);
             self.b.ins().stack_store(types::I64, x, slot, ((i + 2) * 8) as i32);
         }
+        for (k, &h) in homes.iter().enumerate() {
+            let (base, off) = self.home_at(h).expect("homes slot");
+            let x = self.b.ins().load(types::I64, t, base, off);
+            self.b.ins().stack_store(types::I64, x, slot, ((words.len() + k + 2) * 8) as i32);
+        }
         let at = self.b.ins().stack_addr(types::I64, slot, 0);
         self.b.ins().store(t, at, self.ctx, NATIVE_CTX_ROOTS);
         let epoch = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
-        Some(Roots { prev, slot, words, epoch })
+        Some(Roots { prev, slot, words, homes, epoch })
     }
 
     /// Unlink [`Self::push_roots`]'s record. When a collection may have run
     /// meanwhile, reload the words (a minor collection moves young objects
     /// and rewrites the record) and re-read every array view.
     fn pop_roots(&mut self, f: &MirFunc, roots: Option<Roots>) {
-        let Some(Roots { prev, slot, words, epoch }) = roots else {
+        let Some(Roots { prev, slot, words, homes, epoch }) = roots else {
             return;
         };
         let t = MemFlagsData::trusted();
@@ -1142,6 +1252,11 @@ impl<'a> Lower<'a> {
         for (i, v) in words.iter().enumerate() {
             let x = self.b.ins().stack_load(types::I64, types::I64, slot, ((i + 2) * 8) as i32);
             self.set(f, *v, x);
+        }
+        for (k, &h) in homes.iter().enumerate() {
+            let x = self.b.ins().stack_load(types::I64, types::I64, slot, ((words.len() + k + 2) * 8) as i32);
+            let (base, off) = self.home_at(h).expect("homes slot");
+            self.b.ins().store(t, x, base, off);
         }
         self.drop_views();
         self.b.ins().jump(go, &[]);
@@ -1238,9 +1353,29 @@ impl<'a> Lower<'a> {
         }
         let entry = self.b.current_block().expect("entry block");
         let params: Vec<_> = self.b.block_params(entry)[1..].to_vec();
-        for (&p, &x) in f.params.iter().zip(&params) {
-            self.set(f, p, x);
-            self.view_of(f, p);
+        if self.is_pad {
+            self.homes_ptr = params.first().copied();
+        } else {
+            for (&p, &x) in f.params.iter().zip(&params) {
+                self.set(f, p, x);
+                self.view_of(f, p);
+            }
+            if !f.homes.is_empty() {
+                // Homes start zeroed (every `defer` disarmed), as frame
+                // words past the registers do.
+                let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    (f.homes.len() * 8) as u32,
+                    3,
+                ));
+                let zero = self.b.ins().iconst(types::I64, 0);
+                for i in 0..f.homes.len() {
+                    self.b.ins().stack_store(types::I64, zero, slot, (i * 8) as i32);
+                }
+                self.homes_slot = Some(slot);
+                self.heap_homes = (0..f.homes.len() as u16).filter(|&h| heap_word(f.homes[h as usize])).collect();
+            }
+            self.pad_fn = self.body_index.and_then(|i| self.pad_refs.get(&i).copied());
         }
         for blk in &f.blocks {
             let cl = self.b.create_block();
@@ -1321,6 +1456,16 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(self.bail);
         let p = self.b.block_params(self.bail).to_vec();
         self.b.ins().call(self.unwind, &[self.ctx, p[0], p[1]]);
+        // After a committed panic, this frame's armed `defer`s run once the
+        // VM reported it: hand it the pad and the homes.
+        if let (Some(pad), Some(slot)) = (self.pad_fn, self.homes_slot) {
+            let fp = self.b.ins().func_addr(types::I64, pad);
+            let at = self.b.ins().stack_addr(types::I64, slot, 0);
+            let n = self.b.ins().iconst(types::I64, f.homes.len() as i64);
+            let mask = self.heap_homes.iter().fold(0u64, |m, &h| m | (1 << h));
+            let mask = self.b.ins().iconst(types::I64, mask as i64);
+            self.b.ins().call(self.defer, &[self.ctx, fp, at, n, mask]);
+        }
         let mut zeros = Vec::new();
         for t in std::iter::once(self.ret).chain(self.ret_hi) {
             zeros.push(if t == types::F64 { self.b.ins().f64const(0.0) } else { self.b.ins().iconst(types::I64, 0) });
@@ -1407,6 +1552,22 @@ impl<'a> Lower<'a> {
             }
             MirInst::Phi { dest, .. } => self.view_of(f, *dest),
             MirInst::Deopt { .. } => {}
+            MirInst::HomeLoad { dest, home } => {
+                let (base, off) = self.home_at(*home)?;
+                let x = self.b.ins().load(types::I64, MemFlagsData::trusted(), base, off);
+                self.set_word(f, *dest, x);
+                self.view_of(f, *dest);
+            }
+            MirInst::HomeStore { dest, home, value } => {
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                let (base, off) = self.home_at(*home)?;
+                self.b.ins().store(MemFlagsData::trusted(), v, base, off);
+                if numeric(ty_of(f, *dest)) {
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.set(f, *dest, zero);
+                }
+            }
             MirInst::KeepAlive { dest, .. } => {
                 if numeric(ty_of(f, *dest)) {
                     let zero = self.b.ins().iconst(types::I64, 0);
@@ -1414,48 +1575,34 @@ impl<'a> Lower<'a> {
                 }
             }
             MirInst::Call { dest, dest_hi, target, args } => {
-                let callee = *self.by_label.get(target).ok_or("unknown callee")?;
-                if let Some(&pc) = self.plan.vm_calls.get(&callee) {
-                    let pcv = self.b.ins().iconst(types::I64, i64::from(pc));
-                    let p = self.words_slot(f, args);
-                    let n = self.b.ins().iconst(types::I64, args.len() as i64);
-                    let roots = self.push_roots(f);
-                    let call = self.b.ins().call(self.call_vm, &[self.ctx, pcv, p, n]);
-                    let w = self.b.inst_results(call)[0];
-                    self.pop_roots(f, roots);
-                    let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                    self.bail_if(flag, TRAP_HELPER);
-                    self.drop_views();
-                    self.set(f, *dest, w);
-                    if let Some(h) = dest_hi {
-                        let x = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_VM_HI);
-                        self.set(f, *h, x);
-                    }
-                    self.view_of(f, *dest);
-                    return Ok(());
-                }
-                let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
-                let sig = self.b.func.dfg.ext_funcs[fref].signature;
-                let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
-                let mut vals = vec![self.ctx];
-                for (a, &want) in args.iter().zip(&params[1..]) {
-                    let x = self.get(f, *a);
-                    vals.push(self.coerce(x, want));
-                }
-                let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
-                let call = self.b.ins().call(fref, &vals);
-                let results = self.b.inst_results(call).to_vec();
-                self.pop_roots(f, roots);
-                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag, TRAP_HELPER);
-                if self.plan.moves.contains(&callee) {
-                    self.drop_views();
-                }
-                self.set(f, *dest, results[0]);
+                // A `drop` called as a method: claim its finalizer first, as
+                // the VM's `CALL` does, and skip the call when it ran.
+                let drop_pc = self
+                    .by_label
+                    .get(target)
+                    .filter(|c| args.len() == 1 && self.plan.drops.contains(c))
+                    .and_then(|_| self.plan.pcs.get(target).copied());
+                let Some(pc) = drop_pc else {
+                    return self.call(f, *dest, *dest_hi, *target, args);
+                };
+                let pcv = self.b.ins().iconst(types::I64, i64::from(pc));
+                let w = self.get(f, args[0]);
+                let w = self.coerce(w, types::I64);
+                let c = self.b.ins().call(self.claim, &[self.ctx, pcv, w]);
+                let run = self.b.inst_results(c)[0];
+                let (go, skip, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(run, go, &[], skip, &[]);
+                self.b.switch_to_block(skip);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
                 if let Some(h) = dest_hi {
-                    let x = *results.get(1).ok_or("two-word call of a one-word body")?;
-                    self.set(f, *h, x);
+                    self.set(f, *h, zero);
                 }
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(go);
+                self.call(f, *dest, *dest_hi, *target, args)?;
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(join);
                 self.view_of(f, *dest);
             }
             MirInst::CallIndirect { dest, callee, args, dicts } => {
@@ -1622,6 +1769,13 @@ impl<'a> Lower<'a> {
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
+            }
+            // A pad's end: the VM goes on unwinding once the pad returns.
+            MirInst::HostInvoke { dest, native_id, .. } if *native_id == common::UNWIND_RESUME_ID => {
+                if numeric(ty_of(f, *dest)) {
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.set(f, *dest, zero);
+                }
             }
             MirInst::HostInvoke { dest, native_id, layout, args } => {
                 let fp = self.b.ins().iconst(types::I64, i64::from(*native_id));
@@ -1797,6 +1951,68 @@ impl<'a> Lower<'a> {
         self.bail_if(out, TRAP_HELPER);
         let base = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_STATICS);
         self.b.ins().iadd_imm_u(base, i64::from(slot) * 8)
+    }
+
+    /// A direct call of the body at `target`.
+    fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, target: Label, args: &[ValueId]) -> Result<(), String> {
+        let (dest, dest_hi, target) = (&dest, &dest_hi, &target);
+        let callee = *self.by_label.get(target).ok_or("unknown callee")?;
+        if let Some(&pc) = self.plan.vm_calls.get(&callee) {
+            let pcv = self.b.ins().iconst(types::I64, i64::from(pc));
+            let p = self.words_slot(f, args);
+            let n = self.b.ins().iconst(types::I64, args.len() as i64);
+            let roots = self.push_roots(f);
+            let call = self.b.ins().call(self.call_vm, &[self.ctx, pcv, p, n]);
+            let w = self.b.inst_results(call)[0];
+            self.pop_roots(f, roots);
+            let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+            self.bail_if(flag, TRAP_HELPER);
+            self.drop_views();
+            self.set(f, *dest, w);
+            if let Some(h) = dest_hi {
+                let x = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_VM_HI);
+                self.set(f, *h, x);
+            }
+            self.view_of(f, *dest);
+            return Ok(());
+        }
+        let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
+        let sig = self.b.func.dfg.ext_funcs[fref].signature;
+        let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
+        if params.len() != args.len() + 1 {
+            return Err(format!("call of {} words to a body of {}", args.len(), params.len() - 1));
+        }
+        let mut vals = vec![self.ctx];
+        for (a, &want) in args.iter().zip(&params[1..]) {
+            let x = self.get(f, *a);
+            vals.push(self.coerce(x, want));
+        }
+        let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
+        let call = self.b.ins().call(fref, &vals);
+        let results = self.b.inst_results(call).to_vec();
+        self.pop_roots(f, roots);
+        let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+        self.bail_if(flag, TRAP_HELPER);
+        if self.plan.moves.contains(&callee) {
+            self.drop_views();
+        }
+        self.set(f, *dest, results[0]);
+        if let Some(h) = dest_hi {
+            let x = *results.get(1).ok_or("two-word call of a one-word body")?;
+            self.set(f, *h, x);
+        }
+        self.view_of(f, *dest);
+        Ok(())
+    }
+
+    /// Base address and offset of home `h`.
+    fn home_at(&mut self, h: u16) -> Result<(cranelift_codegen::ir::Value, i32), String> {
+        let off = i32::from(h) * 8;
+        if let Some(p) = self.homes_ptr {
+            return Ok((p, off));
+        }
+        let slot = self.homes_slot.ok_or("home outside a body with homes")?;
+        Ok((self.b.ins().stack_addr(types::I64, slot, 0), off))
     }
 
     /// The words of `vs` in a new stack slot, in order; its address.

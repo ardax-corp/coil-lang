@@ -1835,24 +1835,7 @@ impl<const S: usize> Machine<S> {
         for (i, w) in words.iter_mut().take(arity).enumerate() {
             *w = self.stack[base + i].bits();
         }
-        let strings_len = self.program_strings.len().min(self.program_string_cache.len());
-        let env = crate::native::NativeEnv {
-            heap: std::ptr::from_mut::<crate::memory::Heap>(&mut self.heap),
-            strings: self.program_strings.as_ptr(),
-            string_cache: self.program_string_cache.as_mut_ptr(),
-            strings_len,
-            has_finalizers: !self.finalizer_by_type.is_empty(),
-            statics: self.statics.as_mut_ptr(),
-            statics_len: self.statics.len(),
-            machine: std::ptr::from_mut(self).cast(),
-            host: crate::native::NativeHost {
-                print: Self::native_print,
-                call: Self::native_vm_call,
-                call_value: Self::native_call_value,
-                collect: Self::native_collect,
-                free: Self::native_free,
-            },
-        };
+        let env = self.native_env();
         // Native code never collects; a VM call it makes may, with the
         // native frames' heap words pinned (`native_vm_call`).
         let out = crate::native::call(&entry, &words[..arity], &env);
@@ -1872,6 +1855,43 @@ impl<const S: usize> Machine<S> {
                 None
             }
         }
+    }
+
+    /// The machine as native code reaches it.
+    fn native_env(&mut self) -> crate::native::NativeEnv {
+        let strings_len = self.program_strings.len().min(self.program_string_cache.len());
+        crate::native::NativeEnv {
+            heap: std::ptr::from_mut::<crate::memory::Heap>(&mut self.heap),
+            strings: self.program_strings.as_ptr(),
+            string_cache: self.program_string_cache.as_mut_ptr(),
+            strings_len,
+            has_finalizers: !self.finalizer_by_type.is_empty(),
+            statics: self.statics.as_mut_ptr(),
+            statics_len: self.statics.len(),
+            machine: std::ptr::from_mut(self).cast(),
+            host: crate::native::NativeHost {
+                print: Self::native_print,
+                call: Self::native_vm_call,
+                call_value: Self::native_call_value,
+                claim: Self::native_claim,
+                collect: Self::native_collect,
+                free: Self::native_free,
+            },
+        }
+    }
+
+    /// Run the cleanup pads of the native frames a panic unwound (the
+    /// panic already reported), as the VM runs a frame's pad on its way
+    /// out.
+    fn run_native_pads(&mut self, pads: Vec<crate::native::NativePad>) {
+        if pads.is_empty() {
+            return;
+        }
+        let was_panicked = self.panicked;
+        self.panicked = false;
+        let env = self.native_env();
+        crate::native::run_pads(pads, &env);
+        self.panicked |= was_panicked;
     }
 
     /// [`crate::native::NativeHost::collect`]: a collection at a native
@@ -1928,6 +1948,17 @@ impl<const S: usize> Machine<S> {
         // SAFETY: the calling native code's live context.
         unsafe { (*ctx).vm_hi = std::mem::take(&mut vm.nested_return_hi).bits() };
         out.bits()
+    }
+
+    /// [`crate::native::NativeHost::claim`]: the finalizer claim `CALL`
+    /// makes before a `drop`.
+    unsafe fn native_claim(raw: *mut c_void, pc: u32, word: u64) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        if !vm.finalizer_pcs.contains(&pc) {
+            return 1;
+        }
+        if vm.claim_finalizer(Value::from(word)) { 2 } else { 0 }
     }
 
     /// [`crate::native::NativeHost::call_value`]: [`Self::call_value`],
@@ -5891,9 +5922,14 @@ impl<const S: usize> Machine<S> {
                             // reported it: go on unwinding from this call.
                             Err(p) if p.code == crate::native::TRAP_VM_PANIC => {
                                 self.rearm_unwind_after_early_drop(ip.saturating_sub(1));
+                                self.run_native_pads(p.pads);
                                 return false;
                             }
-                            Err(p) => return self.native_panic(&p, ip.saturating_sub(1)),
+                            Err(p) => {
+                                let out = self.native_panic(&p, ip.saturating_sub(1));
+                                self.run_native_pads(p.pads);
+                                return out;
+                            }
                         };
                         let base = self.stack.tell() - arity;
                         self.stack.seek(base);

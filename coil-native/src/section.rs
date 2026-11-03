@@ -21,7 +21,7 @@ use compiler::native_mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 5;
+const FORMAT: u8 = 6;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for the bodies of `bodies` the backend compiles, keyed to
@@ -280,6 +280,19 @@ fn func(w: &mut Writer, f: &MirFunc) {
         w.u32(l.file);
         w.u32(l.start_byte);
         w.u32(l.end_byte);
+    }
+    // `defer` homes, and the cleanup pad that reads them.
+    w.u32(f.homes.len() as u32);
+    for &t in &f.homes {
+        w.ty(t);
+    }
+    w.u8(f.home_base.map_or(NONE, |b| b.min(NONE - 1)));
+    match f.cleanup.as_deref() {
+        Some(pad) => {
+            w.u8(1);
+            func(w, pad);
+        }
+        None => w.u8(0),
     }
 }
 
@@ -637,6 +650,12 @@ fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
         let v = r.v()?;
         let loc = DebugLoc { file: r.u32()?, start_byte: r.u32()?, end_byte: r.u32()? };
         f.op_locs.insert(v, loc);
+    }
+    let nh = r.len()?;
+    f.homes = (0..nh).map(|_| r.ty()).collect::<Result<_, _>>()?;
+    f.home_base = Some(r.u8()?).filter(|&b| b != NONE);
+    if r.u8()? == 1 {
+        f.cleanup = Some(Box::new(read_func(r, &format!("{name}$pad"))?));
     }
     Ok(f)
 }
