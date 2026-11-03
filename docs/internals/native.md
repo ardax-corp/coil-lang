@@ -107,7 +107,33 @@ object made right before it, and the VM checks for a collection after a
 native call that allocated, with the result on its stack. A call that
 makes more than `NATIVE_ALLOC_CAP` objects while a collection is due
 bails, so the VM's re-run collects as it goes and native code cannot
-grow the heap without bound. Comparing heap words comes next.
+grow the heap without bound.
+
+More instructions follow the same pattern, each a helper that does what
+the VM's instruction does:
+
+| MIR | Helper | Note |
+|---|---|---|
+| `JumpIfMatch` on a boxed enum, `MatchPayload` | `coil_native_enum_tag`, `_enum_payload` | a niche word (`Option`: `0` is `None`; `Result`: low bit is `Err`) is tested inline and is its own payload |
+| `String` | `coil_native_string` | the machine's string table and cache travel in `NativeCtx` |
+| `StrEq` | `coil_native_eq` | `value_eq::values_eq`, as `EQ` |
+| `Stringify` | `coil_native_stringify` | |
+| `Format` | `coil_native_format` | `vm::render_format` is shared with the VM's `FORMAT` |
+| `FreeEarly` | `coil_native_free_early` | queued: see below |
+| `ClearWord`, `GcBarrier` | none | nothing to zero or root while no collection can run |
+
+An early free cannot be undone, so native code only queues it
+(`NativeCtx::frees`) and the VM frees after the call returns; a bail
+drops the queue. When the program has `drop` finalizers an early free may
+run one (VM code), so `FreeEarly` bails instead and the VM runs it.
+
+A body that returns two words (a two-slot `Option<int>`, a pair) returns
+two Cranelift values; the entry leaves the second in `NativeCtx::ret_hi`
+and `CALL` pushes both (`NativeEntry::ret_words`).
+
+Host calls (`HostInvoke`: `println`, file and socket I/O) are effects no
+undo log can take back, so they wait for step 5, where native code raises
+panics itself instead of bailing.
 
 ### Bail instead of trap
 
