@@ -20,7 +20,7 @@ fn run(name: &str, src: &str, jit: bool) -> Output {
         cmd.arg("--root").arg(root);
     }
     if jit {
-        cmd.arg("--jit").env("COIL_NATIVE_STATS", "1");
+        cmd.arg("--jit").env("COIL_NATIVE_STATS", "2");
     }
     cmd.output().expect("spawn coil")
 }
@@ -29,9 +29,14 @@ fn run(name: &str, src: &str, jit: bool) -> Output {
 fn program_stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr)
         .lines()
-        .filter(|l| !l.starts_with("native:"))
+        .filter(|l| !l.starts_with("native:") && !l.starts_with("  native: ") && !l.starts_with("  vm: "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Whether the stats (`COIL_NATIVE_STATS=2`) list `name` as compiled.
+fn compiled(stats: &str, name: &str) -> bool {
+    stats.lines().any(|l| l == format!("  native: {name}"))
 }
 
 /// The run with `--jit` matches the VM run; returns the JIT run's stderr.
@@ -57,7 +62,8 @@ fn pure_recursion_runs_natively() {
          fn main() {{ let _ = println(format(\"%i\", fib(25))); }}\n"
     );
     let stats = same_as_vm("fib", &src);
-    assert!(stats.contains("1 calls ran natively, 0 bailed"), "stats: {stats}");
+    assert!(compiled(&stats, "fib"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
 }
 
 #[test]
@@ -123,7 +129,9 @@ fn heap_reads_run_natively() {
     );
     let stats = same_as_vm("heap", &src);
     assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
-    assert!(stats.contains("native: 4 compiled"), "stats: {stats}");
+    for f in ["vsum", "px", "at", "flag"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
 }
 
 #[test]
@@ -140,7 +148,7 @@ fn heap_stores_are_undone_when_the_call_bails() {
            let _ = println(format(\"%i\", bump(c, 0)));\n}}\n"
     );
     let stats = same_as_vm("stores", &src);
-    assert!(stats.contains("native: 2 compiled"), "stats: {stats}");
+    assert!(compiled(&stats, "fill") && compiled(&stats, "bump"), "stats: {stats}");
     assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
     let src = format!(
         "{HEADER}#[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i + 7; i = i + 1; }} return a[n]; }}\n\
@@ -170,7 +178,39 @@ fn copy_on_write_keeps_value_semantics_natively() {
     );
     let stats = same_as_vm("cow", &src);
     assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
-    assert!(!stats.contains("native: 0 compiled"), "stats: {stats}");
+    assert!(compiled(&stats, "step"), "stats: {stats}");
+}
+
+#[test]
+fn allocation_runs_natively_and_matches_the_vm() {
+    // Objects, tuples, enums and arrays made in native code, pushes, and a
+    // push that a bail takes back before the VM's re-run panics.
+    let src = format!(
+        "{HEADER}class Pt {{ pub x: int, pub y: int }}\n\
+         enum Shape {{ Dot, Sq(int), Rect(int, int) }}\n\
+         #[inline(never)]\nfn make(int n) -> Vec<Pt> {{ let v: Vec<Pt> = Vec::new(); let i = 0; while i < n {{ v.push(new Pt(i, i * 2)); i = i + 1; }} return v; }}\n\
+         #[inline(never)]\nfn area(Shape s) -> int {{ return match s {{ Shape::Dot => 0, Shape::Sq(a) => a * a, Shape::Rect(a, b) => a * b }}; }}\n\
+         #[inline(never)]\nfn shape(int i) -> Shape {{ if i % 3 == 0 {{ return Shape::Dot; }} if i % 3 == 1 {{ return Shape::Sq(i); }} return Shape::Rect(i, 2); }}\n\
+         #[inline(never)]\nfn pair(int a) -> (int, int) {{ return (a, a + 1); }}\n\
+         #[inline(never)]\nfn grow(Vec<int> v, int n) -> int {{ let i = 0; while i < n {{ v.push(i); i = i + 1; }} return v[n * 2]; }}\n\
+         fn main() {{\n  let ps = make(5);\n  let s = 0;\n  let i = 0;\n  while i < 9 {{ s = s + area(shape(i)); i = i + 1; }}\n\
+           let (a, b) = pair(4);\n  let _ = println(format(\"%i %i %i %i %i\", ps.len(), ps[4].y, s, a, b));\n\
+           let v: Vec<int> = [9];\n  let _ = println(format(\"%i\", grow(v, 3)));\n}}\n"
+    );
+    let stats = same_as_vm("alloc", &src);
+    for f in ["make", "shape", "grow"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert!(stats.contains("1 bailed"), "stats: {stats}");
+    // A call that allocates far past the collection threshold bails (no
+    // collection runs inside native code); the VM's re-run collects.
+    let src = format!(
+        "{HEADER}class N {{ pub v: int }}\nclass H {{ pub last: N }}\n\
+         #[inline(never)]\nfn churn(H h, int n) -> int {{ let s = 0; let i = 0; while i < n {{ h.last = new N(i); s = s + h.last.v; i = i + 1; }} return s; }}\n\
+         fn main() {{ let h = new H(new N(0)); let _ = println(format(\"%i %i\", churn(h, 3000000), h.last.v)); }}\n"
+    );
+    let stats = same_as_vm("alloc_churn", &src);
+    assert!(compiled(&stats, "churn") && stats.contains("1 bailed"), "stats: {stats}");
 }
 
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
