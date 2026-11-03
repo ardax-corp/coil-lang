@@ -9488,9 +9488,11 @@ fn hot_hint_inlines_past_the_default_limit() {
     assert!(untagged.functions.contains_key("big"), "the fixture should be over the default inline limit");
     let (_, tagged) = compile_src_compiler(&hot_fixture("#[hot]", 40), |_| {});
     assert!(!tagged.functions.contains_key("big"), "`#[hot]` `big` should be spliced into `main` and shaken");
-    let (_, ten) = compile_src_compiler(&hot_fixture("#[hot]", 200), |_| {});
-    assert!(!ten.functions.contains_key("big"), "a `#[hot]` callee inlines up to ten times the limit");
-    let (_, huge) = compile_src_compiler(&hot_fixture("#[hot]", 400), |_| {});
+    let (_, five) = compile_src_compiler(&hot_fixture("#[hot]", 120), |_| {});
+    assert!(!five.functions.contains_key("big"), "a `#[hot]` callee inlines up to five times the limit");
+    let (_, best_effort) = compile_src_compiler(&hot_fixture("#[inline]", 120), |_| {});
+    assert!(best_effort.functions.contains_key("big"), "the same callee is over the `#[inline]` limit, three times the default");
+    let (_, huge) = compile_src_compiler(&hot_fixture("#[hot]", 200), |_| {});
     assert!(huge.functions.contains_key("big"), "a `#[hot]` callee over the hot limit should keep its call");
 }
 
@@ -9617,12 +9619,12 @@ fn partial_inlining_leaves_a_warm_callee_whole() {
     assert!(!warm.functions.keys().any(|k| k.contains("$cold")), "an arm that is not cold stays in place");
 }
 
-/// `#[inline]` is best effort, up to five times the limit; `#[inline(always)]`
+/// `#[inline]` is best effort, up to three times the limit; `#[inline(always)]`
 /// has no limit.
 #[test]
 fn inline_always_inlines_past_the_best_effort_limit() {
     let (_, plain) = compile_src_compiler(&hot_fixture("#[inline]", 200), |_| {});
-    assert!(plain.functions.contains_key("big"), "a best-effort `#[inline]` callee over five times the limit keeps its call");
+    assert!(plain.functions.contains_key("big"), "a best-effort `#[inline]` callee over three times the limit keeps its call");
     let (_, always) = compile_src_compiler(&hot_fixture("#[inline(always)]", 200), |_| {});
     assert!(!always.functions.contains_key("big"), "`#[inline(always)]` `big` should be spliced into `main` and shaken");
 }

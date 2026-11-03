@@ -48,10 +48,12 @@ pub(crate) struct Outlined {
 
 /// Inline cost limits, as multiples of the level's limit
 /// (`docs/internals/opt-hints.md`): a call in a hot body, and a callee hot
-/// by spreading, 4x; an `#[inline]` callee 5x; a `#[hot]` one 10x.
-const HOT_SPREAD_FACTOR: usize = 4;
-const INLINE_FACTOR: usize = 5;
-const HOT_FACTOR: usize = 10;
+/// by spreading, 2x; an `#[inline]` callee 3x; a `#[hot]` one 5x. Past
+/// those a splice rarely pays: a merged body over the dense register limit
+/// runs as LIR (coil-lang#2242).
+const HOT_SPREAD_FACTOR: usize = 2;
+const INLINE_FACTOR: usize = 3;
+const HOT_FACTOR: usize = 5;
 
 /// Where a field lives: a class slot or a record's (`LoadField` /
 /// `SetField` slot form). A record's slots are its fields sorted by name.
@@ -2657,8 +2659,8 @@ impl Compiler {
         };
         let here = home(hir);
         // Cost limits by hint, as multiples of the level's: a hot body's
-        // calls and a callee hot by spreading 4x, `#[inline]` 5x, `#[hot]`
-        // 10x; `#[inline(always)]` lifts them (`docs/internals/opt-hints.md`).
+        // calls and a callee hot by spreading 2x, `#[inline]` 3x, `#[hot]`
+        // 5x; `#[inline(always)]` lifts them (`docs/internals/opt-hints.md`).
         let base = self.inline_cost.max_inline_cost;
         let cross_base = match self.inline_cost.max_cross_module_inline_cost {
             0 => base,
