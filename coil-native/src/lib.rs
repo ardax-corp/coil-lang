@@ -26,9 +26,18 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_RET_HI, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
-    NativeEntry, NativeEntryFn,
+    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
+    NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
+
+/// A root record [`Lower::push_roots`] linked.
+struct Roots {
+    prev: cranelift_codegen::ir::Value,
+    slot: cranelift_codegen::ir::StackSlot,
+    words: Vec<ValueId>,
+    /// `NativeCtx::gc_epoch` when it was linked.
+    epoch: cranelift_codegen::ir::Value,
+}
 
 /// What [`jit`] produced.
 pub struct NativeProgram {
@@ -38,6 +47,8 @@ pub struct NativeProgram {
     pub compiled: Vec<String>,
     /// Bodies left to the VM, with the reason.
     pub refused: Vec<(String, String)>,
+    /// The panic sites the code names (see `machine::native::NativeSite`).
+    pub sites: Vec<NativeSite>,
 }
 
 /// Compile every eligible body of `bodies` in memory. `entry_pcs` maps a
@@ -68,10 +79,10 @@ fn jit_once(
     entry_pcs: &HashMap<String, u32>,
     excluded: &HashMap<usize, String>,
 ) -> Result<Attempt, String> {
-    let plan = plan_without(bodies, excluded);
-    let refused = plan.refused;
+    let plan = plan_without(bodies, excluded, entry_pcs);
+    let refused = plan.refused.clone();
     if plan.compile.is_empty() {
-        return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused }));
+        return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused, sites: Vec::new() }));
     }
 
     let mut flags = settings::builder();
@@ -101,6 +112,11 @@ fn jit_once(
     jb.symbol("coil_native_string", machine::native::coil_native_string as *const u8);
     jb.symbol("coil_native_enum_tag", machine::native::coil_native_enum_tag as *const u8);
     jb.symbol("coil_native_enum_payload", machine::native::coil_native_enum_payload as *const u8);
+    jb.symbol("coil_native_unwind", machine::native::coil_native_unwind as *const u8);
+    jb.symbol("coil_native_print", machine::native::coil_native_print as *const u8);
+    jb.symbol("coil_native_host", machine::native::coil_native_host as *const u8);
+    jb.symbol("coil_native_call_vm", machine::native::coil_native_call_vm as *const u8);
+    jb.symbol("coil_native_collect", machine::native::coil_native_collect as *const u8);
     let mut module = JITModule::new(jb);
 
     let ids = declare(&mut module, bodies, &plan.compile)?;
@@ -108,11 +124,14 @@ fn jit_once(
     let mut fbc = FunctionBuilderContext::new();
     let mut ctx = module.make_context();
     let mut defined = Vec::new();
+    let mut sites = Vec::new();
     for &i in &plan.compile {
         let body = &bodies[i];
         ctx.func.signature = impl_signature(&module, &body.mir);
         let lowered = {
-            let mut lower = Lower::new(&mut module, &mut ctx.func, &mut fbc, &ids, &plan.by_label, bodies);
+            let entry_pc = entry_pcs.get(&body.name).copied();
+            let mut lower = Lower::new(&mut module, &mut ctx.func, &mut fbc, &ids, &plan, &mut sites, entry_pc);
+            lower.body_index = Some(i);
             let r = lower.body(&body.mir);
             if r.is_ok() {
                 lower.b.finalize(fcfg);
@@ -153,7 +172,7 @@ fn jit_once(
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
-    Ok(Attempt::Done(NativeProgram { entries, compiled, refused }))
+    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites }))
 }
 
 extern "C" fn coil_native_fmod(a: f64, b: f64) -> f64 {
@@ -172,14 +191,32 @@ struct Plan {
     compile: Vec<usize>,
     by_label: HashMap<Label, usize>,
     refused: Vec<(String, String)>,
+    /// Bodies compiled code calls that stay on the VM, with their entry
+    /// PCs: native code runs them through the machine.
+    vm_calls: HashMap<usize, u32>,
+    /// Compiled bodies that may move an array's storage (a push, a host
+    /// call, a VM call, or a call to such a body): their callers re-read
+    /// the arrays they view after the call.
+    moves: HashSet<usize>,
+    /// Compiled bodies in which a collection may run (they allocate or
+    /// make a VM call, or call such a body): they have safepoints, and
+    /// their callers root the heap words they hold across the call.
+    may_gc: HashSet<usize>,
 }
 
-fn plan(bodies: &[NativeBody]) -> Plan {
-    plan_without(bodies, &HashMap::new())
+fn plan(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Plan {
+    plan_without(bodies, &HashMap::new(), entry_pcs)
+}
+
+/// Whether native code may call body `b` through the VM: it has an entry
+/// PC and returns at most one word.
+fn vm_callable(b: &NativeBody, entry_pcs: &HashMap<String, u32>) -> Option<u32> {
+    let pc = *entry_pcs.get(&b.name)?;
+    (b.mir.params.len() <= 16).then_some(pc)
 }
 
 /// [`plan`] with `excluded` bodies refused for the given reason.
-fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>) -> Plan {
+fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_pcs: &HashMap<String, u32>) -> Plan {
     let by_label: HashMap<Label, usize> = bodies
         .iter()
         .enumerate()
@@ -199,11 +236,14 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>) -> Pla
             Err(why) => refused.push((b.name.clone(), why)),
         }
     }
-    // Drop bodies that call a body that does not compile, to a fixpoint.
+    // A call to a body that does not compile goes through the VM; drop
+    // the bodies that call one the VM cannot run for them, to a fixpoint.
     loop {
         let bad: Vec<usize> = ok
             .iter()
-            .filter(|(_, callees)| callees.iter().any(|c| !ok.contains_key(c)))
+            .filter(|(_, callees)| {
+                callees.iter().any(|&c| !ok.contains_key(&c) && vm_callable(&bodies[c], entry_pcs).is_none())
+            })
             .map(|(&i, _)| i)
             .collect();
         if bad.is_empty() {
@@ -211,12 +251,76 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>) -> Pla
         }
         for i in bad {
             ok.remove(&i);
-            refused.push((bodies[i].name.clone(), "calls a body that stays on the VM".to_string()));
+            refused.push((bodies[i].name.clone(), "calls a body native code cannot call".to_string()));
         }
+    }
+    let mut vm_calls = HashMap::new();
+    for callees in ok.values() {
+        for &c in callees {
+            if !ok.contains_key(&c)
+                && let Some(pc) = vm_callable(&bodies[c], entry_pcs)
+            {
+                vm_calls.insert(c, pc);
+            }
+        }
+    }
+    let mut moves: HashSet<usize> = ok
+        .iter()
+        .filter(|(i, callees)| {
+            callees.iter().any(|c| vm_calls.contains_key(c))
+                || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
+                    matches!(inst, MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. })
+                })
+        })
+        .map(|(&i, _)| i)
+        .collect();
+    loop {
+        let more: Vec<usize> = ok
+            .iter()
+            .filter(|(i, callees)| !moves.contains(i) && callees.iter().any(|c| moves.contains(c)))
+            .map(|(&i, _)| i)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        moves.extend(more);
+    }
+    let mut may_gc: HashSet<usize> = ok
+        .iter()
+        .filter(|(i, callees)| {
+            callees.iter().any(|c| vm_calls.contains_key(c))
+                || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(allocates)
+        })
+        .map(|(&i, _)| i)
+        .collect();
+    loop {
+        let more: Vec<usize> = ok
+            .iter()
+            .filter(|(i, callees)| !may_gc.contains(i) && callees.iter().any(|c| may_gc.contains(c)))
+            .map(|(&i, _)| i)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        may_gc.extend(more);
     }
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused }
+    Plan { compile, by_label, refused, vm_calls, moves, may_gc }
+}
+
+/// An instruction whose helper may allocate.
+fn allocates(inst: &MirInst) -> bool {
+    matches!(
+        inst,
+        MirInst::Alloc { .. }
+            | MirInst::ArrayPush { .. }
+            | MirInst::String { .. }
+            | MirInst::Format { .. }
+            | MirInst::Stringify { .. }
+            | MirInst::Cow { .. }
+            | MirInst::HostInvoke { .. }
+    )
 }
 
 /// A value native code holds: a scalar, or a heap word it passes along and
@@ -456,6 +560,21 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         need(dest)?;
                         need(value)?;
                     }
+                    MirInst::Print { dest, src } => {
+                        need(dest)?;
+                        need(src)?;
+                    }
+                    MirInst::HostInvoke { dest, native_id, args, .. } => {
+                        need(dest)?;
+                        for a in args {
+                            need(a)?;
+                        }
+                        match machine::native::direct_host_natives().get(usize::from(*native_id)) {
+                            Some(h) if h.func.is_some() && args.len() <= 16 => {}
+                            Some(h) => return Err(format!("host call `{}` runs in the VM", h.name)),
+                            None => return Err(format!("host call {native_id} outside the standard table")),
+                        }
+                    }
                     MirInst::Format { dest, fmt, args } => {
                         need(dest)?;
                         need(fmt)?;
@@ -552,6 +671,16 @@ struct Ids {
     format: FuncId,
     /// `FreeEarly` (queued for the VM).
     free_early: FuncId,
+    /// Bails and native panics (`coil_native_unwind`).
+    unwind: FuncId,
+    /// `PRINT` (commits the call).
+    print: FuncId,
+    /// Direct host natives (commit the call).
+    host: FuncId,
+    /// Calls to bodies on the VM (commit the call).
+    call_vm: FuncId,
+    /// Collections at safepoints.
+    collect: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -622,6 +751,15 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let string = module.declare_function("coil_native_string", Linkage::Import, &s2).map_err(e)?;
     let enum_tag = module.declare_function("coil_native_enum_tag", Linkage::Import, &s1).map_err(e)?;
     let enum_payload = module.declare_function("coil_native_enum_payload", Linkage::Import, &s3).map_err(e)?;
+    let mut s3v = module.make_signature();
+    s3v.params.extend((0..3).map(|_| AbiParam::new(types::I64)));
+    let unwind = module.declare_function("coil_native_unwind", Linkage::Import, &s3v).map_err(e)?;
+    let print = module.declare_function("coil_native_print", Linkage::Import, &s2).map_err(e)?;
+    let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
+    let call_vm = module.declare_function("coil_native_call_vm", Linkage::Import, &s4).map_err(e)?;
+    let mut s1v2 = module.make_signature();
+    s1v2.params.push(AbiParam::new(types::I64));
+    let collect = module.declare_function("coil_native_collect", Linkage::Import, &s1v2).map_err(e)?;
     Ok(Ids {
         imp,
         entry,
@@ -645,6 +783,11 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         stringify,
         format,
         free_early,
+        unwind,
+        print,
+        host,
+        call_vm,
+        collect,
     })
 }
 
@@ -721,6 +864,22 @@ struct Lower<'a> {
     stringify: FuncRef,
     format: FuncRef,
     free_early: FuncRef,
+    unwind: FuncRef,
+    print: FuncRef,
+    host: FuncRef,
+    call_vm: FuncRef,
+    collect: FuncRef,
+    /// This body's index into the plan's bodies.
+    body_index: Option<usize>,
+    /// Panic sites of every body so far; this body's ops name theirs by
+    /// index ([`Self::site`]).
+    sites: &'a mut Vec<NativeSite>,
+    /// This body's entry PC, which its sites name (`None`: no sites).
+    entry_pc: Option<u32>,
+    /// The location of the op being lowered, and its site once a bail
+    /// path named it.
+    cur_loc: Option<common::DebugLoc>,
+    cur_site: Option<i64>,
     /// Arrays this body indexes: `(ok, pointer, length)` of their element
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
@@ -732,6 +891,7 @@ struct Lower<'a> {
     /// Two words `coil_native_view` writes to.
     view_slot: cranelift_codegen::ir::StackSlot,
     by_label: &'a HashMap<Label, usize>,
+    plan: &'a Plan,
     vars: Vec<Option<Variable>>,
     blocks: HashMap<BlockId, Block>,
     ctx: cranelift_codegen::ir::Value,
@@ -747,9 +907,11 @@ impl<'a> Lower<'a> {
         func: &'a mut cranelift_codegen::ir::Function,
         fbc: &'a mut FunctionBuilderContext,
         ids: &Ids,
-        by_label: &'a HashMap<Label, usize>,
-        _bodies: &[NativeBody],
+        plan: &'a Plan,
+        sites: &'a mut Vec<NativeSite>,
+        entry_pc: Option<u32>,
     ) -> Self {
+        let by_label = &plan.by_label;
         let mut module_refs = HashMap::new();
         for (&i, &id) in &ids.imp {
             module_refs.insert(i, module.declare_func_in_func(id, func));
@@ -774,6 +936,11 @@ impl<'a> Lower<'a> {
         let stringify = module.declare_func_in_func(ids.stringify, func);
         let format = module.declare_func_in_func(ids.format, func);
         let free_early = module.declare_func_in_func(ids.free_early, func);
+        let unwind = module.declare_func_in_func(ids.unwind, func);
+        let print = module.declare_func_in_func(ids.print, func);
+        let host = module.declare_func_in_func(ids.host, func);
+        let call_vm = module.declare_func_in_func(ids.call_vm, func);
+        let collect = module.declare_func_in_func(ids.collect, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -782,7 +949,10 @@ impl<'a> Lower<'a> {
         let ret = func.signature.returns[0].value_type;
         let ret_hi = func.signature.returns.get(1).map(|r| r.value_type);
         let mut b = FunctionBuilder::new(func, fbc);
+        // Params: the `TRAP_*` code and the site.
         let bail = b.create_block();
+        b.append_block_param(bail, types::I64);
+        b.append_block_param(bail, types::I64);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         let ctx = b.block_params(entry)[0];
@@ -810,11 +980,22 @@ impl<'a> Lower<'a> {
             stringify,
             format,
             free_early,
+            unwind,
+            print,
+            host,
+            call_vm,
+            collect,
+            body_index: None,
+            sites,
+            entry_pc,
+            cur_loc: None,
+            cur_site: None,
             views: HashMap::new(),
             stored: HashSet::new(),
             barriers: HashMap::new(),
             view_slot,
             by_label,
+            plan,
             vars: Vec::new(),
             blocks: HashMap::new(),
             ctx,
@@ -858,11 +1039,128 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Branch to the bail block when `cond` is non-zero; continue in a new block.
-    fn bail_if(&mut self, cond: cranelift_codegen::ir::Value) {
+    /// Before a call in which a collection may run: link a record of every
+    /// heap word this body holds into the context's root chain (the VM
+    /// pins them; see `machine::native::NativeCtx::roots`). Returns the
+    /// chain's previous head, for [`Self::pop_roots`].
+    fn push_roots(&mut self, f: &MirFunc) -> Option<Roots> {
+        let words: Vec<ValueId> = (0..f.types.len() as u32)
+            .map(ValueId)
+            .filter(|&v| heap_word(ty_of(f, v)))
+            .collect();
+        if words.is_empty() {
+            return None;
+        }
+        let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            ((words.len() + 2) * 8) as u32,
+            3,
+        ));
+        let t = MemFlagsData::trusted();
+        let prev = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ROOTS);
+        self.b.ins().stack_store(types::I64, prev, slot, 0);
+        let n = self.b.ins().iconst(types::I64, words.len() as i64);
+        self.b.ins().stack_store(types::I64, n, slot, 8);
+        for (i, v) in words.iter().enumerate() {
+            let x = self.get(f, *v);
+            let x = self.coerce(x, types::I64);
+            self.b.ins().stack_store(types::I64, x, slot, ((i + 2) * 8) as i32);
+        }
+        let at = self.b.ins().stack_addr(types::I64, slot, 0);
+        self.b.ins().store(t, at, self.ctx, NATIVE_CTX_ROOTS);
+        let epoch = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
+        Some(Roots { prev, slot, words, epoch })
+    }
+
+    /// Unlink [`Self::push_roots`]'s record. When a collection may have run
+    /// meanwhile, reload the words (a minor collection moves young objects
+    /// and rewrites the record) and re-read every array view.
+    fn pop_roots(&mut self, f: &MirFunc, roots: Option<Roots>) {
+        let Some(Roots { prev, slot, words, epoch }) = roots else {
+            return;
+        };
+        let t = MemFlagsData::trusted();
+        self.b.ins().store(t, prev, self.ctx, NATIVE_CTX_ROOTS);
+        let now = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
+        let moved = self.b.ins().icmp(IntCC::NotEqual, now, epoch);
+        let cold = self.b.create_block();
+        let go = self.b.create_block();
+        self.b.ins().brif(moved, cold, &[], go, &[]);
+        self.b.set_cold_block(cold);
+        self.b.switch_to_block(cold);
+        for (i, v) in words.iter().enumerate() {
+            let x = self.b.ins().stack_load(types::I64, types::I64, slot, ((i + 2) * 8) as i32);
+            self.set(f, *v, x);
+        }
+        self.drop_views();
+        self.b.ins().jump(go, &[]);
+        self.b.switch_to_block(go);
+    }
+
+    /// A safepoint: when a collection is due, collect with this body's heap
+    /// words rooted.
+    fn safepoint(&mut self, f: &MirFunc) {
+        let due = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_GC_DUE);
+        let cold = self.b.create_block();
+        let go = self.b.create_block();
+        self.b.ins().brif(due, cold, &[], go, &[]);
+        self.b.set_cold_block(cold);
+        self.b.switch_to_block(cold);
+        let roots = self.push_roots(f);
+        self.b.ins().call(self.collect, &[self.ctx]);
+        self.pop_roots(f, roots);
+        self.b.ins().jump(go, &[]);
+        self.b.switch_to_block(go);
+    }
+
+    /// After an op that may move an array's storage (a push, a host or VM
+    /// call), when other values may name the same array: every view reads
+    /// through the helpers until its value is defined again.
+    fn drop_views(&mut self) {
+        let views: Vec<_> = self.views.values().map(|v| v.0).collect();
+        let zero = self.b.ins().iconst(types::I64, 0);
+        for ok in views {
+            self.b.def_var(ok, zero);
+        }
+    }
+
+    /// Branch to the bail block when `cond` is non-zero, stopping at the
+    /// current op for reason `code` (a `TRAP_*`); continue in a new block.
+    fn bail_if(&mut self, cond: cranelift_codegen::ir::Value, code: u64) {
         let next = self.b.create_block();
-        self.b.ins().brif(cond, self.bail, &[], next, &[]);
+        let args = self.bail_args(code);
+        self.b.ins().brif(cond, self.bail, &args, next, &[]);
         self.b.switch_to_block(next);
+    }
+
+    fn bail_args(&mut self, code: u64) -> [cranelift_codegen::ir::BlockArg; 2] {
+        let site = self.site();
+        let code = self.b.ins().iconst(types::I64, code as i64);
+        let site = self.b.ins().iconst(types::I64, site);
+        [code.into(), site.into()]
+    }
+
+    /// The current op's site: its index into `sites`, or [`NO_SITE`] when
+    /// its location is unknown.
+    fn site(&mut self) -> i64 {
+        if let Some(s) = self.cur_site {
+            return s;
+        }
+        let s = match (self.entry_pc, self.cur_loc) {
+            (Some(entry_pc), Some(loc)) if loc.is_known() => {
+                self.sites.push(NativeSite { entry_pc, loc });
+                (self.sites.len() - 1) as i64
+            }
+            _ => NO_SITE as i64,
+        };
+        self.cur_site = Some(s);
+        s
+    }
+
+    /// Lower the next op at `loc` (`None`: no site).
+    fn at(&mut self, loc: Option<common::DebugLoc>) {
+        self.cur_loc = loc;
+        self.cur_site = None;
     }
 
     fn body(&mut self, f: &MirFunc) -> Result<(), String> {
@@ -901,13 +1199,52 @@ impl<'a> Lower<'a> {
         let sp = self.b.ins().get_stack_pointer(types::I64);
         let limit = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_STACK_LIMIT);
         let low = self.b.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
-        self.bail_if(low);
+        let deep = self.b.create_block();
+        let go = self.b.create_block();
+        self.b.ins().brif(low, deep, &[], go, &[]);
+        // Past the budget: bail, unless the call committed and the thread's
+        // stack still has room. No site of its own: the caller's call
+        // names the frame.
+        self.b.switch_to_block(deep);
+        let t = MemFlagsData::trusted();
+        let committed = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_COMMITTED);
+        let hard = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_STACK_HARD);
+        let under = self.b.ins().icmp(IntCC::UnsignedLessThan, sp, hard);
+        let open = self.b.ins().icmp_imm_s(IntCC::Equal, committed, 0);
+        let stop = self.b.ins().bor(under, open);
+        self.at(None);
+        self.bail_if(stop, TRAP_STACK);
+        self.b.ins().jump(go, &[]);
+        self.b.switch_to_block(go);
+        let gc = self.body_index.is_some_and(|i| self.plan.may_gc.contains(&i));
+        if gc {
+            self.safepoint(f);
+        }
+        // Loop headers (the targets of edges back in block order) are
+        // safepoints too.
+        let order: HashMap<BlockId, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+        let mut headers = HashSet::new();
+        if gc {
+            for (i, blk) in f.blocks.iter().enumerate() {
+                let targets: Vec<BlockId> = match &blk.term {
+                    Some(Terminator::Jump { dest }) => vec![*dest],
+                    Some(Terminator::Br { taken, not_taken, .. }) => vec![*taken, *not_taken],
+                    Some(Terminator::JumpIfMatch { taken, not_taken, .. }) => vec![*taken, *not_taken],
+                    _ => Vec::new(),
+                };
+                headers.extend(targets.into_iter().filter(|t| order.get(t).is_some_and(|&j| j <= i)));
+            }
+        }
         let first = self.blocks[&f.entry];
         self.b.ins().jump(first, &[]);
 
         for blk in &f.blocks {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
+            if headers.contains(&blk.id) {
+                self.at(None);
+                self.safepoint(f);
+            }
             // A `MatchPayload` of a payload the block's `JumpIfMatch` binds
             // belongs to the taken edge, where the terminator binds it (as
             // the VM's emission does): run here, it would read the payload
@@ -922,15 +1259,17 @@ impl<'a> Lower<'a> {
                 {
                     continue;
                 }
+                self.at(Some(f.op_loc(inst.dest())));
                 self.inst(f, inst)?;
             }
+            self.at(None);
             self.term(f, blk.id, blk.term.as_ref().ok_or("no terminator")?)?;
         }
 
-        // Bail: flag the context, return a dummy word.
+        // Bail or panic (`coil_native_unwind` decides), return a dummy word.
         self.b.switch_to_block(self.bail);
-        let one = self.b.ins().iconst(types::I64, 1);
-        self.b.ins().store(MemFlagsData::trusted(), one, self.ctx, NATIVE_CTX_BAIL);
+        let p = self.b.block_params(self.bail).to_vec();
+        self.b.ins().call(self.unwind, &[self.ctx, p[0], p[1]]);
         let mut zeros = Vec::new();
         for t in std::iter::once(self.ret).chain(self.ret_hi) {
             zeros.push(if t == types::F64 { self.b.ins().f64const(0.0) } else { self.b.ins().iconst(types::I64, 0) });
@@ -990,7 +1329,7 @@ impl<'a> Lower<'a> {
                     (MirUnaryOp::Neg, MirTy::F64) => self.b.ins().fneg(a),
                     (MirUnaryOp::Neg, _) => {
                         let min = self.b.ins().icmp_imm_s(IntCC::Equal, a, i64::MIN);
-                        self.bail_if(min);
+                        self.bail_if(min, TRAP_OVERFLOW);
                         self.b.ins().ineg(a)
                     }
                     (MirUnaryOp::Not, MirTy::F64) => return Err("float not".into()),
@@ -1019,6 +1358,25 @@ impl<'a> Lower<'a> {
             MirInst::Deopt { .. } => {}
             MirInst::Call { dest, dest_hi, target, args } => {
                 let callee = *self.by_label.get(target).ok_or("unknown callee")?;
+                if let Some(&pc) = self.plan.vm_calls.get(&callee) {
+                    let pcv = self.b.ins().iconst(types::I64, i64::from(pc));
+                    let p = self.words_slot(f, args);
+                    let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                    let roots = self.push_roots(f);
+                    let call = self.b.ins().call(self.call_vm, &[self.ctx, pcv, p, n]);
+                    let w = self.b.inst_results(call)[0];
+                    self.pop_roots(f, roots);
+                    let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                    self.bail_if(flag, TRAP_HELPER);
+                    self.drop_views();
+                    self.set(f, *dest, w);
+                    if let Some(h) = dest_hi {
+                        let x = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_VM_HI);
+                        self.set(f, *h, x);
+                    }
+                    self.view_of(f, *dest);
+                    return Ok(());
+                }
                 let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
                 let sig = self.b.func.dfg.ext_funcs[fref].signature;
                 let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
@@ -1027,10 +1385,15 @@ impl<'a> Lower<'a> {
                     let x = self.get(f, *a);
                     vals.push(self.coerce(x, want));
                 }
+                let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
                 let call = self.b.ins().call(fref, &vals);
                 let results = self.b.inst_results(call).to_vec();
+                self.pop_roots(f, roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
+                if self.plan.moves.contains(&callee) {
+                    self.drop_views();
+                }
                 self.set(f, *dest, results[0]);
                 if let Some(h) = dest_hi {
                     let x = *results.get(1).ok_or("two-word call of a one-word body")?;
@@ -1050,7 +1413,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.index, &[self.ctx, a, i]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 self.b.ins().jump(join, &[w.into()]);
                 self.b.switch_to_block(join);
                 let w = self.b.block_params(join)[0];
@@ -1101,7 +1464,7 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(slow);
                 self.b.ins().call(self.store_index, &[self.ctx, a, i, v]);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
                 let v = self.get(f, *value);
@@ -1115,7 +1478,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.set_field, &[self.ctx, o, i, v]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
             }
             MirInst::Alloc { dest, kind, elems, kinds } => {
@@ -1146,7 +1509,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.alloc, &[self.ctx, code, p, n, extra]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -1157,15 +1520,8 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.array_push, &[self.ctx, a, v]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
-                // A push may move the array's storage, and other values may
-                // name the same array: every view reads through the helpers
-                // until its value is defined again.
-                let views: Vec<_> = self.views.values().map(|v| v.0).collect();
-                let zero = self.b.ins().iconst(types::I64, 0);
-                for ok in views {
-                    self.b.def_var(ok, zero);
-                }
+                self.bail_if(flag, TRAP_HELPER);
+                self.drop_views();
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -1174,7 +1530,29 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.string, &[self.ctx, i]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
+                self.set(f, *dest, w);
+            }
+            MirInst::HostInvoke { dest, native_id, layout, args } => {
+                let fp = self.b.ins().iconst(types::I64, i64::from(*native_id));
+                let lay = self.b.ins().iconst(types::I64, i64::from(*layout));
+                let p = self.words_slot(f, args);
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
+                self.drop_views();
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::Print { dest, src } => {
+                let v = self.get(f, *src);
+                let v = self.coerce(v, types::I64);
+                let call = self.b.ins().call(self.print, &[self.ctx, v]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
             }
             MirInst::FreeEarly { dest, value, deep } => {
@@ -1184,7 +1562,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.free_early, &[self.ctx, v, d]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
             }
             MirInst::Format { dest, fmt, args } => {
@@ -1194,7 +1572,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.format, &[self.ctx, fw, p, n]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
             }
             MirInst::Stringify { dest, src, tag } => {
@@ -1208,7 +1586,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.stringify, &[self.ctx, v, op]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
             }
             MirInst::StrEq { dest, lhs, rhs, ne } => {
@@ -1219,7 +1597,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.eq, &[self.ctx, a, c]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 let w = if *ne { self.b.ins().bxor_imm_u(w, 1) } else { w };
                 self.set(f, *dest, w);
             }
@@ -1272,7 +1650,7 @@ impl<'a> Lower<'a> {
                 };
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag);
+                self.bail_if(flag, TRAP_HELPER);
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -1311,7 +1689,7 @@ impl<'a> Lower<'a> {
         let t = MemFlagsData::trusted();
         let len = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_STATICS_LEN);
         let out = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, len, i64::from(slot));
-        self.bail_if(out);
+        self.bail_if(out, TRAP_HELPER);
         let base = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_STATICS);
         self.b.ins().iadd_imm_u(base, i64::from(slot) * 8)
     }
@@ -1343,7 +1721,7 @@ impl<'a> Lower<'a> {
         let call = self.b.ins().call(self.enum_payload, &[self.ctx, s, i]);
         let w = self.b.inst_results(call)[0];
         let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-        self.bail_if(flag);
+        self.bail_if(flag, TRAP_HELPER);
         w
     }
 
@@ -1408,31 +1786,31 @@ impl<'a> Lower<'a> {
         Ok(match op {
             MirBinOp::Add => {
                 let (r, of) = self.b.ins().sadd_overflow(a, c);
-                self.bail_if(of);
+                self.bail_if(of, TRAP_OVERFLOW);
                 r
             }
             MirBinOp::Sub => {
                 let (r, of) = self.b.ins().ssub_overflow(a, c);
-                self.bail_if(of);
+                self.bail_if(of, TRAP_OVERFLOW);
                 r
             }
             MirBinOp::Mul => {
                 let (r, of) = self.b.ins().smul_overflow(a, c);
-                self.bail_if(of);
+                self.bail_if(of, TRAP_OVERFLOW);
                 r
             }
             MirBinOp::Div => {
                 let z = self.b.ins().icmp_imm_s(IntCC::Equal, c, 0);
-                self.bail_if(z);
+                self.bail_if(z, TRAP_DIV_ZERO);
                 let m1 = self.b.ins().icmp_imm_s(IntCC::Equal, c, -1);
                 let min = self.b.ins().icmp_imm_s(IntCC::Equal, a, i64::MIN);
                 let both = self.b.ins().band(m1, min);
-                self.bail_if(both);
+                self.bail_if(both, TRAP_OVERFLOW);
                 self.b.ins().sdiv(a, c)
             }
             MirBinOp::Rem => {
                 let z = self.b.ins().icmp_imm_s(IntCC::Equal, c, 0);
-                self.bail_if(z);
+                self.bail_if(z, TRAP_DIV_ZERO);
                 // `x % -1` is 0 (and `srem` would trap on `MIN % -1`).
                 let m1 = self.b.ins().icmp_imm_s(IntCC::Equal, c, -1);
                 let one = self.b.ins().iconst(types::I64, 1);
@@ -1446,7 +1824,7 @@ impl<'a> Lower<'a> {
             MirBinOp::Xor => self.b.ins().bxor(a, c),
             MirBinOp::Shl | MirBinOp::Shr => {
                 let out = self.b.ins().icmp_imm_s(IntCC::UnsignedGreaterThanOrEqual, c, 64);
-                self.bail_if(out);
+                self.bail_if(out, TRAP_SHIFT);
                 if op == MirBinOp::Shl { self.b.ins().ishl(a, c) } else { self.b.ins().sshr(a, c) }
             }
             MirBinOp::Pow => return Err("int **".into()),
@@ -1526,7 +1904,8 @@ impl<'a> Lower<'a> {
                 }
             }
             Terminator::Unreachable => {
-                self.b.ins().jump(self.bail, &[]);
+                let args = self.bail_args(TRAP_HELPER);
+                self.b.ins().jump(self.bail, &args);
             }
             Terminator::JumpIfMatch { scrutinee, tag, payloads, taken, not_taken } => {
                 let s = self.get(f, *scrutinee);
@@ -1552,7 +1931,7 @@ impl<'a> Lower<'a> {
                         let call = self.b.ins().call(self.enum_tag, &[s]);
                         let tl = self.b.inst_results(call)[0];
                         let not_enum = self.b.ins().icmp_imm_s(IntCC::Equal, tl, -1);
-                        self.bail_if(not_enum);
+                        self.bail_if(not_enum, TRAP_HELPER);
                         let low = self.b.ins().band_imm_u(tl, 0xffff_ffff);
                         let hit = self.b.ins().icmp_imm_s(IntCC::Equal, low, i64::from(*tag));
                         let check = self.b.create_block();
@@ -1560,7 +1939,7 @@ impl<'a> Lower<'a> {
                         self.b.switch_to_block(check);
                         let n = self.b.ins().ushr_imm_u(tl, 32);
                         let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, n, payloads.len() as i64);
-                        self.bail_if(other);
+                        self.bail_if(other, TRAP_HELPER);
                         self.b.ins().jump(et, &[]);
                     }
                 }

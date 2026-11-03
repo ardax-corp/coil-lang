@@ -484,7 +484,7 @@ fn install_native_bodies(
                     }
                 }
             }
-            machine::native::install_for_next_run(program.entries);
+            machine::native::install_for_next_run(program.entries, program.sites);
         }
         Err(e) => eprintln!("warning: --jit: native compile failed ({e}); running on the VM"),
     }

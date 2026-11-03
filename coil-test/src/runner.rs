@@ -117,7 +117,7 @@ fn native_code(pipeline: &Pipeline, code_len: usize) -> Option<Arc<machine::nati
             }
         }
     }
-    let code = machine::native::NativeCode::new(code_len, program.entries);
+    let code = machine::native::NativeCode::new(code_len, program.entries, program.sites);
     (!code.is_empty()).then(|| Arc::new(code))
 }
 

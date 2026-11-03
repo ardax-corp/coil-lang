@@ -1229,6 +1229,7 @@ dependencies = [
  "parking_lot",
  "rkyv",
  "sha2",
+ "stacker",
 ]
 
 [[package]]

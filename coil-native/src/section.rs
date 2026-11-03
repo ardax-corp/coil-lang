@@ -12,6 +12,7 @@
 //! compile's own `Label` numbers; a call names its callee by label.
 
 use std::collections::HashMap;
+use common::DebugLoc;
 
 use compiler::native_mir::{
     BlockId, Label, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFunc, MirGcKind, MirInst, MirTy,
@@ -20,30 +21,44 @@ use compiler::native_mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 2;
+const FORMAT: u8 = 4;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for the bodies of `bodies` the backend compiles, keyed to
 /// their entry PCs. Empty when none compiles.
 pub fn encode(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Vec<u8> {
-    let plan = crate::plan(bodies);
+    let plan = crate::plan(bodies, entry_pcs);
     if plan.compile.is_empty() {
         return Vec::new();
     }
     let mut w = Writer(Vec::new());
     w.0.extend_from_slice(MAGIC);
     w.u8(FORMAT);
-    w.u32(plan.compile.len() as u32);
-    for &i in &plan.compile {
+    // The bodies that compile, then a stub of each body they call on the
+    // VM (its name, PC, label and shape: what `plan` needs to call it).
+    let mut stubs: Vec<usize> = plan.vm_calls.keys().copied().collect();
+    stubs.sort_unstable();
+    w.u32((plan.compile.len() + stubs.len()) as u32);
+    for (&i, stub) in plan.compile.iter().map(|i| (i, false)).chain(stubs.iter().map(|i| (i, true))) {
         let body = &bodies[i];
         w.str(&body.name);
         w.u32(entry_pcs.get(&body.name).copied().unwrap_or(NO_PC));
         // `plan` keeps only bodies a call can name, so each has a label.
         w.u32(body.entry.map_or(u32::MAX, |l| l.0));
-        func(&mut w, &body.mir);
+        if stub {
+            w.u8(BODY_STUB);
+            w.u32(body.mir.params.len() as u32);
+            w.u8(u8::from(body.mir.ret_hi_ty.is_some()));
+        } else {
+            w.u8(BODY_FULL);
+            func(&mut w, &body.mir);
+        }
     }
     w.0
 }
+
+const BODY_FULL: u8 = 0;
+const BODY_STUB: u8 = 1;
 
 /// The bodies of a section and their entry PCs, ready for [`crate::jit`].
 pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), String> {
@@ -62,7 +77,20 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
         let name = r.str()?;
         let pc = r.u32()?;
         let label = r.u32()?;
-        let mir = read_func(&mut r, &name)?;
+        let mir = match r.u8()? {
+            BODY_FULL => read_func(&mut r, &name)?,
+            BODY_STUB => {
+                // A body that stays on the VM: native code calls it there.
+                let mut f = MirFunc::new(&name);
+                f.emit_refusal = Some("runs on the VM");
+                f.params = (0..r.u32()?).map(ValueId).collect();
+                if r.u8()? != 0 {
+                    f.ret_hi_ty = Some(MirTy::I64);
+                }
+                f
+            }
+            k => return Err(format!("native MIR: bad body kind {k}")),
+        };
         if pc != NO_PC {
             pcs.insert(name.clone(), pc);
         }
@@ -129,6 +157,8 @@ const I_FORMAT: u8 = 23;
 const I_FREE_EARLY: u8 = 24;
 const I_LOAD_STATIC: u8 = 25;
 const I_STORE_STATIC: u8 = 26;
+const I_PRINT: u8 = 27;
+const I_HOST: u8 = 28;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -231,6 +261,22 @@ fn func(w: &mut Writer, f: &MirFunc) {
             }
             _ => w.u8(T_UNREACHABLE),
         }
+    }
+    // Source locations of the ops a native panic names (see
+    // `crate::Lower::site`): each instruction's own location, when known.
+    let locs: Vec<(ValueId, DebugLoc)> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .map(|i| (i.dest(), f.op_loc(i.dest())))
+        .filter(|(_, l)| l.is_known())
+        .collect();
+    w.u32(locs.len() as u32);
+    for (v, l) in locs {
+        w.v(v);
+        w.u32(l.file);
+        w.u32(l.start_byte);
+        w.u32(l.end_byte);
     }
 }
 
@@ -384,6 +430,18 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u32(*slot);
             w.v(*value);
         }
+        MirInst::HostInvoke { dest, native_id, layout, args } => {
+            w.u8(I_HOST);
+            w.v(*dest);
+            w.u32(u32::from(*native_id));
+            w.u8(*layout);
+            w.vs(args);
+        }
+        MirInst::Print { dest, src } => {
+            w.u8(I_PRINT);
+            w.v(*dest);
+            w.v(*src);
+        }
         MirInst::FreeEarly { dest, value, deep } => {
             w.u8(I_FREE_EARLY);
             w.v(*dest);
@@ -534,6 +592,12 @@ fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
         });
         f.blocks.push(b);
     }
+    let nl = r.len()?;
+    for _ in 0..nl {
+        let v = r.v()?;
+        let loc = DebugLoc { file: r.u32()?, start_byte: r.u32()?, end_byte: r.u32()? };
+        f.op_locs.insert(v, loc);
+    }
     Ok(f)
 }
 
@@ -609,6 +673,13 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
         I_LOAD_STATIC => MirInst::LoadStatic { dest: r.v()?, slot: r.u32()? },
         I_STORE_STATIC => MirInst::StoreStatic { dest: r.v()?, slot: r.u32()?, value: r.v()? },
+        I_PRINT => MirInst::Print { dest: r.v()?, src: r.v()? },
+        I_HOST => MirInst::HostInvoke {
+            dest: r.v()?,
+            native_id: u16::try_from(r.u32()?).map_err(|_| "native MIR: bad host id")?,
+            layout: r.u8()?,
+            args: r.vs()?,
+        },
         I_FREE_EARLY => MirInst::FreeEarly { dest: r.v()?, value: r.v()?, deep: r.u8()? != 0 },
         I_FORMAT => MirInst::Format { dest: r.v()?, fmt: r.v()?, args: r.vs()? },
         I_STRINGIFY => MirInst::Stringify { dest: r.v()?, src: r.v()?, tag: Some(r.u32()?).filter(|&t| t != u32::MAX) },

@@ -1464,7 +1464,7 @@ fn resolve_dense_index_object_in(
 }
 
 /// Panic when a frame needs more operand stack than [`crate::MAX_OPERAND_STACK_SLOTS`].
-const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
+pub(crate) const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
 
 /// Panic when [`Machine::set_step_budget`]'s budget runs out.
 pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
@@ -1541,6 +1541,8 @@ pub struct Machine<const S: usize> {
     /// overwrite the outer depth.
     nested_frame_depths: Vec<usize>,
     nested_return: Option<Value>,
+    /// The second word of the two-word `RETURN` `nested_return` captured.
+    nested_return_hi: Value,
     /// Over-apply stub frames entered and not yet finished (`OVER_APPLY_IP`).
     /// A panic that unwinds one leaves the count high, which only keeps
     /// `return_bookkeeping` on.
@@ -1559,6 +1561,13 @@ pub struct Machine<const S: usize> {
     /// The next runtime panic's message already names its location
     /// (`contract_fail`): print no ` at …` suffix.
     panic_without_location: bool,
+    /// While the VM reports a native panic: one backtrace line per native
+    /// frame, innermost first, and the innermost frame's location.
+    native_panic_frames: Vec<String>,
+    native_panic_loc: Option<String>,
+    /// Native calls in a VM call, innermost last: the heap words their
+    /// frames hold are pinned roots ([`crate::native::NativeCtx::for_each_root`]).
+    native_roots: Vec<*mut crate::native::NativeCtx>,
     /// Task scheduler, created by the first `task::scope` (see `task.rs`).
     sched: Option<Box<crate::task::Scheduler>>,
     /// Message of a panic a child task raised (the scope reports it).
@@ -1716,12 +1725,16 @@ impl<const S: usize> Machine<S> {
             return_bookkeeping: false,
             nested_frame_depths: Vec::new(),
             nested_return: None,
+            nested_return_hi: Value::default(),
             over_apply_frames: 0,
             pending_ffi: None,
             ffi_arg_roots: Vec::new(),
             pending_io: None,
             panicked: false,
             panic_without_location: false,
+            native_panic_frames: Vec::new(),
+            native_panic_loc: None,
+            native_roots: Vec::new(),
             sched: None,
             task_panic_message: None,
             finalizer_aborted: false,
@@ -1790,8 +1803,13 @@ impl<const S: usize> Machine<S> {
 
     /// Run the native code at `target` on the top `arity` stack words.
     /// `None`: no native code there, or it bailed and the VM runs the call.
+    /// `Some(Err)`: it panicked after an effect it cannot take back.
     #[inline(never)]
-    fn try_native_call(&mut self, target: usize, arity: usize) -> Option<crate::native::NativeResult> {
+    fn try_native_call(
+        &mut self,
+        target: usize,
+        arity: usize,
+    ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
         let base = self.stack.tell() - arity;
         let table = self.native.as_deref_mut()?;
         // After a bail the VM re-runs that call in bytecode; calls nested
@@ -1812,18 +1830,98 @@ impl<const S: usize> Machine<S> {
         for (i, w) in words.iter_mut().take(arity).enumerate() {
             *w = self.stack[base + i].bits();
         }
-        let has_finalizers = !self.finalizer_by_type.is_empty();
-        match crate::native::call(&entry, &words[..arity], &mut self.heap, &self.program_strings, &mut self.program_string_cache, has_finalizers, &mut self.statics) {
-            Some(r) => {
+        let strings_len = self.program_strings.len().min(self.program_string_cache.len());
+        let env = crate::native::NativeEnv {
+            heap: std::ptr::from_mut::<crate::memory::Heap>(&mut self.heap),
+            strings: self.program_strings.as_ptr(),
+            string_cache: self.program_string_cache.as_mut_ptr(),
+            strings_len,
+            has_finalizers: !self.finalizer_by_type.is_empty(),
+            statics: self.statics.as_mut_ptr(),
+            statics_len: self.statics.len(),
+            machine: std::ptr::from_mut(self).cast(),
+            host: crate::native::NativeHost {
+                print: Self::native_print,
+                call: Self::native_vm_call,
+                collect: Self::native_collect,
+                free: Self::native_free,
+            },
+        };
+        // Native code never collects; a VM call it makes may, with the
+        // native frames' heap words pinned (`native_vm_call`).
+        let out = crate::native::call(&entry, &words[..arity], &env);
+        let table = self.native.as_deref_mut()?;
+        match out {
+            crate::native::NativeOutcome::Done(r) => {
                 table.hits += 1;
-                Some(r)
+                Some(Ok(r))
             }
-            None => {
+            crate::native::NativeOutcome::Panicked(p) => {
+                table.hits += 1;
+                Some(Err(p))
+            }
+            crate::native::NativeOutcome::Bailed => {
                 table.bails += 1;
                 table.quiet_above = base;
                 None
             }
         }
+    }
+
+    /// [`crate::native::NativeHost::collect`]: a collection at a native
+    /// safepoint, as after a call that allocated.
+    unsafe fn native_collect(raw: *mut c_void, ctx: *mut crate::native::NativeCtx) {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let ip = if vm.frames.is_empty() { 0 } else { vm.frames.get().tell() };
+        vm.native_roots.push(ctx);
+        vm.maybe_gc_after_call_alloc(ip);
+        vm.native_roots.pop();
+    }
+
+    /// [`crate::native::NativeHost::free`]: what `FreeEarly` does.
+    unsafe fn native_free(raw: *mut c_void, word: u64, deep: bool) {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let _ = vm.free_early(Value::from(word), deep);
+    }
+
+    /// [`crate::native::NativeHost::print`]: what `PRINT` does.
+    unsafe fn native_print(raw: *mut c_void, s: &str) {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        if crate::io::capture_write(false, s.as_bytes()) {
+            // `io::capture_begin()` keeps it.
+        } else if let Some(out) = vm.output.as_mut() {
+            let _ = write!(out, "{s}");
+            let _ = out.flush();
+            vm.mirror_stdout(s);
+        } else {
+            print!("{s}");
+            let _ = io::stdout().flush();
+        }
+    }
+
+    /// [`crate::native::NativeHost::call`]: run a body native code calls
+    /// that stays on the VM, in a nested execution.
+    unsafe fn native_vm_call(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        pc: u32,
+        args: &[Value],
+        panicked: &mut bool,
+    ) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        vm.nested_return_hi = Value::default();
+        // A collection in the call pins what the native frames hold.
+        vm.native_roots.push(ctx);
+        let out = vm.call_function(pc, args);
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        // SAFETY: the calling native code's live context.
+        unsafe { (*ctx).vm_hi = std::mem::take(&mut vm.nested_return_hi).bits() };
+        out.bits()
     }
 
     /// Limit execution to `budget` steps, where a step is a taken loop
@@ -2376,7 +2474,10 @@ impl<const S: usize> Machine<S> {
         // ip is the panic instruction.
         let top_is_panic_site =
             !self.frames.is_empty() && self.frames.get().tell() == panic_insn_ip;
-        if !top_is_panic_site && let Some(loc) = self.format_panic_location(panic_insn_ip) {
+        if !top_is_panic_site
+            && self.native_panic_frames.is_empty()
+            && let Some(loc) = self.format_panic_location(panic_insn_ip)
+        {
             lines.push(format!("  at {loc}"));
         }
         // Deep recursion repeats one frame line; print each run once.
@@ -2387,6 +2488,15 @@ impl<const S: usize> Machine<S> {
                 *repeats = 0;
             }
         };
+        // Frames of a native panic sit above the VM's own.
+        for line in &self.native_panic_frames {
+            if lines.last() == Some(line) {
+                repeats += 1;
+                continue;
+            }
+            flush(&mut lines, &mut repeats);
+            lines.push(line.clone());
+        }
         for frame_idx in (0..self.frames.len()).rev() {
             let ip = self.frames[frame_idx].tell();
             // An over-apply stub runs no code of its own.
@@ -2415,6 +2525,61 @@ impl<const S: usize> Machine<S> {
         lines.join("\n")
     }
 
+    /// A panic native code raised in the call at `call_ip`: the VM's panic
+    /// for the same trap, with the native frames above the VM's own.
+    #[cold]
+    #[inline(never)]
+    fn native_panic(&mut self, p: &crate::native::NativePanic, call_ip: usize) -> bool {
+        let Some(code) = self.native.as_ref().map(|t| std::sync::Arc::clone(&t.code)) else {
+            return self.runtime_panic(p.message(), call_ip);
+        };
+        let mut frames = Vec::new();
+        let mut innermost = None;
+        for (i, &s) in p.trace.iter().enumerate() {
+            let Some(site) = code.site(s) else { continue };
+            let name = self.fn_symbol_at_ip(site.entry_pc as usize).unwrap_or("<unknown>").to_string();
+            let loc = self.native_site_location(site);
+            if i == 0 {
+                innermost = loc.clone();
+            }
+            frames.push(match loc {
+                Some(loc) => format!("  in {name} at {loc}"),
+                None => format!("  in {name}"),
+            });
+        }
+        self.native_panic_loc = innermost;
+        self.native_panic_frames = frames;
+        let out = self.runtime_panic(p.message(), call_ip);
+        self.native_panic_frames.clear();
+        self.native_panic_loc = None;
+        out
+    }
+
+    /// `path:line:col` of a native panic site: the location the VM records
+    /// for the same op, found among the PCs of the site's function.
+    fn native_site_location(&self, site: crate::native::NativeSite) -> Option<String> {
+        let start = site.entry_pc as usize;
+        let syms = &self.program_debug.fn_symbols;
+        let end = syms
+            .iter()
+            .map(|s| s.entry_pc as usize)
+            .filter(|&pc| pc > start)
+            .min()
+            .unwrap_or(self.program_code.len());
+        let want = site.loc;
+        let mut near = None;
+        for pc in start..end {
+            let Some(l) = self.program_debug.loc_at(pc) else { continue };
+            if l.file == want.file && l.start_byte == want.start_byte {
+                if l.end_byte == want.end_byte {
+                    return self.format_panic_location(pc);
+                }
+                near.get_or_insert(pc);
+            }
+        }
+        near.and_then(|pc| self.format_panic_location(pc))
+    }
+
     /// Abort execution with a VM panic (same path as `Instruction::Panic`).
     fn runtime_panic(&mut self, message: &str, panic_insn_ip: usize) -> bool {
         // The top frame's saved ip is stale mid-instruction; the backtrace
@@ -2431,6 +2596,10 @@ impl<const S: usize> Machine<S> {
             return false;
         }
         let loc_suffix = if std::mem::take(&mut self.panic_without_location) {
+            String::new()
+        } else if let Some(loc) = self.native_panic_loc.take() {
+            format!(" at {loc}")
+        } else if !self.native_panic_frames.is_empty() {
             String::new()
         } else {
             self.format_panic_location(panic_insn_ip)
@@ -2918,14 +3087,34 @@ impl<const S: usize> Machine<S> {
             crate::memory::RootKind::Precise => must_statics.push(i),
             _ => pins.push(addr),
         });
-        self.for_each_handle_root(&mut |addr, _| pins.push(addr));
+        self.for_each_handle_root_but_native(&mut |addr, _| pins.push(addr));
+        // Native frames reload their heap words after a collection: they
+        // move like precise stack slots.
+        let mut must_native: Vec<*mut u64> = Vec::new();
+        for &ctx in &self.native_roots {
+            // SAFETY: a native call in a collection keeps its context alive.
+            unsafe { &*ctx }.for_each_root(|w| must_native.push(w));
+        }
         let precise: Vec<u64> = must
             .iter()
             .map(|&idx| self.stack[idx].heap_addr())
             .chain(must_statics.iter().map(|&i| self.statics[i].heap_addr()))
+            .chain(must_native.iter().filter_map(|&w| {
+                // SAFETY: the slot is a live word of a native root record.
+                let addr = Value::from(unsafe { *w }).heap_addr();
+                (addr != 0 && self.heap.find_object_by_addr(addr).is_some()).then_some(addr)
+            }))
             .collect();
         let plan = self.heap.minor_plan(&pins, &precise);
         self.heap.restore_gc_roots(pins);
+        for w in must_native {
+            // SAFETY: as above.
+            unsafe {
+                if let Some(v) = plan.forward(Value::from(*w)) {
+                    *w = v.bits();
+                }
+            }
+        }
         for idx in must {
             if let Some(v) = plan.forward(self.stack[idx]) {
                 self.stack[idx] = v;
@@ -3244,6 +3433,23 @@ impl<const S: usize> Machine<S> {
     /// VM roots outside the operand stack and statics. None of them can be
     /// rewritten by a moving collector (untyped words, or Rust-held handles).
     fn for_each_handle_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
+        self.for_each_handle_root_but_native(visit);
+        // Heap words native frames hold across a VM call or a safepoint.
+        let heap = &self.heap;
+        for &ctx in &self.native_roots {
+            // SAFETY: a native call in a collection keeps its context alive.
+            unsafe { &*ctx }.for_each_root(|w| {
+                let addr = Value::from(unsafe { *w }).heap_addr();
+                if addr != 0 && heap.find_object_by_addr(addr).is_some() {
+                    visit(addr, crate::memory::RootKind::Precise);
+                }
+            });
+        }
+    }
+
+    /// [`Self::for_each_handle_root`] without the native frames' words (a
+    /// minor collection forwards those).
+    fn for_each_handle_root_but_native(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.heap;
         let word = |v: Value, kind: crate::memory::RootKind, visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
             let addr = v.heap_addr();
@@ -3280,6 +3486,7 @@ impl<const S: usize> Machine<S> {
         for &v in &self.ffi_arg_roots {
             word(v, crate::memory::RootKind::Pinned, visit);
         }
+
         self.for_each_mapped_slot_index(|idx| {
             if idx < self.stack.capacity() {
                 word(self.stack[idx], crate::memory::RootKind::Precise, visit);
@@ -5528,8 +5735,23 @@ impl<const S: usize> Machine<S> {
                     if unlikely(self.native.is_some())
                         && !debug_attached
                         && target != 0
-                        && let Some(ret) = self.try_native_call(target, arity)
+                        && let Some(ret) = {
+                            // The caller's return address, as a CALL saves it:
+                            // a panic or a VM call inside names this frame.
+                            self.frames.get_mut().seek(ip);
+                            self.try_native_call(target, arity)
+                        }
                     {
+                        let ret = match ret {
+                            Ok(ret) => ret,
+                            // A VM call native code made panicked and
+                            // reported it: go on unwinding from this call.
+                            Err(p) if p.code == crate::native::TRAP_VM_PANIC => {
+                                self.rearm_unwind_after_early_drop(ip.saturating_sub(1));
+                                return false;
+                            }
+                            Err(p) => return self.native_panic(&p, ip.saturating_sub(1)),
+                        };
                         let base = self.stack.tell() - arity;
                         self.stack.seek(base);
                         self.stack.push(Value::from(ret.lo));
@@ -5618,6 +5840,8 @@ impl<const S: usize> Machine<S> {
                         let tag = self.stack.pop();
                         let payload = self.stack.pop();
                         if self.capture_nested_return(payload) {
+                            // A native caller's VM call reads both words.
+                            self.nested_return_hi = tag;
                             return false;
                         }
                         let return_sp = self.pop_call_frame();

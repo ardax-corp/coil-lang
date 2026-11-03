@@ -19,6 +19,7 @@ gc-stress = []
 gc-stats = []
 
 [dependencies]
+stacker = "0.1.25"
 common = { path = "../common" }
 coil-simd = { path = "../coil-simd" }
 crossbeam-deque = "0.8"
