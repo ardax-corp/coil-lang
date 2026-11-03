@@ -198,7 +198,7 @@ fn allocation_runs_natively_and_matches_the_vm() {
            let v: Vec<int> = [9];\n  let _ = println(format(\"%i\", grow(v, 3)));\n}}\n"
     );
     let stats = same_as_vm("alloc", &src);
-    for f in ["make", "shape", "grow"] {
+    for f in ["make", "area", "shape", "grow"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
     assert!(stats.contains("1 bailed"), "stats: {stats}");
@@ -211,6 +211,30 @@ fn allocation_runs_natively_and_matches_the_vm() {
     );
     let stats = same_as_vm("alloc_churn", &src);
     assert!(compiled(&stats, "churn") && stats.contains("1 bailed"), "stats: {stats}");
+}
+
+#[test]
+fn matches_on_option_result_and_enums_run_natively() {
+    let src = format!(
+        "{HEADER}class B {{ pub n: int }}\n\
+         #[inline(never)]\nfn find(Vec<B> v, int k) -> Option<B> {{ let i = 0; while i < v.len() {{ if v[i].n == k {{ return Some(v[i]); }} i = i + 1; }} return None; }}\n\
+         #[inline(never)]\nfn get(Vec<B> v, int k) -> int {{ return match find(v, k) {{ Some(b) => b.n * 10, None => -1 }}; }}\n\
+         #[inline(never)]\nfn check(B b) -> Result<B, B> {{ if b.n > 2 {{ return Err(b); }} return Ok(b); }}\n\
+         #[inline(never)]\nfn score(B b) -> int {{ return match check(b) {{ Ok(x) => x.n, Err(e) => 100 + e.n }}; }}\n\
+         fn main() {{\n  let v: Vec<B> = [new B(1), new B(2), new B(3)];\n\
+           let _ = println(format(\"%i %i %i %i\", get(v, 2), get(v, 7), score(v[0]), score(v[2])));\n}}\n"
+    );
+    let stats = same_as_vm("matches", &src);
+    for f in ["find", "get", "check", "score"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    // The same bodies through the archive's native MIR section.
+    let archive = compile("matches_archive", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(jit.stdout, vm.stdout);
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert!(String::from_utf8_lossy(&jit.stderr).contains("calls ran natively, 0 bailed"));
 }
 
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
