@@ -4521,6 +4521,40 @@
         assert_eq!(vm.pop().as_int(), 30);
     }
 
+    /// A function value that captures nothing and fills nothing is the same
+    /// value every time it is built: a lambda in a loop (`and_modify(fn (int
+    /// c) => c + 1)` once per word) must not allocate a closure per pass,
+    /// which no minor collection reclaims.
+    #[test]
+    fn make_fn_without_captures_allocates_once() {
+        let body_entry = 13u32;
+        let code = vec![
+            const_int(0),
+            const_int(body_entry as i64),
+            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_op(0, 0, 2, false)),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            const_int(0),
+            const_int(body_entry as i64),
+            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_op(0, 0, 2, false)),
+            Byte::new(Instruction::StorePop).with_operand_u32(1),
+            const_int(10),
+            const_int(20),
+            Byte::new(Instruction::LOAD).with_operand_u32(1),
+            Byte::new(Instruction::CallIndirect).with_operand_u32(2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            Byte::new(Instruction::LOAD).with_operand_u32(1),
+            Byte::new(Instruction::ADD),
+            Byte::new(Instruction::RETURN),
+        ];
+        assert!(matches!(code[body_entry as usize].bytecode(), Instruction::LOAD));
+        let mut vm = Machine::<16>::default();
+        let before = vm.heap.live_object_count();
+        vm.run(&code);
+        assert_eq!(vm.pop().as_int(), 30);
+        assert_eq!(vm.heap.live_object_count(), before + 1, "both builds share one function object");
+    }
+
     #[test]
     fn make_fn_partial_then_complete_via_call_indirect() {
         let body_entry = 9u32;
