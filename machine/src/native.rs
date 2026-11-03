@@ -97,6 +97,11 @@ pub struct NativeCtx {
     /// first ([`coil_native_defer`]): the VM runs them once it reported
     /// the panic, as it runs its own frames' pads.
     pub pads: *mut Vec<NativePad>,
+    /// While a native frame makes a call that may run VM code (which may
+    /// panic and print a backtrace): a chain of `[next, site]` records on
+    /// the native stack, innermost first, `0`-terminated, naming each such
+    /// frame's call site ([`NativeCode::sites`]).
+    pub calls: u64,
 }
 
 /// A `defer` cleanup pad: called with its frame's homes.
@@ -128,6 +133,9 @@ pub const NATIVE_CTX_GC_DUE: i32 = std::mem::offset_of!(NativeCtx, gc_due) as i3
 /// Byte offset of [`NativeCtx::has_finalizers`].
 pub const NATIVE_CTX_HAS_FINALIZERS: i32 = std::mem::offset_of!(NativeCtx, has_finalizers) as i32;
 
+/// Byte offset of [`NativeCtx::calls`].
+pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
+
 /// Byte offset of [`NativeCtx::roots`].
 pub const NATIVE_CTX_ROOTS: i32 = std::mem::offset_of!(NativeCtx, roots) as i32;
 
@@ -136,6 +144,20 @@ impl NativeCtx {
     /// call: the root chain and the queued early frees.
     /// The words are native code's to reload: a moving collection may
     /// rewrite them.
+    /// The sites of [`Self::calls`], innermost first.
+    pub(crate) fn call_sites(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut at = self.calls as *const u64;
+        while !at.is_null() {
+            // SAFETY: native code links only live records of its frames.
+            unsafe {
+                out.push(*at.add(1) as u32);
+                at = *at as *const u64;
+            }
+        }
+        out
+    }
+
     pub(crate) fn for_each_root(&self, mut visit: impl FnMut(*mut u64, bool)) {
         let mut at = self.roots as *mut u64;
         while !at.is_null() {
@@ -321,6 +343,7 @@ impl NativeCtx {
             gc_due: 0,
             gc_epoch: 0,
             pads: std::ptr::null_mut(),
+            calls: 0,
         }
     }
 

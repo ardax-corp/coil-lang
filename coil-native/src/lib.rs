@@ -26,7 +26,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN, ROOTS_AMBIGUOUS,
+    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -245,6 +245,9 @@ struct Plan {
     may_gc: HashSet<usize>,
     /// Entry PCs of the bodies by label, for function values.
     pcs: HashMap<Label, u32>,
+    /// Bodies that may run VM code ([`runs_vm_code`], a VM call, or a
+    /// call of such a body): calls of them link a `NativeCtx::calls` record.
+    vm_reach: HashSet<usize>,
     /// Bodies that may be a type's `drop` (a call claims its finalizer).
     drops: HashSet<usize>,
 }
@@ -352,8 +355,6 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         }
         may_gc.extend(more);
     }
-    let mut compile: Vec<usize> = ok.into_keys().collect();
-    compile.sort_unstable();
     let pcs = by_label
         .iter()
         .filter_map(|(&l, &i)| Some((l, *entry_pcs.get(&bodies[i].name)?)))
@@ -364,7 +365,41 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         .filter(|(_, b)| b.name.ends_with("::drop") && b.mir.params.len() == 1)
         .map(|(i, _)| i)
         .collect();
-    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs, drops }
+    // Bodies that may run VM code (which may panic and print a
+    // backtrace): their calls name themselves in `NativeCtx::calls`.
+    let mut vm_reach: HashSet<usize> = ok
+        .iter()
+        .filter(|(i, callees)| {
+            callees.iter().any(|c| vm_calls.contains_key(c)) || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(runs_vm_code)
+        })
+        .map(|(&i, _)| i)
+        .collect();
+    loop {
+        let more: Vec<usize> = ok
+            .iter()
+            .filter(|(i, callees)| !vm_reach.contains(i) && callees.iter().any(|c| vm_reach.contains(c)))
+            .map(|(&i, _)| i)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        vm_reach.extend(more);
+    }
+    let mut compile: Vec<usize> = ok.into_keys().collect();
+    compile.sort_unstable();
+    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs, drops, vm_reach }
+}
+
+/// An instruction that may run VM code: a function value's call, a free
+/// or collection that may run `drop`s.
+fn runs_vm_code(inst: &MirInst) -> bool {
+    match inst {
+        MirInst::CallIndirect { .. } | MirInst::FreeEarly { .. } => true,
+        MirInst::HostInvoke { native_id, .. } => {
+            machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect)
+        }
+        _ => false,
+    }
 }
 
 /// An instruction whose helper may allocate.
@@ -1065,6 +1100,8 @@ struct Lower<'a> {
     homes_ptr: Option<cranelift_codegen::ir::Value>,
     /// Homes holding heap words, rooted with the body's heap values.
     heap_homes: Vec<u16>,
+    /// The [`Self::push_call`] record of this frame.
+    calls_slot: Option<cranelift_codegen::ir::StackSlot>,
     /// An opaque body's `int` words that may be objects: rooted in an
     /// ambiguous record (pinned, never rewritten).
     opaque: Vec<ValueId>,
@@ -1202,6 +1239,7 @@ impl<'a> Lower<'a> {
             homes_ptr: None,
             heap_homes: Vec::new(),
             opaque: Vec::new(),
+            calls_slot: None,
             defer,
             claim,
             pad_fn: None,
@@ -1710,7 +1748,9 @@ impl<'a> Lower<'a> {
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
                 let d = self.b.ins().iconst(types::I64, i64::from(*dicts));
                 let roots = self.push_roots(f);
+                let prev = self.push_call();
                 let call = self.b.ins().call(self.call_value, &[self.ctx, c, p, n, d]);
+                self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
                 self.pop_roots(f, roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
@@ -1885,8 +1925,12 @@ impl<'a> Lower<'a> {
                 // `gc_collect` collects: this frame's words are roots.
                 let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect);
                 let roots = if collect { self.push_roots(f) } else { None };
+                let prev = if collect { Some(self.push_call()) } else { None };
                 let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
                 let w = self.b.inst_results(call)[0];
+                if let Some(prev) = prev {
+                    self.pop_call(prev);
+                }
                 self.pop_roots(f, roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
@@ -1927,7 +1971,9 @@ impl<'a> Lower<'a> {
                 let v = self.coerce(v, types::I64);
                 let d = self.b.ins().iconst(types::I64, i64::from(*deep));
                 let roots = self.push_roots(f);
+                let prev = self.push_call();
                 self.b.ins().call(self.free_early, &[self.ctx, v, d]);
+                self.pop_call(prev);
                 self.pop_roots(f, roots);
                 self.drop_views();
                 self.b.ins().jump(join, &[]);
@@ -2087,8 +2133,10 @@ impl<'a> Lower<'a> {
             let p = self.words_slot(f, args);
             let n = self.b.ins().iconst(types::I64, args.len() as i64);
             let roots = self.push_roots(f);
+            let prev = self.push_call();
             let call = self.b.ins().call(self.call_vm, &[self.ctx, pcv, p, n]);
             let w = self.b.inst_results(call)[0];
+            self.pop_call(prev);
             self.pop_roots(f, roots);
             let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
             self.bail_if(flag, TRAP_HELPER);
@@ -2113,8 +2161,12 @@ impl<'a> Lower<'a> {
             vals.push(self.coerce(x, want));
         }
         let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
+        let prev = if self.plan.vm_reach.contains(&callee) { Some(self.push_call()) } else { None };
         let call = self.b.ins().call(fref, &vals);
         let results = self.b.inst_results(call).to_vec();
+        if let Some(prev) = prev {
+            self.pop_call(prev);
+        }
         self.pop_roots(f, roots);
         let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
         self.bail_if(flag, TRAP_HELPER);
@@ -2128,6 +2180,38 @@ impl<'a> Lower<'a> {
         }
         self.view_of(f, *dest);
         Ok(())
+    }
+
+    /// Before a call that may run VM code: link this frame's call site
+    /// into `NativeCtx::calls`, so a panic the VM reports meanwhile names
+    /// this frame in its backtrace. Returns the chain's previous head.
+    fn push_call(&mut self) -> cranelift_codegen::ir::Value {
+        let slot = match self.calls_slot {
+            Some(s) => s,
+            None => {
+                let s = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    16,
+                    3,
+                ));
+                self.calls_slot = Some(s);
+                s
+            }
+        };
+        let t = MemFlagsData::trusted();
+        let prev = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_CALLS);
+        self.b.ins().stack_store(types::I64, prev, slot, 0);
+        let site = self.site();
+        let site = self.b.ins().iconst(types::I64, site);
+        self.b.ins().stack_store(types::I64, site, slot, 8);
+        let at = self.b.ins().stack_addr(types::I64, slot, 0);
+        self.b.ins().store(t, at, self.ctx, NATIVE_CTX_CALLS);
+        prev
+    }
+
+    /// Unlink [`Self::push_call`]'s record.
+    fn pop_call(&mut self, prev: cranelift_codegen::ir::Value) {
+        self.b.ins().store(MemFlagsData::trusted(), prev, self.ctx, NATIVE_CTX_CALLS);
     }
 
     /// Base address and offset of home `h`.
