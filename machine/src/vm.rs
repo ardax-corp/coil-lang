@@ -2832,7 +2832,7 @@ impl<const S: usize> Machine<S> {
     /// nursery and reset it (`feature/escape-memory` step 4). Where nothing
     /// may move it promotes the young objects in place instead.
     fn gc_minor(&mut self) {
-        if !self.heap.has_young() || !self.heap.gc_is_idle() {
+        if !self.heap.has_young_in_use() || !self.heap.gc_is_idle() {
             return;
         }
         #[cfg(any(test, feature = "vm_profile"))]

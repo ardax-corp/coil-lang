@@ -1519,6 +1519,7 @@ impl Heap {
         self.gc_phase == GcPhase::Idle
             && (cfg!(feature = "gc-stress")
                 || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+                || self.slab.held_chunks() >= self.nursery_chunks
                 || self.slab.young_chunks_in_use() >= self.nursery_chunks)
     }
 
@@ -1544,7 +1545,9 @@ impl Heap {
     /// them buys nothing: allocate old for a while, longer each time in a
     /// row, and try the nursery again after.
     pub(super) fn note_survival(&mut self, survivors: usize, objects: usize) {
-        if self.region_depth != 0 {
+        // A minor that found nothing young (only held chunks) says nothing
+        // about survival.
+        if self.region_depth != 0 || objects == 0 {
             return;
         }
         if survivors * 2 > objects {
@@ -1593,6 +1596,7 @@ impl Heap {
         };
         cfg!(feature = "gc-stress")
             || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+            || self.slab.held_chunks() >= self.nursery_chunks
     }
 
     /// Allocate instances, enums, boxes, tuples and arrays in the nursery
@@ -4407,7 +4411,7 @@ pub trait GcSized {
     const NURSERY: bool = false;
     /// Allocated in the nursery inside a `region` block: the movable kinds,
     /// and strings, which a minor collection frees but never moves (a
-    /// surviving one turns old in place).
+    /// surviving one is held in place).
     const REGION: bool = Self::NURSERY;
     /// Can hold heap references: an old object of this kind is remembered
     /// when it is born, since it may start out naming young objects.
@@ -4427,6 +4431,18 @@ pub(crate) const GEN_UNLOGGED: u8 = 2;
 /// [`GcHeader::generation`]: a young object a minor collection may not
 /// move (an ambiguous word names it). Only set during a minor collection.
 pub(crate) const GEN_PINNED: u8 = 4;
+/// [`GcHeader::generation`]: a young object a minor pinned, held in its
+/// chunk until a major frees it. Minors treat it as old: they do not trace
+/// it, and the write barrier records it ([`GEN_UNLOGGED`]) like any old
+/// object (#2255).
+pub(crate) const GEN_HELD: u8 = 8;
+
+/// Generation bits of an object the write barrier covers: an old one or a
+/// held one.
+#[inline]
+pub(crate) fn barriered(generation: u8) -> bool {
+    generation & GEN_YOUNG == 0 || generation & GEN_HELD != 0
+}
 
 thread_local! {
     /// Old objects written since the last minor collection (the nursery's
@@ -4465,7 +4481,7 @@ pub(super) fn relog_all(slab: &super::slab::Slab) {
     while let Some(addr) = slab.next_slot(&mut cur) {
         // SAFETY: `next_slot` yields slot starts in mapped chunks.
         let header = unsafe { &*(addr as *const GcHeader) };
-        if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
+        if header.kind.get() != 0 && barriered(header.generation.get()) {
             header.generation.set(header.generation.get() | GEN_UNLOGGED);
         }
     }
@@ -4483,7 +4499,7 @@ pub(super) fn relog_quiet(slab: &super::slab::Slab) {
             // freed or re-carved slot reads as free or as another old
             // object, and an extra log bit only costs one more record.
             let header = unsafe { &*(addr as *const GcHeader) };
-            if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
+            if header.kind.get() != 0 && barriered(header.generation.get()) {
                 header.generation.set(header.generation.get() | GEN_UNLOGGED);
             }
             false
