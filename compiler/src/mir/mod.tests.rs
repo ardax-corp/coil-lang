@@ -5684,3 +5684,37 @@ fn main() {
         assert_vec_loop(fn_ops(&bc, &symbols, name), name);
     }
 }
+
+/// A straight-line body with more lets than registers stays dense: values
+/// whose live ranges never overlap share a register (#2242).
+#[test]
+fn long_straight_line_body_shares_dense_registers() {
+    const LETS: u32 = 300;
+    let mut body = String::from("    let v0 = (x * 31 + y) % 1000003;\n");
+    for i in 1..LETS {
+        body.push_str(&format!("    let v{i} = (v{} ^ {i}) % 1000003;\n", i - 1));
+    }
+    let (x, y): (i64, i64) = (7, 5);
+    let mut want = (x * 31 + y) % 1000003;
+    for i in 1..i64::from(LETS) {
+        want = (want ^ i) % 1000003;
+    }
+    let src = format!(
+        "fn mix(int x, int y) -> int {{\n{body}    return v{};\n}}\nfn main() {{\n    if mix(7, 5) != {want} {{\n        panic \"mix\";\n    }}\n}}\n",
+        LETS - 1
+    );
+    let mut p = crate::Pipeline::new();
+    p.set_collect_opt_stats(true);
+    let (bc, constants) = p.compile_src(&src).expect("compile long body");
+    let stats = crate::last_opt_stats();
+    let mix = stats
+        .body_tiers
+        .iter()
+        .find(|b| b.name == "mix")
+        .unwrap_or_else(|| panic!("mix tier; stats={stats:?}"));
+    assert_eq!(mix.tier, "dense", "{mix:?}");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "mix computes the chain");
+}
