@@ -3193,7 +3193,17 @@ impl<const S: usize> Machine<S> {
         let mut must_native: Vec<*mut u64> = Vec::new();
         for &ctx in &self.native_roots {
             // SAFETY: a native call in a collection keeps its context alive.
-            unsafe { &*ctx }.for_each_root(|w| must_native.push(w));
+            unsafe { &*ctx }.for_each_root(|w, ambiguous| {
+                if ambiguous {
+                    // SAFETY: the slot is a live word of a native root record.
+                    let addr = Value::from(unsafe { *w }).heap_addr();
+                    if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                        pins.push(addr);
+                    }
+                } else {
+                    must_native.push(w);
+                }
+            });
         }
         let precise: Vec<u64> = must
             .iter()
@@ -3538,10 +3548,11 @@ impl<const S: usize> Machine<S> {
         let heap = &self.heap;
         for &ctx in &self.native_roots {
             // SAFETY: a native call in a collection keeps its context alive.
-            unsafe { &*ctx }.for_each_root(|w| {
+            unsafe { &*ctx }.for_each_root(|w, ambiguous| {
                 let addr = Value::from(unsafe { *w }).heap_addr();
                 if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                    visit(addr, crate::memory::RootKind::Precise);
+                    let kind = if ambiguous { crate::memory::RootKind::Ambiguous } else { crate::memory::RootKind::Precise };
+                    visit(addr, kind);
                 }
             });
         }

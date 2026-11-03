@@ -115,6 +115,11 @@ pub struct NativePad {
 /// are heap words (the rest are scalars to skip).
 pub const ROOTS_MASKED: u64 = 1 << 63;
 
+/// Set in a root record's count: its words are ambiguous (an opaque word
+/// of a generic body may be an immediate), so the collector pins what they
+/// hit instead of moving it, and never rewrites them.
+pub const ROOTS_AMBIGUOUS: u64 = 1 << 62;
+
 /// Byte offset of [`NativeCtx::gc_epoch`].
 pub const NATIVE_CTX_GC_EPOCH: i32 = std::mem::offset_of!(NativeCtx, gc_epoch) as i32;
 
@@ -131,22 +136,24 @@ impl NativeCtx {
     /// call: the root chain and the queued early frees.
     /// The words are native code's to reload: a moving collection may
     /// rewrite them.
-    pub(crate) fn for_each_root(&self, mut visit: impl FnMut(*mut u64)) {
+    pub(crate) fn for_each_root(&self, mut visit: impl FnMut(*mut u64, bool)) {
         let mut at = self.roots as *mut u64;
         while !at.is_null() {
             // SAFETY: native code links only live records of its frames.
             unsafe {
                 let n = *at.add(1);
+                let ambiguous = n & ROOTS_AMBIGUOUS != 0;
+                let count = n & !(ROOTS_MASKED | ROOTS_AMBIGUOUS);
                 if n & ROOTS_MASKED != 0 {
                     let mask = *at.add(2);
-                    for i in 0..(n & !ROOTS_MASKED).min(64) as usize {
+                    for i in 0..count.min(64) as usize {
                         if mask & (1 << i) != 0 {
-                            visit(at.add(3 + i));
+                            visit(at.add(3 + i), ambiguous);
                         }
                     }
                 } else {
-                    for i in 0..n as usize {
-                        visit(at.add(2 + i));
+                    for i in 0..count as usize {
+                        visit(at.add(2 + i), ambiguous);
                     }
                 }
                 at = *at as *mut u64;
@@ -155,7 +162,7 @@ impl NativeCtx {
         if !self.frees.is_null() {
             // SAFETY: `call` set `frees` for the call.
             for (w, _) in unsafe { &mut *self.frees } {
-                visit(w);
+                visit(w, false);
             }
         }
     }

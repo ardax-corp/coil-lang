@@ -26,7 +26,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
+    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN, ROOTS_AMBIGUOUS,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -384,6 +384,33 @@ fn heap_word(t: MirTy) -> bool {
     matches!(t, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes)
 }
 
+/// The `int` words of an [`MirFunc::opaque_words`] body that may hold an
+/// object (a type variable's word): all but those an arithmetic, compare,
+/// constant or code pointer defines.
+fn opaque_words(f: &MirFunc) -> Vec<ValueId> {
+    if !f.opaque_words {
+        return Vec::new();
+    }
+    let scalar: HashSet<ValueId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::Const { dest, .. }
+            | MirInst::CodePtr { dest, .. }
+            | MirInst::Bin { dest, .. }
+            | MirInst::Cmp { dest, .. }
+            | MirInst::Unary { dest, .. }
+            | MirInst::ArrayLen { dest, .. } => Some(*dest),
+            _ => None,
+        })
+        .collect();
+    (0..f.types.len() as u32)
+        .map(ValueId)
+        .filter(|v| ty_of(f, *v) == MirTy::I64 && !scalar.contains(v))
+        .collect()
+}
+
 fn ty_of(f: &MirFunc, v: ValueId) -> MirTy {
     f.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
 }
@@ -434,8 +461,10 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
     if let Some(why) = f.emit_refusal {
         return Err(format!("no emission: {why}"));
     }
-    if f.opaque_words {
-        return Err("opaque words".into());
+    // An opaque body's `int` words may be objects: roots name them
+    // ambiguously, but a pad's masked homes record has no such kind.
+    if f.opaque_words && f.homes.contains(&MirTy::I64) {
+        return Err("opaque defer home".into());
     }
     if f.homes.len() > 64 {
         return Err("more than 64 defer homes".into());
@@ -1017,6 +1046,9 @@ struct Lower<'a> {
     homes_ptr: Option<cranelift_codegen::ir::Value>,
     /// Homes holding heap words, rooted with the body's heap values.
     heap_homes: Vec<u16>,
+    /// An opaque body's `int` words that may be objects: rooted in an
+    /// ambiguous record (pinned, never rewritten).
+    opaque: Vec<ValueId>,
     defer: FuncRef,
     claim: FuncRef,
     /// This body's cleanup pad.
@@ -1148,6 +1180,7 @@ impl<'a> Lower<'a> {
             homes_slot: None,
             homes_ptr: None,
             heap_homes: Vec::new(),
+            opaque: Vec::new(),
             defer,
             claim,
             pad_fn: None,
@@ -1215,8 +1248,18 @@ impl<'a> Lower<'a> {
             .filter(|&v| heap_word(ty_of(f, v)))
             .collect();
         let homes = if self.homes_slot.is_some() { self.heap_homes.clone() } else { Vec::new() };
-        if words.is_empty() && homes.is_empty() {
+        let opaque = self.opaque.clone();
+        if words.is_empty() && homes.is_empty() && opaque.is_empty() {
             return None;
+        }
+        let t = MemFlagsData::trusted();
+        let prev = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ROOTS);
+        // The ambiguous record links behind the precise one; nothing
+        // rewrites it, so nothing reloads from it.
+        let mut next = prev;
+        if !opaque.is_empty() {
+            let amb = self.record(f, next, &opaque, ROOTS_AMBIGUOUS);
+            next = self.b.ins().stack_addr(types::I64, amb, 0);
         }
         let total = words.len() + homes.len();
         let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
@@ -1224,9 +1267,7 @@ impl<'a> Lower<'a> {
             ((total + 2) * 8) as u32,
             3,
         ));
-        let t = MemFlagsData::trusted();
-        let prev = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ROOTS);
-        self.b.ins().stack_store(types::I64, prev, slot, 0);
+        self.b.ins().stack_store(types::I64, next, slot, 0);
         let n = self.b.ins().iconst(types::I64, total as i64);
         self.b.ins().stack_store(types::I64, n, slot, 8);
         for (i, v) in words.iter().enumerate() {
@@ -1243,6 +1284,24 @@ impl<'a> Lower<'a> {
         self.b.ins().store(t, at, self.ctx, NATIVE_CTX_ROOTS);
         let epoch = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
         Some(Roots { prev, slot, words, homes, epoch })
+    }
+
+    /// A root record `[next, n | flags, words...]` of `vals` in a new slot.
+    fn record(&mut self, f: &MirFunc, next: cranelift_codegen::ir::Value, vals: &[ValueId], flags: u64) -> cranelift_codegen::ir::StackSlot {
+        let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            ((vals.len() + 2) * 8) as u32,
+            3,
+        ));
+        self.b.ins().stack_store(types::I64, next, slot, 0);
+        let n = self.b.ins().iconst(types::I64, (vals.len() as u64 | flags) as i64);
+        self.b.ins().stack_store(types::I64, n, slot, 8);
+        for (i, v) in vals.iter().enumerate() {
+            let x = self.get(f, *v);
+            let x = self.coerce(x, types::I64);
+            self.b.ins().stack_store(types::I64, x, slot, ((i + 2) * 8) as i32);
+        }
+        slot
     }
 
     /// Unlink [`Self::push_roots`]'s record. When a collection may have run
@@ -1343,6 +1402,7 @@ impl<'a> Lower<'a> {
 
     fn body(&mut self, f: &MirFunc) -> Result<(), String> {
         self.barriers = barrier_pairs(f);
+        self.opaque = opaque_words(f);
         for blk in &f.blocks {
             for inst in &blk.insts {
                 let array = match inst {
@@ -1726,7 +1786,9 @@ impl<'a> Lower<'a> {
                 if matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::DropEnum { .. }) {
                     words.reverse();
                 }
-                let packed = || common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w))));
+                // An opaque body's `int` words may be objects: their kinds
+                // stay unknown, as the VM's emission leaves them.
+                let packed = || if f.opaque_words { 0 } else { common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w)))) };
                 let (code, n, extra) = match *kind {
                     MirAllocKind::Array => (ALLOC_ARRAY, words.len() as u64, u64::from(*kinds)),
                     MirAllocKind::Tuple => {
