@@ -47,6 +47,13 @@ pub struct NativeCtx {
     pub strings: *const String,
     pub string_cache: *mut common::Value,
     pub strings_len: u64,
+    /// Early frees (`FreeEarly`) the VM makes once the call returns:
+    /// `(word, deep)`. A free cannot be undone, so none happens inside a
+    /// call that may still bail.
+    pub frees: *mut Vec<(u64, bool)>,
+    /// Non-zero when the program has `drop` finalizers: an early free may
+    /// then run one, so `FreeEarly` bails and the VM runs it.
+    pub has_finalizers: u64,
 }
 
 /// Byte offset of [`NativeCtx::ret_hi`].
@@ -92,6 +99,8 @@ impl NativeCtx {
             strings: std::ptr::null(),
             string_cache: std::ptr::null_mut(),
             strings_len: 0,
+            frees: std::ptr::null_mut(),
+            has_finalizers: 0,
         }
     }
 
@@ -228,6 +237,8 @@ pub(crate) struct NativeResult {
     pub(crate) lo: u64,
     pub(crate) hi: Option<u64>,
     pub(crate) allocated: bool,
+    /// Early frees to make now, in order (see [`NativeCtx::frees`]).
+    pub(crate) frees: Vec<(u64, bool)>,
 }
 
 /// Run `entry` with `args`. `None` when it bailed.
@@ -238,6 +249,7 @@ pub(crate) fn call(
     heap: &mut crate::memory::Heap,
     strings: &[String],
     string_cache: &mut [common::Value],
+    has_finalizers: bool,
 ) -> Option<NativeResult> {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
@@ -246,12 +258,15 @@ pub(crate) fn call(
     ctx.strings = strings.as_ptr();
     ctx.string_cache = string_cache.as_mut_ptr();
     ctx.strings_len = strings.len().min(string_cache.len()) as u64;
+    let mut frees = Vec::new();
+    ctx.frees = &mut frees;
+    ctx.has_finalizers = u64::from(has_finalizers);
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
     if ctx.bail == 0 {
         let hi = (entry.ret_words == 2).then_some(ctx.ret_hi);
-        return Some(NativeResult { lo: out, hi, allocated: ctx.allocs != 0 });
+        return Some(NativeResult { lo: out, hi, allocated: ctx.allocs != 0, frees });
     }
     ctx.undo();
     None
@@ -680,4 +695,87 @@ pub unsafe extern "C" fn coil_native_eq(ctx: *mut NativeCtx, a: u64, b: u64) -> 
         return 0;
     }
     u64::from(crate::value_eq::values_eq(heap, a, b))
+}
+
+/// `STRINGIFY`: a new string of `word`, as the VM writes it. `tag` is the
+/// instruction's operand (`common::stringify_operand`, `0`: inspect the
+/// word).
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+pub unsafe extern "C" fn coil_native_stringify(ctx: *mut NativeCtx, word: u64, tag: u64) -> u64 {
+    type M = crate::Machine<{ crate::DEFAULT_OPERAND_STACK_SLOTS }>;
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let v = common::Value::from(word);
+    let text = match common::stringify_tag(tag as u32) {
+        Some(t) => M::stringify_immediate(t, v),
+        None => M::stringify_value(heap, v),
+    };
+    let s = heap.alloc_string(text);
+    unsafe { note_alloc(ctx, heap) };
+    s.as_ptr() as *mut u8 as u64
+}
+
+/// `FORMAT` with the format string `fmt` and the `n` argument words at
+/// `args` (in order), as the VM's handler: a leading `%s` appends the rest
+/// to the first argument (in place when that string ends at its buffer's
+/// tail), and with no arguments only `%%` is rewritten.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `fmt` is a string object; `args`
+/// points at `n` words.
+pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args: *const u64, n: u64) -> u64 {
+    use crate::memory::{GcData, ObjString, Object};
+    type M = crate::Machine<{ crate::DEFAULT_OPERAND_STACK_SLOTS }>;
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(Object::String(_)) = object(fmt) else {
+        return unsafe { bail(ctx) };
+    };
+    // SAFETY: checked above.
+    let format_string = unsafe { &*common::Value::from(fmt).as_ptr::<GcData<ObjString>>() }.as_ref().data.as_str();
+    let words: &[u64] = if n == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, n as usize) } };
+    let mut words = words.iter().map(|&w| common::Value::from(w));
+    let addr = if n == 0 {
+        if !format_string.contains("%%") {
+            return fmt;
+        }
+        let message = format_string.replace("%%", "%");
+        heap.alloc_string(message).as_ptr() as *mut u8 as u64
+    } else {
+        let (head, rest) = match format_string.strip_prefix("%s") {
+            Some(rest) => (words.next(), rest),
+            None => (None, format_string),
+        };
+        let message = crate::vm::render_format(rest, || words.next().unwrap_or_default());
+        match head {
+            Some(head) => {
+                let joined = match object(head.bits()) {
+                    Some(Object::String(gh)) => gh.as_ref().concat(&message),
+                    _ => ObjString::new(M::object_string_value(heap, &head) + &message),
+                };
+                heap.alloc(joined, Object::String).0.addr()
+            }
+            None => heap.alloc_string(message).as_ptr() as *mut u8 as u64,
+        }
+    };
+    unsafe { note_alloc(ctx, heap) };
+    addr
+}
+
+/// `FreeEarly`: queue `word` for the VM to free after the call (see
+/// [`NativeCtx::frees`]). With finalizers in the program: bail.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+pub unsafe extern "C" fn coil_native_free_early(ctx: *mut NativeCtx, word: u64, deep: u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    if c.has_finalizers != 0 || c.frees.is_null() {
+        return unsafe { bail(ctx) };
+    }
+    unsafe { (*c.frees).push((word, deep != 0)) };
+    0
 }
