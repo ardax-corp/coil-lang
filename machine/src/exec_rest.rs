@@ -1247,6 +1247,7 @@ impl<const S: usize> Machine<S> {
                         yield_from_resume_ip: 0,
                         started: false,
                         closeable: false,
+                        native: None,
                     };
                     let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
 
@@ -1278,7 +1279,14 @@ impl<const S: usize> Machine<S> {
                             });
                             target = sub;
                         }
-                        if !self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
+                        if unlikely(self.native.is_some())
+                            && let Some(panic) = self.native_resume_coro(target, send_val, &mut ip, &mut sp)
+                        {
+                            if let Some(p) = panic {
+                                return dispatch::RestExit::done(self.native_gen_panic(p, ip));
+                            }
+                            self.maybe_gc_after_call_alloc(ip);
+                        } else if !self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
                             return dispatch::RestExit::done(
                                 self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                             );
@@ -1307,11 +1315,41 @@ impl<const S: usize> Machine<S> {
                     if let Some(Object::Coroutine(sub)) =
                         Self::find_object_by_addr(&self.heap, addr)
                     {
+                    'yield_from: {
+                        // A delegate already running natively steps natively.
+                        if unlikely(sub.as_ref().native.is_some()) {
+                            self.frames.get_mut().seek(ip);
+                            match self.native_gen_step(sub, Value::from(0_i64)) {
+                                Some(GenStep::Returned(v)) => {
+                                    self.stack.push(v);
+                                    break 'yield_from;
+                                }
+                                Some(GenStep::Yielded(v)) => {
+                                    if let Some(outer) = self.resume_stack.last().map(|c| c.coro) {
+                                        Self::with_coroutine_mut(outer, |o| {
+                                            o.yield_from = Some(sub);
+                                            o.yield_from_resume_ip = ip;
+                                        });
+                                        Self::with_coroutine_mut(sub, |c| c.delegator = Some(outer));
+                                    }
+                                    self.yield_coroutine(&mut ip, &mut sp, v);
+                                    if unlikely(self.frames.len() == self.resume_floor) {
+                                        return dispatch::RestExit::done(false);
+                                    }
+                                    break 'yield_from;
+                                }
+                                Some(GenStep::Panicked(p)) => {
+                                    return dispatch::RestExit::done(self.native_gen_panic(p, ip));
+                                }
+                                None => {}
+                            }
+                        }
                         if !self.start_yield_from(&mut ip, &mut sp, sub, code) {
                             return dispatch::RestExit::done(
                                 self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                             );
                         }
+                    }
                     } else {
                     return dispatch::RestExit::done(self.runtime_panic(
                             "yield from invalid coroutine handle",

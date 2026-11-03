@@ -210,6 +210,7 @@ impl<const S: usize> Machine<S> {
     /// The GC words of every VM state not swapped in: parked fibers' and,
     /// while a fiber runs, the task's own.
     fn for_each_fiber_word(&self, visit: &mut dyn FnMut(Value)) {
+        self.gen_running.iter().for_each(|v| visit(*v));
         #[cfg(not(target_family = "wasm"))]
         {
             for f in self.parked_fibers.values() {

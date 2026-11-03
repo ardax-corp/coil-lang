@@ -127,6 +127,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Ao
             bytes[at + 6..at + 8].copy_from_slice(&reads.to_le_bytes());
             bytes[at + 8] = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
             bytes[at + 9] = u8::from(plan.vm_reach.contains(&i));
+            bytes[at + std::mem::offset_of!(machine::native::AotEntry, generator)] = u8::from(is_generator(&body.mir));
             relocs.push((at + std::mem::offset_of!(machine::native::AotEntry, entry), ids.entry[&i]));
         }
         let count = bytes.len() / ENTRY_BYTES;
@@ -214,7 +215,8 @@ fn jit_once(
         let entry: NativeEntryFn = unsafe { std::mem::transmute::<*const u8, NativeEntryFn>(ptr) };
         let ret_words = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, entry });
+        let generator = is_generator(&body.mir);
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, entry });
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
@@ -393,7 +395,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
                 || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
-                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. }
+                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. }
                     )
                 })
         })
@@ -510,6 +512,11 @@ fn used_params(f: &MirFunc) -> usize {
     f.params.iter().rposition(|p| used.contains(p)).map_or(0, |i| i + 1)
 }
 
+/// A generator's body: it yields.
+fn is_generator(f: &MirFunc) -> bool {
+    f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MirInst::Yield { .. }))
+}
+
 /// An instruction whose helper may allocate.
 fn allocates(inst: &MirInst) -> bool {
     matches!(
@@ -524,6 +531,7 @@ fn allocates(inst: &MirInst) -> bool {
             | MirInst::CallIndirect { .. }
             | MirInst::ResumeCoro { .. }
             | MirInst::FreeEarly { .. }
+            | MirInst::Yield { .. }
     )
 }
 
@@ -865,6 +873,21 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need_scalar(dest)?;
                         need(handle)?;
                     }
+                    // A generator body: it runs on a fiber of its own and a
+                    // yield suspends it (`machine::native_gen`).
+                    MirInst::Yield { dest, value, from, .. } => {
+                        if *from {
+                            return Err("yield from".into());
+                        }
+                        if f.cleanup.is_some() {
+                            return Err("generator with a defer".into());
+                        }
+                        if f.ret_hi_ty.is_some() {
+                            return Err("generator returning two words".into());
+                        }
+                        need(dest)?;
+                        need(value)?;
+                    }
                     MirInst::Panic { msg, .. } => need(msg)?,
                     // A cleanup pad's end (lowered to nothing).
                     MirInst::HostInvoke { dest, native_id, .. } if pad && *native_id == common::UNWIND_RESUME_ID => {
@@ -1001,6 +1024,7 @@ struct Ids {
     call_value: FuncId,
     resume: FuncId,
     coro_done: FuncId,
+    gen_yield: FuncId,
     /// Collections at safepoints.
     collect: FuncId,
     /// Explicit `panic`.
@@ -1092,6 +1116,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
     let resume = module.declare_function("coil_native_resume", Linkage::Import, &s4).map_err(e)?;
     let coro_done = module.declare_function("coil_native_coro_done", Linkage::Import, &s2).map_err(e)?;
+    let gen_yield = module.declare_function("coil_native_yield", Linkage::Import, &s2).map_err(e)?;
     let mut s5v = module.make_signature();
     s5v.params.extend((0..5).map(|_| AbiParam::new(types::I64)));
     let defer = module.declare_function("coil_native_defer", Linkage::Import, &s5v).map_err(e)?;
@@ -1134,6 +1159,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
         call_value,
         resume,
         coro_done,
+        gen_yield,
         collect,
         panic,
     })
@@ -1220,6 +1246,7 @@ struct Lower<'a> {
     call_value: FuncRef,
     resume: FuncRef,
     coro_done: FuncRef,
+    gen_yield: FuncRef,
     collect: FuncRef,
     panic: FuncRef,
     /// This body's index into the plan's bodies.
@@ -1315,6 +1342,7 @@ impl<'a> Lower<'a> {
         let call_value = module.declare_func_in_func(ids.call_value, func);
         let resume = module.declare_func_in_func(ids.resume, func);
         let coro_done = module.declare_func_in_func(ids.coro_done, func);
+        let gen_yield = module.declare_func_in_func(ids.gen_yield, func);
         let collect = module.declare_func_in_func(ids.collect, func);
         let panic = module.declare_func_in_func(ids.panic, func);
         let defer = module.declare_func_in_func(ids.defer, func);
@@ -1367,6 +1395,7 @@ impl<'a> Lower<'a> {
         call_value,
         resume,
         coro_done,
+        gen_yield,
             collect,
             panic,
             body_index: None,
@@ -1919,6 +1948,21 @@ impl<'a> Lower<'a> {
                 self.pop_roots(f, roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
+                self.drop_views();
+                self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::Yield { dest, value, .. } => {
+                // The fiber suspends here; the resumer forwards the frame's
+                // words while it is away (they are this call's roots).
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                let roots = self.push_roots(f);
+                let prev = self.push_call();
+                let call = self.b.ins().call(self.gen_yield, &[self.ctx, v]);
+                self.pop_call(prev);
+                let w = self.b.inst_results(call)[0];
+                self.pop_roots(f, roots);
                 self.drop_views();
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);

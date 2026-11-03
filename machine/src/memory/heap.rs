@@ -3944,6 +3944,9 @@ pub struct ObjCoroutine {
     /// Listed for a close by the collector: it suspended with a `defer`
     /// armed ([`Heap::note_closeable`]).
     pub closeable: bool,
+    /// Its body is native code, suspended on this fiber (`vm_gen.rs`):
+    /// `saved_stack` then holds that frame's root words.
+    pub native: Option<Box<crate::native::GenFiber>>,
 }
 
 /// Heap-allocated boxed value for the generics runtime.

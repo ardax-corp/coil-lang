@@ -283,8 +283,8 @@ stack as before.
 
 Native code makes generators (`Alloc` of `MirAllocKind::Coro`, as
 `MakeCoro`: `ALLOC_CORO`), checks them (`DoneCoro`, a heap read) and
-resumes them (`ResumeCoro`). A generator's body stays on the VM for now
-(`Yield` refuses a body): `coil_native_resume` runs it with
+resumes them (`ResumeCoro`). A body that stays on the VM runs from
+`coil_native_resume` with
 `Machine::resume_value`, a nested execution like `call_function`'s. A floor
 frame stands for the resumer; the generator's frames go above it, and the
 execution stops when a yield or the body's return comes back to that depth
@@ -294,6 +294,31 @@ the opcode's. A resume of a finished or invalid handle panics at native
 code's own site, before the VM runs anything. Inside a task fiber the
 resume goes through `native_reenter`, so a generator body that waits can
 switch tasks.
+
+### Generator bodies
+
+A generator's body compiles too (`NativeEntry::generator`, `AotEntry`
+byte `generator`); no `CALL` enters it. Its first resume (VM `ResumeCoro`,
+`Machine::resume_value`, or a `yield from` of a delegate already running
+natively) makes a fiber for it (`vm_gen.rs`, `native_gen_step`) and runs
+`native::call` on the generator's saved arguments there. `Yield` calls
+`coil_native_yield`, which commits and suspends the fiber with the value
+and its call's context. The resumer then copies that call's root words into
+the generator's `saved_stack` (precise mask unless a record is ambiguous),
+so the collector traces and forwards them like a VM generator's segment,
+and the `ObjCoroutine` owns the fiber (`native`). The next resume writes
+the words back, sends its word, and native code reloads after the yield
+(`gc_epoch`). Its return finishes the generator; a VM generator that
+delegated to it goes on (`finish_yield_from`). A bail can only come before
+the first yield, and the VM then runs the body from the start.
+
+While the fiber runs, the generator's handle is a pinned root
+(`gen_running`) and VM code under it runs one nesting level deeper, so it
+never switches tasks; a body that may run VM code therefore stays on the
+VM when a scheduler exists. Refused: `yield from` in the body, a body with
+`defer` (a close would have to unwind it), and two-word returns. A
+generator collected while suspended drops its fiber unwound
+(`GenFiber::drop`).
 
 A fiber's VM state starts with a base frame (ip 0, as the program's
 bootstrap frame), so VM calls on it open their frames as anywhere else. A

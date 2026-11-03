@@ -452,6 +452,9 @@ pub struct NativeEntry {
     /// Result words: `1`, or `2` for a two-slot return (`lo`, then `hi`
     /// in [`NativeCtx::ret_hi`]), as the VM's `RETURN` pushes them.
     pub ret_words: u8,
+    /// A generator's body: only a resume enters it, on a fiber of its own
+    /// (`native_gen.rs`), never a `CALL`.
+    pub generator: bool,
     pub entry: NativeEntryFn,
 }
 
@@ -465,7 +468,9 @@ pub struct AotEntry {
     pub ret_words: u8,
     /// `1` when it may run VM code ([`NativeEntry::suspends`]).
     pub suspends: u8,
-    pub pad: [u8; 6],
+    /// `1` for a generator's body ([`NativeEntry::generator`]).
+    pub generator: u8,
+    pub pad: [u8; 5],
     pub entry: NativeEntryFn,
 }
 
@@ -482,7 +487,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
     let words = unsafe { std::slice::from_raw_parts(sites, n_sites * 4) };
     let entries = entries
         .iter()
-        .map(|e| NativeEntry { pc: e.pc, arity: e.arity, suspends: e.suspends != 0, reads: e.reads, ret_words: e.ret_words, entry: e.entry })
+        .map(|e| NativeEntry { pc: e.pc, arity: e.arity, suspends: e.suspends != 0, reads: e.reads, ret_words: e.ret_words, generator: e.generator != 0, entry: e.entry })
         .collect();
     let sites = words
         .chunks_exact(4)
@@ -1129,6 +1134,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 yield_from_resume_ip: 0,
                 started: false,
                 closeable: false,
+                native: None,
             };
             heap.alloc(coro, Object::Coroutine).0.addr()
         }
@@ -1666,6 +1672,75 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     v.bits()
 }
 
+/// `Yield` in a generator's body: suspend its fiber with `value` (the
+/// resumer takes the frame's root words into the generator meanwhile and
+/// puts them back, forwarded, before it resumes); the word the resumer
+/// sends comes back. What the resumer sees cannot be taken back: commit.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`], on a generator's fiber.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_yield(ctx: *mut NativeCtx, value: u64) -> u64 {
+    unsafe { (*ctx).committed = 1 };
+    let send = gen_suspend(ctx, value);
+    // The words may have moved while it was away.
+    unsafe { (*ctx).gc_epoch += 1 };
+    send
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn gen_suspend(ctx: *mut NativeCtx, value: u64) -> u64 {
+    let y = GEN_YIELDER.get().cast::<corosensei::Yielder<u64, (u64, usize)>>();
+    assert!(!y.is_null(), "a yield outside a generator's fiber");
+    // SAFETY: the running generator fiber set its yielder.
+    unsafe { (*y).suspend((value, ctx as usize)) }
+}
+
+#[cfg(target_family = "wasm")]
+fn gen_suspend(_ctx: *mut NativeCtx, _value: u64) -> u64 {
+    unreachable!("no generator fibers on wasm")
+}
+
+#[cfg(not(target_family = "wasm"))]
+thread_local! {
+    /// The running generator fiber's yielder.
+    pub(crate) static GEN_YIELDER: std::cell::Cell<*const ()> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// A generator's fiber, for a generator whose body is native code: resumes
+/// send it a word, a yield gives back the yielded word and the parked
+/// call's context, and it returns the body's outcome.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type GenCoro = corosensei::Coroutine<u64, (u64, usize), NativeOutcome, corosensei::stack::DefaultStack>;
+
+/// The native side of a generator whose body runs natively: owned by its
+/// `ObjCoroutine` while it is suspended (`vm_gen.rs`).
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
+pub struct GenFiber {
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) coro: Option<GenCoro>,
+    pub(crate) stack_limit: usize,
+    pub(crate) yielder: *const (),
+    /// The context of the call suspended at a yield (its root words are
+    /// the generator's saved words meanwhile).
+    pub(crate) parked: *mut NativeCtx,
+}
+
+impl Drop for GenFiber {
+    fn drop(&mut self) {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(coro) = &mut self.coro
+            && coro.started()
+            && !coro.done()
+        {
+            // A generator dropped while suspended: its native frames cannot
+            // unwind (no unwind tables), so the stack is reclaimed as it is.
+            // SAFETY: nothing runs on the fiber's stack again.
+            unsafe { coro.force_reset() };
+        }
+    }
+}
+
 /// [`coil_native_host`] of a native that needs the VM: its stub runs in a
 /// nested VM execution ([`NativeHost::host`]), as [`coil_native_call_vm`]
 /// runs a body, with the same commit and panic rules.
@@ -1873,6 +1948,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_call_value", coil_native_call_value as *const u8),
         ("coil_native_resume", coil_native_resume as *const u8),
         ("coil_native_coro_done", coil_native_coro_done as *const u8),
+        ("coil_native_yield", coil_native_yield as *const u8),
         ("coil_native_defer", coil_native_defer as *const u8),
         ("coil_native_claim", coil_native_claim as *const u8),
         ("coil_native_collect", coil_native_collect as *const u8),
@@ -1881,4 +1957,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 32;
+const HELPERS: usize = 33;

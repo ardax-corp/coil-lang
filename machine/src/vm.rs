@@ -1582,6 +1582,9 @@ pub struct Machine<const S: usize> {
     /// Stacks of finished fibers, for the next ones.
     #[cfg(not(target_family = "wasm"))]
     fiber_stacks: Vec<corosensei::stack::DefaultStack>,
+    /// Generators whose native body runs now, innermost last: roots
+    /// (pinned) while their fibers run (`vm_gen.rs`).
+    gen_running: Vec<Value>,
     /// How a fiber's suspension point suspends its task (block, result slot).
     fiber_park_request: Option<(Option<crate::task::Block>, bool)>,
     /// The wake a parked fiber's suspension point gets when it resumes.
@@ -1772,6 +1775,7 @@ impl<const S: usize> Machine<S> {
             parked_fibers: std::collections::HashMap::new(),
             #[cfg(not(target_family = "wasm"))]
             fiber_stacks: Vec::new(),
+            gen_running: Vec::new(),
             fiber_park_request: None,
             fiber_wake: None,
             fiber_cancel: false,
@@ -2197,6 +2201,28 @@ impl<const S: usize> Machine<S> {
             self.runtime_panic(STACK_OVERFLOW, call_ip.saturating_sub(1));
             return Value::default();
         }
+        // A body that runs natively: no VM frames, unless it returns into
+        // a VM generator's `yield from` (which then runs on the VM).
+        let mut delegate_returned = None;
+        if unlikely(self.native.is_some()) {
+            match self.native_gen_step(target, send_val) {
+                Some(GenStep::Yielded(v)) => return v,
+                Some(GenStep::Returned(v)) => match self.find_delegator(target) {
+                    Some(parent) => delegate_returned = Some((parent, v)),
+                    None => return v,
+                },
+                Some(GenStep::Panicked(p)) => {
+                    if p.code == crate::native::TRAP_VM_PANIC {
+                        self.rearm_unwind_after_early_drop(call_ip.saturating_sub(1));
+                    } else {
+                        self.native_panic(&p, call_ip.saturating_sub(1));
+                    }
+                    self.run_native_pads(p.pads);
+                    return Value::default();
+                }
+                None => {}
+            }
+        }
         let saved_sp = self.stack.tell();
         self.nested_return = None;
         self.nested_depth += 1;
@@ -2212,7 +2238,15 @@ impl<const S: usize> Machine<S> {
         let mut ip = 0;
         let mut sp = saved_sp;
         let mut out = Value::default();
-        if self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
+        let begun = match delegate_returned {
+            Some((parent, v)) => {
+                self.stack.push(v);
+                self.finish_yield_from(parent, target, saved_sp, &mut ip, &mut sp);
+                true
+            }
+            None => self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true),
+        };
+        if begun {
             loop {
                 let paused = self.run_execute(code, constants, ip);
                 if let Some(pending) = self.pending_ffi.take() {
@@ -6954,6 +6988,7 @@ include!("exec_rest.rs");
 include!("vm_task.rs");
 include!("vm_unwind.rs");
 include!("vm_fiber.rs");
+include!("vm_gen.rs");
 
 impl<const S: usize> Drop for Machine<S> {
     fn drop(&mut self) {
