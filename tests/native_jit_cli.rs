@@ -426,3 +426,16 @@ fn native_code_calls_bodies_on_the_vm_and_collects() {
     assert!(compiled(&stats, "run") && compiled(&stats, "churn"), "stats: {stats}");
     assert!(stats.contains(", 0 bailed"), "stats: {stats}");
 }
+
+#[test]
+fn an_explicit_panic_after_a_print_matches_the_vm() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn check(int x) -> int {{ let _ = println(format(\"check %i\", x)); if x > 2 {{ panic(format(\"too big: %i\", x)); }} return x * 2; }}\n\
+         #[inline(never)]\nfn loop_it(int n) -> int {{ let i = 0; let t = 0; while i < n {{ t = t + check(i); i = i + 1; }} return t; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", loop_it(5))); }}\n"
+    );
+    let stats = same_as_vm("explicit_panic", &src);
+    assert!(compiled(&stats, "check") && compiled(&stats, "loop_it"), "stats: {stats}");
+    let err = program_stderr(&run("explicit_panic", &src, true));
+    assert!(err.starts_with("panic: too big: 3 at "), "stderr: {err}");
+}
