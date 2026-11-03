@@ -548,3 +548,24 @@ fn an_explicit_drop_from_native_code_claims_the_finalizer() {
     let stats = same_as_vm("explicit_drop", src);
     assert!(compiled(&stats, "explicit"), "stats: {stats}");
 }
+
+#[test]
+fn an_archive_carries_closures_defers_and_drops() {
+    // Every instruction step 5 added goes through the native MIR section.
+    let src = format!(
+        "{HEADER}class Handle {{ pub fd: int }}\nstatic let drops: int = 0;\nimpl Handle {{ fn drop() {{ drops = drops + 1; }} }}\n\
+         fn add(int a, int b) -> int {{ return a + b; }}\n\
+         #[inline(never)]\nfn twice(int -> int f, int x) -> int {{ return f(f(x)); }}\n\
+         #[inline(never)]\nfn run(int k) -> int {{\n  let tag = format(\"k%i\", k);\n  defer use (tag) {{ let _ = println(\"run done \" + tag); }}\n\
+           let h = new Handle(k);\n  h.drop();\n  let plus = fn (int x) use (k) => x + k;\n  let g = add(a: 5);\n  return twice(plus, 1) + g(2) + 10 / (k - 3);\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", run(2))); let _ = println(format(\"%i %i\", drops, run(3))); }}\n"
+    );
+    let archive = compile("archive_step5", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(jit.stdout, vm.stdout);
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert_eq!(jit.status.code(), vm.status.code());
+    let stats = String::from_utf8_lossy(&jit.stderr);
+    assert!(stats.contains("calls ran natively"), "stats: {stats}");
+}
