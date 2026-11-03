@@ -2584,7 +2584,10 @@ impl Compiler {
                 if size > self.inline_cost.max_cross_module_inline_cost {
                     return Err("cost".to_string());
                 }
-                let shape = inline::inlinable(callee, budget)?.with_foreign(true);
+                // Weighed by the cross-module budget, which it passed: the
+                // level's own limit is for this module's callees (`-Os`'s 40
+                // refused a 55-node `KeyIndex::find`, #2248).
+                let shape = inline::inlinable(callee, budget.max(self.inline_cost.max_cross_module_inline_cost))?.with_foreign(true);
                 return Ok((callee, shape));
             }
             let core = core_insts.get(&id.0);
@@ -2642,7 +2645,7 @@ impl Compiler {
                         if size > self.inline_cost.max_cross_module_inline_cost {
                             return Err("cost".to_string());
                         }
-                        let shape = inline::inlinable(callee, budget)?.with_foreign(true);
+                        let shape = inline::inlinable(callee, budget.max(self.inline_cost.max_cross_module_inline_cost))?.with_foreign(true);
                         return Ok((callee, shape));
                     }
                     let index = self.hir_fn_body(&call.key).ok_or("ambiguous")?;
