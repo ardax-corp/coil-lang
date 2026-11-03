@@ -94,6 +94,7 @@ fn jit_once(
     jb.symbol("coil_native_cow_field", machine::native::coil_native_cow_field as *const u8);
     jb.symbol("coil_native_alloc", machine::native::coil_native_alloc as *const u8);
     jb.symbol("coil_native_array_push", machine::native::coil_native_array_push as *const u8);
+    jb.symbol("coil_native_eq", machine::native::coil_native_eq as *const u8);
     jb.symbol("coil_native_string", machine::native::coil_native_string as *const u8);
     jb.symbol("coil_native_enum_tag", machine::native::coil_native_enum_tag as *const u8);
     jb.symbol("coil_native_enum_payload", machine::native::coil_native_enum_payload as *const u8);
@@ -443,6 +444,11 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         }
                     }
                     MirInst::String { dest, .. } => need(dest)?,
+                    MirInst::StrEq { dest, lhs, rhs, .. } => {
+                        need_scalar(dest)?;
+                        need(lhs)?;
+                        need(rhs)?;
+                    }
                     // Native code keeps no frame words for the collector to
                     // scan, so there is nothing to zero.
                     MirInst::ClearWord { dest, .. } => need(dest)?,
@@ -515,6 +521,8 @@ struct Ids {
     enum_payload: FuncId,
     /// Program strings (`STRING`).
     string: FuncId,
+    /// Content / structural `==` (`StrEq`).
+    eq: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -578,6 +586,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
+    let eq = module.declare_function("coil_native_eq", Linkage::Import, &s3).map_err(e)?;
     let string = module.declare_function("coil_native_string", Linkage::Import, &s2).map_err(e)?;
     let enum_tag = module.declare_function("coil_native_enum_tag", Linkage::Import, &s1).map_err(e)?;
     let enum_payload = module.declare_function("coil_native_enum_payload", Linkage::Import, &s3).map_err(e)?;
@@ -600,6 +609,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         enum_tag,
         enum_payload,
         string,
+        eq,
     })
 }
 
@@ -672,6 +682,7 @@ struct Lower<'a> {
     enum_tag: FuncRef,
     enum_payload: FuncRef,
     string: FuncRef,
+    eq: FuncRef,
     /// Arrays this body indexes: `(ok, pointer, length)` of their element
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
@@ -721,6 +732,7 @@ impl<'a> Lower<'a> {
         let enum_tag = module.declare_func_in_func(ids.enum_tag, func);
         let enum_payload = module.declare_func_in_func(ids.enum_payload, func);
         let string = module.declare_func_in_func(ids.string, func);
+        let eq = module.declare_func_in_func(ids.eq, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -753,6 +765,7 @@ impl<'a> Lower<'a> {
             enum_tag,
             enum_payload,
             string,
+            eq,
             views: HashMap::new(),
             stored: HashSet::new(),
             barriers: HashMap::new(),
@@ -1133,6 +1146,18 @@ impl<'a> Lower<'a> {
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag);
+                self.set(f, *dest, w);
+            }
+            MirInst::StrEq { dest, lhs, rhs, ne } => {
+                let a = self.get(f, *lhs);
+                let a = self.coerce(a, types::I64);
+                let c = self.get(f, *rhs);
+                let c = self.coerce(c, types::I64);
+                let call = self.b.ins().call(self.eq, &[self.ctx, a, c]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                let w = if *ne { self.b.ins().bxor_imm_u(w, 1) } else { w };
                 self.set(f, *dest, w);
             }
             MirInst::ClearWord { dest, .. } => {

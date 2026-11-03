@@ -123,6 +123,7 @@ const I_ARRAY_PUSH: u8 = 17;
 const I_MATCH_PAYLOAD: u8 = 18;
 const I_STRING: u8 = 19;
 const I_CLEAR_WORD: u8 = 20;
+const I_STR_EQ: u8 = 21;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -367,6 +368,13 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*dest);
             w.u32(*idx);
         }
+        MirInst::StrEq { dest, lhs, rhs, ne } => {
+            w.u8(I_STR_EQ);
+            w.v(*dest);
+            w.v(*lhs);
+            w.v(*rhs);
+            w.u8(*ne as u8);
+        }
         MirInst::ClearWord { dest, value } => {
             w.u8(I_CLEAR_WORD);
             w.v(*dest);
@@ -565,6 +573,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
         }
         I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
+        I_STR_EQ => MirInst::StrEq { dest: r.v()?, lhs: r.v()?, rhs: r.v()?, ne: r.u8()? != 0 },
         I_CLEAR_WORD => MirInst::ClearWord { dest: r.v()?, value: r.v()? },
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
