@@ -94,6 +94,9 @@ fn jit_once(
     jb.symbol("coil_native_cow_field", machine::native::coil_native_cow_field as *const u8);
     jb.symbol("coil_native_alloc", machine::native::coil_native_alloc as *const u8);
     jb.symbol("coil_native_array_push", machine::native::coil_native_array_push as *const u8);
+    jb.symbol("coil_native_free_early", machine::native::coil_native_free_early as *const u8);
+    jb.symbol("coil_native_format", machine::native::coil_native_format as *const u8);
+    jb.symbol("coil_native_stringify", machine::native::coil_native_stringify as *const u8);
     jb.symbol("coil_native_eq", machine::native::coil_native_eq as *const u8);
     jb.symbol("coil_native_string", machine::native::coil_native_string as *const u8);
     jb.symbol("coil_native_enum_tag", machine::native::coil_native_enum_tag as *const u8);
@@ -444,6 +447,21 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         }
                     }
                     MirInst::String { dest, .. } => need(dest)?,
+                    MirInst::FreeEarly { dest, value, .. } => {
+                        need(dest)?;
+                        need(value)?;
+                    }
+                    MirInst::Format { dest, fmt, args } => {
+                        need(dest)?;
+                        need(fmt)?;
+                        for a in args {
+                            need(a)?;
+                        }
+                    }
+                    MirInst::Stringify { dest, src, .. } => {
+                        need(dest)?;
+                        need(src)?;
+                    }
                     MirInst::StrEq { dest, lhs, rhs, .. } => {
                         need_scalar(dest)?;
                         need(lhs)?;
@@ -523,6 +541,12 @@ struct Ids {
     string: FuncId,
     /// Content / structural `==` (`StrEq`).
     eq: FuncId,
+    /// `STRINGIFY`.
+    stringify: FuncId,
+    /// `FORMAT`.
+    format: FuncId,
+    /// `FreeEarly` (queued for the VM).
+    free_early: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -586,6 +610,9 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
+    let free_early = module.declare_function("coil_native_free_early", Linkage::Import, &s3).map_err(e)?;
+    let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
+    let stringify = module.declare_function("coil_native_stringify", Linkage::Import, &s3).map_err(e)?;
     let eq = module.declare_function("coil_native_eq", Linkage::Import, &s3).map_err(e)?;
     let string = module.declare_function("coil_native_string", Linkage::Import, &s2).map_err(e)?;
     let enum_tag = module.declare_function("coil_native_enum_tag", Linkage::Import, &s1).map_err(e)?;
@@ -610,6 +637,9 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         enum_payload,
         string,
         eq,
+        stringify,
+        format,
+        free_early,
     })
 }
 
@@ -683,6 +713,9 @@ struct Lower<'a> {
     enum_payload: FuncRef,
     string: FuncRef,
     eq: FuncRef,
+    stringify: FuncRef,
+    format: FuncRef,
+    free_early: FuncRef,
     /// Arrays this body indexes: `(ok, pointer, length)` of their element
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
@@ -733,6 +766,9 @@ impl<'a> Lower<'a> {
         let enum_payload = module.declare_func_in_func(ids.enum_payload, func);
         let string = module.declare_func_in_func(ids.string, func);
         let eq = module.declare_func_in_func(ids.eq, func);
+        let stringify = module.declare_func_in_func(ids.stringify, func);
+        let format = module.declare_func_in_func(ids.format, func);
+        let free_early = module.declare_func_in_func(ids.free_early, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -766,6 +802,9 @@ impl<'a> Lower<'a> {
             enum_payload,
             string,
             eq,
+            stringify,
+            format,
+            free_early,
             views: HashMap::new(),
             stored: HashSet::new(),
             barriers: HashMap::new(),
@@ -1100,17 +1139,7 @@ impl<'a> Lower<'a> {
                     MirAllocKind::Object { type_id, nfields } => (ALLOC_OBJECT, u64::from(nfields), u64::from(type_id)),
                     other => return Err(format!("allocation {other:?}")),
                 };
-                let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                    (words.len().max(1) * 8) as u32,
-                    3,
-                ));
-                for (i, w) in words.iter().enumerate() {
-                    let x = self.get(f, *w);
-                    let x = self.coerce(x, types::I64);
-                    self.b.ins().stack_store(types::I64, x, slot, (i * 8) as i32);
-                }
-                let p = self.b.ins().stack_addr(types::I64, slot, 0);
+                let p = self.words_slot(f, &words);
                 let code = self.b.ins().iconst(types::I64, code as i64);
                 let n = self.b.ins().iconst(types::I64, n as i64);
                 let extra = self.b.ins().iconst(types::I64, extra as i64);
@@ -1143,6 +1172,40 @@ impl<'a> Lower<'a> {
             MirInst::String { dest, idx } => {
                 let i = self.b.ins().iconst(types::I64, i64::from(*idx));
                 let call = self.b.ins().call(self.string, &[self.ctx, i]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set(f, *dest, w);
+            }
+            MirInst::FreeEarly { dest, value, deep } => {
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                let d = self.b.ins().iconst(types::I64, i64::from(*deep));
+                let call = self.b.ins().call(self.free_early, &[self.ctx, v, d]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set(f, *dest, w);
+            }
+            MirInst::Format { dest, fmt, args } => {
+                let p = self.words_slot(f, args);
+                let fw = self.get(f, *fmt);
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let call = self.b.ins().call(self.format, &[self.ctx, fw, p, n]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set(f, *dest, w);
+            }
+            MirInst::Stringify { dest, src, tag } => {
+                let v = self.get(f, *src);
+                let v = self.coerce(v, types::I64);
+                // The instruction's operand, as the VM's emission packs it.
+                let op = tag
+                    .and_then(|t| common::ValueTag::from_u16(u16::try_from(t).ok()?))
+                    .map_or(0, common::stringify_operand);
+                let op = self.b.ins().iconst(types::I64, i64::from(op));
+                let call = self.b.ins().call(self.stringify, &[self.ctx, v, op]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag);
@@ -1198,6 +1261,21 @@ impl<'a> Lower<'a> {
             other => return Err(format!("instruction {}", inst_name(other))),
         }
         Ok(())
+    }
+
+    /// The words of `vs` in a new stack slot, in order; its address.
+    fn words_slot(&mut self, f: &MirFunc, vs: &[ValueId]) -> cranelift_codegen::ir::Value {
+        let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (vs.len().max(1) * 8) as u32,
+            3,
+        ));
+        for (i, v) in vs.iter().enumerate() {
+            let x = self.get(f, *v);
+            let x = self.coerce(x, types::I64);
+            self.b.ins().stack_store(types::I64, x, slot, (i * 8) as i32);
+        }
+        self.b.ins().stack_addr(types::I64, slot, 0)
     }
 
     /// Payload word `index` of the matched `scrutinee` (word `s`): a niche

@@ -124,6 +124,9 @@ const I_MATCH_PAYLOAD: u8 = 18;
 const I_STRING: u8 = 19;
 const I_CLEAR_WORD: u8 = 20;
 const I_STR_EQ: u8 = 21;
+const I_STRINGIFY: u8 = 22;
+const I_FORMAT: u8 = 23;
+const I_FREE_EARLY: u8 = 24;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -368,6 +371,24 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*dest);
             w.u32(*idx);
         }
+        MirInst::FreeEarly { dest, value, deep } => {
+            w.u8(I_FREE_EARLY);
+            w.v(*dest);
+            w.v(*value);
+            w.u8(*deep as u8);
+        }
+        MirInst::Format { dest, fmt, args } => {
+            w.u8(I_FORMAT);
+            w.v(*dest);
+            w.v(*fmt);
+            w.vs(args);
+        }
+        MirInst::Stringify { dest, src, tag } => {
+            w.u8(I_STRINGIFY);
+            w.v(*dest);
+            w.v(*src);
+            w.u32(tag.unwrap_or(u32::MAX));
+        }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             w.u8(I_STR_EQ);
             w.v(*dest);
@@ -573,6 +594,9 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
         }
         I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
+        I_FREE_EARLY => MirInst::FreeEarly { dest: r.v()?, value: r.v()?, deep: r.u8()? != 0 },
+        I_FORMAT => MirInst::Format { dest: r.v()?, fmt: r.v()?, args: r.vs()? },
+        I_STRINGIFY => MirInst::Stringify { dest: r.v()?, src: r.v()?, tag: Some(r.u32()?).filter(|&t| t != u32::MAX) },
         I_STR_EQ => MirInst::StrEq { dest: r.v()?, lhs: r.v()?, rhs: r.v()?, ne: r.u8()? != 0 },
         I_CLEAR_WORD => MirInst::ClearWord { dest: r.v()?, value: r.v()? },
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
