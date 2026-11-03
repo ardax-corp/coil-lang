@@ -468,14 +468,18 @@ fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl 
         .expect("string_compare signature");
     let id = out.len();
     register_id(name, id);
-    out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
+    // Direct (native code calls it in place): the checker passes only
+    // strings; anything else orders before every string.
+    out.push(Arc::new(HostClosureFn::new_direct(sig, |heap, args| {
         let text = |v: Value| match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, v).bits()) {
-            Some(crate::memory::Object::String(gc)) => Ok(gc),
-            _ => Err(FfiError::Unsupported(format!("{name}: expected a string"))),
+            Some(crate::memory::Object::String(gc)) => Some(gc),
+            _ => None,
         };
-        let (a, b) = (text(args[0])?, text(args[1])?);
-        let order = a.as_ref().data.as_bytes().cmp(b.as_ref().data.as_bytes());
-        Ok(Some(Value::from(order as i64)))
+        let order = match (text(args[0]), text(args[1])) {
+            (Some(a), Some(b)) => a.as_ref().data.as_bytes().cmp(b.as_ref().data.as_bytes()),
+            (a, b) => a.is_some().cmp(&b.is_some()),
+        };
+        Value::from(order as i64)
     })));
 }
 
