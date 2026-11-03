@@ -1791,7 +1791,7 @@ impl<const S: usize> Machine<S> {
     /// Run the native code at `target` on the top `arity` stack words.
     /// `None`: no native code there, or it bailed and the VM runs the call.
     #[inline(never)]
-    fn try_native_call(&mut self, target: usize, arity: usize) -> Option<Value> {
+    fn try_native_call(&mut self, target: usize, arity: usize) -> Option<(Value, bool)> {
         let base = self.stack.tell() - arity;
         let table = self.native.as_deref_mut()?;
         // After a bail the VM re-runs that call in bytecode; calls nested
@@ -1812,10 +1812,10 @@ impl<const S: usize> Machine<S> {
         for (i, w) in words.iter_mut().take(arity).enumerate() {
             *w = self.stack[base + i].bits();
         }
-        match crate::native::call(&entry, &words[..arity]) {
-            Some(out) => {
+        match crate::native::call(&entry, &words[..arity], &mut self.heap) {
+            Some((out, allocated)) => {
                 table.hits += 1;
-                Some(Value::from(out))
+                Some((Value::from(out), allocated))
             }
             None => {
                 table.bails += 1;
@@ -5527,11 +5527,16 @@ impl<const S: usize> Machine<S> {
                     if unlikely(self.native.is_some())
                         && !debug_attached
                         && target != 0
-                        && let Some(ret) = self.try_native_call(target, arity)
+                        && let Some((ret, allocated)) = self.try_native_call(target, arity)
                     {
                         let base = self.stack.tell() - arity;
                         self.stack.seek(base);
                         self.stack.push(ret);
+                        if allocated {
+                            // Native code never collects; objects it made
+                            // are reachable from `ret` or the heap now.
+                            self.maybe_gc_after_call_alloc(ip);
+                        }
                         continue;
                     }
                     let callee_sp = self.stack.tell() - arity;
@@ -6140,7 +6145,7 @@ impl<const N: usize> Machine<N> {
 }
 
 /// `COIL_COW_EAGER=1` (measuring only): every copy-on-write share copies.
-fn cow_eager() -> bool {
+pub(crate) fn cow_eager() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("COIL_COW_EAGER").is_some())
 }

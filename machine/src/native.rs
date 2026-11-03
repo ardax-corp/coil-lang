@@ -32,7 +32,17 @@ pub struct NativeCtx {
     pub undo_cap: u64,
     /// The storage behind `undo_buf`.
     pub undo_vec: *mut Vec<UndoEntry>,
+    /// The machine's heap, for helpers that allocate (null: they bail).
+    pub heap: *mut crate::memory::Heap,
+    /// Objects helpers allocated during this call. No collection runs
+    /// while native code holds raw heap words, so the VM collects after
+    /// the call returns; past [`NATIVE_ALLOC_CAP`] with a collection due,
+    /// helpers bail instead and the VM's re-run collects as it goes.
+    pub allocs: u64,
 }
+
+/// Allocations one native call may make while a collection is due.
+pub const NATIVE_ALLOC_CAP: u64 = 1 << 16;
 
 /// One heap store native code made: `[target, index, old word]`. `target`
 /// is the object's address, with bit 0 set for an instance slot (clear for
@@ -63,7 +73,14 @@ impl NativeCtx {
             undo_len: 0,
             undo_cap: undo.capacity() as u64,
             undo_vec: undo,
+            heap: std::ptr::null_mut(),
+            allocs: 0,
         }
+    }
+
+    /// As [`Self::new`], with `heap` for the helpers that allocate.
+    pub fn with_heap(stack_limit: u64, undo: &mut Vec<UndoEntry>, heap: *mut crate::memory::Heap) -> Self {
+        Self { heap, ..Self::new(stack_limit, undo) }
     }
 
     /// Put back every logged store, newest first.
@@ -181,18 +198,19 @@ impl NativeTable {
     }
 }
 
-/// Run `entry` with `args`. `None` when it bailed.
+/// Run `entry` with `args`: its result and whether it allocated (the VM
+/// then checks for a collection). `None` when it bailed.
 #[inline(never)]
-pub(crate) fn call(entry: &NativeEntry, args: &[u64]) -> Option<u64> {
+pub(crate) fn call(entry: &NativeEntry, args: &[u64], heap: &mut crate::memory::Heap) -> Option<(u64, bool)> {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
     let mut undo = Vec::new();
-    let mut ctx = NativeCtx::new(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo);
+    let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo, heap);
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
     if ctx.bail == 0 {
-        return Some(out);
+        return Some((out, ctx.allocs != 0));
     }
     ctx.undo();
     None
@@ -236,8 +254,9 @@ pub(crate) fn take_pending() -> Option<Pending> {
 // Heap reads for native code (heap tier).
 //
 // Native code calls these with heap words it was handed. It never
-// allocates and never re-enters the VM, so no collection runs while it
-// holds them and every address stays a live object. Each helper does what
+// re-enters the VM and its helpers never collect (the Cow helpers below
+// allocate, but the VM collects only after the call returns), so every
+// address it holds stays a live object at the same place. Each helper does what
 // the matching VM instruction does; where the VM would panic, it sets the
 // bail flag and returns 0.
 
@@ -383,4 +402,73 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
         }
         None => 0,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Copy-on-write for native code. These allocate (a unique copy) but never
+// collect; see [`NativeCtx::allocs`].
+
+/// The heap of `ctx`, or `None` (the caller bails).
+unsafe fn heap<'a>(ctx: *mut NativeCtx) -> Option<&'a mut crate::memory::Heap> {
+    unsafe { (*ctx).heap.as_mut() }
+}
+
+/// Count one allocation; bail when the call allocated past
+/// [`NATIVE_ALLOC_CAP`] with a collection due.
+unsafe fn note_alloc(ctx: *mut NativeCtx, heap: &crate::memory::Heap) {
+    let ctx = unsafe { &mut *ctx };
+    ctx.allocs += 1;
+    if ctx.allocs >= NATIVE_ALLOC_CAP && heap.should_collect() {
+        ctx.bail = 1;
+    }
+}
+
+/// `Cow` without a field: share `word` (`unique == 0`) or return a unique
+/// copy of it when it is shared (`unique != 0`), as the VM's `Cow` does.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `word` is a heap word.
+pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique: u64) -> u64 {
+    if crate::vm::cow_eager() {
+        return unsafe { bail(ctx) };
+    }
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let v = common::Value::from(word);
+    if unique == 0 {
+        heap.cow_share(v);
+        return word;
+    }
+    match heap.cow_unique(v) {
+        Some(copy) => {
+            unsafe { note_alloc(ctx, heap) };
+            copy.bits()
+        }
+        None => word,
+    }
+}
+
+/// `Cow` of field `field` of the instance `obj`: `obj.f = unique(obj.f)`,
+/// writing the slot back (and logging it for undo) only when it copied.
+/// Returns `obj`.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `obj` is a heap word.
+pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, field: u64) -> u64 {
+    if crate::vm::cow_eager() {
+        return unsafe { bail(ctx) };
+    }
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    if let Some(crate::memory::Object::Instance(mut gc)) = object(obj)
+        && let Some(v) = gc.as_ref().slot(field as usize)
+        && let Some(copy) = heap.cow_unique(v)
+    {
+        unsafe { log(ctx, [obj | UNDO_FIELD, field, v.bits()]) };
+        gc.as_mut().set_slot(field as usize, copy);
+        unsafe { note_alloc(ctx, heap) };
+    }
+    obj
 }
