@@ -193,13 +193,16 @@ pub struct NativeHost {
     pub claim: unsafe fn(*mut std::ffi::c_void, u32, u64) -> u64,
     /// Collect, with the context's roots pinned.
     pub collect: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx),
+    /// `gc_collect`: a full collection, with the context's roots pinned;
+    /// returns the bytes freed and sets the `bool` when a `drop` panicked.
+    pub gc: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, &mut bool) -> u64,
     /// `FreeEarly` now, running the `drop`s it owes (with the context's
     /// roots pinned); `false` when one panicked (the VM reported it).
     pub free: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, bool) -> bool,
 }
 
 impl NativeHost {
-    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, free: |_, _, _, _| true };
+    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true };
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
@@ -1345,7 +1348,8 @@ pub fn direct_host_natives() -> &'static [DirectHost] {
             .map(|n| {
                 let guarded = crate::host_natives::stream_first(n.name());
                 let func = if guarded { n.guarded_direct() } else { n.direct() };
-                DirectHost { name: n.name().to_string(), func, guarded }
+                let collect = n.name() == crate::gc_handles::GC_COLLECT_NATIVE;
+                DirectHost { name: n.name().to_string(), func, guarded, collect }
             })
             .collect()
     })
@@ -1358,6 +1362,9 @@ pub struct DirectHost {
     pub func: Option<crate::HostValueFn>,
     /// It takes a `Stream` first, which must not be unsent.
     pub guarded: bool,
+    /// `gc_collect`: a full collection on the VM ([`NativeHost::gc`]),
+    /// with native code's words rooted around the call.
+    pub collect: bool,
 }
 
 /// `HostInvoke` of the direct host native `id` ([`direct_host_natives`])
@@ -1372,7 +1379,25 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         return unsafe { bail(ctx) };
     };
     let c = unsafe { &mut *ctx };
-    let Some(DirectHost { name, func: Some(f), guarded }) = direct_host_natives().get(id as usize) else {
+    if direct_host_natives().get(id as usize).is_some_and(|h| h.collect) {
+        if c.machine.is_null() {
+            return unsafe { bail(ctx) };
+        }
+        // Finalizers it runs cannot be taken back.
+        c.committed = 1;
+        c.vm_calls += 1;
+        c.gc_epoch += 1;
+        let mut panicked = false;
+        // SAFETY: `machine` is the live machine `host` was made for.
+        let freed = unsafe { (c.host.gc)(c.machine, ctx, &mut panicked) };
+        if panicked {
+            let c = unsafe { &mut *ctx };
+            c.trap = TRAP_VM_PANIC;
+            return unsafe { bail(ctx) };
+        }
+        return freed;
+    }
+    let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
         return unsafe { bail(ctx) };
     };
     let mut buf = [common::Value::default(); 16];

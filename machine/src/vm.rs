@@ -1875,6 +1875,7 @@ impl<const S: usize> Machine<S> {
                 call_value: Self::native_call_value,
                 claim: Self::native_claim,
                 collect: Self::native_collect,
+                gc: Self::native_gc,
                 free: Self::native_free,
             },
         }
@@ -1903,6 +1904,22 @@ impl<const S: usize> Machine<S> {
         vm.native_roots.push(ctx);
         vm.maybe_gc_after_call_alloc(ip);
         vm.native_roots.pop();
+    }
+
+    /// [`crate::native::NativeHost::gc`]: what `gc_collect` does.
+    unsafe fn native_gc(raw: *mut c_void, ctx: *mut crate::native::NativeCtx, panicked: &mut bool) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let ip = if vm.frames.is_empty() { 0 } else { vm.frames.get().tell() };
+        if unlikely(!vm.stack_maps.is_empty()) {
+            vm.gc_ip = ip;
+        }
+        let before = vm.heap.size();
+        vm.native_roots.push(ctx);
+        vm.gc_collect();
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        before.saturating_sub(vm.heap.size()) as u64
     }
 
     /// [`crate::native::NativeHost::free`]: what `FreeEarly` does.

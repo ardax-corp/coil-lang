@@ -96,6 +96,7 @@ fn jit_once(
     let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
     jb.symbol("coil_native_fmod", coil_native_fmod as *const u8);
     jb.symbol("coil_native_powf", coil_native_powf as *const u8);
+    jb.symbol("coil_native_ipow", coil_native_ipow as *const u8);
     jb.symbol("coil_native_index", machine::native::coil_native_index as *const u8);
     jb.symbol("coil_native_len", machine::native::coil_native_len as *const u8);
     jb.symbol("coil_native_field", machine::native::coil_native_field as *const u8);
@@ -207,6 +208,20 @@ extern "C" fn coil_native_fmod(a: f64, b: f64) -> f64 {
 
 extern "C" fn coil_native_powf(a: f64, b: f64) -> f64 {
     a.powf(b)
+}
+
+/// `int **` (`common::int_arith::pow`): the power goes to `out`; returns
+/// `0`, or the trap code of its failure.
+extern "C" fn coil_native_ipow(a: i64, b: i64, out: *mut i64) -> i64 {
+    match common::int_arith::pow(a, b) {
+        Ok(v) => {
+            // SAFETY: native code passes a slot of its frame.
+            unsafe { *out = v };
+            0
+        }
+        Err(common::int_arith::IntTrap::NegativeExponent) => machine::native::TRAP_NEGATIVE_EXPONENT as i64,
+        Err(_) => TRAP_OVERFLOW as i64,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -520,9 +535,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need_scalar(dest)?;
                         need_scalar(lhs)?;
                         need_scalar(rhs)?;
-                        if *ty == MirTy::I64 && *op == MirBinOp::Pow {
-                            return Err("int **".into());
-                        }
                         if *ty == MirTy::Bool && !op.requires_int() {
                             return Err("bool arithmetic".into());
                         }
@@ -706,7 +718,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(a)?;
                         }
                         match machine::native::direct_host_natives().get(usize::from(*native_id)) {
-                            Some(h) if h.func.is_some() && args.len() <= 16 => {}
+                            Some(h) if (h.func.is_some() || h.collect) && args.len() <= 16 => {}
                             Some(h) => return Err(format!("host call `{}` runs in the VM", h.name)),
                             None => return Err(format!("host call {native_id} outside the standard table")),
                         }
@@ -791,6 +803,7 @@ struct Ids {
     claim: FuncId,
     fmod: FuncId,
     powf: FuncId,
+    ipow: FuncId,
     /// Heap reads (`machine::native::coil_native_*`).
     index: FuncId,
     len: FuncId,
@@ -878,6 +891,10 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     f2.returns.push(AbiParam::new(types::F64));
     let fmod = module.declare_function("coil_native_fmod", Linkage::Import, &f2).map_err(e)?;
     let powf = module.declare_function("coil_native_powf", Linkage::Import, &f2).map_err(e)?;
+    let mut i3 = module.make_signature();
+    i3.params.extend((0..3).map(|_| AbiParam::new(types::I64)));
+    i3.returns.push(AbiParam::new(types::I64));
+    let ipow = module.declare_function("coil_native_ipow", Linkage::Import, &i3).map_err(e)?;
     let words = |n: usize| {
         let mut sig = module.make_signature();
         sig.params.extend((0..n).map(|_| AbiParam::new(types::I64)));
@@ -928,6 +945,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         claim,
         fmod,
         powf,
+        ipow,
         index,
         len,
         field,
@@ -1011,6 +1029,7 @@ struct Lower<'a> {
     module_refs: HashMap<usize, FuncRef>,
     fmod: FuncRef,
     powf: FuncRef,
+    ipow: FuncRef,
     index: FuncRef,
     len: FuncRef,
     field: FuncRef,
@@ -1101,6 +1120,7 @@ impl<'a> Lower<'a> {
         }
         let fmod = module.declare_func_in_func(ids.fmod, func);
         let powf = module.declare_func_in_func(ids.powf, func);
+        let ipow = module.declare_func_in_func(ids.ipow, func);
         let index = module.declare_func_in_func(ids.index, func);
         let len = module.declare_func_in_func(ids.len, func);
         let field = module.declare_func_in_func(ids.field, func);
@@ -1150,6 +1170,7 @@ impl<'a> Lower<'a> {
             module_refs,
             fmod,
             powf,
+            ipow,
             index,
             len,
             field,
@@ -1861,8 +1882,12 @@ impl<'a> Lower<'a> {
                 let lay = self.b.ins().iconst(types::I64, i64::from(*layout));
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                // `gc_collect` collects: this frame's words are roots.
+                let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect);
+                let roots = if collect { self.push_roots(f) } else { None };
                 let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
                 let w = self.b.inst_results(call)[0];
+                self.pop_roots(f, roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
@@ -2258,7 +2283,20 @@ impl<'a> Lower<'a> {
                 self.bail_if(out, TRAP_SHIFT);
                 if op == MirBinOp::Shl { self.b.ins().ishl(a, c) } else { self.b.ins().sshr(a, c) }
             }
-            MirBinOp::Pow => return Err("int **".into()),
+            MirBinOp::Pow => {
+                let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                let out = self.b.ins().stack_addr(types::I64, slot, 0);
+                let call = self.b.ins().call(self.ipow, &[a, c, out]);
+                let code = self.b.inst_results(call)[0];
+                let neg = self.b.ins().icmp_imm_s(IntCC::Equal, code, machine::native::TRAP_NEGATIVE_EXPONENT as i64);
+                self.bail_if(neg, machine::native::TRAP_NEGATIVE_EXPONENT);
+                self.bail_if(code, TRAP_OVERFLOW);
+                self.b.ins().stack_load(types::I64, types::I64, slot, 0)
+            }
         })
     }
 
