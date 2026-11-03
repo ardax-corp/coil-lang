@@ -1688,11 +1688,15 @@ impl<'a> Lower<'a> {
         let full = self.b.ins().icmp(IntCC::Equal, n, cap);
         let grow = self.b.create_block();
         let write = self.b.create_block();
-        self.b.ins().brif(full, grow, &[], write, &[]);
+        self.b.append_block_param(write, types::I64);
+        self.b.ins().brif(full, grow, &[], write, &[n.into()]);
         self.b.switch_to_block(grow);
         self.b.ins().call(self.undo_grow, &[self.ctx]);
-        self.b.ins().jump(write, &[]);
+        // A committed call starts the log over: the length changed.
+        let again = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_LEN);
+        self.b.ins().jump(write, &[again.into()]);
         self.b.switch_to_block(write);
+        let n = self.b.block_params(write)[0];
         let buf = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_BUF);
         let off = self.b.ins().imul_imm_u(n, 24);
         let e = self.b.ins().iadd(buf, off);
