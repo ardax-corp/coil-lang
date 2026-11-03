@@ -1770,22 +1770,17 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// Limit execution to `budget` steps, where a step is a taken loop
-    /// back-edge (a jump whose target PC is at or before the jump) or a call
-    /// (`CALL`, `TailCall`, `CallIndirect`, closure / polymorphic calls, and
-    /// [`Self::call_function`] re-entry). Running out is a VM panic
-    /// ([`Self::panicked`] and [`Self::step_budget_exhausted`] become true).
-    /// `None` (the default) removes the limit. The budget spans every run on
-    /// this machine until set again; spawned worker machines never inherit it.
     /// Install native code for some functions (see [`crate::native`]). A
     /// `CALL` of an installed entry PC runs it instead of the bytecode,
-    /// except while a debugger is attached. An empty list removes it.
-    pub fn install_native(&mut self, code_len: usize, entries: Vec<crate::native::NativeEntry>) {
-        self.native = if entries.is_empty() {
-            None
-        } else {
-            Some(Box::new(crate::native::NativeTable::new(code_len, entries)))
-        };
+    /// except while a debugger is attached. Machines this one spawns
+    /// (threads, auto-par jobs, test cases) run it too. `None` removes it.
+    pub fn install_native(&mut self, code: Option<std::sync::Arc<crate::native::NativeCode>>) {
+        self.native = code.filter(|c| !c.is_empty()).map(|c| Box::new(crate::native::NativeTable::new(c)));
+    }
+
+    /// The installed native code, for a machine that runs this program.
+    pub fn native_code(&self) -> Option<std::sync::Arc<crate::native::NativeCode>> {
+        self.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
     }
 
     /// Native calls run and bailed so far: `(hits, bails)`.
@@ -1830,6 +1825,13 @@ impl<const S: usize> Machine<S> {
         }
     }
 
+    /// Limit execution to `budget` steps, where a step is a taken loop
+    /// back-edge (a jump whose target PC is at or before the jump) or a call
+    /// (`CALL`, `TailCall`, `CallIndirect`, closure / polymorphic calls, and
+    /// [`Self::call_function`] re-entry). Running out is a VM panic
+    /// ([`Self::panicked`] and [`Self::step_budget_exhausted`] become true).
+    /// `None` (the default) removes the limit. The budget spans every run on
+    /// this machine until set again; spawned worker machines never inherit it.
     pub fn set_step_budget(&mut self, budget: Option<u64>) {
         // `budget` charges succeed; the next one reaches zero.
         self.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
@@ -4146,6 +4148,7 @@ impl<const S: usize> Machine<S> {
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
             statics: self.static_words(),
+            native: self.native_code(),
         })
     }
 
@@ -5277,7 +5280,8 @@ impl<const S: usize> Machine<S> {
     ) {
         let code: &[Byte] = unsafe { std::slice::from_raw_parts(code.as_ptr().cast(), code.len()) };
         if let Some(entries) = crate::native::take_pending() {
-            self.install_native(code.len(), entries);
+            let native = crate::native::NativeCode::new(code.len(), entries);
+            self.install_native(Some(std::sync::Arc::new(native)));
         }
         self.run_with_pool(code, constants, strings, static_slots);
         if std::env::var_os("COIL_NATIVE_STATS").is_some()

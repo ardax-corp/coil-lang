@@ -90,6 +90,8 @@ pub struct Job {
     /// Harness case (`coil-test`): run static init first, then report
     /// pass / fail instead of a spawn result.
     pub test: Option<TestJob>,
+    /// The spawner's native code (`None`: bytecode only).
+    pub native: Option<Arc<crate::native::NativeCode>>,
 }
 
 /// A `test("…")` case (or a case-less file's `main`) run as a reactor job.
@@ -710,6 +712,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         struct_layouts,
         test,
         statics,
+        native,
     } = job;
 
     // A joining root help-steals jobs onto its *own* thread, so the print
@@ -766,6 +769,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             Arc::clone(&program.strings),
         );
         vm.set_struct_layouts(struct_layouts);
+        vm.install_native(native);
         // A job reads the spawner's statics (startup `const`s, tables built
         // once): a shared-heap job its words as they are, an isolate job
         // the copies made into its own heap.
@@ -1046,6 +1050,7 @@ pub fn job_from_spawn_context(
         struct_layouts: ctx.struct_layouts,
         test: None,
         statics: None,
+        native: ctx.native,
     }
 }
 
@@ -1094,6 +1099,7 @@ mod tests {
             struct_layouts: Arc::default(),
             test: None,
             statics: None,
+            native: None,
         };
         reactor.submit(job);
         state
@@ -1128,6 +1134,7 @@ mod tests {
             dload_gate: DloadGate::deny_all(),
             struct_layouts: Arc::default(),
             statics: Arc::default(),
+            native: None,
         }
     }
 
@@ -1395,6 +1402,7 @@ mod tests {
             struct_layouts: Arc::default(),
             test: None,
             statics: None,
+            native: None,
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(

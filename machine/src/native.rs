@@ -48,21 +48,18 @@ pub struct NativeEntry {
     pub entry: NativeEntryFn,
 }
 
-/// The installed native functions, indexed by entry PC.
+/// The compiled functions of one program, indexed by entry PC. Shared
+/// (`Arc`) by every machine that runs the program.
 #[derive(Default)]
-pub struct NativeTable {
+pub struct NativeCode {
     /// `by_pc[pc]` is `index + 1` into `entries`, or `0`.
     by_pc: Vec<u32>,
     entries: Vec<NativeEntry>,
-    /// Calls that ran natively / bailed to the VM (`COIL_NATIVE_STATS=1`).
-    pub(crate) hits: u64,
-    pub(crate) bails: u64,
-    /// Operand stack base of the last call that bailed: calls whose base
-    /// is above it run in the VM (`usize::MAX`: none).
-    pub(crate) quiet_above: usize,
 }
 
-impl NativeTable {
+impl NativeCode {
+    /// `code_len` is the program's bytecode length; entries past it are
+    /// dropped.
     pub fn new(code_len: usize, entries: Vec<NativeEntry>) -> Self {
         let mut by_pc = vec![0u32; code_len];
         let mut kept = Vec::with_capacity(entries.len());
@@ -72,13 +69,7 @@ impl NativeTable {
                 *slot = kept.len() as u32;
             }
         }
-        Self {
-            by_pc,
-            entries: kept,
-            hits: 0,
-            bails: 0,
-            quiet_above: usize::MAX,
-        }
+        Self { by_pc, entries: kept }
     }
 
     pub fn len(&self) -> usize {
@@ -96,6 +87,29 @@ impl NativeTable {
             return None;
         }
         Some(self.entries[i as usize - 1])
+    }
+}
+
+/// One machine's view of the native code: the shared code plus its own
+/// counters and bail state.
+pub(crate) struct NativeTable {
+    pub(crate) code: std::sync::Arc<NativeCode>,
+    /// Calls that ran natively / bailed to the VM (`COIL_NATIVE_STATS=1`).
+    pub(crate) hits: u64,
+    pub(crate) bails: u64,
+    /// Operand stack base of the last call that bailed: calls whose base
+    /// is above it run in the VM (`usize::MAX`: none).
+    pub(crate) quiet_above: usize,
+}
+
+impl NativeTable {
+    pub(crate) fn new(code: std::sync::Arc<NativeCode>) -> Self {
+        Self { code, hits: 0, bails: 0, quiet_above: usize::MAX }
+    }
+
+    #[inline]
+    pub(crate) fn lookup(&self, pc: usize) -> Option<NativeEntry> {
+        self.code.lookup(pc)
     }
 }
 
@@ -117,8 +131,7 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64]) -> Option<u64> {
 static PENDING: std::sync::Mutex<Option<Vec<NativeEntry>>> = std::sync::Mutex::new(None);
 
 /// Native code for the next [`crate::Machine::run_raw`] in this process
-/// (the program's main machine). Worker machines start without it and run
-/// bytecode.
+/// (the program's main machine); the machines it spawns share it.
 pub fn install_for_next_run(entries: Vec<NativeEntry>) {
     *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(entries);
 }
