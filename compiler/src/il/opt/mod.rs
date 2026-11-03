@@ -136,7 +136,7 @@ mod labels;
 mod opt_level;
 mod stats;
 pub(crate) use labels::{max_code_label, remap_label_space};
-pub use opt_level::{EarlyFree, OptLevel};
+pub use opt_level::{EarlyFree, HintFactors, OptLevel};
 pub(crate) use stats::{
     note_body_tier, note_body_tiers, note_comptime_consts, note_comptime_macros, note_fuse_reason, note_hir_fallback, note_hir_mir, note_hir_mir_kept,
     note_hir_inline_refused, note_hir_inlined, note_hir_lowered,

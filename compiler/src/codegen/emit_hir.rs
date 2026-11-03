@@ -46,15 +46,6 @@ pub(crate) struct Outlined {
     ret: ValueLayout,
 }
 
-/// Inline cost limits, as multiples of the level's limit
-/// (`docs/internals/opt-hints.md`): a call in a hot body, and a callee hot
-/// by spreading, 2x; an `#[inline]` callee 3x; a `#[hot]` one 5x. Past
-/// those a splice rarely pays: a merged body over the dense register limit
-/// runs as LIR (coil-lang#2242).
-const HOT_SPREAD_FACTOR: usize = 2;
-const INLINE_FACTOR: usize = 3;
-const HOT_FACTOR: usize = 5;
-
 /// Where a field lives: a class slot or a record's (`LoadField` /
 /// `SetField` slot form). A record's slots are its fields sorted by name.
 #[derive(Clone, Copy)]
@@ -2658,24 +2649,26 @@ impl Compiler {
             s.to_string()
         };
         let here = home(hir);
-        // Cost limits by hint, as multiples of the level's: a hot body's
-        // calls and a callee hot by spreading 2x, `#[inline]` 3x, `#[hot]`
-        // 5x; `#[inline(always)]` lifts them (`docs/internals/opt-hints.md`).
+        // Cost limits by hint, as multiples of the level's
+        // (`OptLevel::hint_factors`: at -O2 a hot body's calls and a callee
+        // hot by spreading 2x, `#[inline]` 3x, `#[hot]` 5x);
+        // `#[inline(always)]` lifts them (`docs/internals/opt-hints.md`).
+        let factors = self.inline_cost.hint_factors;
         let base = self.inline_cost.max_inline_cost;
         let cross_base = match self.inline_cost.max_cross_module_inline_cost {
             0 => base,
             c => c,
         };
         let hot_here = self.is_hot_body(hir);
-        let budget = if hot_here { base * HOT_SPREAD_FACTOR } else { base };
-        let cross_budget = if hot_here { cross_base * HOT_SPREAD_FACTOR } else { self.inline_cost.max_cross_module_inline_cost };
+        let budget = if hot_here { base * factors.spread } else { base };
+        let cross_budget = if hot_here { cross_base * factors.spread } else { self.inline_cost.max_cross_module_inline_cost };
         let factor = |b: &HirBody| {
             if b.hints.hot && !b.hints.cold {
-                HOT_FACTOR
+                factors.hot
             } else if b.hints.inline {
-                INLINE_FACTOR
+                factors.inline
             } else if self.is_hot_body(b) {
-                HOT_SPREAD_FACTOR
+                factors.spread
             } else {
                 1
             }

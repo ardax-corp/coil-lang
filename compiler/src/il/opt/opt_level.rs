@@ -56,6 +56,38 @@ impl OptLevel {
     pub fn inline_across_modules(self) -> bool {
         matches!(self, Self::Standard | Self::Aggressive | Self::Size)
     }
+
+    /// The optimization-hint tiers: how many times [`Self::inline_max_cost`]
+    /// a callee may cost when it is hot by spreading, `#[inline]` or
+    /// `#[hot]` (`docs/internals/opt-hints.md`). `-O3` trades code for
+    /// speed with the widest tiers, `-Os` keeps them narrow; at `-O0` and
+    /// `-Og` nothing inlines, so a multiple of 0 stays 0.
+    pub fn hint_factors(self) -> HintFactors {
+        match self {
+            Self::None | Self::Debug => HintFactors { spread: 1, inline: 1, hot: 1 },
+            Self::Basic | Self::Standard => HintFactors { spread: 2, inline: 3, hot: 5 },
+            Self::Aggressive => HintFactors { spread: 4, inline: 5, hot: 10 },
+            Self::Size => HintFactors { spread: 1, inline: 2, hot: 3 },
+        }
+    }
+}
+
+/// Multiples of a level's inline cost limit that the optimization hints
+/// grant ([`OptLevel::hint_factors`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HintFactors {
+    /// A call in a hot body, and a callee hot by spreading.
+    pub spread: usize,
+    /// An `#[inline]` callee.
+    pub inline: usize,
+    /// A `#[hot]` callee.
+    pub hot: usize,
+}
+
+impl Default for HintFactors {
+    fn default() -> Self {
+        OptLevel::Standard.hint_factors()
+    }
 }
 
 /// `--early-free`: free what the escape facts prove dead (`on`), compile
@@ -381,5 +413,22 @@ mod tests {
         assert!(!OptLevel::Basic.inline_across_modules());
         assert!(OptLevel::Standard.inline_across_modules());
         assert!(OptLevel::Aggressive.inline_across_modules());
+    }
+
+    #[test]
+    fn hint_tiers_follow_the_level() {
+        let f = |l: OptLevel| {
+            let h = l.hint_factors();
+            (h.spread, h.inline, h.hot)
+        };
+        assert_eq!(f(OptLevel::Standard), (2, 3, 5));
+        assert_eq!(f(OptLevel::Basic), (2, 3, 5));
+        assert_eq!(f(OptLevel::Aggressive), (4, 5, 10));
+        assert_eq!(f(OptLevel::Size), (1, 2, 3));
+        // Each tag buys a larger limit than the one below it.
+        for l in [OptLevel::Basic, OptLevel::Standard, OptLevel::Aggressive, OptLevel::Size] {
+            let (spread, inline, hot) = f(l);
+            assert!(spread < inline && inline < hot, "{l:?}");
+        }
     }
 }
