@@ -489,3 +489,14 @@ fn closures_run_from_native_code_as_on_the_vm() {
     let err = program_stderr(&run("closures", &src, true));
     assert!(err.contains("panic: division by zero"), "stderr: {err}");
 }
+
+#[test]
+fn a_bailed_call_leaves_no_drop_owed() {
+    // `make` allocates a `drop` object natively, then bails (an early free
+    // of a finalizer object): the VM's re-run makes the one that drops.
+    let src = "use gc::collect;\nuse io::sync::println;\nuse string::format;\nstatic let drops: int = 0;\n\
+               class Handle { pub fd: int }\nimpl Handle { fn drop() { drops = drops + 1; } }\n\
+               #[inline(never)]\nfn make() { let h = new Handle(1); }\n\
+               fn main() { make(); collect(); let _ = println(format(\"%i\", drops)); }\n";
+    let _ = same_as_vm("bailed_drop", src);
+}
