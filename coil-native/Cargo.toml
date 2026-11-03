@@ -6,6 +6,7 @@ description = "Native code for Coil: MIR to Cranelift (JIT now, AOT objects late
 
 [dependencies]
 compiler = { path = "../compiler", default-features = false }
+common = { path = "../common" }
 machine = { path = "../machine", default-features = false }
 cranelift-codegen = "0.137"
 cranelift-frontend = "0.137"

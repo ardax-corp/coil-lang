@@ -423,6 +423,7 @@ dependencies = [
 name = "coil-native"
 version = "0.1.0"
 dependencies = [
+ "common",
  "compiler",
  "cranelift-codegen",
  "cranelift-frontend",

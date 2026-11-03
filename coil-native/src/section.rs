@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use compiler::native_mir::{
-    BlockId, Label, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFunc, MirGcKind, MirInst, MirTy,
+    BlockId, Label, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFunc, MirGcKind, MirInst, MirTy,
     MirUnaryOp, NativeBody, Terminator, ValueId,
 };
 
@@ -118,6 +118,8 @@ const I_STORE_INDEX: u8 = 12;
 const I_SET_FIELD: u8 = 13;
 const I_COW: u8 = 14;
 const I_GC_BARRIER: u8 = 15;
+const I_ALLOC: u8 = 16;
+const I_ARRAY_PUSH: u8 = 17;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -296,6 +298,35 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u8(*unique as u8);
             w.u32(field.unwrap_or(u32::MAX));
         }
+        MirInst::Alloc { dest, kind, elems, kinds } => {
+            w.u8(I_ALLOC);
+            w.v(*dest);
+            match *kind {
+                MirAllocKind::Array => w.u8(0),
+                MirAllocKind::Tuple => w.u8(1),
+                MirAllocKind::Enum { tag } => {
+                    w.u8(2);
+                    w.u32(tag);
+                }
+                MirAllocKind::Object { type_id, nfields } => {
+                    w.u8(3);
+                    w.u32(type_id);
+                    w.u32(nfields);
+                }
+                _ => unreachable!("native section: allocation outside the native tier"),
+            }
+            w.u32(elems.len() as u32);
+            for e in elems {
+                w.v(*e);
+            }
+            w.u8(*kinds);
+        }
+        MirInst::ArrayPush { dest, array, value } => {
+            w.u8(I_ARRAY_PUSH);
+            w.v(*dest);
+            w.v(*array);
+            w.v(*value);
+        }
         MirInst::GcBarrier { dest, .. } => {
             // Native code only needs the pairing, which order gives.
             w.u8(I_GC_BARRIER);
@@ -448,6 +479,20 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             unchecked: r.u8()? != 0,
         },
         I_SET_FIELD => MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()? },
+        I_ALLOC => {
+            let dest = r.v()?;
+            let kind = match r.u8()? {
+                0 => MirAllocKind::Array,
+                1 => MirAllocKind::Tuple,
+                2 => MirAllocKind::Enum { tag: r.u32()? },
+                3 => MirAllocKind::Object { type_id: r.u32()?, nfields: r.u32()? },
+                k => return Err(format!("native MIR: bad allocation kind {k}")),
+            };
+            let n = r.len()?;
+            let elems = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
+            MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
+        }
+        I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
         I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: Vec::new() },
         I_COW => {
             let (dest, src, unique) = (r.v()?, r.v()?, r.u8()? != 0);

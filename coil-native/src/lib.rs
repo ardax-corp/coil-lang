@@ -16,7 +16,7 @@ pub mod section;
 use std::collections::{HashMap, HashSet};
 
 use compiler::native_mir::{
-    BlockId, Label, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
+    BlockId, Label, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
     NativeBody, Terminator, ValueId,
 };
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -92,6 +92,8 @@ fn jit_once(
     jb.symbol("coil_native_undo_grow", machine::native::coil_native_undo_grow as *const u8);
     jb.symbol("coil_native_cow", machine::native::coil_native_cow as *const u8);
     jb.symbol("coil_native_cow_field", machine::native::coil_native_cow_field as *const u8);
+    jb.symbol("coil_native_alloc", machine::native::coil_native_alloc as *const u8);
+    jb.symbol("coil_native_array_push", machine::native::coil_native_array_push as *const u8);
     let mut module = JITModule::new(jb);
 
     let ids = declare(&mut module, bodies, &plan.compile)?;
@@ -229,6 +231,16 @@ fn ty_of(f: &MirFunc, v: ValueId) -> MirTy {
     f.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
 }
 
+/// A word's kind for an object's packed word kinds, as the VM's emission
+/// records them.
+fn word_kind(t: MirTy) -> u8 {
+    match t {
+        MirTy::I64 | MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
+        MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => common::WORD_POINTER,
+        MirTy::Value | MirTy::Bottom => common::WORD_UNKNOWN,
+    }
+}
+
 /// Each `GcBarrier`'s object: the dest of the allocating instruction right
 /// before it in its block, as the VM's emission pairs them. Native code
 /// never collects during a call, so the barrier only names that word.
@@ -352,6 +364,22 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                     need_heap(object)?;
                     need(value)?;
                 }
+                MirInst::Alloc { dest, kind, elems, .. } => {
+                    need(dest)?;
+                    for e in elems {
+                        need(e)?;
+                    }
+                    match kind {
+                        MirAllocKind::Array | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
+                        MirAllocKind::Object { .. } if elems.is_empty() => {}
+                        other => return Err(format!("allocation {other:?}")),
+                    }
+                }
+                MirInst::ArrayPush { dest, array, value } => {
+                    need(dest)?;
+                    need_heap(array)?;
+                    need(value)?;
+                }
                 MirInst::GcBarrier { dest, .. } => {
                     need(dest)?;
                     if !pairs.contains_key(dest) {
@@ -426,6 +454,9 @@ struct Ids {
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
+    /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
+    alloc: FuncId,
+    array_push: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -472,7 +503,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         sig.returns.push(AbiParam::new(types::I64));
         sig
     };
-    let (s4, s3, s1, s2) = (words(4), words(3), words(1), words(2));
+    let (s5, s4, s3, s1, s2) = (words(5), words(4), words(3), words(1), words(2));
     let index = module.declare_function("coil_native_index", Linkage::Import, &s3).map_err(e)?;
     let len = module.declare_function("coil_native_len", Linkage::Import, &s1).map_err(e)?;
     let field = module.declare_function("coil_native_field", Linkage::Import, &s2).map_err(e)?;
@@ -484,7 +515,9 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let undo_grow = module.declare_function("coil_native_undo_grow", Linkage::Import, &s1v).map_err(e)?;
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
-    Ok(Ids { imp, entry, fmod, powf, index, len, field, store_index, set_field, view, undo_grow, cow, cow_field })
+    let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
+    let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
+    Ok(Ids { imp, entry, fmod, powf, index, len, field, store_index, set_field, view, undo_grow, cow, cow_field, alloc, array_push })
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +581,8 @@ struct Lower<'a> {
     undo_grow: FuncRef,
     cow: FuncRef,
     cow_field: FuncRef,
+    alloc: FuncRef,
+    array_push: FuncRef,
     /// Arrays this body indexes: `(ok, pointer, length)` of their element
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
@@ -590,6 +625,8 @@ impl<'a> Lower<'a> {
         let undo_grow = module.declare_func_in_func(ids.undo_grow, func);
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
+        let alloc = module.declare_func_in_func(ids.alloc, func);
+        let array_push = module.declare_func_in_func(ids.array_push, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -616,6 +653,8 @@ impl<'a> Lower<'a> {
             undo_grow,
             cow,
             cow_field,
+            alloc,
+            array_push,
             views: HashMap::new(),
             stored: HashSet::new(),
             barriers: HashMap::new(),
@@ -923,6 +962,67 @@ impl<'a> Lower<'a> {
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag);
                 self.set(f, *dest, w);
+            }
+            MirInst::Alloc { dest, kind, elems, kinds } => {
+                use machine::native::{ALLOC_ARRAY, ALLOC_ENUM, ALLOC_OBJECT, ALLOC_TUPLE};
+                // Declaration order: an enum's elems are in push order and
+                // its payload starts with the last push, as `DenseMake`.
+                let mut words = elems.clone();
+                if matches!(kind, MirAllocKind::Enum { .. }) {
+                    words.reverse();
+                }
+                let packed = || common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w))));
+                let (code, n, extra) = match *kind {
+                    MirAllocKind::Array => (ALLOC_ARRAY, words.len() as u64, u64::from(*kinds)),
+                    MirAllocKind::Tuple => {
+                        (ALLOC_TUPLE, words.len() as u64, u64::from(if *kinds != 0 { *kinds } else { packed() }))
+                    }
+                    MirAllocKind::Enum { tag } => {
+                        let k = if *kinds != 0 { *kinds } else { packed() };
+                        (ALLOC_ENUM, words.len() as u64, u64::from(tag) | (u64::from(k) << 32))
+                    }
+                    MirAllocKind::Object { type_id, nfields } => (ALLOC_OBJECT, u64::from(nfields), u64::from(type_id)),
+                    other => return Err(format!("allocation {other:?}")),
+                };
+                let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    (words.len().max(1) * 8) as u32,
+                    3,
+                ));
+                for (i, w) in words.iter().enumerate() {
+                    let x = self.get(f, *w);
+                    let x = self.coerce(x, types::I64);
+                    self.b.ins().stack_store(types::I64, x, slot, (i * 8) as i32);
+                }
+                let p = self.b.ins().stack_addr(types::I64, slot, 0);
+                let code = self.b.ins().iconst(types::I64, code as i64);
+                let n = self.b.ins().iconst(types::I64, n as i64);
+                let extra = self.b.ins().iconst(types::I64, extra as i64);
+                let call = self.b.ins().call(self.alloc, &[self.ctx, code, p, n, extra]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::ArrayPush { dest, array, value } => {
+                let a = self.get(f, *array);
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                let call = self.b.ins().call(self.array_push, &[self.ctx, a, v]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                // A push may move the array's storage, and other values may
+                // name the same array: every view reads through the helpers
+                // until its value is defined again.
+                let views: Vec<_> = self.views.values().map(|v| v.0).collect();
+                let zero = self.b.ins().iconst(types::I64, 0);
+                for ok in views {
+                    self.b.def_var(ok, zero);
+                }
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
             }
             MirInst::GcBarrier { dest, .. } => {
                 let obj = *self.barriers.get(dest).ok_or("GcBarrier without an allocation")?;
