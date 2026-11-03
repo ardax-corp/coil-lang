@@ -516,3 +516,35 @@ fn a_scope_native_code_ran_leaves_no_scheduler_behind() {
     let stats = same_as_vm("scope_after_native", &src);
     assert!(compiled(&stats, "first"), "stats: {stats}");
 }
+
+#[test]
+fn defers_run_from_native_frames_on_return_and_panic() {
+    // `step` arms defers capturing heap values in a loop that allocates
+    // (collections move them); `outer` panics through `inner` after a
+    // print: the VM reports the panic, then the native frames' defers run.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn step(int n) -> int {{\n  let tag = format(\"n%i\", n);\n  defer use (tag) {{ let _ = println(\"step done \" + tag); }}\n\
+           let parts: Vec<string> = [];\n  let i = 0;\n  while i < n {{ parts.push(format(\"%i-%i\", n, i)); i = i + 1; }}\n\
+           if n > 3 {{ let late = parts[n - 1]; defer use (late) {{ let _ = println(\"late \" + late); }} }}\n  return parts.len();\n}}\n\
+         #[inline(never)]\nfn inner(int x) -> int {{ let msg = format(\"inner %i\", x); defer use (msg) {{ let _ = println(msg); }} let _ = println(\"in inner\"); return 10 / x; }}\n\
+         #[inline(never)]\nfn outer(int x) -> int {{ defer {{ let _ = println(\"outer defer\"); }} return inner(x) + 1; }}\n\
+         fn main() {{\n  let t = 0;\n  let k = 1;\n  while k < 6 {{ t = t + step(k * 4000); k = k + 1; }}\n  let _ = println(format(\"%i\", t));\n\
+           let _ = println(format(\"%i\", outer(2)));\n  let _ = println(format(\"%i\", outer(0)));\n}}\n"
+    );
+    let stats = same_as_vm("defers", &src);
+    assert!(compiled(&stats, "step") && compiled(&stats, "inner") && compiled(&stats, "outer"), "stats: {stats}");
+    let err = program_stderr(&run("defers", &src, true));
+    assert!(err.contains("panic: division by zero") && err.contains("  in inner at"), "stderr: {err}");
+}
+
+#[test]
+fn an_explicit_drop_from_native_code_claims_the_finalizer() {
+    // `explicit` calls `drop` itself; the collector must not run it again.
+    let src = "use gc::collect;\nuse io::sync::println;\nuse string::format;\nstatic let drops: int = 0;\n\
+               class Handle { pub fd: int }\nstatic let kept: Option<Handle> = Option::None;\n\
+               impl Handle { fn drop() { drops = drops + 1; kept = Option::Some(self); } }\n\
+               #[inline(never)]\nfn explicit() { let h = new Handle(7); h.drop(); }\n\
+               fn main() { explicit(); collect(); kept = Option::None; collect(); let _ = println(format(\"%i\", drops)); }\n";
+    let stats = same_as_vm("explicit_drop", src);
+    assert!(compiled(&stats, "explicit"), "stats: {stats}");
+}
