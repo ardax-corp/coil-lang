@@ -189,6 +189,8 @@ pub const TRAP_STACK: u64 = 6;
 pub const TRAP_MESSAGE: u64 = 7;
 /// A VM call native code made panicked; the VM already reported it.
 pub const TRAP_VM_PANIC: u64 = 8;
+/// An explicit `panic(msg)`: the message in [`NativeCtx::message`].
+pub const TRAP_EXPLICIT: u64 = 9;
 /// No site: a frame that pushes nothing onto the panic's trace.
 pub const NO_SITE: u64 = u32::MAX as u64;
 
@@ -443,7 +445,7 @@ impl NativePanic {
     /// The VM's message for the same trap.
     pub(crate) fn message(&self) -> &str {
         match self.code {
-            TRAP_MESSAGE => &self.message,
+            TRAP_MESSAGE | TRAP_EXPLICIT => &self.message,
             TRAP_OVERFLOW => common::int_arith::IntTrap::Overflow.message(),
             TRAP_DIV_ZERO => common::int_arith::IntTrap::DivByZero.message(),
             TRAP_NEGATIVE_EXPONENT => common::int_arith::IntTrap::NegativeExponent.message(),
@@ -1194,4 +1196,19 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         unsafe { note_alloc(ctx, heap) };
     }
     v.bits()
+}
+
+/// `Panic` of the string `msg`: before a commit, bail (the VM's run panics);
+/// after, a native panic with that message ([`TRAP_EXPLICIT`]).
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `msg` is a heap word.
+pub unsafe extern "C" fn coil_native_panic(ctx: *mut NativeCtx, msg: u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    if let Some(crate::memory::Object::String(gc)) = object(msg) {
+        c.trap = TRAP_EXPLICIT;
+        // SAFETY: `call` set `message` for the call.
+        unsafe { *c.message = gc.as_ref().data.as_str().to_string() };
+    }
+    unsafe { bail(ctx) }
 }

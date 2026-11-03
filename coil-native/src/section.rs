@@ -159,6 +159,7 @@ const I_LOAD_STATIC: u8 = 25;
 const I_STORE_STATIC: u8 = 26;
 const I_PRINT: u8 = 27;
 const I_HOST: u8 = 28;
+const I_PANIC: u8 = 29;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -437,6 +438,11 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u8(*layout);
             w.vs(args);
         }
+        MirInst::Panic { dest, msg } => {
+            w.u8(I_PANIC);
+            w.v(*dest);
+            w.v(*msg);
+        }
         MirInst::Print { dest, src } => {
             w.u8(I_PRINT);
             w.v(*dest);
@@ -674,6 +680,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_LOAD_STATIC => MirInst::LoadStatic { dest: r.v()?, slot: r.u32()? },
         I_STORE_STATIC => MirInst::StoreStatic { dest: r.v()?, slot: r.u32()?, value: r.v()? },
         I_PRINT => MirInst::Print { dest: r.v()?, src: r.v()? },
+        I_PANIC => MirInst::Panic { dest: r.v()?, msg: r.v()? },
         I_HOST => MirInst::HostInvoke {
             dest: r.v()?,
             native_id: u16::try_from(r.u32()?).map_err(|_| "native MIR: bad host id")?,

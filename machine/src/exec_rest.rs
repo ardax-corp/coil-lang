@@ -650,34 +650,8 @@ impl<const S: usize> Machine<S> {
                         self.frames.get_mut().seek(panic_ip);
                     }
                     let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
-                    let s = unsafe { (*ptr).as_ref() };
-                    self.arm_unwind(&s.to_string());
-                    if self.task_panic_is_caught() {
-                        // A child task's panic fails its scope, which reports it.
-                        self.task_panic_message = Some(s.to_string());
-                        self.panicked = true;
-                        return dispatch::RestExit::done(false);
-                    }
-                    let loc_suffix = self
-                        .format_panic_location(panic_ip)
-                        .map(|loc| format!(" at {loc}"))
-                        .unwrap_or_default();
-                    let backtrace = self
-                        .explicit_panic_backtrace(panic_ip)
-                        .filter(|bt| !bt.is_empty())
-                        .map(|bt| format!("\n{bt}"))
-                        .unwrap_or_default();
-                    if let Some(out) = self.output.as_mut() {
-                        let text = format!("panic: {}{}{}", s, loc_suffix, backtrace);
-                        let _ = write!(out, "{text}");
-                        let _ = out.flush();
-                        self.mirror_stderr(&text);
-                    } else {
-                        eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
-                        let _ = io::stderr().flush();
-                    }
-                    self.panicked = true;
-                    return dispatch::RestExit::done(false);
+                    let s = unsafe { (*ptr).as_ref() }.to_string();
+                    return dispatch::RestExit::done(self.explicit_panic(&s, panic_ip));
                 }
                 Instruction::STRING => {
                     let idx = opcode.operand_u32() as usize;

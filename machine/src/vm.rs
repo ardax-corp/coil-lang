@@ -2549,7 +2549,14 @@ impl<const S: usize> Machine<S> {
         }
         self.native_panic_loc = innermost;
         self.native_panic_frames = frames;
-        let out = self.runtime_panic(p.message(), call_ip);
+        if !self.frames.is_empty() {
+            self.frames.get_mut().seek(call_ip);
+        }
+        let out = if p.code == crate::native::TRAP_EXPLICIT {
+            self.explicit_panic(p.message(), call_ip)
+        } else {
+            self.runtime_panic(p.message(), call_ip)
+        };
         self.native_panic_frames.clear();
         self.native_panic_loc = None;
         out
@@ -2578,6 +2585,40 @@ impl<const S: usize> Machine<S> {
             }
         }
         near.and_then(|pc| self.format_panic_location(pc))
+    }
+
+    /// An explicit `panic(msg)` at `panic_ip` (`Instruction::Panic`, or
+    /// native code's): its message, location, and the backtrace only under
+    /// `COIL_BACKTRACE`.
+    pub(crate) fn explicit_panic(&mut self, s: &str, panic_ip: usize) -> bool {
+        self.arm_unwind(s);
+        if self.task_panic_is_caught() {
+            // A child task's panic fails its scope, which reports it.
+            self.task_panic_message = Some(s.to_string());
+            self.panicked = true;
+            return false;
+        }
+        let loc_suffix = match self.native_panic_loc.take() {
+            Some(loc) => format!(" at {loc}"),
+            None if !self.native_panic_frames.is_empty() => String::new(),
+            None => self.format_panic_location(panic_ip).map(|loc| format!(" at {loc}")).unwrap_or_default(),
+        };
+        let backtrace = self
+            .explicit_panic_backtrace(panic_ip)
+            .filter(|bt| !bt.is_empty())
+            .map(|bt| format!("\n{bt}"))
+            .unwrap_or_default();
+        if let Some(out) = self.output.as_mut() {
+            let text = format!("panic: {}{}{}", s, loc_suffix, backtrace);
+            let _ = write!(out, "{text}");
+            let _ = out.flush();
+            self.mirror_stderr(&text);
+        } else {
+            eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
+            let _ = io::stderr().flush();
+        }
+        self.panicked = true;
+        false
     }
 
     /// Abort execution with a VM panic (same path as `Instruction::Panic`).

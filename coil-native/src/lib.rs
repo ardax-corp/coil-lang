@@ -117,6 +117,7 @@ fn jit_once(
     jb.symbol("coil_native_host", machine::native::coil_native_host as *const u8);
     jb.symbol("coil_native_call_vm", machine::native::coil_native_call_vm as *const u8);
     jb.symbol("coil_native_collect", machine::native::coil_native_collect as *const u8);
+    jb.symbol("coil_native_panic", machine::native::coil_native_panic as *const u8);
     let mut module = JITModule::new(jb);
 
     let ids = declare(&mut module, bodies, &plan.compile)?;
@@ -564,6 +565,7 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         need(dest)?;
                         need(src)?;
                     }
+                    MirInst::Panic { msg, .. } => need(msg)?,
                     MirInst::HostInvoke { dest, native_id, args, .. } => {
                         need(dest)?;
                         for a in args {
@@ -681,6 +683,8 @@ struct Ids {
     call_vm: FuncId,
     /// Collections at safepoints.
     collect: FuncId,
+    /// Explicit `panic`.
+    panic: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -760,6 +764,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let mut s1v2 = module.make_signature();
     s1v2.params.push(AbiParam::new(types::I64));
     let collect = module.declare_function("coil_native_collect", Linkage::Import, &s1v2).map_err(e)?;
+    let panic = module.declare_function("coil_native_panic", Linkage::Import, &s2).map_err(e)?;
     Ok(Ids {
         imp,
         entry,
@@ -788,6 +793,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         host,
         call_vm,
         collect,
+        panic,
     })
 }
 
@@ -869,6 +875,7 @@ struct Lower<'a> {
     host: FuncRef,
     call_vm: FuncRef,
     collect: FuncRef,
+    panic: FuncRef,
     /// This body's index into the plan's bodies.
     body_index: Option<usize>,
     /// Panic sites of every body so far; this body's ops name theirs by
@@ -941,6 +948,7 @@ impl<'a> Lower<'a> {
         let host = module.declare_func_in_func(ids.host, func);
         let call_vm = module.declare_func_in_func(ids.call_vm, func);
         let collect = module.declare_func_in_func(ids.collect, func);
+        let panic = module.declare_func_in_func(ids.panic, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -985,6 +993,7 @@ impl<'a> Lower<'a> {
             host,
             call_vm,
             collect,
+            panic,
             body_index: None,
             sites,
             entry_pc,
@@ -1545,6 +1554,17 @@ impl<'a> Lower<'a> {
                 self.drop_views();
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
+            }
+            MirInst::Panic { dest, msg } => {
+                let v = self.get(f, *msg);
+                let v = self.coerce(v, types::I64);
+                self.b.ins().call(self.panic, &[self.ctx, v]);
+                let one = self.b.ins().iconst(types::I64, 1);
+                self.bail_if(one, TRAP_HELPER);
+                if numeric(ty_of(f, *dest)) {
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.set(f, *dest, zero);
+                }
             }
             MirInst::Print { dest, src } => {
                 let v = self.get(f, *src);
