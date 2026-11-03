@@ -62,13 +62,8 @@ pub fn emit_dense(
             "dense emit refuses untyped HostInvoke".into(),
         ));
     }
-    let mut func = func.clone();
-    sink_phi_incomings(&mut func);
+    let DenseLayout { func, plan, regs, scratch, .. } = dense_layout(func, entry_label)?;
     let func = &func;
-    let plan = ConvoyPlan::new(func, entry_label);
-    let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
-    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let regs = alias_dead_store_dests(func, regs);
     let mut cleared = cleared_words(func, &regs, &plan.need_slot);
     let mut entry_clears = entry_clears(func, &regs, &plan.need_slot);
     let gathers = Gathers::new(func, &regs, &plan.need_slot, scratch, entry_label);
@@ -428,16 +423,171 @@ pub(super) fn stringify_byte(tag: Option<u32>) -> Byte {
 }
 
 pub(super) fn dense_sidecars(func: &MirFunc, entry_label: Option<Label>) -> super::emit_lir::LirSidecars {
+    let Ok(DenseLayout { func, plan, regs, shared, .. }) = dense_layout(func, entry_label) else {
+        let mut func = func.clone();
+        sink_phi_incomings(&mut func);
+        let plan = ConvoyPlan::new(&func, entry_label);
+        let mut draft = super::deopt::encode_draft(&func, &[], &plan.need_slot);
+        draft.complete = false;
+        return (super::deopt::debug_slot_remap(&func, &[], &plan.need_slot), draft);
+    };
+    let mut draft = super::deopt::encode_draft(&func, &regs, &plan.need_slot);
+    // A shared register holds whichever value is live there, not every
+    // name the site lists.
+    draft.complete &= !shared;
+    (super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot), draft)
+}
+
+/// Frame words of the dense body for `func` that no local holds: its
+/// temporaries' registers. The precise frame map lets them die at their
+/// last read instead of at the return ([`crate::codegen`]'s liveness), so a
+/// dead copy of an object (a field load, an unused push result, last
+/// iteration's value) is no longer a word that may hold a pointer and pins
+/// a young object in place (#2241). A register keeps its word when it holds
+/// a parameter, a local's word ([`MirFunc::bound_words`], scope lifetime),
+/// a value a `KeepAlive` names, a named let, or a word a panic pad stores
+/// (read on unwind, past what the map sees). None under a debugger.
+pub(crate) fn dense_temp_words(func: &MirFunc, entry_label: Option<Label>) -> Vec<u16> {
+    if func.debug_keep {
+        return Vec::new();
+    }
+    let Ok(DenseLayout { func, plan, regs, .. }) = dense_layout(func, entry_label) else {
+        return Vec::new();
+    };
+    let slot = |v: ValueId| plan.needs_slot(v) && v.index() < regs.len();
+    let mut kept: HashSet<u8> = (0..func.params.len()).map(|i| i as u8).collect();
+    let mut keep = |v: ValueId| {
+        if slot(v) {
+            kept.insert(regs[v.index()]);
+        }
+    };
+    func.bound_words.iter().copied().for_each(&mut keep);
+    func.debug_slots.values().copied().for_each(&mut keep);
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::KeepAlive { value, .. } => keep(*value),
+            MirInst::PanicStore { object, value, .. } => {
+                keep(*object);
+                keep(*value);
+            }
+            _ => {}
+        }
+    }
+    // A box of plain words lives until its register is rewritten, as
+    // `arg_clears` leaves it: a weak to it keeps upgrading. A number
+    // matched out of a generic payload counts as plain here (keeping a
+    // word only costs a pin), so `weak(get(root(5)))` boxes one too.
+    rootless_words(&func, &|v: ValueId| func.ty(v).is_heap_word()).into_iter().for_each(&mut keep);
+    let mut temps: Vec<u16> = (0..regs.len())
+        .map(|i| ValueId(i as u32))
+        .filter(|&v| slot(v) && !kept.contains(&regs[v.index()]))
+        .map(|v| u16::from(regs[v.index()]))
+        .collect();
+    temps.sort_unstable();
+    temps.dedup();
+    temps
+}
+
+/// The body dense emits and its registers, as emit and its sidecars see them.
+struct DenseLayout {
+    func: MirFunc,
+    plan: ConvoyPlan,
+    regs: Vec<u8>,
+    scratch: u8,
+    /// Registers are shared by liveness (#2242).
+    shared: bool,
+}
+
+/// Assign dense registers: one per slotted value, or, when that runs past
+/// the frame and no debugger needs every value kept, shared by liveness
+/// (scalar φs too when the rest alone does not fit); if even that does not
+/// fit, constants are rebuilt where they are read instead of held in a
+/// register across the body (#2242).
+fn dense_layout(func: &MirFunc, entry_label: Option<Label>) -> Result<DenseLayout, LowerError> {
     let mut func = func.clone();
     sink_phi_incomings(&mut func);
-    let plan = ConvoyPlan::new(&func, entry_label);
-    let (regs, _) = assign_regs(&func, &plan.need_slot).unwrap_or_else(|_| (Vec::new(), 0));
-    let regs = coalesce_latch_overwrite(&func, regs, &plan.need_slot);
+    let mut plan = ConvoyPlan::new(&func, entry_label);
+    // Phis keep their own registers while that fits (the latch and join
+    // coalescing then still apply); constants are rebuilt where they are
+    // read only when sharing alone does not fit.
+    let share = |func: &MirFunc, need_slot: &[bool]| {
+        assign_regs_shared(func, need_slot, false)
+            .map(|(r, s)| (r, s, false))
+            .or_else(|_| assign_regs_shared(func, need_slot, true).map(|(r, s)| (r, s, true)))
+    };
+    let (regs, scratch, shared, share_phis) = match assign_regs(&func, &plan.need_slot) {
+        Ok((regs, scratch)) => (regs, scratch, false, false),
+        Err(LowerError::Refused(why)) if why == "too many dense slots" && !func.debug_keep => {
+            match share(&func, &plan.need_slot) {
+                Ok((regs, scratch, phis)) => (regs, scratch, true, phis),
+                Err(_) if rematerialize_consts(&mut func) => {
+                    plan = ConvoyPlan::new(&func, entry_label);
+                    let (regs, scratch, phis) = share(&func, &plan.need_slot)?;
+                    (regs, scratch, true, phis)
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    // The coalescing aliases φ registers as if each were the φ's alone.
+    let regs = if share_phis { regs } else { coalesce_latch_overwrite(&func, regs, &plan.need_slot) };
     let regs = alias_dead_store_dests(&func, regs);
-    (
-        super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot),
-        super::deopt::encode_draft(&func, &regs, &plan.need_slot),
-    )
+    Ok(DenseLayout { func, plan, regs, scratch, shared })
+}
+
+/// Give each instruction that reads a scalar constant a copy of it right
+/// before it, and drop the constants left unread: a constant hoisted ahead
+/// of a loop then holds no register through it. φ incomings and
+/// terminators keep theirs. Whether anything changed.
+fn rematerialize_consts(func: &mut MirFunc) -> bool {
+    let consts: HashMap<ValueId, MirInst> = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| matches!(i, MirInst::Const { c: MirConst::I64(_) | MirConst::Bool(_) | MirConst::F64(_), .. }))
+        .map(|i| (i.dest(), i.clone()))
+        .collect();
+    if consts.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for bi in 0..func.blocks.len() {
+        let insts = std::mem::take(&mut func.blocks[bi].insts);
+        let mut out = Vec::with_capacity(insts.len());
+        for mut inst in insts {
+            if !inst.is_phi() && !matches!(inst, MirInst::Const { .. }) {
+                let mut fresh = Vec::new();
+                inst.rewrite_values(|v| {
+                    let Some(MirInst::Const { c, .. }) = consts.get(&v) else {
+                        return v;
+                    };
+                    let dest = ValueId(func.types.len() as u32);
+                    func.types.push(func.types[v.index()]);
+                    fresh.push(MirInst::Const { dest, c: *c });
+                    dest
+                });
+                changed |= !fresh.is_empty();
+                out.extend(fresh);
+            }
+            out.push(inst);
+        }
+        func.blocks[bi].insts = out;
+    }
+    let mut read: HashSet<ValueId> = HashSet::new();
+    for b in &func.blocks {
+        for inst in &b.insts {
+            read.extend(inst.operands());
+        }
+        if let Some(term) = &b.term {
+            read.extend(super::emit_common::term_uses(term));
+        }
+    }
+    let named: HashSet<ValueId> = func.debug_slots.values().copied().collect();
+    for b in &mut func.blocks {
+        b.insts.retain(|i| !(consts.contains_key(&i.dest()) && !read.contains(&i.dest()) && !named.contains(&i.dest())));
+    }
+    changed
 }
 
 /// Labels of other functions this body calls or starts. A forward callee's
@@ -1538,6 +1688,40 @@ impl Gathers {
     }
 }
 
+/// Words a call's argument register may keep holding: a constant (a
+/// `None` niche, a pooled string) or a cast of one, which roots nothing,
+/// and a box of plain words (an `Option<int>`, a pair of numbers, made to
+/// pass a value to `weak` or a generic parameter). That box holds no other
+/// object and nothing but its register can hold it, so a weak to it keeps
+/// upgrading until the register is rewritten
+/// (`tests/memory/gc_weak_option_arg.coil`).
+fn rootless_words(func: &MirFunc, heapish: &impl Fn(ValueId) -> bool) -> HashSet<ValueId> {
+    let mut consts: HashSet<ValueId> = HashSet::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::Const { dest, .. } => {
+                consts.insert(*dest);
+            }
+            MirInst::Alloc {
+                dest,
+                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple,
+                elems,
+                ..
+            } if elems.iter().all(|e| !heapish(*e)) => {
+                consts.insert(*dest);
+            }
+            MirInst::Cast { dest, src, .. } if consts.contains(src) => {
+                consts.insert(*dest);
+            }
+            MirInst::GcBarrier { dest, roots, .. } if roots.len() == 1 && consts.contains(&roots[0]) && func.ty(*dest).is_heap_word() => {
+                consts.insert(*dest);
+            }
+            _ => {}
+        }
+    }
+    consts
+}
+
 /// Registers to zero right after a call, or an op that stores a word
 /// into an object ([`consumes`]), by its dest: those of a heap word it
 /// takes whose last use it is (a temporary passed straight to it,
@@ -1611,34 +1795,9 @@ pub(super) fn arg_clears(
         return out;
     }
     // A constant (a `None` niche, a pooled string), or a cast of one,
-    // roots nothing. A box of plain words (an `Option<int>`, a pair of
-    // numbers, made to pass a value to `weak` or a generic parameter)
-    // holds no other object, and nothing but the call's register can hold
-    // that box: it stays as it was, so a weak to it still upgrades until
-    // the register is rewritten.
-    let mut consts: HashSet<ValueId> = HashSet::new();
-    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
-        match inst {
-            MirInst::Const { dest, .. } => {
-                consts.insert(*dest);
-            }
-            MirInst::Alloc {
-                dest,
-                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple,
-                elems,
-                ..
-            } if elems.iter().all(|e| !heapish(*e)) => {
-                consts.insert(*dest);
-            }
-            MirInst::Cast { dest, src, .. } if consts.contains(src) => {
-                consts.insert(*dest);
-            }
-            MirInst::GcBarrier { dest, roots, .. } if roots.len() == 1 && consts.contains(&roots[0]) && func.ty(*dest).is_heap_word() => {
-                consts.insert(*dest);
-            }
-            _ => {}
-        }
-    }
+    // roots nothing. A box of plain words stays as it was, so a weak to it
+    // still upgrades until the register is rewritten.
+    let consts = rootless_words(func, &heapish);
     let live = super::gc::liveness_after(func);
     let cmp_dests = term_cmp_dests(func);
     let preds = func.preds();
@@ -2063,6 +2222,94 @@ pub(super) fn push_clear_word(out: &mut Vec<IlOp>, reg: u8) {
         byte: Byte::new(Instruction::STORE).with_load_store_slot(u32::from(reg)),
         loc: DebugLoc::unknown(),
     });
+}
+
+/// Registers shared between scalar values that are never live at the same
+/// time. Everything the later passes treat as owning its register keeps
+/// one of its own, as [`assign_regs_prefer_payloads`] gives it: parameters,
+/// match payloads, heap and opaque words (GC clears and stack maps name
+/// them by register), and φ dests and incomings (the latch and join
+/// coalescing alias those). With `share_phis`, scalar φs share too, and
+/// the caller skips that coalescing: a φ is written on each incoming edge,
+/// which the interference graph counts. A value not in a register (a call
+/// convoy word, a fused compare) is counted as reading its operands where
+/// its consumer is emitted, which only lengthens live ranges.
+fn assign_regs_shared(func: &MirFunc, need_slot: &[bool], share_phis: bool) -> Result<(Vec<u8>, u8), LowerError> {
+    let n = func.types.len();
+    let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false);
+    let opaque = super::gc::live_opaque_words(func);
+    let mut own = vec![false; n];
+    let mut mark = |v: ValueId| {
+        if v.index() < n {
+            own[v.index()] = true;
+        }
+    };
+    for &p in &func.params {
+        mark(p);
+    }
+    let mut def: Vec<Option<(usize, usize)>> = vec![None; n];
+    for (bi, b) in func.blocks.iter().enumerate() {
+        for (k, inst) in b.insts.iter().enumerate() {
+            for d in inst.dests() {
+                if d.index() < n {
+                    def[d.index()] = Some((bi, k));
+                }
+            }
+            match inst {
+                MirInst::Phi { dest, args, .. } if !share_phis || func.types[dest.index()].is_heap_word() => {
+                    mark(*dest);
+                    for &(_, v) in args.iter() {
+                        mark(v);
+                    }
+                }
+                MirInst::MatchPayload { dest, .. } => mark(*dest),
+                _ => {}
+            }
+        }
+        if let Some(Terminator::JumpIfMatch { payloads, .. }) = &b.term {
+            for &v in payloads {
+                mark(v);
+            }
+        }
+    }
+    for (i, o) in own.iter_mut().enumerate() {
+        *o = *o || func.types[i].is_heap_word() || opaque.contains(&ValueId(i as u32));
+    }
+    let unique: Vec<bool> = (0..n).map(|i| slot(ValueId(i as u32)) && own[i]).collect();
+    let (mut reg, base) = assign_regs_prefer_payloads(func, &unique)?;
+    let base = usize::from(base);
+    let reads = |v: ValueId, out: &mut Vec<ValueId>| {
+        let mut seen = HashSet::new();
+        let mut work = vec![v];
+        while let Some(v) = work.pop() {
+            if slot(v) {
+                out.push(v);
+            } else if seen.insert(v)
+                && let Some((bi, k)) = def.get(v.index()).copied().flatten()
+            {
+                work.extend(func.blocks[bi].insts[k].operands());
+            }
+        }
+    };
+    let read = |v: ValueId, out: &mut Vec<ValueId>| reads(v, out);
+    let adj = super::emit_common::interference(func, &slot, &read, &|_| false);
+    let mut color: Vec<Option<usize>> = vec![None; n];
+    let mut top = base;
+    for i in 0..n {
+        let v = ValueId(i as u32);
+        if !slot(v) || own[i] {
+            continue;
+        }
+        let taken: HashSet<usize> = adj[i].iter().filter_map(|o| color[o.index()]).collect();
+        let c = (base..).find(|c| !taken.contains(c)).expect("unbounded");
+        if c > 254 {
+            return Err(LowerError::Refused("too many live dense slots".into()));
+        }
+        color[i] = Some(c);
+        reg[i] = c as u8;
+        top = top.max(c + 1);
+    }
+    Ok((reg, top as u8))
 }
 
 pub(super) fn assign_regs(func: &MirFunc, need_slot: &[bool]) -> Result<(Vec<u8>, u8), LowerError> {

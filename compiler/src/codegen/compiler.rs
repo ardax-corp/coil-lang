@@ -8721,6 +8721,7 @@ impl Compiler {
         let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
         self.frame_inputs = Some(Box::new(super::FrameInputs {
             needs_extent: lowered.needs_frame_extent.clone(),
+            temp_words: lowered.temp_words.clone(),
             match_arities: lowered.match_arities.clone(),
             entries,
             entry_sps,
@@ -8997,6 +8998,7 @@ impl Compiler {
             &inputs.entry_sps,
             self.prologue_jmp_target(),
             &inputs.fn_kinds,
+            &inputs.temp_words,
         );
     }
 

@@ -5684,3 +5684,243 @@ fn main() {
         assert_vec_loop(fn_ops(&bc, &symbols, name), name);
     }
 }
+
+/// A straight-line body with more lets than registers stays dense: values
+/// whose live ranges never overlap share a register (#2242).
+#[test]
+fn long_straight_line_body_shares_dense_registers() {
+    const LETS: u32 = 300;
+    let mut body = String::from("    let v0 = (x * 31 + y) % 1000003;\n");
+    for i in 1..LETS {
+        body.push_str(&format!("    let v{i} = (v{} ^ {i}) % 1000003;\n", i - 1));
+    }
+    let (x, y): (i64, i64) = (7, 5);
+    let mut want = (x * 31 + y) % 1000003;
+    for i in 1..i64::from(LETS) {
+        want = (want ^ i) % 1000003;
+    }
+    let src = format!(
+        "fn mix(int x, int y) -> int {{\n{body}    return v{};\n}}\nfn main() {{\n    if mix(7, 5) != {want} {{\n        panic \"mix\";\n    }}\n}}\n",
+        LETS - 1
+    );
+    let mut p = crate::Pipeline::new();
+    p.set_collect_opt_stats(true);
+    let (bc, constants) = p.compile_src(&src).expect("compile long body");
+    let stats = crate::last_opt_stats();
+    let mix = stats
+        .body_tiers
+        .iter()
+        .find(|b| b.name == "mix")
+        .unwrap_or_else(|| panic!("mix tier; stats={stats:?}"));
+    assert_eq!(mix.tier, "dense", "{mix:?}");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "mix computes the chain");
+}
+
+/// Compile `src`, check `name` emitted dense, and run `main` clean.
+fn assert_dense_runs(src: &str, name: &str) {
+    let mut p = crate::Pipeline::new();
+    p.set_collect_opt_stats(true);
+    let (bc, constants) = p.compile_src(src).unwrap_or_else(|e| panic!("compile {name}: {e:?}"));
+    let stats = crate::last_opt_stats();
+    let tier = stats
+        .body_tiers
+        .iter()
+        .find(|b| b.name == name)
+        .unwrap_or_else(|| panic!("{name} tier; stats={stats:?}"));
+    assert_eq!(tier.tier, "dense", "{tier:?}");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "{name} result");
+}
+
+/// Shared dense registers inside a loop: loop-carried values and the long
+/// chain each iteration computes stay apart (#2242).
+#[test]
+fn long_loop_body_shares_dense_registers() {
+    const LETS: i64 = 300;
+    let mut body = String::from("        let v0 = (acc * 31 + i) % 1000003;\n");
+    for k in 1..LETS {
+        body.push_str(&format!("        let v{k} = (v{} ^ {k}) % 1000003;\n", k - 1));
+    }
+    let mut want: i64 = 0;
+    for i in 0..4 {
+        let mut v = (want * 31 + i) % 1000003;
+        for k in 1..LETS {
+            v = (v ^ k) % 1000003;
+        }
+        want = (want + v + i) % 1000003;
+    }
+    let src = format!(
+        "fn churn(int n) -> int {{\n    let acc = 0;\n    let i = 0;\n    while i < n {{\n{body}        acc = (acc + v{} + i) % 1000003;\n        i = i + 1;\n    }}\n    return acc;\n}}\nfn main() {{\n    if churn(4) != {want} {{\n        panic \"churn\";\n    }}\n}}\n",
+        LETS - 1
+    );
+    assert_dense_runs(&src, "churn");
+}
+
+/// More scalar φs than registers: each `if` join merges a value, and
+/// three hundred of them stay dense once φs share registers by liveness
+/// too (#2242).
+#[test]
+fn many_join_phis_share_dense_registers() {
+    const JOINS: i64 = 300;
+    let mut body = String::from("    let v0 = x;\n");
+    for k in 1..JOINS {
+        let p = k - 1;
+        body.push_str(&format!(
+            "    let v{k} = 0;\n    if v{p} % 2 == 0 {{\n        v{k} = v{p} / 2 + {k};\n    }} else {{\n        v{k} = (v{p} * 3 + 1) % 1000003;\n    }}\n"
+        ));
+    }
+    let x: i64 = 7;
+    let mut want = x;
+    for k in 1..JOINS {
+        want = if want % 2 == 0 { want / 2 + k } else { (want * 3 + 1) % 1000003 };
+    }
+    let src = format!(
+        "fn hops(int x) -> int {{\n{body}    return v{};\n}}\nfn main() {{\n    if hops({x}) != {want} {{\n        panic \"hops\";\n    }}\n}}\n",
+        JOINS - 1
+    );
+    assert_dense_runs(&src, "hops");
+}
+
+/// Strings among the shared scalars keep their own registers: the GC
+/// clears and the stack map still see each heap word (#2242).
+#[test]
+fn long_body_with_heap_words_shares_dense_registers() {
+    const LETS: i64 = 300;
+    let mut body = String::from("    let v0 = (x * 31) % 1000003;\n    let s0 = \"a\";\n");
+    for k in 1..LETS {
+        body.push_str(&format!("    let v{k} = (v{} ^ {k}) % 1000003;\n", k - 1));
+        if k % 50 == 0 {
+            body.push_str(&format!("    let s{k} = s{} + \"b\";\n", k - 50));
+        }
+    }
+    let last_s = (LETS - 1) / 50 * 50;
+    let x: i64 = 3;
+    let mut want = (x * 31) % 1000003;
+    for k in 1..LETS {
+        want = (want ^ k) % 1000003;
+    }
+    let want_len = 1 + last_s / 50;
+    let src = format!(
+        "fn mixed(int x) -> int {{\n{body}    return v{} + s{last_s}.len();\n}}\nfn main() {{\n    if mixed(3) != {} {{\n        panic \"mixed\";\n    }}\n}}\n",
+        LETS - 1,
+        want + want_len
+    );
+    assert_dense_runs(&src, "mixed");
+}
+
+/// An arena's `add` inlined into a loop (reached through a field, as
+/// coil-toml and coil-json call theirs) leaves no stale copy of each pushed
+/// array in the frame. The copy is a word that may hold a pointer, so each
+/// minor collection pinned the young arrays in place instead of moving
+/// them, and a major cycle started at every one (#2241).
+#[test]
+fn inlined_arena_pushes_do_not_pin_the_arrays() {
+    let src = r#"
+class Arena {
+    tags: Vec<int>,
+    ints: Vec<int>,
+    strs: Vec<string>,
+    first: Vec<int>,
+    next: Vec<int>,
+    parent: Vec<int>,
+}
+impl Arena {
+    pub fn add(int tag, int n, string s) -> int {
+        let idx = self.tags.len();
+        self.tags.push(tag);
+        self.ints.push(n);
+        self.strs.push(s);
+        self.first.push(-1);
+        self.next.push(-1);
+        self.parent.push(-1);
+        return idx;
+    }
+}
+class Parser {
+    store: Arena,
+    pos: int,
+}
+impl Parser {
+    pub fn value(int i) -> int {
+        self.pos = self.pos + 1;
+        return self.store.add(i % 7, i, "x");
+    }
+}
+fn main() {
+    let p = new Parser(new Arena(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()), 0);
+    let i = 0;
+    let sum = 0;
+    while i < 200000 {
+        sum = sum + p.value(i);
+        i = i + 1;
+    }
+    if sum != 19999900000 {
+        panic "sum";
+    }
+}
+"#;
+    assert_arrays_move(src, Some(2000));
+}
+
+/// The same pushes written out in the loop, through a field of a field.
+#[test]
+fn field_pushes_in_a_loop_do_not_pin_the_arrays() {
+    let src = r#"
+class Arena {
+    pub tags: Vec<int>,
+    pub ints: Vec<int>,
+    pub strs: Vec<string>,
+    pub first: Vec<int>,
+    pub next: Vec<int>,
+    pub parent: Vec<int>,
+}
+class Parser {
+    pub store: Arena,
+    pub pos: int,
+}
+fn main() {
+    let p = new Parser(new Arena(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()), 0);
+    let i = 0;
+    let sum = 0;
+    while i < 200000 {
+        p.pos = p.pos + 1;
+        sum = sum + p.store.tags.len();
+        p.store.tags.push(i % 7);
+        p.store.ints.push(i);
+        p.store.strs.push("x");
+        p.store.first.push(-1);
+        p.store.next.push(-1);
+        p.store.parent.push(-1);
+        i = i + 1;
+    }
+    if sum != 19999900000 {
+        panic "sum";
+    }
+}
+"#;
+    assert_arrays_move(src, None);
+}
+
+/// Run `src` with its frame maps and check the growing arrays left the
+/// nursery by moving: a pinned one keeps a held chunk, and every
+/// collection after it opens a major cycle that rescans the arrays.
+fn assert_arrays_move(src: &str, inline_cost: Option<usize>) {
+    let mut p = crate::Pipeline::new();
+    if let Some(cost) = inline_cost {
+        p.set_inline_max_cost(cost);
+    }
+    let (bc, constants) = p.compile_src(src).expect("compile");
+    let mut vm = machine::Machine::<256>::with_operand_capacity(p.operand_stack_slots() as usize);
+    p.wire_host_natives(&mut vm);
+    p.wire_thread_program(&mut vm, &bc, &constants, p.strings());
+    machine::reset_alloc_profile();
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "sum");
+    let (minors, majors) = (machine::minor_gc_count(), machine::gc_count());
+    assert!(majors <= 4, "{majors} major cycles over {minors} minors");
+}
