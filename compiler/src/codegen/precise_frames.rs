@@ -38,6 +38,7 @@ pub fn bind_precise_frames(
     entry_sps: &HashMap<String, u32>,
     prologue_entry: u32,
     fn_kinds: &HashMap<String, FnWordKinds>,
+    temp_words: &HashMap<String, Vec<u16>>,
 ) -> Vec<PreciseFrameMap> {
     // A `CALL` result is a must-pointer when every name bound to the target
     // declares a pointer return.
@@ -113,6 +114,13 @@ pub fn bind_precise_frames(
                     declared,
                     params,
                 };
+                // Frame words no local holds, when every name agrees.
+                let mut temps = names().map(|n| temp_words.get(n));
+                let first = temps.next().flatten();
+                let temps: &[u16] = match first {
+                    Some(t) if temps.all(|o| o == Some(t)) => t,
+                    _ => &[],
+                };
                 if let Some(at_pc) = analyze_body(
                     bytecode,
                     constants,
@@ -122,6 +130,7 @@ pub fn bind_precise_frames(
                     &seed,
                     &ret_ptr,
                     indirect_one_word,
+                    temps,
                 ) {
                     row.at_pc = at_pc;
                 }
@@ -782,6 +791,7 @@ fn analyze_body(
     seed: &EntrySeed,
     ret_ptr: &HashMap<u32, bool>,
     indirect_one_word: bool,
+    temps: &[u16],
 ) -> Option<Vec<SlotMap>> {
     let (entry, end) = (entry as usize, end as usize);
     let (arity, coroutine) = entry_arity(bytecode, constants, entry, seed).or_else(|| {
@@ -806,6 +816,7 @@ fn analyze_body(
         ret_ptr,
         indirect_one_word,
         handoff: None,
+        temps,
     };
     let mut merged: std::collections::BTreeMap<usize, std::collections::BTreeSet<u16>> =
         std::collections::BTreeMap::new();
@@ -871,6 +882,22 @@ fn closure_entries(
     Some(out)
 }
 
+/// The register a one-word dense op writes whole (its result), when it
+/// writes one: the ops whose [`slot_effect`] lists the dest among its reads.
+fn dense_dest(b: &Byte, constants: &[u64]) -> Option<usize> {
+    use Instruction::*;
+    match *b.bytecode() {
+        DenseBin | DenseCmp | DenseIndex | DenseFieldLoad | DenseArrayPush => Some(b.dense_abc_parts().1),
+        DenseMake => Some(b.dense_abc_parts().1),
+        DenseMakeK => Some(b.dense_make_k_parts(constants)?.1),
+        DenseHostCall => Some(b.dense_host_call_parts(constants)?.0),
+        DenseMakeObject => Some(common::dense::unpack_make_object(b.operand_u32()).0 as usize),
+        DenseArrayLen => Some(b.dense_move_parts().0),
+        DenseUnary | DenseCast => Some(b.dense_unary_parts().1),
+        _ => None,
+    }
+}
+
 /// One body's bytecode range and the side tables the dataflow reads.
 struct Body<'a> {
     bytecode: &'a [Byte],
@@ -888,6 +915,10 @@ struct Body<'a> {
     /// A PC past the body that control may leave to with an empty frame
     /// (setup's `JMP` to `main`).
     handoff: Option<usize>,
+    /// Frame words of the body's own frame that no local holds (a dense
+    /// body's temporaries, [`crate::mir::dense_temp_words`]): an exit does
+    /// not read them, so they die at their last read.
+    temps: &'a [u16],
 }
 
 impl Body<'_> {
@@ -960,7 +991,9 @@ impl Body<'_> {
         }
         // Recorded sets must reflect the fixpoint: recompute from final states,
         // then drop slots no later op reads (when liveness is modeled).
-        let live_out = self.liveness(&states, coroutine);
+        // A closure entered inside the body has a frame of its own.
+        let temps = if start == entry && !coroutine { self.temps } else { &[] };
+        let live_out = self.liveness(&states, coroutine, temps);
         let mut out = Vec::with_capacity(recorded.len());
         for pc in recorded {
             let mut st = states.get(&pc)?.clone();
@@ -979,7 +1012,8 @@ impl Body<'_> {
     /// path from after `pc` may read word `p`, or leave the function, before
     /// overwriting it. So a dropped word is one every path overwrites first
     /// (last iteration's value in a loop local), never a local merely past
-    /// its last read. Reads are over-approximated (every slot an op names
+    /// its last read; a word in `temps` holds no local, and the function
+    /// leaving does not read it. Reads are over-approximated (every slot an op names
     /// but does not purely overwrite, every word a pop could read under an
     /// inexact cursor, every word at an exit), writes under-approximated
     /// (pure slot stores and exact-cursor pushes). Only safepoints
@@ -994,6 +1028,7 @@ impl Body<'_> {
         &self,
         states: &HashMap<usize, FrameState>,
         coroutine: bool,
+        temps: &[u16],
     ) -> Option<HashMap<usize, Vec<bool>>> {
         use Instruction::*;
         struct Node {
@@ -1001,6 +1036,8 @@ impl Body<'_> {
             defs: Vec<usize>,
             all: bool,
             succs: Vec<usize>,
+            /// Leaves the function: reads every word but `temps`.
+            exit: bool,
             filter: bool,
             /// A word the row keeps live (a `CallIndirect`'s base word).
             keep: Option<usize>,
@@ -1031,6 +1068,17 @@ impl Body<'_> {
                     _ => effect = SlotEffect::All,
                 }
             }
+            // A temporary's register is written whole by the dense op that
+            // defines it: its old value dies there. (Other words keep the
+            // op's dest as a read: a trap before the write leaves it.)
+            if step.width == 1
+                && let (Some(d), SlotEffect::Named { uses, defs }) = (dense_dest(b, self.constants), &mut effect)
+                && temps.contains(&(d as u16))
+                && uses.iter().filter(|&&u| u == d).count() == 1
+            {
+                uses.retain(|&u| u != d);
+                defs.push(d);
+            }
             let (mut uses, mut defs, all) = match effect {
                 SlotEffect::Named { uses, defs } => (uses, defs, false),
                 SlotEffect::All => (Vec::new(), Vec::new(), true),
@@ -1043,11 +1091,12 @@ impl Body<'_> {
             if matches!(inst, JumpIfMatch) {
                 uses.extend(pre.lo.saturating_sub(1)..pre.hi);
             }
-            // Exits read every word: a local keeps its value alive until it
-            // is overwritten or the function returns (scope lifetime, which
-            // `gc::root` handles and FFI buffers rely on), not only until its
-            // last read.
-            let all = all || exit;
+            // Exits read every word but `temps`: a local keeps its value
+            // alive until it is overwritten or the function returns (scope
+            // lifetime, which `gc::root` handles and FFI buffers rely on),
+            // not only until its last read. A temporary dies at its last
+            // read: past it, a word that may hold a pointer only pinned the
+            // object it named in the nursery (#2241).
             words = words
                 .max(pre.hi + 1)
                 .max(pre.bits.len())
@@ -1067,7 +1116,7 @@ impl Body<'_> {
             if let Some(k) = keep {
                 words = words.max(k + 1);
             }
-            nodes.insert(pc, Node { uses, defs, all, succs, filter, keep });
+            nodes.insert(pc, Node { uses, defs, all, succs, exit, filter, keep });
         }
         if words > MAX_WORDS {
             return None;
@@ -1101,6 +1150,17 @@ impl Body<'_> {
             let n = &nodes[&pc];
             let mut inn = if n.all {
                 vec![true; words]
+            } else if n.exit {
+                let mut inn = vec![true; words];
+                for &t in temps {
+                    if let Some(w) = inn.get_mut(usize::from(t)) {
+                        *w = false;
+                    }
+                }
+                for &u in &n.uses {
+                    inn[u] = true;
+                }
+                inn
             } else {
                 let mut inn = out_of(pc, &live_in);
                 for &d in &n.defs {
@@ -1276,6 +1336,7 @@ fn entered_from_setup(
         ret_ptr,
         indirect_one_word,
         handoff: Some(entry),
+        temps: &[],
     };
     body.analyze_from(setup, 0, false).is_some()
 }
@@ -1787,6 +1848,7 @@ mod tests {
             &HashMap::new(),
             u32::MAX,
             &fn_kinds,
+            &HashMap::new(),
         )
     }
 
@@ -2006,6 +2068,7 @@ mod tests {
             &declared,
             u32::MAX,
             &HashMap::new(),
+            &HashMap::new(),
         );
         assert_eq!(slots_at(&maps, 2), Some(vec![0, 1]));
 
@@ -2020,6 +2083,7 @@ mod tests {
             &entries,
             &HashMap::new(),
             u32::MAX,
+            &HashMap::new(),
             &HashMap::new(),
         );
         assert!(no_precise(&maps));
@@ -2053,6 +2117,7 @@ mod tests {
             &entries,
             &HashMap::new(),
             u32::MAX,
+            &HashMap::new(),
             &HashMap::new(),
         );
         // After resume: saved local 0, the sent value in slot 1, a new object.
@@ -2118,6 +2183,7 @@ mod tests {
                 &HashMap::new(),
                 u32::MAX,
                 &HashMap::new(),
+            &HashMap::new(),
             )
         };
         let plain = bind_with(HashSet::new());
@@ -2150,7 +2216,7 @@ mod tests {
         ]);
         let entries = vec![("f".to_string(), 2)];
         let maps =
-            bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX, &HashMap::new());
+            bind_precise_frames(&HashSet::new(), &HashSet::new(), &code, &[], &HashMap::new(), &entries, &HashMap::new(), u32::MAX, &HashMap::new(), &HashMap::new());
         assert!(no_precise(&maps));
     }
     #[test]

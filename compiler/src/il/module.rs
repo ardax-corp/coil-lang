@@ -42,6 +42,9 @@ pub struct IlModule {
     pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
     /// Allocating dense bodies, whose frames need a decoded extent.
     pub needs_frame_extent: HashSet<String>,
+    /// Dense bodies' frame words that no local holds (see
+    /// [`crate::mir::dense_temp_words`]).
+    pub temp_words: HashMap<String, Vec<u16>>,
     /// Original IL slot → reconstruct slot after dense / LIR (named lets).
     pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
     /// A pinned (`defer`) body the LIR tier took: its cleanup pad's label
@@ -81,6 +84,7 @@ impl IlModule {
                 entry_at_offset: HashMap::new(),
                 deopt_map_drafts: Vec::new(),
                 needs_frame_extent: HashSet::new(),
+                temp_words: HashMap::new(),
                 debug_slot_remaps: HashMap::new(),
                 lir_cleanup_pads: HashMap::new(),
                 panic_pads: HashMap::new(),
@@ -342,6 +346,7 @@ impl IlModule {
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
         // Every other body takes LIR from its MIR (lowered from HIR).
         self.needs_frame_extent.clear();
+        self.temp_words.clear();
         let mut dense_calls = crate::layout::DenseCallMap::new();
         // Pinned (`defer`) bodies try LIR below, with their cleanup pad.
         let mut pending: Vec<usize> = (0..self.funcs.len())
@@ -393,6 +398,9 @@ impl IlModule {
                     }
                     if side.needs_frame_extent {
                         self.needs_frame_extent.insert(body.meta.name.clone());
+                    }
+                    if !side.temp_words.is_empty() {
+                        self.temp_words.insert(body.meta.name.clone(), side.temp_words);
                     }
                     if !side.panic_pads.ranges.is_empty() {
                         self.panic_pads.insert(body.meta.name.clone(), side.panic_pads);

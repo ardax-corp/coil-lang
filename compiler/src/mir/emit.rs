@@ -438,6 +438,51 @@ pub(super) fn dense_sidecars(func: &MirFunc, entry_label: Option<Label>) -> supe
     (super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot), draft)
 }
 
+/// Frame words of the dense body for `func` that no local holds: its
+/// temporaries' registers. The precise frame map lets them die at their
+/// last read instead of at the return ([`crate::codegen`]'s liveness), so a
+/// dead copy of an object (a field load, an unused push result, last
+/// iteration's value) is no longer a word that may hold a pointer and pins
+/// a young object in place (#2241). A register keeps its word when it holds
+/// a parameter, a local's word ([`MirFunc::bound_words`], scope lifetime),
+/// a value a `KeepAlive` names, a named let, or a word a panic pad stores
+/// (read on unwind, past what the map sees). None under a debugger.
+pub(crate) fn dense_temp_words(func: &MirFunc, entry_label: Option<Label>) -> Vec<u16> {
+    if func.debug_keep {
+        return Vec::new();
+    }
+    let Ok(DenseLayout { func, plan, regs, .. }) = dense_layout(func, entry_label) else {
+        return Vec::new();
+    };
+    let slot = |v: ValueId| plan.needs_slot(v) && v.index() < regs.len();
+    let mut kept: HashSet<u8> = (0..func.params.len()).map(|i| i as u8).collect();
+    let mut keep = |v: ValueId| {
+        if slot(v) {
+            kept.insert(regs[v.index()]);
+        }
+    };
+    func.bound_words.iter().copied().for_each(&mut keep);
+    func.debug_slots.values().copied().for_each(&mut keep);
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::KeepAlive { value, .. } => keep(*value),
+            MirInst::PanicStore { object, value, .. } => {
+                keep(*object);
+                keep(*value);
+            }
+            _ => {}
+        }
+    }
+    let mut temps: Vec<u16> = (0..regs.len())
+        .map(|i| ValueId(i as u32))
+        .filter(|&v| slot(v) && !kept.contains(&regs[v.index()]))
+        .map(|v| u16::from(regs[v.index()]))
+        .collect();
+    temps.sort_unstable();
+    temps.dedup();
+    temps
+}
+
 /// The body dense emits and its registers, as emit and its sidecars see them.
 struct DenseLayout {
     func: MirFunc,
