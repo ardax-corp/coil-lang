@@ -2299,6 +2299,49 @@ mod tests {
         assert!(must_at(&maps, 6).expect("safepoint row").contains(&3));
     }
 
+    /// [`bind`] with `f`'s dense temporaries.
+    fn bind_temps(body: &[Byte], temps: &[u16]) -> Vec<PreciseFrameMap> {
+        let mut code = vec![call(1, 2), op(Instruction::HALT)];
+        code.extend_from_slice(body);
+        let entries = vec![("f".to_string(), 2)];
+        bind_precise_frames(
+            &HashSet::new(),
+            &HashSet::new(),
+            &code,
+            &[],
+            &HashMap::new(),
+            &entries,
+            &HashMap::new(),
+            u32::MAX,
+            &HashMap::new(),
+            &HashMap::from([("f".to_string(), temps.to_vec())]),
+        )
+    }
+
+    #[test]
+    fn allocating_return_drops_a_dead_temporary() {
+        // [2] Seek 2 [3] InitTyped [4] store 1 [5] load 1 [6] POP
+        // [7] InitTyped [8] load 0 [9] MakeEnumReturnK arity 2. Word 1
+        // is a temporary read last at 5: the collections at 7 and 9 skip
+        // it, so 9 must not list it either, or it names the address an
+        // evacuation at 7 moved (gc-stress, #2241).
+        let body = [
+            op(Instruction::Seek).with_operand_u32(2),
+            op(Instruction::InitTyped),
+            store(1),
+            load(1),
+            op(Instruction::POP),
+            op(Instruction::InitTyped),
+            load(0),
+            op(Instruction::MakeEnumReturnK).with_operand_u32(2),
+        ];
+        let local = bind_temps(&body, &[]);
+        assert!(slots_at(&local, 9).expect("exit row").contains(&1), "a local stays listed");
+        let temp = bind_temps(&body, &[1]);
+        assert!(!slots_at(&temp, 7).expect("alloc row").contains(&1));
+        assert!(!slots_at(&temp, 9).expect("exit row").contains(&1));
+    }
+
     #[test]
     fn make_enum_return_records_its_allocation() {
         // [2] InitTyped [3] load 0 [4] MakeEnumReturnK arity 2
