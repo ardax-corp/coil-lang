@@ -66,7 +66,7 @@ fn jit_once(
     excluded: &HashMap<usize, String>,
 ) -> Result<Attempt, String> {
     let plan = plan_without(bodies, excluded);
-    let mut refused = plan.refused;
+    let refused = plan.refused;
     if plan.compile.is_empty() {
         return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused }));
     }
