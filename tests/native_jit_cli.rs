@@ -439,3 +439,16 @@ fn an_explicit_panic_after_a_print_matches_the_vm() {
     let err = program_stderr(&run("explicit_panic", &src, true));
     assert!(err.starts_with("panic: too big: 3 at "), "stderr: {err}");
 }
+
+#[test]
+fn stores_after_a_commit_outgrow_the_undo_log() {
+    // `Vec::with_capacity` commits (a host call); the stores after it fill
+    // the undo log many times over, which a committed call starts over.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn fill(int n, int reps) -> int {{\n  let a: Vec<int> = Vec::with_capacity(n);\n  let i = 0;\n  while i < n {{ a.push(1); i = i + 1; }}\n\
+           let r = 0;\n  while r < reps {{ let k = 0; while k < n {{ a[k] = r; k = k + 1; }} r = r + 1; }}\n  return a[0] + a[n - 1];\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", fill(4096, 50))); }}\n"
+    );
+    let stats = same_as_vm("undo_after_commit", &src);
+    assert!(compiled(&stats, "fill"), "stats: {stats}");
+}
