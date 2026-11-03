@@ -62,7 +62,8 @@ A body compiles when:
   `Cast`, `Phi`, direct `Call`, and its terminators `Jump`, `Br`,
   one-word `Return`, `Unreachable`;
 - every callee compiles too (a fixpoint over the call graph);
-- it has no `defer`, no emission refusal and no opaque words.
+- it has no emission refusal and no opaque words (a `defer` compiles
+  with its cleanup pad since step 5).
 
 Such a function is **pure**: it reads nothing but its arguments and does
 nothing but return a word. That is what makes the tier simple and exact.
@@ -193,6 +194,46 @@ body where a collection may run (`Plan::may_gc`) do the same around the
 call. The VM treats those words as precise roots: a minor collection
 forwards them in place. After the call, when `NativeCtx::gc_epoch` moved,
 native code reloads the words and drops its array views.
+
+### Function values and indirect calls
+
+`Alloc` of a function value (`Fn`, `PolyFn`, `PolyFnCapture`) builds the
+`ObjFn` as `MakeFn` / `MakePolyFn` / `MakePolyFnCapture` do
+(`coil_native_alloc`, `ALLOC_FN` / `ALLOC_POLY_FN`); the body it names
+counts as a callee, so its entry PC is known (`Plan::pcs`, a stub in the
+section when it stays on the VM). `CallIndirect` commits and runs the call
+on the VM (`coil_native_call_value` → `Machine::call_value`): the VM's own
+`call_indirect` handles exact calls, partial and over-application and
+dictionaries, then runs the callee as `call_function` does.
+
+### Drops
+
+`ALLOC_OBJECT` / `ALLOC_DROP_ENUM` of a type with a `drop` log the new
+object (`UNDO_BORN`): a bail marks it finalized, so the discarded object
+owes no `drop` (the VM's re-run makes its own). A direct call of a body
+that may be a `drop` (`Plan::drops`) claims the finalizer first, as the
+VM's `CALL` does (`coil_native_claim`), skips a `drop` that ran, and logs
+the claim (`UNDO_CLAIM`) before a commit.
+
+### `defer`
+
+A body with `defer`s compiles with its cleanup pad (`MirFunc::cleanup`,
+a separate function `(ctx, *const u64 homes) -> u64`). Its homes live in
+a zeroed stack slot; heap homes are rooted with the body's heap words.
+The normal exits run the defers inline, as in MIR. After a committed
+panic, each unwound frame's bail path hands its pad and a copy of its
+homes to `coil_native_defer`; `Machine::run_native_pads` runs them once
+the panic is reported, innermost first, before the VM unwinds its own
+frames: the VM's order (panic and backtrace, then the defers inside out).
+The pad's `unwind_resume` lowers to nothing. Before a commit nothing runs:
+the VM's re-run runs the defers.
+
+### Tasks
+
+A task switch needs every frame below it on the VM. Until native code
+gets task stacks (step 6), `try_native_call` stays on the VM while a
+scheduler exists; native code that opens a scope through a VM call runs
+it in that nested execution, where its tasks switch.
 
 ### Bail instead of trap
 
