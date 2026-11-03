@@ -261,6 +261,9 @@ pub struct Heap {
     unit_enum: Option<(u32, Object)>,
     /// Shared `()` ([`Self::immortal_empty_tuple`]), never swept or moved.
     empty_tuple: Option<Object>,
+    /// Shared function values that capture and fill nothing, by entry,
+    /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
+    immortal_fns: HashMap<(u32, u32, bool), Object>,
     /// Reused gray worklist / root buffers across collections.
     gc_gray: Vec<Object>,
     gc_root_objects: Vec<Object>,
@@ -347,6 +350,7 @@ impl Default for Heap {
             immortal_enums: HashMap::default(),
             unit_enum: None,
             empty_tuple: None,
+            immortal_fns: HashMap::new(),
             gc_gray: Vec::new(),
             gc_root_objects: Vec::new(),
             gc_roots: Vec::new(),
@@ -1808,7 +1812,25 @@ impl Heap {
         if let Some(obj) = self.empty_tuple {
             roots.push(obj.addr());
         }
+        roots.extend(self.immortal_fns.values().map(Object::addr));
         roots
+    }
+
+    /// The shared function value at `entry` that captures and fills
+    /// nothing. Such a value holds only its entry and arity, so every
+    /// evaluation of a lambda without captures (one per loop pass) can be
+    /// one object. Closures live in the old space, where a dead one waits
+    /// for a major cycle: allocating one per pass piled up a million of
+    /// them over a large heap.
+    pub fn immortal_plain_fn(&mut self, entry: u32, arity: u32, is_rest: bool) -> Object {
+        if let Some(obj) = self.immortal_fns.get(&(entry, arity, is_rest)) {
+            return *obj;
+        }
+        let _epoch_guard = self.epoch_guard();
+        let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None };
+        let (object, _) = self.alloc_unlocked(pfn, Object::Fn);
+        self.immortal_fns.insert((entry, arity, is_rest), object);
+        object
     }
 
     /// The shared empty tuple `()`. It has no elements to change, so every
