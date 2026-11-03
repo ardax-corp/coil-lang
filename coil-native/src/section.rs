@@ -162,6 +162,9 @@ const I_HOST: u8 = 28;
 const I_PANIC: u8 = 29;
 const I_CALL_INDIRECT: u8 = 30;
 const I_KEEP_ALIVE: u8 = 31;
+const I_CODE_PTR: u8 = 32;
+const I_HOME_LOAD: u8 = 33;
+const I_HOME_STORE: u8 = 34;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -473,6 +476,22 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u8(*layout);
             w.vs(args);
         }
+        MirInst::CodePtr { dest, target } => {
+            w.u8(I_CODE_PTR);
+            w.v(*dest);
+            w.u32(target.0);
+        }
+        MirInst::HomeLoad { dest, home } => {
+            w.u8(I_HOME_LOAD);
+            w.v(*dest);
+            w.u32(u32::from(*home));
+        }
+        MirInst::HomeStore { dest, home, value } => {
+            w.u8(I_HOME_STORE);
+            w.v(*dest);
+            w.u32(u32::from(*home));
+            w.v(*value);
+        }
         MirInst::KeepAlive { dest, value } => {
             w.u8(I_KEEP_ALIVE);
             w.v(*dest);
@@ -751,6 +770,13 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_STR_EQ => MirInst::StrEq { dest: r.v()?, lhs: r.v()?, rhs: r.v()?, ne: r.u8()? != 0 },
         I_CLEAR_WORD => MirInst::ClearWord { dest: r.v()?, value: r.v()? },
         I_KEEP_ALIVE => MirInst::KeepAlive { dest: r.v()?, value: r.v()? },
+        I_CODE_PTR => MirInst::CodePtr { dest: r.v()?, target: Label(r.u32()?) },
+        I_HOME_LOAD => MirInst::HomeLoad { dest: r.v()?, home: u16::try_from(r.u32()?).map_err(|_| "native MIR: bad home")? },
+        I_HOME_STORE => MirInst::HomeStore {
+            dest: r.v()?,
+            home: u16::try_from(r.u32()?).map_err(|_| "native MIR: bad home")?,
+            value: r.v()?,
+        },
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
         I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: Vec::new() },

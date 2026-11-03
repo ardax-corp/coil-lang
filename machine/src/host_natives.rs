@@ -448,14 +448,14 @@ fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut imp
         .expect("values_eq_shaped signature");
     let id = out.len();
     register_id(name, id);
-    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+    out.push(Arc::new(HostClosureFn::new_direct(sig, |heap, args| {
         let eq = match heap.find_object_by_addr(args[2].bits()) {
             Some(crate::memory::Object::String(gc)) => {
                 crate::value_eq::values_eq_shaped(heap, args[0], args[1], gc.as_ref().data.as_bytes())
             }
             _ => crate::value_eq::values_eq(heap, args[0], args[1]),
         };
-        Ok(Some(Value::from(i64::from(eq))))
+        Value::from(i64::from(eq))
     })));
 }
 
@@ -898,6 +898,12 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
             IoKind::Stdin => Some(|heap, _| stream_stdin(heap).unwrap_or_default()),
             IoKind::Stdout => Some(|heap, _| stream_stdout(heap).unwrap_or_default()),
             IoKind::Stderr => Some(|heap, _| stream_stderr(heap).unwrap_or_default()),
+            // Pure conversions: they only allocate.
+            IoKind::ToBytes => Some(|heap, args| to_bytes(heap, args[0])),
+            IoKind::FromBytes => Some(|heap, args| {
+                let r = from_bytes(heap, args[0]);
+                crate::str_bytes::as_string_result_value(heap, r)
+            }),
             _ => None,
         };
         if let Some(f) = direct {
