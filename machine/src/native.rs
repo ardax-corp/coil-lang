@@ -662,3 +662,22 @@ pub unsafe extern "C" fn coil_native_string(ctx: *mut NativeCtx, idx: u64) -> u6
     unsafe { note_alloc(ctx, heap) };
     handle.bits()
 }
+
+/// `StrEq` (the VM's `EQ`): `1` when `a` and `b` are equal as the VM
+/// compares them (strings by content, other objects structurally).
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `a` and `b` are words.
+pub unsafe extern "C" fn coil_native_eq(ctx: *mut NativeCtx, a: u64, b: u64) -> u64 {
+    if a == b {
+        return 1;
+    }
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let (a, b) = (common::Value::from(a), common::Value::from(b));
+    if !heap.may_be_ref(a) || !heap.may_be_ref(b) {
+        return 0;
+    }
+    u64::from(crate::value_eq::values_eq(heap, a, b))
+}
