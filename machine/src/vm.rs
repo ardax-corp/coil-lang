@@ -1585,6 +1585,8 @@ pub struct Machine<const S: usize> {
     /// Generators whose native body runs now, innermost last: roots
     /// (pinned) while their fibers run (`vm_gen.rs`).
     gen_running: Vec<Value>,
+    /// The frame depth of the running host-call stub, or `0`.
+    host_stub_frame: usize,
     /// How a fiber's suspension point suspends its task (block, result slot).
     fiber_park_request: Option<(Option<crate::task::Block>, bool)>,
     /// The wake a parked fiber's suspension point gets when it resumes.
@@ -1776,6 +1778,7 @@ impl<const S: usize> Machine<S> {
             #[cfg(not(target_family = "wasm"))]
             fiber_stacks: Vec::new(),
             gen_running: Vec::new(),
+            host_stub_frame: 0,
             fiber_park_request: None,
             fiber_wake: None,
             fiber_cancel: false,
@@ -2109,7 +2112,9 @@ impl<const S: usize> Machine<S> {
         words[1..=args.len()].copy_from_slice(args);
         vm.nested_return_hi = Value::default();
         vm.native_roots.push((ctx, vm.frames.len()));
+        let saved = std::mem::replace(&mut vm.host_stub_frame, vm.frames.len() + 1);
         let out = vm.native_reenter(|vm| vm.call_function(pc as u32, &words[..=args.len()]));
+        vm.host_stub_frame = saved;
         vm.native_roots.pop();
         *panicked = vm.panicked;
         Some(out.bits())
@@ -2973,6 +2978,20 @@ impl<const S: usize> Machine<S> {
         // SAFETY: a native call in a VM call keeps its context alive.
         let s = *unsafe { &*ctx }.call_sites().first()?;
         self.native_site_location(code.site(s)?)
+    }
+
+    /// In a host-call stub: where the native function that made the host
+    /// call was called from, when native code called it (`None` inside:
+    /// the VM frame below the stub made the call).
+    fn host_stub_caller_location(&self) -> Option<Option<String>> {
+        if self.host_stub_frame == 0 || self.host_stub_frame != self.frames.len() {
+            return None;
+        }
+        let &(ctx, _) = self.native_roots.last()?;
+        let code = &self.native.as_ref()?.code;
+        // SAFETY: a native call in a VM call keeps its context alive.
+        let sites = unsafe { &*ctx }.call_sites();
+        Some(sites.get(1).and_then(|&s| self.native_site_location(code.site(s)?)))
     }
 
     /// `path:line:col` of a native panic site: the location the VM records

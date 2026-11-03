@@ -70,8 +70,14 @@ impl<const S: usize> Machine<S> {
     fn contract_failure(&mut self, msg: Value) -> String {
         let ptr = msg.as_ptr::<crate::memory::GcData<crate::memory::ObjString>>();
         let mut text = unsafe { (*ptr).as_ref() }.to_string();
-        // Native code that called the function: its call site.
-        if let Some(loc) = self.native_caller_location() {
+        // A host-call stub: the native function's caller.
+        let stub = self.host_stub_caller_location();
+        if let Some(Some(loc)) = &stub {
+            text.push_str(&format!(", called from {loc}"));
+        } else if stub.is_none()
+            && let Some(loc) = self.native_caller_location()
+        {
+            // Native code that called the function: its call site.
             text.push_str(&format!(", called from {loc}"));
         } else if let Some(ret) = self.caller_return_ip() {
             // The caller's saved ip is its return address; the call is the

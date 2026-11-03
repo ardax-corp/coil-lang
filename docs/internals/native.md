@@ -206,7 +206,10 @@ so parking (a fiber under a scheduler, `pending_io` without one), retries
 and panics are the VM's own. A frame in a stub prints no backtrace line,
 and a panic in it is located at the native call site
 (`Machine::in_host_stub`). The `task_*` host ops (scope, spawn, join, ...)
-still keep their body on the VM.
+go the same way: a scope native code opens through a stub lives at that
+nesting level, and its switches happen in the stub executions, as in a VM
+body native code called. A failed `requires` (`contract_fail`) in a stub
+names the native function's caller (`host_stub_caller_location`).
 
 ### Function values and indirect calls
 
