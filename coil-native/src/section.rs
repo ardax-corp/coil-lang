@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(program.entries.len(), 1);
         assert_eq!(program.entries[0].pc, 42);
         let mut undo = Vec::new();
-        let mut ctx = NativeCtx { bail: 0, stack_limit: 0, undo: &mut undo };
+        let mut ctx = NativeCtx::new(0, &mut undo);
         let marker = 0u8;
         ctx.stack_limit = (std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET);
         let args = [5u64, 10];

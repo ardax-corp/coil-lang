@@ -25,7 +25,10 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
-use machine::native::{NATIVE_CTX_BAIL, NATIVE_CTX_STACK_LIMIT, NativeEntry, NativeEntryFn};
+use machine::native::{
+    NATIVE_CTX_BAIL, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
+    NativeEntry, NativeEntryFn,
+};
 
 /// What [`jit`] produced.
 pub struct NativeProgram {
@@ -85,6 +88,8 @@ fn jit_once(
     jb.symbol("coil_native_field", machine::native::coil_native_field as *const u8);
     jb.symbol("coil_native_store_index", machine::native::coil_native_store_index as *const u8);
     jb.symbol("coil_native_set_field", machine::native::coil_native_set_field as *const u8);
+    jb.symbol("coil_native_view", machine::native::coil_native_view as *const u8);
+    jb.symbol("coil_native_undo_grow", machine::native::coil_native_undo_grow as *const u8);
     let mut module = JITModule::new(jb);
 
     let ids = declare(&mut module, bodies, &plan.compile)?;
@@ -373,6 +378,8 @@ struct Ids {
     field: FuncId,
     store_index: FuncId,
     set_field: FuncId,
+    view: FuncId,
+    undo_grow: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -425,7 +432,11 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let field = module.declare_function("coil_native_field", Linkage::Import, &s2).map_err(e)?;
     let store_index = module.declare_function("coil_native_store_index", Linkage::Import, &s4).map_err(e)?;
     let set_field = module.declare_function("coil_native_set_field", Linkage::Import, &s4).map_err(e)?;
-    Ok(Ids { imp, entry, fmod, powf, index, len, field, store_index, set_field })
+    let view = module.declare_function("coil_native_view", Linkage::Import, &s3).map_err(e)?;
+    let mut s1v = module.make_signature();
+    s1v.params.push(AbiParam::new(types::I64));
+    let undo_grow = module.declare_function("coil_native_undo_grow", Linkage::Import, &s1v).map_err(e)?;
+    Ok(Ids { imp, entry, fmod, powf, index, len, field, store_index, set_field, view, undo_grow })
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +496,16 @@ struct Lower<'a> {
     field: FuncRef,
     store_index: FuncRef,
     set_field: FuncRef,
+    view: FuncRef,
+    undo_grow: FuncRef,
+    /// Arrays this body indexes: `(ok, pointer, length)` of their element
+    /// words in place, set where the array value is defined (see
+    /// `machine::native::coil_native_view`).
+    views: HashMap<ValueId, (Variable, Variable, Variable)>,
+    /// Array values this body stores into.
+    stored: HashSet<ValueId>,
+    /// Two words `coil_native_view` writes to.
+    view_slot: cranelift_codegen::ir::StackSlot,
     by_label: &'a HashMap<Label, usize>,
     vars: Vec<Option<Variable>>,
     blocks: HashMap<BlockId, Block>,
@@ -513,6 +534,13 @@ impl<'a> Lower<'a> {
         let field = module.declare_func_in_func(ids.field, func);
         let store_index = module.declare_func_in_func(ids.store_index, func);
         let set_field = module.declare_func_in_func(ids.set_field, func);
+        let view = module.declare_func_in_func(ids.view, func);
+        let undo_grow = module.declare_func_in_func(ids.undo_grow, func);
+        let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            16,
+            3,
+        ));
         let ret = func.signature.returns[0].value_type;
         let mut b = FunctionBuilder::new(func, fbc);
         let bail = b.create_block();
@@ -530,6 +558,11 @@ impl<'a> Lower<'a> {
             field,
             store_index,
             set_field,
+            view,
+            undo_grow,
+            views: HashMap::new(),
+            stored: HashSet::new(),
+            view_slot,
             by_label,
             vars: Vec::new(),
             blocks: HashMap::new(),
@@ -581,10 +614,31 @@ impl<'a> Lower<'a> {
     }
 
     fn body(&mut self, f: &MirFunc) -> Result<(), String> {
+        for blk in &f.blocks {
+            for inst in &blk.insts {
+                let array = match inst {
+                    MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
+                    MirInst::StoreIndex { array, .. } => {
+                        self.stored.insert(*array);
+                        *array
+                    }
+                    _ => continue,
+                };
+                if !self.views.contains_key(&array) {
+                    let vars = (
+                        self.b.declare_var(types::I64),
+                        self.b.declare_var(types::I64),
+                        self.b.declare_var(types::I64),
+                    );
+                    self.views.insert(array, vars);
+                }
+            }
+        }
         let entry = self.b.current_block().expect("entry block");
         let params: Vec<_> = self.b.block_params(entry)[1..].to_vec();
         for (&p, &x) in f.params.iter().zip(&params) {
             self.set(f, p, x);
+            self.view_of(f, p);
         }
         for blk in &f.blocks {
             let cl = self.b.create_block();
@@ -696,7 +750,8 @@ impl<'a> Lower<'a> {
                 };
                 self.set(f, *dest, x);
             }
-            MirInst::Phi { .. } | MirInst::Deopt { .. } => {}
+            MirInst::Phi { dest, .. } => self.view_of(f, *dest),
+            MirInst::Deopt { .. } => {}
             MirInst::Call { dest, target, args, .. } => {
                 let callee = *self.by_label.get(target).ok_or("unknown callee")?;
                 let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
@@ -716,16 +771,40 @@ impl<'a> Lower<'a> {
             MirInst::Index { dest, array, index, .. } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
+                let (fast, slow, join) = self.in_view(*array, i, true);
+                self.b.switch_to_block(fast);
+                let at = self.element(*array, i);
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(slow);
                 let call = self.b.ins().call(self.index, &[self.ctx, a, i]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag);
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                let w = self.b.block_params(join)[0];
                 self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
             }
             MirInst::ArrayLen { dest, array } => {
                 let a = self.get(f, *array);
+                let (ok, _, len) = self.views[array];
+                let ok = self.b.use_var(ok);
+                let fast = self.b.create_block();
+                let slow = self.b.create_block();
+                let join = self.b.create_block();
+                self.b.append_block_param(join, types::I64);
+                self.b.ins().brif(ok, fast, &[], slow, &[]);
+                self.b.switch_to_block(fast);
+                let n = self.b.use_var(len);
+                self.b.ins().jump(join, &[n.into()]);
+                self.b.switch_to_block(slow);
                 let call = self.b.ins().call(self.len, &[a]);
                 let w = self.b.inst_results(call)[0];
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                let w = self.b.block_params(join)[0];
                 self.set(f, *dest, w);
             }
             MirInst::HeapFieldLoad { dest, object, index } => {
@@ -734,17 +813,47 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.field, &[o, i]);
                 let w = self.b.inst_results(call)[0];
                 self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
             }
             MirInst::StoreIndex { dest, array, index, value, .. } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let call = self.b.ins().call(self.store_index, &[self.ctx, a, i, v]);
-                let w = self.b.inst_results(call)[0];
+                let (fast, slow, join) = self.in_view(*array, i, false);
+                // In place: log `[array, index, old]`, then store.
+                self.b.switch_to_block(fast);
+                let at = self.element(*array, i);
+                let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                let t = MemFlagsData::trusted();
+                let n = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_LEN);
+                let cap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_CAP);
+                let full = self.b.ins().icmp(IntCC::Equal, n, cap);
+                let grow = self.b.create_block();
+                let write = self.b.create_block();
+                self.b.ins().brif(full, grow, &[], write, &[]);
+                self.b.switch_to_block(grow);
+                self.b.ins().call(self.undo_grow, &[self.ctx]);
+                self.b.ins().jump(write, &[]);
+                self.b.switch_to_block(write);
+                let buf = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_BUF);
+                let off = self.b.ins().imul_imm_u(n, 24);
+                let e = self.b.ins().iadd(buf, off);
+                self.b.ins().store(t, a, e, 0);
+                self.b.ins().store(t, i, e, 8);
+                self.b.ins().store(t, old, e, 16);
+                let n1 = self.b.ins().iadd_imm_u(n, 1);
+                self.b.ins().store(t, n1, self.ctx, NATIVE_CTX_UNDO_LEN);
+                self.b.ins().store(t, v, at, 0);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(slow);
+                self.b.ins().call(self.store_index, &[self.ctx, a, i, v]);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag);
-                self.set(f, *dest, w);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(join);
+                let v = self.get(f, *value);
+                self.set(f, *dest, v);
             }
             MirInst::HeapFieldStore { dest, object, value, index } => {
                 let o = self.get(f, *object);
@@ -760,6 +869,50 @@ impl<'a> Lower<'a> {
             other => return Err(format!("instruction {}", inst_name(other))),
         }
         Ok(())
+    }
+
+    /// Fill `v`'s view right after `v` is defined, when the body indexes it.
+    fn view_of(&mut self, f: &MirFunc, v: ValueId) {
+        let Some(&(ok, ptr, len)) = self.views.get(&v) else {
+            return;
+        };
+        let a = self.get(f, v);
+        let store = self.b.ins().iconst(types::I64, i64::from(self.stored.contains(&v)));
+        let out = self.b.ins().stack_addr(types::I64, self.view_slot, 0);
+        let call = self.b.ins().call(self.view, &[a, store, out]);
+        let r = self.b.inst_results(call)[0];
+        let p = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 0);
+        let n = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 8);
+        self.b.def_var(ok, r);
+        self.b.def_var(ptr, p);
+        self.b.def_var(len, n);
+    }
+
+    /// Branch on whether `array[i]` is in its view: `(in view, otherwise,
+    /// join)`. The join block takes one word when the caller passes one.
+    fn in_view(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, word: bool) -> (Block, Block, Block) {
+        let (ok, _, len) = self.views[&array];
+        let ok = self.b.use_var(ok);
+        let len = self.b.use_var(len);
+        let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        let has = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+        let c = self.b.ins().band(inb, has);
+        let fast = self.b.create_block();
+        let slow = self.b.create_block();
+        let join = self.b.create_block();
+        if word {
+            self.b.append_block_param(join, types::I64);
+        }
+        self.b.ins().brif(c, fast, &[], slow, &[]);
+        (fast, slow, join)
+    }
+
+    /// Address of `array[i]` in its view.
+    fn element(&mut self, array: ValueId, i: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        let (_, ptr, _) = self.views[&array];
+        let p = self.b.use_var(ptr);
+        let off = self.b.ins().ishl_imm_u(i, 3);
+        self.b.ins().iadd(p, off)
     }
 
     /// Define `v` from a VM word read out of the heap: a `bool` word is
@@ -912,11 +1065,7 @@ mod tests {
     fn run(entry: &NativeEntry, args: &[u64]) -> (u64, u64) {
         let marker = 0u8;
         let mut undo = Vec::new();
-        let mut ctx = NativeCtx {
-            bail: 0,
-            stack_limit: (std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET),
-            undo: &mut undo,
-        };
+        let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET), &mut undo);
         // SAFETY: compiled for `args.len()` argument words.
         let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
         (ctx.bail, out)

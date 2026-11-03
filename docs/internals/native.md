@@ -79,8 +79,18 @@ does; an index out of bounds or a store to the wrong kind of object
 bails. Such a body never allocates or calls into the VM, so no collection
 can run while it holds a heap word and every word stays a live object.
 
+An array a body indexes gets a *view* where its value is defined (a
+parameter, a phi, a load): `coil_native_view` hands back the pointer and
+length of its element words, and `Index` / `StoreIndex` / `ArrayLen` in
+bounds of the view read and write in place. Byte arrays, tuples and an
+index out of the view take the helpers. The view stays valid for the
+call: native code never grows or shrinks an array, and storing into a
+word array never moves its storage.
+
 Stores are effects, and a bail re-runs the call. So every store logs the
-word it overwrote (`NativeCtx::undo`), and a bail puts them back, newest
+word it overwrote in the context's undo log (`undo_buf` / `undo_len` /
+`undo_cap`; in-place stores append inline and call
+`coil_native_undo_grow` when it is full), and a bail puts them back, newest
 first, before the VM runs the call again: the re-run starts from the heap
 as the call found it, and makes the stores (and the panic, if any)
 itself. Comparing heap words and allocation come with the next parts of
