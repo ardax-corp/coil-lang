@@ -455,9 +455,7 @@ impl Compiler {
         self.opt_options = opts;
         self.inline_cost.max_inline_cost = level.inline_max_cost();
         self.inline_cost.inline_across_modules = level.inline_across_modules();
-        if !level.inline_across_modules() {
-            self.inline_cost.max_cross_module_inline_cost = 0;
-        }
+        self.inline_cost.max_cross_module_inline_cost = level.cross_module_inline_cost();
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
