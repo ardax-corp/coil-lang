@@ -861,3 +861,44 @@ fn task_ops_and_contracts_run_from_native_code() {
     }
     assert!(program_stderr(&run("task_ops_native", &src, true)).contains("called from"));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ffi_calls_run_from_native_code() {
+    // `total` calls an `extern` C function (an FFI op through its stub).
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-ffi", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lib = dir.join("libsum.so");
+    let cc = Command::new("cc").args(["-shared", "-fPIC", "-o"]).arg(&lib).arg(manifest.join("examples/sum.c")).status();
+    if !cc.is_ok_and(|s| s.success()) {
+        eprintln!("skipped: no C compiler");
+        return;
+    }
+    let file = dir.join("ffi.coil");
+    std::fs::write(
+        &file,
+        format!(
+            "{HEADER}extern \"sum\" {{\n    fn sum(int a, int b) -> int;\n}}\n\
+             #[inline(never)]\nfn total(int n) -> int {{ let t = 0; let i = 0; while i < n {{ t = sum(t, i); i = i + 1; }} return t; }}\n\
+             fn main() {{ let _ = println(format(\"%i\", total(100))); }}\n"
+        ),
+    )
+    .expect("write source");
+    let run = |jit: bool| {
+        let mut cmd = Command::new(coil_bin());
+        cmd.arg(&file).args(["--no-build-cache", "--fold-calls", "off", "--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"]).arg(&dir);
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        if jit {
+            cmd.arg("--jit").env("COIL_NATIVE_STATS", "2");
+        }
+        cmd.output().expect("spawn coil")
+    };
+    let (vm, jit) = (run(false), run(true));
+    assert_eq!(String::from_utf8_lossy(&vm.stdout), "4950\n");
+    assert_eq!(String::from_utf8_lossy(&vm.stdout), String::from_utf8_lossy(&jit.stdout));
+    let stats = String::from_utf8_lossy(&jit.stderr);
+    assert!(compiled(&stats, "total"), "stats: {stats}");
+}
