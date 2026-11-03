@@ -3249,7 +3249,7 @@ impl GcSized for ObjString {
 
 impl From<&str> for ObjString {
     fn from(value: &str) -> Self {
-        Self::new(String::from(value))
+        Self::from_data(value.into())
     }
 }
 
