@@ -271,6 +271,13 @@ fn string_literals_come_from_native_code() {
     );
     let stats = same_as_vm("strings", &src);
     assert!(compiled(&stats, "sign") && compiled(&stats, "signs"), "stats: {stats}");
+    // Content equality of strings (and `!=`) in native code.
+    let eq = format!(
+        "{HEADER}#[inline(never)]\nfn count(Vec<String> v, String k) -> int {{ let n = 0; for s in v {{ if s == k {{ n = n + 1; }} if s != k {{ n = n + 100; }} }} return n; }}\n\
+         fn main() {{\n  let v: Vec<String> = [\"ab\", \"cd\", \"ab\"];\n  let k = format(\"%s%s\", \"a\", \"b\");\n  let _ = println(format(\"%i\", count(v, k)));\n}}\n"
+    );
+    let stats = same_as_vm("str_eq", &eq);
+    assert!(compiled(&stats, "count"), "stats: {stats}");
     let archive = compile("strings_archive", &src, true);
     let jit = run_archive(&archive, &[]);
     assert_eq!(String::from_utf8_lossy(&jit.stdout), "pos\nneg\nzero\npos\n");
