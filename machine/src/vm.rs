@@ -1657,6 +1657,8 @@ pub struct Machine<const S: usize> {
     /// Set once the live heap outgrew [`Self::heap_cap`] after a full
     /// collection (see [`Self::heap_cap_exceeded`]).
     heap_cap_hit: bool,
+    /// Native code installed by a native backend (`None`: VM only).
+    native: Option<Box<crate::native::NativeTable>>,
 }
 
 
@@ -1764,6 +1766,7 @@ impl<const S: usize> Machine<S> {
             fuel_start: u64::MAX,
             heap_cap: usize::MAX,
             heap_cap_hit: false,
+            native: None,
         }
     }
 
@@ -1774,6 +1777,59 @@ impl<const S: usize> Machine<S> {
     /// ([`Self::panicked`] and [`Self::step_budget_exhausted`] become true).
     /// `None` (the default) removes the limit. The budget spans every run on
     /// this machine until set again; spawned worker machines never inherit it.
+    /// Install native code for some functions (see [`crate::native`]). A
+    /// `CALL` of an installed entry PC runs it instead of the bytecode,
+    /// except while a debugger is attached. An empty list removes it.
+    pub fn install_native(&mut self, code_len: usize, entries: Vec<crate::native::NativeEntry>) {
+        self.native = if entries.is_empty() {
+            None
+        } else {
+            Some(Box::new(crate::native::NativeTable::new(code_len, entries)))
+        };
+    }
+
+    /// Native calls run and bailed so far: `(hits, bails)`.
+    pub fn native_stats(&self) -> Option<(u64, u64)> {
+        self.native.as_ref().map(|t| (t.hits, t.bails))
+    }
+
+    /// Run the native code at `target` on the top `arity` stack words.
+    /// `None`: no native code there, or it bailed and the VM runs the call.
+    #[inline(never)]
+    fn try_native_call(&mut self, target: usize, arity: usize) -> Option<Value> {
+        let base = self.stack.tell() - arity;
+        let table = self.native.as_deref_mut()?;
+        // After a bail the VM re-runs that call in bytecode; calls nested
+        // in the re-run (above its frame base) stay in the VM, or a deep
+        // recursion would bail again at every level.
+        if base > table.quiet_above {
+            return None;
+        }
+        table.quiet_above = usize::MAX;
+        let entry = table.lookup(target)?;
+        if entry.arity as usize != arity {
+            return None;
+        }
+        let mut words = [0u64; 16];
+        if arity > words.len() {
+            return None;
+        }
+        for (i, w) in words.iter_mut().take(arity).enumerate() {
+            *w = self.stack[base + i].bits();
+        }
+        match crate::native::call(&entry, &words[..arity]) {
+            Some(out) => {
+                table.hits += 1;
+                Some(Value::from(out))
+            }
+            None => {
+                table.bails += 1;
+                table.quiet_above = base;
+                None
+            }
+        }
+    }
+
     pub fn set_step_budget(&mut self, budget: Option<u64>) {
         // `budget` charges succeed; the next one reaches zero.
         self.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
@@ -5220,7 +5276,15 @@ impl<const S: usize> Machine<S> {
         static_slots: u32,
     ) {
         let code: &[Byte] = unsafe { std::slice::from_raw_parts(code.as_ptr().cast(), code.len()) };
+        if let Some(entries) = crate::native::take_pending() {
+            self.install_native(code.len(), entries);
+        }
         self.run_with_pool(code, constants, strings, static_slots);
+        if std::env::var_os("COIL_NATIVE_STATS").is_some()
+            && let Some((hits, bails)) = self.native_stats()
+        {
+            eprintln!("native: {hits} calls ran natively, {bails} bailed to the VM");
+        }
     }
 
     /// Never-inline: `#[inline(always)]` forced fat LTO to paste this giant
@@ -5456,6 +5520,16 @@ impl<const S: usize> Machine<S> {
                             self.stack.push(Value::from(0i64));
                             continue;
                         }
+                    }
+                    if unlikely(self.native.is_some())
+                        && !debug_attached
+                        && target != 0
+                        && let Some(ret) = self.try_native_call(target, arity)
+                    {
+                        let base = self.stack.tell() - arity;
+                        self.stack.seek(base);
+                        self.stack.push(ret);
+                        continue;
                     }
                     let callee_sp = self.stack.tell() - arity;
                     // Direct calls dominate; avoid the indirect `target == 0`
