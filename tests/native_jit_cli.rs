@@ -811,3 +811,32 @@ fn a_host_call_through_the_vm_panics_at_its_native_call_site() {
     let stats = same_as_vm("vm_host_panic", &src);
     assert!(compiled(&stats, "insert_at"), "stats: {stats}");
 }
+
+#[test]
+fn generator_bodies_run_natively() {
+    // The generators' own bodies compile: yields, sends, strings held
+    // across yields while the resumer collects, an early `for` exit, a VM
+    // generator delegating to one, and a panic after a yield.
+    let defs = format!(
+        "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i * i; i = i + 1; }} return 1000; }}\n\
+         gen fn echo() {{ let x = yield 0; let y = yield x * 2; return x + y; }}\n\
+         gen fn words(int n) {{ let s = \"w\"; let i = 0; while i < n {{ s = format(\"%s%i\", s, i % 10); yield s.len(); i = i + 1; }} return s.len(); }}\n\
+         gen fn outer() {{ yield 6; yield from count(3); yield 9; }}\n\
+         gen fn bad() {{ yield 1; let z = 0; yield 10 / z; }}\n\
+         #[inline(never)]\nfn drain(int n) -> int {{ let g = count(n); let t = 0; while !done(g) {{ t = t + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn talk() -> int {{ let g = echo(); let a = resume g; let b = resume g with 5; let c = resume g with 3; return a * 10000 + b * 100 + c; }}\n\
+         #[inline(never)]\nfn churn() -> int {{ let g = words(300); let t = 0; while !done(g) {{ let junk = format(\"%i-%i\", t, t); let r = resume g; t = t + r + junk.len() - junk.len(); }} return t; }}\n\
+         #[inline(never)]\nfn early() -> int {{ let t = 0; for x in count(100) {{ if x > 50 {{ break; }} t = t + x; }} return t; }}\n\
+         #[inline(never)]\nfn nest() -> int {{ let g = outer(); let t = 0; while !done(g) {{ t = t * 10 + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn boom() -> int {{ let g = bad(); let a = resume g; let _ = println(\"first\"); return a + resume g; }}\n"
+    );
+    let ok = format!("{defs}fn main() {{ let _ = println(format(\"%i %i %i %i %i\", drain(10), talk(), churn(), early(), nest())); }}\n");
+    let stats = same_as_vm("native_gen", &ok);
+    for f in ["count", "echo", "words"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    let boom = format!("{defs}fn main() {{ let _ = println(format(\"%i\", drain(3) + boom())); }}\n");
+    let stats = same_as_vm("native_gen_panic", &boom);
+    assert!(compiled(&stats, "bad"), "stats: {stats}");
+    assert!(program_stderr(&run("native_gen_panic", &boom, true)).contains("division by zero"));
+}
