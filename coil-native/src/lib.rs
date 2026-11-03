@@ -903,7 +903,20 @@ impl<'a> Lower<'a> {
         for blk in &f.blocks {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
+            // A `MatchPayload` of a payload the block's `JumpIfMatch` binds
+            // belongs to the taken edge, where the terminator binds it (as
+            // the VM's emission does): run here, it would read the payload
+            // of whatever variant the word holds.
+            let edge_bound: &[ValueId] = match &blk.term {
+                Some(Terminator::JumpIfMatch { payloads, .. }) => payloads,
+                _ => &[],
+            };
             for inst in &blk.insts {
+                if let MirInst::MatchPayload { dest, .. } = inst
+                    && edge_bound.contains(dest)
+                {
+                    continue;
+                }
                 self.inst(f, inst)?;
             }
             self.term(f, blk.id, blk.term.as_ref().ok_or("no terminator")?)?;
