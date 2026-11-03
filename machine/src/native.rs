@@ -213,6 +213,10 @@ pub struct NativeHost {
     /// `drop`; else, as the VM's `CALL` claims a finalizer, `2` when this
     /// call claimed it and `0` when it ran already (skip the call).
     pub claim: unsafe fn(*mut std::ffi::c_void, u32, u64) -> u64,
+    /// Resume the generator word (with the sent word when the `bool` says
+    /// so), as `ResumeCoro` does: its body runs on the VM until it yields
+    /// or returns, and that word comes back; same panic rules as `call`.
+    pub resume: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, Option<u64>, &mut bool) -> u64,
     /// Collect, with the context's roots pinned.
     pub collect: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx),
     /// `gc_collect`: a full collection, with the context's roots pinned;
@@ -224,7 +228,7 @@ pub struct NativeHost {
 }
 
 impl NativeHost {
-    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true };
+    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, resume: |_, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true };
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
@@ -952,6 +956,7 @@ pub const ALLOC_OBJECT: u64 = 3;
 pub const ALLOC_FN: u64 = 4;
 pub const ALLOC_POLY_FN: u64 = 5;
 pub const ALLOC_DROP_ENUM: u64 = 6;
+pub const ALLOC_CORO: u64 = 7;
 
 /// A new object of `kind` from the `n` words at `words`, in declaration
 /// order (an enum's payload order):
@@ -967,7 +972,9 @@ pub const ALLOC_DROP_ENUM: u64 = 6;
 ///   `MakePolyFnCapture`: `extra` is the entry PC `| params << 32`, the
 ///   words its dictionaries (`0`: filled in by the call);
 /// - [`ALLOC_DROP_ENUM`]: [`ALLOC_ENUM`] of an enum with a `drop`, as
-///   `TagEnumType` stamps it: the last word is its type id.
+///   `TagEnumType` stamps it: the last word is its type id;
+/// - [`ALLOC_CORO`]: a generator, as `MakeCoro`: `extra` is its body's
+///   entry PC, the words its arguments.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
@@ -1038,6 +1045,30 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 unsafe { born(ctx, addr) };
             }
             addr
+        }
+        ALLOC_CORO => {
+            let mut live_mask = 0u64;
+            for (i, v) in values.iter().take(64).enumerate() {
+                let a = v.heap_addr();
+                if a != 0 && heap.find_object_by_addr(a).is_some() {
+                    live_mask |= 1 << i;
+                }
+            }
+            let target = extra as usize;
+            let coro = crate::memory::ObjCoroutine {
+                state: crate::CoroState::Suspended,
+                resume_ip: target,
+                saved_stack: values,
+                saved_live_mask: live_mask,
+                saved_frames: vec![(target, 0)],
+                pending_send: common::Value::from(0_i64),
+                yield_from: None,
+                delegator: None,
+                yield_from_resume_ip: 0,
+                started: false,
+                closeable: false,
+            };
+            heap.alloc(coro, Object::Coroutine).0.addr()
         }
         ALLOC_FN => {
             let op = (extra >> 32) as u32;
@@ -1375,6 +1406,60 @@ pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64
         return unsafe { bail(ctx) };
     }
     out
+}
+
+/// `ResumeCoro`: resume a generator ([`NativeHost::resume`]).
+///
+/// # Safety
+///
+/// `ctx` is the calling native code's live context.
+pub unsafe extern "C" fn coil_native_resume(ctx: *mut NativeCtx, handle: u64, send: u64, has_send: u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    if c.machine.is_null() {
+        return unsafe { bail(ctx) };
+    }
+    // A resume that cannot run panics here, at native code's own site.
+    // SAFETY: the context's heap is the machine's.
+    let refused = match unsafe { &*c.heap }.find_object_by_addr(handle) {
+        Some(crate::Object::Coroutine(gc)) if gc.as_ref().state == crate::CoroState::Done => Some("resumed after completion"),
+        Some(crate::Object::Coroutine(_)) => None,
+        _ => Some("resumed invalid coroutine handle"),
+    };
+    if let Some(msg) = refused {
+        c.trap = TRAP_MESSAGE;
+        // SAFETY: `call` set `message` for the call.
+        unsafe { *c.message = msg.to_string() };
+        return unsafe { bail(ctx) };
+    }
+    c.committed = 1;
+    c.vm_calls += 1;
+    c.gc_epoch += 1;
+    let mut panicked = false;
+    let (machine, resume) = (c.machine, c.host.resume);
+    let send = (has_send != 0).then_some(send);
+    // SAFETY: `machine` is the live machine `host` was made for.
+    let out = unsafe { resume(machine, ctx, handle, send, &mut panicked) };
+    let c = unsafe { &mut *ctx };
+    if panicked {
+        c.trap = TRAP_VM_PANIC;
+        return unsafe { bail(ctx) };
+    }
+    out
+}
+
+/// `DoneCoro`: `1` when the generator word finished (a word that is no
+/// generator is not).
+///
+/// # Safety
+///
+/// `ctx` is a live context with its heap.
+pub unsafe extern "C" fn coil_native_coro_done(ctx: *mut NativeCtx, handle: u64) -> u64 {
+    // SAFETY: the context's heap is the machine's.
+    let heap = unsafe { &*(*ctx).heap };
+    u64::from(matches!(
+        heap.find_object_by_addr(handle),
+        Some(crate::Object::Coroutine(gc)) if gc.as_ref().state == crate::CoroState::Done
+    ))
 }
 
 /// The standard host natives native code may call straight

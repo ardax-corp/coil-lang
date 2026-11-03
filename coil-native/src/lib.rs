@@ -123,6 +123,8 @@ fn jit_once(
     jb.symbol("coil_native_host", machine::native::coil_native_host as *const u8);
     jb.symbol("coil_native_call_vm", machine::native::coil_native_call_vm as *const u8);
     jb.symbol("coil_native_call_value", machine::native::coil_native_call_value as *const u8);
+    jb.symbol("coil_native_resume", machine::native::coil_native_resume as *const u8);
+    jb.symbol("coil_native_coro_done", machine::native::coil_native_coro_done as *const u8);
     jb.symbol("coil_native_defer", machine::native::coil_native_defer as *const u8);
     jb.symbol("coil_native_claim", machine::native::coil_native_claim as *const u8);
     jb.symbol("coil_native_collect", machine::native::coil_native_collect as *const u8);
@@ -327,7 +329,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
                 || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
-                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::FreeEarly { .. }
+                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. }
                     )
                 })
         })
@@ -404,7 +406,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
 /// (in a program with `drop`s) or collection that may run `drop`s.
 fn runs_vm_code(inst: &MirInst, drops: bool) -> bool {
     match inst {
-        MirInst::CallIndirect { .. } => true,
+        MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } => true,
         MirInst::FreeEarly { .. } => drops,
         MirInst::HostInvoke { native_id, .. } => {
             machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect)
@@ -456,6 +458,7 @@ fn allocates(inst: &MirInst) -> bool {
             | MirInst::Cow { .. }
             | MirInst::HostInvoke { .. }
             | MirInst::CallIndirect { .. }
+            | MirInst::ResumeCoro { .. }
             | MirInst::FreeEarly { .. }
     )
 }
@@ -684,7 +687,10 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             MirAllocKind::Object { .. } if elems.is_empty() => {}
                             // A function value: its body must have an entry
                             // PC, so it counts as a callee.
-                            MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target, .. }
+                            MirAllocKind::Fn { target, .. }
+                            | MirAllocKind::PolyFn { target }
+                            | MirAllocKind::PolyFnCapture { target, .. }
+                            | MirAllocKind::Coro { target }
                                 if elems.len() < 16 =>
                             {
                                 let Some(&callee) = by_label.get(target) else {
@@ -783,6 +789,17 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         if args.len() > 16 {
                             return Err("indirect call of more than 16 words".into());
                         }
+                    }
+                    MirInst::ResumeCoro { dest, handle, send } => {
+                        need(dest)?;
+                        need(handle)?;
+                        if let Some(s) = send {
+                            need(s)?;
+                        }
+                    }
+                    MirInst::DoneCoro { dest, handle } => {
+                        need_scalar(dest)?;
+                        need(handle)?;
                     }
                     MirInst::Panic { msg, .. } => need(msg)?,
                     // A cleanup pad's end (lowered to nothing).
@@ -917,6 +934,8 @@ struct Ids {
     /// Calls to bodies on the VM (commit the call).
     call_vm: FuncId,
     call_value: FuncId,
+    resume: FuncId,
+    coro_done: FuncId,
     /// Collections at safepoints.
     collect: FuncId,
     /// Explicit `panic`.
@@ -1006,6 +1025,8 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
     let call_vm = module.declare_function("coil_native_call_vm", Linkage::Import, &s4).map_err(e)?;
     let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
+    let resume = module.declare_function("coil_native_resume", Linkage::Import, &s4).map_err(e)?;
+    let coro_done = module.declare_function("coil_native_coro_done", Linkage::Import, &s2).map_err(e)?;
     let mut s5v = module.make_signature();
     s5v.params.extend((0..5).map(|_| AbiParam::new(types::I64)));
     let defer = module.declare_function("coil_native_defer", Linkage::Import, &s5v).map_err(e)?;
@@ -1046,6 +1067,8 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         host,
         call_vm,
         call_value,
+        resume,
+        coro_done,
         collect,
         panic,
     })
@@ -1130,6 +1153,8 @@ struct Lower<'a> {
     host: FuncRef,
     call_vm: FuncRef,
     call_value: FuncRef,
+    resume: FuncRef,
+    coro_done: FuncRef,
     collect: FuncRef,
     panic: FuncRef,
     /// This body's index into the plan's bodies.
@@ -1223,6 +1248,8 @@ impl<'a> Lower<'a> {
         let host = module.declare_func_in_func(ids.host, func);
         let call_vm = module.declare_func_in_func(ids.call_vm, func);
         let call_value = module.declare_func_in_func(ids.call_value, func);
+        let resume = module.declare_func_in_func(ids.resume, func);
+        let coro_done = module.declare_func_in_func(ids.coro_done, func);
         let collect = module.declare_func_in_func(ids.collect, func);
         let panic = module.declare_func_in_func(ids.panic, func);
         let defer = module.declare_func_in_func(ids.defer, func);
@@ -1273,6 +1300,8 @@ impl<'a> Lower<'a> {
             host,
             call_vm,
         call_value,
+        resume,
+        coro_done,
             collect,
             panic,
             body_index: None,
@@ -1801,6 +1830,38 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
+            MirInst::ResumeCoro { dest, handle, send } => {
+                // A generator's body runs on the VM, in a nested execution
+                // that ends at its next yield or return.
+                let h = self.get(f, *handle);
+                let h = self.coerce(h, types::I64);
+                let (sv, has) = match send {
+                    Some(s) => {
+                        let v = self.get(f, *s);
+                        (self.coerce(v, types::I64), 1)
+                    }
+                    None => (self.b.ins().iconst(types::I64, 0), 0),
+                };
+                let has = self.b.ins().iconst(types::I64, has);
+                let roots = self.push_roots(f);
+                let prev = self.push_call();
+                let call = self.b.ins().call(self.resume, &[self.ctx, h, sv, has]);
+                self.pop_call(prev);
+                let w = self.b.inst_results(call)[0];
+                self.pop_roots(f, roots);
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
+                self.drop_views();
+                self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::DoneCoro { dest, handle } => {
+                let h = self.get(f, *handle);
+                let h = self.coerce(h, types::I64);
+                let call = self.b.ins().call(self.coro_done, &[self.ctx, h]);
+                let w = self.b.inst_results(call)[0];
+                self.set_word(f, *dest, w);
+            }
             MirInst::Index { dest, array, index, .. } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
@@ -1910,12 +1971,15 @@ impl<'a> Lower<'a> {
                         let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no entry PC")?;
                         (machine::native::ALLOC_FN, words.len() as u64 + 1, u64::from(pc) | (u64::from(operand) << 32))
                     }
+                    MirAllocKind::Coro { target } => {
+                        let pc = *self.plan.pcs.get(&target).ok_or("generator of a body with no entry PC")?;
+                        (machine::native::ALLOC_CORO, words.len() as u64, u64::from(pc))
+                    }
                     MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target, .. } => {
                         let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no entry PC")?;
                         let params = if let MirAllocKind::PolyFnCapture { params, .. } = *kind { params } else { 0 };
                         (machine::native::ALLOC_POLY_FN, words.len() as u64, u64::from(pc) | (u64::from(params) << 32))
                     }
-                    other => return Err(format!("allocation {other:?}")),
                 };
                 let p = match *kind {
                     MirAllocKind::Fn { mask, .. } => self.words_slot_with(f, &words, Some(i64::from(mask))),

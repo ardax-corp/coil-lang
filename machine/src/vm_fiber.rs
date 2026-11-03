@@ -45,6 +45,7 @@ struct ExecCtx<const S: usize> {
     fiber_switch_depth: Option<u32>,
     /// The native table's `quiet_above`: a stack position in this state.
     quiet_above: usize,
+    resume_floor: usize,
 }
 
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
@@ -52,9 +53,16 @@ impl<const S: usize> ExecCtx<S> {
     /// A fiber's state, before its first VM call: nothing on it, nested
     /// as deep as the level that started it, where tasks switch.
     fn fresh(nested_depth: u32) -> Self {
+        // A base frame, as the program's bootstrap one: VM calls open
+        // theirs above it (at `ip` 0 it names no function).
+        let mut frames = ArrayVec::default();
+        frames.setup_current_and_advance(|f: &mut Frame| {
+            f.seek(0);
+            f.set(0);
+        });
         Self {
             stack: Stack::with_capacity(crate::DEFAULT_OPERAND_STACK_SLOTS),
-            frames: ArrayVec::default(),
+            frames,
             frame_pins: Vec::new(),
             resume_stack: Vec::new(),
             nested_depth,
@@ -68,6 +76,7 @@ impl<const S: usize> ExecCtx<S> {
             unwind: Unwind::default(),
             fiber_switch_depth: Some(nested_depth),
             quiet_above: usize::MAX,
+            resume_floor: usize::MAX,
         }
     }
 
@@ -159,6 +168,7 @@ impl<const S: usize> Machine<S> {
         std::mem::swap(&mut self.native_roots, &mut x.native_roots);
         std::mem::swap(&mut self.unwind, &mut x.unwind);
         std::mem::swap(&mut self.fiber_switch_depth, &mut x.fiber_switch_depth);
+        std::mem::swap(&mut self.resume_floor, &mut x.resume_floor);
         if let Some(t) = self.native.as_deref_mut() {
             std::mem::swap(&mut t.quiet_above, &mut x.quiet_above);
         }
@@ -336,6 +346,21 @@ impl<const S: usize> Machine<S> {
 }
 
 impl<const S: usize> Machine<S> {
+    /// The return address in the running frame's caller: inside a fiber,
+    /// for the first frame above its base, the task's frame that started
+    /// it (its `CALL`).
+    fn caller_return_ip(&self) -> Option<usize> {
+        let n = self.frames.len();
+        if let Some(outer) = self.fiber_outer
+            && n <= 2
+        {
+            // SAFETY: the running fiber's `NativeFiber` outlives its run.
+            let outer = unsafe { &*outer };
+            return (!outer.frames.is_empty()).then(|| outer.frames.get().tell());
+        }
+        (n >= 2).then(|| self.frames[n - 2].tell())
+    }
+
     /// Whether task `id` waits in a parked fiber.
     #[inline]
     fn task_has_parked_fiber(&self, id: crate::task::TaskId) -> bool {

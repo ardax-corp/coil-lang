@@ -70,11 +70,13 @@ impl<const S: usize> Machine<S> {
     fn contract_failure(&mut self, msg: Value) -> String {
         let ptr = msg.as_ptr::<crate::memory::GcData<crate::memory::ObjString>>();
         let mut text = unsafe { (*ptr).as_ref() }.to_string();
-        let n = self.frames.len();
-        if n >= 2 {
+        // Native code that called the function: its call site.
+        if let Some(loc) = self.native_caller_location() {
+            text.push_str(&format!(", called from {loc}"));
+        } else if let Some(ret) = self.caller_return_ip() {
             // The caller's saved ip is its return address; the call is the
             // instruction before it (#841).
-            let ip = self.frames[n - 2].tell().saturating_sub(1);
+            let ip = ret.saturating_sub(1);
             // The bootstrap frame (prologue `CALL main`) is not user code.
             if (ip >= 3 || self.fn_symbol_at_ip(ip).is_some())
                 && let Some(loc) = self.format_panic_location(ip)

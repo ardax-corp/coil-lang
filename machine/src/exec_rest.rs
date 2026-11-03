@@ -1295,6 +1295,10 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let yield_val = self.stack.pop();
                     self.yield_coroutine(&mut ip, &mut sp, yield_val);
+                    // Back at a native resume's floor: it takes the value.
+                    if unlikely(self.frames.len() == self.resume_floor) {
+                        return dispatch::RestExit::done(false);
+                    }
                 }
                 Instruction::YieldFromCoro => {
                     promise!(self.stack.tell() > 0);
@@ -1314,6 +1318,9 @@ impl<const S: usize> Machine<S> {
                             ip.saturating_sub(1),
                         ));
 
+                    }
+                    if unlikely(self.frames.len() == self.resume_floor) {
+                        return dispatch::RestExit::done(false);
                     }
                 }
                 Instruction::DoneCoro => {

@@ -1595,6 +1595,9 @@ pub struct Machine<const S: usize> {
     fiber_resume_pending: bool,
     /// A fiber's suspension point took a cancel: the unwinder takes over.
     fiber_stop: bool,
+    /// Inside [`Self::resume_value`]: the frame depth its generator yields
+    /// or returns to, where the nested execution stops (`usize::MAX`: none).
+    resume_floor: usize,
     /// Task scheduler, created by the first `task::scope` (see `task.rs`).
     sched: Option<Box<crate::task::Scheduler>>,
     /// Message of a panic a child task raised (the scope reports it).
@@ -1774,6 +1777,7 @@ impl<const S: usize> Machine<S> {
             fiber_cancel: false,
             fiber_resume_pending: false,
             fiber_stop: false,
+            resume_floor: usize::MAX,
             sched: None,
             task_panic_message: None,
             finalizer_aborted: false,
@@ -1957,6 +1961,7 @@ impl<const S: usize> Machine<S> {
                 print: Self::native_print,
                 call: Self::native_vm_call,
                 call_value: Self::native_call_value,
+                resume: Self::native_resume,
                 claim: Self::native_claim,
                 collect: Self::native_collect,
                 gc: Self::native_gc,
@@ -2083,6 +2088,117 @@ impl<const S: usize> Machine<S> {
         vm.native_roots.pop();
         *panicked = vm.panicked;
         out.bits()
+    }
+
+    /// [`crate::native::NativeHost::resume`]: [`Self::resume_value`], with
+    /// the native frames rooted, as [`Self::native_vm_call`].
+    unsafe fn native_resume(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        handle: u64,
+        send: Option<u64>,
+        panicked: &mut bool,
+    ) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        vm.native_roots.push((ctx, vm.frames.len()));
+        let out = vm.native_reenter(|vm| vm.resume_value(Value::from(handle), send.map(Value::from)));
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        out.bits()
+    }
+
+    /// `ResumeCoro` reentrantly, for native code: run the generator
+    /// `handle` (sent `send`) in a nested execution until it yields or
+    /// returns, and give back that value. The generator's frames go above
+    /// a frame of the caller's own (the floor), as the VM's `ResumeCoro`
+    /// puts them above the resumer's.
+    pub(crate) fn resume_value(&mut self, handle: Value, send: Option<Value>) -> Value {
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        let constants: &[u64] = unsafe {
+            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+        };
+        self.bind_frame_reserve(code, constants);
+        let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits()) else {
+            self.runtime_panic("resumed invalid coroutine handle", call_ip.saturating_sub(1));
+            return Value::default();
+        };
+        if gc.as_ref().state == CoroState::Done {
+            self.runtime_panic("resumed after completion", call_ip.saturating_sub(1));
+            return Value::default();
+        }
+        let send_val = send.unwrap_or_else(|| Value::from(0_i64));
+        // A delegating generator resumes its innermost `yield from` delegate.
+        let mut target = gc;
+        while let Some(sub) = target.as_ref().yield_from {
+            Self::with_coroutine_mut(target, |c| c.pending_send = send_val);
+            target = sub;
+        }
+        self.fuel = self.fuel.wrapping_sub(1);
+        if unlikely(self.fuel == 0) {
+            self.step_budget_out(call_ip);
+            return Value::default();
+        }
+        if self.frames.len() >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(1) {
+            self.runtime_panic(STACK_OVERFLOW, call_ip.saturating_sub(1));
+            return Value::default();
+        }
+        let saved_sp = self.stack.tell();
+        self.nested_return = None;
+        self.nested_depth += 1;
+        self.return_bookkeeping = true;
+        // The floor: the resumer's frame for the generator's.
+        self.frames.setup_current_and_advance(|f| {
+            f.seek(0);
+            f.set(saved_sp);
+        });
+        let floor = self.frames.len();
+        self.nested_frame_depths.push(floor);
+        let saved_floor = std::mem::replace(&mut self.resume_floor, floor);
+        let mut ip = 0;
+        let mut sp = saved_sp;
+        let mut out = Value::default();
+        if self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
+            loop {
+                let paused = self.run_execute(code, constants, ip);
+                if let Some(pending) = self.pending_ffi.take() {
+                    ip = pending.resume_ip;
+                    self.finish_pending_ffi_invoke(pending);
+                    continue;
+                }
+                if let Some(pending) = self.pending_io.take() {
+                    ip = pending.resume_ip;
+                    self.finish_pending_io_wait(pending);
+                    continue;
+                }
+                if !paused {
+                    break;
+                }
+            }
+            if !self.panicked && self.stack.tell() > saved_sp {
+                out = self.stack.pop();
+            }
+        } else {
+            self.runtime_panic(STACK_OVERFLOW, call_ip.saturating_sub(1));
+        }
+        self.resume_floor = saved_floor;
+        let _ = self.nested_frame_depths.pop();
+        while self.frames.len() >= floor {
+            let _ = self.pop_call_frame();
+        }
+        self.stack.seek(saved_sp);
+        if saved_sp < self.stack.capacity() {
+            self.stack[saved_sp] = Value::default();
+        }
+        self.nested_depth -= 1;
+        self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
+        out
     }
 
     /// Limit execution to `budget` steps, where a step is a taken loop
@@ -2688,12 +2804,6 @@ impl<const S: usize> Machine<S> {
         });
         let states = std::iter::once((&self.frames, self.native_roots.as_slice())).chain(fiber_outer);
         for (state, (frames, roots)) in states.enumerate() {
-            if state > 0 {
-                // The fiber's own native frames, below its VM calls.
-                for line in native_lines(&self.native_roots, 0) {
-                    emit(line, &mut lines, &mut repeats);
-                }
-            }
             for frame_idx in (0..frames.len()).rev() {
                 for line in native_lines(roots, frame_idx + 1) {
                     emit(line, &mut lines, &mut repeats);
@@ -2761,6 +2871,19 @@ impl<const S: usize> Machine<S> {
             Some(loc) => format!("  in {name} at {loc}"),
             None => format!("  in {name}"),
         })
+    }
+
+    /// When native code made the VM call the running frame belongs to:
+    /// the location of that call.
+    fn native_caller_location(&self) -> Option<String> {
+        let &(ctx, depth) = self.native_roots.last()?;
+        if depth + 1 != self.frames.len() {
+            return None;
+        }
+        let code = &self.native.as_ref()?.code;
+        // SAFETY: a native call in a VM call keeps its context alive.
+        let s = *unsafe { &*ctx }.call_sites().first()?;
+        self.native_site_location(code.site(s)?)
     }
 
     /// `path:line:col` of a native panic site: the location the VM records
@@ -4835,6 +4958,10 @@ impl<const S: usize> Machine<S> {
             || self.over_apply_frames > 0
             || !self.resume_stack.is_empty()
             || !self.frame_pins.is_empty();
+        // A generator a native resume ran returned to its floor.
+        if self.frames.len() == self.resume_floor {
+            return Some(false);
+        }
         None
     }
 

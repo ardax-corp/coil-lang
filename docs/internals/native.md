@@ -266,6 +266,27 @@ stack as before.
 - wasm has no fibers: there, under a scheduler, only bodies that reach no
   VM code run natively.
 
+### Generators
+
+Native code makes generators (`Alloc` of `MirAllocKind::Coro`, as
+`MakeCoro`: `ALLOC_CORO`), checks them (`DoneCoro`, a heap read) and
+resumes them (`ResumeCoro`). A generator's body stays on the VM for now
+(`Yield` refuses a body): `coil_native_resume` runs it with
+`Machine::resume_value`, a nested execution like `call_function`'s. A floor
+frame stands for the resumer; the generator's frames go above it, and the
+execution stops when a yield or the body's return comes back to that depth
+(`resume_floor`, checked after `YieldCoro` / `YieldFromCoro` and in
+`after_return_bookkeeping`). Delegation (`yield from`) and sends behave as
+the opcode's. A resume of a finished or invalid handle panics at native
+code's own site, before the VM runs anything. Inside a task fiber the
+resume goes through `native_reenter`, so a generator body that waits can
+switch tasks.
+
+A fiber's VM state starts with a base frame (ip 0, as the program's
+bootstrap frame), so VM calls on it open their frames as anywhere else. A
+failed `requires` in a VM body native code called names native code's call
+site (`native_caller_location`).
+
 ### Bail instead of trap
 
 Before a commit native code never raises a Coil panic. Where the VM would trap (int
