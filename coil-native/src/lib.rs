@@ -726,3 +726,56 @@ pub fn describe(p: &NativeProgram) -> String {
         refused.len()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compiler::native_mir::{MirBlock, Terminator};
+    use machine::native::{NATIVE_STACK_BUDGET, NativeCtx};
+
+    fn run(entry: &NativeEntry, args: &[u64]) -> (u64, u64) {
+        let marker = 0u8;
+        let mut ctx = NativeCtx {
+            bail: 0,
+            stack_limit: (std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET),
+        };
+        // SAFETY: compiled for `args.len()` argument words.
+        let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
+        (ctx.bail, out)
+    }
+
+    /// `ret_ty` body returning its one parameter of type `param`.
+    fn ident(name: &str, param: MirTy, ret: MirTy) -> MirFunc {
+        let mut f = MirFunc::new(name);
+        f.blocks.clear();
+        f.types = vec![param];
+        f.params = vec![ValueId(0)];
+        f.ret_ty = Some(ret);
+        let mut b = MirBlock::new(BlockId(0));
+        b.term = Some(Terminator::Return { lo: Some(ValueId(0)), hi: None });
+        f.blocks.push(b);
+        f
+    }
+
+    #[test]
+    fn a_float_result_moves_into_an_int_value_by_bits() {
+        let g = ident("g", MirTy::F64, MirTy::F64);
+        let mut f = MirFunc::new("f");
+        f.blocks.clear();
+        f.types = vec![MirTy::F64, MirTy::I64];
+        f.params = vec![ValueId(0)];
+        f.ret_ty = Some(MirTy::I64);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::Call { dest: ValueId(1), dest_hi: None, target: Label(1), args: vec![ValueId(0)] });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        f.blocks.push(b);
+        let bodies = vec![
+            NativeBody { name: "f".into(), entry: Some(Label(0)), mir: f },
+            NativeBody { name: "g".into(), entry: Some(Label(1)), mir: g },
+        ];
+        let pcs = HashMap::from([("f".to_string(), 0u32)]);
+        let p = jit(&bodies, &pcs).expect("jit");
+        assert_eq!(p.entries.len(), 1, "refused: {:?}", p.refused);
+        assert_eq!(run(&p.entries[0], &[1.5f64.to_bits()]), (0, 1.5f64.to_bits()));
+    }
+}
