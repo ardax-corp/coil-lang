@@ -42,6 +42,11 @@ pub struct NativeCtx {
     /// The second result word of a body that returns two
     /// ([`NativeEntry::ret_words`] `2`): the entry stores it here.
     pub ret_hi: u64,
+    /// The program's string table and the machine's cache of its
+    /// interned objects (`STRING`), `strings_len` entries each.
+    pub strings: *const String,
+    pub string_cache: *mut common::Value,
+    pub strings_len: u64,
 }
 
 /// Byte offset of [`NativeCtx::ret_hi`].
@@ -84,6 +89,9 @@ impl NativeCtx {
             heap: std::ptr::null_mut(),
             allocs: 0,
             ret_hi: 0,
+            strings: std::ptr::null(),
+            string_cache: std::ptr::null_mut(),
+            strings_len: 0,
         }
     }
 
@@ -224,11 +232,20 @@ pub(crate) struct NativeResult {
 
 /// Run `entry` with `args`. `None` when it bailed.
 #[inline(never)]
-pub(crate) fn call(entry: &NativeEntry, args: &[u64], heap: &mut crate::memory::Heap) -> Option<NativeResult> {
+pub(crate) fn call(
+    entry: &NativeEntry,
+    args: &[u64],
+    heap: &mut crate::memory::Heap,
+    strings: &[String],
+    string_cache: &mut [common::Value],
+) -> Option<NativeResult> {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
     let mut undo = Vec::new();
     let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo, heap);
+    ctx.strings = strings.as_ptr();
+    ctx.string_cache = string_cache.as_mut_ptr();
+    ctx.strings_len = strings.len().min(string_cache.len()) as u64;
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
@@ -617,4 +634,31 @@ pub unsafe extern "C" fn coil_native_enum_payload(ctx: *mut NativeCtx, addr: u64
         },
         _ => unsafe { bail(ctx) },
     }
+}
+
+/// `STRING idx`: the program string's interned object, as the VM's
+/// `push_program_string` (cached per machine). Bad index: bail.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+pub unsafe extern "C" fn coil_native_string(ctx: *mut NativeCtx, idx: u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    if idx >= c.strings_len {
+        return unsafe { bail(ctx) };
+    }
+    // SAFETY: `idx < strings_len`, the length of both tables.
+    let cached = unsafe { *c.string_cache.add(idx as usize) };
+    if !cached.is_zero() {
+        return cached.bits();
+    }
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let data = unsafe { &*c.strings.add(idx as usize) };
+    let handle = common::Value::from(heap.intern_str(data).as_ptr() as *mut u8 as u64);
+    // No collection runs during native code, so the cache entry stays
+    // valid until the VM's next sweep clears it, as after `STRING`.
+    unsafe { *c.string_cache.add(idx as usize) = handle };
+    unsafe { note_alloc(ctx, heap) };
+    handle.bits()
 }

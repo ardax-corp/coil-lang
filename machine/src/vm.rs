@@ -1812,7 +1812,7 @@ impl<const S: usize> Machine<S> {
         for (i, w) in words.iter_mut().take(arity).enumerate() {
             *w = self.stack[base + i].bits();
         }
-        match crate::native::call(&entry, &words[..arity], &mut self.heap) {
+        match crate::native::call(&entry, &words[..arity], &mut self.heap, &self.program_strings, &mut self.program_string_cache) {
             Some(r) => {
                 table.hits += 1;
                 Some(r)
