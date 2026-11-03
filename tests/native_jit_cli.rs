@@ -787,3 +787,27 @@ fn a_contract_failing_under_a_task_fiber_blames_the_caller() {
     let stats = same_as_vm("contract_on_fiber", &src);
     assert!(compiled(&stats, "blame"), "stats: {stats}");
 }
+
+#[test]
+fn host_calls_that_need_the_vm_run_from_native_code() {
+    // `write_all` waits for the stream (`await_writable`) and `write` goes
+    // through the VM's host call: both bodies still compile.
+    let src = "use io::stdout;\nuse io::sync::write_all;\nuse io::sync::println;\nuse string::to_bytes;\nuse string::format;\n\
+         #[inline(never)]\nfn emit(int i) -> int { let _ = write_all(stdout(), to_bytes(format(\"line %i\\n\", i))); return i; }\n\
+         fn main() { let t = 0; let i = 0; while i < 5 { t = t + emit(i); i = i + 1; } let _ = println(format(\"%i\", t)); }\n";
+    let stats = same_as_vm("vm_host", src);
+    assert!(compiled(&stats, "io::sync::write_all"), "stats: {stats}");
+    assert!(compiled(&stats, "emit"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 5, "stats: {stats}");
+}
+
+#[test]
+fn a_host_call_through_the_vm_panics_at_its_native_call_site() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn insert_at(int i) -> int {{ let v: Vec<int> = Vec::new(); v.push(1); v.insert(i, 2); return v.len(); }}\n\
+         #[inline(never)]\nfn outer(int i) -> int {{ return insert_at(i) + 1; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", outer(1))); let _ = println(format(\"%i\", outer(5))); }}\n"
+    );
+    let stats = same_as_vm("vm_host_panic", &src);
+    assert!(compiled(&stats, "insert_at"), "stats: {stats}");
+}
