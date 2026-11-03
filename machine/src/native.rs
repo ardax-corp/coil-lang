@@ -162,3 +162,69 @@ pub(crate) fn take_pending() -> Option<Pending> {
     PENDING.with(|p| p.borrow_mut().take())
 }
 
+// ---------------------------------------------------------------------------
+// Heap reads for native code (heap tier).
+//
+// Native code calls these with heap words it was handed. It never
+// allocates and never re-enters the VM, so no collection runs while it
+// holds them and every address stays a live object. Each helper does what
+// the matching VM instruction does; where the VM would panic, it sets the
+// bail flag and returns 0.
+
+/// The object at a heap word, as the VM's `trusted_object` reads it.
+fn object(addr: u64) -> Option<crate::memory::Object> {
+    if addr == 0 {
+        return None;
+    }
+    // SAFETY: see above; a non-zero heap word names a live object.
+    unsafe { crate::memory::Object::from_header(addr) }
+}
+
+/// `Index` / `IndexUnchecked` (both checked here: bounds are cheap next to
+/// the call). Out of bounds or not an array or tuple: bail.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+pub unsafe extern "C" fn coil_native_index(ctx: *mut NativeCtx, addr: u64, index: i64) -> u64 {
+    let read = match object(addr) {
+        Some(crate::memory::Object::Array(gc)) => gc.as_ref().read_indexed(index, false),
+        Some(crate::memory::Object::Tuple(gc)) => {
+            let elements = gc.as_ref().elements();
+            usize::try_from(index).ok().and_then(|i| elements.get(i).copied())
+        }
+        _ => None,
+    };
+    match read {
+        Some(v) => v.bits(),
+        None => {
+            // SAFETY: the caller passes its live context.
+            unsafe { (*ctx).bail = 1 };
+            0
+        }
+    }
+}
+
+/// `ArrayLen`.
+pub extern "C" fn coil_native_len(addr: u64) -> u64 {
+    (match object(addr) {
+        Some(crate::memory::Object::Array(gc)) => gc.as_ref().len(),
+        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().len(),
+        Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
+        Some(crate::memory::Object::Instance(gc)) => {
+            gc.as_ref().slot_len().unwrap_or_else(|| gc.as_ref().iter_fields().count())
+        }
+        _ => 0,
+    }) as u64
+}
+
+/// `LoadField` of slot `index`.
+pub extern "C" fn coil_native_field(addr: u64, index: u64) -> u64 {
+    let index = index as usize;
+    match object(addr) {
+        Some(crate::memory::Object::Enum(e)) => e.as_ref().payload.get(index).map_or(0, |v| v.bits()),
+        Some(crate::memory::Object::Instance(gc)) => {
+            gc.as_ref().slot_len().and_then(|_| gc.as_ref().slot(index)).map_or(0, |v| v.bits())
+        }
+        _ => 0,
+    }
+}

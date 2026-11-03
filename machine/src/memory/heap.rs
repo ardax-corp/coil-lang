@@ -2592,7 +2592,7 @@ impl Object {
 
     /// Rebuild a typed handle from a live allocation. The address must be a
     /// current [`Heap::alloc`] result (non-moving); kind is the header byte.
-    unsafe fn from_header(addr: u64) -> Option<Self> {
+    pub(crate) unsafe fn from_header(addr: u64) -> Option<Self> {
         let header = unsafe { &*(addr as *const GcHeader) };
         Some(match header.kind.get() {
             1 => Self::String(unsafe { Gc::from_addr(addr) }),
