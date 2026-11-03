@@ -1515,7 +1515,6 @@ impl Heap {
         self.gc_phase == GcPhase::Idle
             && (cfg!(feature = "gc-stress")
                 || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
-                || self.slab.held_chunks() >= self.nursery_chunks
                 || self.slab.young_chunks_in_use() >= self.nursery_chunks)
     }
 
@@ -1590,7 +1589,6 @@ impl Heap {
         };
         cfg!(feature = "gc-stress")
             || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
-            || self.slab.held_chunks() >= self.nursery_chunks
     }
 
     /// Allocate instances, enums, boxes, tuples and arrays in the nursery
@@ -4387,7 +4385,7 @@ pub trait GcSized {
     const NURSERY: bool = false;
     /// Allocated in the nursery inside a `region` block: the movable kinds,
     /// and strings, which a minor collection frees but never moves (a
-    /// surviving one is held in place).
+    /// surviving one turns old in place).
     const REGION: bool = Self::NURSERY;
     /// Can hold heap references: an old object of this kind is remembered
     /// when it is born, since it may start out naming young objects.
