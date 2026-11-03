@@ -5787,3 +5787,115 @@ fn long_body_with_heap_words_shares_dense_registers() {
     );
     assert_dense_runs(&src, "mixed");
 }
+
+/// An arena's `add` inlined into a loop (reached through a field, as
+/// coil-toml and coil-json call theirs) leaves no stale copy of each pushed
+/// array in the frame. The copy is a word that may hold a pointer, so each
+/// minor collection pinned the young arrays in place instead of moving
+/// them, and a major cycle started at every one (#2241).
+#[test]
+fn inlined_arena_pushes_do_not_pin_the_arrays() {
+    let src = r#"
+class Arena {
+    tags: Vec<int>,
+    ints: Vec<int>,
+    strs: Vec<string>,
+    first: Vec<int>,
+    next: Vec<int>,
+    parent: Vec<int>,
+}
+impl Arena {
+    pub fn add(int tag, int n, string s) -> int {
+        let idx = self.tags.len();
+        self.tags.push(tag);
+        self.ints.push(n);
+        self.strs.push(s);
+        self.first.push(-1);
+        self.next.push(-1);
+        self.parent.push(-1);
+        return idx;
+    }
+}
+class Parser {
+    store: Arena,
+    pos: int,
+}
+impl Parser {
+    pub fn value(int i) -> int {
+        self.pos = self.pos + 1;
+        return self.store.add(i % 7, i, "x");
+    }
+}
+fn main() {
+    let p = new Parser(new Arena(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()), 0);
+    let i = 0;
+    let sum = 0;
+    while i < 200000 {
+        sum = sum + p.value(i);
+        i = i + 1;
+    }
+    if sum != 19999900000 {
+        panic "sum";
+    }
+}
+"#;
+    assert_arrays_move(src, Some(2000));
+}
+
+/// The same pushes written out in the loop, through a field of a field.
+#[test]
+fn field_pushes_in_a_loop_do_not_pin_the_arrays() {
+    let src = r#"
+class Arena {
+    pub tags: Vec<int>,
+    pub ints: Vec<int>,
+    pub strs: Vec<string>,
+    pub first: Vec<int>,
+    pub next: Vec<int>,
+    pub parent: Vec<int>,
+}
+class Parser {
+    pub store: Arena,
+    pub pos: int,
+}
+fn main() {
+    let p = new Parser(new Arena(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()), 0);
+    let i = 0;
+    let sum = 0;
+    while i < 200000 {
+        p.pos = p.pos + 1;
+        sum = sum + p.store.tags.len();
+        p.store.tags.push(i % 7);
+        p.store.ints.push(i);
+        p.store.strs.push("x");
+        p.store.first.push(-1);
+        p.store.next.push(-1);
+        p.store.parent.push(-1);
+        i = i + 1;
+    }
+    if sum != 19999900000 {
+        panic "sum";
+    }
+}
+"#;
+    assert_arrays_move(src, None);
+}
+
+/// Run `src` with its frame maps and check the growing arrays left the
+/// nursery by moving: a pinned one keeps a held chunk, and every
+/// collection after it opens a major cycle that rescans the arrays.
+fn assert_arrays_move(src: &str, inline_cost: Option<usize>) {
+    let mut p = crate::Pipeline::new();
+    if let Some(cost) = inline_cost {
+        p.set_inline_max_cost(cost);
+    }
+    let (bc, constants) = p.compile_src(src).expect("compile");
+    let mut vm = machine::Machine::<256>::with_operand_capacity(p.operand_stack_slots() as usize);
+    p.wire_host_natives(&mut vm);
+    p.wire_thread_program(&mut vm, &bc, &constants, p.strings());
+    machine::reset_alloc_profile();
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "sum");
+    let (minors, majors) = (machine::minor_gc_count(), machine::gc_count());
+    assert!(majors <= 4, "{majors} major cycles over {minors} minors");
+}
