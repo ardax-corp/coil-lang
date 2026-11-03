@@ -120,24 +120,83 @@ the VM's instruction does:
 | `Stringify` | `coil_native_stringify` | |
 | `Format` | `coil_native_format` | `vm::render_format` is shared with the VM's `FORMAT` |
 | `FreeEarly` | `coil_native_free_early` | queued: see below |
+| `Print` | `coil_native_print` | commits |
+| `HostInvoke` | `coil_native_host` | direct natives only; commits |
+| `Call` of a body on the VM | `coil_native_call_vm` | commits; see below |
 | `ClearWord`, `GcBarrier` | none | nothing to zero or root while no collection can run |
 
-An early free cannot be undone, so native code only queues it
-(`NativeCtx::frees`) and the VM frees after the call returns; a bail
-drops the queue. When the program has `drop` finalizers an early free may
+An early free cannot be undone, so before a commit native code only
+queues it (`NativeCtx::frees`) and the VM frees after the call returns; a
+bail drops the queue. When the program has `drop` finalizers an early free may
 run one (VM code), so `FreeEarly` bails instead and the VM runs it.
 
 A body that returns two words (a two-slot `Option<int>`, a pair) returns
 two Cranelift values; the entry leaves the second in `NativeCtx::ret_hi`
 and `CALL` pushes both (`NativeEntry::ret_words`).
 
-Host calls (`HostInvoke`: `println`, file and socket I/O) are effects no
-undo log can take back, so they wait for step 5, where native code raises
-panics itself instead of bailing.
+### Commit mode (step 5)
+
+Some effects no undo log can take back: a `PRINT`
+(`coil_native_print`), a direct host native (`coil_native_host`: the
+plain `HostValueFn` behind a native that never parks, opens descriptors
+or switches tasks, from `machine::native::direct_host_natives`; ids are
+frozen, so the backend resolves them at compile time), and a call to a
+body that stays on the VM (`coil_native_call_vm`). Each sets
+`NativeCtx::committed` before it acts. From then on the call never bails:
+
+- A trap panics natively (below).
+- Past the stack budget it goes on down to `NativeCtx::stack_hard`, 128
+  KiB above the thread's real stack end (`stacker::remaining_stack`), then
+  panics with the VM's stack overflow message.
+- Instead of the allocation cap it collects at safepoints (below).
+- An early free happens at once (`NativeHost::free`); the undo log stops
+  growing.
+
+What still bails after a commit (a shape native code does not model, an
+early free when the program has finalizers) panics with a message saying
+so; the corpus never reaches it.
+
+A host native whose first argument is a `Stream` keeps its unsent-stream
+check: native code makes it and raises the VM's panic message
+(`TRAP_MESSAGE`).
+
+### Native panics
+
+Every bail path goes through `coil_native_unwind(ctx, code, site)`. Before
+a commit it sets the bail flag. After, the first frame records the trap
+(`TRAP_OVERFLOW`, `TRAP_DIV_ZERO`, `TRAP_SHIFT`, `TRAP_OUT_OF_BOUNDS`,
+`TRAP_STACK`, …) and every frame on the way out appends its *site*: an
+index into `NativeCode::sites`, the function's entry PC and the MIR op's
+source location (`MirFunc::op_loc`, carried in the native MIR section).
+`Machine::native_panic` finds the PC in that function whose debug location
+matches, so the message, its ` at file:line:col` and the backtrace lines
+(`in f at …`, repeats folded) are the VM's own, with the native frames
+above the VM frames. The panic then unwinds the VM frames as any runtime
+panic does.
+
+### Calls into the VM and collections
+
+A call to a body that does not compile is no longer a reason to refuse the
+caller: native code runs it through `Machine::call_function` (a nested
+execution; a two-word `RETURN` leaves its second word in
+`nested_return_hi`). If that run panics, the VM has reported it; native
+code unwinds with `TRAP_VM_PANIC` and the VM goes on unwinding from the
+`CALL` (`rearm_unwind_after_early_drop`). The backtrace then lacks the
+native frames in between.
+
+A collection can run inside such a call, and at a *safepoint*: the entry
+and loop headers of a body that may allocate, taken when an allocation
+after the commit found a collection due (`NativeCtx::gc_due`). Before
+either, native code links a record of every heap-typed value of the body
+into `NativeCtx::roots` (`[next, n, words…]` on its stack); callers of a
+body where a collection may run (`Plan::may_gc`) do the same around the
+call. The VM treats those words as precise roots: a minor collection
+forwards them in place. After the call, when `NativeCtx::gc_epoch` moved,
+native code reloads the words and drops its array views.
 
 ### Bail instead of trap
 
-Native code never raises a Coil panic. Where the VM would trap (int
+Before a commit native code never raises a Coil panic. Where the VM would trap (int
 overflow, division by zero, `MIN / -1`, a shift count outside `0..=63`,
 `-MIN`) or where native code would leave its stack budget (256 KiB below the
 VM's call), it sets `NativeCtx::bail` and returns. Every native caller checks
