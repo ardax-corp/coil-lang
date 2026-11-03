@@ -391,3 +391,38 @@ fn archive_without_mir_runs_on_the_vm() {
     assert!(stderr.contains("carries no native MIR"), "stderr: {stderr}");
     assert!(!stderr.contains("native:"), "stderr: {stderr}");
 }
+
+#[test]
+fn a_trap_after_a_print_panics_natively_as_the_vm_does() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn step(int a, int b) -> int {{ let _ = println(\"step\"); return a * b; }}\n\
+         #[inline(never)]\nfn deep(int n, int x) -> int {{ if n == 0 {{ return step(x, x); }} return deep(n - 1, x) + 1; }}\n\
+         #[inline(never)]\nfn at(Vec<int> a, int i) -> int {{ let _ = println(\"at\"); return a[i]; }}\n\
+         fn main() {{\n  let _ = println(format(\"%i\", deep(3, 5)));\n  let a: Vec<int> = [1, 2];\n  let _ = println(format(\"%i\", at(a, 1)));\n\
+           if a.len() == 2 {{ let _ = println(format(\"%i\", deep(3, 4000000000))); }}\n  let _ = println(format(\"%i\", at(a, 5)));\n}}\n"
+    );
+    let stats = same_as_vm("trap_after_print", &src);
+    assert!(compiled(&stats, "step") && compiled(&stats, "deep"), "stats: {stats}");
+    // The panic is raised in native code, with the VM's backtrace.
+    let jit = run("trap_after_print", &src, true);
+    let err = program_stderr(&jit);
+    assert!(err.contains("panic: integer overflow at"), "stderr: {err}");
+    assert!(err.contains("  in step at") && err.contains("  in deep at") && err.contains("repeated 2 more times"), "stderr: {err}");
+}
+
+#[test]
+fn native_code_calls_bodies_on_the_vm_and_collects() {
+    // `println` stays on the VM (its writes may park); `run` calls it and
+    // allocates in a loop long enough for collections at its safepoints.
+    let src = format!(
+        "{HEADER}class B {{ pub v: int, pub s: string }}\n\
+         #[inline(never)]\nfn churn(int i) -> B {{ let parts: Vec<string> = []; let k = 0; while k < 20 {{ parts.push(format(\"%i-%i\", i, k)); k = k + 1; }} return new B(i, parts[19]); }}\n\
+         #[inline(never)]\nfn run(int n) -> int {{\n  let keep: Vec<B> = [];\n  let first = churn(7);\n  let i = 0;\n  let total = 0;\n\
+           while i < n {{ let b = churn(i); if i % 1000 == 0 {{ keep.push(b); let _ = println(b.s); }} total = total + b.v; i = i + 1; }}\n\
+           let _ = println(first.s);\n  let j = 0;\n  while j < keep.len() {{ total = total + keep[j].v + keep[j].s.len(); j = j + 1; }}\n  return total;\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", run(30000))); }}\n"
+    );
+    let stats = same_as_vm("vm_calls_and_gc", &src);
+    assert!(compiled(&stats, "run") && compiled(&stats, "churn"), "stats: {stats}");
+    assert!(stats.contains(", 0 bailed"), "stats: {stats}");
+}
