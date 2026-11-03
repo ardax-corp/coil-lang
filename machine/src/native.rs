@@ -224,6 +224,10 @@ pub const UNDO_PUSH: u64 = 2;
 /// [`UndoEntry`] target of a static store (no object): `[UNDO_STATIC,
 /// slot, old]`.
 pub const UNDO_STATIC: u64 = 4;
+/// [`UndoEntry`] target bits of an object with a `drop` the call made
+/// (`[addr | UNDO_BORN, 0, 0]`): a bail marks it finalized, so the
+/// discarded object owes no `drop` (the VM's re-run makes its own).
+pub const UNDO_BORN: u64 = 3;
 
 /// Byte offset of [`NativeCtx::bail`].
 pub const NATIVE_CTX_BAIL: i32 = 0;
@@ -281,7 +285,13 @@ impl NativeCtx {
             // SAFETY: entries below `undo_len` were written.
             let [target, index, old] = unsafe { *self.undo_buf.add(i) };
             let old = common::Value::from(old);
-            if target == UNDO_STATIC {
+            if target & 7 == UNDO_BORN {
+                match object(target & !7) {
+                    Some(crate::memory::Object::Instance(mut gc)) => gc.as_mut().finalized = true,
+                    Some(crate::memory::Object::Enum(mut gc)) => gc.as_mut().finalized = true,
+                    _ => {}
+                }
+            } else if target == UNDO_STATIC {
                 if index < self.statics_len {
                     // SAFETY: `index < statics_len`.
                     unsafe { *self.statics.add(index as usize) = old };
@@ -657,6 +667,19 @@ unsafe fn log(ctx: *mut NativeCtx, entry: UndoEntry) {
     }
 }
 
+/// Log the new `drop` object `addr` ([`UNDO_BORN`]); a committed call
+/// never bails, so it logs nothing.
+///
+/// # Safety
+/// `ctx` is a live [`NativeCtx`].
+unsafe fn born(ctx: *mut NativeCtx, addr: u64) {
+    unsafe {
+        if (*ctx).committed == 0 {
+            log(ctx, [addr | UNDO_BORN, 0, 0]);
+        }
+    }
+}
+
 /// Set the bail flag; returns `0` for the helper's result.
 ///
 /// # Safety
@@ -892,6 +915,9 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             let type_id = type_id.bits() as u32;
             gc.as_mut().type_id = type_id;
             heap.note_enum_type(Object::Enum(gc), type_id);
+            if heap.has_finalizer(type_id) {
+                unsafe { born(ctx, obj.addr()) };
+            }
             obj.addr()
         }
         ALLOC_ENUM => {
@@ -911,7 +937,11 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
         ALLOC_OBJECT => {
             let (_, mut r) = heap.alloc(ObjInstance::with_type_id_and_fields(extra as u32, n), Object::Instance);
             let _ = r.as_mut();
-            r.as_ptr().addr() as u64
+            let addr = r.as_ptr().addr() as u64;
+            if heap.has_finalizer(extra as u32) {
+                unsafe { born(ctx, addr) };
+            }
+            addr
         }
         ALLOC_FN => {
             let op = (extra >> 32) as u32;

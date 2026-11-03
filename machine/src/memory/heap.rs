@@ -723,7 +723,7 @@ impl Heap {
     }
 
     #[inline(always)]
-    fn has_finalizer(&self, type_id: u32) -> bool {
+    pub(crate) fn has_finalizer(&self, type_id: u32) -> bool {
         self.finalizer_types
             .get(type_id as usize / 64)
             .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
