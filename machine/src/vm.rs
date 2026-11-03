@@ -1810,6 +1810,11 @@ impl<const S: usize> Machine<S> {
         target: usize,
         arity: usize,
     ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
+        // A task switch needs every frame below it on the VM: while tasks
+        // exist (until native code gets task stacks), calls stay in the VM.
+        if self.sched.is_some() {
+            return None;
+        }
         let base = self.stack.tell() - arity;
         let table = self.native.as_deref_mut()?;
         // After a bail the VM re-runs that call in bytecode; calls nested
