@@ -25,6 +25,9 @@ pub struct BodySidecar {
     pub cleanup_pad: Option<(Label, u32)>,
     /// A dense body's panic write-backs ([`super::emit::PanicPads`]).
     pub panic_pads: super::emit::PanicPads,
+    /// A dense body's frame words no local holds
+    /// ([`super::emit::dense_temp_words`]).
+    pub temp_words: Vec<u16>,
 }
 
 type RefusalSlot = std::thread::LocalKey<std::cell::RefCell<Option<String>>>;
@@ -344,12 +347,14 @@ fn specialize_side(
     // The compare is against the code that runs if dense refuses (its
     // LIR): a body the LIR tier refuses has nothing to lose to.
     let Some(ops) = fallback else {
+        side.temp_words = super::emit::dense_temp_words(&func, entry);
         return Some((out, abi));
     };
     // Two-slot CALL/RETURN must not grow a boxed reconstruct (C1).
     if count_make_enum(&out) > count_make_enum(ops) {
         return refuse_dense("MakeEnum growth");
     }
+    side.temp_words = super::emit::dense_temp_words(&func, entry);
     Some((out, abi))
 }
 

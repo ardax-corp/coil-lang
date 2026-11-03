@@ -438,6 +438,56 @@ pub(super) fn dense_sidecars(func: &MirFunc, entry_label: Option<Label>) -> supe
     (super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot), draft)
 }
 
+/// Frame words of the dense body for `func` that no local holds: its
+/// temporaries' registers. The precise frame map lets them die at their
+/// last read instead of at the return ([`crate::codegen`]'s liveness), so a
+/// dead copy of an object (a field load, an unused push result, last
+/// iteration's value) is no longer a word that may hold a pointer and pins
+/// a young object in place (#2241). A register keeps its word when it holds
+/// a parameter, a local's word ([`MirFunc::bound_words`], scope lifetime),
+/// a value a `KeepAlive` names, a named let, or a word a panic pad stores
+/// (read on unwind, past what the map sees). None under a debugger.
+pub(crate) fn dense_temp_words(func: &MirFunc, entry_label: Option<Label>) -> Vec<u16> {
+    if func.debug_keep {
+        return Vec::new();
+    }
+    let Ok(DenseLayout { func, plan, regs, .. }) = dense_layout(func, entry_label) else {
+        return Vec::new();
+    };
+    let slot = |v: ValueId| plan.needs_slot(v) && v.index() < regs.len();
+    let mut kept: HashSet<u8> = (0..func.params.len()).map(|i| i as u8).collect();
+    let mut keep = |v: ValueId| {
+        if slot(v) {
+            kept.insert(regs[v.index()]);
+        }
+    };
+    func.bound_words.iter().copied().for_each(&mut keep);
+    func.debug_slots.values().copied().for_each(&mut keep);
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::KeepAlive { value, .. } => keep(*value),
+            MirInst::PanicStore { object, value, .. } => {
+                keep(*object);
+                keep(*value);
+            }
+            _ => {}
+        }
+    }
+    // A box of plain words lives until its register is rewritten, as
+    // `arg_clears` leaves it: a weak to it keeps upgrading. A number
+    // matched out of a generic payload counts as plain here (keeping a
+    // word only costs a pin), so `weak(get(root(5)))` boxes one too.
+    rootless_words(&func, &|v: ValueId| func.ty(v).is_heap_word()).into_iter().for_each(&mut keep);
+    let mut temps: Vec<u16> = (0..regs.len())
+        .map(|i| ValueId(i as u32))
+        .filter(|&v| slot(v) && !kept.contains(&regs[v.index()]))
+        .map(|v| u16::from(regs[v.index()]))
+        .collect();
+    temps.sort_unstable();
+    temps.dedup();
+    temps
+}
+
 /// The body dense emits and its registers, as emit and its sidecars see them.
 struct DenseLayout {
     func: MirFunc,
@@ -1628,6 +1678,40 @@ impl Gathers {
     }
 }
 
+/// Words a call's argument register may keep holding: a constant (a
+/// `None` niche, a pooled string) or a cast of one, which roots nothing,
+/// and a box of plain words (an `Option<int>`, a pair of numbers, made to
+/// pass a value to `weak` or a generic parameter). That box holds no other
+/// object and nothing but its register can hold it, so a weak to it keeps
+/// upgrading until the register is rewritten
+/// (`tests/memory/gc_weak_option_arg.coil`).
+fn rootless_words(func: &MirFunc, heapish: &impl Fn(ValueId) -> bool) -> HashSet<ValueId> {
+    let mut consts: HashSet<ValueId> = HashSet::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::Const { dest, .. } => {
+                consts.insert(*dest);
+            }
+            MirInst::Alloc {
+                dest,
+                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple,
+                elems,
+                ..
+            } if elems.iter().all(|e| !heapish(*e)) => {
+                consts.insert(*dest);
+            }
+            MirInst::Cast { dest, src, .. } if consts.contains(src) => {
+                consts.insert(*dest);
+            }
+            MirInst::GcBarrier { dest, roots, .. } if roots.len() == 1 && consts.contains(&roots[0]) && func.ty(*dest).is_heap_word() => {
+                consts.insert(*dest);
+            }
+            _ => {}
+        }
+    }
+    consts
+}
+
 /// Registers to zero right after a call, or an op that stores a word
 /// into an object ([`consumes`]), by its dest: those of a heap word it
 /// takes whose last use it is (a temporary passed straight to it,
@@ -1701,34 +1785,9 @@ pub(super) fn arg_clears(
         return out;
     }
     // A constant (a `None` niche, a pooled string), or a cast of one,
-    // roots nothing. A box of plain words (an `Option<int>`, a pair of
-    // numbers, made to pass a value to `weak` or a generic parameter)
-    // holds no other object, and nothing but the call's register can hold
-    // that box: it stays as it was, so a weak to it still upgrades until
-    // the register is rewritten.
-    let mut consts: HashSet<ValueId> = HashSet::new();
-    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
-        match inst {
-            MirInst::Const { dest, .. } => {
-                consts.insert(*dest);
-            }
-            MirInst::Alloc {
-                dest,
-                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple,
-                elems,
-                ..
-            } if elems.iter().all(|e| !heapish(*e)) => {
-                consts.insert(*dest);
-            }
-            MirInst::Cast { dest, src, .. } if consts.contains(src) => {
-                consts.insert(*dest);
-            }
-            MirInst::GcBarrier { dest, roots, .. } if roots.len() == 1 && consts.contains(&roots[0]) && func.ty(*dest).is_heap_word() => {
-                consts.insert(*dest);
-            }
-            _ => {}
-        }
-    }
+    // roots nothing. A box of plain words stays as it was, so a weak to it
+    // still upgrades until the register is rewritten.
+    let consts = rootless_words(func, &heapish);
     let live = super::gc::liveness_after(func);
     let cmp_dests = term_cmp_dests(func);
     let preds = func.preds();
