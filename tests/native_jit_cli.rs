@@ -312,6 +312,22 @@ fn question_mark_err_of_a_string_result_matches_the_vm() {
     same_as_vm("question_err", &src);
 }
 
+#[test]
+fn statics_are_read_and_written_natively() {
+    // `tick` bumps a static, then divides by its argument: with 0 the bail
+    // must take the bump back before the VM's re-run panics.
+    let src = format!(
+        "{HEADER}static let COUNT: int = 0;\nstatic let NAME: string = \"n\";\n\
+         #[inline(never)]\nfn tick(int by) -> int {{ COUNT = COUNT + 1; return COUNT * 10 / by; }}\n\
+         #[inline(never)]\nfn rename(string s) -> int {{ NAME = s; return NAME.len(); }}\n\
+         fn main() {{\n  let a = tick(1);\n  let b = tick(2);\n  let n = rename(\"abc\");\n\
+           let _ = println(format(\"%i %i %i %i %s\", a, b, n, COUNT, NAME));\n  let _ = println(format(\"%i\", tick(0)));\n}}\n"
+    );
+    let stats = same_as_vm("statics", &src);
+    assert!(compiled(&stats, "tick") && compiled(&stats, "rename"), "stats: {stats}");
+    assert!(stats.contains("1 bailed"), "stats: {stats}");
+}
+
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
 /// section.
 fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
