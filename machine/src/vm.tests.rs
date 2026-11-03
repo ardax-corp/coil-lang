@@ -4589,6 +4589,39 @@
         assert_eq!(vm.heap.live_object_count(), before + 1, "both builds share one function object");
     }
 
+    /// A closure built and dropped once per loop pass dies young (#2252):
+    /// minor collections reclaim it, so the loop runs no major cycle.
+    #[test]
+    fn a_short_lived_closure_dies_in_the_nursery() {
+        let code = vec![
+            const_int(3_000_000),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            // 2: loop head
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(0),
+            Byte::new(Instruction::LEQ),
+            Byte::new(Instruction::JMPF).with_operand_u32(7),
+            Byte::new(Instruction::HALT),
+            // 7: body, one closure capturing the counter per pass
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(0),
+            const_int(0),
+            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_op(1, 0, 1, false)),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(1),
+            Byte::new(Instruction::SUB),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            Byte::new(Instruction::JMP).with_operand_u32(2),
+        ];
+        let mut vm = Machine::<16>::default();
+        vm.heap.set_nursery(true);
+        reset_alloc_profile();
+        vm.run(&code);
+        assert!(minor_gc_count() >= 40, "the closures fill the nursery many times: {}", minor_gc_count());
+        assert_eq!(gc_count(), 0, "no closure survives a minor, so no major cycle runs");
+    }
+
     #[test]
     fn make_fn_partial_then_complete_via_call_indirect() {
         let body_entry = 9u32;
