@@ -19,6 +19,14 @@ pub use hir::effects::{
 };
 pub use hir::{ContractLevel, start_hir_capture, take_hir_capture};
 pub use mir::{start_mir_capture, take_mir_capture};
+/// MIR for a native backend (`coil-native`): the capture and the types it reads.
+pub mod native_mir {
+    pub use crate::il::Label;
+    pub use crate::mir::{
+        BlockId, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy,
+        MirUnaryOp, NativeBody, Terminator, ValueId, start_native_capture, take_native_capture,
+    };
+}
 pub(crate) mod hir;
 mod layout;
 mod host_grants;
