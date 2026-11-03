@@ -499,6 +499,11 @@ impl<const S: usize> Machine<S> {
         if let Some(w) = wake {
             self.task_write_wake(w);
         }
+        // The root back with nothing left (its last scope ended): forget
+        // the scheduler, as a scope that ended without waiting does.
+        if id == crate::task::ROOT {
+            self.task_drop_idle_scheduler();
+        }
         true
     }
 
