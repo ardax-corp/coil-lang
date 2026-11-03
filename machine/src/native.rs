@@ -23,26 +23,80 @@ pub struct NativeCtx {
     pub bail: u64,
     /// Native code bails when its stack pointer drops below this address.
     pub stack_limit: u64,
-    /// Heap stores made so far, so a bail can take them back before the
-    /// VM runs the call again (see [`Undo`]).
-    pub undo: *mut Vec<Undo>,
+    /// The undo log: heap stores made so far, so a bail can take them back
+    /// before the VM runs the call again. `undo_len` entries of
+    /// [`UndoEntry`] at `undo_buf`, room for `undo_cap`; native code
+    /// appends inline and calls [`coil_native_undo_grow`] when it is full.
+    pub undo_buf: *mut UndoEntry,
+    pub undo_len: u64,
+    pub undo_cap: u64,
+    /// The storage behind `undo_buf`.
+    pub undo_vec: *mut Vec<UndoEntry>,
 }
 
-/// One heap store native code made: the word it overwrote. A bail restores
-/// them newest first, so the VM's re-run starts from the heap as the call
-/// found it.
-#[derive(Clone, Copy, Debug)]
-pub enum Undo {
-    Index { array: u64, index: i64, old: u64 },
-    Field { object: u64, slot: usize, old: u64 },
-}
+/// One heap store native code made: `[target, index, old word]`. `target`
+/// is the object's address, with bit 0 set for an instance slot (clear for
+/// an array element). A bail restores them newest first, so the VM's re-run
+/// starts from the heap as the call found it.
+pub type UndoEntry = [u64; 3];
+
+/// [`UndoEntry`] target bit of an instance slot store.
+pub const UNDO_FIELD: u64 = 1;
 
 /// Byte offset of [`NativeCtx::bail`].
 pub const NATIVE_CTX_BAIL: i32 = 0;
 /// Byte offset of [`NativeCtx::stack_limit`].
 pub const NATIVE_CTX_STACK_LIMIT: i32 = 8;
-/// Byte offset of [`NativeCtx::undo`].
-pub const NATIVE_CTX_UNDO: i32 = 16;
+/// Byte offsets of the undo log fields of [`NativeCtx`].
+pub const NATIVE_CTX_UNDO_BUF: i32 = 16;
+pub const NATIVE_CTX_UNDO_LEN: i32 = 24;
+pub const NATIVE_CTX_UNDO_CAP: i32 = 32;
+
+impl NativeCtx {
+    /// A context for one call from the VM, logging into `undo`.
+    pub fn new(stack_limit: u64, undo: &mut Vec<UndoEntry>) -> Self {
+        undo.clear();
+        Self {
+            bail: 0,
+            stack_limit,
+            undo_buf: undo.as_mut_ptr(),
+            undo_len: 0,
+            undo_cap: undo.capacity() as u64,
+            undo_vec: undo,
+        }
+    }
+
+    /// Put back every logged store, newest first.
+    pub fn undo(&mut self) {
+        for i in (0..self.undo_len as usize).rev() {
+            // SAFETY: entries below `undo_len` were written.
+            let [target, index, old] = unsafe { *self.undo_buf.add(i) };
+            let old = common::Value::from(old);
+            if target & UNDO_FIELD != 0 {
+                if let Some(crate::memory::Object::Instance(mut gc)) = object(target & !UNDO_FIELD) {
+                    gc.as_mut().set_slot(index as usize, old);
+                }
+            } else if let Some(crate::memory::Object::Array(mut gc)) = object(target) {
+                gc.as_mut().store_indexed(index as i64, old, false);
+            }
+        }
+        self.undo_len = 0;
+    }
+}
+
+/// Make room for one more undo entry.
+///
+/// # Safety
+/// `ctx` is a live [`NativeCtx`] made by [`NativeCtx::new`].
+pub unsafe extern "C" fn coil_native_undo_grow(ctx: *mut NativeCtx) {
+    let ctx = unsafe { &mut *ctx };
+    let vec = unsafe { &mut *ctx.undo_vec };
+    // SAFETY: the first `undo_len` entries are initialized.
+    unsafe { vec.set_len(ctx.undo_len as usize) };
+    vec.reserve(vec.len().max(64));
+    ctx.undo_buf = vec.as_mut_ptr();
+    ctx.undo_cap = vec.capacity() as u64;
+}
 
 /// How much native stack a call from the VM may use before it bails to the
 /// VM (which then runs the call with its own frame limits).
@@ -133,31 +187,14 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64]) -> Option<u64> {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
     let mut undo = Vec::new();
-    let mut ctx = NativeCtx {
-        bail: 0,
-        stack_limit: sp.saturating_sub(NATIVE_STACK_BUDGET),
-        undo: &mut undo,
-    };
+    let mut ctx = NativeCtx::new(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo);
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
     if ctx.bail == 0 {
         return Some(out);
     }
-    for u in undo.into_iter().rev() {
-        match u {
-            Undo::Index { array, index, old } => {
-                if let Some(crate::memory::Object::Array(mut gc)) = object(array) {
-                    gc.as_mut().store_indexed(index, common::Value::from(old), false);
-                }
-            }
-            Undo::Field { object: o, slot, old } => {
-                if let Some(crate::memory::Object::Instance(mut gc)) = object(o) {
-                    gc.as_mut().set_slot(slot, common::Value::from(old));
-                }
-            }
-        }
-    }
+    ctx.undo();
     None
 }
 
@@ -262,12 +299,19 @@ pub extern "C" fn coil_native_field(addr: u64, index: u64) -> u64 {
     }
 }
 
-/// Log a store into `ctx`'s undo list.
+/// Log a store into `ctx`'s undo log.
 ///
 /// # Safety
-/// `ctx` is a live [`NativeCtx`] whose `undo` points at a live list.
-unsafe fn log(ctx: *mut NativeCtx, u: Undo) {
-    unsafe { (*(*ctx).undo).push(u) };
+/// `ctx` is a live [`NativeCtx`] made by [`NativeCtx::new`].
+unsafe fn log(ctx: *mut NativeCtx, entry: UndoEntry) {
+    unsafe {
+        if (*ctx).undo_len == (*ctx).undo_cap {
+            coil_native_undo_grow(ctx);
+        }
+        let c = &mut *ctx;
+        c.undo_buf.add(c.undo_len as usize).write(entry);
+        c.undo_len += 1;
+    }
 }
 
 /// Set the bail flag; returns `0` for the helper's result.
@@ -291,7 +335,7 @@ pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64,
     let Some(old) = gc.as_ref().read_indexed(index, false) else {
         return unsafe { bail(ctx) };
     };
-    unsafe { log(ctx, Undo::Index { array: addr, index, old: old.bits() }) };
+    unsafe { log(ctx, [addr, index as u64, old.bits()]) };
     gc.as_mut().store_indexed(index, common::Value::from(value), false);
     value
 }
@@ -309,7 +353,34 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
     let Some(old) = gc.as_ref().slot_len().filter(|&n| slot < n).and_then(|_| gc.as_ref().slot(slot)) else {
         return unsafe { bail(ctx) };
     };
-    unsafe { log(ctx, Undo::Field { object: addr, slot, old: old.bits() }) };
+    unsafe { log(ctx, [addr | UNDO_FIELD, slot as u64, old.bits()]) };
     gc.as_mut().set_slot(slot, common::Value::from(value));
     value
+}
+
+/// An array's element words, for native code to index in place: writes
+/// `[pointer, length]` to `out` and returns `1` for an array that stores
+/// words, `0` for anything else (a byte array, a tuple, not an array),
+/// which native code then reads through the helpers above. With
+/// `for_store` set, marks the array as possibly holding references, as
+/// every VM store does. The pointer stays valid while native code runs:
+/// it never grows or shrinks an array, and storing into a word array never
+/// moves its storage.
+///
+/// # Safety
+/// `addr` is a heap word; `out` points at two writable words.
+pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u64) -> u64 {
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return 0;
+    };
+    match gc.as_mut().words_view(for_store != 0) {
+        Some((ptr, len)) => {
+            unsafe {
+                out.write(ptr as u64);
+                out.add(1).write(len as u64);
+            }
+            1
+        }
+        None => 0,
+    }
 }

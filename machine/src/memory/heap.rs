@@ -3605,6 +3605,18 @@ impl ObjArray {
         self.may_hold_refs
     }
 
+    /// The element words in place, for native code (`None` for a byte
+    /// array). `for_store` marks the array as a VM store would.
+    pub(crate) fn words_view(&mut self, for_store: bool) -> Option<(*mut Value, usize)> {
+        if for_store {
+            self.note();
+        }
+        match &mut self.data {
+            ArrayData::Words(w) => Some((w.as_mut_ptr(), w.len())),
+            ArrayData::Bytes(_) => None,
+        }
+    }
+
     /// A write may add a reference: the next mark rescans.
     #[inline(always)]
     fn note(&mut self) {
