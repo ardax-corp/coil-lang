@@ -171,6 +171,7 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
         native_mir: Vec::new(),
     };
     let full = pipeline.program_debug_full();
+    #[cfg(not(target_family = "wasm"))]
     if compiler::native_mir::native_capture_active() {
         // `coil compile --jit`: keep the MIR native code is made from.
         program.native_mir = coil_native::section::encode(
@@ -471,6 +472,12 @@ fn install_native_bodies(
     bodies: &[compiler::native_mir::NativeBody],
     pcs: &std::collections::HashMap<String, u32>,
 ) {
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = (bodies, pcs);
+        eprintln!("warning: --jit: no native code on wasm; running on the VM");
+    }
+    #[cfg(not(target_family = "wasm"))]
     match coil_native::jit(bodies, pcs) {
         Ok(program) => {
             if std::env::var_os("COIL_NATIVE_STATS").is_some() {
@@ -597,6 +604,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
 
     if !no_jit {
         if !loaded.native_mir.is_empty() {
+            #[cfg(not(target_family = "wasm"))]
             match coil_native::section::decode(&loaded.native_mir) {
                 Ok((bodies, pcs)) => install_native_bodies(&bodies, &pcs),
                 Err(e) => eprintln!("warning: `{archive}`: {e}; running on the VM"),

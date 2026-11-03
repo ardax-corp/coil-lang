@@ -8,6 +8,9 @@ description = "Native code for Coil: MIR to Cranelift (JIT now, AOT objects late
 compiler = { path = "../compiler", default-features = false }
 common = { path = "../common" }
 machine = { path = "../machine", default-features = false }
+
+# No native code on wasm (the playground runs the VM): the crate is empty there.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 cranelift-codegen = "0.137"
 cranelift-frontend = "0.137"
 cranelift-jit = "0.137"

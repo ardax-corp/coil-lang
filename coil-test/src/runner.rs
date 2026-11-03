@@ -102,8 +102,15 @@ impl Engine {
     }
 }
 
+/// No native code on wasm: the file runs on the VM.
+#[cfg(target_family = "wasm")]
+fn native_code(_: &Pipeline, _: usize) -> Option<Arc<machine::native::NativeCode>> {
+    None
+}
+
 /// JIT what this compile captured. `None` when nothing compiles or the
 /// backend fails (the file then runs on the VM, as `coil --jit` does).
+#[cfg(not(target_family = "wasm"))]
 fn native_code(pipeline: &Pipeline, code_len: usize) -> Option<Arc<machine::native::NativeCode>> {
     let bodies = compiler::native_mir::take_native_capture();
     let debug = pipeline.program_debug_full();
