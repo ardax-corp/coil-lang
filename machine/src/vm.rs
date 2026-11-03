@@ -1906,10 +1906,13 @@ impl<const S: usize> Machine<S> {
     }
 
     /// [`crate::native::NativeHost::free`]: what `FreeEarly` does.
-    unsafe fn native_free(raw: *mut c_void, word: u64, deep: bool) {
+    unsafe fn native_free(raw: *mut c_void, ctx: *mut crate::native::NativeCtx, word: u64, deep: bool) -> bool {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        let _ = vm.free_early(Value::from(word), deep);
+        vm.native_roots.push(ctx);
+        let ok = vm.free_early(Value::from(word), deep);
+        vm.native_roots.pop();
+        ok && !vm.panicked
     }
 
     /// [`crate::native::NativeHost::print`]: what `PRINT` does.

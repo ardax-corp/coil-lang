@@ -120,6 +120,8 @@ pub const NATIVE_CTX_GC_EPOCH: i32 = std::mem::offset_of!(NativeCtx, gc_epoch) a
 
 /// Byte offset of [`NativeCtx::gc_due`].
 pub const NATIVE_CTX_GC_DUE: i32 = std::mem::offset_of!(NativeCtx, gc_due) as i32;
+/// Byte offset of [`NativeCtx::has_finalizers`].
+pub const NATIVE_CTX_HAS_FINALIZERS: i32 = std::mem::offset_of!(NativeCtx, has_finalizers) as i32;
 
 /// Byte offset of [`NativeCtx::roots`].
 pub const NATIVE_CTX_ROOTS: i32 = std::mem::offset_of!(NativeCtx, roots) as i32;
@@ -184,12 +186,13 @@ pub struct NativeHost {
     pub claim: unsafe fn(*mut std::ffi::c_void, u32, u64) -> u64,
     /// Collect, with the context's roots pinned.
     pub collect: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx),
-    /// `FreeEarly` now (no finalizers).
-    pub free: unsafe fn(*mut std::ffi::c_void, u64, bool),
+    /// `FreeEarly` now, running the `drop`s it owes (with the context's
+    /// roots pinned); `false` when one panicked (the VM reported it).
+    pub free: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, bool) -> bool,
 }
 
 impl NativeHost {
-    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, free: |_, _, _| {} };
+    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, free: |_, _, _, _| true };
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
@@ -1195,18 +1198,38 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
 
 /// `FreeEarly`: queue `word` for the VM to free after the call (see
 /// [`NativeCtx::frees`]); once the call committed (it can no longer bail)
-/// the VM frees it now. With finalizers in the program: bail.
+/// the VM frees it now. With finalizers in the program the free may run
+/// `drop`s, which cannot be taken back: the call commits, and the VM frees
+/// it now as its `FreeEarly` does (a collection may run: native code roots
+/// its words around this call then). A `drop` that panicked unwinds with
+/// [`TRAP_VM_PANIC`].
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
 pub unsafe extern "C" fn coil_native_free_early(ctx: *mut NativeCtx, word: u64, deep: u64) -> u64 {
     let c = unsafe { &mut *ctx };
-    if c.has_finalizers != 0 || c.frees.is_null() {
+    if c.frees.is_null() {
         return unsafe { bail(ctx) };
+    }
+    if c.has_finalizers != 0 {
+        if c.machine.is_null() {
+            return unsafe { bail(ctx) };
+        }
+        c.committed = 1;
+        c.vm_calls += 1;
+        c.gc_epoch += 1;
+        let (machine, free) = (c.machine, c.host.free);
+        // SAFETY: `machine` is the live machine `host` was made for.
+        if !unsafe { free(machine, ctx, word, deep != 0) } {
+            let c = unsafe { &mut *ctx };
+            c.trap = TRAP_VM_PANIC;
+            return unsafe { bail(ctx) };
+        }
+        return 0;
     }
     if c.committed != 0 && !c.machine.is_null() {
         // SAFETY: `machine` is the live machine `host` was made for.
-        unsafe { (c.host.free)(c.machine, word, deep != 0) };
+        let _ = unsafe { (c.host.free)(c.machine, ctx, word, deep != 0) };
         return 0;
     }
     unsafe { (*c.frees).push((word, deep != 0)) };

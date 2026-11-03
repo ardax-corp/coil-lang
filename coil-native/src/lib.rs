@@ -26,7 +26,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
+    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -299,7 +299,10 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         .filter(|(i, callees)| {
             callees.iter().any(|c| vm_calls.contains_key(c))
                 || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
-                    matches!(inst, MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. })
+                    matches!(
+                        inst,
+                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::FreeEarly { .. }
+                    )
                 })
         })
         .map(|(&i, _)| i)
@@ -361,6 +364,7 @@ fn allocates(inst: &MirInst) -> bool {
             | MirInst::Cow { .. }
             | MirInst::HostInvoke { .. }
             | MirInst::CallIndirect { .. }
+            | MirInst::FreeEarly { .. }
     )
 }
 
@@ -618,6 +622,14 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         }
                     }
                     MirInst::String { dest, .. } => need(dest)?,
+                    // A code pointer (a dictionary method's entry PC).
+                    MirInst::CodePtr { dest, target } => {
+                        need(dest)?;
+                        let Some(&callee) = by_label.get(target) else {
+                            return Err("code pointer of an unknown body".into());
+                        };
+                        callees.push(callee);
+                    }
                     MirInst::HomeLoad { dest, home } => {
                         need(dest)?;
                         if usize::from(*home) >= f.homes.len() {
@@ -1552,6 +1564,11 @@ impl<'a> Lower<'a> {
             }
             MirInst::Phi { dest, .. } => self.view_of(f, *dest),
             MirInst::Deopt { .. } => {}
+            MirInst::CodePtr { dest, target } => {
+                let pc = *self.plan.pcs.get(target).ok_or("code pointer of a body with no entry PC")?;
+                let x = self.b.ins().iconst(types::I64, i64::from(pc));
+                self.set(f, *dest, x);
+            }
             MirInst::HomeLoad { dest, home } => {
                 let (base, off) = self.home_at(*home)?;
                 let x = self.b.ins().load(types::I64, MemFlagsData::trusted(), base, off);
@@ -1811,14 +1828,35 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
             }
             MirInst::FreeEarly { dest, value, deep } => {
+                // With finalizers in the program the free may run `drop`s
+                // on the VM (and collect): root this frame's words then.
+                let t = MemFlagsData::trusted();
+                let fin = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HAS_FINALIZERS);
+                let (slow, fast, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(fin, slow, &[], fast, &[]);
+                self.b.set_cold_block(slow);
+                self.b.switch_to_block(slow);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let d = self.b.ins().iconst(types::I64, i64::from(*deep));
-                let call = self.b.ins().call(self.free_early, &[self.ctx, v, d]);
-                let w = self.b.inst_results(call)[0];
-                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                let roots = self.push_roots(f);
+                self.b.ins().call(self.free_early, &[self.ctx, v, d]);
+                self.pop_roots(f, roots);
+                self.drop_views();
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(fast);
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                let d = self.b.ins().iconst(types::I64, i64::from(*deep));
+                self.b.ins().call(self.free_early, &[self.ctx, v, d]);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(join);
+                let flag = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
-                self.set(f, *dest, w);
+                if numeric(ty_of(f, *dest)) {
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.set(f, *dest, zero);
+                }
             }
             MirInst::Format { dest, fmt, args } => {
                 let p = self.words_slot(f, args);
