@@ -1121,7 +1121,93 @@ fn main() {
 "#,
         ),
     ];
-    let (root, entry) = build_project("entry_chain_cross_file", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    assert_entry_chain_dissolves("entry_chain_cross_file", &files);
+}
+
+/// The same chain with a generic key, at `string`: the key reaches the
+/// view through a copy-on-write op, which does nothing to a string.
+#[test]
+fn cross_module_entry_chain_dissolves_the_view_with_string_keys() {
+    let files = [
+        (
+            "src/names.coil",
+            r#"
+class Names<K, V> {
+    pub keys: Vec<K>,
+    pub vals: Vec<V>,
+}
+
+view class Slot<K, V> {
+    mut map: Names<K, V>,
+    key: K,
+    slot: int,
+}
+
+impl Names<K: Eq, V> {
+    pub fn find(K k) -> int {
+        let i = 0;
+        while i < self.keys.len() {
+            if self.keys[i] == k {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    pub fn entry(K k) -> Slot<K, V> {
+        return new Slot(mut self, k, self.find(k));
+    }
+}
+
+impl Slot<K, V> {
+    pub fn and_modify(V -> V f) -> Slot<K, V> {
+        if self.slot >= 0 {
+            self.map.vals[self.slot] = f(self.map.vals[self.slot]);
+        }
+        return self;
+    }
+
+    pub fn or_insert(V v) -> V {
+        if self.slot >= 0 {
+            return self.map.vals[self.slot];
+        }
+        self.map.keys.push(self.key);
+        self.map.vals.push(v);
+        return v;
+    }
+}
+"#,
+        ),
+        (
+            "src/main.coil",
+            r#"
+use names::{Names};
+
+fn main() {
+    let words = ["a", "b", "c", "d", "e", "f", "g"];
+    let c: Names<string, int> = new Names(Vec::new(), Vec::new());
+    let i = 0;
+    let s = 0;
+    while i < 50 {
+        s = s + c.entry(words[i % 7]).and_modify(fn (int n) => n + 1).or_insert(1);
+        i = i + 1;
+    }
+    if s != 1029 {
+        panic "sum";
+    }
+}
+"#,
+        ),
+    ];
+    assert_entry_chain_dissolves("entry_chain_cross_file_string", &files);
+}
+
+/// Compiles the project and checks `main` builds no view: `new` of the
+/// map is the one object, and the calls left are at most its two
+/// `Vec::new()` and `find`, whose loop keeps its call.
+fn assert_entry_chain_dissolves(name: &str, files: &[(&str, &str)]) {
+    let (root, entry) = build_project(name, &manifest_src_and_stdlib(), files, "src/main.coil");
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, &[]);
@@ -1137,8 +1223,6 @@ fn main() {
         let start = pipeline.function_offset("main").expect("main");
         let end = pipeline.compiler().function_end(start);
         let main: Vec<_> = bytecode[start..end].iter().map(|b| *b.bytecode()).collect();
-        // `new Counts(..)` is the one object; the calls left are its two
-        // `Vec::new()` and `find`, whose loop keeps its call.
         let makes = main.iter().filter(|o| matches!(o, common::Instruction::DenseMakeObject | common::Instruction::InitTyped)).count();
         let calls = main.iter().filter(|o| matches!(o, common::Instruction::CALL)).count();
         assert_eq!(makes, 1, "`main` builds the view: {main:?}");
