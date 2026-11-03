@@ -1,13 +1,13 @@
 //! Nursery minor collection (`feature/escape-memory` step 4).
 //!
-//! Instances, payload enums, boxes, tuples and arrays are bump-allocated
-//! into young slab chunks ([`super::Slab::alloc_young`]). A minor collection
+//! Instances, payload enums, boxes, tuples, arrays and closures are
+//! bump-allocated into young slab chunks ([`super::Slab::alloc_young`]). A minor collection
 //! traces young objects from the VM roots and the remembered set (old
 //! objects written since the last one, see the barrier in
 //! [`super::GcData`]'s `as_mut`), copies every survivor only precise words
 //! name into an old slot, rewrites those words, and resets the young chunks.
-//! A survivor an ambiguous word names is pinned: its chunk is promoted in
-//! place. See `docs/internals/escape-memory.md`.
+//! A survivor an ambiguous word names is pinned: it stays where it is and
+//! its chunk is held until a major frees it. See `docs/internals/escape-memory.md`.
 
 use std::ptr::NonNull;
 
