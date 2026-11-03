@@ -26,7 +26,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
+    NATIVE_CTX_BAIL, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
     NativeEntry, NativeEntryFn,
 };
 
@@ -143,7 +143,8 @@ fn jit_once(
         let ptr = module.get_finalized_function(ids.entry[&i]);
         // SAFETY: `build_entry` gave this function the `NativeEntryFn` ABI.
         let entry: NativeEntryFn = unsafe { std::mem::transmute::<*const u8, NativeEntryFn>(ptr) };
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, entry });
+        let ret_words = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, ret_words, entry });
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
@@ -288,8 +289,12 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
             return Err(format!("parameter type {:?}", ty_of(f, p)));
         }
     }
+    // One word, two (a two-slot return: `lo`, then `hi`), or none (the
+    // VM returns a `0` word).
     match (f.ret_ty, f.ret_hi_ty) {
+        (None, None) => {}
         (Some(t), None) if numeric(t) => {}
+        (Some(t), Some(h)) if numeric(t) && numeric(h) => {}
         other => return Err(format!("return type {other:?}")),
     }
     let mut callees = Vec::new();
@@ -418,8 +423,8 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         }
                     }
                     MirInst::Call { dest, dest_hi, target, args } => {
-                        if dest_hi.is_some() {
-                            return Err("two-word call".into());
+                        if let Some(h) = dest_hi {
+                            need(h)?;
                         }
                         need(dest)?;
                         for a in args {
@@ -446,7 +451,14 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
         match &b.term {
             Some(Terminator::Jump { .. }) | Some(Terminator::Unreachable) => {}
             Some(Terminator::Br { cond, .. }) => need_scalar(cond)?,
-            Some(Terminator::Return { lo: Some(v), hi: None }) => need(v)?,
+            Some(Terminator::Return { lo, hi }) => {
+                if lo.is_some() != f.ret_ty.is_some() || hi.is_some() != f.ret_hi_ty.is_some() {
+                    return Err("return width".into());
+                }
+                for v in lo.iter().chain(hi) {
+                    need(v)?;
+                }
+            }
             Some(Terminator::JumpIfMatch { scrutinee, tag, payloads, .. }) => {
                 match ty_of(f, *scrutinee) {
                     MirTy::HeapRef => {}
@@ -458,7 +470,6 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                     need(p)?;
                 }
             }
-            Some(t) => return Err(format!("terminator {t:?}").chars().take(60).collect()),
             None => return Err("block without terminator".into()),
         }
     }
@@ -510,6 +521,9 @@ fn impl_signature(module: &JITModule, f: &MirFunc) -> Signature {
         sig.params.push(AbiParam::new(cl_ty(ty_of(f, p))));
     }
     sig.returns.push(AbiParam::new(cl_ty(f.ret_ty.unwrap_or(MirTy::I64))));
+    if let Some(h) = f.ret_hi_ty {
+        sig.returns.push(AbiParam::new(cl_ty(h)));
+    }
     sig
 }
 
@@ -613,12 +627,15 @@ fn build_entry(
         args.push(v);
     }
     let call = b.ins().call(callee, &args);
-    let r = b.inst_results(call)[0];
-    let out = if f.ret_ty == Some(MirTy::F64) {
-        b.ins().bitcast(types::I64, MemFlagsData::new(), r)
-    } else {
-        r
+    let results = b.inst_results(call).to_vec();
+    let word = |b: &mut FunctionBuilder, x: cranelift_codegen::ir::Value| {
+        if b.func.dfg.value_type(x) == types::F64 { b.ins().bitcast(types::I64, MemFlagsData::new(), x) } else { x }
     };
+    let out = word(&mut b, results[0]);
+    if let Some(&hi) = results.get(1) {
+        let hi = word(&mut b, hi);
+        b.ins().store(MemFlagsData::trusted(), hi, ctx, NATIVE_CTX_RET_HI);
+    }
     b.ins().return_(&[out]);
     b.seal_all_blocks();
     b.finalize(module.isa().frontend_config());
@@ -661,6 +678,8 @@ struct Lower<'a> {
     ctx: cranelift_codegen::ir::Value,
     bail: Block,
     ret: Type,
+    /// The second result's type of a two-word return.
+    ret_hi: Option<Type>,
 }
 
 impl<'a> Lower<'a> {
@@ -697,6 +716,7 @@ impl<'a> Lower<'a> {
             3,
         ));
         let ret = func.signature.returns[0].value_type;
+        let ret_hi = func.signature.returns.get(1).map(|r| r.value_type);
         let mut b = FunctionBuilder::new(func, fbc);
         let bail = b.create_block();
         let entry = b.create_block();
@@ -731,6 +751,7 @@ impl<'a> Lower<'a> {
             ctx,
             bail,
             ret,
+            ret_hi,
         }
     }
 
@@ -828,12 +849,11 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(self.bail);
         let one = self.b.ins().iconst(types::I64, 1);
         self.b.ins().store(MemFlagsData::trusted(), one, self.ctx, NATIVE_CTX_BAIL);
-        let zero = if self.ret == types::F64 {
-            self.b.ins().f64const(0.0)
-        } else {
-            self.b.ins().iconst(types::I64, 0)
-        };
-        self.b.ins().return_(&[zero]);
+        let mut zeros = Vec::new();
+        for t in std::iter::once(self.ret).chain(self.ret_hi) {
+            zeros.push(if t == types::F64 { self.b.ins().f64const(0.0) } else { self.b.ins().iconst(types::I64, 0) });
+        }
+        self.b.ins().return_(&zeros);
         self.b.seal_all_blocks();
         Ok(())
     }
@@ -915,7 +935,7 @@ impl<'a> Lower<'a> {
             }
             MirInst::Phi { dest, .. } => self.view_of(f, *dest),
             MirInst::Deopt { .. } => {}
-            MirInst::Call { dest, target, args, .. } => {
+            MirInst::Call { dest, dest_hi, target, args } => {
                 let callee = *self.by_label.get(target).ok_or("unknown callee")?;
                 let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
                 let sig = self.b.func.dfg.ext_funcs[fref].signature;
@@ -926,10 +946,15 @@ impl<'a> Lower<'a> {
                     vals.push(self.coerce(x, want));
                 }
                 let call = self.b.ins().call(fref, &vals);
-                let r = self.b.inst_results(call)[0];
+                let results = self.b.inst_results(call).to_vec();
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag);
-                self.set(f, *dest, r);
+                self.set(f, *dest, results[0]);
+                if let Some(h) = dest_hi {
+                    let x = *results.get(1).ok_or("two-word call of a one-word body")?;
+                    self.set(f, *h, x);
+                }
+                self.view_of(f, *dest);
             }
             MirInst::Index { dest, array, index, .. } => {
                 let a = self.get(f, *array);
@@ -1302,10 +1327,23 @@ impl<'a> Lower<'a> {
                     self.b.ins().jump(to, &[]);
                 }
             }
-            Terminator::Return { lo: Some(v), hi: None } => {
-                let x = self.get(f, *v);
+            Terminator::Return { lo, hi } => {
+                let x = match lo {
+                    Some(v) => self.get(f, *v),
+                    None => self.b.ins().iconst(types::I64, 0),
+                };
                 let x = self.coerce(x, self.ret);
-                self.b.ins().return_(&[x]);
+                match (hi, self.ret_hi) {
+                    (None, None) => {
+                        self.b.ins().return_(&[x]);
+                    }
+                    (Some(h), Some(t)) => {
+                        let y = self.get(f, *h);
+                        let y = self.coerce(y, t);
+                        self.b.ins().return_(&[x, y]);
+                    }
+                    _ => return Err("return width differs from the signature".into()),
+                }
             }
             Terminator::Unreachable => {
                 self.b.ins().jump(self.bail, &[]);
@@ -1360,7 +1398,6 @@ impl<'a> Lower<'a> {
                 let to = self.blocks[not_taken];
                 self.b.ins().jump(to, &[]);
             }
-            _ => return Err("terminator".into()),
         }
         Ok(())
     }

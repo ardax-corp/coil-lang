@@ -20,7 +20,7 @@ use compiler::native_mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for the bodies of `bodies` the backend compiles, keyed to
@@ -127,6 +127,8 @@ const T_BR: u8 = 1;
 const T_RETURN: u8 = 2;
 const T_UNREACHABLE: u8 = 3;
 const T_MATCH: u8 = 4;
+/// No result type ([`Writer::opt_ty`]), or a return without that word.
+const NONE: u8 = 0xff;
 
 struct Writer(Vec<u8>);
 
@@ -147,6 +149,21 @@ impl Writer {
     fn ty(&mut self, t: MirTy) {
         self.u8(idx(&TYS, &t));
     }
+    fn opt_ty(&mut self, t: Option<MirTy>) {
+        match t {
+            Some(t) => self.ty(t),
+            None => self.u8(NONE),
+        }
+    }
+    fn opt_v(&mut self, v: Option<ValueId>) {
+        match v {
+            Some(v) => {
+                self.u8(1);
+                self.v(v);
+            }
+            None => self.u8(0),
+        }
+    }
     fn v(&mut self, v: ValueId) {
         self.u32(v.0);
     }
@@ -166,7 +183,8 @@ fn func(w: &mut Writer, f: &MirFunc) {
         w.u8(if crate::numeric(t) { idx(&TYS, &t) } else { 0xfe });
     }
     w.vs(&f.params);
-    w.ty(f.ret_ty.unwrap_or(MirTy::Bottom));
+    w.opt_ty(f.ret_ty);
+    w.opt_ty(f.ret_hi_ty);
     w.u32(f.blocks.len() as u32);
     for b in &f.blocks {
         w.u32(b.id.0);
@@ -186,9 +204,10 @@ fn func(w: &mut Writer, f: &MirFunc) {
                 w.u32(taken.0);
                 w.u32(not_taken.0);
             }
-            Some(Terminator::Return { lo: Some(v), hi: None }) => {
+            Some(Terminator::Return { lo, hi }) => {
                 w.u8(T_RETURN);
-                w.v(*v);
+                w.opt_v(*lo);
+                w.opt_v(*hi);
             }
             // `plan` admits no other terminator.
             Some(Terminator::JumpIfMatch { scrutinee, tag, payloads, taken, not_taken }) => {
@@ -265,9 +284,10 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                 w.v(*v);
             }
         }
-        MirInst::Call { dest, target, args, .. } => {
+        MirInst::Call { dest, dest_hi, target, args } => {
             w.u8(I_CALL);
             w.v(*dest);
+            w.opt_v(*dest_hi);
             w.u32(target.0);
             w.vs(args);
         }
@@ -401,6 +421,20 @@ impl<'a> Reader<'a> {
     fn ty(&mut self) -> Result<MirTy, String> {
         self.pick(&TYS, "type")
     }
+    fn opt_ty(&mut self) -> Result<Option<MirTy>, String> {
+        if self.b.get(self.i) == Some(&NONE) {
+            self.i += 1;
+            return Ok(None);
+        }
+        self.ty().map(Some)
+    }
+    fn opt_v(&mut self) -> Result<Option<ValueId>, String> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => self.v().map(Some),
+            t => Err(format!("native MIR: bad optional value {t}")),
+        }
+    }
     fn v(&mut self) -> Result<ValueId, String> {
         Ok(ValueId(self.u32()?))
     }
@@ -422,7 +456,8 @@ fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
         })
         .collect::<Result<_, String>>()?;
     f.params = r.vs()?;
-    f.ret_ty = Some(r.ty()?);
+    f.ret_ty = r.opt_ty()?;
+    f.ret_hi_ty = r.opt_ty()?;
     let nb = r.len()?;
     for _ in 0..nb {
         let mut b = MirBlock::new(BlockId(r.u32()?));
@@ -433,7 +468,7 @@ fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
         b.term = Some(match r.u8()? {
             T_JUMP => Terminator::Jump { dest: BlockId(r.u32()?) },
             T_BR => Terminator::Br { cond: r.v()?, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) },
-            T_RETURN => Terminator::Return { lo: Some(r.v()?), hi: None },
+            T_RETURN => Terminator::Return { lo: r.opt_v()?, hi: r.opt_v()? },
             T_UNREACHABLE => Terminator::Unreachable,
             T_MATCH => {
                 let (scrutinee, tag) = (r.v()?, r.u32()?);
@@ -489,9 +524,9 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             MirInst::Phi { dest, ty, args }
         }
         I_CALL => {
-            let dest = r.v()?;
+            let (dest, dest_hi) = (r.v()?, r.opt_v()?);
             let target = Label(r.u32()?);
-            MirInst::Call { dest, dest_hi: None, target, args: r.vs()? }
+            MirInst::Call { dest, dest_hi, target, args: r.vs()? }
         }
         I_INDEX => MirInst::Index { dest: r.v()?, array: r.v()?, index: r.v()?, unchecked: r.u8()? != 0 },
         I_LEN => MirInst::ArrayLen { dest: r.v()?, array: r.v()? },
