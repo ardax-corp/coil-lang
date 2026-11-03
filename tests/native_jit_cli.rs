@@ -107,6 +107,25 @@ fn floats_and_bools_match_the_vm() {
     same_as_vm("floats", &src);
 }
 
+#[test]
+fn heap_reads_run_natively() {
+    let src = format!(
+        "{HEADER}class P {{ pub x: int, pub y: float, pub on: bool }}\n\
+         #[inline(never)]\nfn vsum(Vec<int> v) -> int {{ let s = 0; let i = 0; while i < v.len() {{ s = s + v[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn px(P p) -> float {{ if p.on {{ return p.y * 2.0 + (p.x as float); }} return 0.0; }}\n\
+         #[inline(never)]\nfn at(Vec<int> a, int i) -> int {{ return a[i]; }}\n\
+         #[inline(never)]\nfn flag(Vec<bool> a, int i) -> bool {{ return a[i]; }}\n\
+         fn main() {{\n  let a: Vec<int> = [1, 2, 3, 4, 5];\n  let b: Vec<bool> = [true, false];\n\
+           let _ = println(format(\"%i %i\", vsum(a), at(a, 4)));\n\
+           let _ = println(format(\"%f\", px(new P(3, 1.5, true))));\n\
+           if flag(b, 0) && !flag(b, 1) {{ let _ = println(\"flags\"); }}\n\
+           let _ = println(format(\"%i\", at(a, 9)));\n}}\n"
+    );
+    let stats = same_as_vm("heap", &src);
+    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(stats.contains("native: 4 compiled"), "stats: {stats}");
+}
+
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
 /// section.
 fn compile(name: &str, src: &str, jit: bool) -> PathBuf {

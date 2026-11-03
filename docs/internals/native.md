@@ -57,7 +57,7 @@ MIR, not machine code.
 A body compiles when:
 
 - every parameter, value and the (one-word) result is `int`, `float` or
-  `bool` (`MirTy::I64` / `F64` / `Bool`);
+  `bool` (`MirTy::I64` / `F64` / `Bool`), or a heap word (below);
 - its instructions are `Const`, `Bin` (not int `**`), `Cmp`, `Unary`,
   `Cast`, `Phi`, direct `Call`, and its terminators `Jump`, `Br`,
   one-word `Return`, `Unreachable`;
@@ -66,6 +66,18 @@ A body compiles when:
 
 Such a function is **pure**: it reads nothing but its arguments and does
 nothing but return a word. That is what makes the tier simple and exact.
+
+### Heap reads (step 4, first part)
+
+A body may also hold heap words (`HeapRef`, `NicheOpt`, `NicheRes`): take
+them as parameters, pass them to calls, return them, move them through
+phis, and read through a `HeapRef` with `Index`, `ArrayLen` and
+`HeapFieldLoad`. Those three call `machine::native::coil_native_index` /
+`_len` / `_field`, which do what the VM instruction does; an index out of
+bounds bails. Such a body still never allocates, stores or calls into the
+VM, so no collection can run while it holds a heap word and every word
+stays a live object. Comparing heap words, stores and allocation come
+with the next parts of the tier.
 
 ### Bail instead of trap
 

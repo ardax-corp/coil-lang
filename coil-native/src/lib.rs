@@ -56,6 +56,9 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
     let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
     jb.symbol("coil_native_fmod", coil_native_fmod as *const u8);
     jb.symbol("coil_native_powf", coil_native_powf as *const u8);
+    jb.symbol("coil_native_index", machine::native::coil_native_index as *const u8);
+    jb.symbol("coil_native_len", machine::native::coil_native_len as *const u8);
+    jb.symbol("coil_native_field", machine::native::coil_native_field as *const u8);
     let mut module = JITModule::new(jb);
 
     let ids = declare(&mut module, bodies, &plan.compile)?;
@@ -168,8 +171,20 @@ fn plan(bodies: &[NativeBody]) -> Plan {
     Plan { compile, by_label, refused }
 }
 
+/// A value native code holds: a scalar, or a heap word it passes along and
+/// reads through (heap tier).
 fn numeric(t: MirTy) -> bool {
+    scalar(t) || heap_word(t)
+}
+
+/// A value native arithmetic works on.
+fn scalar(t: MirTy) -> bool {
     matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool)
+}
+
+/// A heap object word (a pointer, or a niche `Option` / `Result` word).
+fn heap_word(t: MirTy) -> bool {
+    matches!(t, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes)
 }
 
 fn ty_of(f: &MirFunc, v: ValueId) -> MirTy {
@@ -204,14 +219,22 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
         let t = ty_of(f, *v);
         if numeric(t) { Ok(()) } else { Err(format!("value type {t:?}")) }
     };
+    let need_scalar = |v: &ValueId| -> Result<(), String> {
+        let t = ty_of(f, *v);
+        if scalar(t) { Ok(()) } else { Err(format!("{t:?} in arithmetic")) }
+    };
+    let need_heap = |v: &ValueId| -> Result<(), String> {
+        let t = ty_of(f, *v);
+        if t == MirTy::HeapRef { Ok(()) } else { Err(format!("{t:?} read as an object")) }
+    };
     for b in &f.blocks {
         for inst in &b.insts {
             match inst {
                 MirInst::Const { dest, .. } => need(dest)?,
                 MirInst::Bin { dest, op, ty, lhs, rhs } => {
-                    need(dest)?;
-                    need(lhs)?;
-                    need(rhs)?;
+                    need_scalar(dest)?;
+                    need_scalar(lhs)?;
+                    need_scalar(rhs)?;
                     if *ty == MirTy::I64 && *op == MirBinOp::Pow {
                         return Err("int **".into());
                     }
@@ -219,18 +242,39 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         return Err("bool arithmetic".into());
                     }
                 }
-                MirInst::Cmp { dest, lhs, rhs, .. } => {
-                    need(dest)?;
-                    need(lhs)?;
-                    need(rhs)?;
+                MirInst::Cmp { dest, ty, lhs, rhs, .. } => {
+                    if !scalar(*ty) {
+                        return Err(format!("compare of {ty:?}"));
+                    }
+                    need_scalar(dest)?;
+                    need_scalar(lhs)?;
+                    need_scalar(rhs)?;
                 }
                 MirInst::Unary { dest, src, .. } => {
-                    need(dest)?;
-                    need(src)?;
+                    need_scalar(dest)?;
+                    need_scalar(src)?;
                 }
-                MirInst::Cast { dest, src, .. } => {
+                MirInst::Cast { dest, kind, src, .. } => {
+                    if *kind == MirCastKind::Word {
+                        need(dest)?;
+                        need(src)?;
+                    } else {
+                        need_scalar(dest)?;
+                        need_scalar(src)?;
+                    }
+                }
+                MirInst::Index { dest, array, index, .. } => {
                     need(dest)?;
-                    need(src)?;
+                    need_heap(array)?;
+                    need_scalar(index)?;
+                }
+                MirInst::ArrayLen { dest, array } => {
+                    need_scalar(dest)?;
+                    need_heap(array)?;
+                }
+                MirInst::HeapFieldLoad { dest, object, .. } => {
+                    need(dest)?;
+                    need_heap(object)?;
                 }
                 MirInst::Phi { dest, args, .. } => {
                     need(dest)?;
@@ -257,7 +301,7 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
         }
         match &b.term {
             Some(Terminator::Jump { .. }) | Some(Terminator::Unreachable) => {}
-            Some(Terminator::Br { cond, .. }) => need(cond)?,
+            Some(Terminator::Br { cond, .. }) => need_scalar(cond)?,
             Some(Terminator::Return { lo: Some(v), hi: None }) => need(v)?,
             Some(t) => return Err(format!("terminator {t:?}").chars().take(60).collect()),
             None => return Err("block without terminator".into()),
@@ -281,6 +325,10 @@ struct Ids {
     entry: HashMap<usize, FuncId>,
     fmod: FuncId,
     powf: FuncId,
+    /// Heap reads (`machine::native::coil_native_*`).
+    index: FuncId,
+    len: FuncId,
+    field: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -321,7 +369,17 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     f2.returns.push(AbiParam::new(types::F64));
     let fmod = module.declare_function("coil_native_fmod", Linkage::Import, &f2).map_err(e)?;
     let powf = module.declare_function("coil_native_powf", Linkage::Import, &f2).map_err(e)?;
-    Ok(Ids { imp, entry, fmod, powf })
+    let words = |n: usize| {
+        let mut sig = module.make_signature();
+        sig.params.extend((0..n).map(|_| AbiParam::new(types::I64)));
+        sig.returns.push(AbiParam::new(types::I64));
+        sig
+    };
+    let (s3, s1, s2) = (words(3), words(1), words(2));
+    let index = module.declare_function("coil_native_index", Linkage::Import, &s3).map_err(e)?;
+    let len = module.declare_function("coil_native_len", Linkage::Import, &s1).map_err(e)?;
+    let field = module.declare_function("coil_native_field", Linkage::Import, &s2).map_err(e)?;
+    Ok(Ids { imp, entry, fmod, powf, index, len, field })
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +434,9 @@ struct Lower<'a> {
     module_refs: HashMap<usize, FuncRef>,
     fmod: FuncRef,
     powf: FuncRef,
+    index: FuncRef,
+    len: FuncRef,
+    field: FuncRef,
     by_label: &'a HashMap<Label, usize>,
     vars: Vec<Option<Variable>>,
     blocks: HashMap<BlockId, Block>,
@@ -399,6 +460,9 @@ impl<'a> Lower<'a> {
         }
         let fmod = module.declare_func_in_func(ids.fmod, func);
         let powf = module.declare_func_in_func(ids.powf, func);
+        let index = module.declare_func_in_func(ids.index, func);
+        let len = module.declare_func_in_func(ids.len, func);
+        let field = module.declare_func_in_func(ids.field, func);
         let ret = func.signature.returns[0].value_type;
         let mut b = FunctionBuilder::new(func, fbc);
         let bail = b.create_block();
@@ -411,6 +475,9 @@ impl<'a> Lower<'a> {
             module_refs,
             fmod,
             powf,
+            index,
+            len,
+            field,
             by_label,
             vars: Vec::new(),
             blocks: HashMap::new(),
@@ -594,9 +661,44 @@ impl<'a> Lower<'a> {
                 self.bail_if(flag);
                 self.set(f, *dest, r);
             }
+            MirInst::Index { dest, array, index, .. } => {
+                let a = self.get(f, *array);
+                let i = self.get(f, *index);
+                let call = self.b.ins().call(self.index, &[self.ctx, a, i]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set_word(f, *dest, w);
+            }
+            MirInst::ArrayLen { dest, array } => {
+                let a = self.get(f, *array);
+                let call = self.b.ins().call(self.len, &[a]);
+                let w = self.b.inst_results(call)[0];
+                self.set(f, *dest, w);
+            }
+            MirInst::HeapFieldLoad { dest, object, index } => {
+                let o = self.get(f, *object);
+                let i = self.b.ins().iconst(types::I64, i64::from(*index));
+                let call = self.b.ins().call(self.field, &[o, i]);
+                let w = self.b.inst_results(call)[0];
+                self.set_word(f, *dest, w);
+            }
             other => return Err(format!("instruction {}", inst_name(other))),
         }
         Ok(())
+    }
+
+    /// Define `v` from a VM word read out of the heap: a `bool` word is
+    /// true when its low byte is `1`, as `Value::as_bool` reads it.
+    fn set_word(&mut self, f: &MirFunc, v: ValueId, w: cranelift_codegen::ir::Value) {
+        let w = if ty_of(f, v) == MirTy::Bool {
+            let low = self.b.ins().band_imm_u(w, 0xff);
+            let t = self.b.ins().icmp_imm_s(IntCC::Equal, low, 1);
+            self.b.ins().uextend(types::I64, t)
+        } else {
+            w
+        };
+        self.set(f, v, w);
     }
 
     fn ibin(&mut self, op: MirBinOp, a: cranelift_codegen::ir::Value, c: cranelift_codegen::ir::Value) -> Result<cranelift_codegen::ir::Value, String> {

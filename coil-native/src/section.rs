@@ -78,7 +78,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
 // ---------------------------------------------------------------------------
 // Encoding
 
-const TYS: [MirTy; 3] = [MirTy::I64, MirTy::F64, MirTy::Bool];
+const TYS: [MirTy; 6] = [MirTy::I64, MirTy::F64, MirTy::Bool, MirTy::HeapRef, MirTy::NicheOpt, MirTy::NicheRes];
 const BIN_OPS: [MirBinOp; 11] = [
     MirBinOp::Add,
     MirBinOp::Sub,
@@ -111,6 +111,9 @@ const I_UNARY: u8 = 5;
 const I_CAST: u8 = 6;
 const I_PHI: u8 = 7;
 const I_CALL: u8 = 8;
+const I_INDEX: u8 = 9;
+const I_LEN: u8 = 10;
+const I_FIELD: u8 = 11;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -249,6 +252,24 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u32(target.0);
             w.vs(args);
         }
+        MirInst::Index { dest, array, index, unchecked } => {
+            w.u8(I_INDEX);
+            w.v(*dest);
+            w.v(*array);
+            w.v(*index);
+            w.u8(*unchecked as u8);
+        }
+        MirInst::ArrayLen { dest, array } => {
+            w.u8(I_LEN);
+            w.v(*dest);
+            w.v(*array);
+        }
+        MirInst::HeapFieldLoad { dest, object, index } => {
+            w.u8(I_FIELD);
+            w.v(*dest);
+            w.v(*object);
+            w.u32(*index);
+        }
         // `plan` admits nothing else, and `func` drops `Deopt`.
         _ => unreachable!("native section: instruction outside the numeric tier"),
     }
@@ -385,6 +406,9 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let target = Label(r.u32()?);
             MirInst::Call { dest, dest_hi: None, target, args: r.vs()? }
         }
+        I_INDEX => MirInst::Index { dest: r.v()?, array: r.v()?, index: r.v()?, unchecked: r.u8()? != 0 },
+        I_LEN => MirInst::ArrayLen { dest: r.v()?, array: r.v()? },
+        I_FIELD => MirInst::HeapFieldLoad { dest: r.v()?, object: r.v()?, index: r.u32()? },
         t => return Err(format!("native MIR: bad instruction {t}")),
     })
 }
