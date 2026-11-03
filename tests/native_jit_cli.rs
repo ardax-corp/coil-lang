@@ -840,3 +840,24 @@ fn generator_bodies_run_natively() {
     assert!(compiled(&stats, "bad"), "stats: {stats}");
     assert!(program_stderr(&run("native_gen_panic", &boom, true)).contains("division by zero"));
 }
+
+#[test]
+fn task_ops_and_contracts_run_from_native_code() {
+    // `scope` itself (scope open, spawn, join) and `half` (its failed
+    // `requires`) compile: tasks still switch and the failure names the
+    // caller, as on the VM.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, TaskError, yield_now}};\n\
+         fn half(int n) -> int\n    requires n >= 0, \"negative\"\n{{\n    return n / 2;\n}}\n\
+         fn ok(Result<int, TaskError> r) -> int {{ return match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; }}\n\
+         #[inline(never)]\nfn work(int k) -> int {{ let t = 0; let i = 0; while i < 3 {{ yield_now(); t = t + half(k + i); i = i + 1; }} return t; }}\n\
+         #[inline(never)]\nfn run() -> int {{ return ok(scope(fn (Scope s) {{ let a = s.spawn(fn () => work(10)); let b = s.spawn(fn () => work(20)); return 1; }})); }}\n\
+         #[inline(never)]\nfn blame(int n) -> int {{ return half(n) + 1; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", run())); let _ = println(format(\"%i\", blame(-2))); }}\n"
+    );
+    let stats = same_as_vm("task_ops_native", &src);
+    for f in ["task::scope", "half", "work"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert!(program_stderr(&run("task_ops_native", &src, true)).contains("called from"));
+}
