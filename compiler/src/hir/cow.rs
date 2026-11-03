@@ -46,7 +46,7 @@ pub fn enabled() -> bool {
 /// can change: anything but a scalar, a string, a tuple, an enum, a
 /// function, a record, an opaque handle, a `readonly class` or a class
 /// with a `drop`. A type parameter counts, since it may stand for one.
-pub(super) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
+pub(crate) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
     let Some(ty) = ty else { return false };
     let ty = crate::typechecking::subst::apply_ty_prune(checker.subst(), ty);
     let name = match strip_readonly(&ty) {
