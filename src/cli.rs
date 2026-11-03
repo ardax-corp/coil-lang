@@ -42,6 +42,9 @@ pub(crate) enum Command {
         natives: Vec<FfiNative>,
         check_native: bool,
         strip_debug: bool,
+        /// Link native code for the program (an AOT executable); `false`
+        /// with `--no-aot` or `--runner`: the VM runner runs it.
+        aot: bool,
     },
     /// Dump / list native lock metadata.
     Natives {
@@ -244,6 +247,10 @@ enum RawCommand {
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
+        /// Package the VM runner with the program instead of linking native
+        /// code for it (the default links an AOT executable with `cc`)
+        #[arg(long)]
+        no_aot: bool,
         /// Entry `.coil` file
         file: Option<String>,
     },
@@ -640,6 +647,7 @@ impl RawCli {
                 runner,
                 ffi_native,
                 check_native,
+                no_aot,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -660,6 +668,7 @@ impl RawCli {
                         Command::Package {
                             filename,
                             output: out,
+                            aot: !no_aot && runner.is_none(),
                             runner,
                             natives: ffi_native,
                             check_native,
@@ -1035,6 +1044,7 @@ mod tests {
                 natives: Vec::new(),
                 check_native: false,
                 strip_debug: false,
+                aot: true,
             }
         );
     }
@@ -1070,6 +1080,7 @@ mod tests {
                 }],
                 check_native: true,
                 strip_debug: true,
+                aot: false,
             }
         );
     }

@@ -53,6 +53,96 @@ fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Res
         .map_err(|_| ())
 }
 
+/// Link an AOT executable for the program just compiled: its MIR through
+/// `coil_native::aot`, then `cc` with the runtime library (`libcoil_rt.a`
+/// beside `coil`, or `COIL_RT_LIB`). Returns the image, how many functions
+/// compiled and the runtime used; `None` (with a warning) when this host
+/// cannot link one, and the VM runner is packaged instead.
+#[cfg(not(target_family = "wasm"))]
+fn link_aot_executable(pipeline: &Pipeline) -> Option<(Vec<u8>, usize, PathBuf)> {
+    let bodies = compiler::native_mir::take_native_capture();
+    let debug = pipeline.program_debug_full();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    let fallback = |why: String| {
+        eprintln!("warning: {why}; packaging the VM runner instead (pass `--no-aot` to skip linking)");
+        None
+    };
+    let object = match coil_native::aot(&bodies, &pcs) {
+        Ok(o) => o,
+        Err(e) => return fallback(format!("native code for the package failed ({e})")),
+    };
+    if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+        for (name, why) in &object.refused {
+            eprintln!("  vm: {name}: {why}");
+        }
+    }
+    let rt = match runtime_library() {
+        Ok(p) => p,
+        Err(e) => return fallback(e),
+    };
+    match link_with_cc(&object.bytes, &rt) {
+        Ok(exe) => Some((exe, object.compiled.len(), rt)),
+        Err(e) => fallback(e),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn link_aot_executable(_: &Pipeline) -> Option<(Vec<u8>, usize, PathBuf)> {
+    None
+}
+
+/// `libcoil_rt.a`: `COIL_RT_LIB`, else beside this binary.
+#[cfg(not(target_family = "wasm"))]
+fn runtime_library() -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("COIL_RT_LIB") {
+        return Ok(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("cannot resolve current executable: {e}"))?;
+    let lib = exe.with_file_name(if cfg!(windows) { "coil_rt.lib" } else { "libcoil_rt.a" });
+    if lib.is_file() {
+        Ok(lib)
+    } else {
+        Err(format!("the native runtime `{}` is not installed", lib.display()))
+    }
+}
+
+/// `cc OBJECT RUNTIME -o EXE` with the system libraries the runtime needs.
+#[cfg(not(target_family = "wasm"))]
+fn link_with_cc(object: &[u8], rt: &Path) -> Result<Vec<u8>, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let dir = std::env::temp_dir().join(format!("coil-aot-{}-{nanos}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create `{}`: {e}", dir.display()))?;
+    let obj = dir.join("program.o");
+    let exe = dir.join("program");
+    let out = (|| {
+        fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
+        let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+        let libs: &[&str] = if cfg!(target_os = "macos") {
+            &["-lSystem", "-lc", "-lm"]
+        } else {
+            &["-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
+        };
+        let run = std::process::Command::new(&cc)
+            .arg(&obj)
+            .arg(rt)
+            .arg("-o")
+            .arg(&exe)
+            .args(libs)
+            .output()
+            .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))?;
+        if !run.status.success() {
+            let err = String::from_utf8_lossy(&run.stderr);
+            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output");
+            return Err(format!("linking with `{}` failed: {first}", cc.to_string_lossy()));
+        }
+        fs::read(&exe).map_err(|e| format!("cannot read `{}`: {e}", exe.display()))
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    out
+}
+
 fn resolve_runner_path(runner: Option<&Path>) -> Result<PathBuf, String> {
     match runner {
         Some(p) => Ok(p.to_path_buf()),
@@ -293,7 +383,13 @@ pub fn cmd_package(
     runner: Option<&Path>,
     natives: &[FfiNative],
     check_native: bool,
+    aot: bool,
 ) {
+    // An AOT executable is linked from this compile's MIR.
+    #[cfg(not(target_family = "wasm"))]
+    if aot {
+        compiler::native_mir::start_native_capture();
+    }
     let archive_bytes = compile_program_archive_bytes(pipeline, filename);
     // Notes below and errors go to a clean line.
     crate::end_compile_progress();
@@ -364,6 +460,38 @@ pub fn cmd_package(
         }
     }
 
+    // The executable the payload goes on: one linked from native code for
+    // the program, or the VM runner (`--no-aot`, `--runner`, or when
+    // linking is not possible here).
+    let linked = if aot { link_aot_executable(pipeline) } else { None };
+    if let Some((exe, compiled, rt)) = linked {
+        let lock_json = (!native_lock.entries.is_empty()).then(|| native_lock.to_json());
+        let packaged = append_package_payload_with_natives(
+            &exe,
+            &archive_bytes,
+            lock_json.as_deref().map(|s| s.as_bytes()),
+            flags,
+            ARCHIVE_VERSION,
+        );
+        if let Err(e) = fs::write(output, &packaged) {
+            fail_and_exit(pipeline, ErrorCode::IoError, format!("cannot write packaged output `{}`: {e}", output));
+        }
+        make_executable(Path::new(output));
+        if let Err(e) = pipeline.finish_reporting() {
+            pipeline.emit_spanless_warning(ErrorCode::IoError, format!("failed to flush diagnostics: {e}"));
+            let _ = pipeline.finish_reporting();
+        }
+        eprintln!(
+            "packaged `{}` for {}-{} ({} bytes; native code for {} functions, runtime {})",
+            output,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            packaged.len(),
+            compiled,
+            rt.display()
+        );
+        return;
+    }
     let runner_path = match resolve_runner_path(runner) {
         Ok(p) => p,
         Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),

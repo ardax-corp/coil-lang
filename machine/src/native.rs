@@ -397,6 +397,7 @@ impl NativeCtx {
 ///
 /// # Safety
 /// `ctx` is a live [`NativeCtx`] made by [`NativeCtx::new`].
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_undo_grow(ctx: *mut NativeCtx) {
     let ctx = unsafe { &mut *ctx };
     // A committed call never bails, so nothing will be undone: start over
@@ -434,7 +435,8 @@ pub struct NativeEntry {
     pub arity: u16,
     /// It may run VM code (a VM call, a function value, a `drop`), so a
     /// task switch could come while its frames are live: with a scheduler
-    /// that can switch, the VM runs the call itself.
+    /// that can switch, the call runs on the task's own fiber stack
+    /// (`vm_fiber.rs`).
     pub suspends: bool,
     /// The leading parameters the body reads: a `CALL` of at least this
     /// many words (and at most `arity`) enters it, the rest passed as `0`.
@@ -443,6 +445,42 @@ pub struct NativeEntry {
     /// in [`NativeCtx::ret_hi`]), as the VM's `RETURN` pushes them.
     pub ret_words: u8,
     pub entry: NativeEntryFn,
+}
+
+/// A [`NativeEntry`] as an AOT object's `coil_aot_entries` table lays it
+/// out (`coil_native::aot` writes it, [`install_aot`] reads it).
+#[repr(C)]
+pub struct AotEntry {
+    pub pc: u32,
+    pub arity: u16,
+    pub reads: u16,
+    pub ret_words: u8,
+    /// `1` when it may run VM code ([`NativeEntry::suspends`]).
+    pub suspends: u8,
+    pub pad: [u8; 6],
+    pub entry: NativeEntryFn,
+}
+
+/// Install the code an AOT object linked into this executable defines,
+/// for the next run: `n` entries and `n_sites` sites, each four words
+/// (`entry_pc`, then the location's file, start and end byte).
+///
+/// # Safety
+///
+/// The tables are the linked object's, as `coil_native::aot` wrote them.
+pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32, n_sites: usize) {
+    // SAFETY: the object defines `n` entries and `4 * n_sites` words.
+    let entries = unsafe { std::slice::from_raw_parts(entries, n) };
+    let words = unsafe { std::slice::from_raw_parts(sites, n_sites * 4) };
+    let entries = entries
+        .iter()
+        .map(|e| NativeEntry { pc: e.pc, arity: e.arity, suspends: e.suspends != 0, reads: e.reads, ret_words: e.ret_words, entry: e.entry })
+        .collect();
+    let sites = words
+        .chunks_exact(4)
+        .map(|w| NativeSite { entry_pc: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
+        .collect();
+    install_for_next_run(entries, sites);
 }
 
 /// An op native code may panic at: the function it is in (by entry PC)
@@ -628,6 +666,7 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
 ///
 /// # Safety
 /// `ctx` is the call's live [`NativeCtx`].
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_unwind(ctx: *mut NativeCtx, code: u64, site: u64) {
     let ctx = unsafe { &mut *ctx };
     if ctx.bail != BAIL_PANIC {
@@ -704,6 +743,7 @@ fn object(addr: u64) -> Option<crate::memory::Object> {
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_index(ctx: *mut NativeCtx, addr: u64, index: i64) -> u64 {
     let read = match object(addr) {
         Some(crate::memory::Object::Array(gc)) => gc.as_ref().read_indexed(index, false),
@@ -728,6 +768,7 @@ pub unsafe extern "C" fn coil_native_index(ctx: *mut NativeCtx, addr: u64, index
 }
 
 /// `ArrayLen`.
+#[unsafe(no_mangle)]
 pub extern "C" fn coil_native_len(addr: u64) -> u64 {
     (match object(addr) {
         Some(crate::memory::Object::Array(gc)) => gc.as_ref().len(),
@@ -741,6 +782,7 @@ pub extern "C" fn coil_native_len(addr: u64) -> u64 {
 }
 
 /// `LoadField` of slot `index`.
+#[unsafe(no_mangle)]
 pub extern "C" fn coil_native_field(addr: u64, index: u64) -> u64 {
     let index = index as usize;
     match object(addr) {
@@ -794,6 +836,7 @@ unsafe fn bail(ctx: *mut NativeCtx) -> u64 {
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64, index: i64, value: u64) -> u64 {
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
@@ -812,6 +855,7 @@ pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64,
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, index: u64, value: u64) -> u64 {
     let slot = index as usize;
     let Some(crate::memory::Object::Instance(mut gc)) = object(addr) else {
@@ -836,6 +880,7 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
 ///
 /// # Safety
 /// `addr` is a heap word; `out` points at two writable words.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u64) -> u64 {
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return 0;
@@ -881,6 +926,7 @@ unsafe fn note_alloc(ctx: *mut NativeCtx, heap: &crate::memory::Heap) {
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_collect(ctx: *mut NativeCtx) {
     let c = unsafe { &mut *ctx };
     c.gc_due = 0;
@@ -898,6 +944,7 @@ pub unsafe extern "C" fn coil_native_collect(ctx: *mut NativeCtx) {
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `word` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique: u64) -> u64 {
     if crate::vm::cow_eager() {
         return unsafe { bail(ctx) };
@@ -925,6 +972,7 @@ pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique:
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `obj` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, field: u64) -> u64 {
     if crate::vm::cow_eager() {
         return unsafe { bail(ctx) };
@@ -978,6 +1026,7 @@ pub const ALLOC_CORO: u64 = 7;
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words: *const u64, n: u64, extra: u64) -> u64 {
     use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, ObjTuple, Object};
     let Some(heap) = (unsafe { heap(ctx) }) else {
@@ -1114,6 +1163,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_array_push(ctx: *mut NativeCtx, addr: u64, value: u64) -> u64 {
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
@@ -1138,6 +1188,7 @@ pub const NOT_AN_ENUM: u64 = u64::MAX;
 ///
 /// # Safety
 /// `addr` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_enum_tag(addr: u64) -> u64 {
     match object(addr) {
         Some(crate::memory::Object::Enum(gc)) => {
@@ -1153,6 +1204,7 @@ pub unsafe extern "C" fn coil_native_enum_tag(addr: u64) -> u64 {
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_enum_payload(ctx: *mut NativeCtx, addr: u64, index: u64) -> u64 {
     match object(addr) {
         Some(crate::memory::Object::Enum(gc)) => match gc.as_ref().payload.get(index as usize) {
@@ -1168,6 +1220,7 @@ pub unsafe extern "C" fn coil_native_enum_payload(ctx: *mut NativeCtx, addr: u64
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_string(ctx: *mut NativeCtx, idx: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     if idx >= c.strings_len {
@@ -1195,6 +1248,7 @@ pub unsafe extern "C" fn coil_native_string(ctx: *mut NativeCtx, idx: u64) -> u6
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `a` and `b` are words.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_eq(ctx: *mut NativeCtx, a: u64, b: u64) -> u64 {
     if a == b {
         return 1;
@@ -1215,6 +1269,7 @@ pub unsafe extern "C" fn coil_native_eq(ctx: *mut NativeCtx, a: u64, b: u64) -> 
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_stringify(ctx: *mut NativeCtx, word: u64, tag: u64) -> u64 {
     type M = crate::Machine<{ crate::DEFAULT_OPERAND_STACK_SLOTS }>;
     let Some(heap) = (unsafe { heap(ctx) }) else {
@@ -1238,6 +1293,7 @@ pub unsafe extern "C" fn coil_native_stringify(ctx: *mut NativeCtx, word: u64, t
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `fmt` is a string object; `args`
 /// points at `n` words.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args: *const u64, n: u64) -> u64 {
     use crate::memory::{GcData, ObjString, Object};
     type M = crate::Machine<{ crate::DEFAULT_OPERAND_STACK_SLOTS }>;
@@ -1288,6 +1344,7 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_free_early(ctx: *mut NativeCtx, word: u64, deep: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     if c.frees.is_null() {
@@ -1323,6 +1380,7 @@ pub unsafe extern "C" fn coil_native_free_early(ctx: *mut NativeCtx, word: u64, 
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `word` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_print(ctx: *mut NativeCtx, word: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     let Some(crate::memory::Object::String(gc)) = object(word) else {
@@ -1345,6 +1403,7 @@ pub unsafe extern "C" fn coil_native_print(ctx: *mut NativeCtx, word: u64) -> u6
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_call_vm(ctx: *mut NativeCtx, pc: u64, args: *const u64, n: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); 16];
@@ -1380,6 +1439,7 @@ pub unsafe extern "C" fn coil_native_call_vm(ctx: *mut NativeCtx, pc: u64, args:
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, dicts: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); 16];
@@ -1413,6 +1473,7 @@ pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64
 /// # Safety
 ///
 /// `ctx` is the calling native code's live context.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_resume(ctx: *mut NativeCtx, handle: u64, send: u64, has_send: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     if c.machine.is_null() {
@@ -1453,6 +1514,7 @@ pub unsafe extern "C" fn coil_native_resume(ctx: *mut NativeCtx, handle: u64, se
 /// # Safety
 ///
 /// `ctx` is a live context with its heap.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_coro_done(ctx: *mut NativeCtx, handle: u64) -> u64 {
     // SAFETY: the context's heap is the machine's.
     let heap = unsafe { &*(*ctx).heap };
@@ -1500,6 +1562,7 @@ pub struct DirectHost {
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
@@ -1561,6 +1624,7 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, mask: u64) {
     let c = unsafe { &mut *ctx };
     if c.bail != BAIL_PANIC || c.pads.is_null() || func == 0 {
@@ -1624,6 +1688,7 @@ pub(crate) fn run_pads(mut pads: Vec<NativePad>, env: &NativeEnv) {
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_claim(ctx: *mut NativeCtx, pc: u64, word: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     if c.machine.is_null() {
@@ -1642,6 +1707,7 @@ pub unsafe extern "C" fn coil_native_claim(ctx: *mut NativeCtx, pc: u64, word: u
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `msg` is a heap word.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_panic(ctx: *mut NativeCtx, msg: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     if let Some(crate::memory::Object::String(gc)) = object(msg) {
@@ -1651,3 +1717,80 @@ pub unsafe extern "C" fn coil_native_panic(ctx: *mut NativeCtx, msg: u64) -> u64
     }
     unsafe { bail(ctx) }
 }
+
+/// `float %`.
+#[unsafe(no_mangle)]
+pub extern "C" fn coil_native_fmod(a: f64, b: f64) -> f64 {
+    a % b
+}
+
+/// `float **`.
+#[unsafe(no_mangle)]
+pub extern "C" fn coil_native_powf(a: f64, b: f64) -> f64 {
+    a.powf(b)
+}
+
+/// `int **` (`common::int_arith::pow`): the power goes to `out`; returns
+/// `0`, or the trap code of its failure.
+///
+/// # Safety
+///
+/// `out` is a writable slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ipow(a: i64, b: i64, out: *mut i64) -> i64 {
+    match common::int_arith::pow(a, b) {
+        Ok(v) => {
+            // SAFETY: native code passes a slot of its frame.
+            unsafe { *out = v };
+            0
+        }
+        Err(common::int_arith::IntTrap::NegativeExponent) => TRAP_NEGATIVE_EXPONENT as i64,
+        Err(_) => TRAP_OVERFLOW as i64,
+    }
+}
+
+/// Every runtime helper native code calls, by symbol name: the JIT binds
+/// them, an AOT object imports them (the runtime library exports them
+/// under these names).
+pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
+    struct Table([(&'static str, *const u8); HELPERS]);
+    // SAFETY: function addresses, read-only.
+    unsafe impl Sync for Table {}
+    static TABLE: Table = Table([
+        ("coil_native_fmod", coil_native_fmod as *const u8),
+        ("coil_native_powf", coil_native_powf as *const u8),
+        ("coil_native_ipow", coil_native_ipow as *const u8),
+        ("coil_native_index", coil_native_index as *const u8),
+        ("coil_native_len", coil_native_len as *const u8),
+        ("coil_native_field", coil_native_field as *const u8),
+        ("coil_native_store_index", coil_native_store_index as *const u8),
+        ("coil_native_set_field", coil_native_set_field as *const u8),
+        ("coil_native_view", coil_native_view as *const u8),
+        ("coil_native_undo_grow", coil_native_undo_grow as *const u8),
+        ("coil_native_cow", coil_native_cow as *const u8),
+        ("coil_native_cow_field", coil_native_cow_field as *const u8),
+        ("coil_native_alloc", coil_native_alloc as *const u8),
+        ("coil_native_array_push", coil_native_array_push as *const u8),
+        ("coil_native_free_early", coil_native_free_early as *const u8),
+        ("coil_native_format", coil_native_format as *const u8),
+        ("coil_native_stringify", coil_native_stringify as *const u8),
+        ("coil_native_eq", coil_native_eq as *const u8),
+        ("coil_native_string", coil_native_string as *const u8),
+        ("coil_native_enum_tag", coil_native_enum_tag as *const u8),
+        ("coil_native_enum_payload", coil_native_enum_payload as *const u8),
+        ("coil_native_unwind", coil_native_unwind as *const u8),
+        ("coil_native_print", coil_native_print as *const u8),
+        ("coil_native_host", coil_native_host as *const u8),
+        ("coil_native_call_vm", coil_native_call_vm as *const u8),
+        ("coil_native_call_value", coil_native_call_value as *const u8),
+        ("coil_native_resume", coil_native_resume as *const u8),
+        ("coil_native_coro_done", coil_native_coro_done as *const u8),
+        ("coil_native_defer", coil_native_defer as *const u8),
+        ("coil_native_claim", coil_native_claim as *const u8),
+        ("coil_native_collect", coil_native_collect as *const u8),
+        ("coil_native_panic", coil_native_panic as *const u8),
+    ]);
+    &TABLE.0
+}
+
+const HELPERS: usize = 32;

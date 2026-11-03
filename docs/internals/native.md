@@ -24,8 +24,7 @@ coil run --no-jit prog.ccoil                 # VM only
 ```
 
 `coil run --jit` on an archive without the section warns and runs on the
-VM. `coil package` does not use the section yet (step 7 builds AOT
-binaries instead).
+VM. `coil package` compiles ahead of time instead (see [AOT](#aot-coil-package)).
 
 ### Testing against the VM
 
@@ -328,6 +327,30 @@ counters (`NativeTable`).
 | float `!=` | true when unordered (Rust `!=`), `==` / `<` ordered |
 | `float as int` | `fcvt_to_sint_sat` (Rust `as`: saturating, NaN is 0) |
 
+## AOT `coil package`
+
+`coil package` links a native executable by default (`--no-aot` or
+`--runner` keep the old runner + payload):
+
+1. The build captures MIR as for `--jit`; `coil_native::aot()` lowers it
+   with `cranelift-object` (PIC) into `program.o`. The object defines
+   `coil_aot_entries` / `coil_aot_entry_count` (one `AotEntry` per
+   compiled body, the function address relocated in) and
+   `coil_aot_sites` / `coil_aot_site_count` (call-site words), and imports
+   the runtime helpers by name (`machine::native::helper_symbols()`, all
+   `#[unsafe(no_mangle)]`).
+2. `cc` links `program.o` with `libcoil_rt.a` (the `coil-rt` staticlib,
+   found via `COIL_RT_LIB` or beside the `coil` binary). `coil-rt`'s
+   `main` calls `machine::native::install_aot` with those symbols, then
+   runs the embedded payload like `coil-embed`.
+3. The archive payload is appended as for a runner package; the VM runs
+   every body the object does not hold.
+
+If the object or the link fails (no `cc`, no `libcoil_rt.a`, Windows) the
+package warns and falls back to the runner. `tests/package_cli.rs`
+(`aot_package_matches_the_vm_runner`) checks output and exit status equal
+the runner package.
+
 ## Where the pieces are
 
 | Piece | Place |
@@ -337,4 +360,6 @@ counters (`NativeTable`).
 | Native table, `NativeCtx`, bail | `machine/src/native.rs`, `Machine::try_native_call` |
 | `--jit` / `--no-jit` | `coil-args` (`NurseryFlag`), `coil compile --jit` in `src/cli.rs`, `src/main.rs` `install_native_bodies` |
 | Archive section | `coil-native/src/section.rs`, `ArchivedProgram::native_mir` |
-| Tests | `tests/native_jit_cli.rs` (JIT output equals VM output) |
+| AOT object | `coil_native::aot` (`coil-native/src/lib.rs`), `src/package_app.rs` `link_aot_executable` |
+| AOT runtime | `coil-rt/` (staticlib with `main`), `machine::native::install_aot` |
+| Tests | `tests/native_jit_cli.rs` (JIT output equals VM output), `tests/package_cli.rs` (AOT package equals runner) |

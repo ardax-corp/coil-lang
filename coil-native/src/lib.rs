@@ -73,6 +73,99 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
     }
 }
 
+/// What [`aot`] produced: a relocatable object for the host target that
+/// defines the compiled bodies and the tables `machine::native::install_aot`
+/// reads (`coil_aot_entries`, `coil_aot_entry_count`, `coil_aot_sites`,
+/// `coil_aot_site_count`), importing the runtime helpers by name.
+pub struct AotObject {
+    pub bytes: Vec<u8>,
+    pub compiled: Vec<String>,
+    pub refused: Vec<(String, String)>,
+}
+
+/// Compile every eligible body of `bodies` to an object file (`coil
+/// package`): the same lowering as [`jit`], linked against the runtime
+/// library instead of bound in memory.
+pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<AotObject, String> {
+    let mut excluded = HashMap::new();
+    loop {
+        let plan = plan_without(bodies, &excluded, entry_pcs);
+        let refused = plan.refused.clone();
+        let mut flags = settings::builder();
+        flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
+        // Executables are position independent on most hosts.
+        flags.set("is_pic", "true").map_err(|e| e.to_string())?;
+        let isa = cranelift_native::builder()
+            .map_err(|e| e.to_string())?
+            .finish(settings::Flags::new(flags))
+            .map_err(|e| e.to_string())?;
+        let builder = cranelift_object::ObjectBuilder::new(isa, "coil_aot", default_libcall_names()).map_err(|e| e.to_string())?;
+        let mut module = cranelift_object::ObjectModule::new(builder);
+        let (ids, defined, sites) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
+            Ok(done) => done,
+            Err((i, why)) => {
+                excluded.insert(i, why);
+                continue;
+            }
+        };
+        let e = |e: cranelift_module::ModuleError| e.to_string();
+        // The entry table: `machine::native::AotEntry` records.
+        const ENTRY_BYTES: usize = std::mem::size_of::<machine::native::AotEntry>();
+        let mut table = cranelift_module::DataDescription::new();
+        let mut bytes = Vec::new();
+        let mut relocs = Vec::new();
+        let mut compiled = Vec::new();
+        for &i in &defined {
+            let body = &bodies[i];
+            compiled.push(body.name.clone());
+            let Some(&pc) = entry_pcs.get(&body.name) else { continue };
+            let at = bytes.len();
+            bytes.resize(at + ENTRY_BYTES, 0);
+            bytes[at..at + 4].copy_from_slice(&pc.to_le_bytes());
+            bytes[at + 4..at + 6].copy_from_slice(&(body.mir.params.len() as u16).to_le_bytes());
+            let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
+            bytes[at + 6..at + 8].copy_from_slice(&reads.to_le_bytes());
+            bytes[at + 8] = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
+            bytes[at + 9] = u8::from(plan.vm_reach.contains(&i));
+            relocs.push((at + std::mem::offset_of!(machine::native::AotEntry, entry), ids.entry[&i]));
+        }
+        let count = bytes.len() / ENTRY_BYTES;
+        if bytes.is_empty() {
+            bytes.resize(ENTRY_BYTES, 0);
+        }
+        table.define(bytes.into_boxed_slice());
+        table.set_align(8);
+        for (off, id) in relocs {
+            let f = module.declare_func_in_data(id, &mut table);
+            table.write_function_addr(off as u32, f);
+        }
+        let table_id = module.declare_data("coil_aot_entries", Linkage::Export, false, false).map_err(e)?;
+        module.define_data(table_id, &table).map_err(e)?;
+        let mut words = |name: &str, data: Vec<u8>| -> Result<(), String> {
+            let mut d = cranelift_module::DataDescription::new();
+            d.define(data.into_boxed_slice());
+            d.set_align(8);
+            let id = module.declare_data(name, Linkage::Export, false, false).map_err(e)?;
+            module.define_data(id, &d).map_err(e)
+        };
+        words("coil_aot_entry_count", (count as u64).to_le_bytes().to_vec())?;
+        let mut site_words = Vec::with_capacity(sites.len() * 16 + 16);
+        for site in &sites {
+            for w in [site.entry_pc, site.loc.file, site.loc.start_byte, site.loc.end_byte] {
+                site_words.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        let site_count = sites.len() as u64;
+        if site_words.is_empty() {
+            site_words.resize(16, 0);
+        }
+        words("coil_aot_sites", site_words)?;
+        words("coil_aot_site_count", site_count.to_le_bytes().to_vec())?;
+        let bytes = module.finish().emit().map_err(|e| e.to_string())?;
+        return Ok(AotObject { bytes, compiled, refused });
+    }
+}
+
 enum Attempt {
     Done(NativeProgram),
     /// Body `i` does not lower: try again without it.
@@ -97,95 +190,15 @@ fn jit_once(
         .finish(settings::Flags::new(flags))
         .map_err(|e| e.to_string())?;
     let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
-    jb.symbol("coil_native_fmod", coil_native_fmod as *const u8);
-    jb.symbol("coil_native_powf", coil_native_powf as *const u8);
-    jb.symbol("coil_native_ipow", coil_native_ipow as *const u8);
-    jb.symbol("coil_native_index", machine::native::coil_native_index as *const u8);
-    jb.symbol("coil_native_len", machine::native::coil_native_len as *const u8);
-    jb.symbol("coil_native_field", machine::native::coil_native_field as *const u8);
-    jb.symbol("coil_native_store_index", machine::native::coil_native_store_index as *const u8);
-    jb.symbol("coil_native_set_field", machine::native::coil_native_set_field as *const u8);
-    jb.symbol("coil_native_view", machine::native::coil_native_view as *const u8);
-    jb.symbol("coil_native_undo_grow", machine::native::coil_native_undo_grow as *const u8);
-    jb.symbol("coil_native_cow", machine::native::coil_native_cow as *const u8);
-    jb.symbol("coil_native_cow_field", machine::native::coil_native_cow_field as *const u8);
-    jb.symbol("coil_native_alloc", machine::native::coil_native_alloc as *const u8);
-    jb.symbol("coil_native_array_push", machine::native::coil_native_array_push as *const u8);
-    jb.symbol("coil_native_free_early", machine::native::coil_native_free_early as *const u8);
-    jb.symbol("coil_native_format", machine::native::coil_native_format as *const u8);
-    jb.symbol("coil_native_stringify", machine::native::coil_native_stringify as *const u8);
-    jb.symbol("coil_native_eq", machine::native::coil_native_eq as *const u8);
-    jb.symbol("coil_native_string", machine::native::coil_native_string as *const u8);
-    jb.symbol("coil_native_enum_tag", machine::native::coil_native_enum_tag as *const u8);
-    jb.symbol("coil_native_enum_payload", machine::native::coil_native_enum_payload as *const u8);
-    jb.symbol("coil_native_unwind", machine::native::coil_native_unwind as *const u8);
-    jb.symbol("coil_native_print", machine::native::coil_native_print as *const u8);
-    jb.symbol("coil_native_host", machine::native::coil_native_host as *const u8);
-    jb.symbol("coil_native_call_vm", machine::native::coil_native_call_vm as *const u8);
-    jb.symbol("coil_native_call_value", machine::native::coil_native_call_value as *const u8);
-    jb.symbol("coil_native_resume", machine::native::coil_native_resume as *const u8);
-    jb.symbol("coil_native_coro_done", machine::native::coil_native_coro_done as *const u8);
-    jb.symbol("coil_native_defer", machine::native::coil_native_defer as *const u8);
-    jb.symbol("coil_native_claim", machine::native::coil_native_claim as *const u8);
-    jb.symbol("coil_native_collect", machine::native::coil_native_collect as *const u8);
-    jb.symbol("coil_native_panic", machine::native::coil_native_panic as *const u8);
+    for &(name, ptr) in machine::native::helper_symbols() {
+        jb.symbol(name, ptr);
+    }
     let mut module = JITModule::new(jb);
 
-    let ids = declare(&mut module, bodies, &plan.compile)?;
-    let fcfg = module.isa().frontend_config();
-    let mut fbc = FunctionBuilderContext::new();
-    let mut ctx = module.make_context();
-    let mut defined = Vec::new();
-    let mut sites = Vec::new();
-    for &i in &plan.compile {
-        let body = &bodies[i];
-        ctx.func.signature = impl_signature(&module, &body.mir);
-        let lowered = {
-            let entry_pc = entry_pcs.get(&body.name).copied();
-            let mut lower = Lower::new(&mut module, &mut ctx.func, &mut fbc, &ids, &plan, &mut sites, entry_pc);
-            lower.body_index = Some(i);
-            let r = lower.body(&body.mir);
-            if r.is_ok() {
-                lower.b.finalize(fcfg);
-            }
-            r
-        };
-        if let Err(why) = lowered {
-            return Ok(Attempt::Without(i, why));
-        }
-        if let Err(e) = module.define_function(ids.imp[&i], &mut ctx) {
-            return Ok(Attempt::Without(i, format!("cranelift: {e:?}")));
-        }
-        module.clear_context(&mut ctx);
-
-        if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
-            ctx.func.signature = entry_signature(&module);
-            let lowered = {
-                let mut lower = Lower::new(&mut module, &mut ctx.func, &mut fbc, &ids, &plan, &mut sites, None);
-                lower.is_pad = true;
-                let r = lower.body(pad);
-                if r.is_ok() {
-                    lower.b.finalize(fcfg);
-                }
-                r
-            };
-            if let Err(why) = lowered {
-                return Ok(Attempt::Without(i, format!("cleanup pad: {why}")));
-            }
-            if let Err(e) = module.define_function(pad_id, &mut ctx) {
-                return Ok(Attempt::Without(i, format!("cranelift pad: {e:?}")));
-            }
-            module.clear_context(&mut ctx);
-        }
-
-        ctx.func.signature = entry_signature(&module);
-        build_entry(&mut module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
-        module
-            .define_function(ids.entry[&i], &mut ctx)
-            .map_err(|e| format!("cranelift entry of `{}`: {e:?}", body.name))?;
-        module.clear_context(&mut ctx);
-        defined.push(i);
-    }
+    let (ids, defined, sites) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
+        Ok(done) => done,
+        Err((i, why)) => return Ok(Attempt::Without(i, why)),
+    };
     module.finalize_definitions().map_err(|e| e.to_string())?;
 
     let mut entries = Vec::new();
@@ -206,28 +219,6 @@ fn jit_once(
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
     Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites }))
-}
-
-extern "C" fn coil_native_fmod(a: f64, b: f64) -> f64 {
-    a % b
-}
-
-extern "C" fn coil_native_powf(a: f64, b: f64) -> f64 {
-    a.powf(b)
-}
-
-/// `int **` (`common::int_arith::pow`): the power goes to `out`; returns
-/// `0`, or the trap code of its failure.
-extern "C" fn coil_native_ipow(a: i64, b: i64, out: *mut i64) -> i64 {
-    match common::int_arith::pow(a, b) {
-        Ok(v) => {
-            // SAFETY: native code passes a slot of its frame.
-            unsafe { *out = v };
-            0
-        }
-        Err(common::int_arith::IntTrap::NegativeExponent) => machine::native::TRAP_NEGATIVE_EXPONENT as i64,
-        Err(_) => TRAP_OVERFLOW as i64,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +262,79 @@ fn plan(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Plan {
 fn vm_callable(b: &NativeBody, entry_pcs: &HashMap<String, u32>) -> Option<u32> {
     let pc = *entry_pcs.get(&b.name)?;
     (b.mir.params.len() <= 16).then_some(pc)
+}
+
+
+/// What [`define_all`] made: the declared ids, the bodies defined, and
+/// the panic sites their code names.
+type Defined = (Ids, Vec<usize>, Vec<NativeSite>);
+
+/// Declare and define every body `plan` compiles (its implementation,
+/// cleanup pad and VM entry) in `module`. `Ok(Err((i, why)))` when body
+/// `i` does not lower: the caller tries again without it.
+#[allow(clippy::type_complexity)]
+fn define_all<M: Module>(
+    module: &mut M,
+    bodies: &[NativeBody],
+    entry_pcs: &HashMap<String, u32>,
+    plan: &Plan,
+) -> Result<Result<Defined, (usize, String)>, String> {
+    let ids = declare(module, bodies, &plan.compile)?;
+    let fcfg = module.isa().frontend_config();
+    let mut fbc = FunctionBuilderContext::new();
+    let mut ctx = module.make_context();
+    let mut defined = Vec::new();
+    let mut sites = Vec::new();
+    for &i in &plan.compile {
+        let body = &bodies[i];
+        ctx.func.signature = impl_signature(&*module, &body.mir);
+        let lowered = {
+            let entry_pc = entry_pcs.get(&body.name).copied();
+            let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, entry_pc);
+            lower.body_index = Some(i);
+            let r = lower.body(&body.mir);
+            if r.is_ok() {
+                lower.b.finalize(fcfg);
+            }
+            r
+        };
+        if let Err(why) = lowered {
+            return Ok(Err((i, why)));
+        }
+        if let Err(e) = module.define_function(ids.imp[&i], &mut ctx) {
+            return Ok(Err((i, format!("cranelift: {e:?}"))));
+        }
+        module.clear_context(&mut ctx);
+
+        if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
+            ctx.func.signature = entry_signature(&*module);
+            let lowered = {
+                let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, None);
+                lower.is_pad = true;
+                let r = lower.body(pad);
+                if r.is_ok() {
+                    lower.b.finalize(fcfg);
+                }
+                r
+            };
+            if let Err(why) = lowered {
+                return Ok(Err((i, format!("cleanup pad: {why}"))));
+            }
+            if let Err(e) = module.define_function(pad_id, &mut ctx) {
+                return Ok(Err((i, format!("cranelift pad: {e:?}"))));
+            }
+            module.clear_context(&mut ctx);
+        }
+
+        ctx.func.signature = entry_signature(&*module);
+        build_entry(module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
+        module
+            .define_function(ids.entry[&i], &mut ctx)
+            .map_err(|e| format!("cranelift entry of `{}`: {e:?}", body.name))?;
+        module.clear_context(&mut ctx);
+        defined.push(i);
+    }
+    Ok(Ok((ids, defined, sites)))
 }
 
 /// [`plan`] with `excluded` bodies refused for the given reason.
@@ -946,7 +1010,7 @@ fn cl_ty(t: MirTy) -> Type {
     if t == MirTy::F64 { types::F64 } else { types::I64 }
 }
 
-fn impl_signature(module: &JITModule, f: &MirFunc) -> Signature {
+fn impl_signature(module: &impl Module, f: &MirFunc) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     for &p in &f.params {
@@ -959,7 +1023,7 @@ fn impl_signature(module: &JITModule, f: &MirFunc) -> Signature {
     sig
 }
 
-fn entry_signature(module: &JITModule) -> Signature {
+fn entry_signature(module: &impl Module) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
@@ -967,7 +1031,7 @@ fn entry_signature(module: &JITModule) -> Signature {
     sig
 }
 
-fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> Result<Ids, String> {
+fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -> Result<Ids, String> {
     let e = |e: cranelift_module::ModuleError| e.to_string();
     let mut imp = HashMap::new();
     let mut entry = HashMap::new();
@@ -1078,7 +1142,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
 // The VM entry wrapper
 
 fn build_entry(
-    module: &mut JITModule,
+    module: &mut impl Module,
     func: &mut cranelift_codegen::ir::Function,
     fbc: &mut FunctionBuilderContext,
     imp: FuncId,
@@ -1209,7 +1273,7 @@ struct Lower<'a> {
 
 impl<'a> Lower<'a> {
     fn new(
-        module: &mut JITModule,
+        module: &mut impl Module,
         func: &'a mut cranelift_codegen::ir::Function,
         fbc: &'a mut FunctionBuilderContext,
         ids: &Ids,
