@@ -454,13 +454,20 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                             return Err("bool arithmetic".into());
                         }
                     }
+                    // Heap words compare as `i64` words, as `DenseCmp` does.
                     MirInst::Cmp { dest, ty, lhs, rhs, .. } => {
-                        if !scalar(*ty) {
+                        if !scalar(*ty) && !heap_word(*ty) {
                             return Err(format!("compare of {ty:?}"));
                         }
                         need_scalar(dest)?;
-                        need_scalar(lhs)?;
-                        need_scalar(rhs)?;
+                        need(lhs)?;
+                        need(rhs)?;
+                    }
+                    // Native code roots every heap word it holds across a
+                    // call that may collect: nothing to keep.
+                    MirInst::KeepAlive { dest, value } => {
+                        need(dest)?;
+                        need(value)?;
                     }
                     // `!w` is `w == 0`, exact on any word (`None` is 0).
                     MirInst::Unary { dest, op: MirUnaryOp::Not, src } if ty_of(f, *src) != MirTy::F64 => {
@@ -511,6 +518,7 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         }
                         match kind {
                             MirAllocKind::Array | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
+                            MirAllocKind::DropEnum { .. } if elems.len() < 16 => {}
                             MirAllocKind::Object { .. } if elems.is_empty() => {}
                             // A function value: its body must have an entry
                             // PC, so it counts as a callee.
@@ -1399,6 +1407,12 @@ impl<'a> Lower<'a> {
             }
             MirInst::Phi { dest, .. } => self.view_of(f, *dest),
             MirInst::Deopt { .. } => {}
+            MirInst::KeepAlive { dest, .. } => {
+                if numeric(ty_of(f, *dest)) {
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.set(f, *dest, zero);
+                }
+            }
             MirInst::Call { dest, dest_hi, target, args } => {
                 let callee = *self.by_label.get(target).ok_or("unknown callee")?;
                 if let Some(&pc) = self.plan.vm_calls.get(&callee) {
@@ -1545,7 +1559,7 @@ impl<'a> Lower<'a> {
                 // Declaration order: an enum's elems are in push order and
                 // its payload starts with the last push, as `DenseMake`.
                 let mut words = elems.clone();
-                if matches!(kind, MirAllocKind::Enum { .. }) {
+                if matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::DropEnum { .. }) {
                     words.reverse();
                 }
                 let packed = || common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w))));
@@ -1559,6 +1573,10 @@ impl<'a> Lower<'a> {
                         (ALLOC_ENUM, words.len() as u64, u64::from(tag) | (u64::from(k) << 32))
                     }
                     MirAllocKind::Object { type_id, nfields } => (ALLOC_OBJECT, u64::from(nfields), u64::from(type_id)),
+                    MirAllocKind::DropEnum { tag, .. } => {
+                        let k = if *kinds != 0 { *kinds } else { packed() };
+                        (machine::native::ALLOC_DROP_ENUM, words.len() as u64 + 1, u64::from(tag) | (u64::from(k) << 32))
+                    }
                     MirAllocKind::Fn { target, operand, .. } => {
                         let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no entry PC")?;
                         (machine::native::ALLOC_FN, words.len() as u64 + 1, u64::from(pc) | (u64::from(operand) << 32))
@@ -1570,10 +1588,10 @@ impl<'a> Lower<'a> {
                     }
                     other => return Err(format!("allocation {other:?}")),
                 };
-                let p = if let MirAllocKind::Fn { mask, .. } = *kind {
-                    self.words_slot_with(f, &words, Some(i64::from(mask)))
-                } else {
-                    self.words_slot(f, &words)
+                let p = match *kind {
+                    MirAllocKind::Fn { mask, .. } => self.words_slot_with(f, &words, Some(i64::from(mask))),
+                    MirAllocKind::DropEnum { type_id, .. } => self.words_slot_with(f, &words, Some(i64::from(type_id))),
+                    _ => self.words_slot(f, &words),
                 };
                 let code = self.b.ins().iconst(types::I64, code as i64);
                 let n = self.b.ins().iconst(types::I64, n as i64);

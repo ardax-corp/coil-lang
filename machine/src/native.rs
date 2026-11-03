@@ -832,6 +832,7 @@ pub const ALLOC_ENUM: u64 = 2;
 pub const ALLOC_OBJECT: u64 = 3;
 pub const ALLOC_FN: u64 = 4;
 pub const ALLOC_POLY_FN: u64 = 5;
+pub const ALLOC_DROP_ENUM: u64 = 6;
 
 /// A new object of `kind` from the `n` words at `words`, in declaration
 /// order (an enum's payload order):
@@ -845,7 +846,9 @@ pub const ALLOC_POLY_FN: u64 = 5;
 ///   the filled mask;
 /// - [`ALLOC_POLY_FN`]: a generic function's value, as `MakePolyFn` /
 ///   `MakePolyFnCapture`: `extra` is the entry PC `| params << 32`, the
-///   words its dictionaries (`0`: filled in by the call).
+///   words its dictionaries (`0`: filled in by the call);
+/// - [`ALLOC_DROP_ENUM`]: [`ALLOC_ENUM`] of an enum with a `drop`, as
+///   `TagEnumType` stamps it: the last word is its type id.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
@@ -871,6 +874,26 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
         }
         ALLOC_TUPLE if n == 0 => return heap.immortal_empty_tuple().addr(),
         ALLOC_TUPLE => heap.alloc(ObjTuple::from_slice(&values).with_kinds(extra as u8), Object::Tuple).0.addr(),
+        ALLOC_DROP_ENUM => {
+            let Some((&type_id, payload)) = values.split_last() else {
+                return unsafe { bail(ctx) };
+            };
+            if payload.is_empty() {
+                // A unit variant is a shared immortal, untagged.
+                return heap.immortal_unit_enum(extra as u32).addr();
+            }
+            let payload = match payload {
+                [a] => EnumPayload::one(*a),
+                [a, b] => EnumPayload::two(*a, *b),
+                v => EnumPayload::from_slice(v),
+            }
+            .with_kinds((extra >> 32) as u8);
+            let (obj, mut gc) = heap.alloc(ObjEnum::new(extra as u32, payload), Object::Enum);
+            let type_id = type_id.bits() as u32;
+            gc.as_mut().type_id = type_id;
+            heap.note_enum_type(Object::Enum(gc), type_id);
+            obj.addr()
+        }
         ALLOC_ENUM => {
             let tag = extra as u32;
             if n == 0 {

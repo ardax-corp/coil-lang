@@ -161,6 +161,7 @@ const I_PRINT: u8 = 27;
 const I_HOST: u8 = 28;
 const I_PANIC: u8 = 29;
 const I_CALL_INDIRECT: u8 = 30;
+const I_KEEP_ALIVE: u8 = 31;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -408,6 +409,11 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                     w.u32(operand);
                     w.u32(mask);
                 }
+                MirAllocKind::DropEnum { tag, type_id } => {
+                    w.u8(7);
+                    w.u32(tag);
+                    w.u32(type_id);
+                }
                 MirAllocKind::PolyFn { target } => {
                     w.u8(5);
                     w.u32(target.0);
@@ -453,6 +459,11 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u32(u32::from(*native_id));
             w.u8(*layout);
             w.vs(args);
+        }
+        MirInst::KeepAlive { dest, value } => {
+            w.u8(I_KEEP_ALIVE);
+            w.v(*dest);
+            w.v(*value);
         }
         MirInst::CallIndirect { dest, callee, args, dicts } => {
             w.u8(I_CALL_INDIRECT);
@@ -694,6 +705,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
                 2 => MirAllocKind::Enum { tag: r.u32()? },
                 3 => MirAllocKind::Object { type_id: r.u32()?, nfields: r.u32()? },
                 4 => MirAllocKind::Fn { target: Label(r.u32()?), operand: r.u32()?, mask: r.u32()? },
+                7 => MirAllocKind::DropEnum { tag: r.u32()?, type_id: r.u32()? },
                 5 => MirAllocKind::PolyFn { target: Label(r.u32()?) },
                 6 => MirAllocKind::PolyFnCapture { target: Label(r.u32()?), params: r.u32()? },
                 k => return Err(format!("native MIR: bad allocation kind {k}")),
@@ -719,6 +731,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_STRINGIFY => MirInst::Stringify { dest: r.v()?, src: r.v()?, tag: Some(r.u32()?).filter(|&t| t != u32::MAX) },
         I_STR_EQ => MirInst::StrEq { dest: r.v()?, lhs: r.v()?, rhs: r.v()?, ne: r.u8()? != 0 },
         I_CLEAR_WORD => MirInst::ClearWord { dest: r.v()?, value: r.v()? },
+        I_KEEP_ALIVE => MirInst::KeepAlive { dest: r.v()?, value: r.v()? },
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
         I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: Vec::new() },
