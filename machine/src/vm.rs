@@ -1832,6 +1832,32 @@ impl<const S: usize> Machine<S> {
     /// (threads, auto-par jobs, test cases) run it too. `None` removes it.
     pub fn install_native(&mut self, code: Option<std::sync::Arc<crate::native::NativeCode>>) {
         self.native = code.filter(|c| !c.is_empty()).map(|c| Box::new(crate::native::NativeTable::new(c)));
+        self.ensure_host_stubs();
+    }
+
+    /// With native code installed and the program loaded, append the
+    /// host-call stubs (`native::host_stubs`) past the program, once. Runs
+    /// only while no execution borrows the code.
+    fn ensure_host_stubs(&mut self) {
+        let Some(base) = self.native.as_ref().map(|t| t.code.code_len()) else {
+            return;
+        };
+        if self.program_code.len() == base {
+            Arc::make_mut(&mut self.program_code).extend(crate::native::host_stubs());
+        }
+    }
+
+    /// The PC of the host-call stub for `arity` words in `layout`.
+    fn host_stub_pc(&self, arity: usize, layout: u64) -> Option<usize> {
+        let base = self.native.as_ref()?.code.code_len();
+        let off = crate::native::host_stub_offset(arity, layout)?;
+        (self.program_code.len() >= base + crate::native::HOST_STUBS_LEN).then_some(base + off)
+    }
+
+    /// Whether `ip` lies in the host-call stubs: a frame there runs no code
+    /// of its own (its caller is native code).
+    fn in_host_stub(&self, ip: usize) -> bool {
+        self.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < t.code.code_len() + crate::native::HOST_STUBS_LEN)
     }
 
     /// The installed native code, for a machine that runs this program.
@@ -1966,6 +1992,7 @@ impl<const S: usize> Machine<S> {
                 collect: Self::native_collect,
                 gc: Self::native_gc,
                 free: Self::native_free,
+                host: Self::native_host_vm,
             },
         }
     }
@@ -2058,6 +2085,30 @@ impl<const S: usize> Machine<S> {
         // SAFETY: the calling native code's live context.
         unsafe { (*ctx).vm_hi = std::mem::take(&mut vm.nested_return_hi).bits() };
         out.bits()
+    }
+
+    /// [`crate::native::NativeHost::host`]: the host native `id` through
+    /// its stub, in a nested execution, as [`Self::native_vm_call`].
+    unsafe fn native_host_vm(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        id: u64,
+        layout: u64,
+        args: &[Value],
+        panicked: &mut bool,
+    ) -> Option<u64> {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let pc = vm.host_stub_pc(args.len(), layout)?;
+        let mut words = [Value::default(); crate::native::HOST_STUB_ARITIES + 1];
+        words[0] = Value::from(id as i64);
+        words[1..=args.len()].copy_from_slice(args);
+        vm.nested_return_hi = Value::default();
+        vm.native_roots.push((ctx, vm.frames.len()));
+        let out = vm.native_reenter(|vm| vm.call_function(pc as u32, &words[..=args.len()]));
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        Some(out.bits())
     }
 
     /// [`crate::native::NativeHost::claim`]: the finalizer claim `CALL`
@@ -2712,6 +2763,10 @@ impl<const S: usize> Machine<S> {
     }
 
     fn format_panic_location(&self, panic_insn_ip: usize) -> Option<String> {
+        // A host call native code made: its call site.
+        if self.in_host_stub(panic_insn_ip) {
+            return self.native_caller_location();
+        }
         let (file, line, column) = self.pc_file_line_column(panic_insn_ip)?;
         let path = self.program_debug.source_files.get(file as usize)?;
         Some(format!("{}:{}:{}", path, line, column))
@@ -2809,8 +2864,8 @@ impl<const S: usize> Machine<S> {
                     emit(line, &mut lines, &mut repeats);
                 }
                 let ip = frames[frame_idx].tell();
-                // An over-apply stub runs no code of its own.
-                if ip >= OVER_APPLY_IP {
+                // An over-apply or host-call stub runs no code of its own.
+                if ip >= OVER_APPLY_IP || self.in_host_stub(ip) {
                     continue;
                 }
                 // A caller's saved ip is its return address: name the call.
@@ -2898,6 +2953,9 @@ impl<const S: usize> Machine<S> {
             .min()
             .unwrap_or(self.program_code.len());
         let want = site.loc;
+        if !want.is_known() {
+            return None;
+        }
         let mut near = None;
         for pc in start..end {
             let Some(l) = self.program_debug.loc_at(pc) else { continue };
@@ -5240,6 +5298,7 @@ impl<const S: usize> Machine<S> {
     /// Load bytecode for reentrant [`call_function`] without running `main`.
     pub fn load_program(&mut self, code: &[RawByte], constants: &[u64], strings: &[String]) {
         self.program_code = Arc::new(code.to_vec());
+        self.ensure_host_stubs();
         self.program_constants = Arc::new(constants.to_vec());
         self.install_program_strings(strings);
         self.panicked = false;
@@ -5255,6 +5314,7 @@ impl<const S: usize> Machine<S> {
         strings: Arc<Vec<String>>,
     ) {
         self.program_code = code;
+        self.ensure_host_stubs();
         self.program_constants = constants;
         self.install_program_strings_arc(strings);
         self.panicked = false;
@@ -5509,6 +5569,7 @@ impl<const S: usize> Machine<S> {
         self.program_code = Arc::new(unsafe {
             std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
         });
+        self.ensure_host_stubs();
         self.program_constants = Arc::new(constants.to_vec());
         self.install_program_strings(strings);
         self.sync_thread_program_from_current();

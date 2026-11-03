@@ -194,6 +194,20 @@ call. The VM treats those words as precise roots: a minor collection
 forwards them in place. After the call, when `NativeCtx::gc_epoch` moved,
 native code reloads the words and drops its array views.
 
+### Host calls through the VM
+
+A host native without a plain function (`write`, `await_writable`,
+`thread_*`, `vec_insert`, ...: `DirectHost::via_vm`, the ordinary host
+ops) runs as a VM call. A machine with native code appends *host-call
+stubs* past the program (`native::host_stubs`, `Machine::ensure_host_stubs`):
+for each enum layout and arity, `HostInvoke; RETURN`. `coil_native_host`
+calls the stub through `NativeHost::host` with `[id, args…]` as its frame,
+so parking (a fiber under a scheduler, `pending_io` without one), retries
+and panics are the VM's own. A frame in a stub prints no backtrace line,
+and a panic in it is located at the native call site
+(`Machine::in_host_stub`). The `task_*` host ops (scope, spawn, join, ...)
+still keep their body on the VM.
+
 ### Function values and indirect calls
 
 `Alloc` of a function value (`Fn`, `PolyFn`, `PolyFnCapture`) builds the

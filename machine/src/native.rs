@@ -225,10 +225,18 @@ pub struct NativeHost {
     /// `FreeEarly` now, running the `drop`s it owes (with the context's
     /// roots pinned); `false` when one panicked (the VM reported it).
     pub free: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, bool) -> bool,
+    /// Run the host native `id` that needs the VM on `args` in `layout`
+    /// through its stub ([`host_stubs`]), as `call` runs a body; `None`
+    /// when the machine has no stub for it (nothing ran).
+    pub host: HostViaVmFn,
 }
 
+/// [`NativeHost::host`]: machine, context, native id, layout, arguments,
+/// panicked flag.
+pub type HostViaVmFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64, &[common::Value], &mut bool) -> Option<u64>;
+
 impl NativeHost {
-    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, resume: |_, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true };
+    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, resume: |_, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true, host: |_, _, _, _, _, _| None };
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
@@ -515,6 +523,11 @@ impl NativeCode {
             }
         }
         Self { by_pc, entries: kept, sites }
+    }
+
+    /// The program's length, where the host-call stubs start.
+    pub(crate) fn code_len(&self) -> usize {
+        self.by_pc.len()
     }
 
     pub(crate) fn site(&self, i: u32) -> Option<NativeSite> {
@@ -1537,7 +1550,8 @@ pub fn direct_host_natives() -> &'static [DirectHost] {
                 let guarded = crate::host_natives::stream_first(n.name());
                 let func = if guarded { n.guarded_direct() } else { n.direct() };
                 let collect = n.name() == crate::gc_handles::GC_COLLECT_NATIVE;
-                DirectHost { name: n.name().to_string(), func, guarded, collect }
+                let via_vm = func.is_none() && !collect && n.host_op() == crate::HostOp::Ordinary;
+                DirectHost { name: n.name().to_string(), func, guarded, collect, via_vm }
             })
             .collect()
     })
@@ -1553,6 +1567,38 @@ pub struct DirectHost {
     /// `gc_collect`: a full collection on the VM ([`NativeHost::gc`]),
     /// with native code's words rooted around the call.
     pub collect: bool,
+    /// An ordinary native that needs the VM (it may park the task, open
+    /// descriptors, ...): native code runs it through a host-call stub
+    /// ([`host_stubs`]) in a nested VM execution, as a VM call.
+    pub via_vm: bool,
+}
+
+/// Arities a host-call stub exists for (the words after the native id).
+pub(crate) const HOST_STUB_ARITIES: usize = 16;
+/// Enum layouts a host-call stub exists for (`common::HOST_ENUM_LAYOUT_*`
+/// below the reserved one).
+const HOST_STUB_LAYOUTS: usize = 3;
+/// Code words the stubs take past the program.
+pub(crate) const HOST_STUBS_LEN: usize = 2 * HOST_STUB_ARITIES * HOST_STUB_LAYOUTS;
+
+/// The host-call stubs a machine with native code appends to its program:
+/// for each layout and arity, `HostInvoke; RETURN`. Called with the native
+/// id and the arguments as its frame, a stub runs the host call as a VM
+/// body would: parking, retries and panics as in the VM.
+pub(crate) fn host_stubs() -> Vec<common::Byte> {
+    let mut out = Vec::with_capacity(HOST_STUBS_LEN);
+    for layout in 0..HOST_STUB_LAYOUTS as u32 {
+        for arity in 0..HOST_STUB_ARITIES as u32 {
+            out.push(common::Byte::new(common::Instruction::HostInvoke).with_operand_u32(common::pack_host_invoke_operand(arity, layout)));
+            out.push(common::Byte::new(common::Instruction::RETURN));
+        }
+    }
+    out
+}
+
+/// Where the stub for `arity` words in `layout` starts, past the program.
+pub(crate) fn host_stub_offset(arity: usize, layout: u64) -> Option<usize> {
+    (arity < HOST_STUB_ARITIES && (layout as usize) < HOST_STUB_LAYOUTS).then(|| 2 * (layout as usize * HOST_STUB_ARITIES + arity))
 }
 
 /// `HostInvoke` of the direct host native `id` ([`direct_host_natives`])
@@ -1586,6 +1632,9 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         }
         return freed;
     }
+    if direct_host_natives().get(id as usize).is_some_and(|h| h.via_vm) {
+        return unsafe { host_via_vm(ctx, id, layout, args, n) };
+    }
     let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
         return unsafe { bail(ctx) };
     };
@@ -1615,6 +1664,45 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         unsafe { note_alloc(ctx, heap) };
     }
     v.bits()
+}
+
+/// [`coil_native_host`] of a native that needs the VM: its stub runs in a
+/// nested VM execution ([`NativeHost::host`]), as [`coil_native_call_vm`]
+/// runs a body, with the same commit and panic rules.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
+unsafe fn host_via_vm(ctx: *mut NativeCtx, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
+    let Some(words) = buf.get_mut(..n as usize) else {
+        return unsafe { bail(ctx) };
+    };
+    if c.machine.is_null() {
+        return unsafe { bail(ctx) };
+    }
+    for (i, w) in words.iter_mut().enumerate() {
+        // SAFETY: `args` holds `n` words.
+        *w = common::Value::from(unsafe { *args.add(i) });
+    }
+    let committed = std::mem::replace(&mut c.committed, 1);
+    c.vm_calls += 1;
+    c.gc_epoch += 1;
+    let mut panicked = false;
+    let (machine, host) = (c.machine, c.host.host);
+    // SAFETY: `machine` is the live machine `host` was made for.
+    let out = unsafe { host(machine, ctx, id, layout, words, &mut panicked) };
+    let c = unsafe { &mut *ctx };
+    let Some(out) = out else {
+        // No stub: nothing ran.
+        c.committed = committed;
+        return unsafe { bail(ctx) };
+    };
+    if panicked {
+        c.trap = TRAP_VM_PANIC;
+        return unsafe { bail(ctx) };
+    }
+    out
 }
 
 /// A frame with `defer`s on its way out: after a committed panic, keep its

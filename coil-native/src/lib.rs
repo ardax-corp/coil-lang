@@ -473,7 +473,7 @@ fn runs_vm_code(inst: &MirInst, drops: bool) -> bool {
         MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } => true,
         MirInst::FreeEarly { .. } => drops,
         MirInst::HostInvoke { native_id, .. } => {
-            machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect)
+            machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.via_vm)
         }
         _ => false,
     }
@@ -877,6 +877,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         }
                         match machine::native::direct_host_natives().get(usize::from(*native_id)) {
                             Some(h) if (h.func.is_some() || h.collect) && args.len() <= 16 => {}
+                            Some(h) if h.via_vm && args.len() < 16 => {}
                             Some(h) => return Err(format!("host call `{}` runs in the VM", h.name)),
                             None => return Err(format!("host call {native_id} outside the standard table")),
                         }
@@ -1578,7 +1579,10 @@ impl<'a> Lower<'a> {
             return s;
         }
         let s = match (self.entry_pc, self.cur_loc) {
-            (Some(entry_pc), Some(loc)) if loc.is_known() => {
+            // Without a location the site still names its function, as a
+            // VM frame without one does.
+            (Some(entry_pc), loc) => {
+                let loc = loc.unwrap_or(common::DebugLoc::unknown());
                 self.sites.push(NativeSite { entry_pc, loc });
                 (self.sites.len() - 1) as i64
             }
@@ -2092,8 +2096,9 @@ impl<'a> Lower<'a> {
                 let lay = self.b.ins().iconst(types::I64, i64::from(*layout));
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
-                // `gc_collect` collects: this frame's words are roots.
-                let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect);
+                // `gc_collect` collects, and a host call through the VM may:
+                // this frame's words are roots.
+                let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.via_vm);
                 let roots = if collect { self.push_roots(f) } else { None };
                 let prev = if collect { Some(self.push_call()) } else { None };
                 let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
