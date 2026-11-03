@@ -283,6 +283,23 @@ fn string_literals_come_from_native_code() {
     assert_eq!(String::from_utf8_lossy(&jit.stdout), "pos\nneg\nzero\npos\n");
 }
 
+#[test]
+fn format_and_string_building_run_natively() {
+    // `format` with each kind of argument, `%%`, and `s = s + x` (a `%s%s`
+    // format that appends in place), built in native code.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn show(int i, float f, bool b, String s) -> String {{ return format(\"%i|%f|%v|%s|%v|100%%\", i, f, b, s, f); }}\n\
+         #[inline(never)]\nfn join(Vec<String> v) -> String {{ let s = \"\"; for x in v {{ s = s + x + \",\"; }} return s; }}\n\
+         #[inline(never)]\nfn pct() -> String {{ return format(\"50%%\"); }}\n\
+         fn main() {{\n  let _ = println(show(-3, 2.25, true, \"hi\"));\n\
+           let v: Vec<String> = [\"a\", \"bb\", \"ccc\"];\n  let j = join(v);\n  let _ = println(j);\n  let _ = println(join(v));\n  let _ = println(pct());\n}}\n"
+    );
+    let stats = same_as_vm("format", &src);
+    for f in ["show", "join", "pct"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+}
+
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
 /// section.
 fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
