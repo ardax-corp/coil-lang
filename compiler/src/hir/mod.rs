@@ -16,10 +16,12 @@
 //! flags, so a consumer never asks the checker again.
 
 pub mod build;
+pub mod cold;
 pub mod check;
 pub mod effects;
 pub mod enum_sroa;
 pub mod inline;
+pub mod outline;
 pub mod lower;
 pub mod match_tree;
 pub mod print;
@@ -87,6 +89,20 @@ pub struct DeclaredEffects {
 }
 
 /// What a [`HirBody`] was built from.
+/// Optimizer hints a function states (`docs/internals/opt-hints.md`). They
+/// change speed only: `#[inline]` raises the function's inline limit (best
+/// effort), `#[inline(always)]` lifts it, `#[inline(never)]` keeps its
+/// calls, `#[cold]` marks calls to it rare, `#[hot]` raises its limit
+/// further and specializes it past the clone budget. Checked in `attrs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OptHints {
+    pub inline: bool,
+    pub always: bool,
+    pub never: bool,
+    pub cold: bool,
+    pub hot: bool,
+}
+
 /// Escape facts a function states: `#[noescape(a, b)]` names parameters
 /// the call never keeps or hands back, `#[fresh]` says its result is fresh.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -134,6 +150,8 @@ pub struct HirBody {
     /// Escape facts the function states (`#[noescape(..)]`, `#[fresh]`),
     /// checked against the inferred ones.
     pub stated_escape: Option<StatedEscape>,
+    /// `#[inline]` / `#[cold]` / `#[hot]` on the function.
+    pub hints: OptHints,
     /// The function's `requires` / `ensures` clauses: what runs inside one
     /// must have no visible effect.
     pub contract_spans: Vec<Span>,

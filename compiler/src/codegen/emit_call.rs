@@ -49,7 +49,7 @@ impl Compiler {
     pub(super) fn named_entry_target(&mut self, name: &str, on_module: bool) -> Option<crate::il::Label> {
         let adapter = self.raw_instance_redirect(name);
         let name = adapter.as_deref().unwrap_or(name);
-        if let Some(&offset) = self.functions.get(name) {
+        let label = if let Some(&offset) = self.functions.get(name) {
             self.bytecode.entry_label_for_offset(offset)
         } else {
             let label = self.fn_entry_labels.get(name).copied()?;
@@ -57,7 +57,13 @@ impl Compiler {
                 self.builtin_show_used.insert(name.to_string());
             }
             Some(label)
+        };
+        if let Some(label) = label
+            && self.is_cold_fn(name)
+        {
+            self.cold_labels.insert(label);
         }
+        label
     }
 
     /// The adapter an entry of raw instance method `name` goes through

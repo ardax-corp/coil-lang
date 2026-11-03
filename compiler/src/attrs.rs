@@ -18,7 +18,10 @@ use reporting::{ErrorCode, Message};
 
 use crate::macros::{CallPosition, MacroDecl, MacroKind, PendingMacro};
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh", "shared", "view"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh", "shared", "view", "inline", "cold", "hot"];
+
+/// Optimizer hints: speed only, never behaviour (`docs/internals/opt-hints.md`).
+const OPT_HINTS: &[&str] = &["inline", "cold", "hot"];
 
 /// Result of attribute expansion before typechecking.
 #[derive(Default, Clone)]
@@ -401,7 +404,63 @@ fn validate_attrs<'x, 'a>(
             }
         }
     }
+    check_opt_hints(attrs, target, messages, span);
     unknown
+}
+
+/// `#[inline]` / `#[cold]` / `#[hot]`: on a function or method, without
+/// arguments but `#[inline(always)]` / `#[inline(never)]`. `#[cold]` goes
+/// with `#[inline(never)]` only, and `#[inline(never)]` with nothing that
+/// asks for inlining.
+fn check_opt_hints(attrs: &[Attribute<'_>], target: &str, messages: &mut Vec<Message>, span: SimpleSpan) {
+    fn inline_arg(a: &Attribute<'_>) -> Option<&'static str> {
+        match &a.args {
+            AttrArgs::Idents(ids) if a.name == "inline" && ids.len() == 1 => ["always", "never"].into_iter().find(|&k| k == ids[0]),
+            _ => None,
+        }
+    }
+    for attr in attrs {
+        if OPT_HINTS.contains(&attr.name) {
+            if target != "function" {
+                messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("`#[{}]` applies to a function or method, not a {}", attr.name, target),
+                    span.into_range(),
+                ));
+            } else if attr.name == "inline" && attr.args != AttrArgs::Empty && inline_arg(attr).is_none() {
+                messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    "`#[inline]` takes `always` or `never`: `#[inline(always)]`, `#[inline(never)]`".to_string(),
+                    span.into_range(),
+                ));
+            } else if attr.name != "inline" && attr.args != AttrArgs::Empty {
+                messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("`#[{}]` takes no arguments", attr.name),
+                    span.into_range(),
+                ));
+            }
+        }
+    }
+    if target != "function" {
+        return;
+    }
+    // The spelling of each hint, as written.
+    let spell = |a: &Attribute<'_>| inline_arg(a).map_or_else(|| format!("#[{}]", a.name), |arg| format!("#[inline({arg})]"));
+    let never = attrs.iter().find(|a| inline_arg(a) == Some("never"));
+    let wants = |a: &&Attribute<'_>| (a.name == "inline" && inline_arg(a) != Some("never")) || a.name == "hot";
+    let conflict = if let Some(never) = never {
+        attrs.iter().find(wants).map(|other| (spell(never), spell(other), "`#[inline(never)]` to keep the calls"))
+    } else if let Some(cold) = attrs.iter().find(|a| a.name == "cold") {
+        attrs.iter().find(wants).map(|other| (spell(cold), spell(other), "`#[cold]` for a rarely called function"))
+    } else {
+        None
+    };
+    if let Some((first, other, keep)) = conflict {
+        let mut msg = Message::error(ErrorCode::ConflictingOptHints, format!("a function cannot be both `{first}` and `{other}`"), span.into_range());
+        msg.with_help(format!("keep the one that holds: {keep}"));
+        messages.push(msg);
+    }
 }
 
 fn unwrap_disc_expr<'e, 'a>(expr: &'a Expression<'e>) -> &'a Expression<'e> {
@@ -522,6 +581,19 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                     && let Some(a) = validate_attrs(attrs, "function", &mut messages, span, false).first()
                 {
                     pending.push(pending_attr(a.name, &a.args, method.0, Some(owner)));
+                }
+            }
+        }
+
+        // Optimizer hints on trait impl and default methods.
+        if let Expression::TypeClassImpl { methods, .. } | Expression::TypeClass { methods, .. } = decls[i].1.as_ref() {
+            for method in methods {
+                let func = match method.1.as_ref() {
+                    Expression::Method(_, f) => f,
+                    _ => method,
+                };
+                if let Expression::Function { attrs, .. } = func.1.as_ref() {
+                    check_opt_hints(attrs, "function", &mut messages, method.0);
                 }
             }
         }

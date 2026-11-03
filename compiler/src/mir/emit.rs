@@ -3740,6 +3740,51 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                     block_lab,
                     loc,
                 );
+            } else if t_moves.is_empty() && t_clears.is_empty() {
+                // Only the false edge has copies: branch away on true and
+                // run them inline, so the false path takes no jump.
+                out.push(IlOp::Jump {
+                    kind: IlJumpKind::JumpIfTrue,
+                    target: block_lab[taken.index()],
+                    loc,
+                    hint: Default::default(),
+                });
+                for (d, s) in f_moves {
+                    out.push(move_op(d, s));
+                }
+                for &r in f_clears {
+                    push_clear_word(out, r);
+                }
+                if !is_fallthrough(func, block.id, *not_taken) {
+                    out.push(IlOp::Jump {
+                        kind: IlJumpKind::Unconditional,
+                        target: block_lab[not_taken.index()],
+                        loc,
+                        hint: Default::default(),
+                    });
+                }
+            } else if f_moves.is_empty() && f_clears.is_empty() {
+                // Only the true edge has copies: the mirror image.
+                out.push(IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: block_lab[not_taken.index()],
+                    loc,
+                    hint: Default::default(),
+                });
+                for (d, s) in t_moves {
+                    out.push(move_op(d, s));
+                }
+                for &r in t_clears {
+                    push_clear_word(out, r);
+                }
+                if !is_fallthrough(func, block.id, *taken) {
+                    out.push(IlOp::Jump {
+                        kind: IlJumpKind::Unconditional,
+                        target: block_lab[taken.index()],
+                        loc,
+                        hint: Default::default(),
+                    });
+                }
             } else {
                 let f_lab = take_label(next_label, reserved);
                 out.push(IlOp::Jump {

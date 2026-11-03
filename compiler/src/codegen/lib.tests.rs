@@ -9420,3 +9420,228 @@ fn main() {
     }
     assert!(key("count_if").is_none(), "a body calling a function value is not kept");
 }
+
+/// A callee body well over the inline cost limit (100): 80 `let`s.
+fn over_limit_body() -> String {
+    let mut body = String::from("{ let v0 = x + 1; ");
+    for k in 1..80 {
+        body.push_str(&format!("let v{k} = v{} % 1000 + {k}; ", k - 1));
+    }
+    body.push_str("return v79; }");
+    body
+}
+
+/// `#[inline]` splices a callee past the cost limit; without it the call stays.
+#[test]
+fn inline_hint_inlines_past_the_cost_limit() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn big(int x) -> int {} \
+             fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = (s + big(i)) % 1000; i = i + 1; }} return s; }}",
+            over_limit_body()
+        )
+    };
+    let (_, untagged) = compile_src_compiler(&src(""), |_| {});
+    assert!(untagged.functions.contains_key("big"), "the fixture should be over the inline limit");
+    let (_, tagged) = compile_src_compiler(&src("#[inline]"), |_| {});
+    assert!(!tagged.functions.contains_key("big"), "`#[inline]` `big` should be spliced into `main` and shaken");
+}
+
+/// `#[cold]` keeps the call of a callee small enough to inline.
+#[test]
+fn cold_hint_keeps_the_call() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn small(int x) -> int {{ return x + 1; }} \
+             fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = s + small(i); i = i + 1; }} return s; }}"
+        )
+    };
+    let (_, untagged) = compile_src_compiler(&src(""), |_| {});
+    assert!(!untagged.functions.contains_key("small"), "the fixture should inline without a tag");
+    let (_, tagged) = compile_src_compiler(&src("#[cold]"), |_| {});
+    assert!(tagged.functions.contains_key("small"), "`#[cold]` `small` should keep its call");
+}
+
+/// A body of `n` dependent `let`s over `x`, returning the last.
+fn lets_body(n: usize) -> String {
+    let mut body = String::from("{ let v0 = x + 1; ");
+    for k in 1..n {
+        body.push_str(&format!("let v{k} = v{} % 1000 + {k}; ", k - 1));
+    }
+    body.push_str(&format!("return v{}; }}", n - 1));
+    body
+}
+
+/// A loop in `main` calling `big`, tagged `tag`, with a body of `n` lets.
+fn hot_fixture(tag: &str, n: usize) -> String {
+    format!(
+        "{tag} fn big(int x) -> int {} \
+         fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = (s + big(i)) % 1000; i = i + 1; }} return s; }}",
+        lets_body(n)
+    )
+}
+
+/// `#[hot]` inlines a callee over the default limit, up to the hot limit.
+#[test]
+fn hot_hint_inlines_past_the_default_limit() {
+    let (_, untagged) = compile_src_compiler(&hot_fixture("", 40), |_| {});
+    assert!(untagged.functions.contains_key("big"), "the fixture should be over the default inline limit");
+    let (_, tagged) = compile_src_compiler(&hot_fixture("#[hot]", 40), |_| {});
+    assert!(!tagged.functions.contains_key("big"), "`#[hot]` `big` should be spliced into `main` and shaken");
+    let (_, five) = compile_src_compiler(&hot_fixture("#[hot]", 120), |_| {});
+    assert!(!five.functions.contains_key("big"), "a `#[hot]` callee inlines up to five times the limit");
+    let (_, best_effort) = compile_src_compiler(&hot_fixture("#[inline]", 120), |_| {});
+    assert!(best_effort.functions.contains_key("big"), "the same callee is over the `#[inline]` limit, three times the default");
+    let (_, huge) = compile_src_compiler(&hot_fixture("#[hot]", 200), |_| {});
+    assert!(huge.functions.contains_key("big"), "a `#[hot]` callee over the hot limit should keep its call");
+}
+
+/// A hot body's calls inline under the hot limit, but an explicit `#[cold]`
+/// callee keeps its call.
+#[test]
+fn hot_caller_inlines_its_callees_but_not_cold_ones() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn big(int x) -> int {} \
+             #[hot] fn run(int n) -> int {{ let s = 0; let i = 0; while i < n {{ s = (s + big(i)) % 1000; i = i + 1; }} return s; }} \
+             fn main() -> int {{ return run(50) + run(60); }}",
+            lets_body(40)
+        )
+    };
+    let (_, plain) = compile_src_compiler(&src(""), |_| {});
+    assert!(!plain.functions.contains_key("big"), "`big` should be spliced into hot `run`");
+    let (_, cold) = compile_src_compiler(&src("#[cold]"), |_| {});
+    assert!(cold.functions.contains_key("big"), "`#[cold]` `big` should keep its call in hot `run`");
+}
+
+/// The other methods of a `#[hot]` method's class are hot too.
+#[test]
+fn hot_hint_spreads_to_class_methods() {
+    let src = |tag: &str| {
+        format!(
+            "class Acc {{ pub base: int, }} \
+             impl Acc {{ \
+               {tag} pub fn tiny(int x) -> int {{ return x + self.base; }} \
+               pub fn big(int x) -> int {} }} \
+             fn main() -> int {{ let a = new Acc(1); let s = 0; let i = 0; \
+               while i < 50 {{ s = (s + a.big(i) + a.tiny(i)) % 1000; i = i + 1; }} return s; }}",
+            lets_body(40)
+        )
+    };
+    let (_, untagged) = compile_src_compiler(&src(""), |_| {});
+    assert!(untagged.functions.contains_key("Acc::big"), "the fixture should be over the default inline limit: {:?}", untagged.functions.keys().collect::<Vec<_>>());
+    let (_, tagged) = compile_src_compiler(&src("#[hot]"), |_| {});
+    assert!(!tagged.functions.contains_key("Acc::big"), "`Acc::big` should be hot through its `#[hot]` sibling and spliced");
+}
+
+/// A compile under `--clone-budget 1`.
+fn budget_one(c: &mut Compiler) {
+    let mut grants = crate::HostGrants::deny_all();
+    grants.clone_budget = Some(1);
+    c.set_host_grants(grants, Vec::new());
+}
+
+/// A `#[hot]` generic function gets a clone per type past the clone budget.
+#[test]
+fn hot_generic_fn_clones_past_the_budget() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn pick<T>(T a, T b, bool first) -> T {{ if first {{ return a; }} return b; }} \
+             fn main() -> int {{ let s = pick(\"x\", \"yz\", false); let f = pick(1.5, 2.5, true); \
+               let b = pick(true, false, true); return pick(1, 2, false) + s.len() + (if b {{ 1 }} else {{ 0 }}) + (if f > 1.0 {{ 1 }} else {{ 0 }}); }}"
+        )
+    };
+    let caps = |c: &Compiler| c.messages.iter().filter(|m| m.code() == Some(reporting::ErrorCode::MonomorphizeCap)).count();
+    let (_, plain) = compile_src_compiler(&src(""), budget_one);
+    assert!(caps(&plain) > 0, "the fixture should hit the clone budget: {:?}", plain.messages);
+    let (_, hot) = compile_src_compiler(&src("#[hot]"), budget_one);
+    assert_eq!(caps(&hot), 0, "`#[hot]` `pick` should clone past the budget: {:?}", hot.messages);
+}
+
+/// A `#[hot]` method of a generic class gets a clone per type past the
+/// clone budget, and its class's other methods with it.
+#[test]
+fn hot_method_clones_past_the_budget() {
+    let src = |tag: &str| {
+        "class Cell<T> { pub v: T, } \
+         impl Cell<T> { TAG pub fn get() -> T { let i = 0; while i < 3 { i = i + 1; } return self.v; } pub fn put(T x) { let i = 0; while i < 3 { i = i + 1; } self.v = x; } } \
+         fn main() -> int { let a = new Cell(1); let b = new Cell(\"s\"); let c = new Cell(2.5); \
+           a.put(3); b.put(\"tt\"); c.put(1.0); return a.get() + b.get().len() + (if c.get() > 0.5 { 1 } else { 0 }); }"
+            .replace("TAG", tag)
+    };
+    let clones = |c: &Compiler| c.functions.keys().filter(|k| k.contains("$inst$")).count();
+    let (_, plain) = compile_src_compiler(&src(""), budget_one);
+    let (_, hot) = compile_src_compiler(&src("#[hot]"), budget_one);
+    assert!(clones(&plain) <= 1, "the fixture should hit the clone budget: {:?}", plain.functions.keys().collect::<Vec<_>>());
+    assert!(clones(&hot) >= 6, "`#[hot]` `get` and its sibling `put` should clone at every type: {:?}", hot.functions.keys().collect::<Vec<_>>());
+}
+
+/// An `#[inline(always)]` function that recurses stays a call, and says
+/// so once; a best-effort `#[inline]` one says nothing.
+#[test]
+fn inline_hint_on_a_recursive_function_warns() {
+    let (_, plain) = compile_src_compiler(
+        "#[inline] fn fact(int n) -> int { if n <= 1 { return 1; } return n * fact(n - 1); } \
+         fn main() -> int { return fact(5) + fact(6); }",
+        |_| {},
+    );
+    assert!(!plain.messages.iter().any(|m| m.code() == Some(reporting::ErrorCode::InlineRefused)), "{:?}", plain.messages);
+    let (_, compiler) = compile_src_compiler(
+        "#[inline(always)] fn fact(int n) -> int { if n <= 1 { return 1; } return n * fact(n - 1); } \
+         fn main() -> int { return fact(5) + fact(6); }",
+        |_| {},
+    );
+    let warns: Vec<_> = compiler.messages.iter().filter(|m| m.code() == Some(reporting::ErrorCode::InlineRefused)).collect();
+    assert_eq!(warns.len(), 1, "{:?}", compiler.messages);
+    assert!(warns[0].message().contains("fact"), "{:?}", warns[0].message());
+}
+
+/// A callee whose failing arm builds a panic message: the arm is cut out
+/// into a cold helper and the rest is spliced into the caller.
+fn partial_fixture(arm: &str) -> String {
+    format!(
+        "fn at(int x, int n) -> int {{ if x >= n {{ {arm} }} return x * 3 + 1; }} \
+         fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = (s + at(i, 64)) % 1000; i = i + 1; }} return s; }}"
+    )
+}
+
+#[test]
+fn partial_inlining_cuts_out_a_failing_arm() {
+    let msg = "let m = \"index \" + x.show() + \" out of \" + n.show(); panic(m);";
+    let (_, cut) = compile_src_compiler(&partial_fixture(msg), |_| {});
+    assert!(!cut.functions.contains_key("at"), "the rest of `at` should be spliced into `main` and shaken");
+    assert!(cut.functions.contains_key("at$cold0"), "the failing arm should be its own helper");
+}
+
+#[test]
+fn partial_inlining_leaves_a_warm_callee_whole() {
+    let (_, warm) = compile_src_compiler(&partial_fixture("let y = x * 2; let z = y + n; x = z % 7;"), |_| {});
+    assert!(!warm.functions.keys().any(|k| k.contains("$cold")), "an arm that is not cold stays in place");
+}
+
+/// `#[inline]` is best effort, up to three times the limit; `#[inline(always)]`
+/// has no limit.
+#[test]
+fn inline_always_inlines_past_the_best_effort_limit() {
+    let (_, plain) = compile_src_compiler(&hot_fixture("#[inline]", 200), |_| {});
+    assert!(plain.functions.contains_key("big"), "a best-effort `#[inline]` callee over three times the limit keeps its call");
+    let (_, always) = compile_src_compiler(&hot_fixture("#[inline(always)]", 200), |_| {});
+    assert!(!always.functions.contains_key("big"), "`#[inline(always)]` `big` should be spliced into `main` and shaken");
+}
+
+/// `#[inline(never)]` keeps the call of a callee small enough to inline,
+/// without making it cold.
+#[test]
+fn inline_never_keeps_the_call() {
+    let src = |tag: &str| {
+        format!(
+            "{tag} fn small(int x) -> int {{ return x + 1; }} \
+             fn main() -> int {{ let s = 0; let i = 0; while i < 50 {{ s = s + small(i); i = i + 1; }} return s; }}"
+        )
+    };
+    let (_, never) = compile_src_compiler(&src("#[inline(never)]"), |_| {});
+    assert!(never.functions.contains_key("small"), "`#[inline(never)]` `small` should keep its call");
+    assert!(!never.is_cold_fn("small"), "`#[inline(never)]` does not make `small` cold");
+    let (_, hot) = compile_src_compiler(&src("#[inline(never)]").replace("fn main", "#[hot] fn run(int n) -> int { return small(n); } fn main"), |_| {});
+    assert!(hot.functions.contains_key("small"), "a hot caller does not lift `#[inline(never)]`");
+}

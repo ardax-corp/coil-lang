@@ -1,0 +1,34 @@
+// Hit bench (opt hints step 5): a `#[hot]` method of a generic class keeps
+// its per-type clone past `--clone-budget` (measure with `--clone-budget 1`).
+// Without the tag its calls go to the shared body, which compares through
+// the `Eq` dictionary.
+use io::sync::print;
+
+class Bag<T> {
+    pub items: Vec<T>,
+}
+
+impl Bag<T: Eq> {
+    #[hot]
+    pub fn count(T x) -> int {
+        let n = 0;
+        for y in self.items {
+            if y == x {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+}
+
+fn main() {
+    let ints = new Bag([1, 2, 3, 2, 5, 2, 7, 8]);
+    let words = new Bag(["a", "bb", "a", "ccc"]);
+    let acc = 0;
+    let i = 0;
+    while i < 100000 {
+        acc = (acc + ints.count(i % 8) + words.count("a")) % 1000003;
+        i = i + 1;
+    }
+    let _ = print(acc.show());
+}
