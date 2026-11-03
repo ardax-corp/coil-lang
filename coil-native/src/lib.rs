@@ -116,6 +116,7 @@ fn jit_once(
     jb.symbol("coil_native_print", machine::native::coil_native_print as *const u8);
     jb.symbol("coil_native_host", machine::native::coil_native_host as *const u8);
     jb.symbol("coil_native_call_vm", machine::native::coil_native_call_vm as *const u8);
+    jb.symbol("coil_native_call_value", machine::native::coil_native_call_value as *const u8);
     jb.symbol("coil_native_collect", machine::native::coil_native_collect as *const u8);
     jb.symbol("coil_native_panic", machine::native::coil_native_panic as *const u8);
     let mut module = JITModule::new(jb);
@@ -203,6 +204,8 @@ struct Plan {
     /// make a VM call, or call such a body): they have safepoints, and
     /// their callers root the heap words they hold across the call.
     may_gc: HashSet<usize>,
+    /// Entry PCs of the bodies by label, for function values.
+    pcs: HashMap<Label, u32>,
 }
 
 fn plan(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Plan {
@@ -270,7 +273,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         .filter(|(i, callees)| {
             callees.iter().any(|c| vm_calls.contains_key(c))
                 || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
-                    matches!(inst, MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. })
+                    matches!(inst, MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. })
                 })
         })
         .map(|(&i, _)| i)
@@ -307,7 +310,11 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
     }
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused, vm_calls, moves, may_gc }
+    let pcs = by_label
+        .iter()
+        .filter_map(|(&l, &i)| Some((l, *entry_pcs.get(&bodies[i].name)?)))
+        .collect();
+    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs }
 }
 
 /// An instruction whose helper may allocate.
@@ -321,6 +328,7 @@ fn allocates(inst: &MirInst) -> bool {
             | MirInst::Stringify { .. }
             | MirInst::Cow { .. }
             | MirInst::HostInvoke { .. }
+            | MirInst::CallIndirect { .. }
     )
 }
 
@@ -504,6 +512,16 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         match kind {
                             MirAllocKind::Array | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
                             MirAllocKind::Object { .. } if elems.is_empty() => {}
+                            // A function value: its body must have an entry
+                            // PC, so it counts as a callee.
+                            MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target, .. }
+                                if elems.len() < 16 =>
+                            {
+                                let Some(&callee) = by_label.get(target) else {
+                                    return Err("function value of an unknown body".into());
+                                };
+                                callees.push(callee);
+                            }
                             other => return Err(format!("allocation {other:?}")),
                         }
                     }
@@ -564,6 +582,16 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                     MirInst::Print { dest, src } => {
                         need(dest)?;
                         need(src)?;
+                    }
+                    MirInst::CallIndirect { dest, callee, args, .. } => {
+                        need(dest)?;
+                        need(callee)?;
+                        for a in args {
+                            need(a)?;
+                        }
+                        if args.len() > 16 {
+                            return Err("indirect call of more than 16 words".into());
+                        }
                     }
                     MirInst::Panic { msg, .. } => need(msg)?,
                     MirInst::HostInvoke { dest, native_id, args, .. } => {
@@ -681,6 +709,7 @@ struct Ids {
     host: FuncId,
     /// Calls to bodies on the VM (commit the call).
     call_vm: FuncId,
+    call_value: FuncId,
     /// Collections at safepoints.
     collect: FuncId,
     /// Explicit `panic`.
@@ -761,6 +790,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let print = module.declare_function("coil_native_print", Linkage::Import, &s2).map_err(e)?;
     let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
     let call_vm = module.declare_function("coil_native_call_vm", Linkage::Import, &s4).map_err(e)?;
+    let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
     let mut s1v2 = module.make_signature();
     s1v2.params.push(AbiParam::new(types::I64));
     let collect = module.declare_function("coil_native_collect", Linkage::Import, &s1v2).map_err(e)?;
@@ -792,6 +822,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         print,
         host,
         call_vm,
+        call_value,
         collect,
         panic,
     })
@@ -874,6 +905,7 @@ struct Lower<'a> {
     print: FuncRef,
     host: FuncRef,
     call_vm: FuncRef,
+    call_value: FuncRef,
     collect: FuncRef,
     panic: FuncRef,
     /// This body's index into the plan's bodies.
@@ -947,6 +979,7 @@ impl<'a> Lower<'a> {
         let print = module.declare_func_in_func(ids.print, func);
         let host = module.declare_func_in_func(ids.host, func);
         let call_vm = module.declare_func_in_func(ids.call_vm, func);
+        let call_value = module.declare_func_in_func(ids.call_value, func);
         let collect = module.declare_func_in_func(ids.collect, func);
         let panic = module.declare_func_in_func(ids.panic, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
@@ -992,6 +1025,7 @@ impl<'a> Lower<'a> {
             print,
             host,
             call_vm,
+        call_value,
             collect,
             panic,
             body_index: None,
@@ -1410,6 +1444,22 @@ impl<'a> Lower<'a> {
                 }
                 self.view_of(f, *dest);
             }
+            MirInst::CallIndirect { dest, callee, args, dicts } => {
+                let c = self.get(f, *callee);
+                let c = self.coerce(c, types::I64);
+                let p = self.words_slot(f, args);
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let d = self.b.ins().iconst(types::I64, i64::from(*dicts));
+                let roots = self.push_roots(f);
+                let call = self.b.ins().call(self.call_value, &[self.ctx, c, p, n, d]);
+                let w = self.b.inst_results(call)[0];
+                self.pop_roots(f, roots);
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
+                self.drop_views();
+                self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
+            }
             MirInst::Index { dest, array, index, .. } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
@@ -1509,9 +1559,22 @@ impl<'a> Lower<'a> {
                         (ALLOC_ENUM, words.len() as u64, u64::from(tag) | (u64::from(k) << 32))
                     }
                     MirAllocKind::Object { type_id, nfields } => (ALLOC_OBJECT, u64::from(nfields), u64::from(type_id)),
+                    MirAllocKind::Fn { target, operand, .. } => {
+                        let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no entry PC")?;
+                        (machine::native::ALLOC_FN, words.len() as u64 + 1, u64::from(pc) | (u64::from(operand) << 32))
+                    }
+                    MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target, .. } => {
+                        let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no entry PC")?;
+                        let params = if let MirAllocKind::PolyFnCapture { params, .. } = *kind { params } else { 0 };
+                        (machine::native::ALLOC_POLY_FN, words.len() as u64, u64::from(pc) | (u64::from(params) << 32))
+                    }
                     other => return Err(format!("allocation {other:?}")),
                 };
-                let p = self.words_slot(f, &words);
+                let p = if let MirAllocKind::Fn { mask, .. } = *kind {
+                    self.words_slot_with(f, &words, Some(i64::from(mask)))
+                } else {
+                    self.words_slot(f, &words)
+                };
                 let code = self.b.ins().iconst(types::I64, code as i64);
                 let n = self.b.ins().iconst(types::I64, n as i64);
                 let extra = self.b.ins().iconst(types::I64, extra as i64);
@@ -1720,15 +1783,25 @@ impl<'a> Lower<'a> {
 
     /// The words of `vs` in a new stack slot, in order; its address.
     fn words_slot(&mut self, f: &MirFunc, vs: &[ValueId]) -> cranelift_codegen::ir::Value {
+        self.words_slot_with(f, vs, None)
+    }
+
+    /// [`Self::words_slot`] with the constant `last` after the words.
+    fn words_slot_with(&mut self, f: &MirFunc, vs: &[ValueId], last: Option<i64>) -> cranelift_codegen::ir::Value {
+        let n = vs.len() + usize::from(last.is_some());
         let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            (vs.len().max(1) * 8) as u32,
+            (n.max(1) * 8) as u32,
             3,
         ));
         for (i, v) in vs.iter().enumerate() {
             let x = self.get(f, *v);
             let x = self.coerce(x, types::I64);
             self.b.ins().stack_store(types::I64, x, slot, (i * 8) as i32);
+        }
+        if let Some(c) = last {
+            let x = self.b.ins().iconst(types::I64, c);
+            self.b.ins().stack_store(types::I64, x, slot, (vs.len() * 8) as i32);
         }
         self.b.ins().stack_addr(types::I64, slot, 0)
     }

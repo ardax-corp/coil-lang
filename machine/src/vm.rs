@@ -1843,6 +1843,7 @@ impl<const S: usize> Machine<S> {
             host: crate::native::NativeHost {
                 print: Self::native_print,
                 call: Self::native_vm_call,
+                call_value: Self::native_call_value,
                 collect: Self::native_collect,
                 free: Self::native_free,
             },
@@ -1921,6 +1922,25 @@ impl<const S: usize> Machine<S> {
         *panicked = vm.panicked;
         // SAFETY: the calling native code's live context.
         unsafe { (*ctx).vm_hi = std::mem::take(&mut vm.nested_return_hi).bits() };
+        out.bits()
+    }
+
+    /// [`crate::native::NativeHost::call_value`]: [`Self::call_value`],
+    /// with the native frames rooted, as [`Self::native_vm_call`].
+    unsafe fn native_call_value(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        callee: u64,
+        args: &[Value],
+        dicts: u32,
+        panicked: &mut bool,
+    ) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        vm.native_roots.push(ctx);
+        let out = vm.call_value(Value::from(callee), args, dicts as usize);
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
         out.bits()
     }
 
@@ -5488,6 +5508,83 @@ impl<const S: usize> Machine<S> {
             || !self.resume_stack.is_empty()
             || !self.frame_pins.is_empty();
         self.nested_return.take().unwrap_or_default()
+    }
+
+    /// `CallIndirect` of the function value (or code pointer) `callee`
+    /// reentrantly, for native code: `args` ends with `dicts` instance
+    /// dictionaries. Runs as [`Self::call_function`] does once the call
+    /// enters a frame; a partial application returns the new value.
+    pub(crate) fn call_value(&mut self, callee: Value, args: &[Value], dicts: usize) -> Value {
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        let constants: &[u64] = unsafe {
+            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+        };
+        self.bind_frame_reserve(code, constants);
+        // Where a panic in the call itself (stack, bad target) points: the
+        // native code's caller, as for its other panics.
+        let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
+        self.fuel = self.fuel.wrapping_sub(1);
+        if unlikely(self.fuel == 0) {
+            self.step_budget_out(call_ip);
+            return Value::default();
+        }
+        if !self.reserve_operand_words(args.len()) {
+            self.runtime_panic(STACK_OVERFLOW, call_ip.saturating_sub(1));
+            return Value::default();
+        }
+        let saved_sp = self.stack.tell();
+        for a in args {
+            self.stack.push(*a);
+        }
+        self.nested_return = None;
+        self.nested_depth += 1;
+        self.return_bookkeeping = true;
+        let depth = self.frames.len();
+        let mut sp = saved_sp;
+        let (mut ip, flow) = self.call_indirect(callee, args.len() - dicts, dicts, call_ip, &mut sp, code);
+        let entered = self.frames.len() > depth;
+        let mut out = Value::default();
+        match flow {
+            dispatch::RestFlow::Continue if entered => {
+                // The frame the call opened (an over-apply stub's when it
+                // made one) returns the result.
+                self.nested_frame_depths.push(depth + 1);
+                loop {
+                    let paused = self.run_execute(code, constants, ip);
+                    if let Some(pending) = self.pending_ffi.take() {
+                        ip = pending.resume_ip;
+                        self.finish_pending_ffi_invoke(pending);
+                        continue;
+                    }
+                    if let Some(pending) = self.pending_io.take() {
+                        ip = pending.resume_ip;
+                        self.finish_pending_io_wait(pending);
+                        continue;
+                    }
+                    if !paused {
+                        break;
+                    }
+                }
+                let _ = self.pop_call_frame();
+                let _ = self.nested_frame_depths.pop();
+                out = self.nested_return.take().unwrap_or_default();
+            }
+            // A partial application: the new function value is on the stack.
+            dispatch::RestFlow::Continue => out = self.stack.pop(),
+            dispatch::RestFlow::Done(_) => {}
+        }
+        self.stack.seek(saved_sp);
+        for i in saved_sp..(saved_sp + args.len()).min(self.stack.capacity()) {
+            self.stack[i] = Value::default();
+        }
+        self.nested_depth -= 1;
+        self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
+        out
     }
 
     /// Stash a return value when `execute` runs inside [`Self::call_function`].

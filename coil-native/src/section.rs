@@ -21,7 +21,7 @@ use compiler::native_mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 4;
+const FORMAT: u8 = 5;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for the bodies of `bodies` the backend compiles, keyed to
@@ -160,6 +160,7 @@ const I_STORE_STATIC: u8 = 26;
 const I_PRINT: u8 = 27;
 const I_HOST: u8 = 28;
 const I_PANIC: u8 = 29;
+const I_CALL_INDIRECT: u8 = 30;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -401,6 +402,21 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                     w.u32(type_id);
                     w.u32(nfields);
                 }
+                MirAllocKind::Fn { target, operand, mask } => {
+                    w.u8(4);
+                    w.u32(target.0);
+                    w.u32(operand);
+                    w.u32(mask);
+                }
+                MirAllocKind::PolyFn { target } => {
+                    w.u8(5);
+                    w.u32(target.0);
+                }
+                MirAllocKind::PolyFnCapture { target, params } => {
+                    w.u8(6);
+                    w.u32(target.0);
+                    w.u32(params);
+                }
                 _ => unreachable!("native section: allocation outside the native tier"),
             }
             w.u32(elems.len() as u32);
@@ -437,6 +453,13 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u32(u32::from(*native_id));
             w.u8(*layout);
             w.vs(args);
+        }
+        MirInst::CallIndirect { dest, callee, args, dicts } => {
+            w.u8(I_CALL_INDIRECT);
+            w.v(*dest);
+            w.v(*callee);
+            w.vs(args);
+            w.u32(*dicts);
         }
         MirInst::Panic { dest, msg } => {
             w.u8(I_PANIC);
@@ -670,6 +693,9 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
                 1 => MirAllocKind::Tuple,
                 2 => MirAllocKind::Enum { tag: r.u32()? },
                 3 => MirAllocKind::Object { type_id: r.u32()?, nfields: r.u32()? },
+                4 => MirAllocKind::Fn { target: Label(r.u32()?), operand: r.u32()?, mask: r.u32()? },
+                5 => MirAllocKind::PolyFn { target: Label(r.u32()?) },
+                6 => MirAllocKind::PolyFnCapture { target: Label(r.u32()?), params: r.u32()? },
                 k => return Err(format!("native MIR: bad allocation kind {k}")),
             };
             let n = r.len()?;
@@ -681,6 +707,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_STORE_STATIC => MirInst::StoreStatic { dest: r.v()?, slot: r.u32()?, value: r.v()? },
         I_PRINT => MirInst::Print { dest: r.v()?, src: r.v()? },
         I_PANIC => MirInst::Panic { dest: r.v()?, msg: r.v()? },
+        I_CALL_INDIRECT => MirInst::CallIndirect { dest: r.v()?, callee: r.v()?, args: r.vs()?, dicts: r.u32()? },
         I_HOST => MirInst::HostInvoke {
             dest: r.v()?,
             native_id: u16::try_from(r.u32()?).map_err(|_| "native MIR: bad host id")?,

@@ -145,6 +145,10 @@ pub struct NativeHost {
     /// The context is the calling native code's: its roots stay pinned
     /// while the VM runs.
     pub call: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u32, &[common::Value], &mut bool) -> u64,
+    /// Call the function value (or code pointer) word on `args`, the last
+    /// `u32` of them instance dictionaries, as `CallIndirect` does; same
+    /// result and panic rules as `call`.
+    pub call_value: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, &[common::Value], u32, &mut bool) -> u64,
     /// Collect, with the context's roots pinned.
     pub collect: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx),
     /// `FreeEarly` now (no finalizers).
@@ -152,7 +156,7 @@ pub struct NativeHost {
 }
 
 impl NativeHost {
-    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, collect: |_, _| {}, free: |_, _, _| {} };
+    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, collect: |_, _| {}, free: |_, _, _| {} };
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
@@ -826,6 +830,8 @@ pub const ALLOC_ARRAY: u64 = 0;
 pub const ALLOC_TUPLE: u64 = 1;
 pub const ALLOC_ENUM: u64 = 2;
 pub const ALLOC_OBJECT: u64 = 3;
+pub const ALLOC_FN: u64 = 4;
+pub const ALLOC_POLY_FN: u64 = 5;
 
 /// A new object of `kind` from the `n` words at `words`, in declaration
 /// order (an enum's payload order):
@@ -833,7 +839,13 @@ pub const ALLOC_OBJECT: u64 = 3;
 /// - [`ALLOC_TUPLE`]: `extra` is the packed word kinds;
 /// - [`ALLOC_ENUM`]: `extra` is `tag | kinds << 32`;
 /// - [`ALLOC_OBJECT`]: `extra` is the type id and `n` the field count
-///   (`words` unused: stores fill the fields).
+///   (`words` unused: stores fill the fields);
+/// - [`ALLOC_FN`]: a function value, as `MakeFn`: `extra` is the entry PC
+///   `| operand << 32`, the words its captures and filled parameters, then
+///   the filled mask;
+/// - [`ALLOC_POLY_FN`]: a generic function's value, as `MakePolyFn` /
+///   `MakePolyFnCapture`: `extra` is the entry PC `| params << 32`, the
+///   words its dictionaries (`0`: filled in by the call).
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
@@ -877,6 +889,39 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             let (_, mut r) = heap.alloc(ObjInstance::with_type_id_and_fields(extra as u32, n), Object::Instance);
             let _ = r.as_mut();
             r.as_ptr().addr() as u64
+        }
+        ALLOC_FN => {
+            let op = (extra >> 32) as u32;
+            let (n_captures, n_filled) = ((op & 0xFF) as usize, ((op >> 8) & 0xFF) as usize);
+            let Some((&mask, rest)) = values.split_last() else {
+                return unsafe { bail(ctx) };
+            };
+            if rest.len() != n_captures + n_filled {
+                return unsafe { bail(ctx) };
+            }
+            let (captures, filled) = rest.split_at(n_captures);
+            let pfn = crate::memory::ObjFn {
+                entry: extra as u32,
+                arity: (op >> 16) & 0xFF,
+                is_rest: op & (1 << 24) != 0,
+                // `Const mask` then `as_int() as u64`, as `MakeFn` reads it.
+                filled_mask: i64::from(mask.bits() as u32 as i32) as u64,
+                captured_args: filled.to_vec(),
+                captures: captures.to_vec(),
+                dicts: None,
+            };
+            heap.alloc(pfn, Object::Fn).0.addr()
+        }
+        ALLOC_POLY_FN => {
+            use crate::memory::Member;
+            let dicts = values
+                .iter()
+                .map(|&v| match v.bits() {
+                    0 => None,
+                    addr => Some(heap.find_object_by_addr(addr).map_or(Member::Value(v), Member::Object)),
+                })
+                .collect();
+            heap.alloc(crate::memory::ObjFn::poly(extra as u32, (extra >> 32) as u32, dicts), Object::Fn).0.addr()
         }
         _ => return unsafe { bail(ctx) },
     };
@@ -1120,6 +1165,41 @@ pub unsafe extern "C" fn coil_native_call_vm(ctx: *mut NativeCtx, pc: u64, args:
     // SAFETY: `machine` is the live machine `host` was made for.
     let (machine, call) = (c.machine, c.host.call);
     let out = unsafe { call(machine, ctx, pc as u32, words, &mut panicked) };
+    let c = unsafe { &mut *ctx };
+    if panicked {
+        c.trap = TRAP_VM_PANIC;
+        return unsafe { bail(ctx) };
+    }
+    out
+}
+
+/// `CallIndirect` from native code: call the function value (or code
+/// pointer) `callee` on the `n` words at `args`, the last `dicts` of them
+/// instance dictionaries, on the VM. Commits first, as
+/// [`coil_native_call_vm`] does, with the same panic rule.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
+pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, dicts: u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    let mut buf = [common::Value::default(); 16];
+    let Some(words) = buf.get_mut(..n as usize) else {
+        return unsafe { bail(ctx) };
+    };
+    if c.machine.is_null() || dicts > n {
+        return unsafe { bail(ctx) };
+    }
+    for (i, w) in words.iter_mut().enumerate() {
+        // SAFETY: `args` holds `n` words.
+        *w = common::Value::from(unsafe { *args.add(i) });
+    }
+    c.committed = 1;
+    c.vm_calls += 1;
+    c.gc_epoch += 1;
+    let mut panicked = false;
+    let (machine, call) = (c.machine, c.host.call_value);
+    // SAFETY: `machine` is the live machine `host` was made for.
+    let out = unsafe { call(machine, ctx, callee, words, dicts as u32, &mut panicked) };
     let c = unsafe { &mut *ctx };
     if panicked {
         c.trap = TRAP_VM_PANIC;

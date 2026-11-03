@@ -468,3 +468,24 @@ fn tasks_that_wait_under_native_code_still_switch() {
     let stats = same_as_vm("tasks_under_native", &src);
     assert!(compiled(&stats, "put"), "stats: {stats}");
 }
+
+#[test]
+fn closures_run_from_native_code_as_on_the_vm() {
+    // Function values made and called in native code after a commit:
+    // captures, partial and over-application, named and generic function
+    // values, and a panic inside a closure.
+    let src = format!(
+        "{HEADER}fn add(int a, int b) -> int {{ return a + b; }}\n\
+         fn id<T>(T x) -> T {{ return x; }}\n\
+         #[inline(never)]\nfn curried() -> int -> int -> int {{ return fn (int a) => fn (int b) use (a) => a * 10 + b; }}\n\
+         #[inline(never)]\nfn twice(int -> int f, int x) -> int {{ return f(f(x)); }}\n\
+         #[inline(never)]\nfn run(int k) -> int {{\n  let _ = println(\"run\");\n  let plus = fn (int x) use (k) => x + k;\n  let g = add(a: 5);\n\
+           let h: int -> int = id;\n  let c = curried();\n  let t = twice(plus, 1) + g(2) + h(7) + c(1, 2) + c(3)(4);\n\
+           let bad = fn (int x) => 10 / x;\n  return t + bad(k - 3);\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", run(2))); let _ = println(format(\"%i\", run(3))); }}\n"
+    );
+    let stats = same_as_vm("closures", &src);
+    assert!(compiled(&stats, "run") && compiled(&stats, "twice"), "stats: {stats}");
+    let err = program_stderr(&run("closures", &src, true));
+    assert!(err.contains("panic: division by zero"), "stderr: {err}");
+}
