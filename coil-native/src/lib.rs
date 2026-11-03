@@ -41,10 +41,34 @@ pub struct NativeProgram {
 /// body's name to its bytecode entry PC. The code stays mapped for the
 /// rest of the process.
 pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<NativeProgram, String> {
-    let plan = plan(bodies);
+    // A body `plan` admits may still fail to lower; its callers already
+    // name it, so leave it out and build the module again.
+    let mut excluded = HashMap::new();
+    loop {
+        match jit_once(bodies, entry_pcs, &excluded)? {
+            Attempt::Done(program) => return Ok(program),
+            Attempt::Without(i, why) => {
+                excluded.insert(i, why);
+            }
+        }
+    }
+}
+
+enum Attempt {
+    Done(NativeProgram),
+    /// Body `i` does not lower: try again without it.
+    Without(usize, String),
+}
+
+fn jit_once(
+    bodies: &[NativeBody],
+    entry_pcs: &HashMap<String, u32>,
+    excluded: &HashMap<usize, String>,
+) -> Result<Attempt, String> {
+    let plan = plan_without(bodies, excluded);
     let mut refused = plan.refused;
     if plan.compile.is_empty() {
-        return Ok(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused });
+        return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused }));
     }
 
     let mut flags = settings::builder();
@@ -80,14 +104,10 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
             r
         };
         if let Err(why) = lowered {
-            refused.push((body.name.clone(), why));
-            module.clear_context(&mut ctx);
-            continue;
+            return Ok(Attempt::Without(i, why));
         }
         if let Err(e) = module.define_function(ids.imp[&i], &mut ctx) {
-            refused.push((body.name.clone(), format!("cranelift: {e:?}")));
-            module.clear_context(&mut ctx);
-            continue;
+            return Ok(Attempt::Without(i, format!("cranelift: {e:?}")));
         }
         module.clear_context(&mut ctx);
 
@@ -116,7 +136,7 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
-    Ok(NativeProgram { entries, compiled, refused })
+    Ok(Attempt::Done(NativeProgram { entries, compiled, refused }))
 }
 
 extern "C" fn coil_native_fmod(a: f64, b: f64) -> f64 {
@@ -138,6 +158,11 @@ struct Plan {
 }
 
 fn plan(bodies: &[NativeBody]) -> Plan {
+    plan_without(bodies, &HashMap::new())
+}
+
+/// [`plan`] with `excluded` bodies refused for the given reason.
+fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>) -> Plan {
     let by_label: HashMap<Label, usize> = bodies
         .iter()
         .enumerate()
@@ -146,6 +171,10 @@ fn plan(bodies: &[NativeBody]) -> Plan {
     let mut refused = Vec::new();
     let mut ok: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, b) in bodies.iter().enumerate() {
+        if let Some(why) = excluded.get(&i) {
+            refused.push((b.name.clone(), why.clone()));
+            continue;
+        }
         match eligible(&b.mir, &by_label) {
             Ok(callees) => {
                 ok.insert(i, callees);
@@ -927,6 +956,7 @@ mod tests {
         assert_eq!(p.entries.len(), 1, "refused: {:?}", p.refused);
         assert_eq!(run(&p.entries[0], &[1.5f64.to_bits()]), (0, 1.5f64.to_bits()));
     }
+
     #[test]
     fn a_callee_that_fails_to_lower_keeps_its_callers_on_the_vm() {
         // `g` passes `plan` but has no lowering (`!` of a float); `f` calls it.
