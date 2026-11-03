@@ -127,6 +127,8 @@ const I_STR_EQ: u8 = 21;
 const I_STRINGIFY: u8 = 22;
 const I_FORMAT: u8 = 23;
 const I_FREE_EARLY: u8 = 24;
+const I_LOAD_STATIC: u8 = 25;
+const I_STORE_STATIC: u8 = 26;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -371,6 +373,17 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*dest);
             w.u32(*idx);
         }
+        MirInst::LoadStatic { dest, slot } => {
+            w.u8(I_LOAD_STATIC);
+            w.v(*dest);
+            w.u32(*slot);
+        }
+        MirInst::StoreStatic { dest, slot, value } => {
+            w.u8(I_STORE_STATIC);
+            w.v(*dest);
+            w.u32(*slot);
+            w.v(*value);
+        }
         MirInst::FreeEarly { dest, value, deep } => {
             w.u8(I_FREE_EARLY);
             w.v(*dest);
@@ -594,6 +607,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
         }
         I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
+        I_LOAD_STATIC => MirInst::LoadStatic { dest: r.v()?, slot: r.u32()? },
+        I_STORE_STATIC => MirInst::StoreStatic { dest: r.v()?, slot: r.u32()?, value: r.v()? },
         I_FREE_EARLY => MirInst::FreeEarly { dest: r.v()?, value: r.v()?, deep: r.u8()? != 0 },
         I_FORMAT => MirInst::Format { dest: r.v()?, fmt: r.v()?, args: r.vs()? },
         I_STRINGIFY => MirInst::Stringify { dest: r.v()?, src: r.v()?, tag: Some(r.u32()?).filter(|&t| t != u32::MAX) },

@@ -26,7 +26,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
+    NATIVE_CTX_BAIL, NATIVE_CTX_RET_HI, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN,
     NativeEntry, NativeEntryFn,
 };
 
@@ -447,6 +447,11 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                         }
                     }
                     MirInst::String { dest, .. } => need(dest)?,
+                    MirInst::LoadStatic { dest, .. } => need(dest)?,
+                    MirInst::StoreStatic { dest, value, .. } => {
+                        need(dest)?;
+                        need(value)?;
+                    }
                     MirInst::FreeEarly { dest, value, .. } => {
                         need(dest)?;
                         need(value)?;
@@ -1090,26 +1095,8 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(fast);
                 let at = self.element(*array, i);
                 let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
-                let t = MemFlagsData::trusted();
-                let n = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_LEN);
-                let cap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_CAP);
-                let full = self.b.ins().icmp(IntCC::Equal, n, cap);
-                let grow = self.b.create_block();
-                let write = self.b.create_block();
-                self.b.ins().brif(full, grow, &[], write, &[]);
-                self.b.switch_to_block(grow);
-                self.b.ins().call(self.undo_grow, &[self.ctx]);
-                self.b.ins().jump(write, &[]);
-                self.b.switch_to_block(write);
-                let buf = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_BUF);
-                let off = self.b.ins().imul_imm_u(n, 24);
-                let e = self.b.ins().iadd(buf, off);
-                self.b.ins().store(t, a, e, 0);
-                self.b.ins().store(t, i, e, 8);
-                self.b.ins().store(t, old, e, 16);
-                let n1 = self.b.ins().iadd_imm_u(n, 1);
-                self.b.ins().store(t, n1, self.ctx, NATIVE_CTX_UNDO_LEN);
-                self.b.ins().store(t, v, at, 0);
+                self.log_undo(a, i, old);
+                self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(slow);
                 self.b.ins().call(self.store_index, &[self.ctx, a, i, v]);
@@ -1236,6 +1223,24 @@ impl<'a> Lower<'a> {
                 let w = if *ne { self.b.ins().bxor_imm_u(w, 1) } else { w };
                 self.set(f, *dest, w);
             }
+            MirInst::LoadStatic { dest, slot } => {
+                let at = self.static_at(*slot);
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::StoreStatic { dest, slot, value } => {
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                let at = self.static_at(*slot);
+                let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                let target = self.b.ins().iconst(types::I64, machine::native::UNDO_STATIC as i64);
+                let i = self.b.ins().iconst(types::I64, i64::from(*slot));
+                self.log_undo(target, i, old);
+                self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                let z = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, z);
+            }
             MirInst::ClearWord { dest, .. } => {
                 let z = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, z);
@@ -1274,6 +1279,41 @@ impl<'a> Lower<'a> {
             other => return Err(format!("instruction {}", inst_name(other))),
         }
         Ok(())
+    }
+
+    /// Append `[target, index, old]` to the undo log inline, growing it
+    /// through `coil_native_undo_grow` when it is full.
+    fn log_undo(&mut self, target: cranelift_codegen::ir::Value, index: cranelift_codegen::ir::Value, old: cranelift_codegen::ir::Value) {
+        let t = MemFlagsData::trusted();
+        let n = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_LEN);
+        let cap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_CAP);
+        let full = self.b.ins().icmp(IntCC::Equal, n, cap);
+        let grow = self.b.create_block();
+        let write = self.b.create_block();
+        self.b.ins().brif(full, grow, &[], write, &[]);
+        self.b.switch_to_block(grow);
+        self.b.ins().call(self.undo_grow, &[self.ctx]);
+        self.b.ins().jump(write, &[]);
+        self.b.switch_to_block(write);
+        let buf = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_BUF);
+        let off = self.b.ins().imul_imm_u(n, 24);
+        let e = self.b.ins().iadd(buf, off);
+        self.b.ins().store(t, target, e, 0);
+        self.b.ins().store(t, index, e, 8);
+        self.b.ins().store(t, old, e, 16);
+        let n1 = self.b.ins().iadd_imm_u(n, 1);
+        self.b.ins().store(t, n1, self.ctx, NATIVE_CTX_UNDO_LEN);
+    }
+
+    /// The address of static `slot`, or bail when the machine has fewer
+    /// statics (the VM reads `0` there and drops the store; never seen).
+    fn static_at(&mut self, slot: u32) -> cranelift_codegen::ir::Value {
+        let t = MemFlagsData::trusted();
+        let len = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_STATICS_LEN);
+        let out = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, len, i64::from(slot));
+        self.bail_if(out);
+        let base = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_STATICS);
+        self.b.ins().iadd_imm_u(base, i64::from(slot) * 8)
     }
 
     /// The words of `vs` in a new stack slot, in order; its address.
