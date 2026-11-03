@@ -157,6 +157,22 @@ fn heap_stores_are_undone_when_the_call_bails() {
     assert!(stats.contains("1 bailed"), "stats: {stats}");
 }
 
+#[test]
+fn copy_on_write_keeps_value_semantics_natively() {
+    // `step` writes through `mut ps[i]`: a copy-on-write in native code.
+    // `keep` names the same Vec, so the writes copy and `keep` is unchanged.
+    let src = format!(
+        "{HEADER}class P {{ pub x: float, pub v: float }}\n\
+         #[inline(never)]\nfn step(Vec<P> ps, float dt) -> float {{ let s = 0.0; let i = 0; while i < ps.len() {{ let p = mut ps[i]; p.v = p.v - p.x * dt; p.x = p.x + p.v * dt; s = s + p.x; i = i + 1; }} return s; }}\n\
+         fn main() {{\n  let ps: Vec<P> = Vec::new();\n  let i = 0;\n  while i < 4 {{ ps.push(new P(i as float, 0.0)); i = i + 1; }}\n\
+           let keep = ps;\n  let s = 0.0;\n  let r = 0;\n  while r < 50 {{ s = step(ps, 0.01); r = r + 1; }}\n\
+           let _ = println(format(\"%f %f %f\", s, ps[3].x, keep[3].x));\n}}\n"
+    );
+    let stats = same_as_vm("cow", &src);
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
+    assert!(!stats.contains("native: 0 compiled"), "stats: {stats}");
+}
+
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
 /// section.
 fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
