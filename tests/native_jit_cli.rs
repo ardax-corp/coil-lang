@@ -742,3 +742,33 @@ fn timeouts_panics_and_joins_under_native_frames_match_the_vm() {
     assert!(compiled(&stats, "sleeper") && compiled(&stats, "waits"), "stats: {stats}");
     assert!(native_calls(&stats) >= 5, "stats: {stats}");
 }
+
+#[test]
+fn native_code_resumes_generators_as_the_vm_does() {
+    // `drain`, `talk`, `nest` and `boom` compile and resume generators whose
+    // bodies run on the VM: yields, sends, `yield from`, completion, a
+    // generator that panics, and a resume after it finished.
+    let defs = format!(
+        "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i * i; i = i + 1; }} return 1000; }}\n\
+         gen fn echo() {{ let x = yield 0; let y = yield x * 2; return x + y; }}\n\
+         gen fn inner() {{ yield 7; yield 8; }}\n\
+         gen fn outer() {{ yield 6; yield from inner(); yield 9; }}\n\
+         gen fn bad() {{ yield 1; let z = 0; yield 10 / z; }}\n\
+         #[inline(never)]\nfn drain(int n) -> int {{ let g = count(n); let t = 0; while !done(g) {{ t = t + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn talk() -> int {{ let g = echo(); let a = resume g; let b = resume g with 5; let c = resume g with 3; return a * 10000 + b * 100 + c; }}\n\
+         #[inline(never)]\nfn nest() -> int {{ let g = outer(); let t = 0; let i = 0; while i < 4 {{ t = t * 10 + resume g; i = i + 1; }} return t; }}\n\
+         #[inline(never)]\nfn twice() -> int {{ let g = count(0); let a = resume g; return a + resume g; }}\n\
+         #[inline(never)]\nfn boom() -> int {{ let g = bad(); let a = resume g; let _ = println(\"first\"); return a + resume g; }}\n"
+    );
+    let ok = format!("{defs}fn main() {{ let _ = println(format(\"%i %i %i\", drain(10), talk(), nest())); }}\n");
+    let stats = same_as_vm("native_resume", &ok);
+    for f in ["drain", "talk", "nest"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    let boom = format!("{defs}fn main() {{ let _ = println(format(\"%i\", drain(3) + boom())); }}\n");
+    let stats = same_as_vm("native_resume_panic", &boom);
+    assert!(compiled(&stats, "boom"), "stats: {stats}");
+    assert!(program_stderr(&run("native_resume_panic", &boom, true)).contains("division by zero"));
+    let twice = format!("{defs}fn main() {{ let _ = println(format(\"%i\", twice())); }}\n");
+    let _ = same_as_vm("native_resume_done", &twice);
+}
