@@ -4,8 +4,8 @@
     };
 
     use super::{
-        alloc_count, dispatch_count, intern_str_count, make_fast_count, reset_alloc_profile,
-        reset_dispatch_count,
+        alloc_count, dispatch_count, gc_count, intern_str_count, make_fast_count, minor_gc_count,
+        reset_alloc_profile, reset_dispatch_count,
     };
     use crate::{Heap, Machine, ObjArray, ObjEnum, Object};
     use std::sync::{Arc, Mutex};
@@ -4519,6 +4519,40 @@
         let mut vm = Machine::<16>::default();
         vm.run(&code);
         assert_eq!(vm.pop().as_int(), 30);
+    }
+
+    /// The object an allocation just pushed is the VM's own word, not a
+    /// guess: the minor collection that allocation triggers moves it like
+    /// any precise root. Pinned instead, every minor would hold a nursery
+    /// chunk until a major cycle, and a loop of short-lived objects would
+    /// run major cycles it never needs.
+    #[test]
+    fn a_minor_at_an_allocation_moves_the_fresh_object() {
+        let code = vec![
+            const_int(3_000_000),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            // 2: loop head
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(0),
+            Byte::new(Instruction::LEQ),
+            Byte::new(Instruction::JMPF).with_operand_u32(7),
+            Byte::new(Instruction::HALT),
+            // 7: body, one short-lived enum per pass
+            const_int(1),
+            make_enum(0, 1),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(1),
+            Byte::new(Instruction::SUB),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            Byte::new(Instruction::JMP).with_operand_u32(2),
+        ];
+        let mut vm = Machine::<16>::default();
+        vm.heap.set_nursery(true);
+        reset_alloc_profile();
+        vm.run(&code);
+        assert!(minor_gc_count() >= 40, "the loop fills the nursery many times: {}", minor_gc_count());
+        assert_eq!(gc_count(), 0, "nothing survives a minor, so no major cycle runs");
     }
 
     #[test]
