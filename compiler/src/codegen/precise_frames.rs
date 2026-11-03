@@ -1016,9 +1016,10 @@ impl Body<'_> {
     /// leaving does not read it. Reads are over-approximated (every slot an op names
     /// but does not purely overwrite, every word a pop could read under an
     /// inexact cursor, every word at an exit), writes under-approximated
-    /// (pure slot stores and exact-cursor pushes). Only safepoints
-    /// that resume in this frame are filtered (exits are not in the
-    /// result); a `CallIndirect` keeps its base word, which the VM keeps
+    /// (pure slot stores and exact-cursor pushes). A safepoint that resumes
+    /// in this frame keeps its live-out words; one in an exit keeps its
+    /// live-in (every word but the temporaries the exit does not read). A
+    /// `CallIndirect` keeps its base word, which the VM keeps
     /// during a partial application. A `CallIndirect` row is filtered like
     /// a `CALL`'s: kept whole, it named a word dead at the allocations
     /// before it, which an evacuation there left holding a moved object's
@@ -1108,7 +1109,7 @@ impl Body<'_> {
                 .chain(step.jump)
                 .filter(|s| states.contains_key(s))
                 .collect();
-            let filter = step.record.is_some() && !exit;
+            let filter = step.record.is_some();
             let keep = matches!(inst, CallIndirect).then(|| {
                 let packed = b.operand_u32();
                 pre.hi.saturating_sub(1 + (packed & 0xFFFF) as usize + ((packed >> 16) & 0xFFFF) as usize)
@@ -1188,6 +1189,14 @@ impl Body<'_> {
                 .iter()
                 .filter(|(_, n)| n.filter)
                 .map(|(&pc, n)| {
+                    // A safepoint in an op that leaves the function (an
+                    // allocating `MakeEnumReturn`) keeps the words the op
+                    // reads and every local, not a temporary past its
+                    // last read: that word may name an object an earlier
+                    // evacuation already moved.
+                    if n.exit {
+                        return (pc, live_in[&pc].clone());
+                    }
                     let mut out = out_of(pc, &live_in);
                     if let Some(k) = n.keep {
                         out[k] = true;
