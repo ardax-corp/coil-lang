@@ -107,13 +107,66 @@ fn floats_and_bools_match_the_vm() {
     same_as_vm("floats", &src);
 }
 
-#[test]
-fn jit_flag_is_rejected_on_compile_until_archives_carry_mir() {
-    let ws = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let out = Command::new(coil_bin())
-        .args(["compile", "--jit"])
-        .arg(ws.join("examples/perf/fib.coil"))
+/// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
+/// section.
+fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join(format!("{name}.coil"));
+    std::fs::write(&file, src).expect("write source");
+    let out = dir.join(format!("{name}.ccoil"));
+    let mut cmd = Command::new(coil_bin());
+    cmd.args(["compile", "--no-build-cache", "--fold-calls", "off", "-o"]).arg(&out).arg(&file);
+    if jit {
+        cmd.arg("--jit");
+    }
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let compiled = cmd.output().expect("spawn coil compile");
+    assert!(compiled.status.success(), "compile: {}", String::from_utf8_lossy(&compiled.stderr));
+    out
+}
+
+fn run_archive(archive: &PathBuf, extra: &[&str]) -> Output {
+    Command::new(coil_bin())
+        .arg("run")
+        .args(extra)
+        .arg(archive)
+        .env("COIL_NATIVE_STATS", "1")
         .output()
-        .expect("spawn coil compile");
-    assert!(!out.status.success());
+        .expect("spawn coil run")
+}
+
+#[test]
+fn compiled_archive_carries_mir_and_runs_natively() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn fib(int n) -> int {{ if n <= 2 {{ return 1; }} return fib(n - 1) + fib(n - 2); }}\n\
+         #[inline(never)]\nfn q(int a, int b) -> int {{ return a / b; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", fib(20))); let _ = println(format(\"%i\", q(1, 0))); }}\n"
+    );
+    let archive = compile("archive", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(String::from_utf8_lossy(&jit.stdout), "6765\n");
+    assert_eq!(jit.stdout, vm.stdout);
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert_eq!(jit.status.code(), vm.status.code());
+    let stats = String::from_utf8_lossy(&jit.stderr);
+    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(!String::from_utf8_lossy(&vm.stderr).contains("native:"), "--no-jit stays on the VM");
+}
+
+#[test]
+fn archive_without_mir_runs_on_the_vm() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sq(int n) -> int {{ return n * n; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", sq(7))); }}\n"
+    );
+    let out = compile("plain", &src, false);
+    let run = run_archive(&out, &["--jit"]);
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "49\n");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("carries no native MIR"), "stderr: {stderr}");
+    assert!(!stderr.contains("native:"), "stderr: {stderr}");
 }

@@ -3,9 +3,9 @@
 Coil can run some functions as machine code made by
 [Cranelift](https://cranelift.dev) from their MIR. The VM stays: it runs
 comptime and macros, `coil debug`, coverage, wasm, and every body the native
-backend does not compile. The plan (AOT `coil package`, `coil compile --jit`
-archives, heap and task tiers) is in the project's native-compilation
-assessment; this page describes what is implemented.
+backend does not compile. The plan (AOT `coil package`, heap and task
+tiers) is in the project's native-compilation assessment; this page
+describes what is implemented.
 
 ## Using it
 
@@ -16,6 +16,30 @@ COIL_NATIVE_STATS=2 coil prog.coil --jit   # plus why each body stays on the VM
 ```
 
 `--jit` skips the build cache (it needs this compile's MIR).
+
+```
+coil compile --jit prog.coil -o prog.ccoil   # archive with a native MIR section
+coil run prog.ccoil                          # JITs the section, then runs
+coil run --no-jit prog.ccoil                 # VM only
+```
+
+`coil run --jit` on an archive without the section warns and runs on the
+VM. `coil package` does not use the section yet (step 7 builds AOT
+binaries instead).
+
+### The native MIR section
+
+`ArchivedProgram::native_mir` (archive 6.20; 6.0 to 6.19 archives load
+with it empty) holds bytes in the `coil-native` section format
+(`coil-native/src/section.rs`): the magic `CNMIR`, a format byte, then each
+body the backend compiles with its name, bytecode entry PC, entry label,
+signature, value types and blocks. Only those bodies and only the MIR the
+backend lowers are stored, so the encoder never meets an instruction
+outside the tier; the format grows with the tiers and bumps its format byte
+when the layout changes. A reader refuses any other format, a truncated
+section or trailing bytes, and the run falls back to the VM with a
+warning. The section is compiled again on every run: the archive carries
+MIR, not machine code.
 
 ## Numeric tier (step 2)
 
@@ -78,5 +102,6 @@ machines (auto-par, threads) run bytecode.
 | MIR capture for a backend | `compiler/src/mir/native_capture.rs`, called from `IlModule::optimize_and_flatten`; exported as `compiler::native_mir` |
 | Lowering MIR → Cranelift, JIT driver | `coil-native/src/lib.rs` |
 | Native table, `NativeCtx`, bail | `machine/src/native.rs`, `Machine::try_native_call` |
-| `--jit` | `coil-args` (`NurseryFlag`), `src/main.rs` `install_native` |
+| `--jit` / `--no-jit` | `coil-args` (`NurseryFlag`), `coil compile --jit` in `src/cli.rs`, `src/main.rs` `install_native_bodies` |
+| Archive section | `coil-native/src/section.rs`, `ArchivedProgram::native_mir` |
 | Tests | `tests/native_jit_cli.rs` (JIT output equals VM output) |
