@@ -35,6 +35,8 @@ pub struct Lowered {
     pub match_arities: HashMap<u32, u32>,
     pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
     pub needs_frame_extent: std::collections::HashSet<String>,
+    /// [`super::IlModule::temp_words`].
+    pub temp_words: HashMap<String, Vec<u16>>,
     pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
     /// [`super::IlModule::lir_cleanup_pads`].
     pub lir_cleanup_pads: HashMap<String, (super::Label, u32)>,
@@ -177,6 +179,7 @@ pub(crate) fn lower_module_inner(
     lowered.func_label_maps = func_label_maps;
     lowered.deopt_map_drafts = std::mem::take(&mut module.deopt_map_drafts);
     lowered.needs_frame_extent = std::mem::take(&mut module.needs_frame_extent);
+    lowered.temp_words = std::mem::take(&mut module.temp_words);
     lowered.debug_slot_remaps = std::mem::take(&mut module.debug_slot_remaps);
     lowered.lir_cleanup_pads = std::mem::take(&mut module.lir_cleanup_pads);
     lowered.panic_pads = std::mem::take(&mut module.panic_pads);
@@ -244,6 +247,7 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
         match_arities,
         deopt_map_drafts: Vec::new(),
         needs_frame_extent: Default::default(),
+        temp_words: HashMap::new(),
         debug_slot_remaps: HashMap::new(),
         lir_cleanup_pads: HashMap::new(),
         panic_pads: HashMap::new(),

@@ -1230,3 +1230,66 @@ fn assert_entry_chain_dissolves(name: &str, files: &[(&str, &str)]) {
         let _ = run_bytecode(bytecode, constants, &pipeline);
     });
 }
+
+/// The stdlib `HashMap` entry chain splices whole at every level that
+/// inlines across modules, not only `-O2`: `main` keeps no call to an
+/// `Entry` method or to the lookup the view is built from (#2248).
+#[test]
+fn stdlib_entry_chain_splices_whole_at_every_level() {
+    let files = [(
+        "src/main.coil",
+        r#"
+use collections::map::{HashMap};
+
+fn main() {
+    let counts: HashMap<string, int> = HashMap::new();
+    let words = ["a", "bb", "ccc", "a", "dd", "bb", "a"];
+    let i = 0;
+    while i < 70 {
+        let w = words[i % 7];
+        let _ = counts.entry(w).and_modify(fn (int c) => c + 1).or_insert(1);
+        i = i + 1;
+    }
+    if counts.get("a").unwrap_or(0) != 30 {
+        panic "count";
+    }
+}
+"#,
+    )];
+    let kept = [
+        "collections::map::HashMap::entry$inst$string_int",
+        "collections::map::Entry::and_modify$inst$string_int",
+        "collections::map::Entry::or_insert$inst$string_int",
+        "collections::index::KeyIndex::find$inst$string",
+    ];
+    for level in [compiler::OptLevel::Standard, compiler::OptLevel::Aggressive, compiler::OptLevel::Size] {
+        let (root, entry) = build_project(&format!("stdlib_entry_chain_{level:?}"), &manifest_src_and_stdlib(), &files, "src/main.coil");
+        with_project_cwd(&root, || {
+            let mut pipeline = Pipeline::new();
+            bind_ns_pipeline(&mut pipeline, &[]);
+            pipeline.set_opt_level(level);
+            let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+                Ok(pair) => pair,
+                Err(_) => {
+                    for msg in pipeline.messages() {
+                        eprintln!("PIPELINE ERROR: {}", msg.message());
+                    }
+                    panic!("compile failed at {level:?}");
+                }
+            };
+            let start = pipeline.function_offset("main").expect("main");
+            let end = pipeline.compiler().function_end(start);
+            let targets: Vec<usize> = bytecode[start..end]
+                .iter()
+                .filter(|b| matches!(*b.bytecode(), common::Instruction::CALL))
+                .map(|b| b.call_parts().1)
+                .collect();
+            for name in kept {
+                if let Some(at) = pipeline.function_offset(name) {
+                    assert!(!targets.contains(&at), "{level:?}: `main` keeps a call to `{name}`");
+                }
+            }
+            let _ = run_bytecode(bytecode, constants, &pipeline);
+        });
+    }
+}

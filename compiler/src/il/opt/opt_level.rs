@@ -57,6 +57,19 @@ impl OptLevel {
         matches!(self, Self::Standard | Self::Aggressive | Self::Size)
     }
 
+    /// Budget for another module's callee (`InlineCostOptions::
+    /// max_cross_module_inline_cost`, every node weighed and a call as 25).
+    /// It follows `-O3`'s larger limit: a callee clone built at that level
+    /// already holds what its own module inlined into it (an
+    /// `Entry::or_insert` with `HashMap::insert` spliced in, #2248).
+    pub fn cross_module_inline_cost(self) -> usize {
+        match self {
+            Self::None | Self::Debug | Self::Basic => 0,
+            Self::Standard | Self::Size => 100,
+            Self::Aggressive => 200,
+        }
+    }
+
     /// The optimization-hint tiers: how many times [`Self::inline_max_cost`]
     /// a callee may cost when it is hot by spreading, `#[inline]` or
     /// `#[hot]` (`docs/internals/opt-hints.md`). `-O3` trades code for
@@ -409,6 +422,10 @@ mod tests {
         assert_eq!(OptLevel::Standard.inline_max_cost(), 100);
         assert_eq!(OptLevel::Aggressive.inline_max_cost(), 200);
         assert_eq!(OptLevel::Size.inline_max_cost(), 40);
+        assert_eq!(OptLevel::Standard.cross_module_inline_cost(), 100);
+        assert_eq!(OptLevel::Aggressive.cross_module_inline_cost(), 200);
+        assert_eq!(OptLevel::Size.cross_module_inline_cost(), 100);
+        assert_eq!(OptLevel::Basic.cross_module_inline_cost(), 0);
         assert!(!OptLevel::None.inline_across_modules());
         assert!(!OptLevel::Basic.inline_across_modules());
         assert!(OptLevel::Standard.inline_across_modules());

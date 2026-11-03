@@ -2812,8 +2812,12 @@ impl Compiler {
             f
         }
         let fit = same(|id: HirId, callee, foreign: bool, cross: bool| {
+            // Another module's callee, past the cross-module limit, is
+            // weighed by that limit: the level's own is for this module's
+            // callees (`-Os`'s 40 refused a 55-node `KeyIndex::find`, #2248).
+            let weigh = |b: &HirBody| if cross { budget_of(b).max(cross_budget) } else { budget_of(b) };
             if !(cross && over_cross(callee, cross_size(callee))) {
-                match inline::inlinable(callee, budget_of(callee)) {
+                match inline::inlinable(callee, weigh(callee)) {
                     Err("cost" | "construct") if callee.exprs.len() >= crate::hir::outline::MIN_NODES => {}
                     found => return Ok((callee, found?)),
                 }
@@ -2822,7 +2826,7 @@ impl Compiler {
             if cross && over_cross(cut, cross_size(cut)) {
                 return Err("cost".to_string());
             }
-            Ok((cut, inline::inlinable(cut, budget_of(cut))?))
+            Ok((cut, inline::inlinable(cut, weigh(cut))?))
         });
         let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
             if let Some(lambda) = lambda_calls.get(&id.0) {

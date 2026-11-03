@@ -1074,6 +1074,7 @@ pub(crate) struct GatedHostCall {
 /// code and the constant pool.
 struct FrameInputs {
     needs_extent: HashSet<String>,
+    temp_words: HashMap<String, Vec<u16>>,
     match_arities: HashMap<u32, u32>,
     entries: Vec<(String, u32)>,
     entry_sps: HashMap<String, u32>,
