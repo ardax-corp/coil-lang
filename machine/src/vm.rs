@@ -1791,7 +1791,7 @@ impl<const S: usize> Machine<S> {
     /// Run the native code at `target` on the top `arity` stack words.
     /// `None`: no native code there, or it bailed and the VM runs the call.
     #[inline(never)]
-    fn try_native_call(&mut self, target: usize, arity: usize) -> Option<(Value, bool)> {
+    fn try_native_call(&mut self, target: usize, arity: usize) -> Option<crate::native::NativeResult> {
         let base = self.stack.tell() - arity;
         let table = self.native.as_deref_mut()?;
         // After a bail the VM re-runs that call in bytecode; calls nested
@@ -1813,9 +1813,9 @@ impl<const S: usize> Machine<S> {
             *w = self.stack[base + i].bits();
         }
         match crate::native::call(&entry, &words[..arity], &mut self.heap) {
-            Some((out, allocated)) => {
+            Some(r) => {
                 table.hits += 1;
-                Some((Value::from(out), allocated))
+                Some(r)
             }
             None => {
                 table.bails += 1;
@@ -5527,12 +5527,15 @@ impl<const S: usize> Machine<S> {
                     if unlikely(self.native.is_some())
                         && !debug_attached
                         && target != 0
-                        && let Some((ret, allocated)) = self.try_native_call(target, arity)
+                        && let Some(ret) = self.try_native_call(target, arity)
                     {
                         let base = self.stack.tell() - arity;
                         self.stack.seek(base);
-                        self.stack.push(ret);
-                        if allocated {
+                        self.stack.push(Value::from(ret.lo));
+                        if let Some(hi) = ret.hi {
+                            self.stack.push(Value::from(hi));
+                        }
+                        if ret.allocated {
                             // Native code never collects; objects it made
                             // are reachable from `ret` or the heap now.
                             self.maybe_gc_after_call_alloc(ip);

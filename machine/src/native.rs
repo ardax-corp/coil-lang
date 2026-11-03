@@ -39,7 +39,13 @@ pub struct NativeCtx {
     /// the call returns; past [`NATIVE_ALLOC_CAP`] with a collection due,
     /// helpers bail instead and the VM's re-run collects as it goes.
     pub allocs: u64,
+    /// The second result word of a body that returns two
+    /// ([`NativeEntry::ret_words`] `2`): the entry stores it here.
+    pub ret_hi: u64,
 }
+
+/// Byte offset of [`NativeCtx::ret_hi`].
+pub const NATIVE_CTX_RET_HI: i32 = std::mem::offset_of!(NativeCtx, ret_hi) as i32;
 
 /// Allocations one native call may make while a collection is due.
 pub const NATIVE_ALLOC_CAP: u64 = 1 << 16;
@@ -77,6 +83,7 @@ impl NativeCtx {
             undo_vec: undo,
             heap: std::ptr::null_mut(),
             allocs: 0,
+            ret_hi: 0,
         }
     }
 
@@ -136,6 +143,9 @@ pub struct NativeEntry {
     /// Bytecode PC of the function's entry (its `CALL` target).
     pub pc: u32,
     pub arity: u16,
+    /// Result words: `1`, or `2` for a two-slot return (`lo`, then `hi`
+    /// in [`NativeCtx::ret_hi`]), as the VM's `RETURN` pushes them.
+    pub ret_words: u8,
     pub entry: NativeEntryFn,
 }
 
@@ -204,10 +214,17 @@ impl NativeTable {
     }
 }
 
-/// Run `entry` with `args`: its result and whether it allocated (the VM
-/// then checks for a collection). `None` when it bailed.
+/// What a native call gave back: its result words and whether it
+/// allocated (the VM then checks for a collection).
+pub(crate) struct NativeResult {
+    pub(crate) lo: u64,
+    pub(crate) hi: Option<u64>,
+    pub(crate) allocated: bool,
+}
+
+/// Run `entry` with `args`. `None` when it bailed.
 #[inline(never)]
-pub(crate) fn call(entry: &NativeEntry, args: &[u64], heap: &mut crate::memory::Heap) -> Option<(u64, bool)> {
+pub(crate) fn call(entry: &NativeEntry, args: &[u64], heap: &mut crate::memory::Heap) -> Option<NativeResult> {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
     let mut undo = Vec::new();
@@ -216,7 +233,8 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], heap: &mut crate::memory::
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
     if ctx.bail == 0 {
-        return Some((out, ctx.allocs != 0));
+        let hi = (entry.ret_words == 2).then_some(ctx.ret_hi);
+        return Some(NativeResult { lo: out, hi, allocated: ctx.allocs != 0 });
     }
     ctx.undo();
     None
