@@ -300,6 +300,18 @@ fn format_and_string_building_run_natively() {
     }
 }
 
+#[test]
+fn question_mark_err_of_a_string_result_matches_the_vm() {
+    // `?` on the `Err` of a `Result<string, int>` crashed native code.
+    let src = format!(
+        "{HEADER}fn inner(int x) -> Result<string, int> {{ if x > 0 {{ return Result::Ok(\"abc\"); }} return Result::Err(x); }}\n\
+         fn len_of_ok(int y) -> Result<int, int> {{ let r = match inner(y)? {{ s => s.len() }}; return Result::Ok(r); }}\n\
+         fn main() {{\n  let b = match len_of_ok(-4) {{ Result::Ok(n) => n, Result::Err(e) => e }};\n  let a = match len_of_ok(2) {{ Result::Ok(n) => n, Result::Err(e) => e }};\n\
+           let _ = println(format(\"%i %i\", a, b));\n}}\n"
+    );
+    same_as_vm("question_err", &src);
+}
+
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
 /// section.
 fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
