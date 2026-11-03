@@ -80,6 +80,9 @@ pub struct NurseryFlag {
     /// Compile what it can to native code with Cranelift before running
     #[arg(long)]
     pub jit: bool,
+    /// Run on the VM alone, even when the archive carries native MIR
+    #[arg(long, conflicts_with = "jit")]
+    pub no_jit: bool,
 }
 
 fn parse_nursery(s: &str) -> Result<bool, String> {

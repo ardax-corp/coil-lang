@@ -43,6 +43,7 @@ fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Res
         cleanup_ranges: Vec::new(),
         line_table: Vec::new(),
         span_table: Vec::new(),
+        native_mir: Vec::new(),
     };
     // Cleanup ranges are behaviour (panics run `defer`s), not debug info:
     // `set_debug` keeps them at every level.
@@ -466,6 +467,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
         assert!(matches!(
@@ -492,6 +494,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
         assert!(matches!(
@@ -591,6 +594,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let mut prefixed = vec![0u8; 1];

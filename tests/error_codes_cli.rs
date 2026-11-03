@@ -43,6 +43,7 @@ fn run_of_other_archive_version_is_e0901() {
         cleanup_ranges: Vec::new(),
         line_table: Vec::new(),
         span_table: Vec::new(),
+        native_mir: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&stale).unwrap();
     let dir = std::env::temp_dir().join(format!("coil-e0901-{}", std::process::id()));
