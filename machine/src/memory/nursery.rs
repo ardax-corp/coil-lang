@@ -524,6 +524,31 @@ mod tests {
         assert!(heap.find_object_by_addr(head).is_none(), "the young slot is poisoned");
     }
 
+    /// A pinned survivor turns old where it is (#2255): later minors do not
+    /// trace it again, and a major frees it once nothing reaches it.
+    #[test]
+    fn a_pinned_survivor_becomes_old_where_it_is() {
+        let mut heap = nursery_heap();
+        let head = cons_list(&mut heap, 100);
+        let before = walk(&heap, head);
+        let moved = minor(&mut heap, &[head], &mut []);
+        assert_eq!(moved, 99, "everything but the pinned head moves");
+        assert_eq!(walk(&heap, head), before, "the pinned head's link is rewritten");
+        let obj = heap.find_object_by_addr(head).expect("pinned head stays");
+        assert_eq!(obj.generation(), GEN_UNLOGGED, "it is old and write-barriered");
+        assert!(!heap.has_young(), "its chunk is old, not held");
+        // Later minors leave it alone, even unrooted.
+        let _ = cons_list(&mut heap, 10);
+        assert_eq!(minor(&mut heap, &[], &mut []), 0);
+        assert_eq!(walk(&heap, head), before);
+        // A major cycle that does not reach it frees it.
+        heap.begin_mark(&[]);
+        while !heap.mark_quantum(usize::MAX) {}
+        unsafe { heap.sweep() };
+        assert!(heap.find_object_by_addr(head).is_none());
+        assert_eq!(heap.live_object_count(), 0);
+    }
+
     #[test]
     fn an_ambiguous_root_pins_its_target_and_holds_its_chunk() {
         let mut heap = nursery_heap();
