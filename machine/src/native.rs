@@ -23,12 +23,26 @@ pub struct NativeCtx {
     pub bail: u64,
     /// Native code bails when its stack pointer drops below this address.
     pub stack_limit: u64,
+    /// Heap stores made so far, so a bail can take them back before the
+    /// VM runs the call again (see [`Undo`]).
+    pub undo: *mut Vec<Undo>,
+}
+
+/// One heap store native code made: the word it overwrote. A bail restores
+/// them newest first, so the VM's re-run starts from the heap as the call
+/// found it.
+#[derive(Clone, Copy, Debug)]
+pub enum Undo {
+    Index { array: u64, index: i64, old: u64 },
+    Field { object: u64, slot: usize, old: u64 },
 }
 
 /// Byte offset of [`NativeCtx::bail`].
 pub const NATIVE_CTX_BAIL: i32 = 0;
 /// Byte offset of [`NativeCtx::stack_limit`].
 pub const NATIVE_CTX_STACK_LIMIT: i32 = 8;
+/// Byte offset of [`NativeCtx::undo`].
+pub const NATIVE_CTX_UNDO: i32 = 16;
 
 /// How much native stack a call from the VM may use before it bails to the
 /// VM (which then runs the call with its own frame limits).
@@ -118,14 +132,33 @@ impl NativeTable {
 pub(crate) fn call(entry: &NativeEntry, args: &[u64]) -> Option<u64> {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
+    let mut undo = Vec::new();
     let mut ctx = NativeCtx {
         bail: 0,
         stack_limit: sp.saturating_sub(NATIVE_STACK_BUDGET),
+        undo: &mut undo,
     };
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
-    (ctx.bail == 0).then_some(out)
+    if ctx.bail == 0 {
+        return Some(out);
+    }
+    for u in undo.into_iter().rev() {
+        match u {
+            Undo::Index { array, index, old } => {
+                if let Some(crate::memory::Object::Array(mut gc)) = object(array) {
+                    gc.as_mut().store_indexed(index, common::Value::from(old), false);
+                }
+            }
+            Undo::Field { object: o, slot, old } => {
+                if let Some(crate::memory::Object::Instance(mut gc)) = object(o) {
+                    gc.as_mut().set_slot(slot, common::Value::from(old));
+                }
+            }
+        }
+    }
+    None
 }
 
 thread_local! {
@@ -227,4 +260,56 @@ pub extern "C" fn coil_native_field(addr: u64, index: u64) -> u64 {
         }
         _ => 0,
     }
+}
+
+/// Log a store into `ctx`'s undo list.
+///
+/// # Safety
+/// `ctx` is a live [`NativeCtx`] whose `undo` points at a live list.
+unsafe fn log(ctx: *mut NativeCtx, u: Undo) {
+    unsafe { (*(*ctx).undo).push(u) };
+}
+
+/// Set the bail flag; returns `0` for the helper's result.
+///
+/// # Safety
+/// `ctx` is a live [`NativeCtx`].
+unsafe fn bail(ctx: *mut NativeCtx) -> u64 {
+    unsafe { (*ctx).bail = 1 };
+    0
+}
+
+/// `StoreIndex` / `StoreIndexUnchecked`: store `value` at `index` and
+/// return it. Out of bounds or not an array: bail.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64, index: i64, value: u64) -> u64 {
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(old) = gc.as_ref().read_indexed(index, false) else {
+        return unsafe { bail(ctx) };
+    };
+    unsafe { log(ctx, Undo::Index { array: addr, index, old: old.bits() }) };
+    gc.as_mut().store_indexed(index, common::Value::from(value), false);
+    value
+}
+
+/// `SetField` of slot `index` on an instance with slots; return `value`.
+/// Anything else: bail.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, index: u64, value: u64) -> u64 {
+    let slot = index as usize;
+    let Some(crate::memory::Object::Instance(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(old) = gc.as_ref().slot_len().filter(|&n| slot < n).and_then(|_| gc.as_ref().slot(slot)) else {
+        return unsafe { bail(ctx) };
+    };
+    unsafe { log(ctx, Undo::Field { object: addr, slot, old: old.bits() }) };
+    gc.as_mut().set_slot(slot, common::Value::from(value));
+    value
 }
