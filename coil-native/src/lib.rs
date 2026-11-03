@@ -94,6 +94,7 @@ fn jit_once(
     jb.symbol("coil_native_cow_field", machine::native::coil_native_cow_field as *const u8);
     jb.symbol("coil_native_alloc", machine::native::coil_native_alloc as *const u8);
     jb.symbol("coil_native_array_push", machine::native::coil_native_array_push as *const u8);
+    jb.symbol("coil_native_string", machine::native::coil_native_string as *const u8);
     jb.symbol("coil_native_enum_tag", machine::native::coil_native_enum_tag as *const u8);
     jb.symbol("coil_native_enum_payload", machine::native::coil_native_enum_payload as *const u8);
     let mut module = JITModule::new(jb);
@@ -441,6 +442,10 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                             return Err(format!("match payload of {:?}", ty_of(f, *scrutinee)));
                         }
                     }
+                    MirInst::String { dest, .. } => need(dest)?,
+                    // Native code keeps no frame words for the collector to
+                    // scan, so there is nothing to zero.
+                    MirInst::ClearWord { dest, .. } => need(dest)?,
                     MirInst::Deopt { .. } => {}
                     other => return Err(format!("instruction {}", inst_name(other))),
                 }
@@ -508,6 +513,8 @@ struct Ids {
     /// Boxed enum matches.
     enum_tag: FuncId,
     enum_payload: FuncId,
+    /// Program strings (`STRING`).
+    string: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -571,6 +578,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
+    let string = module.declare_function("coil_native_string", Linkage::Import, &s2).map_err(e)?;
     let enum_tag = module.declare_function("coil_native_enum_tag", Linkage::Import, &s1).map_err(e)?;
     let enum_payload = module.declare_function("coil_native_enum_payload", Linkage::Import, &s3).map_err(e)?;
     Ok(Ids {
@@ -591,6 +599,7 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         array_push,
         enum_tag,
         enum_payload,
+        string,
     })
 }
 
@@ -662,6 +671,7 @@ struct Lower<'a> {
     array_push: FuncRef,
     enum_tag: FuncRef,
     enum_payload: FuncRef,
+    string: FuncRef,
     /// Arrays this body indexes: `(ok, pointer, length)` of their element
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
@@ -710,6 +720,7 @@ impl<'a> Lower<'a> {
         let array_push = module.declare_func_in_func(ids.array_push, func);
         let enum_tag = module.declare_func_in_func(ids.enum_tag, func);
         let enum_payload = module.declare_func_in_func(ids.enum_payload, func);
+        let string = module.declare_func_in_func(ids.string, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -741,6 +752,7 @@ impl<'a> Lower<'a> {
             array_push,
             enum_tag,
             enum_payload,
+            string,
             views: HashMap::new(),
             stored: HashSet::new(),
             barriers: HashMap::new(),
@@ -1114,6 +1126,18 @@ impl<'a> Lower<'a> {
                 }
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
+            }
+            MirInst::String { dest, idx } => {
+                let i = self.b.ins().iconst(types::I64, i64::from(*idx));
+                let call = self.b.ins().call(self.string, &[self.ctx, i]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set(f, *dest, w);
+            }
+            MirInst::ClearWord { dest, .. } => {
+                let z = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, z);
             }
             MirInst::MatchPayload { dest, scrutinee, index } => {
                 let s = self.get(f, *scrutinee);

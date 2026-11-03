@@ -121,6 +121,8 @@ const I_GC_BARRIER: u8 = 15;
 const I_ALLOC: u8 = 16;
 const I_ARRAY_PUSH: u8 = 17;
 const I_MATCH_PAYLOAD: u8 = 18;
+const I_STRING: u8 = 19;
+const I_CLEAR_WORD: u8 = 20;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -360,6 +362,16 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*array);
             w.v(*value);
         }
+        MirInst::String { dest, idx } => {
+            w.u8(I_STRING);
+            w.v(*dest);
+            w.u32(*idx);
+        }
+        MirInst::ClearWord { dest, value } => {
+            w.u8(I_CLEAR_WORD);
+            w.v(*dest);
+            w.v(*value);
+        }
         MirInst::MatchPayload { dest, scrutinee, index } => {
             w.u8(I_MATCH_PAYLOAD);
             w.v(*dest);
@@ -552,6 +564,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let elems = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
             MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
         }
+        I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
+        I_CLEAR_WORD => MirInst::ClearWord { dest: r.v()?, value: r.v()? },
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
         I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: Vec::new() },
