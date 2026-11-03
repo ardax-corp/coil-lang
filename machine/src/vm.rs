@@ -1810,11 +1810,6 @@ impl<const S: usize> Machine<S> {
         target: usize,
         arity: usize,
     ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
-        // A task switch needs every frame below it on the VM: while tasks
-        // exist (until native code gets task stacks), calls stay in the VM.
-        if self.sched.is_some() {
-            return None;
-        }
         let base = self.stack.tell() - arity;
         let table = self.native.as_deref_mut()?;
         // After a bail the VM re-runs that call in bytecode; calls nested
@@ -1825,6 +1820,11 @@ impl<const S: usize> Machine<S> {
         }
         table.quiet_above = usize::MAX;
         let entry = table.lookup(target)?;
+        // A task switch while native frames are live would strand them:
+        // under a scheduler, only bodies that reach no VM code run natively.
+        if entry.suspends && self.sched.is_some() {
+            return None;
+        }
         // A `CALL` passes its own arity: words a body's MIR parameters
         // name but it never reads pass as `0`; extra words are dropped.
         if arity < entry.reads as usize {

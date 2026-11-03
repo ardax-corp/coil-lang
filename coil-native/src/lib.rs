@@ -196,7 +196,7 @@ fn jit_once(
         let entry: NativeEntryFn = unsafe { std::mem::transmute::<*const u8, NativeEntryFn>(ptr) };
         let ret_words = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, reads, ret_words, entry });
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, entry });
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
@@ -372,10 +372,11 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         .collect();
     // Bodies that may run VM code (which may panic and print a
     // backtrace): their calls name themselves in `NativeCtx::calls`.
+    let has_drops = bodies.iter().any(|b| b.name.ends_with("::drop") && b.mir.params.len() == 1);
     let mut vm_reach: HashSet<usize> = ok
         .iter()
         .filter(|(i, callees)| {
-            callees.iter().any(|c| vm_calls.contains_key(c)) || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(runs_vm_code)
+            callees.iter().any(|c| vm_calls.contains_key(c)) || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| runs_vm_code(inst, has_drops))
         })
         .map(|(&i, _)| i)
         .collect();
@@ -397,10 +398,11 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
 }
 
 /// An instruction that may run VM code: a function value's call, a free
-/// or collection that may run `drop`s.
-fn runs_vm_code(inst: &MirInst) -> bool {
+/// (in a program with `drop`s) or collection that may run `drop`s.
+fn runs_vm_code(inst: &MirInst, drops: bool) -> bool {
     match inst {
-        MirInst::CallIndirect { .. } | MirInst::FreeEarly { .. } => true,
+        MirInst::CallIndirect { .. } => true,
+        MirInst::FreeEarly { .. } => drops,
         MirInst::HostInvoke { native_id, .. } => {
             machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect)
         }

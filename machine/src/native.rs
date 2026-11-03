@@ -425,6 +425,10 @@ pub struct NativeEntry {
     /// Bytecode PC of the function's entry (its `CALL` target).
     pub pc: u32,
     pub arity: u16,
+    /// It may run VM code (a VM call, a function value, a `drop`), so a
+    /// task switch could come while its frames are live: with a scheduler
+    /// that can switch, the VM runs the call itself.
+    pub suspends: bool,
     /// The leading parameters the body reads: a `CALL` of at least this
     /// many words (and at most `arity`) enters it, the rest passed as `0`.
     pub reads: u16,
