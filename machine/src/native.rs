@@ -128,14 +128,37 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64]) -> Option<u64> {
     (ctx.bail == 0).then_some(out)
 }
 
-static PENDING: std::sync::Mutex<Option<Vec<NativeEntry>>> = std::sync::Mutex::new(None);
+thread_local! {
+    /// Per thread: a harness compiles and runs several programs at once.
+    static PENDING: std::cell::RefCell<Option<Pending>> = const { std::cell::RefCell::new(None) };
+}
 
-/// Native code for the next [`crate::Machine::run_raw`] in this process
+/// Native code for the next [`crate::Machine::run_raw`] on this thread
 /// (the program's main machine); the machines it spawns share it.
 pub fn install_for_next_run(entries: Vec<NativeEntry>) {
-    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(entries);
+    PENDING.with(|p| *p.borrow_mut() = Some(Pending::Entries(entries)));
 }
 
-pub(crate) fn take_pending() -> Option<Vec<NativeEntry>> {
-    PENDING.lock().unwrap_or_else(|e| e.into_inner()).take()
+/// [`install_for_next_run`] with code already built for the program.
+pub fn install_shared_for_next_run(code: std::sync::Arc<NativeCode>) {
+    PENDING.with(|p| *p.borrow_mut() = Some(Pending::Shared(code)));
 }
+
+pub(crate) enum Pending {
+    Entries(Vec<NativeEntry>),
+    Shared(std::sync::Arc<NativeCode>),
+}
+
+impl Pending {
+    pub(crate) fn into_code(self, code_len: usize) -> std::sync::Arc<NativeCode> {
+        match self {
+            Self::Entries(entries) => std::sync::Arc::new(NativeCode::new(code_len, entries)),
+            Self::Shared(code) => code,
+        }
+    }
+}
+
+pub(crate) fn take_pending() -> Option<Pending> {
+    PENDING.with(|p| p.borrow_mut().take())
+}
+

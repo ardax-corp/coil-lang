@@ -5279,9 +5279,8 @@ impl<const S: usize> Machine<S> {
         static_slots: u32,
     ) {
         let code: &[Byte] = unsafe { std::slice::from_raw_parts(code.as_ptr().cast(), code.len()) };
-        if let Some(entries) = crate::native::take_pending() {
-            let native = crate::native::NativeCode::new(code.len(), entries);
-            self.install_native(Some(std::sync::Arc::new(native)));
+        if let Some(pending) = crate::native::take_pending() {
+            self.install_native(Some(pending.into_code(code.len())));
         }
         self.run_with_pool(code, constants, strings, static_slots);
         if std::env::var_os("COIL_NATIVE_STATS").is_some()

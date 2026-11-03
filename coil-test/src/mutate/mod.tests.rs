@@ -143,6 +143,7 @@ fn weak_suite_end_to_end() {
             report: Default::default(),
             doc_tests: crate::runner::DocTests::Off,
             wall_timeout: None,
+            engine: Default::default(),
         },
         files: Vec::new(),
         operators: Operator::ALL.to_vec(),

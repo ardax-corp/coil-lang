@@ -34,6 +34,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         report: Report::Human,
         doc_tests: DocTests::On,
         wall_timeout: None,
+        engine: Default::default(),
     }
 }
 
