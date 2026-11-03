@@ -262,6 +262,20 @@ fn two_word_returns_run_natively() {
     assert!(String::from_utf8_lossy(&jit.stderr).contains("calls ran natively, 0 bailed"));
 }
 
+#[test]
+fn string_literals_come_from_native_code() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sign(int i) -> String {{ if i > 0 {{ return \"pos\"; }} if i < 0 {{ return \"neg\"; }} return \"zero\"; }}\n\
+         #[inline(never)]\nfn signs(Vec<int> v) -> Vec<String> {{ let out: Vec<String> = Vec::new(); for x in v {{ out.push(sign(x)); }} return out; }}\n\
+         fn main() {{\n  let v: Vec<int> = [3, -1, 0, 8];\n  for s in signs(v) {{ let _ = println(s); }}\n}}\n"
+    );
+    let stats = same_as_vm("strings", &src);
+    assert!(compiled(&stats, "sign") && compiled(&stats, "signs"), "stats: {stats}");
+    let archive = compile("strings_archive", &src, true);
+    let jit = run_archive(&archive, &[]);
+    assert_eq!(String::from_utf8_lossy(&jit.stdout), "pos\nneg\nzero\npos\n");
+}
+
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
 /// section.
 fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
