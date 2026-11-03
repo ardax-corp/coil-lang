@@ -24,7 +24,7 @@ use common::Value;
 use super::super::AddrHashBuilder;
 use super::{
     GcData, GcHeader, GcPhase, Heap, InstanceStorage, Member, ObjArray, ObjBoxed, ObjEnum,
-    ObjInstance, ObjTuple, Object,
+    ObjFn, ObjInstance, ObjTuple, Object,
 };
 
 type AddrSet = HashSet<u64, AddrHashBuilder>;
@@ -101,6 +101,7 @@ impl Object {
             // `()` is a shared immortal.
             Self::Tuple(t) if !t.as_ref().elements().is_empty() => Layout::new::<GcData<ObjTuple>>(),
             Self::Array(_) => Layout::new::<GcData<ObjArray>>(),
+            Self::Fn(_) => Layout::new::<GcData<ObjFn>>(),
             _ => return None,
         })
     }

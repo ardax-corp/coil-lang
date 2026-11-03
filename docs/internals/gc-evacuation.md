@@ -18,8 +18,8 @@ one of:
 - a masked coroutine slot;
 - a must-pointer frame slot (`PRECISE_SLOT_MUST`).
 
-Only instances, payload enums, boxes, tuples and arrays move. Strings,
-closures, coroutines, streams, threads, immortal unit enums and the shared
+Only instances, payload enums, boxes, tuples, arrays and closures move.
+Strings, coroutines, streams, threads, immortal unit enums and the shared
 empty tuple `()` stay put.
 
 These **pin** the object they reach:

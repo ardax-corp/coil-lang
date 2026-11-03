@@ -1599,8 +1599,8 @@ impl Heap {
             || self.slab.held_chunks() >= self.nursery_chunks
     }
 
-    /// Allocate instances, enums, boxes, tuples and arrays in the nursery
-    /// (the VM turns it on; `--nursery off` keeps it off).
+    /// Allocate instances, enums, boxes, tuples, arrays and closures in the
+    /// nursery (the VM turns it on; `--nursery off` keeps it off).
     pub fn set_nursery(&mut self, on: bool) {
         self.nursery = on;
     }
@@ -1821,16 +1821,15 @@ impl Heap {
     /// The shared function value at `entry` that captures and fills
     /// nothing. Such a value holds only its entry and arity, so every
     /// evaluation of a lambda without captures (one per loop pass) can be
-    /// one object. Closures live in the old space, where a dead one waits
-    /// for a major cycle: allocating one per pass piled up a million of
-    /// them over a large heap.
+    /// one object instead of a nursery allocation per pass (#2251).
     pub fn immortal_plain_fn(&mut self, entry: u32, arity: u32, is_rest: bool) -> Object {
         if let Some(obj) = self.immortal_fns.get(&(entry, arity, is_rest)) {
             return *obj;
         }
         let _epoch_guard = self.epoch_guard();
         let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None };
-        let (object, _) = self.alloc_unlocked(pfn, Object::Fn);
+        // Old: a root for the VM's lifetime, never worth a nursery copy.
+        let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
         self.immortal_fns.insert((entry, arity, is_rest), object);
         object
     }
@@ -4182,6 +4181,8 @@ impl GcSized for ObjWeak {
 }
 
 impl GcSized for ObjFn {
+    const NURSERY: bool = true;
+
     fn size(&self) -> usize {
         // Vec payloads use Rust's allocator (same as ObjArray elements).
         mem::size_of::<Self>()

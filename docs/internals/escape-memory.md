@@ -305,18 +305,19 @@ object at all.
 
 Design (copying nursery, decided 2026-10-27):
 
-- **Young chunks.** Instances, payload enums, boxes, tuples and arrays,
-  the kinds evacuation may move, are bump-allocated into *young* slab
-  chunks, one current chunk per size class. Every other kind (strings,
-  closures, coroutines, handles) and every allocation in a shared-heap
+- **Young chunks.** Instances, payload enums, boxes, tuples, arrays and
+  closures, the kinds evacuation may move, are bump-allocated into *young*
+  slab chunks, one current chunk per size class (closures since #2252: a
+  closure made per loop pass used to wait for a major). Every other kind
+  (strings, coroutines, handles) and every allocation in a shared-heap
   epoch goes to the old space as before. The nursery holds a fixed number
   of chunks; filling it asks for a minor collection at the next
   safepoint.
 - **Write barrier.** An old object is *remembered* when its payload is
   written: every payload write goes through `GcData::as_mut`, which tests
   one header bit and, the first time, records the object's address. An
-  old object allocated with references (a closure, a coroutine) is
-  remembered when it is born. A prototype of the barrier measured within
+  old object allocated with references (a coroutine, a pretenured
+  closure) is remembered when it is born. A prototype of the barrier measured within
   noise (0 to 3%).
 - **Minor collection.** Trace young objects from the VM roots and the
   remembered objects, never into old ones. A young object reached through
