@@ -27,6 +27,17 @@ coil run --no-jit prog.ccoil                 # VM only
 VM. `coil package` does not use the section yet (step 7 builds AOT
 binaries instead).
 
+### Testing against the VM
+
+```
+coil test --engine native [PATH]
+```
+
+runs a suite with native code: each file's MIR is captured and JIT
+compiled, and its cases (and the machines they spawn) run it. A suite must
+pass on both engines; CI's `harness native` cell runs every corpus this
+way. `--coverage` needs `--engine vm` (it counts what the VM runs).
+
 ### The native MIR section
 
 `ArchivedProgram::native_mir` (archive 6.20; 6.0 to 6.19 archives load
