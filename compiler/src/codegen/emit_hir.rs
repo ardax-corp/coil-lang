@@ -785,6 +785,10 @@ impl Compiler {
                     }
                 }
                 HirKind::Call { .. } if plan.lens.contains_key(&(i as u32)) => {}
+                // A call of a function parameter needs nothing resolved: the
+                // splice binds the parameter to the caller's argument.
+                HirKind::Call { callee: Callee::Value(v), .. }
+                    if matches!(body.expr(*v).kind, HirKind::Local(l) if body.params.contains(&l)) => {}
                 HirKind::Call {
                     callee: Callee::Named { .. } | Callee::Method { .. } | Callee::Resolved(_),
                     ..
@@ -3237,12 +3241,16 @@ impl Compiler {
         // name is reassigned and no plain field of either is written, the
         // copy reads its source instead (a chained `c.slot(i).add(1).add(2)`
         // passes the first `add`'s `self` on as the second's).
+        // Making a name writable in place (`x = unique(x)`, copy-on-write
+        // before a write through it) keeps it the same place.
         let assigned: HashSet<LocalId> = body
             .exprs
             .iter()
             .filter_map(|e| match e.kind {
-                HirKind::Assign { place, .. } => match body.expr(place).kind {
+                HirKind::Assign { place, value } => match body.expr(place).kind {
+                    HirKind::Local(l) if Self::hir_self_unique(body, l, value) => None,
                     HirKind::Local(l) => Some(l),
+                    HirKind::Field { .. } if Self::hir_self_unique_field(body, place, value) => None,
                     HirKind::Field { base, .. } => match body.expr(base).kind {
                         HirKind::Local(l) => Some(l),
                         _ => None,
@@ -3302,7 +3310,17 @@ impl Compiler {
                 read.remove(l);
             }
         }
-        Self::hir_dissolve_views(body, checker, &assigned);
+        // The copies forwarded above go below; their values are no use of
+        // a view as a whole.
+        let copies: HashSet<u32> = body
+            .exprs
+            .iter()
+            .filter_map(|e| match e.kind {
+                HirKind::Let { local, init: Some(init) } if forward.contains_key(&local) => Some(init.0),
+                _ => None,
+            })
+            .collect();
+        Self::hir_dissolve_views(body, checker, &assigned, &copies);
         let unit = Some(crate::typechecking::ty::unit());
         for i in 0..body.exprs.len() {
             let HirKind::Let { local, init: Some(init) } = body.exprs[i].kind else {
@@ -3341,7 +3359,7 @@ impl Compiler {
     /// from a local nothing reassigns (or a literal): every `v.f` reads its
     /// argument instead and the `let` goes. `v.c.vals[i] = ..` through a
     /// view is then `c.vals[i] = ..`, the code with no view at all.
-    fn hir_dissolve_views(body: &mut HirBody, checker: &crate::typechecking::infer::Checker, assigned: &HashSet<LocalId>) {
+    fn hir_dissolve_views(body: &mut HirBody, checker: &crate::typechecking::infer::Checker, assigned: &HashSet<LocalId>, copies: &HashSet<u32>) {
         let bases: HashSet<u32> = body
             .exprs
             .iter()
@@ -3349,8 +3367,14 @@ impl Compiler {
                 HirKind::Field { base, .. } => Some(base.0),
                 _ => None,
             })
+            .chain(copies.iter().copied())
             .collect();
         let mut dissolve: HashMap<LocalId, (usize, HashMap<String, HirKind>)> = HashMap::new();
+        // A view's one scalar argument that is not a local or a literal (a
+        // spliced `new Entry(mut self, k, self.find(k))`): computed once
+        // into a new local where the view was bound, by view.
+        let mut spilled: HashMap<LocalId, (HirId, LocalId)> = HashMap::new();
+        let mut fresh = body.locals.len();
         'lets: for (i, e) in body.exprs.iter().enumerate() {
             let HirKind::Let { local, init: Some(init) } = e.kind else {
                 continue;
@@ -3367,6 +3391,7 @@ impl Compiler {
             }
             let fields = checker.class_fields(&key).unwrap_or_default();
             let mut values = HashMap::new();
+            let mut spill = None;
             let mut next = 0usize;
             for &a in args {
                 let (name, v) = match &body.expr(a).kind {
@@ -3376,10 +3401,30 @@ impl Compiler {
                         (fields.get(next - 1).map(|(n, _)| n.clone()), a)
                     }
                 };
-                let kind = body.expr(v).kind.clone();
+                let mut kind = body.expr(v).kind.clone();
+                // Copy-on-write ops on a value no write can change (a
+                // generic key's, at `int` or `string`) do nothing: the
+                // value is their operand.
+                if !crate::hir::effects::cow::cow_ty(checker, body.expr(v).ty.as_ref()) {
+                    let mut at = v;
+                    while let HirKind::Builtin { op: crate::hir::Builtin::Cow { .. }, args } = &body.expr(at).kind
+                        && let [x] = args.as_slice()
+                    {
+                        at = *x;
+                    }
+                    if at != v && matches!(body.expr(at).kind, HirKind::Local(_) | HirKind::Lit(_)) {
+                        kind = body.expr(at).kind.clone();
+                    }
+                }
                 let ok = match &kind {
                     HirKind::Local(s) => !assigned.contains(s) && !body.local(*s).captured,
                     HirKind::Lit(_) => true,
+                    _ if spill.is_none() && body.expr(v).ty.as_ref().is_some_and(|t| crate::hir::lower::primitive(t).is_some()) => {
+                        let tmp = LocalId((fresh + spilled.len()) as u32);
+                        spill = Some((v, tmp));
+                        kind = HirKind::Local(tmp);
+                        true
+                    }
                     _ => false,
                 };
                 let Some(name) = name else { continue 'lets };
@@ -3391,18 +3436,30 @@ impl Compiler {
             if values.len() != fields.len() {
                 continue;
             }
-            // Only ever the base of a field read.
+            // Only ever the base of a field read, or made writable in place
+            // (which a view dissolved into its arguments needs no more).
+            let uniques: HashSet<u32> = Self::hir_self_uniques(body, local).into_iter().flat_map(|(place, op)| [place.0, op.0]).collect();
             let whole = body
                 .exprs
                 .iter()
                 .enumerate()
-                .any(|(k, x)| x.kind == HirKind::Local(local) && !bases.contains(&(k as u32)));
+                .any(|(k, x)| x.kind == HirKind::Local(local) && !bases.contains(&(k as u32)) && !uniques.contains(&(k as u32)));
             if !whole {
                 dissolve.insert(local, (i, values));
+                if let Some(spill) = spill {
+                    spilled.insert(local, spill);
+                }
             }
         }
         if dissolve.is_empty() {
             return;
+        }
+        let mut spills: Vec<_> = spilled.values().copied().collect();
+        spills.sort_by_key(|&(_, tmp)| tmp.0);
+        for (value, _) in spills {
+            let ty = body.expr(value).ty.clone();
+            body.locals.push(crate::hir::HirLocal { name: format!("__view_arg{fresh}"), ty, kind: crate::hir::LocalKind::Temp, captured: false, borrow: false });
+            fresh += 1;
         }
         for k in 0..body.exprs.len() {
             let HirKind::Field { base, name } = &body.exprs[k].kind else {
@@ -3421,12 +3478,33 @@ impl Compiler {
                 b.node = None;
             }
         }
+        for local in dissolve.keys() {
+            for k in 0..body.exprs.len() {
+                if let HirKind::Assign { place, value } = body.exprs[k].kind
+                    && body.expr(place).kind == HirKind::Local(*local)
+                    && Self::hir_self_unique(body, *local, value)
+                {
+                    for x in [k, place.0 as usize, value.0 as usize] {
+                        let e = &mut body.exprs[x];
+                        e.kind = HirKind::Lit(Lit::Unit);
+                        e.ty = Some(crate::typechecking::ty::unit());
+                        e.layout = crate::layout::Layout::Word;
+                        e.node = None;
+                    }
+                }
+            }
+        }
         for (local, (i, _)) in &dissolve {
             // The `new` and its arguments go too: arena scans (field-only
             // bases, assigned locals) must not see them.
+            let spill = spilled.get(local).copied();
             if let HirKind::Let { init: Some(init), .. } = body.exprs[*i].kind {
                 let mut todo = vec![init];
                 while let Some(x) = todo.pop() {
+                    // The spilled argument stays, as its new local's value.
+                    if spill.is_some_and(|(v, _)| v == x) {
+                        continue;
+                    }
                     todo.extend(crate::hir::lower::children(body, x));
                     let e = &mut body.exprs[x.0 as usize];
                     e.kind = HirKind::Lit(Lit::Unit);
@@ -3436,7 +3514,10 @@ impl Compiler {
                 }
             }
             let e = &mut body.exprs[*i];
-            e.kind = HirKind::Lit(Lit::Unit);
+            e.kind = match spill {
+                Some((value, tmp)) => HirKind::Let { local: tmp, init: Some(value) },
+                None => HirKind::Lit(Lit::Unit),
+            };
             e.ty = Some(crate::typechecking::ty::unit());
             e.layout = crate::layout::Layout::Word;
             e.node = None;
@@ -3446,6 +3527,39 @@ impl Compiler {
                 }
             }
         }
+    }
+
+    /// Whether `value`, assigned to `l`, is `unique(l)`: copy-on-write
+    /// making `l` writable in place.
+    fn hir_self_unique(body: &HirBody, l: LocalId, value: HirId) -> bool {
+        matches!(&body.expr(value).kind,
+            HirKind::Builtin { op: crate::hir::Builtin::Cow { unique: true }, args }
+                if matches!(args.as_slice(), [x] if body.expr(*x).kind == HirKind::Local(l)))
+    }
+
+    /// Whether `value`, stored to field place `x.f`, is `unique(x.f)`.
+    fn hir_self_unique_field(body: &HirBody, place: HirId, value: HirId) -> bool {
+        let HirKind::Field { base, name } = &body.expr(place).kind else { return false };
+        matches!(&body.expr(value).kind,
+            HirKind::Builtin { op: crate::hir::Builtin::Cow { unique: true }, args }
+                if matches!(args.as_slice(), [x] if matches!(&body.expr(*x).kind,
+                    HirKind::Field { base: b, name: n } if n == name && body.expr(*b).kind == body.expr(*base).kind
+                        && matches!(body.expr(*base).kind, HirKind::Local(_)))))
+    }
+
+    /// The reads of `l` in its `l = unique(l)` statements: the place and
+    /// the operand, by statement.
+    fn hir_self_uniques(body: &HirBody, l: LocalId) -> Vec<(HirId, HirId)> {
+        body.exprs
+            .iter()
+            .filter_map(|e| match e.kind {
+                HirKind::Assign { place, value } if body.expr(place).kind == HirKind::Local(l) && Self::hir_self_unique(body, l, value) => {
+                    let HirKind::Builtin { args, .. } = &body.expr(value).kind else { return None };
+                    Some((place, args[0]))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether `ty` is (or may be) a class with `fn drop()`.
