@@ -263,6 +263,9 @@ pub const TRAP_MESSAGE: u64 = 7;
 pub const TRAP_VM_PANIC: u64 = 8;
 /// An explicit `panic(msg)`: the message in [`NativeCtx::message`].
 pub const TRAP_EXPLICIT: u64 = 9;
+/// Not a panic: the call's fiber parked (its task suspended inside it);
+/// the task suspends at the `CALL` (`vm_fiber.rs`).
+pub const TRAP_PARKED: u64 = 10;
 /// No site: a frame that pushes nothing onto the panic's trace.
 pub const NO_SITE: u64 = u32::MAX as u64;
 
@@ -539,6 +542,12 @@ pub(crate) struct NativePanic {
 }
 
 impl NativePanic {
+    /// A fiber parked ([`TRAP_PARKED`]).
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    pub(crate) fn parked() -> Self {
+        Self { code: TRAP_PARKED, trace: Vec::new(), message: String::new(), pads: Vec::new() }
+    }
+
     /// The VM's message for the same trap.
     pub(crate) fn message(&self) -> &str {
         match self.code {
@@ -569,7 +578,9 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     let sp = std::ptr::addr_of!(marker) as u64;
     let mut undo = Vec::new();
     let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo, env.heap);
-    if let Some(left) = stacker::remaining_stack() {
+    if let Some(limit) = crate::vm::fiber_stack_limit() {
+        ctx.stack_hard = ctx.stack_hard.min(limit as u64);
+    } else if let Some(left) = stacker::remaining_stack() {
         ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
     }
     ctx.machine = env.machine;
@@ -1493,7 +1504,9 @@ pub(crate) fn run_pads(mut pads: Vec<NativePad>, env: &NativeEnv) {
     for i in 0..pads.len() {
         let mut undo = Vec::new();
         let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo, env.heap);
-        if let Some(left) = stacker::remaining_stack() {
+        if let Some(limit) = crate::vm::fiber_stack_limit() {
+            ctx.stack_hard = ctx.stack_hard.min(limit as u64);
+        } else if let Some(left) = stacker::remaining_stack() {
             ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
         }
         ctx.machine = env.machine;

@@ -496,6 +496,9 @@ impl<const S: usize> Machine<S> {
                             match self.task_host_op(fn_id, &args[..n], &mut ip, &mut sp) {
                                 TaskFlow::Value(v) => self.stack.push(v),
                                 TaskFlow::Switched => {
+                                    if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                        return dispatch::RestExit::done(false);
+                                    }
                                     return dispatch::RestExit::resume(ip, sp);
                                 }
                                 // A generator close unwinds its frames.
@@ -519,6 +522,9 @@ impl<const S: usize> Machine<S> {
                                 self.stack.seek(tell - consume);
                                 if let TaskFlow::Value(v) = self.task_sleep(ms, &mut ip, &mut sp) {
                                     self.stack.push(v);
+                                }
+                                if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                    return dispatch::RestExit::done(false);
                                 }
                                 return dispatch::RestExit::resume(ip, sp);
                             }
@@ -560,6 +566,9 @@ impl<const S: usize> Machine<S> {
                                     // The arguments stay: the HostInvoke runs again
                                     // when another thread posts the wake.
                                     self.task_suspend_thread(&mut ip, &mut sp);
+                                    if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                        return dispatch::RestExit::done(false);
+                                    }
                                     return dispatch::RestExit::resume(ip, sp);
                                 }
                                 Ok(None) if park_tasks && crate::task::io_retry_parked() => {
@@ -567,6 +576,9 @@ impl<const S: usize> Machine<S> {
                                     // the HostInvoke runs again on readiness.
                                     let req = crate::task::take_io_retry_park().expect("checked");
                                     self.task_suspend_io_retry(req, &mut ip, &mut sp);
+                                    if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                        return dispatch::RestExit::done(false);
+                                    }
                                     return dispatch::RestExit::resume(ip, sp);
                                 }
                                 Ok(None) => {
@@ -576,6 +588,9 @@ impl<const S: usize> Machine<S> {
                                             // Suspend this task (with any generator it
                                             // is resuming); another task runs meanwhile.
                                             self.task_suspend_io(req, layout, &mut ip, &mut sp);
+                                            if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                                return dispatch::RestExit::done(false);
+                                            }
                                             return dispatch::RestExit::resume(ip, sp);
                                         } else {
                                             // No other task: park the whole VM, even

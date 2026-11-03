@@ -1568,6 +1568,33 @@ pub struct Machine<const S: usize> {
     /// Native calls in a VM call, innermost last: the heap words their
     /// frames hold are pinned roots ([`crate::native::NativeCtx::for_each_root`]).
     native_roots: Vec<(*mut crate::native::NativeCtx, usize)>,
+    /// Inside a fiber (`vm_fiber.rs`): the nesting level its VM calls switch
+    /// tasks at. `None` outside fibers.
+    fiber_switch_depth: Option<u32>,
+    /// The running fiber's `corosensei::Yielder` (null outside fibers).
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    fiber_yielder: *const (),
+    /// While a fiber runs: the task's own VM state it swapped out (a GC root).
+    fiber_outer: Option<*const ExecCtx<S>>,
+    /// Fibers parked in a task switch, by task.
+    #[cfg(not(target_family = "wasm"))]
+    parked_fibers: std::collections::HashMap<crate::task::TaskId, Box<NativeFiber<S>>>,
+    /// Stacks of finished fibers, for the next ones.
+    #[cfg(not(target_family = "wasm"))]
+    fiber_stacks: Vec<corosensei::stack::DefaultStack>,
+    /// How a fiber's suspension point suspends its task (block, result slot).
+    fiber_park_request: Option<(Option<crate::task::Block>, bool)>,
+    /// The wake a parked fiber's suspension point gets when it resumes.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    fiber_wake: Option<crate::task::Wake>,
+    /// A parked fiber resumes with a cancel to unwind from its suspension
+    /// point.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    fiber_cancel: bool,
+    /// The task just switched in resumes at a `CALL` whose fiber parked.
+    fiber_resume_pending: bool,
+    /// A fiber's suspension point took a cancel: the unwinder takes over.
+    fiber_stop: bool,
     /// Task scheduler, created by the first `task::scope` (see `task.rs`).
     sched: Option<Box<crate::task::Scheduler>>,
     /// Message of a panic a child task raised (the scope reports it).
@@ -1735,6 +1762,18 @@ impl<const S: usize> Machine<S> {
             native_panic_frames: Vec::new(),
             native_panic_loc: None,
             native_roots: Vec::new(),
+            fiber_switch_depth: None,
+            fiber_yielder: std::ptr::null(),
+            fiber_outer: None,
+            #[cfg(not(target_family = "wasm"))]
+            parked_fibers: std::collections::HashMap::new(),
+            #[cfg(not(target_family = "wasm"))]
+            fiber_stacks: Vec::new(),
+            fiber_park_request: None,
+            fiber_wake: None,
+            fiber_cancel: false,
+            fiber_resume_pending: false,
+            fiber_stop: false,
             sched: None,
             task_panic_message: None,
             finalizer_aborted: false,
@@ -1820,9 +1859,12 @@ impl<const S: usize> Machine<S> {
         }
         table.quiet_above = usize::MAX;
         let entry = table.lookup(target)?;
-        // A task switch while native frames are live would strand them:
-        // under a scheduler, only bodies that reach no VM code run natively.
-        if entry.suspends && self.sched.is_some() {
+        // A task switch while native frames are live would strand them on
+        // the thread's stack: where tasks switch, a body that may reach VM
+        // code runs on a fiber of its own (`vm_fiber.rs`). The wasm build
+        // has no fibers: there it stays in the VM.
+        let on_fiber = entry.suspends && self.native_needs_fiber();
+        if cfg!(target_family = "wasm") && entry.suspends && self.sched.is_some() {
             return None;
         }
         // A `CALL` passes its own arity: words a body's MIR parameters
@@ -1838,10 +1880,31 @@ impl<const S: usize> Machine<S> {
         for (i, w) in words.iter_mut().take(arity.min(params)).enumerate() {
             *w = self.stack[base + i].bits();
         }
-        let env = self.native_env();
         // Native code never collects; a VM call it makes may, with the
         // native frames' heap words pinned (`native_vm_call`).
-        let out = crate::native::call(&entry, &words[..params], &env);
+        #[cfg(not(target_family = "wasm"))]
+        let out = if on_fiber {
+            self.native_call_on_fiber(entry, words)
+        } else {
+            let env = self.native_env();
+            crate::native::call(&entry, &words[..params], &env)
+        };
+        #[cfg(target_family = "wasm")]
+        let out = {
+            let _ = on_fiber;
+            let env = self.native_env();
+            crate::native::call(&entry, &words[..params], &env)
+        };
+        self.native_outcome(out, base)
+    }
+
+    /// What a native call's outcome means at its `CALL` (`base`: its
+    /// arguments' first slot); `None` when the VM runs the call.
+    fn native_outcome(
+        &mut self,
+        out: crate::native::NativeOutcome,
+        base: usize,
+    ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
         let table = self.native.as_deref_mut()?;
         match out {
             crate::native::NativeOutcome::Done(r) => {
@@ -1857,6 +1920,24 @@ impl<const S: usize> Machine<S> {
                 table.quiet_above = base;
                 None
             }
+        }
+    }
+
+    /// [`Self::resume_parked_fiber`] at the `CALL` it parked in.
+    fn resume_native_fiber(
+        &mut self,
+        arity: usize,
+    ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let base = self.stack.tell() - arity;
+            let out = self.resume_parked_fiber()?;
+            self.native_outcome(out, base)
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = arity;
+            None
         }
     }
 
@@ -1965,7 +2046,8 @@ impl<const S: usize> Machine<S> {
         vm.nested_return_hi = Value::default();
         // A collection in the call pins what the native frames hold.
         vm.native_roots.push((ctx, vm.frames.len()));
-        let out = vm.call_function(pc, args);
+        // Inside a fiber its VM code may switch tasks (`vm_fiber.rs`).
+        let out = vm.native_reenter(|vm| vm.call_function(pc, args));
         vm.native_roots.pop();
         *panicked = vm.panicked;
         // SAFETY: the calling native code's live context.
@@ -1997,7 +2079,7 @@ impl<const S: usize> Machine<S> {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
         vm.native_roots.push((ctx, vm.frames.len()));
-        let out = vm.call_value(Value::from(callee), args, dicts as usize);
+        let out = vm.native_reenter(|vm| vm.call_value(Value::from(callee), args, dicts as usize));
         vm.native_roots.pop();
         *panicked = vm.panicked;
         out.bits()
@@ -2578,9 +2660,9 @@ impl<const S: usize> Machine<S> {
         }
         // A native call's frames that made a VM call sit between the VM
         // frames that call pushed and the frame that entered native code.
-        let native_lines = |depth: usize| -> Vec<String> {
+        let native_lines = |roots: &[(*mut crate::native::NativeCtx, usize)], depth: usize| -> Vec<String> {
             let Some(code) = self.native.as_ref().map(|t| &t.code) else { return Vec::new() };
-            self.native_roots
+            roots
                 .iter()
                 .rev()
                 .filter(|&&(_, d)| d == depth)
@@ -2589,37 +2671,51 @@ impl<const S: usize> Machine<S> {
                 .filter_map(|s| self.native_site_line(code, s))
                 .collect()
         };
-        for frame_idx in (0..self.frames.len()).rev() {
-            for line in native_lines(frame_idx + 1) {
-                if lines.last() == Some(&line) {
-                    repeats += 1;
+        let emit = |line: String, lines: &mut Vec<String>, repeats: &mut usize| {
+            if lines.last() == Some(&line) {
+                *repeats += 1;
+                return;
+            }
+            flush(lines, repeats);
+            lines.push(line);
+        };
+        // The VM states, innermost first: inside a fiber, its own, then the
+        // task's that started it (the fiber's native frames between them).
+        let fiber_outer = self.fiber_outer.map(|o| {
+            // SAFETY: the running fiber's `NativeFiber` outlives its run.
+            let o = unsafe { &*o };
+            (&o.frames, o.native_roots.as_slice())
+        });
+        let states = std::iter::once((&self.frames, self.native_roots.as_slice())).chain(fiber_outer);
+        for (state, (frames, roots)) in states.enumerate() {
+            if state > 0 {
+                // The fiber's own native frames, below its VM calls.
+                for line in native_lines(&self.native_roots, 0) {
+                    emit(line, &mut lines, &mut repeats);
+                }
+            }
+            for frame_idx in (0..frames.len()).rev() {
+                for line in native_lines(roots, frame_idx + 1) {
+                    emit(line, &mut lines, &mut repeats);
+                }
+                let ip = frames[frame_idx].tell();
+                // An over-apply stub runs no code of its own.
+                if ip >= OVER_APPLY_IP {
                     continue;
                 }
-                flush(&mut lines, &mut repeats);
-                lines.push(line);
+                // A caller's saved ip is its return address: name the call.
+                let ip = if state == 0 && frame_idx + 1 == frames.len() { ip } else { ip.saturating_sub(1) };
+                // The bootstrap frame (prologue `CALL main`) is not user code.
+                if ip < 3 && self.fn_symbol_at_ip(ip).is_none() {
+                    continue;
+                }
+                let name = self.fn_symbol_at_ip(ip).unwrap_or("<unknown>");
+                let line = match self.format_panic_location(ip) {
+                    Some(loc) => format!("  in {name} at {loc}"),
+                    None => format!("  in {name}"),
+                };
+                emit(line, &mut lines, &mut repeats);
             }
-            let ip = self.frames[frame_idx].tell();
-            // An over-apply stub runs no code of its own.
-            if ip >= OVER_APPLY_IP {
-                continue;
-            }
-            // A caller's saved ip is its return address: name the call.
-            let ip = if frame_idx + 1 == self.frames.len() { ip } else { ip.saturating_sub(1) };
-            // The bootstrap frame (prologue `CALL main`) is not user code.
-            if ip < 3 && self.fn_symbol_at_ip(ip).is_none() {
-                continue;
-            }
-            let name = self.fn_symbol_at_ip(ip).unwrap_or("<unknown>");
-            let line = match self.format_panic_location(ip) {
-                Some(loc) => format!("  in {name} at {loc}"),
-                None => format!("  in {name}"),
-            };
-            if lines.last() == Some(&line) {
-                repeats += 1;
-                continue;
-            }
-            flush(&mut lines, &mut repeats);
-            lines.push(line);
         }
         flush(&mut lines, &mut repeats);
         lines.join("\n")
@@ -3643,6 +3739,9 @@ impl<const S: usize> Machine<S> {
         for &v in &self.ffi_arg_roots {
             word(v, crate::memory::RootKind::Pinned, visit);
         }
+        // VM states not swapped in (parked fibers', the task's own while a
+        // fiber runs): their words stay where they are.
+        self.for_each_fiber_word(&mut |v| word(v, crate::memory::RootKind::Ambiguous, visit));
 
         self.for_each_mapped_slot_index(|idx| {
             if idx < self.stack.capacity() {
@@ -5953,8 +6052,18 @@ impl<const S: usize> Machine<S> {
                 Instruction::CALL => {
                     let (arity, target) = opcode.call_parts();
                     promise!(self.stack.tell() >= arity);
+                    // The task resumes at the `CALL` its fiber parked in:
+                    // the fiber runs on instead of a new call.
+                    let resumed = if unlikely(self.fiber_resume_pending) {
+                        self.fiber_resume_pending = false;
+                        self.frames.get_mut().seek(ip);
+                        self.resume_native_fiber(arity)
+                    } else {
+                        None
+                    };
                     // Empty set is the hot path (fib); skip HashSet::contains.
-                    if arity == 1
+                    if resumed.is_none()
+                        && arity == 1
                         && unlikely(!self.finalizer_pcs.is_empty())
                         && self.finalizer_pcs.contains(&(target as u32))
                     {
@@ -5966,18 +6075,24 @@ impl<const S: usize> Machine<S> {
                             continue;
                         }
                     }
-                    if unlikely(self.native.is_some())
-                        && !debug_attached
-                        && target != 0
-                        && let Some(ret) = {
+                    if let Some(ret) = match resumed {
+                        Some(r) => Some(r),
+                        None if unlikely(self.native.is_some()) && !debug_attached && target != 0 => {
                             // The caller's return address, as a CALL saves it:
                             // a panic or a VM call inside names this frame.
                             self.frames.get_mut().seek(ip);
                             self.try_native_call(target, arity)
                         }
-                    {
+                        None => None,
+                    } {
                         let ret = match ret {
                             Ok(ret) => ret,
+                            // Its fiber parked: the task suspends here, to
+                            // run the `CALL` again (resuming the fiber).
+                            Err(p) if p.code == crate::native::TRAP_PARKED => {
+                                self.task_park_at_call(&mut ip, &mut sp);
+                                continue;
+                            }
                             // A VM call native code made panicked and
                             // reported it: go on unwinding from this call.
                             Err(p) if p.code == crate::native::TRAP_VM_PANIC => {
@@ -6650,6 +6765,7 @@ fn free_early_in(heap: &mut Heap, frame_pins: &mut [FramePins], dense_obj_addr: 
 include!("exec_rest.rs");
 include!("vm_task.rs");
 include!("vm_unwind.rs");
+include!("vm_fiber.rs");
 
 impl<const S: usize> Drop for Machine<S> {
     fn drop(&mut self) {

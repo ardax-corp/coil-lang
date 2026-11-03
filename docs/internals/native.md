@@ -230,10 +230,41 @@ the VM's re-run runs the defers.
 
 ### Tasks
 
-A task switch needs every frame below it on the VM. Until native code
-gets task stacks (step 6), `try_native_call` stays on the VM while a
-scheduler exists; native code that opens a scope through a VM call runs
-it in that nested execution, where its tasks switch.
+A task switch must not strand native frames on the thread's stack, so a
+native body that may reach VM code (`NativeEntry::suspends`, from the
+plan's `vm_reach` set) runs on a **fiber** wherever tasks can switch
+(`vm_fiber.rs`; `corosensei` coroutines, 8 MiB reserved stacks, reused).
+Bodies that reach no VM code cannot suspend and run on the thread's
+stack as before.
+
+- The fiber's VM calls run on a VM state of its own (`ExecCtx`: operand
+  stack, frames, nesting, native roots, unwind), swapped into the machine
+  while the fiber runs (`Machine::swap_exec`). `fiber_switch_depth` is the
+  nesting level its VM calls switch tasks at (`at_task_level`);
+  `native_reenter` moves it one level down for each native → VM call, so
+  a wait any number of native/VM levels deep can switch.
+- A suspension point inside the fiber (`task_suspend_at`) parks it:
+  `fiber_park` records the block, yields, and the `CALL` that started the
+  fiber sees `TRAP_PARKED`. The task suspends there with `Retry`
+  semantics (its arguments stay on the stack); when it runs again the
+  `CALL` re-executes with `fiber_resume_pending` set and resumes the fiber
+  instead. The wake goes to the fiber's result slot (`fiber_wake`).
+- A cancel is taken when the fiber resumes (`resume_parked_fiber`, not
+  `task_run_next`) and unwinds from the suspension point inside it: the
+  fiber's defers, then its native frames' pads (`TRAP_VM_PANIC`), then the
+  task's own frames. `rearm_unwind_after_early_drop` leaves a cancel
+  without a message, so the task ends `Cancelled`, not `Panicked`.
+- GC: a parked fiber's VM state and native roots, and the task's own
+  state while a fiber runs, are scanned as ambiguous (pinned) roots
+  (`for_each_fiber_word`). A parked fiber's executions stay counted in
+  `IN_EXECUTE`, so nothing moves while one exists.
+- Backtraces inside a fiber name its frames, its native frames, then the
+  task's frames below the `CALL`.
+- A task that never resumes (its scope torn down after a root panic)
+  drops its fiber with `force_reset`: native frames have no unwind tables,
+  so what they own leaks, as a VM coroutine dropped mid-way does.
+- wasm has no fibers: there, under a scheduler, only bodies that reach no
+  VM code run natively.
 
 ### Bail instead of trap
 

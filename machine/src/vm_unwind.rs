@@ -66,7 +66,12 @@ impl<const S: usize> Machine<S> {
             && message != STEP_BUDGET_EXHAUSTED
             && message != HEAP_CAP_EXCEEDED;
         self.unwind.resumed = false;
-        if self.task_panic_is_caught() {
+        // A cancel unwinding out of a fiber has no message: the task is
+        // dropped, not failed (a panic on the way set its own).
+        let cancelling = self.sched.as_ref().is_some_and(|s| {
+            s.tasks.get(&s.current).is_some_and(|r| r.cancel == crate::task::Cancel::Unwinding)
+        });
+        if self.task_panic_is_caught() && !(cancelling && message.is_empty()) {
             self.task_panic_message = Some(message.clone());
         }
         self.unwind.message = message;
@@ -85,6 +90,7 @@ impl<const S: usize> Machine<S> {
         if let Some(s) = &self.sched
             && s.current != crate::task::ROOT
             && s.base_nested == self.nested_depth
+            && self.fiber_switch_depth.is_none()
             && let Some(rec) = s.tasks.get(&s.current)
             && let Some(ctx) = self.resume_stack.get(rec.ctx_index)
         {
