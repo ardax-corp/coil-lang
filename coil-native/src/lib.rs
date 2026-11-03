@@ -439,7 +439,19 @@ impl<'a> Lower<'a> {
 
     fn set(&mut self, f: &MirFunc, v: ValueId, x: cranelift_codegen::ir::Value) {
         let var = self.var(f, v);
+        let x = self.coerce(x, cl_ty(ty_of(f, v)));
         self.b.def_var(var, x);
+    }
+
+    /// `x` as a `want` word with the same bits. MIR may move a word between
+    /// an `f64` and an `i64` value unchanged (a callee's `float` result into
+    /// a caller's `int`-typed value, as the VM's untyped words allow).
+    fn coerce(&mut self, x: cranelift_codegen::ir::Value, want: Type) -> cranelift_codegen::ir::Value {
+        if self.b.func.dfg.value_type(x) == want {
+            x
+        } else {
+            self.b.ins().bitcast(want, MemFlagsData::new(), x)
+        }
     }
 
     /// Branch to the bail block when `cond` is non-zero; continue in a new block.
@@ -569,9 +581,12 @@ impl<'a> Lower<'a> {
             MirInst::Call { dest, target, args, .. } => {
                 let callee = *self.by_label.get(target).ok_or("unknown callee")?;
                 let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
+                let sig = self.b.func.dfg.ext_funcs[fref].signature;
+                let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
                 let mut vals = vec![self.ctx];
-                for a in args {
-                    vals.push(self.get(f, *a));
+                for (a, &want) in args.iter().zip(&params[1..]) {
+                    let x = self.get(f, *a);
+                    vals.push(self.coerce(x, want));
                 }
                 let call = self.b.ins().call(fref, &vals);
                 let r = self.b.inst_results(call)[0];
@@ -689,6 +704,7 @@ impl<'a> Lower<'a> {
             }
             Terminator::Return { lo: Some(v), hi: None } => {
                 let x = self.get(f, *v);
+                let x = self.coerce(x, self.ret);
                 self.b.ins().return_(&[x]);
             }
             Terminator::Unreachable => {
