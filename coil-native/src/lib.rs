@@ -94,6 +94,8 @@ fn jit_once(
     jb.symbol("coil_native_cow_field", machine::native::coil_native_cow_field as *const u8);
     jb.symbol("coil_native_alloc", machine::native::coil_native_alloc as *const u8);
     jb.symbol("coil_native_array_push", machine::native::coil_native_array_push as *const u8);
+    jb.symbol("coil_native_enum_tag", machine::native::coil_native_enum_tag as *const u8);
+    jb.symbol("coil_native_enum_payload", machine::native::coil_native_enum_payload as *const u8);
     let mut module = JITModule::new(jb);
 
     let ids = declare(&mut module, bodies, &plan.compile)?;
@@ -306,121 +308,156 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
     };
     for b in &f.blocks {
         for inst in &b.insts {
-            match inst {
-                MirInst::Const { dest, .. } => need(dest)?,
-                MirInst::Bin { dest, op, ty, lhs, rhs } => {
-                    need_scalar(dest)?;
-                    need_scalar(lhs)?;
-                    need_scalar(rhs)?;
-                    if *ty == MirTy::I64 && *op == MirBinOp::Pow {
-                        return Err("int **".into());
-                    }
-                    if *ty == MirTy::Bool && !op.requires_int() {
-                        return Err("bool arithmetic".into());
-                    }
-                }
-                MirInst::Cmp { dest, ty, lhs, rhs, .. } => {
-                    if !scalar(*ty) {
-                        return Err(format!("compare of {ty:?}"));
-                    }
-                    need_scalar(dest)?;
-                    need_scalar(lhs)?;
-                    need_scalar(rhs)?;
-                }
-                MirInst::Unary { dest, src, .. } => {
-                    need_scalar(dest)?;
-                    need_scalar(src)?;
-                }
-                MirInst::Cast { dest, kind, src, .. } => {
-                    if *kind == MirCastKind::Word {
+            let mut one = || -> Result<(), String> {
+                match inst {
+                    MirInst::Const { dest, .. } => need(dest)?,
+                    // Bit ops are exact on any word: niche matches tag and
+                    // untag `Option` / `Result` words with them.
+                    MirInst::Bin { dest, op: MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor, ty, lhs, rhs }
+                        if *ty != MirTy::F64 =>
+                    {
                         need(dest)?;
+                        need(lhs)?;
+                        need(rhs)?;
+                    }
+                    MirInst::Bin { dest, op, ty, lhs, rhs } => {
+                        need_scalar(dest)?;
+                        need_scalar(lhs)?;
+                        need_scalar(rhs)?;
+                        if *ty == MirTy::I64 && *op == MirBinOp::Pow {
+                            return Err("int **".into());
+                        }
+                        if *ty == MirTy::Bool && !op.requires_int() {
+                            return Err("bool arithmetic".into());
+                        }
+                    }
+                    MirInst::Cmp { dest, ty, lhs, rhs, .. } => {
+                        if !scalar(*ty) {
+                            return Err(format!("compare of {ty:?}"));
+                        }
+                        need_scalar(dest)?;
+                        need_scalar(lhs)?;
+                        need_scalar(rhs)?;
+                    }
+                    // `!w` is `w == 0`, exact on any word (`None` is 0).
+                    MirInst::Unary { dest, op: MirUnaryOp::Not, src } if ty_of(f, *src) != MirTy::F64 => {
+                        need_scalar(dest)?;
                         need(src)?;
-                    } else {
+                    }
+                    MirInst::Unary { dest, src, .. } => {
                         need_scalar(dest)?;
                         need_scalar(src)?;
                     }
-                }
-                MirInst::Index { dest, array, index, .. } => {
-                    need(dest)?;
-                    need_heap(array)?;
-                    need_scalar(index)?;
-                }
-                MirInst::ArrayLen { dest, array } => {
-                    need_scalar(dest)?;
-                    need_heap(array)?;
-                }
-                MirInst::HeapFieldLoad { dest, object, .. } => {
-                    need(dest)?;
-                    need_heap(object)?;
-                }
-                MirInst::StoreIndex { dest, array, index, value, .. } => {
-                    need(dest)?;
-                    need_heap(array)?;
-                    need_scalar(index)?;
-                    need(value)?;
-                }
-                MirInst::HeapFieldStore { dest, object, value, .. } => {
-                    need(dest)?;
-                    need_heap(object)?;
-                    need(value)?;
-                }
-                MirInst::Alloc { dest, kind, elems, .. } => {
-                    need(dest)?;
-                    for e in elems {
-                        need(e)?;
+                    MirInst::Cast { dest, kind, src, .. } => {
+                        if *kind == MirCastKind::Word {
+                            need(dest)?;
+                            need(src)?;
+                        } else {
+                            need_scalar(dest)?;
+                            need_scalar(src)?;
+                        }
                     }
-                    match kind {
-                        MirAllocKind::Array | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
-                        MirAllocKind::Object { .. } if elems.is_empty() => {}
-                        other => return Err(format!("allocation {other:?}")),
+                    MirInst::Index { dest, array, index, .. } => {
+                        need(dest)?;
+                        need_heap(array)?;
+                        need_scalar(index)?;
                     }
-                }
-                MirInst::ArrayPush { dest, array, value } => {
-                    need(dest)?;
-                    need_heap(array)?;
-                    need(value)?;
-                }
-                MirInst::GcBarrier { dest, .. } => {
-                    need(dest)?;
-                    if !pairs.contains_key(dest) {
-                        return Err("GcBarrier without an allocation".into());
+                    MirInst::ArrayLen { dest, array } => {
+                        need_scalar(dest)?;
+                        need_heap(array)?;
                     }
-                }
-                MirInst::Cow { dest, src, field, .. } => {
-                    need(dest)?;
-                    if field.is_some() {
-                        need_heap(src)?;
-                    } else {
-                        need(src)?;
+                    MirInst::HeapFieldLoad { dest, object, .. } => {
+                        need(dest)?;
+                        need_heap(object)?;
                     }
-                }
-                MirInst::Phi { dest, args, .. } => {
-                    need(dest)?;
-                    for (_, v) in args {
-                        need(v)?;
+                    MirInst::StoreIndex { dest, array, index, value, .. } => {
+                        need(dest)?;
+                        need_heap(array)?;
+                        need_scalar(index)?;
+                        need(value)?;
                     }
-                }
-                MirInst::Call { dest, dest_hi, target, args } => {
-                    if dest_hi.is_some() {
-                        return Err("two-word call".into());
+                    MirInst::HeapFieldStore { dest, object, value, .. } => {
+                        need(dest)?;
+                        need_heap(object)?;
+                        need(value)?;
                     }
-                    need(dest)?;
-                    for a in args {
-                        need(a)?;
+                    MirInst::Alloc { dest, kind, elems, .. } => {
+                        need(dest)?;
+                        for e in elems {
+                            need(e)?;
+                        }
+                        match kind {
+                            MirAllocKind::Array | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
+                            MirAllocKind::Object { .. } if elems.is_empty() => {}
+                            other => return Err(format!("allocation {other:?}")),
+                        }
                     }
-                    let Some(&callee) = by_label.get(target) else {
-                        return Err("call to an unknown body".into());
-                    };
-                    callees.push(callee);
+                    MirInst::ArrayPush { dest, array, value } => {
+                        need(dest)?;
+                        need_heap(array)?;
+                        need(value)?;
+                    }
+                    MirInst::GcBarrier { dest, .. } => {
+                        need(dest)?;
+                        if !pairs.contains_key(dest) {
+                            return Err("GcBarrier without an allocation".into());
+                        }
+                    }
+                    MirInst::Cow { dest, src, field, .. } => {
+                        need(dest)?;
+                        if field.is_some() {
+                            need_heap(src)?;
+                        } else {
+                            need(src)?;
+                        }
+                    }
+                    MirInst::Phi { dest, args, .. } => {
+                        need(dest)?;
+                        for (_, v) in args {
+                            need(v)?;
+                        }
+                    }
+                    MirInst::Call { dest, dest_hi, target, args } => {
+                        if dest_hi.is_some() {
+                            return Err("two-word call".into());
+                        }
+                        need(dest)?;
+                        for a in args {
+                            need(a)?;
+                        }
+                        let Some(&callee) = by_label.get(target) else {
+                            return Err("call to an unknown body".into());
+                        };
+                        callees.push(callee);
+                    }
+                    MirInst::MatchPayload { dest, scrutinee, .. } => {
+                        need(dest)?;
+                        if !heap_word(ty_of(f, *scrutinee)) {
+                            return Err(format!("match payload of {:?}", ty_of(f, *scrutinee)));
+                        }
+                    }
+                    MirInst::Deopt { .. } => {}
+                    other => return Err(format!("instruction {}", inst_name(other))),
                 }
-                MirInst::Deopt { .. } => {}
-                other => return Err(format!("instruction {}", inst_name(other))),
-            }
+                Ok(())
+            };
+            one().map_err(|e| if e.starts_with("instruction ") { e } else { format!("{e} in {}", inst_name(inst)) })?;
         }
         match &b.term {
             Some(Terminator::Jump { .. }) | Some(Terminator::Unreachable) => {}
             Some(Terminator::Br { cond, .. }) => need_scalar(cond)?,
             Some(Terminator::Return { lo: Some(v), hi: None }) => need(v)?,
+            Some(Terminator::JumpIfMatch { scrutinee, tag, payloads, .. }) => {
+                match ty_of(f, *scrutinee) {
+                    MirTy::HeapRef => {}
+                    // A niche word is its own payload, read with `MatchPayload`.
+                    MirTy::NicheOpt | MirTy::NicheRes if *tag <= 1 && payloads.is_empty() => {}
+                    t => return Err(format!("match on {t:?} tag {tag}")),
+                }
+                for p in payloads {
+                    need(p)?;
+                }
+            }
             Some(t) => return Err(format!("terminator {t:?}").chars().take(60).collect()),
             None => return Err("block without terminator".into()),
         }
@@ -457,6 +494,9 @@ struct Ids {
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
     array_push: FuncId,
+    /// Boxed enum matches.
+    enum_tag: FuncId,
+    enum_payload: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -517,7 +557,27 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
-    Ok(Ids { imp, entry, fmod, powf, index, len, field, store_index, set_field, view, undo_grow, cow, cow_field, alloc, array_push })
+    let enum_tag = module.declare_function("coil_native_enum_tag", Linkage::Import, &s1).map_err(e)?;
+    let enum_payload = module.declare_function("coil_native_enum_payload", Linkage::Import, &s3).map_err(e)?;
+    Ok(Ids {
+        imp,
+        entry,
+        fmod,
+        powf,
+        index,
+        len,
+        field,
+        store_index,
+        set_field,
+        view,
+        undo_grow,
+        cow,
+        cow_field,
+        alloc,
+        array_push,
+        enum_tag,
+        enum_payload,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +643,8 @@ struct Lower<'a> {
     cow_field: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
+    enum_tag: FuncRef,
+    enum_payload: FuncRef,
     /// Arrays this body indexes: `(ok, pointer, length)` of their element
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
@@ -627,6 +689,8 @@ impl<'a> Lower<'a> {
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
+        let enum_tag = module.declare_func_in_func(ids.enum_tag, func);
+        let enum_payload = module.declare_func_in_func(ids.enum_payload, func);
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             16,
@@ -655,6 +719,8 @@ impl<'a> Lower<'a> {
             cow_field,
             alloc,
             array_push,
+            enum_tag,
+            enum_payload,
             views: HashMap::new(),
             stored: HashSet::new(),
             barriers: HashMap::new(),
@@ -1024,6 +1090,12 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
+            MirInst::MatchPayload { dest, scrutinee, index } => {
+                let s = self.get(f, *scrutinee);
+                let w = self.payload(f, *scrutinee, s, *index);
+                self.set_word(f, *dest, w);
+                self.view_of(f, *dest);
+            }
             MirInst::GcBarrier { dest, .. } => {
                 let obj = *self.barriers.get(dest).ok_or("GcBarrier without an allocation")?;
                 let w = self.get(f, obj);
@@ -1052,6 +1124,22 @@ impl<'a> Lower<'a> {
             other => return Err(format!("instruction {}", inst_name(other))),
         }
         Ok(())
+    }
+
+    /// Payload word `index` of the matched `scrutinee` (word `s`): a niche
+    /// word is its own payload, as the VM's emission moves it; a boxed
+    /// enum's comes from its object.
+    fn payload(&mut self, f: &MirFunc, scrutinee: ValueId, s: cranelift_codegen::ir::Value, index: u32) -> cranelift_codegen::ir::Value {
+        let s = self.coerce(s, types::I64);
+        if matches!(ty_of(f, scrutinee), MirTy::NicheOpt | MirTy::NicheRes) {
+            return s;
+        }
+        let i = self.b.ins().iconst(types::I64, i64::from(index));
+        let call = self.b.ins().call(self.enum_payload, &[self.ctx, s, i]);
+        let w = self.b.inst_results(call)[0];
+        let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+        self.bail_if(flag);
+        w
     }
 
     /// Fill `v`'s view right after `v` is defined, when the body indexes it.
@@ -1221,6 +1309,56 @@ impl<'a> Lower<'a> {
             }
             Terminator::Unreachable => {
                 self.b.ins().jump(self.bail, &[]);
+            }
+            Terminator::JumpIfMatch { scrutinee, tag, payloads, taken, not_taken } => {
+                let s = self.get(f, *scrutinee);
+                let et = self.b.create_block();
+                let en = self.b.create_block();
+                match ty_of(f, *scrutinee) {
+                    // `None` is 0 (tag 0); `Some` any other word (tag 1).
+                    MirTy::NicheOpt => {
+                        let none = self.b.ins().icmp_imm_s(IntCC::Equal, s, 0);
+                        let (t, n) = if *tag == 0 { (et, en) } else { (en, et) };
+                        self.b.ins().brif(none, t, &[], n, &[]);
+                    }
+                    // `Err` has the low bit set (tag 1); `Ok` is aligned (tag 0).
+                    MirTy::NicheRes => {
+                        let err = self.b.ins().band_imm_u(s, 1);
+                        let (t, n) = if *tag == 1 { (et, en) } else { (en, et) };
+                        self.b.ins().brif(err, t, &[], n, &[]);
+                    }
+                    _ => {
+                        // A boxed enum: `tag | payload length << 32`. A tag
+                        // match with another payload width than the arm
+                        // binds is left to the VM.
+                        let call = self.b.ins().call(self.enum_tag, &[s]);
+                        let tl = self.b.inst_results(call)[0];
+                        let not_enum = self.b.ins().icmp_imm_s(IntCC::Equal, tl, -1);
+                        self.bail_if(not_enum);
+                        let low = self.b.ins().band_imm_u(tl, 0xffff_ffff);
+                        let hit = self.b.ins().icmp_imm_s(IntCC::Equal, low, i64::from(*tag));
+                        let check = self.b.create_block();
+                        self.b.ins().brif(hit, check, &[], en, &[]);
+                        self.b.switch_to_block(check);
+                        let n = self.b.ins().ushr_imm_u(tl, 32);
+                        let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, n, payloads.len() as i64);
+                        self.bail_if(other);
+                        self.b.ins().jump(et, &[]);
+                    }
+                }
+                self.b.switch_to_block(et);
+                for (i, p) in payloads.iter().enumerate() {
+                    let w = self.payload(f, *scrutinee, s, i as u32);
+                    self.set_word(f, *p, w);
+                    self.view_of(f, *p);
+                }
+                self.edge_phis(f, here, *taken)?;
+                let to = self.blocks[taken];
+                self.b.ins().jump(to, &[]);
+                self.b.switch_to_block(en);
+                self.edge_phis(f, here, *not_taken)?;
+                let to = self.blocks[not_taken];
+                self.b.ins().jump(to, &[]);
             }
             _ => return Err("terminator".into()),
         }

@@ -120,11 +120,13 @@ const I_COW: u8 = 14;
 const I_GC_BARRIER: u8 = 15;
 const I_ALLOC: u8 = 16;
 const I_ARRAY_PUSH: u8 = 17;
+const I_MATCH_PAYLOAD: u8 = 18;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
 const T_RETURN: u8 = 2;
 const T_UNREACHABLE: u8 = 3;
+const T_MATCH: u8 = 4;
 
 struct Writer(Vec<u8>);
 
@@ -189,6 +191,17 @@ fn func(w: &mut Writer, f: &MirFunc) {
                 w.v(*v);
             }
             // `plan` admits no other terminator.
+            Some(Terminator::JumpIfMatch { scrutinee, tag, payloads, taken, not_taken }) => {
+                w.u8(T_MATCH);
+                w.v(*scrutinee);
+                w.u32(*tag);
+                w.u32(payloads.len() as u32);
+                for p in payloads {
+                    w.v(*p);
+                }
+                w.u32(taken.0);
+                w.u32(not_taken.0);
+            }
             _ => w.u8(T_UNREACHABLE),
         }
     }
@@ -327,6 +340,12 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*array);
             w.v(*value);
         }
+        MirInst::MatchPayload { dest, scrutinee, index } => {
+            w.u8(I_MATCH_PAYLOAD);
+            w.v(*dest);
+            w.v(*scrutinee);
+            w.u32(*index);
+        }
         MirInst::GcBarrier { dest, .. } => {
             // Native code only needs the pairing, which order gives.
             w.u8(I_GC_BARRIER);
@@ -416,6 +435,12 @@ fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
             T_BR => Terminator::Br { cond: r.v()?, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) },
             T_RETURN => Terminator::Return { lo: Some(r.v()?), hi: None },
             T_UNREACHABLE => Terminator::Unreachable,
+            T_MATCH => {
+                let (scrutinee, tag) = (r.v()?, r.u32()?);
+                let n = r.len()?;
+                let payloads = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
+                Terminator::JumpIfMatch { scrutinee, tag, payloads, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) }
+            }
             t => return Err(format!("native MIR: bad terminator {t}")),
         });
         f.blocks.push(b);
@@ -492,6 +517,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let elems = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
             MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
         }
+        I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
         I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: Vec::new() },
         I_COW => {
