@@ -635,3 +635,16 @@ fn a_vm_panic_under_native_frames_names_them_in_its_backtrace() {
     let err = program_stderr(&run("vm_panic_trace", &src, true));
     assert!(err.contains("  in mid at") && err.contains("  in outer at"), "stderr: {err}");
 }
+
+#[test]
+fn trait_methods_with_unread_parameters_run_natively() {
+    // `for e in m` calls `into_iter` / `next`, whose MIR names a parameter
+    // the `CALL` does not pass (and the body never reads).
+    let src = format!(
+        "{HEADER}use collections::map::HashMap;\n\
+         #[inline(never)]\nfn first(int x) -> int {{ let m: HashMap<string, int> = HashMap::new(); m.insert(\"k\", x); for e in m {{ return e.value; }} return -1; }}\n\
+         fn main() {{ let t = 0; let i = 0; while i < 200 {{ t = t + first(i); i = i + 1; }} let _ = println(format(\"%i\", t)); }}\n"
+    );
+    let stats = same_as_vm("unread_params", &src);
+    assert!(compiled(&stats, "first"), "stats: {stats}");
+}
