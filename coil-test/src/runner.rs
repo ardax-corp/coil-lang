@@ -111,6 +111,11 @@ fn native_code(pipeline: &Pipeline, code_len: usize) -> Option<Arc<machine::nati
     let program = coil_native::jit(&bodies, &pcs).ok()?;
     if std::env::var_os("COIL_NATIVE_STATS").is_some() {
         eprintln!("{} ({} bodies)", coil_native::describe(&program), bodies.len());
+        if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+            for (name, why) in &program.refused {
+                eprintln!("  vm: {name}: {why}");
+            }
+        }
     }
     let code = machine::native::NativeCode::new(code_len, program.entries);
     (!code.is_empty()).then(|| Arc::new(code))
