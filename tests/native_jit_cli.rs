@@ -569,3 +569,21 @@ fn an_archive_carries_closures_defers_and_drops() {
     let stats = String::from_utf8_lossy(&jit.stderr);
     assert!(stats.contains("calls ran natively"), "stats: {stats}");
 }
+
+#[test]
+fn generic_bodies_keep_their_opaque_words_across_collections() {
+    // A shared generic body's type-variable words may be objects: native
+    // code roots them ambiguously (pinned, never rewritten) while the
+    // inserts allocate enough to collect. `HashMap::with_capacity` is one.
+    let src = format!(
+        "{HEADER}use collections::map::HashMap;\n\
+         class Pair<T> {{ pub a: T, pub b: T }}\n\
+         #[inline(never)]\nfn swap<T>(Pair<T> p) -> Pair<T> {{ let tmp = format(\"%i\", 1); let q = new Pair(p.b, p.a); return q; }}\n\
+         fn main() {{\n  let m: HashMap<string, int> = HashMap::new();\n  let i = 0;\n\
+           while i < 20000 {{ m.insert(format(\"k%i\", i % 5000), i); i = i + 1; }}\n\
+           let p = new Pair(\"left\", \"right\");\n  let j = 0;\n  while j < 2001 {{ p = swap(p); j = j + 1; }}\n\
+           let _ = println(format(\"%i %i \", m.len(), m.get(\"k42\").unwrap_or(-1)) + p.a);\n}}\n"
+    );
+    let stats = same_as_vm("opaque_words", &src);
+    assert!(compiled(&stats, "collections::map::HashMap::with_capacity"), "stats: {stats}");
+}
