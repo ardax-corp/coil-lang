@@ -587,3 +587,33 @@ fn generic_bodies_keep_their_opaque_words_across_collections() {
     let stats = same_as_vm("opaque_words", &src);
     assert!(compiled(&stats, "collections::map::HashMap::with_capacity"), "stats: {stats}");
 }
+
+#[test]
+fn gc_collect_runs_from_native_code_with_its_words_rooted() {
+    // `churn` holds heap words across `collect()`; the collection must
+    // keep (and may move) them, and run the drops it owes.
+    let src = format!(
+        "{HEADER}use gc::collect;\nstatic let drops: int = 0;\nclass Handle {{ pub fd: int }}\nimpl Handle {{ fn drop() {{ drops = drops + 1; }} }}\n\
+         #[inline(never)]\nfn churn(int n) -> int {{\n  let keep = format(\"keep %i\", n);\n  let parts: Vec<string> = [];\n  let i = 0;\n\
+           while i < n {{ parts.push(format(\"%i\", i)); let _h = new Handle(i); i = i + 1; }}\n\
+           let freed = collect();\n  return parts.len() + keep.len() + (if freed >= 0 {{ 1 }} else {{ 0 }});\n}}\n\
+         fn main() {{ let t = 0; let k = 0; while k < 4 {{ t = t + churn(3000); k = k + 1; }} let _ = println(format(\"%i %i\", t, drops)); }}\n"
+    );
+    let stats = same_as_vm("gc_collect", &src);
+    assert!(compiled(&stats, "churn"), "stats: {stats}");
+}
+
+#[test]
+fn int_powers_trap_as_on_the_vm() {
+    // `**` on ints: exact powers, then overflow and a negative exponent
+    // panic with the VM's messages (after a print: committed).
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn power(int a, int b) -> int {{ return a ** b; }}\n\
+         #[inline(never)]\nfn table(int n) -> int {{ let t = 0; let i = 0; while i < n {{ t = t + power(3, i % 20) + power(-1, i) + power(0, i % 2); i = i + 1; }} return t; }}\n\
+         #[inline(never)]\nfn loud(int a, int b) -> int {{ let _ = println(\"loud\"); return power(a, b); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", table(1000))); let _ = println(format(\"%i\", loud(2, 62)));\n\
+           if table(1) == 1 {{ let _ = println(format(\"%i\", loud(3, -1))); }}\n  let _ = println(format(\"%i\", loud(2, 64)));\n}}\n"
+    );
+    let stats = same_as_vm("int_pow", &src);
+    assert!(compiled(&stats, "power") && compiled(&stats, "table") && compiled(&stats, "loud"), "stats: {stats}");
+}
