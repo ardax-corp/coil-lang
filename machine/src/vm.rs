@@ -1813,7 +1813,7 @@ impl<const S: usize> Machine<S> {
             *w = self.stack[base + i].bits();
         }
         let has_finalizers = !self.finalizer_by_type.is_empty();
-        match crate::native::call(&entry, &words[..arity], &mut self.heap, &self.program_strings, &mut self.program_string_cache, has_finalizers) {
+        match crate::native::call(&entry, &words[..arity], &mut self.heap, &self.program_strings, &mut self.program_string_cache, has_finalizers, &mut self.statics) {
             Some(r) => {
                 table.hits += 1;
                 Some(r)

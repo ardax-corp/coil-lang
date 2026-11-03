@@ -54,7 +54,15 @@ pub struct NativeCtx {
     /// Non-zero when the program has `drop` finalizers: an early free may
     /// then run one, so `FreeEarly` bails and the VM runs it.
     pub has_finalizers: u64,
+    /// The machine's statics (`LoadStatic` / `StoreStatic`), `statics_len`
+    /// words.
+    pub statics: *mut common::Value,
+    pub statics_len: u64,
 }
+
+/// Byte offsets of [`NativeCtx::statics`] and [`NativeCtx::statics_len`].
+pub const NATIVE_CTX_STATICS: i32 = std::mem::offset_of!(NativeCtx, statics) as i32;
+pub const NATIVE_CTX_STATICS_LEN: i32 = std::mem::offset_of!(NativeCtx, statics_len) as i32;
 
 /// Byte offset of [`NativeCtx::ret_hi`].
 pub const NATIVE_CTX_RET_HI: i32 = std::mem::offset_of!(NativeCtx, ret_hi) as i32;
@@ -72,6 +80,9 @@ pub type UndoEntry = [u64; 3];
 pub const UNDO_FIELD: u64 = 1;
 /// [`UndoEntry`] target bit of an array push (undone by a pop).
 pub const UNDO_PUSH: u64 = 2;
+/// [`UndoEntry`] target of a static store (no object): `[UNDO_STATIC,
+/// slot, old]`.
+pub const UNDO_STATIC: u64 = 4;
 
 /// Byte offset of [`NativeCtx::bail`].
 pub const NATIVE_CTX_BAIL: i32 = 0;
@@ -101,6 +112,8 @@ impl NativeCtx {
             strings_len: 0,
             frees: std::ptr::null_mut(),
             has_finalizers: 0,
+            statics: std::ptr::null_mut(),
+            statics_len: 0,
         }
     }
 
@@ -115,7 +128,12 @@ impl NativeCtx {
             // SAFETY: entries below `undo_len` were written.
             let [target, index, old] = unsafe { *self.undo_buf.add(i) };
             let old = common::Value::from(old);
-            if target & UNDO_PUSH != 0 {
+            if target == UNDO_STATIC {
+                if index < self.statics_len {
+                    // SAFETY: `index < statics_len`.
+                    unsafe { *self.statics.add(index as usize) = old };
+                }
+            } else if target & UNDO_PUSH != 0 {
                 if let Some(crate::memory::Object::Array(mut gc)) = object(target & !UNDO_PUSH) {
                     let _ = gc.as_mut().pop();
                 }
@@ -250,6 +268,7 @@ pub(crate) fn call(
     strings: &[String],
     string_cache: &mut [common::Value],
     has_finalizers: bool,
+    statics: &mut [common::Value],
 ) -> Option<NativeResult> {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
@@ -261,6 +280,8 @@ pub(crate) fn call(
     let mut frees = Vec::new();
     ctx.frees = &mut frees;
     ctx.has_finalizers = u64::from(has_finalizers);
+    ctx.statics = statics.as_mut_ptr();
+    ctx.statics_len = statics.len() as u64;
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
