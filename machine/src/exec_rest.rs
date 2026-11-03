@@ -1434,30 +1434,35 @@ impl<const S: usize> Machine<S> {
 
                     let entry = self.stack.pop().as_int() as u32;
                     let filled_mask = self.stack.pop().as_int() as u64;
+                    if n_captures == 0 && n_filled == 0 && filled_mask == 0 {
+                        // Nothing captured or filled: one shared value per entry.
+                        let object = self.heap.immortal_plain_fn(entry, arity, is_rest);
+                        self.stack.push(Value::from(object.addr()));
+                    } else {
+                        let mut filled_vals = Vec::with_capacity(n_filled);
+                        for _ in 0..n_filled {
+                            filled_vals.push(self.stack.pop());
+                        }
+                        filled_vals.reverse();
 
-                    let mut filled_vals = Vec::with_capacity(n_filled);
-                    for _ in 0..n_filled {
-                        filled_vals.push(self.stack.pop());
+                        let mut captures = Vec::with_capacity(n_captures);
+                        for _ in 0..n_captures {
+                            captures.push(self.stack.pop());
+                        }
+                        captures.reverse();
+
+                        let pfn = ObjFn {
+                            entry,
+                            arity,
+                            is_rest,
+                            filled_mask,
+                            captured_args: filled_vals,
+                            captures,
+                            dicts: None,
+                        };
+                        let (object, _) = self.heap.alloc(pfn, Object::Fn);
+                        self.push_fresh(object.addr(), ip);
                     }
-                    filled_vals.reverse();
-
-                    let mut captures = Vec::with_capacity(n_captures);
-                    for _ in 0..n_captures {
-                        captures.push(self.stack.pop());
-                    }
-                    captures.reverse();
-
-                    let pfn = ObjFn {
-                        entry,
-                        arity,
-                        is_rest,
-                        filled_mask,
-                        captured_args: filled_vals,
-                        captures,
-                        dicts: None,
-                    };
-                    let (object, _) = self.heap.alloc(pfn, Object::Fn);
-                    self.push_fresh(object.addr(), ip);
                 }
                 Instruction::LoadStatic => {
                     let slot = opcode.operand_u32() as usize;
