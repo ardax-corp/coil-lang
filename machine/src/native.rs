@@ -565,3 +565,38 @@ pub unsafe extern "C" fn coil_native_array_push(ctx: *mut NativeCtx, addr: u64, 
     unsafe { note_alloc(ctx, heap) };
     addr
 }
+
+// ---------------------------------------------------------------------------
+// Boxed enum matches (`JumpIfMatch`, `MatchPayload` on an enum object).
+
+/// [`coil_native_enum_tag`] of a word that is not an enum object.
+pub const NOT_AN_ENUM: u64 = u64::MAX;
+
+/// An enum object's `tag | payload length << 32`, or [`NOT_AN_ENUM`].
+///
+/// # Safety
+/// `addr` is a heap word.
+pub unsafe extern "C" fn coil_native_enum_tag(addr: u64) -> u64 {
+    match object(addr) {
+        Some(crate::memory::Object::Enum(gc)) => {
+            let e = gc.as_ref();
+            u64::from(e.tag) | ((e.payload.len() as u64) << 32)
+        }
+        _ => NOT_AN_ENUM,
+    }
+}
+
+/// Payload word `index` (declaration order) of the enum object `addr`.
+/// Not an enum or out of range: bail.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+pub unsafe extern "C" fn coil_native_enum_payload(ctx: *mut NativeCtx, addr: u64, index: u64) -> u64 {
+    match object(addr) {
+        Some(crate::memory::Object::Enum(gc)) => match gc.as_ref().payload.get(index as usize) {
+            Some(v) => v.bits(),
+            None => unsafe { bail(ctx) },
+        },
+        _ => unsafe { bail(ctx) },
+    }
+}
