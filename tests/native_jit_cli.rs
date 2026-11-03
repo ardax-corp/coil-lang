@@ -648,3 +648,30 @@ fn trait_methods_with_unread_parameters_run_natively() {
     let stats = same_as_vm("unread_params", &src);
     assert!(compiled(&stats, "first"), "stats: {stats}");
 }
+
+/// The `native: N calls ran natively` count of a JIT run's stats.
+fn native_calls(stats: &str) -> u64 {
+    stats
+        .lines()
+        .find_map(|l| l.strip_prefix("native: ")?.split(" calls ran natively").next()?.parse().ok())
+        .unwrap_or(0)
+}
+
+#[test]
+fn bodies_that_cannot_suspend_run_natively_inside_tasks() {
+    // `work` reaches no VM code, so no suspension point: tasks run it
+    // natively while the scheduler is live. `put` may suspend (a channel
+    // send) and keeps the switch working.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, Channel}};\n\
+         #[inline(never)]\nfn work(int n) -> int {{ let parts: Vec<string> = []; let i = 0; let t = 0; while i < n {{ parts.push(format(\"%i\", i)); t = t + parts[i].len(); i = i + 1; }} return t; }}\n\
+         #[inline(never)]\nfn put(Channel<int> ch, int v) {{ match ch.send(v) {{ Result::Ok(_) => {{}}, Result::Err(_) => panic \"closed\", }} }}\n\
+         fn main() {{\n  let ch: Channel<int> = task::channel(1);\n\
+           let r = scope(fn (Scope s) use (ch) {{ s.spawn(fn () use (ch) {{ let i = 0; while i < 20 {{ put(ch, work(i * 50)); i = i + 1; }} ch.close(); 0 }}); let t = 0; let done = false;\n\
+             while !done {{ match ch.recv() {{ Result::Ok(v) => {{ t = t + v; }}, Result::Err(_) => {{ done = true; }}, }} }} return t; }});\n\
+           let _ = println(format(\"%i\", match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}));\n}}\n"
+    );
+    let stats = same_as_vm("no_suspend_in_tasks", &src);
+    assert!(compiled(&stats, "work"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 20, "stats: {stats}");
+}
