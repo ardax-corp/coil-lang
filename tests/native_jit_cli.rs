@@ -198,7 +198,7 @@ fn allocation_runs_natively_and_matches_the_vm() {
            let v: Vec<int> = [9];\n  let _ = println(format(\"%i\", grow(v, 3)));\n}}\n"
     );
     let stats = same_as_vm("alloc", &src);
-    for f in ["make", "area", "shape", "grow"] {
+    for f in ["make", "area", "shape", "pair", "grow"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
     assert!(stats.contains("1 bailed"), "stats: {stats}");
@@ -234,6 +234,31 @@ fn matches_on_option_result_and_enums_run_natively() {
     let vm = run_archive(&archive, &["--no-jit"]);
     assert_eq!(jit.stdout, vm.stdout);
     assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert!(String::from_utf8_lossy(&jit.stderr).contains("calls ran natively, 0 bailed"));
+}
+
+#[test]
+fn two_word_returns_run_natively() {
+    // A two-slot `Option<int>` and a pair, returned to native callers and
+    // to the VM (`main`), through the JIT and through an archive.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn half(int n) -> Option<int> {{ if n % 2 == 0 {{ return Some(n / 2); }} return None; }}\n\
+         #[inline(never)]\nfn halves(int n) -> int {{ let s = 0; let i = 0; while i < n {{ s = s + match half(i) {{ Some(h) => h, None => 1 }}; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn minmax(Vec<int> v) -> (int, int) {{ let lo = v[0]; let hi = v[0]; for x in v {{ if x < lo {{ lo = x; }} if x > hi {{ hi = x; }} }} return (lo, hi); }}\n\
+         #[inline(never)]\nfn spread(Vec<int> v) -> int {{ let (a, b) = minmax(v); return b - a; }}\n\
+         fn main() {{\n  let v: Vec<int> = [4, 9, -2, 7];\n  let (lo, hi) = minmax(v);\n\
+           let h = match half(8) {{ Some(x) => x, None => -1 }};\n\
+           let _ = println(format(\"%i %i %i %i %i\", halves(11), spread(v), lo, hi, h));\n}}\n"
+    );
+    let stats = same_as_vm("two_words", &src);
+    for f in ["half", "halves", "minmax", "spread"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    let archive = compile("two_words_archive", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(String::from_utf8_lossy(&jit.stdout), "20 11 -2 9 4\n");
+    assert_eq!(jit.stdout, vm.stdout);
     assert!(String::from_utf8_lossy(&jit.stderr).contains("calls ran natively, 0 bailed"));
 }
 
