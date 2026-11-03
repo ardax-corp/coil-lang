@@ -501,6 +501,27 @@ mod tests {
 
     /// A pinned survivor turns old where it is (#2255): later minors do not
     /// trace it again, and a major frees it once nothing reaches it.
+    /// A pinned object that dies gives its chunk back to the nursery once a
+    /// major frees it. A stale stack word pins one object per minor: if
+    /// each such chunk stayed in the old space, a churn loop's footprint
+    /// would grow with its run time (`result_heap_churn`, #2255).
+    #[test]
+    fn a_dead_pinned_objects_chunk_returns_to_the_nursery() {
+        let mut heap = nursery_heap();
+        let mut most = 0;
+        for _ in 0..200 {
+            let head = cons_list(&mut heap, 100);
+            minor(&mut heap, &[head], &mut []);
+            heap.begin_mark(&[]);
+            while !heap.mark_quantum(usize::MAX) {}
+            unsafe { heap.sweep() };
+            let _ = cons_list(&mut heap, 1);
+            minor(&mut heap, &[], &mut []);
+            most = most.max(heap.slab.chunk_count());
+        }
+        assert!(most <= 8, "chunks stay bounded: {most}");
+    }
+
     #[test]
     fn a_pinned_survivor_becomes_old_where_it_is() {
         let mut heap = nursery_heap();
