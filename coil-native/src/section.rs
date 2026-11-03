@@ -114,6 +114,8 @@ const I_CALL: u8 = 8;
 const I_INDEX: u8 = 9;
 const I_LEN: u8 = 10;
 const I_FIELD: u8 = 11;
+const I_STORE_INDEX: u8 = 12;
+const I_SET_FIELD: u8 = 13;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -270,6 +272,21 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*object);
             w.u32(*index);
         }
+        MirInst::StoreIndex { dest, array, index, value, unchecked } => {
+            w.u8(I_STORE_INDEX);
+            w.v(*dest);
+            w.v(*array);
+            w.v(*index);
+            w.v(*value);
+            w.u8(*unchecked as u8);
+        }
+        MirInst::HeapFieldStore { dest, object, value, index } => {
+            w.u8(I_SET_FIELD);
+            w.v(*dest);
+            w.v(*object);
+            w.v(*value);
+            w.u32(*index);
+        }
         // `plan` admits nothing else, and `func` drops `Deopt`.
         _ => unreachable!("native section: instruction outside the numeric tier"),
     }
@@ -409,6 +426,14 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_INDEX => MirInst::Index { dest: r.v()?, array: r.v()?, index: r.v()?, unchecked: r.u8()? != 0 },
         I_LEN => MirInst::ArrayLen { dest: r.v()?, array: r.v()? },
         I_FIELD => MirInst::HeapFieldLoad { dest: r.v()?, object: r.v()?, index: r.u32()? },
+        I_STORE_INDEX => MirInst::StoreIndex {
+            dest: r.v()?,
+            array: r.v()?,
+            index: r.v()?,
+            value: r.v()?,
+            unchecked: r.u8()? != 0,
+        },
+        I_SET_FIELD => MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()? },
         t => return Err(format!("native MIR: bad instruction {t}")),
     })
 }
@@ -448,7 +473,8 @@ mod tests {
         let program = crate::jit(&bodies, &back_pcs).expect("jit");
         assert_eq!(program.entries.len(), 1);
         assert_eq!(program.entries[0].pc, 42);
-        let mut ctx = NativeCtx { bail: 0, stack_limit: 0 };
+        let mut undo = Vec::new();
+        let mut ctx = NativeCtx { bail: 0, stack_limit: 0, undo: &mut undo };
         let marker = 0u8;
         ctx.stack_limit = (std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET);
         let args = [5u64, 10];

@@ -67,17 +67,24 @@ A body compiles when:
 Such a function is **pure**: it reads nothing but its arguments and does
 nothing but return a word. That is what makes the tier simple and exact.
 
-### Heap reads (step 4, first part)
+### Heap words (step 4)
 
 A body may also hold heap words (`HeapRef`, `NicheOpt`, `NicheRes`): take
 them as parameters, pass them to calls, return them, move them through
-phis, and read through a `HeapRef` with `Index`, `ArrayLen` and
-`HeapFieldLoad`. Those three call `machine::native::coil_native_index` /
-`_len` / `_field`, which do what the VM instruction does; an index out of
-bounds bails. Such a body still never allocates, stores or calls into the
-VM, so no collection can run while it holds a heap word and every word
-stays a live object. Comparing heap words, stores and allocation come
-with the next parts of the tier.
+phis, read through a `HeapRef` with `Index`, `ArrayLen` and
+`HeapFieldLoad`, and write with `StoreIndex` and `HeapFieldStore`. Each
+calls a helper in `machine::native` (`coil_native_index`, `_len`,
+`_field`, `_store_index`, `_set_field`) that does what the VM instruction
+does; an index out of bounds or a store to the wrong kind of object
+bails. Such a body never allocates or calls into the VM, so no collection
+can run while it holds a heap word and every word stays a live object.
+
+Stores are effects, and a bail re-runs the call. So every store logs the
+word it overwrote (`NativeCtx::undo`), and a bail puts them back, newest
+first, before the VM runs the call again: the re-run starts from the heap
+as the call found it, and makes the stores (and the panic, if any)
+itself. Comparing heap words and allocation come with the next parts of
+the tier.
 
 ### Bail instead of trap
 

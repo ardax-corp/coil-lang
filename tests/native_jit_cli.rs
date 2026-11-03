@@ -126,6 +126,37 @@ fn heap_reads_run_natively() {
     assert!(stats.contains("native: 4 compiled"), "stats: {stats}");
 }
 
+#[test]
+fn heap_stores_are_undone_when_the_call_bails() {
+    // `fill` writes a[0..n] and then indexes past the end: the bail takes
+    // the stores back and the VM's re-run makes them and panics as before.
+    let src = format!(
+        "{HEADER}class C {{ pub n: int, pub f: float }}\n\
+         #[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i * 10; i = i + 1; }} return a[n]; }}\n\
+         #[inline(never)]\nfn bump(C c, int by) -> int {{ c.n = c.n + by; c.f = c.f * 2.0; return 100 / by; }}\n\
+         fn main() {{\n  let a: Vec<int> = [0, 0, 0, 0];\n  let c = new C(1, 1.5);\n\
+           let _ = println(format(\"%i %i %i\", fill(a, 3), a[1], a[2]));\n\
+           let _ = println(format(\"%i %i %f\", bump(c, 2), c.n, c.f));\n\
+           let _ = println(format(\"%i\", bump(c, 0)));\n}}\n"
+    );
+    let stats = same_as_vm("stores", &src);
+    assert!(stats.contains("native: 2 compiled"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i + 7; i = i + 1; }} return a[n]; }}\n\
+         fn main() {{ let a: Vec<int> = [0, 0, 0]; let _ = println(format(\"%i\", fill(a, 3))); }}\n"
+    );
+    same_as_vm("stores_oob", &src);
+    // A recursion past the native stack budget bails with no panic: without
+    // the undo the counts would include the native run's increments too.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn rec(Vec<int> a, int d) -> int {{ if d == 0 {{ return 0; }} a[d % 4] = a[d % 4] + 1; return 1 + rec(a, d - 1); }}\n\
+         fn main() {{ let a: Vec<int> = [0, 0, 0, 0]; let n = rec(a, 50000); let _ = println(format(\"%i %i %i %i %i\", n, a[0], a[1], a[2], a[3])); }}\n"
+    );
+    let stats = same_as_vm("stores_deep", &src);
+    assert!(stats.contains("1 bailed"), "stats: {stats}");
+}
+
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
 /// section.
 fn compile(name: &str, src: &str, jit: bool) -> PathBuf {

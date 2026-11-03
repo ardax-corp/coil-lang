@@ -59,6 +59,8 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
     jb.symbol("coil_native_index", machine::native::coil_native_index as *const u8);
     jb.symbol("coil_native_len", machine::native::coil_native_len as *const u8);
     jb.symbol("coil_native_field", machine::native::coil_native_field as *const u8);
+    jb.symbol("coil_native_store_index", machine::native::coil_native_store_index as *const u8);
+    jb.symbol("coil_native_set_field", machine::native::coil_native_set_field as *const u8);
     let mut module = JITModule::new(jb);
 
     let ids = declare(&mut module, bodies, &plan.compile)?;
@@ -276,6 +278,17 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
                     need(dest)?;
                     need_heap(object)?;
                 }
+                MirInst::StoreIndex { dest, array, index, value, .. } => {
+                    need(dest)?;
+                    need_heap(array)?;
+                    need_scalar(index)?;
+                    need(value)?;
+                }
+                MirInst::HeapFieldStore { dest, object, value, .. } => {
+                    need(dest)?;
+                    need_heap(object)?;
+                    need(value)?;
+                }
                 MirInst::Phi { dest, args, .. } => {
                     need(dest)?;
                     for (_, v) in args {
@@ -329,6 +342,8 @@ struct Ids {
     index: FuncId,
     len: FuncId,
     field: FuncId,
+    store_index: FuncId,
+    set_field: FuncId,
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -375,11 +390,13 @@ fn declare(module: &mut JITModule, bodies: &[NativeBody], compile: &[usize]) -> 
         sig.returns.push(AbiParam::new(types::I64));
         sig
     };
-    let (s3, s1, s2) = (words(3), words(1), words(2));
+    let (s4, s3, s1, s2) = (words(4), words(3), words(1), words(2));
     let index = module.declare_function("coil_native_index", Linkage::Import, &s3).map_err(e)?;
     let len = module.declare_function("coil_native_len", Linkage::Import, &s1).map_err(e)?;
     let field = module.declare_function("coil_native_field", Linkage::Import, &s2).map_err(e)?;
-    Ok(Ids { imp, entry, fmod, powf, index, len, field })
+    let store_index = module.declare_function("coil_native_store_index", Linkage::Import, &s4).map_err(e)?;
+    let set_field = module.declare_function("coil_native_set_field", Linkage::Import, &s4).map_err(e)?;
+    Ok(Ids { imp, entry, fmod, powf, index, len, field, store_index, set_field })
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +454,8 @@ struct Lower<'a> {
     index: FuncRef,
     len: FuncRef,
     field: FuncRef,
+    store_index: FuncRef,
+    set_field: FuncRef,
     by_label: &'a HashMap<Label, usize>,
     vars: Vec<Option<Variable>>,
     blocks: HashMap<BlockId, Block>,
@@ -463,6 +482,8 @@ impl<'a> Lower<'a> {
         let index = module.declare_func_in_func(ids.index, func);
         let len = module.declare_func_in_func(ids.len, func);
         let field = module.declare_func_in_func(ids.field, func);
+        let store_index = module.declare_func_in_func(ids.store_index, func);
+        let set_field = module.declare_func_in_func(ids.set_field, func);
         let ret = func.signature.returns[0].value_type;
         let mut b = FunctionBuilder::new(func, fbc);
         let bail = b.create_block();
@@ -478,6 +499,8 @@ impl<'a> Lower<'a> {
             index,
             len,
             field,
+            store_index,
+            set_field,
             by_label,
             vars: Vec::new(),
             blocks: HashMap::new(),
@@ -683,6 +706,28 @@ impl<'a> Lower<'a> {
                 let w = self.b.inst_results(call)[0];
                 self.set_word(f, *dest, w);
             }
+            MirInst::StoreIndex { dest, array, index, value, .. } => {
+                let a = self.get(f, *array);
+                let i = self.get(f, *index);
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                let call = self.b.ins().call(self.store_index, &[self.ctx, a, i, v]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set(f, *dest, w);
+            }
+            MirInst::HeapFieldStore { dest, object, value, index } => {
+                let o = self.get(f, *object);
+                let i = self.b.ins().iconst(types::I64, i64::from(*index));
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                let call = self.b.ins().call(self.set_field, &[self.ctx, o, i, v]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag);
+                self.set(f, *dest, w);
+            }
             other => return Err(format!("instruction {}", inst_name(other))),
         }
         Ok(())
@@ -837,9 +882,11 @@ mod tests {
 
     fn run(entry: &NativeEntry, args: &[u64]) -> (u64, u64) {
         let marker = 0u8;
+        let mut undo = Vec::new();
         let mut ctx = NativeCtx {
             bail: 0,
             stack_limit: (std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET),
+            undo: &mut undo,
         };
         // SAFETY: compiled for `args.len()` argument words.
         let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
