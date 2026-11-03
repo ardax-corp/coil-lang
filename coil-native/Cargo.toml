@@ -1,0 +1,14 @@
+[package]
+name = "coil-native"
+version = "0.1.0"
+edition = "2024"
+description = "Native code for Coil: MIR to Cranelift (JIT now, AOT objects later)"
+
+[dependencies]
+compiler = { path = "../compiler", default-features = false }
+machine = { path = "../machine", default-features = false }
+cranelift-codegen = "0.137"
+cranelift-frontend = "0.137"
+cranelift-jit = "0.137"
+cranelift-module = "0.137"
+cranelift-native = "0.137"
