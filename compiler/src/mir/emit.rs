@@ -499,29 +499,39 @@ struct DenseLayout {
 }
 
 /// Assign dense registers: one per slotted value, or, when that runs past
-/// the frame and no debugger needs every value kept, shared by liveness;
-/// if even that does not fit, constants are rebuilt where they are read
-/// instead of held in a register across the body (#2242).
+/// the frame and no debugger needs every value kept, shared by liveness
+/// (scalar φs too when the rest alone does not fit); if even that does not
+/// fit, constants are rebuilt where they are read instead of held in a
+/// register across the body (#2242).
 fn dense_layout(func: &MirFunc, entry_label: Option<Label>) -> Result<DenseLayout, LowerError> {
     let mut func = func.clone();
     sink_phi_incomings(&mut func);
     let mut plan = ConvoyPlan::new(&func, entry_label);
-    let (regs, scratch, shared) = match assign_regs(&func, &plan.need_slot) {
-        Ok((regs, scratch)) => (regs, scratch, false),
+    // Phis keep their own registers while that fits (the latch and join
+    // coalescing then still apply); constants are rebuilt where they are
+    // read only when sharing alone does not fit.
+    let share = |func: &MirFunc, need_slot: &[bool]| {
+        assign_regs_shared(func, need_slot, false)
+            .map(|(r, s)| (r, s, false))
+            .or_else(|_| assign_regs_shared(func, need_slot, true).map(|(r, s)| (r, s, true)))
+    };
+    let (regs, scratch, shared, share_phis) = match assign_regs(&func, &plan.need_slot) {
+        Ok((regs, scratch)) => (regs, scratch, false, false),
         Err(LowerError::Refused(why)) if why == "too many dense slots" && !func.debug_keep => {
-            match assign_regs_shared(&func, &plan.need_slot) {
-                Ok((regs, scratch)) => (regs, scratch, true),
+            match share(&func, &plan.need_slot) {
+                Ok((regs, scratch, phis)) => (regs, scratch, true, phis),
                 Err(_) if rematerialize_consts(&mut func) => {
                     plan = ConvoyPlan::new(&func, entry_label);
-                    let (regs, scratch) = assign_regs_shared(&func, &plan.need_slot)?;
-                    (regs, scratch, true)
+                    let (regs, scratch, phis) = share(&func, &plan.need_slot)?;
+                    (regs, scratch, true, phis)
                 }
                 Err(e) => return Err(e),
             }
         }
         Err(e) => return Err(e),
     };
-    let regs = coalesce_latch_overwrite(&func, regs, &plan.need_slot);
+    // The coalescing aliases φ registers as if each were the φ's alone.
+    let regs = if share_phis { regs } else { coalesce_latch_overwrite(&func, regs, &plan.need_slot) };
     let regs = alias_dead_store_dests(&func, regs);
     Ok(DenseLayout { func, plan, regs, scratch, shared })
 }
@@ -2219,10 +2229,12 @@ pub(super) fn push_clear_word(out: &mut Vec<IlOp>, reg: u8) {
 /// one of its own, as [`assign_regs_prefer_payloads`] gives it: parameters,
 /// match payloads, heap and opaque words (GC clears and stack maps name
 /// them by register), and φ dests and incomings (the latch and join
-/// coalescing alias those). A value not in a register (a call convoy word,
-/// a fused compare) is counted as reading its operands where its consumer
-/// is emitted, which only lengthens live ranges.
-fn assign_regs_shared(func: &MirFunc, need_slot: &[bool]) -> Result<(Vec<u8>, u8), LowerError> {
+/// coalescing alias those). With `share_phis`, scalar φs share too, and
+/// the caller skips that coalescing: a φ is written on each incoming edge,
+/// which the interference graph counts. A value not in a register (a call
+/// convoy word, a fused compare) is counted as reading its operands where
+/// its consumer is emitted, which only lengthens live ranges.
+fn assign_regs_shared(func: &MirFunc, need_slot: &[bool], share_phis: bool) -> Result<(Vec<u8>, u8), LowerError> {
     let n = func.types.len();
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false);
     let opaque = super::gc::live_opaque_words(func);
@@ -2244,7 +2256,7 @@ fn assign_regs_shared(func: &MirFunc, need_slot: &[bool]) -> Result<(Vec<u8>, u8
                 }
             }
             match inst {
-                MirInst::Phi { dest, args, .. } => {
+                MirInst::Phi { dest, args, .. } if !share_phis || func.types[dest.index()].is_heap_word() => {
                     mark(*dest);
                     for &(_, v) in args.iter() {
                         mark(v);

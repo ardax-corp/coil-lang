@@ -5761,6 +5761,31 @@ fn long_loop_body_shares_dense_registers() {
     assert_dense_runs(&src, "churn");
 }
 
+/// More scalar φs than registers: each `if` join merges a value, and
+/// three hundred of them stay dense once φs share registers by liveness
+/// too (#2242).
+#[test]
+fn many_join_phis_share_dense_registers() {
+    const JOINS: i64 = 300;
+    let mut body = String::from("    let v0 = x;\n");
+    for k in 1..JOINS {
+        let p = k - 1;
+        body.push_str(&format!(
+            "    let v{k} = 0;\n    if v{p} % 2 == 0 {{\n        v{k} = v{p} / 2 + {k};\n    }} else {{\n        v{k} = (v{p} * 3 + 1) % 1000003;\n    }}\n"
+        ));
+    }
+    let x: i64 = 7;
+    let mut want = x;
+    for k in 1..JOINS {
+        want = if want % 2 == 0 { want / 2 + k } else { (want * 3 + 1) % 1000003 };
+    }
+    let src = format!(
+        "fn hops(int x) -> int {{\n{body}    return v{};\n}}\nfn main() {{\n    if hops({x}) != {want} {{\n        panic \"hops\";\n    }}\n}}\n",
+        JOINS - 1
+    );
+    assert_dense_runs(&src, "hops");
+}
+
 /// Strings among the shared scalars keep their own registers: the GC
 /// clears and the stack map still see each heap word (#2242).
 #[test]
