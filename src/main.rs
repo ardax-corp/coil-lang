@@ -384,7 +384,13 @@ fn cmd_build_and_run(
     opt_stats: bool,
     opt_stats_json: bool,
     cache: Option<BuildCache>,
+    jit: bool,
 ) {
+    // `--jit` needs this compile's MIR, so it skips the build cache.
+    let cache = if jit { None } else { cache };
+    if jit {
+        compiler::native_mir::start_native_capture();
+    }
     if let Some(cache) = &cache
         && let Some(loaded) = cache.load().and_then(|b| load_archive_bytes(&b).ok())
     {
@@ -421,6 +427,9 @@ fn cmd_build_and_run(
     }
 
     maybe_warn_stale_default_out(pipeline, filename, &full);
+    if jit {
+        install_native(&full);
+    }
     let entry = ffi_entry_path(Path::new(filename));
     let panicked = execute_pipeline(ExecutePipelineArgs {
         pipeline,
@@ -434,6 +443,30 @@ fn cmd_build_and_run(
     });
     if panicked {
         exit(1);
+    }
+}
+
+/// Compile the captured MIR with Cranelift for the coming run.
+fn install_native(debug: &common::ProgramDebug) {
+    let bodies = compiler::native_mir::take_native_capture();
+    let pcs: std::collections::HashMap<String, u32> =
+        debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    match coil_native::jit(&bodies, &pcs) {
+        Ok(program) => {
+            if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+                eprintln!("{}", coil_native::describe(&program));
+                if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+                    for name in &program.compiled {
+                        eprintln!("  native: {name}");
+                    }
+                    for (name, why) in &program.refused {
+                        eprintln!("  vm: {name}: {why}");
+                    }
+                }
+            }
+            machine::native::install_for_next_run(program.entries);
+        }
+        Err(e) => eprintln!("warning: --jit: native compile failed ({e}); running on the VM"),
     }
 }
 
@@ -748,6 +781,7 @@ fn main() {
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
+                        cli.jit,
                     );
                 }
                 Command::Compile { filename, output } => {

@@ -89,6 +89,8 @@ pub(crate) struct CliArgs {
     pub nursery: Option<bool>,
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
+    /// `--jit`: run with native code where the backend can compile it.
+    pub jit: bool,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
     pub opt_stats: bool,
@@ -381,6 +383,7 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             early_free: None,
             nursery: None,
             cow_report: false,
+            jit: false,
             auto_par: None,
             opt_stats: false,
             opt_stats_json: false,
@@ -446,6 +449,7 @@ fn cli_from(
         early_free: opt.early_free,
         nursery: None,
         cow_report: false,
+        jit: false,
         auto_par: opt.auto_par,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
@@ -470,6 +474,7 @@ impl RawCli {
             || self.opt.is_set()
             || self.nursery.nursery.is_some()
             || self.nursery.cow_report
+            || self.nursery.jit
             || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
@@ -496,6 +501,7 @@ impl RawCli {
                     debug_level: self.debug.level(),
                     nursery: self.nursery.nursery,
                     cow_report: self.nursery.cow_report,
+                    jit: self.nursery.jit,
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -598,6 +604,7 @@ impl RawCli {
             }) => CliArgs {
                 nursery: nursery.nursery,
                 cow_report: nursery.cow_report,
+                jit: nursery.jit,
                 ..cli_from(
                     Command::Run { archive },
                     log,
