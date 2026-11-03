@@ -1,0 +1,453 @@
+//! The native MIR section of a `.ccoil` (`ArchivedProgram::native_mir`).
+//!
+//! `coil compile --jit` stores the typed MIR of the bodies the native
+//! backend compiles, so `coil run` can JIT an archive without the source.
+//! Only those bodies are stored, and only the MIR the backend reads: the
+//! encoder never meets an instruction the backend does not lower, and the
+//! format grows with each tier.
+//!
+//! Layout (little-endian): the magic `CNMIR`, a format byte, then the
+//! bodies. Each body is its name, bytecode entry PC (`u32::MAX`: none),
+//! entry label, signature, value types and blocks. Labels are the
+//! compile's own `Label` numbers; a call names its callee by label.
+
+use std::collections::HashMap;
+
+use compiler::native_mir::{
+    BlockId, Label, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy,
+    MirUnaryOp, NativeBody, Terminator, ValueId,
+};
+
+const MAGIC: &[u8; 5] = b"CNMIR";
+/// Bump when the layout changes; a reader refuses any other format.
+const FORMAT: u8 = 1;
+const NO_PC: u32 = u32::MAX;
+
+/// The section for the bodies of `bodies` the backend compiles, keyed to
+/// their entry PCs. Empty when none compiles.
+pub fn encode(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Vec<u8> {
+    let plan = crate::plan(bodies);
+    if plan.compile.is_empty() {
+        return Vec::new();
+    }
+    let mut w = Writer(Vec::new());
+    w.0.extend_from_slice(MAGIC);
+    w.u8(FORMAT);
+    w.u32(plan.compile.len() as u32);
+    for &i in &plan.compile {
+        let body = &bodies[i];
+        w.str(&body.name);
+        w.u32(entry_pcs.get(&body.name).copied().unwrap_or(NO_PC));
+        // `plan` keeps only bodies a call can name, so each has a label.
+        w.u32(body.entry.map_or(u32::MAX, |l| l.0));
+        func(&mut w, &body.mir);
+    }
+    w.0
+}
+
+/// The bodies of a section and their entry PCs, ready for [`crate::jit`].
+pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), String> {
+    let mut r = Reader { b: bytes, i: 0 };
+    if r.take(MAGIC.len())? != MAGIC {
+        return Err("not a native MIR section".into());
+    }
+    let format = r.u8()?;
+    if format != FORMAT {
+        return Err(format!("native MIR format {format}, this coil reads {FORMAT}"));
+    }
+    let n = r.u32()?;
+    let mut bodies = Vec::new();
+    let mut pcs = HashMap::new();
+    for _ in 0..n {
+        let name = r.str()?;
+        let pc = r.u32()?;
+        let label = r.u32()?;
+        let mir = read_func(&mut r, &name)?;
+        if pc != NO_PC {
+            pcs.insert(name.clone(), pc);
+        }
+        let entry = (label != u32::MAX).then_some(Label(label));
+        bodies.push(NativeBody { name, entry, mir });
+    }
+    if r.i != bytes.len() {
+        return Err("trailing bytes after the native MIR section".into());
+    }
+    Ok((bodies, pcs))
+}
+
+// ---------------------------------------------------------------------------
+// Encoding
+
+const TYS: [MirTy; 3] = [MirTy::I64, MirTy::F64, MirTy::Bool];
+const BIN_OPS: [MirBinOp; 11] = [
+    MirBinOp::Add,
+    MirBinOp::Sub,
+    MirBinOp::Mul,
+    MirBinOp::Div,
+    MirBinOp::Rem,
+    MirBinOp::BitAnd,
+    MirBinOp::BitOr,
+    MirBinOp::Xor,
+    MirBinOp::Shl,
+    MirBinOp::Shr,
+    MirBinOp::Pow,
+];
+const CMP_OPS: [MirCmpOp; 6] = [MirCmpOp::Lt, MirCmpOp::Le, MirCmpOp::Gt, MirCmpOp::Ge, MirCmpOp::Eq, MirCmpOp::Ne];
+const UNARY_OPS: [MirUnaryOp; 2] = [MirUnaryOp::Neg, MirUnaryOp::Not];
+const CASTS: [MirCastKind; 3] = [MirCastKind::IntToFloat, MirCastKind::FloatToInt, MirCastKind::Word];
+
+/// Index of `x` in `table`. Types outside the numeric tier encode as
+/// `0xff`, which [`Reader::pick`] refuses, so they never come back.
+fn idx<T: PartialEq>(table: &[T], x: &T) -> u8 {
+    table.iter().position(|t| t == x).map_or(0xff, |i| i as u8)
+}
+
+const I_CONST_I64: u8 = 0;
+const I_CONST_F64: u8 = 1;
+const I_CONST_BOOL: u8 = 2;
+const I_BIN: u8 = 3;
+const I_CMP: u8 = 4;
+const I_UNARY: u8 = 5;
+const I_CAST: u8 = 6;
+const I_PHI: u8 = 7;
+const I_CALL: u8 = 8;
+
+const T_JUMP: u8 = 0;
+const T_BR: u8 = 1;
+const T_RETURN: u8 = 2;
+const T_UNREACHABLE: u8 = 3;
+
+struct Writer(Vec<u8>);
+
+impl Writer {
+    fn u8(&mut self, x: u8) {
+        self.0.push(x);
+    }
+    fn u32(&mut self, x: u32) {
+        self.0.extend_from_slice(&x.to_le_bytes());
+    }
+    fn u64(&mut self, x: u64) {
+        self.0.extend_from_slice(&x.to_le_bytes());
+    }
+    fn str(&mut self, s: &str) {
+        self.u32(s.len() as u32);
+        self.0.extend_from_slice(s.as_bytes());
+    }
+    fn ty(&mut self, t: MirTy) {
+        self.u8(idx(&TYS, &t));
+    }
+    fn v(&mut self, v: ValueId) {
+        self.u32(v.0);
+    }
+    fn vs(&mut self, vs: &[ValueId]) {
+        self.u32(vs.len() as u32);
+        for &v in vs {
+            self.v(v);
+        }
+    }
+}
+
+fn func(w: &mut Writer, f: &MirFunc) {
+    w.u32(f.entry.0);
+    w.u32(f.types.len() as u32);
+    for &t in &f.types {
+        // Unused value slots may hold any type; they stay `Bottom`.
+        w.u8(if crate::numeric(t) { idx(&TYS, &t) } else { 0xfe });
+    }
+    w.vs(&f.params);
+    w.ty(f.ret_ty.unwrap_or(MirTy::Bottom));
+    w.u32(f.blocks.len() as u32);
+    for b in &f.blocks {
+        w.u32(b.id.0);
+        let insts: Vec<&MirInst> = b.insts.iter().filter(|i| !matches!(i, MirInst::Deopt { .. })).collect();
+        w.u32(insts.len() as u32);
+        for inst in insts {
+            self::inst(w, inst);
+        }
+        match &b.term {
+            Some(Terminator::Jump { dest }) => {
+                w.u8(T_JUMP);
+                w.u32(dest.0);
+            }
+            Some(Terminator::Br { cond, taken, not_taken }) => {
+                w.u8(T_BR);
+                w.v(*cond);
+                w.u32(taken.0);
+                w.u32(not_taken.0);
+            }
+            Some(Terminator::Return { lo: Some(v), hi: None }) => {
+                w.u8(T_RETURN);
+                w.v(*v);
+            }
+            // `plan` admits no other terminator.
+            _ => w.u8(T_UNREACHABLE),
+        }
+    }
+}
+
+fn inst(w: &mut Writer, inst: &MirInst) {
+    match inst {
+        MirInst::Const { dest, c } => {
+            match c {
+                MirConst::I64(x) => {
+                    w.u8(I_CONST_I64);
+                    w.u64(*x as u64);
+                }
+                MirConst::F64(bits) => {
+                    w.u8(I_CONST_F64);
+                    w.u64(*bits);
+                }
+                MirConst::Bool(b) => {
+                    w.u8(I_CONST_BOOL);
+                    w.u64(*b as u64);
+                }
+            }
+            w.v(*dest);
+        }
+        MirInst::Bin { dest, op, ty, lhs, rhs } => {
+            w.u8(I_BIN);
+            w.u8(idx(&BIN_OPS, op));
+            w.ty(*ty);
+            w.v(*dest);
+            w.v(*lhs);
+            w.v(*rhs);
+        }
+        MirInst::Cmp { dest, op, ty, lhs, rhs } => {
+            w.u8(I_CMP);
+            w.u8(idx(&CMP_OPS, op));
+            w.ty(*ty);
+            w.v(*dest);
+            w.v(*lhs);
+            w.v(*rhs);
+        }
+        MirInst::Unary { dest, op, src } => {
+            w.u8(I_UNARY);
+            w.u8(idx(&UNARY_OPS, op));
+            w.v(*dest);
+            w.v(*src);
+        }
+        MirInst::Cast { dest, kind, to, src } => {
+            w.u8(I_CAST);
+            w.u8(idx(&CASTS, kind));
+            w.ty(*to);
+            w.v(*dest);
+            w.v(*src);
+        }
+        MirInst::Phi { dest, ty, args } => {
+            w.u8(I_PHI);
+            w.ty(*ty);
+            w.v(*dest);
+            w.u32(args.len() as u32);
+            for (b, v) in args {
+                w.u32(b.0);
+                w.v(*v);
+            }
+        }
+        MirInst::Call { dest, target, args, .. } => {
+            w.u8(I_CALL);
+            w.v(*dest);
+            w.u32(target.0);
+            w.vs(args);
+        }
+        // `plan` admits nothing else, and `func` drops `Deopt`.
+        _ => unreachable!("native section: instruction outside the numeric tier"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decoding
+
+struct Reader<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        let end = self.i.checked_add(n).filter(|&e| e <= self.b.len()).ok_or("native MIR section is truncated")?;
+        let s = &self.b[self.i..end];
+        self.i = end;
+        Ok(s)
+    }
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> Result<u64, String> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    /// A length that cannot exceed what is left of the section (each
+    /// element takes at least one byte), so a corrupt count cannot ask
+    /// for a huge allocation.
+    fn len(&mut self) -> Result<usize, String> {
+        let n = self.u32()? as usize;
+        if n > self.b.len() - self.i {
+            return Err("native MIR section has a bad length".into());
+        }
+        Ok(n)
+    }
+    fn str(&mut self) -> Result<String, String> {
+        let n = self.len()?;
+        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| "native MIR name is not UTF-8".into())
+    }
+    fn pick<T: Copy>(&mut self, table: &[T], what: &str) -> Result<T, String> {
+        let i = self.u8()?;
+        table.get(i as usize).copied().ok_or_else(|| format!("native MIR: bad {what} {i}"))
+    }
+    fn ty(&mut self) -> Result<MirTy, String> {
+        self.pick(&TYS, "type")
+    }
+    fn v(&mut self) -> Result<ValueId, String> {
+        Ok(ValueId(self.u32()?))
+    }
+    fn vs(&mut self) -> Result<Vec<ValueId>, String> {
+        let n = self.len()?;
+        (0..n).map(|_| self.v()).collect()
+    }
+}
+
+fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
+    let mut f = MirFunc::new(name);
+    f.blocks.clear();
+    f.entry = BlockId(r.u32()?);
+    let n = r.len()?;
+    f.types = (0..n)
+        .map(|_| match r.u8()? {
+            0xfe => Ok(MirTy::Bottom),
+            i => TYS.get(i as usize).copied().ok_or_else(|| format!("native MIR: bad type {i}")),
+        })
+        .collect::<Result<_, String>>()?;
+    f.params = r.vs()?;
+    f.ret_ty = Some(r.ty()?);
+    let nb = r.len()?;
+    for _ in 0..nb {
+        let mut b = MirBlock::new(BlockId(r.u32()?));
+        let ni = r.len()?;
+        for _ in 0..ni {
+            b.insts.push(read_inst(r)?);
+        }
+        b.term = Some(match r.u8()? {
+            T_JUMP => Terminator::Jump { dest: BlockId(r.u32()?) },
+            T_BR => Terminator::Br { cond: r.v()?, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) },
+            T_RETURN => Terminator::Return { lo: Some(r.v()?), hi: None },
+            T_UNREACHABLE => Terminator::Unreachable,
+            t => return Err(format!("native MIR: bad terminator {t}")),
+        });
+        f.blocks.push(b);
+    }
+    Ok(f)
+}
+
+fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
+    Ok(match r.u8()? {
+        I_CONST_I64 => {
+            let c = MirConst::I64(r.u64()? as i64);
+            MirInst::Const { c, dest: r.v()? }
+        }
+        I_CONST_F64 => {
+            let c = MirConst::F64(r.u64()?);
+            MirInst::Const { c, dest: r.v()? }
+        }
+        I_CONST_BOOL => {
+            let c = MirConst::Bool(r.u64()? != 0);
+            MirInst::Const { c, dest: r.v()? }
+        }
+        I_BIN => {
+            let op = r.pick(&BIN_OPS, "binary op")?;
+            let ty = r.ty()?;
+            MirInst::Bin { op, ty, dest: r.v()?, lhs: r.v()?, rhs: r.v()? }
+        }
+        I_CMP => {
+            let op = r.pick(&CMP_OPS, "compare op")?;
+            let ty = r.ty()?;
+            MirInst::Cmp { op, ty, dest: r.v()?, lhs: r.v()?, rhs: r.v()? }
+        }
+        I_UNARY => {
+            let op = r.pick(&UNARY_OPS, "unary op")?;
+            MirInst::Unary { op, dest: r.v()?, src: r.v()? }
+        }
+        I_CAST => {
+            let kind = r.pick(&CASTS, "cast")?;
+            let to = r.ty()?;
+            MirInst::Cast { kind, to, dest: r.v()?, src: r.v()? }
+        }
+        I_PHI => {
+            let ty = r.ty()?;
+            let dest = r.v()?;
+            let n = r.len()?;
+            let args = (0..n).map(|_| Ok((BlockId(r.u32()?), r.v()?))).collect::<Result<_, String>>()?;
+            MirInst::Phi { dest, ty, args }
+        }
+        I_CALL => {
+            let dest = r.v()?;
+            let target = Label(r.u32()?);
+            MirInst::Call { dest, dest_hi: None, target, args: r.vs()? }
+        }
+        t => return Err(format!("native MIR: bad instruction {t}")),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use machine::native::{NATIVE_STACK_BUDGET, NativeCtx};
+
+    /// `fn f(int a, int b) -> int { return a + b * 2; }`
+    fn body() -> NativeBody {
+        let mut f = MirFunc::new("f");
+        f.blocks.clear();
+        f.types = vec![MirTy::I64; 5];
+        f.params = vec![ValueId(0), ValueId(1)];
+        f.ret_ty = Some(MirTy::I64);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::Const { dest: ValueId(2), c: MirConst::I64(2) });
+        b.insts.push(MirInst::Bin { dest: ValueId(3), op: MirBinOp::Mul, ty: MirTy::I64, lhs: ValueId(1), rhs: ValueId(2) });
+        b.insts.push(MirInst::Bin { dest: ValueId(4), op: MirBinOp::Add, ty: MirTy::I64, lhs: ValueId(0), rhs: ValueId(3) });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(4)), hi: None });
+        f.blocks.push(b);
+        NativeBody { name: "f".into(), entry: Some(Label(7)), mir: f }
+    }
+
+    #[test]
+    fn section_round_trips_and_runs() {
+        let pcs = HashMap::from([("f".to_string(), 42u32)]);
+        let bytes = encode(&[body()], &pcs);
+        let (bodies, back_pcs) = decode(&bytes).expect("decode");
+        assert_eq!(back_pcs, pcs);
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].entry, Some(Label(7)));
+        assert_eq!(bodies[0].mir.blocks, body().mir.blocks);
+        assert_eq!(bodies[0].mir.params, body().mir.params);
+
+        let program = crate::jit(&bodies, &back_pcs).expect("jit");
+        assert_eq!(program.entries.len(), 1);
+        assert_eq!(program.entries[0].pc, 42);
+        let mut ctx = NativeCtx { bail: 0, stack_limit: 0 };
+        let marker = 0u8;
+        ctx.stack_limit = (std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET);
+        let args = [5u64, 10];
+        // SAFETY: compiled for two argument words.
+        let out = unsafe { (program.entries[0].entry)(&mut ctx, args.as_ptr()) };
+        assert_eq!((ctx.bail, out), (0, 25));
+    }
+
+    #[test]
+    fn nothing_to_compile_is_an_empty_section() {
+        let mut b = body();
+        b.mir.types[4] = MirTy::HeapRef;
+        assert!(encode(&[b], &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn corrupt_sections_are_refused() {
+        let bytes = encode(&[body()], &HashMap::new());
+        assert!(decode(&bytes[..bytes.len() - 1]).is_err());
+        assert!(decode(b"CNMIR\x02").is_err());
+        assert!(decode(b"nope").is_err());
+        let mut long = bytes.clone();
+        long.push(0);
+        assert!(decode(&long).is_err());
+    }
+}

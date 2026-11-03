@@ -11,6 +11,8 @@
 //! [`jit`] compiles in memory for `coil --jit`. An object-file driver for
 //! `coil package` reuses the same lowering later.
 
+pub mod section;
+
 use std::collections::{HashMap, HashSet};
 
 use compiler::native_mir::{
