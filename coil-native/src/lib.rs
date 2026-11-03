@@ -927,4 +927,36 @@ mod tests {
         assert_eq!(p.entries.len(), 1, "refused: {:?}", p.refused);
         assert_eq!(run(&p.entries[0], &[1.5f64.to_bits()]), (0, 1.5f64.to_bits()));
     }
+    #[test]
+    fn a_callee_that_fails_to_lower_keeps_its_callers_on_the_vm() {
+        // `g` passes `plan` but has no lowering (`!` of a float); `f` calls it.
+        let mut g = MirFunc::new("g");
+        g.blocks.clear();
+        g.types = vec![MirTy::F64, MirTy::Bool];
+        g.params = vec![ValueId(0)];
+        g.ret_ty = Some(MirTy::Bool);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::Unary { dest: ValueId(1), op: MirUnaryOp::Not, src: ValueId(0) });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        g.blocks.push(b);
+        let mut f = MirFunc::new("f");
+        f.blocks.clear();
+        f.types = vec![MirTy::F64, MirTy::Bool];
+        f.params = vec![ValueId(0)];
+        f.ret_ty = Some(MirTy::Bool);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::Call { dest: ValueId(1), dest_hi: None, target: Label(1), args: vec![ValueId(0)] });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        f.blocks.push(b);
+        let h = ident("h", MirTy::I64, MirTy::I64);
+        let bodies = vec![
+            NativeBody { name: "f".into(), entry: Some(Label(0)), mir: f },
+            NativeBody { name: "g".into(), entry: Some(Label(1)), mir: g },
+            NativeBody { name: "h".into(), entry: Some(Label(2)), mir: h },
+        ];
+        let pcs = HashMap::from([("f".to_string(), 0u32), ("h".to_string(), 1u32)]);
+        let p = jit(&bodies, &pcs).expect("jit");
+        assert_eq!(p.compiled, vec!["h".to_string()]);
+        assert_eq!(run(&p.entries[0], &[7]), (0, 7));
+    }
 }
