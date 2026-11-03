@@ -52,6 +52,8 @@ pub type UndoEntry = [u64; 3];
 
 /// [`UndoEntry`] target bit of an instance slot store.
 pub const UNDO_FIELD: u64 = 1;
+/// [`UndoEntry`] target bit of an array push (undone by a pop).
+pub const UNDO_PUSH: u64 = 2;
 
 /// Byte offset of [`NativeCtx::bail`].
 pub const NATIVE_CTX_BAIL: i32 = 0;
@@ -89,7 +91,11 @@ impl NativeCtx {
             // SAFETY: entries below `undo_len` were written.
             let [target, index, old] = unsafe { *self.undo_buf.add(i) };
             let old = common::Value::from(old);
-            if target & UNDO_FIELD != 0 {
+            if target & UNDO_PUSH != 0 {
+                if let Some(crate::memory::Object::Array(mut gc)) = object(target & !UNDO_PUSH) {
+                    let _ = gc.as_mut().pop();
+                }
+            } else if target & UNDO_FIELD != 0 {
                 if let Some(crate::memory::Object::Instance(mut gc)) = object(target & !UNDO_FIELD) {
                     gc.as_mut().set_slot(index as usize, old);
                 }
@@ -471,4 +477,91 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
         unsafe { note_alloc(ctx, heap) };
     }
     obj
+}
+
+// ---------------------------------------------------------------------------
+// Allocation for native code (`Alloc`, `ArrayPush`), as the VM's
+// `DenseMake` / `DenseMakeObject` / `ArrayPush` do. Same rule as the Cow
+// helpers: they allocate and never collect.
+
+/// [`coil_native_alloc`] kinds.
+pub const ALLOC_ARRAY: u64 = 0;
+pub const ALLOC_TUPLE: u64 = 1;
+pub const ALLOC_ENUM: u64 = 2;
+pub const ALLOC_OBJECT: u64 = 3;
+
+/// A new object of `kind` from the `n` words at `words`, in declaration
+/// order (an enum's payload order):
+/// - [`ALLOC_ARRAY`]: `extra` is the element word kind (`0`: none);
+/// - [`ALLOC_TUPLE`]: `extra` is the packed word kinds;
+/// - [`ALLOC_ENUM`]: `extra` is `tag | kinds << 32`;
+/// - [`ALLOC_OBJECT`]: `extra` is the type id and `n` the field count
+///   (`words` unused: stores fill the fields).
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
+pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words: *const u64, n: u64, extra: u64) -> u64 {
+    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, ObjTuple, Object};
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let n = n as usize;
+    let values: Vec<common::Value> = if kind == ALLOC_OBJECT || n == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: the caller passes `n` words.
+        unsafe { std::slice::from_raw_parts(words, n) }.iter().map(|&w| common::Value::from(w)).collect()
+    };
+    let addr = match kind {
+        ALLOC_ARRAY => {
+            let mut arr = ObjArray::from_values(values, heap);
+            if extra != 0 {
+                arr.set_elem_kind(extra as u8 & 0x3);
+            }
+            heap.alloc(arr, Object::Array).0.addr()
+        }
+        ALLOC_TUPLE if n == 0 => return heap.immortal_empty_tuple().addr(),
+        ALLOC_TUPLE => heap.alloc(ObjTuple::from_slice(&values).with_kinds(extra as u8), Object::Tuple).0.addr(),
+        ALLOC_ENUM => {
+            let tag = extra as u32;
+            if n == 0 {
+                // A payload-less variant is shared, as `MakeEnum`.
+                return heap.immortal_unit_enum(tag).addr();
+            }
+            let payload = match values.as_slice() {
+                [a] => EnumPayload::one(*a),
+                [a, b] => EnumPayload::two(*a, *b),
+                v => EnumPayload::from_slice(v),
+            }
+            .with_kinds((extra >> 32) as u8);
+            heap.alloc(ObjEnum::new(tag, payload), Object::Enum).0.addr()
+        }
+        ALLOC_OBJECT => {
+            let (_, mut r) = heap.alloc(ObjInstance::with_type_id_and_fields(extra as u32, n), Object::Instance);
+            let _ = r.as_mut();
+            r.as_ptr().addr() as u64
+        }
+        _ => return unsafe { bail(ctx) },
+    };
+    unsafe { note_alloc(ctx, heap) };
+    addr
+}
+
+/// `ArrayPush`: append `value` to the array `addr` (logged for undo as a
+/// pop) and return `addr`. Not an array: bail, where the VM panics.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+pub unsafe extern "C" fn coil_native_array_push(ctx: *mut NativeCtx, addr: u64, value: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    unsafe { log(ctx, [addr | UNDO_PUSH, 0, 0]) };
+    gc.as_mut().push(common::Value::from(value));
+    heap.account_array(gc.as_mut());
+    unsafe { note_alloc(ctx, heap) };
+    addr
 }
