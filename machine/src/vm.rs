@@ -1612,6 +1612,9 @@ pub struct Machine<const S: usize> {
     /// PC past the op that entered the current GC safepoint, while one runs.
     /// `None` keeps the top frame on the conservative scan.
     gc_top_ip: Option<usize>,
+    /// The stack word an allocation just wrote its new object to, while
+    /// the safepoint that allocation reached runs ([`Self::maybe_gc_after_fresh`]).
+    gc_fresh_slot: Option<usize>,
     /// Bytecode PC of the current GC safepoint (alloc / `gc::collect`).
     gc_ip: usize,
     /// Compiler-only SIMD file (numeric bits only; never GC-traced).
@@ -1745,6 +1748,7 @@ impl<const S: usize> Machine<S> {
             stack_maps: Vec::new(),
             precise_frames: Arc::default(),
             gc_top_ip: None,
+            gc_fresh_slot: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
             finalizer_by_type: std::collections::HashMap::default(),
@@ -2850,7 +2854,16 @@ impl<const S: usize> Machine<S> {
         self.clear_dense_obj_cache();
         let mut pins = self.heap.take_gc_roots();
         let mut must = Vec::new();
+        // The object an allocation just wrote is the VM's own word: move it,
+        // even where the map can only say the slot may hold a reference.
+        let fresh = self.gc_fresh_slot;
+        let mut fresh_seen = false;
         self.for_each_stack_word(&mut |idx, kind| match kind {
+            _ if fresh == Some(idx) => {
+                if !std::mem::replace(&mut fresh_seen, true) {
+                    must.push(idx);
+                }
+            }
             crate::memory::RootKind::Precise => must.push(idx),
             _ => pins.push(self.stack[idx].heap_addr()),
         });
@@ -3712,6 +3725,27 @@ impl<const S: usize> Machine<S> {
         self.gc_safepoint_from_alloc(ip);
     }
 
+    /// As [`Self::maybe_gc_after_alloc`], for an allocation whose new object
+    /// the VM just wrote to stack word `slot`: a minor collection moves it
+    /// instead of pinning it (a pinned object holds its nursery chunk until
+    /// a major cycle).
+    #[inline]
+    fn maybe_gc_after_fresh(&mut self, ip: usize, slot: usize) {
+        if likely(self.heap.gc_is_idle() && !self.heap.should_collect()) {
+            return;
+        }
+        self.gc_fresh_slot = Some(slot);
+        self.gc_safepoint_from_alloc(ip);
+        self.gc_fresh_slot = None;
+    }
+
+    /// Push the object an allocation just made, then maybe collect.
+    #[inline]
+    fn push_fresh(&mut self, addr: u64, ip: usize) {
+        self.stack.push(Value::from(addr));
+        self.maybe_gc_after_fresh(ip, self.stack.tell() - 1);
+    }
+
     /// As [`Self::maybe_gc_after_alloc`], for an object the VM made at a
     /// `CallIndirect` and pushed as its result. The call's precise map row
     /// lists the slots live across the call, not the result word above them,
@@ -3768,8 +3802,7 @@ impl<const S: usize> Machine<S> {
         let obj_enum = ObjEnum::new(tag, payload);
         let (object, _) = self.heap.alloc(obj_enum, Object::Enum);
         self.stack.seek(sp - arity);
-        self.stack.push(Value::from(object.addr()));
-        self.maybe_gc_after_alloc(ip);
+        self.push_fresh(object.addr(), ip);
     }
 
     /// Copy `n` stack values in declaration order (`stack[base..base+n]`).
@@ -3850,8 +3883,7 @@ impl<const S: usize> Machine<S> {
             _ => crate::memory::ObjString::new(Self::object_string_value(&self.heap, &head) + tail),
         };
         let (obj, _) = self.heap.alloc(joined, Object::String);
-        self.stack.push(Value::from(obj.addr()));
-        self.maybe_gc_after_alloc(ip);
+        self.push_fresh(obj.addr(), ip);
     }
 
     fn install_program_strings(&mut self, strings: &[String]) {
@@ -5883,7 +5915,7 @@ impl<const S: usize> Machine<S> {
                         object.addr()
                     };
                     self.stack[sp + dest] = Value::from(addr);
-                    self.maybe_gc_after_alloc(ip);
+                    self.maybe_gc_after_fresh(ip, sp + dest);
                 }
                 Instruction::DenseMakeK => {
                     // Tuple / enum only; the verifier checked the pool index.
@@ -5909,7 +5941,7 @@ impl<const S: usize> Machine<S> {
                         object.addr()
                     };
                     self.stack[sp + dest] = Value::from(addr);
-                    self.maybe_gc_after_alloc(ip);
+                    self.maybe_gc_after_fresh(ip, sp + dest);
                 }
                 Instruction::DensePush => {
                     let (arity, base) = opcode.dense_move_parts();
