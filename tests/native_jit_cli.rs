@@ -500,3 +500,19 @@ fn a_bailed_call_leaves_no_drop_owed() {
                fn main() { make(); collect(); let _ = println(format(\"%i\", drops)); }\n";
     let _ = same_as_vm("bailed_drop", src);
 }
+
+#[test]
+fn a_scope_native_code_ran_leaves_no_scheduler_behind() {
+    // `first` compiles and runs a scope on the VM whose child suspends it;
+    // `main` stays on the VM (its `defer`) and opens its own scope after.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, yield_now}};\n\
+         fn ok(Result<int, task::TaskError> r) -> int {{ return match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; }}\n\
+         #[inline(never)]\nfn first() -> int {{ return ok(scope(fn (Scope s) {{ let _ = s.spawn(fn () {{ yield_now(); return 1; }}); return 2; }})); }}\n\
+         fn main() {{\n  defer {{ let _ = println(\"done\"); }}\n  let a = first();\n\
+           let b = ok(scope(fn (Scope s) {{ let _ = s.spawn(fn () {{ yield_now(); return 1; }}); return 3; }}));\n\
+           let _ = println(format(\"%i %i\", a, b));\n}}\n"
+    );
+    let stats = same_as_vm("scope_after_native", &src);
+    assert!(compiled(&stats, "first"), "stats: {stats}");
+}
