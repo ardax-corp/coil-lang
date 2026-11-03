@@ -5718,3 +5718,72 @@ fn long_straight_line_body_shares_dense_registers() {
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     assert!(!vm.panicked(), "mix computes the chain");
 }
+
+/// Compile `src`, check `name` emitted dense, and run `main` clean.
+fn assert_dense_runs(src: &str, name: &str) {
+    let mut p = crate::Pipeline::new();
+    p.set_collect_opt_stats(true);
+    let (bc, constants) = p.compile_src(src).unwrap_or_else(|e| panic!("compile {name}: {e:?}"));
+    let stats = crate::last_opt_stats();
+    let tier = stats
+        .body_tiers
+        .iter()
+        .find(|b| b.name == name)
+        .unwrap_or_else(|| panic!("{name} tier; stats={stats:?}"));
+    assert_eq!(tier.tier, "dense", "{tier:?}");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    p.wire_host_natives(&mut vm);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    assert!(!vm.panicked(), "{name} result");
+}
+
+/// Shared dense registers inside a loop: loop-carried values and the long
+/// chain each iteration computes stay apart (#2242).
+#[test]
+fn long_loop_body_shares_dense_registers() {
+    const LETS: i64 = 300;
+    let mut body = String::from("        let v0 = (acc * 31 + i) % 1000003;\n");
+    for k in 1..LETS {
+        body.push_str(&format!("        let v{k} = (v{} ^ {k}) % 1000003;\n", k - 1));
+    }
+    let mut want: i64 = 0;
+    for i in 0..4 {
+        let mut v = (want * 31 + i) % 1000003;
+        for k in 1..LETS {
+            v = (v ^ k) % 1000003;
+        }
+        want = (want + v + i) % 1000003;
+    }
+    let src = format!(
+        "fn churn(int n) -> int {{\n    let acc = 0;\n    let i = 0;\n    while i < n {{\n{body}        acc = (acc + v{} + i) % 1000003;\n        i = i + 1;\n    }}\n    return acc;\n}}\nfn main() {{\n    if churn(4) != {want} {{\n        panic \"churn\";\n    }}\n}}\n",
+        LETS - 1
+    );
+    assert_dense_runs(&src, "churn");
+}
+
+/// Strings among the shared scalars keep their own registers: the GC
+/// clears and the stack map still see each heap word (#2242).
+#[test]
+fn long_body_with_heap_words_shares_dense_registers() {
+    const LETS: i64 = 300;
+    let mut body = String::from("    let v0 = (x * 31) % 1000003;\n    let s0 = \"a\";\n");
+    for k in 1..LETS {
+        body.push_str(&format!("    let v{k} = (v{} ^ {k}) % 1000003;\n", k - 1));
+        if k % 50 == 0 {
+            body.push_str(&format!("    let s{k} = s{} + \"b\";\n", k - 50));
+        }
+    }
+    let last_s = (LETS - 1) / 50 * 50;
+    let x: i64 = 3;
+    let mut want = (x * 31) % 1000003;
+    for k in 1..LETS {
+        want = (want ^ k) % 1000003;
+    }
+    let want_len = 1 + last_s / 50;
+    let src = format!(
+        "fn mixed(int x) -> int {{\n{body}    return v{} + s{last_s}.len();\n}}\nfn main() {{\n    if mixed(3) != {} {{\n        panic \"mixed\";\n    }}\n}}\n",
+        LETS - 1,
+        want + want_len
+    );
+    assert_dense_runs(&src, "mixed");
+}
