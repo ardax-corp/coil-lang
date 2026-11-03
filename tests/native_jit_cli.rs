@@ -675,3 +675,70 @@ fn bodies_that_cannot_suspend_run_natively_inside_tasks() {
     assert!(compiled(&stats, "work"), "stats: {stats}");
     assert!(native_calls(&stats) >= 20, "stats: {stats}");
 }
+
+/// Tasks that suspend under native frames, for the fiber tests: `nap`
+/// stays on the VM (a task host call), the `#[inline(never)]` callers
+/// around it compile.
+const TASK_SUSPENDERS: &str = "use task::{scope, Scope, Task, TaskError, timeout};\n\
+     static let LOG: int = 0;\n\
+     fn push(int d) { LOG = LOG * 10 + d; }\n\
+     #[inline(never)]\nfn nap(int ms) { task::sleep(ms); }\n\
+     #[inline(never)]\nfn sleeper(int d, int ms) -> int { defer use (d) { push(d); } nap(ms); push(9); return d; }\n\
+     #[inline(never)]\nfn boom(int ms) -> int { nap(ms); panic \"boom\"; }\n\
+     #[inline(never)]\nfn waits(Task<int> t) -> int { return match t.join() { Result::Ok(v) => v * 100, Result::Err(TaskError::Cancelled) => -1, Result::Err(_) => -2 }; }\n\
+     fn show(Result<int, TaskError> r) -> string { return match r { Result::Ok(v) => format(\"ok %i\", v), Result::Err(TaskError::Cancelled) => \"cancelled\", Result::Err(TaskError::TimedOut) => \"timed out\", Result::Err(TaskError::Panicked(m)) => format(\"panicked %s\", m) }; }\n";
+
+#[test]
+fn bodies_that_suspend_run_natively_on_task_stacks() {
+    // `put` sends on a full channel, so it suspends inside native code: the
+    // task parks with its native frames and the receiver runs meanwhile.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, Channel}};\n\
+         #[inline(never)]\nfn put(Channel<int> ch, int v) {{ match ch.send(v) {{ Result::Ok(_) => {{}}, Result::Err(_) => panic \"closed\", }} }}\n\
+         fn main() {{\n  let ch: Channel<int> = task::channel(1);\n\
+           let r = scope(fn (Scope s) use (ch) {{ s.spawn(fn () use (ch) {{ let i = 0; while i < 40 {{ put(ch, i); i = i + 1; }} ch.close(); 0 }}); let t = 0; let done = false;\n\
+             while !done {{ match ch.recv() {{ Result::Ok(v) => {{ t = t + v; }}, Result::Err(_) => {{ done = true; }}, }} }} return t; }});\n\
+           let _ = println(format(\"%i\", match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}));\n}}\n"
+    );
+    let stats = same_as_vm("suspend_on_fibers", &src);
+    assert!(compiled(&stats, "put"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 40, "stats: {stats}");
+}
+
+#[test]
+fn tasks_cancelled_under_native_frames_unwind_them() {
+    // The cancel reaches the task inside `nap`, under `sleeper`'s native
+    // frame: its `defer` runs and the join reports the cancel.
+    let src = format!(
+        "{HEADER}{TASK_SUSPENDERS}\
+         fn main() {{\n\
+           let r = scope(fn (Scope s) {{ let t = s.spawn(fn () => sleeper(1, 10000)); task::yield_now(); t.cancel(); show(t.join()) }});\n\
+           let _ = println(format(\"%s %i\", match r {{ Result::Ok(m) => m, Result::Err(_) => \"scope failed\" }}, LOG));\n\
+           LOG = 0;\n\
+           let q = scope(fn (Scope s) {{ let a = s.spawn(fn () => sleeper(2, 10000)); let b = s.spawn(fn () => sleeper(3, 10000)); task::yield_now(); a.cancel(); b.cancel(); format(\"%s %s\", show(a.join()), show(b.join())) }});\n\
+           let _ = println(format(\"%s %i\", match q {{ Result::Ok(m) => m, Result::Err(_) => \"scope failed\" }}, LOG));\n}}\n"
+    );
+    let stats = same_as_vm("cancel_on_fibers", &src);
+    assert!(compiled(&stats, "sleeper"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 3, "stats: {stats}");
+}
+
+#[test]
+fn timeouts_panics_and_joins_under_native_frames_match_the_vm() {
+    // A timeout cancels a body waiting under native frames; a child task
+    // panics after it resumed in native code; a native body joins.
+    let src = format!(
+        "{HEADER}{TASK_SUSPENDERS}\
+         fn main() {{\n\
+           let _ = println(show(timeout(5, fn () => sleeper(4, 10000))));\n\
+           let _ = println(show(timeout(10000, fn () => sleeper(5, 1))));\n\
+           let p = scope(fn (Scope s) {{ let _ = s.spawn(fn () => boom(1)); let _ = s.spawn(fn () => sleeper(6, 10000)); 0 }});\n\
+           let _ = println(show(p));\n\
+           let j = scope(fn (Scope s) {{ let t = s.spawn(fn () => sleeper(7, 2)); let w = s.spawn(fn () use (t) => waits(t)); match w.join() {{ Result::Ok(v) => v, Result::Err(_) => -3 }} }});\n\
+           let _ = println(show(j));\n\
+           let _ = println(format(\"%i\", LOG));\n}}\n"
+    );
+    let stats = same_as_vm("timeout_on_fibers", &src);
+    assert!(compiled(&stats, "sleeper") && compiled(&stats, "waits"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 5, "stats: {stats}");
+}
