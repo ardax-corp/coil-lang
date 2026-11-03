@@ -11,6 +11,8 @@ pub struct InlineCostOptions {
     /// and a call as 25: stricter than [`Self::max_inline_cost`] at the
     /// same number. 100 takes a `HashMap` lookup's clone.
     pub max_cross_module_inline_cost: usize,
+    /// Multiples of these budgets the optimization hints grant.
+    pub hint_factors: crate::il::opt::HintFactors,
 }
 
 impl Default for InlineCostOptions {
@@ -19,6 +21,7 @@ impl Default for InlineCostOptions {
             max_inline_cost: 100,
             inline_across_modules: true,
             max_cross_module_inline_cost: 100,
+            hint_factors: crate::il::opt::HintFactors::default(),
         }
     }
 }

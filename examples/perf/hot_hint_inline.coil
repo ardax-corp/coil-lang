@@ -1,5 +1,5 @@
 // Hit bench (opt hints step 5): `#[hot]` on a function over the default
-// inline cost limit but under the hot limit (400), called in a loop.
+// inline cost limit but under the hot limit (500), called in a loop.
 // Without the tag the call stays.
 use io::sync::print;
 
