@@ -76,16 +76,18 @@ phis, read through a `HeapRef` with `Index`, `ArrayLen` and
 calls a helper in `machine::native` (`coil_native_index`, `_len`,
 `_field`, `_store_index`, `_set_field`) that does what the VM instruction
 does; an index out of bounds or a store to the wrong kind of object
-bails. Such a body never allocates or calls into the VM, so no collection
-can run while it holds a heap word and every word stays a live object.
+bails. Native code never calls into the VM and its helpers never collect
+(the collector moves objects), so every heap word it holds stays a live
+object at the same address for the whole call.
 
 An array a body indexes gets a *view* where its value is defined (a
 parameter, a phi, a load): `coil_native_view` hands back the pointer and
 length of its element words, and `Index` / `StoreIndex` / `ArrayLen` in
 bounds of the view read and write in place. Byte arrays, tuples and an
-index out of the view take the helpers. The view stays valid for the
-call: native code never grows or shrinks an array, and storing into a
-word array never moves its storage.
+index out of the view take the helpers. Storing into a word array never
+moves its storage; a push may, and another value may name the same array,
+so after an `ArrayPush` every view reads through the helpers until its
+value is defined again.
 
 Stores are effects, and a bail re-runs the call. So every store logs the
 word it overwrote in the context's undo log (`undo_buf` / `undo_len` /
@@ -93,8 +95,19 @@ word it overwrote in the context's undo log (`undo_buf` / `undo_len` /
 `coil_native_undo_grow` when it is full), and a bail puts them back, newest
 first, before the VM runs the call again: the re-run starts from the heap
 as the call found it, and makes the stores (and the panic, if any)
-itself. Comparing heap words and allocation come with the next parts of
-the tier.
+itself. A push logs a pop.
+
+`Cow` (share, unique, or unique of a field), `Alloc` (arrays, tuples,
+enums, and class instances whose fields stores fill) and `ArrayPush` call
+`coil_native_cow`, `_cow_field`, `_alloc` and `_array_push`, which build
+objects as the VM's `Cow`, `DenseMake`, `DenseMakeObject` and `ArrayPush`
+do, with the same word kinds. They allocate through the machine's heap
+(`NativeCtx::heap`) but never collect: a `GcBarrier` only names the
+object made right before it, and the VM checks for a collection after a
+native call that allocated, with the result on its stack. A call that
+makes more than `NATIVE_ALLOC_CAP` objects while a collection is due
+bails, so the VM's re-run collects as it goes and native code cannot
+grow the heap without bound. Comparing heap words comes next.
 
 ### Bail instead of trap
 
@@ -103,8 +116,9 @@ overflow, division by zero, `MIN / -1`, a shift count outside `0..=63`,
 `-MIN`) or where native code would leave its stack budget (256 KiB below the
 VM's call), it sets `NativeCtx::bail` and returns. Every native caller checks
 the flag after a call and returns too. The VM then runs the original call in
-bytecode from its first instruction. Because the function is pure, that
-re-run gives the VM's own result, panic message, location and backtrace.
+bytecode from its first instruction. The undo log takes back the call's
+heap stores first (objects it made are garbage), so that re-run gives the
+VM's own result, effects, panic message, location and backtrace.
 
 After a bail, calls nested inside the VM's re-run (operand stack base above
 the bailed call's) stay in the VM, so a deep recursion bails once, not once
@@ -120,8 +134,9 @@ its low byte is `1`, as `Value::as_bool`; a `float` word is its bits), calls
 the native body, and packs the result. Native-to-native calls are direct
 Cranelift calls with the values in registers.
 
-The table is installed on the program's main machine (`run_raw`); worker
-machines (auto-par, threads) run bytecode.
+The table is installed on the program's main machine (`run_raw`) and
+shared (`Arc<NativeCode>`) with the machines it spawns, each with its own
+counters (`NativeTable`).
 
 ### Semantics kept equal to the VM
 
