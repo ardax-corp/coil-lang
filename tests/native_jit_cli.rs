@@ -617,3 +617,21 @@ fn int_powers_trap_as_on_the_vm() {
     let stats = same_as_vm("int_pow", &src);
     assert!(compiled(&stats, "power") && compiled(&stats, "table") && compiled(&stats, "loud"), "stats: {stats}");
 }
+
+#[test]
+fn a_vm_panic_under_native_frames_names_them_in_its_backtrace() {
+    // `vmside` runs on the VM (a host call native code leaves there) and
+    // panics under two native frames, directly and through a closure: the
+    // backtrace lists them as the VM run does.
+    let src = format!(
+        "{HEADER}use clock::sleep_ms;\n\
+         #[inline(never)]\nfn vmside(int x) -> int {{ sleep_ms(0); let v: Vec<int> = [1, 2]; return v[x]; }}\n\
+         #[inline(never)]\nfn mid(int x) -> int {{ let _ = println(\"mid\"); return vmside(x) + 1; }}\n\
+         #[inline(never)]\nfn outer(int x) -> int {{ let f = fn (int y) => mid(y); return f(x) + mid(0); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", outer(1))); let _ = println(format(\"%i\", outer(5))); }}\n"
+    );
+    let stats = same_as_vm("vm_panic_trace", &src);
+    assert!(compiled(&stats, "mid") && compiled(&stats, "outer"), "stats: {stats}");
+    let err = program_stderr(&run("vm_panic_trace", &src, true));
+    assert!(err.contains("  in mid at") && err.contains("  in outer at"), "stderr: {err}");
+}
