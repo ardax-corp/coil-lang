@@ -14,7 +14,7 @@ coil is a **statically typed** scripting language with Hindley–Milner inferenc
 **Do not invent stdlib APIs** — userland helpers live in
 [coil-stdlib](https://github.com/ardax-corp/coil-stdlib)
 ([docs](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/README.md)).
-Compiler builtins live in virtual modules; see [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/not-builtins.md) (`/docs/references/not-builtins`).
+Compiler builtins live in virtual modules; see [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/not-builtins.md) (`/docs/language/not-builtins`).
 
 **Prefer method-based APIs** — operations on a type should be `impl` methods (`m.insert(k, v)`), not free functions (`insert(m, k, v)`). Virtual-module host primitives (`io::read`) stay as free fns; stdlib collections and new language surface default to methods.
 
@@ -78,7 +78,7 @@ Named call-site args: positional prefix then `f(name: v)`. Rest: trailing `T... 
 Ranges `a..b` / `a..=b` are **lazy** `Range<T: Ord>` / `RangeInclusive<T: Ord>`.
 `for` and `.to_vec()` step `int`/`byte`/`float` only; other `Ord` is a type error.
 
-Full grammar: [syntax](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/syntax.md) (`/docs/references/syntax`).
+Full grammar: [syntax](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/syntax.md) (`/docs/language/syntax`).
 
 ## Virtual modules (explicit `use`)
 
@@ -106,7 +106,7 @@ userland modules. Prelude is auto-injected.
 
 `gen fn`, `yield`, `resume h`, `resume h with v`, `let x = yield e`, `yield from`, `done(h)`. Types: `coroutine<Y, S>`. Resume after done → default value.
 
-Tutorial: [08-coroutines](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/08-coroutines.md) (`/docs/manual/tutorial/08-coroutines`).
+Tutorial: [12-generators](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/12-generators.md) (`/docs/manual/tutorial/12-generators`).
 
 ## Tests
 
@@ -122,7 +122,7 @@ Body is Result mode. `raise` / failed `assert!` (stdlib `tests` macro) is a catc
 
 ## Multi-file projects
 
-Module search roots come from `--root DIR` (repeatable); `coil` reads no `coil.toml` / `coil.lock` ([spool](https://github.com/ardax-corp/spool) turns its manifest into flags). Entry file has empty namespace. See [project-config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md) (`/docs/references/project-config`).
+Module search roots come from `--root DIR` (repeatable); `coil` reads no `coil.toml` / `coil.lock` ([spool](https://github.com/ardax-corp/spool) turns its manifest into flags). Entry file has empty namespace. See [project-config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/project-config.md) (`/docs/language/project-config`).
 
 ## Learn by example
 
@@ -145,7 +145,7 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 3. **Missing `use`** — `io`/`string` are not auto-imported.
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `--ffi-search-path` dirs, system; `dload` needs `--allow-dload` plus `--dload-pin` / `--dload-trusted`.
 5. **Stale `out.ccoil`** — only from `coil compile`; delete before `coil run` if sources changed.
-6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md) (`/docs/references/error-codes`).
+6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/error-codes.md) (`/docs/language/error-codes`).
 7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two-slot on direct `CALL`/`RETURN` ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`.
 8. **`raise` is not abort** — `raise` returns `Result::Err` and can be swallowed. Default `coil` / `coil run` / `coil-embed` exit 1 only on `panic`. Checksum boards must `panic`.
 
@@ -156,6 +156,6 @@ For hangs, wrong values, panics, breakpoints: use the **coil-debug** skill (`coi
 ## Additional resources
 
 - Syntax cheat sheet + patterns: [reference.md](reference.md)
-- API lookup: [references](https://github.com/ardax-corp/coil-website/tree/main/src/content/docs/references) (`/docs/references`)
+- API lookup: [API reference](https://github.com/ardax-corp/coil-website/tree/main/src/content/reference) (`/docs/reference`); language pages: [language](https://github.com/ardax-corp/coil-website/tree/main/src/content/docs/language) (`/docs/language/…`)
 - Userland stdlib: [coil-stdlib docs](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/README.md)
 - Internals (contributors): **coil-contributor** skill

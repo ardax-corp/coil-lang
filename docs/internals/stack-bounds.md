@@ -105,7 +105,7 @@ fn walk(int n) -> int {
 Optional. `N` presizes the stack for `N` simultaneous frames of that function
 when the analysis cannot prove a depth; a wrong `N` only costs a regrow. Valid
 only on `fn`, and `N` must be a positive integer (see
-[Syntax — Attributes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/syntax.md#attributes)).
+[Syntax — Attributes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/syntax.md#attributes)).
 `E0802` / `E0803` (unbounded recursion, stack need past the VM limit) are no
 longer emitted.
 

@@ -88,10 +88,10 @@ Full-suite commands (what CI runs) are listed in AGENTS.md "Commands".
 
 1. Draft plan for large language changes (do not edit attached plan files during impl).
 2. Parser + AST if syntax changes.
-3. Typechecker — new types/constraints/diagnostics (`E####` in coil-website `src/content/docs/references/error-codes.md`).
+3. Typechecker — new types/constraints/diagnostics (`E####` in coil-website `src/content/docs/language/error-codes.md`).
 4. Codegen — HIR lowering to MIR (`mir/from_hir.rs`); new optimizations go in HIR or MIR passes, never on the stack IL.
 5. VM only if new opcode (rare) or runtime behavior.
-6. coil-website `src/content/docs/` (manual/references; routes `/docs/…`) + example in `examples/` or `tests/`.
+6. coil-website `src/content/docs/` (manual/language; generated API pages in `src/content/reference/`; routes `/docs/…`) + example in `examples/` or `tests/`.
 7. Bump archive **minor** for additive bytecode; bump **major** if bytecode/tag/opcode incompatible.
 8. Granular conventional commits; stage only related files.
 

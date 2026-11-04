@@ -35,8 +35,8 @@ fn abs_search_root(project_root: &Path, root: &Path) -> PathBuf {
 ///    `sadge` lives inside that module file)
 ///
 /// If both exist, Convention A wins silently (documented in
-/// coil-website `src/content/docs/references/modules.md`
-/// (`/docs/references/modules`) under Path resolution /
+/// coil-website `src/content/docs/language/modules.md`
+/// (`/docs/language/modules`) under Path resolution /
 /// Shadowing). Brace/glob imports against a module file are
 /// unaffected when only Convention B is present.
 ///

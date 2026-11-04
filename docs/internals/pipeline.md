@@ -130,7 +130,7 @@ Incrementality (fingerprint-based reuse of a compile) is a later design, not cur
 
 ## Multi-file programs
 
-The pipeline discovers dependencies via `use` / `mod` under the `--root` search roots, compiles each file with a namespace prefix into one shared IL buffer, and **lowers once** after linking. The **entry file** uses the empty namespace. See [Modules](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/modules.md) and [Project config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md).
+The pipeline discovers dependencies via `use` / `mod` under the `--root` search roots, compiles each file with a namespace prefix into one shared IL buffer, and **lowers once** after linking. The **entry file** uses the empty namespace. See [Modules](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/modules.md) and [Project config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/project-config.md).
 
 ## Opcode discipline
 
