@@ -670,6 +670,60 @@ impl HostStateGuard {
         Self { prev }
     }
 
+    /// Bind the native driver `d`: host natives on this thread spawn,
+    /// steal and call back through it.
+    pub(crate) fn enter_driver(d: &mut crate::driver::Driver<'_>) -> Self {
+        let prev = HOST_STATE.with(|c| c.borrow_mut().take());
+        let io_reactor = Some(Arc::clone(&d.rt.io_reactor));
+        let cpu_reactor = Some(Arc::clone(&d.rt.reactor));
+        HOST_STATE.with(|c| {
+            *c.borrow_mut() = Some(MachineHostState {
+                raw: std::ptr::from_mut(d).cast(),
+                call_function: Self::driver_call,
+                begin_shared_steal: Self::driver_begin_steal,
+                end_shared_steal: Self::driver_end_steal,
+                debugger_attached: false,
+                spawn_context: Self::driver_spawn_context,
+                static_words: Self::driver_static_words,
+                dload_gate: Self::driver_dload_gate,
+                io_reactor,
+                cpu_reactor,
+            });
+        });
+        Self { prev }
+    }
+
+    /// # Safety
+    /// `raw` is the driver [`Self::enter_driver`] bound, still alive.
+    unsafe fn driver<'a>(raw: *mut ()) -> &'a mut crate::driver::Driver<'static> {
+        unsafe { &mut *raw.cast::<crate::driver::Driver<'static>>() }
+    }
+
+    unsafe fn driver_call(raw: *mut (), offset: u32, args: &[Value]) -> Value {
+        let d = unsafe { Self::driver(raw) };
+        d.call(offset as usize, args).map_or_else(Value::default, |(lo, _)| Value::from(lo))
+    }
+
+    unsafe fn driver_spawn_context(raw: *mut ()) -> Option<ThreadSpawnContext> {
+        unsafe { Self::driver(raw) }.thread_spawn_context()
+    }
+
+    unsafe fn driver_static_words(raw: *mut ()) -> Arc<Vec<u64>> {
+        unsafe { Self::driver(raw) }.rt.static_words()
+    }
+
+    unsafe fn driver_dload_gate(raw: *mut ()) -> *const crate::ffi::DloadGate {
+        &raw const unsafe { Self::driver(raw) }.rt.ffi.dload_gate
+    }
+
+    unsafe fn driver_begin_steal(raw: *mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
+        crate::collect::begin_shared_steal(unsafe { Self::driver(raw) })
+    }
+
+    unsafe fn driver_end_steal(raw: *mut (), published: Value) {
+        crate::collect::end_shared_steal(unsafe { Self::driver(raw) }, published);
+    }
+
     unsafe fn call<const N: usize>(raw: *mut (), offset: u32, args: &[Value]) -> Value {
         unsafe { (*(raw.cast::<Machine<N>>())).call_function(offset, args) }
     }

@@ -2064,9 +2064,13 @@ impl<const S: usize> Machine<S> {
             native,
             debug: self.program_debug.clone(),
             base_dir: self.rt.ffi.base_dir.clone(),
+            thread_program: self.thread_program.clone(),
+            shared_print: self.shared_print.clone(),
         };
         let mut driver = crate::driver::Driver::new(&mut self.rt, program);
+        let guard = crate::thread::HostStateGuard::enter_driver(&mut driver);
         let out = f(&mut driver);
+        drop(guard);
         self.panicked |= driver.panicked();
         Some(out)
     }

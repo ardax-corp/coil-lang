@@ -79,6 +79,10 @@ pub(crate) struct DriverProgram {
     pub(crate) native: Arc<NativeCode>,
     pub(crate) debug: ProgramDebug,
     pub(crate) base_dir: Option<std::path::PathBuf>,
+    /// What a thread it spawns runs (`None`: it spawns none).
+    pub(crate) thread_program: Option<Arc<crate::thread::ThreadProgram>>,
+    /// Where spawned threads print (the test harness's capture).
+    pub(crate) shared_print: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 /// Runs a program's native code with no interpreter.
@@ -151,6 +155,11 @@ impl<'a> Driver<'a> {
 
     pub(crate) fn panicked(&self) -> bool {
         self.panicked
+    }
+
+    /// What a thread the program spawns runs with.
+    pub(crate) fn thread_spawn_context(&self) -> Option<crate::thread::ThreadSpawnContext> {
+        self.rt.thread_spawn_context(self.program.thread_program.clone()?, self.program.shared_print.clone())
     }
 
     /// Whether the driver can run the program that starts at `ip`: its
@@ -1181,8 +1190,9 @@ impl GcHost for Driver<'_> {
 
     fn set_slot(&mut self, _idx: usize, _v: Value) {}
 
+    /// Not while auto-par workers run on the heap.
     fn can_move(&self) -> bool {
-        true
+        self.rt.shared_epoch.is_none()
     }
 
     fn run_pending(&mut self, val: Value, pc: Option<u32>) {
