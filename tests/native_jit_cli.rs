@@ -67,14 +67,14 @@ fn pure_recursion_runs_natively() {
 }
 
 #[test]
-fn int_traps_bail_to_the_vm_panic() {
+fn int_traps_panic_as_the_vm_does() {
     let src = format!(
         "{HEADER}#[inline(never)]\nfn grow(int x, int n) -> int {{ let i = 0; while i < n {{ x = x * 3; i = i + 1; }} return x; }}\n\
          #[inline(never)]\nfn q(int a, int b) -> int {{ return a / b + a % b; }}\n\
          fn main() {{\n  let _ = println(format(\"%i %i\", grow(1, 10), q(-7, 2)));\n  let _ = println(format(\"%i\", q(7, 0)));\n}}\n"
     );
     let stats = same_as_vm("traps", &src);
-    assert!(stats.contains("bailed"), "stats: {stats}");
+    assert!(stats.contains("0 bailed"), "stats: {stats}");
     let src = format!(
         "{HEADER}#[inline(never)]\nfn grow(int x, int n) -> int {{ let i = 0; while i < n {{ x = x * 3; i = i + 1; }} return x; }}\n\
          fn main() {{ let _ = println(format(\"%i\", grow(1, 50))); }}\n"
@@ -93,13 +93,31 @@ fn int_traps_bail_to_the_vm_panic() {
 }
 
 #[test]
-fn deep_recursion_falls_back_once() {
+fn deep_recursion_runs_natively() {
+    // Native frames live on the machine stack: it holds recursion as deep
+    // as the VM's frame limit allows, with nothing handed back to the VM.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn down(int n) -> int {{ if n == 0 {{ return 0; }} return 1 + down(n - 1); }}\n\
-         fn main() {{ let _ = println(format(\"%i\", down(100000))); }}\n"
+         fn main() {{ let _ = println(format(\"%i\", down(900000))); }}\n"
     );
     let stats = same_as_vm("deep", &src);
-    assert!(stats.contains("1 bailed"), "one bail, then the VM keeps the recursion: {stats}");
+    assert!(stats.contains("0 bailed"), "stats: {stats}");
+}
+
+#[test]
+fn unbounded_recursion_overflows_at_the_vm_location() {
+    // The VM's frame limit and the native stack end at different depths,
+    // so only the repeat count differs: message, location and frames match.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn f(int n) -> int {{ return 1 + f(n + 1); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", f(0))); }}\n"
+    );
+    let vm = run("overflow_loc", &src, false);
+    let jit = run("overflow_loc", &src, true);
+    let head = |o: &Output| program_stderr(o).lines().take(2).map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(head(&vm), head(&jit));
+    assert!(head(&jit)[0].starts_with("panic: stack overflow"), "{:?}", head(&jit));
+    assert_eq!(vm.status.code(), jit.status.code());
 }
 
 #[test]
@@ -135,7 +153,7 @@ fn heap_reads_run_natively() {
 }
 
 #[test]
-fn heap_stores_are_undone_when_the_call_bails() {
+fn heap_stores_stay_when_native_code_panics() {
     // `fill` writes a[0..n] and then indexes past the end: it panics
     // natively, with the stores made, as the VM's run does.
     let src = format!(
@@ -155,14 +173,13 @@ fn heap_stores_are_undone_when_the_call_bails() {
          fn main() {{ let a: Vec<int> = [0, 0, 0]; let _ = println(format(\"%i\", fill(a, 3))); }}\n"
     );
     same_as_vm("stores_oob", &src);
-    // A recursion past the native stack budget bails with no panic: without
-    // the undo the counts would include the native run's increments too.
+    // Deep recursion that writes as it goes runs natively to the end.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn rec(Vec<int> a, int d) -> int {{ if d == 0 {{ return 0; }} a[d % 4] = a[d % 4] + 1; return 1 + rec(a, d - 1); }}\n\
          fn main() {{ let a: Vec<int> = [0, 0, 0, 0]; let n = rec(a, 50000); let _ = println(format(\"%i %i %i %i %i\", n, a[0], a[1], a[2], a[3])); }}\n"
     );
     let stats = same_as_vm("stores_deep", &src);
-    assert!(stats.contains("1 bailed"), "stats: {stats}");
+    assert!(stats.contains("0 bailed"), "stats: {stats}");
 }
 
 #[test]
@@ -184,7 +201,7 @@ fn copy_on_write_keeps_value_semantics_natively() {
 #[test]
 fn allocation_runs_natively_and_matches_the_vm() {
     // Objects, tuples, enums and arrays made in native code, pushes, and a
-    // push that a bail takes back before the VM's re-run panics (each push
+    // panic after pushes that stay made, as in the VM's run (each push
     // reads the length, so the loop stays one push at a time).
     let src = format!(
         "{HEADER}class Pt {{ pub x: int, pub y: int }}\n\
@@ -315,8 +332,8 @@ fn question_mark_err_of_a_string_result_matches_the_vm() {
 
 #[test]
 fn statics_are_read_and_written_natively() {
-    // `tick` bumps a static, then divides by its argument: with 0 the bail
-    // must take the bump back before the VM's re-run panics.
+    // `tick` bumps a static, then divides by its argument: with 0 it
+    // panics natively with the bump made, as the VM's run does.
     let src = format!(
         "{HEADER}static let COUNT: int = 0;\nstatic let NAME: string = \"n\";\n\
          #[inline(never)]\nfn tick(int by) -> int {{ COUNT = COUNT + 1; return COUNT * 10 / by; }}\n\
@@ -492,9 +509,9 @@ fn closures_run_from_native_code_as_on_the_vm() {
 }
 
 #[test]
-fn a_bailed_call_leaves_no_drop_owed() {
-    // `make` allocates a `drop` object natively, then bails (an early free
-    // of a finalizer object): the VM's re-run makes the one that drops.
+fn an_early_freed_drop_object_drops_once() {
+    // `make` allocates a `drop` object natively that dies at its end (an
+    // early free of a finalizer object): it drops exactly once.
     let src = "use gc::collect;\nuse io::sync::println;\nuse string::format;\nstatic let drops: int = 0;\n\
                class Handle { pub fd: int }\nimpl Handle { fn drop() { drops = drops + 1; } }\n\
                #[inline(never)]\nfn make() { let h = new Handle(1); }\n\
