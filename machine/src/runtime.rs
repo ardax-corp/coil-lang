@@ -43,14 +43,55 @@ pub(crate) struct Runtime {
     pub(crate) finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>,
     /// Drop entry PCs (for explicit `obj.drop()` once-bit intercept).
     pub(crate) finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>,
+    /// Where `print` writes instead of the process's stdout.
+    pub(crate) output: Option<crate::vm::OutputSink>,
+    /// What of `shared_print` is stdout: panic messages and stderr writes
+    /// stay out of it (a `coil-test` case's `// @output`, #1828).
+    pub(crate) shared_stdout: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// What of `shared_print` is stderr: stderr writes and panic messages.
+    pub(crate) shared_stderr: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl Runtime {
+    /// What `print` does: into an `io::capture_begin()` capture, else the
+    /// output sink (and the stdout capture), else stdout.
+    pub(crate) fn print(&mut self, s: &str) {
+        use std::io::Write;
+        if crate::io::capture_write(false, s.as_bytes()) {
+            // `io::capture_begin()` keeps it.
+        } else if let Some(out) = self.output.as_mut() {
+            let _ = out.write_all(s.as_bytes());
+            let _ = out.flush();
+            self.mirror_stdout(s);
+        } else {
+            print!("{s}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    /// Copy `text` into the stdout capture, when there is one.
+    pub(crate) fn mirror_stdout(&self, text: &str) {
+        if let Some(buf) = &self.shared_stdout
+            && let Ok(mut g) = buf.lock()
+        {
+            g.extend_from_slice(text.as_bytes());
+        }
+    }
+
+    /// Copy `text` into the stderr capture, when there is one.
+    pub(crate) fn mirror_stderr(&self, text: &str) {
+        if let Some(buf) = &self.shared_stderr
+            && let Ok(mut g) = buf.lock()
+        {
+            g.extend_from_slice(text.as_bytes());
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with(sched: Option<Box<crate::task::Scheduler>>, reactor: std::sync::Arc<crate::reactor::Reactor>, io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>, live_threads: crate::thread::LiveThreadRegistry, worker_cap: std::sync::Arc<crate::thread::WorkerCap>, statics: Vec<Value>, program_strings: Arc<Vec<String>>, program_string_cache: Vec<Value>, native_roots: Vec<(*mut crate::native::NativeCtx, usize)>, ffi_arg_roots: Vec<Value>, finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>, finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>) -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs }
+        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs, output: None, shared_stdout: None, shared_stderr: None }
     }
 }
 

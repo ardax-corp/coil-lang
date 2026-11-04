@@ -288,7 +288,7 @@ mod dispatch;
 
 // type External = fn(&[Value]) -> Value;
 
-type OutputSink = Box<dyn IoWrite + Send>;
+pub(crate) type OutputSink = Box<dyn IoWrite + Send>;
 
 /// Saved resumer context while a coroutine runs on the shared stack.
 #[derive(Clone, Copy)]
@@ -1558,7 +1558,6 @@ pub struct Machine<const S: usize> {
     /// Last dense-index array identity (predicted hit in counted loops).
     dense_obj_addr: u64,
     dense_obj: Option<Object>,
-    output: Option<OutputSink>,
     /// A dense streak's `DenseHostCall` allocated: run the safepoint.
     streak_host_alloc: bool,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
@@ -1681,11 +1680,6 @@ pub struct Machine<const S: usize> {
     thread_program: Option<std::sync::Arc<crate::thread::ThreadProgram>>,
     /// Optional shared stdout capture for worker threads.
     shared_print: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
-    /// What of `shared_print` is stdout: panic messages and stderr writes
-    /// stay out of it (a `coil-test` case's `// @output`, #1828).
-    shared_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
-    /// What of `shared_print` is stderr: stderr writes and panic messages.
-    shared_stderr: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     /// S2b maps: live heap IL slots at alloc safepoints. Only archives from
     /// before precise maps covered every body carry them (the compiler no
     /// longer emits any); empty for everything compiled now.
@@ -1775,7 +1769,6 @@ impl<const S: usize> Machine<S> {
             dense_obj: None,
             rt: crate::runtime::Runtime::with(None, reactor, crate::io_reactor::IoReactor::new(), crate::thread::new_live_thread_registry(), worker_cap, Vec::new(), Arc::new(Vec::new()), Vec::new(), Vec::new(), Vec::new(), std::collections::HashMap::default(), std::collections::HashSet::default()),
             stack: Stack::with_capacity(cap),
-            output: None,
             streak_host_alloc: false,
             libraries: std::collections::HashMap::new(),
             userland_libraries: std::collections::HashMap::default(),
@@ -1832,8 +1825,6 @@ impl<const S: usize> Machine<S> {
             coverage: None,
             thread_program: None,
             shared_print: None,
-            shared_stdout: None,
-            shared_stderr: None,
             stack_maps: Vec::new(),
             precise_frames: Arc::default(),
             gc_top_ip: None,
@@ -2176,16 +2167,7 @@ impl<const S: usize> Machine<S> {
     unsafe fn native_print(raw: *mut c_void, s: &str) {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        if crate::io::capture_write(false, s.as_bytes()) {
-            // `io::capture_begin()` keeps it.
-        } else if let Some(out) = vm.output.as_mut() {
-            let _ = write!(out, "{s}");
-            let _ = out.flush();
-            vm.mirror_stdout(s);
-        } else {
-            print!("{s}");
-            let _ = io::stdout().flush();
-        }
+        vm.rt.print(s);
     }
 
     /// [`crate::native::NativeHost::call`]: run a body native code calls
@@ -3365,11 +3347,11 @@ impl<const S: usize> Machine<S> {
             .filter(|bt| !bt.is_empty())
             .map(|bt| format!("\n{bt}"))
             .unwrap_or_default();
-        if let Some(out) = self.output.as_mut() {
+        if let Some(out) = self.rt.output.as_mut() {
             let text = format!("panic: {}{}{}", s, loc_suffix, backtrace);
             let _ = write!(out, "{text}");
             let _ = out.flush();
-            self.mirror_stderr(&text);
+            self.rt.mirror_stderr(&text);
         } else {
             eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
             let _ = io::stderr().flush();
@@ -3405,7 +3387,7 @@ impl<const S: usize> Machine<S> {
                 .unwrap_or_default()
         };
         let backtrace = self.format_panic_backtrace(panic_insn_ip);
-        if let Some(out) = self.output.as_mut() {
+        if let Some(out) = self.rt.output.as_mut() {
             let mut text = format!("panic: {message}{loc_suffix}");
             if !backtrace.is_empty() {
                 text.push('\n');
@@ -3413,7 +3395,7 @@ impl<const S: usize> Machine<S> {
             }
             let _ = write!(out, "{text}");
             let _ = out.flush();
-            self.mirror_stderr(&text);
+            self.rt.mirror_stderr(&text);
         } else {
             eprintln!("panic: {message}{loc_suffix}");
             if !backtrace.is_empty() {
@@ -4737,7 +4719,7 @@ impl<const S: usize> Machine<S> {
     #[inline(never)]
     fn abort_after_finalizer_panic(&mut self) {
         if !crate::env::exit_trapped() {
-            if let Some(out) = self.output.as_mut() {
+            if let Some(out) = self.rt.output.as_mut() {
                 let _ = out.flush();
             }
             let _ = io::stdout().flush();
@@ -4993,9 +4975,9 @@ impl<const S: usize> Machine<S> {
 
     /// Redirect `PRINT` output (used by pipeline tests).
     pub fn with_output<W: IoWrite + Send + 'static>(&mut self, writer: W) -> Option<OutputSink> {
-        let prev = self.output.take();
-        self.output = Some(Box::new(writer));
-        if let Some(out) = self.output.as_mut() {
+        let prev = self.rt.output.take();
+        self.rt.output = Some(Box::new(writer));
+        if let Some(out) = self.rt.output.as_mut() {
             crate::io::set_output_redirect(Some(out.as_mut() as *mut (dyn IoWrite + Send)));
         }
         prev
@@ -5006,7 +4988,7 @@ impl<const S: usize> Machine<S> {
     /// want to scope the redirection).
     pub fn restore_output(&mut self) -> Option<OutputSink> {
         crate::io::set_output_redirect(None);
-        self.output.take()
+        self.rt.output.take()
     }
 
     /// Register a host native with an explicit signature via the
@@ -5074,32 +5056,14 @@ impl<const S: usize> Machine<S> {
     /// Also copy this VM's stdout (not its panic messages or stderr) into
     /// `buf`, next to the shared print buffer that takes both (#1828).
     pub fn set_shared_stdout(&mut self, buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>) {
-        self.shared_stdout = buf.clone();
+        self.rt.shared_stdout = buf.clone();
         crate::io::set_shared_stdout_redirect(buf);
     }
 
     /// Also copy this VM's stderr writes and panic messages into `buf`.
     pub fn set_shared_stderr(&mut self, buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>) {
-        self.shared_stderr = buf.clone();
+        self.rt.shared_stderr = buf.clone();
         crate::io::set_shared_stderr_redirect(buf);
-    }
-
-    /// Copy `text` into the stdout capture, when there is one.
-    pub(crate) fn mirror_stdout(&self, text: &str) {
-        if let Some(buf) = &self.shared_stdout
-            && let Ok(mut g) = buf.lock()
-        {
-            g.extend_from_slice(text.as_bytes());
-        }
-    }
-
-    /// Copy `text` into the stderr capture, when there is one.
-    pub(crate) fn mirror_stderr(&self, text: &str) {
-        if let Some(buf) = &self.shared_stderr
-            && let Ok(mut g) = buf.lock()
-        {
-            g.extend_from_slice(text.as_bytes());
-        }
     }
 
     /// Replace the undetached-spawn registry (used by workers to share the
@@ -5171,8 +5135,8 @@ impl<const S: usize> Machine<S> {
             program,
             natives: self.rt.natives.clone_registry(),
             shared_print: self.shared_print.clone(),
-            shared_stdout: self.shared_stdout.clone(),
-            shared_stderr: self.shared_stderr.clone(),
+            shared_stdout: self.rt.shared_stdout.clone(),
+            shared_stderr: self.rt.shared_stderr.clone(),
             live_threads: std::sync::Arc::clone(&self.rt.live_threads),
             worker_cap: std::sync::Arc::clone(&self.rt.worker_cap),
             reactor: std::sync::Arc::clone(&self.rt.reactor),
