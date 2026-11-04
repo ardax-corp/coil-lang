@@ -21,15 +21,32 @@ The stats end with the run's dependence on the VM:
 not compile, re-runs after a bail); `M` counts bytecode executions started
 under a native frame (`VM_ENTRIES`, counted in `run_execute` while
 `native_roots` is non-empty). Every program in `examples/` and
-`examples/perf` reports `0` and `0`: once `main` is native, no bytecode
-runs after module setup.
+`examples/perf` reports `0` and `0`: module setup and `main` are native,
+and no bytecode runs but the prologue's few ops.
 
 The prologue reaches `main` by a `JMP` (after a `CALL` with no target, or
-at the end of module setup: statics, `extern` blocks), never by a `CALL`.
-With native code installed, `Machine::ensure_host_stubs` points that jump
-at an appended `CALL main; RETURN` (`main_entry_jmp`), so `main` enters
-natively like any call; the run executes the loaded image. Module setup
-itself stays bytecode.
+at the end of the setup region), never by a `CALL`. With native code
+installed, `Machine::ensure_host_stubs` points that jump at an appended
+`CALL main; RETURN` (`main_entry_jmp`), so `main` enters natively like any
+call; the run executes the loaded image.
+
+### Module setup
+
+Module setup is a function, `__module_setup`
+(`compiler/src/codegen/module_setup.rs`): the stores of the statics
+computed at run time, each `extern` library's load and declarations
+(`FfiLoad` / `DeclareFFI`, a failure panicking with the error's message)
+and the finalizer registry (`gc_register_finalizer` per class with a
+`drop`). Codegen records the steps (`SetupStep`) as it emits them and
+builds the function's MIR from them, so the register tiers emit it and
+native code compiles it like any body. The setup region the prologue
+jumps to is `CALL __module_setup; POP; JMP main`, after the calls of the
+initializers computed while compiling (`const`s and pure `static let`s):
+those stay in the region because `Pipeline::compute_consts` replaces
+their `CALL init; StoreStatic` pairs with one `RestoreSnapshot`; one that
+cannot be computed keeps its call, which reaches the initializer's native
+entry. Native code registers a finalizer through the machine
+(`HostOp::RegisterFinalizer` in `Machine::native_invoke`).
 
 An archive or package with native code keeps byte spans at `-g1`
 (`native_debug_level`): native code finds a panic's location by span.
@@ -479,7 +496,32 @@ counters (`NativeTable`).
    every body the object does not hold.
 
 If the object or the link fails (no `cc`, no `libcoil_rt.a`, Windows) the
-package warns and falls back to the runner. `tests/package_cli.rs`
+package warns and falls back to the runner.
+
+### Static `extern` libraries
+
+`coil package --link-static [STEM=]PATH` (repeatable) links a static
+archive for the `extern` block that names `STEM` (from the file name
+when omitted: `libsum.a` is `sum`); `--link-arg ARG` passes linker
+arguments after the libraries. Both need the AOT executable (an error
+with `--no-aot` / `--runner`, or when linking fails). Preparing the
+archive is the build tool's job (spool); the compiler takes paths only.
+
+- The compiler lists each `extern` function as `(library, symbol)`
+  (`Pipeline::extern_symbols`); `link_aot_executable` keeps those whose
+  library stem is linked and hands them to `coil_native::aot`.
+- The object imports each symbol and defines `coil_static_syms` (one
+  `machine::StaticSymbol` per function: stem, symbol, address) and
+  `coil_static_sym_count`; `cc` links `program.o`, the archives,
+  `libcoil_rt.a`, then the link arguments.
+- `coil-rt`'s `main` installs the table (`machine::install_static_symbols`).
+  `resolve_library` answers a linked stem with the executable itself,
+  before the dload gate (no file to open, pin or grant at run time;
+  compiling the `extern` block took `--allow-dload`), and `FfiLoad` marks
+  the library object (`ObjLibrary::static_symbols`), so `DeclareFFI`
+  takes each function's address from the table. Calls go through libffi
+  as for a shared library.
+- The native lock and `--check-native` skip linked stems. `tests/package_cli.rs`
 (`aot_package_matches_the_vm_runner`) checks output and exit status equal
 the runner package.
 
@@ -494,4 +536,6 @@ the runner package.
 | Archive section | `coil-native/src/section.rs`, `ArchivedProgram::native_mir` |
 | AOT object | `coil_native::aot` (`coil-native/src/lib.rs`), `src/package_app.rs` `link_aot_executable` |
 | AOT runtime | `coil-rt/` (staticlib with `main`), `machine::native::install_aot` |
-| Tests | `tests/native_jit_cli.rs` (JIT output equals VM output), `tests/package_cli.rs` (AOT package equals runner) |
+| Module setup | `compiler/src/codegen/module_setup.rs` (`__module_setup`) |
+| Static `extern` libraries | `--link-static` in `src/cli.rs`, `src/package_app.rs` (`LinkInputs`), `coil-native` `static_symbol_table`, `machine/src/ffi/static_libs.rs` |
+| Tests | `tests/native_jit_cli.rs` (JIT output equals VM output), `tests/package_cli.rs` (AOT package equals runner; `aot_package_links_extern_libraries_statically`) |
