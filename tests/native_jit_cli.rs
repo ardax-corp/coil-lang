@@ -902,3 +902,25 @@ fn ffi_calls_run_from_native_code() {
     let stats = String::from_utf8_lossy(&jit.stderr);
     assert!(compiled(&stats, "total"), "stats: {stats}");
 }
+
+#[test]
+fn yield_from_runs_in_native_generator_bodies() {
+    // `outer`, `relay` and `talk` delegate natively: values, sends passed
+    // through, a delegate that runs on the VM (`slow` has a `defer`), and
+    // nesting.
+    let src = format!(
+        "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i; i = i + 1; }} return 99; }}\n\
+         gen fn echo() {{ let x = yield 1; let y = yield x + 1; return x + y; }}\n\
+         gen fn talk() {{ yield from echo(); return 0; }}\n\
+         gen fn slow() {{ defer {{ let _ = println(\"slow done\"); }} yield 50; yield 51; return 0; }}\n\
+         gen fn outer() {{ yield 7; yield from count(3); yield from slow(); yield 8; return 0; }}\n\
+         gen fn relay() {{ yield from outer(); return 0; }}\n\
+         #[inline(never)]\nfn walk() -> int {{ let g = relay(); let t = 0; while !done(g) {{ t = t * 3 + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn chat() -> int {{ let g = talk(); let a = resume g; let b = resume g with 10; let c = resume g with 2; return a * 10000 + b * 100 + c; }}\n\
+         fn main() {{ let _ = println(format(\"%i %i\", walk(), chat())); }}\n"
+    );
+    let stats = same_as_vm("native_yield_from", &src);
+    for f in ["outer", "relay", "talk"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+}
