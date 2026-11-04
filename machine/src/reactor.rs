@@ -252,6 +252,12 @@ impl Reactor {
 
     /// Wake idle workers and joiners. Holds `sleep` so a waiter cannot miss the
     /// signal between a failed steal and `wait` (idle and join park with no timeout).
+    /// A job stored its result: one fewer in flight, and waiters wake.
+    pub(crate) fn job_done(&self) {
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
+        self.notify();
+    }
+
     fn notify(&self) {
         let _g = self.sleep.lock().unwrap_or_else(|e| e.into_inner());
         self.sleep_cvar.notify_all();
@@ -744,7 +750,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     // `set_thread_program` installs the job's static word kinds on this
     // thread; a VM waiting here in a join reads its own statics by the ones
     // it had (#2053).
-    let outer_static_kinds = crate::vm::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
+    let outer_static_kinds = crate::collect::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
     let mut panic_message = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.install_natives(&natives);
@@ -811,7 +817,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         }
     }));
     crate::env::restore_exit_request(outer_exit);
-    crate::vm::swap_static_word_kinds(outer_static_kinds);
+    crate::collect::swap_static_word_kinds(outer_static_kinds);
     crate::io::flush_open_captures();
     if redirected {
         crate::io::set_output_redirect(prev_output);
@@ -831,8 +837,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         vm.heap_mut().flush_epoch_batch();
     }
     state.store_result_with_panic(stored, panic_message);
-    reactor.inflight.fetch_sub(1, Ordering::SeqCst);
-    reactor.notify();
+    reactor.job_done();
     if shared {
         vm.clear_statics();
         vm.unbind_shared_heap();
@@ -1031,24 +1036,35 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
 /// covers the case (`None`: the VM runs it).
 fn run_test_job_natively(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> Option<PortableValue> {
     let start = test.init_ip.unwrap_or(entry) as usize;
-    let ret = vm.with_native_driver(start, |d| {
-        if let Some(ip) = test.init_ip {
-            d.run_from(ip as usize);
-        }
-        if d.panicked() {
-            return None;
-        }
-        let ret = d.call(entry as usize, &[]);
-        if !test.expect_ok_result {
-            d.run_remaining_finalizers();
-        }
-        ret.map(|(lo, _)| common::Value::from(lo))
-    })?;
+    let ret = vm.with_native_driver(start, |d| test_on_driver(d, entry, test))?;
+    Some(finish_test(vm.panicked(), ret, vm.heap(), test))
+}
+
+/// A harness case on the driver: its static init, then the case, then
+/// (for a file's `main`) the finalizers left. The case's return, `None`
+/// when it panicked.
+pub(crate) fn test_on_driver(d: &mut crate::driver::Driver<'_>, entry: u32, test: &TestJob) -> Option<common::Value> {
+    if let Some(ip) = test.init_ip {
+        d.run_from(ip as usize);
+    }
+    if d.panicked() {
+        return None;
+    }
+    let ret = d.call(entry as usize, &[]);
+    if !test.expect_ok_result {
+        d.run_remaining_finalizers();
+    }
+    ret.map(|(lo, _)| common::Value::from(lo))
+}
+
+/// Store a finished case's report: whether it passed, by `ret` (its
+/// return) and whether it `panicked`.
+pub(crate) fn finish_test(panicked: bool, ret: Option<common::Value>, heap: &crate::memory::Heap, test: &TestJob) -> PortableValue {
     let (mut passed, reason) = match ret {
-        _ if vm.panicked() => (false, None),
+        _ if panicked => (false, None),
         Some(_) if !test.expect_ok_result => (true, None),
-        Some(v) if vm.result_is_ok(v) => (true, None),
-        Some(v) => (false, vm.result_err_text(v)),
+        Some(v) if crate::format::result_is_ok(heap, v) => (true, None),
+        Some(v) => (false, crate::format::result_err_text(heap, v)),
         None => (false, None),
     };
     if let Some(code) = crate::env::take_exit_request() {
@@ -1056,7 +1072,7 @@ fn run_test_job_natively(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test:
     }
     let report = TestReport { passed, reason, hits: None, steps: 0, timed_out: false };
     *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
-    Some(PortableValue::Immediate(u64::from(passed)))
+    PortableValue::Immediate(u64::from(passed))
 }
 
 /// Build a [`Job`] from spawn context + decoded args.
@@ -1243,7 +1259,7 @@ mod tests {
     fn job_run_here_keeps_this_threads_static_kinds() {
         let reactor = Reactor::new(1);
         let mine = Arc::new(vec![common::WORD_SCALAR, common::WORD_POINTER]);
-        let outer = crate::vm::swap_static_word_kinds(Arc::clone(&mine));
+        let outer = crate::collect::swap_static_word_kinds(Arc::clone(&mine));
         let other = Arc::new(ThreadProgram {
             static_slot_count: 1,
             static_word_kinds: Arc::new(vec![common::WORD_POINTER]),
@@ -1257,7 +1273,7 @@ mod tests {
             step_budget: None,
         };
         assert!(reactor.run_test_here(program_ctx(&reactor, other), case, Arc::default()).passed);
-        let after = crate::vm::swap_static_word_kinds(outer);
+        let after = crate::collect::swap_static_word_kinds(outer);
         assert_eq!(*after, *mine);
         reactor.shutdown();
     }

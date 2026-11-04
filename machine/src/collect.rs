@@ -25,6 +25,14 @@ thread_local! {
     static COMPACT_ENABLED: bool = !cfg!(test) || std::env::var_os("COIL_GC_COMPACT").is_none_or(|v| v != "0");
 }
 
+/// Install `kinds` as the static word kinds of the program this thread
+/// runs (what a GC root walk reads static slots by) and return the ones
+/// it replaces. A VM that runs on a thread already serving another program
+/// (the compile-time VM) installs its own and puts the old ones back.
+pub fn swap_static_word_kinds(kinds: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
+    STATIC_KINDS.with_borrow_mut(|k| std::mem::replace(k, kinds))
+}
+
 /// Collections between evacuation attempts outside stress mode, and the
 /// ceiling unproductive attempts back off to.
 const COMPACT_WINDOW: u32 = 8;

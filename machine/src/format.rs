@@ -2,8 +2,9 @@
 
 use std::fmt::Write as _;
 
-use common::Value;
+use common::{Value, ValueTag};
 
+use crate::memory::{Heap, Member, Object};
 use crate::{GcData, ObjString};
 
 /// The text of a `FORMAT` specifier string (after any leading `%s` the
@@ -86,4 +87,71 @@ pub(crate) fn render_format(format_rest: &str, mut next: impl FnMut() -> Value) 
         }
     }
     message
+}
+
+/// A value as `STRINGIFY` shows it, when its static type is not known: a
+/// boxed immediate or string by its tag, a string's text, else the word.
+pub(crate) fn stringify_value(heap: &Heap, v: Value) -> String {
+    let addr = v.bits();
+    if v.is_zero() {
+        // `Value::default()` / unit / false-ish null pointer.
+        return "0".into();
+    }
+    match heap.find_object_by_addr(addr) {
+        Some(Object::Boxed(gc)) => {
+            let b = gc.as_ref();
+            match ValueTag::from_u16(b.tag) {
+                Some(ValueTag::Int) => match &b.payload {
+                    Member::Value(iv) => iv.as_int().to_string(),
+                    _ => "?".into(),
+                },
+                Some(ValueTag::Float) => match &b.payload {
+                    Member::Value(iv) => format!("{:?}", iv.as_float()),
+                    _ => "?".into(),
+                },
+                Some(ValueTag::Bool) => match &b.payload {
+                    Member::Value(iv) => {
+                        if iv.as_int() != 0 {
+                            "true".into()
+                        } else {
+                            "false".into()
+                        }
+                    }
+                    _ => "?".into(),
+                },
+                Some(ValueTag::String) => match &b.payload {
+                    Member::Object(o) => string_at(heap, o.addr()),
+                    Member::Value(iv) => string_at(heap, iv.bits()),
+                },
+                Some(ValueTag::Unit) => "()".into(),
+                _ => "?".into(),
+            }
+        }
+        Some(Object::String(gc)) => gc.as_ref().data.to_string(),
+        Some(_) | None => v.as_int().to_string(),
+    }
+}
+
+/// The string object at `addr`'s text (empty when it is not one).
+fn string_at(heap: &Heap, addr: u64) -> String {
+    match heap.find_object_by_addr(addr) {
+        Some(Object::String(gc)) => gc.as_ref().data.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// A `Result::Err`'s payload as text (`None` for an `Ok` or a non-result).
+pub(crate) fn result_err_text(heap: &Heap, value: Value) -> Option<String> {
+    match heap.find_object_by_addr(value.bits()) {
+        Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
+            let payload = gc.as_ref().payload.first().copied()?;
+            Some(stringify_value(heap, payload))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `value` is a `Result::Ok`.
+pub(crate) fn result_is_ok(heap: &Heap, value: Value) -> bool {
+    matches!(heap.find_object_by_addr(value.bits()), Some(Object::Enum(gc)) if gc.as_ref().tag == 0)
 }

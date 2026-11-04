@@ -119,6 +119,41 @@ impl Runtime {
         }
     }
 
+    /// After an isolate job: what the job set up goes and the heap is
+    /// emptied, unmapped when it grew past one slab chunk so RSS cannot
+    /// climb with successive jobs.
+    pub(crate) fn reset_isolate(&mut self) {
+        self.statics.fill(Value::default());
+        self.program_string_cache.fill(Value::default());
+        self.sched = None;
+        self.ffi.userland_libraries.clear();
+        self.ffi.closures.clear();
+        // Drop PCs belong to the job's program: a reused worker may load a
+        // different one next, where the same `type_id` names another type.
+        self.finalizer_by_type.clear();
+        self.finalizer_pcs.clear();
+        self.closeables = false;
+        self.gc_in_progress = false;
+        self.gc_deferred = false;
+        if self.heap.is_borrowed() {
+            return;
+        }
+        self.heap.owned_mut().clear_finalizer_types();
+        if self.heap.owned_mut().slab_chunk_count() > 1 {
+            *self.heap.owned_mut() = crate::memory::Heap::default();
+        } else if self.heap.owned_mut().slab_chunk_count() == 1 {
+            self.heap.owned_mut().collect(&[]);
+            self.program_string_cache.fill(Value::default());
+        }
+    }
+
+    /// After a shared-heap job (the epoch's heap unbound).
+    pub(crate) fn reset_shared(&mut self) {
+        self.sched = None;
+        self.gc_in_progress = false;
+        self.gc_deferred = false;
+    }
+
     /// A runtime with nothing loaded: its own reactors, thread registry
     /// and worker cap.
     pub(crate) fn new() -> Self {

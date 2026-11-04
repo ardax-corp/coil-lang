@@ -55,6 +55,7 @@ pub type HostValueFn = fn(&mut memory::Heap, &[common::Value]) -> common::Value;
 #[cfg(any(test, feature = "debugger"))]
 pub use debug::{DebugController, DebugObject, DebugTask, DebugTaskFrames, StepMode, StopReason};
 pub use clock::CLOCK_WIRING;
+pub use collect::swap_static_word_kinds;
 pub use env::ENV_WIRING;
 pub use ffi::*;
 pub use fs::FS_WIRING;

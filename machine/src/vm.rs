@@ -1697,14 +1697,6 @@ pub struct Machine<const S: usize> {
 }
 
 
-/// Install `kinds` as the static word kinds of the program this thread
-/// runs (what a GC root walk reads static slots by) and return the ones
-/// it replaces. A VM that runs on a thread already serving another program
-/// (the compile-time VM) installs its own and puts the old ones back.
-pub fn swap_static_word_kinds(kinds: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
-    STATIC_KINDS.with_borrow_mut(|k| std::mem::replace(k, kinds))
-}
-
 impl<const S: usize> Default for Machine<S> {
     fn default() -> Self {
         Self::with_operand_capacity(crate::DEFAULT_OPERAND_STACK_SLOTS)
@@ -3545,46 +3537,7 @@ impl<const S: usize> Machine<S> {
     }
 
     pub(crate) fn stringify_value(heap: &Heap, v: Value) -> String {
-        let addr = v.bits();
-        if v.is_zero() {
-            // `Value::default()` / unit / false-ish null pointer.
-            return "0".into();
-        }
-        match Self::find_object_by_addr(heap, addr) {
-            Some(Object::Boxed(gc)) => {
-                let b = gc.as_ref();
-                match ValueTag::from_u16(b.tag) {
-                    Some(ValueTag::Int) => match &b.payload {
-                        Member::Value(iv) => iv.as_int().to_string(),
-                        _ => "?".into(),
-                    },
-                    Some(ValueTag::Float) => match &b.payload {
-                        Member::Value(iv) => format!("{:?}", iv.as_float()),
-                        _ => "?".into(),
-                    },
-                    Some(ValueTag::Bool) => match &b.payload {
-                        Member::Value(iv) => {
-                            if iv.as_int() != 0 {
-                                "true".into()
-                            } else {
-                                "false".into()
-                            }
-                        }
-                        _ => "?".into(),
-                    },
-                    Some(ValueTag::String) => match &b.payload {
-                        Member::Object(o) => {
-                            Self::object_string_value(heap, &Value::from(o.addr()))
-                        }
-                        Member::Value(iv) => Self::object_string_value(heap, iv),
-                    },
-                    Some(ValueTag::Unit) => "()".into(),
-                    _ => "?".into(),
-                }
-            }
-            Some(Object::String(gc)) => gc.as_ref().data.to_string(),
-            Some(_) | None => v.as_int().to_string(),
-        }
+        crate::format::stringify_value(heap, v)
     }
 
     /// Load a shared library; returns its heap address as a `Value`.
@@ -4959,8 +4912,6 @@ impl<const S: usize> Machine<S> {
         self.clear_dense_obj_cache();
         self.stack.seek(0);
         self.resume_stack.clear();
-        self.rt.statics.fill(Value::default());
-        self.rt.program_string_cache.fill(Value::default());
         self.nested_depth = 0;
         self.over_apply_frames = 0;
         self.return_bookkeeping = false;
@@ -4969,28 +4920,9 @@ impl<const S: usize> Machine<S> {
         self.pending_ffi = None;
         self.pending_io = None;
         self.panicked = false;
-        self.rt.sched = None;
         self.unwind = Unwind::default();
-        self.rt.ffi.userland_libraries.clear();
-        self.rt.ffi.closures.clear();
-        // Drop PCs belong to the job's program: a reused worker may load a
-        // different one next, where the same `type_id` names another type.
-        self.rt.finalizer_by_type.clear();
-        self.rt.finalizer_pcs.clear();
         self.finalizer_aborted = false;
-        self.rt.closeables = false;
-        self.rt.gc_in_progress = false;
-        self.rt.gc_deferred = false;
-        if self.rt.heap.is_borrowed() {
-            return;
-        }
-        self.rt.heap.owned_mut().clear_finalizer_types();
-        if self.rt.heap.owned_mut().slab_chunk_count() > 1 {
-            *self.rt.heap.owned_mut() = Heap::default();
-        } else if self.rt.heap.owned_mut().slab_chunk_count() == 1 {
-            self.rt.heap.owned_mut().collect(&[]);
-            self.rt.program_string_cache.fill(Value::default());
-        }
+        self.rt.reset_isolate();
     }
 
     /// Drop frames / pins after a C1/C2 shared-heap job. Does not unmap the
@@ -5017,10 +4949,8 @@ impl<const S: usize> Machine<S> {
         self.pending_ffi = None;
         self.pending_io = None;
         self.panicked = false;
-        self.rt.sched = None;
         self.unwind = Unwind::default();
-        self.rt.gc_in_progress = false;
-        self.rt.gc_deferred = false;
+        self.rt.reset_shared();
     }
 
     pub fn bind_shared_heap(
@@ -5103,20 +5033,11 @@ impl<const S: usize> Machine<S> {
     /// Text of a boxed `Result::Err(payload)` (a string payload as is, other
     /// payloads stringified), for harness failure reports.
     pub fn result_err_text(&self, value: Value) -> Option<String> {
-        match Self::find_object_by_addr(&self.rt.heap, value.bits()) {
-            Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
-                let payload = gc.as_ref().payload.first().copied()?;
-                Some(Self::stringify_value(&self.rt.heap, payload))
-            }
-            _ => None,
-        }
+        crate::format::result_err_text(&self.rt.heap, value)
     }
 
     pub fn result_is_ok(&self, value: Value) -> bool {
-        match Self::find_object_by_addr(&self.rt.heap, value.bits()) {
-            Some(Object::Enum(gc)) => gc.as_ref().tag == 0,
-            _ => false,
-        }
+        crate::format::result_is_ok(&self.rt.heap, value)
     }
 
     pub fn run(&mut self, code: &[Byte]) {
