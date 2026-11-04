@@ -325,9 +325,9 @@ primitive, and keeps a packed byte or float source packed, which the MIR
 array ops cannot ask for. Two more things stay calls: `remove` rotates the element to
 the end and calls `vec_pop`, the shrink primitive, which also packs the
 `Option` in the call's layout (a `None` is an `Alloc` of tag 0 when boxed,
-the zero word when niche); and `insert` out of range calls the twin
-`native_twins::vec_insert_oob` for the runtime's exact message, then
-panics in the caller's frame. A call whose operand or result types the
+the zero word when niche); and `insert` out of range calls `vec_insert`
+itself, so the panic is the host native's, as the VM prints it (the
+message alone, no Coil frames). A call whose operand or result types the
 expansion does not cover stays a `HostInvoke`.
 
 ### Function values and indirect calls
@@ -465,12 +465,11 @@ site (`native_caller_location`).
 Each captured body (`compiler/src/mir/native_capture.rs`) first runs the
 MIR passes the dense tier runs (`mir::specialize::optimize_mir`, at the
 compile's `-O` level): SCCP, the loop passes, SROA, and the loop rewrites
-`byte_scan` and `vec_loops`. Native code then gets the same vector ops as
-the VM. The rewrites that end in a runtime kernel call (`copy_until` and
-`bulk_push`: `vec_extend_range` / `vec_fill`) run for the VM only
-(`OptimizeOptions::host_loop_calls` off): native code compiles those loops
-as written, so the kernels need not be in the runtime. Two more
-exceptions: `promote_fields` does not run (its `PanicStore`s would need
+`byte_scan` and `vec_loops`, and the bulk copy and fill rewrites
+(`copy_until` and `bulk_push`). Native code then gets the same vector ops
+and the same runtime kernels (`vec_extend_range` / `vec_fill`) as the VM:
+an element-by-element copy loop in Cranelift was 3x slower on
+`bytes_copy`. Two exceptions: `promote_fields` does not run (its `PanicStore`s would need
 the native unwinder to write promoted fields back), and generators, bodies
 with a cleanup pad, debugger and coverage builds keep their MIR as lowered.
 
