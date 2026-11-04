@@ -42,7 +42,7 @@ User-facing docs live in [coil-website](https://github.com/ardax-corp/coil-websi
 | Audience | Start here |
 |----------|------------|
 | Users | [Getting started](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/getting-started.md) (`/docs/manual/getting-started`) |
-| Language reference | [References](https://github.com/ardax-corp/coil-website/tree/main/src/content/docs/references) (`/docs/references`) |
+| Language reference | [Language guide](https://github.com/ardax-corp/coil-website/tree/main/src/content/docs/language) (`/docs/language/…`) · [API reference](https://github.com/ardax-corp/coil-website/tree/main/src/content/reference) (`/docs/reference`) |
 | Contributors | [AGENTS.md](AGENTS.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [docs/internals/](docs/internals/README.md) |
 | Userland stdlib | [coil-stdlib docs](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/README.md) |
 | HTTP client/server | [coil-http](https://github.com/ardax-corp/coil-http) via [spool](https://github.com/ardax-corp/spool) |

@@ -3363,8 +3363,7 @@ fn hover_has_detail(hover: &Hover) -> bool {
         HoverContents::Markup(MarkupContent { value, .. }) => {
             value.contains("```")
                 || value.contains("\n\n---\n\n")
-                || value.contains("docs/references/")
-                || value.contains("src/content/docs/")
+                || value.contains("coil-website/blob/main/src/content/")
         }
         _ => false,
     }
@@ -5224,7 +5223,7 @@ fn fib(
             panic!("expected markup hover");
         };
         assert!(value.contains("standard output"));
-        assert!(value.contains("io.md"));
+        assert!(value.contains("reference/io/index.md"));
 
         let items = completions(
             &document,
@@ -5886,7 +5885,7 @@ fn main() { return f(1); }
             value.contains("HostInvoke") || value.contains("wall"),
             "clock hover was {value}"
         );
-        assert!(!value.contains("references/time.md"));
+        assert!(!value.contains("/docs/references/"));
     }
 
     #[test]
