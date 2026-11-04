@@ -236,10 +236,12 @@ fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, 
     let out = (|| {
         fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
         let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+        // Dead code goes: what nothing the program runs references (the
+        // interpreter, when the driver runs it all) is not linked in.
         let libs: &[&str] = if cfg!(target_os = "macos") {
-            &["-lSystem", "-lc", "-lm"]
+            &["-Wl,-dead_strip", "-lSystem", "-lc", "-lm"]
         } else {
-            &["-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
+            &["-Wl,--gc-sections", "-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
         };
         let run = std::process::Command::new(&cc)
             .arg(&obj)
