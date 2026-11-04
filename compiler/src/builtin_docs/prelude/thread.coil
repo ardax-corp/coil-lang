@@ -3,8 +3,9 @@
 // These are the lock primitives `thread::with_lock`, `with_read`,
 // `with_write`, `try_read` and `try_write` are written with (the embedded
 // `thread_locks` module). User code should not call them: a hold taken here
-// lasts until its release, so a missed release leaves the lock held. Use
-// the `thread` lock calls instead.
+// lasts until its release, so a missed release leaves the lock held, and a
+// release does not check its caller holds the lock. Use the `thread` lock
+// calls instead.
 
 /// Locks `m`, parking the running task while another holds it. Low-level: use `thread::with_lock`.
 ///
@@ -18,7 +19,7 @@
 /// ```
 fn lock_acquire<T>(Mutex<T> m) {}
 
-/// Unlocks `m`; a no-op when it is not locked. Low-level: use `thread::with_lock`.
+/// Unlocks `m`; a no-op when it is not locked. It does not check who holds `m`: called from a task without the hold, it frees another task's hold. Low-level: use `thread::with_lock`.
 ///
 /// # Examples
 ///
@@ -103,7 +104,7 @@ fn rw_try_read<T>(RwLock<T> lock) -> bool {}
 /// ```
 fn rw_try_write<T>(RwLock<T> lock) -> bool {}
 
-/// Ends a shared hold on `lock`. Low-level: use `thread::with_read`.
+/// Ends a shared hold on `lock`. It does not check who holds `lock`: called without a hold, it ends another task's. Low-level: use `thread::with_read`.
 ///
 /// # Examples
 ///
@@ -115,7 +116,7 @@ fn rw_try_write<T>(RwLock<T> lock) -> bool {}
 /// ```
 fn rw_release_read<T>(RwLock<T> lock) {}
 
-/// Ends the exclusive hold on `lock`. Low-level: use `thread::with_write`.
+/// Ends the exclusive hold on `lock`. It does not check who holds `lock`: called without the hold, it frees another task's. Low-level: use `thread::with_write`.
 ///
 /// # Examples
 ///
