@@ -200,11 +200,13 @@ impl<const S: usize> Machine<S> {
         out
     }
 
-    /// Whether a native call that may reach VM code must run on a fiber:
-    /// tasks may switch while it runs, and it does not run on one already.
+    /// Whether a native call that may suspend must run on a fiber: it does
+    /// not run on one already, and tasks may switch while it runs (at the
+    /// scheduler's level, or with no scheduler yet: a scope it opens
+    /// switches tasks on its fiber).
     #[inline]
     fn native_needs_fiber(&self) -> bool {
-        cfg!(not(target_family = "wasm")) && self.sched.is_some() && self.fiber_switch_depth.is_none() && self.at_task_level()
+        cfg!(not(target_family = "wasm")) && self.fiber_switch_depth.is_none() && (self.sched.is_none() || self.at_task_level())
     }
 
     /// The GC words of every VM state not swapped in: parked fibers' and,

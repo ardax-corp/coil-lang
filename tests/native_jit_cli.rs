@@ -1076,15 +1076,16 @@ fn a_pure_native_run_reports_no_vm_dependence() {
 
 #[test]
 fn a_native_run_counts_its_vm_entries() {
-    // `yield_now` is a task op, which runs on the VM.
+    // A generator with a `defer` stays on the VM; native `show` resumes it.
     let src = format!(
-        "{HEADER}use task::yield_now;\n#[inline(never)]\nfn show(int i) {{ yield_now(); let _ = println(format(\"%i\", i)); }}\n\
-         fn main() {{ let i = 0; while i < 3 {{ show(i); i = i + 1; }} }}\n"
+        "{HEADER}gen fn nums() {{ defer {{ let _ = println(\"done\"); }} yield 1; yield 2; }}\n\
+         #[inline(never)]\nfn show() {{ for x in nums() {{ let _ = println(format(\"%i\", x)); }} }}\n\
+         fn main() {{ show(); }}\n"
     );
     let stats = same_as_vm("counts_vm", &src);
     assert!(compiled(&stats, "show"), "stats: {stats}");
     let (_, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
-    assert!(entries >= 3, "stats: {stats}");
+    assert!(entries >= 1, "stats: {stats}");
 }
 
 #[test]
