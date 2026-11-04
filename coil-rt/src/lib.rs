@@ -6,6 +6,9 @@
 //! archive as `coil-embed` does: native code where the object has it, the
 //! VM for everything else.
 
+// The libtest build leaves out `main`, so its imports and tables go unused.
+#![cfg_attr(test, allow(dead_code, unused_imports))]
+
 use std::process::exit;
 
 unsafe extern "C" {
@@ -16,6 +19,8 @@ unsafe extern "C" {
 }
 
 /// The executable's entry (the C runtime calls it).
+/// Left out of the libtest build, whose harness brings its own `main`.
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // SAFETY: the linked object defines the tables as `aot` wrote them.
