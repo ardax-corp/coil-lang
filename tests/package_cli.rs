@@ -553,6 +553,7 @@ fn main() {
 
 /// Build `libcoil_rt.a` in the same private target directory and profile
 /// as [`build_matching_coil_embed`], for AOT packages (`COIL_RT_LIB`).
+#[cfg(target_os = "linux")]
 fn build_matching_coil_rt(coil_bin: &Path) -> PathBuf {
     let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/package-cli-embed");
     let profile_dir = coil_profile_dir(coil_bin);
