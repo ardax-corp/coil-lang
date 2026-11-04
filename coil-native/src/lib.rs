@@ -1707,8 +1707,9 @@ impl<'a> Lower<'a> {
         let p1 = self.b.ins().iadd_imm_s(p, 1);
         self.b.ins().jump(lp, &[p1.into(), next.into()]);
         self.b.switch_to_block(slow);
-        let (w, _) = self.vector_via_vm(f, inst);
-        let w = self.coerce(w, lane_ty);
+        // The loop's result is its `dest` slot, as `VLoop` leaves it.
+        let (_, frame) = self.vector_via_vm(f, inst);
+        let w = self.b.ins().stack_load(types::I64, lane_ty, frame, 0);
         self.b.ins().jump(exit, &[w.into()]);
         self.b.switch_to_block(exit);
         let r = self.b.block_params(exit)[0];
