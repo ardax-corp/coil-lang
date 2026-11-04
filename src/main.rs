@@ -891,6 +891,13 @@ fn main() {
     }
 }
 
+/// The debug level an archive with native code keeps: native code finds a
+/// panic's location by its byte span (`Machine::native_site_location`), so
+/// `-g1` (lines only) keeps the spans too; `-g0` stays bare.
+pub(crate) fn native_debug_level(level: common::DebugLevel, native: bool) -> common::DebugLevel {
+    if native && level == common::DebugLevel::Lines { common::DebugLevel::Full } else { level }
+}
+
 #[cfg(test)]
 mod tests {
     use super::archive_staleness::{
@@ -1194,11 +1201,4 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
-}
-
-/// The debug level an archive with native code keeps: native code finds a
-/// panic's location by its byte span (`Machine::native_site_location`), so
-/// `-g1` (lines only) keeps the spans too; `-g0` stays bare.
-pub(crate) fn native_debug_level(level: common::DebugLevel, native: bool) -> common::DebugLevel {
-    if native && level == common::DebugLevel::Lines { common::DebugLevel::Full } else { level }
 }
