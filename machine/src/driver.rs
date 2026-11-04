@@ -70,6 +70,13 @@ impl Drop for TaskFiber {
     }
 }
 
+/// Whether programs native code covers run on the driver
+/// (`COIL_NATIVE_DRIVER=0`: the VM runs them, calling native code per body).
+pub(crate) fn enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_NATIVE_DRIVER").is_none_or(|v| v != "0"))
+}
+
 /// The program a driver runs: its code (for the prologue and the
 /// snapshot pool), the native code for it and its debug tables.
 pub(crate) struct DriverProgram {

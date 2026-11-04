@@ -248,11 +248,6 @@ use crate::stacks::FIBER_STACK_LIMIT;
 /// Programs whose native code covers them run on the native driver,
 /// without the interpreter (`driver.rs`); `COIL_NATIVE_DRIVER=0` runs them
 /// on the VM with native calls instead.
-fn native_driver_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_NATIVE_DRIVER").is_none_or(|v| v != "0"))
-}
-
 #[inline(always)]
 fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
     // Lowering may target `code.len()` as “fall out of the loop” (next `while`
@@ -1721,8 +1716,6 @@ impl<const S: usize> Machine<S> {
     pub fn with_operand_capacity(operand_slots: usize) -> Self {
         let mut frames = ArrayVec::default();
         frames.consume();
-        let worker_cap = crate::thread::WorkerCap::new();
-        let reactor = crate::reactor::Reactor::new(0);
         let cap = operand_slots.clamp(1, crate::MAX_OPERAND_STACK_SLOTS);
         Self {
             frames,
@@ -1731,7 +1724,7 @@ impl<const S: usize> Machine<S> {
             cow_shares: 0,
             dense_obj_addr: 0,
             dense_obj: None,
-            rt: crate::runtime::Runtime::with(None, reactor, crate::io_reactor::IoReactor::new(), crate::thread::new_live_thread_registry(), worker_cap, Vec::new(), Arc::new(Vec::new()), Vec::new(), Vec::new(), Vec::new(), std::collections::HashMap::default(), std::collections::HashSet::default()),
+            rt: crate::runtime::Runtime::new(),
             stack: Stack::with_capacity(cap),
             streak_host_alloc: false,
             resume_stack: Vec::new(),
@@ -1897,7 +1890,7 @@ impl<const S: usize> Machine<S> {
     /// `start` (a prologue from there, or a body), unless
     /// `COIL_NATIVE_DRIVER=0`. `None`: the machine runs it.
     pub(crate) fn with_native_driver<R>(&mut self, start: usize, f: impl FnOnce(&mut crate::driver::Driver<'_>) -> R) -> Option<R> {
-        if !native_driver_enabled() {
+        if !crate::driver::enabled() {
             return None;
         }
         let native = std::sync::Arc::clone(&self.rt.native.as_ref()?.code);
@@ -5643,18 +5636,9 @@ impl<const S: usize> Machine<S> {
         }
         self.run_with_pool(code, constants, strings, static_slots);
         if std::env::var_os("COIL_NATIVE_STATS").is_some()
-            && let Some((hits, bails)) = self.native_stats()
+            && let Some(t) = self.rt.native.as_deref()
         {
-            eprintln!("native: {hits} calls ran natively, {bails} bailed to the VM");
-            let entries = crate::native::VM_ENTRIES.load(std::sync::atomic::Ordering::Relaxed);
-            eprintln!(
-                "native: {} calls ran on the VM, {entries} VM entries from native code",
-                self.native_vm_runs()
-            );
-            let vector = crate::native::VECTOR_OPS.load(std::sync::atomic::Ordering::Relaxed);
-            if vector > 0 {
-                eprintln!("native: {vector} vector ops ran natively");
-            }
+            crate::native::print_stats(t);
         }
     }
 

@@ -123,13 +123,36 @@ pub fn execute_archived_program(
 ) -> bool {
     let slots =
         resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode) as usize;
+    let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
+    // Native code that covers every body (an AOT executable's) runs the
+    // program on the driver, with no interpreter.
+    let program = std::sync::Arc::new(machine::ThreadProgram {
+        code: std::sync::Arc::new(loaded.bytecode.clone()),
+        constants: std::sync::Arc::new(loaded.constants.clone()),
+        strings: std::sync::Arc::new(loaded.strings.clone()),
+        static_slot_count: loaded.static_slots,
+        debug: loaded.debug.clone(),
+        operand_stack_slots: slots as u32,
+        stack_maps: loaded.stack_maps.clone(),
+        precise_frames: std::sync::Arc::new(loaded.precise_frames.clone()),
+        class_word_kinds: machine::class_kind_table(&loaded.class_word_kinds),
+        static_word_kinds: std::sync::Arc::new(loaded.static_word_kinds.clone()),
+    });
+    let start = machine::NativeStart {
+        base_dir: base_dir.clone(),
+        ffi_search_paths: ffi_search_paths.clone(),
+        dload_gate: dload_gate.clone(),
+        struct_layouts: loaded.struct_layouts.iter().map(machine::CStructLayout::from_archive).collect(),
+    };
+    if let Some(panicked) = machine::run_natively(program, start) {
+        return panicked;
+    }
     let mut machine = Machine::<256>::with_operand_capacity(slots);
     wire_standard_host_natives(&mut machine);
     if let Some(gate) = dload_gate {
         machine.set_dload_gate(gate);
     }
 
-    let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
     machine.set_ffi_paths(base_dir, ffi_search_paths);
     for layout in &loaded.struct_layouts {
         machine.register_struct_layout(machine::CStructLayout::from_archive(layout));

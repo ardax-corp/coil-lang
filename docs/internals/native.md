@@ -529,6 +529,14 @@ compiled (`NativeCode::with_complete`; an AOT object exports
 per body, as before the driver.
 The inventory's `vm_entries` is gated at 0.
 
+An archive run (an AOT executable, `coil run` of a `.ccoil`) starts with
+no `Machine` at all: `coil_cli::execute_archived_program` calls
+`machine::run_natively` (`machine/src/start.rs`), which builds a `Runtime`
+for the program and runs the driver over it, and builds a `Machine` only
+when that returns `None` (incomplete code, or the driver off). The AOT
+link passes `--gc-sections` (`-dead_strip` on macOS), so code nothing
+references is left out of the executable.
+
 ### VM ↔ native
 
 `machine::native` holds the table: entry PC → `extern "C" fn(ctx, *const

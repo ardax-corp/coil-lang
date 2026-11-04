@@ -747,6 +747,26 @@ impl Pending {
     }
 }
 
+/// `COIL_NATIVE_STATS`'s counts after a run with native code installed.
+pub(crate) fn print_stats(table: &NativeTable) {
+    eprintln!("native: {} calls ran natively, {} bailed to the VM", table.hits, table.bails);
+    let entries = VM_ENTRIES.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!("native: {} calls ran on the VM, {entries} VM entries from native code", table.vm_runs);
+    let vector = VECTOR_OPS.load(std::sync::atomic::Ordering::Relaxed);
+    if vector > 0 {
+        eprintln!("native: {vector} vector ops ran natively");
+    }
+}
+
+/// Whether the native code pending for the next run covers every body.
+pub(crate) fn pending_is_complete() -> bool {
+    PENDING.with(|p| match &*p.borrow() {
+        Some(Pending::Entries(entries, _, complete)) => *complete && !entries.is_empty(),
+        Some(Pending::Shared(code)) => code.is_complete() && !code.is_empty(),
+        None => false,
+    })
+}
+
 pub(crate) fn take_pending() -> Option<Pending> {
     PENDING.with(|p| p.borrow_mut().take())
 }

@@ -119,11 +119,12 @@ impl Runtime {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with(sched: Option<Box<crate::task::Scheduler>>, reactor: std::sync::Arc<crate::reactor::Reactor>, io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>, live_threads: crate::thread::LiveThreadRegistry, worker_cap: std::sync::Arc<crate::thread::WorkerCap>, statics: Vec<Value>, program_strings: Arc<Vec<String>>, program_string_cache: Vec<Value>, native_roots: Vec<(*mut crate::native::NativeCtx, usize)>, ffi_arg_roots: Vec<Value>, finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>, finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>) -> Self {
+    /// A runtime with nothing loaded: its own reactors, thread registry
+    /// and worker cap.
+    pub(crate) fn new() -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs, output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None }
+        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None }
     }
 }
 
