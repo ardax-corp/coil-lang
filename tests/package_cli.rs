@@ -632,6 +632,50 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The AOT runtime has no bytecode VM: a program with a body native code
+/// does not compile (a function of 17 parameters) packages the VM runner
+/// instead, with a warning, and runs the same.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_body_native_code_refuses_packages_the_vm_runner() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed(Path::new(&bin));
+    let rt = build_matching_coil_rt(Path::new(&bin));
+    let dir = std::env::temp_dir().join(format!("coil_aot_refused_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let params: Vec<String> = (0..17).map(|i| format!("int a{i}")).collect();
+    let sum: Vec<String> = (0..17).map(|i| format!("a{i}")).collect();
+    let args: Vec<String> = (1..=17).map(|i| i.to_string()).collect();
+    let src = format!(
+        "use io::sync::println;\nuse string::format;\n#[inline(never)]\nfn wide({}) -> int {{ return {}; }}\nfn main() {{ let _ = println(format(\"%i\", wide({}))); }}\n",
+        params.join(", "),
+        sum.join(" + "),
+        args.join(", ")
+    );
+    let entry = dir.join("app.coil");
+    std::fs::write(&entry, src).unwrap();
+    let out = dir.join("app");
+    // The fallback takes the runner beside `coil`: link both into `dir`.
+    let coil = dir.join("coil");
+    std::fs::hard_link(&bin, &coil).or_else(|_| std::fs::copy(&bin, &coil).map(|_| ())).unwrap();
+    std::fs::hard_link(&embed, dir.join("coil-embed")).or_else(|_| std::fs::copy(&embed, dir.join("coil-embed")).map(|_| ())).unwrap();
+    let mut cmd = Command::new(&coil);
+    cmd.arg("package");
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    cmd.arg(&entry).arg("-o").arg(&out).env("COIL_RT_LIB", &rt);
+    let o = cmd.output().expect("spawn coil package");
+    let said = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "package failed: {said}");
+    assert!(said.contains("native code does not cover") && said.contains("packaging the VM runner instead"), "no fallback warning: {said}");
+    let run = run_with_timeout(&out, 60);
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "153\n");
+    assert_eq!(run.status.code(), Some(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `--strip-symbols` sets what the AOT executable keeps: `none` is the
 /// largest, the default (`debug`) drops debug info, `all` also the symbol
 /// table. Each runs the same.

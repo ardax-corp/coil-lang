@@ -97,6 +97,11 @@ fn link_aot_executable(pipeline: &Pipeline, link: &LinkInputs) -> Option<(Vec<u8
             eprintln!("  vm: {name}: {why}");
         }
     }
+    // The AOT runtime has no bytecode VM: every body must compile.
+    if let Some((name, why)) = object.refused.first() {
+        let n = object.refused.len();
+        return fallback(format!("native code does not cover {n} function(s) (`{name}`: {why})"));
+    }
     let rt = match runtime_library() {
         Ok(p) => p,
         Err(e) => return fallback(e),
