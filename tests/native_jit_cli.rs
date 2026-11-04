@@ -965,3 +965,26 @@ fn a_vector_loop_trap_matches_the_vm() {
     let stats = same_as_vm("native_vector_trap", &src);
     assert!(compiled(&stats, "sum"), "stats: {stats}");
 }
+
+#[test]
+fn an_archive_carries_generators_and_vector_loops() {
+    // Every instruction steps 6 to 8 added goes through the native MIR
+    // section: resumes, yields (`yield from` too), done checks, vector
+    // loops and byte scans.
+    let src = format!(
+        "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i; i = i + 1; }} return 99; }}\n\
+         gen fn outer() {{ yield 7; yield from count(3); return 0; }}\n\
+         #[inline(never)]\nfn walk() -> int {{ let g = outer(); let t = 0; while !done(g) {{ t = t * 3 + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn sum(Vec<int> xs) -> int {{ let s = 0; let i = 0; while i < xs.len() {{ s = s + xs[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn find(Vec<byte> s, byte b) -> int {{ let i = 0; while i < s.len() {{ if s[i] == b {{ return i; }} i = i + 1; }} return -1; }}\n\
+         fn main() {{\n  let xs: Vec<int> = Vec::new(); let bs: Vec<byte> = Vec::new(); let j = 0;\n  while j < 300 {{ xs.push(j); bs.push((97 + j % 26) as byte); j = j + 1; }}\n  bs[250] = 59 as byte;\n  let _ = println(format(\"%i %i %i\", walk(), sum(xs), find(bs, 59 as byte)));\n}}\n"
+    );
+    let archive = compile("archive_step8", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(jit.stdout, vm.stdout);
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert_eq!(jit.status.code(), vm.status.code());
+    let stats = String::from_utf8_lossy(&jit.stderr);
+    assert!(stats.contains("calls ran natively") && vector_ops(&stats) >= 2, "stats: {stats}");
+}
