@@ -1111,3 +1111,17 @@ fn an_ordinary_host_native_panic_matches_the_vm() {
     assert!(compiled(&stats, "put"), "stats: {stats}");
     assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
 }
+
+#[test]
+fn a_call_that_allocates_past_the_cap_collects_natively() {
+    // Past the allocation cap with a collection due, the call commits and
+    // collects at its next safepoint instead of handing the call back.
+    let src = format!(
+        "{HEADER}class Node {{ pub v: int, pub next: Option<Node>, }}\n\
+         #[inline(never)]\nfn build(int n) -> int {{ let head: Option<Node> = Option::None; let i = 0; while i < n {{ head = Option::Some(new Node(i, head)); if i % 1000 == 999 {{ head = Option::None; }} i = i + 1; }} return n; }}\n\
+         fn main() {{ let t = 0; let r = 0; while r < 4 {{ t = t + build(300000); r = r + 1; }} let _ = println(format(\"%i\", t)); }}\n"
+    );
+    let stats = same_as_vm("alloc_cap", &src);
+    assert!(compiled(&stats, "build"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
+}
