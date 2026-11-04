@@ -102,27 +102,19 @@ pub fn hover_text(code: &str, import: Option<&str>, docs: Option<&str>) -> Strin
     value
 }
 
-const WEBSITE_DOCS: &str = "https://github.com/ardax-corp/coil-website/blob/main/src/content/docs";
+const WEBSITE_CONTENT: &str = "https://github.com/ardax-corp/coil-website/blob/main/src/content";
 
-/// The language reference page for a builtin module (`""`: the types page).
+/// The API reference page for a builtin module (`""`: the types page).
+/// coil-website generates one page per module from these stubs at
+/// `src/content/reference/<module path>/index.md` (`/docs/reference/<path>`);
+/// the internal prelude modules it skips link to the prelude page.
 pub fn reference_url(module: &str) -> String {
-    let page = match module {
-        "" | "prelude::ops" => "references/types.md",
-        "prelude" => "references/option-result.md",
-        "prelude::math" => "references/math.md",
-        "prelude::task" => "references/modules.md",
-        "io" | "io::net::tcp" | "io::net::udp" => "references/io.md",
-        "io::fs" => "references/io-fs.md",
-        "io::tty" => "references/io-tty.md",
-        "string" => "references/string.md",
-        "thread" => "manual/tutorial/11-threads.md",
-        "env" => "references/env.md",
-        "process" => "references/process.md",
-        "gc" => "references/gc.md",
-        "ffi" | "ffi::types" => "references/ffi.md",
-        _ => "references/modules.md",
+    let path = match module {
+        "" => "types".to_string(),
+        "prelude::task" | "prelude::process" => "prelude".to_string(),
+        _ => module.replace("::", "/"),
     };
-    format!("{WEBSITE_DOCS}/{page}")
+    format!("{WEBSITE_CONTENT}/reference/{path}/index.md")
 }
 
 pub struct BuiltinDocs {
