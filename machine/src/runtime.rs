@@ -76,6 +76,22 @@ pub(crate) trait HostEnv {
 }
 
 impl Runtime {
+    /// Module setup's finalizer registry (`__module_setup`): `type_id`'s
+    /// drop method runs at `pc` (`EARLY_DROP_FLAG`: freed early too).
+    pub(crate) fn register_finalizer(&mut self, type_id: u32, pc: u32) {
+        let early = type_id & common::EARLY_DROP_FLAG != 0;
+        let type_id = type_id & !common::EARLY_DROP_FLAG;
+        if type_id == 0 {
+            return;
+        }
+        if early {
+            self.heap.register_early_drop_type(type_id);
+        }
+        self.finalizer_by_type.insert(type_id, pc);
+        self.finalizer_pcs.insert(pc);
+        self.heap.register_finalizer_type(type_id);
+    }
+
     /// The current task's waker, for a native that parks on another
     /// thread (`task::set_task_waiter`).
     pub(crate) fn task_waiter(&self) -> Option<(Arc<crate::task::TaskWaker>, u64, crate::task::TaskId)> {

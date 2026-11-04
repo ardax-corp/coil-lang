@@ -347,7 +347,7 @@ impl<const S: usize> Machine<S> {
                             let args = self.stack.top_window(consume);
                             let type_id = args.get(1).map(|v| v.as_int() as u32).unwrap_or(0);
                             let pc = args.get(2).map(|v| v.as_int() as u32).unwrap_or(0);
-                            self.register_finalizer(type_id, pc);
+                            self.rt.register_finalizer(type_id, pc);
                             self.stack.seek(tell - consume);
                             self.stack.push(Value::from(0i64));
                         }

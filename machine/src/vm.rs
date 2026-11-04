@@ -2278,7 +2278,7 @@ impl<const S: usize> Machine<S> {
             // Module setup's finalizer registry (`__module_setup`).
             crate::HostOp::RegisterFinalizer => {
                 let word = |i: usize| args.get(i).map_or(0, |v| v.as_int() as u32);
-                vm.register_finalizer(word(0), word(1));
+                vm.rt.register_finalizer(word(0), word(1));
                 return Some(Invoked::Value(0));
             }
             _ => return None,
@@ -4745,20 +4745,6 @@ impl<const S: usize> Machine<S> {
         self.fuel = 1;
     }
 
-    fn register_finalizer(&mut self, type_id: u32, pc: u32) {
-        let early = type_id & common::EARLY_DROP_FLAG != 0;
-        let type_id = type_id & !common::EARLY_DROP_FLAG;
-        if type_id == 0 {
-            return;
-        }
-        if early {
-            self.rt.heap.register_early_drop_type(type_id);
-        }
-        self.rt.finalizer_by_type.insert(type_id, pc);
-        self.rt.finalizer_pcs.insert(pc);
-        self.rt.heap.register_finalizer_type(type_id);
-    }
-
     pub(crate) fn run_remaining_finalizers(&mut self) {
         if self.program_code.is_empty() || (self.rt.finalizer_by_type.is_empty() && !self.closeables) {
             return;
@@ -5295,7 +5281,7 @@ impl<const S: usize> Machine<S> {
 
     #[cfg(test)]
     pub fn register_finalizer_for_test(&mut self, type_id: u32, pc: u32) {
-        self.register_finalizer(type_id, pc);
+        self.rt.register_finalizer(type_id, pc);
     }
 
     #[cfg(test)]
