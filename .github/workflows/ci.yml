@@ -10,7 +10,7 @@ name: CI
 #   stage 1 (Linux):  clippy, fmt, test, test corpus, test-release, harness
 #                     builds and cells, wasm  ->  `linux-ok`
 #   stage 2:          Windows (clippy, test, test corpus, harness) and macOS
-#                     (test, test corpus, harness builds and cells)
+#                     (test with the corpus tests, harness builds and cells)
 #   `ci-ok`:          the one check branch protection requires: Linux and
 #                     Windows green (Windows skipped is fine on a draft).
 #                     macOS stays out of it: its runners are capped and can
@@ -134,7 +134,8 @@ jobs:
 
 
   # The workspace suite minus the two corpus-wide tests (`test corpus`).
-  # Linux here; macOS runs the same steps in stage 2 (`test-macos`).
+  # Linux here; macOS runs the same steps in stage 2 (`test-macos`), with
+  # the corpus-wide tests included.
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -201,11 +202,17 @@ jobs:
           if [ "${{ runner.os }}" = "macOS" ]; then
             ulimit -n 65536 || true
           fi
+          # macOS keeps the corpus-wide tests in this job: a second macOS
+          # job would only queue for another of the capped runners.
+          skip="$CORPUS_TESTS_SKIP"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            skip=""
+          fi
           # A FAILED summary with exit 0 must still fail the job.
           log="$(mktemp)"
           set +e
-          # shellcheck disable=SC2086 # CORPUS_TESTS_SKIP is a word list
-          cargo test --workspace --lib --tests --bins -- $CORPUS_TESTS_SKIP 2>&1 | tee "$log"
+          # shellcheck disable=SC2086 # a word list
+          cargo test --workspace --lib --tests --bins -- $skip 2>&1 | tee "$log"
           code="${PIPESTATUS[0]}"
           set -e
           if grep -E -q 'test result: FAILED|error: test failed' "$log" && [ "$code" -eq 0 ]; then
@@ -841,18 +848,6 @@ jobs:
         os: [macos-latest]
     steps: *test-steps
 
-  test-corpus-macos:
-    name: test corpus (${{ matrix.os }})
-    needs: linux-ok
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest]
-    steps: *test-corpus-steps
-
   harness-build-macos:
     name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
     needs: linux-ok
@@ -861,6 +856,8 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      # macOS runners are capped: with `test` this holds three at a time.
+      max-parallel: 2
       matrix:
         os: [macos-latest]
         mode: [debug, release, gc-stress]
