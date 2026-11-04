@@ -37,7 +37,7 @@ pub struct NativeCtx {
     /// Objects helpers allocated during this call. No collection runs
     /// while native code holds raw heap words, so the VM collects after
     /// the call returns; past [`NATIVE_ALLOC_CAP`] with a collection due,
-    /// helpers bail instead and the VM's re-run collects as it goes.
+    /// the call commits and collects at its next safepoint.
     pub allocs: u64,
     /// The second result word of a body that returns two
     /// ([`NativeEntry::ret_words`] `2`): the entry stores it here.
@@ -1075,8 +1075,8 @@ unsafe fn heap<'a>(ctx: *mut NativeCtx) -> Option<&'a mut crate::memory::Heap> {
     unsafe { (*ctx).heap.as_mut() }
 }
 
-/// Count one allocation; bail when the call allocated past
-/// [`NATIVE_ALLOC_CAP`] with a collection due.
+/// Count one allocation; past [`NATIVE_ALLOC_CAP`] with a collection
+/// due, commit and collect at the next safepoint.
 unsafe fn note_alloc(ctx: *mut NativeCtx, heap: &crate::memory::Heap) {
     let ctx = unsafe { &mut *ctx };
     ctx.allocs += 1;
@@ -1086,7 +1086,10 @@ unsafe fn note_alloc(ctx: *mut NativeCtx, heap: &crate::memory::Heap) {
             ctx.gc_due = 1;
         }
     } else if ctx.allocs >= NATIVE_ALLOC_CAP && heap.should_collect() {
-        ctx.bail = 1;
+        // Commit rather than hand the call back to the VM: it collects at
+        // its next safepoint, and a later trap panics natively.
+        ctx.committed = 1;
+        ctx.gc_due = 1;
     }
 }
 
@@ -1570,7 +1573,6 @@ pub unsafe extern "C" fn coil_native_free_early(ctx: *mut NativeCtx, word: u64, 
         }
         c.committed = 1;
         c.vm_calls += 1;
-        VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         c.gc_epoch += 1;
         let (machine, free) = (c.machine, c.host.free);
         // SAFETY: `machine` is the live machine `host` was made for.
@@ -1639,7 +1641,6 @@ pub unsafe extern "C" fn coil_native_call_vm(
     }
     c.committed = 1;
     c.vm_calls += 1;
-    VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     c.gc_epoch += 1;
     let mut panicked = false;
     // SAFETY: `machine` is the live machine `host` was made for.
@@ -1682,7 +1683,6 @@ pub unsafe extern "C" fn coil_native_call_value(
     }
     c.committed = 1;
     c.vm_calls += 1;
-    VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     c.gc_epoch += 1;
     let mut panicked = false;
     let (machine, call) = (c.machine, c.host.call_value);
@@ -1729,7 +1729,6 @@ pub unsafe extern "C" fn coil_native_resume(
     }
     c.committed = 1;
     c.vm_calls += 1;
-    VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     c.gc_epoch += 1;
     let mut panicked = false;
     let (machine, resume) = (c.machine, c.host.resume);
@@ -1876,7 +1875,6 @@ pub unsafe extern "C" fn coil_native_host(
         // Finalizers it runs cannot be taken back.
         c.committed = 1;
         c.vm_calls += 1;
-        VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         c.gc_epoch += 1;
         let mut panicked = false;
         // SAFETY: `machine` is the live machine `host` was made for.
@@ -2129,7 +2127,6 @@ unsafe fn host_via_vm(
     }
     let committed = std::mem::replace(&mut c.committed, 1);
     c.vm_calls += 1;
-    VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     c.gc_epoch += 1;
     let mut panicked = false;
     let machine = c.machine;
@@ -2293,8 +2290,8 @@ pub unsafe extern "C" fn coil_native_ipow(a: i64, b: i64, out: *mut i64) -> i64 
 /// `COIL_NATIVE_STATS`.
 pub static VECTOR_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Calls from native code into the VM (a body, a host stub, a resume, a
-/// finalizer run) so far: what a native run still needs the VM for.
+/// Bytecode runs native code started so far (a body, a host stub, a
+/// generator, a `drop`): what a native run still needs the VM for.
 pub static VM_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A `ByteScan` or `VecLoop` ([`NativeHost::vector`]). `kind` bit 0: a

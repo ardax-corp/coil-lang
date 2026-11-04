@@ -2580,13 +2580,20 @@ impl<const S: usize> Machine<S> {
     /// it: one that may suspend the task does so inside the fiber the
     /// call runs on, then returns the wake or runs again. `None` (the stub
     /// runs it): a suspending op off a fiber, or a generator close.
-    fn native_task_op(&mut self, ctx: *mut crate::native::NativeCtx, fn_id: usize, args: &[Value]) -> Option<crate::native::Invoked> {
+    fn native_task_op(
+        &mut self,
+        ctx: *mut crate::native::NativeCtx,
+        fn_id: usize,
+        args: &[Value],
+    ) -> Option<crate::native::Invoked> {
         use crate::native::Invoked;
         let op = fn_id.saturating_sub(common::TASK_SCOPE_OPEN_ID as usize);
         // scope open/close, join, sleep, yield, shield exit, cond wait.
         let suspends = matches!(op, 0 | 1 | 4 | 6 | 7 | 11 | 13);
         let plain = matches!(op, 2 | 3 | 5 | 9 | 10 | 12 | 14 | 15);
-        let in_fiber = self.fiber_switch_depth.is_some_and(|d| d == self.nested_depth);
+        let in_fiber = self
+            .fiber_switch_depth
+            .is_some_and(|d| d == self.nested_depth);
         if !(plain || suspends && in_fiber) {
             return None;
         }
@@ -2599,7 +2606,8 @@ impl<const S: usize> Machine<S> {
             self.native_roots.push((ctx, self.frames.len()));
             // A failed `requires` blames the native function's caller, as
             // from its stub (`contract_failure`).
-            let saved = (op == 15).then(|| std::mem::replace(&mut self.host_stub_frame, self.frames.len()));
+            let saved =
+                (op == 15).then(|| std::mem::replace(&mut self.host_stub_frame, self.frames.len()));
             let flow = self.task_host_op(fn_id, &words[..n], &mut ip, &mut sp);
             if let Some(saved) = saved {
                 self.host_stub_frame = saved;
@@ -6724,6 +6732,15 @@ impl<const S: usize> Machine<S> {
         let entered = self.frames.len() > depth;
         let mut out = Value::default();
         match flow {
+            // A callee with native code runs natively, as at a `CALL`.
+            dispatch::RestFlow::Continue
+                if entered
+                    && unlikely(self.native.is_some())
+                    && self.frames.len() == depth + 1
+                    && let Some(v) = self.native_call_entered(ip, call_ip) =>
+            {
+                out = v;
+            }
             dispatch::RestFlow::Continue if entered => {
                 // The frame the call opened (an over-apply stub's when it
                 // made one) returns the result.
@@ -6762,6 +6779,48 @@ impl<const S: usize> Machine<S> {
             || !self.resume_stack.is_empty()
             || !self.frame_pins.is_empty();
         out
+    }
+
+    /// In [`Self::call_value`], the callee's frame just opened at `target`
+    /// (its arguments above the frame base): when native code has the
+    /// body, close the frame and run it natively, as a `CALL` does
+    /// (`call_ip`: where a panic in it points). `None`: the VM runs it
+    /// (no native code, it bailed, or it would need a fiber here), the
+    /// frame open again.
+    fn native_call_entered(&mut self, target: usize, call_ip: usize) -> Option<Value> {
+        let entry = self.native.as_deref()?.lookup(target)?;
+        if entry.suspends && self.native_needs_fiber() {
+            return None;
+        }
+        let base = self.frames.get().get();
+        let arity = self.stack.tell() - base;
+        let _ = self.frames.pop();
+        let out = match self.try_native_call(target, arity) {
+            None => {
+                self.frames.setup_current_and_advance(|f| f.set(base));
+                self.keep_call_window(self.frames.len() - 1);
+                return None;
+            }
+            Some(out) => out,
+        };
+        let ret = match out {
+            Ok(ret) => ret,
+            Err(p) => {
+                if p.code == crate::native::TRAP_VM_PANIC {
+                    self.rearm_unwind_after_early_drop(call_ip.saturating_sub(1));
+                } else {
+                    self.native_panic(&p, call_ip.saturating_sub(1));
+                }
+                self.run_native_pads(p.pads);
+                return Some(Value::default());
+            }
+        };
+        self.stack.seek(base);
+        self.nested_return_hi = ret.hi.map_or(Value::default(), Value::from);
+        for (w, deep) in ret.frees {
+            let _ = self.free_early(Value::from(w), deep);
+        }
+        Some(Value::from(ret.lo))
     }
 
     /// Stash a return value when `execute` runs inside [`Self::call_function`].
@@ -6838,6 +6897,10 @@ impl<const S: usize> Machine<S> {
     #[inline(always)]
     fn run_execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         IN_EXECUTE.set(IN_EXECUTE.get() + 1);
+        if unlikely(!self.native_roots.is_empty()) {
+            // Bytecode under native frames.
+            crate::native::VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut start_ip = start_ip;
         let paused = loop {
             // The dispatch loop is instantiated twice: with hooks (a debugger

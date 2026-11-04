@@ -203,15 +203,15 @@ fn allocation_runs_natively_and_matches_the_vm() {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
     assert!(stats.contains("1 bailed"), "stats: {stats}");
-    // A call that allocates far past the collection threshold bails (no
-    // collection runs inside native code); the VM's re-run collects.
+    // A call that allocates far past the collection threshold commits
+    // and collects at a safepoint: it does not bail.
     let src = format!(
         "{HEADER}class N {{ pub v: int }}\nclass H {{ pub last: N }}\n\
          #[inline(never)]\nfn churn(H h, int n) -> int {{ let s = 0; let i = 0; while i < n {{ h.last = new N(i); s = s + h.last.v; i = i + 1; }} return s; }}\n\
          fn main() {{ let h = new H(new N(0)); let _ = println(format(\"%i %i\", churn(h, 3000000), h.last.v)); }}\n"
     );
     let stats = same_as_vm("alloc_churn", &src);
-    assert!(compiled(&stats, "churn") && stats.contains("1 bailed"), "stats: {stats}");
+    assert!(compiled(&stats, "churn") && stats.contains("0 bailed"), "stats: {stats}");
 }
 
 #[test]
