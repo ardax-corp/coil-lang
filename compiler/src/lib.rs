@@ -24,7 +24,8 @@ pub mod native_mir {
     pub use crate::il::Label;
     pub use crate::mir::{
         BlockId, MirAllocKind, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirGcKind, MirInst, MirTy,
-        MirUnaryOp, NativeBody, Terminator, ValueId, native_capture_active, start_native_capture,
+        MirUnaryOp, NativeBody, Terminator, ValueId, VectorOp, native_capture_active, start_native_capture, vector_op,
+        VecLoopKind,
         take_native_capture,
     };
 }

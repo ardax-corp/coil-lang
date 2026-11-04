@@ -5213,7 +5213,7 @@ pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
 /// A `VecLoop`'s `VLoop` body: each tree node into the next free vector
 /// register (freed again after the node), a reduce's `VReduce` into the
 /// loop's `dest` slot `d`; slot `p` holds the block position for an index.
-fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> Option<Vec<Byte>> {
+pub(crate) fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> Option<Vec<Byte>> {
     use super::inst::{VecExpr, VecLoopKind};
     use common::simd;
 
@@ -5478,7 +5478,7 @@ fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> 
 /// tree node into a register counted up from `v0`, so the mask ends in
 /// `v0`. A `VLoad`'s index slot holds the stream's offset from the scan
 /// position.
-fn byte_scan_body(
+pub(crate) fn byte_scan_body(
     expr: &super::inst::LaneExpr,
     streams: &[(ValueId, ValueId)],
     scalars: &[ValueId],

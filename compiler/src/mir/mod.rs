@@ -67,12 +67,12 @@ pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use stackmap::is_alloc_opcode;
 pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
-pub use inst::MirCmpOp;
+pub use inst::{MirCmpOp, VecLoopKind};
 pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]
 pub use inst::LocalId;
 mod native_capture;
-pub use native_capture::{NativeBody, capture_native_bodies, native_capture_active, start_native_capture, take_native_capture};
+pub use native_capture::{NativeBody, VectorOp, capture_native_bodies, vector_op, native_capture_active, start_native_capture, take_native_capture};
 pub use instcombine::{instcombine, instcombine_lir};
 pub use licm::{licm, mark_frozen_arrays};
 #[cfg(test)]

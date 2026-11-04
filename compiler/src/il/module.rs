@@ -346,7 +346,7 @@ impl IlModule {
             crate::mir::capture_native_bodies(self.funcs.iter().filter_map(|b| {
                 let mir = b.meta.hir_mir.as_deref()?;
                 Some((b.meta.name.as_str(), b.meta.entry, mir))
-            }));
+            }), opts);
         }
 
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
