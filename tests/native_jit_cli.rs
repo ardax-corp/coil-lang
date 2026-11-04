@@ -1292,34 +1292,58 @@ fn module_setup_runs_natively() {
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
+/// `coil test --engine native` over a directory holding `src` as
+/// `name.coil`, with a cold cache: the bodies native code refused.
+fn native_test_refusals(name: &str, src: &str) -> Vec<String> {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let tests = dir.join("tests");
+    std::fs::create_dir_all(&tests).expect("temp dir");
+    std::fs::write(tests.join(format!("{name}.coil")), src).expect("write source");
+    let inventory = dir.join("inventory.tsv");
+    let mut cmd = Command::new(coil_bin());
+    cmd.arg("test").arg(&tests).args(["--engine", "native"]);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    // A cold cache: a cached expansion program is loaded, not compiled.
+    let out = cmd
+        .env("COIL_NATIVE_INVENTORY", &inventory)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("spawn coil test");
+    assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+    let lines = std::fs::read_to_string(&inventory).expect("inventory");
+    lines.lines().filter(|l| l.starts_with("refused\t")).map(str::to_owned).collect()
+}
+
 #[test]
 fn a_macro_expansion_program_leaves_the_native_bodies_alone() {
     // `#[derive(Arbitrary)]` compiles an expansion program inside the
     // test file's compile: its bodies have labels of their own, which once
     // named the wrong callee (`Gen::below` calling `Gen::resize` for
     // `Gen::bits`) and refused the bodies that call through them.
-    let dir = std::env::temp_dir().join(format!("coil-native-{}-macro_capture", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    std::fs::write(
-        dir.join("macro_capture.coil"),
+    let refused = native_test_refusals(
+        "macro_capture",
         "use tests::assert;\nuse arbitrary::{Arbitrary, Gen, any};\n\
          #[derive(Arbitrary)]\nclass Point { pub x: int, pub y: int }\n\
          test(\"points\") {\n  let g = Gen::new(7);\n  let i = 0;\n\
            while i < 50 { let p: Point = any(g); assert!(g.below(9) < 9 && p.x == p.x); i = i + 1; }\n}\n",
-    )
-    .expect("write source");
-    let inventory = dir.join("inventory.tsv");
-    let mut cmd = Command::new(coil_bin());
-    cmd.arg("test").arg(&dir).args(["--engine", "native"]);
-    for root in compiler::Pipeline::workspace_language_extra_roots() {
-        cmd.arg("--root").arg(root);
-    }
-    // A cold cache: a cached expansion program is loaded, not compiled.
-    let cache = dir.join("cache");
-    let out = cmd.env("COIL_NATIVE_INVENTORY", &inventory).env("XDG_CACHE_HOME", &cache).output().expect("spawn coil test");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let lines = std::fs::read_to_string(&inventory).expect("inventory");
-    let refused: Vec<&str> = lines.lines().filter(|l| l.starts_with("refused\t")).collect();
+    );
+    assert!(refused.is_empty(), "refused: {refused:#?}");
+}
+
+#[test]
+fn a_generic_body_with_an_int_defer_home_compiles() {
+    // `future::__group_run` defers `g.__finished(idx)`: a shared generic
+    // body, whose `int` words may be objects, with an `int` home.
+    let refused = native_test_refusals(
+        "generic_defer",
+        "use tests::assert;\nuse future::all;\n\
+         test(\"all\") {\n  let bodies: Vec<unit -> int> = Vec::new();\n\
+           bodies.push(fn () => 1);\n  bodies.push(fn () => 2);\n\
+           let d: Vec<int> = Vec::new();\n  let out = all(bodies).unwrap_or(d);\n\
+           assert!(out.len() == 2 && out[0] + out[1] == 3);\n}\n",
+    );
     assert!(refused.is_empty(), "refused: {refused:#?}");
 }
