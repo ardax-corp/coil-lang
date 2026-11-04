@@ -5155,23 +5155,36 @@ impl<const S: usize> Machine<S> {
         // SAFETY: the archived word has the plain word's layout, as the
         // program code's casts rely on; `image` outlives the run.
         let code: &[Byte] = unsafe { std::slice::from_raw_parts(image.as_ptr().cast(), image.len()) };
-        let mut ip = 0usize;
-        loop {
-            let paused = self.run_execute(code, constants, ip);
-            if let Some(pending) = self.pending_ffi.take() {
-                let resume_ip = pending.resume_ip;
-                self.finish_pending_ffi_invoke(pending);
-                ip = resume_ip;
-                continue;
-            }
-            if let Some(pending) = self.pending_io.take() {
-                let resume_ip = pending.resume_ip;
-                self.finish_pending_io_wait(pending);
-                ip = resume_ip;
-                continue;
-            }
-            if !paused {
-                break;
+        // A program native code covers runs on the native driver, with no
+        // interpreter; its finalizers run there before it ends.
+        let natively = self
+            .with_native_driver(0, |d| {
+                d.run_from(0);
+                d.run_remaining_finalizers();
+            })
+            .is_some();
+        if natively && std::env::var_os("COIL_NATIVE_STATS").is_some() {
+            eprintln!("native: the driver ran the program (no interpreter)");
+        }
+        if !natively {
+            let mut ip = 0usize;
+            loop {
+                let paused = self.run_execute(code, constants, ip);
+                if let Some(pending) = self.pending_ffi.take() {
+                    let resume_ip = pending.resume_ip;
+                    self.finish_pending_ffi_invoke(pending);
+                    ip = resume_ip;
+                    continue;
+                }
+                if let Some(pending) = self.pending_io.take() {
+                    let resume_ip = pending.resume_ip;
+                    self.finish_pending_io_wait(pending);
+                    ip = resume_ip;
+                    continue;
+                }
+                if !paused {
+                    break;
+                }
             }
         }
         // Keep undetached workers alive past main's return. Without this,

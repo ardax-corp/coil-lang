@@ -169,12 +169,16 @@ impl<'a> Driver<'a> {
             let Some(b) = code.get(pc) else { return false };
             match *b.bytecode() {
                 Instruction::CALL => {
-                    if native.lookup(b.call_parts().1).is_none() {
+                    // `CALL 0`: the prologue's bootstrap frame, no call.
+                    let t = b.call_parts().1;
+                    if t != 0 && native.lookup(t).is_none() {
                         return false;
                     }
                 }
                 Instruction::StoreStatic | Instruction::POP | Instruction::NOOP | Instruction::RestoreSnapshot => {}
-                Instruction::HALT => return true,
+                // The prologue's end, or the `CALL main; RETURN` its jump
+                // into `main` leads to with native code.
+                Instruction::HALT | Instruction::RETURN => return true,
                 Instruction::JMP => {
                     let t = b.operand_u32() as usize;
                     if native.lookup(t).is_some() {
@@ -200,6 +204,7 @@ impl<'a> Driver<'a> {
         while !self.panicked {
             let Some(b) = code.get(pc) else { return };
             match *b.bytecode() {
+                Instruction::CALL if b.call_parts().1 == 0 => {}
                 Instruction::CALL => last = self.call(b.call_parts().1, &[]).map_or_else(Value::default, |(lo, _)| Value::from(lo)),
                 Instruction::StoreStatic => {
                     if let Some(s) = self.rt.statics.get_mut(b.operand_u32() as usize) {
@@ -273,6 +278,9 @@ impl<'a> Driver<'a> {
         let mut words = [0u64; 16];
         for (w, a) in words.iter_mut().zip(args.iter().take(params)) {
             *w = a.bits();
+        }
+        if let Some(t) = self.rt.native.as_mut() {
+            t.hits += 1;
         }
         let env = self.env();
         self.depth += 1;

@@ -627,11 +627,8 @@ fn main() {
     stats.env("COIL_NATIVE_STATS", "1");
     let stats = run_command_with_timeout(stats, 60);
     let err = String::from_utf8_lossy(&stats.stderr);
-    let calls: u64 = err
-        .lines()
-        .find_map(|l| l.strip_prefix("native: ")?.split(" calls ran natively").next()?.parse().ok())
-        .unwrap_or(0);
-    assert!(calls >= 10, "stats: {err}");
+    // Every body compiled: the driver runs the whole program.
+    assert!(err.lines().any(|l| l == "native: the driver ran the program (no interpreter)"), "stats: {err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

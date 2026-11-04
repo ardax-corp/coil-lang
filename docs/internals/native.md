@@ -520,9 +520,13 @@ startup ops, calls the entry natively and answers native code's host
 requests itself (calls of bodies and function values, host natives,
 collections over the native frames' records, early frees, finalizers,
 tasks on fibers of their own, generators, threads and auto-par workers,
-FFI callbacks). `Machine::with_native_driver` enters it; `coil test
---engine native` runs each case on it. `COIL_NATIVE_DRIVER=0` keeps the VM
-running the program, calling native code per body, as before the driver.
+FFI callbacks). `Machine::with_native_driver` enters it when every body
+compiled (`NativeCode::with_complete`; an AOT object exports
+`coil_aot_refused_count`): `coil --jit`, an AOT executable and each
+`coil test --engine native` case run on it, and `COIL_NATIVE_STATS` says
+"the driver ran the program". With a refused body, or with
+`COIL_NATIVE_DRIVER=0`, the VM runs the program, calling native code
+per body, as before the driver.
 The inventory's `vm_entries` is gated at 0.
 
 ### VM ↔ native

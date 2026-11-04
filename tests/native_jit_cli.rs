@@ -667,12 +667,10 @@ fn trait_methods_with_unread_parameters_run_natively() {
     assert!(compiled(&stats, "first"), "stats: {stats}");
 }
 
-/// The `native: N calls ran natively` count of a JIT run's stats.
-fn native_calls(stats: &str) -> u64 {
-    stats
-        .lines()
-        .find_map(|l| l.strip_prefix("native: ")?.split(" calls ran natively").next()?.parse().ok())
-        .unwrap_or(0)
+/// Whether a JIT run's stats say the driver ran the program: native code
+/// all the way, with no interpreter.
+fn ran_on_driver(stats: &str) -> bool {
+    stats.lines().any(|l| l == "native: the driver ran the program (no interpreter)")
 }
 
 #[test]
@@ -691,7 +689,7 @@ fn bodies_that_cannot_suspend_run_natively_inside_tasks() {
     );
     let stats = same_as_vm("no_suspend_in_tasks", &src);
     assert!(compiled(&stats, "work"), "stats: {stats}");
-    assert!(native_calls(&stats) >= 20, "stats: {stats}");
+    assert!(ran_on_driver(&stats), "stats: {stats}");
 }
 
 /// Tasks that suspend under native frames, for the fiber tests: `nap`
@@ -720,7 +718,7 @@ fn bodies_that_suspend_run_natively_on_task_stacks() {
     );
     let stats = same_as_vm("suspend_on_fibers", &src);
     assert!(compiled(&stats, "put"), "stats: {stats}");
-    assert!(native_calls(&stats) >= 40, "stats: {stats}");
+    assert!(ran_on_driver(&stats), "stats: {stats}");
 }
 
 #[test]
@@ -738,7 +736,7 @@ fn tasks_cancelled_under_native_frames_unwind_them() {
     );
     let stats = same_as_vm("cancel_on_fibers", &src);
     assert!(compiled(&stats, "sleeper"), "stats: {stats}");
-    assert!(native_calls(&stats) >= 3, "stats: {stats}");
+    assert!(ran_on_driver(&stats), "stats: {stats}");
 }
 
 #[test]
@@ -758,7 +756,7 @@ fn timeouts_panics_and_joins_under_native_frames_match_the_vm() {
     );
     let stats = same_as_vm("timeout_on_fibers", &src);
     assert!(compiled(&stats, "sleeper") && compiled(&stats, "waits"), "stats: {stats}");
-    assert!(native_calls(&stats) >= 5, "stats: {stats}");
+    assert!(ran_on_driver(&stats), "stats: {stats}");
 }
 
 #[test]
@@ -817,7 +815,7 @@ fn host_calls_that_need_the_vm_run_from_native_code() {
     assert!(compiled(&stats, "io::sync::write_all"), "stats: {stats}");
     assert!(compiled(&stats, "emit"), "stats: {stats}");
     // `main` enters natively and calls `emit` natively in turn.
-    assert!(native_calls(&stats) >= 1, "stats: {stats}");
+    assert!(ran_on_driver(&stats), "stats: {stats}");
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
