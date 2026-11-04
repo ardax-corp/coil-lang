@@ -29,7 +29,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_UNDO_BUF, NATIVE_CTX_UNDO_CAP, NATIVE_CTX_UNDO_LEN, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
+    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -1083,7 +1083,6 @@ struct Ids {
     store_index: FuncId,
     set_field: FuncId,
     view: FuncId,
-    undo_grow: FuncId,
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
@@ -1188,7 +1187,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     let view = module.declare_function("coil_native_view", Linkage::Import, &s3).map_err(e)?;
     let mut s1v = module.make_signature();
     s1v.params.push(AbiParam::new(types::I64));
-    let undo_grow = module.declare_function("coil_native_undo_grow", Linkage::Import, &s1v).map_err(e)?;
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
@@ -1238,7 +1236,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
         store_index,
         set_field,
         view,
-        undo_grow,
         cow,
         cow_field,
         alloc,
@@ -1327,7 +1324,6 @@ struct Lower<'a> {
     store_index: FuncRef,
     set_field: FuncRef,
     view: FuncRef,
-    undo_grow: FuncRef,
     cow: FuncRef,
     cow_field: FuncRef,
     alloc: FuncRef,
@@ -1425,7 +1421,6 @@ impl<'a> Lower<'a> {
         let store_index = module.declare_func_in_func(ids.store_index, func);
         let set_field = module.declare_func_in_func(ids.set_field, func);
         let view = module.declare_func_in_func(ids.view, func);
-        let undo_grow = module.declare_func_in_func(ids.undo_grow, func);
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
@@ -1480,7 +1475,6 @@ impl<'a> Lower<'a> {
             store_index,
             set_field,
             view,
-            undo_grow,
             cow,
             cow_field,
             alloc,
@@ -2562,11 +2556,9 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let (fast, slow, join) = self.in_view(*array, i, false);
-                // In place: log `[array, index, old]`, then store.
+                // In place.
                 self.b.switch_to_block(fast);
                 let at = self.element(*array, i);
-                let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
-                self.log_undo(a, i, old);
                 self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(slow);
@@ -2791,10 +2783,6 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let at = self.static_at(*slot);
-                let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
-                let target = self.b.ins().iconst(types::I64, machine::native::UNDO_STATIC as i64);
-                let i = self.b.ins().iconst(types::I64, i64::from(*slot));
-                self.log_undo(target, i, old);
                 self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
                 let z = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, z);
@@ -2837,34 +2825,6 @@ impl<'a> Lower<'a> {
             other => return Err(format!("instruction {}", inst_name(other))),
         }
         Ok(())
-    }
-
-    /// Append `[target, index, old]` to the undo log inline, growing it
-    /// through `coil_native_undo_grow` when it is full.
-    fn log_undo(&mut self, target: cranelift_codegen::ir::Value, index: cranelift_codegen::ir::Value, old: cranelift_codegen::ir::Value) {
-        let t = MemFlagsData::trusted();
-        let n = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_LEN);
-        let cap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_CAP);
-        let full = self.b.ins().icmp(IntCC::Equal, n, cap);
-        let grow = self.b.create_block();
-        let write = self.b.create_block();
-        self.b.append_block_param(write, types::I64);
-        self.b.ins().brif(full, grow, &[], write, &[n.into()]);
-        self.b.switch_to_block(grow);
-        self.b.ins().call(self.undo_grow, &[self.ctx]);
-        // A committed call starts the log over: the length changed.
-        let again = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_LEN);
-        self.b.ins().jump(write, &[again.into()]);
-        self.b.switch_to_block(write);
-        let n = self.b.block_params(write)[0];
-        let buf = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_UNDO_BUF);
-        let off = self.b.ins().imul_imm_u(n, 24);
-        let e = self.b.ins().iadd(buf, off);
-        self.b.ins().store(t, target, e, 0);
-        self.b.ins().store(t, index, e, 8);
-        self.b.ins().store(t, old, e, 16);
-        let n1 = self.b.ins().iadd_imm_u(n, 1);
-        self.b.ins().store(t, n1, self.ctx, NATIVE_CTX_UNDO_LEN);
     }
 
     /// The address of static `slot`, or bail when the machine has fewer
@@ -3292,8 +3252,7 @@ mod tests {
 
     fn run(entry: &NativeEntry, args: &[u64]) -> (u64, u64) {
         let marker = 0u8;
-        let mut undo = Vec::new();
-        let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET), &mut undo);
+        let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET));
         // SAFETY: compiled for `args.len()` argument words.
         let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
         (ctx.bail, out)

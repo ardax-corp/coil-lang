@@ -23,15 +23,6 @@ pub struct NativeCtx {
     pub bail: u64,
     /// Native code bails when its stack pointer drops below this address.
     pub stack_limit: u64,
-    /// The undo log: heap stores made so far, so a bail can take them back
-    /// before the VM runs the call again. `undo_len` entries of
-    /// [`UndoEntry`] at `undo_buf`, room for `undo_cap`; native code
-    /// appends inline and calls [`coil_native_undo_grow`] when it is full.
-    pub undo_buf: *mut UndoEntry,
-    pub undo_len: u64,
-    pub undo_cap: u64,
-    /// The storage behind `undo_buf`.
-    pub undo_vec: *mut Vec<UndoEntry>,
     /// The machine's heap, for helpers that allocate (null: they bail).
     pub heap: *mut crate::memory::Heap,
     /// Objects helpers allocated during this call. No collection runs
@@ -340,47 +331,17 @@ pub const NATIVE_CTX_RET_HI: i32 = std::mem::offset_of!(NativeCtx, ret_hi) as i3
 /// Allocations one native call may make while a collection is due.
 pub const NATIVE_ALLOC_CAP: u64 = 1 << 16;
 
-/// One heap store native code made: `[target, index, old word]`. `target`
-/// is the object's address, with bit 0 set for an instance slot (clear for
-/// an array element). A bail restores them newest first, so the VM's re-run
-/// starts from the heap as the call found it.
-pub type UndoEntry = [u64; 3];
-
-/// [`UndoEntry`] target bit of an instance slot store.
-pub const UNDO_FIELD: u64 = 1;
-/// [`UndoEntry`] target bit of an array push (undone by a pop).
-pub const UNDO_PUSH: u64 = 2;
-/// [`UndoEntry`] target of a static store (no object): `[UNDO_STATIC,
-/// slot, old]`.
-pub const UNDO_STATIC: u64 = 4;
-/// [`UndoEntry`] target bits of an object with a `drop` the call made
-/// (`[addr | UNDO_BORN, 0, 0]`): a bail marks it finalized, so the
-/// discarded object owes no `drop` (the VM's re-run makes its own).
-pub const UNDO_BORN: u64 = 3;
-/// [`UndoEntry`] target bits of a `drop` the call claimed
-/// (`[addr | UNDO_CLAIM, 0, 0]`): a bail gives the claim back.
-pub const UNDO_CLAIM: u64 = 5;
-
 /// Byte offset of [`NativeCtx::bail`].
 pub const NATIVE_CTX_BAIL: i32 = 0;
 /// Byte offset of [`NativeCtx::stack_limit`].
 pub const NATIVE_CTX_STACK_LIMIT: i32 = 8;
-/// Byte offsets of the undo log fields of [`NativeCtx`].
-pub const NATIVE_CTX_UNDO_BUF: i32 = 16;
-pub const NATIVE_CTX_UNDO_LEN: i32 = 24;
-pub const NATIVE_CTX_UNDO_CAP: i32 = 32;
 
 impl NativeCtx {
-    /// A context for one call from the VM, logging into `undo`.
-    pub fn new(stack_limit: u64, undo: &mut Vec<UndoEntry>) -> Self {
-        undo.clear();
+    /// A context for one call from the VM.
+    pub fn new(stack_limit: u64) -> Self {
         Self {
             bail: 0,
             stack_limit,
-            undo_buf: undo.as_mut_ptr(),
-            undo_len: 0,
-            undo_cap: undo.capacity() as u64,
-            undo_vec: undo,
             heap: std::ptr::null_mut(),
             allocs: 0,
             ret_hi: 0,
@@ -409,63 +370,9 @@ impl NativeCtx {
     }
 
     /// As [`Self::new`], with `heap` for the helpers that allocate.
-    pub fn with_heap(stack_limit: u64, undo: &mut Vec<UndoEntry>, heap: *mut crate::memory::Heap) -> Self {
-        Self { heap, ..Self::new(stack_limit, undo) }
+    pub fn with_heap(stack_limit: u64, heap: *mut crate::memory::Heap) -> Self {
+        Self { heap, ..Self::new(stack_limit) }
     }
-
-    /// Put back every logged store, newest first.
-    pub fn undo(&mut self) {
-        for i in (0..self.undo_len as usize).rev() {
-            // SAFETY: entries below `undo_len` were written.
-            let [target, index, old] = unsafe { *self.undo_buf.add(i) };
-            let old = common::Value::from(old);
-            if target & 7 == UNDO_BORN || target & 7 == UNDO_CLAIM {
-                let finalized = target & 7 == UNDO_BORN;
-                match object(target & !7) {
-                    Some(crate::memory::Object::Instance(mut gc)) => gc.as_mut().finalized = finalized,
-                    Some(crate::memory::Object::Enum(mut gc)) => gc.as_mut().finalized = finalized,
-                    _ => {}
-                }
-            } else if target == UNDO_STATIC {
-                if index < self.statics_len {
-                    // SAFETY: `index < statics_len`.
-                    unsafe { *self.statics.add(index as usize) = old };
-                }
-            } else if target & UNDO_PUSH != 0 {
-                if let Some(crate::memory::Object::Array(mut gc)) = object(target & !UNDO_PUSH) {
-                    let _ = gc.as_mut().pop();
-                }
-            } else if target & UNDO_FIELD != 0 {
-                if let Some(crate::memory::Object::Instance(mut gc)) = object(target & !UNDO_FIELD) {
-                    gc.as_mut().set_slot(index as usize, old);
-                }
-            } else if let Some(crate::memory::Object::Array(mut gc)) = object(target) {
-                gc.as_mut().store_indexed(index as i64, old, false);
-            }
-        }
-        self.undo_len = 0;
-    }
-}
-
-/// Make room for one more undo entry.
-///
-/// # Safety
-/// `ctx` is a live [`NativeCtx`] made by [`NativeCtx::new`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn coil_native_undo_grow(ctx: *mut NativeCtx) {
-    let ctx = unsafe { &mut *ctx };
-    // A committed call never bails, so nothing will be undone: start over
-    // (once there is room for an entry).
-    if ctx.committed != 0 && ctx.undo_cap > 0 {
-        ctx.undo_len = 0;
-        return;
-    }
-    let vec = unsafe { &mut *ctx.undo_vec };
-    // SAFETY: the first `undo_len` entries are initialized.
-    unsafe { vec.set_len(ctx.undo_len as usize) };
-    vec.reserve(vec.len().max(64));
-    ctx.undo_buf = vec.as_mut_ptr();
-    ctx.undo_cap = vec.capacity() as u64;
 }
 
 /// How much native stack a call from the VM may use before it bails to the
@@ -696,7 +603,9 @@ impl NativePanic {
 /// How a native call ended.
 pub(crate) enum NativeOutcome {
     Done(NativeResult),
-    /// Bailed: the VM runs the call again.
+    /// The call never started (no fiber stack): the VM runs it. Native
+    /// code commits at entry, so nothing else bails.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     Bailed,
     Panicked(NativePanic),
 }
@@ -706,8 +615,7 @@ pub(crate) enum NativeOutcome {
 pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> NativeOutcome {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
-    let mut undo = Vec::new();
-    let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo, env.heap);
+    let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap);
     if let Some(limit) = crate::vm::fiber_stack_limit() {
         ctx.stack_hard = ctx.stack_hard.min(limit as u64);
     } else if let Some(left) = stacker::remaining_stack() {
@@ -729,6 +637,12 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     ctx.message = &mut message;
     let mut pads = Vec::new();
     ctx.pads = &mut pads;
+    // One mode: the call is committed from its first instruction. A trap
+    // panics natively with the VM's message, the stack runs to the
+    // thread's real end, and collections run at safepoints; nothing hands
+    // the call back to the VM.
+    ctx.committed = 1;
+    ctx.stack_limit = ctx.stack_hard;
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
@@ -737,12 +651,9 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
             let hi = (entry.ret_words == 2).then_some(ctx.ret_hi);
             NativeOutcome::Done(NativeResult { lo: out, hi, allocated: ctx.allocs != 0 || ctx.vm_calls != 0, frees })
         }
-        // Its effects stay, as a VM panic's do.
-        BAIL_PANIC => NativeOutcome::Panicked(NativePanic { code: ctx.trap, trace, message, pads }),
-        _ => {
-            ctx.undo();
-            NativeOutcome::Bailed
-        }
+        // Its effects stay, as a VM panic's do. A committed call cannot
+        // bail, so any other flag is a panic as well.
+        _ => NativeOutcome::Panicked(NativePanic { code: ctx.trap, trace, message, pads }),
     }
 }
 
@@ -907,33 +818,6 @@ pub extern "C" fn coil_native_field(addr: u64, index: u64) -> u64 {
     }
 }
 
-/// Log a store into `ctx`'s undo log.
-///
-/// # Safety
-/// `ctx` is a live [`NativeCtx`] made by [`NativeCtx::new`].
-unsafe fn log(ctx: *mut NativeCtx, entry: UndoEntry) {
-    unsafe {
-        if (*ctx).undo_len == (*ctx).undo_cap {
-            coil_native_undo_grow(ctx);
-        }
-        let c = &mut *ctx;
-        c.undo_buf.add(c.undo_len as usize).write(entry);
-        c.undo_len += 1;
-    }
-}
-
-/// Log the new `drop` object `addr` ([`UNDO_BORN`]); a committed call
-/// never bails, so it logs nothing.
-///
-/// # Safety
-/// `ctx` is a live [`NativeCtx`].
-unsafe fn born(ctx: *mut NativeCtx, addr: u64) {
-    unsafe {
-        if (*ctx).committed == 0 {
-            log(ctx, [addr | UNDO_BORN, 0, 0]);
-        }
-    }
-}
 
 /// Set the bail flag; returns `0` for the helper's result.
 ///
@@ -954,11 +838,10 @@ pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64,
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    let Some(old) = gc.as_ref().read_indexed(index, false) else {
+    if gc.as_ref().read_indexed(index, false).is_none() {
         unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
         return unsafe { bail(ctx) };
-    };
-    unsafe { log(ctx, [addr, index as u64, old.bits()]) };
+    }
     gc.as_mut().store_indexed(index, common::Value::from(value), false);
     value
 }
@@ -974,10 +857,9 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
     let Some(crate::memory::Object::Instance(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    let Some(old) = gc.as_ref().slot_len().filter(|&n| slot < n).and_then(|_| gc.as_ref().slot(slot)) else {
+    if gc.as_ref().slot_len().is_none_or(|n| slot >= n) {
         return unsafe { bail(ctx) };
-    };
-    unsafe { log(ctx, [addr | UNDO_FIELD, slot as u64, old.bits()]) };
+    }
     gc.as_mut().set_slot(slot, common::Value::from(value));
     value
 }
@@ -1083,7 +965,7 @@ pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique:
 }
 
 /// `Cow` of field `field` of the instance `obj`: `obj.f = unique(obj.f)`,
-/// writing the slot back (and logging it for undo) only when it copied.
+/// writing the slot back only when it copied.
 /// Returns `obj`.
 ///
 /// # Safety
@@ -1100,7 +982,6 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
         && let Some(v) = gc.as_ref().slot(field as usize)
         && let Some(copy) = heap.cow_unique(v)
     {
-        unsafe { log(ctx, [obj | UNDO_FIELD, field, v.bits()]) };
         gc.as_mut().set_slot(field as usize, copy);
         unsafe { note_alloc(ctx, heap) };
     }
@@ -1183,9 +1064,6 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             let type_id = type_id.bits() as u32;
             gc.as_mut().type_id = type_id;
             heap.note_enum_type(Object::Enum(gc), type_id);
-            if heap.has_finalizer(type_id) {
-                unsafe { born(ctx, obj.addr()) };
-            }
             obj.addr()
         }
         ALLOC_ENUM => {
@@ -1203,13 +1081,8 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             heap.alloc(ObjEnum::new(tag, payload), Object::Enum).0.addr()
         }
         ALLOC_OBJECT => {
-            let (_, mut r) = heap.alloc(ObjInstance::with_type_id_and_fields(extra as u32, n), Object::Instance);
-            let _ = r.as_mut();
-            let addr = r.as_ptr().addr() as u64;
-            if heap.has_finalizer(extra as u32) {
-                unsafe { born(ctx, addr) };
-            }
-            addr
+            let (_, r) = heap.alloc(ObjInstance::with_type_id_and_fields(extra as u32, n), Object::Instance);
+            r.as_ptr().addr() as u64
         }
         ALLOC_CORO => {
             let mut live_mask = 0u64;
@@ -1275,8 +1148,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
     addr
 }
 
-/// `ArrayPush`: append `value` to the array `addr` (logged for undo as a
-/// pop) and return `addr`. Not an array: bail, where the VM panics.
+/// `ArrayPush`: append `value` to the array `addr` and return `addr`. Not an array: bail, where the VM panics.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
@@ -1288,7 +1160,6 @@ pub unsafe extern "C" fn coil_native_array_push(ctx: *mut NativeCtx, addr: u64, 
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    unsafe { log(ctx, [addr | UNDO_PUSH, 0, 0]) };
     gc.as_mut().push(common::Value::from(value));
     heap.account_array(gc.as_mut());
     unsafe { note_alloc(ctx, heap) };
@@ -2019,8 +1890,7 @@ pub(crate) fn run_pads(
         pads[i].homes[0] = next;
     }
     for i in 0..pads.len() {
-        let mut undo = Vec::new();
-        let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), &mut undo, env.heap);
+        let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap);
         if let Some(limit) = crate::vm::fiber_stack_limit() {
             ctx.stack_hard = ctx.stack_hard.min(limit as u64);
         } else if let Some(left) = stacker::remaining_stack() {
@@ -2074,9 +1944,6 @@ pub unsafe extern "C" fn coil_native_claim(ctx: *mut NativeCtx, pc: u64, word: u
     }
     // SAFETY: `machine` is the live machine `host` was made for.
     let got = unsafe { (c.host.claim)(c.machine, pc as u32, word) };
-    if got == 2 && c.committed == 0 {
-        unsafe { log(ctx, [word | UNDO_CLAIM, 0, 0]) };
-    }
     u64::from(got != 0)
 }
 
@@ -2232,7 +2099,6 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_store_index", coil_native_store_index as *const u8),
         ("coil_native_set_field", coil_native_set_field as *const u8),
         ("coil_native_view", coil_native_view as *const u8),
-        ("coil_native_undo_grow", coil_native_undo_grow as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
@@ -2262,4 +2128,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 35;
+const HELPERS: usize = 34;
