@@ -219,7 +219,7 @@ impl<const S: usize> Machine<S> {
             return;
         }
         Self::with_coroutine_mut(gc, |c| c.closeable = true);
-        self.closeables = true;
+        self.rt.closeables = true;
         self.rt.heap.note_closeable(Object::Coroutine(gc));
     }
 

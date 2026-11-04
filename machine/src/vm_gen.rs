@@ -86,7 +86,7 @@ impl<const S: usize> Machine<S> {
                 // Its `defer`s run when the collector closes it.
                 if cleanup && !gc.as_ref().closeable {
                     Self::with_coroutine_mut(gc, |c| c.closeable = true);
-                    self.closeables = true;
+                    self.rt.closeables = true;
                     self.rt.heap.note_closeable(Object::Coroutine(gc));
                 }
                 Some(GenStep::Yielded(Value::from(v)))

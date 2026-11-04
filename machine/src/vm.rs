@@ -1782,9 +1782,6 @@ pub struct Machine<const S: usize> {
     /// A collector-run `drop` panicked under the test harness: the job stops
     /// at the next fuel charge and runs no more finalizers.
     finalizer_aborted: bool,
-    /// Some generator suspended with a `defer` armed: the collector looks
-    /// for ones to close.
-    closeables: bool,
     /// Unwinder state (`vm_unwind.rs`): a panic that may run `defer`s.
     unwind: Unwind,
     /// Debug line table (parallel to archived bytecode indices).
@@ -1820,10 +1817,6 @@ pub struct Machine<const S: usize> {
     gc_ip: usize,
     /// Compiler-only SIMD file (numeric bits only; never GC-traced).
     vregs: [[u64; common::simd::LANES]; common::simd::NREGS],
-    /// True while a mark/finalize/sweep cycle is running.
-    gc_in_progress: bool,
-    /// Nested `gc_collect` during a finalizer; run another cycle after.
-    gc_deferred: bool,
     /// Live C1/C2 steal epoch (root). Helpers bind via [`HeapSlot`].
     shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// Join result bits not yet stored on the operand stack (Layer A collect).
@@ -1928,7 +1921,6 @@ impl<const S: usize> Machine<S> {
             resume_floor: usize::MAX,
             task_panic_message: None,
             finalizer_aborted: false,
-            closeables: false,
             unwind: Unwind::default(),
             program_debug: ProgramDebug::default(),
             pc_lines: Vec::new(),
@@ -1946,8 +1938,6 @@ impl<const S: usize> Machine<S> {
             gc_fresh_slot: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
-            gc_in_progress: false,
-            gc_deferred: false,
             shared_epoch: None,
             steal_join_root: Value::default(),
             frame_reserve: 0,
@@ -3614,7 +3604,7 @@ impl<const S: usize> Machine<S> {
         self.rt.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
         let mut ok = true;
         for obj in drops {
-            let Some(pc) = self.pending_finalizer(*obj) else { continue };
+            let Some(pc) = self.rt.pending_finalizer(*obj) else { continue };
             let val = Value::from(obj.addr());
             if self.finalizer_aborted || !self.claim_finalizer(val) {
                 continue;
@@ -3802,265 +3792,26 @@ impl<const S: usize> Machine<S> {
         Ok(Value::from(addr))
     }
 
-    /// Complete a GC cycle (explicit `gc::collect` / tests). Finishes any
-    /// in-flight incremental sweep first so unmarked survivors are not freed.
+    /// Complete a GC cycle (explicit `gc::collect`, a heap over its cap,
+    /// tests). See [`crate::collect::collect`].
     fn gc_collect(&mut self) {
-        if self.rt.heap.epoch_stw() {
-            if let Some(e) = &self.shared_epoch {
-                e.abort();
-            }
-            return;
-        }
-        if self.gc_in_progress {
-            self.gc_deferred = true;
-            return;
-        }
-        self.gc_in_progress = true;
-        loop {
-            self.gc_deferred = false;
-            #[cfg(any(test, feature = "vm_profile"))]
-            VM_GC_COUNT.with(|c| {
-                c.fetch_add(1, Ordering::Relaxed);
-            });
-
-            if self.rt.heap.gc_is_sweeping() {
-                self.rt.heap.finish_sweep();
-            }
-            self.gc_minor();
-            self.clear_dense_obj_cache();
-
-            self.mark_from_vm_roots();
-            let queue = self.queue_unmarked_finalizers();
-            if !queue.is_empty() {
-                let mut gray = Vec::new();
-                for (val, _) in &queue {
-                    if let Some(obj) = Self::find_object_by_addr(&self.rt.heap, val.bits()) {
-                        obj.mark(&mut gray);
-                        obj.mark_references(&self.rt.heap, &mut gray);
-                    }
-                }
-                while let Some(obj) = gray.pop() {
-                    obj.mark_references(&self.rt.heap, &mut gray);
-                }
-                for (val, pc) in queue {
-                    self.run_pending(val, pc);
-                }
-                self.unmark_heap();
-                self.mark_from_vm_roots();
-            }
-
-            #[cfg(feature = "gc-stats")]
-            self.note_gc_census();
-            self.check_early_frees();
-            self.rt.heap.clear_dead_weaks();
-            // SAFETY: all reachable objects were marked above; dead weaks cleared.
-            unsafe { self.rt.heap.sweep() };
-            // Cache is not a GC root; unmarked interned literals are gone.
-            self.invalidate_program_string_cache();
-            if !self.gc_deferred {
-                break;
-            }
-        }
-        self.gc_compact();
-        self.gc_in_progress = false;
+        crate::collect::collect(self);
     }
 
-    /// Minor collection: copy the surviving young objects out of the
-    /// nursery and reset it (`feature/escape-memory` step 4). Where nothing
-    /// may move it promotes the young objects in place instead.
-    #[cold]
-    #[inline(never)]
-    fn gc_minor(&mut self) {
-        #[cfg(any(test, feature = "vm_profile"))]
-        if self.rt.heap.has_young_in_use() && self.rt.heap.gc_is_idle() {
-            VM_MINOR_COUNT.with(|c| {
-                c.fetch_add(1, Ordering::Relaxed);
-            });
-        }
-        crate::collect::minor(self);
-    }
-
-    /// `gc_region_enter` / `gc_region_exit` around a `region` block. The
-    /// outermost one starts and ends with a minor collection, so what the
-    /// block allocated and dropped is reclaimed when it ends.
+    /// `gc_region_enter` / `gc_region_exit` around a `region` block.
     fn gc_region(&mut self, enter: bool) {
-        if !self.rt.heap.nursery() {
-            return;
-        }
-        if enter {
-            if self.rt.heap.region_enter() {
-                if self.rt.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
-                    self.gc_finish_sweep();
-                }
-                self.gc_minor();
-            }
-        } else if self.rt.heap.region_exit() {
-            if self.rt.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
-                self.gc_finish_sweep();
-            }
-            self.invalidate_program_string_cache();
-            self.gc_minor();
-        }
-    }
-
-    /// Evacuate sparse chunks after a finished cycle
-    /// (`docs/internals/gc-evacuation.md`). Skipped while a host frame sits
-    /// between VM frames (native re-entry, finalizers), in a shared-heap
-    /// epoch, or under the debugger.
-    fn gc_compact(&mut self) {
-        crate::collect::compact(self);
-    }
-
-    /// `gc-stats`: census of the live set just marked, before weaks clear.
-    #[cfg(feature = "gc-stats")]
-    fn note_gc_census(&self) {
-        let mut roots = Vec::new();
-        crate::collect::for_each_root(self, &mut |addr, kind| roots.push((addr, kind)));
-        eprintln!("{}", self.rt.heap.census(&roots));
-    }
-
-    /// `--early-free check`, with a complete mark: mark again from the
-    /// roots that are certainly live (precise frame slots, statics and VM
-    /// handles, not words a conservative frame scan finds, which may be
-    /// stale copies), fail if that reaches an object an early free gave
-    /// up, then restore the full mark.
-    fn check_early_frees(&mut self) {
-        if !self.rt.heap.has_doomed() {
-            return;
-        }
-        self.unmark_heap();
-        let roots = crate::collect::certain_root_addrs(self);
-        self.rt.heap.mark_from_roots(&roots);
-        self.rt.heap.restore_gc_roots(roots);
-        self.rt.heap.check_doomed();
-        self.unmark_heap();
-        self.mark_from_vm_roots();
-    }
-
-    fn gc_start_mark(&mut self) {
-        // The dense-index cache is not a root (it kept the last indexed
-        // array alive after its frame returned); drop it before objects can
-        // be freed or moved under it.
-        self.clear_dense_obj_cache();
-        let roots = self.collect_vm_root_addrs();
-        self.rt.heap.begin_mark(&roots);
-        self.rt.heap.restore_gc_roots(roots);
-    }
-
-    fn gc_remark_vm_roots(&mut self) {
-        let roots = self.collect_vm_root_addrs();
-        self.rt.heap.remark_roots(&roots);
-        self.rt.heap.restore_gc_roots(roots);
+        crate::collect::region(self, enter);
     }
 
     /// Mark to completion / lazy sweep at an alloc safepoint.
     #[inline(never)]
     fn gc_safepoint(&mut self) {
-        if self.gc_in_progress {
-            return;
-        }
-        if self.rt.heap.epoch_stw() {
-            if !self.rt.heap.gc_is_idle() || self.rt.heap.should_collect() {
-                if let Some(e) = &self.shared_epoch {
-                    e.abort();
-                }
-                if self.rt.heap.is_borrowed() {
-                    self.panicked = true;
-                }
-            }
-            return;
-        }
-        match self.rt.heap.gc_phase() {
-            crate::memory::GcPhase::Idle => {
-                if self.rt.heap.should_collect_young() {
-                    self.gc_minor();
-                }
-                if self.rt.heap.should_collect_old() {
-                    self.gc_start_incremental();
-                }
-            }
-            crate::memory::GcPhase::Marking => self.gc_mark_slice(),
-            crate::memory::GcPhase::Sweeping if self.rt.heap.should_collect_young() => {
-                self.gc_finish_sweep();
-                self.gc_minor();
-            }
-            crate::memory::GcPhase::Sweeping => self.gc_sweep_slice(),
-        }
-        if unlikely(self.rt.heap.get().over_byte_cap()) {
-            self.heap_cap_safepoint();
-        }
-    }
-
-    /// Open a cycle: mark to completion now, leave the sweep to later
-    /// safepoints.
-    fn gc_start_incremental(&mut self) {
-        #[cfg(any(test, feature = "vm_profile"))]
-        VM_GC_COUNT.with(|c| {
-            c.fetch_add(1, Ordering::Relaxed);
-        });
-        // Empty the nursery first: the major cycle then sees only old objects.
-        self.gc_minor();
-        self.gc_start_mark();
-        self.gc_mark_slice();
+        crate::collect::safepoint(self);
     }
 
     /// Finish a pending lazy sweep in one go.
     fn gc_finish_sweep(&mut self) {
-        self.rt.heap.finish_sweep();
-        self.invalidate_program_string_cache();
-        self.gc_compact();
-    }
-
-    #[inline(never)]
-    fn gc_mark_slice(&mut self) {
-        // Drain mark at this safepoint: the mutator never runs with gray
-        // objects (finalizers below run after the drain), so stores need no
-        // write barrier. See `Heap::resurrect_during_mark`.
-        while !self.rt.heap.mark_quantum(usize::MAX) {}
-        self.gc_remark_vm_roots();
-        while !self.rt.heap.mark_quantum(usize::MAX) {}
-        let queue = self.queue_unmarked_finalizers();
-        if !queue.is_empty() {
-            for (val, _) in &queue {
-                if let Some(obj) = Self::find_object_by_addr(&self.rt.heap, val.bits()) {
-                    self.rt.heap.shade_for_finalizer(obj);
-                }
-            }
-            while !self.rt.heap.mark_quantum(usize::MAX) {}
-            self.gc_in_progress = true;
-            for (val, pc) in queue {
-                self.run_pending(val, pc);
-            }
-            self.gc_in_progress = false;
-            self.gc_remark_vm_roots();
-            while !self.rt.heap.mark_quantum(usize::MAX) {}
-        }
-        #[cfg(feature = "gc-stats")]
-        self.note_gc_census();
-        self.check_early_frees();
-        self.rt.heap.clear_dead_weaks();
-        self.rt.heap.begin_sweep();
-        // Intern table is unlinked; unmarked literals will be freed across
-        // later sweep quantums. Drop the STRING index cache now so the mutator
-        // cannot reload a pointer that this cycle will dealloc (COI-410).
-        self.invalidate_program_string_cache();
-        self.gc_sweep_slice();
-    }
-
-    fn invalidate_program_string_cache(&mut self) {
-        self.rt.program_string_cache.fill(Value::default());
-    }
-
-    fn gc_sweep_slice(&mut self) {
-        let n = self.rt.heap.gc_sweep_quantum();
-        if self.rt.heap.sweep_quantum(n) {
-            self.invalidate_program_string_cache();
-            self.gc_compact();
-        }
-    }
-
-    fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
-        crate::collect::root_addrs(self)
+        crate::collect::finish_sweep(self);
     }
 
     /// The VM's roots outside the operand stack. None of them can be
@@ -4340,41 +4091,6 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn mark_from_vm_roots(&mut self) {
-        crate::collect::mark(self);
-    }
-
-    fn unmark_heap(&self) {
-        for obj in self.rt.heap.objects() {
-            obj.unmark();
-        }
-    }
-
-    /// The unmarked objects that owe a `drop` (its pc) or, for a generator
-    /// suspended with a `defer` armed, a close (`None`).
-    fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, Option<u32>)> {
-        if self.rt.finalizer_by_type.is_empty() && !self.closeables {
-            return Vec::new();
-        }
-        // The heap lists its finalizable objects: no walk of the heap (#1870).
-        let unmarked = self.rt.heap.unmarked_finalizable();
-        unmarked
-            .into_iter()
-            .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_cleanup(obj)?)))
-            .collect()
-    }
-
-    /// What `obj` still owes: its `drop` pc, or a close for a generator.
-    fn pending_cleanup(&self, obj: Object) -> Option<Option<u32>> {
-        match obj {
-            Object::Coroutine(gc) => {
-                let c = gc.as_ref();
-                (c.closeable && c.state == CoroState::Suspended).then_some(None)
-            }
-            _ => self.pending_finalizer(obj).map(Some),
-        }
-    }
-
     fn run_pending(&mut self, val: Value, pc: Option<u32>) {
         match pc {
             Some(pc) => self.run_finalizer(val, pc),
@@ -4463,19 +4179,6 @@ impl<const S: usize> Machine<S> {
         self.panicked = was_panicked;
     }
 
-    /// Drop PC for a tagged instance or enum whose finalizer has not run.
-    fn pending_finalizer(&self, obj: Object) -> Option<u32> {
-        let (type_id, finalized) = match obj {
-            Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
-            Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
-            _ => return None,
-        };
-        if type_id == 0 || finalized {
-            return None;
-        }
-        self.rt.finalizer_by_type.get(&type_id).copied()
-    }
-
     fn claim_finalizer(&self, v: Value) -> bool {
         match Self::find_object_by_addr(&self.rt.heap, v.bits()) {
             Some(Object::Instance(gc)) => {
@@ -4527,12 +4230,12 @@ impl<const S: usize> Machine<S> {
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
-        if self.program_code.is_empty() || (self.rt.finalizer_by_type.is_empty() && !self.closeables) {
+        if self.program_code.is_empty() || (self.rt.finalizer_by_type.is_empty() && !self.rt.closeables) {
             return;
         }
         let mut queue = Vec::new();
         for obj in self.rt.heap.objects() {
-            if let Some(pc) = self.pending_cleanup(obj) {
+            if let Some(pc) = self.rt.pending_cleanup(obj) {
                 queue.push((Value::from(obj.addr()), pc));
             }
         }
@@ -5511,9 +5214,9 @@ impl<const S: usize> Machine<S> {
         self.rt.finalizer_by_type.clear();
         self.rt.finalizer_pcs.clear();
         self.finalizer_aborted = false;
-        self.closeables = false;
-        self.gc_in_progress = false;
-        self.gc_deferred = false;
+        self.rt.closeables = false;
+        self.rt.gc_in_progress = false;
+        self.rt.gc_deferred = false;
         if self.rt.heap.is_borrowed() {
             return;
         }
@@ -5552,8 +5255,8 @@ impl<const S: usize> Machine<S> {
         self.panicked = false;
         self.rt.sched = None;
         self.unwind = Unwind::default();
-        self.gc_in_progress = false;
-        self.gc_deferred = false;
+        self.rt.gc_in_progress = false;
+        self.rt.gc_deferred = false;
     }
 
     pub fn bind_shared_heap(
@@ -5621,10 +5324,10 @@ impl<const S: usize> Machine<S> {
         if self.rt.heap.get().should_collect() {
             // Same incremental start as an alloc safepoint: mark now (with
             // `published` rooted), sweep lazily from later safepoints.
-            if self.gc_in_progress {
+            if self.rt.gc_in_progress {
                 self.gc_collect();
             } else {
-                self.gc_start_incremental();
+                crate::collect::start_incremental(self);
             }
         }
         self.steal_join_root = Value::default();
@@ -7229,6 +6932,32 @@ impl<const S: usize> crate::collect::GcHost for Machine<S> {
 
     fn clear_caches(&mut self) {
         self.clear_dense_obj_cache();
+    }
+
+    fn run_pending(&mut self, val: Value, pc: Option<u32>) {
+        Machine::run_pending(self, val, pc);
+    }
+
+    fn epoch_abort(&mut self) {
+        if let Some(e) = &self.shared_epoch {
+            e.abort();
+        }
+    }
+
+    fn borrowed_heap_wants_collect(&mut self) {
+        self.panicked = true;
+    }
+
+    fn over_cap(&mut self) {
+        self.heap_cap_safepoint();
+    }
+
+    #[cfg(any(test, feature = "vm_profile"))]
+    fn note_cycle(&self, minor: bool) {
+        let counter = if minor { &VM_MINOR_COUNT } else { &VM_GC_COUNT };
+        counter.with(|c| {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
     }
 
     fn before_mark(&mut self) {
