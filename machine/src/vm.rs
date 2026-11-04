@@ -2344,7 +2344,7 @@ impl<const S: usize> Machine<S> {
         let was_panicked = self.panicked;
         self.panicked = false;
         let env = self.native_env();
-        crate::native::run_pads(pads, &env);
+        crate::native::run_pads(pads, &env, &mut |_| {});
         self.panicked |= was_panicked;
     }
 
@@ -2617,10 +2617,13 @@ impl<const S: usize> Machine<S> {
         // scope open/close, join, sleep, yield, shield exit, cond wait.
         let suspends = matches!(op, 0 | 1 | 4 | 6 | 7 | 11 | 13);
         let plain = matches!(op, 2 | 3 | 5 | 9 | 10 | 12 | 14 | 15);
+        // A generator close: natively only when the innermost generator's
+        // body is native code (it unwinds on its own fiber).
+        let close = op == 45 && self.native_close_target(args.first().copied().unwrap_or_default());
         let in_fiber = self
             .fiber_switch_depth
             .is_some_and(|d| d == self.nested_depth);
-        if !(plain || suspends && in_fiber) {
+        if !(plain || close || suspends && in_fiber) {
             return None;
         }
         let mut words = [Value::default(); 2];
@@ -2642,7 +2645,7 @@ impl<const S: usize> Machine<S> {
             match flow {
                 TaskFlow::Value(v) => return Some(Invoked::Value(v.bits())),
                 TaskFlow::Panic(msg) => return Some(Invoked::Panic(msg)),
-                TaskFlow::Unwind => return Some(Invoked::Unwound),
+                TaskFlow::Unwind | TaskFlow::Reported(_) => return Some(Invoked::Unwound),
                 TaskFlow::Switched => {
                     if std::mem::take(&mut self.fiber_stop) {
                         return Some(Invoked::Unwound);
@@ -2654,6 +2657,23 @@ impl<const S: usize> Machine<S> {
                 }
             }
         }
+    }
+
+    /// Whether `coro_close` of `handle` closes a generator whose innermost
+    /// delegate's body runs natively (no VM frames to unwind), or one
+    /// that needs no unwind at all.
+    fn native_close_target(&self, handle: Value) -> bool {
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits())
+        else {
+            return true;
+        };
+        let mut target = gc;
+        while let Some(sub) = target.as_ref().yield_from {
+            target = sub;
+        }
+        let c = target.as_ref();
+        c.native.is_some()
+            || !(c.state == CoroState::Suspended && c.started && self.coro_has_pad(c))
     }
 
     /// Register the current task's wait for `req`'s readiness (and its

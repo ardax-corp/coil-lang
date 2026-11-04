@@ -75,6 +75,7 @@ impl<const S: usize> Machine<S> {
                 });
                 let mask = if ambiguous { 0 } else { Self::saved_stack_live_mask(&self.heap, &words) };
                 fiber.parked = ctx;
+                let cleanup = fiber.cleanup;
                 Self::with_coroutine_mut(gc, |c| {
                     c.saved_stack = words;
                     c.saved_live_mask = mask;
@@ -82,6 +83,12 @@ impl<const S: usize> Machine<S> {
                     c.state = CoroState::Suspended;
                     c.native = Some(fiber);
                 });
+                // Its `defer`s run when the collector closes it.
+                if cleanup && !gc.as_ref().closeable {
+                    Self::with_coroutine_mut(gc, |c| c.closeable = true);
+                    self.closeables = true;
+                    self.heap.note_closeable(Object::Coroutine(gc));
+                }
                 Some(GenStep::Yielded(Value::from(v)))
             }
             corosensei::CoroutineResult::Return(outcome) => {
@@ -150,7 +157,78 @@ impl<const S: usize> Machine<S> {
             crate::native::GEN_YIELDER.set(std::ptr::from_ref(yielder).cast());
             crate::native::call(&entry, &words[..entry.arity as usize], &env)
         });
-        Some(Box::new(crate::native::GenFiber { coro: Some(coro), stack_limit, yielder: std::ptr::null(), parked: std::ptr::null_mut() }))
+        let cleanup = entry.cleanup;
+        Some(Box::new(crate::native::GenFiber { coro: Some(coro), stack_limit, yielder: std::ptr::null(), parked: std::ptr::null_mut(), cleanup }))
+    }
+
+    /// Close suspended generator `gc`, whose body runs natively: resume
+    /// its fiber to unwind from the yield it waits at, then run the armed
+    /// `defer`s it collected. A panic in one is reported, as at the close
+    /// before `ip`: `Some(stop)` then. The generator is done either way.
+    #[cfg(not(target_family = "wasm"))]
+    fn native_gen_close(&mut self, gc: RefCoroutine, ip: usize) -> Option<bool> {
+        let Some(mut fiber) = gc.payload_mut().native.take() else {
+            Self::finish_coroutine(gc);
+            return None;
+        };
+        if !fiber.cleanup {
+            // Nothing to unwind: its stack is dropped with it.
+            Self::finish_coroutine(gc);
+            return None;
+        }
+        // Put the parked call's words back, forwarded, as a resume does.
+        let words = std::mem::take(&mut gc.payload_mut().saved_stack);
+        let mut i = 0;
+        // SAFETY: the parked call's frames, and so its context, stay on the
+        // fiber's stack while it is suspended.
+        unsafe { &*fiber.parked }.for_each_root(|w, _| {
+            if let Some(v) = words.get(i) {
+                // SAFETY: a root slot of a live record.
+                unsafe { *w = v.bits() };
+            }
+            i += 1;
+        });
+        let handle = Value::from(gc.as_ptr() as u64);
+        self.gen_running.push(handle);
+        self.nested_depth += 1;
+        let saved_limit = FIBER_STACK_LIMIT.replace(fiber.stack_limit);
+        let saved_yielder = crate::native::GEN_YIELDER.replace(fiber.yielder);
+        crate::native::GEN_CLOSING.set(true);
+        let out = fiber.coro.as_mut().expect("a generator fiber").resume(0);
+        crate::native::GEN_CLOSING.set(false);
+        fiber.yielder = crate::native::GEN_YIELDER.replace(saved_yielder);
+        FIBER_STACK_LIMIT.set(saved_limit);
+        self.nested_depth -= 1;
+        self.gen_running.pop();
+        Self::finish_coroutine(gc);
+        let pads = match out {
+            corosensei::CoroutineResult::Return(crate::native::NativeOutcome::Panicked(p)) => {
+                self.recycle_gen_stack(&mut fiber);
+                p.pads
+            }
+            // A body cannot yield or return from its unwind; drop the rest.
+            corosensei::CoroutineResult::Return(_) => {
+                self.recycle_gen_stack(&mut fiber);
+                Vec::new()
+            }
+            corosensei::CoroutineResult::Yield(_) => Vec::new(),
+        };
+        if pads.is_empty() {
+            return None;
+        }
+        let was_panicked = self.panicked;
+        self.panicked = false;
+        let env = self.native_env();
+        let mut stop = None;
+        crate::native::run_pads(pads, &env, &mut |p| {
+            if stop.is_none() {
+                stop = Some(self.native_panic(&p, ip.saturating_sub(1)));
+            }
+        });
+        if stop.is_none() {
+            self.panicked = was_panicked;
+        }
+        stop
     }
 
     /// Keep a finished generator fiber's stack for the next fiber.

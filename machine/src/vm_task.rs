@@ -12,6 +12,9 @@ enum TaskFlow {
     Panic(String),
     /// A generator close set up its unwind: the unwinder takes over.
     Unwind,
+    /// A panic already reported (a `defer` a native close ran): unwind,
+    /// stopping the run when the flag says so.
+    Reported(bool),
 }
 
 impl<const S: usize> Machine<S> {

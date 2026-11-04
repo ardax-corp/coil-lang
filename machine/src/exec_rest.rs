@@ -381,6 +381,9 @@ impl<const S: usize> Machine<S> {
                                         self.runtime_panic(&msg, ip.saturating_sub(1)),
                                     );
                                 }
+                                TaskFlow::Reported(stop) => {
+                                    return dispatch::RestExit::done(stop);
+                                }
                             }
                         }
                         crate::HostOp::Ordinary => {

@@ -345,6 +345,9 @@ pub const TRAP_EXPLICIT: u64 = 9;
 /// Not a panic: the call's fiber parked (its task suspended inside it);
 /// the task suspends at the `CALL` (`vm_fiber.rs`).
 pub const TRAP_PARKED: u64 = 10;
+/// Not a panic: a generator's close unwinds its body from the yield it is
+/// suspended at, collecting its armed `defer`s (`vm_gen.rs`).
+pub const TRAP_CLOSE: u64 = 11;
 /// No site: a frame that pushes nothing onto the panic's trace.
 pub const NO_SITE: u64 = u32::MAX as u64;
 
@@ -532,6 +535,9 @@ pub struct NativeEntry {
     /// A generator's body: only a resume enters it, on a fiber of its own
     /// (`native_gen.rs`), never a `CALL`.
     pub generator: bool,
+    /// It has `defer`s (a cleanup pad): a generator's close resumes its
+    /// fiber to unwind them (`vm_gen.rs`).
+    pub cleanup: bool,
     pub entry: NativeEntryFn,
 }
 
@@ -547,7 +553,9 @@ pub struct AotEntry {
     pub suspends: u8,
     /// `1` for a generator's body ([`NativeEntry::generator`]).
     pub generator: u8,
-    pub pad: [u8; 5],
+    /// `1` when it has `defer`s ([`NativeEntry::cleanup`]).
+    pub cleanup: u8,
+    pub pad: [u8; 4],
     pub entry: NativeEntryFn,
 }
 
@@ -571,6 +579,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
             reads: e.reads,
             ret_words: e.ret_words,
             generator: e.generator != 0,
+            cleanup: e.cleanup != 0,
             entry: e.entry,
         })
         .collect();
@@ -1948,9 +1957,21 @@ pub unsafe extern "C" fn coil_native_host(
 pub unsafe extern "C" fn coil_native_yield(ctx: *mut NativeCtx, value: u64) -> u64 {
     unsafe { (*ctx).committed = 1 };
     let send = gen_suspend(ctx, value);
+    let c = unsafe { &mut *ctx };
     // The words may have moved while it was away.
-    unsafe { (*ctx).gc_epoch += 1 };
+    c.gc_epoch += 1;
+    if GEN_CLOSING.replace(false) {
+        // Closed while suspended: unwind from here, as a panic does.
+        c.trap = TRAP_CLOSE;
+        c.bail = BAIL_PANIC;
+        return 0;
+    }
     send
+}
+
+thread_local! {
+    /// The next generator resume is a close ([`coil_native_yield`]).
+    pub(crate) static GEN_CLOSING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1992,6 +2013,8 @@ pub struct GenFiber {
     /// The context of the call suspended at a yield (its root words are
     /// the generator's saved words meanwhile).
     pub(crate) parked: *mut NativeCtx,
+    /// Its body has `defer`s: a close resumes it to unwind them.
+    pub(crate) cleanup: bool,
 }
 
 impl Drop for GenFiber {
@@ -2175,7 +2198,11 @@ pub unsafe extern "C" fn coil_native_defer(
 /// Run the cleanup pads of a native panic, innermost first, on `env`'s
 /// machine (committed: whatever they do is for good). Each pad's homes,
 /// and those of the pads still to run, are roots meanwhile.
-pub(crate) fn run_pads(mut pads: Vec<NativePad>, env: &NativeEnv) {
+pub(crate) fn run_pads(
+    mut pads: Vec<NativePad>,
+    env: &NativeEnv,
+    on_panic: &mut dyn FnMut(NativePanic),
+) {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
     // Link every record: the chain is innermost-last so each pad's own
@@ -2213,9 +2240,19 @@ pub(crate) fn run_pads(mut pads: Vec<NativePad>, env: &NativeEnv) {
         // The last record links all before it.
         let last = pads.len() - 1;
         ctx.roots = pads[last].homes.as_mut_ptr() as u64;
+        let mut inner = Vec::new();
+        ctx.pads = &mut inner;
         let homes = pads[i].homes[3..].as_ptr();
         // SAFETY: the backend compiled `func` as this frame's pad.
         let _ = unsafe { (pads[i].func)(&mut ctx, homes) };
+        if ctx.bail == BAIL_PANIC {
+            on_panic(NativePanic {
+                code: ctx.trap,
+                trace,
+                message,
+                pads: inner,
+            });
+        }
     }
 }
 

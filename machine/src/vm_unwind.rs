@@ -161,6 +161,20 @@ impl<const S: usize> Machine<S> {
         while let Some(sub) = target.as_ref().yield_from {
             target = sub;
         }
+        #[cfg(not(target_family = "wasm"))]
+        if target.as_ref().native.is_some() {
+            // A native body unwinds on its own fiber.
+            let stop = self.native_gen_close(target, *ip);
+            let mut link = Some(gc);
+            while let Some(c) = link {
+                link = c.as_ref().yield_from;
+                Self::finish_coroutine(c);
+            }
+            return match stop {
+                Some(stop) => TaskFlow::Reported(stop),
+                None => TaskFlow::Value(Value::default()),
+            };
+        }
         let coro = target.as_ref();
         if !(coro.state == CoroState::Suspended && coro.started && self.coro_has_pad(coro)) {
             let mut link = Some(gc);
