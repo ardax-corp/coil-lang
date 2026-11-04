@@ -18,6 +18,7 @@ unsafe extern "C" {
     static coil_aot_sites: u32;
     static coil_aot_site_count: u64;
     static coil_aot_refused_count: u64;
+    static coil_aot_layout: u64;
     static coil_static_syms: machine::StaticSymbol;
     static coil_static_sym_count: u64;
 }
@@ -29,13 +30,18 @@ unsafe extern "C" {
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // SAFETY: the linked object defines the tables as `aot` wrote them.
     unsafe {
-        machine::native::install_aot(
+        let installed = machine::native::install_aot(
             &raw const coil_aot_entries,
             coil_aot_entry_count as usize,
             &raw const coil_aot_sites,
             coil_aot_site_count as usize,
             coil_aot_refused_count == 0,
+            coil_aot_layout,
         );
+        if let Err(e) = installed {
+            eprintln!("coil: {e}");
+            exit(1);
+        }
         machine::install_static_symbols(&raw const coil_static_syms, coil_static_sym_count as usize);
     }
     match coil_cli::try_run_embedded() {

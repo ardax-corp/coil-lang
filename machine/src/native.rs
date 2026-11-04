@@ -93,6 +93,11 @@ pub struct NativeCtx {
     /// the native stack, innermost first, `0`-terminated, naming each such
     /// frame's call site ([`NativeCode::sites`]).
     pub calls: u64,
+    /// The heap's counters and nursery cursors, which inline allocation
+    /// reads and bumps ([`crate::memory::inline_object`]); null without a
+    /// heap.
+    pub alloc_counts: *mut crate::memory::HeapCounts,
+    pub alloc_bumps: *mut crate::memory::Bump,
 }
 
 /// A `defer` cleanup pad: called with its frame's homes.
@@ -129,6 +134,24 @@ pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
 
 /// Byte offset of [`NativeCtx::roots`].
 pub const NATIVE_CTX_ROOTS: i32 = std::mem::offset_of!(NativeCtx, roots) as i32;
+
+pub use crate::memory::{InlineObject, InlineShape, inline_object, layout_fingerprint};
+
+/// Byte offsets of [`NativeCtx::alloc_counts`] and [`NativeCtx::alloc_bumps`].
+pub const NATIVE_CTX_ALLOC_COUNTS: i32 = std::mem::offset_of!(NativeCtx, alloc_counts) as i32;
+pub const NATIVE_CTX_ALLOC_BUMPS: i32 = std::mem::offset_of!(NativeCtx, alloc_bumps) as i32;
+
+/// Byte offsets in [`crate::memory::HeapCounts`] and [`crate::memory::Bump`]
+/// inline allocation reads and writes.
+pub const COUNTS_INLINE_GATE: i32 = std::mem::offset_of!(crate::memory::HeapCounts, inline_gate) as i32;
+pub const COUNTS_FIN_WORDS: i32 = std::mem::offset_of!(crate::memory::HeapCounts, fin_words) as i32;
+pub const COUNTS_FIN_LEN: i32 = std::mem::offset_of!(crate::memory::HeapCounts, fin_len) as i32;
+pub const COUNTS_ALLOC_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCounts, alloc_bytes) as i32;
+pub const COUNTS_YOUNG_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCounts, young_bytes) as i32;
+pub const COUNTS_LIVE_COUNT: i32 = std::mem::offset_of!(crate::memory::HeapCounts, live_count) as i32;
+pub const BUMP_NEXT: i32 = std::mem::offset_of!(crate::memory::Bump, next) as i32;
+pub const BUMP_END: i32 = std::mem::offset_of!(crate::memory::Bump, end) as i32;
+pub const BUMP_BYTES: i32 = std::mem::size_of::<crate::memory::Bump>() as i32;
 
 impl NativeCtx {
     /// Every heap word the call's native frames hold while it is in a VM
@@ -358,12 +381,20 @@ impl NativeCtx {
             gc_epoch: 0,
             pads: std::ptr::null_mut(),
             calls: 0,
+            alloc_counts: std::ptr::null_mut(),
+            alloc_bumps: std::ptr::null_mut(),
         }
     }
 
     /// As [`Self::new`], with `heap` for the helpers that allocate.
-    pub fn with_heap(stack_limit: u64, heap: *mut crate::memory::Heap) -> Self {
-        Self { heap, ..Self::new(stack_limit) }
+    ///
+    /// # Safety
+    /// `heap` is null or the live heap the call runs on.
+    pub(crate) unsafe fn with_heap(stack_limit: u64, heap: *mut crate::memory::Heap) -> Self {
+        // SAFETY: the caller's.
+        let (alloc_counts, alloc_bumps) =
+            if heap.is_null() { (std::ptr::null_mut(), std::ptr::null_mut()) } else { unsafe { (*heap).inline_alloc_ptrs() } };
+        Self { heap, alloc_counts, alloc_bumps, ..Self::new(stack_limit) }
     }
 }
 
@@ -427,12 +458,18 @@ pub struct AotEntry {
 /// Install the code an AOT object linked into this executable defines,
 /// for the next run: `n` entries and `n_sites` sites, each four words
 /// (`entry_pc`, then the location's file, start and end byte).
-/// `complete`: the object compiled every body of the program.
+/// `complete`: the object compiled every body of the program. `layout`:
+/// the [`layout_fingerprint`] of the compiler that made the object; an
+/// object made against other object layouts is refused (`Err`), since its
+/// inline allocation would write them wrong.
 ///
 /// # Safety
 ///
 /// The tables are the linked object's, as `coil_native::aot` wrote them.
-pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32, n_sites: usize, complete: bool) {
+pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32, n_sites: usize, complete: bool, layout: u64) -> Result<(), String> {
+    if layout != layout_fingerprint() {
+        return Err("this executable's native code was compiled against another build of the runtime (object layouts differ); package it again".to_string());
+    }
     // SAFETY: the object defines `n` entries and `4 * n_sites` words.
     let entries = unsafe { std::slice::from_raw_parts(entries, n) };
     let words = unsafe { std::slice::from_raw_parts(sites, n_sites * 4) };
@@ -456,6 +493,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
         .map(|w| NativeSite { entry_pc: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
         .collect();
     install_for_next_run(entries, sites, complete);
+    Ok(())
 }
 
 /// An op native code may panic at: the function it is in (by entry PC)
@@ -622,7 +660,7 @@ pub(crate) enum NativeOutcome {
 pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> NativeOutcome {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
-    let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap);
+    let mut ctx = unsafe { NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap) };
     if let Some(limit) = crate::stacks::fiber_stack_limit() {
         ctx.stack_hard = ctx.stack_hard.min(limit as u64);
     } else if let Some(left) = stacker::remaining_stack() {
@@ -1935,7 +1973,7 @@ pub(crate) fn run_pads(
         pads[i].homes[0] = next;
     }
     for i in 0..pads.len() {
-        let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap);
+        let mut ctx = unsafe { NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap) };
         if let Some(limit) = crate::stacks::fiber_stack_limit() {
             ctx.stack_hard = ctx.stack_hard.min(limit as u64);
         } else if let Some(left) = stacker::remaining_stack() {

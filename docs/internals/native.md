@@ -541,6 +541,31 @@ covers the program: `machine/src/worker.rs` sets up a `Runtime` of the
 worker's own (pooled per thread, reset between jobs) and calls the entry
 on the driver, where `run_job_on_vm` would set up a `Machine`.
 
+### Inline allocation
+
+An `Alloc` of a fixed-size nursery object (an enum variant or tuple of 1 to
+4 words, an instance of a class with 1 to 4 fields) does not call
+`coil_native_alloc` on its fast path. Native code loads the heap's gate
+(`HeapCounts::inline_gate`, closed while the nursery is off, a mark is
+open, pretenuring after a mostly surviving minor, a steal epoch, and under
+`gc-stress`), and for an instance tests its type's bit in the finalizer
+types (a type with a `drop` stays old). It then bumps its size class's
+cursor (`Bump`, boxed in the slab, indexed by a class fixed for every heap),
+writes the slot's image with the payload words in place, and adds the
+object to `alloc_bytes`, `young_bytes` and `live_count`. A full chunk, a
+closed gate or a `drop` type falls back to the helper, which refills the
+chunk and sets `gc_due` when a minor collection is due, so collections still
+come at safepoints on time.
+
+The images come from `machine::memory::inline_object`, probed from real
+objects: `ObjEnum`, `ObjTuple`, `ObjInstance` and their payloads are
+`repr(C)` / `repr(u8)`, so the compiler that writes the image and the
+runtime that reads the object agree. An AOT object records
+`layout_fingerprint` as `coil_aot_layout`; `install_aot` refuses an object
+made against other layouts. `COIL_NATIVE_INLINE_ALLOC=0` at compile time
+turns the fast path off, for A/B runs. Arrays, closures, generators and
+`drop` enums always take the helper.
+
 ### VM ↔ native
 
 `machine::native` holds the table: entry PC → `extern "C" fn(ctx, *const

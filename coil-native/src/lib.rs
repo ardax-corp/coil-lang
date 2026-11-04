@@ -73,10 +73,27 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
     }
 }
 
+/// The [`machine::native::InlineShape`] of an `Alloc` of `kind` with `n`
+/// words and the helper's `extra` word, when native code may allocate it
+/// inline (`COIL_NATIVE_INLINE_ALLOC=0` turns that off, for A/B runs).
+fn inline_shape(kind: MirAllocKind, n: usize, extra: u64) -> Option<machine::native::InlineShape> {
+    use machine::native::InlineShape;
+    if std::env::var_os("COIL_NATIVE_INLINE_ALLOC").is_some_and(|v| v == "0") {
+        return None;
+    }
+    let n = u8::try_from(n).ok()?;
+    match kind {
+        MirAllocKind::Tuple => Some(InlineShape::Tuple { kinds: extra as u8, n }),
+        MirAllocKind::Enum { tag } => Some(InlineShape::Enum { tag, kinds: (extra >> 32) as u8, n }),
+        MirAllocKind::Object { type_id, nfields } => Some(InlineShape::Instance { type_id, n: u8::try_from(nfields).ok()? }),
+        _ => None,
+    }
+}
+
 /// What [`aot`] produced: a relocatable object for the host target that
 /// defines the compiled bodies and the tables `machine::native::install_aot`
 /// reads (`coil_aot_entries`, `coil_aot_entry_count`, `coil_aot_sites`,
-/// `coil_aot_site_count`, `coil_aot_refused_count`), importing the runtime helpers by name, and the
+/// `coil_aot_site_count`, `coil_aot_refused_count`, `coil_aot_layout`), importing the runtime helpers by name, and the
 /// statically linked `extern` symbols' table `machine::install_static_symbols` reads
 /// (`coil_static_syms`, `coil_static_sym_count`).
 pub struct AotObject {
@@ -168,6 +185,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         words("coil_aot_sites", site_words)?;
         words("coil_aot_site_count", site_count.to_le_bytes().to_vec())?;
         words("coil_aot_refused_count", (refused.len() as u64).to_le_bytes().to_vec())?;
+        words("coil_aot_layout", machine::native::layout_fingerprint().to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
@@ -2789,6 +2807,13 @@ impl<'a> Lower<'a> {
                         (machine::native::ALLOC_POLY_FN, words.len() as u64, u64::from(pc) | (u64::from(params) << 32))
                     }
                 };
+                let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object);
+                let join = inline.map(|obj| {
+                    let join = self.b.create_block();
+                    self.b.append_block_param(join, types::I64);
+                    self.inline_alloc(f, &obj, *kind, &words, join);
+                    join
+                });
                 let p = match *kind {
                     MirAllocKind::Fn { mask, .. } => self.words_slot_with(f, &words, Some(i64::from(mask))),
                     MirAllocKind::DropEnum { type_id, .. } => self.words_slot_with(f, &words, Some(i64::from(type_id))),
@@ -2798,9 +2823,14 @@ impl<'a> Lower<'a> {
                 let n = self.b.ins().iconst(types::I64, n as i64);
                 let extra = self.b.ins().iconst(types::I64, extra as i64);
                 let call = self.b.ins().call(self.alloc, &[self.ctx, code, p, n, extra]);
-                let w = self.b.inst_results(call)[0];
+                let mut w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
+                if let Some(join) = join {
+                    self.b.ins().jump(join, &[w.into()]);
+                    self.b.switch_to_block(join);
+                    w = self.b.block_params(join)[0];
+                }
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -3112,6 +3142,72 @@ impl<'a> Lower<'a> {
     }
 
     /// The words of `vs` in a new stack slot, in order; its address.
+    /// Inline allocation of `obj` (`machine::native::inline_object`): with
+    /// the heap's gate open (and, for an instance, no `drop` on its type)
+    /// and room in its nursery chunk, bump the class's cursor, write the
+    /// slot's image with `words` in place and count the object, then jump
+    /// to `join` with its address. Otherwise the code after this (the
+    /// current block, on return) calls the helper, which refills.
+    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], join: Block) {
+        use machine::native::{
+            BUMP_BYTES, BUMP_END, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
+            COUNTS_LIVE_COUNT, COUNTS_YOUNG_BYTES, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
+        };
+        let mem = MemFlagsData::trusted();
+        let slow = self.b.create_block();
+        let bump = self.b.create_block();
+        let fast = self.b.create_block();
+        let counts = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_COUNTS);
+        let gate = self.b.ins().load(types::I64, mem, counts, COUNTS_INLINE_GATE);
+        if let MirAllocKind::Object { type_id, .. } = kind {
+            // A type with a `drop` stays out of the nursery: the helper
+            // allocates it old and lists it.
+            let check = self.b.create_block();
+            self.b.ins().brif(gate, check, &[], slow, &[]);
+            self.b.switch_to_block(check);
+            let word = i64::from(type_id / 64);
+            let len = self.b.ins().load(types::I64, mem, counts, COUNTS_FIN_LEN);
+            let past = self.b.ins().icmp_imm_s(IntCC::UnsignedLessThanOrEqual, len, word);
+            let test = self.b.create_block();
+            self.b.ins().brif(past, bump, &[], test, &[]);
+            self.b.switch_to_block(test);
+            let base = self.b.ins().load(types::I64, mem, counts, COUNTS_FIN_WORDS);
+            let bits = self.b.ins().load(types::I64, mem, base, (word * 8) as i32);
+            let bit = self.b.ins().band_imm_s(bits, 1_i64 << (type_id % 64));
+            self.b.ins().brif(bit, slow, &[], bump, &[]);
+        } else {
+            self.b.ins().brif(gate, bump, &[], slow, &[]);
+        }
+        self.b.switch_to_block(bump);
+        let bumps = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_BUMPS);
+        let cursor = self.b.ins().iadd_imm_s(bumps, i64::from(obj.class) * i64::from(BUMP_BYTES));
+        let at = self.b.ins().load(types::I64, mem, cursor, BUMP_NEXT);
+        let end = self.b.ins().load(types::I64, mem, cursor, BUMP_END);
+        let next = self.b.ins().iadd_imm_s(at, i64::from(obj.slot));
+        let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, next, end);
+        self.b.ins().brif(fits, fast, &[], slow, &[]);
+        self.b.switch_to_block(fast);
+        self.b.ins().store(mem, next, cursor, BUMP_NEXT);
+        let first = obj.words_at as usize;
+        for (i, &img) in obj.image.iter().enumerate() {
+            let x = match i.checked_sub(first).and_then(|k| words.get(k)) {
+                Some(&v) => {
+                    let x = self.get(f, v);
+                    self.coerce(x, types::I64)
+                }
+                None => self.b.ins().iconst(types::I64, img as i64),
+            };
+            self.b.ins().store(mem, x, at, (i * 8) as i32);
+        }
+        for (off, by) in [(COUNTS_ALLOC_BYTES, i64::from(obj.size)), (COUNTS_YOUNG_BYTES, i64::from(obj.size)), (COUNTS_LIVE_COUNT, 1)] {
+            let c = self.b.ins().load(types::I64, mem, counts, off);
+            let c = self.b.ins().iadd_imm_s(c, by);
+            self.b.ins().store(mem, c, counts, off);
+        }
+        self.b.ins().jump(join, &[at.into()]);
+        self.b.switch_to_block(slow);
+    }
+
     fn words_slot(&mut self, f: &MirFunc, vs: &[ValueId]) -> cranelift_codegen::ir::Value {
         self.words_slot_with(f, vs, None)
     }
