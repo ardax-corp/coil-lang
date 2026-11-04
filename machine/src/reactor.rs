@@ -20,7 +20,7 @@ use crate::thread::{
     ThreadErrorTag, ThreadProgram, ThreadSpawnContext, WORKER_STACK_SLOTS, spawn_arg_to_value,
     value_to_portable,
 };
-#[cfg(feature = "vm")]
+#[cfg(any(test, feature = "vm"))]
 use crate::vm::Machine;
 
 /// No OS threads on this target (wasm without the atomics feature): the pool
@@ -482,7 +482,7 @@ thread_local! {
     /// Reused join-help VMs (one live checkout per nested steal on this thread).
     /// Boxed so checking one out moves a pointer, not the VM (clippy only
     /// sees the VM as small on 32-bit targets).
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     #[allow(clippy::vec_box)]
     static HELP_VMS: std::cell::RefCell<Vec<Box<Machine<WORKER_STACK_SLOTS>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
@@ -530,14 +530,14 @@ fn with_owned_local_worker<R>(reactor: &Reactor, f: impl FnOnce(&Worker<Job>) ->
     })
 }
 
-#[cfg(feature = "vm")]
+#[cfg(any(test, feature = "vm"))]
 fn machine_for_program(program: &ThreadProgram) -> Box<Machine<WORKER_STACK_SLOTS>> {
     Box::new(Machine::with_operand_capacity(
         program.operand_stack_slots as usize,
     ))
 }
 
-#[cfg(feature = "vm")]
+#[cfg(any(test, feature = "vm"))]
 /// Checkout a TLS helper VM, run `f`, then return it with a bounded heap.
 fn with_help_vm<R>(program: &ThreadProgram, f: impl FnOnce(&mut Machine<WORKER_STACK_SLOTS>) -> R) -> R {
     let mut vm = HELP_VMS
@@ -561,7 +561,7 @@ fn help_vm_pool_len() -> usize {
     HELP_VMS.with(|slot| slot.borrow().len())
 }
 
-#[cfg(feature = "vm")]
+#[cfg(any(test, feature = "vm"))]
 fn ensure_operand_capacity(vm: &mut Machine<WORKER_STACK_SLOTS>, slots: u32) {
     let need = (slots as usize).max(1);
     if vm.operand_stack_capacity() < need {
@@ -573,7 +573,7 @@ fn worker_loop(reactor: Arc<Reactor>) {
     let local = Worker::new_fifo();
     reactor.register_stealer(local.stealer());
 
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     let mut vm = Machine::<WORKER_STACK_SLOTS>::default();
 
     IS_POOL_WORKER.with(|c| c.set(true));
@@ -602,13 +602,13 @@ fn worker_loop(reactor: Arc<Reactor>) {
                 crate::worker::run_native_job(job);
                 continue;
             }
-            #[cfg(feature = "vm")]
+            #[cfg(any(test, feature = "vm"))]
             {
                 ensure_operand_capacity(&mut vm, job.program.operand_stack_slots);
                 vm.set_reactor(Arc::clone(&reactor));
                 run_job_on_vm(&mut vm, job);
             }
-            #[cfg(not(feature = "vm"))]
+            #[cfg(not(any(test, feature = "vm")))]
             refuse_job(job);
         }
     }
@@ -634,17 +634,17 @@ fn run_job_here(job: Job) {
     if crate::worker::runs_natively(&job) {
         return crate::worker::run_native_job(job);
     }
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     {
         let program = Arc::clone(&job.program);
         with_help_vm(&program, |vm| run_job_on_vm(vm, job));
     }
-    #[cfg(not(feature = "vm"))]
+    #[cfg(not(any(test, feature = "vm")))]
     refuse_job(job);
 }
 
 /// Without the VM, a job native code does not cover fails its join.
-#[cfg(not(feature = "vm"))]
+#[cfg(not(any(test, feature = "vm")))]
 fn refuse_job(job: Job) {
     eprintln!("coil: a thread's code needs the bytecode VM, which this runtime leaves out");
     job.state.store_result_with_panic(Err(ThreadErrorTag::JoinFailed), None);
@@ -734,7 +734,7 @@ fn wait_join_on_worker(
     })
 }
 
-#[cfg(feature = "vm")]
+#[cfg(any(test, feature = "vm"))]
 fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     let Job {
         entry,
@@ -1010,7 +1010,7 @@ pub struct TestCase {
     pub step_budget: Option<u64>,
 }
 
-#[cfg(feature = "vm")]
+#[cfg(any(test, feature = "vm"))]
 /// Static init, then the case; the report is stored before the join completes.
 fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> PortableValue {
     // A case's GC roots must not depend on which job this worker ran before
@@ -1071,7 +1071,7 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
 
 /// [`run_test_job`] on the native driver, when the program's native code
 /// covers the case (`None`: the VM runs it).
-#[cfg(feature = "vm")]
+#[cfg(any(test, feature = "vm"))]
 fn run_test_job_natively(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> Option<PortableValue> {
     let start = test.init_ip.unwrap_or(entry) as usize;
     let ret = vm.with_native_driver(start, |d| test_on_driver(d, entry, test))?;

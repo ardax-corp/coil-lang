@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# The bytecode interpreter (`Machine`). Off, a program runs only on the
-# native driver (`docs/internals/native.md`): the AOT runtime `coil-rt`.
-default = ["vm"]
+default = []
+# The bytecode interpreter (`Machine`); every VM user enables it. Off, a
+# program runs only on the native driver (`docs/internals/native.md`): the
+# AOT runtime `coil-rt`. This crate's own unit tests always build it (`cfg(test)`).
 vm = []
 # `debugger` / `coverage` gate the hook state and APIs only. The dispatch
 # loop picks its hooked instantiation (`execute::<true>`) only while a

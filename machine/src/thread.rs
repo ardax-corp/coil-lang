@@ -137,7 +137,7 @@ use crate::memory::{
     EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
     ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
 };
-#[cfg(feature = "vm")]
+#[cfg(any(test, feature = "vm"))]
 use crate::vm::Machine;
 
 /// Operand-stack slots for worker VMs (same default as `execute_archive` in `src/main.rs`).
@@ -711,7 +711,7 @@ pub(crate) struct HostStateGuard {
 }
 
 impl HostStateGuard {
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     pub fn enter<const N: usize>(vm: &mut Machine<N>) -> Self {
         let prev = HOST_STATE.with(|c| c.borrow_mut().take());
         let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
@@ -797,34 +797,34 @@ impl HostStateGuard {
         crate::collect::end_shared_steal(unsafe { Self::driver(raw) }, published);
     }
 
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     unsafe fn call<const N: usize>(raw: *mut (), offset: u32, args: &[Value]) -> Value {
         unsafe { (*(raw.cast::<Machine<N>>())).call_function(offset, args) }
     }
 
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     unsafe fn spawn_context<const N: usize>(raw: *mut ()) -> Option<ThreadSpawnContext> {
         unsafe { (*(raw.cast::<Machine<N>>())).thread_spawn_context() }
     }
 
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     unsafe fn static_words<const N: usize>(raw: *mut ()) -> Arc<Vec<u64>> {
         unsafe { (*(raw.cast::<Machine<N>>())).static_words() }
     }
 
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     unsafe fn dload_gate<const N: usize>(raw: *mut ()) -> *const crate::ffi::DloadGate {
         unsafe { (*(raw.cast::<Machine<N>>())).dload_gate() as *const _ }
     }
 
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     unsafe fn begin_steal<const N: usize>(
         raw: *mut (),
     ) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
         unsafe { (*(raw.cast::<Machine<N>>())).begin_shared_steal() }
     }
 
-    #[cfg(feature = "vm")]
+    #[cfg(any(test, feature = "vm"))]
     unsafe fn end_steal<const N: usize>(raw: *mut (), extra: Value) {
         unsafe { (*(raw.cast::<Machine<N>>())).end_shared_steal(extra) }
     }
