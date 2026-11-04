@@ -134,7 +134,7 @@ impl<const S: usize> Machine<S> {
         let table = self.native.as_deref_mut()?;
         let entry = table.lookup(coro.resume_ip).filter(|e| e.generator)?;
         // Its VM code could not switch tasks from a fiber of its own.
-        if entry.suspends && self.sched.is_some() {
+        if entry.suspends && self.rt.sched.is_some() {
             return None;
         }
         let n = coro.saved_stack.len();

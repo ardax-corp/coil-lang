@@ -24,12 +24,12 @@ impl<const S: usize> Machine<S> {
     /// so a suspension point can switch tasks.
     #[inline]
     fn tasks_can_switch(&self) -> bool {
-        self.sched.as_ref().is_some_and(|s| s.live > 0) && self.at_task_level()
+        self.rt.sched.as_ref().is_some_and(|s| s.live > 0) && self.at_task_level()
     }
 
     /// A panic now fails the current child task instead of the VM.
     fn task_panic_is_caught(&self) -> bool {
-        self.sched.as_ref().is_some_and(|s| s.current != crate::task::ROOT) && self.at_task_level()
+        self.rt.sched.as_ref().is_some_and(|s| s.current != crate::task::ROOT) && self.at_task_level()
     }
 
     fn task_host_op(
@@ -59,7 +59,7 @@ impl<const S: usize> Machine<S> {
             12 => TaskFlow::Value(Value::from(crate::task::new_cond())),
             13 => self.task_cond_wait(arg(0), ip, sp),
             14 => {
-                if let Some(s) = self.sched.as_mut() {
+                if let Some(s) = self.rt.sched.as_mut() {
                     s.notify_cond(arg(0));
                 }
                 TaskFlow::Value(Value::default())
@@ -108,7 +108,7 @@ impl<const S: usize> Machine<S> {
         };
         // A scope a fiber opens at its task level joins the scheduler.
         let at_task_level = self.at_task_level();
-        if let Some(s) = &self.sched
+        if let Some(s) = &self.rt.sched
             && !at_task_level
         {
             if !s.idle() {
@@ -117,17 +117,17 @@ impl<const S: usize> Machine<S> {
                         .into(),
                 );
             }
-            self.sched = None;
+            self.rt.sched = None;
         }
         let s = self
-            .sched
+            .rt.sched
             .get_or_insert_with(|| Box::new(crate::task::Scheduler::new(nested)));
         TaskFlow::Value(Value::from(s.open_scope()))
     }
 
     /// The scope body returned: wait for its children (suspension point).
     fn task_scope_close(&mut self, id: i64, ip: &mut usize, sp: &mut usize) -> TaskFlow {
-        let Some(s) = self.sched.as_mut() else {
+        let Some(s) = self.rt.sched.as_mut() else {
             return TaskFlow::Panic("task scope is not open".into());
         };
         let current = s.current;
@@ -158,7 +158,7 @@ impl<const S: usize> Machine<S> {
     /// Panic message of a failed scope; forgets the scope.
     fn task_scope_error(&mut self, id: i64) -> TaskFlow {
         let msg = self
-            .sched
+            .rt.sched
             .as_mut()
             .and_then(|s| s.remove_scope(id))
             .and_then(|sc| sc.failed)
@@ -172,7 +172,7 @@ impl<const S: usize> Machine<S> {
             Some(Object::Coroutine(gc)) => gc,
             _ => return TaskFlow::Panic("task spawn: not a coroutine".into()),
         };
-        let Some(s) = self.sched.as_mut() else {
+        let Some(s) = self.rt.sched.as_mut() else {
             return TaskFlow::Panic("spawn outside a task scope".into());
         };
         if !s.scopes.get(&scope).is_some_and(|sc| !sc.closed) {
@@ -185,7 +185,7 @@ impl<const S: usize> Machine<S> {
     /// Wait for task `id` (suspension point); returns its status.
     fn task_join(&mut self, id: u64, ip: &mut usize, sp: &mut usize) -> TaskFlow {
         use crate::task::{Block, STATUS_OK, Scheduler};
-        let Some(s) = self.sched.as_mut() else {
+        let Some(s) = self.rt.sched.as_mut() else {
             // Finished and forgotten with its scope.
             return TaskFlow::Value(Value::from(STATUS_OK));
         };
@@ -210,7 +210,7 @@ impl<const S: usize> Machine<S> {
     /// Panic message of failed task `id` (empty if it did not panic).
     fn task_error(&mut self, id: u64) -> TaskFlow {
         let msg = self
-            .sched
+            .rt.sched
             .as_ref()
             .and_then(|s| s.tasks.get(&id))
             .and_then(|r| r.panic.clone())
@@ -225,7 +225,7 @@ impl<const S: usize> Machine<S> {
         }
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0) as u64);
-        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
         let current = s.current;
         s.add_timer(current, deadline);
         self.task_suspend(Some(crate::task::Block::Sleep), ip, sp);
@@ -235,7 +235,7 @@ impl<const S: usize> Machine<S> {
     /// Let other ready tasks run first.
     fn task_yield(&mut self, ip: &mut usize, sp: &mut usize) -> TaskFlow {
         let others_ready = self.tasks_can_switch()
-            && self.sched.as_ref().is_some_and(|s| !s.run_queue.is_empty());
+            && self.rt.sched.as_ref().is_some_and(|s| !s.run_queue.is_empty());
         if !others_ready {
             return TaskFlow::Value(Value::default());
         }
@@ -249,7 +249,7 @@ impl<const S: usize> Machine<S> {
         if !self.tasks_can_switch() {
             return TaskFlow::Value(Value::from(crate::task::STATUS_DEADLOCK));
         }
-        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
         let current = s.current;
         s.cond_waits.entry(cond).or_default().push(current);
         self.task_suspend(Some(crate::task::Block::Cond(cond)), ip, sp);
@@ -260,7 +260,7 @@ impl<const S: usize> Machine<S> {
     fn task_waiter(
         &self,
     ) -> Option<(std::sync::Arc<crate::task::TaskWaker>, u64, crate::task::TaskId)> {
-        let s = self.sched.as_ref()?;
+        let s = self.rt.sched.as_ref()?;
         Some((std::sync::Arc::clone(&s.waker), s.peek_thread_key(), s.current))
     }
 
@@ -268,7 +268,7 @@ impl<const S: usize> Machine<S> {
     /// still on the stack): suspend at the HostInvoke itself, so it runs
     /// again once the other thread posts the wake.
     fn task_suspend_thread(&mut self, ip: &mut usize, sp: &mut usize) {
-        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
         let key = s.peek_thread_key();
         let current = s.current;
         s.add_thread_wait(current, key);
@@ -284,7 +284,7 @@ impl<const S: usize> Machine<S> {
         ip: &mut usize,
         sp: &mut usize,
     ) {
-        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
         let token = s.reactor.register_wait(req.handle, req.interest);
         let current = s.current;
         s.io_waits.insert(token, current);
@@ -298,7 +298,7 @@ impl<const S: usize> Machine<S> {
     /// the stack (a connect in progress): suspend at the HostInvoke itself, so
     /// it runs again once the handle is ready or the timeout passed.
     fn task_suspend_io_retry(&mut self, req: crate::io::IoParkRequest, ip: &mut usize, sp: &mut usize) {
-        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
         let token = s.reactor.register_wait(req.handle, req.interest);
         let current = s.current;
         s.io_waits.insert(token, current);
@@ -341,7 +341,7 @@ impl<const S: usize> Machine<S> {
             self.stack.push(Value::default());
         }
         self.frames.get_mut().set(*sp);
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         let current = s.current;
         let rec = s.tasks.get_mut(&current).expect("current task");
         let mut block = block;
@@ -378,7 +378,7 @@ impl<const S: usize> Machine<S> {
 
     /// Copy the running child task (and generators it resumes) off the stack.
     fn task_save_current(&mut self, ip: usize, sp: usize) {
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         let current = s.current;
         let idx = s.tasks[&current].ctx_index;
         let ctx = self.resume_stack[idx];
@@ -389,7 +389,7 @@ impl<const S: usize> Machine<S> {
             .map(|c| (c.coro, c.base_sp - ctx.base_sp, c.frame_depth - ctx.frame_depth))
             .collect();
         self.task_discard_above(idx);
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         s.tasks.get_mut(&current).expect("current task").inner = inner;
     }
 
@@ -439,7 +439,7 @@ impl<const S: usize> Machine<S> {
     fn task_run_next(&mut self, ip: &mut usize, sp: &mut usize) {
         use crate::task::{ROOT, TaskState};
         loop {
-            let s = self.sched.as_mut().expect("scheduler");
+            let s = self.rt.sched.as_mut().expect("scheduler");
             let mut next = None;
             while let Some(id) = s.run_queue.pop_front() {
                 if s.tasks.get(&id).is_some_and(|r| r.state == TaskState::Ready) {
@@ -481,7 +481,7 @@ impl<const S: usize> Machine<S> {
     /// Continue the root task where it suspended (it never left the stack).
     fn task_resume_root(&mut self, ip: &mut usize, sp: &mut usize) {
         use crate::task::{ROOT, TaskState};
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         s.current = ROOT;
         let rec = s.tasks.get_mut(&ROOT).expect("root task");
         rec.state = TaskState::Running;
@@ -499,7 +499,7 @@ impl<const S: usize> Machine<S> {
     /// Resume child task `id` above the root's words. `false` on stack overflow.
     fn task_switch_in(&mut self, id: crate::task::TaskId, ip: &mut usize, sp: &mut usize) -> bool {
         use crate::task::TaskState;
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         let rec = s.tasks.get_mut(&id).expect("ready task");
         let coro = rec.coro.expect("child task");
         let wake = rec.wake.take();
@@ -518,7 +518,7 @@ impl<const S: usize> Machine<S> {
                 task: false,
             });
         }
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         s.current = id;
         let rec = s.tasks.get_mut(&id).expect("ready task");
         rec.ctx_index = idx;
@@ -541,7 +541,7 @@ impl<const S: usize> Machine<S> {
         use crate::task::Wake;
         #[cfg(not(target_family = "wasm"))]
         if self.fiber_switch_depth.is_none() && !matches!(wake, Wake::Retry) {
-            let current = self.sched.as_ref().map_or(crate::task::ROOT, |s| s.current);
+            let current = self.rt.sched.as_ref().map_or(crate::task::ROOT, |s| s.current);
             if self.parked_fibers.contains_key(&current) {
                 // The task waits in its fiber: the wake goes to the
                 // suspension point there, when the fiber resumes.
@@ -570,7 +570,7 @@ impl<const S: usize> Machine<S> {
         use crate::task::{Block, Wake};
         // How often IO polling looks for wakes from other threads.
         const THREAD_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         if s.take_posted() {
             return true;
         }
@@ -585,11 +585,11 @@ impl<const S: usize> Machine<S> {
         let waker = std::sync::Arc::clone(&s.waker);
         if has_io && has_thread {
             timeout = Some(timeout.map_or(THREAD_SLICE, |t| t.min(THREAD_SLICE)));
-            self.reactor.help_local_once();
+            self.rt.reactor.help_local_once();
         }
         if has_io {
             reactor.wait_any(timeout);
-            let s = self.sched.as_mut().expect("scheduler");
+            let s = self.rt.sched.as_mut().expect("scheduler");
             for token in reactor.take_ready() {
                 if let Some(id) = s.io_waits.remove(&token) {
                     let wake = match s.tasks.get(&id).and_then(|r| r.block) {
@@ -603,13 +603,13 @@ impl<const S: usize> Machine<S> {
         } else if has_thread {
             // The thread a task waits for may be a job queued on this very
             // worker: run queued jobs before sleeping.
-            if !self.reactor.help_local_once() {
+            if !self.rt.reactor.help_local_once() {
                 waker.wait(timeout.map_or(THREAD_SLICE, |t| t.min(THREAD_SLICE)).into());
             }
         } else if let Some(t) = timeout {
             std::thread::sleep(t);
         }
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         s.take_posted();
         for (id, block) in s.expired_timers(std::time::Instant::now()) {
             match block {
@@ -634,7 +634,7 @@ impl<const S: usize> Machine<S> {
     /// (the `task` module panics on it).
     fn task_deadlock(&mut self) {
         use crate::task::{ROOT, STATUS_DEADLOCK, TaskState, Wake};
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         if let Some(rec) = s.tasks.get_mut(&ROOT) {
             rec.state = TaskState::Blocked;
         }
@@ -646,7 +646,7 @@ impl<const S: usize> Machine<S> {
         use crate::task::TaskState;
         // The task coroutine's own return value.
         let _ = self.stack.pop();
-        let id = self.sched.as_ref().expect("scheduler").current;
+        let id = self.rt.sched.as_ref().expect("scheduler").current;
         self.task_end(id, TaskState::Done, None);
         let caller = self.frames.get_mut();
         *ip = caller.tell();
@@ -660,7 +660,7 @@ impl<const S: usize> Machine<S> {
     /// abort the VM.
     fn task_recover_panic(&mut self) -> Option<usize> {
         use crate::task::{Cancel, TaskState};
-        let s = self.sched.as_ref()?;
+        let s = self.rt.sched.as_ref()?;
         if s.current == crate::task::ROOT {
             // The root task's panic ends the program: forget every task.
             self.task_teardown();
@@ -689,7 +689,7 @@ impl<const S: usize> Machine<S> {
     /// Drop the running child task's frames (and the generators it was
     /// resuming); `ip` / `sp` continue in the scheduler's frame.
     fn task_leave_current(&mut self, ip: &mut usize, sp: &mut usize) {
-        let s = self.sched.as_ref().expect("scheduler");
+        let s = self.rt.sched.as_ref().expect("scheduler");
         let idx = s.tasks[&s.current].ctx_index;
         for ctx in &self.resume_stack[idx..] {
             Self::finish_coroutine(ctx.coro);
@@ -714,7 +714,7 @@ impl<const S: usize> Machine<S> {
     /// opened are cancelled; it finishes once they have.
     fn task_end(&mut self, id: crate::task::TaskId, state: crate::task::TaskState, panic: Option<String>) {
         use crate::task::TaskState;
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         let Some(rec) = s.tasks.get_mut(&id) else {
             return;
         };
@@ -738,7 +738,7 @@ impl<const S: usize> Machine<S> {
         for c in cancel {
             self.task_request_cancel(c);
         }
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         if s.tasks.get(&id).is_some_and(|r| r.state == TaskState::Ending)
             && s.owned_children_finished(id)
         {
@@ -753,7 +753,7 @@ impl<const S: usize> Machine<S> {
     /// then ends as cancelled. A task already unwinding is not cancelled again.
     fn task_request_cancel(&mut self, id: crate::task::TaskId) {
         use crate::task::{Block, Cancel, ROOT, TaskState, Wake};
-        let Some(s) = self.sched.as_mut() else {
+        let Some(s) = self.rt.sched.as_mut() else {
             return;
         };
         let current = s.current;
@@ -796,7 +796,7 @@ impl<const S: usize> Machine<S> {
     /// tasks: cancel those and block until they stop (so they unwind first).
     fn task_cancel_waits_for_children(&mut self, id: crate::task::TaskId) -> bool {
         use crate::task::{Block, Cancel, TaskState};
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         let Some(rec) = s.tasks.get(&id) else {
             return false;
         };
@@ -812,7 +812,7 @@ impl<const S: usize> Machine<S> {
         for c in children {
             self.task_request_cancel(c);
         }
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         if s.owned_children_finished(id) {
             return false;
         }
@@ -825,7 +825,7 @@ impl<const S: usize> Machine<S> {
     /// The task just switched in has a cancel to deliver: mark it unwinding.
     fn task_take_cancel(&mut self) -> bool {
         use crate::task::Cancel;
-        let s = self.sched.as_mut().expect("scheduler");
+        let s = self.rt.sched.as_mut().expect("scheduler");
         let current = s.current;
         let rec = s.tasks.get_mut(&current).expect("current task");
         if rec.cancel != Cancel::Requested || rec.shield > 0 {
@@ -851,7 +851,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn task_shield_enter(&mut self) -> TaskFlow {
-        if let Some(s) = self.sched.as_mut()
+        if let Some(s) = self.rt.sched.as_mut()
             && let Some(rec) = s.tasks.get_mut(&s.current)
         {
             rec.shield += 1;
@@ -861,7 +861,7 @@ impl<const S: usize> Machine<S> {
 
     /// Leaving the last `shield` delivers a cancel that waited for it.
     fn task_shield_exit(&mut self, ip: &mut usize, sp: &mut usize) -> TaskFlow {
-        let Some(s) = self.sched.as_mut() else {
+        let Some(s) = self.rt.sched.as_mut() else {
             return TaskFlow::Value(Value::default());
         };
         let current = s.current;
@@ -886,8 +886,8 @@ impl<const S: usize> Machine<S> {
 
     /// Forget the scheduler once no scope or task is left.
     fn task_drop_idle_scheduler(&mut self) {
-        if self.sched.as_ref().is_some_and(|s| s.idle()) {
-            self.sched = None;
+        if self.rt.sched.as_ref().is_some_and(|s| s.idle()) {
+            self.rt.sched = None;
         }
     }
 
@@ -895,7 +895,7 @@ impl<const S: usize> Machine<S> {
     fn task_teardown(&mut self) {
         #[cfg(not(target_family = "wasm"))]
         self.parked_fibers.clear();
-        self.sched = None;
+        self.rt.sched = None;
         self.task_panic_message = None;
     }
 
@@ -905,7 +905,7 @@ impl<const S: usize> Machine<S> {
     pub fn debug_tasks(&self) -> Vec<crate::debug::DebugTask> {
         use crate::debug::{DebugTask, DebugTaskFrames};
         use crate::task::{Block, ROOT, TaskState};
-        let Some(s) = self.sched.as_ref() else {
+        let Some(s) = self.rt.sched.as_ref() else {
             return Vec::new();
         };
         if s.live == 0 {

@@ -68,7 +68,7 @@ impl<const S: usize> Machine<S> {
         self.unwind.resumed = false;
         // A cancel unwinding out of a fiber has no message: the task is
         // dropped, not failed (a panic on the way set its own).
-        let cancelling = self.sched.as_ref().is_some_and(|s| {
+        let cancelling = self.rt.sched.as_ref().is_some_and(|s| {
             s.tasks.get(&s.current).is_some_and(|r| r.cancel == crate::task::Cancel::Unwinding)
         });
         if self.task_panic_is_caught() && !(cancelling && message.is_empty()) {
@@ -87,7 +87,7 @@ impl<const S: usize> Machine<S> {
         {
             floor = floor.max(depth);
         }
-        if let Some(s) = &self.sched
+        if let Some(s) = &self.rt.sched
             && s.current != crate::task::ROOT
             && s.base_nested == self.nested_depth
             && self.fiber_switch_depth.is_none()

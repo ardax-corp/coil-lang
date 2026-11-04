@@ -3232,7 +3232,7 @@
         );
         assert!(Arc::ptr_eq(&vm.program_code, &code));
         assert!(Arc::ptr_eq(&vm.program_constants, &constants));
-        assert!(Arc::ptr_eq(&vm.program_strings, &strings));
+        assert!(Arc::ptr_eq(&vm.rt.program_strings, &strings));
         assert_eq!(vm.call_function(0, &[]).as_int(), 0);
     }
 
@@ -4972,7 +4972,7 @@
 
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "slot < self.statics.len()")]
+    #[should_panic(expected = "slot < self.rt.statics.len()")]
     fn store_static_out_of_range_debug_asserts() {
         let code = [
             Byte::new(Instruction::CONST).with_operand_u32(7),
@@ -5945,10 +5945,10 @@
     fn reset_isolate_heap_forgets_program_finalizers() {
         let mut vm = Machine::<256>::default();
         vm.register_finalizer_for_test(7, 42);
-        assert!(!vm.finalizer_by_type.is_empty());
+        assert!(!vm.rt.finalizer_by_type.is_empty());
         vm.reset_isolate_heap();
-        assert!(vm.finalizer_by_type.is_empty());
-        assert!(vm.finalizer_pcs.is_empty());
+        assert!(vm.rt.finalizer_by_type.is_empty());
+        assert!(vm.rt.finalizer_pcs.is_empty());
     }
 
     /// A payload enum stamped by `TagEnumType` is finalized at teardown.

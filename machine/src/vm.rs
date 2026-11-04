@@ -1579,11 +1579,6 @@ pub struct Machine<const S: usize> {
     /// `Arc` so reactor workers share the [`crate::thread::ThreadProgram`] image.
     program_code: Arc<Vec<RawByte>>,
     program_constants: Arc<Vec<u64>>,
-    program_strings: Arc<Vec<String>>,
-    /// Interned handle per `program_strings` index. Not a GC root: sweep
-    /// zeros the table so unmarked literals can die; STRING still stacks
-    /// the handle before `maybe_gc`.
-    program_string_cache: Vec<Value>,
     /// When > 0, `RETURN` captures into `nested_return` instead of unwinding to caller.
     nested_depth: u32,
     /// Set when a `RETURN` must update pins, a nested host call, or a
@@ -1605,11 +1600,6 @@ pub struct Machine<const S: usize> {
     over_apply_frames: usize,
     /// Set when `execute` pauses before a native FFI call that may reenter the VM.
     pending_ffi: Option<PendingFfiInvoke>,
-    /// Arguments of the native FFI calls in flight (nested when a callback
-    /// re-enters the VM and calls out again). `FfiInvoke` pops them off the
-    /// operand stack, so they are rooted here until the call returns:
-    /// `ConstBytes` lends a string's bytes to C for the whole call.
-    ffi_arg_roots: Vec<Value>,
     /// Set when `await_*` parks until fd readiness (CPU help-steals meanwhile).
     pending_io: Option<PendingIoWait>,
     /// Set when a language-level `panic` aborts the VM.
@@ -1621,9 +1611,6 @@ pub struct Machine<const S: usize> {
     /// frame, innermost first, and the innermost frame's location.
     native_panic_frames: Vec<String>,
     native_panic_loc: Option<String>,
-    /// Native calls in a VM call, innermost last: the heap words their
-    /// frames hold are pinned roots ([`crate::native::NativeCtx::for_each_root`]).
-    native_roots: Vec<(*mut crate::native::NativeCtx, usize)>,
     /// Inside a fiber (`vm_fiber.rs`): the nesting level its VM calls switch
     /// tasks at. `None` outside fibers.
     fiber_switch_depth: Option<u32>,
@@ -1667,8 +1654,6 @@ pub struct Machine<const S: usize> {
     /// Inside [`Self::resume_value`]: the frame depth its generator yields
     /// or returns to, where the nested execution stops (`usize::MAX`: none).
     resume_floor: usize,
-    /// Task scheduler, created by the first `task::scope` (see `task.rs`).
-    sched: Option<Box<crate::task::Scheduler>>,
     /// Message of a panic a child task raised (the scope reports it).
     task_panic_message: Option<String>,
     /// A collector-run `drop` panicked under the test harness: the job stops
@@ -1679,8 +1664,6 @@ pub struct Machine<const S: usize> {
     closeables: bool,
     /// Unwinder state (`vm_unwind.rs`): a panic that may run `defer`s.
     unwind: Unwind,
-    /// Global static slots (`LoadStatic` / `StoreStatic`).
-    statics: Vec<Value>,
     /// Debug line table (parallel to archived bytecode indices).
     program_debug: ProgramDebug,
     /// Cached `(file_index, line)` per PC for debug stepping (built from `program_debug`).
@@ -1703,14 +1686,6 @@ pub struct Machine<const S: usize> {
     shared_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     /// What of `shared_print` is stderr: stderr writes and panic messages.
     shared_stderr: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
-    /// Undetached spawns owned by this VM (joined at end of `run_with_pool`).
-    live_threads: crate::thread::LiveThreadRegistry,
-    /// Shared concurrent OS-worker budget for this root VM (and its workers).
-    worker_cap: std::sync::Arc<crate::thread::WorkerCap>,
-    /// Work-stealing pool sized by [`Self::worker_cap`].
-    reactor: std::sync::Arc<crate::reactor::Reactor>,
-    /// IO readiness reactor (sync adapters + async waiters).
-    io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
     /// S2b maps: live heap IL slots at alloc safepoints. Only archives from
     /// before precise maps covered every body carry them (the compiler no
     /// longer emits any); empty for everything compiled now.
@@ -1727,10 +1702,6 @@ pub struct Machine<const S: usize> {
     gc_ip: usize,
     /// Compiler-only SIMD file (numeric bits only; never GC-traced).
     vregs: [[u64; common::simd::LANES]; common::simd::NREGS],
-    /// `type_id` → drop method entry PC (empty = no user finalizers).
-    finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>,
-    /// Drop entry PCs (for explicit `obj.drop()` once-bit intercept).
-    finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>,
     /// True while a mark/finalize/sweep cycle is running.
     gc_in_progress: bool,
     /// Nested `gc_collect` during a finalizer; run another cycle after.
@@ -1802,7 +1773,7 @@ impl<const S: usize> Machine<S> {
             cow_shares: 0,
             dense_obj_addr: 0,
             dense_obj: None,
-            rt: crate::runtime::Runtime::new(),
+            rt: crate::runtime::Runtime::with(None, reactor, crate::io_reactor::IoReactor::new(), crate::thread::new_live_thread_registry(), worker_cap, Vec::new(), Arc::new(Vec::new()), Vec::new(), Vec::new(), Vec::new(), std::collections::HashMap::default(), std::collections::HashSet::default()),
             stack: Stack::with_capacity(cap),
             output: None,
             streak_host_alloc: false,
@@ -1816,8 +1787,6 @@ impl<const S: usize> Machine<S> {
             ffi_closures: Vec::new(),
             program_code: Arc::new(Vec::new()),
             program_constants: Arc::new(Vec::new()),
-            program_strings: Arc::new(Vec::new()),
-            program_string_cache: Vec::new(),
             nested_depth: 0,
             return_bookkeeping: false,
             nested_frame_depths: Vec::new(),
@@ -1825,13 +1794,11 @@ impl<const S: usize> Machine<S> {
             nested_return_hi: Value::default(),
             over_apply_frames: 0,
             pending_ffi: None,
-            ffi_arg_roots: Vec::new(),
             pending_io: None,
             panicked: false,
             panic_without_location: false,
             native_panic_frames: Vec::new(),
             native_panic_loc: None,
-            native_roots: Vec::new(),
             fiber_switch_depth: None,
             fiber_base: None,
             fiber_yielder: std::ptr::null(),
@@ -1851,12 +1818,10 @@ impl<const S: usize> Machine<S> {
             fiber_resume_pending: false,
             fiber_stop: false,
             resume_floor: usize::MAX,
-            sched: None,
             task_panic_message: None,
             finalizer_aborted: false,
             closeables: false,
             unwind: Unwind::default(),
-            statics: Vec::new(),
             program_debug: ProgramDebug::default(),
             pc_lines: Vec::new(),
             #[cfg(any(test, feature = "debugger"))]
@@ -1869,18 +1834,12 @@ impl<const S: usize> Machine<S> {
             shared_print: None,
             shared_stdout: None,
             shared_stderr: None,
-            live_threads: crate::thread::new_live_thread_registry(),
-            worker_cap,
-            reactor,
-            io_reactor: crate::io_reactor::IoReactor::new(),
             stack_maps: Vec::new(),
             precise_frames: Arc::default(),
             gc_top_ip: None,
             gc_fresh_slot: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
-            finalizer_by_type: std::collections::HashMap::default(),
-            finalizer_pcs: std::collections::HashSet::default(),
             gc_in_progress: false,
             gc_deferred: false,
             shared_epoch: None,
@@ -2046,7 +2005,7 @@ impl<const S: usize> Machine<S> {
         // code runs on a fiber of its own (`vm_fiber.rs`). The wasm build
         // has no fibers: there it stays in the VM.
         let on_fiber = entry.suspends && self.native_needs_fiber();
-        if cfg!(target_family = "wasm") && entry.suspends && self.sched.is_some() {
+        if cfg!(target_family = "wasm") && entry.suspends && self.rt.sched.is_some() {
             return None;
         }
         // A `CALL` passes its own arity: words a body's MIR parameters
@@ -2126,15 +2085,15 @@ impl<const S: usize> Machine<S> {
 
     /// The machine as native code reaches it.
     fn native_env(&mut self) -> crate::native::NativeEnv {
-        let strings_len = self.program_strings.len().min(self.program_string_cache.len());
+        let strings_len = self.rt.program_strings.len().min(self.rt.program_string_cache.len());
         crate::native::NativeEnv {
             heap: std::ptr::from_mut::<crate::memory::Heap>(&mut self.rt.heap),
-            strings: self.program_strings.as_ptr(),
-            string_cache: self.program_string_cache.as_mut_ptr(),
+            strings: self.rt.program_strings.as_ptr(),
+            string_cache: self.rt.program_string_cache.as_mut_ptr(),
             strings_len,
-            has_finalizers: !self.finalizer_by_type.is_empty(),
-            statics: self.statics.as_mut_ptr(),
-            statics_len: self.statics.len(),
+            has_finalizers: !self.rt.finalizer_by_type.is_empty(),
+            statics: self.rt.statics.as_mut_ptr(),
+            statics_len: self.rt.statics.len(),
             machine: std::ptr::from_mut(self).cast(),
             host: crate::native::NativeHost {
                 print: Self::native_print,
@@ -2182,9 +2141,9 @@ impl<const S: usize> Machine<S> {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
         let ip = if vm.frames.is_empty() { 0 } else { vm.frames.get().tell() };
-        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.rt.native_roots.push((ctx, vm.frames.len()));
         vm.maybe_gc_after_call_alloc(ip);
-        vm.native_roots.pop();
+        vm.rt.native_roots.pop();
     }
 
     /// [`crate::native::NativeHost::gc`]: what `gc_collect` does.
@@ -2196,9 +2155,9 @@ impl<const S: usize> Machine<S> {
             vm.gc_ip = ip;
         }
         let before = vm.rt.heap.size();
-        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.rt.native_roots.push((ctx, vm.frames.len()));
         vm.gc_collect();
-        vm.native_roots.pop();
+        vm.rt.native_roots.pop();
         *panicked = vm.panicked;
         before.saturating_sub(vm.rt.heap.size()) as u64
     }
@@ -2207,9 +2166,9 @@ impl<const S: usize> Machine<S> {
     unsafe fn native_free(raw: *mut c_void, ctx: *mut crate::native::NativeCtx, word: u64, deep: bool) -> bool {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.rt.native_roots.push((ctx, vm.frames.len()));
         let ok = vm.free_early(Value::from(word), deep);
-        vm.native_roots.pop();
+        vm.rt.native_roots.pop();
         ok && !vm.panicked
     }
 
@@ -2242,10 +2201,10 @@ impl<const S: usize> Machine<S> {
         let vm = unsafe { &mut *raw.cast::<Self>() };
         vm.nested_return_hi = Value::default();
         // A collection in the call pins what the native frames hold.
-        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.rt.native_roots.push((ctx, vm.frames.len()));
         // Inside a fiber its VM code may switch tasks (`vm_fiber.rs`).
         let out = vm.native_reenter(|vm| vm.call_function(pc, args));
-        vm.native_roots.pop();
+        vm.rt.native_roots.pop();
         *panicked = vm.panicked;
         // SAFETY: the calling native code's live context.
         unsafe { (*ctx).vm_hi = std::mem::take(&mut vm.nested_return_hi).bits() };
@@ -2269,11 +2228,11 @@ impl<const S: usize> Machine<S> {
         words[0] = Value::from(id as i64);
         words[1..=args.len()].copy_from_slice(args);
         vm.nested_return_hi = Value::default();
-        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.rt.native_roots.push((ctx, vm.frames.len()));
         let saved = std::mem::replace(&mut vm.host_stub_frame, vm.frames.len() + 1);
         let out = vm.native_reenter(|vm| vm.call_function(pc as u32, &words[..=args.len()]));
         vm.host_stub_frame = saved;
-        vm.native_roots.pop();
+        vm.rt.native_roots.pop();
         *panicked = vm.panicked;
         Some(out.bits())
     }
@@ -2307,9 +2266,9 @@ impl<const S: usize> Machine<S> {
                         vm.frames.get().tell()
                     };
                 }
-                vm.native_roots.push((ctx, vm.frames.len()));
+                vm.rt.native_roots.push((ctx, vm.frames.len()));
                 vm.gc_region(op == crate::HostOp::RegionEnter);
-                vm.native_roots.pop();
+                vm.rt.native_roots.pop();
                 return Some(if vm.panicked {
                     Invoked::Unwound
                 } else {
@@ -2337,7 +2296,7 @@ impl<const S: usize> Machine<S> {
                 + std::time::Duration::from_millis(
                     args.first().map_or(0, |v| v.as_int()).max(0) as u64
                 );
-            let s = vm.sched.as_mut().expect("tasks_can_switch");
+            let s = vm.rt.sched.as_mut().expect("tasks_can_switch");
             let current = s.current;
             s.add_timer(current, deadline);
             return Some(
@@ -2359,7 +2318,7 @@ impl<const S: usize> Machine<S> {
             }
             // A native may collect (a shared-heap spawn opens its epoch):
             // the native frames' words stay rooted.
-            vm.native_roots.push((ctx, vm.frames.len()));
+            vm.rt.native_roots.push((ctx, vm.frames.len()));
             let native = vm.rt.natives.get_by_id(fn_id).expect("checked above");
             let mut invoked = crate::host_enum::with_host_enum_layout(layout, || {
                 native.invoke(&mut vm.rt.heap, args)
@@ -2367,18 +2326,18 @@ impl<const S: usize> Machine<S> {
             if opens_fd && crate::io::take_fd_exhausted() {
                 // Streams nothing reaches may hold the descriptors:
                 // collect (native frames' words pinned) and try once more.
-                let roots_len = vm.ffi_arg_roots.len();
-                vm.ffi_arg_roots.extend_from_slice(args);
+                let roots_len = vm.rt.ffi_arg_roots.len();
+                vm.rt.ffi_arg_roots.extend_from_slice(args);
                 let mut panicked = false;
                 // SAFETY: as above.
                 unsafe { Self::native_gc(raw, ctx, &mut panicked) };
-                vm.ffi_arg_roots.truncate(roots_len);
+                vm.rt.ffi_arg_roots.truncate(roots_len);
                 let native = vm.rt.natives.get_by_id(fn_id).expect("checked above");
                 invoked = crate::host_enum::with_host_enum_layout(layout, || {
                     native.invoke(&mut vm.rt.heap, args)
                 });
             }
-            vm.native_roots.pop();
+            vm.rt.native_roots.pop();
             if park_tasks {
                 crate::task::set_task_waiter(None);
             }
@@ -2386,7 +2345,7 @@ impl<const S: usize> Machine<S> {
                 Ok(Some(v)) => return Some(Invoked::Value(v.bits())),
                 Ok(None) if park_tasks && crate::task::take_thread_parked() => {
                     // Runs again when another thread posts the wake.
-                    let s = vm.sched.as_mut().expect("tasks_can_switch");
+                    let s = vm.rt.sched.as_mut().expect("tasks_can_switch");
                     let key = s.peek_thread_key();
                     let current = s.current;
                     s.add_thread_wait(current, key);
@@ -2468,7 +2427,7 @@ impl<const S: usize> Machine<S> {
         loop {
             let (mut ip, mut sp) = (self.frames.get().tell(), self.frames.get().get());
             let before = self.stack.tell();
-            self.native_roots.push((ctx, self.frames.len()));
+            self.rt.native_roots.push((ctx, self.frames.len()));
             // A failed `requires` blames the native function's caller, as
             // from its stub (`contract_failure`).
             let saved =
@@ -2477,7 +2436,7 @@ impl<const S: usize> Machine<S> {
             if let Some(saved) = saved {
                 self.host_stub_frame = saved;
             }
-            self.native_roots.pop();
+            self.rt.native_roots.pop();
             match flow {
                 TaskFlow::Value(v) => return Some(Invoked::Value(v.bits())),
                 TaskFlow::Panic(msg) => return Some(Invoked::Panic(msg)),
@@ -2515,7 +2474,7 @@ impl<const S: usize> Machine<S> {
     /// Register the current task's wait for `req`'s readiness (and its
     /// timeout), as [`Self::task_suspend_io`] does; returns the token.
     fn native_io_wait(&mut self, req: &crate::io::IoParkRequest) -> crate::io_reactor::WaitToken {
-        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
         let token = s.reactor.register_wait(req.handle, req.interest);
         let current = s.current;
         s.io_waits.insert(token, current);
@@ -2539,9 +2498,9 @@ impl<const S: usize> Machine<S> {
         #[cfg(not(target_family = "wasm"))]
         {
             let (mut ip, mut sp) = (self.frames.get().tell(), self.frames.get().get());
-            self.native_roots.push((ctx, self.frames.len()));
+            self.rt.native_roots.push((ctx, self.frames.len()));
             let cancelled = self.fiber_park(block, result_slot, &mut ip, &mut sp);
-            self.native_roots.pop();
+            self.rt.native_roots.pop();
             if cancelled {
                 return None;
             }
@@ -2580,7 +2539,7 @@ impl<const S: usize> Machine<S> {
         }
         // A callback the C function makes may collect: the native frames'
         // words stay pinned.
-        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.rt.native_roots.push((ctx, vm.frames.len()));
         match op as u8 {
             o if o == common::Instruction::FfiLoad as u8 => vm.ffi_load_top(),
             o if o == common::Instruction::DeclareFFI as u8 => vm.declare_ffi_top(operand),
@@ -2590,7 +2549,7 @@ impl<const S: usize> Machine<S> {
                 vm.native_reenter(|vm| vm.finish_pending_ffi_invoke(call.pending(0, sp)));
             }
         }
-        vm.native_roots.pop();
+        vm.rt.native_roots.pop();
         *panicked = vm.panicked;
         let out = if vm.stack.tell() > before {
             vm.stack.pop()
@@ -2606,7 +2565,7 @@ impl<const S: usize> Machine<S> {
     unsafe fn native_claim(raw: *mut c_void, pc: u32, word: u64) -> u64 {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        if !vm.finalizer_pcs.contains(&pc) {
+        if !vm.rt.finalizer_pcs.contains(&pc) {
             return 1;
         }
         if vm.claim_finalizer(Value::from(word)) { 2 } else { 0 }
@@ -2624,9 +2583,9 @@ impl<const S: usize> Machine<S> {
     ) -> u64 {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.rt.native_roots.push((ctx, vm.frames.len()));
         let out = vm.native_reenter(|vm| vm.call_value(Value::from(callee), args, dicts as usize));
-        vm.native_roots.pop();
+        vm.rt.native_roots.pop();
         *panicked = vm.panicked;
         out.bits()
     }
@@ -2642,9 +2601,9 @@ impl<const S: usize> Machine<S> {
     ) -> u64 {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.rt.native_roots.push((ctx, vm.frames.len()));
         let out = vm.native_reenter(|vm| vm.resume_value(Value::from(handle), send.map(Value::from)));
-        vm.native_roots.pop();
+        vm.rt.native_roots.pop();
         *panicked = vm.panicked;
         out.bits()
     }
@@ -3141,7 +3100,7 @@ impl<const S: usize> Machine<S> {
         self.panicked = false;
         self.pending_ffi = None;
         self.pending_io = None;
-        self.sched = None;
+        self.rt.sched = None;
         self.unwind = Unwind::default();
         self.pending_debug_stop = None;
         self.nested_depth = 0;
@@ -3150,7 +3109,7 @@ impl<const S: usize> Machine<S> {
         self.resume_stack.clear();
         self.over_apply_frames = 0;
         self.return_bookkeeping = !self.frame_pins.is_empty();
-        self.statics.clear();
+        self.rt.statics.clear();
         if let Some(dbg) = self.debug.as_mut() {
             dbg.clear_step();
             dbg.clear_skip_bp();
@@ -3177,8 +3136,8 @@ impl<const S: usize> Machine<S> {
         if code.is_empty() {
             return StopReason::Halt;
         }
-        if self.statics.len() != static_slots as usize {
-            self.statics = vec![Value::default(); static_slots as usize];
+        if self.rt.statics.len() != static_slots as usize {
+            self.rt.statics = vec![Value::default(); static_slots as usize];
         }
         if self.program_code.is_empty() {
             self.program_code = Arc::new(unsafe {
@@ -3377,7 +3336,7 @@ impl<const S: usize> Machine<S> {
             let o = unsafe { &*o };
             (&o.frames, o.native_roots.as_slice())
         });
-        let states = std::iter::once((&self.frames, self.native_roots.as_slice())).chain(fiber_outer);
+        let states = std::iter::once((&self.frames, self.rt.native_roots.as_slice())).chain(fiber_outer);
         for (state, (frames, roots)) in states.enumerate() {
             for frame_idx in (0..frames.len()).rev() {
                 for line in native_lines(roots, frame_idx + 1) {
@@ -3454,7 +3413,7 @@ impl<const S: usize> Machine<S> {
     /// When native code made the VM call the running frame belongs to:
     /// the location of that call.
     fn native_caller_location(&self) -> Option<String> {
-        let &(ctx, depth) = self.native_roots.last()?;
+        let &(ctx, depth) = self.rt.native_roots.last()?;
         if depth + 1 != self.frames.len() {
             return None;
         }
@@ -3471,7 +3430,7 @@ impl<const S: usize> Machine<S> {
         if self.host_stub_frame == 0 || self.host_stub_frame != self.frames.len() {
             return None;
         }
-        let &(ctx, _) = self.native_roots.last()?;
+        let &(ctx, _) = self.rt.native_roots.last()?;
         let code = &self.native.as_ref()?.code;
         // SAFETY: a native call in a VM call keeps its context alive.
         let sites = unsafe { &*ctx }.call_sites();
@@ -3666,7 +3625,7 @@ impl<const S: usize> Machine<S> {
     /// call: a panic in one unwinds from the free (`false`), and the free
     /// then frees nothing.
     pub(crate) fn free_early(&mut self, v: Value, deep: bool) -> bool {
-        if !self.finalizer_by_type.is_empty() && crate::memory::early_free_mode() == crate::memory::EarlyFreeMode::Free {
+        if !self.rt.finalizer_by_type.is_empty() && crate::memory::early_free_mode() == crate::memory::EarlyFreeMode::Free {
             let pins = &self.frame_pins;
             let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
             let Some(drops) = self.rt.heap.early_drops(v, deep, &keep) else {
@@ -3686,9 +3645,9 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn run_early_drops(&mut self, v: Value, drops: &[crate::memory::Object]) -> bool {
-        let roots_len = self.ffi_arg_roots.len();
-        self.ffi_arg_roots.push(v);
-        self.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
+        let roots_len = self.rt.ffi_arg_roots.len();
+        self.rt.ffi_arg_roots.push(v);
+        self.rt.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
         let mut ok = true;
         for obj in drops {
             let Some(pc) = self.pending_finalizer(*obj) else { continue };
@@ -3702,7 +3661,7 @@ impl<const S: usize> Machine<S> {
                 break;
             }
         }
-        self.ffi_arg_roots.truncate(roots_len);
+        self.rt.ffi_arg_roots.truncate(roots_len);
         ok
     }
 
@@ -4060,7 +4019,7 @@ impl<const S: usize> Machine<S> {
         // Native frames reload their heap words after a collection: they
         // move like precise stack slots.
         let mut must_native: Vec<*mut u64> = Vec::new();
-        for &(ctx, _) in &self.native_roots {
+        for &(ctx, _) in &self.rt.native_roots {
             // SAFETY: a native call in a collection keeps its context alive.
             unsafe { &*ctx }.for_each_root(|w, ambiguous| {
                 if ambiguous {
@@ -4077,7 +4036,7 @@ impl<const S: usize> Machine<S> {
         let precise: Vec<u64> = must
             .iter()
             .map(|&idx| self.stack[idx].heap_addr())
-            .chain(must_statics.iter().map(|&i| self.statics[i].heap_addr()))
+            .chain(must_statics.iter().map(|&i| self.rt.statics[i].heap_addr()))
             .chain(must_native.iter().filter_map(|&w| {
                 // SAFETY: the slot is a live word of a native root record.
                 let addr = Value::from(unsafe { *w }).heap_addr();
@@ -4100,8 +4059,8 @@ impl<const S: usize> Machine<S> {
             }
         }
         for i in must_statics {
-            if let Some(v) = plan.forward(self.statics[i]) {
-                self.statics[i] = v;
+            if let Some(v) = plan.forward(self.rt.statics[i]) {
+                self.rt.statics[i] = v;
             }
         }
         #[cfg(feature = "gc-stress")]
@@ -4185,8 +4144,8 @@ impl<const S: usize> Machine<S> {
             }
         }
         for i in must_statics {
-            if let Some(v) = plan.forward(self.statics[i]) {
-                self.statics[i] = v;
+            if let Some(v) = plan.forward(self.rt.statics[i]) {
+                self.rt.statics[i] = v;
             }
         }
         #[cfg(feature = "gc-stress")]
@@ -4350,7 +4309,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn invalidate_program_string_cache(&mut self) {
-        self.program_string_cache.fill(Value::default());
+        self.rt.program_string_cache.fill(Value::default());
     }
 
     fn gc_sweep_slice(&mut self) {
@@ -4390,7 +4349,7 @@ impl<const S: usize> Machine<S> {
     fn for_each_static_root(&self, visit: &mut dyn FnMut(usize, u64, crate::memory::RootKind)) {
         let heap = &self.rt.heap;
         let kinds = STATIC_KINDS.with_borrow(Arc::clone);
-        for (i, v) in self.statics.iter().enumerate() {
+        for (i, v) in self.rt.statics.iter().enumerate() {
             let kind = match kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN) {
                 common::WORD_SCALAR => continue,
                 common::WORD_POINTER => crate::memory::RootKind::Precise,
@@ -4415,7 +4374,7 @@ impl<const S: usize> Machine<S> {
         self.for_each_handle_root_but_native(visit);
         // Heap words native frames hold across a VM call or a safepoint.
         let heap = &self.rt.heap;
-        for &(ctx, _) in &self.native_roots {
+        for &(ctx, _) in &self.rt.native_roots {
             // SAFETY: a native call in a collection keeps its context alive.
             unsafe { &*ctx }.for_each_root(|w, ambiguous| {
                 let addr = Value::from(unsafe { *w }).heap_addr();
@@ -4442,7 +4401,7 @@ impl<const S: usize> Machine<S> {
         for ctx in &self.resume_stack {
             visit(ctx.coro.as_ptr() as u64, crate::memory::RootKind::Precise);
         }
-        if let Some(sched) = &self.sched {
+        if let Some(sched) = &self.rt.sched {
             for rec in sched.tasks.values() {
                 let inner = rec.inner.iter().map(|(c, _, _)| *c);
                 for coro in rec.coro.into_iter().chain(inner) {
@@ -4463,7 +4422,7 @@ impl<const S: usize> Machine<S> {
             visit(addr, crate::memory::RootKind::Pinned);
         }
         // In-flight FFI arguments: C may hold pointers into them.
-        for &v in &self.ffi_arg_roots {
+        for &v in &self.rt.ffi_arg_roots {
             word(v, crate::memory::RootKind::Pinned, visit);
         }
         // VM states not swapped in (parked fibers', the task's own while a
@@ -4737,7 +4696,7 @@ impl<const S: usize> Machine<S> {
     /// The unmarked objects that owe a `drop` (its pc) or, for a generator
     /// suspended with a `defer` armed, a close (`None`).
     fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, Option<u32>)> {
-        if self.finalizer_by_type.is_empty() && !self.closeables {
+        if self.rt.finalizer_by_type.is_empty() && !self.closeables {
             return Vec::new();
         }
         // The heap lists its finalizable objects: no walk of the heap (#1870).
@@ -4778,15 +4737,15 @@ impl<const S: usize> Machine<S> {
         args: Vec<Value>,
         layout: crate::host_enum::HostEnumLayout,
     ) -> Result<Option<Value>, crate::FfiError> {
-        let roots_len = self.ffi_arg_roots.len();
-        self.ffi_arg_roots.extend_from_slice(&args);
+        let roots_len = self.rt.ffi_arg_roots.len();
+        self.rt.ffi_arg_roots.extend_from_slice(&args);
         if unlikely(!self.stack_maps.is_empty()) {
             self.gc_ip = ip;
         }
         self.gc_top_ip = Some(ip);
         self.gc_collect();
         self.gc_top_ip = None;
-        self.ffi_arg_roots.truncate(roots_len);
+        self.rt.ffi_arg_roots.truncate(roots_len);
         let Some(native) = self.rt.natives.get_by_id(fn_id) else {
             return Err(crate::FfiError::Panic(format!("HostInvoke: unknown native id {fn_id}")));
         };
@@ -4857,7 +4816,7 @@ impl<const S: usize> Machine<S> {
         if type_id == 0 || finalized {
             return None;
         }
-        self.finalizer_by_type.get(&type_id).copied()
+        self.rt.finalizer_by_type.get(&type_id).copied()
     }
 
     fn claim_finalizer(&self, v: Value) -> bool {
@@ -4919,13 +4878,13 @@ impl<const S: usize> Machine<S> {
         if early {
             self.rt.heap.register_early_drop_type(type_id);
         }
-        self.finalizer_by_type.insert(type_id, pc);
-        self.finalizer_pcs.insert(pc);
+        self.rt.finalizer_by_type.insert(type_id, pc);
+        self.rt.finalizer_pcs.insert(pc);
         self.rt.heap.register_finalizer_type(type_id);
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
-        if self.program_code.is_empty() || (self.finalizer_by_type.is_empty() && !self.closeables) {
+        if self.program_code.is_empty() || (self.rt.finalizer_by_type.is_empty() && !self.closeables) {
             return;
         }
         let mut queue = Vec::new();
@@ -5127,26 +5086,26 @@ impl<const S: usize> Machine<S> {
     }
 
     fn install_program_strings_arc(&mut self, strings: Arc<Vec<String>>) {
-        self.program_strings = strings;
-        self.program_string_cache.clear();
-        self.program_string_cache
-            .resize(self.program_strings.len(), Value::default());
+        self.rt.program_strings = strings;
+        self.rt.program_string_cache.clear();
+        self.rt.program_string_cache
+            .resize(self.rt.program_strings.len(), Value::default());
     }
 
     fn push_program_string(&mut self, idx: usize, ip: usize) {
-        let cached = unsafe { *self.program_string_cache.get_unchecked(idx) };
+        let cached = unsafe { *self.rt.program_string_cache.get_unchecked(idx) };
         if likely(!cached.is_zero()) {
             self.stack.push(cached);
             return;
         }
-        let data = unsafe { self.program_strings.get_unchecked(idx) };
+        let data = unsafe { self.rt.program_strings.get_unchecked(idx) };
         let gc_string = self.rt.heap.intern_str(data);
         let handle = Value::from(gc_string.as_ptr() as *mut u8 as u64);
         self.stack.push(handle);
         self.maybe_gc_after_alloc(ip);
         // Re-store after maybe-GC: sweep zeros the cache (not a root).
         unsafe {
-            *self.program_string_cache.get_unchecked_mut(idx) = handle;
+            *self.rt.program_string_cache.get_unchecked_mut(idx) = handle;
         }
     }
 }
@@ -5281,53 +5240,53 @@ impl<const S: usize> Machine<S> {
     /// Replace the undetached-spawn registry (used by workers to share the
     /// root VM's list so nested `spawn` still joins with the root).
     pub fn set_live_threads(&mut self, registry: crate::thread::LiveThreadRegistry) {
-        self.live_threads = registry;
+        self.rt.live_threads = registry;
     }
 
     pub fn live_threads(&self) -> &crate::thread::LiveThreadRegistry {
-        &self.live_threads
+        &self.rt.live_threads
     }
 
     /// Share the root VM's worker-thread budget with nested workers.
     pub fn set_worker_cap(&mut self, cap: std::sync::Arc<crate::thread::WorkerCap>) {
-        self.worker_cap = cap;
+        self.rt.worker_cap = cap;
     }
 
     pub fn worker_cap(&self) -> &std::sync::Arc<crate::thread::WorkerCap> {
-        &self.worker_cap
+        &self.rt.worker_cap
     }
 
     /// Share the root VM's work-stealing reactor with nested workers.
     pub fn set_reactor(&mut self, reactor: std::sync::Arc<crate::reactor::Reactor>) {
-        self.reactor = reactor;
+        self.rt.reactor = reactor;
     }
 
     pub fn reactor(&self) -> &std::sync::Arc<crate::reactor::Reactor> {
-        &self.reactor
+        &self.rt.reactor
     }
 
     /// Share the root VM's IO reactor with nested workers.
     pub fn set_io_reactor(&mut self, io: std::sync::Arc<crate::io_reactor::IoReactor>) {
-        self.io_reactor = io;
+        self.rt.io_reactor = io;
     }
 
     pub fn io_reactor(&self) -> &std::sync::Arc<crate::io_reactor::IoReactor> {
-        &self.io_reactor
+        &self.rt.io_reactor
     }
 
     /// Allocate global static slots without running bytecode.
     pub fn init_static_slots(&mut self, static_slots: u32) {
-        self.statics = vec![Value::default(); static_slots as usize];
+        self.rt.statics = vec![Value::default(); static_slots as usize];
     }
 
     /// Static slot `slot`'s value (`None` past the slots).
     pub fn static_value(&self, slot: u32) -> Option<Value> {
-        self.statics.get(slot as usize).copied()
+        self.rt.statics.get(slot as usize).copied()
     }
 
     /// Write static slot `slot`; false past the slots.
     pub fn set_static(&mut self, slot: u32, value: Value) -> bool {
-        match self.statics.get_mut(slot as usize) {
+        match self.rt.statics.get_mut(slot as usize) {
             Some(s) => {
                 *s = value;
                 true
@@ -5349,10 +5308,10 @@ impl<const S: usize> Machine<S> {
             shared_print: self.shared_print.clone(),
             shared_stdout: self.shared_stdout.clone(),
             shared_stderr: self.shared_stderr.clone(),
-            live_threads: std::sync::Arc::clone(&self.live_threads),
-            worker_cap: std::sync::Arc::clone(&self.worker_cap),
-            reactor: std::sync::Arc::clone(&self.reactor),
-            io_reactor: std::sync::Arc::clone(&self.io_reactor),
+            live_threads: std::sync::Arc::clone(&self.rt.live_threads),
+            worker_cap: std::sync::Arc::clone(&self.rt.worker_cap),
+            reactor: std::sync::Arc::clone(&self.rt.reactor),
+            io_reactor: std::sync::Arc::clone(&self.rt.io_reactor),
             ffi_base_dir: self.base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
@@ -5364,23 +5323,23 @@ impl<const S: usize> Machine<S> {
 
     /// The static slots' words, for a worker that reads them.
     pub fn static_words(&self) -> Arc<Vec<u64>> {
-        Arc::new(self.statics.iter().map(|v| v.bits()).collect())
+        Arc::new(self.rt.statics.iter().map(|v| v.bits()).collect())
     }
 
     /// A shared-heap job's statics: the spawning VM's words, which name
     /// objects of the heap this VM is bound to (#1561).
     pub(crate) fn load_shared_statics(&mut self, words: &[u64]) {
-        self.statics = words.iter().map(|&w| Value::from(w)).collect();
+        self.rt.statics = words.iter().map(|&w| Value::from(w)).collect();
     }
 
     /// An isolate job's statics: the spawner's, copied into this VM's heap
     /// ([`crate::reactor::JobStatics::Copied`], #1663, #1684, #1708). A
     /// slot whose copy fails stays zeroed.
     pub(crate) fn load_copied_statics(&mut self, slots: Vec<Option<crate::thread::SpawnArg>>) {
-        for (i, arg) in slots.into_iter().enumerate().take(self.statics.len()) {
+        for (i, arg) in slots.into_iter().enumerate().take(self.rt.statics.len()) {
             let Some(arg) = arg else { continue };
             if let Ok(v) = crate::thread::spawn_arg_to_value(self.heap_mut(), arg) {
-                self.statics[i] = v;
+                self.rt.statics[i] = v;
             }
         }
     }
@@ -5388,7 +5347,7 @@ impl<const S: usize> Machine<S> {
     /// Drop a finished shared-heap job's statics: their words name the
     /// heap it was bound to.
     pub(crate) fn clear_statics(&mut self) {
-        self.statics.clear();
+        self.rt.statics.clear();
     }
 
     fn sync_thread_program_from_current(&mut self) {
@@ -5401,8 +5360,8 @@ impl<const S: usize> Machine<S> {
         self.thread_program = Some(std::sync::Arc::new(crate::thread::ThreadProgram {
             code: Arc::clone(&self.program_code),
             constants: Arc::clone(&self.program_constants),
-            strings: Arc::clone(&self.program_strings),
-            static_slot_count: self.statics.len() as u32,
+            strings: Arc::clone(&self.rt.program_strings),
+            static_slot_count: self.rt.statics.len() as u32,
             debug: self.program_debug.clone(),
             operand_stack_slots: self.stack.capacity() as u32,
             stack_maps: self.stack_maps.clone(),
@@ -5444,7 +5403,7 @@ impl<const S: usize> Machine<S> {
 
     #[cfg(test)]
     pub fn finalizer_pc(&self, type_id: u32) -> Option<u32> {
-        self.finalizer_by_type.get(&type_id).copied()
+        self.rt.finalizer_by_type.get(&type_id).copied()
     }
 
     #[cfg(test)]
@@ -5908,8 +5867,8 @@ impl<const S: usize> Machine<S> {
         self.clear_dense_obj_cache();
         self.stack.seek(0);
         self.resume_stack.clear();
-        self.statics.fill(Value::default());
-        self.program_string_cache.fill(Value::default());
+        self.rt.statics.fill(Value::default());
+        self.rt.program_string_cache.fill(Value::default());
         self.nested_depth = 0;
         self.over_apply_frames = 0;
         self.return_bookkeeping = false;
@@ -5918,14 +5877,14 @@ impl<const S: usize> Machine<S> {
         self.pending_ffi = None;
         self.pending_io = None;
         self.panicked = false;
-        self.sched = None;
+        self.rt.sched = None;
         self.unwind = Unwind::default();
         self.userland_libraries.clear();
         self.ffi_closures.clear();
         // Drop PCs belong to the job's program: a reused worker may load a
         // different one next, where the same `type_id` names another type.
-        self.finalizer_by_type.clear();
-        self.finalizer_pcs.clear();
+        self.rt.finalizer_by_type.clear();
+        self.rt.finalizer_pcs.clear();
         self.finalizer_aborted = false;
         self.closeables = false;
         self.gc_in_progress = false;
@@ -5938,7 +5897,7 @@ impl<const S: usize> Machine<S> {
             *self.rt.heap.owned_mut() = Heap::default();
         } else if self.rt.heap.owned_mut().slab_chunk_count() == 1 {
             self.rt.heap.owned_mut().collect(&[]);
-            self.program_string_cache.fill(Value::default());
+            self.rt.program_string_cache.fill(Value::default());
         }
     }
 
@@ -5966,7 +5925,7 @@ impl<const S: usize> Machine<S> {
         self.pending_ffi = None;
         self.pending_io = None;
         self.panicked = false;
-        self.sched = None;
+        self.rt.sched = None;
         self.unwind = Unwind::default();
         self.gc_in_progress = false;
         self.gc_deferred = false;
@@ -6130,7 +6089,7 @@ impl<const S: usize> Machine<S> {
         if code.is_empty() {
             return;
         }
-        self.statics = vec![Value::default(); static_slots as usize];
+        self.rt.statics = vec![Value::default(); static_slots as usize];
         self.program_code = Arc::new(unsafe {
             std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
         });
@@ -6169,9 +6128,9 @@ impl<const S: usize> Machine<S> {
         // Only joins *this* Machine's registry (not a process-global list).
         // Without OS threads the workers are still queued: run them now.
         if crate::reactor::NO_THREADS {
-            while self.reactor.help_local_once() {}
+            while self.rt.reactor.help_local_once() {}
         }
-        crate::thread::join_undetached_threads(&self.live_threads);
+        crate::thread::join_undetached_threads(&self.rt.live_threads);
         self.print_cow_report();
         // Remaining class finalizers need host IO / FFI while the reactor is
         // still up. `Drop` still runs this as a safety net for embedders.
@@ -6181,8 +6140,8 @@ impl<const S: usize> Machine<S> {
         // a coil thread leaks `worker_cap` OS threads for the rest of the
         // process. Skip if a detached job is still in flight (rare) rather
         // than abandon queued work; that reactor just leaks as before.
-        if self.reactor.inflight() == 0 {
-            self.reactor.shutdown();
+        if self.rt.reactor.inflight() == 0 {
+            self.rt.reactor.shutdown();
         }
     }
 
@@ -6367,8 +6326,8 @@ impl<const S: usize> Machine<S> {
                     )
                     .lending_arrays(self.ffi_closures.is_empty());
                     let mut closure_ptrs = Vec::new();
-                    let roots_len = self.ffi_arg_roots.len();
-                    self.ffi_arg_roots.extend_from_slice(&args);
+                    let roots_len = self.rt.ffi_arg_roots.len();
+                    self.rt.ffi_arg_roots.extend_from_slice(&args);
                     let result = crate::ffi::invoke_via_libffi(
                         &registered.prepared,
                         ffi_sig,
@@ -6377,7 +6336,7 @@ impl<const S: usize> Machine<S> {
                         &mut ctx,
                         &mut closure_ptrs,
                     );
-                    self.ffi_arg_roots.truncate(roots_len);
+                    self.rt.ffi_arg_roots.truncate(roots_len);
                     result
                 } else {
                     Err(crate::ffi::FfiError::InvalidHandle(
@@ -6819,7 +6778,7 @@ impl<const S: usize> Machine<S> {
     #[inline(always)]
     fn run_execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         IN_EXECUTE.set(IN_EXECUTE.get() + 1);
-        if unlikely(!self.native_roots.is_empty()) {
+        if unlikely(!self.rt.native_roots.is_empty()) {
             // Bytecode under native frames.
             crate::native::VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -6842,7 +6801,7 @@ impl<const S: usize> Machine<S> {
                     continue;
                 }
             }
-            if unlikely(!paused && self.panicked && self.sched.is_some()) {
+            if unlikely(!paused && self.panicked && self.rt.sched.is_some()) {
                 // A child task panicked: fail it and run the next task.
                 if let Some(ip) = self.task_recover_panic() {
                     start_ip = ip;
@@ -7040,8 +6999,8 @@ impl<const S: usize> Machine<S> {
                     // Empty set is the hot path (fib); skip HashSet::contains.
                     if resumed.is_none()
                         && arity == 1
-                        && unlikely(!self.finalizer_pcs.is_empty())
-                        && self.finalizer_pcs.contains(&(target as u32))
+                        && unlikely(!self.rt.finalizer_pcs.is_empty())
+                        && self.rt.finalizer_pcs.contains(&(target as u32))
                     {
                         promise!(self.stack.tell() >= 1);
                         let self_val = self.stack[self.stack.tell() - 1];

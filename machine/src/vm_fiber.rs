@@ -217,8 +217,8 @@ impl<const S: usize> Machine<S> {
         std::mem::swap(&mut self.nested_return_hi, &mut x.nested_return_hi);
         std::mem::swap(&mut self.return_bookkeeping, &mut x.return_bookkeeping);
         std::mem::swap(&mut self.over_apply_frames, &mut x.over_apply_frames);
-        std::mem::swap(&mut self.ffi_arg_roots, &mut x.ffi_arg_roots);
-        std::mem::swap(&mut self.native_roots, &mut x.native_roots);
+        std::mem::swap(&mut self.rt.ffi_arg_roots, &mut x.ffi_arg_roots);
+        std::mem::swap(&mut self.rt.native_roots, &mut x.native_roots);
         std::mem::swap(&mut self.unwind, &mut x.unwind);
         std::mem::swap(&mut self.fiber_switch_depth, &mut x.fiber_switch_depth);
         std::mem::swap(&mut self.fiber_base, &mut x.fiber_base);
@@ -238,7 +238,7 @@ impl<const S: usize> Machine<S> {
     fn at_task_level(&self) -> bool {
         match self.fiber_switch_depth {
             Some(d) => d == self.nested_depth,
-            None => self.sched.as_ref().is_some_and(|s| s.base_nested == self.nested_depth),
+            None => self.rt.sched.as_ref().is_some_and(|s| s.base_nested == self.nested_depth),
         }
     }
 
@@ -260,7 +260,7 @@ impl<const S: usize> Machine<S> {
     /// switches tasks on its fiber).
     #[inline]
     fn native_needs_fiber(&self) -> bool {
-        cfg!(not(target_family = "wasm")) && self.fiber_switch_depth.is_none() && (self.sched.is_none() || self.at_task_level())
+        cfg!(not(target_family = "wasm")) && self.fiber_switch_depth.is_none() && (self.rt.sched.is_none() || self.at_task_level())
     }
 
     /// The GC words of every VM state not swapped in: parked fibers' and,
@@ -342,7 +342,7 @@ impl<const S: usize> Machine<S> {
                 // Put back what the fiber's state holds of it.
                 fiber.exec.unwind.message = fiber_unwind_message;
                 fiber.in_execute = (fiber.in_execute + IN_EXECUTE.get()).saturating_sub(before);
-                let current = self.sched.as_ref().map_or(crate::task::ROOT, |s| s.current);
+                let current = self.rt.sched.as_ref().map_or(crate::task::ROOT, |s| s.current);
                 self.parked_fibers.insert(current, fiber);
                 crate::native::NativeOutcome::Panicked(crate::native::NativePanic::parked())
             }
@@ -353,7 +353,7 @@ impl<const S: usize> Machine<S> {
     /// fiber on, delivering the wake or a cancel at its suspension point.
     #[cfg(not(target_family = "wasm"))]
     fn resume_parked_fiber(&mut self) -> Option<crate::native::NativeOutcome> {
-        let current = self.sched.as_ref().map_or(crate::task::ROOT, |s| s.current);
+        let current = self.rt.sched.as_ref().map_or(crate::task::ROOT, |s| s.current);
         let fiber = self.parked_fibers.remove(&current)?;
         self.fiber_cancel = current != crate::task::ROOT && self.task_take_cancel();
         Some(self.run_fiber(fiber))

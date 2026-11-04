@@ -542,7 +542,7 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::STRING => {
                     let idx = opcode.operand_u32() as usize;
-                    promise!(idx < self.program_strings.len());
+                    promise!(idx < self.rt.program_strings.len());
                     self.push_program_string(idx, ip);
                 }
                 Instruction::NOOP => {
@@ -1299,17 +1299,17 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::LoadStatic => {
                     let slot = opcode.operand_u32() as usize;
-                    debug_assert!(slot < self.statics.len());
+                    debug_assert!(slot < self.rt.statics.len());
                     // Checked in release too: an out-of-range slot must not touch
                     // memory past the statics buffer (#1744).
-                    let val = self.statics.get(slot).copied().unwrap_or_default();
+                    let val = self.rt.statics.get(slot).copied().unwrap_or_default();
                     self.stack.push(val);
                 }
                 Instruction::StoreStatic => {
                     let slot = opcode.operand_u32() as usize;
-                    debug_assert!(slot < self.statics.len());
+                    debug_assert!(slot < self.rt.statics.len());
                     let val = self.stack.pop();
-                    if let Some(s) = self.statics.get_mut(slot) {
+                    if let Some(s) = self.rt.statics.get_mut(slot) {
                         *s = val;
                     }
                 }
@@ -1346,7 +1346,7 @@ impl<const S: usize> Machine<S> {
                         .ok_or(common::SnapshotDecodeError::Truncated)
                         .and_then(common::HeapSnapshot::decode);
                     let snapshot = match snapshot {
-                        Ok(s) if s.statics.iter().all(|(slot, _)| (*slot as usize) < self.statics.len()) => s,
+                        Ok(s) if s.statics.iter().all(|(slot, _)| (*slot as usize) < self.rt.statics.len()) => s,
                         Ok(_) => {
                             return dispatch::RestExit::done(
                                 self.runtime_panic("RestoreSnapshot: static slot out of range", ip.saturating_sub(1)),
@@ -1358,7 +1358,7 @@ impl<const S: usize> Machine<S> {
                         }
                     };
                     for (slot, value) in self.rt.heap.restore_snapshot(&snapshot) {
-                        self.statics[slot as usize] = value;
+                        self.rt.statics[slot as usize] = value;
                     }
                 }
                 Instruction::TagEnumType => {
