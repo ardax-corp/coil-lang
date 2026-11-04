@@ -1607,6 +1607,9 @@ pub struct Machine<const S: usize> {
     /// Stacks of finished fibers, for the next ones.
     #[cfg(not(target_family = "wasm"))]
     fiber_stacks: Vec<corosensei::stack::DefaultStack>,
+    /// Stacks of finished generator fibers (smaller than a task's).
+    #[cfg(not(target_family = "wasm"))]
+    gen_stacks: Vec<corosensei::stack::DefaultStack>,
     /// Generators whose native body runs now, innermost last: roots
     /// (pinned) while their fibers run (`vm_gen.rs`).
     gen_running: Vec<Value>,
@@ -1808,6 +1811,8 @@ impl<const S: usize> Machine<S> {
             parked_fibers: std::collections::HashMap::new(),
             #[cfg(not(target_family = "wasm"))]
             fiber_stacks: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            gen_stacks: Vec::new(),
             gen_running: Vec::new(),
             host_stub_frame: 0,
             ffi_stubs: std::collections::HashMap::new(),
@@ -2035,7 +2040,7 @@ impl<const S: usize> Machine<S> {
             self.native_call_on_fiber(entry, words)
         } else {
             let env = self.native_env();
-            crate::native::call(&entry, &words[..params], &env)
+            on_deep_stack(|| crate::native::call(&entry, &words[..params], &env))
         };
         #[cfg(target_family = "wasm")]
         let out = {
@@ -3421,7 +3426,10 @@ impl<const S: usize> Machine<S> {
         };
         let mut frames = Vec::new();
         let mut innermost = None;
-        for (i, &s) in p.trace.iter().enumerate() {
+        // A stack overflow traps in the prologue of a frame that never
+        // started: the VM reports it at the call that made it.
+        let skip = usize::from(p.code == crate::native::TRAP_STACK);
+        for (i, &s) in p.trace.iter().skip(skip).enumerate() {
             let Some(site) = code.site(s) else { continue };
             if i == 0 {
                 innermost = self.native_site_location(site);

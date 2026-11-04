@@ -146,9 +146,9 @@ impl<const S: usize> Machine<S> {
         for (w, v) in words.iter_mut().zip(coro.saved_stack.iter()) {
             *w = v.bits();
         }
-        let stack = match self.fiber_stacks.pop() {
+        let stack = match self.gen_stacks.pop() {
             Some(s) => s,
-            None => corosensei::stack::DefaultStack::new(FIBER_STACK_BYTES).ok()?,
+            None => corosensei::stack::DefaultStack::new(GEN_STACK_BYTES).ok()?,
         };
         use corosensei::stack::Stack as _;
         let stack_limit = stack.limit().get() + 64 * 1024;
@@ -235,9 +235,9 @@ impl<const S: usize> Machine<S> {
     #[cfg(not(target_family = "wasm"))]
     fn recycle_gen_stack(&mut self, fiber: &mut crate::native::GenFiber) {
         if let Some(coro) = fiber.coro.take()
-            && self.fiber_stacks.len() < 8
+            && self.gen_stacks.len() < 8
         {
-            self.fiber_stacks.push(coro.into_stack());
+            self.gen_stacks.push(coro.into_stack());
         }
     }
 
