@@ -821,8 +821,15 @@ pub unsafe extern "C" fn coil_native_unwind(ctx: *mut NativeCtx, code: u64, site
     let ctx = unsafe { &mut *ctx };
     if ctx.bail != BAIL_PANIC {
         if ctx.committed == 0 {
-            ctx.bail = 1;
-            return;
+            // A panic the VM's re-run would raise too panics here: native
+            // code reports it as the VM does. Anything else (an op it does
+            // not model, the native stack) hands the call back to the VM.
+            let trap = if code == TRAP_HELPER { ctx.trap } else { code };
+            if !panics_natively(trap) {
+                ctx.bail = 1;
+                return;
+            }
+            ctx.committed = 1;
         }
         if code != TRAP_HELPER {
             ctx.trap = code;
@@ -833,6 +840,21 @@ pub unsafe extern "C" fn coil_native_unwind(ctx: *mut NativeCtx, code: u64, site
         // SAFETY: `call` set `trace` for the call.
         unsafe { (*ctx.trace).push(site as u32) };
     }
+}
+
+/// A trap code that is a Coil panic wherever it comes from: before a
+/// commit, native code raises it itself instead of bailing.
+fn panics_natively(trap: u64) -> bool {
+    matches!(
+        trap,
+        TRAP_OVERFLOW
+            | TRAP_DIV_ZERO
+            | TRAP_NEGATIVE_EXPONENT
+            | TRAP_SHIFT
+            | TRAP_OUT_OF_BOUNDS
+            | TRAP_MESSAGE
+            | TRAP_EXPLICIT
+    )
 }
 
 thread_local! {
