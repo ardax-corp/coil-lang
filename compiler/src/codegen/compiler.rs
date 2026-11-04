@@ -773,6 +773,12 @@ impl Compiler {
         !self.extern_runtime_functions.is_empty()
     }
 
+    /// Each `extern` function's library (as its block names it) and C
+    /// symbol.
+    pub fn extern_symbols(&self) -> &[(String, String)] {
+        &self.extern_symbols
+    }
+
     /// Record a user-visible local/param for `coil debug` / dissect.
     ///
     /// Skips synthetic `__pad*` / `__dict*` names. `__shadow_name_N` is stored
@@ -7522,6 +7528,8 @@ impl Compiler {
                     self.emit_result_unwrap_or_panic();
                     self.bytecode
                         .push(Byte::new(Instruction::StoreStatic).with_operand_u32(fn_id_slot));
+                    self.extern_symbols
+                        .push((unescape_coil_string(library), unescape_coil_string(sym)));
                     self.setup_steps.push(module_setup::SetupStep::Declare {
                         lib_slot,
                         name: sym_idx,

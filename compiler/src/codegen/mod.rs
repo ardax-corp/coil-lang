@@ -308,6 +308,9 @@ pub struct Compiler {
     extern_runtime_libs: HashMap<String, u32>,
     /// Source name → (lib_static_slot, fn_id_static_slot) for runtime FFI calls.
     extern_runtime_functions: HashMap<String, (u32, u32)>,
+    /// Each `extern` function's library (as the block names it) and C
+    /// symbol, in declaration order: what a package links statically.
+    extern_symbols: Vec<(String, String)>,
     /// Records which FFI library short names have already
     /// been loaded in the current compilation unit. Cleared
     /// each `compile`.
@@ -788,6 +791,7 @@ impl Default for Compiler {
             native: HashMap::default(),
             extern_runtime_libs: HashMap::with_capacity(4),
             extern_runtime_functions: HashMap::with_capacity(16),
+            extern_symbols: Vec::new(),
             extern_runtime_libs_loaded: HashSet::new(),
             messages: Vec::default(),
             context: Context::default(),

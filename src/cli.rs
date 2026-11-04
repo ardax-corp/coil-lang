@@ -9,7 +9,7 @@ use coil_args::{
     OptLevelFlags, RootFlags, expand_o_shorts, merge_entry,
 };
 use compiler::{DebugLevel, EarlyFree, HostGrants, OptLevel};
-use crate::package_app::{FfiNative, parse_ffi_native};
+use crate::package_app::{FfiNative, LinkInputs, parse_ffi_native, parse_static_link};
 
 pub(crate) const DEFAULT_OUT: &str = "out.ccoil";
 
@@ -42,9 +42,9 @@ pub(crate) enum Command {
         natives: Vec<FfiNative>,
         check_native: bool,
         strip_debug: bool,
-        /// Link native code for the program (an AOT executable); `false`
-        /// with `--no-aot` or `--runner`: the VM runner runs it.
-        aot: bool,
+        /// Native code or the VM runner, static libraries and linker
+        /// arguments for the executable.
+        link: LinkInputs,
     },
     /// Dump / list native lock metadata.
     Natives {
@@ -251,6 +251,16 @@ enum RawCommand {
         /// code for it (the default links an AOT executable with `cc`)
         #[arg(long)]
         no_aot: bool,
+        /// Link a static library into the AOT executable for the `extern`
+        /// block that names STEM (repeatable): its functions resolve from
+        /// the executable instead of a shared library. Without `STEM=`,
+        /// the stem is the file's (`libsum.a` is `sum`)
+        #[arg(long = "link-static", value_name = "[STEM=]PATH", value_parser = parse_static_link, action = clap::ArgAction::Append)]
+        link_static: Vec<crate::package_app::StaticLink>,
+        /// Pass ARG to the linker of the AOT executable, after the
+        /// libraries (repeatable; e.g. `-lm` for a static library's needs)
+        #[arg(long = "link-arg", value_name = "ARG", allow_hyphen_values = true, action = clap::ArgAction::Append)]
+        link_arg: Vec<String>,
         /// Entry `.coil` file
         file: Option<String>,
     },
@@ -648,6 +658,8 @@ impl RawCli {
                 ffi_native,
                 check_native,
                 no_aot,
+                link_static,
+                link_arg,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -668,7 +680,7 @@ impl RawCli {
                         Command::Package {
                             filename,
                             output: out,
-                            aot: !no_aot && runner.is_none(),
+                            link: LinkInputs { aot: !no_aot && runner.is_none(), statics: link_static, args: link_arg },
                             runner,
                             natives: ffi_native,
                             check_native,
@@ -1044,9 +1056,28 @@ mod tests {
                 natives: Vec::new(),
                 check_native: false,
                 strip_debug: false,
-                aot: true,
+                link: LinkInputs { aot: true, ..LinkInputs::default() },
             }
         );
+    }
+
+    #[test]
+    fn parse_package_static_links() {
+        let cli = parse_args(&args(&[
+            "package",
+            "app.coil",
+            "--link-static",
+            "deps/libsum.a",
+            "--link-static",
+            "z=deps/libz-static.a",
+            "--link-arg",
+            "-lm",
+        ]))
+        .unwrap();
+        let Command::Package { link, .. } = cli.command else { panic!("not a package command") };
+        let stems: Vec<&str> = link.statics.iter().map(|l| l.stem.as_str()).collect();
+        assert_eq!(stems, ["sum", "z"]);
+        assert_eq!(link.args, ["-lm"]);
     }
 
     #[test]
@@ -1080,7 +1111,7 @@ mod tests {
                 }],
                 check_native: true,
                 strip_debug: true,
-                aot: false,
+                link: LinkInputs::default(),
             }
         );
     }

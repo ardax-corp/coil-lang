@@ -622,6 +622,12 @@ impl Pipeline {
     }
 
     /// Stems from `--dload-trusted` (no hash check).
+    /// Each `extern` function's library (as its block names it) and C
+    /// symbol, from the last compile.
+    pub fn extern_symbols(&self) -> Vec<(String, String)> {
+        self.compiler_lazy().extern_symbols().to_vec()
+    }
+
     pub fn dload_trusted_stems(&self) -> Vec<String> {
         self.host_grants.dload_trusted.clone()
     }

@@ -860,7 +860,7 @@ fn main() {
                     check_native,
                     // Folded into `cli.debug_level` (`-g0`).
                     strip_debug: _,
-                    aot,
+                    link,
                 } => {
                     cmd_package(
                         &mut pipeline,
@@ -869,7 +869,7 @@ fn main() {
                         runner.as_deref(),
                         &natives,
                         check_native,
-                        aot,
+                        &link,
                     );
                     print_opt_stats(cli.opt_stats, cli.opt_stats_json);
                 }

@@ -1039,6 +1039,7 @@ impl Heap {
             signatures: Vec::new(),
             by_name: std::collections::HashMap::new(),
             closures: Vec::new(),
+            static_symbols: None,
         };
         self.alloc(obj_lib, Object::Library)
     }
@@ -4250,6 +4251,9 @@ pub struct ObjLibrary {
     pub by_name: std::collections::HashMap<String, usize>,
     /// libffi closures registered for callbacks (keeps trampolines alive).
     pub closures: Vec<crate::ffi::OwnedClosure>,
+    /// A library linked into the executable: its functions' addresses
+    /// (`library` is then the process itself).
+    pub static_symbols: Option<&'static crate::ffi::StaticLibrary>,
 }
 
 /// C signature metadata for an FFI function.

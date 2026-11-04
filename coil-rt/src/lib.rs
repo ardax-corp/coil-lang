@@ -16,6 +16,8 @@ unsafe extern "C" {
     static coil_aot_entry_count: u64;
     static coil_aot_sites: u32;
     static coil_aot_site_count: u64;
+    static coil_static_syms: machine::StaticSymbol;
+    static coil_static_sym_count: u64;
 }
 
 /// The executable's entry (the C runtime calls it).
@@ -31,6 +33,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             &raw const coil_aot_sites,
             coil_aot_site_count as usize,
         );
+        machine::install_static_symbols(&raw const coil_static_syms, coil_static_sym_count as usize);
     }
     match coil_cli::try_run_embedded() {
         // A language `panic` exits 1, as `coil-embed`.

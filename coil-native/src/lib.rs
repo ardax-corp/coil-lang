@@ -76,7 +76,9 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
 /// What [`aot`] produced: a relocatable object for the host target that
 /// defines the compiled bodies and the tables `machine::native::install_aot`
 /// reads (`coil_aot_entries`, `coil_aot_entry_count`, `coil_aot_sites`,
-/// `coil_aot_site_count`), importing the runtime helpers by name.
+/// `coil_aot_site_count`), importing the runtime helpers by name, and the
+/// statically linked `extern` symbols' table `machine::install_static_symbols` reads
+/// (`coil_static_syms`, `coil_static_sym_count`).
 pub struct AotObject {
     pub bytes: Vec<u8>,
     pub compiled: Vec<String>,
@@ -85,8 +87,10 @@ pub struct AotObject {
 
 /// Compile every eligible body of `bodies` to an object file (`coil
 /// package`): the same lowering as [`jit`], linked against the runtime
-/// library instead of bound in memory.
-pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<AotObject, String> {
+/// library instead of bound in memory. `statics` are the `extern`
+/// functions linked into the executable, as `(library stem, C symbol)`:
+/// the object imports each symbol and records its address.
+pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(String, String)]) -> Result<AotObject, String> {
     let mut excluded = HashMap::new();
     loop {
         let plan = plan_without(bodies, &excluded, entry_pcs);
@@ -163,9 +167,62 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Ao
         }
         words("coil_aot_sites", site_words)?;
         words("coil_aot_site_count", site_count.to_le_bytes().to_vec())?;
+        static_symbol_table(&mut module, statics)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
     }
+}
+
+/// `coil_static_syms`: a `machine::StaticSymbol` record (library
+/// stem, symbol, address) per statically linked `extern` function, and
+/// `coil_static_sym_count`.
+fn static_symbol_table(module: &mut cranelift_object::ObjectModule, statics: &[(String, String)]) -> Result<(), String> {
+    let e = |e: cranelift_module::ModuleError| e.to_string();
+    const RECORD: usize = std::mem::size_of::<machine::StaticSymbol>();
+    let mut table = cranelift_module::DataDescription::new();
+    table.define(vec![0u8; RECORD * statics.len().max(1)].into_boxed_slice());
+    table.set_align(8);
+    let mut strings = HashMap::new();
+    let mut string = |module: &mut cranelift_object::ObjectModule, text: &str| -> Result<cranelift_module::DataId, String> {
+        if let Some(&id) = strings.get(text) {
+            return Ok(id);
+        }
+        let mut d = cranelift_module::DataDescription::new();
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0);
+        d.define(bytes.into_boxed_slice());
+        let id = module.declare_anonymous_data(false, false).map_err(e)?;
+        module.define_data(id, &d).map_err(e)?;
+        strings.insert(text.to_string(), id);
+        Ok(id)
+    };
+    let sig = module.make_signature();
+    let mut funcs = HashMap::new();
+    for (i, (lib, sym)) in statics.iter().enumerate() {
+        let at = (i * RECORD) as u32;
+        for (off, text) in [(std::mem::offset_of!(machine::StaticSymbol, library), lib), (std::mem::offset_of!(machine::StaticSymbol, symbol), sym)] {
+            let id = string(module, text)?;
+            let gv = module.declare_data_in_data(id, &mut table);
+            table.write_data_addr(at + off as u32, gv, 0);
+        }
+        let f = match funcs.get(sym) {
+            Some(&f) => f,
+            None => {
+                let id = module.declare_function(sym, Linkage::Import, &sig).map_err(e)?;
+                let f = module.declare_func_in_data(id, &mut table);
+                funcs.insert(sym.clone(), f);
+                f
+            }
+        };
+        table.write_function_addr(at + std::mem::offset_of!(machine::StaticSymbol, address) as u32, f);
+    }
+    let id = module.declare_data("coil_static_syms", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &table).map_err(e)?;
+    let mut d = cranelift_module::DataDescription::new();
+    d.define((statics.len() as u64).to_le_bytes().to_vec().into_boxed_slice());
+    d.set_align(8);
+    let id = module.declare_data("coil_static_sym_count", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &d).map_err(e)
 }
 
 enum Attempt {

@@ -62,15 +62,33 @@ fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Res
 /// compiled and the runtime used; `None` (with a warning) when this host
 /// cannot link one, and the VM runner is packaged instead.
 #[cfg(not(target_family = "wasm"))]
-fn link_aot_executable(pipeline: &Pipeline) -> Option<(Vec<u8>, usize, PathBuf)> {
+fn link_aot_executable(pipeline: &Pipeline, link: &LinkInputs) -> Option<(Vec<u8>, usize, PathBuf)> {
     let bodies = compiler::native_mir::take_native_capture();
     let debug = pipeline.program_debug_full();
     let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
     let fallback = |why: String| {
+        // Static libraries link only into an AOT executable.
+        if !link.statics.is_empty() {
+            eprintln!("error: {why}; `--link-static` needs the AOT executable");
+            exit(1);
+        }
         eprintln!("warning: {why}; packaging the VM runner instead (pass `--no-aot` to skip linking)");
         None
     };
-    let object = match coil_native::aot(&bodies, &pcs) {
+    let linked: Vec<(String, String)> = pipeline
+        .extern_symbols()
+        .into_iter()
+        .filter_map(|(lib, sym)| {
+            let stem = machine::dload_request_stem(&lib);
+            link.statics.iter().any(|s| s.stem == stem).then_some((stem, sym))
+        })
+        .collect();
+    for s in &link.statics {
+        if !linked.iter().any(|(stem, _)| *stem == s.stem) {
+            eprintln!("warning: `--link-static {}`: no `extern \"{}\"` block declares a function", s.path.display(), s.stem);
+        }
+    }
+    let object = match coil_native::aot(&bodies, &pcs, &linked) {
         Ok(o) => o,
         Err(e) => return fallback(format!("native code for the package failed ({e})")),
     };
@@ -83,15 +101,27 @@ fn link_aot_executable(pipeline: &Pipeline) -> Option<(Vec<u8>, usize, PathBuf)>
         Ok(p) => p,
         Err(e) => return fallback(e),
     };
-    match link_with_cc(&object.bytes, &rt) {
+    match link_with_cc(&object.bytes, &rt, link) {
         Ok(exe) => Some((exe, object.compiled.len(), rt)),
         Err(e) => fallback(e),
     }
 }
 
 #[cfg(target_family = "wasm")]
-fn link_aot_executable(_: &Pipeline) -> Option<(Vec<u8>, usize, PathBuf)> {
+fn link_aot_executable(_: &Pipeline, _: &LinkInputs) -> Option<(Vec<u8>, usize, PathBuf)> {
     None
+}
+
+/// How a package's executable is made.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LinkInputs {
+    /// Link native code for the program (an AOT executable); `false` with
+    /// `--no-aot` or `--runner`: the VM runner runs it.
+    pub aot: bool,
+    /// Static libraries for `extern` blocks (`--link-static`).
+    pub statics: Vec<StaticLink>,
+    /// Extra linker arguments, after the libraries (`--link-arg`).
+    pub args: Vec<String>,
 }
 
 /// `libcoil_rt.a`: `COIL_RT_LIB`, else beside this binary.
@@ -109,9 +139,10 @@ fn runtime_library() -> Result<PathBuf, String> {
     }
 }
 
-/// `cc OBJECT RUNTIME -o EXE` with the system libraries the runtime needs.
+/// `cc OBJECT STATIC-LIBS RUNTIME -o EXE LINK-ARGS` with the system
+/// libraries the runtime needs.
 #[cfg(not(target_family = "wasm"))]
-fn link_with_cc(object: &[u8], rt: &Path) -> Result<Vec<u8>, String> {
+fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
@@ -129,9 +160,11 @@ fn link_with_cc(object: &[u8], rt: &Path) -> Result<Vec<u8>, String> {
         };
         let run = std::process::Command::new(&cc)
             .arg(&obj)
+            .args(link.statics.iter().map(|s| &s.path))
             .arg(rt)
             .arg("-o")
             .arg(&exe)
+            .args(&link.args)
             .args(libs)
             .output()
             .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))?;
@@ -190,6 +223,32 @@ fn sha256_hex_file(path: &Path) -> Result<(String, u64), String> {
             .collect(),
         size,
     ))
+}
+
+/// A static library an AOT package links for an `extern` block (one
+/// `--link-static [STEM=]PATH` flag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticLink {
+    /// The library stem `extern "STEM"` names.
+    pub stem: String,
+    /// The archive (`libSTEM.a`, `STEM.lib`).
+    pub path: PathBuf,
+}
+
+/// Parse `[STEM=]PATH`; without `STEM=`, the stem is the file name's
+/// (`libsum.a` and `sum.lib` are `sum`).
+pub fn parse_static_link(spec: &str) -> Result<StaticLink, String> {
+    if let Some((stem, path)) = spec.split_once('=')
+        && !stem.is_empty()
+        && !stem.contains(['/', '\\'])
+    {
+        return Ok(StaticLink { stem: stem.to_string(), path: PathBuf::from(path) });
+    }
+    let path = PathBuf::from(spec);
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("`{spec}` names no file"))?;
+    let base = name.strip_suffix(".a").or_else(|| name.strip_suffix(".lib")).ok_or_else(|| format!("`{spec}` is not a static library (`libNAME.a` or `NAME.lib`); give its stem as `STEM={spec}`"))?;
+    let stem = base.strip_prefix("lib").filter(|s| !s.is_empty()).unwrap_or(base);
+    Ok(StaticLink { stem: stem.to_string(), path })
 }
 
 /// A native library the packaged app loads (one `--ffi-native` flag).
@@ -264,6 +323,7 @@ pub fn build_native_lock(
     natives: &[FfiNative],
     bytecode: &[Byte],
     strings: &[String],
+    linked: &[StaticLink],
 ) -> Result<NativeLock, String> {
     // Reduce each literal to the stem the runtime dload gate uses
     // (`./native/libtls.so` → `tls`), so one `--ffi-native name=tls` row covers
@@ -278,7 +338,9 @@ pub fn build_native_lock(
     let mut entries = Vec::new();
 
     for (stem, literal) in &stems {
-        if is_system_ffi_stem(stem) {
+        // System libraries, and ones linked into the executable, ship
+        // with no artifact.
+        if is_system_ffi_stem(stem) || linked.iter().any(|l| l.stem == *stem) {
             continue;
         }
         let decl = natives.iter().find(|n| n.name == *stem).ok_or_else(|| {
@@ -386,8 +448,16 @@ pub fn cmd_package(
     runner: Option<&Path>,
     natives: &[FfiNative],
     check_native: bool,
-    aot: bool,
+    link: &LinkInputs,
 ) {
+    let aot = link.aot;
+    if !aot && !link.statics.is_empty() {
+        fail_and_exit(
+            pipeline,
+            ErrorCode::IoError,
+            "`--link-static` links into the AOT executable; it cannot be used with `--no-aot` or `--runner`".to_string(),
+        );
+    }
     // An AOT executable is linked from this compile's MIR.
     #[cfg(not(target_family = "wasm"))]
     if aot {
@@ -416,12 +486,15 @@ pub fn cmd_package(
         flags |= PACKAGE_FLAG_USES_FFI;
     }
 
-    let native_lock = match build_native_lock(natives, &bytecode, &strings) {
+    let native_lock = match build_native_lock(natives, &bytecode, &strings, &link.statics) {
         Ok(lock) => lock,
         Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
     };
 
-    if uses_ffi && native_lock.entries.is_empty() {
+    if !link.statics.is_empty() {
+        let stems: Vec<&str> = link.statics.iter().map(|l| l.stem.as_str()).collect();
+        eprintln!("note: linking `{}` into the executable statically", stems.join("`, `"));
+    } else if uses_ffi && native_lock.entries.is_empty() {
         // FFI opcodes present but only system libs (or dynamic dload) — OK for libc-only.
         eprintln!(
             "note: this program uses FFI; only system libraries were detected. \
@@ -452,7 +525,9 @@ pub fn cmd_package(
             let _ = gate.grant_file(stem, path);
         }
         let search = pipeline.ffi_search_path_bufs();
-        for name in &libs {
+        // A library linked statically has no file to find on the target.
+        let linked = |name: &str| link.statics.iter().any(|l| l.stem == machine::dload_request_stem(name));
+        for name in libs.iter().filter(|n| !linked(n)) {
             if let Err(e) = machine::resolve_library(name, base_dir, &search, &gate) {
                 fail_and_exit(
                     pipeline,
@@ -466,7 +541,7 @@ pub fn cmd_package(
     // The executable the payload goes on: one linked from native code for
     // the program, or the VM runner (`--no-aot`, `--runner`, or when
     // linking is not possible here).
-    let linked = if aot { link_aot_executable(pipeline) } else { None };
+    let linked = if aot { link_aot_executable(pipeline, link) } else { None };
     if let Some((exe, compiled, rt)) = linked {
         let lock_json = (!native_lock.entries.is_empty()).then(|| native_lock.to_json());
         let packaged = append_package_payload_with_natives(
@@ -576,6 +651,16 @@ mod tests {
     use super::*;
     use coil_cli::{LoadErr, load_archive_bytes};
     use common::{ArchivedProgram, Instruction, pack_archive_version};
+
+    #[test]
+    fn static_link_stem_comes_from_the_file_or_the_flag() {
+        let l = parse_static_link("deps/libsum.a").unwrap();
+        assert_eq!((l.stem.as_str(), l.path.as_path()), ("sum", Path::new("deps/libsum.a")));
+        assert_eq!(parse_static_link("sum.lib").unwrap().stem, "sum");
+        let l = parse_static_link("plugin=out/libplugin-x86.a").unwrap();
+        assert_eq!((l.stem.as_str(), l.path.as_path()), ("plugin", Path::new("out/libplugin-x86.a")));
+        assert!(parse_static_link("libsum.so").is_err());
+    }
 
     #[test]
     fn load_archive_bytes_rejects_version() {
@@ -696,7 +781,7 @@ mod tests {
             Byte::new(Instruction::STRING).with_operand_u32(1),
             Byte::new(Instruction::FfiLoad),
         ];
-        let lock = build_native_lock(&natives, &bytecode, &strings);
+        let lock = build_native_lock(&natives, &bytecode, &strings, &[]);
         let _ = fs::remove_dir_all(&dir);
         let lock = lock.expect("the `tls` row covers `./native/libtls.so`");
         assert_eq!(lock.entries.len(), 1, "one entry per stem: {:?}", lock.entries);

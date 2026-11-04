@@ -6218,7 +6218,8 @@ impl<const S: usize> Machine<S> {
                 self.libraries
                     .entry(path.clone())
                     .or_insert_with(|| lib_arc.clone());
-                let (object, _gc) = self.heap.alloc_library(lib_arc);
+                let (object, lib) = self.heap.alloc_library(lib_arc);
+                lib.payload_mut().static_symbols = crate::ffi::static_library(&path);
                 let addr = object.addr();
                 self.userland_libraries.insert(addr, object);
                 self.push_result_ok(Value::from(addr));
