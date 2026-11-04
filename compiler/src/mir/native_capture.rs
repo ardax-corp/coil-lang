@@ -49,6 +49,7 @@ pub fn take_native_capture() -> Vec<NativeBody> {
     let mut bodies = NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default();
     let entries = bodies.iter().filter_map(|b| Some((b.name.clone(), b.entry?))).collect();
     super::native_twins::apply(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)), &entries);
+    super::native_expand::apply_all(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)), &entries);
     bodies
 }
 

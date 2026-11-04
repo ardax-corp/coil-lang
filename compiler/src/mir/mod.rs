@@ -72,6 +72,7 @@ pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]
 pub use inst::LocalId;
 mod native_capture;
+pub mod native_expand;
 pub mod native_twins;
 pub use native_capture::{NativeBody, VectorOp, capture_native_bodies, vector_op, native_capture_active, start_native_capture, take_native_capture, without_native_capture};
 pub use instcombine::{instcombine, instcombine_lir};
