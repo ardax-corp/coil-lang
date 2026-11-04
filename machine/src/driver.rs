@@ -11,8 +11,7 @@
 //! own call) never leaves its stack: where it waits, the driver runs the
 //! scheduler there until the root is ready again; a child that waits
 //! suspends its fiber back to that loop.
-//!
-//! Not yet: FFI callbacks (each reports a panic naming the gap).
+
 
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -689,13 +688,28 @@ impl<'a> Driver<'a> {
             _ => {
                 let call = crate::vm::FfiCall::from_words(&d.rt.heap, args);
                 d.rooted(ctx, |d| {
-                    let mut callback = |_| Err(crate::ffi::FfiError::Panic("native driver: FFI callbacks are not supported yet".into()));
+                    // A callback the C function makes runs that body natively.
+                    let me = std::ptr::from_mut(d).cast::<c_void>();
+                    let layouts = Arc::clone(&d.rt.ffi.struct_layouts);
+                    let mut callback = |offset: u32| {
+                        let cif = crate::ffi::callback_cif(&[crate::memory::FfiType::Int], crate::memory::FfiType::Int, &layouts)?;
+                        crate::ffi::make_int_callback(me, offset, Driver::ffi_callback, cif)
+                    };
                     d.rt.ffi_invoke(call.lib_addr, call.function_id, &call.args, call.arg_types.as_deref(), &mut callback)
                 })
             }
         };
         *panicked = d.panicked;
         Some(out.bits())
+    }
+
+    /// An FFI callback into the body at `offset` on `len` words at `args`.
+    unsafe fn ffi_callback(raw: *mut c_void, offset: u32, args: *const Value, len: usize) -> Value {
+        // SAFETY: the driver made the callback and runs the C call.
+        let d = unsafe { Self::from_raw(raw) };
+        // SAFETY: libffi passes the callback's argument words.
+        let args = unsafe { std::slice::from_raw_parts(args, len) };
+        d.call(offset as usize, args).map_or_else(Value::default, |(lo, _)| Value::from(lo))
     }
 
     unsafe fn host_invoke(raw: *mut c_void, ctx: *mut NativeCtx, id: u64, layout: u64, args: &[Value]) -> Option<Invoked> {
