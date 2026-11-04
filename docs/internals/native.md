@@ -449,9 +449,10 @@ MIR passes the dense tier runs (`mir::specialize::optimize_mir`, at the
 compile's `-O` level): SCCP, the loop passes, SROA, and the loop rewrites
 `byte_scan` and `vec_loops`. Native code then gets the same vector ops as
 the VM. The rewrites that end in a runtime kernel call (`copy_until` and
-`bulk_push`: `vec_extend_range` / `vec_fill`) stay the VM's
+`bulk_push`: `vec_extend_range` / `vec_fill`) run for the VM only
 (`OptimizeOptions::host_loop_calls` off): native code compiles those loops
-as written, so the kernels need not be in the runtime. Two exceptions: `promote_fields` does not run (its `PanicStore`s would need
+as written, so the kernels need not be in the runtime. Two more
+exceptions: `promote_fields` does not run (its `PanicStore`s would need
 the native unwinder to write promoted fields back), and generators, bodies
 with a cleanup pad, debugger and coverage builds keep their MIR as lowered.
 
