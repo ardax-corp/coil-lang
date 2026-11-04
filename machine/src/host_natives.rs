@@ -142,6 +142,8 @@ pub fn build_standard_host_natives(
     push_entropy(&mut out, &mut register_id);
     // Append-only after entropy: `key_index::*` (major 6 minor 18).
     push_wiring(&mut out, &mut register_id, crate::key_index::KEY_INDEX_WIRING, "key_index");
+    // Append-only after key_index: the lock primitives (major 6 minor 21).
+    push_lock_natives(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -627,6 +629,26 @@ fn push_wiring(
             continue;
         }
         out.push(Arc::new(HostClosureFn::new_direct(sig, host)));
+    }
+}
+
+/// The lock primitives the Coil `with_lock` family builds on. An acquire
+/// may park the task (no result yet; the VM or the native driver runs it
+/// again after the wake), so it is an ordinary closure; the rest are
+/// direct.
+fn push_lock_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    for &(name, arity, host) in crate::thread::LOCK_WIRING {
+        if !matches!(name, "lock_acquire" | "rw_acquire_read" | "rw_acquire_write") {
+            push_wiring(out, register_id, &[(name, arity, host)], "lock");
+            continue;
+        }
+        let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; arity], FfiType::Int)
+            .unwrap_or_else(|_| panic!("lock native signature"));
+        register_id(name, out.len());
+        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
+            let v = host(heap, args);
+            Ok((!crate::task::thread_parked()).then_some(v))
+        })));
     }
 }
 
@@ -1480,9 +1502,11 @@ mod tests {
             Some(common::KEY_INDEX_CLEAR_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(199).map(String::as_str),
             Some(common::KEY_INDEX_EQ_MODE_NATIVE)
         );
+        assert_eq!(names.get(200).map(String::as_str), Some("lock_acquire"));
+        assert_eq!(names.last().map(String::as_str), Some("rw_store"));
         assert_eq!(attach, 119);
     }
 
@@ -1861,6 +1885,10 @@ mod tests {
             registrations.get(end + 63).map(|(n, _)| n.as_str()),
             Some(common::KEY_INDEX_EQ_MODE_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 64);
+        assert_eq!(
+            registrations.get(end + 75).map(|(n, _)| n.as_str()),
+            Some("rw_store")
+        );
+        assert_eq!(registrations.len(), end + 76);
     }
 }

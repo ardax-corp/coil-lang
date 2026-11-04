@@ -59,6 +59,37 @@ pub const CORE_MODULE: &str = "core";
 /// Source of the embedded `core` module.
 pub const CORE_SOURCE: &str = include_str!("../prelude/core.coil");
 
+/// Module path of the embedded `thread::with_lock` family, in Coil over
+/// the `prelude::thread` lock primitives.
+pub const THREAD_LOCKS_MODULE: &str = "thread_locks";
+
+/// Source of the embedded `thread_locks` module.
+pub const THREAD_LOCKS_SOURCE: &str = include_str!("../prelude/thread_locks.coil");
+
+/// The `thread` names [`THREAD_LOCKS_MODULE`] defines: a `use thread::x`
+/// of one is a `use thread_locks::x` ([`forward_thread_uses`]).
+pub const THREAD_LOCKS_FNS: &[&str] = &["with_lock", "with_read", "with_write", "try_read", "try_write"];
+
+/// Point each top-level `use thread::x` of a [`THREAD_LOCKS_FNS`] name at
+/// [`THREAD_LOCKS_MODULE`], where `x` is written in Coil.
+pub fn forward_thread_uses(ast: &mut parser::ast::Output<'_>) {
+    use parser::ast::Expression;
+    fn visit(e: &mut Expression<'_>) {
+        match e {
+            Expression::Use { path, name, .. } => {
+                if path.len() == 1 && path[0] == "thread" && THREAD_LOCKS_FNS.contains(&name.as_str()) {
+                    path[0] = THREAD_LOCKS_MODULE.to_string();
+                }
+            }
+            Expression::Fragment(items) => items.iter_mut().for_each(|i| visit(&mut i.1)),
+            _ => {}
+        }
+    }
+    if let Expression::Program(children) = ast.1.as_mut() {
+        children.iter_mut().for_each(|c| visit(&mut c.1));
+    }
+}
+
 /// Module path of the Coil twins of host natives native code calls
 /// instead of the native (`mir::native_twins`). Embedded only while a
 /// native capture is open.
@@ -172,6 +203,11 @@ pub fn twins_module_path() -> PathBuf {
     PathBuf::from("<coil>/twins.coil")
 }
 
+/// Pseudo path of the embedded `thread_locks` module.
+pub fn thread_locks_module_path() -> PathBuf {
+    PathBuf::from("<coil>/thread_locks.coil")
+}
+
 /// Pseudo path of the core prelude module.
 pub fn core_module_path() -> PathBuf {
     PathBuf::from("<coil>/core.coil")
@@ -193,6 +229,8 @@ pub fn embedded_source(path: &Path) -> Option<&'static str> {
         Some(CORE_SOURCE)
     } else if path == twins_module_path() {
         Some(TWINS_SOURCE)
+    } else if path == thread_locks_module_path() {
+        Some(THREAD_LOCKS_SOURCE)
     } else {
         None
     }
@@ -214,6 +252,8 @@ pub fn embedded_module(path: &Path) -> Option<&'static str> {
         Some(CORE_MODULE)
     } else if path == twins_module_path() {
         Some(TWINS_MODULE)
+    } else if path == thread_locks_module_path() {
+        Some(THREAD_LOCKS_MODULE)
     } else {
         None
     }
@@ -233,6 +273,9 @@ pub fn embedded_use(path: &[String], name: &str) -> Option<(PathBuf, &'static st
     }
     if head == ARBITRARY_MODULE {
         return Some((arbitrary_module_path(), ARBITRARY_MODULE));
+    }
+    if head == THREAD_LOCKS_MODULE {
+        return Some((thread_locks_module_path(), THREAD_LOCKS_MODULE));
     }
     (head == DERIVE_MODULE).then(|| (derive_module_path(), DERIVE_MODULE))
 }

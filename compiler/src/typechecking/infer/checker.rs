@@ -1387,6 +1387,23 @@ impl Checker {
             "task_cancel" | "task_cond_notify" => fun(&[int()], unit_ty()),
             "task_cond_new" => fun(&[], int()),
             "task_cond_wait" => fun(&[int()], int()),
+            "lock_acquire" | "lock_release" | "lock_load" | "lock_store" | "rw_acquire_read" | "rw_acquire_write"
+            | "rw_try_read" | "rw_try_write" | "rw_release_read" | "rw_release_write" | "rw_load" | "rw_store" => {
+                use crate::typechecking::ty::{mutex_ty, rwlock_ty};
+                // The lock primitives (`prelude::thread`): every one takes the
+                // lock with its value type `T`.
+                let t = self.counter.fresh();
+                let tv = Ty::Var(t);
+                let lock_err = Ty::Con(common::BUILTIN_LOCK_ERROR_ENUM.into());
+                let lock = if registry.starts_with("lock_") { mutex_ty(tv.clone()) } else { rwlock_ty(tv.clone()) };
+                let ty = match registry {
+                    "rw_try_read" | "rw_try_write" => fun(&[lock], boolean()),
+                    "lock_load" | "rw_load" => fun(&[lock], result_app_ty(tv, lock_err)),
+                    "lock_store" | "rw_store" => fun(&[lock, tv], result_app_ty(unit_ty(), lock_err)),
+                    _ => fun(&[lock], unit_ty()),
+                };
+                return Scheme::poly(vec![t], vec![], ty);
+            }
             "task_spawn" => {
                 // (scope, coroutine) -> task id; the coroutine's type is free.
                 let t = self.counter.fresh();
