@@ -1567,7 +1567,7 @@ pub fn direct_host_natives() -> &'static [DirectHost] {
                 let guarded = crate::host_natives::stream_first(n.name());
                 let func = if guarded { n.guarded_direct() } else { n.direct() };
                 let collect = n.name() == crate::gc_handles::GC_COLLECT_NATIVE;
-                let via_vm = func.is_none() && !collect && matches!(n.host_op(), crate::HostOp::Ordinary | crate::HostOp::Task);
+                let via_vm = func.is_none() && !collect && matches!(n.host_op(), crate::HostOp::Ordinary | crate::HostOp::Task | crate::HostOp::RegionEnter | crate::HostOp::RegionExit);
                 DirectHost { name: n.name().to_string(), func, guarded, collect, via_vm }
             })
             .collect()
@@ -1585,7 +1585,8 @@ pub struct DirectHost {
     /// with native code's words rooted around the call.
     pub collect: bool,
     /// An ordinary native that needs the VM (it may park the task, open
-    /// descriptors, ...) or a task op: native code runs it through a host-call stub
+    /// descriptors, ...), a task op or a `region` hook (a minor collection):
+    /// native code runs it through a host-call stub
     /// ([`host_stubs`]) in a nested VM execution, as a VM call.
     pub via_vm: bool,
 }
