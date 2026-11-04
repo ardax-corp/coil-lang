@@ -1158,3 +1158,17 @@ fn auto_par_forks_from_native_code_keep_their_trees() {
     let stats = same_as_vm("auto_par_trees", &src);
     assert!(compiled(&stats, "work"), "stats: {stats}");
 }
+
+#[test]
+fn a_drop_the_collector_runs_enters_native_code() {
+    // `collect` from native `main` finalizes the handle: its `drop` has
+    // native code, so no bytecode runs.
+    let src = format!(
+        "{HEADER}use gc::collect;\nstatic let LOG: int = 0;\nclass Handle {{ pub fd: int, }}\n\
+         impl Handle {{ fn drop() {{ LOG = LOG + self.fd; }} }}\n\
+         #[inline(never)]\nfn leak(int fd) {{ let h = new Handle(fd); }}\n\
+         fn main() {{ leak(3); leak(4); collect(); let _ = println(format(\"%i\", LOG)); }}\n"
+    );
+    let stats = same_as_vm("native_drop", &src);
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
+}
