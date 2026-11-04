@@ -401,12 +401,15 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         mode: [debug, release]
-        variant: [default, O0, leak-smoke, gc-stress]
+        variant: [default, O0, leak-smoke, gc-stress, native]
         # GC stress runs in release only. The debug cells took over 30
         # minutes even split in three and kept timing out on a stall
         # (#2131), so PRs ignored them; restore them once that is fixed.
-        exclude: &no-debug-gc-stress
+        # Native code runs in release only: the debug cell would test the
+        # same Cranelift output at a fraction of the speed.
+        exclude:
           - { mode: debug, variant: gc-stress }
+          - { mode: debug, variant: native }
     env: &harness-env
       # A worker abort (coil-lang#804) prints where it happened.
       RUST_BACKTRACE: "1"
@@ -461,6 +464,9 @@ jobs:
             # Optimizations hide codegen bugs (LICM materializes invariants,
             # inlining drops CALL targets); run the unoptimized pipeline too.
             O0) $run -- -O 0 $FLAGS ;;
+            # Every corpus again with native code where the backend compiles
+            # a body (`docs/internals/native.md`): it must pass as the VM does.
+            native) $run -- --engine native $FLAGS ;;
             leak-smoke)
               # Each corpus process gets 128 MiB of address space above the
               # harness's own code, and one job: every extra thread reserves
@@ -606,7 +612,8 @@ jobs:
         os: [macos-latest]
         mode: [debug, release]
         variant: [default, gc-stress]
-        exclude: *no-debug-gc-stress
+        exclude:
+          - { mode: debug, variant: gc-stress }
     env: *harness-env
     steps: *harness-steps
 

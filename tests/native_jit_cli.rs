@@ -1,0 +1,1054 @@
+//! `coil FILE --jit`: functions the native backend compiles must behave
+//! exactly as the VM runs them (output, panic message and location, exit
+//! status), and they must actually run natively.
+
+use std::path::PathBuf;
+use std::process::{Command, Output};
+
+fn coil_bin() -> String {
+    std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)")
+}
+
+fn run(name: &str, src: &str, jit: bool) -> Output {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join(format!("{name}.coil"));
+    std::fs::write(&file, src).expect("write source");
+    let mut cmd = Command::new(coil_bin());
+    cmd.arg(&file).args(["--no-build-cache", "--fold-calls", "off"]);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    if jit {
+        cmd.arg("--jit").env("COIL_NATIVE_STATS", "2");
+    }
+    cmd.output().expect("spawn coil")
+}
+
+/// Stderr without the `native:` statistics lines.
+fn program_stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| !l.starts_with("native:") && !l.starts_with("  native: ") && !l.starts_with("  vm: "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether the stats (`COIL_NATIVE_STATS=2`) list `name` as compiled.
+fn compiled(stats: &str, name: &str) -> bool {
+    stats.lines().any(|l| l == format!("  native: {name}"))
+}
+
+/// The run with `--jit` matches the VM run; returns the JIT run's stderr.
+fn same_as_vm(name: &str, src: &str) -> String {
+    let vm = run(name, src, false);
+    let jit = run(name, src, true);
+    assert_eq!(
+        String::from_utf8_lossy(&vm.stdout),
+        String::from_utf8_lossy(&jit.stdout),
+        "{name}: stdout differs"
+    );
+    assert_eq!(program_stderr(&vm), program_stderr(&jit), "{name}: stderr differs");
+    assert_eq!(vm.status.code(), jit.status.code(), "{name}: exit status differs");
+    String::from_utf8_lossy(&jit.stderr).into_owned()
+}
+
+const HEADER: &str = "use io::sync::println;\nuse string::format;\n";
+
+#[test]
+fn pure_recursion_runs_natively() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn fib(int n) -> int {{ if n <= 2 {{ return 1; }} return fib(n - 1) + fib(n - 2); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", fib(25))); }}\n"
+    );
+    let stats = same_as_vm("fib", &src);
+    assert!(compiled(&stats, "fib"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
+}
+
+#[test]
+fn int_traps_bail_to_the_vm_panic() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn grow(int x, int n) -> int {{ let i = 0; while i < n {{ x = x * 3; i = i + 1; }} return x; }}\n\
+         #[inline(never)]\nfn q(int a, int b) -> int {{ return a / b + a % b; }}\n\
+         fn main() {{\n  let _ = println(format(\"%i %i\", grow(1, 10), q(-7, 2)));\n  let _ = println(format(\"%i\", q(7, 0)));\n}}\n"
+    );
+    let stats = same_as_vm("traps", &src);
+    assert!(stats.contains("bailed"), "stats: {stats}");
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn grow(int x, int n) -> int {{ let i = 0; while i < n {{ x = x * 3; i = i + 1; }} return x; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", grow(1, 50))); }}\n"
+    );
+    same_as_vm("overflow", &src);
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn q(int a, int b) -> int {{ return a / b; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", q(-9223372036854775807 - 1, -1))); }}\n"
+    );
+    same_as_vm("min_div", &src);
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sh(int a, int b) -> int {{ return (a << b) + (a >> b); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", sh(3, 4))); let _ = println(format(\"%i\", sh(1, 64))); }}\n"
+    );
+    same_as_vm("shift", &src);
+}
+
+#[test]
+fn deep_recursion_falls_back_once() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn down(int n) -> int {{ if n == 0 {{ return 0; }} return 1 + down(n - 1); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", down(100000))); }}\n"
+    );
+    let stats = same_as_vm("deep", &src);
+    assert!(stats.contains("1 bailed"), "one bail, then the VM keeps the recursion: {stats}");
+}
+
+#[test]
+fn floats_and_bools_match_the_vm() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn f(float a, float b) -> int {{\n  let r = 0;\n  if a != b {{ r = r + 1; }}\n  if a == b {{ r = r + 2; }}\n  if a < b {{ r = r + 4; }}\n  return r * 1000 + ((a / b) as int) % 1000;\n}}\n\
+         #[inline(never)]\nfn g(float x) -> float {{ return -x * 2.5 % 7.0; }}\n\
+         #[inline(never)]\nfn bits(bool p, bool q) -> bool {{ return p && !q; }}\n\
+         fn main() {{\n  let nan = 0.0 / 0.0;\n  let _ = println(format(\"%i %i %i\", f(1.0, 2.0), f(nan, nan), f(-5.5, 0.0)));\n  let _ = println(format(\"%f %f\", g(3.0), g(nan)));\n  if bits(true, false) {{ let _ = println(\"yes\"); }}\n}}\n"
+    );
+    same_as_vm("floats", &src);
+}
+
+#[test]
+fn heap_reads_run_natively() {
+    let src = format!(
+        "{HEADER}class P {{ pub x: int, pub y: float, pub on: bool }}\n\
+         #[inline(never)]\nfn vsum(Vec<int> v) -> int {{ let s = 0; let i = 0; while i < v.len() {{ s = s + v[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn px(P p) -> float {{ if p.on {{ return p.y * 2.0 + (p.x as float); }} return 0.0; }}\n\
+         #[inline(never)]\nfn at(Vec<int> a, int i) -> int {{ return a[i]; }}\n\
+         #[inline(never)]\nfn flag(Vec<bool> a, int i) -> bool {{ return a[i]; }}\n\
+         fn main() {{\n  let a: Vec<int> = [1, 2, 3, 4, 5];\n  let b: Vec<bool> = [true, false];\n\
+           let _ = println(format(\"%i %i\", vsum(a), at(a, 4)));\n\
+           let _ = println(format(\"%f\", px(new P(3, 1.5, true))));\n\
+           if flag(b, 0) && !flag(b, 1) {{ let _ = println(\"flags\"); }}\n\
+           let _ = println(format(\"%i\", at(a, 9)));\n}}\n"
+    );
+    let stats = same_as_vm("heap", &src);
+    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    for f in ["vsum", "px", "at", "flag"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+}
+
+#[test]
+fn heap_stores_are_undone_when_the_call_bails() {
+    // `fill` writes a[0..n] and then indexes past the end: the bail takes
+    // the stores back and the VM's re-run makes them and panics as before.
+    let src = format!(
+        "{HEADER}class C {{ pub n: int, pub f: float }}\n\
+         #[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i * 10; i = i + 1; }} return a[n]; }}\n\
+         #[inline(never)]\nfn bump(C c, int by) -> int {{ c.n = c.n + by; c.f = c.f * 2.0; return 100 / by; }}\n\
+         fn main() {{\n  let a: Vec<int> = [0, 0, 0, 0];\n  let c = new C(1, 1.5);\n\
+           let _ = println(format(\"%i %i %i\", fill(a, 3), a[1], a[2]));\n\
+           let _ = println(format(\"%i %i %f\", bump(c, 2), c.n, c.f));\n\
+           let _ = println(format(\"%i\", bump(c, 0)));\n}}\n"
+    );
+    let stats = same_as_vm("stores", &src);
+    assert!(compiled(&stats, "fill") && compiled(&stats, "bump"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i + 7; i = i + 1; }} return a[n]; }}\n\
+         fn main() {{ let a: Vec<int> = [0, 0, 0]; let _ = println(format(\"%i\", fill(a, 3))); }}\n"
+    );
+    same_as_vm("stores_oob", &src);
+    // A recursion past the native stack budget bails with no panic: without
+    // the undo the counts would include the native run's increments too.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn rec(Vec<int> a, int d) -> int {{ if d == 0 {{ return 0; }} a[d % 4] = a[d % 4] + 1; return 1 + rec(a, d - 1); }}\n\
+         fn main() {{ let a: Vec<int> = [0, 0, 0, 0]; let n = rec(a, 50000); let _ = println(format(\"%i %i %i %i %i\", n, a[0], a[1], a[2], a[3])); }}\n"
+    );
+    let stats = same_as_vm("stores_deep", &src);
+    assert!(stats.contains("1 bailed"), "stats: {stats}");
+}
+
+#[test]
+fn copy_on_write_keeps_value_semantics_natively() {
+    // `step` writes through `mut ps[i]`: a copy-on-write in native code.
+    // `keep` names the same Vec, so the writes copy and `keep` is unchanged.
+    let src = format!(
+        "{HEADER}class P {{ pub x: float, pub v: float }}\n\
+         #[inline(never)]\nfn step(Vec<P> ps, float dt) -> float {{ let s = 0.0; let i = 0; while i < ps.len() {{ let p = mut ps[i]; p.v = p.v - p.x * dt; p.x = p.x + p.v * dt; s = s + p.x; i = i + 1; }} return s; }}\n\
+         fn main() {{\n  let ps: Vec<P> = Vec::new();\n  let i = 0;\n  while i < 4 {{ ps.push(new P(i as float, 0.0)); i = i + 1; }}\n\
+           let keep = ps;\n  let s = 0.0;\n  let r = 0;\n  while r < 50 {{ s = step(ps, 0.01); r = r + 1; }}\n\
+           let _ = println(format(\"%f %f %f\", s, ps[3].x, keep[3].x));\n}}\n"
+    );
+    let stats = same_as_vm("cow", &src);
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
+    assert!(compiled(&stats, "step"), "stats: {stats}");
+}
+
+#[test]
+fn allocation_runs_natively_and_matches_the_vm() {
+    // Objects, tuples, enums and arrays made in native code, pushes, and a
+    // push that a bail takes back before the VM's re-run panics (each push
+    // reads the length, so the loop stays one push at a time).
+    let src = format!(
+        "{HEADER}class Pt {{ pub x: int, pub y: int }}\n\
+         enum Shape {{ Dot, Sq(int), Rect(int, int) }}\n\
+         #[inline(never)]\nfn make(int n) -> Vec<Pt> {{ let v: Vec<Pt> = Vec::new(); let i = 0; while i < n {{ v.push(new Pt(i, i * 2)); i = i + 1; }} return v; }}\n\
+         #[inline(never)]\nfn area(Shape s) -> int {{ return match s {{ Shape::Dot => 0, Shape::Sq(a) => a * a, Shape::Rect(a, b) => a * b }}; }}\n\
+         #[inline(never)]\nfn shape(int i) -> Shape {{ if i % 3 == 0 {{ return Shape::Dot; }} if i % 3 == 1 {{ return Shape::Sq(i); }} return Shape::Rect(i, 2); }}\n\
+         #[inline(never)]\nfn pair(int a) -> (int, int) {{ return (a, a + 1); }}\n\
+         #[inline(never)]\nfn grow(Vec<int> v, int n) -> int {{ let i = 0; while i < n {{ v.push(v.len()); i = i + 1; }} return v[n * 2]; }}\n\
+         fn main() {{\n  let ps = make(5);\n  let s = 0;\n  let i = 0;\n  while i < 9 {{ s = s + area(shape(i)); i = i + 1; }}\n\
+           let (a, b) = pair(4);\n  let _ = println(format(\"%i %i %i %i %i\", ps.len(), ps[4].y, s, a, b));\n\
+           let v: Vec<int> = [9];\n  let _ = println(format(\"%i\", grow(v, 3)));\n}}\n"
+    );
+    let stats = same_as_vm("alloc", &src);
+    for f in ["make", "area", "shape", "pair", "grow"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert!(stats.contains("1 bailed"), "stats: {stats}");
+    // A call that allocates far past the collection threshold bails (no
+    // collection runs inside native code); the VM's re-run collects.
+    let src = format!(
+        "{HEADER}class N {{ pub v: int }}\nclass H {{ pub last: N }}\n\
+         #[inline(never)]\nfn churn(H h, int n) -> int {{ let s = 0; let i = 0; while i < n {{ h.last = new N(i); s = s + h.last.v; i = i + 1; }} return s; }}\n\
+         fn main() {{ let h = new H(new N(0)); let _ = println(format(\"%i %i\", churn(h, 3000000), h.last.v)); }}\n"
+    );
+    let stats = same_as_vm("alloc_churn", &src);
+    assert!(compiled(&stats, "churn") && stats.contains("1 bailed"), "stats: {stats}");
+}
+
+#[test]
+fn matches_on_option_result_and_enums_run_natively() {
+    let src = format!(
+        "{HEADER}class B {{ pub n: int }}\n\
+         #[inline(never)]\nfn find(Vec<B> v, int k) -> Option<B> {{ let i = 0; while i < v.len() {{ if v[i].n == k {{ return Some(v[i]); }} i = i + 1; }} return None; }}\n\
+         #[inline(never)]\nfn get(Vec<B> v, int k) -> int {{ return match find(v, k) {{ Some(b) => b.n * 10, None => -1 }}; }}\n\
+         #[inline(never)]\nfn check(B b) -> Result<B, B> {{ if b.n > 2 {{ return Err(b); }} return Ok(b); }}\n\
+         #[inline(never)]\nfn score(B b) -> int {{ return match check(b) {{ Ok(x) => x.n, Err(e) => 100 + e.n }}; }}\n\
+         fn main() {{\n  let v: Vec<B> = [new B(1), new B(2), new B(3)];\n\
+           let _ = println(format(\"%i %i %i %i\", get(v, 2), get(v, 7), score(v[0]), score(v[2])));\n}}\n"
+    );
+    let stats = same_as_vm("matches", &src);
+    for f in ["find", "get", "check", "score"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    // The same bodies through the archive's native MIR section.
+    let archive = compile("matches_archive", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(jit.stdout, vm.stdout);
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert!(String::from_utf8_lossy(&jit.stderr).contains("calls ran natively, 0 bailed"));
+}
+
+#[test]
+fn two_word_returns_run_natively() {
+    // A two-slot `Option<int>` and a pair, returned to native callers and
+    // to the VM (`main`), through the JIT and through an archive.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn half(int n) -> Option<int> {{ if n % 2 == 0 {{ return Some(n / 2); }} return None; }}\n\
+         #[inline(never)]\nfn halves(int n) -> int {{ let s = 0; let i = 0; while i < n {{ s = s + match half(i) {{ Some(h) => h, None => 1 }}; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn minmax(Vec<int> v) -> (int, int) {{ let lo = v[0]; let hi = v[0]; for x in v {{ if x < lo {{ lo = x; }} if x > hi {{ hi = x; }} }} return (lo, hi); }}\n\
+         #[inline(never)]\nfn spread(Vec<int> v) -> int {{ let (a, b) = minmax(v); return b - a; }}\n\
+         fn main() {{\n  let v: Vec<int> = [4, 9, -2, 7];\n  let (lo, hi) = minmax(v);\n\
+           let h = match half(8) {{ Some(x) => x, None => -1 }};\n\
+           let _ = println(format(\"%i %i %i %i %i\", halves(11), spread(v), lo, hi, h));\n}}\n"
+    );
+    let stats = same_as_vm("two_words", &src);
+    for f in ["half", "halves", "minmax", "spread"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    let archive = compile("two_words_archive", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(String::from_utf8_lossy(&jit.stdout), "20 11 -2 9 4\n");
+    assert_eq!(jit.stdout, vm.stdout);
+    assert!(String::from_utf8_lossy(&jit.stderr).contains("calls ran natively, 0 bailed"));
+}
+
+#[test]
+fn string_literals_come_from_native_code() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sign(int i) -> String {{ if i > 0 {{ return \"pos\"; }} if i < 0 {{ return \"neg\"; }} return \"zero\"; }}\n\
+         #[inline(never)]\nfn signs(Vec<int> v) -> Vec<String> {{ let out: Vec<String> = Vec::new(); for x in v {{ out.push(sign(x)); }} return out; }}\n\
+         fn main() {{\n  let v: Vec<int> = [3, -1, 0, 8];\n  for s in signs(v) {{ let _ = println(s); }}\n}}\n"
+    );
+    let stats = same_as_vm("strings", &src);
+    assert!(compiled(&stats, "sign") && compiled(&stats, "signs"), "stats: {stats}");
+    // Content equality of strings (and `!=`) in native code.
+    let eq = format!(
+        "{HEADER}#[inline(never)]\nfn count(Vec<String> v, String k) -> int {{ let n = 0; for s in v {{ if s == k {{ n = n + 1; }} if s != k {{ n = n + 100; }} }} return n; }}\n\
+         fn main() {{\n  let v: Vec<String> = [\"ab\", \"cd\", \"ab\"];\n  let k = format(\"%s%s\", \"a\", \"b\");\n  let _ = println(format(\"%i\", count(v, k)));\n}}\n"
+    );
+    let stats = same_as_vm("str_eq", &eq);
+    assert!(compiled(&stats, "count"), "stats: {stats}");
+    let archive = compile("strings_archive", &src, true);
+    let jit = run_archive(&archive, &[]);
+    assert_eq!(String::from_utf8_lossy(&jit.stdout), "pos\nneg\nzero\npos\n");
+}
+
+#[test]
+fn format_and_string_building_run_natively() {
+    // `format` with each kind of argument, `%%`, and `s = s + x` (a `%s%s`
+    // format that appends in place), built in native code.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn show(int i, float f, bool b, String s) -> String {{ return format(\"%i|%f|%v|%s|%v|100%%\", i, f, b, s, f); }}\n\
+         #[inline(never)]\nfn join(Vec<String> v) -> String {{ let s = \"\"; for x in v {{ s = s + x + \",\"; }} return s; }}\n\
+         #[inline(never)]\nfn pct() -> String {{ return format(\"50%%\"); }}\n\
+         fn main() {{\n  let _ = println(show(-3, 2.25, true, \"hi\"));\n\
+           let v: Vec<String> = [\"a\", \"bb\", \"ccc\"];\n  let j = join(v);\n  let _ = println(j);\n  let _ = println(join(v));\n  let _ = println(pct());\n}}\n"
+    );
+    let stats = same_as_vm("format", &src);
+    for f in ["show", "join", "pct"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+}
+
+#[test]
+fn question_mark_err_of_a_string_result_matches_the_vm() {
+    // `?` on the `Err` of a `Result<string, int>` crashed native code.
+    let src = format!(
+        "{HEADER}fn inner(int x) -> Result<string, int> {{ if x > 0 {{ return Result::Ok(\"abc\"); }} return Result::Err(x); }}\n\
+         fn len_of_ok(int y) -> Result<int, int> {{ let r = match inner(y)? {{ s => s.len() }}; return Result::Ok(r); }}\n\
+         fn main() {{\n  let b = match len_of_ok(-4) {{ Result::Ok(n) => n, Result::Err(e) => e }};\n  let a = match len_of_ok(2) {{ Result::Ok(n) => n, Result::Err(e) => e }};\n\
+           let _ = println(format(\"%i %i\", a, b));\n}}\n"
+    );
+    same_as_vm("question_err", &src);
+}
+
+#[test]
+fn statics_are_read_and_written_natively() {
+    // `tick` bumps a static, then divides by its argument: with 0 the bail
+    // must take the bump back before the VM's re-run panics.
+    let src = format!(
+        "{HEADER}static let COUNT: int = 0;\nstatic let NAME: string = \"n\";\n\
+         #[inline(never)]\nfn tick(int by) -> int {{ COUNT = COUNT + 1; return COUNT * 10 / by; }}\n\
+         #[inline(never)]\nfn rename(string s) -> int {{ NAME = s; return NAME.len(); }}\n\
+         fn main() {{\n  let a = tick(1);\n  let b = tick(2);\n  let n = rename(\"abc\");\n\
+           let _ = println(format(\"%i %i %i %i %s\", a, b, n, COUNT, NAME));\n  let _ = println(format(\"%i\", tick(0)));\n}}\n"
+    );
+    let stats = same_as_vm("statics", &src);
+    assert!(compiled(&stats, "tick") && compiled(&stats, "rename"), "stats: {stats}");
+    assert!(stats.contains("1 bailed"), "stats: {stats}");
+}
+
+/// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
+/// section.
+fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join(format!("{name}.coil"));
+    std::fs::write(&file, src).expect("write source");
+    let out = dir.join(format!("{name}.ccoil"));
+    let mut cmd = Command::new(coil_bin());
+    cmd.args(["compile", "--no-build-cache", "--fold-calls", "off", "-o"]).arg(&out).arg(&file);
+    if jit {
+        cmd.arg("--jit");
+    }
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let compiled = cmd.output().expect("spawn coil compile");
+    assert!(compiled.status.success(), "compile: {}", String::from_utf8_lossy(&compiled.stderr));
+    out
+}
+
+fn run_archive(archive: &PathBuf, extra: &[&str]) -> Output {
+    Command::new(coil_bin())
+        .arg("run")
+        .args(extra)
+        .arg(archive)
+        .env("COIL_NATIVE_STATS", "1")
+        .output()
+        .expect("spawn coil run")
+}
+
+#[test]
+fn compiled_archive_carries_mir_and_runs_natively() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn fib(int n) -> int {{ if n <= 2 {{ return 1; }} return fib(n - 1) + fib(n - 2); }}\n\
+         #[inline(never)]\nfn q(int a, int b) -> int {{ return a / b; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", fib(20))); let _ = println(format(\"%i\", q(1, 0))); }}\n"
+    );
+    let archive = compile("archive", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(String::from_utf8_lossy(&jit.stdout), "6765\n");
+    assert_eq!(jit.stdout, vm.stdout);
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert_eq!(jit.status.code(), vm.status.code());
+    let stats = String::from_utf8_lossy(&jit.stderr);
+    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(!String::from_utf8_lossy(&vm.stderr).contains("native:"), "--no-jit stays on the VM");
+}
+
+#[test]
+fn archive_without_mir_runs_on_the_vm() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sq(int n) -> int {{ return n * n; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", sq(7))); }}\n"
+    );
+    let out = compile("plain", &src, false);
+    let run = run_archive(&out, &["--jit"]);
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "49\n");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("carries no native MIR"), "stderr: {stderr}");
+    assert!(!stderr.contains("native:"), "stderr: {stderr}");
+}
+
+#[test]
+fn a_trap_after_a_print_panics_natively_as_the_vm_does() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn step(int a, int b) -> int {{ let _ = println(\"step\"); return a * b; }}\n\
+         #[inline(never)]\nfn deep(int n, int x) -> int {{ if n == 0 {{ return step(x, x); }} return deep(n - 1, x) + 1; }}\n\
+         #[inline(never)]\nfn at(Vec<int> a, int i) -> int {{ let _ = println(\"at\"); return a[i]; }}\n\
+         fn main() {{\n  let _ = println(format(\"%i\", deep(3, 5)));\n  let a: Vec<int> = [1, 2];\n  let _ = println(format(\"%i\", at(a, 1)));\n\
+           if a.len() == 2 {{ let _ = println(format(\"%i\", deep(3, 4000000000))); }}\n  let _ = println(format(\"%i\", at(a, 5)));\n}}\n"
+    );
+    let stats = same_as_vm("trap_after_print", &src);
+    assert!(compiled(&stats, "step") && compiled(&stats, "deep"), "stats: {stats}");
+    // The panic is raised in native code, with the VM's backtrace.
+    let jit = run("trap_after_print", &src, true);
+    let err = program_stderr(&jit);
+    assert!(err.contains("panic: integer overflow at"), "stderr: {err}");
+    assert!(err.contains("  in step at") && err.contains("  in deep at") && err.contains("repeated 2 more times"), "stderr: {err}");
+}
+
+#[test]
+fn native_code_calls_bodies_on_the_vm_and_collects() {
+    // `println` stays on the VM (its writes may park); `run` calls it and
+    // allocates in a loop long enough for collections at its safepoints.
+    let src = format!(
+        "{HEADER}class B {{ pub v: int, pub s: string }}\n\
+         #[inline(never)]\nfn churn(int i) -> B {{ let parts: Vec<string> = []; let k = 0; while k < 20 {{ parts.push(format(\"%i-%i\", i, k)); k = k + 1; }} return new B(i, parts[19]); }}\n\
+         #[inline(never)]\nfn run(int n) -> int {{\n  let keep: Vec<B> = [];\n  let first = churn(7);\n  let i = 0;\n  let total = 0;\n\
+           while i < n {{ let b = churn(i); if i % 1000 == 0 {{ keep.push(b); let _ = println(b.s); }} total = total + b.v; i = i + 1; }}\n\
+           let _ = println(first.s);\n  let j = 0;\n  while j < keep.len() {{ total = total + keep[j].v + keep[j].s.len(); j = j + 1; }}\n  return total;\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", run(30000))); }}\n"
+    );
+    let stats = same_as_vm("vm_calls_and_gc", &src);
+    assert!(compiled(&stats, "run") && compiled(&stats, "churn"), "stats: {stats}");
+    assert!(stats.contains(", 0 bailed"), "stats: {stats}");
+}
+
+#[test]
+fn an_explicit_panic_after_a_print_matches_the_vm() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn check(int x) -> int {{ let _ = println(format(\"check %i\", x)); if x > 2 {{ panic(format(\"too big: %i\", x)); }} return x * 2; }}\n\
+         #[inline(never)]\nfn loop_it(int n) -> int {{ let i = 0; let t = 0; while i < n {{ t = t + check(i); i = i + 1; }} return t; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", loop_it(5))); }}\n"
+    );
+    let stats = same_as_vm("explicit_panic", &src);
+    assert!(compiled(&stats, "check") && compiled(&stats, "loop_it"), "stats: {stats}");
+    let err = program_stderr(&run("explicit_panic", &src, true));
+    assert!(err.starts_with("panic: too big: 3 at "), "stderr: {err}");
+}
+
+#[test]
+fn stores_after_a_commit_outgrow_the_undo_log() {
+    // `Vec::with_capacity` commits (a host call); the stores after it fill
+    // the undo log many times over, which a committed call starts over.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn fill(int n, int reps) -> int {{\n  let a: Vec<int> = Vec::with_capacity(n);\n  let i = 0;\n  while i < n {{ a.push(1); i = i + 1; }}\n\
+           let r = 0;\n  while r < reps {{ let k = 0; while k < n {{ a[k] = r; k = k + 1; }} r = r + 1; }}\n  return a[0] + a[n - 1];\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", fill(4096, 50))); }}\n"
+    );
+    let stats = same_as_vm("undo_after_commit", &src);
+    assert!(compiled(&stats, "fill"), "stats: {stats}");
+}
+
+#[test]
+fn tasks_that_wait_under_native_code_still_switch() {
+    // `put` compiles and calls `send`, which suspends the task on a full
+    // channel: the scheduler must still switch to the receiver.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, Channel}};\n\
+         #[inline(never)]\nfn put(Channel<int> ch, int v) {{ match ch.send(v) {{ Result::Ok(_) => {{}}, Result::Err(_) => panic \"closed\", }} }}\n\
+         fn main() {{\n  let ch: Channel<int> = task::channel(1);\n\
+           let r = scope(fn (Scope s) use (ch) {{ s.spawn(fn () use (ch) {{ let i = 0; while i < 20 {{ put(ch, i); i = i + 1; }} ch.close(); 0 }}); let t = 0; let done = false;\n\
+             while !done {{ match ch.recv() {{ Result::Ok(v) => {{ t = t + v; }}, Result::Err(_) => {{ done = true; }}, }} }} return t; }});\n\
+           let _ = println(format(\"%i\", match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}));\n}}\n"
+    );
+    let stats = same_as_vm("tasks_under_native", &src);
+    assert!(compiled(&stats, "put"), "stats: {stats}");
+}
+
+#[test]
+fn closures_run_from_native_code_as_on_the_vm() {
+    // Function values made and called in native code after a commit:
+    // captures, partial and over-application, named and generic function
+    // values, and a panic inside a closure.
+    let src = format!(
+        "{HEADER}fn add(int a, int b) -> int {{ return a + b; }}\n\
+         fn id<T>(T x) -> T {{ return x; }}\n\
+         #[inline(never)]\nfn curried() -> int -> int -> int {{ return fn (int a) => fn (int b) use (a) => a * 10 + b; }}\n\
+         #[inline(never)]\nfn twice(int -> int f, int x) -> int {{ return f(f(x)); }}\n\
+         #[inline(never)]\nfn run(int k) -> int {{\n  let _ = println(\"run\");\n  let plus = fn (int x) use (k) => x + k;\n  let g = add(a: 5);\n\
+           let h: int -> int = id;\n  let c = curried();\n  let t = twice(plus, 1) + g(2) + h(7) + c(1, 2) + c(3)(4);\n\
+           let bad = fn (int x) => 10 / x;\n  return t + bad(k - 3);\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", run(2))); let _ = println(format(\"%i\", run(3))); }}\n"
+    );
+    let stats = same_as_vm("closures", &src);
+    assert!(compiled(&stats, "run") && compiled(&stats, "twice"), "stats: {stats}");
+    let err = program_stderr(&run("closures", &src, true));
+    assert!(err.contains("panic: division by zero"), "stderr: {err}");
+}
+
+#[test]
+fn a_bailed_call_leaves_no_drop_owed() {
+    // `make` allocates a `drop` object natively, then bails (an early free
+    // of a finalizer object): the VM's re-run makes the one that drops.
+    let src = "use gc::collect;\nuse io::sync::println;\nuse string::format;\nstatic let drops: int = 0;\n\
+               class Handle { pub fd: int }\nimpl Handle { fn drop() { drops = drops + 1; } }\n\
+               #[inline(never)]\nfn make() { let h = new Handle(1); }\n\
+               fn main() { make(); collect(); let _ = println(format(\"%i\", drops)); }\n";
+    let _ = same_as_vm("bailed_drop", src);
+}
+
+#[test]
+fn a_scope_native_code_ran_leaves_no_scheduler_behind() {
+    // `first` compiles and runs a scope on the VM whose child suspends it;
+    // `main` stays on the VM (its `defer`) and opens its own scope after.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, yield_now}};\n\
+         fn ok(Result<int, task::TaskError> r) -> int {{ return match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; }}\n\
+         #[inline(never)]\nfn first() -> int {{ return ok(scope(fn (Scope s) {{ let _ = s.spawn(fn () {{ yield_now(); return 1; }}); return 2; }})); }}\n\
+         fn main() {{\n  defer {{ let _ = println(\"done\"); }}\n  let a = first();\n\
+           let b = ok(scope(fn (Scope s) {{ let _ = s.spawn(fn () {{ yield_now(); return 1; }}); return 3; }}));\n\
+           let _ = println(format(\"%i %i\", a, b));\n}}\n"
+    );
+    let stats = same_as_vm("scope_after_native", &src);
+    assert!(compiled(&stats, "first"), "stats: {stats}");
+}
+
+#[test]
+fn defers_run_from_native_frames_on_return_and_panic() {
+    // `step` arms defers capturing heap values in a loop that allocates
+    // (collections move them); `outer` panics through `inner` after a
+    // print: the VM reports the panic, then the native frames' defers run.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn step(int n) -> int {{\n  let tag = format(\"n%i\", n);\n  defer use (tag) {{ let _ = println(\"step done \" + tag); }}\n\
+           let parts: Vec<string> = [];\n  let i = 0;\n  while i < n {{ parts.push(format(\"%i-%i\", n, i)); i = i + 1; }}\n\
+           if n > 3 {{ let late = parts[n - 1]; defer use (late) {{ let _ = println(\"late \" + late); }} }}\n  return parts.len();\n}}\n\
+         #[inline(never)]\nfn inner(int x) -> int {{ let msg = format(\"inner %i\", x); defer use (msg) {{ let _ = println(msg); }} let _ = println(\"in inner\"); return 10 / x; }}\n\
+         #[inline(never)]\nfn outer(int x) -> int {{ defer {{ let _ = println(\"outer defer\"); }} return inner(x) + 1; }}\n\
+         fn main() {{\n  let t = 0;\n  let k = 1;\n  while k < 6 {{ t = t + step(k * 4000); k = k + 1; }}\n  let _ = println(format(\"%i\", t));\n\
+           let _ = println(format(\"%i\", outer(2)));\n  let _ = println(format(\"%i\", outer(0)));\n}}\n"
+    );
+    let stats = same_as_vm("defers", &src);
+    assert!(compiled(&stats, "step") && compiled(&stats, "inner") && compiled(&stats, "outer"), "stats: {stats}");
+    let err = program_stderr(&run("defers", &src, true));
+    assert!(err.contains("panic: division by zero") && err.contains("  in inner at"), "stderr: {err}");
+}
+
+#[test]
+fn an_explicit_drop_from_native_code_claims_the_finalizer() {
+    // `explicit` calls `drop` itself; the collector must not run it again.
+    let src = "use gc::collect;\nuse io::sync::println;\nuse string::format;\nstatic let drops: int = 0;\n\
+               class Handle { pub fd: int }\nstatic let kept: Option<Handle> = Option::None;\n\
+               impl Handle { fn drop() { drops = drops + 1; kept = Option::Some(self); } }\n\
+               #[inline(never)]\nfn explicit() { let h = new Handle(7); h.drop(); }\n\
+               fn main() { explicit(); collect(); kept = Option::None; collect(); let _ = println(format(\"%i\", drops)); }\n";
+    let stats = same_as_vm("explicit_drop", src);
+    assert!(compiled(&stats, "explicit"), "stats: {stats}");
+}
+
+#[test]
+fn an_archive_carries_closures_defers_and_drops() {
+    // Every instruction step 5 added goes through the native MIR section.
+    let src = format!(
+        "{HEADER}class Handle {{ pub fd: int }}\nstatic let drops: int = 0;\nimpl Handle {{ fn drop() {{ drops = drops + 1; }} }}\n\
+         fn add(int a, int b) -> int {{ return a + b; }}\n\
+         #[inline(never)]\nfn twice(int -> int f, int x) -> int {{ return f(f(x)); }}\n\
+         #[inline(never)]\nfn run(int k) -> int {{\n  let tag = format(\"k%i\", k);\n  defer use (tag) {{ let _ = println(\"run done \" + tag); }}\n\
+           let h = new Handle(k);\n  h.drop();\n  let plus = fn (int x) use (k) => x + k;\n  let g = add(a: 5);\n  return twice(plus, 1) + g(2) + 10 / (k - 3);\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", run(2))); let _ = println(format(\"%i %i\", drops, run(3))); }}\n"
+    );
+    let archive = compile("archive_step5", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(jit.stdout, vm.stdout);
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert_eq!(jit.status.code(), vm.status.code());
+    let stats = String::from_utf8_lossy(&jit.stderr);
+    assert!(stats.contains("calls ran natively"), "stats: {stats}");
+}
+
+#[test]
+fn generic_bodies_keep_their_opaque_words_across_collections() {
+    // A shared generic body's type-variable words may be objects: native
+    // code roots them ambiguously (pinned, never rewritten) while the
+    // inserts allocate enough to collect. `HashMap::with_capacity` is one.
+    let src = format!(
+        "{HEADER}use collections::map::HashMap;\n\
+         class Pair<T> {{ pub a: T, pub b: T }}\n\
+         #[inline(never)]\nfn swap<T>(Pair<T> p) -> Pair<T> {{ let tmp = format(\"%i\", 1); let q = new Pair(p.b, p.a); return q; }}\n\
+         fn main() {{\n  let m: HashMap<string, int> = HashMap::new();\n  let i = 0;\n\
+           while i < 20000 {{ m.insert(format(\"k%i\", i % 5000), i); i = i + 1; }}\n\
+           let p = new Pair(\"left\", \"right\");\n  let j = 0;\n  while j < 2001 {{ p = swap(p); j = j + 1; }}\n\
+           let _ = println(format(\"%i %i \", m.len(), m.get(\"k42\").unwrap_or(-1)) + p.a);\n}}\n"
+    );
+    let stats = same_as_vm("opaque_words", &src);
+    assert!(compiled(&stats, "collections::map::HashMap::with_capacity"), "stats: {stats}");
+}
+
+#[test]
+fn gc_collect_runs_from_native_code_with_its_words_rooted() {
+    // `churn` holds heap words across `collect()`; the collection must
+    // keep (and may move) them, and run the drops it owes.
+    let src = format!(
+        "{HEADER}use gc::collect;\nstatic let drops: int = 0;\nclass Handle {{ pub fd: int }}\nimpl Handle {{ fn drop() {{ drops = drops + 1; }} }}\n\
+         #[inline(never)]\nfn churn(int n) -> int {{\n  let keep = format(\"keep %i\", n);\n  let parts: Vec<string> = [];\n  let i = 0;\n\
+           while i < n {{ parts.push(format(\"%i\", i)); let _h = new Handle(i); i = i + 1; }}\n\
+           let freed = collect();\n  return parts.len() + keep.len() + (if freed >= 0 {{ 1 }} else {{ 0 }});\n}}\n\
+         fn main() {{ let t = 0; let k = 0; while k < 4 {{ t = t + churn(3000); k = k + 1; }} let _ = println(format(\"%i %i\", t, drops)); }}\n"
+    );
+    let stats = same_as_vm("gc_collect", &src);
+    assert!(compiled(&stats, "churn"), "stats: {stats}");
+}
+
+#[test]
+fn int_powers_trap_as_on_the_vm() {
+    // `**` on ints: exact powers, then overflow and a negative exponent
+    // panic with the VM's messages (after a print: committed).
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn power(int a, int b) -> int {{ return a ** b; }}\n\
+         #[inline(never)]\nfn table(int n) -> int {{ let t = 0; let i = 0; while i < n {{ t = t + power(3, i % 20) + power(-1, i) + power(0, i % 2); i = i + 1; }} return t; }}\n\
+         #[inline(never)]\nfn loud(int a, int b) -> int {{ let _ = println(\"loud\"); return power(a, b); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", table(1000))); let _ = println(format(\"%i\", loud(2, 62)));\n\
+           if table(1) == 1 {{ let _ = println(format(\"%i\", loud(3, -1))); }}\n  let _ = println(format(\"%i\", loud(2, 64)));\n}}\n"
+    );
+    let stats = same_as_vm("int_pow", &src);
+    assert!(compiled(&stats, "power") && compiled(&stats, "table") && compiled(&stats, "loud"), "stats: {stats}");
+}
+
+#[test]
+fn a_vm_panic_under_native_frames_names_them_in_its_backtrace() {
+    // `vmside` runs on the VM (a host call native code leaves there) and
+    // panics under two native frames, directly and through a closure: the
+    // backtrace lists them as the VM run does.
+    let src = format!(
+        "{HEADER}use clock::sleep_ms;\n\
+         #[inline(never)]\nfn vmside(int x) -> int {{ sleep_ms(0); let v: Vec<int> = [1, 2]; return v[x]; }}\n\
+         #[inline(never)]\nfn mid(int x) -> int {{ let _ = println(\"mid\"); return vmside(x) + 1; }}\n\
+         #[inline(never)]\nfn outer(int x) -> int {{ let f = fn (int y) => mid(y); return f(x) + mid(0); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", outer(1))); let _ = println(format(\"%i\", outer(5))); }}\n"
+    );
+    let stats = same_as_vm("vm_panic_trace", &src);
+    assert!(compiled(&stats, "mid") && compiled(&stats, "outer"), "stats: {stats}");
+    let err = program_stderr(&run("vm_panic_trace", &src, true));
+    assert!(err.contains("  in mid at") && err.contains("  in outer at"), "stderr: {err}");
+}
+
+#[test]
+fn trait_methods_with_unread_parameters_run_natively() {
+    // `for e in m` calls `into_iter` / `next`, whose MIR names a parameter
+    // the `CALL` does not pass (and the body never reads).
+    let src = format!(
+        "{HEADER}use collections::map::HashMap;\n\
+         #[inline(never)]\nfn first(int x) -> int {{ let m: HashMap<string, int> = HashMap::new(); m.insert(\"k\", x); for e in m {{ return e.value; }} return -1; }}\n\
+         fn main() {{ let t = 0; let i = 0; while i < 200 {{ t = t + first(i); i = i + 1; }} let _ = println(format(\"%i\", t)); }}\n"
+    );
+    let stats = same_as_vm("unread_params", &src);
+    assert!(compiled(&stats, "first"), "stats: {stats}");
+}
+
+/// The `native: N calls ran natively` count of a JIT run's stats.
+fn native_calls(stats: &str) -> u64 {
+    stats
+        .lines()
+        .find_map(|l| l.strip_prefix("native: ")?.split(" calls ran natively").next()?.parse().ok())
+        .unwrap_or(0)
+}
+
+#[test]
+fn bodies_that_cannot_suspend_run_natively_inside_tasks() {
+    // `work` reaches no VM code, so no suspension point: tasks run it
+    // natively while the scheduler is live. `put` may suspend (a channel
+    // send) and keeps the switch working.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, Channel}};\n\
+         #[inline(never)]\nfn work(int n) -> int {{ let parts: Vec<string> = []; let i = 0; let t = 0; while i < n {{ parts.push(format(\"%i\", i)); t = t + parts[i].len(); i = i + 1; }} return t; }}\n\
+         #[inline(never)]\nfn put(Channel<int> ch, int v) {{ match ch.send(v) {{ Result::Ok(_) => {{}}, Result::Err(_) => panic \"closed\", }} }}\n\
+         fn main() {{\n  let ch: Channel<int> = task::channel(1);\n\
+           let r = scope(fn (Scope s) use (ch) {{ s.spawn(fn () use (ch) {{ let i = 0; while i < 20 {{ put(ch, work(i * 50)); i = i + 1; }} ch.close(); 0 }}); let t = 0; let done = false;\n\
+             while !done {{ match ch.recv() {{ Result::Ok(v) => {{ t = t + v; }}, Result::Err(_) => {{ done = true; }}, }} }} return t; }});\n\
+           let _ = println(format(\"%i\", match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}));\n}}\n"
+    );
+    let stats = same_as_vm("no_suspend_in_tasks", &src);
+    assert!(compiled(&stats, "work"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 20, "stats: {stats}");
+}
+
+/// Tasks that suspend under native frames, for the fiber tests: `nap`
+/// stays on the VM (a task host call), the `#[inline(never)]` callers
+/// around it compile.
+const TASK_SUSPENDERS: &str = "use task::{scope, Scope, Task, TaskError, timeout};\n\
+     static let LOG: int = 0;\n\
+     fn push(int d) { LOG = LOG * 10 + d; }\n\
+     #[inline(never)]\nfn nap(int ms) { task::sleep(ms); }\n\
+     #[inline(never)]\nfn sleeper(int d, int ms) -> int { defer use (d) { push(d); } nap(ms); push(9); return d; }\n\
+     #[inline(never)]\nfn boom(int ms) -> int { nap(ms); panic \"boom\"; }\n\
+     #[inline(never)]\nfn waits(Task<int> t) -> int { return match t.join() { Result::Ok(v) => v * 100, Result::Err(TaskError::Cancelled) => -1, Result::Err(_) => -2 }; }\n\
+     fn show(Result<int, TaskError> r) -> string { return match r { Result::Ok(v) => format(\"ok %i\", v), Result::Err(TaskError::Cancelled) => \"cancelled\", Result::Err(TaskError::TimedOut) => \"timed out\", Result::Err(TaskError::Panicked(m)) => format(\"panicked %s\", m) }; }\n";
+
+#[test]
+fn bodies_that_suspend_run_natively_on_task_stacks() {
+    // `put` sends on a full channel, so it suspends inside native code: the
+    // task parks with its native frames and the receiver runs meanwhile.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, Channel}};\n\
+         #[inline(never)]\nfn put(Channel<int> ch, int v) {{ match ch.send(v) {{ Result::Ok(_) => {{}}, Result::Err(_) => panic \"closed\", }} }}\n\
+         fn main() {{\n  let ch: Channel<int> = task::channel(1);\n\
+           let r = scope(fn (Scope s) use (ch) {{ s.spawn(fn () use (ch) {{ let i = 0; while i < 40 {{ put(ch, i); i = i + 1; }} ch.close(); 0 }}); let t = 0; let done = false;\n\
+             while !done {{ match ch.recv() {{ Result::Ok(v) => {{ t = t + v; }}, Result::Err(_) => {{ done = true; }}, }} }} return t; }});\n\
+           let _ = println(format(\"%i\", match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}));\n}}\n"
+    );
+    let stats = same_as_vm("suspend_on_fibers", &src);
+    assert!(compiled(&stats, "put"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 40, "stats: {stats}");
+}
+
+#[test]
+fn tasks_cancelled_under_native_frames_unwind_them() {
+    // The cancel reaches the task inside `nap`, under `sleeper`'s native
+    // frame: its `defer` runs and the join reports the cancel.
+    let src = format!(
+        "{HEADER}{TASK_SUSPENDERS}\
+         fn main() {{\n\
+           let r = scope(fn (Scope s) {{ let t = s.spawn(fn () => sleeper(1, 10000)); task::yield_now(); t.cancel(); show(t.join()) }});\n\
+           let _ = println(format(\"%s %i\", match r {{ Result::Ok(m) => m, Result::Err(_) => \"scope failed\" }}, LOG));\n\
+           LOG = 0;\n\
+           let q = scope(fn (Scope s) {{ let a = s.spawn(fn () => sleeper(2, 10000)); let b = s.spawn(fn () => sleeper(3, 10000)); task::yield_now(); a.cancel(); b.cancel(); format(\"%s %s\", show(a.join()), show(b.join())) }});\n\
+           let _ = println(format(\"%s %i\", match q {{ Result::Ok(m) => m, Result::Err(_) => \"scope failed\" }}, LOG));\n}}\n"
+    );
+    let stats = same_as_vm("cancel_on_fibers", &src);
+    assert!(compiled(&stats, "sleeper"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 3, "stats: {stats}");
+}
+
+#[test]
+fn timeouts_panics_and_joins_under_native_frames_match_the_vm() {
+    // A timeout cancels a body waiting under native frames; a child task
+    // panics after it resumed in native code; a native body joins.
+    let src = format!(
+        "{HEADER}{TASK_SUSPENDERS}\
+         fn main() {{\n\
+           let _ = println(show(timeout(5, fn () => sleeper(4, 10000))));\n\
+           let _ = println(show(timeout(10000, fn () => sleeper(5, 1))));\n\
+           let p = scope(fn (Scope s) {{ let _ = s.spawn(fn () => boom(1)); let _ = s.spawn(fn () => sleeper(6, 10000)); 0 }});\n\
+           let _ = println(show(p));\n\
+           let j = scope(fn (Scope s) {{ let t = s.spawn(fn () => sleeper(7, 2)); let w = s.spawn(fn () use (t) => waits(t)); match w.join() {{ Result::Ok(v) => v, Result::Err(_) => -3 }} }});\n\
+           let _ = println(show(j));\n\
+           let _ = println(format(\"%i\", LOG));\n}}\n"
+    );
+    let stats = same_as_vm("timeout_on_fibers", &src);
+    assert!(compiled(&stats, "sleeper") && compiled(&stats, "waits"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 5, "stats: {stats}");
+}
+
+#[test]
+fn native_code_resumes_generators_as_the_vm_does() {
+    // `drain`, `talk`, `nest` and `boom` compile and resume generators whose
+    // bodies run on the VM: yields, sends, `yield from`, completion, a
+    // generator that panics, and a resume after it finished.
+    let defs = format!(
+        "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i * i; i = i + 1; }} return 1000; }}\n\
+         gen fn echo() {{ let x = yield 0; let y = yield x * 2; return x + y; }}\n\
+         gen fn inner() {{ yield 7; yield 8; }}\n\
+         gen fn outer() {{ yield 6; yield from inner(); yield 9; }}\n\
+         gen fn bad() {{ yield 1; let z = 0; yield 10 / z; }}\n\
+         #[inline(never)]\nfn drain(int n) -> int {{ let g = count(n); let t = 0; while !done(g) {{ t = t + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn talk() -> int {{ let g = echo(); let a = resume g; let b = resume g with 5; let c = resume g with 3; return a * 10000 + b * 100 + c; }}\n\
+         #[inline(never)]\nfn nest() -> int {{ let g = outer(); let t = 0; let i = 0; while i < 4 {{ t = t * 10 + resume g; i = i + 1; }} return t; }}\n\
+         #[inline(never)]\nfn twice() -> int {{ let g = count(0); let a = resume g; return a + resume g; }}\n\
+         #[inline(never)]\nfn boom() -> int {{ let g = bad(); let a = resume g; let _ = println(\"first\"); return a + resume g; }}\n"
+    );
+    let ok = format!("{defs}fn main() {{ let _ = println(format(\"%i %i %i\", drain(10), talk(), nest())); }}\n");
+    let stats = same_as_vm("native_resume", &ok);
+    for f in ["drain", "talk", "nest"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    let boom = format!("{defs}fn main() {{ let _ = println(format(\"%i\", drain(3) + boom())); }}\n");
+    let stats = same_as_vm("native_resume_panic", &boom);
+    assert!(compiled(&stats, "boom"), "stats: {stats}");
+    assert!(program_stderr(&run("native_resume_panic", &boom, true)).contains("division by zero"));
+    let twice = format!("{defs}fn main() {{ let _ = println(format(\"%i\", twice())); }}\n");
+    let _ = same_as_vm("native_resume_done", &twice);
+}
+
+#[test]
+fn a_contract_failing_under_a_task_fiber_blames_the_caller() {
+    // `blame` runs on its task's fiber and calls `half` on the VM: the
+    // failed `requires` names the call site, as on the VM.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, TaskError}};\n\
+         fn half(int n) -> int\n    requires n >= 0, \"negative\"\n{{\n    return n / 2;\n}}\n\
+         #[inline(never)]\nfn blame(int n) -> int {{ let _ = println(\"in\"); return half(n) + 1; }}\n\
+         fn main() {{\n  let r = scope(fn (Scope s) {{ let _ = s.spawn(fn () => blame(-4)); 0 }});\n\
+           let _ = println(match r {{ Result::Ok(_) => \"ok\", Result::Err(TaskError::Panicked(m)) => m, Result::Err(_) => \"other\" }});\n}}\n"
+    );
+    let stats = same_as_vm("contract_on_fiber", &src);
+    assert!(compiled(&stats, "blame"), "stats: {stats}");
+}
+
+#[test]
+fn host_calls_that_need_the_vm_run_from_native_code() {
+    // `write_all` waits for the stream (`await_writable`) and `write` goes
+    // through the VM's host call: both bodies still compile.
+    let src = "use io::stdout;\nuse io::sync::write_all;\nuse io::sync::println;\nuse string::to_bytes;\nuse string::format;\n\
+         #[inline(never)]\nfn emit(int i) -> int { let _ = write_all(stdout(), to_bytes(format(\"line %i\\n\", i))); return i; }\n\
+         fn main() { let t = 0; let i = 0; while i < 5 { t = t + emit(i); i = i + 1; } let _ = println(format(\"%i\", t)); }\n";
+    let stats = same_as_vm("vm_host", src);
+    assert!(compiled(&stats, "io::sync::write_all"), "stats: {stats}");
+    assert!(compiled(&stats, "emit"), "stats: {stats}");
+    assert!(native_calls(&stats) >= 5, "stats: {stats}");
+}
+
+#[test]
+fn a_host_call_through_the_vm_panics_at_its_native_call_site() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn insert_at(int i) -> int {{ let v: Vec<int> = Vec::new(); v.push(1); v.insert(i, 2); return v.len(); }}\n\
+         #[inline(never)]\nfn outer(int i) -> int {{ return insert_at(i) + 1; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", outer(1))); let _ = println(format(\"%i\", outer(5))); }}\n"
+    );
+    let stats = same_as_vm("vm_host_panic", &src);
+    assert!(compiled(&stats, "insert_at"), "stats: {stats}");
+}
+
+#[test]
+fn generator_bodies_run_natively() {
+    // The generators' own bodies compile: yields, sends, strings held
+    // across yields while the resumer collects, an early `for` exit, a VM
+    // generator delegating to one, and a panic after a yield.
+    let defs = format!(
+        "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i * i; i = i + 1; }} return 1000; }}\n\
+         gen fn echo() {{ let x = yield 0; let y = yield x * 2; return x + y; }}\n\
+         gen fn words(int n) {{ let s = \"w\"; let i = 0; while i < n {{ s = format(\"%s%i\", s, i % 10); yield s.len(); i = i + 1; }} return s.len(); }}\n\
+         gen fn outer() {{ yield 6; yield from count(3); yield 9; }}\n\
+         gen fn bad() {{ yield 1; let z = 0; yield 10 / z; }}\n\
+         #[inline(never)]\nfn drain(int n) -> int {{ let g = count(n); let t = 0; while !done(g) {{ t = t + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn talk() -> int {{ let g = echo(); let a = resume g; let b = resume g with 5; let c = resume g with 3; return a * 10000 + b * 100 + c; }}\n\
+         #[inline(never)]\nfn churn() -> int {{ let g = words(300); let t = 0; while !done(g) {{ let junk = format(\"%i-%i\", t, t); let r = resume g; t = t + r + junk.len() - junk.len(); }} return t; }}\n\
+         #[inline(never)]\nfn early() -> int {{ let t = 0; for x in count(100) {{ if x > 50 {{ break; }} t = t + x; }} return t; }}\n\
+         #[inline(never)]\nfn nest() -> int {{ let g = outer(); let t = 0; while !done(g) {{ t = t * 10 + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn boom() -> int {{ let g = bad(); let a = resume g; let _ = println(\"first\"); return a + resume g; }}\n"
+    );
+    let ok = format!("{defs}fn main() {{ let _ = println(format(\"%i %i %i %i %i\", drain(10), talk(), churn(), early(), nest())); }}\n");
+    let stats = same_as_vm("native_gen", &ok);
+    for f in ["count", "echo", "words"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    let boom = format!("{defs}fn main() {{ let _ = println(format(\"%i\", drain(3) + boom())); }}\n");
+    let stats = same_as_vm("native_gen_panic", &boom);
+    assert!(compiled(&stats, "bad"), "stats: {stats}");
+    assert!(program_stderr(&run("native_gen_panic", &boom, true)).contains("division by zero"));
+}
+
+#[test]
+fn task_ops_and_contracts_run_from_native_code() {
+    // `scope` itself (scope open, spawn, join) and `half` (its failed
+    // `requires`) compile: tasks still switch and the failure names the
+    // caller, as on the VM.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, TaskError, yield_now}};\n\
+         fn half(int n) -> int\n    requires n >= 0, \"negative\"\n{{\n    return n / 2;\n}}\n\
+         fn ok(Result<int, TaskError> r) -> int {{ return match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; }}\n\
+         #[inline(never)]\nfn work(int k) -> int {{ let t = 0; let i = 0; while i < 3 {{ yield_now(); t = t + half(k + i); i = i + 1; }} return t; }}\n\
+         #[inline(never)]\nfn run() -> int {{ return ok(scope(fn (Scope s) {{ let a = s.spawn(fn () => work(10)); let b = s.spawn(fn () => work(20)); return 1; }})); }}\n\
+         #[inline(never)]\nfn blame(int n) -> int {{ return half(n) + 1; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", run())); let _ = println(format(\"%i\", blame(-2))); }}\n"
+    );
+    let stats = same_as_vm("task_ops_native", &src);
+    for f in ["task::scope", "half", "work"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert!(program_stderr(&run("task_ops_native", &src, true)).contains("called from"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ffi_calls_run_from_native_code() {
+    // `total` calls an `extern` C function (an FFI op through its stub).
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-ffi", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lib = dir.join("libsum.so");
+    let cc = Command::new("cc").args(["-shared", "-fPIC", "-o"]).arg(&lib).arg(manifest.join("examples/sum.c")).status();
+    if !cc.is_ok_and(|s| s.success()) {
+        eprintln!("skipped: no C compiler");
+        return;
+    }
+    let file = dir.join("ffi.coil");
+    std::fs::write(
+        &file,
+        format!(
+            "{HEADER}extern \"sum\" {{\n    fn sum(int a, int b) -> int;\n}}\n\
+             #[inline(never)]\nfn total(int n) -> int {{ let t = 0; let i = 0; while i < n {{ t = sum(t, i); i = i + 1; }} return t; }}\n\
+             fn main() {{ let _ = println(format(\"%i\", total(100))); }}\n"
+        ),
+    )
+    .expect("write source");
+    let run = |jit: bool| {
+        let mut cmd = Command::new(coil_bin());
+        cmd.arg(&file).args(["--no-build-cache", "--fold-calls", "off", "--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"]).arg(&dir);
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        if jit {
+            cmd.arg("--jit").env("COIL_NATIVE_STATS", "2");
+        }
+        cmd.output().expect("spawn coil")
+    };
+    let (vm, jit) = (run(false), run(true));
+    assert_eq!(String::from_utf8_lossy(&vm.stdout), "4950\n");
+    assert_eq!(String::from_utf8_lossy(&vm.stdout), String::from_utf8_lossy(&jit.stdout));
+    let stats = String::from_utf8_lossy(&jit.stderr);
+    assert!(compiled(&stats, "total"), "stats: {stats}");
+}
+
+#[test]
+fn yield_from_runs_in_native_generator_bodies() {
+    // `outer`, `relay` and `talk` delegate natively: values, sends passed
+    // through, a delegate that runs on the VM (`slow` has a `defer`), and
+    // nesting.
+    let src = format!(
+        "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i; i = i + 1; }} return 99; }}\n\
+         gen fn echo() {{ let x = yield 1; let y = yield x + 1; return x + y; }}\n\
+         gen fn talk() {{ yield from echo(); return 0; }}\n\
+         gen fn slow() {{ defer {{ let _ = println(\"slow done\"); }} yield 50; yield 51; return 0; }}\n\
+         gen fn outer() {{ yield 7; yield from count(3); yield from slow(); yield 8; return 0; }}\n\
+         gen fn relay() {{ yield from outer(); return 0; }}\n\
+         #[inline(never)]\nfn walk() -> int {{ let g = relay(); let t = 0; while !done(g) {{ t = t * 3 + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn chat() -> int {{ let g = talk(); let a = resume g; let b = resume g with 10; let c = resume g with 2; return a * 10000 + b * 100 + c; }}\n\
+         fn main() {{ let _ = println(format(\"%i %i\", walk(), chat())); }}\n"
+    );
+    let stats = same_as_vm("native_yield_from", &src);
+    for f in ["outer", "relay", "talk"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+}
+
+/// The `native: N vector ops ran natively` count (0 when absent).
+fn vector_ops(stats: &str) -> u64 {
+    stats
+        .lines()
+        .find_map(|l| l.strip_prefix("native: ")?.strip_suffix(" vector ops ran natively")?.parse().ok())
+        .unwrap_or(0)
+}
+
+#[test]
+fn vector_loops_and_byte_scans_run_from_native_code() {
+    // `sum` and `dot` are counted reduce loops (`VecLoop`), `scale` a map
+    // loop storing lanes, `find` an early-exit byte loop (`ByteScan`) and
+    // `copy` a push loop (one bulk copy): the MIR passes the VM's dense
+    // tier runs give native code the same loops.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs, int from) -> int {{ let s = 0; let i = from; while i < xs.len() {{ s = s + xs[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn dot(Vec<float> a, Vec<float> b) -> float {{ let s = 0.0; let i = 0; while i < a.len() {{ s = s + a[i] * b[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn scale(Vec<int> xs, int k) {{ let i = 0; while i < xs.len() {{ xs[i] = xs[i] * k + 1; i = i + 1; }} }}\n\
+         #[inline(never)]\nfn find(Vec<byte> s, byte b, int from) -> int {{ let n = s.len(); let i = from; while i < n {{ if s[i] == b {{ return i; }} i = i + 1; }} return -1; }}\n\
+         #[inline(never)]\nfn copy(Vec<byte> src, int from) -> Vec<byte> {{ let out: Vec<byte> = Vec::new(); let i = from; while i < src.len() {{ out.push(src[i]); i = i + 1; }} return out; }}\n\
+         fn main() {{\n  let xs: Vec<int> = Vec::new(); let fs: Vec<float> = Vec::new(); let bs: Vec<byte> = Vec::new();\n  let j = 0;\n  while j < 1000 {{ xs.push(j * 7 % 101); fs.push((j % 13) as float); bs.push((97 + j % 26) as byte); j = j + 1; }}\n  bs[777] = 59 as byte;\n  scale(xs, 3);\n  let c = copy(bs, 5);\n  let _ = println(format(\"%i %i %i %i %i\", sum(xs, 1), dot(fs, fs) as int, find(bs, 59 as byte, 3), find(bs, 33 as byte, 0), c.len() + c[0] as int));\n}}\n"
+    );
+    let stats = same_as_vm("native_vector_loops", &src);
+    for f in ["sum", "dot", "scale", "find", "copy"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    // `scale` (a store loop) and `find` (a scan, run twice) go through the
+    // VM's lane code; the reduces compile to native loops.
+    assert!(vector_ops(&stats) >= 3, "stats: {stats}");
+}
+
+#[test]
+fn a_vector_loop_trap_matches_the_vm() {
+    // The lanes overflow after a print: the panic is native code's own.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs) -> int {{ let s = 0; let i = 0; while i < xs.len() {{ s = s + xs[i]; i = i + 1; }} return s; }}\n\
+         fn main() {{\n  let xs: Vec<int> = Vec::new(); let j = 0;\n  while j < 64 {{ xs.push(9223372036854775807 - j); j = j + 1; }}\n  let _ = println(\"start\");\n  let _ = println(format(\"%i\", sum(xs)));\n}}\n"
+    );
+    let stats = same_as_vm("native_vector_trap", &src);
+    assert!(compiled(&stats, "sum"), "stats: {stats}");
+}
+
+#[test]
+fn an_archive_carries_generators_and_vector_loops() {
+    // Every instruction steps 6 to 8 added goes through the native MIR
+    // section: resumes, yields (`yield from` too), done checks, vector
+    // loops and byte scans.
+    let src = format!(
+        "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i; i = i + 1; }} return 99; }}\n\
+         gen fn outer() {{ yield 7; yield from count(3); return 0; }}\n\
+         #[inline(never)]\nfn walk() -> int {{ let g = outer(); let t = 0; while !done(g) {{ t = t * 3 + resume g; }} return t; }}\n\
+         #[inline(never)]\nfn sum(Vec<int> xs) -> int {{ let s = 0; let i = 0; while i < xs.len() {{ s = s + xs[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn find(Vec<byte> s, byte b) -> int {{ let i = 0; while i < s.len() {{ if s[i] == b {{ return i; }} i = i + 1; }} return -1; }}\n\
+         fn main() {{\n  let xs: Vec<int> = Vec::new(); let bs: Vec<byte> = Vec::new(); let j = 0;\n  while j < 300 {{ xs.push(j); bs.push((97 + j % 26) as byte); j = j + 1; }}\n  bs[250] = 59 as byte;\n  let _ = println(format(\"%i %i %i\", walk(), sum(xs), find(bs, 59 as byte)));\n}}\n"
+    );
+    let archive = compile("archive_step8", &src, true);
+    let jit = run_archive(&archive, &[]);
+    let vm = run_archive(&archive, &["--no-jit"]);
+    assert_eq!(jit.stdout, vm.stdout);
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
+    assert_eq!(jit.status.code(), vm.status.code());
+    let stats = String::from_utf8_lossy(&jit.stderr);
+    assert!(stats.contains("calls ran natively") && vector_ops(&stats) >= 1, "stats: {stats}");
+}
+
+#[test]
+fn region_blocks_run_from_native_code() {
+    // `region { }` enters and leaves through host calls that collect on the
+    // VM: native code's words stay rooted (and forwarded) across both.
+    let src = format!(
+        "{HEADER}class Node {{ pub v: int, pub next: Option<Node> }}\n\
+         #[inline(never)]\nfn build(int n) -> Option<Node> {{ let head: Option<Node> = Option::None; let i = 0; while i < n {{ head = Option::Some(new Node(i, head)); i += 1; }} return head; }}\n\
+         #[inline(never)]\nfn total(Option<Node> head) -> int {{ let n = 0; let cur = head; while let Option::Some(node) = cur {{ n += node.v; cur = node.next; }} return n; }}\n\
+         #[inline(never)]\nfn rounds(Option<Node> kept, int k) -> int {{ let sum = 0; let r = 0; while r < k {{ sum += region {{ let list = build(100 + r); total(list) + total(kept) }}; r += 1; }} return sum + total(kept); }}\n\
+         fn main() {{ let kept = build(50); let _ = println(format(\"%i\", rounds(kept, 200))); }}\n"
+    );
+    let stats = same_as_vm("native_region", &src);
+    assert!(compiled(&stats, "rounds"), "stats: {stats}");
+}
+
+#[test]
+fn reduce_loops_compile_to_native_loops() {
+    // Counted reduces (a sum over an index expression as spectral_norm's,
+    // a float dot, an int max, a xor, a NaN-aware float max) run as native
+    // loops: no vector op goes through the VM's lane code. Results match
+    // the VM's left-to-right folds bit for bit.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn row(Vec<float> v, int i) -> float {{ let s = 0.0; let j = 0; while j < v.len() {{ let ij = i + j; s = s + 1.0 / (((ij * (ij + 1)) / 2 + i + 1) as float) * v[j]; j = j + 1; }} return s; }}\n\
+         #[inline(never)]\nfn dot(Vec<float> a, Vec<float> b) -> float {{ let s = 0.0; let i = 0; while i < a.len() {{ s = s + a[i] * b[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn vmax(Vec<int> xs) -> int {{ let m = xs[0]; let i = 1; while i < xs.len() {{ if xs[i] > m {{ m = xs[i]; }} i = i + 1; }} return m; }}\n\
+         #[inline(never)]\nfn xor(Vec<int> xs) -> int {{ let h = 0; let i = 0; while i < xs.len() {{ h = h ^ (xs[i] * 3); i = i + 1; }} return h; }}\n\
+         #[inline(never)]\nfn fmax(Vec<float> xs) -> float {{ let m = xs[0]; let i = 1; while i < xs.len() {{ if xs[i] > m {{ m = xs[i]; }} i = i + 1; }} return m; }}\n\
+         fn main() {{\n  let v: Vec<float> = Vec::new(); let xs: Vec<int> = Vec::new(); let j = 0;\n  while j < 203 {{ v.push((j % 7) as float * 0.1 + 0.3); xs.push(j * 7919 % 1009 - 500); j = j + 1; }}\n  let w: Vec<float> = Vec::new(); j = 0;\n  while j < 37 {{ if j == 11 {{ w.push(0.0 / 0.0); }} else {{ w.push((j * 13 % 17) as float); }} j = j + 1; }}\n  let _ = println(format(\"%f %f %i %i %f\", row(v, 3), dot(v, v), vmax(xs), xor(xs), fmax(w)));\n}}\n"
+    );
+    let stats = same_as_vm("native_reduce_loops", &src);
+    for f in ["row", "dot", "vmax", "xor", "fmax"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert_eq!(vector_ops(&stats), 0, "stats: {stats}");
+}
+
+#[test]
+fn a_trap_in_a_native_reduce_reports_the_vm_lane_trap() {
+    // A lane's term divides by zero after an earlier partial sum would
+    // overflow: the VM evaluates a block's terms before it folds, so the
+    // panic is the division's. Native code re-runs the op on the VM's
+    // lanes when anything traps.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs, Vec<int> ds) -> int {{ let s = 0; let i = 0; while i < xs.len() {{ s = s + xs[i] / ds[i]; i = i + 1; }} return s; }}\n\
+         fn main() {{\n  let xs: Vec<int> = Vec::new(); let ds: Vec<int> = Vec::new(); let j = 0;\n  while j < 16 {{ xs.push(9223372036854775807); if j == 5 {{ ds.push(0); }} else {{ ds.push(1); }} j = j + 1; }}\n  let _ = println(\"start\");\n  let _ = println(format(\"%i\", sum(xs, ds)));\n}}\n"
+    );
+    let stats = same_as_vm("native_reduce_trap", &src);
+    assert!(compiled(&stats, "sum"), "stats: {stats}");
+}
+
+#[test]
+fn a_reduce_over_bytes_takes_the_vm_lanes_result() {
+    // A byte array has no word view: the native loop leaves for the VM's
+    // lanes on its first load, and the reduce's result is theirs.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn byte_sum(Vec<byte> bytes, int n) -> int {{ let total = 0; for i in 0..n {{ total = total + (bytes[i] as int); }} return total; }}\n\
+         fn main() {{ let v: Vec<byte> = Vec::new(); let j = 0; while j < 21 {{ v.push((j * 3) as byte); j = j + 1; }} let _ = println(format(\"%i\", byte_sum(v, v.len()))); }}\n"
+    );
+    let stats = same_as_vm("native_byte_reduce", &src);
+    assert!(compiled(&stats, "byte_sum"), "stats: {stats}");
+}

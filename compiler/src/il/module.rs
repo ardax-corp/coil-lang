@@ -342,6 +342,12 @@ impl IlModule {
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
             drop_jumps_to_next_label(&mut body.ops);
         }
+        if crate::mir::native_capture_active() {
+            crate::mir::capture_native_bodies(self.funcs.iter().filter_map(|b| {
+                let mir = b.meta.hir_mir.as_deref()?;
+                Some((b.meta.name.as_str(), b.meta.entry, mir))
+            }), opts);
+        }
 
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
         // Every other body takes LIR from its MIR (lowered from HIR).

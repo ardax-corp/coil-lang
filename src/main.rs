@@ -168,8 +168,18 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
         cleanup_ranges: Vec::new(),
         line_table: Vec::new(),
         span_table: Vec::new(),
+        native_mir: Vec::new(),
     };
-    program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
+    let full = pipeline.program_debug_full();
+    #[cfg(not(target_family = "wasm"))]
+    if compiler::native_mir::native_capture_active() {
+        // `coil compile --jit`: keep the MIR native code is made from.
+        program.native_mir = coil_native::section::encode(
+            &compiler::native_mir::take_native_capture(),
+            &entry_pcs(&full),
+        );
+    }
+    program.set_debug(full, pipeline.debug_level());
 
     match rkyv::to_bytes::<Error>(&program) {
         Ok(b) => b.to_vec(),
@@ -384,7 +394,13 @@ fn cmd_build_and_run(
     opt_stats: bool,
     opt_stats_json: bool,
     cache: Option<BuildCache>,
+    jit: bool,
 ) {
+    // `--jit` needs this compile's MIR, so it skips the build cache.
+    let cache = if jit { None } else { cache };
+    if jit {
+        compiler::native_mir::start_native_capture();
+    }
     if let Some(cache) = &cache
         && let Some(loaded) = cache.load().and_then(|b| load_archive_bytes(&b).ok())
     {
@@ -421,6 +437,9 @@ fn cmd_build_and_run(
     }
 
     maybe_warn_stale_default_out(pipeline, filename, &full);
+    if jit {
+        install_native(&full);
+    }
     let entry = ffi_entry_path(Path::new(filename));
     let panicked = execute_pipeline(ExecutePipelineArgs {
         pipeline,
@@ -434,6 +453,47 @@ fn cmd_build_and_run(
     });
     if panicked {
         exit(1);
+    }
+}
+
+/// Compile the captured MIR with Cranelift for the coming run.
+fn install_native(debug: &common::ProgramDebug) {
+    let bodies = compiler::native_mir::take_native_capture();
+    install_native_bodies(&bodies, &entry_pcs(debug));
+}
+
+/// Function name to bytecode entry PC.
+fn entry_pcs(debug: &common::ProgramDebug) -> std::collections::HashMap<String, u32> {
+    debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect()
+}
+
+/// JIT `bodies` and install them for the coming run.
+fn install_native_bodies(
+    bodies: &[compiler::native_mir::NativeBody],
+    pcs: &std::collections::HashMap<String, u32>,
+) {
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = (bodies, pcs);
+        eprintln!("warning: --jit: no native code on wasm; running on the VM");
+    }
+    #[cfg(not(target_family = "wasm"))]
+    match coil_native::jit(bodies, pcs) {
+        Ok(program) => {
+            if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+                eprintln!("{}", coil_native::describe(&program));
+                if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+                    for name in &program.compiled {
+                        eprintln!("  native: {name}");
+                    }
+                    for (name, why) in &program.refused {
+                        eprintln!("  vm: {name}: {why}");
+                    }
+                }
+            }
+            machine::native::install_for_next_run(program.entries, program.sites);
+        }
+        Err(e) => eprintln!("warning: --jit: native compile failed ({e}); running on the VM"),
     }
 }
 
@@ -475,7 +535,13 @@ fn cmd_compile(
     opt_stats: bool,
     opt_stats_json: bool,
     cache: Option<BuildCache>,
+    jit: bool,
 ) {
+    // The build cache holds archives without MIR.
+    let cache = if jit { None } else { cache };
+    if jit {
+        compiler::native_mir::start_native_capture();
+    }
     compile_to_archive(pipeline, filename, output, cache);
     end_compile_progress();
     print_opt_stats(opt_stats, opt_stats_json);
@@ -488,7 +554,7 @@ fn cmd_compile(
     }
 }
 
-fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
+fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
     if common::ext::is_source_path(Path::new(archive)) {
         fail_and_exit(
             pipeline,
@@ -534,6 +600,20 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
             format!("failed to flush diagnostics: {e}"),
         );
         let _ = pipeline.finish_reporting();
+    }
+
+    if !no_jit {
+        if !loaded.native_mir.is_empty() {
+            #[cfg(not(target_family = "wasm"))]
+            match coil_native::section::decode(&loaded.native_mir) {
+                Ok((bodies, pcs)) => install_native_bodies(&bodies, &pcs),
+                Err(e) => eprintln!("warning: `{archive}`: {e}; running on the VM"),
+            }
+        } else if jit {
+            eprintln!(
+                "warning: `{archive}` carries no native MIR (build it with `coil compile --jit`); running on the VM"
+            );
+        }
     }
 
     // Weak base_dir: archive parent, for relative FFI dload paths.
@@ -748,6 +828,7 @@ fn main() {
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
+                        cli.jit,
                     );
                 }
                 Command::Compile { filename, output } => {
@@ -763,11 +844,12 @@ fn main() {
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
+                        cli.jit,
                     );
                 }
                 Command::Run { archive } => {
                     set_program_args(&archive, &cli.program_args);
-                    cmd_run(&mut pipeline, &archive);
+                    cmd_run(&mut pipeline, &archive, cli.jit, cli.no_jit);
                 }
                 Command::Package {
                     filename,
@@ -777,6 +859,7 @@ fn main() {
                     check_native,
                     // Folded into `cli.debug_level` (`-g0`).
                     strip_debug: _,
+                    aot,
                 } => {
                     cmd_package(
                         &mut pipeline,
@@ -785,6 +868,7 @@ fn main() {
                         runner.as_deref(),
                         &natives,
                         check_native,
+                        aot,
                     );
                     print_opt_stats(cli.opt_stats, cli.opt_stats_json);
                 }
@@ -864,6 +948,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         })
         .unwrap();
         std::fs::write(&stale, bytes.as_slice()).unwrap();
@@ -895,6 +980,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();
         std::fs::write(&ok_path, ok_bytes.as_slice()).unwrap();

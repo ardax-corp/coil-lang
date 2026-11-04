@@ -42,6 +42,9 @@ pub struct LoadedArchive {
     /// Per-class field word kinds (minor 24+). Empty = every field unknown.
     pub class_word_kinds: Vec<common::ClassWordKinds>,
     pub static_word_kinds: Vec<u8>,
+    /// Native MIR section (major 6 minor 20+, `coil compile --jit`); empty
+    /// when the archive has none.
+    pub native_mir: Vec<u8>,
 }
 
 /// Deserialize an `ArchivedProgram` blob (from `.ccoil` or an embedded slice).
@@ -82,6 +85,7 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
         precise_frames: program.precise_frames,
         class_word_kinds: program.class_word_kinds,
         static_word_kinds: program.static_word_kinds,
+        native_mir: program.native_mir,
     })
 }
 
@@ -449,6 +453,7 @@ mod tests {
             precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
+            native_mir: Vec::new(),
         };
         assert_eq!(
             resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode),
@@ -493,6 +498,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let loaded = load_archive_bytes(bytes.as_slice()).expect("load");

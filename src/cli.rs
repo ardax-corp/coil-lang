@@ -42,6 +42,9 @@ pub(crate) enum Command {
         natives: Vec<FfiNative>,
         check_native: bool,
         strip_debug: bool,
+        /// Link native code for the program (an AOT executable); `false`
+        /// with `--no-aot` or `--runner`: the VM runner runs it.
+        aot: bool,
     },
     /// Dump / list native lock metadata.
     Natives {
@@ -89,6 +92,11 @@ pub(crate) struct CliArgs {
     pub nursery: Option<bool>,
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
+    /// `--jit`: run with native code where the backend can compile it;
+    /// on `coil compile`, store the MIR for it in the archive.
+    pub jit: bool,
+    /// `--no-jit`: `coil run` ignores an archive's native MIR.
+    pub no_jit: bool,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
     pub opt_stats: bool,
@@ -172,6 +180,9 @@ enum RawCommand {
         /// Output archive path
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<String>,
+        /// Store the MIR of what native code can run, so `coil run` JITs it
+        #[arg(long)]
+        jit: bool,
         /// Entry `.coil` (or `--entry`)
         file: Option<String>,
     },
@@ -236,6 +247,10 @@ enum RawCommand {
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
+        /// Package the VM runner with the program instead of linking native
+        /// code for it (the default links an AOT executable with `cc`)
+        #[arg(long)]
+        no_aot: bool,
         /// Entry `.coil` file
         file: Option<String>,
     },
@@ -381,6 +396,8 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             early_free: None,
             nursery: None,
             cow_report: false,
+            jit: false,
+            no_jit: false,
             auto_par: None,
             opt_stats: false,
             opt_stats_json: false,
@@ -446,6 +463,8 @@ fn cli_from(
         early_free: opt.early_free,
         nursery: None,
         cow_report: false,
+        jit: false,
+        no_jit: false,
         auto_par: opt.auto_par,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
@@ -470,6 +489,8 @@ impl RawCli {
             || self.opt.is_set()
             || self.nursery.nursery.is_some()
             || self.nursery.cow_report
+            || self.nursery.jit
+            || self.nursery.no_jit
             || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
@@ -496,6 +517,8 @@ impl RawCli {
                     debug_level: self.debug.level(),
                     nursery: self.nursery.nursery,
                     cow_report: self.nursery.cow_report,
+                    jit: self.nursery.jit,
+                    no_jit: self.nursery.no_jit,
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -567,6 +590,7 @@ impl RawCli {
                 entry_flag,
                 include_tests,
                 output,
+                jit,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -576,6 +600,7 @@ impl RawCli {
                 }
                 CliArgs {
                     debug_level: debug.level(),
+                    jit,
                     ..cli_from(
                         Command::Compile {
                             filename,
@@ -598,6 +623,8 @@ impl RawCli {
             }) => CliArgs {
                 nursery: nursery.nursery,
                 cow_report: nursery.cow_report,
+                jit: nursery.jit,
+                no_jit: nursery.no_jit,
                 ..cli_from(
                     Command::Run { archive },
                     log,
@@ -620,6 +647,7 @@ impl RawCli {
                 runner,
                 ffi_native,
                 check_native,
+                no_aot,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -640,6 +668,7 @@ impl RawCli {
                         Command::Package {
                             filename,
                             output: out,
+                            aot: !no_aot && runner.is_none(),
                             runner,
                             natives: ffi_native,
                             check_native,
@@ -1015,6 +1044,7 @@ mod tests {
                 natives: Vec::new(),
                 check_native: false,
                 strip_debug: false,
+                aot: true,
             }
         );
     }
@@ -1050,6 +1080,7 @@ mod tests {
                 }],
                 check_native: true,
                 strip_debug: true,
+                aot: false,
             }
         );
     }

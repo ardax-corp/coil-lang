@@ -164,6 +164,11 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
+/// Major 6 / minor 20: [`ArchivedProgram::native_mir`], the typed MIR a
+/// native backend compiles (`coil compile --jit`). Minor 0–19 archives load
+/// through [`ArchivedProgramV6m19`] with an empty section. Not an opcode
+/// change.
+///
 /// Major 6 / minor 19: HostInvoke `key_index_*` (ids 191–199,
 /// `key_index::*`): the insertion-ordered hash index natives collections
 /// keyed by any `Hash + Eq` type build on. Older runtimes do not know the
@@ -264,7 +269,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.ccoil`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 19;
+pub const ARCHIVE_MINOR: u16 = 20;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -479,7 +484,38 @@ pub struct ArchivedProgram {
     /// Encoded byte-span runs (minor 40+, [`crate::LineTable::encode_spans`]);
     /// written only at `-g2`.
     pub span_table: Vec<u8>,
+    /// Typed MIR of the bodies a native backend compiles (major 6 minor
+    /// 20+, `coil compile --jit`); empty runs on the VM alone. The bytes are
+    /// the `coil-native` section format, opaque to this crate.
+    pub native_mir: Vec<u8>,
 }
+
+/// Major 6 minor 0–19 envelope (no native MIR section).
+#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct ArchivedProgramV6m19 {
+    pub version: u32,
+    pub static_slot_count: u32,
+    pub constants: Vec<u64>,
+    pub strings: Vec<String>,
+    pub bytecode: Vec<Byte>,
+    pub source_files: Vec<String>,
+    pub debug_locs: Vec<DebugLoc>,
+    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
+    pub struct_layouts: Vec<CStructLayout>,
+    pub operand_stack_slots: u32,
+    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
+    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
+    pub class_word_kinds: Vec<ClassWordKinds>,
+    pub static_word_kinds: Vec<u8>,
+    pub debug_lines: Vec<DebugLine>,
+    pub cleanup_ranges: Vec<crate::debug::CleanupRange>,
+    pub line_table: Vec<u8>,
+    pub span_table: Vec<u8>,
+}
+
+/// First major-6 minor that stores [`ArchivedProgram::native_mir`].
+pub const NATIVE_MIR_MINOR: u16 = 20;
 
 /// Minor 33–39 envelope (dense debug tables, no run tables).
 #[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -739,6 +775,32 @@ impl ArchivedProgram {
     }
 }
 
+impl ArchivedProgramV6m19 {
+    fn into_program(self) -> ArchivedProgram {
+        ArchivedProgram {
+            version: self.version,
+            static_slot_count: self.static_slot_count,
+            constants: self.constants,
+            strings: self.strings,
+            bytecode: self.bytecode,
+            source_files: self.source_files,
+            debug_locs: self.debug_locs,
+            fn_symbols: self.fn_symbols,
+            struct_layouts: self.struct_layouts,
+            operand_stack_slots: self.operand_stack_slots,
+            stack_maps: self.stack_maps,
+            precise_frames: self.precise_frames,
+            class_word_kinds: self.class_word_kinds,
+            static_word_kinds: self.static_word_kinds,
+            debug_lines: self.debug_lines,
+            cleanup_ranges: self.cleanup_ranges,
+            line_table: self.line_table,
+            span_table: self.span_table,
+            native_mir: Vec::new(),
+        }
+    }
+}
+
 impl ArchivedProgramV39 {
     fn into_program(self) -> ArchivedProgram {
         ArchivedProgram {
@@ -760,6 +822,7 @@ impl ArchivedProgramV39 {
             cleanup_ranges: self.cleanup_ranges,
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -785,6 +848,7 @@ impl ArchivedProgramV32 {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -810,6 +874,7 @@ impl ArchivedProgramV29 {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -835,6 +900,7 @@ impl ArchivedProgramV12 {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -860,6 +926,7 @@ impl ArchivedProgramV21 {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -885,6 +952,7 @@ impl ArchivedProgramV28 {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -910,6 +978,7 @@ impl ArchivedProgramV23 {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -935,6 +1004,7 @@ impl ArchivedProgramV20 {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -960,6 +1030,7 @@ impl ArchivedProgramV13 {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         }
     }
 }
@@ -1012,6 +1083,9 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
     let current = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgram, Error>(archived).ok());
+    let v6m19 = rkyv::access::<ArchivedArchivedProgramV6m19, Error>(buffer)
+        .ok()
+        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV6m19, Error>(archived).ok());
     let v39 = rkyv::access::<ArchivedArchivedProgramV39, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgramV39, Error>(archived).ok());
@@ -1056,6 +1130,16 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
         {
             return Err(ArchiveDecodeError::Version(program.version));
         }
+    }
+    if let Some(old) = v6m19
+        && archive_major(old.version) == ARCHIVE_MAJOR
+        && archive_minor(old.version) < NATIVE_MIR_MINOR
+    {
+        return Ok(DecodedArchive {
+            program: old.into_program(),
+            operand_stack_slots_persisted: true,
+            stack_maps_persisted: true,
+        });
     }
     if let Some(old) = v39 {
         if archive_version_compatible(old.version, ARCHIVE_VERSION)
@@ -1234,6 +1318,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -1269,6 +1354,7 @@ mod tests {
                 cleanup_ranges,
                 line_table,
                 span_table,
+                native_mir,
             } = p;
             let _ = (
                 version,
@@ -1289,6 +1375,7 @@ mod tests {
                 cleanup_ranges,
                 line_table,
                 span_table,
+                native_mir,
             );
         };
     }
@@ -1325,6 +1412,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -1341,9 +1429,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
-        assert_eq!(ARCHIVE_MINOR, 19);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 19));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.19");
+        assert_eq!(ARCHIVE_MINOR, 20);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 20));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.20");
     }
 
     #[test]
@@ -1440,6 +1528,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -1474,6 +1563,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1541,6 +1631,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1578,6 +1669,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1661,6 +1753,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1696,6 +1789,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1901,6 +1995,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn major6_minor19_envelope_loads_without_native_mir() {
+        let old = ArchivedProgramV6m19 {
+            version: pack_archive_version(ARCHIVE_MAJOR, NATIVE_MIR_MINOR - 1),
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: three_halts(),
+            source_files: vec!["main.coil".into()],
+            debug_locs: Vec::new(),
+            fn_symbols: vec![crate::debug::FnDebugSym {
+                name: "main".into(),
+                entry_pc: 0,
+            }],
+            struct_layouts: Vec::new(),
+            operand_stack_slots: LEGACY_DEFAULT_OPERAND_STACK_SLOTS,
+            stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
+            static_word_kinds: Vec::new(),
+            debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
+        };
+        let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("6.19 loads");
+        assert_eq!(decoded.program.bytecode, three_halts());
+        assert_eq!(decoded.program.fn_symbols.len(), 1);
+        assert!(decoded.program.native_mir.is_empty());
+    }
+
+    #[test]
+    fn native_mir_section_round_trips() {
+        let mut program = program_at(crate::DebugLevel::Lines);
+        program.native_mir = vec![1, 2, 3, 0xff];
+        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
+        assert_eq!(decoded.program.native_mir, vec![1, 2, 3, 0xff]);
+    }
+
     fn program_at(level: crate::DebugLevel) -> ArchivedProgram {
         let (locs, lines) = dense_debug();
         let mut program = ArchivedProgram {
@@ -1922,6 +2057,7 @@ mod tests {
             cleanup_ranges: Vec::new(),
             line_table: Vec::new(),
             span_table: Vec::new(),
+            native_mir: Vec::new(),
         };
         let debug = ProgramDebug {
             source_files: vec!["main.coil".into()],

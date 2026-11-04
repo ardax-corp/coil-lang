@@ -15,7 +15,7 @@ use crate::mutate::MutateOptions;
 use crate::mutate::job::Isolation;
 use crate::mutate::sites::Operator;
 use crate::order::{Order, fresh_seed, parse_seed};
-use crate::runner::{DocTests, Report, TestOptions};
+use crate::runner::{DocTests, Engine, Report, TestOptions};
 
 /// Default test root when no path is given.
 pub const TESTS_DIR: &str = "tests";
@@ -116,6 +116,10 @@ struct TestCli {
     /// (the files are parsed, not compiled)
     #[arg(long)]
     doc_tests_only: bool,
+    /// What runs the compiled code: vm, or native (Cranelift where the
+    /// backend compiles a body, the VM elsewhere)
+    #[arg(long, value_name = "vm|native", value_parser = Engine::parse, default_value = "vm")]
+    engine: Engine,
     /// Test root (default: ./tests)
     #[arg(value_name = "PATH")]
     path: Option<String>,
@@ -247,6 +251,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
             DocTests::On
         },
         wall_timeout: cli.wall_timeout,
+        engine: cli.engine,
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -285,6 +290,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         doc_tests: DocTests::Off,
         // The parent kills a mutant's worker after `--wall-timeout`.
         wall_timeout: 0,
+        engine: Engine::Vm,
     })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {
@@ -333,6 +339,7 @@ struct RunParts {
     doc_tests: DocTests,
     /// Seconds per case before the run stops; 0: never.
     wall_timeout: u64,
+    engine: Engine,
 }
 
 fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String> {
@@ -344,6 +351,9 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
     let coverage = parts.coverage || parts.coverage_out.is_some() || parts.per_test_out.is_some();
     if coverage && parts.debug.is_some_and(|l| l != compiler::DebugLevel::Full) {
         return Err("coverage needs byte spans: drop -g0 / -g1 (or pass -g2)".into());
+    }
+    if coverage && parts.engine == Engine::Native {
+        return Err("--coverage counts lines the VM runs: use --engine vm".into());
     }
     let order = resolve_order(parts.seed, parts.no_shuffle, fresh_seed)?;
     Ok((
@@ -383,6 +393,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             doc_tests: parts.doc_tests,
             wall_timeout: (parts.wall_timeout != 0)
                 .then(|| std::time::Duration::from_secs(parts.wall_timeout)),
+            engine: parts.engine,
         }),
     ))
 }

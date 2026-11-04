@@ -1464,7 +1464,7 @@ fn resolve_dense_index_object_in(
 }
 
 /// Panic when a frame needs more operand stack than [`crate::MAX_OPERAND_STACK_SLOTS`].
-const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
+pub(crate) const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
 
 /// Panic when [`Machine::set_step_budget`]'s budget runs out.
 pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
@@ -1541,6 +1541,8 @@ pub struct Machine<const S: usize> {
     /// overwrite the outer depth.
     nested_frame_depths: Vec<usize>,
     nested_return: Option<Value>,
+    /// The second word of the two-word `RETURN` `nested_return` captured.
+    nested_return_hi: Value,
     /// Over-apply stub frames entered and not yet finished (`OVER_APPLY_IP`).
     /// A panic that unwinds one leaves the count high, which only keeps
     /// `return_bookkeeping` on.
@@ -1559,6 +1561,50 @@ pub struct Machine<const S: usize> {
     /// The next runtime panic's message already names its location
     /// (`contract_fail`): print no ` at …` suffix.
     panic_without_location: bool,
+    /// While the VM reports a native panic: one backtrace line per native
+    /// frame, innermost first, and the innermost frame's location.
+    native_panic_frames: Vec<String>,
+    native_panic_loc: Option<String>,
+    /// Native calls in a VM call, innermost last: the heap words their
+    /// frames hold are pinned roots ([`crate::native::NativeCtx::for_each_root`]).
+    native_roots: Vec<(*mut crate::native::NativeCtx, usize)>,
+    /// Inside a fiber (`vm_fiber.rs`): the nesting level its VM calls switch
+    /// tasks at. `None` outside fibers.
+    fiber_switch_depth: Option<u32>,
+    /// The running fiber's `corosensei::Yielder` (null outside fibers).
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    fiber_yielder: *const (),
+    /// While a fiber runs: the task's own VM state it swapped out (a GC root).
+    fiber_outer: Option<*const ExecCtx<S>>,
+    /// Fibers parked in a task switch, by task.
+    #[cfg(not(target_family = "wasm"))]
+    parked_fibers: std::collections::HashMap<crate::task::TaskId, Box<NativeFiber<S>>>,
+    /// Stacks of finished fibers, for the next ones.
+    #[cfg(not(target_family = "wasm"))]
+    fiber_stacks: Vec<corosensei::stack::DefaultStack>,
+    /// Generators whose native body runs now, innermost last: roots
+    /// (pinned) while their fibers run (`vm_gen.rs`).
+    gen_running: Vec<Value>,
+    /// The frame depth of the running host-call stub, or `0`.
+    host_stub_frame: usize,
+    /// FFI op stubs past the host-call stubs, by opcode byte and operand.
+    ffi_stubs: std::collections::HashMap<(u8, u32), usize>,
+    /// How a fiber's suspension point suspends its task (block, result slot).
+    fiber_park_request: Option<(Option<crate::task::Block>, bool)>,
+    /// The wake a parked fiber's suspension point gets when it resumes.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    fiber_wake: Option<crate::task::Wake>,
+    /// A parked fiber resumes with a cancel to unwind from its suspension
+    /// point.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    fiber_cancel: bool,
+    /// The task just switched in resumes at a `CALL` whose fiber parked.
+    fiber_resume_pending: bool,
+    /// A fiber's suspension point took a cancel: the unwinder takes over.
+    fiber_stop: bool,
+    /// Inside [`Self::resume_value`]: the frame depth its generator yields
+    /// or returns to, where the nested execution stops (`usize::MAX`: none).
+    resume_floor: usize,
     /// Task scheduler, created by the first `task::scope` (see `task.rs`).
     sched: Option<Box<crate::task::Scheduler>>,
     /// Message of a panic a child task raised (the scope reports it).
@@ -1657,6 +1703,8 @@ pub struct Machine<const S: usize> {
     /// Set once the live heap outgrew [`Self::heap_cap`] after a full
     /// collection (see [`Self::heap_cap_exceeded`]).
     heap_cap_hit: bool,
+    /// Native code installed by a native backend (`None`: VM only).
+    native: Option<Box<crate::native::NativeTable>>,
 }
 
 
@@ -1714,12 +1762,32 @@ impl<const S: usize> Machine<S> {
             return_bookkeeping: false,
             nested_frame_depths: Vec::new(),
             nested_return: None,
+            nested_return_hi: Value::default(),
             over_apply_frames: 0,
             pending_ffi: None,
             ffi_arg_roots: Vec::new(),
             pending_io: None,
             panicked: false,
             panic_without_location: false,
+            native_panic_frames: Vec::new(),
+            native_panic_loc: None,
+            native_roots: Vec::new(),
+            fiber_switch_depth: None,
+            fiber_yielder: std::ptr::null(),
+            fiber_outer: None,
+            #[cfg(not(target_family = "wasm"))]
+            parked_fibers: std::collections::HashMap::new(),
+            #[cfg(not(target_family = "wasm"))]
+            fiber_stacks: Vec::new(),
+            gen_running: Vec::new(),
+            host_stub_frame: 0,
+            ffi_stubs: std::collections::HashMap::new(),
+            fiber_park_request: None,
+            fiber_wake: None,
+            fiber_cancel: false,
+            fiber_resume_pending: false,
+            fiber_stop: false,
+            resume_floor: usize::MAX,
             sched: None,
             task_panic_message: None,
             finalizer_aborted: false,
@@ -1764,7 +1832,545 @@ impl<const S: usize> Machine<S> {
             fuel_start: u64::MAX,
             heap_cap: usize::MAX,
             heap_cap_hit: false,
+            native: None,
         }
+    }
+
+    /// Install native code for some functions (see [`crate::native`]). A
+    /// `CALL` of an installed entry PC runs it instead of the bytecode,
+    /// except while a debugger is attached. Machines this one spawns
+    /// (threads, auto-par jobs, test cases) run it too. `None` removes it.
+    pub fn install_native(&mut self, code: Option<std::sync::Arc<crate::native::NativeCode>>) {
+        self.native = code.filter(|c| !c.is_empty()).map(|c| Box::new(crate::native::NativeTable::new(c)));
+        self.ensure_host_stubs();
+    }
+
+    /// With native code installed and the program loaded, append the
+    /// host-call stubs (`native::host_stubs`) past the program, once. Runs
+    /// only while no execution borrows the code.
+    fn ensure_host_stubs(&mut self) {
+        let Some(base) = self.native.as_ref().map(|t| t.code.code_len()) else {
+            return;
+        };
+        if self.program_code.len() == base {
+            let mut stubs = crate::native::host_stubs();
+            // A stub per FFI op and operand the program uses.
+            let mut seen = std::collections::HashSet::new();
+            for b in self.program_code.iter() {
+                let op = *b.bytecode();
+                if crate::native::is_ffi_op(op) && seen.insert((op as u8, b.operand_u32())) {
+                    stubs.push(RawByte::new(op).with_operand_u32(b.operand_u32()));
+                    stubs.push(RawByte::new(common::Instruction::RETURN));
+                }
+            }
+            Arc::make_mut(&mut self.program_code).extend(stubs);
+        }
+        self.ffi_stubs.clear();
+        let first = base + crate::native::HOST_STUBS_LEN;
+        for pc in (first..self.program_code.len()).step_by(2) {
+            let b = &self.program_code[pc];
+            self.ffi_stubs.insert((*b.bytecode() as u8, b.operand_u32()), pc);
+        }
+    }
+
+    /// The PC of the host-call stub for `arity` words in `layout`.
+    fn host_stub_pc(&self, arity: usize, layout: u64) -> Option<usize> {
+        let base = self.native.as_ref()?.code.code_len();
+        let off = crate::native::host_stub_offset(arity, layout)?;
+        (self.program_code.len() >= base + crate::native::HOST_STUBS_LEN).then_some(base + off)
+    }
+
+    /// Whether `ip` lies in the host-call stubs: a frame there runs no code
+    /// of its own (its caller is native code).
+    fn in_host_stub(&self, ip: usize) -> bool {
+        self.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
+    }
+
+    /// The installed native code, for a machine that runs this program.
+    pub fn native_code(&self) -> Option<std::sync::Arc<crate::native::NativeCode>> {
+        self.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
+    }
+
+    /// Native calls run and bailed so far: `(hits, bails)`.
+    pub fn native_stats(&self) -> Option<(u64, u64)> {
+        self.native.as_ref().map(|t| (t.hits, t.bails))
+    }
+
+    /// Run the native code at `target` on the top `arity` stack words.
+    /// `None`: no native code there, or it bailed and the VM runs the call.
+    /// `Some(Err)`: it panicked after an effect it cannot take back.
+    #[inline(never)]
+    fn try_native_call(
+        &mut self,
+        target: usize,
+        arity: usize,
+    ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
+        let base = self.stack.tell() - arity;
+        let table = self.native.as_deref_mut()?;
+        // After a bail the VM re-runs that call in bytecode; calls nested
+        // in the re-run (above its frame base) stay in the VM, or a deep
+        // recursion would bail again at every level.
+        if base > table.quiet_above {
+            return None;
+        }
+        table.quiet_above = usize::MAX;
+        let entry = table.lookup(target)?;
+        // A task switch while native frames are live would strand them on
+        // the thread's stack: where tasks switch, a body that may reach VM
+        // code runs on a fiber of its own (`vm_fiber.rs`). The wasm build
+        // has no fibers: there it stays in the VM.
+        let on_fiber = entry.suspends && self.native_needs_fiber();
+        if cfg!(target_family = "wasm") && entry.suspends && self.sched.is_some() {
+            return None;
+        }
+        // A `CALL` passes its own arity: words a body's MIR parameters
+        // name but it never reads pass as `0`; extra words are dropped.
+        if arity < entry.reads as usize {
+            return None;
+        }
+        let mut words = [0u64; 16];
+        let params = entry.arity as usize;
+        if params > words.len() {
+            return None;
+        }
+        for (i, w) in words.iter_mut().take(arity.min(params)).enumerate() {
+            *w = self.stack[base + i].bits();
+        }
+        // Native code never collects; a VM call it makes may, with the
+        // native frames' heap words pinned (`native_vm_call`).
+        #[cfg(not(target_family = "wasm"))]
+        let out = if on_fiber {
+            self.native_call_on_fiber(entry, words)
+        } else {
+            let env = self.native_env();
+            crate::native::call(&entry, &words[..params], &env)
+        };
+        #[cfg(target_family = "wasm")]
+        let out = {
+            let _ = on_fiber;
+            let env = self.native_env();
+            crate::native::call(&entry, &words[..params], &env)
+        };
+        self.native_outcome(out, base)
+    }
+
+    /// What a native call's outcome means at its `CALL` (`base`: its
+    /// arguments' first slot); `None` when the VM runs the call.
+    fn native_outcome(
+        &mut self,
+        out: crate::native::NativeOutcome,
+        base: usize,
+    ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
+        let table = self.native.as_deref_mut()?;
+        match out {
+            crate::native::NativeOutcome::Done(r) => {
+                table.hits += 1;
+                Some(Ok(r))
+            }
+            crate::native::NativeOutcome::Panicked(p) => {
+                table.hits += 1;
+                Some(Err(p))
+            }
+            crate::native::NativeOutcome::Bailed => {
+                table.bails += 1;
+                table.quiet_above = base;
+                None
+            }
+        }
+    }
+
+    /// [`Self::resume_parked_fiber`] at the `CALL` it parked in.
+    fn resume_native_fiber(
+        &mut self,
+        arity: usize,
+    ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let base = self.stack.tell() - arity;
+            let out = self.resume_parked_fiber()?;
+            self.native_outcome(out, base)
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = arity;
+            None
+        }
+    }
+
+    /// The machine as native code reaches it.
+    fn native_env(&mut self) -> crate::native::NativeEnv {
+        let strings_len = self.program_strings.len().min(self.program_string_cache.len());
+        crate::native::NativeEnv {
+            heap: std::ptr::from_mut::<crate::memory::Heap>(&mut self.heap),
+            strings: self.program_strings.as_ptr(),
+            string_cache: self.program_string_cache.as_mut_ptr(),
+            strings_len,
+            has_finalizers: !self.finalizer_by_type.is_empty(),
+            statics: self.statics.as_mut_ptr(),
+            statics_len: self.statics.len(),
+            machine: std::ptr::from_mut(self).cast(),
+            host: crate::native::NativeHost {
+                print: Self::native_print,
+                call: Self::native_vm_call,
+                call_value: Self::native_call_value,
+                resume: Self::native_resume,
+                claim: Self::native_claim,
+                collect: Self::native_collect,
+                gc: Self::native_gc,
+                free: Self::native_free,
+                host: Self::native_host_vm,
+                ffi: Self::native_ffi_vm,
+                vector: Self::native_vector,
+            },
+        }
+    }
+
+    /// Run the cleanup pads of the native frames a panic unwound (the
+    /// panic already reported), as the VM runs a frame's pad on its way
+    /// out.
+    fn run_native_pads(&mut self, pads: Vec<crate::native::NativePad>) {
+        if pads.is_empty() {
+            return;
+        }
+        let was_panicked = self.panicked;
+        self.panicked = false;
+        let env = self.native_env();
+        crate::native::run_pads(pads, &env);
+        self.panicked |= was_panicked;
+    }
+
+    /// [`crate::native::NativeHost::collect`]: a collection at a native
+    /// safepoint, as after a call that allocated.
+    unsafe fn native_collect(raw: *mut c_void, ctx: *mut crate::native::NativeCtx) {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let ip = if vm.frames.is_empty() { 0 } else { vm.frames.get().tell() };
+        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.maybe_gc_after_call_alloc(ip);
+        vm.native_roots.pop();
+    }
+
+    /// [`crate::native::NativeHost::gc`]: what `gc_collect` does.
+    unsafe fn native_gc(raw: *mut c_void, ctx: *mut crate::native::NativeCtx, panicked: &mut bool) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let ip = if vm.frames.is_empty() { 0 } else { vm.frames.get().tell() };
+        if unlikely(!vm.stack_maps.is_empty()) {
+            vm.gc_ip = ip;
+        }
+        let before = vm.heap.size();
+        vm.native_roots.push((ctx, vm.frames.len()));
+        vm.gc_collect();
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        before.saturating_sub(vm.heap.size()) as u64
+    }
+
+    /// [`crate::native::NativeHost::free`]: what `FreeEarly` does.
+    unsafe fn native_free(raw: *mut c_void, ctx: *mut crate::native::NativeCtx, word: u64, deep: bool) -> bool {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        vm.native_roots.push((ctx, vm.frames.len()));
+        let ok = vm.free_early(Value::from(word), deep);
+        vm.native_roots.pop();
+        ok && !vm.panicked
+    }
+
+    /// [`crate::native::NativeHost::print`]: what `PRINT` does.
+    unsafe fn native_print(raw: *mut c_void, s: &str) {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        if crate::io::capture_write(false, s.as_bytes()) {
+            // `io::capture_begin()` keeps it.
+        } else if let Some(out) = vm.output.as_mut() {
+            let _ = write!(out, "{s}");
+            let _ = out.flush();
+            vm.mirror_stdout(s);
+        } else {
+            print!("{s}");
+            let _ = io::stdout().flush();
+        }
+    }
+
+    /// [`crate::native::NativeHost::call`]: run a body native code calls
+    /// that stays on the VM, in a nested execution.
+    unsafe fn native_vm_call(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        pc: u32,
+        args: &[Value],
+        panicked: &mut bool,
+    ) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        vm.nested_return_hi = Value::default();
+        // A collection in the call pins what the native frames hold.
+        vm.native_roots.push((ctx, vm.frames.len()));
+        // Inside a fiber its VM code may switch tasks (`vm_fiber.rs`).
+        let out = vm.native_reenter(|vm| vm.call_function(pc, args));
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        // SAFETY: the calling native code's live context.
+        unsafe { (*ctx).vm_hi = std::mem::take(&mut vm.nested_return_hi).bits() };
+        out.bits()
+    }
+
+    /// [`crate::native::NativeHost::host`]: the host native `id` through
+    /// its stub, in a nested execution, as [`Self::native_vm_call`].
+    unsafe fn native_host_vm(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        id: u64,
+        layout: u64,
+        args: &[Value],
+        panicked: &mut bool,
+    ) -> Option<u64> {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let pc = vm.host_stub_pc(args.len(), layout)?;
+        let mut words = [Value::default(); crate::native::HOST_STUB_ARITIES + 1];
+        words[0] = Value::from(id as i64);
+        words[1..=args.len()].copy_from_slice(args);
+        vm.nested_return_hi = Value::default();
+        vm.native_roots.push((ctx, vm.frames.len()));
+        let saved = std::mem::replace(&mut vm.host_stub_frame, vm.frames.len() + 1);
+        let out = vm.native_reenter(|vm| vm.call_function(pc as u32, &words[..=args.len()]));
+        vm.host_stub_frame = saved;
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        Some(out.bits())
+    }
+
+    /// [`crate::native::NativeHost::ffi`]: the FFI op `op` (`operand`)
+    /// through its stub, as [`Self::native_host_vm`].
+    unsafe fn native_ffi_vm(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        op: u64,
+        operand: u64,
+        args: &[Value],
+        panicked: &mut bool,
+    ) -> Option<u64> {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let pc = *vm.ffi_stubs.get(&(op as u8, operand as u32))?;
+        vm.nested_return_hi = Value::default();
+        vm.native_roots.push((ctx, vm.frames.len()));
+        let saved = std::mem::replace(&mut vm.host_stub_frame, vm.frames.len() + 1);
+        let out = vm.native_reenter(|vm| vm.call_function(pc as u32, args));
+        vm.host_stub_frame = saved;
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        Some(out.bits())
+    }
+
+    /// [`crate::native::NativeHost::vector`]: `body` over `slots`, pushed
+    /// as a frame on top of the stack, by [`vscan`] / [`vloop`].
+    unsafe fn native_vector(
+        raw: *mut c_void,
+        scan: bool,
+        flags: u8,
+        body: &[common::Byte],
+        slots: &mut [u64],
+        from: i64,
+        bound: i64,
+    ) -> Option<Result<i64, &'static str>> {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        // SAFETY: the archived word has the plain word's layout, as the
+        // program code's casts rely on.
+        let body: &[Byte] = unsafe { std::slice::from_raw_parts(body.as_ptr().cast(), body.len()) };
+        let sp = vm.stack.tell();
+        if sp + slots.len() > vm.stack.capacity() {
+            return None;
+        }
+        for &w in slots.iter() {
+            vm.stack.push(Value::from(w));
+        }
+        let out = if scan {
+            let inclusive = flags & common::simd::SCAN_INCLUSIVE != 0;
+            let backward = flags & common::simd::SCAN_BACKWARD != 0;
+            vscan(&vm.heap, &vm.stack, sp, &mut vm.vregs, body, from, bound, inclusive, backward)
+        } else {
+            let pos = flags & common::simd::LOOP_POS != 0;
+            vloop(&mut vm.heap, &mut vm.stack, sp, &mut vm.vregs, body, usize::from(pos), from, bound, pos).map(|()| 0)
+        };
+        for (i, w) in slots.iter_mut().enumerate() {
+            *w = vm.stack[sp + i].bits();
+        }
+        vm.stack.seek(sp);
+        Some(out)
+    }
+
+    /// [`crate::native::NativeHost::claim`]: the finalizer claim `CALL`
+    /// makes before a `drop`.
+    unsafe fn native_claim(raw: *mut c_void, pc: u32, word: u64) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        if !vm.finalizer_pcs.contains(&pc) {
+            return 1;
+        }
+        if vm.claim_finalizer(Value::from(word)) { 2 } else { 0 }
+    }
+
+    /// [`crate::native::NativeHost::call_value`]: [`Self::call_value`],
+    /// with the native frames rooted, as [`Self::native_vm_call`].
+    unsafe fn native_call_value(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        callee: u64,
+        args: &[Value],
+        dicts: u32,
+        panicked: &mut bool,
+    ) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        vm.native_roots.push((ctx, vm.frames.len()));
+        let out = vm.native_reenter(|vm| vm.call_value(Value::from(callee), args, dicts as usize));
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        out.bits()
+    }
+
+    /// [`crate::native::NativeHost::resume`]: [`Self::resume_value`], with
+    /// the native frames rooted, as [`Self::native_vm_call`].
+    unsafe fn native_resume(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        handle: u64,
+        send: Option<u64>,
+        panicked: &mut bool,
+    ) -> u64 {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        vm.native_roots.push((ctx, vm.frames.len()));
+        let out = vm.native_reenter(|vm| vm.resume_value(Value::from(handle), send.map(Value::from)));
+        vm.native_roots.pop();
+        *panicked = vm.panicked;
+        out.bits()
+    }
+
+    /// `ResumeCoro` reentrantly, for native code: run the generator
+    /// `handle` (sent `send`) in a nested execution until it yields or
+    /// returns, and give back that value. The generator's frames go above
+    /// a frame of the caller's own (the floor), as the VM's `ResumeCoro`
+    /// puts them above the resumer's.
+    pub(crate) fn resume_value(&mut self, handle: Value, send: Option<Value>) -> Value {
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        let constants: &[u64] = unsafe {
+            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+        };
+        self.bind_frame_reserve(code, constants);
+        let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits()) else {
+            self.runtime_panic("resumed invalid coroutine handle", call_ip.saturating_sub(1));
+            return Value::default();
+        };
+        if gc.as_ref().state == CoroState::Done {
+            self.runtime_panic("resumed after completion", call_ip.saturating_sub(1));
+            return Value::default();
+        }
+        let send_val = send.unwrap_or_else(|| Value::from(0_i64));
+        // A delegating generator resumes its innermost `yield from` delegate.
+        let mut target = gc;
+        while let Some(sub) = target.as_ref().yield_from {
+            Self::with_coroutine_mut(target, |c| c.pending_send = send_val);
+            target = sub;
+        }
+        self.fuel = self.fuel.wrapping_sub(1);
+        if unlikely(self.fuel == 0) {
+            self.step_budget_out(call_ip);
+            return Value::default();
+        }
+        if self.frames.len() >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(1) {
+            self.runtime_panic(STACK_OVERFLOW, call_ip.saturating_sub(1));
+            return Value::default();
+        }
+        // A body that runs natively: no VM frames, unless it returns into
+        // a VM generator's `yield from` (which then runs on the VM).
+        let mut delegate_returned = None;
+        if unlikely(self.native.is_some()) {
+            match self.native_gen_step(target, send_val) {
+                Some(GenStep::Yielded(v)) => return v,
+                Some(GenStep::Returned(v)) => match self.find_delegator(target) {
+                    Some(parent) => delegate_returned = Some((parent, v)),
+                    None => return v,
+                },
+                Some(GenStep::Panicked(p)) => {
+                    if p.code == crate::native::TRAP_VM_PANIC {
+                        self.rearm_unwind_after_early_drop(call_ip.saturating_sub(1));
+                    } else {
+                        self.native_panic(&p, call_ip.saturating_sub(1));
+                    }
+                    self.run_native_pads(p.pads);
+                    return Value::default();
+                }
+                None => {}
+            }
+        }
+        let saved_sp = self.stack.tell();
+        self.nested_return = None;
+        self.nested_depth += 1;
+        self.return_bookkeeping = true;
+        // The floor: the resumer's frame for the generator's.
+        self.frames.setup_current_and_advance(|f| {
+            f.seek(0);
+            f.set(saved_sp);
+        });
+        let floor = self.frames.len();
+        self.nested_frame_depths.push(floor);
+        let saved_floor = std::mem::replace(&mut self.resume_floor, floor);
+        let mut ip = 0;
+        let mut sp = saved_sp;
+        let mut out = Value::default();
+        let begun = match delegate_returned {
+            Some((parent, v)) => {
+                self.stack.push(v);
+                self.finish_yield_from(parent, target, saved_sp, &mut ip, &mut sp);
+                true
+            }
+            None => self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true),
+        };
+        if begun {
+            loop {
+                let paused = self.run_execute(code, constants, ip);
+                if let Some(pending) = self.pending_ffi.take() {
+                    ip = pending.resume_ip;
+                    self.finish_pending_ffi_invoke(pending);
+                    continue;
+                }
+                if let Some(pending) = self.pending_io.take() {
+                    ip = pending.resume_ip;
+                    self.finish_pending_io_wait(pending);
+                    continue;
+                }
+                if !paused {
+                    break;
+                }
+            }
+            if !self.panicked && self.stack.tell() > saved_sp {
+                out = self.stack.pop();
+            }
+        } else {
+            self.runtime_panic(STACK_OVERFLOW, call_ip.saturating_sub(1));
+        }
+        self.resume_floor = saved_floor;
+        let _ = self.nested_frame_depths.pop();
+        while self.frames.len() >= floor {
+            let _ = self.pop_call_frame();
+        }
+        self.stack.seek(saved_sp);
+        if saved_sp < self.stack.capacity() {
+            self.stack[saved_sp] = Value::default();
+        }
+        self.nested_depth -= 1;
+        self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
+        out
     }
 
     /// Limit execution to `budget` steps, where a step is a taken loop
@@ -2278,6 +2884,10 @@ impl<const S: usize> Machine<S> {
     }
 
     fn format_panic_location(&self, panic_insn_ip: usize) -> Option<String> {
+        // A host call native code made: its call site.
+        if self.in_host_stub(panic_insn_ip) {
+            return self.native_caller_location();
+        }
         let (file, line, column) = self.pc_file_line_column(panic_insn_ip)?;
         let path = self.program_debug.source_files.get(file as usize)?;
         Some(format!("{}:{}:{}", path, line, column))
@@ -2317,7 +2927,10 @@ impl<const S: usize> Machine<S> {
         // ip is the panic instruction.
         let top_is_panic_site =
             !self.frames.is_empty() && self.frames.get().tell() == panic_insn_ip;
-        if !top_is_panic_site && let Some(loc) = self.format_panic_location(panic_insn_ip) {
+        if !top_is_panic_site
+            && self.native_panic_frames.is_empty()
+            && let Some(loc) = self.format_panic_location(panic_insn_ip)
+        {
             lines.push(format!("  at {loc}"));
         }
         // Deep recursion repeats one frame line; print each run once.
@@ -2328,32 +2941,201 @@ impl<const S: usize> Machine<S> {
                 *repeats = 0;
             }
         };
-        for frame_idx in (0..self.frames.len()).rev() {
-            let ip = self.frames[frame_idx].tell();
-            // An over-apply stub runs no code of its own.
-            if ip >= OVER_APPLY_IP {
-                continue;
-            }
-            // A caller's saved ip is its return address: name the call.
-            let ip = if frame_idx + 1 == self.frames.len() { ip } else { ip.saturating_sub(1) };
-            // The bootstrap frame (prologue `CALL main`) is not user code.
-            if ip < 3 && self.fn_symbol_at_ip(ip).is_none() {
-                continue;
-            }
-            let name = self.fn_symbol_at_ip(ip).unwrap_or("<unknown>");
-            let line = match self.format_panic_location(ip) {
-                Some(loc) => format!("  in {name} at {loc}"),
-                None => format!("  in {name}"),
-            };
-            if lines.last() == Some(&line) {
+        // Frames of a native panic sit above the VM's own.
+        for line in &self.native_panic_frames {
+            if lines.last() == Some(line) {
                 repeats += 1;
                 continue;
             }
             flush(&mut lines, &mut repeats);
+            lines.push(line.clone());
+        }
+        // A native call's frames that made a VM call sit between the VM
+        // frames that call pushed and the frame that entered native code.
+        let native_lines = |roots: &[(*mut crate::native::NativeCtx, usize)], depth: usize| -> Vec<String> {
+            let Some(code) = self.native.as_ref().map(|t| &t.code) else { return Vec::new() };
+            roots
+                .iter()
+                .rev()
+                .filter(|&&(_, d)| d == depth)
+                // SAFETY: a native call in a VM call keeps its context alive.
+                .flat_map(|&(ctx, _)| unsafe { &*ctx }.call_sites())
+                .filter_map(|s| self.native_site_line(code, s))
+                .collect()
+        };
+        let emit = |line: String, lines: &mut Vec<String>, repeats: &mut usize| {
+            if lines.last() == Some(&line) {
+                *repeats += 1;
+                return;
+            }
+            flush(lines, repeats);
             lines.push(line);
+        };
+        // The VM states, innermost first: inside a fiber, its own, then the
+        // task's that started it (the fiber's native frames between them).
+        let fiber_outer = self.fiber_outer.map(|o| {
+            // SAFETY: the running fiber's `NativeFiber` outlives its run.
+            let o = unsafe { &*o };
+            (&o.frames, o.native_roots.as_slice())
+        });
+        let states = std::iter::once((&self.frames, self.native_roots.as_slice())).chain(fiber_outer);
+        for (state, (frames, roots)) in states.enumerate() {
+            for frame_idx in (0..frames.len()).rev() {
+                for line in native_lines(roots, frame_idx + 1) {
+                    emit(line, &mut lines, &mut repeats);
+                }
+                let ip = frames[frame_idx].tell();
+                // An over-apply or host-call stub runs no code of its own.
+                if ip >= OVER_APPLY_IP || self.in_host_stub(ip) {
+                    continue;
+                }
+                // A caller's saved ip is its return address: name the call.
+                let ip = if state == 0 && frame_idx + 1 == frames.len() { ip } else { ip.saturating_sub(1) };
+                // The bootstrap frame (prologue `CALL main`) is not user code.
+                if ip < 3 && self.fn_symbol_at_ip(ip).is_none() {
+                    continue;
+                }
+                let name = self.fn_symbol_at_ip(ip).unwrap_or("<unknown>");
+                let line = match self.format_panic_location(ip) {
+                    Some(loc) => format!("  in {name} at {loc}"),
+                    None => format!("  in {name}"),
+                };
+                emit(line, &mut lines, &mut repeats);
+            }
         }
         flush(&mut lines, &mut repeats);
         lines.join("\n")
+    }
+
+    /// A panic native code raised in the call at `call_ip`: the VM's panic
+    /// for the same trap, with the native frames above the VM's own.
+    #[cold]
+    #[inline(never)]
+    fn native_panic(&mut self, p: &crate::native::NativePanic, call_ip: usize) -> bool {
+        let Some(code) = self.native.as_ref().map(|t| std::sync::Arc::clone(&t.code)) else {
+            return self.runtime_panic(p.message(), call_ip);
+        };
+        let mut frames = Vec::new();
+        let mut innermost = None;
+        for (i, &s) in p.trace.iter().enumerate() {
+            let Some(site) = code.site(s) else { continue };
+            if i == 0 {
+                innermost = self.native_site_location(site);
+            }
+            frames.extend(self.native_site_line(&code, s));
+        }
+        self.native_panic_loc = innermost;
+        self.native_panic_frames = frames;
+        if !self.frames.is_empty() {
+            self.frames.get_mut().seek(call_ip);
+        }
+        let out = if p.code == crate::native::TRAP_EXPLICIT {
+            self.explicit_panic(p.message(), call_ip)
+        } else {
+            self.runtime_panic(p.message(), call_ip)
+        };
+        self.native_panic_frames.clear();
+        self.native_panic_loc = None;
+        out
+    }
+
+    /// The backtrace line of native site `s`: `  in name at loc`.
+    fn native_site_line(&self, code: &crate::native::NativeCode, s: u32) -> Option<String> {
+        let site = code.site(s)?;
+        let name = self.fn_symbol_at_ip(site.entry_pc as usize).unwrap_or("<unknown>");
+        Some(match self.native_site_location(site) {
+            Some(loc) => format!("  in {name} at {loc}"),
+            None => format!("  in {name}"),
+        })
+    }
+
+    /// When native code made the VM call the running frame belongs to:
+    /// the location of that call.
+    fn native_caller_location(&self) -> Option<String> {
+        let &(ctx, depth) = self.native_roots.last()?;
+        if depth + 1 != self.frames.len() {
+            return None;
+        }
+        let code = &self.native.as_ref()?.code;
+        // SAFETY: a native call in a VM call keeps its context alive.
+        let s = *unsafe { &*ctx }.call_sites().first()?;
+        self.native_site_location(code.site(s)?)
+    }
+
+    /// In a host-call stub: where the native function that made the host
+    /// call was called from, when native code called it (`None` inside:
+    /// the VM frame below the stub made the call).
+    fn host_stub_caller_location(&self) -> Option<Option<String>> {
+        if self.host_stub_frame == 0 || self.host_stub_frame != self.frames.len() {
+            return None;
+        }
+        let &(ctx, _) = self.native_roots.last()?;
+        let code = &self.native.as_ref()?.code;
+        // SAFETY: a native call in a VM call keeps its context alive.
+        let sites = unsafe { &*ctx }.call_sites();
+        Some(sites.get(1).and_then(|&s| self.native_site_location(code.site(s)?)))
+    }
+
+    /// `path:line:col` of a native panic site: the location the VM records
+    /// for the same op, found among the PCs of the site's function.
+    fn native_site_location(&self, site: crate::native::NativeSite) -> Option<String> {
+        let start = site.entry_pc as usize;
+        let syms = &self.program_debug.fn_symbols;
+        let end = syms
+            .iter()
+            .map(|s| s.entry_pc as usize)
+            .filter(|&pc| pc > start)
+            .min()
+            .unwrap_or(self.program_code.len());
+        let want = site.loc;
+        if !want.is_known() {
+            return None;
+        }
+        let mut near = None;
+        for pc in start..end {
+            let Some(l) = self.program_debug.loc_at(pc) else { continue };
+            if l.file == want.file && l.start_byte == want.start_byte {
+                if l.end_byte == want.end_byte {
+                    return self.format_panic_location(pc);
+                }
+                near.get_or_insert(pc);
+            }
+        }
+        near.and_then(|pc| self.format_panic_location(pc))
+    }
+
+    /// An explicit `panic(msg)` at `panic_ip` (`Instruction::Panic`, or
+    /// native code's): its message, location, and the backtrace only under
+    /// `COIL_BACKTRACE`.
+    pub(crate) fn explicit_panic(&mut self, s: &str, panic_ip: usize) -> bool {
+        self.arm_unwind(s);
+        if self.task_panic_is_caught() {
+            // A child task's panic fails its scope, which reports it.
+            self.task_panic_message = Some(s.to_string());
+            self.panicked = true;
+            return false;
+        }
+        let loc_suffix = match self.native_panic_loc.take() {
+            Some(loc) => format!(" at {loc}"),
+            None if !self.native_panic_frames.is_empty() => String::new(),
+            None => self.format_panic_location(panic_ip).map(|loc| format!(" at {loc}")).unwrap_or_default(),
+        };
+        let backtrace = self
+            .explicit_panic_backtrace(panic_ip)
+            .filter(|bt| !bt.is_empty())
+            .map(|bt| format!("\n{bt}"))
+            .unwrap_or_default();
+        if let Some(out) = self.output.as_mut() {
+            let text = format!("panic: {}{}{}", s, loc_suffix, backtrace);
+            let _ = write!(out, "{text}");
+            let _ = out.flush();
+            self.mirror_stderr(&text);
+        } else {
+            eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
+            let _ = io::stderr().flush();
+        }
+        self.panicked = true;
+        false
     }
 
     /// Abort execution with a VM panic (same path as `Instruction::Panic`).
@@ -2372,6 +3154,10 @@ impl<const S: usize> Machine<S> {
             return false;
         }
         let loc_suffix = if std::mem::take(&mut self.panic_without_location) {
+            String::new()
+        } else if let Some(loc) = self.native_panic_loc.take() {
+            format!(" at {loc}")
+        } else if !self.native_panic_frames.is_empty() {
             String::new()
         } else {
             self.format_panic_location(panic_insn_ip)
@@ -2620,7 +3406,7 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn object_string_value(heap: &Heap, v: &Value) -> String {
+    pub(crate) fn object_string_value(heap: &Heap, v: &Value) -> String {
         let addr = v.bits();
         let obj = Self::find_object_by_addr(heap, addr);
         if let Some(crate::memory::Object::String(gc)) = obj {
@@ -2650,7 +3436,7 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn stringify_value(heap: &Heap, v: Value) -> String {
+    pub(crate) fn stringify_value(heap: &Heap, v: Value) -> String {
         let addr = v.bits();
         if v.is_zero() {
             // `Value::default()` / unit / false-ish null pointer.
@@ -2859,14 +3645,44 @@ impl<const S: usize> Machine<S> {
             crate::memory::RootKind::Precise => must_statics.push(i),
             _ => pins.push(addr),
         });
-        self.for_each_handle_root(&mut |addr, _| pins.push(addr));
+        self.for_each_handle_root_but_native(&mut |addr, _| pins.push(addr));
+        // Native frames reload their heap words after a collection: they
+        // move like precise stack slots.
+        let mut must_native: Vec<*mut u64> = Vec::new();
+        for &(ctx, _) in &self.native_roots {
+            // SAFETY: a native call in a collection keeps its context alive.
+            unsafe { &*ctx }.for_each_root(|w, ambiguous| {
+                if ambiguous {
+                    // SAFETY: the slot is a live word of a native root record.
+                    let addr = Value::from(unsafe { *w }).heap_addr();
+                    if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                        pins.push(addr);
+                    }
+                } else {
+                    must_native.push(w);
+                }
+            });
+        }
         let precise: Vec<u64> = must
             .iter()
             .map(|&idx| self.stack[idx].heap_addr())
             .chain(must_statics.iter().map(|&i| self.statics[i].heap_addr()))
+            .chain(must_native.iter().filter_map(|&w| {
+                // SAFETY: the slot is a live word of a native root record.
+                let addr = Value::from(unsafe { *w }).heap_addr();
+                (addr != 0 && self.heap.find_object_by_addr(addr).is_some()).then_some(addr)
+            }))
             .collect();
         let plan = self.heap.minor_plan(&pins, &precise);
         self.heap.restore_gc_roots(pins);
+        for w in must_native {
+            // SAFETY: as above.
+            unsafe {
+                if let Some(v) = plan.forward(Value::from(*w)) {
+                    *w = v.bits();
+                }
+            }
+        }
         for idx in must {
             if let Some(v) = plan.forward(self.stack[idx]) {
                 self.stack[idx] = v;
@@ -3185,6 +4001,24 @@ impl<const S: usize> Machine<S> {
     /// VM roots outside the operand stack and statics. None of them can be
     /// rewritten by a moving collector (untyped words, or Rust-held handles).
     fn for_each_handle_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
+        self.for_each_handle_root_but_native(visit);
+        // Heap words native frames hold across a VM call or a safepoint.
+        let heap = &self.heap;
+        for &(ctx, _) in &self.native_roots {
+            // SAFETY: a native call in a collection keeps its context alive.
+            unsafe { &*ctx }.for_each_root(|w, ambiguous| {
+                let addr = Value::from(unsafe { *w }).heap_addr();
+                if addr != 0 && heap.find_object_by_addr(addr).is_some() {
+                    let kind = if ambiguous { crate::memory::RootKind::Ambiguous } else { crate::memory::RootKind::Precise };
+                    visit(addr, kind);
+                }
+            });
+        }
+    }
+
+    /// [`Self::for_each_handle_root`] without the native frames' words (a
+    /// minor collection forwards those).
+    fn for_each_handle_root_but_native(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.heap;
         let word = |v: Value, kind: crate::memory::RootKind, visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
             let addr = v.heap_addr();
@@ -3221,6 +4055,10 @@ impl<const S: usize> Machine<S> {
         for &v in &self.ffi_arg_roots {
             word(v, crate::memory::RootKind::Pinned, visit);
         }
+        // VM states not swapped in (parked fibers', the task's own while a
+        // fiber runs): their words stay where they are.
+        self.for_each_fiber_word(&mut |v| word(v, crate::memory::RootKind::Ambiguous, visit));
+
         self.for_each_mapped_slot_index(|idx| {
             if idx < self.stack.capacity() {
                 word(self.stack[idx], crate::memory::RootKind::Precise, visit);
@@ -4090,6 +4928,7 @@ impl<const S: usize> Machine<S> {
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
             statics: self.static_words(),
+            native: self.native_code(),
         })
     }
 
@@ -4312,6 +5151,10 @@ impl<const S: usize> Machine<S> {
             || self.over_apply_frames > 0
             || !self.resume_stack.is_empty()
             || !self.frame_pins.is_empty();
+        // A generator a native resume ran returned to its floor.
+        if self.frames.len() == self.resume_floor {
+            return Some(false);
+        }
         None
     }
 
@@ -4590,6 +5433,7 @@ impl<const S: usize> Machine<S> {
     /// Load bytecode for reentrant [`call_function`] without running `main`.
     pub fn load_program(&mut self, code: &[RawByte], constants: &[u64], strings: &[String]) {
         self.program_code = Arc::new(code.to_vec());
+        self.ensure_host_stubs();
         self.program_constants = Arc::new(constants.to_vec());
         self.install_program_strings(strings);
         self.panicked = false;
@@ -4605,6 +5449,7 @@ impl<const S: usize> Machine<S> {
         strings: Arc<Vec<String>>,
     ) {
         self.program_code = code;
+        self.ensure_host_stubs();
         self.program_constants = constants;
         self.install_program_strings_arc(strings);
         self.panicked = false;
@@ -4859,6 +5704,7 @@ impl<const S: usize> Machine<S> {
         self.program_code = Arc::new(unsafe {
             std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
         });
+        self.ensure_host_stubs();
         self.program_constants = Arc::new(constants.to_vec());
         self.install_program_strings(strings);
         self.sync_thread_program_from_current();
@@ -5182,6 +6028,83 @@ impl<const S: usize> Machine<S> {
         self.nested_return.take().unwrap_or_default()
     }
 
+    /// `CallIndirect` of the function value (or code pointer) `callee`
+    /// reentrantly, for native code: `args` ends with `dicts` instance
+    /// dictionaries. Runs as [`Self::call_function`] does once the call
+    /// enters a frame; a partial application returns the new value.
+    pub(crate) fn call_value(&mut self, callee: Value, args: &[Value], dicts: usize) -> Value {
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        let constants: &[u64] = unsafe {
+            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+        };
+        self.bind_frame_reserve(code, constants);
+        // Where a panic in the call itself (stack, bad target) points: the
+        // native code's caller, as for its other panics.
+        let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
+        self.fuel = self.fuel.wrapping_sub(1);
+        if unlikely(self.fuel == 0) {
+            self.step_budget_out(call_ip);
+            return Value::default();
+        }
+        if !self.reserve_operand_words(args.len()) {
+            self.runtime_panic(STACK_OVERFLOW, call_ip.saturating_sub(1));
+            return Value::default();
+        }
+        let saved_sp = self.stack.tell();
+        for a in args {
+            self.stack.push(*a);
+        }
+        self.nested_return = None;
+        self.nested_depth += 1;
+        self.return_bookkeeping = true;
+        let depth = self.frames.len();
+        let mut sp = saved_sp;
+        let (mut ip, flow) = self.call_indirect(callee, args.len() - dicts, dicts, call_ip, &mut sp, code);
+        let entered = self.frames.len() > depth;
+        let mut out = Value::default();
+        match flow {
+            dispatch::RestFlow::Continue if entered => {
+                // The frame the call opened (an over-apply stub's when it
+                // made one) returns the result.
+                self.nested_frame_depths.push(depth + 1);
+                loop {
+                    let paused = self.run_execute(code, constants, ip);
+                    if let Some(pending) = self.pending_ffi.take() {
+                        ip = pending.resume_ip;
+                        self.finish_pending_ffi_invoke(pending);
+                        continue;
+                    }
+                    if let Some(pending) = self.pending_io.take() {
+                        ip = pending.resume_ip;
+                        self.finish_pending_io_wait(pending);
+                        continue;
+                    }
+                    if !paused {
+                        break;
+                    }
+                }
+                let _ = self.pop_call_frame();
+                let _ = self.nested_frame_depths.pop();
+                out = self.nested_return.take().unwrap_or_default();
+            }
+            // A partial application: the new function value is on the stack.
+            dispatch::RestFlow::Continue => out = self.stack.pop(),
+            dispatch::RestFlow::Done(_) => {}
+        }
+        self.stack.seek(saved_sp);
+        for i in saved_sp..(saved_sp + args.len()).min(self.stack.capacity()) {
+            self.stack[i] = Value::default();
+        }
+        self.nested_depth -= 1;
+        self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
+        out
+    }
+
     /// Stash a return value when `execute` runs inside [`Self::call_function`].
     #[inline]
     fn capture_nested_return(&mut self, ret_val: Value) -> bool {
@@ -5220,7 +6143,19 @@ impl<const S: usize> Machine<S> {
         static_slots: u32,
     ) {
         let code: &[Byte] = unsafe { std::slice::from_raw_parts(code.as_ptr().cast(), code.len()) };
+        if let Some(pending) = crate::native::take_pending() {
+            self.install_native(Some(pending.into_code(code.len())));
+        }
         self.run_with_pool(code, constants, strings, static_slots);
+        if std::env::var_os("COIL_NATIVE_STATS").is_some()
+            && let Some((hits, bails)) = self.native_stats()
+        {
+            eprintln!("native: {hits} calls ran natively, {bails} bailed to the VM");
+            let vector = crate::native::VECTOR_OPS.load(std::sync::atomic::Ordering::Relaxed);
+            if vector > 0 {
+                eprintln!("native: {vector} vector ops ran natively");
+            }
+        }
     }
 
     /// Never-inline: `#[inline(always)]` forced fat LTO to paste this giant
@@ -5444,8 +6379,18 @@ impl<const S: usize> Machine<S> {
                 Instruction::CALL => {
                     let (arity, target) = opcode.call_parts();
                     promise!(self.stack.tell() >= arity);
+                    // The task resumes at the `CALL` its fiber parked in:
+                    // the fiber runs on instead of a new call.
+                    let resumed = if unlikely(self.fiber_resume_pending) {
+                        self.fiber_resume_pending = false;
+                        self.frames.get_mut().seek(ip);
+                        self.resume_native_fiber(arity)
+                    } else {
+                        None
+                    };
                     // Empty set is the hot path (fib); skip HashSet::contains.
-                    if arity == 1
+                    if resumed.is_none()
+                        && arity == 1
                         && unlikely(!self.finalizer_pcs.is_empty())
                         && self.finalizer_pcs.contains(&(target as u32))
                     {
@@ -5456,6 +6401,55 @@ impl<const S: usize> Machine<S> {
                             self.stack.push(Value::from(0i64));
                             continue;
                         }
+                    }
+                    if let Some(ret) = match resumed {
+                        Some(r) => Some(r),
+                        None if unlikely(self.native.is_some()) && !debug_attached && target != 0 => {
+                            // The caller's return address, as a CALL saves it:
+                            // a panic or a VM call inside names this frame.
+                            self.frames.get_mut().seek(ip);
+                            self.try_native_call(target, arity)
+                        }
+                        None => None,
+                    } {
+                        let ret = match ret {
+                            Ok(ret) => ret,
+                            // Its fiber parked: the task suspends here, to
+                            // run the `CALL` again (resuming the fiber).
+                            Err(p) if p.code == crate::native::TRAP_PARKED => {
+                                self.task_park_at_call(&mut ip, &mut sp);
+                                continue;
+                            }
+                            // A VM call native code made panicked and
+                            // reported it: go on unwinding from this call.
+                            Err(p) if p.code == crate::native::TRAP_VM_PANIC => {
+                                self.rearm_unwind_after_early_drop(ip.saturating_sub(1));
+                                self.run_native_pads(p.pads);
+                                return false;
+                            }
+                            Err(p) => {
+                                let out = self.native_panic(&p, ip.saturating_sub(1));
+                                self.run_native_pads(p.pads);
+                                return out;
+                            }
+                        };
+                        let base = self.stack.tell() - arity;
+                        self.stack.seek(base);
+                        self.stack.push(Value::from(ret.lo));
+                        if let Some(hi) = ret.hi {
+                            self.stack.push(Value::from(hi));
+                        }
+                        // No finalizers (native code bails otherwise), so
+                        // these only give memory back.
+                        for (w, deep) in ret.frees {
+                            let _ = self.free_early(Value::from(w), deep);
+                        }
+                        if ret.allocated {
+                            // Native code never collects; objects it made
+                            // are reachable from `ret` or the heap now.
+                            self.maybe_gc_after_call_alloc(ip);
+                        }
+                        continue;
                     }
                     let callee_sp = self.stack.tell() - arity;
                     // Direct calls dominate; avoid the indirect `target == 0`
@@ -5527,6 +6521,8 @@ impl<const S: usize> Machine<S> {
                         let tag = self.stack.pop();
                         let payload = self.stack.pop();
                         if self.capture_nested_return(payload) {
+                            // A native caller's VM call reads both words.
+                            self.nested_return_hi = tag;
                             return false;
                         }
                         let return_sp = self.pop_call_frame();
@@ -6063,7 +7059,7 @@ impl<const N: usize> Machine<N> {
 }
 
 /// `COIL_COW_EAGER=1` (measuring only): every copy-on-write share copies.
-fn cow_eager() -> bool {
+pub(crate) fn cow_eager() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("COIL_COW_EAGER").is_some())
 }
@@ -6096,6 +7092,8 @@ fn free_early_in(heap: &mut Heap, frame_pins: &mut [FramePins], dense_obj_addr: 
 include!("exec_rest.rs");
 include!("vm_task.rs");
 include!("vm_unwind.rs");
+include!("vm_fiber.rs");
+include!("vm_gen.rs");
 
 impl<const S: usize> Drop for Machine<S> {
     fn drop(&mut self) {
@@ -6106,3 +7104,85 @@ impl<const S: usize> Drop for Machine<S> {
 #[cfg(test)]
 #[path = "vm.tests.rs"]
 mod tests;
+
+/// The text of a `FORMAT` specifier string (after any leading `%s` the
+/// caller appends to): `next` yields the arguments in order. Shared by the
+/// VM's `FORMAT` and native code's.
+pub(crate) fn render_format(format_rest: &str, mut next: impl FnMut() -> Value) -> String {
+    let mut message = String::default();
+    let mut chars = format_rest.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            match chars.peek() {
+                Some('%') => {
+                    chars.next();
+                    message.push('%');
+                }
+                Some('i') => {
+                    chars.next();
+                    message.push_str(&next().as_int().to_string());
+                }
+                Some('f') => {
+                    chars.next();
+                    // message
+                    //     .push_str(&format!("{:.?}", next().as_float()));
+                    let _ =
+                        write!(&mut message, "{:.?}", next().as_float());
+                }
+                Some('b') => {
+                    chars.next();
+                    let _ = write!(
+                        &mut message,
+                        "{:0b}",
+                        next().bits()
+                    );
+                }
+                Some('s') => {
+                    chars.next();
+                    let string_val = (unsafe {
+                        &*next().as_ptr::<GcData<ObjString>>()
+                    })
+                    .as_ref()
+                    .data
+                    .as_str();
+                    // Allocated::<crate::String>::new(next().as_ptr());
+                    message.push_str(string_val);
+                }
+                Some('x') => {
+                    chars.next();
+                    let _ = write!(
+                        &mut message,
+                        "{:0x}",
+                        next().bits()
+                    );
+                }
+                Some('z') => {
+                    chars.next();
+                    message.push_str(if next().bits() > 0 {
+                        "true"
+                    } else {
+                        "false"
+                    });
+                }
+                Some('u') => {
+                    chars.next();
+                    message.push_str(&next().bits().to_string());
+                }
+                Some('p') => {
+                    chars.next();
+                    let _ = write!(
+                        &mut message,
+                        "{:08x}",
+                        next().as_ptr::<bool>().addr()
+                    );
+                }
+                _ => {
+                    message.push('%');
+                }
+            }
+        } else {
+            message.push(ch);
+        }
+    }
+    message
+}

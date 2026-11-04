@@ -191,82 +191,7 @@ impl<const S: usize> Machine<S> {
                             None => (None, format_string),
                         };
 
-                        let mut message = String::default();
-
-                        let mut chars = format_rest.chars().peekable();
-                        while let Some(ch) = chars.next() {
-                            if ch == '%' {
-                                match chars.peek() {
-                                    Some('%') => {
-                                        chars.next();
-                                        message.push('%');
-                                    }
-                                    Some('i') => {
-                                        chars.next();
-                                        message.push_str(&params.pop().as_int().to_string());
-                                    }
-                                    Some('f') => {
-                                        chars.next();
-                                        // message
-                                        //     .push_str(&format!("{:.?}", params.pop().as_float()));
-                                        let _ =
-                                            write!(&mut message, "{:.?}", params.pop().as_float());
-                                    }
-                                    Some('b') => {
-                                        chars.next();
-                                        let _ = write!(
-                                            &mut message,
-                                            "{:0b}",
-                                            params.pop().bits()
-                                        );
-                                    }
-                                    Some('s') => {
-                                        chars.next();
-                                        let string_val = (unsafe {
-                                            &*params.pop().as_ptr::<GcData<ObjString>>()
-                                        })
-                                        .as_ref()
-                                        .data
-                                        .as_str();
-                                        // Allocated::<crate::String>::new(params.pop().as_ptr());
-                                        message.push_str(string_val);
-                                    }
-                                    Some('x') => {
-                                        chars.next();
-                                        let _ = write!(
-                                            &mut message,
-                                            "{:0x}",
-                                            params.pop().bits()
-                                        );
-                                    }
-                                    Some('z') => {
-                                        chars.next();
-                                        message.push_str(if params.pop().bits() > 0 {
-                                            "true"
-                                        } else {
-                                            "false"
-                                        });
-                                    }
-                                    Some('u') => {
-                                        chars.next();
-                                        message.push_str(&params.pop().bits().to_string());
-                                    }
-                                    Some('p') => {
-                                        chars.next();
-                                        let _ = write!(
-                                            &mut message,
-                                            "{:08x}",
-                                            params.pop().as_ptr::<bool>().addr()
-                                        );
-                                    }
-                                    _ => {
-                                        message.push('%');
-                                    }
-                                }
-                            } else {
-                                message.push(ch);
-                            }
-                        }
+                        let message = crate::vm::render_format(format_rest, || *params.pop());
 
                         match head {
                             Some(head) => self.push_concat_str(head, &message, ip),
@@ -571,6 +496,9 @@ impl<const S: usize> Machine<S> {
                             match self.task_host_op(fn_id, &args[..n], &mut ip, &mut sp) {
                                 TaskFlow::Value(v) => self.stack.push(v),
                                 TaskFlow::Switched => {
+                                    if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                        return dispatch::RestExit::done(false);
+                                    }
                                     return dispatch::RestExit::resume(ip, sp);
                                 }
                                 // A generator close unwinds its frames.
@@ -594,6 +522,9 @@ impl<const S: usize> Machine<S> {
                                 self.stack.seek(tell - consume);
                                 if let TaskFlow::Value(v) = self.task_sleep(ms, &mut ip, &mut sp) {
                                     self.stack.push(v);
+                                }
+                                if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                    return dispatch::RestExit::done(false);
                                 }
                                 return dispatch::RestExit::resume(ip, sp);
                             }
@@ -635,6 +566,9 @@ impl<const S: usize> Machine<S> {
                                     // The arguments stay: the HostInvoke runs again
                                     // when another thread posts the wake.
                                     self.task_suspend_thread(&mut ip, &mut sp);
+                                    if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                        return dispatch::RestExit::done(false);
+                                    }
                                     return dispatch::RestExit::resume(ip, sp);
                                 }
                                 Ok(None) if park_tasks && crate::task::io_retry_parked() => {
@@ -642,6 +576,9 @@ impl<const S: usize> Machine<S> {
                                     // the HostInvoke runs again on readiness.
                                     let req = crate::task::take_io_retry_park().expect("checked");
                                     self.task_suspend_io_retry(req, &mut ip, &mut sp);
+                                    if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                        return dispatch::RestExit::done(false);
+                                    }
                                     return dispatch::RestExit::resume(ip, sp);
                                 }
                                 Ok(None) => {
@@ -651,6 +588,9 @@ impl<const S: usize> Machine<S> {
                                             // Suspend this task (with any generator it
                                             // is resuming); another task runs meanwhile.
                                             self.task_suspend_io(req, layout, &mut ip, &mut sp);
+                                            if unlikely(std::mem::take(&mut self.fiber_stop)) {
+                                                return dispatch::RestExit::done(false);
+                                            }
                                             return dispatch::RestExit::resume(ip, sp);
                                         } else {
                                             // No other task: park the whole VM, even
@@ -725,34 +665,8 @@ impl<const S: usize> Machine<S> {
                         self.frames.get_mut().seek(panic_ip);
                     }
                     let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
-                    let s = unsafe { (*ptr).as_ref() };
-                    self.arm_unwind(&s.to_string());
-                    if self.task_panic_is_caught() {
-                        // A child task's panic fails its scope, which reports it.
-                        self.task_panic_message = Some(s.to_string());
-                        self.panicked = true;
-                        return dispatch::RestExit::done(false);
-                    }
-                    let loc_suffix = self
-                        .format_panic_location(panic_ip)
-                        .map(|loc| format!(" at {loc}"))
-                        .unwrap_or_default();
-                    let backtrace = self
-                        .explicit_panic_backtrace(panic_ip)
-                        .filter(|bt| !bt.is_empty())
-                        .map(|bt| format!("\n{bt}"))
-                        .unwrap_or_default();
-                    if let Some(out) = self.output.as_mut() {
-                        let text = format!("panic: {}{}{}", s, loc_suffix, backtrace);
-                        let _ = write!(out, "{text}");
-                        let _ = out.flush();
-                        self.mirror_stderr(&text);
-                    } else {
-                        eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
-                        let _ = io::stderr().flush();
-                    }
-                    self.panicked = true;
-                    return dispatch::RestExit::done(false);
+                    let s = unsafe { (*ptr).as_ref() }.to_string();
+                    return dispatch::RestExit::done(self.explicit_panic(&s, panic_ip));
                 }
                 Instruction::STRING => {
                     let idx = opcode.operand_u32() as usize;
@@ -1333,6 +1247,7 @@ impl<const S: usize> Machine<S> {
                         yield_from_resume_ip: 0,
                         started: false,
                         closeable: false,
+                        native: None,
                     };
                     let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
 
@@ -1364,7 +1279,14 @@ impl<const S: usize> Machine<S> {
                             });
                             target = sub;
                         }
-                        if !self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
+                        if unlikely(self.native.is_some())
+                            && let Some(panic) = self.native_resume_coro(target, send_val, &mut ip, &mut sp)
+                        {
+                            if let Some(p) = panic {
+                                return dispatch::RestExit::done(self.native_gen_panic(p, ip));
+                            }
+                            self.maybe_gc_after_call_alloc(ip);
+                        } else if !self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
                             return dispatch::RestExit::done(
                                 self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                             );
@@ -1381,6 +1303,10 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let yield_val = self.stack.pop();
                     self.yield_coroutine(&mut ip, &mut sp, yield_val);
+                    // Back at a native resume's floor: it takes the value.
+                    if unlikely(self.frames.len() == self.resume_floor) {
+                        return dispatch::RestExit::done(false);
+                    }
                 }
                 Instruction::YieldFromCoro => {
                     promise!(self.stack.tell() > 0);
@@ -1389,17 +1315,50 @@ impl<const S: usize> Machine<S> {
                     if let Some(Object::Coroutine(sub)) =
                         Self::find_object_by_addr(&self.heap, addr)
                     {
+                    'yield_from: {
+                        // A delegate already running natively steps natively.
+                        if unlikely(sub.as_ref().native.is_some()) {
+                            self.frames.get_mut().seek(ip);
+                            match self.native_gen_step(sub, Value::from(0_i64)) {
+                                Some(GenStep::Returned(v)) => {
+                                    self.stack.push(v);
+                                    break 'yield_from;
+                                }
+                                Some(GenStep::Yielded(v)) => {
+                                    if let Some(outer) = self.resume_stack.last().map(|c| c.coro) {
+                                        Self::with_coroutine_mut(outer, |o| {
+                                            o.yield_from = Some(sub);
+                                            o.yield_from_resume_ip = ip;
+                                        });
+                                        Self::with_coroutine_mut(sub, |c| c.delegator = Some(outer));
+                                    }
+                                    self.yield_coroutine(&mut ip, &mut sp, v);
+                                    if unlikely(self.frames.len() == self.resume_floor) {
+                                        return dispatch::RestExit::done(false);
+                                    }
+                                    break 'yield_from;
+                                }
+                                Some(GenStep::Panicked(p)) => {
+                                    return dispatch::RestExit::done(self.native_gen_panic(p, ip));
+                                }
+                                None => {}
+                            }
+                        }
                         if !self.start_yield_from(&mut ip, &mut sp, sub, code) {
                             return dispatch::RestExit::done(
                                 self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                             );
                         }
+                    }
                     } else {
                     return dispatch::RestExit::done(self.runtime_panic(
                             "yield from invalid coroutine handle",
                             ip.saturating_sub(1),
                         ));
 
+                    }
+                    if unlikely(self.frames.len() == self.resume_floor) {
+                        return dispatch::RestExit::done(false);
                     }
                 }
                 Instruction::DoneCoro => {

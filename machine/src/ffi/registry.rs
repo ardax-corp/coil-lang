@@ -46,6 +46,13 @@ pub trait NativeFn: Send + Sync {
     fn direct(&self) -> Option<crate::HostValueFn> {
         None
     }
+
+    /// [`Self::direct`] of a native that first checks its `Stream`
+    /// argument is not unsent (`host_natives::stream_first`): the plain
+    /// function behind that check, which native code makes itself.
+    fn guarded_direct(&self) -> Option<crate::HostValueFn> {
+        None
+    }
 }
 
 pub struct HostClosureFn {

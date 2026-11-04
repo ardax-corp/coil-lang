@@ -367,6 +367,11 @@ impl Scheduler {
             .get(&owner)
             .is_some_and(|r| r.block == Some(Block::Scope(scope)))
         {
+            // A failed scope stays for `task_scope_error`; a finished one is
+            // done (the owner's `scope` returns without naming it again).
+            if status == STATUS_OK {
+                self.remove_scope(scope);
+            }
             self.make_ready(owner, Wake::Status(status));
         }
     }

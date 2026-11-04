@@ -1420,6 +1420,8 @@ pub struct ThreadSpawnContext {
     /// startup `const`s (#1561). Its words name the parent's heap, so an
     /// isolate job takes copies ([`copy_statics_out`]) instead.
     pub statics: Arc<Vec<u64>>,
+    /// The parent's native code (`None`: bytecode only).
+    pub native: Option<Arc<crate::native::NativeCode>>,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -1439,6 +1441,7 @@ impl Clone for ThreadSpawnContext {
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
             statics: Arc::clone(&self.statics),
+            native: self.native.clone(),
         }
     }
 }

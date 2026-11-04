@@ -723,7 +723,7 @@ impl Heap {
     }
 
     #[inline(always)]
-    fn has_finalizer(&self, type_id: u32) -> bool {
+    pub(crate) fn has_finalizer(&self, type_id: u32) -> bool {
         self.finalizer_types
             .get(type_id as usize / 64)
             .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
@@ -2592,7 +2592,7 @@ impl Object {
 
     /// Rebuild a typed handle from a live allocation. The address must be a
     /// current [`Heap::alloc`] result (non-moving); kind is the header byte.
-    unsafe fn from_header(addr: u64) -> Option<Self> {
+    pub(crate) unsafe fn from_header(addr: u64) -> Option<Self> {
         let header = unsafe { &*(addr as *const GcHeader) };
         Some(match header.kind.get() {
             1 => Self::String(unsafe { Gc::from_addr(addr) }),
@@ -3605,6 +3605,18 @@ impl ObjArray {
         self.may_hold_refs
     }
 
+    /// The element words in place, for native code (`None` for a byte
+    /// array). `for_store` marks the array as a VM store would.
+    pub(crate) fn words_view(&mut self, for_store: bool) -> Option<(*mut Value, usize)> {
+        if for_store {
+            self.note();
+        }
+        match &mut self.data {
+            ArrayData::Words(w) => Some((w.as_mut_ptr(), w.len())),
+            ArrayData::Bytes(_) => None,
+        }
+    }
+
     /// A write may add a reference: the next mark rescans.
     #[inline(always)]
     fn note(&mut self) {
@@ -3932,6 +3944,9 @@ pub struct ObjCoroutine {
     /// Listed for a close by the collector: it suspended with a `defer`
     /// armed ([`Heap::note_closeable`]).
     pub closeable: bool,
+    /// Its body is native code, suspended on this fiber (`vm_gen.rs`):
+    /// `saved_stack` then holds that frame's root words.
+    pub native: Option<Box<crate::native::GenFiber>>,
 }
 
 /// Heap-allocated boxed value for the generics runtime.

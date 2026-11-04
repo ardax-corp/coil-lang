@@ -19,16 +19,12 @@ impl<const S: usize> Machine<S> {
     /// so a suspension point can switch tasks.
     #[inline]
     fn tasks_can_switch(&self) -> bool {
-        self.sched
-            .as_ref()
-            .is_some_and(|s| s.live > 0 && s.base_nested == self.nested_depth)
+        self.sched.as_ref().is_some_and(|s| s.live > 0) && self.at_task_level()
     }
 
     /// A panic now fails the current child task instead of the VM.
     fn task_panic_is_caught(&self) -> bool {
-        self.sched.as_ref().is_some_and(|s| {
-            s.current != crate::task::ROOT && s.base_nested == self.nested_depth
-        })
+        self.sched.as_ref().is_some_and(|s| s.current != crate::task::ROOT) && self.at_task_level()
     }
 
     fn task_host_op(
@@ -74,11 +70,19 @@ impl<const S: usize> Machine<S> {
     fn contract_failure(&mut self, msg: Value) -> String {
         let ptr = msg.as_ptr::<crate::memory::GcData<crate::memory::ObjString>>();
         let mut text = unsafe { (*ptr).as_ref() }.to_string();
-        let n = self.frames.len();
-        if n >= 2 {
+        // A host-call stub: the native function's caller.
+        let stub = self.host_stub_caller_location();
+        if let Some(Some(loc)) = &stub {
+            text.push_str(&format!(", called from {loc}"));
+        } else if stub.is_none()
+            && let Some(loc) = self.native_caller_location()
+        {
+            // Native code that called the function: its call site.
+            text.push_str(&format!(", called from {loc}"));
+        } else if let Some(ret) = self.caller_return_ip() {
             // The caller's saved ip is its return address; the call is the
             // instruction before it (#841).
-            let ip = self.frames[n - 2].tell().saturating_sub(1);
+            let ip = ret.saturating_sub(1);
             // The bootstrap frame (prologue `CALL main`) is not user code.
             if (ip >= 3 || self.fn_symbol_at_ip(ip).is_some())
                 && let Some(loc) = self.format_panic_location(ip)
@@ -92,8 +96,10 @@ impl<const S: usize> Machine<S> {
 
     fn task_scope_open(&mut self) -> TaskFlow {
         let nested = self.nested_depth;
+        // A scope a fiber opens at its task level joins the scheduler.
+        let at_task_level = self.at_task_level();
         if let Some(s) = &self.sched
-            && s.base_nested != nested
+            && !at_task_level
         {
             if !s.idle() {
                 return TaskFlow::Panic(
@@ -312,6 +318,15 @@ impl<const S: usize> Machine<S> {
         sp: &mut usize,
     ) {
         use crate::task::{ROOT, TaskState, Wake};
+        #[cfg(not(target_family = "wasm"))]
+        if self.fiber_switch_depth.is_some() {
+            // Inside a fiber: the task switches at the `CALL` that
+            // started it; a cancel delivered on resume unwinds from here.
+            if self.fiber_park(block, result_slot, ip, sp) {
+                self.fiber_stop = true;
+            }
+            return;
+        }
         if result_slot {
             self.stack.push(Value::default());
         }
@@ -435,7 +450,9 @@ impl<const S: usize> Machine<S> {
                         self.task_end(id, TaskState::Failed, Some(STACK_OVERFLOW.to_string()));
                         continue;
                     }
-                    if !self.task_take_cancel() || self.task_cancel_unwind(ip, sp) {
+                    // A task parked in a fiber takes its cancel there, when
+                    // the `CALL` it parked at resumes the fiber.
+                    if self.task_has_parked_fiber(id) || !self.task_take_cancel() || self.task_cancel_unwind(ip, sp) {
                         return;
                     }
                     // Nothing to unwind: it ends here.
@@ -466,6 +483,7 @@ impl<const S: usize> Machine<S> {
         if let Some(w) = wake {
             self.task_write_wake(w);
         }
+        self.fiber_resume_pending = self.task_has_parked_fiber(ROOT);
     }
 
     /// Resume child task `id` above the root's words. `false` on stack overflow.
@@ -499,12 +517,28 @@ impl<const S: usize> Machine<S> {
         if let Some(w) = wake {
             self.task_write_wake(w);
         }
+        self.fiber_resume_pending = self.task_has_parked_fiber(id);
+        // The root back with nothing left (its last scope ended): forget
+        // the scheduler, as a scope that ended without waiting does.
+        if id == crate::task::ROOT {
+            self.task_drop_idle_scheduler();
+        }
         true
     }
 
     /// Replace the suspension point's result slot (top of stack).
     fn task_write_wake(&mut self, wake: crate::task::Wake) {
         use crate::task::Wake;
+        #[cfg(not(target_family = "wasm"))]
+        if self.fiber_switch_depth.is_none() && !matches!(wake, Wake::Retry) {
+            let current = self.sched.as_ref().map_or(crate::task::ROOT, |s| s.current);
+            if self.parked_fibers.contains_key(&current) {
+                // The task waits in its fiber: the wake goes to the
+                // suspension point there, when the fiber resumes.
+                self.fiber_wake = Some(wake);
+                return;
+            }
+        }
         let v = match wake {
             Wake::Unit => Value::default(),
             Wake::Status(n) => Value::from(n),
@@ -514,6 +548,7 @@ impl<const S: usize> Machine<S> {
             // The instruction runs again; there is no result slot.
             Wake::Retry => return,
         };
+
         let top = self.stack.tell();
         self.stack.seek(top - 1);
         self.stack.push(v);
@@ -621,7 +656,7 @@ impl<const S: usize> Machine<S> {
             self.task_teardown();
             return None;
         }
-        if s.base_nested != self.nested_depth {
+        if s.base_nested != self.nested_depth || self.fiber_switch_depth.is_some() {
             return None;
         }
         let id = s.current;
@@ -827,8 +862,10 @@ impl<const S: usize> Machine<S> {
         if current == crate::task::ROOT
             || rec.shield > 0
             || rec.cancel != crate::task::Cancel::Requested
-            || s.base_nested != self.nested_depth
         {
+            return TaskFlow::Value(Value::default());
+        }
+        if !self.at_task_level() {
             return TaskFlow::Value(Value::default());
         }
         // Suspend here: the scheduler switches straight back and delivers
@@ -846,6 +883,8 @@ impl<const S: usize> Machine<S> {
 
     /// Drop every task and reactor wait (the root task panicked).
     fn task_teardown(&mut self) {
+        #[cfg(not(target_family = "wasm"))]
+        self.parked_fibers.clear();
         self.sched = None;
         self.task_panic_message = None;
     }

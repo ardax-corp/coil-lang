@@ -125,6 +125,12 @@ impl<T: Default + Copy> Stack<T> {
         &self.stack[..self.cursor]
     }
 
+    /// Every slot, past the cursor too (a frame's slots may sit above it).
+    #[inline]
+    pub fn as_full_slice(&self) -> &[T] {
+        &self.stack
+    }
+
     /// The top `n` operands in push order (bottom-to-top). Lets aggregate
     /// builders read a whole argument window instead of popping one at a time;
     /// callers must clamp `n` to [`Self::tell`].

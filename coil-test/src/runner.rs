@@ -78,6 +78,54 @@ pub struct TestOptions {
     /// `--wall-timeout`: a case that runs this long ends the run
     /// (`crate::watchdog`); `None` never does.
     pub wall_timeout: Option<std::time::Duration>,
+    /// What runs the compiled code (`--engine`).
+    pub engine: Engine,
+}
+
+/// `--engine`: the VM alone, or native code where the backend compiles a
+/// body (`docs/internals/native.md`). A suite that passes on both shows
+/// native code behaves as the VM does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Engine {
+    #[default]
+    Vm,
+    Native,
+}
+
+impl Engine {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "vm" => Ok(Self::Vm),
+            "native" => Ok(Self::Native),
+            _ => Err(format!("invalid --engine `{text}` (expected vm|native)")),
+        }
+    }
+}
+
+/// No native code on wasm: the file runs on the VM.
+#[cfg(target_family = "wasm")]
+fn native_code(_: &Pipeline, _: usize) -> Option<Arc<machine::native::NativeCode>> {
+    None
+}
+
+/// JIT what this compile captured. `None` when nothing compiles or the
+/// backend fails (the file then runs on the VM, as `coil --jit` does).
+#[cfg(not(target_family = "wasm"))]
+fn native_code(pipeline: &Pipeline, code_len: usize) -> Option<Arc<machine::native::NativeCode>> {
+    let bodies = compiler::native_mir::take_native_capture();
+    let debug = pipeline.program_debug_full();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    let program = coil_native::jit(&bodies, &pcs).ok()?;
+    if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+        eprintln!("{} ({} bodies)", coil_native::describe(&program), bodies.len());
+        if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+            for (name, why) in &program.refused {
+                eprintln!("  vm: {name}: {why}");
+            }
+        }
+    }
+    let code = machine::native::NativeCode::new(code_len, program.entries, program.sites);
+    (!code.is_empty()).then(|| Arc::new(code))
 }
 
 /// Whether a run includes doc-tests (the code examples in `///` comments).
@@ -739,9 +787,20 @@ pub(crate) fn compile_test_file(
     // catch_unwind isolates a compiler ICE from aborting the whole
     // harness under panic=unwind. Release builds use panic=abort, so
     // compile_fail fixtures must reject via Ok(Err(_)), not panic.
+    let native = options.engine == Engine::Native && !expect_compile_fail;
+    if native {
+        compiler::native_mir::start_native_capture();
+    }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&display)
     }));
+    let native = match &compiled {
+        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len()),
+        _ => {
+            let _ = compiler::native_mir::take_native_capture();
+            None
+        }
+    };
     let mut cases: Vec<(String, u32)> = pipeline.test_cases().to_vec();
     if contract_source {
         cases.retain(|(name, _)| name.starts_with(compiler::CONTRACT_CASE_PREFIX));
@@ -790,6 +849,9 @@ pub(crate) fn compile_test_file(
         let strings = pipeline.strings().to_vec();
         // No cases and no `main` entry: run the program from the top, as
         // `coil <file>` would, on this thread.
+        if let Some(code) = &native {
+            machine::native::install_shared_for_next_run(Arc::clone(code));
+        }
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             execute_pipeline(ExecutePipelineArgs {
                 pipeline: &pipeline,
@@ -806,7 +868,7 @@ pub(crate) fn compile_test_file(
         return Compiled::Decided(ok, (!ok).then(|| format!("> Test \"{display}\" failed")));
     }
 
-    let Some((ctx, init_ip, debug)) = wire_program(pipeline, bytecode, constants, path, reactor) else {
+    let Some((ctx, init_ip, debug)) = wire_program(pipeline, bytecode, constants, path, reactor, native) else {
         let m = format!("> Test \"{display}\" failed (no thread program)");
         return Compiled::Decided(false, Some(m));
     };
@@ -880,6 +942,7 @@ fn wire_program(
     constants: Vec<u64>,
     path: &Path,
     reactor: &Arc<Reactor>,
+    native: Option<Arc<machine::native::NativeCode>>,
 ) -> Option<(ThreadSpawnContext, Option<u32>, ProgramDebug)> {
     let strings = pipeline.strings().to_vec();
     let main = pipeline.main_offset();
@@ -899,6 +962,7 @@ fn wire_program(
         wire_pipeline_threads(&pipeline, &mut root, &code, &constants, &strings);
         root.set_program_debug(debug.clone());
         root.set_reactor(Arc::clone(reactor));
+        root.install_native(native);
         root.thread_spawn_context()
     };
     drop(pipeline);
@@ -1154,9 +1218,20 @@ fn start_doc_case(
     let diagnostics = Captured::default();
     let mut pipeline = run_pipeline(run.config, run.options, Box::new(diagnostics.clone()));
     pipeline.set_file_text(entry.clone(), program);
+    let native = run.options.engine == Engine::Native;
+    if native {
+        compiler::native_mir::start_native_capture();
+    }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&entry.display().to_string())
     }));
+    let native = match &compiled {
+        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len()),
+        _ => {
+            let _ = compiler::native_mir::take_native_capture();
+            None
+        }
+    };
     let _ = pipeline.finish_reporting();
     let (bytecode, constants) = match compiled {
         Ok(Ok(ok)) => ok,
@@ -1176,7 +1251,7 @@ fn start_doc_case(
         let why = "example has no `main` to run".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };
-    let Some((ctx, init_ip, _debug)) = wire_program(pipeline, bytecode, constants, &entry, run.reactor) else {
+    let Some((ctx, init_ip, _debug)) = wire_program(pipeline, bytecode, constants, &entry, run.reactor, native) else {
         let why = "no thread program".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };

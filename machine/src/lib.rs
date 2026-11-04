@@ -22,6 +22,7 @@ mod io_handle;
 pub mod io_reactor;
 pub mod math_libm;
 mod memory;
+pub mod native;
 mod opcode;
 pub mod packed_la;
 pub mod reactor;

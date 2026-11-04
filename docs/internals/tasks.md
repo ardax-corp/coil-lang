@@ -108,6 +108,9 @@ generator with a placeholder `0`, which a `for` loop took as an element).
   sleep sleeps the thread, a join of a finished task returns at once).
 - Switches happen only at the nesting level that opened the scheduler
   (`nested_depth`); a wait inside a native callback (FFI) blocks in place.
+  Under `--jit`, native code that may reach a suspension point runs on a
+  fiber with a VM state of its own, so the wait switches tasks there too
+  (`docs/internals/native.md`, "Tasks").
 - Task results never sit in Rust: the task body writes them into its `Task`
   object, so the GC sees them like any field. Suspended tasks' coroutines
   are GC roots through the scheduler.

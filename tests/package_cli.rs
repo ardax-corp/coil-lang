@@ -550,3 +550,86 @@ fn main() {
     assert!(g0 < g1 && g1 < g2, "sizes -g0 {g0}, -g1 {g1}, -g2 {g2}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Build `libcoil_rt.a` in the same private target directory and profile
+/// as [`build_matching_coil_embed`], for AOT packages (`COIL_RT_LIB`).
+fn build_matching_coil_rt(coil_bin: &Path) -> PathBuf {
+    let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/package-cli-embed");
+    let profile_dir = coil_profile_dir(coil_bin);
+    let mut args = coil_embed_build_args(&target_dir, &profile_dir);
+    let at = args.iter().position(|a| a == "coil-embed").expect("package arg");
+    args[at] = "coil-rt".into();
+    let status = Command::new("cargo").args(&args).status().expect("spawn cargo build -p coil-rt");
+    let lib = target_dir.join(&profile_dir).join("libcoil_rt.a");
+    assert!(status.success() && lib.is_file(), "libcoil_rt.a missing at {}", lib.display());
+    lib
+}
+
+/// `coil package` links native code by default (an AOT executable): its
+/// output, panic and exit status match the VM runner's package of the same
+/// program, and its calls run natively.
+#[cfg(target_os = "linux")]
+#[test]
+fn aot_package_matches_the_vm_runner() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed(Path::new(&bin));
+    let rt = build_matching_coil_rt(Path::new(&bin));
+    let dir = std::env::temp_dir().join(format!("coil_aot_pack_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"use io::sync::println;
+use string::format;
+use task::{scope, Scope, Channel};
+fn fib(int n) -> int { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
+gen fn squares(int n) { let i = 0; while i < n { yield i * i; i = i + 1; } }
+#[inline(never)]
+fn words(int n) -> string { let parts: Vec<string> = []; let i = 0; while i < n { parts.push(format("w%i", i)); i = i + 1; } return parts[n - 1]; }
+#[inline(never)]
+fn drain(int n) -> int { let g = squares(n); let t = 0; while !done(g) { t = t + resume g; } return t; }
+#[inline(never)]
+fn put(Channel<int> ch, int v) { match ch.send(v) { Result::Ok(_) => {}, Result::Err(_) => panic "closed", } }
+#[inline(never)]
+fn last(Vec<int> xs, int i) -> int { return xs[i]; }
+fn main() {
+  let ch: Channel<int> = task::channel(1);
+  let r = scope(fn (Scope s) use (ch) { s.spawn(fn () use (ch) { let i = 0; while i < 10 { put(ch, i); i = i + 1; } ch.close(); 0 }); let t = 0; let done = false;
+    while !done { match ch.recv() { Result::Ok(v) => { t = t + v; }, Result::Err(_) => { done = true; }, } } return t; });
+  let _ = println(format("%i %s %i %i", fib(25), words(40), drain(10), match r { Result::Ok(v) => v, Result::Err(_) => -1 }));
+  let _ = println(format("%i", last([1, 2, 3], 3)));
+}
+"#;
+    let entry = dir.join("app.coil");
+    std::fs::write(&entry, src).unwrap();
+    let package = |out: &Path, extra: &[&str]| {
+        let mut cmd = Command::new(&bin);
+        cmd.arg("package");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        cmd.arg(&entry).arg("-o").arg(out).args(extra).env("COIL_RT_LIB", &rt);
+        let o = cmd.output().expect("spawn coil package");
+        assert!(o.status.success(), "package failed: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stderr).into_owned()
+    };
+    let vm = dir.join("app-vm");
+    let aot = dir.join("app-aot");
+    let _ = package(&vm, &["--runner", embed.to_str().unwrap()]);
+    let said = package(&aot, &[]);
+    assert!(said.contains("native code for"), "not an AOT package: {said}");
+    let vm_run = run_with_timeout(&vm, 60);
+    let aot_run = run_with_timeout(&aot, 60);
+    assert_eq!(String::from_utf8_lossy(&vm_run.stdout), String::from_utf8_lossy(&aot_run.stdout));
+    assert_eq!(String::from_utf8_lossy(&vm_run.stderr), String::from_utf8_lossy(&aot_run.stderr));
+    assert_eq!(vm_run.status.code(), aot_run.status.code());
+    assert!(String::from_utf8_lossy(&aot_run.stderr).contains("index out of bounds"));
+    let mut stats = Command::new(&aot);
+    stats.env("COIL_NATIVE_STATS", "1");
+    let stats = run_command_with_timeout(stats, 60);
+    let err = String::from_utf8_lossy(&stats.stderr);
+    let calls: u64 = err
+        .lines()
+        .find_map(|l| l.strip_prefix("native: ")?.split(" calls ran natively").next()?.parse().ok())
+        .unwrap_or(0);
+    assert!(calls >= 10, "stats: {err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
