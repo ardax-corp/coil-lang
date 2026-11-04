@@ -764,6 +764,9 @@ pub unsafe extern "C" fn coil_native_unwind(ctx: *mut NativeCtx, code: u64, site
             // not model, the native stack) hands the call back to the VM.
             let trap = if code == TRAP_HELPER { ctx.trap } else { code };
             if !panics_natively(trap) {
+                if let Some(n) = BAIL_TRAPS.get(trap as usize) {
+                    n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 ctx.bail = 1;
                 return;
             }
@@ -2139,18 +2142,30 @@ pub static VM_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 pub static BAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// See [`BAILS`].
 pub static VM_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Bails before a commit by trap code ([`TRAP_HELPER`] `0`: an operation
+/// native code does not model; [`TRAP_STACK`]: the stack budget), for the
+/// inventory.
+pub static BAIL_TRAPS: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
 /// See [`BAILS`].
 pub static HOST_VIA_VM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The [`VM_ENTRIES`], [`BAILS`], [`VM_RUNS`] and [`HOST_VIA_VM`] counts.
-pub fn vm_use_counts() -> [(&'static str, u64); 4] {
+/// The [`VM_ENTRIES`], [`BAILS`], [`VM_RUNS`] and [`HOST_VIA_VM`] counts,
+/// then the non-zero [`BAIL_TRAPS`] as `bail_trap_<code>`.
+pub fn vm_use_counts() -> Vec<(String, u64)> {
     use std::sync::atomic::Ordering::Relaxed;
-    [
-        ("vm_entries", VM_ENTRIES.load(Relaxed)),
-        ("bails", BAILS.load(Relaxed)),
-        ("vm_runs", VM_RUNS.load(Relaxed)),
-        ("host_via_vm", HOST_VIA_VM.load(Relaxed)),
-    ]
+    let mut out = vec![
+        ("vm_entries".to_string(), VM_ENTRIES.load(Relaxed)),
+        ("bails".to_string(), BAILS.load(Relaxed)),
+        ("vm_runs".to_string(), VM_RUNS.load(Relaxed)),
+        ("host_via_vm".to_string(), HOST_VIA_VM.load(Relaxed)),
+    ];
+    for (code, n) in BAIL_TRAPS.iter().enumerate() {
+        let n = n.load(Relaxed);
+        if n != 0 {
+            out.push((format!("bail_trap_{code}"), n));
+        }
+    }
+    out
 }
 
 /// A `ByteScan` or `VecLoop` ([`NativeHost::vector`]). `kind` bit 0: a

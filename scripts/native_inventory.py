@@ -7,7 +7,8 @@
 `coil-test --engine native` appends a line per compiled file to the file
 `COIL_NATIVE_INVENTORY` names (bodies compiled and refused, each refusal
 with its reason) and a `counts` line per run (VM entries, bails, calls the
-VM ran, host calls in a VM stub). This prints the totals and the refusals
+VM ran, host calls in a VM stub, bails by trap code: `bail_trap_0` is an
+operation native code does not model, `bail_trap_6` the stack budget). This prints the totals and the refusals
 grouped by reason, and with `--exe` the number of interpreter symbols
 (`machine::vm`) in a packaged executable. `--max KEY=N` fails when a total
 goes over N (keys: refused, failed, vm_entries, bails, vm_runs,
@@ -75,6 +76,7 @@ def main():
     out = ["## Native inventory", ""]
     keys = ["files", "compiled", "refused", "failed", "vm_entries", "bails", "vm_runs", "host_via_vm", "vm_symbols"]
     out += ["| total | count |", "| --- | ---: |"]
+    keys += sorted(k for k in totals if k.startswith("bail_trap_"))
     out += [f"| {k} | {totals[k]} |" for k in keys if k in totals or k in ("refused", "failed")]
     if reasons:
         out += ["", f"### Refusals by reason (top {args.top})", "", "| bodies | reason | first seen |", "| ---: | --- | --- |"]
