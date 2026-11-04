@@ -924,3 +924,43 @@ fn yield_from_runs_in_native_generator_bodies() {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
 }
+
+/// The `native: N vector ops ran natively` count (0 when absent).
+fn vector_ops(stats: &str) -> u64 {
+    stats
+        .lines()
+        .find_map(|l| l.strip_prefix("native: ")?.strip_suffix(" vector ops ran natively")?.parse().ok())
+        .unwrap_or(0)
+}
+
+#[test]
+fn vector_loops_and_byte_scans_run_from_native_code() {
+    // `sum` and `dot` are counted reduce loops (`VecLoop`), `scale` a map
+    // loop storing lanes, `find` an early-exit byte loop (`ByteScan`) and
+    // `copy` a push loop (one bulk copy): the MIR passes the VM's dense
+    // tier runs give native code the same loops.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs, int from) -> int {{ let s = 0; let i = from; while i < xs.len() {{ s = s + xs[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn dot(Vec<float> a, Vec<float> b) -> float {{ let s = 0.0; let i = 0; while i < a.len() {{ s = s + a[i] * b[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn scale(Vec<int> xs, int k) {{ let i = 0; while i < xs.len() {{ xs[i] = xs[i] * k + 1; i = i + 1; }} }}\n\
+         #[inline(never)]\nfn find(Vec<byte> s, byte b, int from) -> int {{ let n = s.len(); let i = from; while i < n {{ if s[i] == b {{ return i; }} i = i + 1; }} return -1; }}\n\
+         #[inline(never)]\nfn copy(Vec<byte> src, int from) -> Vec<byte> {{ let out: Vec<byte> = Vec::new(); let i = from; while i < src.len() {{ out.push(src[i]); i = i + 1; }} return out; }}\n\
+         fn main() {{\n  let xs: Vec<int> = Vec::new(); let fs: Vec<float> = Vec::new(); let bs: Vec<byte> = Vec::new();\n  let j = 0;\n  while j < 1000 {{ xs.push(j * 7 % 101); fs.push((j % 13) as float); bs.push((97 + j % 26) as byte); j = j + 1; }}\n  bs[777] = 59 as byte;\n  scale(xs, 3);\n  let c = copy(bs, 5);\n  let _ = println(format(\"%i %i %i %i %i\", sum(xs, 1), dot(fs, fs) as int, find(bs, 59 as byte, 3), find(bs, 33 as byte, 0), c.len() + c[0] as int));\n}}\n"
+    );
+    let stats = same_as_vm("native_vector_loops", &src);
+    for f in ["sum", "dot", "scale", "find", "copy"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert!(vector_ops(&stats) >= 4, "stats: {stats}");
+}
+
+#[test]
+fn a_vector_loop_trap_matches_the_vm() {
+    // The lanes overflow after a print: the panic is native code's own.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs) -> int {{ let s = 0; let i = 0; while i < xs.len() {{ s = s + xs[i]; i = i + 1; }} return s; }}\n\
+         fn main() {{\n  let xs: Vec<int> = Vec::new(); let j = 0;\n  while j < 64 {{ xs.push(9223372036854775807 - j); j = j + 1; }}\n  let _ = println(\"start\");\n  let _ = println(format(\"%i\", sum(xs)));\n}}\n"
+    );
+    let stats = same_as_vm("native_vector_trap", &src);
+    assert!(compiled(&stats, "sum"), "stats: {stats}");
+}
