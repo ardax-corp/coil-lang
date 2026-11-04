@@ -71,6 +71,10 @@ pub const PRELUDE_TASK_MODULE: &str = "prelude::task";
 /// Child-process natives behind the embedded `process` module.
 pub const PRELUDE_PROCESS_MODULE: &str = "prelude::process";
 
+/// Lock primitives the embedded `thread_locks` module (`thread::with_lock`
+/// and kin, in Coil) builds on: raw holds and value loads / stores.
+pub const PRELUDE_THREAD_MODULE: &str = "prelude::thread";
+
 /// Which userland FFI builtin a virtual export names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FfiBuiltin {
@@ -960,6 +964,24 @@ impl VirtualModules {
                 ("task_cond_new", "task_cond_new"),
                 ("task_cond_wait", "task_cond_wait"),
                 ("task_cond_notify", "task_cond_notify"),
+            ]),
+        );
+
+        modules.insert(
+            PRELUDE_THREAD_MODULE,
+            host_exports(&[
+                ("lock_acquire", "lock_acquire"),
+                ("lock_release", "lock_release"),
+                ("lock_load", "lock_load"),
+                ("lock_store", "lock_store"),
+                ("rw_acquire_read", "rw_acquire_read"),
+                ("rw_acquire_write", "rw_acquire_write"),
+                ("rw_try_read", "rw_try_read"),
+                ("rw_try_write", "rw_try_write"),
+                ("rw_release_read", "rw_release_read"),
+                ("rw_release_write", "rw_release_write"),
+                ("rw_load", "rw_load"),
+                ("rw_store", "rw_store"),
             ]),
         );
 
