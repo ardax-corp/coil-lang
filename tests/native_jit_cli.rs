@@ -128,7 +128,7 @@ fn heap_reads_run_natively() {
            let _ = println(format(\"%i\", at(a, 9)));\n}}\n"
     );
     let stats = same_as_vm("heap", &src);
-    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
     for f in ["vsum", "px", "at", "flag"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
@@ -136,8 +136,8 @@ fn heap_reads_run_natively() {
 
 #[test]
 fn heap_stores_are_undone_when_the_call_bails() {
-    // `fill` writes a[0..n] and then indexes past the end: the bail takes
-    // the stores back and the VM's re-run makes them and panics as before.
+    // `fill` writes a[0..n] and then indexes past the end: it panics
+    // natively, with the stores made, as the VM's run does.
     let src = format!(
         "{HEADER}class C {{ pub n: int, pub f: float }}\n\
          #[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i * 10; i = i + 1; }} return a[n]; }}\n\
@@ -149,7 +149,7 @@ fn heap_stores_are_undone_when_the_call_bails() {
     );
     let stats = same_as_vm("stores", &src);
     assert!(compiled(&stats, "fill") && compiled(&stats, "bump"), "stats: {stats}");
-    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
     let src = format!(
         "{HEADER}#[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i + 7; i = i + 1; }} return a[n]; }}\n\
          fn main() {{ let a: Vec<int> = [0, 0, 0]; let _ = println(format(\"%i\", fill(a, 3))); }}\n"
@@ -202,7 +202,7 @@ fn allocation_runs_natively_and_matches_the_vm() {
     for f in ["make", "area", "shape", "pair", "grow"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
-    assert!(stats.contains("1 bailed"), "stats: {stats}");
+    assert!(stats.contains("0 bailed"), "stats: {stats}");
     // A call that allocates far past the collection threshold commits
     // and collects at a safepoint: it does not bail.
     let src = format!(
@@ -326,7 +326,7 @@ fn statics_are_read_and_written_natively() {
     );
     let stats = same_as_vm("statics", &src);
     assert!(compiled(&stats, "tick") && compiled(&stats, "rename"), "stats: {stats}");
-    assert!(stats.contains("1 bailed"), "stats: {stats}");
+    assert!(stats.contains("0 bailed"), "stats: {stats}");
 }
 
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
@@ -375,7 +375,7 @@ fn compiled_archive_carries_mir_and_runs_natively() {
     assert_eq!(program_stderr(&jit), program_stderr(&vm));
     assert_eq!(jit.status.code(), vm.status.code());
     let stats = String::from_utf8_lossy(&jit.stderr);
-    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
     assert!(!String::from_utf8_lossy(&vm.stderr).contains("native:"), "--no-jit stays on the VM");
 }
 
