@@ -2486,6 +2486,25 @@ impl<const S: usize> Machine<S> {
         match vm.natives.get_by_id(fn_id)?.host_op() {
             crate::HostOp::Ordinary => {}
             crate::HostOp::Task => return vm.native_task_op(ctx, fn_id, args),
+            op @ (crate::HostOp::RegionEnter | crate::HostOp::RegionExit) => {
+                // A minor collection, native frames' words rooted (and
+                // forwarded), as `native_gc` collects.
+                if unlikely(!vm.stack_maps.is_empty()) {
+                    vm.gc_ip = if vm.frames.is_empty() {
+                        0
+                    } else {
+                        vm.frames.get().tell()
+                    };
+                }
+                vm.native_roots.push((ctx, vm.frames.len()));
+                vm.gc_region(op == crate::HostOp::RegionEnter);
+                vm.native_roots.pop();
+                return Some(if vm.panicked {
+                    Invoked::Unwound
+                } else {
+                    Invoked::Value(0)
+                });
+            }
             _ => return None,
         }
         // Where tasks switch, a wait must park a fiber: off one (no task
