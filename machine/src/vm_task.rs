@@ -256,14 +256,6 @@ impl<const S: usize> Machine<S> {
         TaskFlow::Switched
     }
 
-    /// The running task's waker, the key its next thread wait gets, and its id.
-    fn task_waiter(
-        &self,
-    ) -> Option<(std::sync::Arc<crate::task::TaskWaker>, u64, crate::task::TaskId)> {
-        let s = self.rt.sched.as_ref()?;
-        Some((std::sync::Arc::clone(&s.waker), s.peek_thread_key(), s.current))
-    }
-
     /// A native parked the task on a `thread` object (its arguments are
     /// still on the stack): suspend at the HostInvoke itself, so it runs
     /// again once the other thread posts the wake.
@@ -284,13 +276,7 @@ impl<const S: usize> Machine<S> {
         ip: &mut usize,
         sp: &mut usize,
     ) {
-        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
-        let token = s.reactor.register_wait(req.handle, req.interest);
-        let current = s.current;
-        s.io_waits.insert(token, current);
-        if let Some(t) = req.timeout {
-            s.add_timer(current, std::time::Instant::now() + t);
-        }
+        let token = self.rt.io_wait(&req);
         self.task_suspend(Some(crate::task::Block::Io(token, layout)), ip, sp);
     }
 
@@ -298,13 +284,7 @@ impl<const S: usize> Machine<S> {
     /// the stack (a connect in progress): suspend at the HostInvoke itself, so
     /// it runs again once the handle is ready or the timeout passed.
     fn task_suspend_io_retry(&mut self, req: crate::io::IoParkRequest, ip: &mut usize, sp: &mut usize) {
-        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
-        let token = s.reactor.register_wait(req.handle, req.interest);
-        let current = s.current;
-        s.io_waits.insert(token, current);
-        if let Some(t) = req.timeout {
-            s.add_timer(current, std::time::Instant::now() + t);
-        }
+        let token = self.rt.io_wait(&req);
         *ip -= 1;
         self.task_suspend_at(Some(crate::task::Block::IoRetry(token)), false, ip, sp);
     }

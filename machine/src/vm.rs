@@ -2283,118 +2283,7 @@ impl<const S: usize> Machine<S> {
             }
             _ => return None,
         }
-        // Where tasks switch, a wait must park a fiber: off one (no task
-        // may switch under native frames there), the stub runs it.
-        let park_tasks = vm.tasks_can_switch();
-        if park_tasks && vm.fiber_switch_depth.is_none() {
-            return None;
-        }
-        let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
-        if fn_id == common::CLOCK_SLEEP_MS_ID as usize && park_tasks {
-            // Inside a scope, `clock::sleep_ms` suspends the task.
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_millis(
-                    args.first().map_or(0, |v| v.as_int()).max(0) as u64
-                );
-            let s = vm.rt.sched.as_mut().expect("tasks_can_switch");
-            let current = s.current;
-            s.add_timer(current, deadline);
-            return Some(
-                match vm.native_park(ctx, Some(crate::task::Block::Sleep), true) {
-                    Some(_) => Invoked::Value(0),
-                    None => Invoked::Unwound,
-                },
-            );
-        }
-        let opens_fd =
-            fn_id == common::IO_OPEN_ID as usize || fn_id == common::TCP_ACCEPT_ID as usize;
-        loop {
-            let park_tasks = vm.tasks_can_switch();
-            if park_tasks {
-                crate::task::set_task_waiter(vm.task_waiter());
-            }
-            if opens_fd {
-                let _ = crate::io::take_fd_exhausted();
-            }
-            // A native may collect (a shared-heap spawn opens its epoch):
-            // the native frames' words stay rooted.
-            vm.rt.native_roots.push((ctx, vm.frames.len()));
-            let native = vm.rt.natives.get_by_id(fn_id).expect("checked above");
-            let mut invoked = crate::host_enum::with_host_enum_layout(layout, || {
-                native.invoke(&mut vm.rt.heap, args)
-            });
-            if opens_fd && crate::io::take_fd_exhausted() {
-                // Streams nothing reaches may hold the descriptors:
-                // collect (native frames' words pinned) and try once more.
-                let roots_len = vm.rt.ffi_arg_roots.len();
-                vm.rt.ffi_arg_roots.extend_from_slice(args);
-                let mut panicked = false;
-                // SAFETY: as above.
-                unsafe { Self::native_gc(raw, ctx, &mut panicked) };
-                vm.rt.ffi_arg_roots.truncate(roots_len);
-                let native = vm.rt.natives.get_by_id(fn_id).expect("checked above");
-                invoked = crate::host_enum::with_host_enum_layout(layout, || {
-                    native.invoke(&mut vm.rt.heap, args)
-                });
-            }
-            vm.rt.native_roots.pop();
-            if park_tasks {
-                crate::task::set_task_waiter(None);
-            }
-            match invoked {
-                Ok(Some(v)) => return Some(Invoked::Value(v.bits())),
-                Ok(None) if park_tasks && crate::task::take_thread_parked() => {
-                    // Runs again when another thread posts the wake.
-                    let s = vm.rt.sched.as_mut().expect("tasks_can_switch");
-                    let key = s.peek_thread_key();
-                    let current = s.current;
-                    s.add_thread_wait(current, key);
-                    vm.native_park(ctx, Some(crate::task::Block::Thread(key)), false)?;
-                }
-                Ok(None) if park_tasks && crate::task::io_retry_parked() => {
-                    // A connect in progress: runs again on readiness.
-                    let req = crate::task::take_io_retry_park().expect("checked");
-                    let token = vm.native_io_wait(&req);
-                    vm.native_park(ctx, Some(crate::task::Block::IoRetry(token)), false)?;
-                }
-                Ok(None) => {
-                    let Some(req) = crate::io::take_pending_io_park() else {
-                        return Some(Invoked::Value(0));
-                    };
-                    if !park_tasks {
-                        // No other task: block the thread.
-                        let wait =
-                            crate::thread::host_io_wait(req.handle, req.interest, req.timeout);
-                        let v = crate::host_enum::with_host_enum_layout(layout, || {
-                            crate::io::as_result_unit(&mut vm.rt.heap, wait)
-                        });
-                        return Some(Invoked::Value(v.bits()));
-                    }
-                    let token = vm.native_io_wait(&req);
-                    return Some(
-                        match vm.native_park(ctx, Some(crate::task::Block::Io(token, layout)), true)
-                        {
-                            Some(v) => Invoked::Value(v.bits()),
-                            None => Invoked::Unwound,
-                        },
-                    );
-                }
-                Err(crate::FfiError::IntTrap(t)) => {
-                    return Some(Invoked::Panic(t.message().to_string()));
-                }
-                Err(crate::FfiError::Panic(msg)) => return Some(Invoked::Panic(msg)),
-                Err(e) => {
-                    let name = vm
-                        .rt.natives
-                        .get_by_id(fn_id)
-                        .map_or("?", |n| n.name())
-                        .to_string();
-                    return Some(Invoked::Panic(format!(
-                        "HostInvoke failed for `{name}`: {e}"
-                    )));
-                }
-            }
-        }
+        crate::runtime::invoke_ordinary(vm, ctx, fn_id, layout, args)
     }
 
     /// A task op (`HostOp::Task`) from native code, as `HostInvoke` runs
@@ -2469,19 +2358,6 @@ impl<const S: usize> Machine<S> {
         let c = target.as_ref();
         c.native.is_some()
             || !(c.state == CoroState::Suspended && c.started && self.coro_has_pad(c))
-    }
-
-    /// Register the current task's wait for `req`'s readiness (and its
-    /// timeout), as [`Self::task_suspend_io`] does; returns the token.
-    fn native_io_wait(&mut self, req: &crate::io::IoParkRequest) -> crate::io_reactor::WaitToken {
-        let s = self.rt.sched.as_mut().expect("tasks_can_switch");
-        let token = s.reactor.register_wait(req.handle, req.interest);
-        let current = s.current;
-        s.io_waits.insert(token, current);
-        if let Some(t) = req.timeout {
-            s.add_timer(current, std::time::Instant::now() + t);
-        }
-        token
     }
 
     /// From native code inside a fiber: suspend the task on `block` (the
@@ -7702,6 +7578,37 @@ include!("vm_task.rs");
 include!("vm_unwind.rs");
 include!("vm_fiber.rs");
 include!("vm_gen.rs");
+
+/// The VM runs host calls from native code: tasks switch on the fibers
+/// it starts, and it collects with every frame's roots.
+impl<const S: usize> crate::runtime::HostEnv for Machine<S> {
+    fn rt(&mut self) -> &mut crate::runtime::Runtime {
+        &mut self.rt
+    }
+
+    fn frame_depth(&self) -> usize {
+        self.frames.len()
+    }
+
+    fn can_switch(&self) -> bool {
+        self.tasks_can_switch()
+    }
+
+    fn on_fiber(&self) -> bool {
+        self.fiber_switch_depth.is_some()
+    }
+
+    fn park(&mut self, ctx: *mut crate::native::NativeCtx, block: Option<crate::task::Block>, result_slot: bool) -> Option<Value> {
+        self.native_park(ctx, block, result_slot)
+    }
+
+    fn collect(&mut self, ctx: *mut crate::native::NativeCtx) -> bool {
+        let mut panicked = false;
+        // SAFETY: `self` is a live machine, as native code passes back.
+        unsafe { Self::native_gc(std::ptr::from_mut(self).cast(), ctx, &mut panicked) };
+        panicked
+    }
+}
 
 impl<const S: usize> Drop for Machine<S> {
     fn drop(&mut self) {

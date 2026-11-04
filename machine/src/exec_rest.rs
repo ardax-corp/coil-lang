@@ -410,7 +410,7 @@ impl<const S: usize> Machine<S> {
                             // the task instead.
                             let park_tasks = self.tasks_can_switch();
                             if unlikely(park_tasks) {
-                                crate::task::set_task_waiter(self.task_waiter());
+                                crate::task::set_task_waiter(self.rt.task_waiter());
                             }
                             let opens_fd = fn_id == common::IO_OPEN_ID as usize
                                 || fn_id == common::TCP_ACCEPT_ID as usize;
