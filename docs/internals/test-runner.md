@@ -268,12 +268,14 @@ as timed out: the backstop behind `coil test --wall-timeout` for a wedge
 outside a case. Logs land in `target/corpora/<corpus>.log`; CI uploads them
 when a cell fails or is cut off by its job limit.
 
-CI builds the binaries once per OS and build mode (`harness-build`: debug
-and release, each with its GC-stress `coil-test`) and runs every setting
-(default, `-O 0`, leak smoke, GC stress) in both modes
-as separate `harness` cells, side by side. The macOS builds and cells are
-their own jobs (`harness-build-macos`, `harness-macos`), so the Linux cells
-never wait on the capped macOS runners. The same corpus must pass in both
+CI builds the binaries once per OS and build (`harness-build-debug`,
+`harness-build-release`, `harness-build-gc-stress`: the GC-stress
+`coil-test` is release only, #2131) and runs every setting (default, `-O 0`,
+leak smoke in debug and release, GC stress in release) as separate `harness`
+cells, side by side. Each group of Linux cells waits only for its own build.
+macOS (`harness-build-macos`, `harness-macos`) and Windows run in CI's second
+stage, after every Linux job is green and, on a pull request, once it is out
+of draft (`.github/workflows/ci.yml` header). The same corpus must pass in both
 modes, so a build-mode difference (optimizer, overflow checks, debug
 assertions) fails one of them.
 
