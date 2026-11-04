@@ -98,7 +98,12 @@ impl<const S: usize> Machine<S> {
     }
 
     fn task_scope_open(&mut self) -> TaskFlow {
-        let nested = self.nested_depth;
+        // In a task fiber, VM calls under native code run deeper than the
+        // level the task parks back to: the scheduler lives at that level.
+        let nested = match (self.fiber_switch_depth, self.fiber_base) {
+            (Some(_), Some(base)) => base,
+            _ => self.nested_depth,
+        };
         // A scope a fiber opens at its task level joins the scheduler.
         let at_task_level = self.at_task_level();
         if let Some(s) = &self.sched

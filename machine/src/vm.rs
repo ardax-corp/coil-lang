@@ -1851,6 +1851,9 @@ pub struct Machine<const S: usize> {
     /// Inside a fiber (`vm_fiber.rs`): the nesting level its VM calls switch
     /// tasks at. `None` outside fibers.
     fiber_switch_depth: Option<u32>,
+    /// Inside a task fiber: the nesting level that started it, where its
+    /// task resumes after a park (a scope it opens switches tasks there).
+    fiber_base: Option<u32>,
     /// The running fiber's `corosensei::Yielder` (null outside fibers).
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     fiber_yielder: *const (),
@@ -2053,6 +2056,7 @@ impl<const S: usize> Machine<S> {
             native_panic_loc: None,
             native_roots: Vec::new(),
             fiber_switch_depth: None,
+            fiber_base: None,
             fiber_yielder: std::ptr::null(),
             fiber_outer: None,
             #[cfg(not(target_family = "wasm"))]

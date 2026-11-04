@@ -43,6 +43,7 @@ struct ExecCtx<const S: usize> {
     native_roots: Vec<(*mut crate::native::NativeCtx, usize)>,
     unwind: Unwind,
     fiber_switch_depth: Option<u32>,
+    fiber_base: Option<u32>,
     /// The native table's `quiet_above`: a stack position in this state.
     quiet_above: usize,
     resume_floor: usize,
@@ -75,6 +76,7 @@ impl<const S: usize> ExecCtx<S> {
             native_roots: Vec::new(),
             unwind: Unwind::default(),
             fiber_switch_depth: Some(nested_depth),
+            fiber_base: Some(nested_depth),
             quiet_above: usize::MAX,
             resume_floor: usize::MAX,
         }
@@ -168,6 +170,7 @@ impl<const S: usize> Machine<S> {
         std::mem::swap(&mut self.native_roots, &mut x.native_roots);
         std::mem::swap(&mut self.unwind, &mut x.unwind);
         std::mem::swap(&mut self.fiber_switch_depth, &mut x.fiber_switch_depth);
+        std::mem::swap(&mut self.fiber_base, &mut x.fiber_base);
         std::mem::swap(&mut self.resume_floor, &mut x.resume_floor);
         if let Some(t) = self.native.as_deref_mut() {
             std::mem::swap(&mut t.quiet_above, &mut x.quiet_above);
