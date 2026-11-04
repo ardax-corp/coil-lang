@@ -1200,3 +1200,36 @@ fn generators_with_defers_run_natively_and_close() {
     }
     assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
 }
+
+/// The `N` of `native: N calls ran natively`.
+fn native_hits(stats: &str) -> Option<u64> {
+    stats.lines().find_map(|l| l.strip_prefix("native: ")?.split_once(" calls ran natively")?.0.parse().ok())
+}
+
+#[test]
+fn main_itself_runs_natively() {
+    // The prologue enters `main` by a jump after a `CALL` with no target:
+    // native code runs `main`'s own loop (a recurrence, so no auto-par
+    // body is called), not the VM.
+    let src = "fn main() { let t = 1; let n = 0; while t < 100000 { t = t * 2 + n; n = n + 1; } if t < 100000 { panic \"wrong\"; } }\n";
+    let stats = same_as_vm("native_main", src);
+    assert!(compiled(&stats, "main"), "stats: {stats}");
+    assert_eq!(native_hits(&stats), Some(1), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+#[test]
+fn a_scope_inside_a_generator_body_needs_no_vm() {
+    // The generator's body opens and waits for a scope at each step: its
+    // task ops switch tasks on `main`'s fiber, with no bytecode stubs.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, yield_now}};\n\
+         #[inline(never)]\nfn step(int k) -> int {{ yield_now(); return k * 2; }}\n\
+         fn pair(int i) -> int {{ let r = scope(fn (Scope s) use (i) {{ let a = s.spawn(fn () use (i) => step(i)); let b = s.spawn(fn () use (i) => step(i + 1)); let x = match a.join() {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; let y = match b.join() {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; return x + y; }}); return match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; }}\n\
+         gen fn pairs(int n) {{ let i = 0; while i < n {{ yield pair(i); i = i + 1; }} }}\n\
+         fn main() {{ let t = 0; for v in pairs(3) {{ t = t + v; }} let _ = println(format(\"%i\", t)); }}\n"
+    );
+    let stats = same_as_vm("gen_scope", &src);
+    assert!(compiled(&stats, "pairs"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
