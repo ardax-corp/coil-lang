@@ -27,6 +27,13 @@ fn int_or(Option<int> o, int d) -> int {
     };
 }
 
+fn byte_or(Option<byte> o) -> int {
+    return match o {
+        Option::Some(x) => x as int,
+        Option::None => -7,
+    };
+}
+
 fn word_or(Option<string> o, string d) -> string {
     return match o {
         Option::Some(x) => x,
@@ -94,10 +101,7 @@ test("insert and remove keep byte elements") {
     let b: Vec<byte> = Vec::from([1 as byte, 2 as byte, 3 as byte]);
     b.insert(1, 200 as byte);
     assert!(b == Vec::from([1 as byte, 200 as byte, 2 as byte, 3 as byte]));
-    assert!(int_or(match b.remove(0) {
-        Option::Some(x) => Option::Some(x as int),
-        Option::None => Option::None,
-    }, -7) == 1);
+    assert!(byte_or(b.remove(0)) == 1);
     assert!(b == Vec::from([200 as byte, 2 as byte, 3 as byte]));
 }
 
