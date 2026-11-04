@@ -1585,7 +1585,6 @@ mod tests {
             auto_par: false,
             early_free: false,
             require_mir: false,
-            host_loop_calls: false,
         }
     }
 

@@ -192,7 +192,6 @@ fn all_off() -> OptimizeOptions {
         auto_par: false,
         early_free: false,
         require_mir: false,
-        host_loop_calls: false,
     }
 }
 
@@ -210,7 +209,6 @@ fn level_free_knobs(o: &mut OptimizeOptions) {
         None
     };
     o.auto_par = true;
-    o.host_loop_calls = true;
 }
 
 impl OptimizeOptions {
@@ -223,7 +221,6 @@ impl OptimizeOptions {
         self.mir_dense = from.mir_dense;
         self.hir_bisect = from.hir_bisect;
         self.auto_par = from.auto_par;
-        self.host_loop_calls = from.host_loop_calls;
     }
 }
 
