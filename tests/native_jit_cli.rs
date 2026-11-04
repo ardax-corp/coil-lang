@@ -995,8 +995,8 @@ fn an_archive_carries_generators_and_vector_loops() {
 
 #[test]
 fn region_blocks_run_from_native_code() {
-    // `region { }` enters and leaves through host calls that collect on the
-    // VM: native code's words stay rooted (and forwarded) across both.
+    // `region { }` enters and leaves through host calls that collect:
+    // native code's words stay rooted (and forwarded) across both.
     let src = format!(
         "{HEADER}class Node {{ pub v: int, pub next: Option<Node> }}\n\
          #[inline(never)]\nfn build(int n) -> Option<Node> {{ let head: Option<Node> = Option::None; let i = 0; while i < n {{ head = Option::Some(new Node(i, head)); i += 1; }} return head; }}\n\
@@ -1006,6 +1006,8 @@ fn region_blocks_run_from_native_code() {
     );
     let stats = same_as_vm("native_region", &src);
     assert!(compiled(&stats, "rounds"), "stats: {stats}");
+    // The region hooks run in Rust: no stub bytecode.
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
 }
 
 #[test]
@@ -1078,16 +1080,16 @@ fn a_pure_native_run_reports_no_vm_dependence() {
 
 #[test]
 fn a_native_run_counts_its_vm_entries() {
-    // A generator with a `defer` stays on the VM; native `show` resumes it.
+    // `wide` takes more words than native code passes: it and its caller
+    // stay on the VM.
     let src = format!(
-        "{HEADER}gen fn nums() {{ defer {{ let _ = println(\"done\"); }} yield 1; yield 2; }}\n\
-         #[inline(never)]\nfn show() {{ for x in nums() {{ let _ = println(format(\"%i\", x)); }} }}\n\
-         fn main() {{ show(); }}\n"
+        "{HEADER}#[inline(never)]\nfn wide(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16) -> int {{ return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16; }}\n\
+         #[inline(never)]\nfn show(int k) {{ let _ = println(format(\"%i\", k + wide(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))); }}\n\
+         fn main() {{ show(1); show(2); }}\n"
     );
     let stats = same_as_vm("counts_vm", &src);
-    assert!(compiled(&stats, "show"), "stats: {stats}");
-    let (_, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
-    assert!(entries >= 1, "stats: {stats}");
+    let (calls, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
+    assert!(calls + entries >= 2, "stats: {stats}");
 }
 
 #[test]
@@ -1178,16 +1180,19 @@ fn generators_with_defers_run_natively_and_close() {
     // `nums` has a `defer`: a loop that leaves early closes it (the defer
     // runs natively), one that runs it out runs the defer on return, and
     // the collector closes one nothing reaches. `loud`'s defer panics in
-    // the close: the panic goes on to the loop's caller.
+    // the close: the panic goes on to the loop's caller (inside a task, so
+    // the VM's double report of it, #2261, stays out of stderr).
     let src = format!(
-        "{HEADER}use gc::collect;\nstatic let LOG: string = \"\";\nfn say(string s) {{ LOG = LOG + s; }}\n\
+        "{HEADER}use gc::collect;\nuse task::{{scope, Scope, TaskError}};\nstatic let LOG: string = \"\";\nfn say(string s) {{ LOG = LOG + s; }}\n\
          gen fn nums(int n) {{ defer {{ say(\"[d]\"); }} let i = 0; while i < n {{ say(format(\"%i\", i)); yield i; i = i + 1; }} return 0; }}\n\
          gen fn loud() {{ defer {{ say(\"[loud]\"); panic \"in close\"; }} yield 1; yield 2; return 0; }}\n\
          #[inline(never)]\nfn early() -> int {{ let t = 0; for v in nums(5) {{ if v == 2 {{ break; }} t = t + v; }} return t; }}\n\
          #[inline(never)]\nfn full() -> int {{ let t = 0; for v in nums(3) {{ t = t + v; }} return t; }}\n\
          #[inline(never)]\nfn dropped() {{ let g = nums(4); let _ = resume g; }}\n\
          #[inline(never)]\nfn closes_loud() -> int {{ for v in loud() {{ break; }} say(\"unreached\"); return 0; }}\n\
-         fn main() {{ let a = early(); let b = full(); dropped(); collect(); let _ = println(format(\"%i %i %s\", a, b, LOG)); let _ = closes_loud(); }}\n"
+         fn main() {{ let a = early(); let b = full(); dropped(); collect(); let _ = println(format(\"%i %i %s\", a, b, LOG));\n\
+           let r = scope(fn (Scope s) {{ let _ = s.spawn(fn () => closes_loud()); 0 }});\n\
+           let _ = println(match r {{ Result::Err(TaskError::Panicked(m)) => m, default => \"no panic\" }}); }}\n"
     );
     let stats = same_as_vm("gen_defers", &src);
     for f in ["nums", "loud"] {
