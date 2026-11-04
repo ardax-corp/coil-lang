@@ -670,6 +670,117 @@ fn word_kind(t: MirTy) -> u8 {
 /// Each `GcBarrier`'s object: the dest of the allocating instruction right
 /// before it in its block, as the VM's emission pairs them. Native code
 /// never collects during a call, so the barrier only names that word.
+/// The words of a non-heap type that hold an object for sure: a heap
+/// word moved into an `int` value (an enum payload's word,
+/// `Holder::One(n)`), and the φs merging only such words.
+fn pointer_words(f: &MirFunc) -> HashSet<ValueId> {
+    let mut out = HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            let (dest, ok) = match inst {
+                MirInst::Cast { dest, kind: MirCastKind::Word, src, .. } => (*dest, heap_word(ty_of(f, *src)) || out.contains(src)),
+                MirInst::Phi { dest, args, .. } => (*dest, !args.is_empty() && args.iter().all(|(_, a)| heap_word(ty_of(f, *a)) || out.contains(a))),
+                _ => continue,
+            };
+            if ok && !heap_word(ty_of(f, dest)) && ty_of(f, dest) == MirTy::I64 && out.insert(dest) {
+                changed = true;
+            }
+        }
+    }
+    out
+}
+
+/// `held[block][inst]`: the heap words locals hold just before that inst
+/// (one past the last: at the terminator), by block position. As in the
+/// VM's frame, a local holds the word it was bound to
+/// ([`MirFunc::local_binds`]) from the word's definition until another of
+/// the same local's is defined or a `ClearWord` drops it, even past its
+/// last use; a match binding holds its word only through its scrutinee.
+/// Where paths that
+/// left a local different words meet with no φ to merge them (the φ was
+/// dead), it holds neither: what is live stays rooted anyway.
+fn held_words(f: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
+    let mut locals: HashMap<ValueId, Vec<u32>> = HashMap::new();
+    for &(l, v) in &f.local_binds {
+        locals.entry(v).or_default().push(l.0);
+    }
+    let mut held: Vec<Vec<HashSet<ValueId>>> = f.blocks.iter().map(|b| vec![HashSet::new(); b.insts.len() + 1]).collect();
+    if locals.is_empty() {
+        return held;
+    }
+    let pos: HashMap<BlockId, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
+    for (i, b) in f.blocks.iter().enumerate() {
+        for s in b.term.as_ref().map(|t| t.succs()).unwrap_or_default() {
+            if let Some(&j) = pos.get(&s) {
+                preds[j].push(i);
+            }
+        }
+    }
+    // Local -> the word it holds; `None`: not reached yet.
+    type State = HashMap<u32, ValueId>;
+    let bind = |st: &mut State, v: ValueId| {
+        for &l in locals.get(&v).into_iter().flatten() {
+            st.insert(l, v);
+        }
+    };
+    // A match binding's word is its scrutinee's payload: the scrutinee
+    // holds it, and once that is rebound, the binding holds nothing.
+    let payloads: HashSet<ValueId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::MatchPayload { dest, .. } | MirInst::Cast { dest, .. } => Some(*dest),
+            _ => None,
+        })
+        .collect();
+    let words = |st: &State| -> HashSet<ValueId> { st.values().copied().filter(|&v| heap_word(ty_of(f, v)) && !payloads.contains(&v)).collect() };
+    let entry = pos.get(&f.entry).copied();
+    let mut out: Vec<Option<State>> = vec![None; f.blocks.len()];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (bi, b) in f.blocks.iter().enumerate() {
+            let mut reached = preds[bi].iter().filter_map(|&p| out[p].as_ref());
+            let mut st: State = match reached.next() {
+                Some(first) => {
+                    let mut st = first.clone();
+                    for o in reached {
+                        st.retain(|l, v| o.get(l) == Some(v));
+                    }
+                    st
+                }
+                None if Some(bi) == entry => State::new(),
+                None => continue,
+            };
+            if Some(bi) == entry {
+                for &p in &f.params {
+                    bind(&mut st, p);
+                }
+            }
+            for (ii, inst) in b.insts.iter().enumerate() {
+                held[bi][ii] = words(&st);
+                // A local rebound to a word that holds no object.
+                if let MirInst::ClearWord { value, .. } = inst {
+                    st.retain(|_, v| v != value);
+                }
+                for d in inst.dests() {
+                    bind(&mut st, d);
+                }
+            }
+            held[bi][b.insts.len()] = words(&st);
+            if out[bi].as_ref() != Some(&st) {
+                out[bi] = Some(st);
+                changed = true;
+            }
+        }
+    }
+    held
+}
+
 fn barrier_pairs(f: &MirFunc) -> HashMap<ValueId, ValueId> {
     let mut out = HashMap::new();
     for b in &f.blocks {
@@ -1360,6 +1471,12 @@ struct Lower<'a> {
     /// An opaque body's `int` words that may be objects: rooted in an
     /// ambiguous record (pinned, never rewritten).
     opaque: Vec<ValueId>,
+    /// Words of a non-heap type that hold an object for sure
+    /// ([`pointer_words`]): rooted precisely, as heap words are.
+    ptr_words: HashSet<ValueId>,
+    /// Low words of pairs calls return that may carry an object
+    /// ([`MirFunc::heap_pair_calls`]): rooted ambiguously.
+    pair_words: Vec<ValueId>,
     defer: FuncRef,
     claim: FuncRef,
     /// This body's cleanup pad.
@@ -1378,6 +1495,11 @@ struct Lower<'a> {
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
     views: HashMap<ValueId, (Variable, Variable, Variable)>,
+    /// The MIR values to root at the op being lowered (`None`: all of
+    /// them): those live there and the words locals hold ([`held_words`]).
+    /// [`Self::push_roots`] records only these, so a dead temporary is
+    /// not kept alive by this frame.
+    live: Option<HashSet<ValueId>>,
     /// Array values this body stores into.
     stored: HashSet<ValueId>,
     /// `GcBarrier` dest -> the object it names ([`barrier_pairs`]).
@@ -1503,6 +1625,8 @@ impl<'a> Lower<'a> {
             heap_homes: Vec::new(),
             amb_homes: Vec::new(),
             opaque: Vec::new(),
+            ptr_words: HashSet::new(),
+            pair_words: Vec::new(),
             calls_slot: None,
             defer,
             claim,
@@ -1513,6 +1637,7 @@ impl<'a> Lower<'a> {
             cur_loc: None,
             cur_site: None,
             views: HashMap::new(),
+            live: None,
             stored: HashSet::new(),
             barriers: HashMap::new(),
             view_slot,
@@ -1568,11 +1693,17 @@ impl<'a> Lower<'a> {
     fn push_roots(&mut self, f: &MirFunc) -> Option<Roots> {
         let words: Vec<ValueId> = (0..f.types.len() as u32)
             .map(ValueId)
-            .filter(|&v| heap_word(ty_of(f, v)))
+            .filter(|&v| (heap_word(ty_of(f, v)) || self.ptr_words.contains(&v)) && self.live.as_ref().is_none_or(|l| l.contains(&v)))
             .collect();
         let homes = if self.homes_slot.is_some() { self.heap_homes.clone() } else { Vec::new() };
         let amb_homes = if self.homes_slot.is_some() { self.amb_homes.clone() } else { Vec::new() };
-        let opaque = self.opaque.clone();
+        let opaque: Vec<ValueId> = self
+            .opaque
+            .iter()
+            .chain(&self.pair_words)
+            .copied()
+            .filter(|v| self.live.as_ref().is_none_or(|l| l.contains(v)))
+            .collect();
         if words.is_empty() && homes.is_empty() && opaque.is_empty() && amb_homes.is_empty() {
             return None;
         }
@@ -2083,6 +2214,9 @@ impl<'a> Lower<'a> {
     fn body(&mut self, f: &MirFunc) -> Result<(), String> {
         self.barriers = barrier_pairs(f);
         self.opaque = opaque_words(f);
+        self.ptr_words = pointer_words(f);
+        self.pair_words = f.heap_pair_calls.iter().copied().filter(|&v| !heap_word(ty_of(f, v)) && !self.ptr_words.contains(&v)).collect();
+        self.pair_words.sort_unstable_by_key(|v| v.0);
         for blk in &f.blocks {
             for inst in &blk.insts {
                 let array = match inst {
@@ -2158,7 +2292,20 @@ impl<'a> Lower<'a> {
         self.b.ins().jump(go, &[]);
         self.b.switch_to_block(go);
         let gc = self.body_index.is_some_and(|i| self.plan.may_gc.contains(&i));
+        // Live sets by block position: into the block past its phis, and
+        // at each op (what lives after it and what it reads, which the
+        // call it makes may move).
+        let (live_in, live_after) = compiler::native_mir::liveness(f);
+        let held = held_words(f);
+        let past_phis = |bi: usize| -> HashSet<ValueId> {
+            let phis = f.blocks[bi].insts.iter().take_while(|i| i.is_phi()).count();
+            let mut live = if phis == 0 { live_in[bi].clone() } else { live_after[bi][phis - 1].clone() };
+            live.extend(held[bi][phis].iter().copied());
+            live
+        };
+        let entry_at = f.blocks.iter().position(|b| b.id == f.entry);
         if gc {
+            self.live = entry_at.map(past_phis);
             self.safepoint(f);
         }
         // Loop headers (the targets of edges back in block order) are
@@ -2179,11 +2326,12 @@ impl<'a> Lower<'a> {
         let first = self.blocks[&f.entry];
         self.b.ins().jump(first, &[]);
 
-        for blk in &f.blocks {
+        for (bi, blk) in f.blocks.iter().enumerate() {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
             if headers.contains(&blk.id) {
                 self.at(None);
+                self.live = Some(past_phis(bi));
                 self.safepoint(f);
             }
             // A `MatchPayload` of a payload the block's `JumpIfMatch` binds
@@ -2194,15 +2342,20 @@ impl<'a> Lower<'a> {
                 Some(Terminator::JumpIfMatch { payloads, .. }) => payloads,
                 _ => &[],
             };
-            for inst in &blk.insts {
+            for (ii, inst) in blk.insts.iter().enumerate() {
                 if let MirInst::MatchPayload { dest, .. } = inst
                     && edge_bound.contains(dest)
                 {
                     continue;
                 }
+                let mut live = live_after[bi][ii].clone();
+                live.extend(inst.operands());
+                live.extend(held[bi][ii].iter().copied());
+                self.live = Some(live);
                 self.at(Some(f.op_loc(inst.dest())));
                 self.inst(f, inst)?;
             }
+            self.live = None;
             self.at(None);
             self.term(f, blk.id, blk.term.as_ref().ok_or("no terminator")?)?;
         }
