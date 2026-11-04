@@ -210,13 +210,14 @@ jobs:
             cp "$src" "staging/coil-${triple}/${b}${ext}"
           done
 
-          # The runtime `coil package` links AOT executables against.
+          # The runtime `coil package` links AOT executables against,
+          # embedded in `coil` (written to its cache on first use).
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             src="target/release/libcoil_rt.a"
             if [[ "${{ matrix.libc }}" == "musl" ]]; then
               src="target-musl/release/libcoil_rt.a"
             fi
-            cp "$src" "staging/coil-${triple}/libcoil_rt.a"
+            python3 scripts/embed_runtime.py "staging/coil-${triple}/coil" "$src"
           fi
 
           # Standalone packaging runner (same download name as before).
