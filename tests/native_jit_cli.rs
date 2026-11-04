@@ -1086,3 +1086,28 @@ fn a_native_run_counts_its_vm_entries() {
     let (_, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
     assert!(entries >= 3, "stats: {stats}");
 }
+
+#[test]
+fn ordinary_host_natives_run_without_the_vm() {
+    // Writing to stdout, `Vec::insert` and `clock::sleep_ms` are host
+    // natives that are no plain functions: native code runs them itself.
+    let src = format!(
+        "{HEADER}use clock::sleep_ms;\n\
+         #[inline(never)]\nfn show(int i) {{ let v: Vec<int> = [1, 2]; v.insert(1, i); sleep_ms(0); let _ = println(format(\"%i %i\", v[1], v.len())); }}\n\
+         fn main() {{ let i = 0; while i < 3 {{ show(i); i = i + 1; }} }}\n"
+    );
+    let stats = same_as_vm("ordinary_hosts", &src);
+    assert!(compiled(&stats, "show"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
+}
+
+#[test]
+fn an_ordinary_host_native_panic_matches_the_vm() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn put(int i) -> int {{ let v: Vec<int> = [1, 2]; v.insert(i, 7); return v.len(); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", put(1))); let _ = println(format(\"%i\", put(5))); }}\n"
+    );
+    let stats = same_as_vm("ordinary_host_panic", &src);
+    assert!(compiled(&stats, "put"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
+}
