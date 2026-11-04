@@ -1052,3 +1052,37 @@ fn a_reduce_over_bytes_takes_the_vm_lanes_result() {
     let stats = same_as_vm("native_byte_reduce", &src);
     assert!(compiled(&stats, "byte_sum"), "stats: {stats}");
 }
+
+/// The `native: N calls ran on the VM, M VM entries from native code`
+/// counts of a JIT run's stats: bytecode bodies the VM ran while native
+/// code was installed, and calls from native code into the VM.
+fn vm_dependence(stats: &str) -> Option<(u64, u64)> {
+    stats.lines().find_map(|l| {
+        let rest = l.strip_prefix("native: ")?;
+        let (calls, rest) = rest.split_once(" calls ran on the VM, ")?;
+        let entries = rest.strip_suffix(" VM entries from native code")?;
+        Some((calls.parse().ok()?, entries.parse().ok()?))
+    })
+}
+
+#[test]
+fn a_pure_native_run_reports_no_vm_dependence() {
+    let src = "#[inline(never)]\nfn fib(int n) -> int { if n <= 2 { return 1; } return fib(n - 1) + fib(n - 2); }\n\
+               fn main() { if fib(20) != 6765 { panic \"wrong\"; } }\n";
+    let stats = same_as_vm("pure_no_vm", src);
+    assert!(compiled(&stats, "fib"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+#[test]
+fn a_native_run_counts_its_vm_entries() {
+    // Writing to stdout goes through a host native that runs on the VM.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn show(int i) {{ let _ = println(format(\"%i\", i)); }}\n\
+         fn main() {{ let i = 0; while i < 3 {{ show(i); i = i + 1; }} }}\n"
+    );
+    let stats = same_as_vm("counts_vm", &src);
+    assert!(compiled(&stats, "show"), "stats: {stats}");
+    let (_, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
+    assert!(entries >= 3, "stats: {stats}");
+}
