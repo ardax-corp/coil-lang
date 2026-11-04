@@ -1143,3 +1143,18 @@ fn a_scope_opened_by_native_main_needs_no_vm() {
     assert!(compiled(&stats, "step"), "stats: {stats}");
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
+
+#[test]
+fn auto_par_forks_from_native_code_keep_their_trees() {
+    // `grow` forks its recursive calls onto shared-heap workers; opening
+    // the shared epoch may collect while native frames hold trees.
+    let src = format!(
+        "{HEADER}enum Tree {{ Leaf, Node(Tree, Tree) }}\n\
+         fn grow(int depth) -> Tree {{ if depth == 0 {{ return Tree::Leaf; }} return Tree::Node(grow(depth - 1), grow(depth - 1)); }}\n\
+         fn count(Tree t) -> int {{ return match t {{ Tree::Leaf => 1, Tree::Node(l, r) => 1 + count(l) + count(r), }}; }}\n\
+         #[inline(never)]\nfn work() -> int {{ let t = 0; let i = 0; while i < 12 {{ t = t + count(grow(14)); i = i + 1; }} return t; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", work())); }}\n"
+    );
+    let stats = same_as_vm("auto_par_trees", &src);
+    assert!(compiled(&stats, "work"), "stats: {stats}");
+}
