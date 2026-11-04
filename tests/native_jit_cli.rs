@@ -1387,3 +1387,19 @@ fn native_frames_root_only_what_they_still_hold() {
     let vm = run("frame_roots_vm", &src, false);
     assert_eq!(String::from_utf8_lossy(&vm.stdout), "true\n".repeat(6));
 }
+
+#[test]
+fn byte_array_literals_are_packed_natively() {
+    // A `Vec<byte>` literal native code builds is packed one byte per
+    // element, and the heap counts it so, as the VM's `MakeArrayK` does.
+    let src = format!(
+        "{HEADER}use gc::{{collect, heap_bytes}};\n\
+         #[inline(never)]\nfn row(int i) -> Vec<byte> {{ return [(i % 256) as byte, 1 as byte, 2 as byte, 3 as byte, 4 as byte, 5 as byte, 6 as byte, 7 as byte, \
+         8 as byte, 9 as byte, 10 as byte, 11 as byte, 12 as byte, 13 as byte, 14 as byte, 15 as byte]; }}\n\
+         #[inline(never)]\nfn grown() -> int {{\n  collect();\n  let before = heap_bytes();\n  let rows: Vec<Vec<byte>> = Vec::with_capacity(10000);\n  let i = 0;\n\
+           while i < 10000 {{ rows.push(row(i)); i = i + 1; }}\n  return heap_bytes() - before;\n}}\n\
+         fn main() {{ let g = grown(); let _ = println(if g < 1400000 {{ \"packed\" }} else {{ format(\"%i bytes\", g) }}); }}\n"
+    );
+    let stats = same_as_vm("packed_bytes", &src);
+    assert!(compiled(&stats, "row") && compiled(&stats, "grown"), "stats: {stats}");
+}
