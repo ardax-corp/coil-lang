@@ -63,6 +63,10 @@ test("deeper than the initial stack") {
     assert!(depth(noise(20000)) == 20000);
 }
 
+test("as deep as the frame limit allows") {
+    assert!(depth(noise(900000)) == 900000);
+}
+
 test("non-tail mutual recursion") {
     assert!(ping(noise(10001)) == 10001);
 }
