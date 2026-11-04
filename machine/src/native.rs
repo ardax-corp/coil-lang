@@ -550,7 +550,9 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
         })
         .collect();
     let sites = words
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|w| NativeSite { entry_pc: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
         .collect();
     install_for_next_run(entries, sites);

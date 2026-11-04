@@ -13,7 +13,9 @@ enum TaskFlow {
     /// A generator close set up its unwind: the unwinder takes over.
     Unwind,
     /// A panic already reported (a `defer` a native close ran): unwind,
-    /// stopping the run when the flag says so.
+    /// stopping the run when the flag says so. (Native code only: none on
+    /// wasm.)
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     Reported(bool),
 }
 
