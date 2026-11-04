@@ -377,6 +377,12 @@ jobs:
         if: matrix.mode != 'gc-stress'
         run: cargo build ${{ matrix.mode == 'release' && '--release' || '' }} --bin coil --bin coil-test
 
+      # The runtime `coil package` links native executables with: the
+      # native cell packages one for the inventory (interpreter symbols).
+      - name: Build the native runtime
+        if: matrix.mode == 'release'
+        run: cargo build --release -p coil-rt
+
       # `coil test` re-execs `coil-test`; the GC-stress cells run this
       # harness directly. Release only: the debug GC-stress cells are off
       # (#2131).
@@ -392,6 +398,9 @@ jobs:
             cp target/gc-stress/release/coil-test harness-bin/gc-stress/
           else
             cp target/${{ matrix.mode }}/coil target/${{ matrix.mode }}/coil-test harness-bin/
+            if [ "${{ matrix.mode }}" = release ]; then
+              cp target/release/libcoil_rt.a harness-bin/
+            fi
           fi
 
       - uses: actions/upload-artifact@v4
@@ -496,8 +505,30 @@ jobs:
               $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
             # Every corpus again with native code where the backend compiles
             # a body (`docs/internals/native.md`): it must pass as the VM does.
-            native) $run -- --engine native $FLAGS ;;
+            # Each run also appends what it left on the VM to the
+            # inventory (`scripts/native_inventory.py`, next step).
+            native) mkdir -p target && COIL_NATIVE_INVENTORY="$PWD/target/native-inventory.tsv" $run -- --engine native $FLAGS ;;
           esac
+
+      # What native runs still leave on the VM, and the interpreter symbols
+      # in a packaged executable (the plan in docs/internals/native.md drives
+      # them to 0; `--max` gates join as each step lands).
+      - name: Native inventory
+        if: matrix.variant == 'native' && always()
+        run: |
+          mkdir -p target/native-hello
+          printf 'use io::sync::println;\nfn main() {\n    let _ = println("hello");\n}\n' > target/native-hello/hello.coil
+          COIL_RT_LIB=harness-bin/libcoil_rt.a harness-bin/coil package --root .deps/coil-stdlib/src \
+            target/native-hello/hello.coil -o target/native-hello/hello
+          ls -l target/native-hello/hello
+          python3 scripts/native_inventory.py target/native-inventory.tsv --exe target/native-hello/hello
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.variant == 'native' && always()
+        with:
+          name: native-inventory
+          path: target/native-inventory.tsv
+          retention-days: 14
 
       # The examples in the builtin doc stubs (compiler/src/builtin_docs/)
       # and the embedded modules (compiler/src/prelude/, such as `task`),

@@ -73,6 +73,16 @@ compiled, and its cases (and the machines they spawn) run it. A suite must
 pass on both engines; CI's `harness native` cell runs every corpus this
 way. `--coverage` needs `--engine vm` (it counts what the VM runs).
 
+With `COIL_NATIVE_INVENTORY=FILE` the run appends what it left on the VM:
+per compiled file the bodies compiled and refused (with each reason), and
+per run the VM entries, bails, calls the VM ran and host calls in a VM
+stub (`machine::native::vm_use_counts`). `scripts/native_inventory.py FILE
+[--exe PACKAGED] [--max KEY=N]` sums them, groups the refusals by reason,
+counts the interpreter symbols (`machine::vm`) of a packaged executable,
+and fails over a limit. The `harness native` cell writes the report to its
+job summary and uploads the file (`native-inventory`); the steps that take
+the VM out of native binaries drive every total to 0.
+
 ### The native MIR section
 
 `ArchivedProgram::native_mir` (archive 6.20; 6.0 to 6.19 archives load
