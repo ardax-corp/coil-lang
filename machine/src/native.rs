@@ -872,7 +872,8 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return 0;
     };
-    match gc.as_mut().words_view(for_store != 0) {
+    let view = if for_store != 0 { gc.as_mut().words_view(true) } else { gc.as_ref().words_view_for_load() };
+    match view {
         Some((ptr, len)) => {
             unsafe {
                 out.write(ptr as u64);

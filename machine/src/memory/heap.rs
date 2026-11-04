@@ -3631,6 +3631,15 @@ impl ObjArray {
 
     /// The element words in place, for native code (`None` for a byte
     /// array). `for_store` marks the array as a VM store would.
+    /// [`Self::words_view`] for loads only: no write to the object, so a
+    /// shared-heap worker may view an array from before its epoch.
+    pub(crate) fn words_view_for_load(&self) -> Option<(*mut Value, usize)> {
+        match &self.data {
+            ArrayData::Words(w) => Some((w.as_ptr().cast_mut(), w.len())),
+            ArrayData::Bytes(_) => None,
+        }
+    }
+
     pub(crate) fn words_view(&mut self, for_store: bool) -> Option<(*mut Value, usize)> {
         if for_store {
             self.note();
