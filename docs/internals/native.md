@@ -488,8 +488,15 @@ counters (`NativeTable`).
    `coil_aot_sites` / `coil_aot_site_count` (call-site words), and imports
    the runtime helpers by name (`machine::native::helper_symbols()`, all
    `#[unsafe(no_mangle)]`).
-2. `cc` links `program.o` with `libcoil_rt.a` (the `coil-rt` staticlib,
-   found via `COIL_RT_LIB` or beside the `coil` binary). `coil-rt`'s
+2. `cc` links `program.o` with `libcoil_rt.a` (the `coil-rt` staticlib):
+   `COIL_RT_LIB`, else the copy embedded at the end of `coil`
+   (`scripts/embed_runtime.py`, which the release workflow runs: the
+   library, its length, `COILRT\0\1`), written once to
+   `<cache>/runtime/<sha256 prefix>/` (`package_app::embedded_runtime`),
+   else the file beside `coil` (a cargo build). `--strip-symbols`
+   (`debug` by default, `none`, `all`) sets what the linker strips: the
+   runtime's DWARF, then its symbol table. Coil's backtraces read the
+   program's line table (`-g`), so stripping keeps them. `coil-rt`'s
    `main` calls `machine::native::install_aot` with those symbols, then
    runs the embedded payload like `coil-embed`.
 3. The archive payload is appended as for a runner package; the VM runs
