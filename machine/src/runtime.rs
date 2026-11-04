@@ -50,6 +50,26 @@ pub(crate) struct Runtime {
     pub(crate) shared_stdout: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
     /// What of `shared_print` is stderr: stderr writes and panic messages.
     pub(crate) shared_stderr: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// Loaded libraries and declared C functions (`ffi::`).
+    pub(crate) ffi: FfiState,
+}
+
+/// What the `ffi::` natives keep between calls.
+#[derive(Default)]
+pub(crate) struct FfiState {
+    pub(crate) libraries: std::collections::HashMap<String, Arc<crate::ffi::Library>>,
+    pub(crate) userland_libraries: std::collections::HashMap<u64, crate::memory::Object, AddrHashBuilder>,
+    /// Directory of the entry script (for relative `dload` paths).
+    pub(crate) base_dir: Option<std::path::PathBuf>,
+    /// Extra search paths (`--ffi-search-path`).
+    pub(crate) search_paths: Vec<std::path::PathBuf>,
+    /// Fail-closed `dload` integrity (lock hash or trusted).
+    pub(crate) dload_gate: crate::ffi::DloadGate,
+    /// Registered C struct layouts for pass-by-value FFI.
+    /// Shared with spawned jobs (a refcount per spawn, not a copy).
+    pub(crate) struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// Keeps libffi callback trampolines alive (ties lifetime to the run).
+    pub(crate) closures: Vec<crate::ffi::OwnedClosure>,
 }
 
 impl Runtime {
@@ -91,7 +111,7 @@ impl Runtime {
     pub(crate) fn with(sched: Option<Box<crate::task::Scheduler>>, reactor: std::sync::Arc<crate::reactor::Reactor>, io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>, live_threads: crate::thread::LiveThreadRegistry, worker_cap: std::sync::Arc<crate::thread::WorkerCap>, statics: Vec<Value>, program_strings: Arc<Vec<String>>, program_string_cache: Vec<Value>, native_roots: Vec<(*mut crate::native::NativeCtx, usize)>, ffi_arg_roots: Vec<Value>, finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>, finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>) -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs, output: None, shared_stdout: None, shared_stderr: None }
+        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs, output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default() }
     }
 }
 

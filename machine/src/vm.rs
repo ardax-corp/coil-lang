@@ -1560,20 +1560,7 @@ pub struct Machine<const S: usize> {
     dense_obj: Option<Object>,
     /// A dense streak's `DenseHostCall` allocated: run the safepoint.
     streak_host_alloc: bool,
-    libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
-    userland_libraries: std::collections::HashMap<u64, Object, AddrHashBuilder>,
     resume_stack: Vec<ResumeCtx>,
-    /// Directory of the entry script (for relative `dload` paths).
-    base_dir: Option<PathBuf>,
-    /// Extra search paths (`--ffi-search-path`).
-    ffi_search_paths: Vec<PathBuf>,
-    /// Fail-closed `dload` integrity (lock hash or trusted).
-    dload_gate: crate::ffi::DloadGate,
-    /// Registered C struct layouts for pass-by-value FFI.
-    /// Shared with spawned jobs (a refcount per spawn, not a copy).
-    struct_layouts: Arc<Vec<CStructLayout>>,
-    /// Keeps libffi callback trampolines alive (ties lifetime to VM run).
-    ffi_closures: Vec<crate::ffi::OwnedClosure>,
     /// Bytecode/constants for nested `call_function` / callbacks.
     /// `Arc` so reactor workers share the [`crate::thread::ThreadProgram`] image.
     program_code: Arc<Vec<RawByte>>,
@@ -1770,14 +1757,7 @@ impl<const S: usize> Machine<S> {
             rt: crate::runtime::Runtime::with(None, reactor, crate::io_reactor::IoReactor::new(), crate::thread::new_live_thread_registry(), worker_cap, Vec::new(), Arc::new(Vec::new()), Vec::new(), Vec::new(), Vec::new(), std::collections::HashMap::default(), std::collections::HashSet::default()),
             stack: Stack::with_capacity(cap),
             streak_host_alloc: false,
-            libraries: std::collections::HashMap::new(),
-            userland_libraries: std::collections::HashMap::default(),
             resume_stack: Vec::new(),
-            base_dir: None,
-            ffi_search_paths: Vec::new(),
-            dload_gate: crate::ffi::DloadGate::deny_all(),
-            struct_layouts: Arc::default(),
-            ffi_closures: Vec::new(),
             program_code: Arc::new(Vec::new()),
             program_constants: Arc::new(Vec::new()),
             nested_depth: 0,
@@ -2692,17 +2672,17 @@ impl<const S: usize> Machine<S> {
     }
 
     pub fn set_ffi_paths(&mut self, base_dir: Option<PathBuf>, search_paths: Vec<PathBuf>) {
-        self.base_dir = base_dir;
-        self.ffi_search_paths = search_paths;
+        self.rt.ffi.base_dir = base_dir;
+        self.rt.ffi.search_paths = search_paths;
     }
 
     /// Replace the `dload` gate (default is deny-all).
     pub fn set_dload_gate(&mut self, gate: crate::ffi::DloadGate) {
-        self.dload_gate = gate;
+        self.rt.ffi.dload_gate = gate;
     }
 
     pub fn dload_gate(&self) -> &crate::ffi::DloadGate {
-        &self.dload_gate
+        &self.rt.ffi.dload_gate
     }
 
     /// Host/test stems with no lock hash. Does not restore a first-party exemption.
@@ -2712,13 +2692,13 @@ impl<const S: usize> Machine<S> {
         St: AsRef<str>,
     {
         for stem in extra_stems {
-            self.dload_gate.grant_stem(stem.as_ref());
+            self.rt.ffi.dload_gate.grant_stem(stem.as_ref());
         }
     }
 
     /// Mutable access for host/test grants after [`Self::set_dload_gate`].
     pub fn dload_gate_mut(&mut self) -> &mut crate::ffi::DloadGate {
-        &mut self.dload_gate
+        &mut self.rt.ffi.dload_gate
     }
 
     pub fn set_program_debug(&mut self, debug: ProgramDebug) {
@@ -3059,7 +3039,7 @@ impl<const S: usize> Machine<S> {
         if std::fs::metadata(&p).is_ok() {
             return p;
         }
-        if let Some(base) = &self.base_dir {
+        if let Some(base) = &self.rt.ffi.base_dir {
             let root = base.parent().unwrap_or(base.as_path());
             let from_root = root.join(path);
             if std::fs::metadata(&from_root).is_ok() {
@@ -3414,12 +3394,12 @@ impl<const S: usize> Machine<S> {
 
     /// Replace every C struct layout (a reused worker VM takes its job's list).
     pub fn set_struct_layouts(&mut self, layouts: Arc<Vec<CStructLayout>>) {
-        self.struct_layouts = layouts;
+        self.rt.ffi.struct_layouts = layouts;
     }
 
     pub fn register_struct_layout(&mut self, layout: CStructLayout) -> u32 {
-        let id = self.struct_layouts.len() as u32;
-        Arc::make_mut(&mut self.struct_layouts).push(layout);
+        let id = self.rt.ffi.struct_layouts.len() as u32;
+        Arc::make_mut(&mut self.rt.ffi.struct_layouts).push(layout);
         id
     }
 
@@ -3717,10 +3697,10 @@ impl<const S: usize> Machine<S> {
         for (i, ty) in sig.args.iter().enumerate() {
             if let FfiType::Callback(_) = ty {
                 let offset = out[i].as_int() as u32;
-                let cif = callback_cif(&[FfiType::Int], FfiType::Int, &self.struct_layouts)?;
+                let cif = callback_cif(&[FfiType::Int], FfiType::Int, &self.rt.ffi.struct_layouts)?;
                 let closure = make_int_callback(vm_ptr, offset, call_fn, cif)?;
                 let ptr = closure.code_ptr_usize();
-                self.ffi_closures.push(closure);
+                self.rt.ffi.closures.push(closure);
                 out[i] = Value::from(ptr as u64);
             }
         }
@@ -3747,15 +3727,15 @@ impl<const S: usize> Machine<S> {
     pub fn load_userland_library(&mut self, path: &str) -> Result<Value, String> {
         let lib_arc = crate::ffi::resolve_library(
             path,
-            self.base_dir.as_deref(),
-            &self.ffi_search_paths,
-            &self.dload_gate,
+            self.rt.ffi.base_dir.as_deref(),
+            &self.rt.ffi.search_paths,
+            &self.rt.ffi.dload_gate,
         )
         .map_err(|e| e.to_string())?;
         let (object, _gc) = self.rt.heap.alloc_library(lib_arc.clone());
         let addr = object.addr();
-        self.userland_libraries.insert(addr, object);
-        self.libraries
+        self.rt.ffi.userland_libraries.insert(addr, object);
+        self.rt.ffi.libraries
             .entry(path.to_string())
             .or_insert_with(|| lib_arc.clone());
         Ok(Value::from(addr))
@@ -4279,7 +4259,7 @@ impl<const S: usize> Machine<S> {
         // lifetime; the Coil handle is only an addr. Root those keys so GC
         // cannot sweep a live dload and `FfiInvoke` hit `invalid library handle`.
         // Keyed by address, so they must not move.
-        for &addr in self.userland_libraries.keys() {
+        for &addr in self.rt.ffi.userland_libraries.keys() {
             visit(addr, crate::memory::RootKind::Pinned);
         }
         // In-flight FFI arguments: C may hold pointers into them.
@@ -5141,10 +5121,10 @@ impl<const S: usize> Machine<S> {
             worker_cap: std::sync::Arc::clone(&self.rt.worker_cap),
             reactor: std::sync::Arc::clone(&self.rt.reactor),
             io_reactor: std::sync::Arc::clone(&self.rt.io_reactor),
-            ffi_base_dir: self.base_dir.clone(),
-            ffi_search_paths: self.ffi_search_paths.clone(),
-            dload_gate: self.dload_gate.clone(),
-            struct_layouts: Arc::clone(&self.struct_layouts),
+            ffi_base_dir: self.rt.ffi.base_dir.clone(),
+            ffi_search_paths: self.rt.ffi.search_paths.clone(),
+            dload_gate: self.rt.ffi.dload_gate.clone(),
+            struct_layouts: Arc::clone(&self.rt.ffi.struct_layouts),
             statics: self.static_words(),
             native: self.native_code(),
         })
@@ -5210,15 +5190,15 @@ impl<const S: usize> Machine<S> {
     ) -> Result<usize, String> {
         let addr = library_value.bits();
         let mut lib_obj = self
-            .userland_libraries
+            .rt.ffi.userland_libraries
             .get(&addr)
             .copied()
             .ok_or_else(|| format!("not a loaded library: 0x{:x}", addr))?;
         if let crate::memory::Object::Library(gc) = &mut lib_obj {
             let obj_lib: &mut crate::memory::ObjLibrary = (**gc).as_mut();
-            let id = crate::ffi::register_on_library(obj_lib, signature, &self.struct_layouts)
+            let id = crate::ffi::register_on_library(obj_lib, signature, &self.rt.ffi.struct_layouts)
                 .map_err(|e| e.to_string())?;
-            self.userland_libraries.insert(addr, lib_obj);
+            self.rt.ffi.userland_libraries.insert(addr, lib_obj);
             Ok(id)
         } else {
             Err("not a library object".to_string())
@@ -5708,8 +5688,8 @@ impl<const S: usize> Machine<S> {
         self.panicked = false;
         self.rt.sched = None;
         self.unwind = Unwind::default();
-        self.userland_libraries.clear();
-        self.ffi_closures.clear();
+        self.rt.ffi.userland_libraries.clear();
+        self.rt.ffi.closures.clear();
         // Drop PCs belong to the job's program: a reused worker may load a
         // different one next, where the same `type_id` names another type.
         self.rt.finalizer_by_type.clear();
@@ -5998,18 +5978,18 @@ impl<const S: usize> Machine<S> {
         };
         match crate::ffi::resolve_library(
             &path,
-            self.base_dir.as_deref(),
-            &self.ffi_search_paths,
-            &self.dload_gate,
+            self.rt.ffi.base_dir.as_deref(),
+            &self.rt.ffi.search_paths,
+            &self.rt.ffi.dload_gate,
         ) {
             Ok(lib_arc) => {
-                self.libraries
+                self.rt.ffi.libraries
                     .entry(path.clone())
                     .or_insert_with(|| lib_arc.clone());
                 let (object, lib) = self.rt.heap.alloc_library(lib_arc);
                 lib.payload_mut().static_symbols = crate::ffi::static_library(&path);
                 let addr = object.addr();
-                self.userland_libraries.insert(addr, object);
+                self.rt.ffi.userland_libraries.insert(addr, object);
                 self.push_result_ok(Value::from(addr));
             }
             Err(e) => {
@@ -6092,7 +6072,7 @@ impl<const S: usize> Machine<S> {
         let name = Self::object_string_value(&self.rt.heap, &name_val);
         let lib_val = self.stack.pop();
         let lib_addr = lib_val.bits();
-        let lib_obj = self.userland_libraries.get(&lib_addr).copied();
+        let lib_obj = self.rt.ffi.userland_libraries.get(&lib_addr).copied();
         match lib_obj {
             Some(mut owned) => {
                 let ffi_sig = crate::ffi::FfiSignature {
@@ -6101,10 +6081,10 @@ impl<const S: usize> Machine<S> {
                     ret: ret_type,
                     variadic,
                 };
-                match Self::register_signature_on_object(&mut owned, ffi_sig, &self.struct_layouts)
+                match Self::register_signature_on_object(&mut owned, ffi_sig, &self.rt.ffi.struct_layouts)
                 {
                     Ok(id) => {
-                        self.userland_libraries.insert(lib_addr, owned);
+                        self.rt.ffi.userland_libraries.insert(lib_addr, owned);
                         self.push_result_ok(Value::from(id as i64));
                     }
                     Err(e) => {
@@ -6123,7 +6103,7 @@ impl<const S: usize> Machine<S> {
 
     fn finish_pending_ffi_invoke(&mut self, pending: PendingFfiInvoke) {
         self.frames.get_mut().set(pending.resume_sp);
-        let lib_obj = self.userland_libraries.get(&pending.lib_addr).copied();
+        let lib_obj = self.rt.ffi.userland_libraries.get(&pending.lib_addr).copied();
         let invoke_result = match lib_obj {
             Some(obj) => {
                 let l = match &obj {
@@ -6151,9 +6131,9 @@ impl<const S: usize> Machine<S> {
                     // closure: packed byte arrays can be lent in place.
                     let mut ctx = crate::ffi::InvokeContext::new(
                         self.rt.heap.get_mut() as *mut Heap,
-                        &self.struct_layouts,
+                        &self.rt.ffi.struct_layouts,
                     )
-                    .lending_arrays(self.ffi_closures.is_empty());
+                    .lending_arrays(self.rt.ffi.closures.is_empty());
                     let mut closure_ptrs = Vec::new();
                     let roots_len = self.rt.ffi_arg_roots.len();
                     self.rt.ffi_arg_roots.extend_from_slice(&args);

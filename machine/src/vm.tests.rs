@@ -3476,7 +3476,7 @@
         let vm_ptr = &mut vm as *mut Machine<512> as *mut c_void;
         let closure = make_int_callback(vm_ptr, 0, Machine::<512>::invoke_call, cif).unwrap();
         let cb_ptr = closure.code_ptr_usize();
-        vm.ffi_closures.push(closure);
+        vm.rt.ffi.closures.push(closure);
 
         let sig = FfiSignature::from_parts(
             "apply_cb",
@@ -3486,7 +3486,7 @@
         .unwrap();
         let prepared = prepare_cif_for_symbol(&sig, &lib, "apply_cb", &[]).unwrap();
         let args = [Value::from(cb_ptr as u64), Value::from(21_i64)];
-        let mut ctx = InvokeContext::new(vm.heap_mut() as *mut Heap, &vm.struct_layouts);
+        let mut ctx = InvokeContext::new(vm.heap_mut() as *mut Heap, &vm.rt.ffi.struct_layouts);
         let mut closure_ptrs = Vec::new();
         let ret = invoke_via_libffi(&prepared, &sig, &args, None, &mut ctx, &mut closure_ptrs)
             .unwrap()
