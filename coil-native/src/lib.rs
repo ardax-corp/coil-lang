@@ -512,6 +512,19 @@ fn used_params(f: &MirFunc) -> usize {
     f.params.iter().rposition(|p| used.contains(p)).map_or(0, |i| i + 1)
 }
 
+/// Whether any instruction or terminator of `f` reads `v`.
+fn value_used(f: &MirFunc, v: ValueId) -> bool {
+    f.blocks.iter().any(|b| {
+        b.insts.iter().any(|i| i.operands().contains(&v))
+            || match &b.term {
+                Some(Terminator::Br { cond, .. }) => *cond == v,
+                Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => *scrutinee == v || payloads.contains(&v),
+                Some(Terminator::Return { lo, hi }) => *lo == Some(v) || *hi == Some(v),
+                _ => false,
+            }
+    })
+}
+
 /// A generator's body: it yields.
 fn is_generator(f: &MirFunc) -> bool {
     f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MirInst::Yield { .. }))
@@ -1622,6 +1635,349 @@ impl<'a> Lower<'a> {
 
     /// Branch to the bail block when `cond` is non-zero, stopping at the
     /// current op for reason `code` (a `TRAP_*`); continue in a new block.
+    /// A `VecLoop` reduce with no stores as a native loop over its lanes,
+    /// one lane at a time, folding left to right as the VM does. Anything
+    /// the VM's lanes would trap on, or a load outside its array's view,
+    /// leaves the loop and runs the whole op on the VM's lane code from the
+    /// start (a pure reduce: nothing it did shows), which gives the VM's
+    /// own result or trap. `false`: not such a reduce (nothing emitted).
+    fn native_reduce(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
+        use compiler::native_mir::VecLoopKind;
+        use common::{dense, simd};
+        let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Reduce { init, ty, fold, term, stores } } = inst else {
+            return Ok(false);
+        };
+        let float = match *ty {
+            dense::TY_I64 => false,
+            dense::TY_F64 => true,
+            _ => return Ok(false),
+        };
+        let fold_ok = match *fold {
+            simd::REDUCE_ADD | simd::REDUCE_MUL => true,
+            simd::REDUCE_AND | simd::REDUCE_OR | simd::REDUCE_XOR => !float,
+            k => (simd::REDUCE_TAKE..simd::REDUCE_TAKE + 6).contains(&k),
+        };
+        if !stores.is_empty() || !fold_ok || pos.is_some_and(|p| value_used(f, p)) || !self.lanes_native(term, 0) {
+            return Ok(false);
+        }
+        let lane_ty = if float { types::F64 } else { types::I64 };
+        let lp = self.b.create_block();
+        self.b.append_block_param(lp, types::I64);
+        self.b.append_block_param(lp, lane_ty);
+        let body = self.b.create_block();
+        let slow = self.b.create_block();
+        let exit = self.b.create_block();
+        self.b.append_block_param(exit, lane_ty);
+        let lo = self.get(f, *from);
+        let lo = self.coerce(lo, types::I64);
+        let hi = self.get(f, *to);
+        let hi = self.coerce(hi, types::I64);
+        let acc0 = self.get(f, *init);
+        let acc0 = self.coerce(acc0, lane_ty);
+        self.b.ins().jump(lp, &[lo.into(), acc0.into()]);
+        self.b.switch_to_block(lp);
+        let p = self.b.block_params(lp)[0];
+        let acc = self.b.block_params(lp)[1];
+        let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
+        self.b.ins().brif(done, exit, &[acc.into()], body, &[]);
+        self.b.switch_to_block(body);
+        let x = self.lane(f, term, p, slow);
+        let x = self.coerce(x, lane_ty);
+        let next = match *fold {
+            simd::REDUCE_ADD if float => self.b.ins().fadd(acc, x),
+            simd::REDUCE_MUL if float => self.b.ins().fmul(acc, x),
+            simd::REDUCE_ADD => {
+                let (r, of) = self.b.ins().sadd_overflow(acc, x);
+                self.leave_if(of, slow);
+                r
+            }
+            simd::REDUCE_MUL => {
+                let (r, of) = self.b.ins().smul_overflow(acc, x);
+                self.leave_if(of, slow);
+                r
+            }
+            simd::REDUCE_AND => self.b.ins().band(acc, x),
+            simd::REDUCE_OR => self.b.ins().bor(acc, x),
+            simd::REDUCE_XOR => self.b.ins().bxor(acc, x),
+            k => {
+                let take = self.lane_cmp(k - simd::REDUCE_TAKE, float, x, acc);
+                self.b.ins().select(take, x, acc)
+            }
+        };
+        let p1 = self.b.ins().iadd_imm_s(p, 1);
+        self.b.ins().jump(lp, &[p1.into(), next.into()]);
+        self.b.switch_to_block(slow);
+        let (w, _) = self.vector_via_vm(f, inst);
+        let w = self.coerce(w, lane_ty);
+        self.b.ins().jump(exit, &[w.into()]);
+        self.b.switch_to_block(exit);
+        let r = self.b.block_params(exit)[0];
+        self.set(f, *dest, r);
+        if let Some(p) = pos {
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.set(f, *p, zero);
+        }
+        Ok(true)
+    }
+
+    /// Whether every node of `e` lowers to native lane code: word loads of
+    /// arrays with a view, and the kinds [`Self::lane`] knows.
+    fn lanes_native(&self, e: &compiler::native_mir::VecExpr, depth: u32) -> bool {
+        use compiler::native_mir::VecExpr;
+        use common::{dense, simd};
+        if depth > 32 {
+            return false;
+        }
+        match e {
+            VecExpr::Splat { ty, .. } => matches!(*ty, dense::TY_I64 | dense::TY_F64),
+            VecExpr::Index => true,
+            VecExpr::Load { array, ty, .. } => matches!(*ty, dense::TY_I64 | dense::TY_F64) && self.views.contains_key(array),
+            VecExpr::Bin { kind, lhs, rhs } => {
+                let known = matches!(
+                    *kind,
+                    simd::IADD64 | simd::ISUB64 | simd::IMUL64 | simd::IDIV64 | simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::FDIV64 | simd::IAND64 | simd::IOR64 | simd::IXOR64
+                ) || (simd::ICMP..simd::ICMP + 6).contains(kind)
+                    || (simd::FCMP..simd::FCMP + 6).contains(kind);
+                known && self.lanes_native(lhs, depth + 1) && self.lanes_native(rhs, depth + 1)
+            }
+            VecExpr::Unary { kind, src } => matches!(*kind, simd::INEG | simd::FNEG | simd::I2F | simd::F2I) && self.lanes_native(src, depth + 1),
+            VecExpr::Select { mask, then, els } => {
+                self.lanes_native(mask, depth + 1) && self.lanes_native(then, depth + 1) && self.lanes_native(els, depth + 1)
+            }
+            VecExpr::Fma { ty, a, b, c } => {
+                matches!(*ty, dense::TY_I64 | dense::TY_F64) && self.lanes_native(a, depth + 1) && self.lanes_native(b, depth + 1) && self.lanes_native(c, depth + 1)
+            }
+        }
+    }
+
+    /// Lane `p` of `e` (an `i64` or `f64` value); a trap or a load outside
+    /// its view jumps to `slow`.
+    fn lane(&mut self, f: &MirFunc, e: &compiler::native_mir::VecExpr, p: cranelift_codegen::ir::Value, slow: Block) -> cranelift_codegen::ir::Value {
+        use compiler::native_mir::VecExpr;
+        use common::{dense, simd};
+        let int = |me: &mut Self, v| me.coerce(v, types::I64);
+        let flt = |me: &mut Self, v| me.coerce(v, types::F64);
+        match e {
+            VecExpr::Splat { v, ty } => {
+                let x = self.get(f, *v);
+                self.coerce(x, if *ty == dense::TY_F64 { types::F64 } else { types::I64 })
+            }
+            VecExpr::Index => p,
+            VecExpr::Load { array, off, ty } => {
+                let o = self.get(f, *off);
+                let o = int(self, o);
+                let (i, of) = self.b.ins().sadd_overflow(p, o);
+                self.leave_if(of, slow);
+                let (fast, out, _join) = self.in_view(*array, i, false);
+                self.b.switch_to_block(out);
+                self.b.ins().jump(slow, &[]);
+                self.b.switch_to_block(fast);
+                let at = self.element(*array, i);
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                if *ty == dense::TY_F64 { flt(self, w) } else { w }
+            }
+            VecExpr::Bin { kind, lhs, rhs } => {
+                let a = self.lane(f, lhs, p, slow);
+                let c = self.lane(f, rhs, p, slow);
+                match *kind {
+                    simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::FDIV64 => {
+                        let (a, c) = (flt(self, a), flt(self, c));
+                        match *kind {
+                            simd::FADD64 => self.b.ins().fadd(a, c),
+                            simd::FSUB64 => self.b.ins().fsub(a, c),
+                            simd::FMUL64 => self.b.ins().fmul(a, c),
+                            _ => self.b.ins().fdiv(a, c),
+                        }
+                    }
+                    k if (simd::FCMP..simd::FCMP + 6).contains(&k) => {
+                        let (a, c) = (flt(self, a), flt(self, c));
+                        let t = self.lane_cmp(k - simd::FCMP, true, a, c);
+                        self.b.ins().uextend(types::I64, t)
+                    }
+                    k => {
+                        let (a, c) = (int(self, a), int(self, c));
+                        match k {
+                            simd::IADD64 => {
+                                let (r, of) = self.b.ins().sadd_overflow(a, c);
+                                self.leave_if(of, slow);
+                                r
+                            }
+                            simd::ISUB64 => {
+                                let (r, of) = self.b.ins().ssub_overflow(a, c);
+                                self.leave_if(of, slow);
+                                r
+                            }
+                            simd::IMUL64 => {
+                                let (r, of) = self.b.ins().smul_overflow(a, c);
+                                self.leave_if(of, slow);
+                                r
+                            }
+                            simd::IDIV64 => {
+                                let z = self.b.ins().icmp_imm_s(IntCC::Equal, c, 0);
+                                self.leave_if(z, slow);
+                                let m = self.b.ins().icmp_imm_s(IntCC::Equal, a, i64::MIN);
+                                let n = self.b.ins().icmp_imm_s(IntCC::Equal, c, -1);
+                                let both = self.b.ins().band(m, n);
+                                self.leave_if(both, slow);
+                                self.b.ins().sdiv(a, c)
+                            }
+                            simd::IAND64 => self.b.ins().band(a, c),
+                            simd::IOR64 => self.b.ins().bor(a, c),
+                            simd::IXOR64 => self.b.ins().bxor(a, c),
+                            k => {
+                                let t = self.lane_cmp(k - simd::ICMP, false, a, c);
+                                self.b.ins().uextend(types::I64, t)
+                            }
+                        }
+                    }
+                }
+            }
+            VecExpr::Unary { kind, src } => {
+                let a = self.lane(f, src, p, slow);
+                match *kind {
+                    simd::INEG => {
+                        let a = int(self, a);
+                        let m = self.b.ins().icmp_imm_s(IntCC::Equal, a, i64::MIN);
+                        self.leave_if(m, slow);
+                        self.b.ins().ineg(a)
+                    }
+                    simd::FNEG => {
+                        let a = flt(self, a);
+                        self.b.ins().fneg(a)
+                    }
+                    simd::I2F => {
+                        let a = int(self, a);
+                        self.b.ins().fcvt_from_sint(types::F64, a)
+                    }
+                    _ => {
+                        let a = flt(self, a);
+                        self.b.ins().fcvt_to_sint_sat(types::I64, a)
+                    }
+                }
+            }
+            VecExpr::Select { mask, then, els } => {
+                let m = self.lane(f, mask, p, slow);
+                let m = int(self, m);
+                let t = self.lane(f, then, p, slow);
+                let e = self.lane(f, els, p, slow);
+                let e = self.coerce(e, self.b.func.dfg.value_type(t));
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, m, 0);
+                self.b.ins().select(c, t, e)
+            }
+            VecExpr::Fma { ty, a, b, c } => {
+                let x = self.lane(f, a, p, slow);
+                let y = self.lane(f, b, p, slow);
+                let z = self.lane(f, c, p, slow);
+                if *ty == dense::TY_F64 {
+                    let (x, y, z) = (flt(self, x), flt(self, y), flt(self, z));
+                    let m = self.b.ins().fmul(x, y);
+                    self.b.ins().fadd(m, z)
+                } else {
+                    let (x, y, z) = (int(self, x), int(self, y), int(self, z));
+                    let (m, of) = self.b.ins().smul_overflow(x, y);
+                    self.leave_if(of, slow);
+                    let (r, of) = self.b.ins().sadd_overflow(m, z);
+                    self.leave_if(of, slow);
+                    r
+                }
+            }
+        }
+    }
+
+    /// `a pred b` on lanes (`dense::CMP_*`), signed for ints and IEEE for
+    /// floats (a NaN compares unequal and unordered), as the VM's lanes.
+    fn lane_cmp(&mut self, pred: u8, float: bool, a: cranelift_codegen::ir::Value, b: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        use common::dense;
+        if float {
+            let cc = match pred {
+                dense::CMP_LT => FloatCC::LessThan,
+                dense::CMP_LE => FloatCC::LessThanOrEqual,
+                dense::CMP_GT => FloatCC::GreaterThan,
+                dense::CMP_GE => FloatCC::GreaterThanOrEqual,
+                dense::CMP_EQ => FloatCC::Equal,
+                _ => FloatCC::NotEqual,
+            };
+            self.b.ins().fcmp(cc, a, b)
+        } else {
+            let cc = match pred {
+                dense::CMP_LT => IntCC::SignedLessThan,
+                dense::CMP_LE => IntCC::SignedLessThanOrEqual,
+                dense::CMP_GT => IntCC::SignedGreaterThan,
+                dense::CMP_GE => IntCC::SignedGreaterThanOrEqual,
+                dense::CMP_EQ => IntCC::Equal,
+                _ => IntCC::NotEqual,
+            };
+            self.b.ins().icmp(cc, a, b)
+        }
+    }
+
+    /// Go to `slow` when `cond`, else on.
+    fn leave_if(&mut self, cond: cranelift_codegen::ir::Value, slow: Block) {
+        let next = self.b.create_block();
+        self.b.ins().brif(cond, slow, &[], next, &[]);
+        self.b.switch_to_block(next);
+    }
+
+    /// A `ByteScan` / `VecLoop` through the VM's lane code: the helper's
+    /// result word and the frame the slots came back in.
+    fn vector_via_vm(&mut self, f: &MirFunc, inst: &MirInst) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::StackSlot) {
+        let op = compiler::native_mir::vector_op(inst).expect("a vector op checked at planning");
+        let t = MemFlagsData::trusted();
+        let n = op.inputs.len() + 2;
+        let frame = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (n * 8) as u32,
+            3,
+        ));
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let start = match op.start {
+            Some(v) => {
+                let x = self.get(f, v);
+                self.coerce(x, types::I64)
+            }
+            None => zero,
+        };
+        self.b.ins().stack_store(types::I64, start, frame, 0);
+        self.b.ins().stack_store(types::I64, zero, frame, 8);
+        for (i, v) in op.inputs.iter().enumerate() {
+            let x = self.get(f, *v);
+            let x = self.coerce(x, types::I64);
+            self.b.ins().stack_store(types::I64, x, frame, ((i + 2) * 8) as i32);
+        }
+        let code = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            (op.body.len().max(1) * 8) as u32,
+            3,
+        ));
+        for (i, w) in op.body.iter().enumerate() {
+            let x = self.b.ins().iconst(types::I64, *w as i64);
+            self.b.ins().stack_store(types::I64, x, code, (i * 8) as i32);
+        }
+        let (kind, lo, hi) = match inst {
+            MirInst::ByteScan { from, bound, .. } => (0, *from, *bound),
+            MirInst::VecLoop { from, to, kind, .. } => {
+                let writes = !matches!(kind, compiler::native_mir::VecLoopKind::Reduce { stores, .. } if stores.is_empty());
+                (1 | if writes { 2 } else { 0 }, *from, *to)
+            }
+            _ => unreachable!(),
+        };
+        let lo = self.get(f, lo);
+        let lo = self.coerce(lo, types::I64);
+        let hi = self.get(f, hi);
+        let hi = self.coerce(hi, types::I64);
+        let kind = self.b.ins().iconst(types::I64, kind);
+        let flags = self.b.ins().iconst(types::I64, i64::from(op.flags));
+        let body = self.b.ins().stack_addr(types::I64, code, 0);
+        let nbody = self.b.ins().iconst(types::I64, op.body.len() as i64);
+        let slots = self.b.ins().stack_addr(types::I64, frame, 0);
+        let nslots = self.b.ins().iconst(types::I64, n as i64);
+        let call = self.b.ins().call(self.vector, &[self.ctx, kind, flags, body, nbody, slots, nslots, lo, hi]);
+        let w = self.b.inst_results(call)[0];
+        let flag = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_BAIL);
+        self.bail_if(flag, TRAP_HELPER);
+        (w, frame)
+    }
+
     fn bail_if(&mut self, cond: cranelift_codegen::ir::Value, code: u64) {
         let next = self.b.create_block();
         let args = self.bail_args(code);
@@ -1988,62 +2344,12 @@ impl<'a> Lower<'a> {
                 self.view_of(f, *dest);
             }
             MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
-                // The VM's `VScan` / `VLoop` body over a frame of the
-                // values' words (`coil_native_vector`).
-                let op = compiler::native_mir::vector_op(inst).expect("a vector op checked at planning");
-                let t = MemFlagsData::trusted();
-                let n = op.inputs.len() + 2;
-                let frame = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                    (n * 8) as u32,
-                    3,
-                ));
-                let zero = self.b.ins().iconst(types::I64, 0);
-                let start = match op.start {
-                    Some(v) => {
-                        let x = self.get(f, v);
-                        self.coerce(x, types::I64)
-                    }
-                    None => zero,
-                };
-                self.b.ins().stack_store(types::I64, start, frame, 0);
-                self.b.ins().stack_store(types::I64, zero, frame, 8);
-                for (i, v) in op.inputs.iter().enumerate() {
-                    let x = self.get(f, *v);
-                    let x = self.coerce(x, types::I64);
-                    self.b.ins().stack_store(types::I64, x, frame, ((i + 2) * 8) as i32);
+                // A pure reduce compiles to a native loop; the rest runs the
+                // VM's `VScan` / `VLoop` body (`coil_native_vector`).
+                if self.native_reduce(f, inst)? {
+                    return Ok(());
                 }
-                let code = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                    (op.body.len().max(1) * 8) as u32,
-                    3,
-                ));
-                for (i, w) in op.body.iter().enumerate() {
-                    let x = self.b.ins().iconst(types::I64, *w as i64);
-                    self.b.ins().stack_store(types::I64, x, code, (i * 8) as i32);
-                }
-                let (kind, lo, hi) = match inst {
-                    MirInst::ByteScan { from, bound, .. } => (0, *from, *bound),
-                    MirInst::VecLoop { from, to, kind, .. } => {
-                        let writes = !matches!(kind, compiler::native_mir::VecLoopKind::Reduce { stores, .. } if stores.is_empty());
-                        (1 | if writes { 2 } else { 0 }, *from, *to)
-                    }
-                    _ => unreachable!(),
-                };
-                let lo = self.get(f, lo);
-                let lo = self.coerce(lo, types::I64);
-                let hi = self.get(f, hi);
-                let hi = self.coerce(hi, types::I64);
-                let kind = self.b.ins().iconst(types::I64, kind);
-                let flags = self.b.ins().iconst(types::I64, i64::from(op.flags));
-                let body = self.b.ins().stack_addr(types::I64, code, 0);
-                let nbody = self.b.ins().iconst(types::I64, op.body.len() as i64);
-                let slots = self.b.ins().stack_addr(types::I64, frame, 0);
-                let nslots = self.b.ins().iconst(types::I64, n as i64);
-                let call = self.b.ins().call(self.vector, &[self.ctx, kind, flags, body, nbody, slots, nslots, lo, hi]);
-                let w = self.b.inst_results(call)[0];
-                let flag = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_BAIL);
-                self.bail_if(flag, TRAP_HELPER);
+                let (w, frame) = self.vector_via_vm(f, inst);
                 match inst {
                     MirInst::ByteScan { dest, .. } => self.set(f, *dest, w),
                     MirInst::VecLoop { dest, pos, .. } => {
