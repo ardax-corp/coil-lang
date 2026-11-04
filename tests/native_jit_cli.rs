@@ -866,7 +866,7 @@ fn task_ops_and_contracts_run_from_native_code() {
 #[cfg(target_os = "linux")]
 #[test]
 fn ffi_calls_run_from_native_code() {
-    // `total` calls an `extern` C function (an FFI op through its stub).
+    // `total` calls an `extern` C function (FFI ops).
     let dir = std::env::temp_dir().join(format!("coil-native-{}-ffi", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -902,6 +902,8 @@ fn ffi_calls_run_from_native_code() {
     assert_eq!(String::from_utf8_lossy(&vm.stdout), String::from_utf8_lossy(&jit.stdout));
     let stats = String::from_utf8_lossy(&jit.stderr);
     assert!(compiled(&stats, "total"), "stats: {stats}");
+    // The FFI ops run in Rust, no stub bytecode.
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
 #[test]
