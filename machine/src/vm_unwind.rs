@@ -153,7 +153,7 @@ impl<const S: usize> Machine<S> {
     /// then the closer goes on past the call. Any other generator is just
     /// marked done.
     fn coro_close(&mut self, handle: Value, ip: &mut usize, sp: &mut usize) -> TaskFlow {
-        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits()) else {
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.rt.heap, handle.bits()) else {
             return TaskFlow::Value(Value::default());
         };
         // A delegating generator is suspended in its innermost delegate.
@@ -220,7 +220,7 @@ impl<const S: usize> Machine<S> {
         }
         Self::with_coroutine_mut(gc, |c| c.closeable = true);
         self.closeables = true;
-        self.heap.note_closeable(Object::Coroutine(gc));
+        self.rt.heap.note_closeable(Object::Coroutine(gc));
     }
 
     /// The next step of the innermost close: the next pad among the

@@ -35,7 +35,7 @@ impl<const S: usize> Machine<S> {
                 promise!(top >= 2);
                 let rhs = self.stack[top - 1];
                 let lhs = self.stack[top - 2];
-                match crate::fused::eval_bin(common::Instruction::$op as u8, lhs, rhs, &self.heap) {
+                match crate::fused::eval_bin(common::Instruction::$op as u8, lhs, rhs, &self.rt.heap) {
                     Ok(r) => {
                         self.stack[top - 2] = r;
                         self.stack.seek(top - 1);
@@ -218,7 +218,7 @@ impl<const S: usize> Machine<S> {
                     let v = self.stack.pop();
                     let text = match common::stringify_tag(opcode.operand_u32()) {
                         Some(tag) => Self::stringify_immediate(tag, v),
-                        None => Self::stringify_value(&self.heap, v),
+                        None => Self::stringify_value(&self.rt.heap, v),
                     };
                     self.push_new_string(text, ip);
                 }
@@ -262,14 +262,14 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(Value::from(if v != 0 { 1 } else { 0 }));
                 }
                 Instruction::INIT => {
-                    let (_, mut r) = self.heap.alloc(ObjInstance::default(), Object::Instance);
+                    let (_, mut r) = self.rt.heap.alloc(ObjInstance::default(), Object::Instance);
                     let _ = r.as_mut();
                     // Root before GC, same rule as `push_new_string`.
                     self.push_fresh(r.as_ptr().addr() as u64, ip);
                 }
                 Instruction::InitTyped => {
                     let (type_id, nfields) = unpack_init_typed(opcode.operand_u32());
-                    let (_, mut r) = self.heap.alloc(
+                    let (_, mut r) = self.rt.heap.alloc(
                         ObjInstance::with_type_id_and_fields(type_id, nfields as usize),
                         Object::Instance,
                     );
@@ -282,7 +282,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + b < stack_cap);
                     let va = self.stack[sp + a];
                     let vb = self.stack[sp + b];
-                    match crate::fused::eval_bin(op, va, vb, &self.heap) {
+                    match crate::fused::eval_bin(op, va, vb, &self.rt.heap) {
                         Ok(result) => self.stack.push(result),
                         Err(t) => int_trap!(t),
                     }
@@ -309,8 +309,8 @@ impl<const S: usize> Machine<S> {
                     // `heap.alloc` inside the closure; count those so GC
                     // pressure still fires when HostInvoke is the only
                     // allocator on a hot path.
-                    let live_before = self.heap.live_object_count();
-                    let host_op = match self.natives.get_by_id(fn_id) {
+                    let live_before = self.rt.heap.live_object_count();
+                    let host_op = match self.rt.natives.get_by_id(fn_id) {
                         Some(native) => native.host_op(),
                         None => {
                     return dispatch::RestExit::done(self.runtime_panic(
@@ -323,14 +323,14 @@ impl<const S: usize> Machine<S> {
                     match host_op {
                         crate::HostOp::Collect => {
                             self.stack.seek(tell - consume);
-                            let before = self.heap.size();
+                            let before = self.rt.heap.size();
                             if unlikely(!self.stack_maps.is_empty()) {
                                 self.gc_ip = ip;
                             }
                             self.gc_top_ip = Some(ip);
                             self.gc_collect();
                             self.gc_top_ip = None;
-                            let freed = before.saturating_sub(self.heap.size());
+                            let freed = before.saturating_sub(self.rt.heap.size());
                             self.stack.push(Value::from(freed as i64));
                         }
                         crate::HostOp::RegionEnter | crate::HostOp::RegionExit => {
@@ -400,7 +400,7 @@ impl<const S: usize> Machine<S> {
                                 }
                                 return dispatch::RestExit::resume(ip, sp);
                             }
-                            let native = self.natives.get_by_id(fn_id).expect("id checked above");
+                            let native = self.rt.natives.get_by_id(fn_id).expect("id checked above");
                             let args = &self.stack.top_window(consume)[1..];
                             let layout = crate::host_enum::HostEnumLayout::from_operand(
                                 opcode.operand_u32(),
@@ -418,7 +418,7 @@ impl<const S: usize> Machine<S> {
                                 let _ = crate::io::take_fd_exhausted();
                             }
                             let mut invoked = crate::host_enum::with_host_enum_layout(layout, || {
-                                native.invoke(&mut self.heap, args)
+                                native.invoke(&mut self.rt.heap, args)
                             });
                             if unlikely(opens_fd && crate::io::take_fd_exhausted()) {
                                 // Streams nothing reaches may hold the
@@ -486,7 +486,7 @@ impl<const S: usize> Machine<S> {
                                     return dispatch::RestExit::done(self.runtime_panic(&msg, ip.saturating_sub(1)));
                                 }
                                 Err(e) => {
-                                    let name = self.natives.get_by_id(fn_id).map_or("?", |n| n.name()).to_string();
+                                    let name = self.rt.natives.get_by_id(fn_id).map_or("?", |n| n.name()).to_string();
                     return dispatch::RestExit::done(self.runtime_panic(
                                         &format!("HostInvoke failed for `{name}`: {e}"),
                                         ip.saturating_sub(1),
@@ -496,7 +496,7 @@ impl<const S: usize> Machine<S> {
                             }
                         }
                     }
-                    let allocated = self.heap.live_object_count().saturating_sub(live_before);
+                    let allocated = self.rt.heap.live_object_count().saturating_sub(live_before);
                     if allocated > 0 {
                         self.maybe_gc_after_alloc(ip);
                     }
@@ -569,22 +569,22 @@ impl<const S: usize> Machine<S> {
                         Instruction::MakeArray | Instruction::MakeArrayK
                     );
                     let addr = if !array && n == 0 {
-                        self.heap.immortal_empty_tuple().addr()
+                        self.rt.heap.immortal_empty_tuple().addr()
                     } else if !array {
                         let tuple = ObjTuple::from_slice(&self.stack[base..base + n])
                             .with_kinds(opcode.make_kinds());
-                        let (object, _) = self.heap.alloc(tuple, Object::Tuple);
+                        let (object, _) = self.rt.heap.alloc(tuple, Object::Tuple);
                         object.addr()
                     } else {
                         let values = Self::stack_copy_decl(&self.stack, base, n);
-                        let mut arr = ObjArray::from_values(values, &self.heap);
+                        let mut arr = ObjArray::from_values(values, &self.rt.heap);
                         if matches!(opcode.bytecode(), Instruction::MakeArrayK) {
                             arr.set_elem_kind((opcode.operand_u32() >> 16) as u8 & 0x3);
                             // Not allocated yet: the allocation counts the
                             // packed size.
                             let _ = arr.take_resize();
                         }
-                        let (object, _) = self.heap.alloc(arr, Object::Array);
+                        let (object, _) = self.rt.heap.alloc(arr, Object::Array);
                         object.addr()
                     };
                     self.stack.seek(base);
@@ -594,7 +594,7 @@ impl<const S: usize> Machine<S> {
                     let slot = opcode.operand_u32();
                     let arr_val = self.stack.pop();
                     let addr = arr_val.bits();
-                    if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) {
+                    if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.rt.heap, addr) {
                         self.pin_current_array(slot, Object::Array(gc));
                     }
                 }
@@ -605,7 +605,7 @@ impl<const S: usize> Machine<S> {
                     let index = index_val.as_int();
                     let unchecked = matches!(*bc, Instruction::IndexUnchecked);
                     // Arrays dominate Index traffic (Vec); check Array before Tuple.
-                    let result = match self.heap.trusted_object(target_addr) {
+                    let result = match self.rt.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Array(gc)) => {
                             gc.as_ref().read_indexed(index, unchecked)
                         }
@@ -642,17 +642,17 @@ impl<const S: usize> Machine<S> {
                     for _ in 0..arity {
                         let name_val = self.stack.pop();
                         let value = self.stack.pop();
-                        pairs.push((Self::intern_key(&mut self.heap, name_val), value));
+                        pairs.push((Self::intern_key(&mut self.rt.heap, name_val), value));
                     }
                     pairs.reverse();
                     // Allocate the instance and populate.
                     let (object, mut gc) =
-                        self.heap.alloc(ObjInstance::default(), Object::Instance);
+                        self.rt.heap.alloc(ObjInstance::default(), Object::Instance);
                     {
                         let instance: &mut ObjInstance = gc.as_mut();
                         for (key, value) in pairs {
                             let member = if let Some(obj) =
-                                Self::find_object_by_addr(&self.heap, value.bits())
+                                Self::find_object_by_addr(&self.rt.heap, value.bits())
                             {
                                 crate::memory::Member::Object(obj)
                             } else {
@@ -666,9 +666,9 @@ impl<const S: usize> Machine<S> {
                 Instruction::GetField => {
                     let name_val = self.stack.pop();
                     let target_val = self.stack.pop();
-                    let key = Self::intern_key(&mut self.heap, name_val);
+                    let key = Self::intern_key(&mut self.rt.heap, name_val);
                     let target_addr = target_val.bits();
-                    let result = match self.heap.trusted_object(target_addr) {
+                    let result = match self.rt.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Instance(gc)) => match gc.as_ref().get(key) {
                             Some(v) => v,
                             None => {
@@ -687,7 +687,7 @@ impl<const S: usize> Machine<S> {
                         let value = self.stack.pop();
                         let target_addr = target_val.bits();
                         if let Some(crate::memory::Object::Instance(mut gc)) =
-                            self.heap.trusted_object(target_addr)
+                            self.rt.heap.trusted_object(target_addr)
                         {
                             let idx = slot as usize;
                             promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
@@ -700,12 +700,12 @@ impl<const S: usize> Machine<S> {
                         let name_val = self.stack.pop();
                         let target_val = self.stack.pop();
                         let value = self.stack.pop();
-                        let key = Self::intern_key(&mut self.heap, name_val);
+                        let key = Self::intern_key(&mut self.rt.heap, name_val);
                         let target_addr = target_val.bits();
                         if let Some(crate::memory::Object::Instance(mut gc)) =
-                            self.heap.trusted_object(target_addr)
+                            self.rt.heap.trusted_object(target_addr)
                         {
-                            let member = Self::value_as_member(&self.heap, value);
+                            let member = Self::value_as_member(&self.rt.heap, value);
                             gc.as_mut().set(key, member);
                         } else {
                     return dispatch::RestExit::done(self.runtime_panic("SetField on non-instance", ip.saturating_sub(1)));
@@ -721,7 +721,7 @@ impl<const S: usize> Machine<S> {
                     let index = index_val.as_int();
                     let unchecked = matches!(*bc, Instruction::StoreIndexUnchecked);
                     if let Some(crate::memory::Object::Array(mut gc)) =
-                        self.heap.trusted_object(target_addr)
+                        self.rt.heap.trusted_object(target_addr)
                     {
                         if !gc.as_mut().store_indexed(index, value, unchecked) {
                     return dispatch::RestExit::done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
@@ -791,7 +791,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + bound < stack_cap);
                     let (from, bound) = (self.stack[sp + from].as_int(), self.stack[sp + bound].as_int());
                     let found = match code.get(ip..ip + n) {
-                        Some(body) => vscan(&self.heap, &self.stack, sp, &mut self.vregs, body, from, bound, inclusive, backward),
+                        Some(body) => vscan(&self.rt.heap, &self.stack, sp, &mut self.vregs, body, from, bound, inclusive, backward),
                         None => Err("VScan body past the code"),
                     };
                     match found {
@@ -809,7 +809,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + to < stack_cap);
                     let (from, to) = (self.stack[sp + from].as_int(), self.stack[sp + to].as_int());
                     let ran = match code.get(ip..ip + n) {
-                        Some(body) => vloop(&mut self.heap, &mut self.stack, sp, &mut self.vregs, body, dest, from, to, pos),
+                        Some(body) => vloop(&mut self.rt.heap, &mut self.stack, sp, &mut self.vregs, body, dest, from, to, pos),
                         None => Err("VLoop body past the code"),
                     };
                     if let Err(msg) = ran {
@@ -908,7 +908,7 @@ impl<const S: usize> Machine<S> {
                         common::dense::unpack_make_object(opcode.operand_u32());
                     let dest = dest as usize;
                     promise!(sp + dest < stack_cap);
-                    let (_, mut r) = self.heap.alloc(
+                    let (_, mut r) = self.rt.heap.alloc(
                         ObjInstance::with_type_id_and_fields(type_id, nfields as usize),
                         Object::Instance,
                     );
@@ -932,7 +932,7 @@ impl<const S: usize> Machine<S> {
                 Instruction::ArrayLen => {
                     let target_val = self.stack.pop();
                     let target_addr = target_val.bits();
-                    let len = match self.heap.trusted_object(target_addr) {
+                    let len = match self.rt.heap.trusted_object(target_addr) {
                         Some(crate::memory::Object::Array(gc)) => gc.as_ref().len(),
                         Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().len(),
                         Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
@@ -950,7 +950,7 @@ impl<const S: usize> Machine<S> {
                     let dict_addr = dict_val.bits();
                     let mut pair_addrs: Vec<Value> = Vec::new();
                     if let Some(crate::memory::Object::Instance(gc)) =
-                        Self::find_object_by_addr(&self.heap, dict_addr)
+                        Self::find_object_by_addr(&self.rt.heap, dict_addr)
                     {
                         let entries: Vec<(crate::memory::RefString, Member)> =
                             gc.as_ref().iter_fields().collect();
@@ -960,14 +960,14 @@ impl<const S: usize> Machine<S> {
                                 Member::Value(v) => v,
                                 Member::Object(o) => Value::from(o.addr()),
                             };
-                            let (tuple_obj, _) = self.heap.alloc(
+                            let (tuple_obj, _) = self.rt.heap.alloc(
                                 ObjTuple::new(vec![key_val, val]),
                                 Object::Tuple,
                             );
                             pair_addrs.push(Value::from(tuple_obj.addr()));
                         }
                     }
-                    let (array_obj, _) = self.heap.alloc(
+                    let (array_obj, _) = self.rt.heap.alloc(
                         ObjArray::new(pair_addrs),
                         Object::Array,
                     );
@@ -982,7 +982,7 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.peek().bits();
 
-                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let cell = Self::trusted_enum(&self.rt.heap, scrutinee_addr);
                     let enum_ref = cell.as_ref();
                     if enum_ref.tag == expected_tag {
                         let pool_idx = (operands & 0xFFFF) as usize;
@@ -1030,7 +1030,7 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().bits();
 
-                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let cell = Self::trusted_enum(&self.rt.heap, scrutinee_addr);
                     let enum_ref = cell.as_ref();
                     promise!(arity == enum_ref.payload.len());
                     for i in 0..arity {
@@ -1045,7 +1045,7 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().bits();
 
-                    match self.heap.trusted_object(scrutinee_addr) {
+                    match self.rt.heap.trusted_object(scrutinee_addr) {
                         Some(Object::Enum(enum_ref)) => {
                             let enum_ref = enum_ref.as_ref();
                             promise!(field_index < enum_ref.payload.len());
@@ -1079,7 +1079,7 @@ impl<const S: usize> Machine<S> {
                     promise!(slot < self.stack.tell());
                     let scrutinee_addr = self.stack[slot].bits();
 
-                    let cell = Self::trusted_enum(&self.heap, scrutinee_addr);
+                    let cell = Self::trusted_enum(&self.rt.heap, scrutinee_addr);
                     let enum_ref = cell.as_ref();
                     promise!(arity == enum_ref.payload.len());
                     for i in 0..arity {
@@ -1103,7 +1103,7 @@ impl<const S: usize> Machine<S> {
                     }
                     values.reverse();
 
-                    let live_mask = Self::saved_stack_live_mask(&self.heap, &values);
+                    let live_mask = Self::saved_stack_live_mask(&self.rt.heap, &values);
                     let obj_coro = ObjCoroutine {
                         state: CoroState::Suspended,
                         resume_ip: target,
@@ -1118,7 +1118,7 @@ impl<const S: usize> Machine<S> {
                         closeable: false,
                         native: None,
                     };
-                    let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
+                    let (object, _) = self.rt.heap.alloc(obj_coro, Object::Coroutine);
 
                     self.push_fresh(object.addr(), ip);
                 }
@@ -1133,7 +1133,7 @@ impl<const S: usize> Machine<S> {
                         Value::from(0_i64)
                     };
                     let addr = handle.bits();
-                    if let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, addr)
+                    if let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.rt.heap, addr)
                     {
                         if gc.as_ref().state == CoroState::Done {
                     return dispatch::RestExit::done(self.runtime_panic("resumed after completion", ip.saturating_sub(1)));
@@ -1181,7 +1181,7 @@ impl<const S: usize> Machine<S> {
                     let handle = self.stack.pop();
                     let addr = handle.bits();
                     if let Some(Object::Coroutine(sub)) =
-                        Self::find_object_by_addr(&self.heap, addr)
+                        Self::find_object_by_addr(&self.rt.heap, addr)
                     {
                     'yield_from: {
                         // A delegate already running natively steps natively.
@@ -1234,7 +1234,7 @@ impl<const S: usize> Machine<S> {
                     let handle = self.stack.pop();
                     let addr = handle.bits();
                     let is_done = matches!(
-                        Self::find_object_by_addr(&self.heap, addr),
+                        Self::find_object_by_addr(&self.rt.heap, addr),
                         Some(Object::Coroutine(gc)) if gc.as_ref().state == CoroState::Done
                     );
                     self.stack.push(Value::from(is_done));
@@ -1269,7 +1269,7 @@ impl<const S: usize> Machine<S> {
                     let filled_mask = self.stack.pop().as_int() as u64;
                     if n_captures == 0 && n_filled == 0 && filled_mask == 0 {
                         // Nothing captured or filled: one shared value per entry.
-                        let object = self.heap.immortal_plain_fn(entry, arity, is_rest);
+                        let object = self.rt.heap.immortal_plain_fn(entry, arity, is_rest);
                         self.stack.push(Value::from(object.addr()));
                     } else {
                         let mut filled_vals = Vec::with_capacity(n_filled);
@@ -1293,7 +1293,7 @@ impl<const S: usize> Machine<S> {
                             captures,
                             dicts: None,
                         };
-                        let (object, _) = self.heap.alloc(pfn, Object::Fn);
+                        let (object, _) = self.rt.heap.alloc(pfn, Object::Fn);
                         self.push_fresh(object.addr(), ip);
                     }
                 }
@@ -1317,7 +1317,7 @@ impl<const S: usize> Machine<S> {
                     let tag = (opcode.operand_u32() & 0xFFFF) as u16;
                     let v = self.stack.pop();
                     let addr = v.bits();
-                    let obj = if addr == 0 { None } else { Self::find_object_by_addr(&self.heap, addr) };
+                    let obj = if addr == 0 { None } else { Self::find_object_by_addr(&self.rt.heap, addr) };
                     // A heap enum or class instance is already one tagged
                     // object word: it passes as itself, so a shared generic
                     // body holds an open `Option<T>` or `Slot<T>` the way
@@ -1334,7 +1334,7 @@ impl<const S: usize> Machine<S> {
                             None => Member::Value(v),
                         };
                         let boxed = ObjBoxed { tag, payload };
-                        let (object, _) = self.heap.alloc(boxed, Object::Boxed);
+                        let (object, _) = self.rt.heap.alloc(boxed, Object::Boxed);
                         // Root before GC: an unpushed fresh box would be swept.
                         self.push_fresh(object.addr(), ip);
                     }
@@ -1357,26 +1357,26 @@ impl<const S: usize> Machine<S> {
                             return dispatch::RestExit::done(self.runtime_panic(&message, ip.saturating_sub(1)));
                         }
                     };
-                    for (slot, value) in self.heap.restore_snapshot(&snapshot) {
+                    for (slot, value) in self.rt.heap.restore_snapshot(&snapshot) {
                         self.statics[slot as usize] = value;
                     }
                 }
                 Instruction::TagEnumType => {
                     // Payload variants only: unit variants are shared immortals.
                     let v = *self.stack.top();
-                    if let Some(Object::Enum(gc)) = Self::find_object_by_addr(&self.heap, v.bits())
+                    if let Some(Object::Enum(gc)) = Self::find_object_by_addr(&self.rt.heap, v.bits())
                         && !gc.as_ref().payload.is_empty()
                     {
                         gc.payload_mut().type_id = opcode.operand_u32();
-                        self.heap.note_enum_type(Object::Enum(gc), opcode.operand_u32());
+                        self.rt.heap.note_enum_type(Object::Enum(gc), opcode.operand_u32());
                     }
                 }
                 Instruction::TagArrayKind => {
                     let v = *self.stack.top();
-                    if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, v.bits()) {
+                    if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.rt.heap, v.bits()) {
                         let arr = gc.payload_mut();
                         arr.set_elem_kind(opcode.operand_u32() as u8);
-                        self.heap.account_array(arr);
+                        self.rt.heap.account_array(arr);
                     }
                 }
                 Instruction::UnboxValue => {
@@ -1384,7 +1384,7 @@ impl<const S: usize> Machine<S> {
                     let v = self.stack.pop();
                     let addr = v.bits();
                     let result = if let Some(Object::Boxed(gc)) =
-                        Self::find_object_by_addr(&self.heap, addr)
+                        Self::find_object_by_addr(&self.rt.heap, addr)
                     {
                         let b = gc.as_ref();
                         if b.tag == expected_tag || u32::from(expected_tag) == common::UNBOX_ANY_TAG {
@@ -1413,7 +1413,7 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::MakePolyFn => {
                     let entry = opcode.operand_u32();
-                    let (object, _) = self.heap.alloc(ObjFn::poly(entry, 0, Vec::new()), Object::Fn);
+                    let (object, _) = self.rt.heap.alloc(ObjFn::poly(entry, 0, Vec::new()), Object::Fn);
                     self.push_fresh(object.addr(), ip);
                 }
                 Instruction::MakePolyFnCapture => {
@@ -1427,13 +1427,13 @@ impl<const S: usize> Machine<S> {
                         captured_dicts[slot] = if addr == 0 {
                             // Unresolved evidence, filled at CallIndirect.
                             None
-                        } else if let Some(obj) = Self::find_object_by_addr(&self.heap, addr) {
+                        } else if let Some(obj) = Self::find_object_by_addr(&self.rt.heap, addr) {
                             Some(Member::Object(obj))
                         } else {
                             Some(Member::Value(value))
                         };
                     }
-                    let (object, _) = self.heap.alloc(ObjFn::poly(entry, arity, captured_dicts), Object::Fn);
+                    let (object, _) = self.rt.heap.alloc(ObjFn::poly(entry, arity, captured_dicts), Object::Fn);
                     self.push_fresh(object.addr(), ip);
                 }
                 Instruction::DynAdd
@@ -1472,7 +1472,7 @@ impl<const S: usize> Machine<S> {
         let fn_obj = if raw.is_zero() {
             None
         } else {
-            match self.heap.find_object_by_addr(raw.bits()) {
+            match self.rt.heap.find_object_by_addr(raw.bits()) {
                 Some(Object::Fn(gc)) => Some(gc),
                 _ => None,
             }
@@ -1591,7 +1591,7 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn bad_call_target(&mut self, raw: Value, ip: usize) -> bool {
-        let what = if self.heap.find_object_by_addr(raw.bits()).is_some() {
+        let what = if self.rt.heap.find_object_by_addr(raw.bits()).is_some() {
             "a heap object that is not a function"
         } else {
             "not a code offset"
@@ -1698,7 +1698,7 @@ impl<const S: usize> Machine<S> {
                 captures: base.captures.clone(),
                 dicts: None,
             };
-            let (object, _) = self.heap.alloc(partial, Object::Fn);
+            let (object, _) = self.rt.heap.alloc(partial, Object::Fn);
             self.stack.push(Value::from(object.addr()));
             self.maybe_gc_after_call_alloc(ip);
             return (ip, dispatch::RestFlow::Continue);
@@ -1712,13 +1712,13 @@ impl<const S: usize> Machine<S> {
             let rest_val = if remaining_new.len() == 1
                 && !remaining_new[0].is_zero()
                 && matches!(
-                    Self::find_object_by_addr(&self.heap, remaining_new[0].bits()),
+                    Self::find_object_by_addr(&self.rt.heap, remaining_new[0].bits()),
                     Some(Object::Array(_))
                 ) {
                 remaining_new[0]
             } else {
                 let arr = crate::memory::ObjArray::new(remaining_new.to_vec());
-                let (object, _) = self.heap.alloc(arr, Object::Array);
+                let (object, _) = self.rt.heap.alloc(arr, Object::Array);
                 Value::from(object.addr())
             };
             call_args.push(rest_val);

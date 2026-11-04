@@ -1544,7 +1544,8 @@ const OVER_APPLY_IP: usize = 1 << 40;
 const OVER_APPLY_IP: usize = 1 << 31;
 
 pub struct Machine<const S: usize> {
-    heap: crate::memory::HeapSlot,
+    /// The heap, the host natives and what else native code shares.
+    rt: crate::runtime::Runtime,
     stack: Stack<Value>,
     frames: ArrayVec<Frame, S>,
     /// Pin tables for frames that ran `ArrayPin` or a dense heap index.
@@ -1558,7 +1559,6 @@ pub struct Machine<const S: usize> {
     dense_obj_addr: u64,
     dense_obj: Option<Object>,
     output: Option<OutputSink>,
-    natives: crate::ffi::Natives,
     /// A dense streak's `DenseHostCall` allocated: run the safepoint.
     streak_host_alloc: bool,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
@@ -1802,14 +1802,9 @@ impl<const S: usize> Machine<S> {
             cow_shares: 0,
             dense_obj_addr: 0,
             dense_obj: None,
-            heap: {
-                let mut heap = crate::memory::HeapSlot::default();
-                heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-                heap
-            },
+            rt: crate::runtime::Runtime::new(),
             stack: Stack::with_capacity(cap),
             output: None,
-            natives: crate::ffi::Natives::new(),
             streak_host_alloc: false,
             libraries: std::collections::HashMap::new(),
             userland_libraries: std::collections::HashMap::default(),
@@ -2133,7 +2128,7 @@ impl<const S: usize> Machine<S> {
     fn native_env(&mut self) -> crate::native::NativeEnv {
         let strings_len = self.program_strings.len().min(self.program_string_cache.len());
         crate::native::NativeEnv {
-            heap: std::ptr::from_mut::<crate::memory::Heap>(&mut self.heap),
+            heap: std::ptr::from_mut::<crate::memory::Heap>(&mut self.rt.heap),
             strings: self.program_strings.as_ptr(),
             string_cache: self.program_string_cache.as_mut_ptr(),
             strings_len,
@@ -2200,12 +2195,12 @@ impl<const S: usize> Machine<S> {
         if unlikely(!vm.stack_maps.is_empty()) {
             vm.gc_ip = ip;
         }
-        let before = vm.heap.size();
+        let before = vm.rt.heap.size();
         vm.native_roots.push((ctx, vm.frames.len()));
         vm.gc_collect();
         vm.native_roots.pop();
         *panicked = vm.panicked;
-        before.saturating_sub(vm.heap.size()) as u64
+        before.saturating_sub(vm.rt.heap.size()) as u64
     }
 
     /// [`crate::native::NativeHost::free`]: what `FreeEarly` does.
@@ -2299,7 +2294,7 @@ impl<const S: usize> Machine<S> {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
         let fn_id = id as usize;
-        match vm.natives.get_by_id(fn_id)?.host_op() {
+        match vm.rt.natives.get_by_id(fn_id)?.host_op() {
             crate::HostOp::Ordinary => {}
             crate::HostOp::Task => return vm.native_task_op(ctx, fn_id, args),
             op @ (crate::HostOp::RegionEnter | crate::HostOp::RegionExit) => {
@@ -2365,9 +2360,9 @@ impl<const S: usize> Machine<S> {
             // A native may collect (a shared-heap spawn opens its epoch):
             // the native frames' words stay rooted.
             vm.native_roots.push((ctx, vm.frames.len()));
-            let native = vm.natives.get_by_id(fn_id).expect("checked above");
+            let native = vm.rt.natives.get_by_id(fn_id).expect("checked above");
             let mut invoked = crate::host_enum::with_host_enum_layout(layout, || {
-                native.invoke(&mut vm.heap, args)
+                native.invoke(&mut vm.rt.heap, args)
             });
             if opens_fd && crate::io::take_fd_exhausted() {
                 // Streams nothing reaches may hold the descriptors:
@@ -2378,9 +2373,9 @@ impl<const S: usize> Machine<S> {
                 // SAFETY: as above.
                 unsafe { Self::native_gc(raw, ctx, &mut panicked) };
                 vm.ffi_arg_roots.truncate(roots_len);
-                let native = vm.natives.get_by_id(fn_id).expect("checked above");
+                let native = vm.rt.natives.get_by_id(fn_id).expect("checked above");
                 invoked = crate::host_enum::with_host_enum_layout(layout, || {
-                    native.invoke(&mut vm.heap, args)
+                    native.invoke(&mut vm.rt.heap, args)
                 });
             }
             vm.native_roots.pop();
@@ -2412,7 +2407,7 @@ impl<const S: usize> Machine<S> {
                         let wait =
                             crate::thread::host_io_wait(req.handle, req.interest, req.timeout);
                         let v = crate::host_enum::with_host_enum_layout(layout, || {
-                            crate::io::as_result_unit(&mut vm.heap, wait)
+                            crate::io::as_result_unit(&mut vm.rt.heap, wait)
                         });
                         return Some(Invoked::Value(v.bits()));
                     }
@@ -2431,7 +2426,7 @@ impl<const S: usize> Machine<S> {
                 Err(crate::FfiError::Panic(msg)) => return Some(Invoked::Panic(msg)),
                 Err(e) => {
                     let name = vm
-                        .natives
+                        .rt.natives
                         .get_by_id(fn_id)
                         .map_or("?", |n| n.name())
                         .to_string();
@@ -2504,7 +2499,7 @@ impl<const S: usize> Machine<S> {
     /// delegate's body runs natively (no VM frames to unwind), or one
     /// that needs no unwind at all.
     fn native_close_target(&self, handle: Value) -> bool {
-        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits())
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.rt.heap, handle.bits())
         else {
             return true;
         };
@@ -2668,7 +2663,7 @@ impl<const S: usize> Machine<S> {
         };
         self.bind_frame_reserve(code, constants);
         let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
-        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits()) else {
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.rt.heap, handle.bits()) else {
             self.runtime_panic("resumed invalid coroutine handle", call_ip.saturating_sub(1));
             return Value::default();
         };
@@ -2810,7 +2805,7 @@ impl<const S: usize> Machine<S> {
     pub fn set_heap_cap(&mut self, cap: Option<usize>) {
         self.heap_cap = cap.unwrap_or(usize::MAX);
         self.heap_cap_hit = false;
-        self.heap.get_mut().set_byte_cap(self.heap_cap);
+        self.rt.heap.get_mut().set_byte_cap(self.heap_cap);
     }
 
     /// True once the heap outgrew the cap from [`Self::set_heap_cap`].
@@ -2826,7 +2821,7 @@ impl<const S: usize> Machine<S> {
     fn heap_cap_safepoint(&mut self) {
         if !self.heap_cap_hit {
             self.gc_collect();
-            if !self.heap.get().over_byte_cap() {
+            if !self.rt.heap.get().over_byte_cap() {
                 return;
             }
             self.heap_cap_hit = true;
@@ -3087,7 +3082,7 @@ impl<const S: usize> Machine<S> {
         if addr == 0 {
             return None;
         }
-        Some(match Self::find_object_by_addr(&self.heap, addr)? {
+        Some(match Self::find_object_by_addr(&self.rt.heap, addr)? {
             Object::String(gc) => DebugObject::Str(gc.as_ref().data.to_string()),
             Object::Instance(gc) => {
                 let inst = gc.as_ref();
@@ -3119,7 +3114,7 @@ impl<const S: usize> Machine<S> {
     }
 
     pub fn debug_format_value(&self, v: Value) -> String {
-        Self::stringify_value(&self.heap, v)
+        Self::stringify_value(&self.rt.heap, v)
     }
 
     pub fn program_debug(&self) -> &ProgramDebug {
@@ -3276,7 +3271,7 @@ impl<const S: usize> Machine<S> {
         eprintln!(
             "cow-report: {total} copies for {} shares ({} objects copied; each share is a copy a copy-on-assign design makes)",
             self.cow_shares,
-            self.heap.cow_copies()
+            self.rt.heap.cow_copies()
         );
         // A line that copies over and over (a write in a loop to a value
         // something else shares) is worth a borrow or a `Ref<T>`.
@@ -3674,14 +3669,14 @@ impl<const S: usize> Machine<S> {
         if !self.finalizer_by_type.is_empty() && crate::memory::early_free_mode() == crate::memory::EarlyFreeMode::Free {
             let pins = &self.frame_pins;
             let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
-            let Some(drops) = self.heap.early_drops(v, deep, &keep) else {
+            let Some(drops) = self.rt.heap.early_drops(v, deep, &keep) else {
                 return true;
             };
             if !drops.is_empty() && !self.run_early_drops(v, &drops) {
                 return false;
             }
         }
-        free_early_in(&mut self.heap, &mut self.frame_pins, &mut self.dense_obj_addr, &mut self.dense_obj, v, deep);
+        free_early_in(&mut self.rt.heap, &mut self.frame_pins, &mut self.dense_obj_addr, &mut self.dense_obj, v, deep);
         true
     }
 
@@ -3778,16 +3773,16 @@ impl<const S: usize> Machine<S> {
         if ty == common::simd::TY_U8 {
             return self.vload_bytes(vdest, addr, index);
         }
-        vload_words_into(&self.heap, &mut self.vregs[vdest], addr, index)
+        vload_words_into(&self.rt.heap, &mut self.vregs[vdest], addr, index)
     }
 
     fn vload_bytes(&mut self, vdest: usize, addr: u64, index: i64) -> bool {
-        let obj = Self::find_object_by_addr(&self.heap, addr);
-        vload_bytes_into(&self.heap, obj, &mut self.vregs[vdest], addr, index)
+        let obj = Self::find_object_by_addr(&self.rt.heap, addr);
+        vload_bytes_into(&self.rt.heap, obj, &mut self.vregs[vdest], addr, index)
     }
 
     fn vstore(&mut self, vsrc: usize, addr: u64, index: i64, _ty: u8) -> bool {
-        let Some(Object::Array(mut gc)) = Self::find_object_by_addr(&self.heap, addr) else {
+        let Some(Object::Array(mut gc)) = Self::find_object_by_addr(&self.rt.heap, addr) else {
             return false;
         };
         vstore_lanes(gc.as_mut(), &self.vregs[vsrc], index)
@@ -3937,7 +3932,7 @@ impl<const S: usize> Machine<S> {
             &self.dload_gate,
         )
         .map_err(|e| e.to_string())?;
-        let (object, _gc) = self.heap.alloc_library(lib_arc.clone());
+        let (object, _gc) = self.rt.heap.alloc_library(lib_arc.clone());
         let addr = object.addr();
         self.userland_libraries.insert(addr, object);
         self.libraries
@@ -3949,7 +3944,7 @@ impl<const S: usize> Machine<S> {
     /// Complete a GC cycle (explicit `gc::collect` / tests). Finishes any
     /// in-flight incremental sweep first so unmarked survivors are not freed.
     fn gc_collect(&mut self) {
-        if self.heap.epoch_stw() {
+        if self.rt.heap.epoch_stw() {
             if let Some(e) = &self.shared_epoch {
                 e.abort();
             }
@@ -3967,8 +3962,8 @@ impl<const S: usize> Machine<S> {
                 c.fetch_add(1, Ordering::Relaxed);
             });
 
-            if self.heap.gc_is_sweeping() {
-                self.heap.finish_sweep();
+            if self.rt.heap.gc_is_sweeping() {
+                self.rt.heap.finish_sweep();
             }
             self.gc_minor();
             self.clear_dense_obj_cache();
@@ -3978,13 +3973,13 @@ impl<const S: usize> Machine<S> {
             if !queue.is_empty() {
                 let mut gray = Vec::new();
                 for (val, _) in &queue {
-                    if let Some(obj) = Self::find_object_by_addr(&self.heap, val.bits()) {
+                    if let Some(obj) = Self::find_object_by_addr(&self.rt.heap, val.bits()) {
                         obj.mark(&mut gray);
-                        obj.mark_references(&self.heap, &mut gray);
+                        obj.mark_references(&self.rt.heap, &mut gray);
                     }
                 }
                 while let Some(obj) = gray.pop() {
-                    obj.mark_references(&self.heap, &mut gray);
+                    obj.mark_references(&self.rt.heap, &mut gray);
                 }
                 for (val, pc) in queue {
                     self.run_pending(val, pc);
@@ -3996,9 +3991,9 @@ impl<const S: usize> Machine<S> {
             #[cfg(feature = "gc-stats")]
             self.note_gc_census();
             self.check_early_frees();
-            self.heap.clear_dead_weaks();
+            self.rt.heap.clear_dead_weaks();
             // SAFETY: all reachable objects were marked above; dead weaks cleared.
-            unsafe { self.heap.sweep() };
+            unsafe { self.rt.heap.sweep() };
             // Cache is not a GC root; unmarked interned literals are gone.
             self.invalidate_program_string_cache();
             if !self.gc_deferred {
@@ -4021,7 +4016,7 @@ impl<const S: usize> Machine<S> {
     /// nursery and reset it (`feature/escape-memory` step 4). Where nothing
     /// may move it promotes the young objects in place instead.
     fn gc_minor(&mut self) {
-        if !self.heap.has_young_in_use() || !self.heap.gc_is_idle() {
+        if !self.rt.heap.has_young_in_use() || !self.rt.heap.gc_is_idle() {
             return;
         }
         #[cfg(any(test, feature = "vm_profile"))]
@@ -4030,18 +4025,18 @@ impl<const S: usize> Machine<S> {
         });
         let can_move = IN_EXECUTE.get() <= 1
             && self.shared_epoch.is_none()
-            && !self.heap.epoch_stw()
-            && !self.heap.is_borrowed();
+            && !self.rt.heap.epoch_stw()
+            && !self.rt.heap.is_borrowed();
         #[cfg(any(test, feature = "debugger"))]
         let can_move = can_move && self.debug.is_none();
         if !can_move {
-            self.heap.promote_young();
-            self.heap.pretenure_after_promote();
+            self.rt.heap.promote_young();
+            self.rt.heap.pretenure_after_promote();
             return;
         }
         // The dense-index cache names an object that may move.
         self.clear_dense_obj_cache();
-        let mut pins = self.heap.take_gc_roots();
+        let mut pins = self.rt.heap.take_gc_roots();
         let mut must = Vec::new();
         // The object an allocation just wrote is the VM's own word: move it,
         // even where the map can only say the slot may hold a reference.
@@ -4071,7 +4066,7 @@ impl<const S: usize> Machine<S> {
                 if ambiguous {
                     // SAFETY: the slot is a live word of a native root record.
                     let addr = Value::from(unsafe { *w }).heap_addr();
-                    if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                    if addr != 0 && self.rt.heap.find_object_by_addr(addr).is_some() {
                         pins.push(addr);
                     }
                 } else {
@@ -4086,11 +4081,11 @@ impl<const S: usize> Machine<S> {
             .chain(must_native.iter().filter_map(|&w| {
                 // SAFETY: the slot is a live word of a native root record.
                 let addr = Value::from(unsafe { *w }).heap_addr();
-                (addr != 0 && self.heap.find_object_by_addr(addr).is_some()).then_some(addr)
+                (addr != 0 && self.rt.heap.find_object_by_addr(addr).is_some()).then_some(addr)
             }))
             .collect();
-        let plan = self.heap.minor_plan(&pins, &precise);
-        self.heap.restore_gc_roots(pins);
+        let plan = self.rt.heap.minor_plan(&pins, &precise);
+        self.rt.heap.restore_gc_roots(pins);
         for w in must_native {
             // SAFETY: as above.
             unsafe {
@@ -4116,25 +4111,25 @@ impl<const S: usize> Machine<S> {
                 "gc-stress: {kind:?} VM root still names young {addr:#x} after a minor collection"
             );
         });
-        self.heap.minor_finish(plan);
+        self.rt.heap.minor_finish(plan);
     }
 
     /// `gc_region_enter` / `gc_region_exit` around a `region` block. The
     /// outermost one starts and ends with a minor collection, so what the
     /// block allocated and dropped is reclaimed when it ends.
     fn gc_region(&mut self, enter: bool) {
-        if !self.heap.nursery() {
+        if !self.rt.heap.nursery() {
             return;
         }
         if enter {
-            if self.heap.region_enter() {
-                if self.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
+            if self.rt.heap.region_enter() {
+                if self.rt.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
                     self.gc_finish_sweep();
                 }
                 self.gc_minor();
             }
-        } else if self.heap.region_exit() {
-            if self.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
+        } else if self.rt.heap.region_exit() {
+            if self.rt.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
                 self.gc_finish_sweep();
             }
             self.invalidate_program_string_cache();
@@ -4146,9 +4141,9 @@ impl<const S: usize> Machine<S> {
         if !COMPACT_ENABLED.with(|e| *e)
             || IN_EXECUTE.get() > 1
             || self.shared_epoch.is_some()
-            || self.heap.epoch_stw()
-            || self.heap.is_borrowed()
-            || !self.heap.gc_is_idle()
+            || self.rt.heap.epoch_stw()
+            || self.rt.heap.is_borrowed()
+            || !self.rt.heap.gc_is_idle()
         {
             return;
         }
@@ -4166,7 +4161,7 @@ impl<const S: usize> Machine<S> {
             return;
         }
         COMPACT_PACING.set((0, window));
-        let mut pins = self.heap.take_gc_roots();
+        let mut pins = self.rt.heap.take_gc_roots();
         let mut must = Vec::new();
         self.for_each_stack_word(&mut |idx, kind| match kind {
             crate::memory::RootKind::Precise => must.push(idx),
@@ -4178,12 +4173,12 @@ impl<const S: usize> Machine<S> {
             _ => pins.push(addr),
         });
         self.for_each_handle_root(&mut |addr, _| pins.push(addr));
-        let Some(plan) = self.heap.evacuate_plan(&pins, stress) else {
-            self.heap.restore_gc_roots(pins);
+        let Some(plan) = self.rt.heap.evacuate_plan(&pins, stress) else {
+            self.rt.heap.restore_gc_roots(pins);
             COMPACT_PACING.set((0, (window * 2).min(COMPACT_WINDOW_MAX)));
             return;
         };
-        self.heap.restore_gc_roots(pins);
+        self.rt.heap.restore_gc_roots(pins);
         for idx in must {
             if let Some(v) = plan.forward(self.stack[idx]) {
                 self.stack[idx] = v;
@@ -4196,7 +4191,7 @@ impl<const S: usize> Machine<S> {
         }
         #[cfg(feature = "gc-stress")]
         {
-            self.heap.verify_evacuation(&plan);
+            self.rt.heap.verify_evacuation(&plan);
             self.for_each_vm_root(&mut |addr, kind| {
                 assert!(
                     !plan.moved().contains_key(&addr),
@@ -4204,7 +4199,7 @@ impl<const S: usize> Machine<S> {
                 );
             });
         }
-        let evacuation = self.heap.evacuate_finish(plan);
+        let evacuation = self.rt.heap.evacuate_finish(plan);
         self.clear_dense_obj_cache();
         COMPACT_PACING.set((0, if evacuation.capped { 1 } else { COMPACT_WINDOW }));
         #[cfg(feature = "gc-stats")]
@@ -4217,7 +4212,7 @@ impl<const S: usize> Machine<S> {
     fn note_gc_census(&self) {
         let mut roots = Vec::new();
         self.for_each_vm_root(&mut |addr, kind| roots.push((addr, kind)));
-        eprintln!("{}", self.heap.census(&roots));
+        eprintln!("{}", self.rt.heap.census(&roots));
     }
 
     /// `--early-free check`, with a complete mark: mark again from the
@@ -4226,20 +4221,20 @@ impl<const S: usize> Machine<S> {
     /// stale copies), fail if that reaches an object an early free gave
     /// up, then restore the full mark.
     fn check_early_frees(&mut self) {
-        if !self.heap.has_doomed() {
+        if !self.rt.heap.has_doomed() {
             return;
         }
         self.unmark_heap();
-        let mut roots = self.heap.take_gc_roots();
+        let mut roots = self.rt.heap.take_gc_roots();
         self.for_each_stack_root(&mut |addr, kind| {
             if kind == crate::memory::RootKind::Precise {
                 roots.push(addr);
             }
         });
         self.for_each_non_stack_root(&mut |addr, _| roots.push(addr));
-        self.heap.mark_from_roots(&roots);
-        self.heap.restore_gc_roots(roots);
-        self.heap.check_doomed();
+        self.rt.heap.mark_from_roots(&roots);
+        self.rt.heap.restore_gc_roots(roots);
+        self.rt.heap.check_doomed();
         self.unmark_heap();
         self.mark_from_vm_roots();
     }
@@ -4250,14 +4245,14 @@ impl<const S: usize> Machine<S> {
         // be freed or moved under it.
         self.clear_dense_obj_cache();
         let roots = self.collect_vm_root_addrs();
-        self.heap.begin_mark(&roots);
-        self.heap.restore_gc_roots(roots);
+        self.rt.heap.begin_mark(&roots);
+        self.rt.heap.restore_gc_roots(roots);
     }
 
     fn gc_remark_vm_roots(&mut self) {
         let roots = self.collect_vm_root_addrs();
-        self.heap.remark_roots(&roots);
-        self.heap.restore_gc_roots(roots);
+        self.rt.heap.remark_roots(&roots);
+        self.rt.heap.restore_gc_roots(roots);
     }
 
     /// Mark to completion / lazy sweep at an alloc safepoint.
@@ -4266,34 +4261,34 @@ impl<const S: usize> Machine<S> {
         if self.gc_in_progress {
             return;
         }
-        if self.heap.epoch_stw() {
-            if !self.heap.gc_is_idle() || self.heap.should_collect() {
+        if self.rt.heap.epoch_stw() {
+            if !self.rt.heap.gc_is_idle() || self.rt.heap.should_collect() {
                 if let Some(e) = &self.shared_epoch {
                     e.abort();
                 }
-                if self.heap.is_borrowed() {
+                if self.rt.heap.is_borrowed() {
                     self.panicked = true;
                 }
             }
             return;
         }
-        match self.heap.gc_phase() {
+        match self.rt.heap.gc_phase() {
             crate::memory::GcPhase::Idle => {
-                if self.heap.should_collect_young() {
+                if self.rt.heap.should_collect_young() {
                     self.gc_minor();
                 }
-                if self.heap.should_collect_old() {
+                if self.rt.heap.should_collect_old() {
                     self.gc_start_incremental();
                 }
             }
             crate::memory::GcPhase::Marking => self.gc_mark_slice(),
-            crate::memory::GcPhase::Sweeping if self.heap.should_collect_young() => {
+            crate::memory::GcPhase::Sweeping if self.rt.heap.should_collect_young() => {
                 self.gc_finish_sweep();
                 self.gc_minor();
             }
             crate::memory::GcPhase::Sweeping => self.gc_sweep_slice(),
         }
-        if unlikely(self.heap.get().over_byte_cap()) {
+        if unlikely(self.rt.heap.get().over_byte_cap()) {
             self.heap_cap_safepoint();
         }
     }
@@ -4313,7 +4308,7 @@ impl<const S: usize> Machine<S> {
 
     /// Finish a pending lazy sweep in one go.
     fn gc_finish_sweep(&mut self) {
-        self.heap.finish_sweep();
+        self.rt.heap.finish_sweep();
         self.invalidate_program_string_cache();
         self.gc_compact();
     }
@@ -4323,30 +4318,30 @@ impl<const S: usize> Machine<S> {
         // Drain mark at this safepoint: the mutator never runs with gray
         // objects (finalizers below run after the drain), so stores need no
         // write barrier. See `Heap::resurrect_during_mark`.
-        while !self.heap.mark_quantum(usize::MAX) {}
+        while !self.rt.heap.mark_quantum(usize::MAX) {}
         self.gc_remark_vm_roots();
-        while !self.heap.mark_quantum(usize::MAX) {}
+        while !self.rt.heap.mark_quantum(usize::MAX) {}
         let queue = self.queue_unmarked_finalizers();
         if !queue.is_empty() {
             for (val, _) in &queue {
-                if let Some(obj) = Self::find_object_by_addr(&self.heap, val.bits()) {
-                    self.heap.shade_for_finalizer(obj);
+                if let Some(obj) = Self::find_object_by_addr(&self.rt.heap, val.bits()) {
+                    self.rt.heap.shade_for_finalizer(obj);
                 }
             }
-            while !self.heap.mark_quantum(usize::MAX) {}
+            while !self.rt.heap.mark_quantum(usize::MAX) {}
             self.gc_in_progress = true;
             for (val, pc) in queue {
                 self.run_pending(val, pc);
             }
             self.gc_in_progress = false;
             self.gc_remark_vm_roots();
-            while !self.heap.mark_quantum(usize::MAX) {}
+            while !self.rt.heap.mark_quantum(usize::MAX) {}
         }
         #[cfg(feature = "gc-stats")]
         self.note_gc_census();
         self.check_early_frees();
-        self.heap.clear_dead_weaks();
-        self.heap.begin_sweep();
+        self.rt.heap.clear_dead_weaks();
+        self.rt.heap.begin_sweep();
         // Intern table is unlinked; unmarked literals will be freed across
         // later sweep quantums. Drop the STRING index cache now so the mutator
         // cannot reload a pointer that this cycle will dealloc (COI-410).
@@ -4359,8 +4354,8 @@ impl<const S: usize> Machine<S> {
     }
 
     fn gc_sweep_slice(&mut self) {
-        let n = self.heap.gc_sweep_quantum();
-        if self.heap.sweep_quantum(n) {
+        let n = self.rt.heap.gc_sweep_quantum();
+        if self.rt.heap.sweep_quantum(n) {
             self.invalidate_program_string_cache();
             self.gc_compact();
         }
@@ -4368,7 +4363,7 @@ impl<const S: usize> Machine<S> {
 
     fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
         self.release_stale_pins();
-        let mut roots = self.heap.take_gc_roots();
+        let mut roots = self.rt.heap.take_gc_roots();
         self.for_each_vm_root(&mut |addr, _| roots.push(addr));
         roots
     }
@@ -4393,7 +4388,7 @@ impl<const S: usize> Machine<S> {
     /// scalar static is no root, a pointer static is a precise root (a moving
     /// collector rewrites it), anything else stays ambiguous.
     fn for_each_static_root(&self, visit: &mut dyn FnMut(usize, u64, crate::memory::RootKind)) {
-        let heap = &self.heap;
+        let heap = &self.rt.heap;
         let kinds = STATIC_KINDS.with_borrow(Arc::clone);
         for (i, v) in self.statics.iter().enumerate() {
             let kind = match kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN) {
@@ -4419,7 +4414,7 @@ impl<const S: usize> Machine<S> {
     fn for_each_handle_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         self.for_each_handle_root_but_native(visit);
         // Heap words native frames hold across a VM call or a safepoint.
-        let heap = &self.heap;
+        let heap = &self.rt.heap;
         for &(ctx, _) in &self.native_roots {
             // SAFETY: a native call in a collection keeps its context alive.
             unsafe { &*ctx }.for_each_root(|w, ambiguous| {
@@ -4435,7 +4430,7 @@ impl<const S: usize> Machine<S> {
     /// [`Self::for_each_handle_root`] without the native frames' words (a
     /// minor collection forwards those).
     fn for_each_handle_root_but_native(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
-        let heap = &self.heap;
+        let heap = &self.rt.heap;
         let word = |v: Value, kind: crate::memory::RootKind, visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
             let addr = v.heap_addr();
             if addr != 0 && heap.find_object_by_addr(addr).is_some() {
@@ -4485,7 +4480,7 @@ impl<const S: usize> Machine<S> {
     /// Operand-stack roots, frame by frame: a frame with a trusted precise map
     /// roots only its heap slots; every other stack word is scanned.
     fn for_each_stack_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
-        let heap = &self.heap;
+        let heap = &self.rt.heap;
         self.for_each_stack_word(&mut |idx, kind| {
             let v = self.stack[idx];
             let addr = v.heap_addr();
@@ -4729,12 +4724,12 @@ impl<const S: usize> Machine<S> {
 
     fn mark_from_vm_roots(&mut self) {
         let roots = self.collect_vm_root_addrs();
-        self.heap.mark_from_roots(&roots);
-        self.heap.restore_gc_roots(roots);
+        self.rt.heap.mark_from_roots(&roots);
+        self.rt.heap.restore_gc_roots(roots);
     }
 
     fn unmark_heap(&self) {
-        for obj in self.heap.objects() {
+        for obj in self.rt.heap.objects() {
             obj.unmark();
         }
     }
@@ -4746,7 +4741,7 @@ impl<const S: usize> Machine<S> {
             return Vec::new();
         }
         // The heap lists its finalizable objects: no walk of the heap (#1870).
-        let unmarked = self.heap.unmarked_finalizable();
+        let unmarked = self.rt.heap.unmarked_finalizable();
         unmarked
             .into_iter()
             .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_cleanup(obj)?)))
@@ -4792,10 +4787,10 @@ impl<const S: usize> Machine<S> {
         self.gc_collect();
         self.gc_top_ip = None;
         self.ffi_arg_roots.truncate(roots_len);
-        let Some(native) = self.natives.get_by_id(fn_id) else {
+        let Some(native) = self.rt.natives.get_by_id(fn_id) else {
             return Err(crate::FfiError::Panic(format!("HostInvoke: unknown native id {fn_id}")));
         };
-        crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.heap, &args))
+        crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.rt.heap, &args))
     }
 
     /// Close a generator nothing reaches any more (the collector, or
@@ -4866,7 +4861,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn claim_finalizer(&self, v: Value) -> bool {
-        match Self::find_object_by_addr(&self.heap, v.bits()) {
+        match Self::find_object_by_addr(&self.rt.heap, v.bits()) {
             Some(Object::Instance(gc)) => {
                 let inst = gc.payload_mut();
                 !std::mem::replace(&mut inst.finalized, true)
@@ -4922,11 +4917,11 @@ impl<const S: usize> Machine<S> {
             return;
         }
         if early {
-            self.heap.register_early_drop_type(type_id);
+            self.rt.heap.register_early_drop_type(type_id);
         }
         self.finalizer_by_type.insert(type_id, pc);
         self.finalizer_pcs.insert(pc);
-        self.heap.register_finalizer_type(type_id);
+        self.rt.heap.register_finalizer_type(type_id);
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
@@ -4934,7 +4929,7 @@ impl<const S: usize> Machine<S> {
             return;
         }
         let mut queue = Vec::new();
-        for obj in self.heap.objects() {
+        for obj in self.rt.heap.objects() {
             if let Some(pc) = self.pending_cleanup(obj) {
                 queue.push((Value::from(obj.addr()), pc));
             }
@@ -4948,19 +4943,19 @@ impl<const S: usize> Machine<S> {
     fn array_push_value(&mut self, target: Value, value: Value) -> bool {
         let target_addr = target.bits();
         let Some(crate::memory::Object::Array(mut gc)) =
-            Self::find_object_by_addr(&self.heap, target_addr)
+            Self::find_object_by_addr(&self.rt.heap, target_addr)
         else {
             return false;
         };
         gc.as_mut().push(value);
-        self.heap.account_array(gc.as_mut());
+        self.rt.heap.account_array(gc.as_mut());
         true
     }
 
     /// Incremental GC work after an allocation safepoint.
     #[inline]
     fn maybe_gc_after_alloc(&mut self, ip: usize) {
-        if likely(self.heap.gc_is_idle() && !self.heap.should_collect()) {
+        if likely(self.rt.heap.gc_is_idle() && !self.rt.heap.should_collect()) {
             return;
         }
         self.gc_safepoint_from_alloc(ip);
@@ -4972,7 +4967,7 @@ impl<const S: usize> Machine<S> {
     /// a major cycle).
     #[inline]
     fn maybe_gc_after_fresh(&mut self, ip: usize, slot: usize) {
-        if likely(self.heap.gc_is_idle() && !self.heap.should_collect()) {
+        if likely(self.rt.heap.gc_is_idle() && !self.rt.heap.should_collect()) {
             return;
         }
         self.gc_fresh_slot = Some(slot);
@@ -4992,7 +4987,7 @@ impl<const S: usize> Machine<S> {
     /// lists the slots live across the call, not the result word above them,
     /// so the top frame is scanned conservatively instead.
     fn maybe_gc_after_call_alloc(&mut self, ip: usize) {
-        if likely(self.heap.gc_is_idle() && !self.heap.should_collect()) {
+        if likely(self.rt.heap.gc_is_idle() && !self.rt.heap.should_collect()) {
             return;
         }
         if unlikely(!self.stack_maps.is_empty()) {
@@ -5029,7 +5024,7 @@ impl<const S: usize> Machine<S> {
         let tag = opcode.operand_u32() >> 16;
         let arity = opcode.make_arity() as usize;
         if arity == 0 {
-            let object = self.heap.immortal_unit_enum(tag);
+            let object = self.rt.heap.immortal_unit_enum(tag);
             self.stack.push(Value::from(object.addr()));
             return;
         }
@@ -5041,7 +5036,7 @@ impl<const S: usize> Machine<S> {
         let payload =
             Self::stack_copy_enum_payload(&self.stack, sp, arity).with_kinds(opcode.make_kinds());
         let obj_enum = ObjEnum::new(tag, payload);
-        let (object, _) = self.heap.alloc(obj_enum, Object::Enum);
+        let (object, _) = self.rt.heap.alloc(obj_enum, Object::Enum);
         self.stack.seek(sp - arity);
         self.push_fresh(object.addr(), ip);
     }
@@ -5110,7 +5105,7 @@ impl<const S: usize> Machine<S> {
     /// are swept. The new object must be on the operand stack before
     /// [`Self::gc_collect`] so it survives the cycle.
     fn push_new_string(&mut self, data: String, ip: usize) {
-        let gc_string = self.heap.alloc_string(data);
+        let gc_string = self.rt.heap.alloc_string(data);
         self.stack
             .push(Value::from(gc_string.as_ptr() as *mut u8 as u64));
         self.maybe_gc_after_alloc(ip);
@@ -5119,11 +5114,11 @@ impl<const S: usize> Machine<S> {
     /// Push `head + tail`, appending in place when `head` ends at its
     /// buffer's tail ([`crate::memory::StrData::concat`]).
     fn push_concat_str(&mut self, head: Value, tail: &str, ip: usize) {
-        let joined = match Self::find_object_by_addr(&self.heap, head.bits()) {
+        let joined = match Self::find_object_by_addr(&self.rt.heap, head.bits()) {
             Some(Object::String(gh)) => gh.as_ref().concat(tail),
-            _ => crate::memory::ObjString::new(Self::object_string_value(&self.heap, &head) + tail),
+            _ => crate::memory::ObjString::new(Self::object_string_value(&self.rt.heap, &head) + tail),
         };
-        let (obj, _) = self.heap.alloc(joined, Object::String);
+        let (obj, _) = self.rt.heap.alloc(joined, Object::String);
         self.push_fresh(obj.addr(), ip);
     }
 
@@ -5145,7 +5140,7 @@ impl<const S: usize> Machine<S> {
             return;
         }
         let data = unsafe { self.program_strings.get_unchecked(idx) };
-        let gc_string = self.heap.intern_str(data);
+        let gc_string = self.rt.heap.intern_str(data);
         let handle = Value::from(gc_string.as_ptr() as *mut u8 as u64);
         self.stack.push(handle);
         self.maybe_gc_after_alloc(ip);
@@ -5200,7 +5195,7 @@ impl<const S: usize> Machine<S> {
             + Sync
             + 'static,
     {
-        self.natives
+        self.rt.natives
             .register(std::sync::Arc::new(crate::ffi::HostClosureFn::new(
                 sig, func,
             )))
@@ -5208,18 +5203,18 @@ impl<const S: usize> Machine<S> {
 
     /// Back-compat alias for [`Self::register_fn`].
     pub fn register_native(&mut self, native: std::sync::Arc<dyn crate::ffi::NativeFn>) -> usize {
-        self.natives.register(native)
+        self.rt.natives.register(native)
     }
 
     /// Replace the host-native table with a clone of `other` (worker threads).
     pub fn install_natives(&mut self, other: &crate::ffi::Natives) {
-        self.natives = other.clone_registry();
+        self.rt.natives = other.clone_registry();
     }
 
     pub fn set_thread_program(&mut self, program: std::sync::Arc<crate::thread::ThreadProgram>) {
         self.stack_maps = program.stack_maps.clone();
         self.precise_frames = Arc::clone(&program.precise_frames);
-        self.heap
+        self.rt.heap
             .set_class_word_kinds(Arc::clone(&program.class_word_kinds));
         STATIC_KINDS.with_borrow_mut(|k| *k = Arc::clone(&program.static_word_kinds));
         self.thread_program = Some(program);
@@ -5342,7 +5337,7 @@ impl<const S: usize> Machine<S> {
     }
 
     pub fn heap_mut(&mut self) -> &mut Heap {
-        self.heap.get_mut()
+        self.rt.heap.get_mut()
     }
 
     /// Snapshot needed to spawn a worker on this program.
@@ -5350,7 +5345,7 @@ impl<const S: usize> Machine<S> {
         let program = self.thread_program.clone()?;
         Some(crate::thread::ThreadSpawnContext {
             program,
-            natives: self.natives.clone_registry(),
+            natives: self.rt.natives.clone_registry(),
             shared_print: self.shared_print.clone(),
             shared_stdout: self.shared_stdout.clone(),
             shared_stderr: self.shared_stderr.clone(),
@@ -5412,7 +5407,7 @@ impl<const S: usize> Machine<S> {
             operand_stack_slots: self.stack.capacity() as u32,
             stack_maps: self.stack_maps.clone(),
             precise_frames: Arc::clone(&self.precise_frames),
-            class_word_kinds: self.heap.class_word_kinds_table(),
+            class_word_kinds: self.rt.heap.class_word_kinds_table(),
             static_word_kinds: STATIC_KINDS.with_borrow(Arc::clone),
         }));
     }
@@ -5454,7 +5449,7 @@ impl<const S: usize> Machine<S> {
 
     #[cfg(test)]
     pub fn instance_meta(&self, v: Value) -> Option<(u32, bool)> {
-        match Self::find_object_by_addr(&self.heap, v.bits()) {
+        match Self::find_object_by_addr(&self.rt.heap, v.bits()) {
             Some(Object::Instance(gc)) => {
                 let inst = gc.as_ref();
                 Some((inst.type_id, inst.finalized))
@@ -5525,7 +5520,7 @@ impl<const S: usize> Machine<S> {
             saved_frames.last_mut().unwrap().0 = ip;
         }
 
-        let live_mask = Self::saved_stack_live_mask(&self.heap, &segment);
+        let live_mask = Self::saved_stack_live_mask(&self.rt.heap, &segment);
         Self::with_coroutine_mut(coro_gc, |coro| {
             coro.saved_stack = segment;
             coro.saved_live_mask = live_mask;
@@ -5811,7 +5806,7 @@ impl<const S: usize> Machine<S> {
             saved_frames.last_mut().unwrap().0 = *ip;
         }
 
-        let live_mask = Self::saved_stack_live_mask(&self.heap, &segment);
+        let live_mask = Self::saved_stack_live_mask(&self.rt.heap, &segment);
         Self::with_coroutine_mut(coro_gc, |coro| {
             coro.saved_stack = segment;
             coro.saved_live_mask = live_mask;
@@ -5857,7 +5852,7 @@ impl<const S: usize> Machine<S> {
     /// Read-only access to the heap. Used by the GC integration
     /// test to assert that the heap didn't grow unboundedly.
     pub fn heap(&self) -> &Heap {
-        self.heap.get()
+        self.rt.heap.get()
     }
 
     /// True when a language-level `panic` aborted the last run.
@@ -5935,14 +5930,14 @@ impl<const S: usize> Machine<S> {
         self.closeables = false;
         self.gc_in_progress = false;
         self.gc_deferred = false;
-        if self.heap.is_borrowed() {
+        if self.rt.heap.is_borrowed() {
             return;
         }
-        self.heap.owned_mut().clear_finalizer_types();
-        if self.heap.owned_mut().slab_chunk_count() > 1 {
-            *self.heap.owned_mut() = Heap::default();
-        } else if self.heap.owned_mut().slab_chunk_count() == 1 {
-            self.heap.owned_mut().collect(&[]);
+        self.rt.heap.owned_mut().clear_finalizer_types();
+        if self.rt.heap.owned_mut().slab_chunk_count() > 1 {
+            *self.rt.heap.owned_mut() = Heap::default();
+        } else if self.rt.heap.owned_mut().slab_chunk_count() == 1 {
+            self.rt.heap.owned_mut().collect(&[]);
             self.program_string_cache.fill(Value::default());
         }
     }
@@ -5951,7 +5946,7 @@ impl<const S: usize> Machine<S> {
     /// borrowed epoch Heap.
     pub fn reset_shared_stack(&mut self) {
         debug_assert!(
-            !self.heap.is_borrowed(),
+            !self.rt.heap.is_borrowed(),
             "unbind the epoch Heap before resetting the helper stack"
         );
         self.frames = {
@@ -5981,12 +5976,12 @@ impl<const S: usize> Machine<S> {
         &mut self,
         epoch: &std::sync::Arc<crate::shared_heap::SharedHeapEpoch>,
     ) {
-        self.heap.bind(epoch.heap_ptr());
+        self.rt.heap.bind(epoch.heap_ptr());
         self.shared_epoch = Some(std::sync::Arc::clone(epoch));
     }
 
     pub fn unbind_shared_heap(&mut self) {
-        self.heap.unbind();
+        self.rt.heap.unbind();
         self.shared_epoch = None;
     }
 
@@ -6001,18 +5996,18 @@ impl<const S: usize> Machine<S> {
         }
         // A lazy sweep left over from the last cycle only needs finishing;
         // a fresh full collect here would re-mark the whole heap.
-        if self.heap.get().gc_is_sweeping() {
+        if self.rt.heap.get().gc_is_sweeping() {
             self.gc_finish_sweep();
         }
-        if !self.heap.get().gc_is_idle() || self.heap.get().should_collect() {
+        if !self.rt.heap.get().gc_is_idle() || self.rt.heap.get().should_collect() {
             self.gc_collect();
         }
-        if !self.heap.get().gc_is_idle() {
+        if !self.rt.heap.get().gc_is_idle() {
             return Err(crate::thread::ThreadErrorTag::Other);
         }
-        let ptr = self.heap.owned_ptr();
+        let ptr = self.rt.heap.owned_ptr();
         let epoch = crate::shared_heap::SharedHeapEpoch::new(ptr);
-        self.heap.owned_mut().enter_epoch_stw(epoch.alloc_lock());
+        self.rt.heap.owned_mut().enter_epoch_stw(epoch.alloc_lock());
         epoch.jobs.store(1, std::sync::atomic::Ordering::SeqCst);
         self.shared_epoch = Some(std::sync::Arc::clone(&epoch));
         Ok(epoch)
@@ -6035,11 +6030,11 @@ impl<const S: usize> Machine<S> {
             (*e.heap_ptr()).exit_epoch_stw();
         }
         self.shared_epoch = None;
-        if self.heap.is_borrowed() {
+        if self.rt.heap.is_borrowed() {
             return;
         }
         self.steal_join_root = published;
-        if self.heap.get().should_collect() {
+        if self.rt.heap.get().should_collect() {
             // Same incremental start as an alloc safepoint: mark now (with
             // `published` rooted), sweep lazily from later safepoints.
             if self.gc_in_progress {
@@ -6104,17 +6099,17 @@ impl<const S: usize> Machine<S> {
     /// Text of a boxed `Result::Err(payload)` (a string payload as is, other
     /// payloads stringified), for harness failure reports.
     pub fn result_err_text(&self, value: Value) -> Option<String> {
-        match Self::find_object_by_addr(&self.heap, value.bits()) {
+        match Self::find_object_by_addr(&self.rt.heap, value.bits()) {
             Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
                 let payload = gc.as_ref().payload.first().copied()?;
-                Some(Self::stringify_value(&self.heap, payload))
+                Some(Self::stringify_value(&self.rt.heap, payload))
             }
             _ => None,
         }
     }
 
     pub fn result_is_ok(&self, value: Value) -> bool {
-        match Self::find_object_by_addr(&self.heap, value.bits()) {
+        match Self::find_object_by_addr(&self.rt.heap, value.bits()) {
             Some(Object::Enum(gc)) => gc.as_ref().tag == 0,
             _ => false,
         }
@@ -6196,7 +6191,7 @@ impl<const S: usize> Machine<S> {
         let req = pending.request;
         let wait = crate::thread::host_io_wait(req.handle, req.interest, req.timeout);
         let v = crate::host_enum::with_host_enum_layout(pending.layout, || {
-            crate::io::as_result_unit(&mut self.heap, wait)
+            crate::io::as_result_unit(&mut self.rt.heap, wait)
         });
         self.stack.push(v);
     }
@@ -6208,7 +6203,7 @@ impl<const S: usize> Machine<S> {
         let path_val = self.stack.pop();
         let path = {
             let addr = path_val.bits();
-            match Self::find_object_by_addr(&self.heap, addr) {
+            match Self::find_object_by_addr(&self.rt.heap, addr) {
                 Some(crate::memory::Object::String(gc)) => gc.as_ref().data.to_string(),
                 _ => String::new(),
             }
@@ -6223,7 +6218,7 @@ impl<const S: usize> Machine<S> {
                 self.libraries
                     .entry(path.clone())
                     .or_insert_with(|| lib_arc.clone());
-                let (object, lib) = self.heap.alloc_library(lib_arc);
+                let (object, lib) = self.rt.heap.alloc_library(lib_arc);
                 lib.payload_mut().static_symbols = crate::ffi::static_library(&path);
                 let addr = object.addr();
                 self.userland_libraries.insert(addr, object);
@@ -6246,12 +6241,12 @@ impl<const S: usize> Machine<S> {
             let tags_val = self.stack.pop();
             let tags_addr = tags_val.bits();
             let tags: Vec<crate::memory::FfiType> =
-                match Self::find_object_by_addr(&self.heap, tags_addr) {
+                match Self::find_object_by_addr(&self.rt.heap, tags_addr) {
                     Some(crate::memory::Object::Tuple(gc)) => gc
                         .as_ref()
                         .elements()
                         .iter()
-                        .map(|v| Self::ffi_type_from_value(v, &self.heap))
+                        .map(|v| Self::ffi_type_from_value(v, &self.rt.heap))
                         .collect(),
                     _ => Vec::new(),
                 };
@@ -6269,7 +6264,7 @@ impl<const S: usize> Machine<S> {
         let lib_val = self.stack.pop();
         let lib_addr = lib_val.bits();
 
-        let args: Vec<Value> = match Self::find_object_by_addr(&self.heap, tuple_addr) {
+        let args: Vec<Value> = match Self::find_object_by_addr(&self.rt.heap, tuple_addr) {
             Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
             _ => Vec::new(),
         };
@@ -6289,24 +6284,24 @@ impl<const S: usize> Machine<S> {
 
         // Stack (bottom → top): lib, name, args_tuple, ret_tag.
         let ret_tag_val = self.stack.pop();
-        let ret_type = Self::ffi_type_from_value(&ret_tag_val, &self.heap);
+        let ret_type = Self::ffi_type_from_value(&ret_tag_val, &self.rt.heap);
 
         // Pop args tuple, then name, then lib handle.
         let args_tuple_val = self.stack.pop();
         let args_tuple_addr = args_tuple_val.bits();
 
         let arg_types: Vec<crate::memory::FfiType> =
-            match Self::find_object_by_addr(&self.heap, args_tuple_addr) {
+            match Self::find_object_by_addr(&self.rt.heap, args_tuple_addr) {
                 Some(crate::memory::Object::Tuple(gc)) => gc
                     .as_ref()
                     .elements()
                     .iter()
-                    .map(|v| Self::ffi_type_from_value(v, &self.heap))
+                    .map(|v| Self::ffi_type_from_value(v, &self.rt.heap))
                     .collect(),
                 _ => Vec::new(),
             };
         let name_val = self.stack.pop();
-        let name = Self::object_string_value(&self.heap, &name_val);
+        let name = Self::object_string_value(&self.rt.heap, &name_val);
         let lib_val = self.stack.pop();
         let lib_addr = lib_val.bits();
         let lib_obj = self.userland_libraries.get(&lib_addr).copied();
@@ -6367,7 +6362,7 @@ impl<const S: usize> Machine<S> {
                     // No coil callback can run during the call without a
                     // closure: packed byte arrays can be lent in place.
                     let mut ctx = crate::ffi::InvokeContext::new(
-                        self.heap.get_mut() as *mut Heap,
+                        self.rt.heap.get_mut() as *mut Heap,
                         &self.struct_layouts,
                     )
                     .lending_arrays(self.ffi_closures.is_empty());
@@ -6403,13 +6398,13 @@ impl<const S: usize> Machine<S> {
 
     /// Push `Result::Ok(payload)` for userland FFI builtins.
     fn push_result_ok(&mut self, payload: Value) {
-        let v = crate::io::alloc_result_ok(&mut self.heap, payload);
+        let v = crate::io::alloc_result_ok(&mut self.rt.heap, payload);
         self.stack.push(v);
     }
 
     /// Push `Result::Err(ffi::Error)` for userland FFI builtins.
     fn push_result_err(&mut self, kind: crate::ffi::FfiErrorKindTag, message: String) {
-        let v = crate::ffi::alloc_result_ffi_err(&mut self.heap, kind, message);
+        let v = crate::ffi::alloc_result_ffi_err(&mut self.rt.heap, kind, message);
         self.stack.push(v);
     }
 
@@ -6919,11 +6914,11 @@ impl<const S: usize> Machine<S> {
                         ip: &mut ip,
                         code,
                         constants,
-                        heap: &mut self.heap,
+                        heap: &mut self.rt.heap,
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
                         vregs: &mut self.vregs,
-                        natives: &self.natives,
+                        natives: &self.rt.natives,
                         host_alloc: &mut self.streak_host_alloc,
                         fuel: &mut self.fuel,
                         stack_cap,
@@ -7117,7 +7112,7 @@ impl<const S: usize> Machine<S> {
                         && let Some(ret) = self.unary_bases.fast_return(
                             target,
                             self.stack[self.stack.tell() - 1],
-                            &self.heap,
+                            &self.rt.heap,
                         )
                     {
                         self.stack.pop();
@@ -7201,7 +7196,7 @@ impl<const S: usize> Machine<S> {
                 }
                 // (same shape as `BinSlotSlot`) to avoid two temp pushes.
                 Instruction::BinSlotImm => {
-                    if let Err(t) = dispatch::bin_slot_imm(&mut self.stack, sp, opcode, &self.heap, stack_cap) {
+                    if let Err(t) = dispatch::bin_slot_imm(&mut self.stack, sp, opcode, &self.rt.heap, stack_cap) {
                         return self.runtime_panic(t.message(), ip.saturating_sub(1));
                     }
                 }
@@ -7210,7 +7205,7 @@ impl<const S: usize> Machine<S> {
                         &mut self.stack,
                         opcode,
                         constants,
-                        &self.heap,
+                        &self.rt.heap,
                         matches!(*bc, Instruction::CmpJmpt),
                     ) {
                         jump!(target);
@@ -7224,7 +7219,7 @@ impl<const S: usize> Machine<S> {
                         sp,
                         opcode,
                         constants,
-                        &self.heap,
+                        &self.rt.heap,
                         stack_cap,
                         matches!(*bc, Instruction::BinSlotImmJmpt),
                     ) {
@@ -7249,7 +7244,7 @@ impl<const S: usize> Machine<S> {
                         sp,
                         opcode,
                         constants,
-                        &self.heap,
+                        &self.rt.heap,
                         stack_cap,
                         matches!(*bc, Instruction::BinSlotSlotJmpt),
                     ) {
@@ -7264,7 +7259,7 @@ impl<const S: usize> Machine<S> {
                         sp,
                         opcode,
                         constants,
-                        &self.heap,
+                        &self.rt.heap,
                         stack_cap,
                     ) {
                         return self.runtime_panic(t.message(), ip.saturating_sub(1));
@@ -7275,7 +7270,7 @@ impl<const S: usize> Machine<S> {
                         &mut self.stack,
                         sp,
                         opcode,
-                        &self.heap,
+                        &self.rt.heap,
                         stack_cap,
                     ) {
                         return self.runtime_panic(t.message(), ip.saturating_sub(1));
@@ -7315,7 +7310,7 @@ impl<const S: usize> Machine<S> {
                     promise!(tos >= 2);
                     let rhs = self.stack[tos - 1];
                     let lhs = self.stack[tos - 2];
-                    let ret_val = match crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, &self.heap) {
+                    let ret_val = match crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, &self.rt.heap) {
                         Ok(v) => v,
                         Err(t) => return self.runtime_panic(t.message(), ip.saturating_sub(1)),
                     };
@@ -7370,7 +7365,7 @@ impl<const S: usize> Machine<S> {
                         sp,
                         tail,
                         constants,
-                        &self.heap,
+                        &self.rt.heap,
                         stack_cap,
                     ) {
                         jump!(target);
@@ -7404,7 +7399,7 @@ impl<const S: usize> Machine<S> {
                         stack: &mut self.stack,
                         sp,
                         opcode,
-                        heap: &self.heap,
+                        heap: &self.rt.heap,
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
                         stack_cap,
@@ -7423,7 +7418,7 @@ impl<const S: usize> Machine<S> {
                             sp,
                             tail,
                             constants,
-                            &self.heap,
+                            &self.rt.heap,
                             stack_cap,
                         ) {
                             jump!(target);
@@ -7436,7 +7431,7 @@ impl<const S: usize> Machine<S> {
                         stack: &mut self.stack,
                         sp,
                         opcode,
-                        heap: &self.heap,
+                        heap: &self.rt.heap,
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
                         stack_cap,
@@ -7453,7 +7448,7 @@ impl<const S: usize> Machine<S> {
                     then_hot_streak!();
                 }
                 Instruction::DenseArrayLen => {
-                    dispatch::dense_array_len(&mut self.stack, sp, opcode, &self.heap, stack_cap);
+                    dispatch::dense_array_len(&mut self.stack, sp, opcode, &self.rt.heap, stack_cap);
                     then_hot_streak!();
                 }
                 Instruction::DenseFieldLoad => {
@@ -7461,7 +7456,7 @@ impl<const S: usize> Machine<S> {
                         &mut self.stack,
                         sp,
                         opcode,
-                        &mut self.heap,
+                        &mut self.rt.heap,
                         stack_cap,
                     )
                     .is_err()
@@ -7475,7 +7470,7 @@ impl<const S: usize> Machine<S> {
                         &mut self.stack,
                         sp,
                         opcode,
-                        &mut self.heap,
+                        &mut self.rt.heap,
                         stack_cap,
                     ) {
                         Ok(()) => {}
@@ -7512,24 +7507,24 @@ impl<const S: usize> Machine<S> {
                     let lo = sp + base;
                     let addr = if kind >= common::dense::MAKE_ENUM && arity == 0 {
                         // A payload-less variant is shared, as `MakeEnum`.
-                        self.heap.immortal_unit_enum(u32::from(kind - common::dense::MAKE_ENUM)).addr()
+                        self.rt.heap.immortal_unit_enum(u32::from(kind - common::dense::MAKE_ENUM)).addr()
                     } else if kind >= common::dense::MAKE_ENUM {
                         // Inline payloads read the registers directly (no Vec).
                         let tag = u32::from(kind - common::dense::MAKE_ENUM);
                         let payload =
                             Self::dense_enum_payload(&self.stack[lo..lo + arity]);
-                        let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
+                        let (object, _) = self.rt.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
                     } else if kind == common::dense::MAKE_TUPLE && arity == 0 {
-                        self.heap.immortal_empty_tuple().addr()
+                        self.rt.heap.immortal_empty_tuple().addr()
                     } else if kind == common::dense::MAKE_TUPLE {
                         let tuple = ObjTuple::from_slice(&self.stack[lo..lo + arity]);
-                        let (object, _) = self.heap.alloc(tuple, Object::Tuple);
+                        let (object, _) = self.rt.heap.alloc(tuple, Object::Tuple);
                         object.addr()
                     } else {
                         let values = Self::stack_copy_decl(&self.stack, lo, arity);
-                        let arr = ObjArray::from_values(values, &self.heap);
-                        let (object, _) = self.heap.alloc(arr, Object::Array);
+                        let arr = ObjArray::from_values(values, &self.rt.heap);
+                        let (object, _) = self.rt.heap.alloc(arr, Object::Array);
                         object.addr()
                     };
                     self.stack[sp + dest] = Value::from(addr);
@@ -7549,13 +7544,13 @@ impl<const S: usize> Machine<S> {
                     let addr = if kind >= common::dense::MAKE_ENUM {
                         let tag = u32::from(kind - common::dense::MAKE_ENUM);
                         let payload = Self::dense_enum_payload(words).with_kinds(kinds);
-                        let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
+                        let (object, _) = self.rt.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
                     } else if arity == 0 {
-                        self.heap.immortal_empty_tuple().addr()
+                        self.rt.heap.immortal_empty_tuple().addr()
                     } else {
                         let tuple = ObjTuple::from_slice(words).with_kinds(kinds);
-                        let (object, _) = self.heap.alloc(tuple, Object::Tuple);
+                        let (object, _) = self.rt.heap.alloc(tuple, Object::Tuple);
                         object.addr()
                     };
                     self.stack[sp + dest] = Value::from(addr);
@@ -7583,9 +7578,9 @@ impl<const S: usize> Machine<S> {
                     let op = opcode.operand_u32();
                     let (obj, field) = (((op >> 8) & 0xff) as usize, (op >> 16) as usize);
                     promise!(sp + obj < stack_cap);
-                    if let Some(crate::memory::Object::Instance(mut gc)) = self.heap.find_object_by_addr(self.stack[sp + obj].bits())
+                    if let Some(crate::memory::Object::Instance(mut gc)) = self.rt.heap.find_object_by_addr(self.stack[sp + obj].bits())
                         && let Some(v) = gc.as_ref().slot(field)
-                        && let Some(copy) = self.heap.cow_unique(v)
+                        && let Some(copy) = self.rt.heap.cow_unique(v)
                     {
                         gc.as_mut().set_slot(field, copy);
                         if let Some(sites) = self.cow_sites.as_mut() {
@@ -7599,20 +7594,20 @@ impl<const S: usize> Machine<S> {
                     if opcode.operand_u32() & 1 == 0 {
                         // Measuring only: a deep copy at every share, as a
                         // design that copies on assignment makes.
-                        if cow_eager() && matches!(self.heap.find_object_by_addr(v.heap_addr()), Some(crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) {
+                        if cow_eager() && matches!(self.rt.heap.find_object_by_addr(v.heap_addr()), Some(crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) {
                             if self.cow_sites.is_some() {
                                 self.cow_shares += 1;
                             }
-                            let copy = self.heap.cow_deep_copy(v);
+                            let copy = self.rt.heap.cow_deep_copy(v);
                             self.stack.push(copy);
                             self.maybe_gc_after_alloc(ip);
                         } else {
-                            if self.heap.cow_share(v) && self.cow_sites.is_some() {
+                            if self.rt.heap.cow_share(v) && self.cow_sites.is_some() {
                                 self.cow_shares += 1;
                             }
                             self.stack.push(v);
                         }
-                    } else if let Some(copy) = self.heap.cow_unique(v) {
+                    } else if let Some(copy) = self.rt.heap.cow_unique(v) {
                         if let Some(sites) = self.cow_sites.as_mut() {
                             *sites.entry(ip.saturating_sub(1)).or_insert(0) += 1;
                         }
@@ -7638,22 +7633,22 @@ impl<const S: usize> Machine<S> {
                         return self.runtime_panic(&msg, ip.saturating_sub(1));
                     }
                 }
-                Instruction::HostInvoke if self.natives.direct_by_id(self.host_invoke_id(opcode)).is_some() => {
+                Instruction::HostInvoke if self.rt.natives.direct_by_id(self.host_invoke_id(opcode)).is_some() => {
                     // A plain native ([`crate::ffi::NativeFn::direct`]): call
                     // it here, without the generic path's host-op, task and
                     // descriptor checks in `exec_rest`.
                     let op = opcode.operand_u32();
                     let consume = (op & 0xFFFF) as usize + 1;
                     let tell = self.stack.tell();
-                    let f = self.natives.direct_by_id(self.host_invoke_id(opcode)).expect("checked by the guard");
+                    let f = self.rt.natives.direct_by_id(self.host_invoke_id(opcode)).expect("checked by the guard");
                     let layout = crate::host_enum::HostEnumLayout::from_operand(op);
-                    let live_before = self.heap.live_object_count();
-                    let heap = &mut self.heap;
+                    let live_before = self.rt.heap.live_object_count();
+                    let heap = &mut self.rt.heap;
                     let args = &self.stack.top_window(consume)[1..];
                     let v = crate::host_enum::in_host_enum_layout(layout, || f(heap, args));
                     self.stack.seek(tell - consume);
                     self.stack.push(v);
-                    if self.heap.live_object_count() > live_before {
+                    if self.rt.heap.live_object_count() > live_before {
                         self.maybe_gc_after_alloc(ip);
                     }
                 }
@@ -7672,7 +7667,7 @@ impl<const N: usize> Machine<N> {
     /// one), with its allocation safepoint.
     #[inline(never)]
     fn dense_host_call(&mut self, ip: usize, sp: usize, opcode: &Byte, constants: &[u64], stack_cap: usize) -> Result<(), String> {
-        match dispatch::dense_host_call_direct(&mut self.stack, sp, opcode, constants, &mut self.heap, &self.natives, stack_cap) {
+        match dispatch::dense_host_call_direct(&mut self.stack, sp, opcode, constants, &mut self.rt.heap, &self.rt.natives, stack_cap) {
             Some(false) => {}
             Some(true) => self.maybe_gc_after_alloc(ip),
             None => {
@@ -7690,10 +7685,10 @@ impl<const N: usize> Machine<N> {
         let (dest, layout, id, base, arity) =
             opcode.dense_host_call_parts(constants).ok_or_else(|| "DenseHostCall pool".to_string())?;
         promise!(sp + dest < stack_cap);
-        let native = self.natives.get_by_id(id).ok_or_else(|| format!("DenseHostCall: unknown native id {id}"))?;
+        let native = self.rt.natives.get_by_id(id).ok_or_else(|| format!("DenseHostCall: unknown native id {id}"))?;
         let args = self.stack[sp + base..sp + base + arity].to_vec();
         let layout = crate::host_enum::HostEnumLayout::from_u32(layout);
-        let v = match crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.heap, &args)) {
+        let v = match crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.rt.heap, &args)) {
             Ok(v) => v.unwrap_or_default(),
             Err(crate::FfiError::Panic(msg)) => return Err(msg),
             Err(e) => return Err(format!("HostInvoke failed for `{}`: {e}", native.name())),

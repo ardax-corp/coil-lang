@@ -168,7 +168,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn task_spawn(&mut self, scope: i64, coro: Value) -> TaskFlow {
-        let coro = match Self::find_object_by_addr(&self.heap, coro.bits()) {
+        let coro = match Self::find_object_by_addr(&self.rt.heap, coro.bits()) {
             Some(Object::Coroutine(gc)) => gc,
             _ => return TaskFlow::Panic("task spawn: not a coroutine".into()),
         };
@@ -413,7 +413,7 @@ impl<const S: usize> Machine<S> {
             Some(last) => *last = (ip, sp - base_sp),
             None => saved_frames.push((ip, sp - base_sp)),
         }
-        let live_mask = Self::saved_stack_live_mask(&self.heap, &segment);
+        let live_mask = Self::saved_stack_live_mask(&self.rt.heap, &segment);
         Self::with_coroutine_mut(coro, |c| {
             c.saved_stack = segment;
             c.saved_live_mask = live_mask;
@@ -553,7 +553,7 @@ impl<const S: usize> Machine<S> {
             Wake::Unit => Value::default(),
             Wake::Status(n) => Value::from(n),
             Wake::Io(r, layout) => crate::host_enum::with_host_enum_layout(layout, || {
-                crate::io::as_result_unit(&mut self.heap, r)
+                crate::io::as_result_unit(&mut self.rt.heap, r)
             }),
             // The instruction runs again; there is no result slot.
             Wake::Retry => return,
@@ -967,7 +967,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn task_string(&mut self, text: String) -> Value {
-        let s = self.heap.alloc_string(text);
+        let s = self.rt.heap.alloc_string(text);
         Value::from(s.as_ptr() as *mut u8 as u64)
     }
 }

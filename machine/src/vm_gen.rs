@@ -73,7 +73,7 @@ impl<const S: usize> Machine<S> {
                     words.push(Value::from(unsafe { *w }));
                     ambiguous |= a;
                 });
-                let mask = if ambiguous { 0 } else { Self::saved_stack_live_mask(&self.heap, &words) };
+                let mask = if ambiguous { 0 } else { Self::saved_stack_live_mask(&self.rt.heap, &words) };
                 fiber.parked = ctx;
                 let cleanup = fiber.cleanup;
                 Self::with_coroutine_mut(gc, |c| {
@@ -87,7 +87,7 @@ impl<const S: usize> Machine<S> {
                 if cleanup && !gc.as_ref().closeable {
                     Self::with_coroutine_mut(gc, |c| c.closeable = true);
                     self.closeables = true;
-                    self.heap.note_closeable(Object::Coroutine(gc));
+                    self.rt.heap.note_closeable(Object::Coroutine(gc));
                 }
                 Some(GenStep::Yielded(Value::from(v)))
             }

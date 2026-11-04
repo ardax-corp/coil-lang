@@ -3949,17 +3949,17 @@
     #[test]
     fn vec_pop_allocates_a_boxed_option() {
         let mut vm = Machine::<16>::default();
-        let (object, _) = vm.heap.alloc(
+        let (object, _) = vm.rt.heap.alloc(
             ObjArray::new(vec![Value::from(7_i64)]),
             Object::Array,
         );
-        let before = vm.heap.live_object_count();
+        let before = vm.rt.heap.live_object_count();
         let value = crate::vec_ops::host_vec_pop(
-            &mut vm.heap,
+            &mut vm.rt.heap,
             &[Value::from(object.addr())],
         );
-        assert!(vm.heap.find_object_by_addr(value.bits()).is_some());
-        assert_eq!(vm.heap.live_object_count(), before + 1);
+        assert!(vm.rt.heap.find_object_by_addr(value.bits()).is_some());
+        assert_eq!(vm.rt.heap.live_object_count(), before + 1);
     }
 
     #[test]
@@ -4267,7 +4267,7 @@
             Byte::new(Instruction::HALT),
         ]);
         let s = vm.pop();
-        let text = Machine::<64>::object_string_value(&vm.heap, &s);
+        let text = Machine::<64>::object_string_value(&vm.rt.heap, &s);
         assert_eq!(text, "42");
     }
 
@@ -4289,7 +4289,7 @@
             0,
         );
         let s = vm.pop();
-        let text = Machine::<64>::object_string_value(&vm.heap, &s);
+        let text = Machine::<64>::object_string_value(&vm.rt.heap, &s);
         assert!(
             text.contains("1.5"),
             "expected float display containing 1.5, got {text:?}"
@@ -4312,7 +4312,7 @@
             0,
         );
         let s = vm.pop();
-        let text = Machine::<64>::object_string_value(&vm.heap, &s);
+        let text = Machine::<64>::object_string_value(&vm.rt.heap, &s);
         assert_eq!(text, "hi");
     }
 
@@ -4548,7 +4548,7 @@
             Byte::new(Instruction::JMP).with_operand_u32(2),
         ];
         let mut vm = Machine::<16>::default();
-        vm.heap.set_nursery(true);
+        vm.rt.heap.set_nursery(true);
         reset_alloc_profile();
         vm.run(&code);
         assert!(minor_gc_count() >= 40, "the loop fills the nursery many times: {}", minor_gc_count());
@@ -4583,10 +4583,10 @@
         ];
         assert!(matches!(code[body_entry as usize].bytecode(), Instruction::LOAD));
         let mut vm = Machine::<16>::default();
-        let before = vm.heap.live_object_count();
+        let before = vm.rt.heap.live_object_count();
         vm.run(&code);
         assert_eq!(vm.pop().as_int(), 30);
-        assert_eq!(vm.heap.live_object_count(), before + 1, "both builds share one function object");
+        assert_eq!(vm.rt.heap.live_object_count(), before + 1, "both builds share one function object");
     }
 
     /// A closure built and dropped once per loop pass dies young (#2252):
@@ -4615,7 +4615,7 @@
             Byte::new(Instruction::JMP).with_operand_u32(2),
         ];
         let mut vm = Machine::<16>::default();
-        vm.heap.set_nursery(true);
+        vm.rt.heap.set_nursery(true);
         reset_alloc_profile();
         vm.run(&code);
         assert!(minor_gc_count() >= 40, "the closures fill the nursery many times: {}", minor_gc_count());
