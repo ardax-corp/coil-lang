@@ -27,6 +27,7 @@ pub mod native_mir {
         MirUnaryOp, NativeBody, Terminator, ValueId, VectorOp, native_capture_active, start_native_capture, vector_op,
         VecExpr, VecLoopKind, liveness,
         take_native_capture,
+        allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pointer_words, root_handles, scalar, ty_of, used_params, word_kind,
     };
 }
 pub(crate) mod hir;

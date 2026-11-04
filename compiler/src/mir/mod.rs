@@ -72,9 +72,11 @@ pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
 pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]
 pub use inst::LocalId;
+mod frame_words;
 mod native_capture;
 pub mod native_expand;
 pub mod native_twins;
+pub use frame_words::{allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pointer_words, root_handles, scalar, ty_of, used_params, word_kind};
 pub use native_capture::{NativeBody, VectorOp, capture_native_bodies, vector_op, native_capture_active, start_native_capture, take_native_capture, without_native_capture};
 pub use instcombine::{instcombine, instcombine_lir};
 pub use licm::{licm, mark_frozen_arrays};
