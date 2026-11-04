@@ -45,6 +45,11 @@ pub(crate) trait GenHost {
     fn nest(&mut self, _entered: bool) {}
     /// An early free the body's return queued.
     fn free_early(&mut self, v: Value, deep: bool);
+    /// Whether a task may switch from inside a generator's fiber (the
+    /// native driver's tasks can; the VM's cannot).
+    fn switches_in_fibers(&self) -> bool {
+        false
+    }
 }
 
 /// Mark `coro` done.
@@ -196,8 +201,8 @@ fn new_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Box<cra
     if coro.started || coro.state != CoroState::Suspended || coro.yield_from.is_some() {
         return None;
     }
+    let switches = h.rt().sched.is_some() && !h.switches_in_fibers();
     let rt = h.rt();
-    let switches = rt.sched.is_some();
     let table = rt.native.as_deref_mut()?;
     let entry = table.lookup(coro.resume_ip).filter(|e| e.generator)?;
     // Its VM code could not switch tasks from a fiber of its own.

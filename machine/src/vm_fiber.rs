@@ -25,9 +25,9 @@ type FiberCoro = corosensei::Coroutine<(), FiberParked, crate::native::NativeOut
 /// they are used. Native frames live here, so it is sized for recursion as
 /// deep as the VM's frame limit allows.
 #[cfg(all(not(target_family = "wasm"), target_pointer_width = "64"))]
-const FIBER_STACK_BYTES: usize = 256 << 20;
+pub(crate) const FIBER_STACK_BYTES: usize = 256 << 20;
 #[cfg(all(not(target_family = "wasm"), not(target_pointer_width = "64")))]
-const FIBER_STACK_BYTES: usize = 32 << 20;
+pub(crate) const FIBER_STACK_BYTES: usize = 32 << 20;
 
 /// A generator fiber's machine stack: programs keep many generators live,
 /// so theirs stays small.

@@ -7,8 +7,12 @@
 //! values run natively, host natives on the Runtime, collections over the
 //! native frames' root records ([`GcHost`]).
 //!
-//! Not yet: tasks and FFI callbacks (each reports a panic
-//! naming the gap).
+//! Child tasks run on fibers of their own. The root task (the program's
+//! own call) never leaves its stack: where it waits, the driver runs the
+//! scheduler there until the root is ready again; a child that waits
+//! suspends its fiber back to that loop.
+//!
+//! Not yet: FFI callbacks (each reports a panic naming the gap).
 
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -22,6 +26,50 @@ use crate::runtime::{HostEnv, Runtime};
 /// `gen_close`, the generator close native code calls when a loop leaves
 /// a generator early: its offset from `TASK_SCOPE_OPEN_ID`.
 const GEN_CLOSE_OP: usize = 45;
+
+/// What a task fiber is resumed with: its wait's wake, or a cancel.
+#[cfg(not(target_family = "wasm"))]
+enum TaskResume {
+    Wake(Value),
+    Cancel,
+}
+
+#[cfg(not(target_family = "wasm"))]
+type TaskCoro = corosensei::Coroutine<TaskResume, (), (), corosensei::stack::DefaultStack>;
+
+/// A child task's fiber.
+#[cfg(not(target_family = "wasm"))]
+struct TaskFiber {
+    /// Taken when the body returned (its stack is reused).
+    coro: Option<TaskCoro>,
+    /// The lowest address native code on it may use.
+    stack_limit: usize,
+    /// Its yielder, once it started.
+    yielder: *const (),
+    /// The roots of the side not running: the task's native calls,
+    /// argument roots and call depth while it is parked, the root task's
+    /// while it runs ([`Driver::swap_roots`]).
+    native_roots: Vec<(*mut NativeCtx, usize)>,
+    arg_roots: Vec<Value>,
+    depth: usize,
+    gen_running: Vec<Value>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Drop for TaskFiber {
+    fn drop(&mut self) {
+        if let Some(coro) = &mut self.coro
+            && coro.started()
+            && !coro.done()
+        {
+            // A task that never resumes (the root task panicked): its
+            // native frames cannot unwind, so the stack is reclaimed as
+            // it is; what they own leaks.
+            // SAFETY: nothing runs on the fiber's stack again.
+            unsafe { coro.force_reset() };
+        }
+    }
+}
 
 /// The program a driver runs: its code (for the prologue and the
 /// snapshot pool), the native code for it and its debug tables.
@@ -49,6 +97,20 @@ pub(crate) struct Driver<'a> {
     gen_stacks: Vec<corosensei::stack::DefaultStack>,
     /// Generators whose body runs now, innermost last (roots meanwhile).
     gen_running: Vec<Value>,
+    /// Child tasks' fibers, by task id.
+    #[cfg(not(target_family = "wasm"))]
+    tasks: std::collections::HashMap<crate::task::TaskId, Box<TaskFiber>>,
+    /// Stacks of finished task fibers, for the next ones.
+    #[cfg(not(target_family = "wasm"))]
+    task_stacks: Vec<corosensei::stack::DefaultStack>,
+    /// The running child task's yielder (null while the root runs).
+    #[cfg(not(target_family = "wasm"))]
+    task_yielder: *const (),
+    /// A child task's panic message: its scope reports it.
+    task_panic: Option<String>,
+    /// The next panic reported prints no location (a contract failure
+    /// names its call site in the message).
+    panic_without_location: bool,
 }
 
 impl<'a> Driver<'a> {
@@ -76,6 +138,14 @@ impl<'a> Driver<'a> {
             #[cfg(not(target_family = "wasm"))]
             gen_stacks: Vec::new(),
             gen_running: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            tasks: std::collections::HashMap::new(),
+            #[cfg(not(target_family = "wasm"))]
+            task_stacks: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            task_yielder: std::ptr::null(),
+            task_panic: None,
+            panic_without_location: false,
         }
     }
 
@@ -276,6 +346,17 @@ impl<'a> Driver<'a> {
                 None
             }
             None => {
+                // A body with no `yield` compiles as a plain function: the
+                // first resume runs it to its return.
+                let c = gc.as_ref();
+                let plain = !c.started && c.state == crate::memory::CoroState::Suspended && c.yield_from.is_none();
+                if plain && self.program.native.lookup(c.resume_ip).is_some_and(|e| !e.generator) {
+                    let (pc, args) = (c.resume_ip, c.saved_stack.clone());
+                    gc.payload_mut().started = true;
+                    let out = self.call(pc, &args);
+                    crate::gen_fiber::finish(gc);
+                    return out.map(|(lo, _)| Value::from(lo));
+                }
                 self.report("native driver: a generator without native code", None, Vec::new(), false);
                 None
             }
@@ -362,6 +443,24 @@ impl<'a> Driver<'a> {
         self.run_pads(p.pads);
     }
 
+    /// A panic the driver raises for the host call native code makes
+    /// through `ctx`: at that call, with its native callers' backtrace.
+    fn report_at(&mut self, ctx: *mut NativeCtx, message: &str) {
+        let code = Arc::clone(&self.program.native);
+        let locator = self.locator();
+        // SAFETY: the calling native code's live context.
+        let sites = unsafe { &*ctx }.call_sites();
+        let loc = sites.first().and_then(|&s| locator.native_site_location(code.site(s)?));
+        let mut frames: Vec<String> = sites.iter().filter_map(|&s| locator.native_site_line(&code, s)).collect();
+        for &(c, _) in self.rt.native_roots.iter().rev() {
+            // SAFETY: a native call in progress keeps its context alive.
+            for s in unsafe { &*c }.call_sites() {
+                frames.extend(locator.native_site_line(&code, s));
+            }
+        }
+        self.report(message, loc, frames, false);
+    }
+
     /// Run the cleanup pads a panic unwound; a panic in one is reported and
     /// the rest still run.
     fn run_pads(&mut self, pads: Vec<crate::native::NativePad>) {
@@ -381,6 +480,13 @@ impl<'a> Driver<'a> {
     fn report(&mut self, message: &str, loc: Option<String>, frames: Vec<String>, explicit: bool) {
         use std::io::Write;
         self.panicked = true;
+        let without_location = std::mem::take(&mut self.panic_without_location);
+        if self.rt.sched.as_ref().is_some_and(|s| s.current != crate::task::ROOT) {
+            // A child task's panic fails its scope, which reports it.
+            self.task_panic = Some(message.to_string());
+            return;
+        }
+        let loc = loc.filter(|_| !without_location);
         let loc_suffix = loc.map(|l| format!(" at {l}")).unwrap_or_default();
         let show = !explicit || std::env::var("COIL_BACKTRACE").is_ok_and(|v| !v.is_empty() && v != "0");
         let mut lines: Vec<String> = Vec::new();
@@ -531,6 +637,13 @@ impl<'a> Driver<'a> {
     unsafe fn host_resume(raw: *mut c_void, ctx: *mut NativeCtx, handle: u64, send: Option<u64>, panicked: &mut bool) -> u64 {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
+        if let Some(crate::memory::Object::Coroutine(gc)) = d.rt.heap.find_object_by_addr(handle)
+            && gc.as_ref().state == crate::memory::CoroState::Done
+        {
+            d.report_at(ctx, "resumed after completion");
+            *panicked = true;
+            return 0;
+        }
         let out = d.rooted(ctx, |d| d.resume(Value::from(handle), send.map_or_else(|| Value::from(0_i64), Value::from)));
         *panicked = out.is_none();
         out.unwrap_or_default().bits()
@@ -595,12 +708,440 @@ impl<'a> Driver<'a> {
                 let handle = args.first().copied().unwrap_or_default();
                 Some(if d.rooted(ctx, |d| d.close_now(handle)) { Invoked::Value(0) } else { Invoked::Unwound })
             }
-            _ => Some(Invoked::Panic("native driver: tasks are not supported yet".into())),
+            crate::HostOp::Task => Some(d.task_op(ctx, fn_id, args)),
+            _ => Some(Invoked::Panic("native driver: unknown host op".into())),
         };
         if out.is_some() {
             crate::native::note_host_call(fn_id, crate::native::HostPath::Runtime);
         }
         out
+    }
+}
+
+/// Tasks: the scheduler natives, waits and the scheduler loop.
+impl Driver<'_> {
+    /// A scheduler with live tasks: a wait switches tasks (anywhere, a
+    /// generator's body too: its fiber stays where it is, under the task's).
+    fn tasks_can_switch(&self) -> bool {
+        self.rt.sched.as_ref().is_some_and(|s| s.live > 0)
+    }
+
+    /// Scheduler native `fn_id` (`HostOp::Task`) on `args`.
+    fn task_op(&mut self, ctx: *mut NativeCtx, fn_id: usize, args: &[Value]) -> Invoked {
+        use crate::task::{Block, STATUS_OK, Scheduler};
+        let arg = |i: usize| args.get(i).map_or(0, |v| v.as_int());
+        let unit = Invoked::Value(0);
+        match fn_id.saturating_sub(common::TASK_SCOPE_OPEN_ID as usize) {
+            0 => self.task_scope_open(),
+            1 => self.task_scope_close(ctx, arg(0)),
+            2 => {
+                let msg = self.rt.sched.as_mut().and_then(|s| s.remove_scope(arg(0))).and_then(|sc| sc.failed).unwrap_or_default();
+                self.rt.task_drop_idle_scheduler();
+                Invoked::Value(self.rt.task_string(msg).bits())
+            }
+            3 => {
+                let coro = match self.rt.heap.find_object_by_addr(args.get(1).copied().unwrap_or_default().bits()) {
+                    Some(crate::memory::Object::Coroutine(gc)) => gc,
+                    _ => return Invoked::Panic("task spawn: not a coroutine".into()),
+                };
+                let Some(s) = self.rt.sched.as_mut() else {
+                    return Invoked::Panic("spawn outside a task scope".into());
+                };
+                if !s.scopes.get(&arg(0)).is_some_and(|sc| !sc.closed) {
+                    return Invoked::Panic("spawn on a task scope that has ended".into());
+                }
+                Invoked::Value(Value::from(s.add_task(coro, arg(0)) as i64).bits())
+            }
+            4 => {
+                let id = arg(0) as u64;
+                let Some(s) = self.rt.sched.as_mut() else {
+                    // Finished and forgotten with its scope.
+                    return Invoked::Value(Value::from(STATUS_OK).bits());
+                };
+                let current = s.current;
+                let Some(rec) = s.tasks.get_mut(&id) else {
+                    return Invoked::Value(Value::from(STATUS_OK).bits());
+                };
+                if rec.state.finished() {
+                    return Invoked::Value(Value::from(Scheduler::status_of(rec.state)).bits());
+                }
+                if id == current {
+                    return Invoked::Panic("a task cannot join itself".into());
+                }
+                rec.joiners.push(current);
+                if !self.tasks_can_switch() {
+                    return Invoked::Panic("cannot wait for a task inside a native callback".into());
+                }
+                self.wait(ctx, Some(Block::Join(id)))
+            }
+            5 => {
+                let msg = self.rt.sched.as_ref().and_then(|s| s.tasks.get(&(arg(0) as u64))).and_then(|r| r.panic.clone()).unwrap_or_default();
+                Invoked::Value(self.rt.task_string(msg).bits())
+            }
+            6 => {
+                if !self.tasks_can_switch() {
+                    crate::clock::sleep_ms(arg(0));
+                    return unit;
+                }
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(arg(0).max(0) as u64);
+                let s = self.rt.sched.as_mut().expect("tasks_can_switch");
+                let current = s.current;
+                s.add_timer(current, deadline);
+                self.wait(ctx, Some(Block::Sleep))
+            }
+            7 => {
+                if self.tasks_can_switch() && self.rt.sched.as_ref().is_some_and(|s| !s.run_queue.is_empty()) {
+                    return self.wait(ctx, None);
+                }
+                unit
+            }
+            9 => {
+                self.rt.task_request_cancel(arg(0) as u64);
+                unit
+            }
+            10 => {
+                if let Some(s) = self.rt.sched.as_mut()
+                    && let Some(rec) = s.tasks.get_mut(&s.current)
+                {
+                    rec.shield += 1;
+                }
+                unit
+            }
+            11 => self.task_shield_exit(ctx),
+            12 => Invoked::Value(Value::from(crate::task::new_cond()).bits()),
+            13 => {
+                if !self.tasks_can_switch() {
+                    return Invoked::Value(Value::from(crate::task::STATUS_DEADLOCK).bits());
+                }
+                let s = self.rt.sched.as_mut().expect("tasks_can_switch");
+                let current = s.current;
+                s.cond_waits.entry(arg(0)).or_default().push(current);
+                self.wait(ctx, Some(Block::Cond(arg(0))))
+            }
+            14 => {
+                if let Some(s) = self.rt.sched.as_mut() {
+                    s.notify_cond(arg(0));
+                }
+                unit
+            }
+            15 => Invoked::Panic(self.contract_failure(ctx, args.first().copied().unwrap_or_default())),
+            _ => Invoked::Panic(format!("HostInvoke: unknown task native id {fn_id}")),
+        }
+    }
+
+    /// `contract_fail(msg)`: a failed `requires` blames the caller, so the
+    /// message names the call site of the function that checks it.
+    fn contract_failure(&mut self, ctx: *mut NativeCtx, msg: Value) -> String {
+        let ptr = msg.as_ptr::<crate::memory::GcData<crate::memory::ObjString>>();
+        // SAFETY: the clause's message is a live string.
+        let mut text = unsafe { (*ptr).as_ref() }.to_string();
+        let code = Arc::clone(&self.program.native);
+        // SAFETY: the calling native code's live context.
+        let sites = unsafe { &*ctx }.call_sites();
+        if let Some(loc) = sites.get(1).and_then(|&s| self.locator().native_site_location(code.site(s)?)) {
+            text.push_str(&format!(", called from {loc}"));
+        }
+        self.panic_without_location = true;
+        text
+    }
+
+    fn task_scope_open(&mut self) -> Invoked {
+        // Every task switches at one level: the driver runs no code nested.
+        let s = self.rt.sched.get_or_insert_with(|| Box::new(crate::task::Scheduler::new(0)));
+        Invoked::Value(Value::from(s.open_scope()).bits())
+    }
+
+    /// The scope body returned: wait for its children.
+    fn task_scope_close(&mut self, ctx: *mut NativeCtx, id: i64) -> Invoked {
+        let Some(s) = self.rt.sched.as_mut() else {
+            return Invoked::Panic("task scope is not open".into());
+        };
+        let current = s.current;
+        let Some(scope) = s.scopes.get_mut(&id) else {
+            return Invoked::Panic("task scope is not open".into());
+        };
+        if scope.owner != current {
+            return Invoked::Panic("a task scope must end in the task that opened it".into());
+        }
+        scope.closed = true;
+        if s.children_finished(id) {
+            if s.scopes.get(&id).is_some_and(|sc| sc.failed.is_some()) {
+                // `task_scope_error` reads the message, then forgets the scope.
+                return Invoked::Value(Value::from(crate::task::STATUS_PANICKED).bits());
+            }
+            s.remove_scope(id);
+            self.rt.task_drop_idle_scheduler();
+            return Invoked::Value(Value::from(crate::task::STATUS_OK).bits());
+        }
+        if !self.tasks_can_switch() {
+            return Invoked::Panic("cannot wait for tasks inside a native callback".into());
+        }
+        self.wait(ctx, Some(crate::task::Block::Scope(id)))
+    }
+
+    /// Leaving the last `shield` delivers a cancel that waited for it.
+    fn task_shield_exit(&mut self, ctx: *mut NativeCtx) -> Invoked {
+        let Some(s) = self.rt.sched.as_mut() else {
+            return Invoked::Value(0);
+        };
+        let current = s.current;
+        let Some(rec) = s.tasks.get_mut(&current) else {
+            return Invoked::Value(0);
+        };
+        rec.shield = rec.shield.saturating_sub(1);
+        if current == crate::task::ROOT || rec.shield > 0 || rec.cancel != crate::task::Cancel::Requested || !self.tasks_can_switch() {
+            return Invoked::Value(0);
+        }
+        // The scheduler switches straight back and delivers the cancel.
+        self.wait(ctx, None)
+    }
+
+    /// A scheduler native's wait: its wake is the native's result.
+    fn wait(&mut self, ctx: *mut NativeCtx, block: Option<crate::task::Block>) -> Invoked {
+        match self.suspend(ctx, block, true) {
+            Some(v) => Invoked::Value(v.bits()),
+            None => Invoked::Unwound,
+        }
+    }
+
+    /// Suspend the current task on `block` (`None`: ready again at once)
+    /// with `ctx`'s words rooted: the wake (`0` without `result_slot`, when
+    /// the native runs again), or `None` when a cancel came instead.
+    #[cfg(not(target_family = "wasm"))]
+    fn suspend(&mut self, ctx: *mut NativeCtx, block: Option<crate::task::Block>, result_slot: bool) -> Option<Value> {
+        use crate::task::{Cancel, ROOT, TaskState, Wake};
+        let s = self.rt.sched.as_mut().expect("scheduler");
+        let current = s.current;
+        let rec = s.tasks.get_mut(&current).expect("current task");
+        let mut block = block;
+        if rec.cancel == Cancel::Requested && rec.shield == 0 {
+            // A cancel waits here: switch out and straight back in, which
+            // delivers it.
+            rec.timer_seq = None;
+            s.drop_wait(current, block);
+            block = None;
+            s.run_queue.push_front(current);
+        }
+        let rec = s.tasks.get_mut(&current).expect("current task");
+        rec.block = block;
+        if block.is_some() {
+            rec.state = TaskState::Blocked;
+        } else {
+            rec.state = TaskState::Ready;
+            rec.wake = Some(if result_slot { Wake::Unit } else { Wake::Retry });
+            if s.run_queue.front() != Some(&current) {
+                s.run_queue.push_back(current);
+            }
+        }
+        self.rt.native_roots.push((ctx, self.depth));
+        let out = if current == ROOT {
+            Some(self.run_tasks())
+        } else {
+            // The wait may be inside a generator's fiber, which stays
+            // where it is: the stack bounds and yielder it runs with come
+            // back with it.
+            let limit = crate::vm::FIBER_STACK_LIMIT.get();
+            let gen_yielder = crate::native::GEN_YIELDER.get();
+            let closing = crate::native::GEN_CLOSING.get();
+            let y = self.task_yielder.cast::<corosensei::Yielder<TaskResume, ()>>();
+            // SAFETY: set by the running task fiber's body.
+            let resumed = unsafe { (*y).suspend(()) };
+            crate::vm::FIBER_STACK_LIMIT.set(limit);
+            crate::native::GEN_YIELDER.set(gen_yielder);
+            crate::native::GEN_CLOSING.set(closing);
+            match resumed {
+                TaskResume::Wake(v) => Some(v),
+                TaskResume::Cancel => None,
+            }
+        };
+        self.rt.native_roots.pop();
+        out
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn suspend(&mut self, _ctx: *mut NativeCtx, _block: Option<crate::task::Block>, _result_slot: bool) -> Option<Value> {
+        self.report("native driver: tasks need fibers", None, Vec::new(), false);
+        None
+    }
+
+    /// The word a suspension point returns for `wake`.
+    #[cfg(not(target_family = "wasm"))]
+    fn wake_value(&mut self, wake: Option<crate::task::Wake>) -> Value {
+        use crate::task::Wake;
+        match wake {
+            Some(Wake::Status(n)) => Value::from(n),
+            Some(Wake::Io(r, layout)) => {
+                let heap = &mut self.rt.heap;
+                crate::host_enum::with_host_enum_layout(layout, || crate::io::as_result_unit(heap, r))
+            }
+            Some(Wake::Unit | Wake::Retry) | None => Value::default(),
+        }
+    }
+
+    /// The root task waits: run the other tasks until it is ready again;
+    /// its wake.
+    #[cfg(not(target_family = "wasm"))]
+    fn run_tasks(&mut self) -> Value {
+        use crate::task::{Cancel, ROOT, TaskState};
+        loop {
+            let s = self.rt.sched.as_mut().expect("scheduler");
+            let mut next = None;
+            while let Some(id) = s.run_queue.pop_front() {
+                if s.tasks.get(&id).is_some_and(|r| r.state == TaskState::Ready) {
+                    next = Some(id);
+                    break;
+                }
+            }
+            let Some(id) = next else {
+                if !self.rt.task_wait_events() {
+                    self.rt.task_deadlock();
+                }
+                continue;
+            };
+            if id == ROOT {
+                s.current = ROOT;
+                let rec = s.tasks.get_mut(&ROOT).expect("root task");
+                rec.state = TaskState::Running;
+                let wake = rec.wake.take();
+                return self.wake_value(wake);
+            }
+            if self.rt.task_cancel_waits_for_children(id) {
+                continue;
+            }
+            let s = self.rt.sched.as_mut().expect("scheduler");
+            s.current = id;
+            let rec = s.tasks.get_mut(&id).expect("ready task");
+            rec.state = TaskState::Running;
+            rec.started = true;
+            let wake = rec.wake.take();
+            let coro = rec.coro.expect("child task");
+            let input = if self.rt.task_take_cancel() { TaskResume::Cancel } else { TaskResume::Wake(self.wake_value(wake)) };
+            if !self.tasks.contains_key(&id) {
+                match self.new_task_fiber(coro) {
+                    Some(f) => {
+                        self.tasks.insert(id, f);
+                    }
+                    None => {
+                        crate::gen_fiber::finish(coro);
+                        self.rt.task_end(id, TaskState::Failed, Some("native driver: a task body without native code".into()));
+                        continue;
+                    }
+                }
+            }
+            if !self.run_task_fiber(id, input) {
+                continue;
+            }
+            // Its body returned, or unwound a panic or a cancel.
+            crate::gen_fiber::finish(coro);
+            let failed = std::mem::take(&mut self.panicked);
+            let msg = self.task_panic.take();
+            let cancelling = self.rt.sched.as_ref().and_then(|s| s.tasks.get(&id)).is_some_and(|r| r.cancel == Cancel::Unwinding);
+            match (failed, msg) {
+                (false, _) => self.rt.task_end(id, TaskState::Done, None),
+                (true, None) if cancelling => self.rt.task_end(id, TaskState::Dropped, None),
+                (true, msg) => self.rt.task_end(id, TaskState::Failed, Some(msg.unwrap_or_default())),
+            }
+        }
+    }
+
+    /// A fiber for task coroutine `coro`, whose body compiled.
+    #[cfg(not(target_family = "wasm"))]
+    fn new_task_fiber(&mut self, coro: crate::memory::RefCoroutine) -> Option<Box<TaskFiber>> {
+        let c = coro.as_ref();
+        let entry = self.program.native.lookup(c.resume_ip)?;
+        if c.saved_stack.len() < entry.reads as usize || entry.arity as usize > 16 {
+            return None;
+        }
+        let mut words = [0u64; 16];
+        for (w, v) in words.iter_mut().zip(c.saved_stack.iter()) {
+            *w = v.bits();
+        }
+        coro.payload_mut().started = true;
+        let stack = match self.task_stacks.pop() {
+            Some(s) => s,
+            None => corosensei::stack::DefaultStack::new(crate::vm::FIBER_STACK_BYTES).ok()?,
+        };
+        use corosensei::stack::Stack as _;
+        let stack_limit = stack.limit().get() + 64 * 1024;
+        let me = std::ptr::from_mut(self).cast::<c_void>();
+        let coro = TaskCoro::with_stack(stack, move |yielder, _first| {
+            // SAFETY: the driver outlives its task fibers (it drops them).
+            let d = unsafe { &mut *me.cast::<Driver<'static>>() };
+            d.task_yielder = std::ptr::from_ref(yielder).cast();
+            let env = d.env();
+            let out = crate::native::call(&entry, &words[..entry.arity as usize], &env);
+            d.task_body_done(out);
+        });
+        Some(Box::new(TaskFiber { coro: Some(coro), stack_limit, yielder: std::ptr::null(), native_roots: Vec::new(), arg_roots: Vec::new(), depth: 0, gen_running: Vec::new() }))
+    }
+
+    /// A task body's outcome, on its fiber: what it frees, or its panic
+    /// (which fails the task) and the `defer`s it unwound.
+    #[cfg(not(target_family = "wasm"))]
+    fn task_body_done(&mut self, out: NativeOutcome) {
+        match out {
+            NativeOutcome::Done(r) => {
+                for (w, deep) in r.frees {
+                    if !self.free_early(Value::from(w), deep) {
+                        return;
+                    }
+                }
+            }
+            NativeOutcome::Panicked(p) => self.native_panic(p),
+            NativeOutcome::Bailed => self.report("native driver: a task could not start", None, Vec::new(), false),
+        }
+    }
+
+    /// Run task `id`'s fiber with `input` until it waits (`false`) or its
+    /// body is done (`true`).
+    #[cfg(not(target_family = "wasm"))]
+    fn run_task_fiber(&mut self, id: crate::task::TaskId, input: TaskResume) -> bool {
+        let f: *mut TaskFiber = &mut **self.tasks.get_mut(&id).expect("a task fiber");
+        // SAFETY: the box stays in the map while it runs; only this loop
+        // removes fibers.
+        let f = unsafe { &mut *f };
+        self.swap_roots(f);
+        let saved_limit = crate::vm::FIBER_STACK_LIMIT.replace(f.stack_limit);
+        let saved_gen = crate::native::GEN_YIELDER.get();
+        let saved_yielder = std::mem::replace(&mut self.task_yielder, f.yielder);
+        let out = f.coro.as_mut().expect("a parked task fiber").resume(input);
+        f.yielder = std::mem::replace(&mut self.task_yielder, saved_yielder);
+        crate::native::GEN_YIELDER.set(saved_gen);
+        crate::vm::FIBER_STACK_LIMIT.set(saved_limit);
+        self.swap_roots(f);
+        match out {
+            corosensei::CoroutineResult::Yield(()) => false,
+            corosensei::CoroutineResult::Return(()) => {
+                let mut f = self.tasks.remove(&id).expect("a task fiber");
+                if let Some(coro) = f.coro.take()
+                    && self.task_stacks.len() < 8
+                {
+                    self.task_stacks.push(coro.into_stack());
+                }
+                true
+            }
+        }
+    }
+
+    /// Trade the running side's native calls, argument roots, call depth
+    /// and running generators with `f`'s.
+    #[cfg(not(target_family = "wasm"))]
+    fn swap_roots(&mut self, f: &mut TaskFiber) {
+        std::mem::swap(&mut self.rt.native_roots, &mut f.native_roots);
+        std::mem::swap(&mut self.rt.ffi_arg_roots, &mut f.arg_roots);
+        std::mem::swap(&mut self.depth, &mut f.depth);
+        std::mem::swap(&mut self.gen_running, &mut f.gen_running);
+    }
+}
+
+impl Drop for Driver<'_> {
+    fn drop(&mut self) {
+        // Tasks still waiting (the root task panicked): forget them.
+        #[cfg(not(target_family = "wasm"))]
+        if !self.tasks.is_empty() {
+            self.tasks.clear();
+            self.rt.sched = None;
+        }
     }
 }
 
@@ -616,8 +1157,21 @@ impl GcHost for Driver<'_> {
     /// The generators whose fibers run now: native frames' records and
     /// the Runtime's roots are the rest.
     fn host_roots(&self, visit: &mut dyn FnMut(HostRoot)) {
+        use crate::memory::RootKind;
         for v in &self.gen_running {
-            visit(HostRoot::Handle(v.heap_addr(), crate::memory::RootKind::Ambiguous));
+            visit(HostRoot::Handle(v.heap_addr(), RootKind::Ambiguous));
+        }
+        // The task side not running: its native frames' words and argument
+        // roots, pinned.
+        #[cfg(not(target_family = "wasm"))]
+        for f in self.tasks.values() {
+            for v in f.arg_roots.iter().chain(&f.gen_running) {
+                visit(HostRoot::Handle(v.heap_addr(), RootKind::Ambiguous));
+            }
+            for &(ctx, _) in &f.native_roots {
+                // SAFETY: a parked call's frames keep their contexts.
+                unsafe { &*ctx }.for_each_root(|w, _| visit(HostRoot::Handle(Value::from(unsafe { *w }).heap_addr(), RootKind::Ambiguous)));
+            }
         }
     }
 
@@ -672,6 +1226,10 @@ impl crate::gen_fiber::GenHost for Driver<'_> {
     fn free_early(&mut self, v: Value, deep: bool) {
         let _ = Driver::free_early(self, v, deep);
     }
+
+    fn switches_in_fibers(&self) -> bool {
+        true
+    }
 }
 
 impl HostEnv for Driver<'_> {
@@ -684,15 +1242,17 @@ impl HostEnv for Driver<'_> {
     }
 
     fn can_switch(&self) -> bool {
-        false
+        self.tasks_can_switch()
     }
 
+    /// The root task waits where it is (the scheduler runs there); a
+    /// child parks its fiber.
     fn on_fiber(&self) -> bool {
-        false
+        true
     }
 
-    fn park(&mut self, _ctx: *mut NativeCtx, _block: Option<crate::task::Block>, _result_slot: bool) -> Option<Value> {
-        None
+    fn park(&mut self, ctx: *mut NativeCtx, block: Option<crate::task::Block>, result_slot: bool) -> Option<Value> {
+        self.suspend(ctx, block, result_slot)
     }
 
     fn collect(&mut self, ctx: *mut NativeCtx) -> bool {
