@@ -241,11 +241,12 @@ thread_local! {
 
 use crate::collect::STATIC_KINDS;
 
-/// `COIL_NATIVE_DRIVER=1`: programs whose native code covers them run on
-/// the native driver, without the interpreter (`driver.rs`).
+/// Programs whose native code covers them run on the native driver,
+/// without the interpreter (`driver.rs`); `COIL_NATIVE_DRIVER=0` runs them
+/// on the VM with native calls instead.
 fn native_driver_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_NATIVE_DRIVER").is_some_and(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("COIL_NATIVE_DRIVER").is_none_or(|v| v != "0"))
 }
 
 #[inline(always)]
@@ -2048,8 +2049,8 @@ impl<const S: usize> Machine<S> {
 
     /// Run `f` on a native driver over this machine's Runtime (no
     /// interpreter), when the program's native code covers what starts at
-    /// `start` (a prologue from there, or a body) and `COIL_NATIVE_DRIVER`
-    /// is set. `None`: the machine runs it.
+    /// `start` (a prologue from there, or a body), unless
+    /// `COIL_NATIVE_DRIVER=0`. `None`: the machine runs it.
     pub(crate) fn with_native_driver<R>(&mut self, start: usize, f: impl FnOnce(&mut crate::driver::Driver<'_>) -> R) -> Option<R> {
         if !native_driver_enabled() {
             return None;

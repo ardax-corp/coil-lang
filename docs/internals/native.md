@@ -249,12 +249,24 @@ native frames in between.
 A collection can run inside such a call, and at a *safepoint*: the entry
 and loop headers of a body that may allocate, taken when an allocation
 after the commit found a collection due (`NativeCtx::gc_due`). Before
-either, native code links a record of every heap-typed value of the body
-into `NativeCtx::roots` (`[next, n, words…]` on its stack); callers of a
-body where a collection may run (`Plan::may_gc`) do the same around the
-call. The VM treats those words as precise roots: a minor collection
+either, native code links a record of the heap words the frame still
+holds into `NativeCtx::roots` (`[next, n, words…]` on its stack); callers
+of a body where a collection may run (`Plan::may_gc`) do the same around
+the call. The VM treats those words as precise roots: a minor collection
 forwards them in place. After the call, when `NativeCtx::gc_epoch` moved,
 native code reloads the words and drops its array views.
+
+A record holds what the VM's frame would: the values live after the op
+(`mir::liveness`) and those it reads, and the words locals hold
+(`MirFunc::local_binds`): a local's word from its definition until the
+local is rebound or a `ClearWord` drops it, even past its last use; a
+match binding only through its scrutinee; where paths that left a local
+different words meet with no φ, neither. A heap word moved into an `int`
+value (an enum payload) is rooted precisely; a call's pair low word that
+may carry an object (`MirFunc::heap_pair_calls`), and an opaque body's
+`int` words, go in an ambiguous record (pinned, never rewritten). So a
+dead temporary or a rebound local's old object is not kept alive, and a
+weak to it is cleared by `collect` as on the VM.
 
 ### Host calls
 
@@ -499,6 +511,19 @@ VM's own result, effects, panic message, location and backtrace.
 After a bail, calls nested inside the VM's re-run (operand stack base above
 the bailed call's) stay in the VM, so a deep recursion bails once, not once
 per level (`NativeTable::quiet_above`).
+
+### The native driver
+
+A program whose native code covers it runs on `machine::driver::Driver`,
+over the machine's `Runtime` with no interpreter: it walks the prologue's
+startup ops, calls the entry natively and answers native code's host
+requests itself (calls of bodies and function values, host natives,
+collections over the native frames' records, early frees, finalizers,
+tasks on fibers of their own, generators, threads and auto-par workers,
+FFI callbacks). `Machine::with_native_driver` enters it; `coil test
+--engine native` runs each case on it. `COIL_NATIVE_DRIVER=0` keeps the VM
+running the program, calling native code per body, as before the driver.
+The inventory's `vm_entries` is gated at 0.
 
 ### VM ↔ native
 
