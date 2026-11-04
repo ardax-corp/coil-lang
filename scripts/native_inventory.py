@@ -82,6 +82,12 @@ def main():
         out += ["", f"### Refusals by reason (top {args.top})", "", "| bodies | reason | first seen |", "| ---: | --- | --- |"]
         for kind, n in reasons.most_common(args.top):
             out.append(f"| {n} | {kind.replace('|', '/')} | {examples[kind].replace('|', '/')} |")
+    hosts = sorted(((totals[k], k) for k in totals if k.startswith("host_machine:") or k.startswith("host_stub:")), reverse=True)
+    if hosts:
+        out += ["", "### Host calls through the machine", "", "| calls | path | host function |", "| ---: | --- | --- |"]
+        for n, k in hosts:
+            path, _, name = k.partition(":")
+            out.append(f"| {n} | {path.removeprefix('host_')} | {name.replace('|', '/')} |")
     if failed:
         out += ["", "### Backend failures", ""] + [f"- {x}" for x in failed[: args.top]]
     report = "\n".join(out) + "\n"

@@ -1776,6 +1776,11 @@ unsafe fn host_invoke(
     // SAFETY: `machine` is the live machine `host` was made for.
     let out = unsafe { invoke(machine, ctx, id, layout, words) };
     let c = unsafe { &mut *ctx };
+    if out.is_some()
+        && let Some((n, _)) = HOST_CALLS.get(id as usize)
+    {
+        n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     match out {
         None => {
             c.committed = committed;
@@ -1826,6 +1831,9 @@ unsafe fn host_via_vm(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u
     let committed = std::mem::replace(&mut c.committed, 1);
     c.vm_calls += 1;
     HOST_VIA_VM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some((_, n)) = HOST_CALLS.get(id as usize) {
+        n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     c.gc_epoch += 1;
     let mut panicked = false;
     let machine = c.machine;
@@ -2010,8 +2018,15 @@ pub static BAIL_TRAPS: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::
 /// See [`BAILS`].
 pub static HOST_VIA_VM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Host calls native code made through the machine, by host id: `.0`
+/// those the machine ran in Rust (`NativeHost::invoke`), `.1` those it
+/// ran on a one-op VM stub ([`HOST_VIA_VM`]).
+static HOST_CALLS: [(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64); 256] =
+    [const { (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)) }; 256];
+
 /// The [`VM_ENTRIES`], [`BAILS`], [`VM_RUNS`] and [`HOST_VIA_VM`] counts,
-/// then the non-zero [`BAIL_TRAPS`] as `bail_trap_<code>`.
+/// then the non-zero [`BAIL_TRAPS`] as `bail_trap_<code>` and the
+/// [`HOST_CALLS`] as `host_machine:<name>` / `host_stub:<name>`.
 pub fn vm_use_counts() -> Vec<(String, u64)> {
     use std::sync::atomic::Ordering::Relaxed;
     let mut out = vec![
@@ -2024,6 +2039,15 @@ pub fn vm_use_counts() -> Vec<(String, u64)> {
         let n = n.load(Relaxed);
         if n != 0 {
             out.push((format!("bail_trap_{code}"), n));
+        }
+    }
+    let hosts = direct_host_natives();
+    for (id, (machine, stub)) in HOST_CALLS.iter().enumerate() {
+        let name = hosts.get(id).map_or_else(|| id.to_string(), |h| h.name.clone());
+        for (kind, n) in [("machine", machine.load(Relaxed)), ("stub", stub.load(Relaxed))] {
+            if n != 0 {
+                out.push((format!("host_{kind}:{name}"), n));
+            }
         }
     }
     out
