@@ -5,6 +5,7 @@ mod arith;
 mod collect;
 mod driver;
 mod gen_fiber;
+mod lanes;
 mod locate;
 pub mod char_ord;
 pub mod clock;
@@ -33,6 +34,7 @@ pub mod packed_la;
 pub mod reactor;
 pub mod runtime_wire;
 mod runtime;
+mod profile;
 mod stacks;
 mod start;
 mod worker;
@@ -76,6 +78,7 @@ pub use runtime_wire::{
     VmHostSpec, WireThreadProgramWithMapsArgs, class_kind_table, wire_thread_program, wire_thread_program_with_maps,
     wire_vm_host,
 };
+pub use profile::*;
 pub use start::{NativeStart, run_natively};
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{

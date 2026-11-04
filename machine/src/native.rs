@@ -1290,14 +1290,13 @@ pub unsafe extern "C" fn coil_native_eq(ctx: *mut NativeCtx, a: u64, b: u64) -> 
 /// `ctx` is the call's [`NativeCtx`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_stringify(ctx: *mut NativeCtx, word: u64, tag: u64) -> u64 {
-    type M = crate::Machine<{ crate::DEFAULT_OPERAND_STACK_SLOTS }>;
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
     };
     let v = common::Value::from(word);
     let text = match common::stringify_tag(tag as u32) {
-        Some(t) => M::stringify_immediate(t, v),
-        None => M::stringify_value(heap, v),
+        Some(t) => crate::format::stringify_immediate(t, v),
+        None => crate::format::stringify_value(heap, v),
     };
     let s = heap.alloc_string(text);
     unsafe { note_alloc(ctx, heap) };
@@ -1315,7 +1314,6 @@ pub unsafe extern "C" fn coil_native_stringify(ctx: *mut NativeCtx, word: u64, t
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args: *const u64, n: u64) -> u64 {
     use crate::memory::{GcData, ObjString, Object};
-    type M = crate::Machine<{ crate::DEFAULT_OPERAND_STACK_SLOTS }>;
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
     };
@@ -1342,7 +1340,7 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
             Some(head) => {
                 let joined = match object(head.bits()) {
                     Some(Object::String(gh)) => gh.as_ref().concat(&message),
-                    _ => ObjString::new(M::object_string_value(heap, &head) + &message),
+                    _ => ObjString::new(crate::format::string_at(heap, head.bits()) + &message),
                 };
                 heap.alloc(joined, Object::String).0.addr()
             }
@@ -2151,7 +2149,7 @@ pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flag
     let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };
     // SAFETY: `call` set `heap` to the machine's live heap.
     let heap = unsafe { &mut *c.heap };
-    match crate::vm::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64) {
+    match crate::lanes::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64) {
         Ok(p) => {
             VECTOR_OPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             p as u64

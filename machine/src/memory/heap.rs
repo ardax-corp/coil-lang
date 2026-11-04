@@ -561,7 +561,7 @@ impl Heap {
                 batch.born.push(object.addr());
             }
         });
-        crate::vm::note_heap_alloc();
+        crate::profile::note_heap_alloc();
         (object, content)
     }
 
@@ -639,7 +639,7 @@ impl Heap {
         if young {
             content.header.generation.set(GEN_YOUNG);
             self.young_bytes += size;
-            crate::vm::note_heap_alloc();
+            crate::profile::note_heap_alloc();
             return (object, content);
         }
         if T::NURSERY && self.pretenure_bytes != 0 {
@@ -674,7 +674,7 @@ impl Heap {
             // behind it (most reuse, freed by this sweep) need no tag.
             content.set_fresh();
         }
-        crate::vm::note_heap_alloc();
+        crate::profile::note_heap_alloc();
         debug_assert!(
             self.find_object_by_addr(object.addr()).is_some(),
             "slab alloc must be findable at {:#x}",
@@ -996,7 +996,7 @@ impl Heap {
 
     /// Intern a borrowed string without allocating when it is already cached.
     pub fn intern_str(&mut self, data: &str) -> RefString {
-        crate::vm::note_intern_str();
+        crate::profile::note_intern_str();
         let _epoch_guard = self.epoch_guard();
         let hash = ObjString::hash(data);
         if let Some(s) = self.strings.find(data, hash) {

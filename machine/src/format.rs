@@ -133,7 +133,7 @@ pub(crate) fn stringify_value(heap: &Heap, v: Value) -> String {
 }
 
 /// The string object at `addr`'s text (empty when it is not one).
-fn string_at(heap: &Heap, addr: u64) -> String {
+pub(crate) fn string_at(heap: &Heap, addr: u64) -> String {
     match heap.find_object_by_addr(addr) {
         Some(Object::String(gc)) => gc.as_ref().data.to_string(),
         _ => String::new(),
@@ -154,4 +154,14 @@ pub(crate) fn result_err_text(heap: &Heap, value: Value) -> Option<String> {
 /// Whether `value` is a `Result::Ok`.
 pub(crate) fn result_is_ok(heap: &Heap, value: Value) -> bool {
     matches!(heap.find_object_by_addr(value.bits()), Some(Object::Enum(gc)) if gc.as_ref().tag == 0)
+}
+
+/// `STRINGIFY` of an immediate whose static type the compiler named.
+pub(crate) fn stringify_immediate(tag: ValueTag, v: Value) -> String {
+    match tag {
+        ValueTag::Float => format!("{:?}", v.as_float()),
+        ValueTag::Bool => if v.as_int() != 0 { "true" } else { "false" }.into(),
+        ValueTag::Unit => "()".into(),
+        _ => v.as_int().to_string(),
+    }
 }

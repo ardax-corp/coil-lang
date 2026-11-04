@@ -710,7 +710,7 @@ impl<'a> Driver<'a> {
             o if o == Instruction::FfiLoad as u8 => d.rt.ffi_load(arg(0)),
             o if o == Instruction::DeclareFFI as u8 => d.rt.ffi_declare(operand as u32, arg(0), arg(1), arg(2), arg(3)),
             _ => {
-                let call = crate::vm::FfiCall::from_words(&d.rt.heap, args);
+                let call = crate::runtime_ffi::FfiCall::from_words(&d.rt.heap, args);
                 d.rooted(ctx, |d| {
                     // A callback the C function makes runs that body natively.
                     let me = std::ptr::from_mut(d).cast::<c_void>();
