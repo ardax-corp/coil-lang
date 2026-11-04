@@ -65,7 +65,11 @@ pub(crate) trait GcHost {
     /// close of a generator (`None`).
     fn run_pending(&mut self, val: Value, pc: Option<u32>);
     /// A collection was asked for in a shared-heap epoch: end the epoch.
-    fn epoch_abort(&mut self) {}
+    fn epoch_abort(&mut self) {
+        if let Some(e) = &self.rt().shared_epoch {
+            e.abort();
+        }
+    }
     /// A safepoint wanted a collection while the heap is borrowed.
     fn borrowed_heap_wants_collect(&mut self) {}
     /// The heap is over its byte cap after a safepoint.
@@ -654,4 +658,65 @@ fn sweep_slice<H: GcHost + ?Sized>(h: &mut H) {
         rt.invalidate_program_string_cache();
         compact(h);
     }
+}
+
+/// Drain the collector and open a Layer A steal epoch on `h`'s heap (or
+/// join the one open).
+pub(crate) fn begin_shared_steal<H: GcHost + ?Sized>(
+    h: &mut H,
+) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, crate::thread::ThreadErrorTag> {
+    if let Some(e) = &h.rt().shared_epoch {
+        e.jobs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        return Ok(Arc::clone(e));
+    }
+    // A lazy sweep left over from the last cycle only needs finishing;
+    // a fresh full collect here would re-mark the whole heap.
+    if h.rt().heap.get().gc_is_sweeping() {
+        finish_sweep(h);
+    }
+    if !h.rt().heap.get().gc_is_idle() || h.rt().heap.get().should_collect() {
+        collect(h);
+    }
+    if !h.rt().heap.get().gc_is_idle() {
+        return Err(crate::thread::ThreadErrorTag::Other);
+    }
+    let rt = h.rt_mut();
+    let ptr = rt.heap.owned_ptr();
+    let epoch = crate::shared_heap::SharedHeapEpoch::new(ptr);
+    rt.heap.owned_mut().enter_epoch_stw(epoch.alloc_lock());
+    epoch.jobs.store(1, std::sync::atomic::Ordering::SeqCst);
+    rt.shared_epoch = Some(Arc::clone(&epoch));
+    Ok(epoch)
+}
+
+/// Close one shared-heap job. `published` is the join result, which no
+/// root holds yet: a collection that runs now keeps it.
+pub(crate) fn end_shared_steal<H: GcHost + ?Sized>(h: &mut H, published: Value) {
+    let rt = h.rt_mut();
+    let Some(e) = &rt.shared_epoch else {
+        return;
+    };
+    if e.jobs.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) != 1 {
+        return;
+    }
+    // Exit STW on the epoch Heap (root owned slab, or the borrowed ptr).
+    // Every worker flushed its batch before publishing; this thread's goes
+    // back while the lock is still installed.
+    unsafe {
+        (*e.heap_ptr()).flush_epoch_batch();
+        (*e.heap_ptr()).exit_epoch_stw();
+    }
+    rt.shared_epoch = None;
+    if rt.heap.is_borrowed() || !rt.heap.get().should_collect() {
+        return;
+    }
+    // Same incremental start as an alloc safepoint: mark now (with
+    // `published` rooted), sweep lazily from later safepoints.
+    rt.ffi_arg_roots.push(published);
+    if rt.gc_in_progress {
+        collect(h);
+    } else {
+        start_incremental(h);
+    }
+    h.rt_mut().ffi_arg_roots.pop();
 }

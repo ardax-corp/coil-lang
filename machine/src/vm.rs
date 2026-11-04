@@ -1824,10 +1824,6 @@ pub struct Machine<const S: usize> {
     gc_ip: usize,
     /// Compiler-only SIMD file (numeric bits only; never GC-traced).
     vregs: [[u64; common::simd::LANES]; common::simd::NREGS],
-    /// Live C1/C2 steal epoch (root). Helpers bind via [`HeapSlot`].
-    shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
-    /// Join result bits not yet stored on the operand stack (Layer A collect).
-    steal_join_root: Value,
     /// [`common::FrameReserve`] of the code `execute` last ran, keyed by that
     /// code's address and length. Every frame open keeps `frame_reserve`
     /// words free.
@@ -1945,8 +1941,6 @@ impl<const S: usize> Machine<S> {
             gc_fresh_slot: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
-            shared_epoch: None,
-            steal_join_root: Value::default(),
             frame_reserve: 0,
             match_payload_bound: 0,
             frame_reserve_key: (0, 0),
@@ -3782,11 +3776,6 @@ impl<const S: usize> Machine<S> {
         crate::collect::safepoint(self);
     }
 
-    /// Finish a pending lazy sweep in one go.
-    fn gc_finish_sweep(&mut self) {
-        crate::collect::finish_sweep(self);
-    }
-
     /// The VM's roots outside the operand stack. None of them can be
     /// rewritten by a moving collector (untyped words, or Rust-held handles).
     fn for_each_vm_handle_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
@@ -3797,8 +3786,6 @@ impl<const S: usize> Machine<S> {
                 visit(addr, kind);
             }
         };
-        // Untyped word: the join result may be an immediate.
-        word(self.steal_join_root, crate::memory::RootKind::Ambiguous, visit);
         for ctx in &self.resume_stack {
             visit(ctx.coro.as_ptr() as u64, crate::memory::RootKind::Precise);
         }
@@ -4577,29 +4564,12 @@ impl<const S: usize> Machine<S> {
 
     /// Snapshot needed to spawn a worker on this program.
     pub fn thread_spawn_context(&self) -> Option<crate::thread::ThreadSpawnContext> {
-        let program = self.thread_program.clone()?;
-        Some(crate::thread::ThreadSpawnContext {
-            program,
-            natives: self.rt.natives.clone_registry(),
-            shared_print: self.shared_print.clone(),
-            shared_stdout: self.rt.shared_stdout.clone(),
-            shared_stderr: self.rt.shared_stderr.clone(),
-            live_threads: std::sync::Arc::clone(&self.rt.live_threads),
-            worker_cap: std::sync::Arc::clone(&self.rt.worker_cap),
-            reactor: std::sync::Arc::clone(&self.rt.reactor),
-            io_reactor: std::sync::Arc::clone(&self.rt.io_reactor),
-            ffi_base_dir: self.rt.ffi.base_dir.clone(),
-            ffi_search_paths: self.rt.ffi.search_paths.clone(),
-            dload_gate: self.rt.ffi.dload_gate.clone(),
-            struct_layouts: Arc::clone(&self.rt.ffi.struct_layouts),
-            statics: self.static_words(),
-            native: self.native_code(),
-        })
+        self.rt.thread_spawn_context(self.thread_program.clone()?, self.shared_print.clone())
     }
 
     /// The static slots' words, for a worker that reads them.
     pub fn static_words(&self) -> Arc<Vec<u64>> {
-        Arc::new(self.rt.statics.iter().map(|v| v.bits()).collect())
+        self.rt.static_words()
     }
 
     /// A shared-heap job's statics: the spawning VM's words, which name
@@ -5212,12 +5182,12 @@ impl<const S: usize> Machine<S> {
         epoch: &std::sync::Arc<crate::shared_heap::SharedHeapEpoch>,
     ) {
         self.rt.heap.bind(epoch.heap_ptr());
-        self.shared_epoch = Some(std::sync::Arc::clone(epoch));
+        self.rt.shared_epoch = Some(std::sync::Arc::clone(epoch));
     }
 
     pub fn unbind_shared_heap(&mut self) {
         self.rt.heap.unbind();
-        self.shared_epoch = None;
+        self.rt.shared_epoch = None;
     }
 
     /// Drain incremental GC and open a Layer A steal epoch on this Heap.
@@ -5225,60 +5195,13 @@ impl<const S: usize> Machine<S> {
         &mut self,
     ) -> Result<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>, crate::thread::ThreadErrorTag>
     {
-        if let Some(e) = &self.shared_epoch {
-            e.jobs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            return Ok(std::sync::Arc::clone(e));
-        }
-        // A lazy sweep left over from the last cycle only needs finishing;
-        // a fresh full collect here would re-mark the whole heap.
-        if self.rt.heap.get().gc_is_sweeping() {
-            self.gc_finish_sweep();
-        }
-        if !self.rt.heap.get().gc_is_idle() || self.rt.heap.get().should_collect() {
-            self.gc_collect();
-        }
-        if !self.rt.heap.get().gc_is_idle() {
-            return Err(crate::thread::ThreadErrorTag::Other);
-        }
-        let ptr = self.rt.heap.owned_ptr();
-        let epoch = crate::shared_heap::SharedHeapEpoch::new(ptr);
-        self.rt.heap.owned_mut().enter_epoch_stw(epoch.alloc_lock());
-        epoch.jobs.store(1, std::sync::atomic::Ordering::SeqCst);
-        self.shared_epoch = Some(std::sync::Arc::clone(&epoch));
-        Ok(epoch)
+        crate::collect::begin_shared_steal(self)
     }
 
     /// Close one shared-heap job. `published` is the join result, which is not
     /// on the operand stack yet; Layer A collect must still treat it as a root.
     pub fn end_shared_steal(&mut self, published: Value) {
-        let Some(e) = &self.shared_epoch else {
-            return;
-        };
-        if e.jobs.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) != 1 {
-            return;
-        }
-        // Exit STW on the epoch Heap (root owned slab, or the borrowed ptr).
-        // Every worker flushed its batch before publishing; this thread's goes
-        // back while the lock is still installed.
-        unsafe {
-            (*e.heap_ptr()).flush_epoch_batch();
-            (*e.heap_ptr()).exit_epoch_stw();
-        }
-        self.shared_epoch = None;
-        if self.rt.heap.is_borrowed() {
-            return;
-        }
-        self.steal_join_root = published;
-        if self.rt.heap.get().should_collect() {
-            // Same incremental start as an alloc safepoint: mark now (with
-            // `published` rooted), sweep lazily from later safepoints.
-            if self.rt.gc_in_progress {
-                self.gc_collect();
-            } else {
-                crate::collect::start_incremental(self);
-            }
-        }
-        self.steal_join_root = Value::default();
+        crate::collect::end_shared_steal(self, published);
     }
 
     /// Rewrite the first `JMP target` at or after `from` into `HALT` so setup
@@ -6872,7 +6795,7 @@ impl<const S: usize> crate::collect::GcHost for Machine<S> {
     /// Not while a host frame sits between VM frames (it may hold raw heap
     /// words), in a shared-heap epoch, or under the debugger.
     fn can_move(&self) -> bool {
-        let ok = IN_EXECUTE.get() <= 1 && self.shared_epoch.is_none();
+        let ok = IN_EXECUTE.get() <= 1 && self.rt.shared_epoch.is_none();
         #[cfg(any(test, feature = "debugger"))]
         let ok = ok && self.debug.is_none();
         ok
@@ -6884,12 +6807,6 @@ impl<const S: usize> crate::collect::GcHost for Machine<S> {
 
     fn run_pending(&mut self, val: Value, pc: Option<u32>) {
         Machine::run_pending(self, val, pc);
-    }
-
-    fn epoch_abort(&mut self) {
-        if let Some(e) = &self.shared_epoch {
-            e.abort();
-        }
     }
 
     fn borrowed_heap_wants_collect(&mut self) {

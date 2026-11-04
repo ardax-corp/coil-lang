@@ -61,6 +61,9 @@ pub(crate) struct Runtime {
     pub(crate) gc_in_progress: bool,
     /// Nested collection during a finalizer; run another cycle after.
     pub(crate) gc_deferred: bool,
+    /// The open shared-heap steal epoch (auto-par workers run on this heap
+    /// meanwhile): nothing moves.
+    pub(crate) shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
 }
 
 /// What the `ffi::` natives keep between calls.
@@ -120,7 +123,7 @@ impl Runtime {
     pub(crate) fn with(sched: Option<Box<crate::task::Scheduler>>, reactor: std::sync::Arc<crate::reactor::Reactor>, io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>, live_threads: crate::thread::LiveThreadRegistry, worker_cap: std::sync::Arc<crate::thread::WorkerCap>, statics: Vec<Value>, program_strings: Arc<Vec<String>>, program_string_cache: Vec<Value>, native_roots: Vec<(*mut crate::native::NativeCtx, usize)>, ffi_arg_roots: Vec<Value>, finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>, finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>) -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs, output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false }
+        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs, output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None }
     }
 }
 
@@ -146,6 +149,37 @@ pub(crate) trait HostEnv {
 }
 
 impl Runtime {
+    /// The static slots' words, for a worker that reads them.
+    pub(crate) fn static_words(&self) -> Arc<Vec<u64>> {
+        Arc::new(self.statics.iter().map(|v| v.bits()).collect())
+    }
+
+    /// What a thread this runtime spawns runs with: `program`, printing to
+    /// `shared_print`.
+    pub(crate) fn thread_spawn_context(
+        &self,
+        program: Arc<crate::thread::ThreadProgram>,
+        shared_print: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
+    ) -> Option<crate::thread::ThreadSpawnContext> {
+        Some(crate::thread::ThreadSpawnContext {
+            program,
+            natives: self.natives.clone_registry(),
+            shared_print,
+            shared_stdout: self.shared_stdout.clone(),
+            shared_stderr: self.shared_stderr.clone(),
+            live_threads: Arc::clone(&self.live_threads),
+            worker_cap: Arc::clone(&self.worker_cap),
+            reactor: Arc::clone(&self.reactor),
+            io_reactor: Arc::clone(&self.io_reactor),
+            ffi_base_dir: self.ffi.base_dir.clone(),
+            ffi_search_paths: self.ffi.search_paths.clone(),
+            dload_gate: self.ffi.dload_gate.clone(),
+            struct_layouts: Arc::clone(&self.ffi.struct_layouts),
+            statics: self.static_words(),
+            native: self.native.as_ref().map(|t| Arc::clone(&t.code)),
+        })
+    }
+
     /// Module setup's finalizer registry (`__module_setup`): `type_id`'s
     /// drop method runs at `pc` (`EARLY_DROP_FLAG`: freed early too).
     pub(crate) fn register_finalizer(&mut self, type_id: u32, pc: u32) {
