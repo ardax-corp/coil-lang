@@ -1,15 +1,16 @@
 //! Vec natives native code runs as MIR.
 //!
-//! The VM keeps `vec_insert`, `vec_remove` and `vec_from_array` in the
-//! runtime. In a captured native body [`apply`] writes each `HostInvoke` of
-//! them out as the loop it stands for, over the MIR array ops native code
+//! The VM keeps `vec_insert` and `vec_remove` in the runtime. In a captured
+//! native body [`apply`] writes each `HostInvoke` of them out as the loop it stands for, over the MIR array ops native code
 //! already compiles (`ArrayLen`, `Index`, `StoreIndex`, `ArrayPush`), so a
 //! native build does not need them in `libcoil_rt`. The element moves are
 //! word copies, so one expansion serves every element type: a word whose
 //! type the call does not say is moved as an `i64`, with no safepoint
 //! between its load and its store (a push roots the word it pushes).
 //!
-//! What stays a runtime call: `vec_pop`, the shrink primitive (`remove`
+//! What stays a runtime call: `vec_from_array`, the copy primitive (it
+//! keeps the source's representation, a packed byte or float array stays
+//! packed, which the MIR array ops cannot ask for); `vec_pop`, the shrink primitive (`remove`
 //! rotates the element to the end and pops it, which also packs the
 //! `Option` in the call's layout), and the out-of-bounds message of
 //! `insert`, which the twin `native_twins::vec_insert_oob` formats so the
@@ -29,34 +30,30 @@ pub const INSERT_OOB_TWIN: &str = "vec_insert_oob";
 enum VecNative {
     Insert,
     Remove,
-    FromArray,
 }
 
 struct Ids {
     insert: u16,
     remove: u16,
-    from_array: u16,
     pop: u16,
 }
 
 impl Ids {
     fn get() -> Self {
         let id = |name: &str| common::host_native_id(name).unwrap_or_else(|| panic!("unknown host native `{name}`")) as u16;
-        Self { insert: id("vec_insert"), remove: id("vec_remove"), from_array: id("vec_from_array"), pop: id("vec_pop") }
+        Self { insert: id("vec_insert"), remove: id("vec_remove"), pop: id("vec_pop") }
     }
 
     fn which(&self, native_id: u16) -> Option<VecNative> {
         match native_id {
             n if n == self.insert => Some(VecNative::Insert),
             n if n == self.remove => Some(VecNative::Remove),
-            n if n == self.from_array => Some(VecNative::FromArray),
             _ => None,
         }
     }
 }
 
-/// Expand each `HostInvoke` of `vec_insert` / `vec_remove` /
-/// `vec_from_array` in `func`. `insert_oob` is the entry of
+/// Expand each `HostInvoke` of `vec_insert` / `vec_remove` in `func`. `insert_oob` is the entry of
 /// [`INSERT_OOB_TWIN`]; without it `vec_insert` stays a call.
 pub fn apply(func: &mut MirFunc, insert_oob: Option<Label>) {
     let ids = Ids::get();
@@ -100,7 +97,6 @@ fn expandable(func: &MirFunc, which: VecNative, dest: ValueId, layout: u8, args:
                     (common::HOST_ENUM_LAYOUT_BOXED, MirTy::HeapRef) | (common::HOST_ENUM_LAYOUT_OPTION_NICHE, MirTy::NicheOpt)
                 )
         }
-        VecNative::FromArray => args.len() == 1 && heap(arg(0)) && func.ty(dest) == MirTy::HeapRef,
     }
 }
 
@@ -217,7 +213,6 @@ fn expand(func: &mut MirFunc, b: BlockId, k: usize, which: VecNative, ids: &Ids,
     match which {
         VecNative::Insert => insert(&mut ex, b, rest, dest, &args, insert_oob.expect("checked by `expandable`")),
         VecNative::Remove => remove(&mut ex, b, rest, dest, layout, &args, ids.pop),
-        VecNative::FromArray => from_array(&mut ex, b, rest, dest, args[0]),
     }
 }
 
@@ -326,32 +321,6 @@ fn remove(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
 
     ex.push(join, MirInst::Phi { dest, ty, args: vec![(none, nothing), (out, some)] });
     ex.jump(join, rest);
-}
-
-/// `Vec::from(a)`: a new array with `a`'s elements pushed in order.
-fn from_array(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, src: ValueId) {
-    let head = ex.block();
-    let body = ex.block();
-
-    let n = ex.len(b, src);
-    let zero = ex.int(b, 0);
-    let one = ex.int(b, 1);
-    let fresh = ex.value(MirTy::HeapRef);
-    ex.push(b, MirInst::Alloc { dest: fresh, kind: MirAllocKind::Array, elems: Vec::new(), kinds: 0 });
-    ex.jump(b, head);
-
-    let k = ex.value(MirTy::I64);
-    let k_next = ex.value(MirTy::I64);
-    let grown = ex.value(MirTy::HeapRef);
-    ex.push(head, MirInst::Phi { dest: k, ty: MirTy::I64, args: vec![(b, zero), (body, k_next)] });
-    ex.push(head, MirInst::Phi { dest, ty: MirTy::HeapRef, args: vec![(b, fresh), (body, grown)] });
-    let more = ex.cmp(head, MirCmpOp::Lt, k, n);
-    ex.br(head, more, body, rest);
-
-    let w = ex.index(body, src, k, MirTy::I64);
-    ex.push(body, MirInst::ArrayPush { dest: grown, array: dest, value: w });
-    ex.push(body, MirInst::Bin { dest: k_next, op: MirBinOp::Add, ty: MirTy::I64, lhs: k, rhs: one });
-    ex.jump(body, head);
 }
 
 /// Expand the Vec natives in every captured body but the twins' own.
