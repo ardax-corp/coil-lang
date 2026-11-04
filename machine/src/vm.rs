@@ -311,6 +311,28 @@ struct PendingFfiInvoke {
     resume_sp: usize,
 }
 
+/// An `FfiInvoke`'s operands, taken off the stack.
+struct FfiCall {
+    lib_addr: u64,
+    function_id: usize,
+    args: Vec<Value>,
+    arg_types: Option<Vec<crate::memory::FfiType>>,
+}
+
+impl FfiCall {
+    /// The call, run once the VM pauses (`ip` / `sp`: where it resumes).
+    fn pending(self, resume_ip: usize, resume_sp: usize) -> PendingFfiInvoke {
+        PendingFfiInvoke {
+            lib_addr: self.lib_addr,
+            function_id: self.function_id,
+            args: self.args,
+            arg_types: self.arg_types,
+            resume_ip,
+            resume_sp,
+        }
+    }
+}
+
 /// Parked HostInvoke waiting on IO readiness (`wait_readable` / `wait_writable`).
 struct PendingIoWait {
     request: crate::io::IoParkRequest,
@@ -2676,8 +2698,8 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// [`crate::native::NativeHost::ffi`]: the FFI op `op` (`operand`)
-    /// through its stub, as [`Self::native_host_vm`].
+    /// [`crate::native::NativeHost::ffi`]: the FFI op `op` (`operand`) on
+    /// `args`, as the VM runs it (no bytecode).
     unsafe fn native_ffi_vm(
         raw: *mut c_void,
         ctx: *mut crate::native::NativeCtx,
@@ -2688,14 +2710,34 @@ impl<const S: usize> Machine<S> {
     ) -> Option<u64> {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        let pc = *vm.ffi_stubs.get(&(op as u8, operand as u32))?;
-        vm.nested_return_hi = Value::default();
+        if !vm.reserve_operand_words(args.len() + 1) {
+            return None;
+        }
+        let operand = operand as u32;
+        let before = vm.stack.tell();
+        for &a in args {
+            vm.stack.push(a);
+        }
+        // A callback the C function makes may collect: the native frames'
+        // words stay pinned.
         vm.native_roots.push((ctx, vm.frames.len()));
-        let saved = std::mem::replace(&mut vm.host_stub_frame, vm.frames.len() + 1);
-        let out = vm.native_reenter(|vm| vm.call_function(pc as u32, args));
-        vm.host_stub_frame = saved;
+        match op as u8 {
+            o if o == common::Instruction::FfiLoad as u8 => vm.ffi_load_top(),
+            o if o == common::Instruction::DeclareFFI as u8 => vm.declare_ffi_top(operand),
+            _ => {
+                let call = vm.ffi_invoke_take(operand);
+                let sp = vm.frames.get().get();
+                vm.native_reenter(|vm| vm.finish_pending_ffi_invoke(call.pending(0, sp)));
+            }
+        }
         vm.native_roots.pop();
         *panicked = vm.panicked;
+        let out = if vm.stack.tell() > before {
+            vm.stack.pop()
+        } else {
+            Value::default()
+        };
+        vm.stack.seek(before);
         Some(out.bits())
     }
 
@@ -6417,6 +6459,142 @@ impl<const S: usize> Machine<S> {
             crate::io::as_result_unit(&mut self.heap, wait)
         });
         self.stack.push(v);
+    }
+
+    /// `FfiLoad` on the path on top of the stack: pops it, pushes the
+    /// `Result` of loading the library.
+    fn ffi_load_top(&mut self) {
+        // Inlined to split-borrow `heap`/`libraries` from `frames`.
+        let path_val = self.stack.pop();
+        let path = {
+            let addr = path_val.bits();
+            match Self::find_object_by_addr(&self.heap, addr) {
+                Some(crate::memory::Object::String(gc)) => gc.as_ref().data.to_string(),
+                _ => String::new(),
+            }
+        };
+        match crate::ffi::resolve_library(
+            &path,
+            self.base_dir.as_deref(),
+            &self.ffi_search_paths,
+            &self.dload_gate,
+        ) {
+            Ok(lib_arc) => {
+                self.libraries
+                    .entry(path.clone())
+                    .or_insert_with(|| lib_arc.clone());
+                let (object, _gc) = self.heap.alloc_library(lib_arc);
+                let addr = object.addr();
+                self.userland_libraries.insert(addr, object);
+                self.push_result_ok(Value::from(addr));
+            }
+            Err(e) => {
+                self.push_ffi_error(e);
+            }
+        }
+    }
+
+    /// `FfiInvoke` (operand `raw`): pops the library, function id,
+    /// argument tuple and argument tags it takes, for the call.
+    fn ffi_invoke_take(&mut self, raw: u32) -> FfiCall {
+        let _arity = (raw & 0xFFFF) as usize;
+        let has_arg_tags = (raw & (1 << 16)) != 0;
+
+        // Stack (bottom → top): lib, fn_id, args_tuple [, tags_tuple].
+        let arg_types = if has_arg_tags {
+            let tags_val = self.stack.pop();
+            let tags_addr = tags_val.bits();
+            let tags: Vec<crate::memory::FfiType> =
+                match Self::find_object_by_addr(&self.heap, tags_addr) {
+                    Some(crate::memory::Object::Tuple(gc)) => gc
+                        .as_ref()
+                        .elements()
+                        .iter()
+                        .map(|v| Self::ffi_type_from_value(v, &self.heap))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+            Some(tags)
+        } else {
+            None
+        };
+
+        let tuple_val = self.stack.pop();
+        let tuple_addr = tuple_val.bits();
+
+        let function_id_val = self.stack.pop();
+        let function_id = function_id_val.as_int() as usize;
+
+        let lib_val = self.stack.pop();
+        let lib_addr = lib_val.bits();
+
+        let args: Vec<Value> = match Self::find_object_by_addr(&self.heap, tuple_addr) {
+            Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
+            _ => Vec::new(),
+        };
+        FfiCall {
+            lib_addr,
+            function_id,
+            args,
+            arg_types,
+        }
+    }
+
+    /// `DeclareFFI` (operand `raw`): pops the library, name, argument and
+    /// return tags, pushes the `Result` of declaring the function.
+    fn declare_ffi_top(&mut self, raw: u32) {
+        let _arity = (raw & 0xFFFF) as usize;
+        let variadic = (raw & (1 << 16)) != 0;
+
+        // Stack (bottom → top): lib, name, args_tuple, ret_tag.
+        let ret_tag_val = self.stack.pop();
+        let ret_type = Self::ffi_type_from_value(&ret_tag_val, &self.heap);
+
+        // Pop args tuple, then name, then lib handle.
+        let args_tuple_val = self.stack.pop();
+        let args_tuple_addr = args_tuple_val.bits();
+
+        let arg_types: Vec<crate::memory::FfiType> =
+            match Self::find_object_by_addr(&self.heap, args_tuple_addr) {
+                Some(crate::memory::Object::Tuple(gc)) => gc
+                    .as_ref()
+                    .elements()
+                    .iter()
+                    .map(|v| Self::ffi_type_from_value(v, &self.heap))
+                    .collect(),
+                _ => Vec::new(),
+            };
+        let name_val = self.stack.pop();
+        let name = Self::object_string_value(&self.heap, &name_val);
+        let lib_val = self.stack.pop();
+        let lib_addr = lib_val.bits();
+        let lib_obj = self.userland_libraries.get(&lib_addr).copied();
+        match lib_obj {
+            Some(mut owned) => {
+                let ffi_sig = crate::ffi::FfiSignature {
+                    name,
+                    args: arg_types,
+                    ret: ret_type,
+                    variadic,
+                };
+                match Self::register_signature_on_object(&mut owned, ffi_sig, &self.struct_layouts)
+                {
+                    Ok(id) => {
+                        self.userland_libraries.insert(lib_addr, owned);
+                        self.push_result_ok(Value::from(id as i64));
+                    }
+                    Err(e) => {
+                        self.push_ffi_error(e);
+                    }
+                }
+            }
+            None => {
+                self.push_result_err(
+                    crate::ffi::FfiErrorKindTag::InvalidHandle,
+                    format!("FFI declare: library at 0x{:x} is not loaded", lib_addr),
+                );
+            }
+        }
     }
 
     fn finish_pending_ffi_invoke(&mut self, pending: PendingFfiInvoke) {
