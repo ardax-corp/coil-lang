@@ -10,6 +10,7 @@ mod strbuf;
 pub use addr_hash::*;
 pub use frame::*;
 pub use heap::*;
+pub use slab::Bump;
 pub use stack::*;
 pub use strbuf::StrData;
 

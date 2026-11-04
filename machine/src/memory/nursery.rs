@@ -151,9 +151,9 @@ impl Heap {
                 if header.kind.get() != 0 && !header.marked.get() {
                     let obj = unsafe { Object::from_header(addr) }.expect("live held slot");
                     let bytes = obj.size();
-                    self.alloc_bytes -= bytes;
-                    debug_assert!(self.live_count > 0);
-                    self.live_count -= 1;
+                    self.counts.alloc_bytes -= bytes;
+                    debug_assert!(self.counts.live_count > 0);
+                    self.counts.live_count -= 1;
                     unsafe { obj.recycle_payload() };
                 }
             }
@@ -201,7 +201,7 @@ impl Heap {
             let tail = self.slab.chunk_slots_end(chunk);
             free.extend(slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }));
         }
-        self.young_bytes = 0;
+        self.counts.young_bytes = 0;
         self.slab.finish_young(&promoted, &[], free);
     }
 
@@ -408,9 +408,9 @@ impl Heap {
                 } else {
                     dead += 1;
                     let bytes = obj.size();
-                    self.alloc_bytes -= bytes;
-                    debug_assert!(self.live_count > 0);
-                    self.live_count -= 1;
+                    self.counts.alloc_bytes -= bytes;
+                    debug_assert!(self.counts.live_count > 0);
+                    self.counts.live_count -= 1;
                     unsafe { obj.recycle_payload() };
                 }
             }
@@ -429,7 +429,7 @@ impl Heap {
             }
         }
         // Held objects count as old: only a major frees them.
-        self.young_bytes = 0;
+        self.counts.young_bytes = 0;
         self.note_survival(fwd.len() + kept, fwd.len() + kept + dead);
         self.slab.finish_young(&[], &held, Vec::new());
         fwd.len()
@@ -482,6 +482,7 @@ mod tests {
         // Tests place objects themselves: no pretenuring after a minor
         // most of the nursery survived (see the test of that below).
         heap.pretenure_bytes = 0;
+        heap.sync_inline_gate();
         moved
     }
 
@@ -590,6 +591,7 @@ mod tests {
         assert_eq!(obj.generation(), GEN_UNLOGGED, "nothing young to name: unlogged, not remembered");
         assert!(heap.find_object_by_addr(head).is_some());
         heap.pretenure_bytes = 0;
+        heap.sync_inline_gate();
         let young = cons_list(&mut heap, 1);
         assert_eq!(heap.find_object_by_addr(young).expect("young").generation(), GEN_YOUNG);
     }
