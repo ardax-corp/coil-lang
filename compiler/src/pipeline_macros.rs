@@ -1974,6 +1974,11 @@ thread_local! {
 /// The program for `key`, compiled on first use. Parallel pipelines wait
 /// for one compile instead of repeating it; failures are not cached.
 fn compiled_program(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, CompileFailure> {
+    crate::mir::without_native_capture(|| compiled_program_uncaptured(key, ctx))
+}
+
+/// [`compiled_program`] with the native capture closed.
+fn compiled_program_uncaptured(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, CompileFailure> {
     if COMPILING.with(|c| c.borrow().contains(&key)) {
         return ctx.compile().map(std::sync::Arc::new);
     }

@@ -72,7 +72,7 @@ pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]
 pub use inst::LocalId;
 mod native_capture;
-pub use native_capture::{NativeBody, VectorOp, capture_native_bodies, vector_op, native_capture_active, start_native_capture, take_native_capture};
+pub use native_capture::{NativeBody, VectorOp, capture_native_bodies, vector_op, native_capture_active, start_native_capture, take_native_capture, without_native_capture};
 pub use instcombine::{instcombine, instcombine_lir};
 pub use licm::{licm, mark_frozen_arrays};
 #[cfg(test)]

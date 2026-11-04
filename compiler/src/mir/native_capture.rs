@@ -29,6 +29,16 @@ pub fn start_native_capture() {
     NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
 }
 
+/// Run `f` with the capture closed: a program compiled inside another
+/// (a macro's expansion program) has bodies and labels of its own, which
+/// the outer program's capture must not take.
+pub fn without_native_capture<R>(f: impl FnOnce() -> R) -> R {
+    let saved = NATIVE_CAPTURE.with(|c| c.borrow_mut().take());
+    let out = f();
+    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = saved);
+    out
+}
+
 pub fn native_capture_active() -> bool {
     NATIVE_CAPTURE.with(|c| c.borrow().is_some())
 }
