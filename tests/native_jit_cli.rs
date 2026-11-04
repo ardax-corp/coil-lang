@@ -1040,3 +1040,15 @@ fn a_trap_in_a_native_reduce_reports_the_vm_lane_trap() {
     let stats = same_as_vm("native_reduce_trap", &src);
     assert!(compiled(&stats, "sum"), "stats: {stats}");
 }
+
+#[test]
+fn a_reduce_over_bytes_takes_the_vm_lanes_result() {
+    // A byte array has no word view: the native loop leaves for the VM's
+    // lanes on its first load, and the reduce's result is theirs.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn byte_sum(Vec<byte> bytes, int n) -> int {{ let total = 0; for i in 0..n {{ total = total + (bytes[i] as int); }} return total; }}\n\
+         fn main() {{ let v: Vec<byte> = Vec::new(); let j = 0; while j < 21 {{ v.push((j * 3) as byte); j = j + 1; }} let _ = println(format(\"%i\", byte_sum(v, v.len()))); }}\n"
+    );
+    let stats = same_as_vm("native_byte_reduce", &src);
+    assert!(compiled(&stats, "byte_sum"), "stats: {stats}");
+}
