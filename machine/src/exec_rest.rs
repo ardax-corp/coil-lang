@@ -191,7 +191,7 @@ impl<const S: usize> Machine<S> {
                             None => (None, format_string),
                         };
 
-                        let message = crate::vm::render_format(format_rest, || *params.pop());
+                        let message = crate::format::render_format(format_rest, || *params.pop());
 
                         match head {
                             Some(head) => self.push_concat_str(head, &message, ip),

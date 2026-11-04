@@ -2,7 +2,6 @@
 
 use std::{
     ffi::c_void,
-    fmt::Write as FmtWrite,
     io::{self, Write as IoWrite},
     path::PathBuf,
     sync::Arc,
@@ -288,7 +287,7 @@ mod dispatch;
 
 // type External = fn(&[Value]) -> Value;
 
-pub(crate) type OutputSink = Box<dyn IoWrite + Send>;
+pub(crate) use crate::runtime::OutputSink;
 
 /// Saved resumer context while a coroutine runs on the shared stack.
 #[derive(Clone, Copy)]
@@ -1511,8 +1510,7 @@ fn resolve_dense_index_object_in(
     Some(obj)
 }
 
-/// Panic when a frame needs more operand stack than [`crate::MAX_OPERAND_STACK_SLOTS`].
-pub(crate) const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
+use crate::stacks::STACK_OVERFLOW;
 
 /// Panic when [`Machine::set_step_budget`]'s budget runs out.
 pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
@@ -6435,7 +6433,7 @@ impl<const S: usize> Machine<S> {
                     if opcode.operand_u32() & 1 == 0 {
                         // Measuring only: a deep copy at every share, as a
                         // design that copies on assignment makes.
-                        if cow_eager() && matches!(self.rt.heap.find_object_by_addr(v.heap_addr()), Some(crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) {
+                        if crate::runtime::cow_eager() && matches!(self.rt.heap.find_object_by_addr(v.heap_addr()), Some(crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) {
                             if self.cow_sites.is_some() {
                                 self.cow_shares += 1;
                             }
@@ -6548,11 +6546,6 @@ impl<const N: usize> Machine<N> {
     }
 }
 
-/// `COIL_COW_EAGER=1` (measuring only): every copy-on-write share copies.
-pub(crate) fn cow_eager() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_COW_EAGER").is_some())
-}
 
 /// [`Machine::free_early`] on the parts the dense streak holds too.
 fn free_early_in(heap: &mut Heap, frame_pins: &mut [FramePins], dense_obj_addr: &mut u64, dense_obj: &mut Option<Object>, v: Value, deep: bool) {
@@ -6695,84 +6688,3 @@ impl<const S: usize> Drop for Machine<S> {
 #[path = "vm.tests.rs"]
 mod tests;
 
-/// The text of a `FORMAT` specifier string (after any leading `%s` the
-/// caller appends to): `next` yields the arguments in order. Shared by the
-/// VM's `FORMAT` and native code's.
-pub(crate) fn render_format(format_rest: &str, mut next: impl FnMut() -> Value) -> String {
-    let mut message = String::default();
-    let mut chars = format_rest.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            match chars.peek() {
-                Some('%') => {
-                    chars.next();
-                    message.push('%');
-                }
-                Some('i') => {
-                    chars.next();
-                    message.push_str(&next().as_int().to_string());
-                }
-                Some('f') => {
-                    chars.next();
-                    // message
-                    //     .push_str(&format!("{:.?}", next().as_float()));
-                    let _ =
-                        write!(&mut message, "{:.?}", next().as_float());
-                }
-                Some('b') => {
-                    chars.next();
-                    let _ = write!(
-                        &mut message,
-                        "{:0b}",
-                        next().bits()
-                    );
-                }
-                Some('s') => {
-                    chars.next();
-                    let string_val = (unsafe {
-                        &*next().as_ptr::<GcData<ObjString>>()
-                    })
-                    .as_ref()
-                    .data
-                    .as_str();
-                    // Allocated::<crate::String>::new(next().as_ptr());
-                    message.push_str(string_val);
-                }
-                Some('x') => {
-                    chars.next();
-                    let _ = write!(
-                        &mut message,
-                        "{:0x}",
-                        next().bits()
-                    );
-                }
-                Some('z') => {
-                    chars.next();
-                    message.push_str(if next().bits() > 0 {
-                        "true"
-                    } else {
-                        "false"
-                    });
-                }
-                Some('u') => {
-                    chars.next();
-                    message.push_str(&next().bits().to_string());
-                }
-                Some('p') => {
-                    chars.next();
-                    let _ = write!(
-                        &mut message,
-                        "{:08x}",
-                        next().as_ptr::<bool>().addr()
-                    );
-                }
-                _ => {
-                    message.push('%');
-                }
-            }
-        } else {
-            message.push(ch);
-        }
-    }
-    message
-}

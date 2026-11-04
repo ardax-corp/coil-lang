@@ -586,7 +586,7 @@ impl NativePanic {
             TRAP_NEGATIVE_EXPONENT => common::int_arith::IntTrap::NegativeExponent.message(),
             TRAP_SHIFT => common::int_arith::IntTrap::ShiftOutOfRange.message(),
             TRAP_OUT_OF_BOUNDS => "index out of bounds",
-            TRAP_STACK => crate::vm::STACK_OVERFLOW,
+            TRAP_STACK => crate::stacks::STACK_OVERFLOW,
             _ => "native code reached an operation it does not model",
         }
     }
@@ -937,7 +937,7 @@ pub unsafe extern "C" fn coil_native_collect(ctx: *mut NativeCtx) {
 /// `ctx` is the call's [`NativeCtx`]; `word` is a heap word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique: u64) -> u64 {
-    if crate::vm::cow_eager() {
+    if crate::runtime::cow_eager() {
         return unsafe { bail(ctx) };
     }
     let Some(heap) = (unsafe { heap(ctx) }) else {
@@ -965,7 +965,7 @@ pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique:
 /// `ctx` is the call's [`NativeCtx`]; `obj` is a heap word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, field: u64) -> u64 {
-    if crate::vm::cow_eager() {
+    if crate::runtime::cow_eager() {
         return unsafe { bail(ctx) };
     }
     let Some(heap) = (unsafe { heap(ctx) }) else {
@@ -1301,7 +1301,7 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
             Some(rest) => (words.next(), rest),
             None => (None, format_string),
         };
-        let message = crate::vm::render_format(rest, || words.next().unwrap_or_default());
+        let message = crate::format::render_format(rest, || words.next().unwrap_or_default());
         match head {
             Some(head) => {
                 let joined = match object(head.bits()) {
