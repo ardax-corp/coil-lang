@@ -1776,11 +1776,6 @@ unsafe fn host_invoke(
     // SAFETY: `machine` is the live machine `host` was made for.
     let out = unsafe { invoke(machine, ctx, id, layout, words) };
     let c = unsafe { &mut *ctx };
-    if out.is_some()
-        && let Some((n, _)) = HOST_CALLS.get(id as usize)
-    {
-        n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
     match out {
         None => {
             c.committed = committed;
@@ -1831,9 +1826,7 @@ unsafe fn host_via_vm(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u
     let committed = std::mem::replace(&mut c.committed, 1);
     c.vm_calls += 1;
     HOST_VIA_VM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some((_, n)) = HOST_CALLS.get(id as usize) {
-        n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
+    note_host_call(id as usize, HostPath::Stub);
     c.gc_epoch += 1;
     let mut panicked = false;
     let machine = c.machine;
@@ -2018,15 +2011,31 @@ pub static BAIL_TRAPS: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::
 /// See [`BAILS`].
 pub static HOST_VIA_VM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Host calls native code made through the machine, by host id: `.0`
-/// those the machine ran in Rust (`NativeHost::invoke`), `.1` those it
-/// ran on a one-op VM stub ([`HOST_VIA_VM`]).
-static HOST_CALLS: [(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64); 256] =
-    [const { (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)) }; 256];
+/// How a host call from native code ran, for the inventory.
+#[derive(Clone, Copy)]
+pub(crate) enum HostPath {
+    /// On the runtime ([`crate::runtime::invoke_ordinary`]).
+    Runtime,
+    /// On the machine in Rust (task ops, regions): `NativeHost::invoke`.
+    Machine,
+    /// On a one-op VM stub ([`HOST_VIA_VM`]).
+    Stub,
+}
+
+/// Host calls native code made, by host id and [`HostPath`].
+static HOST_CALLS: [[std::sync::atomic::AtomicU64; 3]; 256] = [const { [const { std::sync::atomic::AtomicU64::new(0) }; 3] }; 256];
+
+/// Count a host call `id` that ran on `path`.
+pub(crate) fn note_host_call(id: usize, path: HostPath) {
+    if let Some(n) = HOST_CALLS.get(id) {
+        n[path as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// The [`VM_ENTRIES`], [`BAILS`], [`VM_RUNS`] and [`HOST_VIA_VM`] counts,
 /// then the non-zero [`BAIL_TRAPS`] as `bail_trap_<code>` and the
-/// [`HOST_CALLS`] as `host_machine:<name>` / `host_stub:<name>`.
+/// [`HOST_CALLS`] as `host_runtime:<name>` / `host_machine:<name>` /
+/// `host_stub:<name>`.
 pub fn vm_use_counts() -> Vec<(String, u64)> {
     use std::sync::atomic::Ordering::Relaxed;
     let mut out = vec![
@@ -2042,9 +2051,9 @@ pub fn vm_use_counts() -> Vec<(String, u64)> {
         }
     }
     let hosts = direct_host_natives();
-    for (id, (machine, stub)) in HOST_CALLS.iter().enumerate() {
+    for (id, paths) in HOST_CALLS.iter().enumerate() {
         let name = hosts.get(id).map_or_else(|| id.to_string(), |h| h.name.clone());
-        for (kind, n) in [("machine", machine.load(Relaxed)), ("stub", stub.load(Relaxed))] {
+        for (kind, n) in ["runtime", "machine", "stub"].into_iter().zip(paths.iter().map(|n| n.load(Relaxed))) {
             if n != 0 {
                 out.push((format!("host_{kind}:{name}"), n));
             }
@@ -2053,7 +2062,8 @@ pub fn vm_use_counts() -> Vec<(String, u64)> {
     out
 }
 
-/// A `ByteScan` or `VecLoop` ([`NativeHost::vector`]). `kind` bit 0: a
+/// A `ByteScan` or `VecLoop` native code cannot reduce to lane code, run
+/// by the runtime's lane kernels ([`crate::vm::lanes_on_frame`]). `kind` bit 0: a
 /// loop (else a scan); bit 1: the loop writes the heap (it commits the
 /// call first, so a trap after it panics here). `body` holds `nbody`
 /// words `opcode | operand << 32`, `slots` the frame's `nslots` words.

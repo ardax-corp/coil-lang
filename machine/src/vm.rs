@@ -2237,11 +2237,10 @@ impl<const S: usize> Machine<S> {
         Some(out.bits())
     }
 
-    /// [`crate::native::NativeHost::invoke`]: the ordinary host native
-    /// `id`, as `HostInvoke` runs it (`exec_rest.rs`), from native code: a
-    /// wait parks the fiber the call runs on ([`Self::native_park`]) where
-    /// the VM would suspend the task, then the native runs again or the
-    /// wake is its result.
+    /// [`crate::native::NativeHost::invoke`]: the host native `id`, as
+    /// `HostInvoke` runs it (`exec_rest.rs`), from native code. An ordinary
+    /// one runs on the runtime ([`crate::runtime::invoke_ordinary`]), a
+    /// task op or a region on the machine ([`Self::native_machine_op`]).
     unsafe fn native_invoke(
         raw: *mut c_void,
         ctx: *mut crate::native::NativeCtx,
@@ -2249,41 +2248,45 @@ impl<const S: usize> Machine<S> {
         layout: u64,
         args: &[Value],
     ) -> Option<crate::native::Invoked> {
-        use crate::native::Invoked;
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
         let fn_id = id as usize;
-        match vm.rt.natives.get_by_id(fn_id)?.host_op() {
-            crate::HostOp::Ordinary => {}
-            crate::HostOp::Task => return vm.native_task_op(ctx, fn_id, args),
-            op @ (crate::HostOp::RegionEnter | crate::HostOp::RegionExit) => {
-                // A minor collection, native frames' words rooted (and
-                // forwarded), as `native_gc` collects.
-                if unlikely(!vm.stack_maps.is_empty()) {
-                    vm.gc_ip = if vm.frames.is_empty() {
-                        0
-                    } else {
-                        vm.frames.get().tell()
-                    };
-                }
-                vm.rt.native_roots.push((ctx, vm.frames.len()));
-                vm.gc_region(op == crate::HostOp::RegionEnter);
-                vm.rt.native_roots.pop();
-                return Some(if vm.panicked {
-                    Invoked::Unwound
-                } else {
-                    Invoked::Value(0)
-                });
-            }
+        let (out, path) = match vm.rt.natives.get_by_id(fn_id)?.host_op() {
+            crate::HostOp::Ordinary => (crate::runtime::invoke_ordinary(vm, ctx, fn_id, layout, args), crate::native::HostPath::Runtime),
             // Module setup's finalizer registry (`__module_setup`).
             crate::HostOp::RegisterFinalizer => {
                 let word = |i: usize| args.get(i).map_or(0, |v| v.as_int() as u32);
                 vm.rt.register_finalizer(word(0), word(1));
-                return Some(Invoked::Value(0));
+                (Some(crate::native::Invoked::Value(0)), crate::native::HostPath::Runtime)
             }
-            _ => return None,
+            _ => (vm.native_machine_op(ctx, fn_id, args), crate::native::HostPath::Machine),
+        };
+        if out.is_some() {
+            crate::native::note_host_call(fn_id, path);
         }
-        crate::runtime::invoke_ordinary(vm, ctx, fn_id, layout, args)
+        out
+    }
+
+    /// A host op that is not an ordinary native ([`crate::HostOp`]) from
+    /// native code, on the machine: `None` (its stub runs it) for one it
+    /// does not take here.
+    fn native_machine_op(&mut self, ctx: *mut crate::native::NativeCtx, fn_id: usize, args: &[Value]) -> Option<crate::native::Invoked> {
+        use crate::native::Invoked;
+        match self.rt.natives.get_by_id(fn_id)?.host_op() {
+            crate::HostOp::Task => self.native_task_op(ctx, fn_id, args),
+            op @ (crate::HostOp::RegionEnter | crate::HostOp::RegionExit) => {
+                // A minor collection, native frames' words rooted (and
+                // forwarded), as `native_gc` collects.
+                if unlikely(!self.stack_maps.is_empty()) {
+                    self.gc_ip = if self.frames.is_empty() { 0 } else { self.frames.get().tell() };
+                }
+                self.rt.native_roots.push((ctx, self.frames.len()));
+                self.gc_region(op == crate::HostOp::RegionEnter);
+                self.rt.native_roots.pop();
+                Some(if self.panicked { Invoked::Unwound } else { Invoked::Value(0) })
+            }
+            _ => None,
+        }
     }
 
     /// A task op (`HostOp::Task`) from native code, as `HostInvoke` runs

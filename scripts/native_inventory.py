@@ -9,7 +9,8 @@
 with its reason) and a `counts` line per run (VM entries, bails, calls the
 VM ran, host calls in a VM stub, bails by trap code: `bail_trap_0` is an
 operation native code does not model, `bail_trap_6` the stack budget). This prints the totals and the refusals
-grouped by reason, and with `--exe` the number of interpreter symbols
+grouped by reason, host calls by function and the path they ran on (`runtime`,
+`machine` or a VM `stub`), and with `--exe` the number of interpreter symbols
 (`machine::vm`) in a packaged executable. `--max KEY=N` fails when a total
 goes over N (keys: refused, failed, vm_entries, bails, vm_runs,
 host_via_vm, vm_symbols); the plan's steps lower them to 0. With
@@ -82,9 +83,9 @@ def main():
         out += ["", f"### Refusals by reason (top {args.top})", "", "| bodies | reason | first seen |", "| ---: | --- | --- |"]
         for kind, n in reasons.most_common(args.top):
             out.append(f"| {n} | {kind.replace('|', '/')} | {examples[kind].replace('|', '/')} |")
-    hosts = sorted(((totals[k], k) for k in totals if k.startswith("host_machine:") or k.startswith("host_stub:")), reverse=True)
+    hosts = sorted(((totals[k], k) for k in totals if k.startswith(("host_runtime:", "host_machine:", "host_stub:"))), reverse=True)
     if hosts:
-        out += ["", "### Host calls through the machine", "", "| calls | path | host function |", "| ---: | --- | --- |"]
+        out += ["", "### Host calls by path (runtime: no machine needed)", "", "| calls | path | host function |", "| ---: | --- | --- |"]
         for n, k in hosts:
             path, _, name = k.partition(":")
             out.append(f"| {n} | {path.removeprefix('host_')} | {name.replace('|', '/')} |")
