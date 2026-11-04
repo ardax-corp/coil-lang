@@ -904,6 +904,8 @@ fn ffi_calls_run_from_native_code() {
     assert_eq!(String::from_utf8_lossy(&vm.stdout), String::from_utf8_lossy(&jit.stdout));
     let stats = String::from_utf8_lossy(&jit.stderr);
     assert!(compiled(&stats, "total"), "stats: {stats}");
+    // The library loads and the declarations run in the native setup body.
+    assert!(compiled(&stats, "__module_setup"), "stats: {stats}");
     // The FFI ops run in Rust, no stub bytecode.
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
@@ -1257,4 +1259,18 @@ fn a_lines_only_archive_locates_native_panics() {
     let vm = run_archive(&out, &["--no-jit"]);
     assert!(program_stderr(&vm).contains("g1.coil:2:"), "vm: {}", program_stderr(&vm));
     assert_eq!(program_stderr(&jit), program_stderr(&vm));
+}
+
+#[test]
+fn module_setup_runs_natively() {
+    // Statics computed at run time and a class with a `drop` (its
+    // finalizer is registered in setup): the setup body is native code.
+    let src = format!(
+        "{HEADER}static let base: int = 40;\nstatic let words: Vec<int> = [1, 2, 3];\n\
+         class Res {{\n    pub id: int,\n}}\nimpl Res {{\n    fn drop() {{ let _ = println(format(\"drop %i\", self.id)); }}\n}}\n\
+         fn main() {{ let r = new Res(7); let _ = println(format(\"%i %i %i\", base + 2, words.len(), r.id)); }}\n"
+    );
+    let stats = same_as_vm("module_setup", &src);
+    assert!(compiled(&stats, "__module_setup"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
