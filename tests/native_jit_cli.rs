@@ -128,7 +128,7 @@ fn heap_reads_run_natively() {
            let _ = println(format(\"%i\", at(a, 9)));\n}}\n"
     );
     let stats = same_as_vm("heap", &src);
-    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
     for f in ["vsum", "px", "at", "flag"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
@@ -136,8 +136,8 @@ fn heap_reads_run_natively() {
 
 #[test]
 fn heap_stores_are_undone_when_the_call_bails() {
-    // `fill` writes a[0..n] and then indexes past the end: the bail takes
-    // the stores back and the VM's re-run makes them and panics as before.
+    // `fill` writes a[0..n] and then indexes past the end: it panics
+    // natively, with the stores made, as the VM's run does.
     let src = format!(
         "{HEADER}class C {{ pub n: int, pub f: float }}\n\
          #[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i * 10; i = i + 1; }} return a[n]; }}\n\
@@ -149,7 +149,7 @@ fn heap_stores_are_undone_when_the_call_bails() {
     );
     let stats = same_as_vm("stores", &src);
     assert!(compiled(&stats, "fill") && compiled(&stats, "bump"), "stats: {stats}");
-    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
     let src = format!(
         "{HEADER}#[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i + 7; i = i + 1; }} return a[n]; }}\n\
          fn main() {{ let a: Vec<int> = [0, 0, 0]; let _ = println(format(\"%i\", fill(a, 3))); }}\n"
@@ -202,16 +202,16 @@ fn allocation_runs_natively_and_matches_the_vm() {
     for f in ["make", "area", "shape", "pair", "grow"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
-    assert!(stats.contains("1 bailed"), "stats: {stats}");
-    // A call that allocates far past the collection threshold bails (no
-    // collection runs inside native code); the VM's re-run collects.
+    assert!(stats.contains("0 bailed"), "stats: {stats}");
+    // A call that allocates far past the collection threshold commits
+    // and collects at a safepoint: it does not bail.
     let src = format!(
         "{HEADER}class N {{ pub v: int }}\nclass H {{ pub last: N }}\n\
          #[inline(never)]\nfn churn(H h, int n) -> int {{ let s = 0; let i = 0; while i < n {{ h.last = new N(i); s = s + h.last.v; i = i + 1; }} return s; }}\n\
          fn main() {{ let h = new H(new N(0)); let _ = println(format(\"%i %i\", churn(h, 3000000), h.last.v)); }}\n"
     );
     let stats = same_as_vm("alloc_churn", &src);
-    assert!(compiled(&stats, "churn") && stats.contains("1 bailed"), "stats: {stats}");
+    assert!(compiled(&stats, "churn") && stats.contains("0 bailed"), "stats: {stats}");
 }
 
 #[test]
@@ -326,7 +326,7 @@ fn statics_are_read_and_written_natively() {
     );
     let stats = same_as_vm("statics", &src);
     assert!(compiled(&stats, "tick") && compiled(&stats, "rename"), "stats: {stats}");
-    assert!(stats.contains("1 bailed"), "stats: {stats}");
+    assert!(stats.contains("0 bailed"), "stats: {stats}");
 }
 
 /// `coil compile` writes `dir/name.ccoil`; `--jit` adds the native MIR
@@ -375,7 +375,7 @@ fn compiled_archive_carries_mir_and_runs_natively() {
     assert_eq!(program_stderr(&jit), program_stderr(&vm));
     assert_eq!(jit.status.code(), vm.status.code());
     let stats = String::from_utf8_lossy(&jit.stderr);
-    assert!(stats.contains("calls ran natively, 1 bailed"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
     assert!(!String::from_utf8_lossy(&vm.stderr).contains("native:"), "--no-jit stays on the VM");
 }
 
@@ -799,7 +799,9 @@ fn host_calls_that_need_the_vm_run_from_native_code() {
     let stats = same_as_vm("vm_host", src);
     assert!(compiled(&stats, "io::sync::write_all"), "stats: {stats}");
     assert!(compiled(&stats, "emit"), "stats: {stats}");
-    assert!(native_calls(&stats) >= 5, "stats: {stats}");
+    // `main` enters natively and calls `emit` natively in turn.
+    assert!(native_calls(&stats) >= 1, "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
 #[test]
@@ -866,7 +868,7 @@ fn task_ops_and_contracts_run_from_native_code() {
 #[cfg(target_os = "linux")]
 #[test]
 fn ffi_calls_run_from_native_code() {
-    // `total` calls an `extern` C function (an FFI op through its stub).
+    // `total` calls an `extern` C function (FFI ops).
     let dir = std::env::temp_dir().join(format!("coil-native-{}-ffi", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -902,6 +904,8 @@ fn ffi_calls_run_from_native_code() {
     assert_eq!(String::from_utf8_lossy(&vm.stdout), String::from_utf8_lossy(&jit.stdout));
     let stats = String::from_utf8_lossy(&jit.stderr);
     assert!(compiled(&stats, "total"), "stats: {stats}");
+    // The FFI ops run in Rust, no stub bytecode.
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
 #[test]
@@ -993,8 +997,8 @@ fn an_archive_carries_generators_and_vector_loops() {
 
 #[test]
 fn region_blocks_run_from_native_code() {
-    // `region { }` enters and leaves through host calls that collect on the
-    // VM: native code's words stay rooted (and forwarded) across both.
+    // `region { }` enters and leaves through host calls that collect:
+    // native code's words stay rooted (and forwarded) across both.
     let src = format!(
         "{HEADER}class Node {{ pub v: int, pub next: Option<Node> }}\n\
          #[inline(never)]\nfn build(int n) -> Option<Node> {{ let head: Option<Node> = Option::None; let i = 0; while i < n {{ head = Option::Some(new Node(i, head)); i += 1; }} return head; }}\n\
@@ -1004,6 +1008,8 @@ fn region_blocks_run_from_native_code() {
     );
     let stats = same_as_vm("native_region", &src);
     assert!(compiled(&stats, "rounds"), "stats: {stats}");
+    // The region hooks run in Rust: no stub bytecode.
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
 }
 
 #[test]
@@ -1051,4 +1057,204 @@ fn a_reduce_over_bytes_takes_the_vm_lanes_result() {
     );
     let stats = same_as_vm("native_byte_reduce", &src);
     assert!(compiled(&stats, "byte_sum"), "stats: {stats}");
+}
+
+/// The `native: N calls ran on the VM, M VM entries from native code`
+/// counts of a JIT run's stats: bytecode bodies the VM ran while native
+/// code was installed, and calls from native code into the VM.
+fn vm_dependence(stats: &str) -> Option<(u64, u64)> {
+    stats.lines().find_map(|l| {
+        let rest = l.strip_prefix("native: ")?;
+        let (calls, rest) = rest.split_once(" calls ran on the VM, ")?;
+        let entries = rest.strip_suffix(" VM entries from native code")?;
+        Some((calls.parse().ok()?, entries.parse().ok()?))
+    })
+}
+
+#[test]
+fn a_pure_native_run_reports_no_vm_dependence() {
+    let src = "#[inline(never)]\nfn fib(int n) -> int { if n <= 2 { return 1; } return fib(n - 1) + fib(n - 2); }\n\
+               fn main() { if fib(20) != 6765 { panic \"wrong\"; } }\n";
+    let stats = same_as_vm("pure_no_vm", src);
+    assert!(compiled(&stats, "fib"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+#[test]
+fn a_native_run_counts_its_vm_entries() {
+    // `wide` takes more words than native code passes: it and its caller
+    // stay on the VM.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn wide(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16) -> int {{ return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16; }}\n\
+         #[inline(never)]\nfn show(int k) {{ let _ = println(format(\"%i\", k + wide(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))); }}\n\
+         fn main() {{ show(1); show(2); }}\n"
+    );
+    let stats = same_as_vm("counts_vm", &src);
+    let (calls, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
+    assert!(calls + entries >= 2, "stats: {stats}");
+}
+
+#[test]
+fn ordinary_host_natives_run_without_the_vm() {
+    // Writing to stdout, `Vec::insert` and `clock::sleep_ms` are host
+    // natives that are no plain functions: native code runs them itself.
+    let src = format!(
+        "{HEADER}use clock::sleep_ms;\n\
+         #[inline(never)]\nfn show(int i) {{ let v: Vec<int> = [1, 2]; v.insert(1, i); sleep_ms(0); let _ = println(format(\"%i %i\", v[1], v.len())); }}\n\
+         fn main() {{ let i = 0; while i < 3 {{ show(i); i = i + 1; }} }}\n"
+    );
+    let stats = same_as_vm("ordinary_hosts", &src);
+    assert!(compiled(&stats, "show"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
+}
+
+#[test]
+fn an_ordinary_host_native_panic_matches_the_vm() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn put(int i) -> int {{ let v: Vec<int> = [1, 2]; v.insert(i, 7); return v.len(); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", put(1))); let _ = println(format(\"%i\", put(5))); }}\n"
+    );
+    let stats = same_as_vm("ordinary_host_panic", &src);
+    assert!(compiled(&stats, "put"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
+}
+
+#[test]
+fn a_call_that_allocates_past_the_cap_collects_natively() {
+    // Past the allocation cap with a collection due, the call commits and
+    // collects at its next safepoint instead of handing the call back.
+    let src = format!(
+        "{HEADER}class Node {{ pub v: int, pub next: Option<Node>, }}\n\
+         #[inline(never)]\nfn build(int n) -> int {{ let head: Option<Node> = Option::None; let i = 0; while i < n {{ head = Option::Some(new Node(i, head)); if i % 1000 == 999 {{ head = Option::None; }} i = i + 1; }} return n; }}\n\
+         fn main() {{ let t = 0; let r = 0; while r < 4 {{ t = t + build(300000); r = r + 1; }} let _ = println(format(\"%i\", t)); }}\n"
+    );
+    let stats = same_as_vm("alloc_cap", &src);
+    assert!(compiled(&stats, "build"), "stats: {stats}");
+    assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
+}
+
+#[test]
+fn a_scope_opened_by_native_main_needs_no_vm() {
+    // `main` runs on a fiber of its own, so the scope it opens switches
+    // tasks there: its task ops need no bytecode stubs.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, yield_now}};\n\
+         #[inline(never)]\nfn step(int k) -> int {{ yield_now(); return k * 2; }}\n\
+         fn main() {{\n  let r = scope(fn (Scope s) {{ let a = s.spawn(fn () => step(1)); let b = s.spawn(fn () => step(2)); let x = match a.join() {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; let y = match b.join() {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; return x + y; }});\n\
+           let _ = println(format(\"%i\", match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}));\n}}\n"
+    );
+    let stats = same_as_vm("root_scope", &src);
+    assert!(compiled(&stats, "step"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+#[test]
+fn auto_par_forks_from_native_code_keep_their_trees() {
+    // `grow` forks its recursive calls onto shared-heap workers; opening
+    // the shared epoch may collect while native frames hold trees.
+    let src = format!(
+        "{HEADER}enum Tree {{ Leaf, Node(Tree, Tree) }}\n\
+         fn grow(int depth) -> Tree {{ if depth == 0 {{ return Tree::Leaf; }} return Tree::Node(grow(depth - 1), grow(depth - 1)); }}\n\
+         fn count(Tree t) -> int {{ return match t {{ Tree::Leaf => 1, Tree::Node(l, r) => 1 + count(l) + count(r), }}; }}\n\
+         #[inline(never)]\nfn work() -> int {{ let t = 0; let i = 0; while i < 12 {{ t = t + count(grow(14)); i = i + 1; }} return t; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", work())); }}\n"
+    );
+    let stats = same_as_vm("auto_par_trees", &src);
+    assert!(compiled(&stats, "work"), "stats: {stats}");
+}
+
+#[test]
+fn a_drop_the_collector_runs_enters_native_code() {
+    // `collect` from native `main` finalizes the handle: its `drop` has
+    // native code, so no bytecode runs.
+    let src = format!(
+        "{HEADER}use gc::collect;\nstatic let LOG: int = 0;\nclass Handle {{ pub fd: int, }}\n\
+         impl Handle {{ fn drop() {{ LOG = LOG + self.fd; }} }}\n\
+         #[inline(never)]\nfn leak(int fd) {{ let h = new Handle(fd); }}\n\
+         fn main() {{ leak(3); leak(4); collect(); let _ = println(format(\"%i\", LOG)); }}\n"
+    );
+    let stats = same_as_vm("native_drop", &src);
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
+}
+
+#[test]
+fn generators_with_defers_run_natively_and_close() {
+    // `nums` has a `defer`: a loop that leaves early closes it (the defer
+    // runs natively), one that runs it out runs the defer on return, and
+    // the collector closes one nothing reaches. `loud`'s defer panics in
+    // the close: the panic goes on to the loop's caller (inside a task, so
+    // the VM's double report of it, #2261, stays out of stderr).
+    let src = format!(
+        "{HEADER}use gc::collect;\nuse task::{{scope, Scope, TaskError}};\nstatic let LOG: string = \"\";\nfn say(string s) {{ LOG = LOG + s; }}\n\
+         gen fn nums(int n) {{ defer {{ say(\"[d]\"); }} let i = 0; while i < n {{ say(format(\"%i\", i)); yield i; i = i + 1; }} return 0; }}\n\
+         gen fn loud() {{ defer {{ say(\"[loud]\"); panic \"in close\"; }} yield 1; yield 2; return 0; }}\n\
+         #[inline(never)]\nfn early() -> int {{ let t = 0; for v in nums(5) {{ if v == 2 {{ break; }} t = t + v; }} return t; }}\n\
+         #[inline(never)]\nfn full() -> int {{ let t = 0; for v in nums(3) {{ t = t + v; }} return t; }}\n\
+         #[inline(never)]\nfn dropped() {{ let g = nums(4); let _ = resume g; }}\n\
+         #[inline(never)]\nfn closes_loud() -> int {{ for v in loud() {{ break; }} say(\"unreached\"); return 0; }}\n\
+         fn main() {{ let a = early(); let b = full(); dropped(); collect(); let _ = println(format(\"%i %i %s\", a, b, LOG));\n\
+           let r = scope(fn (Scope s) {{ let _ = s.spawn(fn () => closes_loud()); 0 }});\n\
+           let _ = println(match r {{ Result::Err(TaskError::Panicked(m)) => m, default => \"no panic\" }}); }}\n"
+    );
+    let stats = same_as_vm("gen_defers", &src);
+    for f in ["nums", "loud"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
+}
+
+/// The `N` of `native: N calls ran natively`.
+fn native_hits(stats: &str) -> Option<u64> {
+    stats.lines().find_map(|l| l.strip_prefix("native: ")?.split_once(" calls ran natively")?.0.parse().ok())
+}
+
+#[test]
+fn main_itself_runs_natively() {
+    // The prologue enters `main` by a jump after a `CALL` with no target:
+    // native code runs `main`'s own loop (a recurrence, so no auto-par
+    // body is called), not the VM.
+    let src = "fn main() { let t = 1; let n = 0; while t < 100000 { t = t * 2 + n; n = n + 1; } if t < 100000 { panic \"wrong\"; } }\n";
+    let stats = same_as_vm("native_main", src);
+    assert!(compiled(&stats, "main"), "stats: {stats}");
+    assert_eq!(native_hits(&stats), Some(1), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+#[test]
+fn a_scope_inside_a_generator_body_needs_no_vm() {
+    // The generator's body opens and waits for a scope at each step: its
+    // task ops switch tasks on `main`'s fiber, with no bytecode stubs.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, yield_now}};\n\
+         #[inline(never)]\nfn step(int k) -> int {{ yield_now(); return k * 2; }}\n\
+         fn pair(int i) -> int {{ let r = scope(fn (Scope s) use (i) {{ let a = s.spawn(fn () use (i) => step(i)); let b = s.spawn(fn () use (i) => step(i + 1)); let x = match a.join() {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; let y = match b.join() {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; return x + y; }}); return match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; }}\n\
+         gen fn pairs(int n) {{ let i = 0; while i < n {{ yield pair(i); i = i + 1; }} }}\n\
+         fn main() {{ let t = 0; for v in pairs(3) {{ t = t + v; }} let _ = println(format(\"%i\", t)); }}\n"
+    );
+    let stats = same_as_vm("gen_scope", &src);
+    assert!(compiled(&stats, "pairs"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+#[test]
+fn a_lines_only_archive_locates_native_panics() {
+    // At `-g1` (`coil package`'s default) a native panic names the same
+    // file:line:col as the VM's.
+    let src = "#[inline(never)]\nfn last(Vec<int> xs, int i) -> int { return xs[i]; }\nfn main() { let r = last([1, 2, 3], 3); if r > 0 { panic \"x\"; } }\n";
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-g1", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("g1.coil");
+    std::fs::write(&file, src).expect("write source");
+    let out = dir.join("g1.ccoil");
+    let made = Command::new(coil_bin())
+        .args(["compile", "--no-build-cache", "--jit", "-g1", "-o"])
+        .arg(&out)
+        .arg(&file)
+        .output()
+        .expect("spawn coil compile");
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    let jit = run_archive(&out, &[]);
+    let vm = run_archive(&out, &["--no-jit"]);
+    assert!(program_stderr(&vm).contains("g1.coil:2:"), "vm: {}", program_stderr(&vm));
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
 }

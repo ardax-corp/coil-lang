@@ -12,15 +12,15 @@ use std::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{
-    LineIndex, byte_to_position, likely, promise, set_field_slot_index, unlikely, unpack_init_typed,
-    ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Byte as RawByte,
-    ProgramDebug, Value,
+    ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Byte as RawByte, LineIndex,
+    ProgramDebug, Value, byte_to_position, likely, promise, set_field_slot_index, unlikely,
+    unpack_init_typed,
 };
 
 use crate::{
     AddrHashBuilder, CStructLayout, CoroState, EnumPayload, Frame, GcData, Heap, Member, ObjArray,
-    ObjBoxed, ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjString, ObjTuple, Object,
-    RefCoroutine, Stack,
+    ObjBoxed, ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjString, ObjTuple, Object, RefCoroutine,
+    Stack,
 };
 #[cfg(any(test, feature = "debugger"))]
 use crate::{DebugController, StopReason};
@@ -311,6 +311,28 @@ struct PendingFfiInvoke {
     resume_sp: usize,
 }
 
+/// An `FfiInvoke`'s operands, taken off the stack.
+struct FfiCall {
+    lib_addr: u64,
+    function_id: usize,
+    args: Vec<Value>,
+    arg_types: Option<Vec<crate::memory::FfiType>>,
+}
+
+impl FfiCall {
+    /// The call, run once the VM pauses (`ip` / `sp`: where it resumes).
+    fn pending(self, resume_ip: usize, resume_sp: usize) -> PendingFfiInvoke {
+        PendingFfiInvoke {
+            lib_addr: self.lib_addr,
+            function_id: self.function_id,
+            args: self.args,
+            arg_types: self.arg_types,
+            resume_ip,
+            resume_sp,
+        }
+    }
+}
+
 /// Parked HostInvoke waiting on IO readiness (`wait_readable` / `wait_writable`).
 struct PendingIoWait {
     request: crate::io::IoParkRequest,
@@ -355,20 +377,23 @@ fn pin_current_array_in(
 ) {
     let idx = slot as usize;
     if let Some(pins) = frame_pins.last_mut()
-        && pins.depth == frames_len {
-            if pins.by_slot.len() <= idx {
-                pins.by_slot.resize(idx + 1, None);
-                pins.sticky.resize(idx + 1, false);
-            }
-            pins.by_slot[idx] = Some(obj);
-            pins.sticky[idx] = false;
-            return;
+        && pins.depth == frames_len
+    {
+        if pins.by_slot.len() <= idx {
+            pins.by_slot.resize(idx + 1, None);
+            pins.sticky.resize(idx + 1, false);
         }
-    let mut pins = SPARE_PINS.with_borrow_mut(Vec::pop).unwrap_or_else(|| FramePins {
-        depth: 0,
-        by_slot: Vec::new(),
-        sticky: Vec::new(),
-    });
+        pins.by_slot[idx] = Some(obj);
+        pins.sticky[idx] = false;
+        return;
+    }
+    let mut pins = SPARE_PINS
+        .with_borrow_mut(Vec::pop)
+        .unwrap_or_else(|| FramePins {
+            depth: 0,
+            by_slot: Vec::new(),
+            sticky: Vec::new(),
+        });
     pins.depth = frames_len;
     pins.by_slot.resize(idx + 1, None);
     pins.sticky.resize(idx + 1, false);
@@ -395,7 +420,12 @@ fn recycle_pins(mut pins: FramePins) {
 
 /// Eight numeric words of the array at `addr` from `index` into `reg`;
 /// `false` past either end.
-pub(crate) fn vload_words_into(heap: &Heap, reg: &mut [u64; common::simd::LANES], addr: u64, index: i64) -> bool {
+pub(crate) fn vload_words_into(
+    heap: &Heap,
+    reg: &mut [u64; common::simd::LANES],
+    addr: u64,
+    index: i64,
+) -> bool {
     let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
         return false;
     };
@@ -429,7 +459,10 @@ fn vload_lanes(arr: &ObjArray, reg: &mut [u64; common::simd::LANES], index: i64)
 /// 8 lanes of `bytes` (a `string`'s) from `index` into `reg`, each byte as
 /// an int lane; `false` past either end.
 fn vload_byte_lanes(bytes: &[u8], reg: &mut [u64; common::simd::LANES], index: i64) -> bool {
-    let Some(src) = usize::try_from(index).ok().and_then(|b| bytes.get(b..b.checked_add(common::simd::LANES)?)) else {
+    let Some(src) = usize::try_from(index)
+        .ok()
+        .and_then(|b| bytes.get(b..b.checked_add(common::simd::LANES)?))
+    else {
         return false;
     };
     for (lane, &b) in reg.iter_mut().zip(src) {
@@ -462,13 +495,21 @@ pub(crate) fn vload_bytes_into(
         return false;
     };
     let obj = match obj {
-        Some(Object::Boxed(_)) => heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits()),
+        Some(Object::Boxed(_)) => {
+            heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits())
+        }
         o => o,
     };
     let lanes = crate::simd::as_bytes_mut(reg);
     match obj {
         Some(Object::String(gc)) => {
-            let Some(src) = gc.as_ref().data.as_str().as_bytes().get(base..base.saturating_add(n)) else {
+            let Some(src) = gc
+                .as_ref()
+                .data
+                .as_str()
+                .as_bytes()
+                .get(base..base.saturating_add(n))
+            else {
                 return false;
             };
             lanes.copy_from_slice(src);
@@ -518,14 +559,44 @@ fn vpush_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES]) {
 /// A decoded `VLoop` body word.
 #[derive(Clone, Copy)]
 enum VloopOp {
-    Load { reg: usize, obj: Option<Object>, off: i64 },
-    Store { reg: usize, obj: Option<Object>, off: i64 },
+    Load {
+        reg: usize,
+        obj: Option<Object>,
+        off: i64,
+    },
+    Store {
+        reg: usize,
+        obj: Option<Object>,
+        off: i64,
+    },
     /// Append the lanes ([`common::simd::STORE_PUSH`]).
-    Push { reg: usize, obj: Option<Object> },
-    Bin { kind: u8, dest: usize, a: usize, b: usize },
-    Sel { dest: usize, a: usize, b: usize },
-    Fma { ty: u8, dest: usize, a: usize, b: usize },
-    Reduce { ty: u8, slot: usize, src: usize, fold: u8 },
+    Push {
+        reg: usize,
+        obj: Option<Object>,
+    },
+    Bin {
+        kind: u8,
+        dest: usize,
+        a: usize,
+        b: usize,
+    },
+    Sel {
+        dest: usize,
+        a: usize,
+        b: usize,
+    },
+    Fma {
+        ty: u8,
+        dest: usize,
+        a: usize,
+        b: usize,
+    },
+    Reduce {
+        ty: u8,
+        slot: usize,
+        src: usize,
+        fold: u8,
+    },
 }
 
 /// `VLoop` (see [`Instruction::VLoop`]): the body over lanes `p ..= p + 7`
@@ -552,8 +623,21 @@ pub(crate) fn vloop(
     thread_local! {
         static SCRATCH: std::cell::RefCell<Option<Box<VloopScratch>>> = const { std::cell::RefCell::new(None) };
     }
-    let mut scratch = SCRATCH.with(|s| s.borrow_mut().take()).unwrap_or_else(|| Box::new(VloopScratch::new()));
-    let ran = vloop_run(heap, stack, sp, regs, body, dest, from, to, pos, &mut scratch);
+    let mut scratch = SCRATCH
+        .with(|s| s.borrow_mut().take())
+        .unwrap_or_else(|| Box::new(VloopScratch::new()));
+    let ran = vloop_run(
+        heap,
+        stack,
+        sp,
+        regs,
+        body,
+        dest,
+        from,
+        to,
+        pos,
+        &mut scratch,
+    );
     // The arrays a body appended to grew: count their storage once.
     for obj in scratch.pushed.drain(..) {
         if let Object::Array(mut gc) = obj {
@@ -578,7 +662,13 @@ struct VloopScratch {
 
 impl VloopScratch {
     fn new() -> Self {
-        Self { ops: Vec::new(), pushed: Vec::new(), pending: Vec::new(), saved: Vec::new(), wide: VloopWide::new() }
+        Self {
+            ops: Vec::new(),
+            pushed: Vec::new(),
+            pending: Vec::new(),
+            saved: Vec::new(),
+            wide: VloopWide::new(),
+        }
     }
 }
 
@@ -616,7 +706,9 @@ fn vloop_run(
         let addr = stack[sp + slot].bits();
         match heap.find_object_by_addr(addr) {
             o @ Some(Object::Array(_) | Object::String(_)) => Ok(o),
-            Some(Object::Boxed(_)) => match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits()) {
+            Some(Object::Boxed(_)) => match heap
+                .find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits())
+            {
                 o @ Some(Object::String(_)) => Ok(o),
                 _ => Err(BAD),
             },
@@ -631,7 +723,13 @@ fn vloop_run(
             _ => Err(OOB),
         }
     };
-    let VloopScratch { ops, pushed, pending, saved, wide } = scratch;
+    let VloopScratch {
+        ops,
+        pushed,
+        pending,
+        saved,
+        wide,
+    } = scratch;
     ops.clear();
     for word in body {
         let (kind, d, a, b) = word.dense_abc_parts();
@@ -654,10 +752,27 @@ fn vloop_run(
                 span(obj, off)?;
                 Op::Store { reg: d, obj, off }
             }
-            Instruction::VBin if kind == simd::SELECT && a < simd::NREGS && b < simd::NREGS => Op::Sel { dest: d, a, b },
-            Instruction::VBin if !simd::is_byte_kind(kind) => Op::Bin { kind, dest: d, a, b },
-            Instruction::VFma if a < simd::NREGS && b < simd::NREGS => Op::Fma { ty: kind, dest: d, a, b },
-            Instruction::VReduce if a < simd::NREGS => Op::Reduce { ty: kind, slot: d, src: a, fold: b as u8 },
+            Instruction::VBin if kind == simd::SELECT && a < simd::NREGS && b < simd::NREGS => {
+                Op::Sel { dest: d, a, b }
+            }
+            Instruction::VBin if !simd::is_byte_kind(kind) => Op::Bin {
+                kind,
+                dest: d,
+                a,
+                b,
+            },
+            Instruction::VFma if a < simd::NREGS && b < simd::NREGS => Op::Fma {
+                ty: kind,
+                dest: d,
+                a,
+                b,
+            },
+            Instruction::VReduce if a < simd::NREGS => Op::Reduce {
+                ty: kind,
+                slot: d,
+                src: a,
+                fold: b as u8,
+            },
             _ => return Err(BAD),
         });
     }
@@ -670,7 +785,12 @@ fn vloop_run(
     // A body of lane-wise words (no fold, no fma) runs up to 64 lanes per
     // dispatch of each word. A wide block that traps stores nothing and
     // runs again 8 lanes at a time below, which finds the trapping lane.
-    let wide_ok = ops.iter().all(|op| matches!(op, Op::Load { .. } | Op::Store { .. } | Op::Push { .. } | Op::Bin { .. } | Op::Sel { .. }));
+    let wide_ok = ops.iter().all(|op| {
+        matches!(
+            op,
+            Op::Load { .. } | Op::Store { .. } | Op::Push { .. } | Op::Bin { .. } | Op::Sel { .. }
+        )
+    });
     let mut narrow_until = from;
     let mut p = from;
     while p < to {
@@ -712,13 +832,25 @@ fn vloop_run(
         let mut trapped = false;
         for op in ops.iter() {
             match *op {
-                Op::Load { reg, obj: Some(Object::Array(gc)), off } => {
+                Op::Load {
+                    reg,
+                    obj: Some(Object::Array(gc)),
+                    off,
+                } => {
                     if !vload_lanes(gc.as_ref(), &mut regs[reg], p + off) {
                         return Err(OOB);
                     }
                 }
-                Op::Load { reg, obj: Some(Object::String(gc)), off } => {
-                    if !vload_byte_lanes(gc.as_ref().data.as_str().as_bytes(), &mut regs[reg], p + off) {
+                Op::Load {
+                    reg,
+                    obj: Some(Object::String(gc)),
+                    off,
+                } => {
+                    if !vload_byte_lanes(
+                        gc.as_ref().data.as_str().as_bytes(),
+                        &mut regs[reg],
+                        p + off,
+                    ) {
                         return Err(OOB);
                     }
                 }
@@ -732,23 +864,30 @@ fn vloop_run(
                         break;
                     }
                 },
-                Op::Sel { dest, a, b } => regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b]),
-                Op::Fma { ty, dest, a, b } => match crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]) {
-                    Ok(out) => regs[dest] = out,
-                    Err(_) => {
-                        trapped = true;
-                        break;
-                    }
-                },
-                Op::Reduce { ty, slot, src, fold } => {
-                    match crate::simd::eval_vreduce(ty, stack[sp + slot], &regs[src], fold) {
-                        Ok(v) => stack[sp + slot] = v,
+                Op::Sel { dest, a, b } => {
+                    regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b])
+                }
+                Op::Fma { ty, dest, a, b } => {
+                    match crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]) {
+                        Ok(out) => regs[dest] = out,
                         Err(_) => {
                             trapped = true;
                             break;
                         }
                     }
                 }
+                Op::Reduce {
+                    ty,
+                    slot,
+                    src,
+                    fold,
+                } => match crate::simd::eval_vreduce(ty, stack[sp + slot], &regs[src], fold) {
+                    Ok(v) => stack[sp + slot] = v,
+                    Err(_) => {
+                        trapped = true;
+                        break;
+                    }
+                },
             }
         }
         if trapped {
@@ -803,7 +942,14 @@ impl VloopWide {
     /// The lane-wise body `ops` over lanes `p .. p + n` (`n` a multiple of
     /// 8; every load in range, checked by the caller); `Ok(false)` on a
     /// trap, with nothing stored.
-    fn run(&mut self, stack: &Stack<Value>, sp: usize, ops: &[VloopOp], p: i64, n: usize) -> Result<bool, &'static str> {
+    fn run(
+        &mut self,
+        stack: &Stack<Value>,
+        sp: usize,
+        ops: &[VloopOp],
+        p: i64,
+        n: usize,
+    ) -> Result<bool, &'static str> {
         use common::simd;
         const OOB: &str = "VLoop out of bounds";
         const WIDE: usize = crate::simd::WIDE;
@@ -823,16 +969,30 @@ impl VloopWide {
                                 return Err(OOB);
                             }
                             if let Some(src) = arr.bytes() {
-                                out.iter_mut().zip(&src[base..base + n]).for_each(|(o, &b)| *o = u64::from(b));
+                                out.iter_mut()
+                                    .zip(&src[base..base + n])
+                                    .for_each(|(o, &b)| *o = u64::from(b));
                             } else if let Some(src) = arr.words() {
-                                out.iter_mut().zip(&src[base..base + n]).for_each(|(o, w)| *o = w.bits());
+                                out.iter_mut()
+                                    .zip(&src[base..base + n])
+                                    .for_each(|(o, w)| *o = w.bits());
                             } else {
-                                out.iter_mut().zip(arr.iter().skip(base)).for_each(|(o, w)| *o = w.bits());
+                                out.iter_mut()
+                                    .zip(arr.iter().skip(base))
+                                    .for_each(|(o, w)| *o = w.bits());
                             }
                         }
                         Some(Object::String(gc)) => {
-                            let src = gc.as_ref().data.as_str().as_bytes().get(base..base + n).ok_or(OOB)?;
-                            out.iter_mut().zip(src).for_each(|(o, &b)| *o = u64::from(b));
+                            let src = gc
+                                .as_ref()
+                                .data
+                                .as_str()
+                                .as_bytes()
+                                .get(base..base + n)
+                                .ok_or(OOB)?;
+                            out.iter_mut()
+                                .zip(src)
+                                .for_each(|(o, &b)| *o = u64::from(b));
                         }
                         _ => return Err(OOB),
                     }
@@ -847,7 +1007,11 @@ impl VloopWide {
                 }
                 VloopOp::Bin { kind, dest, a, b } => {
                     let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
-                    let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
+                    let scalar = if splat {
+                        stack[sp + a]
+                    } else {
+                        Value::from(0i64)
+                    };
                     let out = &mut self.out;
                     const Z: [u64; WIDE] = [0; WIDE];
                     let z = &Z;
@@ -862,12 +1026,17 @@ impl VloopWide {
                 }
                 VloopOp::Sel { dest, a, b } => {
                     let out = &mut self.out;
-                    for (o, (&m, (&x, &y))) in out[..n].iter_mut().zip(regs[dest].iter().zip(regs[a].iter().zip(&regs[b]))) {
+                    for (o, (&m, (&x, &y))) in out[..n]
+                        .iter_mut()
+                        .zip(regs[dest].iter().zip(regs[a].iter().zip(&regs[b])))
+                    {
                         *o = if m != 0 { x } else { y };
                     }
                     regs[dest][..n].copy_from_slice(&out[..n]);
                 }
-                VloopOp::Fma { .. } | VloopOp::Reduce { .. } => return Err("VLoop: malformed body"),
+                VloopOp::Fma { .. } | VloopOp::Reduce { .. } => {
+                    return Err("VLoop: malformed body");
+                }
             }
         }
         Ok(true)
@@ -949,7 +1118,13 @@ fn vloop_short_block(
                         }
                     }
                     Some(Object::String(gc)) => {
-                        let src = gc.as_ref().data.as_str().as_bytes().get(base..base + m).ok_or(OOB)?;
+                        let src = gc
+                            .as_ref()
+                            .data
+                            .as_str()
+                            .as_bytes()
+                            .get(base..base + m)
+                            .ok_or(OOB)?;
                         for (o, &b) in out.iter_mut().zip(src) {
                             *o = u64::from(b);
                         }
@@ -969,19 +1144,32 @@ fn vloop_short_block(
                     break;
                 }
             },
-            VloopOp::Sel { dest, a, b } => regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b]),
-            VloopOp::Fma { ty, dest, a, b } => match crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]) {
-                Ok(out) => regs[dest] = out,
-                Err(_) => {
-                    trapped = true;
-                    break;
+            VloopOp::Sel { dest, a, b } => {
+                regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b])
+            }
+            VloopOp::Fma { ty, dest, a, b } => {
+                match crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]) {
+                    Ok(out) => regs[dest] = out,
+                    Err(_) => {
+                        trapped = true;
+                        break;
+                    }
                 }
-            },
-            VloopOp::Reduce { ty, slot, src, fold } => {
+            }
+            VloopOp::Reduce {
+                ty,
+                slot,
+                src,
+                fold,
+            } => {
                 let mut lanes = regs[src];
                 // min / max keep a repeated lane; the other folds take
                 // their identity there.
-                let pad = if fold >= simd::REDUCE_TAKE { lanes[m - 1] } else { fold_identity(ty, fold) };
+                let pad = if fold >= simd::REDUCE_TAKE {
+                    lanes[m - 1]
+                } else {
+                    fold_identity(ty, fold)
+                };
                 lanes[m..].fill(pad);
                 saved.push((slot, stack[sp + slot]));
                 match crate::simd::eval_vreduce(ty, stack[sp + slot], &lanes, fold) {
@@ -1038,7 +1226,11 @@ fn vbin_block(
     use common::simd;
     let z = [0u64; simd::LANES];
     let splat = matches!(kind, simd::SPLAT_I64 | simd::SPLAT_F64);
-    let scalar = if splat { stack[sp + a] } else { Value::from(0i64) };
+    let scalar = if splat {
+        stack[sp + a]
+    } else {
+        Value::from(0i64)
+    };
     let no_lhs = splat || matches!(kind, simd::IOTA_I64 | simd::IOTA_F64);
     let no_rhs = no_lhs || simd::is_unary_kind(kind);
     let lhs = if no_lhs { z } else { regs[a % simd::NREGS] };
@@ -1068,7 +1260,9 @@ fn vloop_lanes(
                     let i = usize::try_from(p + j + off).map_err(|_| OOB)?;
                     let bits = match obj {
                         Some(Object::Array(gc)) => gc.as_ref().get(i).ok_or(OOB)?.bits(),
-                        Some(Object::String(gc)) => u64::from(*gc.as_ref().data.as_str().as_bytes().get(i).ok_or(OOB)?),
+                        Some(Object::String(gc)) => {
+                            u64::from(*gc.as_ref().data.as_str().as_bytes().get(i).ok_or(OOB)?)
+                        }
                         _ => return Err(OOB),
                     };
                     regs[reg] = [bits; simd::LANES];
@@ -1098,11 +1292,19 @@ fn vloop_lanes(
                         _ => vbin_block(stack, sp, regs, kind, a, b).map_err(|t| t.message())?,
                     };
                 }
-                VloopOp::Sel { dest, a, b } => regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b]),
-                VloopOp::Fma { ty, dest, a, b } => {
-                    regs[dest] = crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest]).map_err(|t| t.message())?;
+                VloopOp::Sel { dest, a, b } => {
+                    regs[dest] = crate::simd::eval_select(&regs[dest], &regs[a], &regs[b])
                 }
-                VloopOp::Reduce { ty, slot, src, fold } => {
+                VloopOp::Fma { ty, dest, a, b } => {
+                    regs[dest] = crate::simd::eval_vfma(ty, &regs[a], &regs[b], &regs[dest])
+                        .map_err(|t| t.message())?;
+                }
+                VloopOp::Reduce {
+                    ty,
+                    slot,
+                    src,
+                    fold,
+                } => {
                     let x = regs[src][0];
                     let one = if fold >= simd::REDUCE_TAKE {
                         [x; simd::LANES]
@@ -1111,8 +1313,8 @@ fn vloop_lanes(
                         v[0] = x;
                         v
                     };
-                    stack[sp + slot] =
-                        crate::simd::eval_vreduce(ty, stack[sp + slot], &one, fold).map_err(|t| t.message())?;
+                    stack[sp + slot] = crate::simd::eval_vreduce(ty, stack[sp + slot], &one, fold)
+                        .map_err(|t| t.message())?;
                 }
             }
         }
@@ -1198,7 +1400,9 @@ pub(crate) fn vscan(
                 let addr = stack[sp + a].bits();
                 let mut obj = heap.find_object_by_addr(addr);
                 if let Some(Object::Boxed(_)) = obj {
-                    obj = heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits());
+                    obj = heap.find_object_by_addr(
+                        crate::io::peel_one_boxed(heap, Value::from(addr)).bits(),
+                    );
                 }
                 let src = match obj {
                     Some(Object::String(gc)) => {
@@ -1211,7 +1415,11 @@ pub(crate) fn vscan(
                     }
                     o => Src::Other(o, addr),
                 };
-                Op::Load { reg: dest, src, off: stack[sp + b].as_int() }
+                Op::Load {
+                    reg: dest,
+                    src,
+                    off: stack[sp + b].as_int(),
+                }
             }
             Instruction::VBin if simd::is_byte_kind(kind) => {
                 let scalar = if kind >= simd::BS_CMP {
@@ -1255,7 +1463,8 @@ pub(crate) fn vscan(
                                 }
                                 // SAFETY: in bounds above; the scan does not
                                 // allocate, so the bytes stay where they were.
-                                let lanes = unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
+                                let lanes =
+                                    unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
                                 *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
                             }
                             Src::Other(obj, addr) => {
@@ -1290,8 +1499,14 @@ pub(crate) fn vscan(
         let mut lanes = (last - i128::from(p) + 1).min(simd::BYTE_LANES as i128) as i64;
         for op in ops {
             match *op {
-                Op::Load { src: Src::Bytes(_, len), off, .. } => {
-                    let Some(at) = p.checked_add(off) else { return p };
+                Op::Load {
+                    src: Src::Bytes(_, len),
+                    off,
+                    ..
+                } => {
+                    let Some(at) = p.checked_add(off) else {
+                        return p;
+                    };
                     if at < 0 {
                         return p;
                     }
@@ -1308,7 +1523,11 @@ pub(crate) fn vscan(
         }
         for op in ops {
             match *op {
-                Op::Load { reg, src: Src::Bytes(ptr, len), off } => {
+                Op::Load {
+                    reg,
+                    src: Src::Bytes(ptr, len),
+                    off,
+                } => {
                     let at = (p + off) as usize;
                     let n = (len - at).min(simd::BYTE_LANES);
                     let mut buf = [0u8; simd::BYTE_LANES];
@@ -1324,13 +1543,29 @@ pub(crate) fn vscan(
         if lanes < 64 {
             m &= (1u64 << lanes) - 1;
         }
-        if m != 0 { p + i64::from(m.trailing_zeros()) } else { p + lanes }
+        if m != 0 {
+            p + i64::from(m.trailing_zeros())
+        } else {
+            p + lanes
+        }
     };
     // The chunk loops; their result is a match, a stop, or the first `p` no
     // full chunk covers.
     let main = (|| -> Result<i64, &'static str> {
         // One string against a byte (find a byte, split): a tight loop.
-        if let [Op::Load { reg, src: Src::Bytes(ptr, len), off }, Op::Bin(crate::simd::ByteOp::CmpK { pred, dest: 0, b, k })] = *ops
+        if let [
+            Op::Load {
+                reg,
+                src: Src::Bytes(ptr, len),
+                off,
+            },
+            Op::Bin(crate::simd::ByteOp::CmpK {
+                pred,
+                dest: 0,
+                b,
+                k,
+            }),
+        ] = *ops
             && b == reg
         {
             // SAFETY: the bytes stay where they were resolved; nothing allocates.
@@ -1340,11 +1575,34 @@ pub(crate) fn vscan(
         // Two bytes of one string (a needle's first two): another tight loop.
         use crate::simd::ByteOp::{CmpK, Logic};
         if let [
-            Op::Load { reg: ra, src: Src::Bytes(pa, la), off: oa },
-            Op::Load { reg: rb, src: Src::Bytes(pb, lb), off: ob },
-            Op::Bin(CmpK { pred: simd_eq_a, dest: 0, b: xa, k: ka }),
-            Op::Bin(CmpK { pred: simd_eq_b, dest: db, b: xb, k: kb }),
-            Op::Bin(Logic { kind: simd::M_AND, dest: 0, a: 0, b: lb2 }),
+            Op::Load {
+                reg: ra,
+                src: Src::Bytes(pa, la),
+                off: oa,
+            },
+            Op::Load {
+                reg: rb,
+                src: Src::Bytes(pb, lb),
+                off: ob,
+            },
+            Op::Bin(CmpK {
+                pred: simd_eq_a,
+                dest: 0,
+                b: xa,
+                k: ka,
+            }),
+            Op::Bin(CmpK {
+                pred: simd_eq_b,
+                dest: db,
+                b: xb,
+                k: kb,
+            }),
+            Op::Bin(Logic {
+                kind: simd::M_AND,
+                dest: 0,
+                a: 0,
+                b: lb2,
+            }),
         ] = *ops
             && (pa, la) == (pb, lb)
             && xa == ra
@@ -1359,10 +1617,23 @@ pub(crate) fn vscan(
             return Ok(crate::simd::scan_pair(bytes, from, (oa, ka), (ob, kb), hi));
         }
         // Every stream in place: range-check once, then load unchecked.
-        if ops.iter().all(|op| !matches!(op, Op::Load { src: Src::Other(..), .. })) {
+        if ops.iter().all(|op| {
+            !matches!(
+                op,
+                Op::Load {
+                    src: Src::Other(..),
+                    ..
+                }
+            )
+        }) {
             let mut hi = hi;
             for op in ops {
-                if let Op::Load { src: Src::Bytes(_, len), off, .. } = *op {
+                if let Op::Load {
+                    src: Src::Bytes(_, len),
+                    off,
+                    ..
+                } = *op
+                {
                     if i128::from(from) + i128::from(off) < 0 {
                         return Ok(from);
                     }
@@ -1373,9 +1644,15 @@ pub(crate) fn vscan(
             while i128::from(p) <= hi {
                 for op in ops {
                     match *op {
-                        Op::Load { reg, src: Src::Bytes(ptr, _), off } => {
+                        Op::Load {
+                            reg,
+                            src: Src::Bytes(ptr, _),
+                            off,
+                        } => {
                             // SAFETY: `0 <= p + off` and `p + off + 64 <= len` by `hi`.
-                            let lanes = unsafe { &*(ptr.add((p + off) as usize) as *const [u8; simd::BYTE_LANES]) };
+                            let lanes = unsafe {
+                                &*(ptr.add((p + off) as usize) as *const [u8; simd::BYTE_LANES])
+                            };
                             *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
                         }
                         Op::Load { .. } => {}
@@ -1410,7 +1687,8 @@ pub(crate) fn vscan(
                                 }
                                 // SAFETY: in bounds above; the scan does not allocate,
                                 // so the bytes stay where they were resolved.
-                                let lanes = unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
+                                let lanes =
+                                    unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
                                 *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
                             }
                             Src::Other(obj, addr) => {
@@ -1464,14 +1742,16 @@ fn resolve_dense_index_object_in(
 }
 
 /// Panic when a frame needs more operand stack than [`crate::MAX_OPERAND_STACK_SLOTS`].
-pub(crate) const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
+pub(crate) const STACK_OVERFLOW: &str =
+    "stack overflow: recursion exceeds the VM's operand stack limit";
 
 /// Panic when [`Machine::set_step_budget`]'s budget runs out.
 pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
     "step budget exhausted: execution exceeded its back-edge / call limit";
 
 /// Panic when the heap outgrows [`Machine::set_heap_cap`]'s cap.
-pub(crate) const HEAP_CAP_EXCEEDED: &str = "heap limit exceeded: live objects outgrew the memory cap";
+pub(crate) const HEAP_CAP_EXCEEDED: &str =
+    "heap limit exceeded: live objects outgrew the memory cap";
 
 /// Call depths [`Machine::rearm_call_window`] reserves ahead of the current one.
 const CALL_WINDOW: usize = 32;
@@ -1571,6 +1851,9 @@ pub struct Machine<const S: usize> {
     /// Inside a fiber (`vm_fiber.rs`): the nesting level its VM calls switch
     /// tasks at. `None` outside fibers.
     fiber_switch_depth: Option<u32>,
+    /// Inside a task fiber: the nesting level that started it, where its
+    /// task resumes after a park (a scope it opens switches tasks there).
+    fiber_base: Option<u32>,
     /// The running fiber's `corosensei::Yielder` (null outside fibers).
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     fiber_yielder: *const (),
@@ -1707,7 +1990,6 @@ pub struct Machine<const S: usize> {
     native: Option<Box<crate::native::NativeTable>>,
 }
 
-
 /// Install `kinds` as the static word kinds of the program this thread
 /// runs (what a GC root walk reads static slots by) and return the ones
 /// it replaces. A VM that runs on a thread already serving another program
@@ -1733,7 +2015,8 @@ impl<const S: usize> Machine<S> {
         Self {
             frames,
             frame_pins: Vec::new(),
-            cow_sites: std::env::var_os("COIL_COW_REPORT").map(|_| std::collections::HashMap::new()),
+            cow_sites: std::env::var_os("COIL_COW_REPORT")
+                .map(|_| std::collections::HashMap::new()),
             cow_shares: 0,
             dense_obj_addr: 0,
             dense_obj: None,
@@ -1773,6 +2056,7 @@ impl<const S: usize> Machine<S> {
             native_panic_loc: None,
             native_roots: Vec::new(),
             fiber_switch_depth: None,
+            fiber_base: None,
             fiber_yielder: std::ptr::null(),
             fiber_outer: None,
             #[cfg(not(target_family = "wasm"))]
@@ -1841,7 +2125,9 @@ impl<const S: usize> Machine<S> {
     /// except while a debugger is attached. Machines this one spawns
     /// (threads, auto-par jobs, test cases) run it too. `None` removes it.
     pub fn install_native(&mut self, code: Option<std::sync::Arc<crate::native::NativeCode>>) {
-        self.native = code.filter(|c| !c.is_empty()).map(|c| Box::new(crate::native::NativeTable::new(c)));
+        self.native = code
+            .filter(|c| !c.is_empty())
+            .map(|c| Box::new(crate::native::NativeTable::new(c)));
         self.ensure_host_stubs();
     }
 
@@ -1863,14 +2149,56 @@ impl<const S: usize> Machine<S> {
                     stubs.push(RawByte::new(common::Instruction::RETURN));
                 }
             }
-            Arc::make_mut(&mut self.program_code).extend(stubs);
+            let main_jmp = self.main_entry_jmp();
+            if let Some((_, main)) = main_jmp {
+                stubs.push(RawByte::new(common::Instruction::CALL).with_call_packed(0, main as u32));
+                stubs.push(RawByte::new(common::Instruction::RETURN));
+            }
+            let entry = base + stubs.len() - 2;
+            let code = Arc::make_mut(&mut self.program_code);
+            code.extend(stubs);
+            if let Some((at, _)) = main_jmp {
+                code[at] = RawByte::new(common::Instruction::JMP).with_operand_u32(entry as u32);
+            }
         }
         self.ffi_stubs.clear();
         let first = base + crate::native::HOST_STUBS_LEN;
         for pc in (first..self.program_code.len()).step_by(2) {
             let b = &self.program_code[pc];
-            self.ffi_stubs.insert((*b.bytecode() as u8, b.operand_u32()), pc);
+            self.ffi_stubs
+                .insert((*b.bytecode() as u8, b.operand_u32()), pc);
         }
+    }
+
+    /// The `JMP` into `main` that ends the prologue (offset 1) or the
+    /// module setup it jumps to (statics, `extern` blocks), and `main`'s
+    /// PC, when `main` has native code. The VM reaches `main` by that jump,
+    /// never by a `CALL`; [`Self::ensure_host_stubs`] points it at an
+    /// appended `CALL main; RETURN` so native code runs `main`.
+    fn main_entry_jmp(&self) -> Option<(usize, usize)> {
+        let table = self.native.as_deref()?;
+        let code = &self.program_code;
+        let jmp = |pc: usize| {
+            code.get(pc)
+                .filter(|b| *b.bytecode() == common::Instruction::JMP)
+                .map(|b| b.operand_u32() as usize)
+        };
+        let start = jmp(1)?;
+        if table.lookup(start).is_some_and(|e| !e.generator) {
+            return Some((1, start));
+        }
+        // Setup is straight-line code before the first function: its
+        // only jump to a function entry is the one into `main`.
+        let mut pc = start;
+        while pc < code.len() && table.lookup(pc).is_none() {
+            if let Some(t) = jmp(pc)
+                && table.lookup(t).is_some_and(|e| !e.generator)
+            {
+                return Some((pc, t));
+            }
+            pc += 1;
+        }
+        None
     }
 
     /// The PC of the host-call stub for `arity` words in `layout`.
@@ -1883,7 +2211,9 @@ impl<const S: usize> Machine<S> {
     /// Whether `ip` lies in the host-call stubs: a frame there runs no code
     /// of its own (its caller is native code).
     fn in_host_stub(&self, ip: usize) -> bool {
-        self.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
+        self.native
+            .as_ref()
+            .is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
     }
 
     /// The installed native code, for a machine that runs this program.
@@ -1896,11 +2226,31 @@ impl<const S: usize> Machine<S> {
         self.native.as_ref().map(|t| (t.hits, t.bails))
     }
 
+    /// Bytecode bodies the VM ran while native code was installed.
+    pub fn native_vm_runs(&self) -> u64 {
+        self.native.as_ref().map_or(0, |t| t.vm_runs)
+    }
+
     /// Run the native code at `target` on the top `arity` stack words.
     /// `None`: no native code there, or it bailed and the VM runs the call.
     /// `Some(Err)`: it panicked after an effect it cannot take back.
     #[inline(never)]
     fn try_native_call(
+        &mut self,
+        target: usize,
+        arity: usize,
+    ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
+        let out = self.try_native_call_at(target, arity);
+        if out.is_none()
+            && let Some(table) = self.native.as_deref_mut()
+        {
+            table.vm_runs += 1;
+        }
+        out
+    }
+
+    /// [`Self::try_native_call`] without the count of calls the VM runs.
+    fn try_native_call_at(
         &mut self,
         target: usize,
         arity: usize,
@@ -1999,7 +2349,10 @@ impl<const S: usize> Machine<S> {
 
     /// The machine as native code reaches it.
     fn native_env(&mut self) -> crate::native::NativeEnv {
-        let strings_len = self.program_strings.len().min(self.program_string_cache.len());
+        let strings_len = self
+            .program_strings
+            .len()
+            .min(self.program_string_cache.len());
         crate::native::NativeEnv {
             heap: std::ptr::from_mut::<crate::memory::Heap>(&mut self.heap),
             strings: self.program_strings.as_ptr(),
@@ -2021,6 +2374,7 @@ impl<const S: usize> Machine<S> {
                 host: Self::native_host_vm,
                 ffi: Self::native_ffi_vm,
                 vector: Self::native_vector,
+                invoke: Self::native_invoke,
             },
         }
     }
@@ -2028,14 +2382,24 @@ impl<const S: usize> Machine<S> {
     /// Run the cleanup pads of the native frames a panic unwound (the
     /// panic already reported), as the VM runs a frame's pad on its way
     /// out.
-    fn run_native_pads(&mut self, pads: Vec<crate::native::NativePad>) {
+    /// A panic in a pad is reported as the VM reports a panic in a `defer`
+    /// while unwinding: it becomes the panic the unwind carries on with,
+    /// and the pads of the frames it left still run.
+    fn run_native_pads(&mut self, pads: Vec<crate::native::NativePad>, call_ip: usize) {
         if pads.is_empty() {
             return;
         }
         let was_panicked = self.panicked;
         self.panicked = false;
         let env = self.native_env();
-        crate::native::run_pads(pads, &env);
+        let mut raised = Vec::new();
+        crate::native::run_pads(pads, &env, &mut |p| raised.push(p));
+        for p in raised {
+            if p.code != crate::native::TRAP_VM_PANIC {
+                self.native_panic(&p, call_ip);
+            }
+            self.run_native_pads(p.pads, call_ip);
+        }
         self.panicked |= was_panicked;
     }
 
@@ -2044,17 +2408,29 @@ impl<const S: usize> Machine<S> {
     unsafe fn native_collect(raw: *mut c_void, ctx: *mut crate::native::NativeCtx) {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        let ip = if vm.frames.is_empty() { 0 } else { vm.frames.get().tell() };
+        let ip = if vm.frames.is_empty() {
+            0
+        } else {
+            vm.frames.get().tell()
+        };
         vm.native_roots.push((ctx, vm.frames.len()));
         vm.maybe_gc_after_call_alloc(ip);
         vm.native_roots.pop();
     }
 
     /// [`crate::native::NativeHost::gc`]: what `gc_collect` does.
-    unsafe fn native_gc(raw: *mut c_void, ctx: *mut crate::native::NativeCtx, panicked: &mut bool) -> u64 {
+    unsafe fn native_gc(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        panicked: &mut bool,
+    ) -> u64 {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        let ip = if vm.frames.is_empty() { 0 } else { vm.frames.get().tell() };
+        let ip = if vm.frames.is_empty() {
+            0
+        } else {
+            vm.frames.get().tell()
+        };
         if unlikely(!vm.stack_maps.is_empty()) {
             vm.gc_ip = ip;
         }
@@ -2067,7 +2443,12 @@ impl<const S: usize> Machine<S> {
     }
 
     /// [`crate::native::NativeHost::free`]: what `FreeEarly` does.
-    unsafe fn native_free(raw: *mut c_void, ctx: *mut crate::native::NativeCtx, word: u64, deep: bool) -> bool {
+    unsafe fn native_free(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        word: u64,
+        deep: bool,
+    ) -> bool {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
         vm.native_roots.push((ctx, vm.frames.len()));
@@ -2141,8 +2522,282 @@ impl<const S: usize> Machine<S> {
         Some(out.bits())
     }
 
-    /// [`crate::native::NativeHost::ffi`]: the FFI op `op` (`operand`)
-    /// through its stub, as [`Self::native_host_vm`].
+    /// [`crate::native::NativeHost::invoke`]: the ordinary host native
+    /// `id`, as `HostInvoke` runs it (`exec_rest.rs`), from native code: a
+    /// wait parks the fiber the call runs on ([`Self::native_park`]) where
+    /// the VM would suspend the task, then the native runs again or the
+    /// wake is its result.
+    unsafe fn native_invoke(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        id: u64,
+        layout: u64,
+        args: &[Value],
+    ) -> Option<crate::native::Invoked> {
+        use crate::native::Invoked;
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let fn_id = id as usize;
+        match vm.natives.get_by_id(fn_id)?.host_op() {
+            crate::HostOp::Ordinary => {}
+            crate::HostOp::Task => return vm.native_task_op(ctx, fn_id, args),
+            op @ (crate::HostOp::RegionEnter | crate::HostOp::RegionExit) => {
+                // A minor collection, native frames' words rooted (and
+                // forwarded), as `native_gc` collects.
+                if unlikely(!vm.stack_maps.is_empty()) {
+                    vm.gc_ip = if vm.frames.is_empty() {
+                        0
+                    } else {
+                        vm.frames.get().tell()
+                    };
+                }
+                vm.native_roots.push((ctx, vm.frames.len()));
+                vm.gc_region(op == crate::HostOp::RegionEnter);
+                vm.native_roots.pop();
+                return Some(if vm.panicked {
+                    Invoked::Unwound
+                } else {
+                    Invoked::Value(0)
+                });
+            }
+            _ => return None,
+        }
+        // Where tasks switch, a wait must park a fiber: off one (no task
+        // may switch under native frames there), the stub runs it.
+        let park_tasks = vm.tasks_can_switch();
+        if park_tasks && vm.fiber_switch_depth.is_none() {
+            return None;
+        }
+        let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
+        if fn_id == common::CLOCK_SLEEP_MS_ID as usize && park_tasks {
+            // Inside a scope, `clock::sleep_ms` suspends the task.
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(
+                    args.first().map_or(0, |v| v.as_int()).max(0) as u64
+                );
+            let s = vm.sched.as_mut().expect("tasks_can_switch");
+            let current = s.current;
+            s.add_timer(current, deadline);
+            return Some(
+                match vm.native_park(ctx, Some(crate::task::Block::Sleep), true) {
+                    Some(_) => Invoked::Value(0),
+                    None => Invoked::Unwound,
+                },
+            );
+        }
+        let opens_fd =
+            fn_id == common::IO_OPEN_ID as usize || fn_id == common::TCP_ACCEPT_ID as usize;
+        loop {
+            let park_tasks = vm.tasks_can_switch();
+            if park_tasks {
+                crate::task::set_task_waiter(vm.task_waiter());
+            }
+            if opens_fd {
+                let _ = crate::io::take_fd_exhausted();
+            }
+            // A native may collect (a shared-heap spawn opens its epoch):
+            // the native frames' words stay rooted.
+            vm.native_roots.push((ctx, vm.frames.len()));
+            let native = vm.natives.get_by_id(fn_id).expect("checked above");
+            let mut invoked = crate::host_enum::with_host_enum_layout(layout, || {
+                native.invoke(&mut vm.heap, args)
+            });
+            if opens_fd && crate::io::take_fd_exhausted() {
+                // Streams nothing reaches may hold the descriptors:
+                // collect (native frames' words pinned) and try once more.
+                let roots_len = vm.ffi_arg_roots.len();
+                vm.ffi_arg_roots.extend_from_slice(args);
+                let mut panicked = false;
+                // SAFETY: as above.
+                unsafe { Self::native_gc(raw, ctx, &mut panicked) };
+                vm.ffi_arg_roots.truncate(roots_len);
+                let native = vm.natives.get_by_id(fn_id).expect("checked above");
+                invoked = crate::host_enum::with_host_enum_layout(layout, || {
+                    native.invoke(&mut vm.heap, args)
+                });
+            }
+            vm.native_roots.pop();
+            if park_tasks {
+                crate::task::set_task_waiter(None);
+            }
+            match invoked {
+                Ok(Some(v)) => return Some(Invoked::Value(v.bits())),
+                Ok(None) if park_tasks && crate::task::take_thread_parked() => {
+                    // Runs again when another thread posts the wake.
+                    let s = vm.sched.as_mut().expect("tasks_can_switch");
+                    let key = s.peek_thread_key();
+                    let current = s.current;
+                    s.add_thread_wait(current, key);
+                    vm.native_park(ctx, Some(crate::task::Block::Thread(key)), false)?;
+                }
+                Ok(None) if park_tasks && crate::task::io_retry_parked() => {
+                    // A connect in progress: runs again on readiness.
+                    let req = crate::task::take_io_retry_park().expect("checked");
+                    let token = vm.native_io_wait(&req);
+                    vm.native_park(ctx, Some(crate::task::Block::IoRetry(token)), false)?;
+                }
+                Ok(None) => {
+                    let Some(req) = crate::io::take_pending_io_park() else {
+                        return Some(Invoked::Value(0));
+                    };
+                    if !park_tasks {
+                        // No other task: block the thread.
+                        let wait =
+                            crate::thread::host_io_wait(req.handle, req.interest, req.timeout);
+                        let v = crate::host_enum::with_host_enum_layout(layout, || {
+                            crate::io::as_result_unit(&mut vm.heap, wait)
+                        });
+                        return Some(Invoked::Value(v.bits()));
+                    }
+                    let token = vm.native_io_wait(&req);
+                    return Some(
+                        match vm.native_park(ctx, Some(crate::task::Block::Io(token, layout)), true)
+                        {
+                            Some(v) => Invoked::Value(v.bits()),
+                            None => Invoked::Unwound,
+                        },
+                    );
+                }
+                Err(crate::FfiError::IntTrap(t)) => {
+                    return Some(Invoked::Panic(t.message().to_string()));
+                }
+                Err(crate::FfiError::Panic(msg)) => return Some(Invoked::Panic(msg)),
+                Err(e) => {
+                    let name = vm
+                        .natives
+                        .get_by_id(fn_id)
+                        .map_or("?", |n| n.name())
+                        .to_string();
+                    return Some(Invoked::Panic(format!(
+                        "HostInvoke failed for `{name}`: {e}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// A task op (`HostOp::Task`) from native code, as `HostInvoke` runs
+    /// it: one that may suspend the task does so inside the fiber the
+    /// call runs on, then returns the wake or runs again. `None` (the stub
+    /// runs it): a suspending op off a fiber, or a generator close.
+    fn native_task_op(
+        &mut self,
+        ctx: *mut crate::native::NativeCtx,
+        fn_id: usize,
+        args: &[Value],
+    ) -> Option<crate::native::Invoked> {
+        use crate::native::Invoked;
+        let op = fn_id.saturating_sub(common::TASK_SCOPE_OPEN_ID as usize);
+        // scope open/close, join, sleep, yield, shield exit, cond wait.
+        let suspends = matches!(op, 0 | 1 | 4 | 6 | 7 | 11 | 13);
+        let plain = matches!(op, 2 | 3 | 5 | 9 | 10 | 12 | 14 | 15);
+        // A generator close: natively only when the innermost generator's
+        // body is native code (it unwinds on its own fiber).
+        let close = op == 45 && self.native_close_target(args.first().copied().unwrap_or_default());
+        let in_fiber = self
+            .fiber_switch_depth
+            .is_some_and(|d| d == self.nested_depth);
+        if !(plain || close || suspends && in_fiber) {
+            return None;
+        }
+        let mut words = [Value::default(); 2];
+        let n = args.len().min(2);
+        words[..n].copy_from_slice(&args[..n]);
+        loop {
+            let (mut ip, mut sp) = (self.frames.get().tell(), self.frames.get().get());
+            let before = self.stack.tell();
+            self.native_roots.push((ctx, self.frames.len()));
+            // A failed `requires` blames the native function's caller, as
+            // from its stub (`contract_failure`).
+            let saved =
+                (op == 15).then(|| std::mem::replace(&mut self.host_stub_frame, self.frames.len()));
+            let flow = self.task_host_op(fn_id, &words[..n], &mut ip, &mut sp);
+            if let Some(saved) = saved {
+                self.host_stub_frame = saved;
+            }
+            self.native_roots.pop();
+            match flow {
+                TaskFlow::Value(v) => return Some(Invoked::Value(v.bits())),
+                TaskFlow::Panic(msg) => return Some(Invoked::Panic(msg)),
+                TaskFlow::Unwind | TaskFlow::Reported(_) => return Some(Invoked::Unwound),
+                TaskFlow::Switched => {
+                    if std::mem::take(&mut self.fiber_stop) {
+                        return Some(Invoked::Unwound);
+                    }
+                    if self.stack.tell() > before {
+                        return Some(Invoked::Value(self.stack.pop().bits()));
+                    }
+                    // Woken to run the op again.
+                }
+            }
+        }
+    }
+
+    /// Whether `coro_close` of `handle` closes a generator whose innermost
+    /// delegate's body runs natively (no VM frames to unwind), or one
+    /// that needs no unwind at all.
+    fn native_close_target(&self, handle: Value) -> bool {
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits())
+        else {
+            return true;
+        };
+        let mut target = gc;
+        while let Some(sub) = target.as_ref().yield_from {
+            target = sub;
+        }
+        let c = target.as_ref();
+        c.native.is_some()
+            || !(c.state == CoroState::Suspended && c.started && self.coro_has_pad(c))
+    }
+
+    /// Register the current task's wait for `req`'s readiness (and its
+    /// timeout), as [`Self::task_suspend_io`] does; returns the token.
+    fn native_io_wait(&mut self, req: &crate::io::IoParkRequest) -> crate::io_reactor::WaitToken {
+        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let token = s.reactor.register_wait(req.handle, req.interest);
+        let current = s.current;
+        s.io_waits.insert(token, current);
+        if let Some(t) = req.timeout {
+            s.add_timer(current, std::time::Instant::now() + t);
+        }
+        token
+    }
+
+    /// From native code inside a fiber: suspend the task on `block` (the
+    /// switch happens at the `CALL` that started the fiber), with `ctx`'s
+    /// words rooted meanwhile. Returns the wake (the result slot's word
+    /// when `result_slot`), or `None` when a cancel came instead: the
+    /// unwind is armed.
+    fn native_park(
+        &mut self,
+        ctx: *mut crate::native::NativeCtx,
+        block: Option<crate::task::Block>,
+        result_slot: bool,
+    ) -> Option<Value> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let (mut ip, mut sp) = (self.frames.get().tell(), self.frames.get().get());
+            self.native_roots.push((ctx, self.frames.len()));
+            let cancelled = self.fiber_park(block, result_slot, &mut ip, &mut sp);
+            self.native_roots.pop();
+            if cancelled {
+                return None;
+            }
+            Some(if result_slot {
+                self.stack.pop()
+            } else {
+                Value::default()
+            })
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (ctx, block, result_slot);
+            unreachable!("no fibers on wasm: tasks never switch under native frames")
+        }
+    }
+
+    /// [`crate::native::NativeHost::ffi`]: the FFI op `op` (`operand`) on
+    /// `args`, as the VM runs it (no bytecode).
     unsafe fn native_ffi_vm(
         raw: *mut c_void,
         ctx: *mut crate::native::NativeCtx,
@@ -2153,14 +2808,34 @@ impl<const S: usize> Machine<S> {
     ) -> Option<u64> {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        let pc = *vm.ffi_stubs.get(&(op as u8, operand as u32))?;
-        vm.nested_return_hi = Value::default();
+        if !vm.reserve_operand_words(args.len() + 1) {
+            return None;
+        }
+        let operand = operand as u32;
+        let before = vm.stack.tell();
+        for &a in args {
+            vm.stack.push(a);
+        }
+        // A callback the C function makes may collect: the native frames'
+        // words stay pinned.
         vm.native_roots.push((ctx, vm.frames.len()));
-        let saved = std::mem::replace(&mut vm.host_stub_frame, vm.frames.len() + 1);
-        let out = vm.native_reenter(|vm| vm.call_function(pc as u32, args));
-        vm.host_stub_frame = saved;
+        match op as u8 {
+            o if o == common::Instruction::FfiLoad as u8 => vm.ffi_load_top(),
+            o if o == common::Instruction::DeclareFFI as u8 => vm.declare_ffi_top(operand),
+            _ => {
+                let call = vm.ffi_invoke_take(operand);
+                let sp = vm.frames.get().get();
+                vm.native_reenter(|vm| vm.finish_pending_ffi_invoke(call.pending(0, sp)));
+            }
+        }
         vm.native_roots.pop();
         *panicked = vm.panicked;
+        let out = if vm.stack.tell() > before {
+            vm.stack.pop()
+        } else {
+            Value::default()
+        };
+        vm.stack.seek(before);
         Some(out.bits())
     }
 
@@ -2190,10 +2865,31 @@ impl<const S: usize> Machine<S> {
         let out = if scan {
             let inclusive = flags & common::simd::SCAN_INCLUSIVE != 0;
             let backward = flags & common::simd::SCAN_BACKWARD != 0;
-            vscan(&vm.heap, &vm.stack, sp, &mut vm.vregs, body, from, bound, inclusive, backward)
+            vscan(
+                &vm.heap,
+                &vm.stack,
+                sp,
+                &mut vm.vregs,
+                body,
+                from,
+                bound,
+                inclusive,
+                backward,
+            )
         } else {
             let pos = flags & common::simd::LOOP_POS != 0;
-            vloop(&mut vm.heap, &mut vm.stack, sp, &mut vm.vregs, body, usize::from(pos), from, bound, pos).map(|()| 0)
+            vloop(
+                &mut vm.heap,
+                &mut vm.stack,
+                sp,
+                &mut vm.vregs,
+                body,
+                usize::from(pos),
+                from,
+                bound,
+                pos,
+            )
+            .map(|()| 0)
         };
         for (i, w) in slots.iter_mut().enumerate() {
             *w = vm.stack[sp + i].bits();
@@ -2210,7 +2906,11 @@ impl<const S: usize> Machine<S> {
         if !vm.finalizer_pcs.contains(&pc) {
             return 1;
         }
-        if vm.claim_finalizer(Value::from(word)) { 2 } else { 0 }
+        if vm.claim_finalizer(Value::from(word)) {
+            2
+        } else {
+            0
+        }
     }
 
     /// [`crate::native::NativeHost::call_value`]: [`Self::call_value`],
@@ -2244,7 +2944,8 @@ impl<const S: usize> Machine<S> {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
         vm.native_roots.push((ctx, vm.frames.len()));
-        let out = vm.native_reenter(|vm| vm.resume_value(Value::from(handle), send.map(Value::from)));
+        let out =
+            vm.native_reenter(|vm| vm.resume_value(Value::from(handle), send.map(Value::from)));
         vm.native_roots.pop();
         *panicked = vm.panicked;
         out.bits()
@@ -2260,12 +2961,23 @@ impl<const S: usize> Machine<S> {
             std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
         };
         let constants: &[u64] = unsafe {
-            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+            std::slice::from_raw_parts(
+                self.program_constants.as_ptr(),
+                self.program_constants.len(),
+            )
         };
         self.bind_frame_reserve(code, constants);
-        let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
-        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits()) else {
-            self.runtime_panic("resumed invalid coroutine handle", call_ip.saturating_sub(1));
+        let call_ip = if self.frames.is_empty() {
+            1
+        } else {
+            self.frames.get().tell()
+        };
+        let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, handle.bits())
+        else {
+            self.runtime_panic(
+                "resumed invalid coroutine handle",
+                call_ip.saturating_sub(1),
+            );
             return Value::default();
         };
         if gc.as_ref().state == CoroState::Done {
@@ -2304,7 +3016,7 @@ impl<const S: usize> Machine<S> {
                     } else {
                         self.native_panic(&p, call_ip.saturating_sub(1));
                     }
-                    self.run_native_pads(p.pads);
+                    self.run_native_pads(p.pads, call_ip.saturating_sub(1));
                     return Value::default();
                 }
                 None => {}
@@ -2726,7 +3438,11 @@ impl<const S: usize> Machine<S> {
     /// dense table, else a binary search over the run table.
     pub fn debug_pc_line(&self, pc: usize) -> Option<(u32, u32)> {
         if self.program_debug.debug_locs.is_empty() {
-            return self.program_debug.table.line_at(pc).map(|(file, l)| (file, l.line));
+            return self
+                .program_debug
+                .table
+                .line_at(pc)
+                .map(|(file, l)| (file, l.line));
         }
         self.pc_lines.get(pc).copied().flatten()
     }
@@ -2857,12 +3573,19 @@ impl<const S: usize> Machine<S> {
     /// `COIL_COW_REPORT`: the copies copy-on-write made, by source line,
     /// most first, on stderr.
     fn print_cow_report(&mut self) {
-        let Some(sites) = self.cow_sites.take() else { return };
+        let Some(sites) = self.cow_sites.take() else {
+            return;
+        };
         let mut by_line: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for (ip, n) in sites {
             let at = self
                 .pc_file_line_column(ip)
-                .and_then(|(file, line, _)| Some(format!("{}:{line}", self.program_debug.source_files.get(file as usize)?)))
+                .and_then(|(file, line, _)| {
+                    Some(format!(
+                        "{}:{line}",
+                        self.program_debug.source_files.get(file as usize)?
+                    ))
+                })
                 .unwrap_or_else(|| format!("pc {ip}"));
             *by_line.entry(at).or_insert(0) += n;
         }
@@ -2878,7 +3601,11 @@ impl<const S: usize> Machine<S> {
         // something else shares) is worth a borrow or a `Ref<T>`.
         const HOT: u64 = 100;
         for (at, n) in &rows {
-            let hint = if *n >= HOT { "  <- copied repeatedly: borrow with `let x = mut …` or share through a `Ref<T>`" } else { "" };
+            let hint = if *n >= HOT {
+                "  <- copied repeatedly: borrow with `let x = mut …` or share through a `Ref<T>`"
+            } else {
+                ""
+            };
             eprintln!("  {n:>10}  {at}{hint}");
         }
     }
@@ -2952,17 +3679,20 @@ impl<const S: usize> Machine<S> {
         }
         // A native call's frames that made a VM call sit between the VM
         // frames that call pushed and the frame that entered native code.
-        let native_lines = |roots: &[(*mut crate::native::NativeCtx, usize)], depth: usize| -> Vec<String> {
-            let Some(code) = self.native.as_ref().map(|t| &t.code) else { return Vec::new() };
-            roots
-                .iter()
-                .rev()
-                .filter(|&&(_, d)| d == depth)
-                // SAFETY: a native call in a VM call keeps its context alive.
-                .flat_map(|&(ctx, _)| unsafe { &*ctx }.call_sites())
-                .filter_map(|s| self.native_site_line(code, s))
-                .collect()
-        };
+        let native_lines =
+            |roots: &[(*mut crate::native::NativeCtx, usize)], depth: usize| -> Vec<String> {
+                let Some(code) = self.native.as_ref().map(|t| &t.code) else {
+                    return Vec::new();
+                };
+                roots
+                    .iter()
+                    .rev()
+                    .filter(|&&(_, d)| d == depth)
+                    // SAFETY: a native call in a VM call keeps its context alive.
+                    .flat_map(|&(ctx, _)| unsafe { &*ctx }.call_sites())
+                    .filter_map(|s| self.native_site_line(code, s))
+                    .collect()
+            };
         let emit = |line: String, lines: &mut Vec<String>, repeats: &mut usize| {
             if lines.last() == Some(&line) {
                 *repeats += 1;
@@ -2978,7 +3708,8 @@ impl<const S: usize> Machine<S> {
             let o = unsafe { &*o };
             (&o.frames, o.native_roots.as_slice())
         });
-        let states = std::iter::once((&self.frames, self.native_roots.as_slice())).chain(fiber_outer);
+        let states =
+            std::iter::once((&self.frames, self.native_roots.as_slice())).chain(fiber_outer);
         for (state, (frames, roots)) in states.enumerate() {
             for frame_idx in (0..frames.len()).rev() {
                 for line in native_lines(roots, frame_idx + 1) {
@@ -2990,7 +3721,11 @@ impl<const S: usize> Machine<S> {
                     continue;
                 }
                 // A caller's saved ip is its return address: name the call.
-                let ip = if state == 0 && frame_idx + 1 == frames.len() { ip } else { ip.saturating_sub(1) };
+                let ip = if state == 0 && frame_idx + 1 == frames.len() {
+                    ip
+                } else {
+                    ip.saturating_sub(1)
+                };
                 // The bootstrap frame (prologue `CALL main`) is not user code.
                 if ip < 3 && self.fn_symbol_at_ip(ip).is_none() {
                     continue;
@@ -3042,7 +3777,9 @@ impl<const S: usize> Machine<S> {
     /// The backtrace line of native site `s`: `  in name at loc`.
     fn native_site_line(&self, code: &crate::native::NativeCode, s: u32) -> Option<String> {
         let site = code.site(s)?;
-        let name = self.fn_symbol_at_ip(site.entry_pc as usize).unwrap_or("<unknown>");
+        let name = self
+            .fn_symbol_at_ip(site.entry_pc as usize)
+            .unwrap_or("<unknown>");
         Some(match self.native_site_location(site) {
             Some(loc) => format!("  in {name} at {loc}"),
             None => format!("  in {name}"),
@@ -3073,7 +3810,11 @@ impl<const S: usize> Machine<S> {
         let code = &self.native.as_ref()?.code;
         // SAFETY: a native call in a VM call keeps its context alive.
         let sites = unsafe { &*ctx }.call_sites();
-        Some(sites.get(1).and_then(|&s| self.native_site_location(code.site(s)?)))
+        Some(
+            sites
+                .get(1)
+                .and_then(|&s| self.native_site_location(code.site(s)?)),
+        )
     }
 
     /// `path:line:col` of a native panic site: the location the VM records
@@ -3093,7 +3834,9 @@ impl<const S: usize> Machine<S> {
         }
         let mut near = None;
         for pc in start..end {
-            let Some(l) = self.program_debug.loc_at(pc) else { continue };
+            let Some(l) = self.program_debug.loc_at(pc) else {
+                continue;
+            };
             if l.file == want.file && l.start_byte == want.start_byte {
                 if l.end_byte == want.end_byte {
                     return self.format_panic_location(pc);
@@ -3118,7 +3861,10 @@ impl<const S: usize> Machine<S> {
         let loc_suffix = match self.native_panic_loc.take() {
             Some(loc) => format!(" at {loc}"),
             None if !self.native_panic_frames.is_empty() => String::new(),
-            None => self.format_panic_location(panic_ip).map(|loc| format!(" at {loc}")).unwrap_or_default(),
+            None => self
+                .format_panic_location(panic_ip)
+                .map(|loc| format!(" at {loc}"))
+                .unwrap_or_default(),
         };
         let backtrace = self
             .explicit_panic_backtrace(panic_ip)
@@ -3264,9 +4010,18 @@ impl<const S: usize> Machine<S> {
     /// call: a panic in one unwinds from the free (`false`), and the free
     /// then frees nothing.
     pub(crate) fn free_early(&mut self, v: Value, deep: bool) -> bool {
-        if !self.finalizer_by_type.is_empty() && crate::memory::early_free_mode() == crate::memory::EarlyFreeMode::Free {
+        if !self.finalizer_by_type.is_empty()
+            && crate::memory::early_free_mode() == crate::memory::EarlyFreeMode::Free
+        {
             let pins = &self.frame_pins;
-            let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
+            let keep = |addr: u64| {
+                pins.iter().any(|p| {
+                    p.by_slot
+                        .iter()
+                        .zip(&p.sticky)
+                        .any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr))
+                })
+            };
             let Some(drops) = self.heap.early_drops(v, deep, &keep) else {
                 return true;
             };
@@ -3274,7 +4029,14 @@ impl<const S: usize> Machine<S> {
                 return false;
             }
         }
-        free_early_in(&mut self.heap, &mut self.frame_pins, &mut self.dense_obj_addr, &mut self.dense_obj, v, deep);
+        free_early_in(
+            &mut self.heap,
+            &mut self.frame_pins,
+            &mut self.dense_obj_addr,
+            &mut self.dense_obj,
+            v,
+            deep,
+        );
         true
     }
 
@@ -3286,10 +4048,13 @@ impl<const S: usize> Machine<S> {
     fn run_early_drops(&mut self, v: Value, drops: &[crate::memory::Object]) -> bool {
         let roots_len = self.ffi_arg_roots.len();
         self.ffi_arg_roots.push(v);
-        self.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
+        self.ffi_arg_roots
+            .extend(drops.iter().map(|o| Value::from(o.addr())));
         let mut ok = true;
         for obj in drops {
-            let Some(pc) = self.pending_finalizer(*obj) else { continue };
+            let Some(pc) = self.pending_finalizer(*obj) else {
+                continue;
+            };
             let val = Value::from(obj.addr());
             if self.finalizer_aborted || !self.claim_finalizer(val) {
                 continue;
@@ -3417,9 +4182,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn intern_key(heap: &mut Heap, v: Value) -> crate::memory::RefString {
-        if let Some(crate::memory::Object::String(gc)) =
-            Self::find_object_by_addr(heap, v.bits())
-        {
+        if let Some(crate::memory::Object::String(gc)) = Self::find_object_by_addr(heap, v.bits()) {
             return heap.intern_ref(gc);
         }
         heap.intern_str("")
@@ -3484,7 +4247,7 @@ impl<const S: usize> Machine<S> {
         sig: &crate::ffi::FfiSignature,
         args: &'a [Value],
     ) -> Result<std::borrow::Cow<'a, [Value]>, crate::ffi::FfiError> {
-        use crate::ffi::{callback_cif, make_int_callback, VmCallFn};
+        use crate::ffi::{VmCallFn, callback_cif, make_int_callback};
         use crate::memory::FfiType;
         if !sig.args.iter().any(|ty| matches!(ty, FfiType::Callback(_))) {
             return Ok(std::borrow::Cow::Borrowed(args));
@@ -4009,7 +4772,11 @@ impl<const S: usize> Machine<S> {
             unsafe { &*ctx }.for_each_root(|w, ambiguous| {
                 let addr = Value::from(unsafe { *w }).heap_addr();
                 if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                    let kind = if ambiguous { crate::memory::RootKind::Ambiguous } else { crate::memory::RootKind::Precise };
+                    let kind = if ambiguous {
+                        crate::memory::RootKind::Ambiguous
+                    } else {
+                        crate::memory::RootKind::Precise
+                    };
                     visit(addr, kind);
                 }
             });
@@ -4020,14 +4787,20 @@ impl<const S: usize> Machine<S> {
     /// minor collection forwards those).
     fn for_each_handle_root_but_native(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.heap;
-        let word = |v: Value, kind: crate::memory::RootKind, visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
+        let word = |v: Value,
+                    kind: crate::memory::RootKind,
+                    visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
             let addr = v.heap_addr();
             if addr != 0 && heap.find_object_by_addr(addr).is_some() {
                 visit(addr, kind);
             }
         };
         // Untyped word: the join result may be an immediate.
-        word(self.steal_join_root, crate::memory::RootKind::Ambiguous, visit);
+        word(
+            self.steal_join_root,
+            crate::memory::RootKind::Ambiguous,
+            visit,
+        );
         for ctx in &self.resume_stack {
             visit(ctx.coro.as_ptr() as u64, crate::memory::RootKind::Precise);
         }
@@ -4151,7 +4924,11 @@ impl<const S: usize> Machine<S> {
         (0..self.frames[0].get().min(top)).for_each(|idx| visit(idx, scanned));
         for i in 0..n {
             let lo = self.frames[i].get();
-            let hi = if i + 1 < n { self.frames[i + 1].get() } else { top };
+            let hi = if i + 1 < n {
+                self.frames[i + 1].get()
+            } else {
+                top
+            };
             if lo > hi || hi > top {
                 // Unexpected frame layout: everything from here up is scanned.
                 (lo.min(top)..top).for_each(|idx| visit(idx, scanned));
@@ -4160,7 +4937,11 @@ impl<const S: usize> Machine<S> {
             match self.trusted_precise_slots(i, lo, hi) {
                 Some(slots) => {
                     // The top frame's stored locals may sit above the cursor.
-                    let limit = if i + 1 == n { self.stack.capacity() } else { hi };
+                    let limit = if i + 1 == n {
+                        self.stack.capacity()
+                    } else {
+                        hi
+                    };
                     for &s in slots {
                         let idx = lo + common::precise_slot_index(s);
                         if idx < limit {
@@ -4196,12 +4977,18 @@ impl<const S: usize> Machine<S> {
         // A coroutine segment starting above this frame's base belongs to
         // frames this map does not describe.
         if !self.resume_stack.is_empty()
-            && self.resume_stack.iter().any(|c| c.base_sp > lo && c.base_sp <= hi)
+            && self
+                .resume_stack
+                .iter()
+                .any(|c| c.base_sp > lo && c.base_sp <= hi)
         {
             return None;
         }
         if !self.nested_frame_depths.is_empty()
-            && self.nested_frame_depths.iter().any(|&d| d >= 2 && d - 2 == i)
+            && self
+                .nested_frame_depths
+                .iter()
+                .any(|&d| d >= 2 && d - 2 == i)
         {
             return None;
         }
@@ -4269,13 +5056,20 @@ impl<const S: usize> Machine<S> {
             // Root only those the frame's precise map has stored at this PC.
             // Without one the frame is scanned conservatively anyway; a
             // safepoint row then still roots its slots, as it always has.
-            let hi = if i + 1 < n { self.frames[i + 1].get() } else { self.stack.as_slice().len() };
+            let hi = if i + 1 < n {
+                self.frames[i + 1].get()
+            } else {
+                self.stack.as_slice().len()
+            };
             let stored = self.trusted_precise_slots(i, sp, hi);
             if stored.is_none() && map.safepoints.is_empty() {
                 continue;
             }
             for &slot in map.slots_at(ip) {
-                if stored.is_some_and(|s| !s.iter().any(|&p| common::precise_slot_index(p) == slot as usize)) {
+                if stored.is_some_and(|s| {
+                    !s.iter()
+                        .any(|&p| common::precise_slot_index(p) == slot as usize)
+                }) {
                     continue;
                 }
                 visit(sp.saturating_add(slot as usize));
@@ -4377,7 +5171,9 @@ impl<const S: usize> Machine<S> {
         self.gc_top_ip = None;
         self.ffi_arg_roots.truncate(roots_len);
         let Some(native) = self.natives.get_by_id(fn_id) else {
-            return Err(crate::FfiError::Panic(format!("HostInvoke: unknown native id {fn_id}")));
+            return Err(crate::FfiError::Panic(format!(
+                "HostInvoke: unknown native id {fn_id}"
+            )));
         };
         crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.heap, &args))
     }
@@ -4393,7 +5189,10 @@ impl<const S: usize> Machine<S> {
             std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
         };
         let constants: &[u64] = unsafe {
-            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+            std::slice::from_raw_parts(
+                self.program_constants.as_ptr(),
+                self.program_constants.len(),
+            )
         };
         self.bind_frame_reserve(code, constants);
         if self.frames.len() >= crate::MAX_CALL_FRAMES {
@@ -5708,6 +6507,12 @@ impl<const S: usize> Machine<S> {
         self.program_constants = Arc::new(constants.to_vec());
         self.install_program_strings(strings);
         self.sync_thread_program_from_current();
+        // Run the loaded image: with native code it carries the stubs and
+        // the patched jump into `main` (`ensure_host_stubs`).
+        let image = Arc::clone(&self.program_code);
+        // SAFETY: the archived word has the plain word's layout, as the
+        // program code's casts rely on; `image` outlives the run.
+        let code: &[Byte] = unsafe { std::slice::from_raw_parts(image.as_ptr().cast(), image.len()) };
         let mut ip = 0usize;
         loop {
             let paused = self.run_execute(code, constants, ip);
@@ -5758,6 +6563,142 @@ impl<const S: usize> Machine<S> {
             crate::io::as_result_unit(&mut self.heap, wait)
         });
         self.stack.push(v);
+    }
+
+    /// `FfiLoad` on the path on top of the stack: pops it, pushes the
+    /// `Result` of loading the library.
+    fn ffi_load_top(&mut self) {
+        // Inlined to split-borrow `heap`/`libraries` from `frames`.
+        let path_val = self.stack.pop();
+        let path = {
+            let addr = path_val.bits();
+            match Self::find_object_by_addr(&self.heap, addr) {
+                Some(crate::memory::Object::String(gc)) => gc.as_ref().data.to_string(),
+                _ => String::new(),
+            }
+        };
+        match crate::ffi::resolve_library(
+            &path,
+            self.base_dir.as_deref(),
+            &self.ffi_search_paths,
+            &self.dload_gate,
+        ) {
+            Ok(lib_arc) => {
+                self.libraries
+                    .entry(path.clone())
+                    .or_insert_with(|| lib_arc.clone());
+                let (object, _gc) = self.heap.alloc_library(lib_arc);
+                let addr = object.addr();
+                self.userland_libraries.insert(addr, object);
+                self.push_result_ok(Value::from(addr));
+            }
+            Err(e) => {
+                self.push_ffi_error(e);
+            }
+        }
+    }
+
+    /// `FfiInvoke` (operand `raw`): pops the library, function id,
+    /// argument tuple and argument tags it takes, for the call.
+    fn ffi_invoke_take(&mut self, raw: u32) -> FfiCall {
+        let _arity = (raw & 0xFFFF) as usize;
+        let has_arg_tags = (raw & (1 << 16)) != 0;
+
+        // Stack (bottom → top): lib, fn_id, args_tuple [, tags_tuple].
+        let arg_types = if has_arg_tags {
+            let tags_val = self.stack.pop();
+            let tags_addr = tags_val.bits();
+            let tags: Vec<crate::memory::FfiType> =
+                match Self::find_object_by_addr(&self.heap, tags_addr) {
+                    Some(crate::memory::Object::Tuple(gc)) => gc
+                        .as_ref()
+                        .elements()
+                        .iter()
+                        .map(|v| Self::ffi_type_from_value(v, &self.heap))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+            Some(tags)
+        } else {
+            None
+        };
+
+        let tuple_val = self.stack.pop();
+        let tuple_addr = tuple_val.bits();
+
+        let function_id_val = self.stack.pop();
+        let function_id = function_id_val.as_int() as usize;
+
+        let lib_val = self.stack.pop();
+        let lib_addr = lib_val.bits();
+
+        let args: Vec<Value> = match Self::find_object_by_addr(&self.heap, tuple_addr) {
+            Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
+            _ => Vec::new(),
+        };
+        FfiCall {
+            lib_addr,
+            function_id,
+            args,
+            arg_types,
+        }
+    }
+
+    /// `DeclareFFI` (operand `raw`): pops the library, name, argument and
+    /// return tags, pushes the `Result` of declaring the function.
+    fn declare_ffi_top(&mut self, raw: u32) {
+        let _arity = (raw & 0xFFFF) as usize;
+        let variadic = (raw & (1 << 16)) != 0;
+
+        // Stack (bottom → top): lib, name, args_tuple, ret_tag.
+        let ret_tag_val = self.stack.pop();
+        let ret_type = Self::ffi_type_from_value(&ret_tag_val, &self.heap);
+
+        // Pop args tuple, then name, then lib handle.
+        let args_tuple_val = self.stack.pop();
+        let args_tuple_addr = args_tuple_val.bits();
+
+        let arg_types: Vec<crate::memory::FfiType> =
+            match Self::find_object_by_addr(&self.heap, args_tuple_addr) {
+                Some(crate::memory::Object::Tuple(gc)) => gc
+                    .as_ref()
+                    .elements()
+                    .iter()
+                    .map(|v| Self::ffi_type_from_value(v, &self.heap))
+                    .collect(),
+                _ => Vec::new(),
+            };
+        let name_val = self.stack.pop();
+        let name = Self::object_string_value(&self.heap, &name_val);
+        let lib_val = self.stack.pop();
+        let lib_addr = lib_val.bits();
+        let lib_obj = self.userland_libraries.get(&lib_addr).copied();
+        match lib_obj {
+            Some(mut owned) => {
+                let ffi_sig = crate::ffi::FfiSignature {
+                    name,
+                    args: arg_types,
+                    ret: ret_type,
+                    variadic,
+                };
+                match Self::register_signature_on_object(&mut owned, ffi_sig, &self.struct_layouts)
+                {
+                    Ok(id) => {
+                        self.userland_libraries.insert(lib_addr, owned);
+                        self.push_result_ok(Value::from(id as i64));
+                    }
+                    Err(e) => {
+                        self.push_ffi_error(e);
+                    }
+                }
+            }
+            None => {
+                self.push_result_err(
+                    crate::ffi::FfiErrorKindTag::InvalidHandle,
+                    format!("FFI declare: library at 0x{:x} is not loaded", lib_addr),
+                );
+            }
+        }
     }
 
     fn finish_pending_ffi_invoke(&mut self, pending: PendingFfiInvoke) {
@@ -5983,6 +6924,11 @@ impl<const S: usize> Machine<S> {
         self.nested_depth += 1;
         self.return_bookkeeping = true;
         let callee_sp = self.stack.tell().saturating_sub(args.len());
+        let call_ip = if self.frames.is_empty() {
+            1
+        } else {
+            self.frames.get().tell()
+        };
         self.frames.setup_current_and_advance(|f| {
             f.seek(0);
             f.set(callee_sp);
@@ -5992,7 +6938,16 @@ impl<const S: usize> Machine<S> {
         // call_function entry), not when inner CALLs return.
         self.nested_frame_depths.push(self.frames.len());
         let mut ip = offset as usize;
-        loop {
+        // A body with native code (a `drop`, a callback) runs natively.
+        let native = if unlikely(self.native.is_some()) {
+            self.native_call_entered(ip, call_ip)
+        } else {
+            None
+        };
+        if let Some(v) = native {
+            self.nested_return = Some(v);
+        }
+        while native.is_none() {
             let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
@@ -6010,7 +6965,9 @@ impl<const S: usize> Machine<S> {
                 break;
             }
         }
-        let _ = self.pop_call_frame();
+        if native.is_none() {
+            let _ = self.pop_call_frame();
+        }
         self.stack.seek(saved_sp);
         // The caller's frame map may list the word its host call returns
         // into (a collection after the call roots the result there): the
@@ -6037,12 +6994,19 @@ impl<const S: usize> Machine<S> {
             std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
         };
         let constants: &[u64] = unsafe {
-            std::slice::from_raw_parts(self.program_constants.as_ptr(), self.program_constants.len())
+            std::slice::from_raw_parts(
+                self.program_constants.as_ptr(),
+                self.program_constants.len(),
+            )
         };
         self.bind_frame_reserve(code, constants);
         // Where a panic in the call itself (stack, bad target) points: the
         // native code's caller, as for its other panics.
-        let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
+        let call_ip = if self.frames.is_empty() {
+            1
+        } else {
+            self.frames.get().tell()
+        };
         self.fuel = self.fuel.wrapping_sub(1);
         if unlikely(self.fuel == 0) {
             self.step_budget_out(call_ip);
@@ -6061,10 +7025,20 @@ impl<const S: usize> Machine<S> {
         self.return_bookkeeping = true;
         let depth = self.frames.len();
         let mut sp = saved_sp;
-        let (mut ip, flow) = self.call_indirect(callee, args.len() - dicts, dicts, call_ip, &mut sp, code);
+        let (mut ip, flow) =
+            self.call_indirect(callee, args.len() - dicts, dicts, call_ip, &mut sp, code);
         let entered = self.frames.len() > depth;
         let mut out = Value::default();
         match flow {
+            // A callee with native code runs natively, as at a `CALL`.
+            dispatch::RestFlow::Continue
+                if entered
+                    && unlikely(self.native.is_some())
+                    && self.frames.len() == depth + 1
+                    && let Some(v) = self.native_call_entered(ip, call_ip) =>
+            {
+                out = v;
+            }
             dispatch::RestFlow::Continue if entered => {
                 // The frame the call opened (an over-apply stub's when it
                 // made one) returns the result.
@@ -6103,6 +7077,48 @@ impl<const S: usize> Machine<S> {
             || !self.resume_stack.is_empty()
             || !self.frame_pins.is_empty();
         out
+    }
+
+    /// In [`Self::call_value`], the callee's frame just opened at `target`
+    /// (its arguments above the frame base): when native code has the
+    /// body, close the frame and run it natively, as a `CALL` does
+    /// (`call_ip`: where a panic in it points). `None`: the VM runs it
+    /// (no native code, it bailed, or it would need a fiber here), the
+    /// frame open again.
+    fn native_call_entered(&mut self, target: usize, call_ip: usize) -> Option<Value> {
+        let entry = self.native.as_deref()?.lookup(target)?;
+        if entry.suspends && self.native_needs_fiber() {
+            return None;
+        }
+        let base = self.frames.get().get();
+        let arity = self.stack.tell() - base;
+        let _ = self.frames.pop();
+        let out = match self.try_native_call(target, arity) {
+            None => {
+                self.frames.setup_current_and_advance(|f| f.set(base));
+                self.keep_call_window(self.frames.len() - 1);
+                return None;
+            }
+            Some(out) => out,
+        };
+        let ret = match out {
+            Ok(ret) => ret,
+            Err(p) => {
+                if p.code == crate::native::TRAP_VM_PANIC {
+                    self.rearm_unwind_after_early_drop(call_ip.saturating_sub(1));
+                } else {
+                    self.native_panic(&p, call_ip.saturating_sub(1));
+                }
+                self.run_native_pads(p.pads, call_ip.saturating_sub(1));
+                return Some(Value::default());
+            }
+        };
+        self.stack.seek(base);
+        self.nested_return_hi = ret.hi.map_or(Value::default(), Value::from);
+        for (w, deep) in ret.frees {
+            let _ = self.free_early(Value::from(w), deep);
+        }
+        Some(Value::from(ret.lo))
     }
 
     /// Stash a return value when `execute` runs inside [`Self::call_function`].
@@ -6151,6 +7167,11 @@ impl<const S: usize> Machine<S> {
             && let Some((hits, bails)) = self.native_stats()
         {
             eprintln!("native: {hits} calls ran natively, {bails} bailed to the VM");
+            let entries = crate::native::VM_ENTRIES.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "native: {} calls ran on the VM, {entries} VM entries from native code",
+                self.native_vm_runs()
+            );
             let vector = crate::native::VECTOR_OPS.load(std::sync::atomic::Ordering::Relaxed);
             if vector > 0 {
                 eprintln!("native: {vector} vector ops ran natively");
@@ -6174,6 +7195,10 @@ impl<const S: usize> Machine<S> {
     #[inline(always)]
     fn run_execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         IN_EXECUTE.set(IN_EXECUTE.get() + 1);
+        if unlikely(!self.native_roots.is_empty()) {
+            // Bytecode under native frames.
+            crate::native::VM_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut start_ip = start_ip;
         let paused = loop {
             // The dispatch loop is instantiated twice: with hooks (a debugger
@@ -6258,23 +7283,23 @@ impl<const S: usize> Machine<S> {
                         // SAFETY: `ip < code_len` checked above.
                         *unsafe { code.get_unchecked(ip) }.bytecode() as u8,
                     )
-                    && let Some(msg) = dispatch::consume_always_hot_streak(
-                    dispatch::ConsumeAlwaysHotStreakArgs {
-                        stack: &mut self.stack,
-                        sp: &mut sp,
-                        ip: &mut ip,
-                        code,
-                        constants,
-                        heap: &mut self.heap,
-                        dense_obj_addr: &mut self.dense_obj_addr,
-                        dense_obj: &mut self.dense_obj,
-                        vregs: &mut self.vregs,
-                        natives: &self.natives,
-                        host_alloc: &mut self.streak_host_alloc,
-                        fuel: &mut self.fuel,
-                        stack_cap,
-                    },
-                ) {
+                    && let Some(msg) =
+                        dispatch::consume_always_hot_streak(dispatch::ConsumeAlwaysHotStreakArgs {
+                            stack: &mut self.stack,
+                            sp: &mut sp,
+                            ip: &mut ip,
+                            code,
+                            constants,
+                            heap: &mut self.heap,
+                            dense_obj_addr: &mut self.dense_obj_addr,
+                            dense_obj: &mut self.dense_obj,
+                            vregs: &mut self.vregs,
+                            natives: &self.natives,
+                            host_alloc: &mut self.streak_host_alloc,
+                            fuel: &mut self.fuel,
+                            stack_cap,
+                        })
+                {
                     return self.hot_streak_panic(msg, ip.saturating_sub(1));
                 }
                 if unlikely(self.streak_host_alloc) {
@@ -6404,7 +7429,10 @@ impl<const S: usize> Machine<S> {
                     }
                     if let Some(ret) = match resumed {
                         Some(r) => Some(r),
-                        None if unlikely(self.native.is_some()) && !debug_attached && target != 0 => {
+                        None if unlikely(self.native.is_some())
+                            && !debug_attached
+                            && target != 0 =>
+                        {
                             // The caller's return address, as a CALL saves it:
                             // a panic or a VM call inside names this frame.
                             self.frames.get_mut().seek(ip);
@@ -6424,12 +7452,12 @@ impl<const S: usize> Machine<S> {
                             // reported it: go on unwinding from this call.
                             Err(p) if p.code == crate::native::TRAP_VM_PANIC => {
                                 self.rearm_unwind_after_early_drop(ip.saturating_sub(1));
-                                self.run_native_pads(p.pads);
+                                self.run_native_pads(p.pads, ip.saturating_sub(1));
                                 return false;
                             }
                             Err(p) => {
                                 let out = self.native_panic(&p, ip.saturating_sub(1));
-                                self.run_native_pads(p.pads);
+                                self.run_native_pads(p.pads, ip.saturating_sub(1));
                                 return out;
                             }
                         };
@@ -6547,7 +7575,9 @@ impl<const S: usize> Machine<S> {
                 }
                 // (same shape as `BinSlotSlot`) to avoid two temp pushes.
                 Instruction::BinSlotImm => {
-                    if let Err(t) = dispatch::bin_slot_imm(&mut self.stack, sp, opcode, &self.heap, stack_cap) {
+                    if let Err(t) =
+                        dispatch::bin_slot_imm(&mut self.stack, sp, opcode, &self.heap, stack_cap)
+                    {
                         return self.runtime_panic(t.message(), ip.saturating_sub(1));
                     }
                 }
@@ -6661,7 +7691,12 @@ impl<const S: usize> Machine<S> {
                     promise!(tos >= 2);
                     let rhs = self.stack[tos - 1];
                     let lhs = self.stack[tos - 2];
-                    let ret_val = match crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, &self.heap) {
+                    let ret_val = match crate::fused::eval_bin(
+                        opcode.bin_return_op(),
+                        lhs,
+                        rhs,
+                        &self.heap,
+                    ) {
                         Ok(v) => v,
                         Err(t) => return self.runtime_panic(t.message(), ip.saturating_sub(1)),
                     };
@@ -6858,12 +7893,13 @@ impl<const S: usize> Machine<S> {
                     let lo = sp + base;
                     let addr = if kind >= common::dense::MAKE_ENUM && arity == 0 {
                         // A payload-less variant is shared, as `MakeEnum`.
-                        self.heap.immortal_unit_enum(u32::from(kind - common::dense::MAKE_ENUM)).addr()
+                        self.heap
+                            .immortal_unit_enum(u32::from(kind - common::dense::MAKE_ENUM))
+                            .addr()
                     } else if kind >= common::dense::MAKE_ENUM {
                         // Inline payloads read the registers directly (no Vec).
                         let tag = u32::from(kind - common::dense::MAKE_ENUM);
-                        let payload =
-                            Self::dense_enum_payload(&self.stack[lo..lo + arity]);
+                        let payload = Self::dense_enum_payload(&self.stack[lo..lo + arity]);
                         let (object, _) = self.heap.alloc(ObjEnum::new(tag, payload), Object::Enum);
                         object.addr()
                     } else if kind == common::dense::MAKE_TUPLE && arity == 0 {
@@ -6929,7 +7965,8 @@ impl<const S: usize> Machine<S> {
                     let op = opcode.operand_u32();
                     let (obj, field) = (((op >> 8) & 0xff) as usize, (op >> 16) as usize);
                     promise!(sp + obj < stack_cap);
-                    if let Some(crate::memory::Object::Instance(mut gc)) = self.heap.find_object_by_addr(self.stack[sp + obj].bits())
+                    if let Some(crate::memory::Object::Instance(mut gc)) =
+                        self.heap.find_object_by_addr(self.stack[sp + obj].bits())
                         && let Some(v) = gc.as_ref().slot(field)
                         && let Some(copy) = self.heap.cow_unique(v)
                     {
@@ -6945,7 +7982,15 @@ impl<const S: usize> Machine<S> {
                     if opcode.operand_u32() & 1 == 0 {
                         // Measuring only: a deep copy at every share, as a
                         // design that copies on assignment makes.
-                        if cow_eager() && matches!(self.heap.find_object_by_addr(v.heap_addr()), Some(crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) {
+                        if cow_eager()
+                            && matches!(
+                                self.heap.find_object_by_addr(v.heap_addr()),
+                                Some(
+                                    crate::memory::Object::Instance(_)
+                                        | crate::memory::Object::Array(_)
+                                )
+                            )
+                        {
                             if self.cow_sites.is_some() {
                                 self.cow_shares += 1;
                             }
@@ -6984,14 +8029,22 @@ impl<const S: usize> Machine<S> {
                         return self.runtime_panic(&msg, ip.saturating_sub(1));
                     }
                 }
-                Instruction::HostInvoke if self.natives.direct_by_id(self.host_invoke_id(opcode)).is_some() => {
+                Instruction::HostInvoke
+                    if self
+                        .natives
+                        .direct_by_id(self.host_invoke_id(opcode))
+                        .is_some() =>
+                {
                     // A plain native ([`crate::ffi::NativeFn::direct`]): call
                     // it here, without the generic path's host-op, task and
                     // descriptor checks in `exec_rest`.
                     let op = opcode.operand_u32();
                     let consume = (op & 0xFFFF) as usize + 1;
                     let tell = self.stack.tell();
-                    let f = self.natives.direct_by_id(self.host_invoke_id(opcode)).expect("checked by the guard");
+                    let f = self
+                        .natives
+                        .direct_by_id(self.host_invoke_id(opcode))
+                        .expect("checked by the guard");
                     let layout = crate::host_enum::HostEnumLayout::from_operand(op);
                     let live_before = self.heap.live_object_count();
                     let heap = &mut self.heap;
@@ -7003,7 +8056,10 @@ impl<const S: usize> Machine<S> {
                         self.maybe_gc_after_alloc(ip);
                     }
                 }
-                _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
+                _ => match self
+                    .exec_rest(opcode, ip, sp, code, constants, stack_cap)
+                    .get()
+                {
                     Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
                     Err(paused) => return paused,
                 },
@@ -7017,8 +8073,23 @@ impl<const N: usize> Machine<N> {
     /// `DenseHostCall` from the giant match (outlined: most code never makes
     /// one), with its allocation safepoint.
     #[inline(never)]
-    fn dense_host_call(&mut self, ip: usize, sp: usize, opcode: &Byte, constants: &[u64], stack_cap: usize) -> Result<(), String> {
-        match dispatch::dense_host_call_direct(&mut self.stack, sp, opcode, constants, &mut self.heap, &self.natives, stack_cap) {
+    fn dense_host_call(
+        &mut self,
+        ip: usize,
+        sp: usize,
+        opcode: &Byte,
+        constants: &[u64],
+        stack_cap: usize,
+    ) -> Result<(), String> {
+        match dispatch::dense_host_call_direct(
+            &mut self.stack,
+            sp,
+            opcode,
+            constants,
+            &mut self.heap,
+            &self.natives,
+            stack_cap,
+        ) {
             Some(false) => {}
             Some(true) => self.maybe_gc_after_alloc(ip),
             None => {
@@ -7032,14 +8103,26 @@ impl<const N: usize> Machine<N> {
     /// A `DenseHostCall` whose native has no direct function (an older
     /// registry or an embedder's): the generic call, without parking.
     #[cold]
-    fn dense_host_call_generic(&mut self, sp: usize, opcode: &Byte, constants: &[u64], stack_cap: usize) -> Result<(), String> {
-        let (dest, layout, id, base, arity) =
-            opcode.dense_host_call_parts(constants).ok_or_else(|| "DenseHostCall pool".to_string())?;
+    fn dense_host_call_generic(
+        &mut self,
+        sp: usize,
+        opcode: &Byte,
+        constants: &[u64],
+        stack_cap: usize,
+    ) -> Result<(), String> {
+        let (dest, layout, id, base, arity) = opcode
+            .dense_host_call_parts(constants)
+            .ok_or_else(|| "DenseHostCall pool".to_string())?;
         promise!(sp + dest < stack_cap);
-        let native = self.natives.get_by_id(id).ok_or_else(|| format!("DenseHostCall: unknown native id {id}"))?;
+        let native = self
+            .natives
+            .get_by_id(id)
+            .ok_or_else(|| format!("DenseHostCall: unknown native id {id}"))?;
         let args = self.stack[sp + base..sp + base + arity].to_vec();
         let layout = crate::host_enum::HostEnumLayout::from_u32(layout);
-        let v = match crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut self.heap, &args)) {
+        let v = match crate::host_enum::with_host_enum_layout(layout, || {
+            native.invoke(&mut self.heap, &args)
+        }) {
             Ok(v) => v.unwrap_or_default(),
             Err(crate::FfiError::Panic(msg)) => return Err(msg),
             Err(e) => return Err(format!("HostInvoke failed for `{}`: {e}", native.name())),
@@ -7065,7 +8148,14 @@ pub(crate) fn cow_eager() -> bool {
 }
 
 /// [`Machine::free_early`] on the parts the dense streak holds too.
-fn free_early_in(heap: &mut Heap, frame_pins: &mut [FramePins], dense_obj_addr: &mut u64, dense_obj: &mut Option<Object>, v: Value, deep: bool) {
+fn free_early_in(
+    heap: &mut Heap,
+    frame_pins: &mut [FramePins],
+    dense_obj_addr: &mut u64,
+    dense_obj: &mut Option<Object>,
+    v: Value,
+    deep: bool,
+) {
     let mode = crate::memory::early_free_mode();
     if mode == crate::memory::EarlyFreeMode::Off {
         return;
@@ -7073,7 +8163,14 @@ fn free_early_in(heap: &mut Heap, frame_pins: &mut [FramePins], dense_obj_addr: 
     // An `ArrayPin` holds its array for the frame; a dense index's pin
     // only caches its register's object, and is dropped with it below.
     let pins = &*frame_pins;
-    let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
+    let keep = |addr: u64| {
+        pins.iter().any(|p| {
+            p.by_slot
+                .iter()
+                .zip(&p.sticky)
+                .any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr))
+        })
+    };
     if heap.free_early(v, deep, mode == crate::memory::EarlyFreeMode::Check, &keep) == 0 {
         return;
     }
@@ -7126,43 +8223,28 @@ pub(crate) fn render_format(format_rest: &str, mut next: impl FnMut() -> Value) 
                     chars.next();
                     // message
                     //     .push_str(&format!("{:.?}", next().as_float()));
-                    let _ =
-                        write!(&mut message, "{:.?}", next().as_float());
+                    let _ = write!(&mut message, "{:.?}", next().as_float());
                 }
                 Some('b') => {
                     chars.next();
-                    let _ = write!(
-                        &mut message,
-                        "{:0b}",
-                        next().bits()
-                    );
+                    let _ = write!(&mut message, "{:0b}", next().bits());
                 }
                 Some('s') => {
                     chars.next();
-                    let string_val = (unsafe {
-                        &*next().as_ptr::<GcData<ObjString>>()
-                    })
-                    .as_ref()
-                    .data
-                    .as_str();
+                    let string_val = (unsafe { &*next().as_ptr::<GcData<ObjString>>() })
+                        .as_ref()
+                        .data
+                        .as_str();
                     // Allocated::<crate::String>::new(next().as_ptr());
                     message.push_str(string_val);
                 }
                 Some('x') => {
                     chars.next();
-                    let _ = write!(
-                        &mut message,
-                        "{:0x}",
-                        next().bits()
-                    );
+                    let _ = write!(&mut message, "{:0x}", next().bits());
                 }
                 Some('z') => {
                     chars.next();
-                    message.push_str(if next().bits() > 0 {
-                        "true"
-                    } else {
-                        "false"
-                    });
+                    message.push_str(if next().bits() > 0 { "true" } else { "false" });
                 }
                 Some('u') => {
                     chars.next();
@@ -7170,11 +8252,7 @@ pub(crate) fn render_format(format_rest: &str, mut next: impl FnMut() -> Value) 
                 }
                 Some('p') => {
                     chars.next();
-                    let _ = write!(
-                        &mut message,
-                        "{:08x}",
-                        next().as_ptr::<bool>().addr()
-                    );
+                    let _ = write!(&mut message, "{:08x}", next().as_ptr::<bool>().addr());
                 }
                 _ => {
                     message.push('%');

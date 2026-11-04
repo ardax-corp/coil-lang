@@ -47,7 +47,10 @@ fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Res
     };
     // Cleanup ranges are behaviour (panics run `defer`s), not debug info:
     // `set_debug` keeps them at every level.
-    program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
+    // Native code locates its panics by byte span: an AOT payload keeps the
+    // spans with the lines.
+    let level = crate::native_debug_level(pipeline.debug_level(), compiler::native_mir::native_capture_active());
+    program.set_debug(pipeline.program_debug_full(), level);
     rkyv::to_bytes::<Error>(&program)
         .map(|b| b.as_slice().to_vec())
         .map_err(|_| ())

@@ -4,7 +4,7 @@
 
 use coil_simd::lanes::{self, LANES};
 use common::int_arith::{self, IntResult, IntTrap};
-use common::{dense, simd, Value};
+use common::{Value, dense, simd};
 
 #[inline]
 fn as_f64(bits: &[u64; LANES]) -> [f64; LANES] {
@@ -35,7 +35,11 @@ fn from_f64(lanes: &[f64; LANES]) -> [u64; LANES] {
 
 /// Each lane's exact int result, or the first lane's trap.
 #[inline]
-fn int_lanes(lhs: &[u64; LANES], rhs: &[u64; LANES], f: fn(i64, i64) -> IntResult) -> Result<[u64; LANES], IntTrap> {
+fn int_lanes(
+    lhs: &[u64; LANES],
+    rhs: &[u64; LANES],
+    f: fn(i64, i64) -> IntResult,
+) -> Result<[u64; LANES], IntTrap> {
     let mut o = [0u64; LANES];
     for i in 0..LANES {
         o[i] = f(lhs[i] as i64, rhs[i] as i64)? as u64;
@@ -46,7 +50,12 @@ fn int_lanes(lhs: &[u64; LANES], rhs: &[u64; LANES], f: fn(i64, i64) -> IntResul
 /// Evaluate `VBin`. `scalar` is the frame-slot word for splat kinds. Int
 /// lanes trap like the scalar ops (overflow, division by zero).
 #[inline]
-pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value) -> Result<[u64; LANES], IntTrap> {
+pub fn eval_vbin(
+    kind: u8,
+    lhs: &[u64; LANES],
+    rhs: &[u64; LANES],
+    scalar: Value,
+) -> Result<[u64; LANES], IntTrap> {
     Ok(match kind {
         simd::IADD64 => return int_lanes(lhs, rhs, int_arith::add),
         simd::ISUB64 => return int_lanes(lhs, rhs, int_arith::sub),
@@ -94,11 +103,18 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
         simd::IXOR64 => std::array::from_fn(|i| lhs[i] ^ rhs[i]),
         k if (simd::ICMP..simd::ICMP + 6).contains(&k) => {
             let pred = k - simd::ICMP;
-            std::array::from_fn(|i| u64::from(cmp_lane(pred, Some((lhs[i] as i64).cmp(&(rhs[i] as i64))))))
+            std::array::from_fn(|i| {
+                u64::from(cmp_lane(pred, Some((lhs[i] as i64).cmp(&(rhs[i] as i64)))))
+            })
         }
         k if (simd::FCMP..simd::FCMP + 6).contains(&k) => {
             let pred = k - simd::FCMP;
-            std::array::from_fn(|i| u64::from(cmp_lane(pred, f64::from_bits(lhs[i]).partial_cmp(&f64::from_bits(rhs[i])))))
+            std::array::from_fn(|i| {
+                u64::from(cmp_lane(
+                    pred,
+                    f64::from_bits(lhs[i]).partial_cmp(&f64::from_bits(rhs[i])),
+                ))
+            })
         }
         simd::SPLAT_I64 => [scalar.as_int() as u64; LANES],
         simd::SPLAT_F64 => [scalar.as_float().to_bits(); LANES],
@@ -158,12 +174,22 @@ pub fn eval_vreduce(ty: u8, acc: Value, src: &[u64; LANES], fold: u8) -> Result<
         })));
     }
     Ok(match (ty, fold) {
-        (dense::TY_I64, simd::REDUCE_AND) => Value::from(src.iter().fold(acc.as_int(), |a, &x| a & x as i64)),
-        (dense::TY_I64, simd::REDUCE_OR) => Value::from(src.iter().fold(acc.as_int(), |a, &x| a | x as i64)),
-        (dense::TY_I64, simd::REDUCE_XOR) => Value::from(src.iter().fold(acc.as_int(), |a, &x| a ^ x as i64)),
+        (dense::TY_I64, simd::REDUCE_AND) => {
+            Value::from(src.iter().fold(acc.as_int(), |a, &x| a & x as i64))
+        }
+        (dense::TY_I64, simd::REDUCE_OR) => {
+            Value::from(src.iter().fold(acc.as_int(), |a, &x| a | x as i64))
+        }
+        (dense::TY_I64, simd::REDUCE_XOR) => {
+            Value::from(src.iter().fold(acc.as_int(), |a, &x| a ^ x as i64))
+        }
         (dense::TY_I64, simd::REDUCE_MUL) => {
             let lanes = as_i64(src);
-            Value::from(lanes.iter().try_fold(acc.as_int(), |a, &x| int_arith::mul(a, x))?)
+            Value::from(
+                lanes
+                    .iter()
+                    .try_fold(acc.as_int(), |a, &x| int_arith::mul(a, x))?,
+            )
         }
         (dense::TY_F64, simd::REDUCE_MUL) => {
             let lanes = as_f64(src);
@@ -171,7 +197,11 @@ pub fn eval_vreduce(ty: u8, acc: Value, src: &[u64; LANES], fold: u8) -> Result<
         }
         (dense::TY_I64, _) => {
             let lanes = as_i64(src);
-            Value::from(lanes.iter().try_fold(acc.as_int(), |a, &x| int_arith::add(a, x))?)
+            Value::from(
+                lanes
+                    .iter()
+                    .try_fold(acc.as_int(), |a, &x| int_arith::add(a, x))?,
+            )
         }
         (dense::TY_F64, _) => {
             let lanes = as_f64(src);
@@ -257,7 +287,14 @@ fn byte_cmp_scalar(pred: u8, a: &bytes64::Block, s: i64) -> bytes64::Block {
 /// A byte-lane `VBin` on the register file: `regs[dest] = regs[a] op
 /// regs[b]`, or lane `regs[b]` against `scalar` for `BS_CMP` kinds.
 #[inline]
-pub fn vbin_bytes_in(regs: &mut [[u64; LANES]; simd::NREGS], kind: u8, dest: usize, a: usize, b: usize, scalar: Value) {
+pub fn vbin_bytes_in(
+    regs: &mut [[u64; LANES]; simd::NREGS],
+    kind: u8,
+    dest: usize,
+    a: usize,
+    b: usize,
+    scalar: Value,
+) {
     ByteOp::new(kind, dest, a, b, scalar).run(regs);
 }
 
@@ -271,7 +308,13 @@ pub(crate) fn scan_byte(bytes: &[u8], from: i64, off: i64, hi: i128, pred: u8, b
         return from;
     }
     #[inline(always)]
-    fn run(bytes: &[u8], from: i64, off: i64, hi: i128, f: impl Fn(&bytes64::Block) -> bytes64::Block) -> i64 {
+    fn run(
+        bytes: &[u8],
+        from: i64,
+        off: i64,
+        hi: i128,
+        f: impl Fn(&bytes64::Block) -> bytes64::Block,
+    ) -> i64 {
         let mut p = from;
         while i128::from(p) <= hi {
             let i = (p + off) as usize;
@@ -295,9 +338,17 @@ pub(crate) fn scan_byte(bytes: &[u8], from: i64, off: i64, hi: i128, pred: u8, b
 
 /// `VScan` for `bytes[p + oa + k] == a && bytes[p + ob + k] == b`, as
 /// [`scan_byte`].
-pub(crate) fn scan_pair(bytes: &[u8], from: i64, (oa, a): (i64, u8), (ob, b): (i64, u8), hi: i128) -> i64 {
+pub(crate) fn scan_pair(
+    bytes: &[u8],
+    from: i64,
+    (oa, a): (i64, u8),
+    (ob, b): (i64, u8),
+    hi: i128,
+) -> i64 {
     let lanes = bytes64::LANES as i128;
-    let hi = hi.min(bytes.len() as i128 - lanes - i128::from(oa)).min(bytes.len() as i128 - lanes - i128::from(ob));
+    let hi = hi
+        .min(bytes.len() as i128 - lanes - i128::from(oa))
+        .min(bytes.len() as i128 - lanes - i128::from(ob));
     if i128::from(from) + i128::from(oa.min(ob)) < 0 {
         return from;
     }
@@ -321,11 +372,26 @@ pub(crate) fn scan_pair(bytes: &[u8], from: i64, (oa, a): (i64, u8), (ob, b): (i
 #[derive(Clone, Copy)]
 pub(crate) enum ByteOp {
     /// `M_*` kind on registers `a`, `b`.
-    Logic { kind: u8, dest: usize, a: usize, b: usize },
+    Logic {
+        kind: u8,
+        dest: usize,
+        a: usize,
+        b: usize,
+    },
     /// Lane `a pred b`.
-    Cmp { pred: u8, dest: usize, a: usize, b: usize },
+    Cmp {
+        pred: u8,
+        dest: usize,
+        a: usize,
+        b: usize,
+    },
     /// Lane `b pred k`.
-    CmpK { pred: u8, dest: usize, b: usize, k: u8 },
+    CmpK {
+        pred: u8,
+        dest: usize,
+        b: usize,
+        k: u8,
+    },
     /// Every lane `v` (a scalar outside a byte: the answer is the same in every lane).
     Fill { dest: usize, v: u8 },
 }
@@ -333,13 +399,23 @@ pub(crate) enum ByteOp {
 impl ByteOp {
     pub(crate) fn new(kind: u8, dest: usize, a: usize, b: usize, scalar: Value) -> Self {
         match kind {
-            simd::M_AND | simd::M_OR | simd::M_ANDN | simd::M_NOT => Self::Logic { kind, dest, a, b },
-            k if (simd::B_CMP..simd::B_CMP + 6).contains(&k) => Self::Cmp { pred: k - simd::B_CMP, dest, a, b },
+            simd::M_AND | simd::M_OR | simd::M_ANDN | simd::M_NOT => {
+                Self::Logic { kind, dest, a, b }
+            }
+            k if (simd::B_CMP..simd::B_CMP + 6).contains(&k) => Self::Cmp {
+                pred: k - simd::B_CMP,
+                dest,
+                a,
+                b,
+            },
             k => {
                 let pred = k - simd::BS_CMP;
                 match u8::try_from(scalar.as_int()) {
                     Ok(k) => Self::CmpK { pred, dest, b, k },
-                    Err(_) => Self::Fill { dest, v: byte_cmp_scalar(pred, &[0; bytes64::LANES], scalar.as_int())[0] },
+                    Err(_) => Self::Fill {
+                        dest,
+                        v: byte_cmp_scalar(pred, &[0; bytes64::LANES], scalar.as_int())[0],
+                    },
                 }
             }
         }
@@ -358,8 +434,12 @@ impl ByteOp {
                 };
                 (dest, out)
             }
-            Self::Cmp { pred, dest, a, b } => (dest, byte_cmp(pred, as_bytes(&regs[a]), as_bytes(&regs[b]))),
-            Self::CmpK { pred, dest, b, k } => (dest, byte_cmp(pred, as_bytes(&regs[b]), &bytes64::splat(k))),
+            Self::Cmp { pred, dest, a, b } => {
+                (dest, byte_cmp(pred, as_bytes(&regs[a]), as_bytes(&regs[b])))
+            }
+            Self::CmpK { pred, dest, b, k } => {
+                (dest, byte_cmp(pred, as_bytes(&regs[b]), &bytes64::splat(k)))
+            }
             Self::Fill { dest, v } => (dest, bytes64::splat(v)),
         };
         *as_bytes_mut(&mut regs[dest]) = out;
@@ -382,13 +462,25 @@ pub const WIDE: usize = simd::BYTE_LANES;
 /// scalar ops would; the trap is reported for the block, and the caller
 /// runs it again 8 lanes at a time to find the lane (the lanes after `n`
 /// in `out` are left as they were).
-pub fn eval_vbin_wide(kind: u8, lhs: &[u64; WIDE], rhs: &[u64; WIDE], scalar: Value, n: usize, out: &mut [u64; WIDE]) -> Result<(), IntTrap> {
+pub fn eval_vbin_wide(
+    kind: u8,
+    lhs: &[u64; WIDE],
+    rhs: &[u64; WIDE],
+    scalar: Value,
+    n: usize,
+    out: &mut [u64; WIDE],
+) -> Result<(), IntTrap> {
     debug_assert!(n <= WIDE);
     let (a, b, o) = (&lhs[..n], &rhs[..n], &mut out[..n]);
     match kind {
         simd::IADD64 | simd::ISUB64 | simd::IMUL64 => {
             // One loop per op; an overflow in any lane traps the block.
-            fn each(o: &mut [u64], a: &[u64], b: &[u64], f: impl Fn(i64, i64) -> (i64, bool)) -> bool {
+            fn each(
+                o: &mut [u64],
+                a: &[u64],
+                b: &[u64],
+                f: impl Fn(i64, i64) -> (i64, bool),
+            ) -> bool {
                 let mut over = false;
                 for (o, (&x, &y)) in o.iter_mut().zip(a.iter().zip(b)) {
                     let (v, f) = f(x as i64, y as i64);
@@ -406,9 +498,18 @@ pub fn eval_vbin_wide(kind: u8, lhs: &[u64; WIDE], rhs: &[u64; WIDE], scalar: Va
                 return Err(IntTrap::Overflow);
             }
         }
-        simd::IAND64 => o.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (x, y))| *o = x & y),
-        simd::IOR64 => o.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (x, y))| *o = x | y),
-        simd::IXOR64 => o.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (x, y))| *o = x ^ y),
+        simd::IAND64 => o
+            .iter_mut()
+            .zip(a.iter().zip(b))
+            .for_each(|(o, (x, y))| *o = x & y),
+        simd::IOR64 => o
+            .iter_mut()
+            .zip(a.iter().zip(b))
+            .for_each(|(o, (x, y))| *o = x | y),
+        simd::IXOR64 => o
+            .iter_mut()
+            .zip(a.iter().zip(b))
+            .for_each(|(o, (x, y))| *o = x ^ y),
         k if (simd::ICMP..simd::ICMP + 6).contains(&k) => {
             // One loop per predicate: the compare is not chosen per lane.
             fn each(o: &mut [u64], a: &[u64], b: &[u64], f: impl Fn(i64, i64) -> bool) {
@@ -428,14 +529,20 @@ pub fn eval_vbin_wide(kind: u8, lhs: &[u64; WIDE], rhs: &[u64; WIDE], scalar: Va
         simd::SPLAT_I64 => o.fill(scalar.as_int() as u64),
         simd::SPLAT_F64 => o.fill(scalar.as_float().to_bits()),
         simd::IOTA_I64 => o.iter_mut().enumerate().for_each(|(i, o)| *o = i as u64),
-        simd::IOTA_F64 => o.iter_mut().enumerate().for_each(|(i, o)| *o = (i as f64).to_bits()),
+        simd::IOTA_F64 => o
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, o)| *o = (i as f64).to_bits()),
         _ => {
             for c in (0..n).step_by(LANES) {
                 let k = (n - c).min(LANES);
                 // A short last chunk repeats its last lane, which gives
                 // (or traps) as that lane does: no trap of its own.
-                let chunk = |src: &[u64; WIDE]| -> [u64; LANES] { std::array::from_fn(|i| src[c + i.min(k - 1)]) };
-                out[c..c + k].copy_from_slice(&eval_vbin(kind, &chunk(lhs), &chunk(rhs), scalar)?[..k]);
+                let chunk = |src: &[u64; WIDE]| -> [u64; LANES] {
+                    std::array::from_fn(|i| src[c + i.min(k - 1)])
+                };
+                out[c..c + k]
+                    .copy_from_slice(&eval_vbin(kind, &chunk(lhs), &chunk(rhs), scalar)?[..k]);
             }
         }
     }
@@ -447,7 +554,12 @@ mod byte_tests {
     use super::*;
 
     /// `a op b` (or lane `b` against `scalar`) into a fresh register.
-    fn eval_vbin_bytes(kind: u8, a: &[u64; LANES], b: &[u64; LANES], scalar: Value) -> [u64; LANES] {
+    fn eval_vbin_bytes(
+        kind: u8,
+        a: &[u64; LANES],
+        b: &[u64; LANES],
+        scalar: Value,
+    ) -> [u64; LANES] {
         let mut regs = [[0u64; LANES]; simd::NREGS];
         regs[0] = *a;
         regs[1] = *b;
@@ -464,11 +576,25 @@ mod byte_tests {
     #[test]
     fn scalar_compare_out_of_byte_range() {
         let r = reg(b"a,b");
-        let eq = |s: i64| movemask(&eval_vbin_bytes(simd::BS_CMP + dense::CMP_EQ, &[0; LANES], &r, Value::from(s)));
+        let eq = |s: i64| {
+            movemask(&eval_vbin_bytes(
+                simd::BS_CMP + dense::CMP_EQ,
+                &[0; LANES],
+                &r,
+                Value::from(s),
+            ))
+        };
         assert_eq!(eq(44), 0b10);
         assert_eq!(eq(44 + 256), 0);
         assert_eq!(eq(-1), 0);
-        let lt = |s: i64| movemask(&eval_vbin_bytes(simd::BS_CMP + dense::CMP_LT, &[0; LANES], &r, Value::from(s)));
+        let lt = |s: i64| {
+            movemask(&eval_vbin_bytes(
+                simd::BS_CMP + dense::CMP_LT,
+                &[0; LANES],
+                &r,
+                Value::from(s),
+            ))
+        };
         assert_eq!(lt(300), u64::MAX as i64);
         assert_eq!(lt(-5), 0);
         assert_eq!(lt(98) & 0b111, 0b011);

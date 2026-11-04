@@ -293,143 +293,14 @@ impl<const S: usize> Machine<S> {
                     #[cfg(debug_assertions)]
                     eprintln!("FFI: deprecated NATIVE opcode — recompile from source");
                 }
-                Instruction::FfiLoad => {
-                    // Inlined to split-borrow `heap`/`libraries` from `frames`.
-                    let path_val = self.stack.pop();
-                    let path = {
-                        let addr = path_val.bits();
-                        match Self::find_object_by_addr(&self.heap, addr) {
-                            Some(crate::memory::Object::String(gc)) => gc.as_ref().data.to_string(),
-                            _ => String::new(),
-                        }
-                    };
-                    match crate::ffi::resolve_library(
-                        &path,
-                        self.base_dir.as_deref(),
-                        &self.ffi_search_paths,
-                        &self.dload_gate,
-                    ) {
-                        Ok(lib_arc) => {
-                            self.libraries
-                                .entry(path.clone())
-                                .or_insert_with(|| lib_arc.clone());
-                            let (object, _gc) = self.heap.alloc_library(lib_arc);
-                            let addr = object.addr();
-                            self.userland_libraries.insert(addr, object);
-                            self.push_result_ok(Value::from(addr));
-                        }
-                        Err(e) => {
-                            self.push_ffi_error(e);
-                        }
-                    }
-                }
+                Instruction::FfiLoad => self.ffi_load_top(),
                 Instruction::FfiInvoke => {
-                    let raw = opcode.operand_u32();
-                    let _arity = (raw & 0xFFFF) as usize;
-                    let has_arg_tags = (raw & (1 << 16)) != 0;
-
-                    // Stack (bottom → top): lib, fn_id, args_tuple [, tags_tuple].
-                    let arg_types = if has_arg_tags {
-                        let tags_val = self.stack.pop();
-                        let tags_addr = tags_val.bits();
-                        let tags: Vec<crate::memory::FfiType> =
-                            match Self::find_object_by_addr(&self.heap, tags_addr) {
-                                Some(crate::memory::Object::Tuple(gc)) => gc
-                                    .as_ref()
-                                    .elements()
-                                    .iter()
-                                    .map(|v| Self::ffi_type_from_value(v, &self.heap))
-                                    .collect(),
-                                _ => Vec::new(),
-                            };
-                        Some(tags)
-                    } else {
-                        None
-                    };
-
-                    let tuple_val = self.stack.pop();
-                    let tuple_addr = tuple_val.bits();
-
-                    let function_id_val = self.stack.pop();
-                    let function_id = function_id_val.as_int() as usize;
-
-                    let lib_val = self.stack.pop();
-                    let lib_addr = lib_val.bits();
-
-                    let args: Vec<Value> = match Self::find_object_by_addr(&self.heap, tuple_addr) {
-                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
-                        _ => Vec::new(),
-                    };
-
+                    let call = self.ffi_invoke_take(opcode.operand_u32());
                     self.frames.get_mut().set(sp);
-                    self.pending_ffi = Some(PendingFfiInvoke {
-                        lib_addr,
-                        function_id,
-                        args,
-                        arg_types,
-                        resume_ip: ip,
-                        resume_sp: sp,
-                    });
+                    self.pending_ffi = Some(call.pending(ip, sp));
                     return dispatch::RestExit::done(true);
                 }
-                Instruction::DeclareFFI => {
-                    let raw = opcode.operand_u32();
-                    let _arity = (raw & 0xFFFF) as usize;
-                    let variadic = (raw & (1 << 16)) != 0;
-
-                    // Stack (bottom → top): lib, name, args_tuple, ret_tag.
-                    let ret_tag_val = self.stack.pop();
-                    let ret_type = Self::ffi_type_from_value(&ret_tag_val, &self.heap);
-
-                    // Pop args tuple, then name, then lib handle.
-                    let args_tuple_val = self.stack.pop();
-                    let args_tuple_addr = args_tuple_val.bits();
-
-                    let arg_types: Vec<crate::memory::FfiType> =
-                        match Self::find_object_by_addr(&self.heap, args_tuple_addr) {
-                            Some(crate::memory::Object::Tuple(gc)) => gc
-                                .as_ref()
-                                .elements()
-                                .iter()
-                                .map(|v| Self::ffi_type_from_value(v, &self.heap))
-                                .collect(),
-                            _ => Vec::new(),
-                        };
-                    let name_val = self.stack.pop();
-                    let name = Self::object_string_value(&self.heap, &name_val);
-                    let lib_val = self.stack.pop();
-                    let lib_addr = lib_val.bits();
-                    let lib_obj = self.userland_libraries.get(&lib_addr).copied();
-                    match lib_obj {
-                        Some(mut owned) => {
-                            let ffi_sig = crate::ffi::FfiSignature {
-                                name,
-                                args: arg_types,
-                                ret: ret_type,
-                                variadic,
-                            };
-                            match Self::register_signature_on_object(
-                                &mut owned,
-                                ffi_sig,
-                                &self.struct_layouts,
-                            ) {
-                                Ok(id) => {
-                                    self.userland_libraries.insert(lib_addr, owned);
-                                    self.push_result_ok(Value::from(id as i64));
-                                }
-                                Err(e) => {
-                                    self.push_ffi_error(e);
-                                }
-                            }
-                        }
-                        None => {
-                            self.push_result_err(
-                                crate::ffi::FfiErrorKindTag::InvalidHandle,
-                                format!("FFI declare: library at 0x{:x} is not loaded", lib_addr),
-                            );
-                        }
-                    }
-                }
+                Instruction::DeclareFFI => self.declare_ffi_top(opcode.operand_u32()),
                 Instruction::HostInvoke => {
                     let arity = (opcode.operand_u32() & 0xFFFF) as usize;
                     let tell = self.stack.tell();
@@ -509,6 +380,9 @@ impl<const S: usize> Machine<S> {
                                     return dispatch::RestExit::done(
                                         self.runtime_panic(&msg, ip.saturating_sub(1)),
                                     );
+                                }
+                                TaskFlow::Reported(stop) => {
+                                    return dispatch::RestExit::done(stop);
                                 }
                             }
                         }

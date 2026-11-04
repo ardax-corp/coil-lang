@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use common::Value;
 
-use crate::memory::Heap;
 use crate::HostValueFn;
+use crate::memory::Heap;
 
 /// The value the next `next_id()` returns. Shared by every thread, task and
 /// VM in the process, so no two calls ever see the same id.
@@ -24,7 +24,8 @@ fn host_next_id(_heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 /// Pipeline wiring: `(registry_name, arity, host_fn)`.
-pub const SYMBOL_WIRING: &[(&str, usize, HostValueFn)] = &[(common::SYMBOL_NEXT_ID_NATIVE, 0, host_next_id)];
+pub const SYMBOL_WIRING: &[(&str, usize, HostValueFn)] =
+    &[(common::SYMBOL_NEXT_ID_NATIVE, 0, host_next_id)];
 
 #[cfg(test)]
 mod tests {
@@ -35,7 +36,10 @@ mod tests {
         let handles: Vec<_> = (0..4)
             .map(|_| std::thread::spawn(|| (0..1000).map(|_| next_id()).collect::<Vec<_>>()))
             .collect();
-        let mut all: Vec<i64> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        let mut all: Vec<i64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
         let n = all.len();
         all.sort_unstable();
         all.dedup();

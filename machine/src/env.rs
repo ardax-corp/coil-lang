@@ -267,7 +267,9 @@ pub fn try_host_exit(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     }
     let code = if args.is_empty() { 0 } else { args[0].as_int() } as i32;
     EXIT_REQUEST.with(|c| c.set(Some(code)));
-    Err(format!("env::exit({code}) ends only this job under the test harness"))
+    Err(format!(
+        "env::exit({code}) ends only this job under the test harness"
+    ))
 }
 
 /// The removed `env_exec` slot (id 64): `env::exec` became the `process`

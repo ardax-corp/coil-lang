@@ -25,7 +25,12 @@ use common::int_arith::{self, IntResult, IntTrap};
 use crate::{Heap, ObjArray, ObjTuple, Object};
 
 /// `out[i] = f(a[i], b[i])`, stopping at the first trap.
-fn zip_i64(a: &[i64], b: &[i64], out: &mut [i64], f: fn(i64, i64) -> IntResult) -> Result<(), IntTrap> {
+fn zip_i64(
+    a: &[i64],
+    b: &[i64],
+    out: &mut [i64],
+    f: fn(i64, i64) -> IntResult,
+) -> Result<(), IntTrap> {
     for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
         *o = f(x, y)?;
     }
@@ -47,16 +52,27 @@ fn scale_i64(a: &[i64], s: i64, out: &mut [i64]) -> Result<(), IntTrap> {
 }
 
 fn dot_i64(a: &[i64], b: &[i64]) -> IntResult {
-    a.iter().zip(b).try_fold(0i64, |acc, (&x, &y)| int_arith::add(acc, int_arith::mul(x, y)?))
+    a.iter().zip(b).try_fold(0i64, |acc, (&x, &y)| {
+        int_arith::add(acc, int_arith::mul(x, y)?)
+    })
 }
 
 /// Row-major `c = a (m×k) · b (k×n)`; each cell sums over `k` in order.
-fn matmul_i64(a: &[i64], b: &[i64], c: &mut [i64], m: usize, k: usize, n: usize) -> Result<(), IntTrap> {
+fn matmul_i64(
+    a: &[i64],
+    b: &[i64],
+    c: &mut [i64],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Result<(), IntTrap> {
     for i in 0..m {
         for j in 0..n {
             let mut acc = 0i64;
             for t in 0..k {
-                let (Some(&x), Some(&y)) = (a.get(i * k + t), b.get(t * n + j)) else { continue };
+                let (Some(&x), Some(&y)) = (a.get(i * k + t), b.get(t * n + j)) else {
+                    continue;
+                };
                 acc = int_arith::add(acc, int_arith::mul(x, y)?)?;
             }
             if let Some(cell) = c.get_mut(i * n + j) {
@@ -282,7 +298,14 @@ pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> 
         matmul_i64(&a_cells, &b_cells, &mut c, m, k, n)?;
         i64_to_values(&c)
     };
-    Ok(alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple))
+    Ok(alloc_nested_matrix(
+        heap,
+        c,
+        m,
+        n,
+        outer_is_tuple,
+        row_is_tuple,
+    ))
 }
 
 /// `packed_matrix_zip(a, b, meta)` — former `PackedMatrixZip` operand layout.
@@ -371,9 +394,19 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTr
         let mut out = vec![0_i64; len];
         if matches!(zip_kind, 0 | 1) {
             if zip_kind == 1 {
-                zip_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen], int_arith::sub)?;
+                zip_i64(
+                    &a_cells[..nlen],
+                    &b_cells[..nlen],
+                    &mut out[..nlen],
+                    int_arith::sub,
+                )?;
             } else {
-                zip_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen], int_arith::add)?;
+                zip_i64(
+                    &a_cells[..nlen],
+                    &b_cells[..nlen],
+                    &mut out[..nlen],
+                    int_arith::add,
+                )?;
             }
         } else {
             // Element-wise `<<` / `>>` trap on a count outside 0..=63 like
@@ -391,7 +424,14 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTr
         }
         i64_to_values(&out)
     };
-    Ok(alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple))
+    Ok(alloc_nested_matrix(
+        heap,
+        c,
+        m,
+        n,
+        outer_is_tuple,
+        row_is_tuple,
+    ))
 }
 
 struct PackF64PairArgs<'a> {
@@ -538,7 +578,14 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTr
         }
         i64_to_values(&out)
     };
-    Ok(alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple))
+    Ok(alloc_nested_matrix(
+        heap,
+        c,
+        m,
+        n,
+        outer_is_tuple,
+        row_is_tuple,
+    ))
 }
 
 /// Zip / broadcast / negate for 1-D aggregates (`[T; N]` / `(T,…)`).
@@ -884,11 +931,14 @@ mod tests {
         assert_eq!(packed_vec_arith(&mut heap, &[]).unwrap().as_int(), 0);
         // Unary path with too-few args still needs meta; binary needs 3.
         assert_eq!(
-            packed_vec_arith(&mut heap, &[Value::from(1_i64)]).unwrap().as_int(),
+            packed_vec_arith(&mut heap, &[Value::from(1_i64)])
+                .unwrap()
+                .as_int(),
             0
         );
         let meta = Value::from((8 | (2 << 16)) as i64); // zip mul
-        let missing = packed_vec_arith(&mut heap, &[Value::from(0_i64), Value::from(0_i64), meta]).unwrap();
+        let missing =
+            packed_vec_arith(&mut heap, &[Value::from(0_i64), Value::from(0_i64), meta]).unwrap();
         let elems = aggregate_elements(&heap, missing).expect("zero-filled");
         assert_eq!(elems.len(), 8);
         assert!(elems.iter().all(|v| v.as_int() == 0));
@@ -914,9 +964,18 @@ mod tests {
         let one = alloc_array(&mut heap, vec![1, 1]);
         let zero = alloc_array(&mut heap, vec![0, 0]);
         let len2 = 2u32;
-        assert_eq!(packed_dot(&mut heap, &[big, one, Value::from(i64::from(len2))]), Err(IntTrap::Overflow));
-        assert_eq!(packed_vec_arith(&mut heap, &[big, one, Value::from(i64::from(len2))]), Err(IntTrap::Overflow));
+        assert_eq!(
+            packed_dot(&mut heap, &[big, one, Value::from(i64::from(len2))]),
+            Err(IntTrap::Overflow)
+        );
+        assert_eq!(
+            packed_vec_arith(&mut heap, &[big, one, Value::from(i64::from(len2))]),
+            Err(IntTrap::Overflow)
+        );
         let div = len2 | (3 << 16);
-        assert_eq!(packed_vec_arith(&mut heap, &[one, zero, Value::from(i64::from(div))]), Err(IntTrap::DivByZero));
+        assert_eq!(
+            packed_vec_arith(&mut heap, &[one, zero, Value::from(i64::from(div))]),
+            Err(IntTrap::DivByZero)
+        );
     }
 }

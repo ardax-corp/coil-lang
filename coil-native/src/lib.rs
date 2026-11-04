@@ -128,6 +128,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Ao
             bytes[at + 8] = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
             bytes[at + 9] = u8::from(plan.vm_reach.contains(&i));
             bytes[at + std::mem::offset_of!(machine::native::AotEntry, generator)] = u8::from(is_generator(&body.mir));
+            bytes[at + std::mem::offset_of!(machine::native::AotEntry, cleanup)] = u8::from(body.mir.cleanup.is_some());
             relocs.push((at + std::mem::offset_of!(machine::native::AotEntry, entry), ids.entry[&i]));
         }
         let count = bytes.len() / ENTRY_BYTES;
@@ -216,7 +217,8 @@ fn jit_once(
         let ret_words = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
         let generator = is_generator(&body.mir);
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, entry });
+        let cleanup = body.mir.cleanup.is_some();
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, cleanup, entry });
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
@@ -311,7 +313,9 @@ fn define_all<M: Module>(
         if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
             ctx.func.signature = entry_signature(&*module);
             let lowered = {
-                let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, None);
+                // Its sites are its body's: a panic in a `defer` names it.
+                let entry_pc = entry_pcs.get(&body.name).copied();
+                let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, entry_pc);
                 lower.is_pad = true;
                 let r = lower.body(pad);
                 if r.is_ok() {
@@ -901,9 +905,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                     // yield suspends it (`machine::native_gen`).
                     MirInst::Yield { dest, value, from, .. } => {
                         let _ = from;
-                        if f.cleanup.is_some() {
-                            return Err("generator with a defer".into());
-                        }
                         if f.ret_hi_ty.is_some() {
                             return Err("generator returning two words".into());
                         }
@@ -2417,6 +2418,9 @@ impl<'a> Lower<'a> {
                 self.pop_call(prev);
                 let sent = self.b.inst_results(call)[0];
                 self.pop_roots(f, roots);
+                // A close unwinds from the yield (`coil_native_yield`).
+                let flag = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
                 self.b.ins().jump(lp, &[sent.into()]);
                 self.b.switch_to_block(exit);
@@ -2434,6 +2438,9 @@ impl<'a> Lower<'a> {
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
                 self.pop_roots(f, roots);
+                // A close unwinds from the yield (`coil_native_yield`).
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);

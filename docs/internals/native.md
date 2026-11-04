@@ -15,6 +15,25 @@ COIL_NATIVE_STATS=1 coil prog.coil --jit   # counts on stderr
 COIL_NATIVE_STATS=2 coil prog.coil --jit   # plus why each body stays on the VM
 ```
 
+The stats end with the run's dependence on the VM:
+`native: N calls ran on the VM, M VM entries from native code`. `N` counts
+`CALL`s the VM executed while native code was installed (bodies that did
+not compile, re-runs after a bail); `M` counts bytecode executions started
+under a native frame (`VM_ENTRIES`, counted in `run_execute` while
+`native_roots` is non-empty). Every program in `examples/` and
+`examples/perf` reports `0` and `0`: once `main` is native, no bytecode
+runs after module setup.
+
+The prologue reaches `main` by a `JMP` (after a `CALL` with no target, or
+at the end of module setup: statics, `extern` blocks), never by a `CALL`.
+With native code installed, `Machine::ensure_host_stubs` points that jump
+at an appended `CALL main; RETURN` (`main_entry_jmp`), so `main` enters
+natively like any call; the run executes the loaded image. Module setup
+itself stays bytecode.
+
+An archive or package with native code keeps byte spans at `-g1`
+(`native_debug_level`): native code finds a panic's location by span.
+
 `--jit` skips the build cache (it needs this compile's MIR).
 
 ```
@@ -151,7 +170,9 @@ body that stays on the VM (`coil_native_call_vm`). Each sets
 - Past the stack budget it goes on down to `NativeCtx::stack_hard`, 128
   KiB above the thread's real stack end (`stacker::remaining_stack`), then
   panics with the VM's stack overflow message.
-- Instead of the allocation cap it collects at safepoints (below).
+- Instead of the allocation cap it collects at safepoints (below). A call that
+  reaches the cap before a commit with a collection due commits there
+  (`note_alloc`) rather than bailing.
 - An early free happens at once (`NativeHost::free`); the undo log stops
   growing.
 
@@ -165,8 +186,13 @@ check: native code makes it and raises the VM's panic message
 
 ### Native panics
 
-Every bail path goes through `coil_native_unwind(ctx, code, site)`. Before
-a commit it sets the bail flag. After, the first frame records the trap
+Every bail path goes through `coil_native_unwind(ctx, code, site)`. A trap
+that is a Coil panic (`TRAP_OVERFLOW`, `TRAP_DIV_ZERO`, `TRAP_NEG_EXP`,
+`TRAP_SHIFT`, `TRAP_OUT_OF_BOUNDS`, `TRAP_MESSAGE`, `TRAP_EXPLICIT`:
+`panics_natively`) commits on the spot even before the call's first
+effect, so it panics natively instead of handing the call to a VM re-run.
+Other codes (an unmodelled shape, the stack budget, the allocation cap)
+set the bail flag before a commit. After, the first frame records the trap
 (`TRAP_OVERFLOW`, `TRAP_DIV_ZERO`, `TRAP_SHIFT`, `TRAP_OUT_OF_BOUNDS`,
 `TRAP_STACK`, …) and every frame on the way out appends its *site*: an
 index into `NativeCode::sites`, the function's entry PC and the MIR op's
@@ -178,6 +204,12 @@ above the VM frames. The panic then unwinds the VM frames as any runtime
 panic does.
 
 ### Calls into the VM and collections
+
+A function value the VM calls (`call_value`, `call_function`: a closure
+passed to a host native, a finalizer the collector runs, a callback) whose
+body is native runs natively: `native_call_entered` pops the frame the VM
+just opened and tries the native table, putting the frame back if the
+body stays on the VM.
 
 A call to a body that does not compile is no longer a reason to refuse the
 caller: native code runs it through `Machine::call_function` (a nested
@@ -197,25 +229,41 @@ call. The VM treats those words as precise roots: a minor collection
 forwards them in place. After the call, when `NativeCtx::gc_epoch` moved,
 native code reloads the words and drops its array views.
 
-### Host calls through the VM
+### Host calls
 
 A host native without a plain function (`write`, `await_writable`,
 `thread_*`, `vec_insert`, ...: `DirectHost::via_vm`, the ordinary host
-ops) runs as a VM call. A machine with native code appends *host-call
-stubs* past the program (`native::host_stubs`, `Machine::ensure_host_stubs`):
-for each enum layout and arity, `HostInvoke; RETURN`. `coil_native_host`
-calls the stub through `NativeHost::host` with `[id, args…]` as its frame,
-so parking (a fiber under a scheduler, `pending_io` without one), retries
-and panics are the VM's own. A frame in a stub prints no backtrace line,
-and a panic in it is located at the native call site
-(`Machine::in_host_stub`). The `task_*` host ops (scope, spawn, join, ...)
-go the same way: a scope native code opens through a stub lives at that
-nesting level, and its switches happen in the stub executions, as in a VM
-body native code called. FFI ops (`FfiLoad`, `DeclareFFI`, `FfiInvoke`) get a stub per opcode and
-operand the program uses (found by scanning its code), which
-`coil_native_ffi` calls the same way (`NativeHost::ffi`). A failed
-`requires` (`contract_fail`) in a stub
-names the native function's caller (`host_stub_caller_location`).
+ops) runs in Rust through `NativeHost::invoke` (`Machine::native_invoke`):
+the call commits, pushes `native_roots` (a shared-heap spawn can collect
+inside it), and maps the result to a value, a panic (`TRAP_MESSAGE`, with
+the VM's message) or an unwind the VM already reported (`TRAP_VM_PANIC`).
+`gc_epoch` moves so native code reloads its words.
+
+- Waits (thread park, io retry, pending io) park the fiber the call runs
+  on (`native_park`, `native_io_wait`); with no scheduler the thread blocks
+  in `host_io_wait`. A clock sleep inside a scope adds a timer and parks.
+- Region enter/exit run `gc_region` with the native roots pushed.
+- `task_*` ops go to `native_task_op`. Ops that never switch (2, 3, 5, 9,
+  10, 12, 14, 15) always run there; close (45) when its target is a native
+  generator (`native_close_target`); ops that suspend (0, 1, 4, 6, 7, 11,
+  13) when the call runs on a fiber. A scope native code opens lives at
+  its nesting level, as one opened by a VM body. A failed `requires`
+  (`contract_fail`) names the native function's caller (`host_stub_frame`).
+- FFI ops (`FfiLoad`, `DeclareFFI`, `FfiInvoke`) run in Rust
+  (`native_ffi_vm`, sharing `ffi_load_top` / `ffi_invoke_take` /
+  `declare_ffi_top` with the `exec_rest` handlers).
+
+The *host-call stubs* (`native::host_stubs`, `Machine::ensure_host_stubs`:
+`HostInvoke; RETURN` per enum layout and arity, run as a VM call through
+`NativeHost::host`) remain only for a wait in code the VM itself runs one
+nesting level down (a finalizer or FFI callback inside a scope), where the
+stub's execution is the scheduler loop; neither the examples nor the
+corpus reach them.
+
+A scope opened under a task fiber gets its scheduler at the fiber's base
+level (`fiber_base`), the level the task parks back to, even when native
+code opened it from a deeper level (a VM call under native code, a
+generator body).
 
 ### Function values and indirect calls
 
@@ -254,8 +302,10 @@ the VM's re-run runs the defers.
 
 A task switch must not strand native frames on the thread's stack, so a
 native body that may reach VM code (`NativeEntry::suspends`, from the
-plan's `vm_reach` set) runs on a **fiber** wherever tasks can switch
-(`vm_fiber.rs`; `corosensei` coroutines, 8 MiB reserved stacks, reused).
+plan's `vm_reach` set) runs on a **fiber** wherever tasks can switch, and
+for a body that reaches a suspending task op even without a scheduler
+yet (`native_needs_fiber`: not wasm, not already inside a fiber, and no
+scheduler or at task level) (`vm_fiber.rs`; `corosensei` coroutines, 8 MiB reserved stacks, reused).
 Bodies that reach no VM code cannot suspend and run on the thread's
 stack as before.
 
@@ -326,8 +376,17 @@ While the fiber runs, the generator's handle is a pinned root
 never switches tasks; a body that may run VM code therefore stays on the
 VM when a scheduler exists. `yield from h` in a native body is a loop
 of resume, done check and yield, the sends passed through (the delegation
-links of the VM's `yield from` are not set). Refused: a body with `defer`
-(a close would have to unwind it) and two-word returns. A
+links of the VM's `yield from` are not set). Refused: two-word returns.
+
+A body with `defer`s compiles (`NativeEntry::cleanup`, `AotEntry`
+byte `cleanup`). After each yield it is noted closeable. A close
+(`coro_close`, `native_gen_close`) resumes the fiber with `GEN_CLOSING`
+set; `coil_native_yield` sees it and unwinds with `TRAP_CLOSE`, the frames
+hand their pads over as for a panic, and the pads run once the coroutine
+is finished (`run_pads`), inside out. A panic in a pad is reported with
+its location (pads are lowered with their body's entry PC) and the close
+returns `TaskFlow::Reported`. After a yield `coil_native_yield` checks the
+bail flag (`TRAP_HELPER`). A
 generator collected while suspended drops its fiber unwound
 (`GenFiber::drop`).
 

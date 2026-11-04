@@ -13,15 +13,9 @@
 //! won ~8% on `fib`, lost ~20% on `tak`, and were flat elsewhere.
 
 use common::int_arith::IntTrap;
-use common::{
-    ArchivedByte as Byte, ArchivedInstruction as Instruction, Value, promise,
-    unlikely,
-};
+use common::{ArchivedByte as Byte, ArchivedInstruction as Instruction, Value, promise, unlikely};
 
-use super::{
-    STEP_BUDGET_EXHAUSTED, prefetch_code, resolve_dense_index_object_in,
-    set_jump_target,
-};
+use super::{STEP_BUDGET_EXHAUSTED, prefetch_code, resolve_dense_index_object_in, set_jump_target};
 use crate::{Heap, Object, Stack};
 
 struct HotExtra<'a> {
@@ -58,13 +52,20 @@ impl RestExit {
 
     #[inline(always)]
     pub(super) fn done(paused: bool) -> Self {
-        Self { ip: usize::MAX, sp: paused as usize }
+        Self {
+            ip: usize::MAX,
+            sp: paused as usize,
+        }
     }
 
     /// `Err(paused)` when execution stops; otherwise `(ip, sp)`.
     #[inline(always)]
     pub(super) fn get(self) -> Result<(usize, usize), bool> {
-        if self.ip == usize::MAX { Err(self.sp != 0) } else { Ok((self.ip, self.sp)) }
+        if self.ip == usize::MAX {
+            Err(self.sp != 0)
+        } else {
+            Ok((self.ip, self.sp))
+        }
     }
 }
 
@@ -94,7 +95,6 @@ fn hot_jump(ctx: &mut HotCtx<'_, '_>, target: usize) {
     }
     set_jump_target(&mut ctx.ip, target, ctx.code);
 }
-
 
 const fn hot_bit(op: Instruction) -> (usize, u64) {
     let i = op as u8 as usize;
@@ -157,7 +157,12 @@ fn is_always_hot(bc: Instruction) -> bool {
 }
 
 #[inline(always)]
-pub(super) fn dense_bin(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) -> Result<(), IntTrap> {
+pub(super) fn dense_bin(
+    stack: &mut Stack<Value>,
+    sp: usize,
+    opcode: &Byte,
+    stack_cap: usize,
+) -> Result<(), IntTrap> {
     let (kind, dest, lhs, rhs) = opcode.dense_abc_parts();
     promise!(sp + dest < stack_cap);
     promise!(sp + lhs < stack_cap);
@@ -264,7 +269,12 @@ pub(super) fn dense_cast(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, sta
 }
 
 #[inline(always)]
-pub(super) fn dense_unary(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) -> Result<(), IntTrap> {
+pub(super) fn dense_unary(
+    stack: &mut Stack<Value>,
+    sp: usize,
+    opcode: &Byte,
+    stack_cap: usize,
+) -> Result<(), IntTrap> {
     let (kind, dest, src) = opcode.dense_unary_parts();
     promise!(sp + dest < stack_cap);
     promise!(sp + src < stack_cap);
@@ -547,27 +557,20 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
     let addr = stack[sp + arr].bits();
     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
     if flags & common::dense::HEAP_STR_BYTE != 0 {
-        let b = match resolve_dense_index_object_in(
-            heap,
-            dense_obj_addr,
-            dense_obj,
-            addr,
-        ) {
-            Some(Object::String(gc)) => crate::str_bytes::byte_at(gc.as_ref().data.as_str().as_bytes(), index),
+        let b = match resolve_dense_index_object_in(heap, dense_obj_addr, dense_obj, addr) {
+            Some(Object::String(gc)) => {
+                crate::str_bytes::byte_at(gc.as_ref().data.as_str().as_bytes(), index)
+            }
             _ => crate::str_bytes::byte_at_value(heap, stack[sp + arr], index),
         };
         stack[sp + dest] = Value::from(b);
         return Ok(());
     }
-    let result = match resolve_dense_index_object_in(
-        heap,
-        dense_obj_addr,
-        dense_obj,
-        addr,
-    ) {
+    let result = match resolve_dense_index_object_in(heap, dense_obj_addr, dense_obj, addr) {
         Some(Object::Array(gc)) => {
             if flags & common::dense::HEAP_PREFETCH != 0 {
-                gc.as_ref().prefetch_ahead(index, common::dense::PREFETCH_DISTANCE);
+                gc.as_ref()
+                    .prefetch_ahead(index, common::dense::PREFETCH_DISTANCE);
             }
             gc.as_ref().read_indexed(index, unchecked)
         }
@@ -612,12 +615,9 @@ pub(super) fn dense_store_index(args: DenseStoreIndexArgs<'_>) -> Result<(), Den
     let index = stack[sp + idx].as_int();
     let addr = stack[sp + arr].bits();
     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
-    if let Some(Object::Array(mut gc)) = resolve_dense_index_object_in(
-        heap,
-        dense_obj_addr,
-        dense_obj,
-        addr,
-    ) {
+    if let Some(Object::Array(mut gc)) =
+        resolve_dense_index_object_in(heap, dense_obj_addr, dense_obj, addr)
+    {
         if !gc.as_mut().store_indexed(index, value, unchecked) {
             return Err(DenseFail::IndexOob);
         }
@@ -659,7 +659,15 @@ pub(super) fn dense_host_call_direct(
 /// not cost the streak loop registers on paths that never make one.
 #[inline(never)]
 fn dense_host_call_in_streak(ctx: &mut HotCtx<'_, '_>, opcode: &Byte) {
-    match dense_host_call_direct(ctx.stack, ctx.sp, opcode, ctx.constants, ctx.heap, ctx.extra.natives, ctx.stack_cap) {
+    match dense_host_call_direct(
+        ctx.stack,
+        ctx.sp,
+        opcode,
+        ctx.constants,
+        ctx.heap,
+        ctx.extra.natives,
+        ctx.stack_cap,
+    ) {
         Some(false) => {}
         Some(true) => {
             // Done; the giant match runs the allocation safepoint.
@@ -748,9 +756,7 @@ pub(super) fn dense_field_load(
         promise!(sp + c < stack_cap);
         let key = super::Machine::<8>::intern_key(heap, stack[sp + c]);
         match heap.trusted_object(addr) {
-            Some(Object::Instance(gc)) => {
-                gc.as_ref().get(key)
-            }
+            Some(Object::Instance(gc)) => gc.as_ref().get(key),
             _ => None,
         }
     } else {
@@ -1131,12 +1137,8 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
             let addr = ctx.stack[ctx.sp + arr].bits();
             let ok = if ty == common::simd::TY_U8 {
                 let x = &mut *ctx.extra;
-                let obj = resolve_dense_index_object_in(
-                    ctx.heap,
-                    x.dense_obj_addr,
-                    x.dense_obj,
-                    addr,
-                );
+                let obj =
+                    resolve_dense_index_object_in(ctx.heap, x.dense_obj_addr, x.dense_obj, addr);
                 super::vload_bytes_into(ctx.heap, obj, &mut x.vregs[vdest], addr, index)
             } else {
                 super::vload_words_into(ctx.heap, &mut ctx.extra.vregs[vdest], addr, index)
@@ -1176,8 +1178,16 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
             let z = [0u64; common::simd::LANES];
             let no_lhs = splat || matches!(kind, common::simd::IOTA_I64 | common::simd::IOTA_F64);
             let no_rhs = no_lhs || common::simd::is_unary_kind(kind);
-            let lhs = if no_lhs { z } else { regs[a % common::simd::NREGS] };
-            let rhs = if no_rhs { z } else { regs[b % common::simd::NREGS] };
+            let lhs = if no_lhs {
+                z
+            } else {
+                regs[a % common::simd::NREGS]
+            };
+            let rhs = if no_rhs {
+                z
+            } else {
+                regs[b % common::simd::NREGS]
+            };
             match crate::simd::eval_vbin(kind, &lhs, &rhs, scalar) {
                 Ok(out) => regs[dest] = out,
                 Err(t) => ctx.panic_msg = Some(t.message()),
@@ -1195,8 +1205,21 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
                 ctx.panic_msg = Some("VScan body past the code");
                 return true;
             };
-            let (from, bound) = (ctx.stack[ctx.sp + from].as_int(), ctx.stack[ctx.sp + bound].as_int());
-            match super::vscan(ctx.heap, ctx.stack, ctx.sp, ctx.extra.vregs, body, from, bound, inclusive, backward) {
+            let (from, bound) = (
+                ctx.stack[ctx.sp + from].as_int(),
+                ctx.stack[ctx.sp + bound].as_int(),
+            );
+            match super::vscan(
+                ctx.heap,
+                ctx.stack,
+                ctx.sp,
+                ctx.extra.vregs,
+                body,
+                from,
+                bound,
+                inclusive,
+                backward,
+            ) {
                 Ok(p) => ctx.stack[ctx.sp + dest] = Value::from(p),
                 Err(msg) => ctx.panic_msg = Some(msg),
             }
@@ -1334,7 +1357,8 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
             apply_jump(ctx, target);
         }
         Instruction::BinSlotSlotStore => {
-            if let Err(t) = bin_slot_slot_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap) {
+            if let Err(t) = bin_slot_slot_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap)
+            {
                 ctx.panic_msg = Some(t.message());
             }
         }
@@ -1384,9 +1408,10 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
             }
         }
         Instruction::DenseFieldStore
-            if dense_field_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() => {
-                ctx.panic_msg = Some("SetField on non-instance");
-            }
+            if dense_field_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() =>
+        {
+            ctx.panic_msg = Some("SetField on non-instance");
+        }
         Instruction::DenseFieldStore => {}
         _ => {
             ctx.ip -= 1;
@@ -1498,7 +1523,8 @@ pub(super) fn consume_always_hot_streak(
     *ip = ctx.ip;
     *sp = ctx.sp;
     *fuel = ctx.fuel;
-    ctx.panic_msg.filter(|msg| !std::ptr::eq(*msg, STREAK_YIELD))
+    ctx.panic_msg
+        .filter(|msg| !std::ptr::eq(*msg, STREAK_YIELD))
 }
 
 #[cfg(test)]
@@ -1507,7 +1533,12 @@ mod tests {
 
     /// `CALL 1 -> 3`; at 3 a guard on slot 0 against `imm`, jumping to a
     /// `ConstReturnImm ret` at 5.
-    fn unary_guard_program(jump: Instruction, cmp: Instruction, imm: i32, ret: u32) -> (Vec<Byte>, Vec<u64>) {
+    fn unary_guard_program(
+        jump: Instruction,
+        cmp: Instruction,
+        imm: i32,
+        ret: u32,
+    ) -> (Vec<Byte>, Vec<u64>) {
         let pool = vec![(5u64 << 32) | (imm as u32 as u64)];
         let code = vec![
             Byte::new(Instruction::CALL).with_call_packed(1, 3),
@@ -1525,7 +1556,10 @@ mod tests {
         let (code, pool) = unary_guard_program(Instruction::BinSlotImmJmpt, Instruction::LEQ, 2, 1);
         let table = UnaryBaseTable::build(&code, &pool);
         let heap = crate::memory::Heap::default();
-        assert_eq!(table.fast_return(3, Value::from(2i64), &heap), Some(Value::from(1i64)));
+        assert_eq!(
+            table.fast_return(3, Value::from(2i64), &heap),
+            Some(Value::from(1i64))
+        );
         assert_eq!(table.fast_return(3, Value::from(3i64), &heap), None);
     }
 
@@ -1535,18 +1569,25 @@ mod tests {
         let (code, pool) = unary_guard_program(Instruction::BinSlotImmJmpf, Instruction::LEQ, 2, 9);
         let table = UnaryBaseTable::build(&code, &pool);
         let heap = crate::memory::Heap::default();
-        assert_eq!(table.fast_return(3, Value::from(5i64), &heap), Some(Value::from(9i64)));
+        assert_eq!(
+            table.fast_return(3, Value::from(5i64), &heap),
+            Some(Value::from(9i64))
+        );
         assert_eq!(table.fast_return(3, Value::from(2i64), &heap), None);
         let (code, pool) = unary_guard_program(Instruction::BinSlotImmJmpf, Instruction::LE, 0, 4);
         let table = UnaryBaseTable::build(&code, &pool);
-        assert_eq!(table.fast_return(3, Value::from(0i64), &heap), Some(Value::from(4i64)));
+        assert_eq!(
+            table.fast_return(3, Value::from(0i64), &heap),
+            Some(Value::from(4i64))
+        );
         assert_eq!(table.fast_return(3, Value::from(-1i64), &heap), None);
     }
 
     /// A target that is not a guarded constant return stays a normal call.
     #[test]
     fn unary_base_ignores_other_callees() {
-        let (mut code, pool) = unary_guard_program(Instruction::BinSlotImmJmpt, Instruction::EQ, 0, 1);
+        let (mut code, pool) =
+            unary_guard_program(Instruction::BinSlotImmJmpt, Instruction::EQ, 0, 1);
         code[5] = Byte::new(Instruction::RETURN);
         let table = UnaryBaseTable::build(&code, &pool);
         let heap = crate::memory::Heap::default();

@@ -150,9 +150,7 @@ mod tests {
 
     fn option_payload(heap: &Heap, opt: Value) -> Option<Value> {
         match heap.find_object_by_addr(opt.bits()) {
-            Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
-                Some(gc.as_ref().payload[0])
-            }
+            Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => Some(gc.as_ref().payload[0]),
             Some(Object::Enum(gc)) if gc.as_ref().tag == 0 => None,
             _ => panic!("expected Option"),
         }
@@ -377,10 +375,7 @@ mod tests {
     fn collect_keeps_array_children() {
         let mut heap = Heap::default();
         let s = intern(&mut heap, "kid");
-        let (arr, _) = heap.alloc(
-            crate::memory::ObjArray::new(vec![s]),
-            Object::Array,
-        );
+        let (arr, _) = heap.alloc(crate::memory::ObjArray::new(vec![s]), Object::Array);
         heap.collect(&[arr.addr()]);
         assert!(
             heap.find_object_by_addr(arr.addr()).is_some(),
@@ -408,8 +403,10 @@ mod tests {
         assert_eq!(register.host_op(), HostOp::RegisterFinalizer);
         let mut heap = Heap::default();
         assert!(collect.invoke(&mut heap, &[]).is_err());
-        assert!(register
-            .invoke(&mut heap, &[Value::from(0i64), Value::from(0i64)])
-            .is_err());
+        assert!(
+            register
+                .invoke(&mut heap, &[Value::from(0i64), Value::from(0i64)])
+                .is_err()
+        );
     }
 }
