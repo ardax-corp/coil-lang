@@ -122,21 +122,104 @@ pub struct LinkInputs {
     pub statics: Vec<StaticLink>,
     /// Extra linker arguments, after the libraries (`--link-arg`).
     pub args: Vec<String>,
+    /// What the linker strips from the executable (`--strip-symbols`).
+    pub strip: StripSymbols,
 }
 
-/// `libcoil_rt.a`: `COIL_RT_LIB`, else beside this binary.
+/// What `coil package` strips from an AOT executable (`--strip-symbols`):
+/// the runtime's DWARF and symbol table. Coil's own backtraces come from
+/// the program's line table (`-g`), not from these.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum StripSymbols {
+    /// Keep everything (for a native debugger or profiler).
+    None,
+    /// Drop debug info, keep the symbol table (named frames in `perf`).
+    #[default]
+    Debug,
+    /// Drop debug info and the symbol table: the smallest executable.
+    All,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl StripSymbols {
+    /// The `cc` arguments that strip this much.
+    fn cc_args(self) -> &'static [&'static str] {
+        match (self, cfg!(target_os = "macos")) {
+            (StripSymbols::None, _) => &[],
+            (StripSymbols::Debug, false) => &["-Wl,--strip-debug"],
+            (StripSymbols::Debug, true) => &["-Wl,-S"],
+            (StripSymbols::All, false) => &["-s"],
+            (StripSymbols::All, true) => &["-Wl,-S", "-Wl,-x"],
+        }
+    }
+}
+
+/// `libcoil_rt.a`: `COIL_RT_LIB`, else the copy embedded in this binary
+/// (written to the cache on first use), else the file beside it.
 #[cfg(not(target_family = "wasm"))]
 fn runtime_library() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("COIL_RT_LIB") {
         return Ok(PathBuf::from(p));
     }
     let exe = std::env::current_exe().map_err(|e| format!("cannot resolve current executable: {e}"))?;
+    if let Some(cache) = compiler::comptime_cache::user_cache_root()
+        && let Some(lib) = embedded_runtime(&exe, &cache.join("runtime"))?
+    {
+        return Ok(lib);
+    }
     let lib = exe.with_file_name(if cfg!(windows) { "coil_rt.lib" } else { "libcoil_rt.a" });
     if lib.is_file() {
         Ok(lib)
     } else {
         Err(format!("the native runtime `{}` is not installed", lib.display()))
     }
+}
+
+/// The trailer `scripts/embed_runtime.py` appends to `coil` after the
+/// runtime library: its length (u64 LE), then this magic.
+#[cfg(not(target_family = "wasm"))]
+pub const RUNTIME_MAGIC: &[u8; 8] = b"COILRT\x00\x01";
+
+/// The runtime library embedded at the end of `exe` (see
+/// [`RUNTIME_MAGIC`]), written once to `cache/<sha256 prefix>/` and reused
+/// from there; `None` when `exe` carries none.
+#[cfg(not(target_family = "wasm"))]
+pub fn embedded_runtime(exe: &Path, cache: &Path) -> Result<Option<PathBuf>, String> {
+    use std::io::{Seek, SeekFrom};
+    let read_err = |e: std::io::Error| format!("cannot read `{}`: {e}", exe.display());
+    let mut f = fs::File::open(exe).map_err(read_err)?;
+    let size = f.metadata().map_err(read_err)?.len();
+    if size < 16 {
+        return Ok(None);
+    }
+    let mut tail = [0u8; 16];
+    f.seek(SeekFrom::End(-16)).map_err(read_err)?;
+    f.read_exact(&mut tail).map_err(read_err)?;
+    if &tail[8..] != RUNTIME_MAGIC {
+        return Ok(None);
+    }
+    let len = u64::from_le_bytes(tail[..8].try_into().expect("8 bytes"));
+    if len > size - 16 {
+        return Err(format!("`{}`: the embedded runtime is truncated", exe.display()));
+    }
+    let mut lib = vec![0u8; len as usize];
+    f.seek(SeekFrom::Start(size - 16 - len)).map_err(read_err)?;
+    f.read_exact(&mut lib).map_err(read_err)?;
+    let digest = Sha256::digest(&lib);
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let dir = cache.join(hex);
+    let path = dir.join(if cfg!(windows) { "coil_rt.lib" } else { "libcoil_rt.a" });
+    if fs::metadata(&path).is_ok_and(|m| m.len() == len) {
+        return Ok(Some(path));
+    }
+    let write_err = |e: std::io::Error| format!("cannot write the runtime to `{}`: {e}", dir.display());
+    fs::create_dir_all(&dir).map_err(write_err)?;
+    // Another `coil package` may be writing the same file: write aside,
+    // then rename over.
+    let tmp = dir.join(format!(".tmp-{}", std::process::id()));
+    fs::write(&tmp, &lib).map_err(write_err)?;
+    fs::rename(&tmp, &path).map_err(write_err)?;
+    Ok(Some(path))
 }
 
 /// `cc OBJECT STATIC-LIBS RUNTIME -o EXE LINK-ARGS` with the system
@@ -166,6 +249,7 @@ fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, 
             .arg(&exe)
             .args(&link.args)
             .args(libs)
+            .args(link.strip.cc_args())
             .output()
             .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))?;
         if !run.status.success() {
@@ -660,6 +744,36 @@ mod tests {
         let l = parse_static_link("plugin=out/libplugin-x86.a").unwrap();
         assert_eq!((l.stem.as_str(), l.path.as_path()), ("plugin", Path::new("out/libplugin-x86.a")));
         assert!(parse_static_link("libsum.so").is_err());
+    }
+
+    /// A runtime appended to `coil` (`scripts/embed_runtime.py`'s layout) is
+    /// written to the cache once and found there after; a binary without
+    /// one has none, and a cut-off one is an error.
+    #[test]
+    fn embedded_runtime_is_cached_by_content() {
+        let dir = std::env::temp_dir().join(format!("coil_embedded_rt_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (exe, cache) = (dir.join("coil"), dir.join("cache"));
+        let lib = b"!<arch>\nruntime objects".to_vec();
+        let mut image = b"\x7fELF the compiler".to_vec();
+        fs::write(&exe, &image).unwrap();
+        assert_eq!(embedded_runtime(&exe, &cache).unwrap(), None);
+        image.extend_from_slice(&lib);
+        image.extend_from_slice(&(lib.len() as u64).to_le_bytes());
+        image.extend_from_slice(RUNTIME_MAGIC);
+        fs::write(&exe, &image).unwrap();
+        let path = embedded_runtime(&exe, &cache).unwrap().expect("embedded runtime");
+        assert!(path.starts_with(&cache));
+        assert_eq!(fs::read(&path).unwrap(), lib);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(embedded_runtime(&exe, &cache).unwrap(), Some(path.clone()));
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified, "reused, not rewritten");
+        let mut cut = image[..4].to_vec();
+        cut.extend_from_slice(&image[image.len() - 16..]);
+        fs::write(&exe, &cut).unwrap();
+        assert!(embedded_runtime(&exe, &cache).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

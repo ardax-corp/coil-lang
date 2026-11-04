@@ -261,6 +261,11 @@ enum RawCommand {
         /// libraries (repeatable; e.g. `-lm` for a static library's needs)
         #[arg(long = "link-arg", value_name = "ARG", allow_hyphen_values = true, action = clap::ArgAction::Append)]
         link_arg: Vec<String>,
+        /// What to strip from the AOT executable: `debug` (default) drops
+        /// the runtime's debug info, `all` also its symbol table, `none`
+        /// keeps both. Coil backtraces use `-g`, not these
+        #[arg(long = "strip-symbols", value_name = "WHAT", value_enum, default_value_t)]
+        strip_symbols: crate::package_app::StripSymbols,
         /// Entry `.coil` file
         file: Option<String>,
     },
@@ -660,6 +665,7 @@ impl RawCli {
                 no_aot,
                 link_static,
                 link_arg,
+                strip_symbols,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -680,7 +686,7 @@ impl RawCli {
                         Command::Package {
                             filename,
                             output: out,
-                            link: LinkInputs { aot: !no_aot && runner.is_none(), statics: link_static, args: link_arg },
+                            link: LinkInputs { aot: !no_aot && runner.is_none(), statics: link_static, args: link_arg, strip: strip_symbols },
                             runner,
                             natives: ffi_native,
                             check_native,
@@ -808,6 +814,7 @@ pub(crate) fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package_app::StripSymbols;
 
     fn args(parts: &[&str]) -> Vec<String> {
         std::iter::once("coil".to_string())
@@ -1078,6 +1085,17 @@ mod tests {
         let stems: Vec<&str> = link.statics.iter().map(|l| l.stem.as_str()).collect();
         assert_eq!(stems, ["sum", "z"]);
         assert_eq!(link.args, ["-lm"]);
+        assert_eq!(link.strip, StripSymbols::Debug);
+    }
+
+    #[test]
+    fn parse_package_strip_symbols() {
+        for (arg, want) in [("none", StripSymbols::None), ("debug", StripSymbols::Debug), ("all", StripSymbols::All)] {
+            let cli = parse_args(&args(&["package", "app.coil", "--strip-symbols", arg])).unwrap();
+            let Command::Package { link, .. } = cli.command else { panic!("not a package command") };
+            assert_eq!(link.strip, want, "{arg}");
+        }
+        assert!(parse_args(&args(&["package", "app.coil", "--strip-symbols", "some"])).is_err());
     }
 
     #[test]
