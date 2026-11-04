@@ -277,7 +277,7 @@ impl<'a> Driver<'a> {
         let env = self.env();
         self.depth += 1;
         #[cfg(not(target_family = "wasm"))]
-        let out = crate::vm::on_deep_stack(|| crate::native::call(&entry, &words[..params], &env));
+        let out = crate::stacks::on_deep_stack(|| crate::native::call(&entry, &words[..params], &env));
         #[cfg(target_family = "wasm")]
         let out = crate::native::call(&entry, &words[..params], &env);
         self.depth -= 1;
@@ -963,13 +963,13 @@ impl Driver<'_> {
             // The wait may be inside a generator's fiber, which stays
             // where it is: the stack bounds and yielder it runs with come
             // back with it.
-            let limit = crate::vm::FIBER_STACK_LIMIT.get();
+            let limit = crate::stacks::FIBER_STACK_LIMIT.get();
             let gen_yielder = crate::native::GEN_YIELDER.get();
             let closing = crate::native::GEN_CLOSING.get();
             let y = self.task_yielder.cast::<corosensei::Yielder<TaskResume, ()>>();
             // SAFETY: set by the running task fiber's body.
             let resumed = unsafe { (*y).suspend(()) };
-            crate::vm::FIBER_STACK_LIMIT.set(limit);
+            crate::stacks::FIBER_STACK_LIMIT.set(limit);
             crate::native::GEN_YIELDER.set(gen_yielder);
             crate::native::GEN_CLOSING.set(closing);
             match resumed {
@@ -1082,7 +1082,7 @@ impl Driver<'_> {
         coro.payload_mut().started = true;
         let stack = match self.task_stacks.pop() {
             Some(s) => s,
-            None => corosensei::stack::DefaultStack::new(crate::vm::FIBER_STACK_BYTES).ok()?,
+            None => corosensei::stack::DefaultStack::new(crate::stacks::FIBER_STACK_BYTES).ok()?,
         };
         use corosensei::stack::Stack as _;
         let stack_limit = stack.limit().get() + 64 * 1024;
@@ -1124,13 +1124,13 @@ impl Driver<'_> {
         // removes fibers.
         let f = unsafe { &mut *f };
         self.swap_roots(f);
-        let saved_limit = crate::vm::FIBER_STACK_LIMIT.replace(f.stack_limit);
+        let saved_limit = crate::stacks::FIBER_STACK_LIMIT.replace(f.stack_limit);
         let saved_gen = crate::native::GEN_YIELDER.get();
         let saved_yielder = std::mem::replace(&mut self.task_yielder, f.yielder);
         let out = f.coro.as_mut().expect("a parked task fiber").resume(input);
         f.yielder = std::mem::replace(&mut self.task_yielder, saved_yielder);
         crate::native::GEN_YIELDER.set(saved_gen);
-        crate::vm::FIBER_STACK_LIMIT.set(saved_limit);
+        crate::stacks::FIBER_STACK_LIMIT.set(saved_limit);
         self.swap_roots(f);
         match out {
             corosensei::CoroutineResult::Yield(()) => false,

@@ -240,6 +240,10 @@ thread_local! {
 }
 
 use crate::collect::STATIC_KINDS;
+#[cfg(not(target_family = "wasm"))]
+use crate::stacks::{FIBER_STACK_BYTES, on_deep_stack};
+#[cfg(not(target_family = "wasm"))]
+use crate::stacks::FIBER_STACK_LIMIT;
 
 /// Programs whose native code covers them run on the native driver,
 /// without the interpreter (`driver.rs`); `COIL_NATIVE_DRIVER=0` runs them

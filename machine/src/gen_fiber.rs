@@ -106,13 +106,13 @@ fn run_fiber<H: GenHost + ?Sized>(
 ) -> corosensei::CoroutineResult<(u64, usize), crate::native::NativeOutcome> {
     h.gen_running().push(Value::from(gc.as_ptr() as u64));
     h.nest(true);
-    let saved_limit = crate::vm::FIBER_STACK_LIMIT.replace(fiber.stack_limit);
+    let saved_limit = crate::stacks::FIBER_STACK_LIMIT.replace(fiber.stack_limit);
     let saved_yielder = crate::native::GEN_YIELDER.replace(fiber.yielder);
     crate::native::GEN_CLOSING.set(closing);
     let out = fiber.coro.as_mut().expect("a generator fiber").resume(send);
     crate::native::GEN_CLOSING.set(false);
     fiber.yielder = crate::native::GEN_YIELDER.replace(saved_yielder);
-    crate::vm::FIBER_STACK_LIMIT.set(saved_limit);
+    crate::stacks::FIBER_STACK_LIMIT.set(saved_limit);
     h.nest(false);
     h.gen_running().pop();
     out
@@ -220,7 +220,7 @@ fn new_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Box<cra
     }
     let stack = match h.gen_stacks().pop() {
         Some(s) => s,
-        None => corosensei::stack::DefaultStack::new(crate::vm::GEN_STACK_BYTES).ok()?,
+        None => corosensei::stack::DefaultStack::new(crate::stacks::GEN_STACK_BYTES).ok()?,
     };
     use corosensei::stack::Stack as _;
     let stack_limit = stack.limit().get() + 64 * 1024;

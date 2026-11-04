@@ -608,7 +608,7 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
     let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap);
-    if let Some(limit) = crate::vm::fiber_stack_limit() {
+    if let Some(limit) = crate::stacks::fiber_stack_limit() {
         ctx.stack_hard = ctx.stack_hard.min(limit as u64);
     } else if let Some(left) = stacker::remaining_stack() {
         ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
@@ -1902,7 +1902,7 @@ pub(crate) fn run_pads(
     }
     for i in 0..pads.len() {
         let mut ctx = NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap);
-        if let Some(limit) = crate::vm::fiber_stack_limit() {
+        if let Some(limit) = crate::stacks::fiber_stack_limit() {
             ctx.stack_hard = ctx.stack_hard.min(limit as u64);
         } else if let Some(left) = stacker::remaining_stack() {
             ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
