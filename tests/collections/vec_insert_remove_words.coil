@@ -1,7 +1,7 @@
-// `Vec::insert`, `Vec::remove` and `Vec::from` move element words. Native
-// code writes them out as loops over the array (`mir/native_expand.rs`)
-// where the VM calls its runtime natives; both keep these results, for
-// scalar and heap elements and at every edge.
+// `Vec::insert` and `Vec::remove` move element words (`Vec::from` copies
+// them). Native code writes the first two out as loops over the array
+// (`mir/native_expand.rs`) where the VM calls its runtime natives; both
+// keep these results, for scalar, byte and heap elements and at every edge.
 use tests::assert;
 use thread::{join, spawn, ThreadError};
 
@@ -88,6 +88,17 @@ test("remove out of range is None and leaves the vec") {
     let s = words("x");
     assert!(word_or(s.remove(9), "none") == "none");
     assert!(v.len() == 6 && s.len() == 4);
+}
+
+test("insert and remove keep byte elements") {
+    let b: Vec<byte> = Vec::from([1 as byte, 2 as byte, 3 as byte]);
+    b.insert(1, 200 as byte);
+    assert!(b == Vec::from([1 as byte, 200 as byte, 2 as byte, 3 as byte]));
+    assert!(int_or(match b.remove(0) {
+        Option::Some(x) => Option::Some(x as int),
+        Option::None => Option::None,
+    }, -7) == 1);
+    assert!(b == Vec::from([200 as byte, 2 as byte, 3 as byte]));
 }
 
 test("from copies the array") {
