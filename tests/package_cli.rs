@@ -635,6 +635,39 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--strip-symbols` sets what the AOT executable keeps: `none` is the
+/// largest, the default (`debug`) drops debug info, `all` also the symbol
+/// table. Each runs the same.
+#[cfg(target_os = "linux")]
+#[test]
+fn aot_package_strips_symbols_as_asked() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let rt = build_matching_coil_rt(Path::new(&bin));
+    let dir = std::env::temp_dir().join(format!("coil_aot_strip_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("app.coil");
+    std::fs::write(&entry, "use io::sync::println;\nfn main() {\n    let _ = println(\"stripped\");\n}\n").unwrap();
+    let mut sizes = Vec::new();
+    for extra in [&["--strip-symbols", "none"][..], &[], &["--strip-symbols", "all"]] {
+        let out = dir.join(format!("app{}", sizes.len()));
+        let mut cmd = Command::new(&bin);
+        cmd.arg("package");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        cmd.arg(&entry).arg("-o").arg(&out).args(extra).env("COIL_RT_LIB", &rt);
+        let o = cmd.output().expect("spawn coil package");
+        assert!(o.status.success(), "{extra:?}: {}", String::from_utf8_lossy(&o.stderr));
+        let run = run_with_timeout(&out, 30);
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "stripped\n", "{extra:?}");
+        sizes.push(std::fs::metadata(&out).unwrap().len());
+    }
+    let [none, debug, all] = sizes[..] else { unreachable!() };
+    assert!(none > debug && debug > all, "none {none}, debug {debug}, all {all}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `--link-static` links an `extern` block's library into the AOT
 /// executable: it runs with no shared library anywhere, and the VM runner
 /// cannot take one.
