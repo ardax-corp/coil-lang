@@ -223,7 +223,7 @@ impl<const S: usize> Machine<S> {
         std::mem::swap(&mut self.fiber_switch_depth, &mut x.fiber_switch_depth);
         std::mem::swap(&mut self.fiber_base, &mut x.fiber_base);
         std::mem::swap(&mut self.resume_floor, &mut x.resume_floor);
-        if let Some(t) = self.native.as_deref_mut() {
+        if let Some(t) = self.rt.native.as_deref_mut() {
             std::mem::swap(&mut t.quiet_above, &mut x.quiet_above);
         }
         // The call window covered the other stack: the next `CALL` re-arms.

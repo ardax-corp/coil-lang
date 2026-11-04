@@ -237,22 +237,9 @@ thread_local! {
     /// not move. Kept out of `Machine` so its hot-loop field layout is
     /// unchanged.
     static IN_EXECUTE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    /// Per static slot word kind of the program installed on this thread
-    /// (archive minor 29). Only GC root walks read it; kept out of `Machine`
-    /// / `Heap` so their hot-loop layout is unchanged.
-    static STATIC_KINDS: std::cell::RefCell<Arc<Vec<u8>>> = std::cell::RefCell::new(Arc::default());
-    /// Evacuation pacing for this thread's VM: `(cycles since the last
-    /// attempt, collections to wait)`. Also outside `Machine` / `Heap`.
-    static COMPACT_PACING: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, COMPACT_WINDOW)) };
-    /// Off with `COIL_GC_COMPACT=0` (debugging a suspected move bug), in
-    /// this crate's unit tests only; other builds always evacuate.
-    static COMPACT_ENABLED: bool = !cfg!(test) || std::env::var_os("COIL_GC_COMPACT").is_none_or(|v| v != "0");
 }
 
-/// Collections between evacuation attempts outside stress mode, and the
-/// ceiling unproductive attempts back off to.
-const COMPACT_WINDOW: u32 = 8;
-const COMPACT_WINDOW_MAX: u32 = 256;
+use crate::collect::STATIC_KINDS;
 
 #[inline(always)]
 fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
@@ -1795,9 +1782,6 @@ pub struct Machine<const S: usize> {
     /// A collector-run `drop` panicked under the test harness: the job stops
     /// at the next fuel charge and runs no more finalizers.
     finalizer_aborted: bool,
-    /// Some generator suspended with a `defer` armed: the collector looks
-    /// for ones to close.
-    closeables: bool,
     /// Unwinder state (`vm_unwind.rs`): a panic that may run `defer`s.
     unwind: Unwind,
     /// Debug line table (parallel to archived bytecode indices).
@@ -1833,10 +1817,6 @@ pub struct Machine<const S: usize> {
     gc_ip: usize,
     /// Compiler-only SIMD file (numeric bits only; never GC-traced).
     vregs: [[u64; common::simd::LANES]; common::simd::NREGS],
-    /// True while a mark/finalize/sweep cycle is running.
-    gc_in_progress: bool,
-    /// Nested `gc_collect` during a finalizer; run another cycle after.
-    gc_deferred: bool,
     /// Live C1/C2 steal epoch (root). Helpers bind via [`HeapSlot`].
     shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// Join result bits not yet stored on the operand stack (Layer A collect).
@@ -1870,8 +1850,6 @@ pub struct Machine<const S: usize> {
     /// Set once the live heap outgrew [`Self::heap_cap`] after a full
     /// collection (see [`Self::heap_cap_exceeded`]).
     heap_cap_hit: bool,
-    /// Native code installed by a native backend (`None`: VM only).
-    native: Option<Box<crate::native::NativeTable>>,
 }
 
 
@@ -1943,7 +1921,6 @@ impl<const S: usize> Machine<S> {
             resume_floor: usize::MAX,
             task_panic_message: None,
             finalizer_aborted: false,
-            closeables: false,
             unwind: Unwind::default(),
             program_debug: ProgramDebug::default(),
             pc_lines: Vec::new(),
@@ -1961,8 +1938,6 @@ impl<const S: usize> Machine<S> {
             gc_fresh_slot: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
-            gc_in_progress: false,
-            gc_deferred: false,
             shared_epoch: None,
             steal_join_root: Value::default(),
             frame_reserve: 0,
@@ -1976,7 +1951,6 @@ impl<const S: usize> Machine<S> {
             fuel_start: u64::MAX,
             heap_cap: usize::MAX,
             heap_cap_hit: false,
-            native: None,
         }
     }
 
@@ -1985,7 +1959,7 @@ impl<const S: usize> Machine<S> {
     /// except while a debugger is attached. Machines this one spawns
     /// (threads, auto-par jobs, test cases) run it too. `None` removes it.
     pub fn install_native(&mut self, code: Option<std::sync::Arc<crate::native::NativeCode>>) {
-        self.native = code.filter(|c| !c.is_empty()).map(|c| Box::new(crate::native::NativeTable::new(c)));
+        self.rt.native = code.filter(|c| !c.is_empty()).map(|c| Box::new(crate::native::NativeTable::new(c)));
         self.ensure_host_stubs();
     }
 
@@ -1993,7 +1967,7 @@ impl<const S: usize> Machine<S> {
     /// host-call stubs (`native::host_stubs`) past the program, once. Runs
     /// only while no execution borrows the code.
     fn ensure_host_stubs(&mut self) {
-        let Some(base) = self.native.as_ref().map(|t| t.code.code_len()) else {
+        let Some(base) = self.rt.native.as_ref().map(|t| t.code.code_len()) else {
             return;
         };
         if self.program_code.len() == base {
@@ -2033,7 +2007,7 @@ impl<const S: usize> Machine<S> {
     /// never by a `CALL`; [`Self::ensure_host_stubs`] points it at an
     /// appended `CALL main; RETURN` so native code runs `main`.
     fn main_entry_jmp(&self) -> Option<(usize, usize)> {
-        let table = self.native.as_deref()?;
+        let table = self.rt.native.as_deref()?;
         let code = &self.program_code;
         let jmp = |pc: usize| {
             code.get(pc)
@@ -2060,7 +2034,7 @@ impl<const S: usize> Machine<S> {
 
     /// The PC of the host-call stub for `arity` words in `layout`.
     fn host_stub_pc(&self, arity: usize, layout: u64) -> Option<usize> {
-        let base = self.native.as_ref()?.code.code_len();
+        let base = self.rt.native.as_ref()?.code.code_len();
         let off = crate::native::host_stub_offset(arity, layout)?;
         (self.program_code.len() >= base + crate::native::HOST_STUBS_LEN).then_some(base + off)
     }
@@ -2068,22 +2042,22 @@ impl<const S: usize> Machine<S> {
     /// Whether `ip` lies in the host-call stubs: a frame there runs no code
     /// of its own (its caller is native code).
     fn in_host_stub(&self, ip: usize) -> bool {
-        self.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
+        self.rt.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
     }
 
     /// The installed native code, for a machine that runs this program.
     pub fn native_code(&self) -> Option<std::sync::Arc<crate::native::NativeCode>> {
-        self.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
+        self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
     }
 
     /// Native calls run and bailed so far: `(hits, bails)`.
     pub fn native_stats(&self) -> Option<(u64, u64)> {
-        self.native.as_ref().map(|t| (t.hits, t.bails))
+        self.rt.native.as_ref().map(|t| (t.hits, t.bails))
     }
 
     /// Bytecode bodies the VM ran while native code was installed.
     pub fn native_vm_runs(&self) -> u64 {
-        self.native.as_ref().map_or(0, |t| t.vm_runs)
+        self.rt.native.as_ref().map_or(0, |t| t.vm_runs)
     }
 
     /// Run the native code at `target` on the top `arity` stack words.
@@ -2097,7 +2071,7 @@ impl<const S: usize> Machine<S> {
     ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
         let out = self.try_native_call_at(target, arity);
         if out.is_none()
-            && let Some(table) = self.native.as_deref_mut()
+            && let Some(table) = self.rt.native.as_deref_mut()
         {
             table.vm_runs += 1;
             crate::native::VM_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2112,7 +2086,7 @@ impl<const S: usize> Machine<S> {
         arity: usize,
     ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
         let base = self.stack.tell() - arity;
-        let table = self.native.as_deref_mut()?;
+        let table = self.rt.native.as_deref_mut()?;
         // After a bail the VM re-runs that call in bytecode; calls nested
         // in the re-run (above its frame base) stay in the VM, or a deep
         // recursion would bail again at every level.
@@ -2167,7 +2141,7 @@ impl<const S: usize> Machine<S> {
         out: crate::native::NativeOutcome,
         base: usize,
     ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
-        let table = self.native.as_deref_mut()?;
+        let table = self.rt.native.as_deref_mut()?;
         match out {
             crate::native::NativeOutcome::Done(r) => {
                 table.hits += 1;
@@ -2629,7 +2603,7 @@ impl<const S: usize> Machine<S> {
         // A body that runs natively: no VM frames, unless it returns into
         // a VM generator's `yield from` (which then runs on the VM).
         let mut delegate_returned = None;
-        if unlikely(self.native.is_some()) {
+        if unlikely(self.rt.native.is_some()) {
             match self.native_gen_step(target, send_val) {
                 Some(GenStep::Yielded(v)) => return v,
                 Some(GenStep::Returned(v)) => match self.find_delegator(target) {
@@ -3291,7 +3265,7 @@ impl<const S: usize> Machine<S> {
         // A native call's frames that made a VM call sit between the VM
         // frames that call pushed and the frame that entered native code.
         let native_lines = |roots: &[(*mut crate::native::NativeCtx, usize)], depth: usize| -> Vec<String> {
-            let Some(code) = self.native.as_ref().map(|t| &t.code) else { return Vec::new() };
+            let Some(code) = self.rt.native.as_ref().map(|t| &t.code) else { return Vec::new() };
             roots
                 .iter()
                 .rev()
@@ -3350,7 +3324,7 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn native_panic(&mut self, p: &crate::native::NativePanic, call_ip: usize) -> bool {
-        let Some(code) = self.native.as_ref().map(|t| std::sync::Arc::clone(&t.code)) else {
+        let Some(code) = self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code)) else {
             return self.runtime_panic(p.message(), call_ip);
         };
         let mut frames = Vec::new();
@@ -3397,7 +3371,7 @@ impl<const S: usize> Machine<S> {
         if depth + 1 != self.frames.len() {
             return None;
         }
-        let code = &self.native.as_ref()?.code;
+        let code = &self.rt.native.as_ref()?.code;
         // SAFETY: a native call in a VM call keeps its context alive.
         let s = *unsafe { &*ctx }.call_sites().first()?;
         self.native_site_location(code.site(s)?)
@@ -3411,7 +3385,7 @@ impl<const S: usize> Machine<S> {
             return None;
         }
         let &(ctx, _) = self.rt.native_roots.last()?;
-        let code = &self.native.as_ref()?.code;
+        let code = &self.rt.native.as_ref()?.code;
         // SAFETY: a native call in a VM call keeps its context alive.
         let sites = unsafe { &*ctx }.call_sites();
         Some(sites.get(1).and_then(|&s| self.native_site_location(code.site(s)?)))
@@ -3630,7 +3604,7 @@ impl<const S: usize> Machine<S> {
         self.rt.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
         let mut ok = true;
         for obj in drops {
-            let Some(pc) = self.pending_finalizer(*obj) else { continue };
+            let Some(pc) = self.rt.pending_finalizer(*obj) else { continue };
             let val = Value::from(obj.addr());
             if self.finalizer_aborted || !self.claim_finalizer(val) {
                 continue;
@@ -3818,495 +3792,31 @@ impl<const S: usize> Machine<S> {
         Ok(Value::from(addr))
     }
 
-    /// Complete a GC cycle (explicit `gc::collect` / tests). Finishes any
-    /// in-flight incremental sweep first so unmarked survivors are not freed.
+    /// Complete a GC cycle (explicit `gc::collect`, a heap over its cap,
+    /// tests). See [`crate::collect::collect`].
     fn gc_collect(&mut self) {
-        if self.rt.heap.epoch_stw() {
-            if let Some(e) = &self.shared_epoch {
-                e.abort();
-            }
-            return;
-        }
-        if self.gc_in_progress {
-            self.gc_deferred = true;
-            return;
-        }
-        self.gc_in_progress = true;
-        loop {
-            self.gc_deferred = false;
-            #[cfg(any(test, feature = "vm_profile"))]
-            VM_GC_COUNT.with(|c| {
-                c.fetch_add(1, Ordering::Relaxed);
-            });
-
-            if self.rt.heap.gc_is_sweeping() {
-                self.rt.heap.finish_sweep();
-            }
-            self.gc_minor();
-            self.clear_dense_obj_cache();
-
-            self.mark_from_vm_roots();
-            let queue = self.queue_unmarked_finalizers();
-            if !queue.is_empty() {
-                let mut gray = Vec::new();
-                for (val, _) in &queue {
-                    if let Some(obj) = Self::find_object_by_addr(&self.rt.heap, val.bits()) {
-                        obj.mark(&mut gray);
-                        obj.mark_references(&self.rt.heap, &mut gray);
-                    }
-                }
-                while let Some(obj) = gray.pop() {
-                    obj.mark_references(&self.rt.heap, &mut gray);
-                }
-                for (val, pc) in queue {
-                    self.run_pending(val, pc);
-                }
-                self.unmark_heap();
-                self.mark_from_vm_roots();
-            }
-
-            #[cfg(feature = "gc-stats")]
-            self.note_gc_census();
-            self.check_early_frees();
-            self.rt.heap.clear_dead_weaks();
-            // SAFETY: all reachable objects were marked above; dead weaks cleared.
-            unsafe { self.rt.heap.sweep() };
-            // Cache is not a GC root; unmarked interned literals are gone.
-            self.invalidate_program_string_cache();
-            if !self.gc_deferred {
-                break;
-            }
-        }
-        self.gc_compact();
-        self.gc_in_progress = false;
+        crate::collect::collect(self);
     }
 
-    /// Evacuate sparse chunks after a finished cycle
-    /// (`docs/internals/gc-evacuation.md`). Must-pointer frame slots are
-    /// rewritten; every other VM root pins its target. Skipped while a host
-    /// frame sits between VM frames (native re-entry, finalizers), in a
-    /// shared-heap epoch, or under the debugger. `gc-stress` moves everything
-    /// movable each cycle and checks that no word still names an old slot.
-    #[cold]
-    #[inline(never)]
-    /// Minor collection: copy the surviving young objects out of the
-    /// nursery and reset it (`feature/escape-memory` step 4). Where nothing
-    /// may move it promotes the young objects in place instead.
-    fn gc_minor(&mut self) {
-        if !self.rt.heap.has_young_in_use() || !self.rt.heap.gc_is_idle() {
-            return;
-        }
-        #[cfg(any(test, feature = "vm_profile"))]
-        VM_MINOR_COUNT.with(|c| {
-            c.fetch_add(1, Ordering::Relaxed);
-        });
-        let can_move = IN_EXECUTE.get() <= 1
-            && self.shared_epoch.is_none()
-            && !self.rt.heap.epoch_stw()
-            && !self.rt.heap.is_borrowed();
-        #[cfg(any(test, feature = "debugger"))]
-        let can_move = can_move && self.debug.is_none();
-        if !can_move {
-            self.rt.heap.promote_young();
-            self.rt.heap.pretenure_after_promote();
-            return;
-        }
-        // The dense-index cache names an object that may move.
-        self.clear_dense_obj_cache();
-        let mut pins = self.rt.heap.take_gc_roots();
-        let mut must = Vec::new();
-        // The object an allocation just wrote is the VM's own word: move it,
-        // even where the map can only say the slot may hold a reference.
-        let fresh = self.gc_fresh_slot;
-        let mut fresh_seen = false;
-        self.for_each_stack_word(&mut |idx, kind| match kind {
-            _ if fresh == Some(idx) => {
-                if !std::mem::replace(&mut fresh_seen, true) {
-                    must.push(idx);
-                }
-            }
-            crate::memory::RootKind::Precise => must.push(idx),
-            _ => pins.push(self.stack[idx].heap_addr()),
-        });
-        let mut must_statics = Vec::new();
-        self.for_each_static_root(&mut |i, addr, kind| match kind {
-            crate::memory::RootKind::Precise => must_statics.push(i),
-            _ => pins.push(addr),
-        });
-        self.for_each_handle_root_but_native(&mut |addr, _| pins.push(addr));
-        // Native frames reload their heap words after a collection: they
-        // move like precise stack slots.
-        let mut must_native: Vec<*mut u64> = Vec::new();
-        for &(ctx, _) in &self.rt.native_roots {
-            // SAFETY: a native call in a collection keeps its context alive.
-            unsafe { &*ctx }.for_each_root(|w, ambiguous| {
-                if ambiguous {
-                    // SAFETY: the slot is a live word of a native root record.
-                    let addr = Value::from(unsafe { *w }).heap_addr();
-                    if addr != 0 && self.rt.heap.find_object_by_addr(addr).is_some() {
-                        pins.push(addr);
-                    }
-                } else {
-                    must_native.push(w);
-                }
-            });
-        }
-        let precise: Vec<u64> = must
-            .iter()
-            .map(|&idx| self.stack[idx].heap_addr())
-            .chain(must_statics.iter().map(|&i| self.rt.statics[i].heap_addr()))
-            .chain(must_native.iter().filter_map(|&w| {
-                // SAFETY: the slot is a live word of a native root record.
-                let addr = Value::from(unsafe { *w }).heap_addr();
-                (addr != 0 && self.rt.heap.find_object_by_addr(addr).is_some()).then_some(addr)
-            }))
-            .collect();
-        let plan = self.rt.heap.minor_plan(&pins, &precise);
-        self.rt.heap.restore_gc_roots(pins);
-        for w in must_native {
-            // SAFETY: as above.
-            unsafe {
-                if let Some(v) = plan.forward(Value::from(*w)) {
-                    *w = v.bits();
-                }
-            }
-        }
-        for idx in must {
-            if let Some(v) = plan.forward(self.stack[idx]) {
-                self.stack[idx] = v;
-            }
-        }
-        for i in must_statics {
-            if let Some(v) = plan.forward(self.rt.statics[i]) {
-                self.rt.statics[i] = v;
-            }
-        }
-        #[cfg(feature = "gc-stress")]
-        self.for_each_vm_root(&mut |addr, kind| {
-            assert!(
-                !plan.moved().contains_key(&addr),
-                "gc-stress: {kind:?} VM root still names young {addr:#x} after a minor collection"
-            );
-        });
-        self.rt.heap.minor_finish(plan);
-    }
-
-    /// `gc_region_enter` / `gc_region_exit` around a `region` block. The
-    /// outermost one starts and ends with a minor collection, so what the
-    /// block allocated and dropped is reclaimed when it ends.
+    /// `gc_region_enter` / `gc_region_exit` around a `region` block.
     fn gc_region(&mut self, enter: bool) {
-        if !self.rt.heap.nursery() {
-            return;
-        }
-        if enter {
-            if self.rt.heap.region_enter() {
-                if self.rt.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
-                    self.gc_finish_sweep();
-                }
-                self.gc_minor();
-            }
-        } else if self.rt.heap.region_exit() {
-            if self.rt.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
-                self.gc_finish_sweep();
-            }
-            self.invalidate_program_string_cache();
-            self.gc_minor();
-        }
-    }
-
-    fn gc_compact(&mut self) {
-        if !COMPACT_ENABLED.with(|e| *e)
-            || IN_EXECUTE.get() > 1
-            || self.shared_epoch.is_some()
-            || self.rt.heap.epoch_stw()
-            || self.rt.heap.is_borrowed()
-            || !self.rt.heap.gc_is_idle()
-        {
-            return;
-        }
-        #[cfg(any(test, feature = "debugger"))]
-        if self.debug.is_some() {
-            return;
-        }
-        // Outside stress mode, wait `compact_window` collections between
-        // attempts; unproductive attempts double it (the analysis walks the
-        // whole heap), a productive one resets it.
-        let stress = cfg!(feature = "gc-stress");
-        let (cycles, window) = COMPACT_PACING.get();
-        if !stress && cycles + 1 < window {
-            COMPACT_PACING.set((cycles + 1, window));
-            return;
-        }
-        COMPACT_PACING.set((0, window));
-        let mut pins = self.rt.heap.take_gc_roots();
-        let mut must = Vec::new();
-        self.for_each_stack_word(&mut |idx, kind| match kind {
-            crate::memory::RootKind::Precise => must.push(idx),
-            _ => pins.push(self.stack[idx].heap_addr()),
-        });
-        let mut must_statics = Vec::new();
-        self.for_each_static_root(&mut |i, addr, kind| match kind {
-            crate::memory::RootKind::Precise => must_statics.push(i),
-            _ => pins.push(addr),
-        });
-        self.for_each_handle_root(&mut |addr, _| pins.push(addr));
-        let Some(plan) = self.rt.heap.evacuate_plan(&pins, stress) else {
-            self.rt.heap.restore_gc_roots(pins);
-            COMPACT_PACING.set((0, (window * 2).min(COMPACT_WINDOW_MAX)));
-            return;
-        };
-        self.rt.heap.restore_gc_roots(pins);
-        for idx in must {
-            if let Some(v) = plan.forward(self.stack[idx]) {
-                self.stack[idx] = v;
-            }
-        }
-        for i in must_statics {
-            if let Some(v) = plan.forward(self.rt.statics[i]) {
-                self.rt.statics[i] = v;
-            }
-        }
-        #[cfg(feature = "gc-stress")]
-        {
-            self.rt.heap.verify_evacuation(&plan);
-            self.for_each_vm_root(&mut |addr, kind| {
-                assert!(
-                    !plan.moved().contains_key(&addr),
-                    "gc-stress: {kind:?} VM root still names moved {addr:#x}"
-                );
-            });
-        }
-        let evacuation = self.rt.heap.evacuate_finish(plan);
-        self.clear_dense_obj_cache();
-        COMPACT_PACING.set((0, if evacuation.capped { 1 } else { COMPACT_WINDOW }));
-        #[cfg(feature = "gc-stats")]
-        eprintln!("gc-stats evacuate: {evacuation:?}");
-        let _ = evacuation;
-    }
-
-    /// `gc-stats`: census of the live set just marked, before weaks clear.
-    #[cfg(feature = "gc-stats")]
-    fn note_gc_census(&self) {
-        let mut roots = Vec::new();
-        self.for_each_vm_root(&mut |addr, kind| roots.push((addr, kind)));
-        eprintln!("{}", self.rt.heap.census(&roots));
-    }
-
-    /// `--early-free check`, with a complete mark: mark again from the
-    /// roots that are certainly live (precise frame slots, statics and VM
-    /// handles, not words a conservative frame scan finds, which may be
-    /// stale copies), fail if that reaches an object an early free gave
-    /// up, then restore the full mark.
-    fn check_early_frees(&mut self) {
-        if !self.rt.heap.has_doomed() {
-            return;
-        }
-        self.unmark_heap();
-        let mut roots = self.rt.heap.take_gc_roots();
-        self.for_each_stack_root(&mut |addr, kind| {
-            if kind == crate::memory::RootKind::Precise {
-                roots.push(addr);
-            }
-        });
-        self.for_each_non_stack_root(&mut |addr, _| roots.push(addr));
-        self.rt.heap.mark_from_roots(&roots);
-        self.rt.heap.restore_gc_roots(roots);
-        self.rt.heap.check_doomed();
-        self.unmark_heap();
-        self.mark_from_vm_roots();
-    }
-
-    fn gc_start_mark(&mut self) {
-        // The dense-index cache is not a root (it kept the last indexed
-        // array alive after its frame returned); drop it before objects can
-        // be freed or moved under it.
-        self.clear_dense_obj_cache();
-        let roots = self.collect_vm_root_addrs();
-        self.rt.heap.begin_mark(&roots);
-        self.rt.heap.restore_gc_roots(roots);
-    }
-
-    fn gc_remark_vm_roots(&mut self) {
-        let roots = self.collect_vm_root_addrs();
-        self.rt.heap.remark_roots(&roots);
-        self.rt.heap.restore_gc_roots(roots);
+        crate::collect::region(self, enter);
     }
 
     /// Mark to completion / lazy sweep at an alloc safepoint.
     #[inline(never)]
     fn gc_safepoint(&mut self) {
-        if self.gc_in_progress {
-            return;
-        }
-        if self.rt.heap.epoch_stw() {
-            if !self.rt.heap.gc_is_idle() || self.rt.heap.should_collect() {
-                if let Some(e) = &self.shared_epoch {
-                    e.abort();
-                }
-                if self.rt.heap.is_borrowed() {
-                    self.panicked = true;
-                }
-            }
-            return;
-        }
-        match self.rt.heap.gc_phase() {
-            crate::memory::GcPhase::Idle => {
-                if self.rt.heap.should_collect_young() {
-                    self.gc_minor();
-                }
-                if self.rt.heap.should_collect_old() {
-                    self.gc_start_incremental();
-                }
-            }
-            crate::memory::GcPhase::Marking => self.gc_mark_slice(),
-            crate::memory::GcPhase::Sweeping if self.rt.heap.should_collect_young() => {
-                self.gc_finish_sweep();
-                self.gc_minor();
-            }
-            crate::memory::GcPhase::Sweeping => self.gc_sweep_slice(),
-        }
-        if unlikely(self.rt.heap.get().over_byte_cap()) {
-            self.heap_cap_safepoint();
-        }
-    }
-
-    /// Open a cycle: mark to completion now, leave the sweep to later
-    /// safepoints.
-    fn gc_start_incremental(&mut self) {
-        #[cfg(any(test, feature = "vm_profile"))]
-        VM_GC_COUNT.with(|c| {
-            c.fetch_add(1, Ordering::Relaxed);
-        });
-        // Empty the nursery first: the major cycle then sees only old objects.
-        self.gc_minor();
-        self.gc_start_mark();
-        self.gc_mark_slice();
+        crate::collect::safepoint(self);
     }
 
     /// Finish a pending lazy sweep in one go.
     fn gc_finish_sweep(&mut self) {
-        self.rt.heap.finish_sweep();
-        self.invalidate_program_string_cache();
-        self.gc_compact();
+        crate::collect::finish_sweep(self);
     }
 
-    #[inline(never)]
-    fn gc_mark_slice(&mut self) {
-        // Drain mark at this safepoint: the mutator never runs with gray
-        // objects (finalizers below run after the drain), so stores need no
-        // write barrier. See `Heap::resurrect_during_mark`.
-        while !self.rt.heap.mark_quantum(usize::MAX) {}
-        self.gc_remark_vm_roots();
-        while !self.rt.heap.mark_quantum(usize::MAX) {}
-        let queue = self.queue_unmarked_finalizers();
-        if !queue.is_empty() {
-            for (val, _) in &queue {
-                if let Some(obj) = Self::find_object_by_addr(&self.rt.heap, val.bits()) {
-                    self.rt.heap.shade_for_finalizer(obj);
-                }
-            }
-            while !self.rt.heap.mark_quantum(usize::MAX) {}
-            self.gc_in_progress = true;
-            for (val, pc) in queue {
-                self.run_pending(val, pc);
-            }
-            self.gc_in_progress = false;
-            self.gc_remark_vm_roots();
-            while !self.rt.heap.mark_quantum(usize::MAX) {}
-        }
-        #[cfg(feature = "gc-stats")]
-        self.note_gc_census();
-        self.check_early_frees();
-        self.rt.heap.clear_dead_weaks();
-        self.rt.heap.begin_sweep();
-        // Intern table is unlinked; unmarked literals will be freed across
-        // later sweep quantums. Drop the STRING index cache now so the mutator
-        // cannot reload a pointer that this cycle will dealloc (COI-410).
-        self.invalidate_program_string_cache();
-        self.gc_sweep_slice();
-    }
-
-    fn invalidate_program_string_cache(&mut self) {
-        self.rt.program_string_cache.fill(Value::default());
-    }
-
-    fn gc_sweep_slice(&mut self) {
-        let n = self.rt.heap.gc_sweep_quantum();
-        if self.rt.heap.sweep_quantum(n) {
-            self.invalidate_program_string_cache();
-            self.gc_compact();
-        }
-    }
-
-    fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
-        self.release_stale_pins();
-        let mut roots = self.rt.heap.take_gc_roots();
-        self.for_each_vm_root(&mut |addr, _| roots.push(addr));
-        roots
-    }
-
-    /// Every VM root that resolves to a live heap object, tagged with how a
-    /// moving collector could treat it (see `docs/internals/gc-evacuation.md`).
-    /// Heap-owned roots (immortal unit enums, handle roots) are seeded by
-    /// [`crate::memory::Heap::take_gc_roots`], not here.
-    pub(crate) fn for_each_vm_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
-        self.for_each_stack_root(visit);
-        self.for_each_non_stack_root(visit);
-    }
-
-    /// VM roots outside the operand stack: typed statics, then
-    /// [`Self::for_each_handle_root`].
-    fn for_each_non_stack_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
-        self.for_each_static_root(&mut |_, addr, kind| visit(addr, kind));
-        self.for_each_handle_root(visit);
-    }
-
-    /// Static slots by their compile-time word kind (archive minor 29): a
-    /// scalar static is no root, a pointer static is a precise root (a moving
-    /// collector rewrites it), anything else stays ambiguous.
-    fn for_each_static_root(&self, visit: &mut dyn FnMut(usize, u64, crate::memory::RootKind)) {
-        let heap = &self.rt.heap;
-        let kinds = STATIC_KINDS.with_borrow(Arc::clone);
-        for (i, v) in self.rt.statics.iter().enumerate() {
-            let kind = match kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN) {
-                common::WORD_SCALAR => continue,
-                common::WORD_POINTER => crate::memory::RootKind::Precise,
-                _ => crate::memory::RootKind::Ambiguous,
-            };
-            let addr = v.heap_addr();
-            let live = addr != 0 && heap.find_object_by_addr(addr).is_some();
-            #[cfg(feature = "gc-stress")]
-            assert!(
-                addr == 0 || live || kind != crate::memory::RootKind::Precise,
-                "gc-stress: pointer static {i} holds a non-object"
-            );
-            if live {
-                visit(i, addr, kind);
-            }
-        }
-    }
-
-    /// VM roots outside the operand stack and statics. None of them can be
+    /// The VM's roots outside the operand stack. None of them can be
     /// rewritten by a moving collector (untyped words, or Rust-held handles).
-    fn for_each_handle_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
-        self.for_each_handle_root_but_native(visit);
-        // Heap words native frames hold across a VM call or a safepoint.
-        let heap = &self.rt.heap;
-        for &(ctx, _) in &self.rt.native_roots {
-            // SAFETY: a native call in a collection keeps its context alive.
-            unsafe { &*ctx }.for_each_root(|w, ambiguous| {
-                let addr = Value::from(unsafe { *w }).heap_addr();
-                if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                    let kind = if ambiguous { crate::memory::RootKind::Ambiguous } else { crate::memory::RootKind::Precise };
-                    visit(addr, kind);
-                }
-            });
-        }
-    }
-
-    /// [`Self::for_each_handle_root`] without the native frames' words (a
-    /// minor collection forwards those).
-    fn for_each_handle_root_but_native(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
+    fn for_each_vm_handle_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.rt.heap;
         let word = |v: Value, kind: crate::memory::RootKind, visit: &mut dyn FnMut(u64, crate::memory::RootKind)| {
             let addr = v.heap_addr();
@@ -4319,29 +3829,10 @@ impl<const S: usize> Machine<S> {
         for ctx in &self.resume_stack {
             visit(ctx.coro.as_ptr() as u64, crate::memory::RootKind::Precise);
         }
-        if let Some(sched) = &self.rt.sched {
-            for rec in sched.tasks.values() {
-                let inner = rec.inner.iter().map(|(c, _, _)| *c);
-                for coro in rec.coro.into_iter().chain(inner) {
-                    visit(coro.as_ptr() as u64, crate::memory::RootKind::Precise);
-                }
-            }
-        }
         for pins in &self.frame_pins {
             for obj in pins.by_slot.iter().flatten() {
                 visit(obj.addr(), crate::memory::RootKind::Precise);
             }
-        }
-        // `FfiLoad` keeps `ObjLibrary` in `userland_libraries` for the VM
-        // lifetime; the Coil handle is only an addr. Root those keys so GC
-        // cannot sweep a live dload and `FfiInvoke` hit `invalid library handle`.
-        // Keyed by address, so they must not move.
-        for &addr in self.rt.ffi.userland_libraries.keys() {
-            visit(addr, crate::memory::RootKind::Pinned);
-        }
-        // In-flight FFI arguments: C may hold pointers into them.
-        for &v in &self.rt.ffi_arg_roots {
-            word(v, crate::memory::RootKind::Pinned, visit);
         }
         // VM states not swapped in (parked fibers', the task's own while a
         // fiber runs): their words stay where they are.
@@ -4356,6 +3847,7 @@ impl<const S: usize> Machine<S> {
 
     /// Operand-stack roots, frame by frame: a frame with a trusted precise map
     /// roots only its heap slots; every other stack word is scanned.
+    #[cfg(any(test, feature = "gc-stress"))]
     fn for_each_stack_root(&self, visit: &mut dyn FnMut(u64, crate::memory::RootKind)) {
         let heap = &self.rt.heap;
         self.for_each_stack_word(&mut |idx, kind| {
@@ -4599,43 +4091,6 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn mark_from_vm_roots(&mut self) {
-        let roots = self.collect_vm_root_addrs();
-        self.rt.heap.mark_from_roots(&roots);
-        self.rt.heap.restore_gc_roots(roots);
-    }
-
-    fn unmark_heap(&self) {
-        for obj in self.rt.heap.objects() {
-            obj.unmark();
-        }
-    }
-
-    /// The unmarked objects that owe a `drop` (its pc) or, for a generator
-    /// suspended with a `defer` armed, a close (`None`).
-    fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, Option<u32>)> {
-        if self.rt.finalizer_by_type.is_empty() && !self.closeables {
-            return Vec::new();
-        }
-        // The heap lists its finalizable objects: no walk of the heap (#1870).
-        let unmarked = self.rt.heap.unmarked_finalizable();
-        unmarked
-            .into_iter()
-            .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_cleanup(obj)?)))
-            .collect()
-    }
-
-    /// What `obj` still owes: its `drop` pc, or a close for a generator.
-    fn pending_cleanup(&self, obj: Object) -> Option<Option<u32>> {
-        match obj {
-            Object::Coroutine(gc) => {
-                let c = gc.as_ref();
-                (c.closeable && c.state == CoroState::Suspended).then_some(None)
-            }
-            _ => self.pending_finalizer(obj).map(Some),
-        }
-    }
-
     fn run_pending(&mut self, val: Value, pc: Option<u32>) {
         match pc {
             Some(pc) => self.run_finalizer(val, pc),
@@ -4724,19 +4179,6 @@ impl<const S: usize> Machine<S> {
         self.panicked = was_panicked;
     }
 
-    /// Drop PC for a tagged instance or enum whose finalizer has not run.
-    fn pending_finalizer(&self, obj: Object) -> Option<u32> {
-        let (type_id, finalized) = match obj {
-            Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
-            Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
-            _ => return None,
-        };
-        if type_id == 0 || finalized {
-            return None;
-        }
-        self.rt.finalizer_by_type.get(&type_id).copied()
-    }
-
     fn claim_finalizer(&self, v: Value) -> bool {
         match Self::find_object_by_addr(&self.rt.heap, v.bits()) {
             Some(Object::Instance(gc)) => {
@@ -4788,12 +4230,12 @@ impl<const S: usize> Machine<S> {
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
-        if self.program_code.is_empty() || (self.rt.finalizer_by_type.is_empty() && !self.closeables) {
+        if self.program_code.is_empty() || (self.rt.finalizer_by_type.is_empty() && !self.rt.closeables) {
             return;
         }
         let mut queue = Vec::new();
         for obj in self.rt.heap.objects() {
-            if let Some(pc) = self.pending_cleanup(obj) {
+            if let Some(pc) = self.rt.pending_cleanup(obj) {
                 queue.push((Value::from(obj.addr()), pc));
             }
         }
@@ -5772,9 +5214,9 @@ impl<const S: usize> Machine<S> {
         self.rt.finalizer_by_type.clear();
         self.rt.finalizer_pcs.clear();
         self.finalizer_aborted = false;
-        self.closeables = false;
-        self.gc_in_progress = false;
-        self.gc_deferred = false;
+        self.rt.closeables = false;
+        self.rt.gc_in_progress = false;
+        self.rt.gc_deferred = false;
         if self.rt.heap.is_borrowed() {
             return;
         }
@@ -5813,8 +5255,8 @@ impl<const S: usize> Machine<S> {
         self.panicked = false;
         self.rt.sched = None;
         self.unwind = Unwind::default();
-        self.gc_in_progress = false;
-        self.gc_deferred = false;
+        self.rt.gc_in_progress = false;
+        self.rt.gc_deferred = false;
     }
 
     pub fn bind_shared_heap(
@@ -5882,10 +5324,10 @@ impl<const S: usize> Machine<S> {
         if self.rt.heap.get().should_collect() {
             // Same incremental start as an alloc safepoint: mark now (with
             // `published` rooted), sweep lazily from later safepoints.
-            if self.gc_in_progress {
+            if self.rt.gc_in_progress {
                 self.gc_collect();
             } else {
-                self.gc_start_incremental();
+                crate::collect::start_incremental(self);
             }
         }
         self.steal_join_root = Value::default();
@@ -6247,7 +5689,7 @@ impl<const S: usize> Machine<S> {
         self.nested_frame_depths.push(self.frames.len());
         let mut ip = offset as usize;
         // A body with native code (a `drop`, a callback) runs natively.
-        let native = if unlikely(self.native.is_some()) {
+        let native = if unlikely(self.rt.native.is_some()) {
             self.native_call_entered(ip, call_ip)
         } else {
             None
@@ -6333,7 +5775,7 @@ impl<const S: usize> Machine<S> {
             // A callee with native code runs natively, as at a `CALL`.
             dispatch::RestFlow::Continue
                 if entered
-                    && unlikely(self.native.is_some())
+                    && unlikely(self.rt.native.is_some())
                     && self.frames.len() == depth + 1
                     && let Some(v) = self.native_call_entered(ip, call_ip) =>
             {
@@ -6386,7 +5828,7 @@ impl<const S: usize> Machine<S> {
     /// (no native code, it bailed, or it would need a fiber here), the
     /// frame open again.
     fn native_call_entered(&mut self, target: usize, call_ip: usize) -> Option<Value> {
-        let entry = self.native.as_deref()?.lookup(target)?;
+        let entry = self.rt.native.as_deref()?.lookup(target)?;
         if entry.suspends && self.native_needs_fiber() {
             return None;
         }
@@ -6729,7 +6171,7 @@ impl<const S: usize> Machine<S> {
                     }
                     if let Some(ret) = match resumed {
                         Some(r) => Some(r),
-                        None if unlikely(self.native.is_some()) && !debug_attached && target != 0 => {
+                        None if unlikely(self.rt.native.is_some()) && !debug_attached && target != 0 => {
                             // The caller's return address, as a CALL saves it:
                             // a panic or a VM call inside names this frame.
                             self.frames.get_mut().seek(ip);
@@ -7448,6 +6890,81 @@ impl<const S: usize> crate::runtime::HostEnv for Machine<S> {
         // SAFETY: `self` is a live machine, as native code passes back.
         unsafe { Self::native_gc(std::ptr::from_mut(self).cast(), ctx, &mut panicked) };
         panicked
+    }
+}
+
+impl<const S: usize> crate::collect::GcHost for Machine<S> {
+    fn rt(&self) -> &crate::runtime::Runtime {
+        &self.rt
+    }
+
+    fn rt_mut(&mut self) -> &mut crate::runtime::Runtime {
+        &mut self.rt
+    }
+
+    /// The operand stack by frame (precise where a frame's map is trusted),
+    /// then the VM's own handles.
+    fn host_roots(&self, visit: &mut dyn FnMut(crate::collect::HostRoot)) {
+        self.for_each_stack_word(&mut |idx, kind| visit(crate::collect::HostRoot::Slot(idx, kind)));
+        self.for_each_vm_handle_root(&mut |addr, kind| visit(crate::collect::HostRoot::Handle(addr, kind)));
+    }
+
+    fn slot(&self, idx: usize) -> Value {
+        self.stack[idx]
+    }
+
+    fn set_slot(&mut self, idx: usize, v: Value) {
+        self.stack[idx] = v;
+    }
+
+    fn fresh_slot(&self) -> Option<usize> {
+        self.gc_fresh_slot
+    }
+
+    /// Not while a host frame sits between VM frames (it may hold raw heap
+    /// words), in a shared-heap epoch, or under the debugger.
+    fn can_move(&self) -> bool {
+        let ok = IN_EXECUTE.get() <= 1 && self.shared_epoch.is_none();
+        #[cfg(any(test, feature = "debugger"))]
+        let ok = ok && self.debug.is_none();
+        ok
+    }
+
+    fn clear_caches(&mut self) {
+        self.clear_dense_obj_cache();
+    }
+
+    fn run_pending(&mut self, val: Value, pc: Option<u32>) {
+        Machine::run_pending(self, val, pc);
+    }
+
+    fn epoch_abort(&mut self) {
+        if let Some(e) = &self.shared_epoch {
+            e.abort();
+        }
+    }
+
+    fn borrowed_heap_wants_collect(&mut self) {
+        self.panicked = true;
+    }
+
+    fn over_cap(&mut self) {
+        self.heap_cap_safepoint();
+    }
+
+    #[cfg(any(test, feature = "vm_profile"))]
+    fn note_cycle(&self, minor: bool) {
+        let counter = if minor { &VM_MINOR_COUNT } else { &VM_GC_COUNT };
+        counter.with(|c| {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    fn before_mark(&mut self) {
+        self.release_stale_pins();
+        // Check that every must-pointer frame slot holds an object.
+        #[cfg(feature = "gc-stress")]
+        self.for_each_stack_root(&mut |_, _| {});
     }
 }
 

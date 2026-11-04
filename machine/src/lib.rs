@@ -1,6 +1,7 @@
 //! Stack VM, managed heap, and FFI runtime for coil bytecode.
 
 mod arith;
+mod collect;
 pub mod char_ord;
 pub mod clock;
 pub mod entropy;
