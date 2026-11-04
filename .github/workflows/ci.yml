@@ -522,7 +522,7 @@ jobs:
             target/native-hello/hello.coil -o target/native-hello/hello
           ls -l target/native-hello/hello
           python3 scripts/native_inventory.py target/native-inventory.tsv --exe target/native-hello/hello \
-            --max refused=0 --max failed=0 --max vm_entries=0 --max bails=0 --max vm_runs=0 --max host_via_vm=0
+            --max refused=0 --max failed=0 --max vm_entries=0 --max bails=0 --max vm_runs=0 --max host_via_vm=0 --max vm_symbols=0
 
       - uses: actions/upload-artifact@v4
         if: matrix.variant == 'native' && always()
