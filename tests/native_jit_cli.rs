@@ -1125,3 +1125,18 @@ fn a_call_that_allocates_past_the_cap_collects_natively() {
     assert!(compiled(&stats, "build"), "stats: {stats}");
     assert!(stats.contains("calls ran natively, 0 bailed"), "stats: {stats}");
 }
+
+#[test]
+fn a_scope_opened_by_native_main_needs_no_vm() {
+    // `main` runs on a fiber of its own, so the scope it opens switches
+    // tasks there: its task ops need no bytecode stubs.
+    let src = format!(
+        "{HEADER}use task::{{scope, Scope, yield_now}};\n\
+         #[inline(never)]\nfn step(int k) -> int {{ yield_now(); return k * 2; }}\n\
+         fn main() {{\n  let r = scope(fn (Scope s) {{ let a = s.spawn(fn () => step(1)); let b = s.spawn(fn () => step(2)); let x = match a.join() {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; let y = match b.join() {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; return x + y; }});\n\
+           let _ = println(format(\"%i\", match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}));\n}}\n"
+    );
+    let stats = same_as_vm("root_scope", &src);
+    assert!(compiled(&stats, "step"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
