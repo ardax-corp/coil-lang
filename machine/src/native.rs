@@ -595,7 +595,7 @@ impl NativePanic {
             TRAP_SHIFT => common::int_arith::IntTrap::ShiftOutOfRange.message(),
             TRAP_OUT_OF_BOUNDS => "index out of bounds",
             TRAP_STACK => crate::vm::STACK_OVERFLOW,
-            _ => "native code cannot finish this call after its effects (an operation it does not model)",
+            _ => "native code reached an operation it does not model",
         }
     }
 }
