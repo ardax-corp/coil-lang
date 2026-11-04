@@ -395,7 +395,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
                 || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
-                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. }
+                        MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::VecLoop { .. }
                     )
                 })
         })
@@ -898,6 +898,16 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(value)?;
                     }
                     MirInst::Panic { msg, .. } => need(msg)?,
+                    // The VM's `VScan` / `VLoop` over a frame of the
+                    // values' words (`coil_native_vector`).
+                    MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
+                        for v in inst.dests().chain(inst.operands()) {
+                            need(&v)?;
+                        }
+                        if compiler::native_mir::vector_op(inst).is_none() {
+                            return Err("vector op the VM's encoding cannot hold".into());
+                        }
+                    }
                     // A cleanup pad's end (lowered to nothing).
                     MirInst::HostInvoke { dest, native_id, .. } if pad && *native_id == common::UNWIND_RESUME_ID => {
                         need(dest)?;
@@ -1029,6 +1039,8 @@ struct Ids {
     /// Direct host natives (commit the call).
     host: FuncId,
     ffi: FuncId,
+    /// `ByteScan` / `VecLoop` (`coil_native_vector`).
+    vector: FuncId,
     /// Calls to bodies on the VM (commit the call).
     call_vm: FuncId,
     call_value: FuncId,
@@ -1123,6 +1135,10 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     let print = module.declare_function("coil_native_print", Linkage::Import, &s2).map_err(e)?;
     let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
     let ffi = module.declare_function("coil_native_ffi", Linkage::Import, &s5).map_err(e)?;
+    let mut s9 = module.make_signature();
+    s9.params.extend((0..9).map(|_| AbiParam::new(types::I64)));
+    s9.returns.push(AbiParam::new(types::I64));
+    let vector = module.declare_function("coil_native_vector", Linkage::Import, &s9).map_err(e)?;
     let call_vm = module.declare_function("coil_native_call_vm", Linkage::Import, &s4).map_err(e)?;
     let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
     let resume = module.declare_function("coil_native_resume", Linkage::Import, &s4).map_err(e)?;
@@ -1167,6 +1183,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
         print,
         host,
         ffi,
+        vector,
         call_vm,
         call_value,
         resume,
@@ -1255,6 +1272,7 @@ struct Lower<'a> {
     print: FuncRef,
     host: FuncRef,
     ffi: FuncRef,
+    vector: FuncRef,
     call_vm: FuncRef,
     call_value: FuncRef,
     resume: FuncRef,
@@ -1352,6 +1370,7 @@ impl<'a> Lower<'a> {
         let print = module.declare_func_in_func(ids.print, func);
         let host = module.declare_func_in_func(ids.host, func);
         let ffi = module.declare_func_in_func(ids.ffi, func);
+        let vector = module.declare_func_in_func(ids.vector, func);
         let call_vm = module.declare_func_in_func(ids.call_vm, func);
         let call_value = module.declare_func_in_func(ids.call_value, func);
         let resume = module.declare_func_in_func(ids.resume, func);
@@ -1406,6 +1425,7 @@ impl<'a> Lower<'a> {
             print,
             host,
             ffi,
+            vector,
             call_vm,
         call_value,
         resume,
@@ -1966,6 +1986,78 @@ impl<'a> Lower<'a> {
                 self.drop_views();
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
+            }
+            MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
+                // The VM's `VScan` / `VLoop` body over a frame of the
+                // values' words (`coil_native_vector`).
+                let op = compiler::native_mir::vector_op(inst).expect("a vector op checked at planning");
+                let t = MemFlagsData::trusted();
+                let n = op.inputs.len() + 2;
+                let frame = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    (n * 8) as u32,
+                    3,
+                ));
+                let zero = self.b.ins().iconst(types::I64, 0);
+                let start = match op.start {
+                    Some(v) => {
+                        let x = self.get(f, v);
+                        self.coerce(x, types::I64)
+                    }
+                    None => zero,
+                };
+                self.b.ins().stack_store(types::I64, start, frame, 0);
+                self.b.ins().stack_store(types::I64, zero, frame, 8);
+                for (i, v) in op.inputs.iter().enumerate() {
+                    let x = self.get(f, *v);
+                    let x = self.coerce(x, types::I64);
+                    self.b.ins().stack_store(types::I64, x, frame, ((i + 2) * 8) as i32);
+                }
+                let code = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    (op.body.len().max(1) * 8) as u32,
+                    3,
+                ));
+                for (i, w) in op.body.iter().enumerate() {
+                    let x = self.b.ins().iconst(types::I64, *w as i64);
+                    self.b.ins().stack_store(types::I64, x, code, (i * 8) as i32);
+                }
+                let (kind, lo, hi) = match inst {
+                    MirInst::ByteScan { from, bound, .. } => (0, *from, *bound),
+                    MirInst::VecLoop { from, to, kind, .. } => {
+                        let writes = !matches!(kind, compiler::native_mir::VecLoopKind::Reduce { stores, .. } if stores.is_empty());
+                        (1 | if writes { 2 } else { 0 }, *from, *to)
+                    }
+                    _ => unreachable!(),
+                };
+                let lo = self.get(f, lo);
+                let lo = self.coerce(lo, types::I64);
+                let hi = self.get(f, hi);
+                let hi = self.coerce(hi, types::I64);
+                let kind = self.b.ins().iconst(types::I64, kind);
+                let flags = self.b.ins().iconst(types::I64, i64::from(op.flags));
+                let body = self.b.ins().stack_addr(types::I64, code, 0);
+                let nbody = self.b.ins().iconst(types::I64, op.body.len() as i64);
+                let slots = self.b.ins().stack_addr(types::I64, frame, 0);
+                let nslots = self.b.ins().iconst(types::I64, n as i64);
+                let call = self.b.ins().call(self.vector, &[self.ctx, kind, flags, body, nbody, slots, nslots, lo, hi]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
+                match inst {
+                    MirInst::ByteScan { dest, .. } => self.set(f, *dest, w),
+                    MirInst::VecLoop { dest, pos, .. } => {
+                        // A push may have moved the array's storage.
+                        self.drop_views();
+                        let d = self.b.ins().stack_load(types::I64, types::I64, frame, 0);
+                        self.set(f, *dest, d);
+                        if let Some(p) = pos {
+                            let x = self.b.ins().stack_load(types::I64, types::I64, frame, 8);
+                            self.set(f, *p, x);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
             }
             MirInst::Ffi { dest, op, operand, args } => {
                 let o = self.b.ins().iconst(types::I64, i64::from(op.instruction() as u8));

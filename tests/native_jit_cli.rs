@@ -184,7 +184,8 @@ fn copy_on_write_keeps_value_semantics_natively() {
 #[test]
 fn allocation_runs_natively_and_matches_the_vm() {
     // Objects, tuples, enums and arrays made in native code, pushes, and a
-    // push that a bail takes back before the VM's re-run panics.
+    // push that a bail takes back before the VM's re-run panics (each push
+    // reads the length, so the loop stays one push at a time).
     let src = format!(
         "{HEADER}class Pt {{ pub x: int, pub y: int }}\n\
          enum Shape {{ Dot, Sq(int), Rect(int, int) }}\n\
@@ -192,7 +193,7 @@ fn allocation_runs_natively_and_matches_the_vm() {
          #[inline(never)]\nfn area(Shape s) -> int {{ return match s {{ Shape::Dot => 0, Shape::Sq(a) => a * a, Shape::Rect(a, b) => a * b }}; }}\n\
          #[inline(never)]\nfn shape(int i) -> Shape {{ if i % 3 == 0 {{ return Shape::Dot; }} if i % 3 == 1 {{ return Shape::Sq(i); }} return Shape::Rect(i, 2); }}\n\
          #[inline(never)]\nfn pair(int a) -> (int, int) {{ return (a, a + 1); }}\n\
-         #[inline(never)]\nfn grow(Vec<int> v, int n) -> int {{ let i = 0; while i < n {{ v.push(i); i = i + 1; }} return v[n * 2]; }}\n\
+         #[inline(never)]\nfn grow(Vec<int> v, int n) -> int {{ let i = 0; while i < n {{ v.push(v.len()); i = i + 1; }} return v[n * 2]; }}\n\
          fn main() {{\n  let ps = make(5);\n  let s = 0;\n  let i = 0;\n  while i < 9 {{ s = s + area(shape(i)); i = i + 1; }}\n\
            let (a, b) = pair(4);\n  let _ = println(format(\"%i %i %i %i %i\", ps.len(), ps[4].y, s, a, b));\n\
            let v: Vec<int> = [9];\n  let _ = println(format(\"%i\", grow(v, 3)));\n}}\n"

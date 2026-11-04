@@ -232,14 +232,22 @@ pub struct NativeHost {
     /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
     /// byte) with its operand on `args` through its stub, as `host` does.
     pub ffi: HostViaVmFn,
+    /// Run a `VScan` (`true`) or `VLoop` body over `slots` laid out as a
+    /// dense frame, with its flags byte and the two bound words, as the VM
+    /// runs it there; the slots come back as the op left them. `None`:
+    /// no room for the frame (nothing ran).
+    pub vector: VectorFn,
 }
+
+/// [`NativeHost::vector`]: machine, scan, flags, body, slots, from, bound.
+pub type VectorFn = unsafe fn(*mut std::ffi::c_void, bool, u8, &[common::Byte], &mut [u64], i64, i64) -> Option<Result<i64, &'static str>>;
 
 /// [`NativeHost::host`]: machine, context, native id, layout, arguments,
 /// panicked flag.
 pub type HostViaVmFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64, &[common::Value], &mut bool) -> Option<u64>;
 
 impl NativeHost {
-    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, resume: |_, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true, host: |_, _, _, _, _, _| None, ffi: |_, _, _, _, _, _| None };
+    const NONE: Self = Self { print: |_, _| {}, call: |_, _, _, _, _| 0, call_value: |_, _, _, _, _, _| 0, resume: |_, _, _, _, _| 0, claim: |_, _, _| 1, collect: |_, _| {}, gc: |_, _, _| 0, free: |_, _, _, _| true, host: |_, _, _, _, _, _| None, ffi: |_, _, _, _, _, _| None, vector: |_, _, _, _, _, _, _| None };
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
@@ -1934,6 +1942,57 @@ pub unsafe extern "C" fn coil_native_ipow(a: i64, b: i64, out: *mut i64) -> i64 
     }
 }
 
+/// `VScan` / `VLoop` ops native code ran ([`coil_native_vector`]), for
+/// `COIL_NATIVE_STATS`.
+pub static VECTOR_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A `ByteScan` or `VecLoop` ([`NativeHost::vector`]). `kind` bit 0: a
+/// loop (else a scan); bit 1: the loop writes the heap (it commits the
+/// call first, so a trap after it panics here). `body` holds `nbody`
+/// words `opcode | operand << 32`, `slots` the frame's `nslots` words.
+/// Returns a scan's stop; a trap panics with the VM's message.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `body` and `slots` point at
+/// `nbody` and `nslots` words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flags: u64, body: *const u64, nbody: u64, slots: *mut u64, nslots: u64, from: u64, bound: u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    let mut words = [common::Byte::default(); 128];
+    let Some(code) = words.get_mut(..nbody as usize) else {
+        return unsafe { bail(ctx) };
+    };
+    if c.machine.is_null() {
+        return unsafe { bail(ctx) };
+    }
+    for (i, w) in code.iter_mut().enumerate() {
+        // SAFETY: `body` holds `nbody` words.
+        let x = unsafe { *body.add(i) };
+        *w = common::Byte::new(common::Instruction::from(x as u8)).with_operand_u32((x >> 32) as u32);
+    }
+    // SAFETY: `slots` holds `nslots` words.
+    let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };
+    if kind & 2 != 0 {
+        c.committed = 1;
+    }
+    let (machine, vector) = (c.machine, c.host.vector);
+    // SAFETY: `machine` is the live machine `vector` was made for.
+    match unsafe { vector(machine, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64) } {
+        None => unsafe { bail(ctx) },
+        Some(Ok(p)) => {
+            VECTOR_OPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            p as u64
+        }
+        Some(Err(msg)) => {
+            let c = unsafe { &mut *ctx };
+            c.trap = TRAP_MESSAGE;
+            // SAFETY: `call` set `message` for the call.
+            unsafe { *c.message = msg.to_string() };
+            unsafe { bail(ctx) }
+        }
+    }
+}
+
 /// Every runtime helper native code calls, by symbol name: the JIT binds
 /// them, an AOT object imports them (the runtime library exports them
 /// under these names).
@@ -1976,8 +2035,9 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_claim", coil_native_claim as *const u8),
         ("coil_native_collect", coil_native_collect as *const u8),
         ("coil_native_panic", coil_native_panic as *const u8),
+        ("coil_native_vector", coil_native_vector as *const u8),
     ]);
     &TABLE.0
 }
 
-const HELPERS: usize = 34;
+const HELPERS: usize = 35;

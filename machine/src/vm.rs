@@ -2020,6 +2020,7 @@ impl<const S: usize> Machine<S> {
                 free: Self::native_free,
                 host: Self::native_host_vm,
                 ffi: Self::native_ffi_vm,
+                vector: Self::native_vector,
             },
         }
     }
@@ -2161,6 +2162,44 @@ impl<const S: usize> Machine<S> {
         vm.native_roots.pop();
         *panicked = vm.panicked;
         Some(out.bits())
+    }
+
+    /// [`crate::native::NativeHost::vector`]: `body` over `slots`, pushed
+    /// as a frame on top of the stack, by [`vscan`] / [`vloop`].
+    unsafe fn native_vector(
+        raw: *mut c_void,
+        scan: bool,
+        flags: u8,
+        body: &[common::Byte],
+        slots: &mut [u64],
+        from: i64,
+        bound: i64,
+    ) -> Option<Result<i64, &'static str>> {
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        // SAFETY: the archived word has the plain word's layout, as the
+        // program code's casts rely on.
+        let body: &[Byte] = unsafe { std::slice::from_raw_parts(body.as_ptr().cast(), body.len()) };
+        let sp = vm.stack.tell();
+        if sp + slots.len() > vm.stack.capacity() {
+            return None;
+        }
+        for &w in slots.iter() {
+            vm.stack.push(Value::from(w));
+        }
+        let out = if scan {
+            let inclusive = flags & common::simd::SCAN_INCLUSIVE != 0;
+            let backward = flags & common::simd::SCAN_BACKWARD != 0;
+            vscan(&vm.heap, &vm.stack, sp, &mut vm.vregs, body, from, bound, inclusive, backward)
+        } else {
+            let pos = flags & common::simd::LOOP_POS != 0;
+            vloop(&mut vm.heap, &mut vm.stack, sp, &mut vm.vregs, body, usize::from(pos), from, bound, pos).map(|()| 0)
+        };
+        for (i, w) in slots.iter_mut().enumerate() {
+            *w = vm.stack[sp + i].bits();
+        }
+        vm.stack.seek(sp);
+        Some(out)
     }
 
     /// [`crate::native::NativeHost::claim`]: the finalizer claim `CALL`
@@ -6112,6 +6151,10 @@ impl<const S: usize> Machine<S> {
             && let Some((hits, bails)) = self.native_stats()
         {
             eprintln!("native: {hits} calls ran natively, {bails} bailed to the VM");
+            let vector = crate::native::VECTOR_OPS.load(std::sync::atomic::Ordering::Relaxed);
+            if vector > 0 {
+                eprintln!("native: {vector} vector ops ran natively");
+            }
         }
     }
 
