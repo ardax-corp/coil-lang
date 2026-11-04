@@ -129,6 +129,10 @@ pub struct MirFunc {
     /// it is rebound or the function returns, so emission zeroes past
     /// their last use only the registers of temporaries (#1650).
     pub bound_words: HashSet<ValueId>,
+    /// The words locals were bound to, by local (each `def_local`, and the
+    /// φs merging a local's definitions). The frame holds one from its
+    /// definition until another of the same local's takes its place.
+    pub local_binds: Vec<(LocalId, ValueId)>,
     /// Low words of the pairs calls return whose enum may carry a heap
     /// payload there (an opaque `i64`): emission zeroes them past their
     /// last use like the payload words a match reads (#1791). A pair of
@@ -197,6 +201,9 @@ impl MirFunc {
         }
         let renamed: Vec<ValueId> = self.bound_words.iter().map(|&v| map(v)).collect();
         self.bound_words.extend(renamed);
+        for (_, v) in &mut self.local_binds {
+            *v = map(*v);
+        }
     }
 
     pub fn new(name: impl Into<String>) -> Self {
@@ -235,6 +242,7 @@ impl MirFunc {
             slot_fields: HashMap::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
+            local_binds: Vec::new(),
             heap_pair_calls: HashSet::new(),
         }
     }

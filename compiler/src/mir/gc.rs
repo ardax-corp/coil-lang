@@ -261,6 +261,13 @@ fn barrier_dests(func: &MirFunc) -> HashSet<ValueId> {
 
 /// `live_after[block][inst]` = SSA values live immediately after that inst.
 pub(super) fn liveness_after(func: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
+    liveness(func).1
+}
+
+/// SSA liveness: the values live into each block (above its phis, so
+/// not their dests) and `after[block][inst]`, the values live just
+/// after each inst.
+pub fn liveness(func: &MirFunc) -> (Vec<HashSet<ValueId>>, Vec<Vec<HashSet<ValueId>>>) {
     let n = func.blocks.len();
     let mut live_in: Vec<HashSet<ValueId>> = vec![HashSet::new(); n];
     let mut after: Vec<Vec<HashSet<ValueId>>> = func
@@ -269,7 +276,7 @@ pub(super) fn liveness_after(func: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
         .map(|b| vec![HashSet::new(); b.insts.len()])
         .collect();
     if n == 0 {
-        return after;
+        return (live_in, after);
     }
     let mut changed = true;
     while changed {
@@ -301,7 +308,7 @@ pub(super) fn liveness_after(func: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
             }
         }
     }
-    after
+    (live_in, after)
 }
 
 fn live_out_of(func: &MirFunc, b: BlockId, live_in: &[HashSet<ValueId>]) -> HashSet<ValueId> {

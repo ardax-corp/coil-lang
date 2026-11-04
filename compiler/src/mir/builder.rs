@@ -57,8 +57,13 @@ pub struct MirBuilder {
     /// Locals kept in a home ([`MirInst::HomeStore`]): each
     /// [`Self::def_local`] of one also writes its home.
     pub homed: HashMap<LocalId, u16>,
-    /// The heap words [`Self::def_local`] bound ([`MirFunc::bound_words`]).
-    bound: Vec<ValueId>,
+    /// The heap words [`Self::def_local`] bound ([`MirFunc::bound_words`]),
+    /// with their locals.
+    bound: Vec<(LocalId, ValueId)>,
+    /// The other words [`Self::def_local`] bound, with their locals.
+    unbound: Vec<(LocalId, ValueId)>,
+    /// The local each of [`Self::var_phis`] merges.
+    phi_locals: Vec<(LocalId, ValueId)>,
     /// Field names announced for the next heap field access at their slot
     /// ([`Self::note_slot_field`]): `(note, slot, bit)`.
     field_notes: Vec<(u32, u32, u64)>,
@@ -89,6 +94,8 @@ impl MirBuilder {
             pending_loc: DebugLoc::unknown(),
             homed: HashMap::new(),
             bound: Vec::new(),
+            phi_locals: Vec::new(),
+            unbound: Vec::new(),
             field_notes: Vec::new(),
             next_note: 0,
             def_count: 0,
@@ -188,9 +195,10 @@ impl MirBuilder {
         let b = self.cur()?;
         if self.func.ty(val).is_heap_word() {
             self.func.heap_slots.insert(local);
-            self.bound.push(val);
+            self.bound.push((local, val));
         } else {
             self.func.word_slots.insert(local);
+            self.unbound.push((local, val));
         }
         self.write_variable(local, b, val);
         self.def_count += 1;
@@ -1303,8 +1311,18 @@ impl MirBuilder {
         self.rewrite_subst();
         self.finished = true;
         self.func.debug_slots = self.snapshot_debug_slots();
-        let bound: HashSet<ValueId> = self.bound.iter().chain(&self.var_phis).map(|&v| self.resolve(v)).collect();
+        let bound: HashSet<ValueId> = self.bound.iter().map(|&(_, v)| v).chain(self.var_phis.iter().copied()).map(|v| self.resolve(v)).collect();
         self.func.bound_words = bound;
+        let mut binds: Vec<(LocalId, ValueId)> = self
+            .bound
+            .iter()
+            .chain(&self.unbound)
+            .chain(&self.phi_locals)
+            .map(|&(l, v)| (l, self.resolve(v)))
+            .collect();
+        binds.sort_unstable_by_key(|&(l, v)| (l.0, v.0));
+        binds.dedup();
+        self.func.local_binds = binds;
         if self.func.has_gc_edge() {
             super::gc::fill_live_roots(&mut self.func);
         }
@@ -1426,7 +1444,7 @@ impl MirBuilder {
 
     fn read_variable_recursive(&mut self, local: LocalId, ty: MirTy, block: BlockId) -> ValueId {
         if !self.sealed[block.index()] {
-            let phi = self.make_phi(block, ty);
+            let phi = self.make_phi(local, block, ty);
             self.incomplete_phis[block.index()].push((local, phi));
             self.write_variable(local, block, phi);
             return phi;
@@ -1448,7 +1466,7 @@ impl MirBuilder {
                 v
             }
             _ => {
-                let phi = self.make_phi(block, ty);
+                let phi = self.make_phi(local, block, ty);
                 self.write_variable(local, block, phi);
                 self.add_phi_operands(local, phi, block);
                 self.resolve(phi)
@@ -1456,9 +1474,10 @@ impl MirBuilder {
         }
     }
 
-    fn make_phi(&mut self, block: BlockId, ty: MirTy) -> ValueId {
+    fn make_phi(&mut self, local: LocalId, block: BlockId, ty: MirTy) -> ValueId {
         let dest = self.alloc(ty);
         self.var_phis.insert(dest);
+        self.phi_locals.push((local, dest));
         let inst = MirInst::Phi {
             dest,
             ty,
