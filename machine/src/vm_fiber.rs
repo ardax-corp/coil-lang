@@ -355,7 +355,7 @@ impl<const S: usize> Machine<S> {
     fn resume_parked_fiber(&mut self) -> Option<crate::native::NativeOutcome> {
         let current = self.rt.sched.as_ref().map_or(crate::task::ROOT, |s| s.current);
         let fiber = self.parked_fibers.remove(&current)?;
-        self.fiber_cancel = current != crate::task::ROOT && self.task_take_cancel();
+        self.fiber_cancel = current != crate::task::ROOT && self.rt.task_take_cancel();
         Some(self.run_fiber(fiber))
     }
 
