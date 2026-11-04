@@ -348,4 +348,17 @@ mod tests {
         assert_eq!(write.import().as_deref(), Some("use io::write;"));
         assert_eq!(push.import(), None);
     }
+
+    #[test]
+    fn reference_url_points_at_generated_api_pages() {
+        let base = "https://github.com/ardax-corp/coil-website/blob/main/src/content/reference";
+        assert_eq!(reference_url("gc"), format!("{base}/gc/index.md"));
+        assert_eq!(reference_url("io::fs"), format!("{base}/io/fs/index.md"));
+        assert_eq!(reference_url("prelude::math"), format!("{base}/prelude/math/index.md"));
+        assert_eq!(reference_url(""), format!("{base}/types/index.md"));
+        assert_eq!(reference_url("prelude::task"), format!("{base}/prelude/index.md"));
+        for (module, _) in compiler::builtin_docs::MODULE_SOURCES {
+            assert!(!reference_url(module).contains("/docs/references/"), "{module}");
+        }
+    }
 }
