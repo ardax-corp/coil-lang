@@ -1959,6 +1959,7 @@ unsafe fn host_via_vm(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u
     }
     let committed = std::mem::replace(&mut c.committed, 1);
     c.vm_calls += 1;
+    HOST_VIA_VM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     c.gc_epoch += 1;
     let mut panicked = false;
     let machine = c.machine;
@@ -2130,6 +2131,27 @@ pub static VECTOR_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// Bytecode runs native code started so far (a body, a host stub, a
 /// generator, a `drop`): what a native run still needs the VM for.
 pub static VM_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Process-wide counts of what a native run still does on the VM, for the
+/// native inventory (`COIL_NATIVE_INVENTORY`, `scripts/native_inventory.py`):
+/// calls that bailed to a VM re-run, calls the VM ran because their body
+/// has no native code, and host calls that ran in a VM stub.
+pub static BAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// See [`BAILS`].
+pub static VM_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// See [`BAILS`].
+pub static HOST_VIA_VM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The [`VM_ENTRIES`], [`BAILS`], [`VM_RUNS`] and [`HOST_VIA_VM`] counts.
+pub fn vm_use_counts() -> [(&'static str, u64); 4] {
+    use std::sync::atomic::Ordering::Relaxed;
+    [
+        ("vm_entries", VM_ENTRIES.load(Relaxed)),
+        ("bails", BAILS.load(Relaxed)),
+        ("vm_runs", VM_RUNS.load(Relaxed)),
+        ("host_via_vm", HOST_VIA_VM.load(Relaxed)),
+    ]
+}
 
 /// A `ByteScan` or `VecLoop` ([`NativeHost::vector`]). `kind` bit 0: a
 /// loop (else a scan); bit 1: the loop writes the heap (it commits the

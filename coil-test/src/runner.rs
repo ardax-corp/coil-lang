@@ -104,18 +104,28 @@ impl Engine {
 
 /// No native code on wasm: the file runs on the VM.
 #[cfg(target_family = "wasm")]
-fn native_code(_: &Pipeline, _: usize) -> Option<Arc<machine::native::NativeCode>> {
+fn native_code(_: &Pipeline, _: usize, _: &str) -> Option<Arc<machine::native::NativeCode>> {
     None
 }
 
 /// JIT what this compile captured. `None` when nothing compiles or the
 /// backend fails (the file then runs on the VM, as `coil --jit` does).
 #[cfg(not(target_family = "wasm"))]
-fn native_code(pipeline: &Pipeline, code_len: usize) -> Option<Arc<machine::native::NativeCode>> {
+fn native_code(pipeline: &Pipeline, code_len: usize, file: &str) -> Option<Arc<machine::native::NativeCode>> {
     let bodies = compiler::native_mir::take_native_capture();
     let debug = pipeline.program_debug_full();
     let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
-    let program = coil_native::jit(&bodies, &pcs).ok()?;
+    let program = match coil_native::jit(&bodies, &pcs) {
+        Ok(p) => p,
+        Err(e) => {
+            inventory(&format!("failed\t{file}\t{e}"));
+            return None;
+        }
+    };
+    inventory(&format!("file\t{file}\t{}\t{}", program.compiled.len(), program.refused.len()));
+    for (name, why) in &program.refused {
+        inventory(&format!("refused\t{file}\t{name}\t{why}"));
+    }
     if std::env::var_os("COIL_NATIVE_STATS").is_some() {
         eprintln!("{} ({} bodies)", coil_native::describe(&program), bodies.len());
         if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
@@ -127,6 +137,36 @@ fn native_code(pipeline: &Pipeline, code_len: usize) -> Option<Arc<machine::nati
     let code = machine::native::NativeCode::new(code_len, program.entries, program.sites);
     (!code.is_empty()).then(|| Arc::new(code))
 }
+
+/// Append one line to the native inventory file, `COIL_NATIVE_INVENTORY`
+/// (`scripts/native_inventory.py` sums them): what a `--engine native` run
+/// left on the VM. Tab-separated: `file`, `refused`, `failed` per compile,
+/// `counts` once per run. No variable: nothing is written.
+#[cfg(not(target_family = "wasm"))]
+fn inventory(line: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("COIL_NATIVE_INVENTORY") else {
+        return;
+    };
+    // One `write` per line on an append-mode file, so the compile threads
+    // and the corpus processes sharing it never interleave a line.
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(format!("{}\n", line.replace('\n', " ")).as_bytes());
+    }
+}
+
+/// The run's VM-use counts as a `counts` inventory line.
+#[cfg(not(target_family = "wasm"))]
+fn inventory_counts(options: &TestOptions) {
+    if options.engine != Engine::Native {
+        return;
+    }
+    let counts: Vec<String> = machine::native::vm_use_counts().iter().map(|(k, v)| format!("{k}={v}")).collect();
+    inventory(&format!("counts\t{}\t{}", options.root.display(), counts.join("\t")));
+}
+
+#[cfg(target_family = "wasm")]
+fn inventory_counts(_: &TestOptions) {}
 
 /// Whether a run includes doc-tests (the code examples in `///` comments).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -795,7 +835,7 @@ pub(crate) fn compile_test_file(
         pipeline.compile_src_from_file(&display)
     }));
     let native = match &compiled {
-        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len()),
+        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len(), &display),
         _ => {
             let _ = compiler::native_mir::take_native_capture();
             None
@@ -1226,7 +1266,7 @@ fn start_doc_case(
         pipeline.compile_src_from_file(&entry.display().to_string())
     }));
     let native = match &compiled {
-        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len()),
+        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len(), &entry.display().to_string()),
         _ => {
             let _ = compiler::native_mir::take_native_capture();
             None
@@ -1539,6 +1579,7 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
             return 1;
         }
     };
+    inventory_counts(&options);
 
     if !json {
         print_failures(&failures);

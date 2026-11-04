@@ -1986,6 +1986,7 @@ impl<const S: usize> Machine<S> {
             && let Some(table) = self.native.as_deref_mut()
         {
             table.vm_runs += 1;
+            crate::native::VM_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         out
     }
@@ -2064,6 +2065,7 @@ impl<const S: usize> Machine<S> {
             }
             crate::native::NativeOutcome::Bailed => {
                 table.bails += 1;
+                crate::native::BAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 table.quiet_above = base;
                 None
             }
