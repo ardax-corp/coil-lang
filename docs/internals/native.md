@@ -312,6 +312,24 @@ stays one, and the backend refuses it, so a gap shows in the inventory.
 | `hash_string` | `native_twins::hash_string` (FNV-1a, 32 bits) |
 | `string_compare` | `native_twins::string_compare` |
 
+### Vec natives written out as MIR
+
+`vec_insert` and `vec_remove` return an `Option` or move elements of any
+type, so a word-for-word twin does not fit them. In a
+captured body `compiler/src/mir/native_expand.rs` writes each `HostInvoke`
+of them out as the loop it stands for, over `ArrayLen` / `Index` /
+`StoreIndex` / `ArrayPush`. Element words are copied as they are (as an
+`i64` when the call does not say their type), so one expansion serves
+every element type. `vec_from_array` stays a call: it is the copy
+primitive, and keeps a packed byte or float source packed, which the MIR
+array ops cannot ask for. Two more things stay calls: `remove` rotates the element to
+the end and calls `vec_pop`, the shrink primitive, which also packs the
+`Option` in the call's layout (a `None` is an `Alloc` of tag 0 when boxed,
+the zero word when niche); and `insert` out of range calls the twin
+`native_twins::vec_insert_oob` for the runtime's exact message, then
+panics in the caller's frame. A call whose operand or result types the
+expansion does not cover stays a `HostInvoke`.
+
 ### Function values and indirect calls
 
 `Alloc` of a function value (`Fn`, `PolyFn`, `PolyFnCapture`) builds the

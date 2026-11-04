@@ -7,6 +7,8 @@
 // and native code share values (a string's hash keys a map either side).
 // The compiler embeds this module only while a native capture is open.
 
+use string::format;
+
 /// Twin of `hash_string` (host id 67): the string's 32-bit FNV-1a hash of
 /// its bytes, as the runtime's `ObjString::hash`.
 fn hash_string(string s) -> int {
@@ -44,4 +46,11 @@ fn string_compare(string a, string b) -> int {
         return 1;
     }
     return 0;
+}
+
+/// Helper of the native `Vec::insert` expansion (`mir/native_expand.rs`):
+/// the panic message of an out-of-bounds `index`, as the runtime's
+/// `vec_insert` words it.
+fn vec_insert_oob(int index, int len) -> string {
+    return format("Vec::insert: index %i out of bounds (len %i)", index, len);
 }
