@@ -634,3 +634,54 @@ fn main() {
     assert!(calls >= 10, "stats: {err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `--link-static` links an `extern` block's library into the AOT
+/// executable: it runs with no shared library anywhere, and the VM runner
+/// cannot take one.
+#[cfg(target_os = "linux")]
+#[test]
+fn aot_package_links_extern_libraries_statically() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let rt = build_matching_coil_rt(Path::new(&bin));
+    let dir = std::env::temp_dir().join(format!("coil_aot_static_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let obj = dir.join("sum.o");
+    let cc = Command::new("cc").args(["-c", "-fPIC", "-o"]).arg(&obj).arg(manifest.join("examples/sum.c")).status();
+    if !cc.is_ok_and(|s| s.success()) {
+        eprintln!("skipped: no C compiler");
+        return;
+    }
+    let lib = dir.join("libsum.a");
+    assert!(Command::new("ar").arg("rcs").arg(&lib).arg(&obj).status().expect("spawn ar").success());
+    let entry = dir.join("app.coil");
+    std::fs::write(
+        &entry,
+        "use io::sync::println;\nuse string::format;\nextern \"sum\" {\n    fn sum(int a, int b) -> int;\n}\n\
+         fn main() { let _ = println(format(\"%i\", sum(40, 2))); }\n",
+    )
+    .unwrap();
+    let package = |out: &Path, extra: &[&str]| {
+        let mut cmd = Command::new(&bin);
+        cmd.arg("package");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        cmd.arg(&entry).arg("-o").arg(out).args(["--allow-dload", "sum", "--dload-trusted", "sum"]).args(extra).env("COIL_RT_LIB", &rt);
+        cmd.output().expect("spawn coil package")
+    };
+    let exe = dir.join("app");
+    let out = package(&exe, &["--link-static", lib.to_str().unwrap()]);
+    assert!(out.status.success(), "package failed: {}", String::from_utf8_lossy(&out.stderr));
+    // Run where no `libsum` can be found.
+    let mut run = Command::new(&exe);
+    run.current_dir(std::env::temp_dir());
+    let run = run_command_with_timeout(run, 60);
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(run.status.code(), Some(0));
+    let vm = package(&dir.join("app-vm"), &["--no-aot", "--link-static", lib.to_str().unwrap()]);
+    assert!(!vm.status.success());
+    assert!(String::from_utf8_lossy(&vm.stderr).contains("--link-static"), "{}", String::from_utf8_lossy(&vm.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
