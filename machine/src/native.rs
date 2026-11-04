@@ -1609,6 +1609,7 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
             return out;
         }
         let host = unsafe { (*ctx).host.host };
+        note_host_call(id as usize, HostPath::Stub);
         return unsafe { host_via_vm(ctx, host, id, layout, args, n) };
     }
     let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
@@ -1735,6 +1736,8 @@ impl Drop for GenFiber {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: u64, args: *const u64, n: u64) -> u64 {
     let ffi = unsafe { (*ctx).host.ffi };
+    let kind = [common::Instruction::FfiLoad as u8, common::Instruction::DeclareFFI as u8].iter().position(|o| u64::from(*o) == op).unwrap_or(2);
+    FFI_CALLS[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe { host_via_vm(ctx, ffi, op, operand, args, n) }
 }
 
@@ -1826,7 +1829,6 @@ unsafe fn host_via_vm(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u
     let committed = std::mem::replace(&mut c.committed, 1);
     c.vm_calls += 1;
     HOST_VIA_VM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    note_host_call(id as usize, HostPath::Stub);
     c.gc_epoch += 1;
     let mut panicked = false;
     let machine = c.machine;
@@ -2025,6 +2027,9 @@ pub(crate) enum HostPath {
 /// Host calls native code made, by host id and [`HostPath`].
 static HOST_CALLS: [[std::sync::atomic::AtomicU64; 3]; 256] = [const { [const { std::sync::atomic::AtomicU64::new(0) }; 3] }; 256];
 
+/// FFI ops native code ran on the machine (`FfiLoad`, `DeclareFFI`, a call).
+static FFI_CALLS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
 /// Count a host call `id` that ran on `path`.
 pub(crate) fn note_host_call(id: usize, path: HostPath) {
     if let Some(n) = HOST_CALLS.get(id) {
@@ -2048,6 +2053,11 @@ pub fn vm_use_counts() -> Vec<(String, u64)> {
         let n = n.load(Relaxed);
         if n != 0 {
             out.push((format!("bail_trap_{code}"), n));
+        }
+    }
+    for (op, n) in ["ffi_load", "ffi_declare", "ffi_call"].into_iter().zip(FFI_CALLS.iter().map(|n| n.load(Relaxed))) {
+        if n != 0 {
+            out.push((format!("host_machine:{op}"), n));
         }
     }
     let hosts = direct_host_natives();
