@@ -6824,6 +6824,11 @@ impl<const S: usize> Machine<S> {
         self.nested_depth += 1;
         self.return_bookkeeping = true;
         let callee_sp = self.stack.tell().saturating_sub(args.len());
+        let call_ip = if self.frames.is_empty() {
+            1
+        } else {
+            self.frames.get().tell()
+        };
         self.frames.setup_current_and_advance(|f| {
             f.seek(0);
             f.set(callee_sp);
@@ -6833,7 +6838,16 @@ impl<const S: usize> Machine<S> {
         // call_function entry), not when inner CALLs return.
         self.nested_frame_depths.push(self.frames.len());
         let mut ip = offset as usize;
-        loop {
+        // A body with native code (a `drop`, a callback) runs natively.
+        let native = if unlikely(self.native.is_some()) {
+            self.native_call_entered(ip, call_ip)
+        } else {
+            None
+        };
+        if let Some(v) = native {
+            self.nested_return = Some(v);
+        }
+        while native.is_none() {
             let paused = self.run_execute(code, constants, ip);
             if let Some(pending) = self.pending_ffi.take() {
                 let resume_ip = pending.resume_ip;
@@ -6851,7 +6865,9 @@ impl<const S: usize> Machine<S> {
                 break;
             }
         }
-        let _ = self.pop_call_frame();
+        if native.is_none() {
+            let _ = self.pop_call_frame();
+        }
         self.stack.seek(saved_sp);
         // The caller's frame map may list the word its host call returns
         // into (a collection after the call roots the result there): the
