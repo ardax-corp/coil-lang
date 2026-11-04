@@ -48,7 +48,10 @@ backend lowers are stored, so the encoder never meets an instruction
 outside the tier; the format grows with the tiers and bumps its format byte
 when the layout changes. A reader refuses any other format, a truncated
 section or trailing bytes, and the run falls back to the VM with a
-warning. The section is compiled again on every run: the archive carries
+warning. Format 7 carries the coroutine ops (`ResumeCoro`, `DoneCoro`,
+`Yield`, coroutine allocations), FFI ops and the vector ops (`ByteScan`
+with its lane expression, `VecLoop` with its vector expression trees, at
+most 64 deep). The section is compiled again on every run: the archive carries
 MIR, not machine code.
 
 ## Numeric tier (step 2)
@@ -332,6 +335,29 @@ A fiber's VM state starts with a base frame (ip 0, as the program's
 bootstrap frame), so VM calls on it open their frames as anywhere else. A
 failed `requires` in a VM body native code called names native code's call
 site (`native_caller_location`).
+
+### MIR passes and vector loops
+
+Each captured body (`compiler/src/mir/native_capture.rs`) first runs the
+MIR passes the dense tier runs (`mir::specialize::optimize_mir`, at the
+compile's `-O` level): SCCP, the loop passes, SROA, and the loop rewrites
+`copy_until`, `byte_scan`, `bulk_push` and `vec_loops`. Native code then
+gets the same bulk copies (host calls) and the same vector ops as the VM.
+Two exceptions: `promote_fields` does not run (its `PanicStore`s would need
+the native unwinder to write promoted fields back), and generators, bodies
+with a cleanup pad, debugger and coverage builds keep their MIR as lowered.
+
+A `ByteScan` or `VecLoop` runs the VM's own lane code (`vscan` / `vloop`)
+through `coil_native_vector`. `compiler::native_mir::vector_op` encodes the
+op as the VM's `VScan` / `VLoop` body over a frame of word slots (slot 0 the
+loop's `dest`, which a reduce's or push's start value fills first, slot 1
+its block position, then each operand); native code stores the words in a
+stack slot, the helper pushes them as a frame on top of the VM stack, runs
+the body and copies the slots back. A loop that writes the heap (a store or
+push loop, a reduce with stores) commits the call first; a trap panics at
+native code's own site with the VM's message. A push may move an array's
+storage, so native code drops its element views after any vector loop.
+`COIL_NATIVE_STATS` counts these ops (`native: N vector ops ran natively`).
 
 ### Bail instead of trap
 
