@@ -52,6 +52,8 @@ pub(crate) struct Runtime {
     pub(crate) shared_stderr: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
     /// Loaded libraries and declared C functions (`ffi::`).
     pub(crate) ffi: FfiState,
+    /// Native code installed by a native backend (`None`: VM only).
+    pub(crate) native: Option<Box<crate::native::NativeTable>>,
 }
 
 /// What the `ffi::` natives keep between calls.
@@ -111,7 +113,7 @@ impl Runtime {
     pub(crate) fn with(sched: Option<Box<crate::task::Scheduler>>, reactor: std::sync::Arc<crate::reactor::Reactor>, io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>, live_threads: crate::thread::LiveThreadRegistry, worker_cap: std::sync::Arc<crate::thread::WorkerCap>, statics: Vec<Value>, program_strings: Arc<Vec<String>>, program_string_cache: Vec<Value>, native_roots: Vec<(*mut crate::native::NativeCtx, usize)>, ffi_arg_roots: Vec<Value>, finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>, finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>) -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs, output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default() }
+        Self { heap, natives: crate::ffi::Natives::new(), sched, reactor, io_reactor, live_threads, worker_cap, statics, program_strings, program_string_cache, native_roots, ffi_arg_roots, finalizer_by_type, finalizer_pcs, output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None }
     }
 }
 

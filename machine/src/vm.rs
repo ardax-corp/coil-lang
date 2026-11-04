@@ -1870,8 +1870,6 @@ pub struct Machine<const S: usize> {
     /// Set once the live heap outgrew [`Self::heap_cap`] after a full
     /// collection (see [`Self::heap_cap_exceeded`]).
     heap_cap_hit: bool,
-    /// Native code installed by a native backend (`None`: VM only).
-    native: Option<Box<crate::native::NativeTable>>,
 }
 
 
@@ -1976,7 +1974,6 @@ impl<const S: usize> Machine<S> {
             fuel_start: u64::MAX,
             heap_cap: usize::MAX,
             heap_cap_hit: false,
-            native: None,
         }
     }
 
@@ -1985,7 +1982,7 @@ impl<const S: usize> Machine<S> {
     /// except while a debugger is attached. Machines this one spawns
     /// (threads, auto-par jobs, test cases) run it too. `None` removes it.
     pub fn install_native(&mut self, code: Option<std::sync::Arc<crate::native::NativeCode>>) {
-        self.native = code.filter(|c| !c.is_empty()).map(|c| Box::new(crate::native::NativeTable::new(c)));
+        self.rt.native = code.filter(|c| !c.is_empty()).map(|c| Box::new(crate::native::NativeTable::new(c)));
         self.ensure_host_stubs();
     }
 
@@ -1993,7 +1990,7 @@ impl<const S: usize> Machine<S> {
     /// host-call stubs (`native::host_stubs`) past the program, once. Runs
     /// only while no execution borrows the code.
     fn ensure_host_stubs(&mut self) {
-        let Some(base) = self.native.as_ref().map(|t| t.code.code_len()) else {
+        let Some(base) = self.rt.native.as_ref().map(|t| t.code.code_len()) else {
             return;
         };
         if self.program_code.len() == base {
@@ -2033,7 +2030,7 @@ impl<const S: usize> Machine<S> {
     /// never by a `CALL`; [`Self::ensure_host_stubs`] points it at an
     /// appended `CALL main; RETURN` so native code runs `main`.
     fn main_entry_jmp(&self) -> Option<(usize, usize)> {
-        let table = self.native.as_deref()?;
+        let table = self.rt.native.as_deref()?;
         let code = &self.program_code;
         let jmp = |pc: usize| {
             code.get(pc)
@@ -2060,7 +2057,7 @@ impl<const S: usize> Machine<S> {
 
     /// The PC of the host-call stub for `arity` words in `layout`.
     fn host_stub_pc(&self, arity: usize, layout: u64) -> Option<usize> {
-        let base = self.native.as_ref()?.code.code_len();
+        let base = self.rt.native.as_ref()?.code.code_len();
         let off = crate::native::host_stub_offset(arity, layout)?;
         (self.program_code.len() >= base + crate::native::HOST_STUBS_LEN).then_some(base + off)
     }
@@ -2068,22 +2065,22 @@ impl<const S: usize> Machine<S> {
     /// Whether `ip` lies in the host-call stubs: a frame there runs no code
     /// of its own (its caller is native code).
     fn in_host_stub(&self, ip: usize) -> bool {
-        self.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
+        self.rt.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
     }
 
     /// The installed native code, for a machine that runs this program.
     pub fn native_code(&self) -> Option<std::sync::Arc<crate::native::NativeCode>> {
-        self.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
+        self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
     }
 
     /// Native calls run and bailed so far: `(hits, bails)`.
     pub fn native_stats(&self) -> Option<(u64, u64)> {
-        self.native.as_ref().map(|t| (t.hits, t.bails))
+        self.rt.native.as_ref().map(|t| (t.hits, t.bails))
     }
 
     /// Bytecode bodies the VM ran while native code was installed.
     pub fn native_vm_runs(&self) -> u64 {
-        self.native.as_ref().map_or(0, |t| t.vm_runs)
+        self.rt.native.as_ref().map_or(0, |t| t.vm_runs)
     }
 
     /// Run the native code at `target` on the top `arity` stack words.
@@ -2097,7 +2094,7 @@ impl<const S: usize> Machine<S> {
     ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
         let out = self.try_native_call_at(target, arity);
         if out.is_none()
-            && let Some(table) = self.native.as_deref_mut()
+            && let Some(table) = self.rt.native.as_deref_mut()
         {
             table.vm_runs += 1;
             crate::native::VM_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2112,7 +2109,7 @@ impl<const S: usize> Machine<S> {
         arity: usize,
     ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
         let base = self.stack.tell() - arity;
-        let table = self.native.as_deref_mut()?;
+        let table = self.rt.native.as_deref_mut()?;
         // After a bail the VM re-runs that call in bytecode; calls nested
         // in the re-run (above its frame base) stay in the VM, or a deep
         // recursion would bail again at every level.
@@ -2167,7 +2164,7 @@ impl<const S: usize> Machine<S> {
         out: crate::native::NativeOutcome,
         base: usize,
     ) -> Option<Result<crate::native::NativeResult, crate::native::NativePanic>> {
-        let table = self.native.as_deref_mut()?;
+        let table = self.rt.native.as_deref_mut()?;
         match out {
             crate::native::NativeOutcome::Done(r) => {
                 table.hits += 1;
@@ -2629,7 +2626,7 @@ impl<const S: usize> Machine<S> {
         // A body that runs natively: no VM frames, unless it returns into
         // a VM generator's `yield from` (which then runs on the VM).
         let mut delegate_returned = None;
-        if unlikely(self.native.is_some()) {
+        if unlikely(self.rt.native.is_some()) {
             match self.native_gen_step(target, send_val) {
                 Some(GenStep::Yielded(v)) => return v,
                 Some(GenStep::Returned(v)) => match self.find_delegator(target) {
@@ -3291,7 +3288,7 @@ impl<const S: usize> Machine<S> {
         // A native call's frames that made a VM call sit between the VM
         // frames that call pushed and the frame that entered native code.
         let native_lines = |roots: &[(*mut crate::native::NativeCtx, usize)], depth: usize| -> Vec<String> {
-            let Some(code) = self.native.as_ref().map(|t| &t.code) else { return Vec::new() };
+            let Some(code) = self.rt.native.as_ref().map(|t| &t.code) else { return Vec::new() };
             roots
                 .iter()
                 .rev()
@@ -3350,7 +3347,7 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn native_panic(&mut self, p: &crate::native::NativePanic, call_ip: usize) -> bool {
-        let Some(code) = self.native.as_ref().map(|t| std::sync::Arc::clone(&t.code)) else {
+        let Some(code) = self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code)) else {
             return self.runtime_panic(p.message(), call_ip);
         };
         let mut frames = Vec::new();
@@ -3397,7 +3394,7 @@ impl<const S: usize> Machine<S> {
         if depth + 1 != self.frames.len() {
             return None;
         }
-        let code = &self.native.as_ref()?.code;
+        let code = &self.rt.native.as_ref()?.code;
         // SAFETY: a native call in a VM call keeps its context alive.
         let s = *unsafe { &*ctx }.call_sites().first()?;
         self.native_site_location(code.site(s)?)
@@ -3411,7 +3408,7 @@ impl<const S: usize> Machine<S> {
             return None;
         }
         let &(ctx, _) = self.rt.native_roots.last()?;
-        let code = &self.native.as_ref()?.code;
+        let code = &self.rt.native.as_ref()?.code;
         // SAFETY: a native call in a VM call keeps its context alive.
         let sites = unsafe { &*ctx }.call_sites();
         Some(sites.get(1).and_then(|&s| self.native_site_location(code.site(s)?)))
@@ -6247,7 +6244,7 @@ impl<const S: usize> Machine<S> {
         self.nested_frame_depths.push(self.frames.len());
         let mut ip = offset as usize;
         // A body with native code (a `drop`, a callback) runs natively.
-        let native = if unlikely(self.native.is_some()) {
+        let native = if unlikely(self.rt.native.is_some()) {
             self.native_call_entered(ip, call_ip)
         } else {
             None
@@ -6333,7 +6330,7 @@ impl<const S: usize> Machine<S> {
             // A callee with native code runs natively, as at a `CALL`.
             dispatch::RestFlow::Continue
                 if entered
-                    && unlikely(self.native.is_some())
+                    && unlikely(self.rt.native.is_some())
                     && self.frames.len() == depth + 1
                     && let Some(v) = self.native_call_entered(ip, call_ip) =>
             {
@@ -6386,7 +6383,7 @@ impl<const S: usize> Machine<S> {
     /// (no native code, it bailed, or it would need a fiber here), the
     /// frame open again.
     fn native_call_entered(&mut self, target: usize, call_ip: usize) -> Option<Value> {
-        let entry = self.native.as_deref()?.lookup(target)?;
+        let entry = self.rt.native.as_deref()?.lookup(target)?;
         if entry.suspends && self.native_needs_fiber() {
             return None;
         }
@@ -6729,7 +6726,7 @@ impl<const S: usize> Machine<S> {
                     }
                     if let Some(ret) = match resumed {
                         Some(r) => Some(r),
-                        None if unlikely(self.native.is_some()) && !debug_attached && target != 0 => {
+                        None if unlikely(self.rt.native.is_some()) && !debug_attached && target != 0 => {
                             // The caller's return address, as a CALL saves it:
                             // a panic or a VM call inside names this frame.
                             self.frames.get_mut().seek(ip);

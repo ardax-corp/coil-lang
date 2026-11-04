@@ -1138,7 +1138,7 @@ impl<const S: usize> Machine<S> {
                             });
                             target = sub;
                         }
-                        if unlikely(self.native.is_some())
+                        if unlikely(self.rt.native.is_some())
                             && let Some(panic) = self.native_resume_coro(target, send_val, &mut ip, &mut sp)
                         {
                             if let Some(p) = panic {

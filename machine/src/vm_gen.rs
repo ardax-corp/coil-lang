@@ -109,7 +109,7 @@ impl<const S: usize> Machine<S> {
                     // VM runs the body from the start.
                     crate::native::NativeOutcome::Bailed => {
                         Self::with_coroutine_mut(gc, |c| c.started = false);
-                        if let Some(t) = self.native.as_deref_mut() {
+                        if let Some(t) = self.rt.native.as_deref_mut() {
                             t.bails += 1;
                         }
                         None
@@ -131,7 +131,7 @@ impl<const S: usize> Machine<S> {
         if coro.started || coro.state != CoroState::Suspended || coro.yield_from.is_some() {
             return None;
         }
-        let table = self.native.as_deref_mut()?;
+        let table = self.rt.native.as_deref_mut()?;
         let entry = table.lookup(coro.resume_ip).filter(|e| e.generator)?;
         // Its VM code could not switch tasks from a fiber of its own.
         if entry.suspends && self.rt.sched.is_some() {
