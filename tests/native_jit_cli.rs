@@ -799,7 +799,9 @@ fn host_calls_that_need_the_vm_run_from_native_code() {
     let stats = same_as_vm("vm_host", src);
     assert!(compiled(&stats, "io::sync::write_all"), "stats: {stats}");
     assert!(compiled(&stats, "emit"), "stats: {stats}");
-    assert!(native_calls(&stats) >= 5, "stats: {stats}");
+    // `main` enters natively and calls `emit` natively in turn.
+    assert!(native_calls(&stats) >= 1, "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
 #[test]
@@ -1232,4 +1234,27 @@ fn a_scope_inside_a_generator_body_needs_no_vm() {
     let stats = same_as_vm("gen_scope", &src);
     assert!(compiled(&stats, "pairs"), "stats: {stats}");
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+#[test]
+fn a_lines_only_archive_locates_native_panics() {
+    // At `-g1` (`coil package`'s default) a native panic names the same
+    // file:line:col as the VM's.
+    let src = "#[inline(never)]\nfn last(Vec<int> xs, int i) -> int { return xs[i]; }\nfn main() { let r = last([1, 2, 3], 3); if r > 0 { panic \"x\"; } }\n";
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-g1", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("g1.coil");
+    std::fs::write(&file, src).expect("write source");
+    let out = dir.join("g1.ccoil");
+    let made = Command::new(coil_bin())
+        .args(["compile", "--no-build-cache", "--jit", "-g1", "-o"])
+        .arg(&out)
+        .arg(&file)
+        .output()
+        .expect("spawn coil compile");
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    let jit = run_archive(&out, &[]);
+    let vm = run_archive(&out, &["--no-jit"]);
+    assert!(program_stderr(&vm).contains("g1.coil:2:"), "vm: {}", program_stderr(&vm));
+    assert_eq!(program_stderr(&jit), program_stderr(&vm));
 }
