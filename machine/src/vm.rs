@@ -2149,7 +2149,17 @@ impl<const S: usize> Machine<S> {
                     stubs.push(RawByte::new(common::Instruction::RETURN));
                 }
             }
-            Arc::make_mut(&mut self.program_code).extend(stubs);
+            let main_jmp = self.main_entry_jmp();
+            if let Some((_, main)) = main_jmp {
+                stubs.push(RawByte::new(common::Instruction::CALL).with_call_packed(0, main as u32));
+                stubs.push(RawByte::new(common::Instruction::RETURN));
+            }
+            let entry = base + stubs.len() - 2;
+            let code = Arc::make_mut(&mut self.program_code);
+            code.extend(stubs);
+            if let Some((at, _)) = main_jmp {
+                code[at] = RawByte::new(common::Instruction::JMP).with_operand_u32(entry as u32);
+            }
         }
         self.ffi_stubs.clear();
         let first = base + crate::native::HOST_STUBS_LEN;
@@ -2158,6 +2168,37 @@ impl<const S: usize> Machine<S> {
             self.ffi_stubs
                 .insert((*b.bytecode() as u8, b.operand_u32()), pc);
         }
+    }
+
+    /// The `JMP` into `main` that ends the prologue (offset 1) or the
+    /// module setup it jumps to (statics, `extern` blocks), and `main`'s
+    /// PC, when `main` has native code. The VM reaches `main` by that jump,
+    /// never by a `CALL`; [`Self::ensure_host_stubs`] points it at an
+    /// appended `CALL main; RETURN` so native code runs `main`.
+    fn main_entry_jmp(&self) -> Option<(usize, usize)> {
+        let table = self.native.as_deref()?;
+        let code = &self.program_code;
+        let jmp = |pc: usize| {
+            code.get(pc)
+                .filter(|b| *b.bytecode() == common::Instruction::JMP)
+                .map(|b| b.operand_u32() as usize)
+        };
+        let start = jmp(1)?;
+        if table.lookup(start).is_some_and(|e| !e.generator) {
+            return Some((1, start));
+        }
+        // Setup is straight-line code before the first function: its
+        // only jump to a function entry is the one into `main`.
+        let mut pc = start;
+        while pc < code.len() && table.lookup(pc).is_none() {
+            if let Some(t) = jmp(pc)
+                && table.lookup(t).is_some_and(|e| !e.generator)
+            {
+                return Some((pc, t));
+            }
+            pc += 1;
+        }
+        None
     }
 
     /// The PC of the host-call stub for `arity` words in `layout`.
@@ -6466,6 +6507,12 @@ impl<const S: usize> Machine<S> {
         self.program_constants = Arc::new(constants.to_vec());
         self.install_program_strings(strings);
         self.sync_thread_program_from_current();
+        // Run the loaded image: with native code it carries the stubs and
+        // the patched jump into `main` (`ensure_host_stubs`).
+        let image = Arc::clone(&self.program_code);
+        // SAFETY: the archived word has the plain word's layout, as the
+        // program code's casts rely on; `image` outlives the run.
+        let code: &[Byte] = unsafe { std::slice::from_raw_parts(image.as_ptr().cast(), image.len()) };
         let mut ip = 0usize;
         loop {
             let paused = self.run_execute(code, constants, ip);
