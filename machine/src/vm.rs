@@ -1901,6 +1901,9 @@ impl<const S: usize> Machine<S> {
             return None;
         }
         let native = std::sync::Arc::clone(&self.rt.native.as_ref()?.code);
+        if !native.is_complete() {
+            return None;
+        }
         if native.lookup(start).is_none() && !crate::driver::Driver::can_start(&self.program_code, &native, start) {
             return None;
         }

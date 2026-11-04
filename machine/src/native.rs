@@ -427,11 +427,12 @@ pub struct AotEntry {
 /// Install the code an AOT object linked into this executable defines,
 /// for the next run: `n` entries and `n_sites` sites, each four words
 /// (`entry_pc`, then the location's file, start and end byte).
+/// `complete`: the object compiled every body of the program.
 ///
 /// # Safety
 ///
 /// The tables are the linked object's, as `coil_native::aot` wrote them.
-pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32, n_sites: usize) {
+pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32, n_sites: usize, complete: bool) {
     // SAFETY: the object defines `n` entries and `4 * n_sites` words.
     let entries = unsafe { std::slice::from_raw_parts(entries, n) };
     let words = unsafe { std::slice::from_raw_parts(sites, n_sites * 4) };
@@ -454,7 +455,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
         .iter()
         .map(|w| NativeSite { entry_pc: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
         .collect();
-    install_for_next_run(entries, sites);
+    install_for_next_run(entries, sites, complete);
 }
 
 /// An op native code may panic at: the function it is in (by entry PC)
@@ -474,6 +475,8 @@ pub struct NativeCode {
     by_pc: Vec<u32>,
     entries: Vec<NativeEntry>,
     sites: Vec<NativeSite>,
+    /// Every body of the program compiled: the driver can run all of it.
+    complete: bool,
 }
 
 impl NativeCode {
@@ -488,7 +491,19 @@ impl NativeCode {
                 *slot = kept.len() as u32;
             }
         }
-        Self { by_pc, entries: kept, sites }
+        Self { by_pc, entries: kept, sites, complete: true }
+    }
+
+    /// The code, marked as covering every body of the program or not
+    /// (some refused): only complete code runs on the driver.
+    pub fn with_complete(mut self, complete: bool) -> Self {
+        self.complete = complete;
+        self
+    }
+
+    /// Every body of the program compiled.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
     }
 
     /// The program's length, where the host-call stubs start.
@@ -708,8 +723,9 @@ thread_local! {
 
 /// Native code for the next [`crate::Machine::run_raw`] on this thread
 /// (the program's main machine); the machines it spawns share it.
-pub fn install_for_next_run(entries: Vec<NativeEntry>, sites: Vec<NativeSite>) {
-    PENDING.with(|p| *p.borrow_mut() = Some(Pending::Entries(entries, sites)));
+/// `complete`: every body of the program compiled.
+pub fn install_for_next_run(entries: Vec<NativeEntry>, sites: Vec<NativeSite>, complete: bool) {
+    PENDING.with(|p| *p.borrow_mut() = Some(Pending::Entries(entries, sites, complete)));
 }
 
 /// [`install_for_next_run`] with code already built for the program.
@@ -718,14 +734,14 @@ pub fn install_shared_for_next_run(code: std::sync::Arc<NativeCode>) {
 }
 
 pub(crate) enum Pending {
-    Entries(Vec<NativeEntry>, Vec<NativeSite>),
+    Entries(Vec<NativeEntry>, Vec<NativeSite>, bool),
     Shared(std::sync::Arc<NativeCode>),
 }
 
 impl Pending {
     pub(crate) fn into_code(self, code_len: usize) -> std::sync::Arc<NativeCode> {
         match self {
-            Self::Entries(entries, sites) => std::sync::Arc::new(NativeCode::new(code_len, entries, sites)),
+            Self::Entries(entries, sites, complete) => std::sync::Arc::new(NativeCode::new(code_len, entries, sites).with_complete(complete)),
             Self::Shared(code) => code,
         }
     }

@@ -76,7 +76,7 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
 /// What [`aot`] produced: a relocatable object for the host target that
 /// defines the compiled bodies and the tables `machine::native::install_aot`
 /// reads (`coil_aot_entries`, `coil_aot_entry_count`, `coil_aot_sites`,
-/// `coil_aot_site_count`), importing the runtime helpers by name, and the
+/// `coil_aot_site_count`, `coil_aot_refused_count`), importing the runtime helpers by name, and the
 /// statically linked `extern` symbols' table `machine::install_static_symbols` reads
 /// (`coil_static_syms`, `coil_static_sym_count`).
 pub struct AotObject {
@@ -167,6 +167,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         }
         words("coil_aot_sites", site_words)?;
         words("coil_aot_site_count", site_count.to_le_bytes().to_vec())?;
+        words("coil_aot_refused_count", (refused.len() as u64).to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });

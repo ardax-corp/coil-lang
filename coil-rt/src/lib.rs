@@ -16,6 +16,7 @@ unsafe extern "C" {
     static coil_aot_entry_count: u64;
     static coil_aot_sites: u32;
     static coil_aot_site_count: u64;
+    static coil_aot_refused_count: u64;
     static coil_static_syms: machine::StaticSymbol;
     static coil_static_sym_count: u64;
 }
@@ -32,6 +33,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             coil_aot_entry_count as usize,
             &raw const coil_aot_sites,
             coil_aot_site_count as usize,
+            coil_aot_refused_count == 0,
         );
         machine::install_static_symbols(&raw const coil_static_syms, coil_static_sym_count as usize);
     }

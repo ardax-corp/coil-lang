@@ -134,7 +134,8 @@ fn native_code(pipeline: &Pipeline, code_len: usize, file: &str) -> Option<Arc<m
             }
         }
     }
-    let code = machine::native::NativeCode::new(code_len, program.entries, program.sites);
+    let complete = program.refused.is_empty();
+    let code = machine::native::NativeCode::new(code_len, program.entries, program.sites).with_complete(complete);
     (!code.is_empty()).then(|| Arc::new(code))
 }
 
