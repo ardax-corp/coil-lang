@@ -31,10 +31,6 @@ impl CodeBuf {
         self.opt_options = opts;
     }
 
-    pub fn il(&self) -> &IlBuilder {
-        &self.il
-    }
-
     pub fn il_mut(&mut self) -> &mut IlBuilder {
         // Error-recovery may mutate IL after a prior lower.
         self.lowered = None;
@@ -495,18 +491,6 @@ impl CodeBuf {
         let n = other.len();
         self.il.splice_code_at(code_pos, other.il);
         self.rewrite_abs_entries_in(code_pos, code_pos + n);
-    }
-
-    /// Move IL ops `[raw_start..]` to logical code index `code_pos` without
-    /// remapping labels (same buffer namespace).
-    pub fn move_raw_suffix_to_code_pos(&mut self, raw_start: usize, code_pos: usize) {
-        self.invalidate_lowered();
-        let suffix: Vec<IlOp> = self.il.ops_mut().drain(raw_start..).collect();
-        if suffix.is_empty() {
-            return;
-        }
-        let raw_idx = self.il.raw_insert_point(code_pos);
-        self.il.ops_mut().splice(raw_idx..raw_idx, suffix);
     }
 
     pub fn insert_jump_at(&mut self, code_pos: usize, target: Label) {

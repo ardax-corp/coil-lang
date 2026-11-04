@@ -2281,6 +2281,12 @@ impl<const S: usize> Machine<S> {
                     Invoked::Value(0)
                 });
             }
+            // Module setup's finalizer registry (`__module_setup`).
+            crate::HostOp::RegisterFinalizer => {
+                let word = |i: usize| args.get(i).map_or(0, |v| v.as_int() as u32);
+                vm.register_finalizer(word(0), word(1));
+                return Some(Invoked::Value(0));
+            }
             _ => return None,
         }
         // Where tasks switch, a wait must park a fiber: off one (no task

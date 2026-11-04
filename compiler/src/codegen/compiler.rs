@@ -14,6 +14,8 @@ mod emit_call;
 pub(super) mod emit_hir;
 #[path = "eq_glue.rs"]
 mod eq_glue;
+#[path = "module_setup.rs"]
+pub(super) mod module_setup;
 
 #[cfg(any(test, feature = "dissect"))]
 type FinalizeIlOut = Option<crate::dissect::IlSnapshot>;
@@ -6377,6 +6379,8 @@ impl Compiler {
         ));
         self.static_init
             .push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
+        self.setup_steps
+            .push(module_setup::SetupStep::Static { init: format!("{STATIC_INIT_FN_PREFIX}{fqn}"), slot, comptime: false });
     }
 
     /// Receiver type for field access / method calls.
@@ -7127,6 +7131,7 @@ impl Compiler {
                     && !startup
                     && let Some(slot) = self.checker.static_slot_index(&fqn)
                 {
+                    self.mark_comptime_setup(&fqn);
                     self.comptime_consts.push(super::ComptimeConst {
                         fqn,
                         slot,
@@ -7417,6 +7422,9 @@ impl Compiler {
                     self.emit_result_unwrap_or_panic();
                     self.bytecode
                         .push(Byte::new(Instruction::StoreStatic).with_operand_u32(lib_slot));
+                    let name = self.intern_string(unescape_coil_string(library));
+                    self.setup_steps
+                        .push(module_setup::SetupStep::Load { name, slot: lib_slot });
                 }
                 // For each declared function, emit declare(lib, name, …) and
                 // store the fn id in a static slot.
@@ -7448,6 +7456,8 @@ impl Compiler {
                     self.bytecode
                         .push(Byte::new(Instruction::LoadStatic).with_operand_u32(lib_slot));
                     let sym = decl.symbol.unwrap_or(decl.name);
+                    let sym_idx = self.intern_string(unescape_coil_string(sym));
+                    let mut tag_words: Vec<u32> = Vec::new();
                     let mut name_bc = CodeBuf::new();
                     self.emit_raw_string_literal(&mut name_bc, &unescape_coil_string(sym));
                     self.bytecode.append(&mut name_bc);
@@ -7461,6 +7471,7 @@ impl Compiler {
                                     ffi_type_tag_from_output(&self.checker, type_expr)
                                 {
                                     emit_ffi_type_const(&mut self.bytecode, tag, aux);
+                                    tag_words.push(encode_tag_operand(tag, aux));
                                     arg_type_tags.push(tag);
                                 } else {
                                     self.messages.push({
@@ -7511,6 +7522,14 @@ impl Compiler {
                     self.emit_result_unwrap_or_panic();
                     self.bytecode
                         .push(Byte::new(Instruction::StoreStatic).with_operand_u32(fn_id_slot));
+                    self.setup_steps.push(module_setup::SetupStep::Declare {
+                        lib_slot,
+                        name: sym_idx,
+                        args: tag_words,
+                        ret: encode_tag_operand(ret_tag, ret_aux),
+                        operand,
+                        slot: fn_id_slot,
+                    });
                     self.extern_runtime_functions
                         .insert(table_name, (lib_slot, fn_id_slot));
                 }
@@ -8265,49 +8284,6 @@ impl Compiler {
         self.emit_synth_fn(name, &hir, calls, true);
     }
 
-    /// Register `type_id → drop PC` via internal `gc_register_finalizer`.
-    ///
-    /// Emitted on the main buffer (so drop labels stay in-namespace) then
-    /// moved to the pre-`main` prologue.
-    fn emit_finalizer_registry(&mut self, insert_at: usize) -> Option<usize> {
-        let native_id = self.native_id("gc_register_finalizer")?;
-        let mut owners: Vec<String> = self.checker.classes_with_drop().cloned().collect();
-        // Registry order must not follow hash-set iteration: archives stay reproducible.
-        owners.sort_by_key(|o| self.checker.class_type_id(o));
-        if owners.is_empty() {
-            return None;
-        }
-        let raw_start = self.bytecode.il().raw_len();
-        let code_start = self.bytecode.len();
-        for owner in owners {
-            let fqn = format!("{owner}::drop");
-            let Some(label) = self.fn_entry_labels.get(&fqn).copied() else {
-                continue;
-            };
-            let mut type_id = self.checker.class_type_id(&owner);
-            // A `drop` that keeps nothing of `self` may run where the object
-            // is freed early.
-            if type_id < common::EARLY_DROP_FLAG && self.program_effects.drop_keeps_nothing(&owner) {
-                type_id |= common::EARLY_DROP_FLAG;
-            }
-            self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-            self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(type_id));
-            self.bytecode
-                .emit_entry(crate::il::EntryKind::CodePtr, 0, label);
-            self.bytecode.push_host_invoke(2);
-            self.bytecode.push_pop();
-        }
-        let n = self.bytecode.len().saturating_sub(code_start);
-        if n == 0 {
-            return None;
-        }
-        self.bytecode
-            .move_raw_suffix_to_code_pos(raw_start, insert_at);
-        Some(n)
-    }
-
     /// Lower stack IL to VM bytecode (fusion select + label resolution).
     ///
     /// Called once after multi-file linking by the pipeline, or at the end
@@ -8341,33 +8317,10 @@ impl Compiler {
         let setup_pos = PROLOGUE_HALT_OFFSET + 1;
         let mut init_len = 0usize;
 
-        if !self.static_init.is_empty() {
+        if let Some(n) = self.emit_module_setup(setup_pos) {
             self.setup_entry_offset = setup_pos as u32;
-            let inits = std::mem::take(&mut self.static_init);
-            let n = inits.len();
-            self.bytecode.splice_buf_at(setup_pos + init_len, inits);
-            self.bytecode
-                .bump_absolute_entry_targets(setup_pos + init_len, n);
-            self.bytecode.bump_func_spans(setup_pos + init_len, n);
-            init_len += n;
-        }
-
-        if !self.ffi_init.is_empty() {
-            self.setup_entry_offset = setup_pos as u32;
-            let ffi = std::mem::take(&mut self.ffi_init);
-            let n = ffi.len();
-            self.bytecode.splice_buf_at(setup_pos + init_len, ffi);
-            self.bytecode
-                .bump_absolute_entry_targets(setup_pos + init_len, n);
-            self.bytecode.bump_func_spans(setup_pos + init_len, n);
-            init_len += n;
-        }
-
-        if let Some(n) = self.emit_finalizer_registry(setup_pos + init_len) {
-            self.setup_entry_offset = setup_pos as u32;
-            self.bytecode
-                .bump_absolute_entry_targets(setup_pos + init_len, n);
-            self.bytecode.bump_func_spans(setup_pos + init_len, n);
+            self.bytecode.bump_absolute_entry_targets(setup_pos, n);
+            self.bytecode.bump_func_spans(setup_pos, n);
             init_len += n;
         }
 
