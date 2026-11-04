@@ -1,20 +1,12 @@
 use super::*;
 
 fn int_vec(heap: &mut Heap, xs: &[i64]) -> Value {
-    let (obj, _) = heap.alloc(
-        ObjArray::new(xs.iter().map(|&x| Value::from(x)).collect()),
-        Object::Array,
-    );
+    let (obj, _) = heap.alloc(ObjArray::new(xs.iter().map(|&x| Value::from(x)).collect()), Object::Array);
     Value::from(obj.addr())
 }
 
 fn ints(heap: &Heap, v: Value) -> Vec<i64> {
-    array(heap, v)
-        .unwrap()
-        .as_ref()
-        .iter()
-        .map(|x| x.as_int())
-        .collect()
+    array(heap, v).unwrap().as_ref().iter().map(|x| x.as_int()).collect()
 }
 
 struct Index {
@@ -28,11 +20,7 @@ impl Index {
         let table = host_table(heap, &[Value::from(n)]);
         let hashes = int_vec(heap, &[]);
         let live = int_vec(heap, &[]);
-        Self {
-            table,
-            hashes,
-            live,
-        }
+        Self { table, hashes, live }
     }
 
     fn insert(&self, heap: &mut Heap, h: i64) -> i64 {
@@ -40,11 +28,7 @@ impl Index {
     }
 
     fn probe(&self, heap: &mut Heap, h: i64, after: i64) -> i64 {
-        host_probe(
-            heap,
-            &[self.table, self.hashes, Value::from(h), Value::from(after)],
-        )
-        .as_int()
+        host_probe(heap, &[self.table, self.hashes, Value::from(h), Value::from(after)]).as_int()
     }
 
     /// Every slot with hash `h`, in probe order.
@@ -154,10 +138,7 @@ fn retain_then_compact_renumbers_in_order() {
     let keys = int_vec(&mut heap, &(0..10).collect::<Vec<_>>());
     assert_eq!(host_retain(&mut heap, &[keys, ix.live]).as_int(), 6);
     assert_eq!(ints(&heap, keys), vec![1, 2, 5, 6, 7, 8]);
-    assert_eq!(
-        host_compact(&mut heap, &[ix.table, ix.hashes, ix.live]).as_int(),
-        6
-    );
+    assert_eq!(host_compact(&mut heap, &[ix.table, ix.hashes, ix.live]).as_int(), 6);
     assert_eq!(ints(&heap, ix.hashes), vec![101, 102, 105, 106, 107, 108]);
     assert_eq!(ints(&heap, ix.live), vec![1; 6]);
     for (s, h) in [101, 102, 105, 106, 107, 108].into_iter().enumerate() {
@@ -208,34 +189,9 @@ fn malformed_arguments_change_nothing() {
     let mut heap = Heap::default();
     let ix = Index::new(&mut heap, 0);
     let bad = int_vec(&mut heap, &[0, 0, 0, 0]);
-    assert_eq!(
-        host_insert(&mut heap, &[bad, ix.hashes, ix.live, Value::from(1i64)]).as_int(),
-        -1
-    );
-    assert_eq!(
-        host_insert(&mut heap, &[ix.table, ix.table, ix.live, Value::from(1i64)]).as_int(),
-        -1
-    );
-    assert_eq!(
-        host_probe(
-            &mut heap,
-            &[bad, ix.hashes, Value::from(1i64), Value::from(-1i64)]
-        )
-        .as_int(),
-        -1
-    );
-    assert_eq!(
-        host_probe(
-            &mut heap,
-            &[
-                Value::from(0i64),
-                ix.hashes,
-                Value::from(1i64),
-                Value::from(-1i64)
-            ]
-        )
-        .as_int(),
-        -1
-    );
+    assert_eq!(host_insert(&mut heap, &[bad, ix.hashes, ix.live, Value::from(1i64)]).as_int(), -1);
+    assert_eq!(host_insert(&mut heap, &[ix.table, ix.table, ix.live, Value::from(1i64)]).as_int(), -1);
+    assert_eq!(host_probe(&mut heap, &[bad, ix.hashes, Value::from(1i64), Value::from(-1i64)]).as_int(), -1);
+    assert_eq!(host_probe(&mut heap, &[Value::from(0i64), ix.hashes, Value::from(1i64), Value::from(-1i64)]).as_int(), -1);
     assert!(ints(&heap, ix.hashes).is_empty());
 }

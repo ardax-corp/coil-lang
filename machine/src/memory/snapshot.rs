@@ -10,10 +10,7 @@
 use common::{HeapSnapshot, SnapObject, SnapStep, SnapWord, SnapshotError, Value};
 
 use super::super::AddrHashBuilder;
-use super::{
-    EnumPayload, Heap, Member, ObjArray, ObjBoxed, ObjEnum, ObjInstance, ObjString, ObjTuple,
-    Object,
-};
+use super::{EnumPayload, Heap, Member, ObjArray, ObjBoxed, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
 
 /// A root to capture: the static slot it is stored to, its value, and the
 /// slot's word kind (`common::WORD_*`).
@@ -81,31 +78,16 @@ impl Heap {
         for (object, snap) in objects.iter().zip(&snapshot.objects) {
             match (object, snap) {
                 (Object::Array(gc), SnapObject::Array { words, .. }) => {
-                    let values: Vec<Value> = words
-                        .iter()
-                        .map(|w| self.snapshot_value(&objects, *w))
-                        .collect();
+                    let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
                     gc.payload_mut().words_mut().copy_from_slice(&values);
                 }
                 (Object::Tuple(gc), SnapObject::Tuple { words, .. }) => {
-                    let values: Vec<Value> = words
-                        .iter()
-                        .map(|w| self.snapshot_value(&objects, *w))
-                        .collect();
-                    gc.payload_mut()
-                        .elements
-                        .as_mut_slice()
-                        .copy_from_slice(&values);
+                    let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
+                    gc.payload_mut().elements.as_mut_slice().copy_from_slice(&values);
                 }
                 (Object::Enum(gc), SnapObject::Enum { words, .. }) => {
-                    let values: Vec<Value> = words
-                        .iter()
-                        .map(|w| self.snapshot_value(&objects, *w))
-                        .collect();
-                    gc.payload_mut()
-                        .payload
-                        .as_mut_slice()
-                        .copy_from_slice(&values);
+                    let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
+                    gc.payload_mut().payload.as_mut_slice().copy_from_slice(&values);
                 }
                 (Object::Instance(gc), SnapObject::Instance { words, .. }) => {
                     for (i, w) in words.iter().enumerate() {
@@ -115,10 +97,7 @@ impl Heap {
                 }
                 (Object::Boxed(gc), SnapObject::Boxed { word, .. }) => {
                     gc.payload_mut().payload = match *word {
-                        SnapWord::Ref {
-                            index,
-                            err_bit: false,
-                        } => Member::Object(objects[index as usize]),
+                        SnapWord::Ref { index, err_bit: false } => Member::Object(objects[index as usize]),
                         w => Member::Value(self.snapshot_value(&objects, w)),
                     };
                 }
@@ -146,31 +125,15 @@ impl Heap {
                 self.alloc(array, Object::Array).0
             }
             SnapObject::Tuple { kinds, words } => {
-                self.alloc(
-                    ObjTuple::new(zeros(words.len())).with_kinds(*kinds),
-                    Object::Tuple,
-                )
-                .0
+                self.alloc(ObjTuple::new(zeros(words.len())).with_kinds(*kinds), Object::Tuple).0
             }
-            SnapObject::Enum {
-                tag,
-                type_id,
-                kinds,
-                words,
-            } => {
-                let mut e = ObjEnum::new(
-                    *tag,
-                    EnumPayload::from_vec(zeros(words.len())).with_kinds(*kinds),
-                );
+            SnapObject::Enum { tag, type_id, kinds, words } => {
+                let mut e = ObjEnum::new(*tag, EnumPayload::from_vec(zeros(words.len())).with_kinds(*kinds));
                 e.type_id = *type_id;
                 self.alloc(e, Object::Enum).0
             }
             SnapObject::Instance { type_id, words } => {
-                self.alloc(
-                    ObjInstance::with_slots(*type_id, zeros(words.len())),
-                    Object::Instance,
-                )
-                .0
+                self.alloc(ObjInstance::with_slots(*type_id, zeros(words.len())), Object::Instance).0
             }
             SnapObject::Boxed { tag, .. } => {
                 let boxed = ObjBoxed {
@@ -185,15 +148,9 @@ impl Heap {
     fn snapshot_value(&mut self, objects: &[Object], word: SnapWord) -> Value {
         match word {
             SnapWord::Raw(raw) => Value::from(raw),
-            SnapWord::Ref { index, err_bit } => {
-                Value::from(objects[index as usize].addr() | u64::from(err_bit))
-            }
-            SnapWord::UnitEnum { tag, err_bit } => {
-                Value::from(self.immortal_unit_enum(tag).addr() | u64::from(err_bit))
-            }
-            SnapWord::EmptyTuple { err_bit } => {
-                Value::from(self.immortal_empty_tuple().addr() | u64::from(err_bit))
-            }
+            SnapWord::Ref { index, err_bit } => Value::from(objects[index as usize].addr() | u64::from(err_bit)),
+            SnapWord::UnitEnum { tag, err_bit } => Value::from(self.immortal_unit_enum(tag).addr() | u64::from(err_bit)),
+            SnapWord::EmptyTuple { err_bit } => Value::from(self.immortal_empty_tuple().addr() | u64::from(err_bit)),
         }
     }
 }
@@ -206,21 +163,13 @@ impl Capture<'_> {
             return Ok(SnapWord::Raw(v.bits()));
         }
         let addr = v.heap_addr();
-        let Some(object) = (addr != 0)
-            .then(|| self.heap.find_object_by_addr(addr))
-            .flatten()
-        else {
+        let Some(object) = (addr != 0).then(|| self.heap.find_object_by_addr(addr)).flatten() else {
             return Ok(SnapWord::Raw(v.bits()));
         };
         self.object_word(object, v.bits() & 1 != 0, parent)
     }
 
-    fn object_word(
-        &mut self,
-        object: Object,
-        err_bit: bool,
-        parent: Parent,
-    ) -> Result<SnapWord, SnapshotError> {
+    fn object_word(&mut self, object: Object, err_bit: bool, parent: Parent) -> Result<SnapWord, SnapshotError> {
         // Shared singletons are rebuilt from the restoring heap's own.
         match &object {
             Object::Enum(gc) if gc.as_ref().payload.is_empty() => {
@@ -229,9 +178,7 @@ impl Capture<'_> {
                     err_bit,
                 });
             }
-            Object::Tuple(gc) if gc.as_ref().elements().is_empty() => {
-                return Ok(SnapWord::EmptyTuple { err_bit });
-            }
+            Object::Tuple(gc) if gc.as_ref().elements().is_empty() => return Ok(SnapWord::EmptyTuple { err_bit }),
             _ => {}
         }
         if let Some(what) = unsupported(&object) {
@@ -255,9 +202,7 @@ impl Capture<'_> {
         let parent = |step| Parent::Object(at, step);
         Ok(match object {
             Object::String(gc) => SnapObject::String(gc.as_ref().data.to_string()),
-            Object::Array(gc) if gc.as_ref().is_packed() => {
-                SnapObject::Bytes(gc.as_ref().to_byte_vec())
-            }
+            Object::Array(gc) if gc.as_ref().is_packed() => SnapObject::Bytes(gc.as_ref().to_byte_vec()),
             Object::Array(gc) => {
                 let a = gc.as_ref();
                 let kind = a.elem_kind();
@@ -269,19 +214,14 @@ impl Capture<'_> {
                     .map(|(i, v)| self.word(*v, kind, parent(SnapStep::Element(i))))
                     .collect::<Result<_, _>>()?;
                 SnapObject::Array {
-                    elem_kind: if kind == common::WORD_POINTER {
-                        kind
-                    } else {
-                        common::WORD_UNKNOWN
-                    },
+                    elem_kind: if kind == common::WORD_POINTER { kind } else { common::WORD_UNKNOWN },
                     words,
                 }
             }
             Object::Tuple(gc) => {
                 let t = gc.as_ref();
                 let kinds = t.kinds();
-                let words =
-                    self.kinded(t.elements(), kinds, |i| parent(SnapStep::TupleElement(i)))?;
+                let words = self.kinded(t.elements(), kinds, |i| parent(SnapStep::TupleElement(i)))?;
                 SnapObject::Tuple { kinds, words }
             }
             Object::Enum(gc) => {
@@ -306,14 +246,7 @@ impl Capture<'_> {
                     .enumerate()
                     .map(|(i, v)| {
                         let kind = kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN);
-                        self.word(
-                            *v,
-                            kind,
-                            parent(SnapStep::Field {
-                                type_id: inst.type_id,
-                                index: i,
-                            }),
-                        )
+                        self.word(*v, kind, parent(SnapStep::Field { type_id: inst.type_id, index: i }))
                     })
                     .collect::<Result<_, _>>()?;
                 SnapObject::Instance {
@@ -325,9 +258,7 @@ impl Capture<'_> {
                 let b = gc.as_ref();
                 let word = match b.payload {
                     Member::Object(o) => self.object_word(o, false, parent(SnapStep::Boxed))?,
-                    Member::Value(v) => {
-                        self.word(v, common::WORD_UNKNOWN, parent(SnapStep::Boxed))?
-                    }
+                    Member::Value(v) => self.word(v, common::WORD_UNKNOWN, parent(SnapStep::Boxed))?,
                 };
                 SnapObject::Boxed { tag: b.tag, word }
             }

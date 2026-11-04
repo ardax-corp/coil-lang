@@ -137,11 +137,7 @@ impl NativeFn for HostClosureFn {
 
     fn direct(&self) -> Option<crate::HostValueFn> {
         // A special host op runs in the VM, never as a plain call.
-        if self.host_op == HostOp::Ordinary {
-            self.direct
-        } else {
-            None
-        }
+        if self.host_op == HostOp::Ordinary { self.direct } else { None }
     }
 
     fn invoke(&self, heap: &mut Heap, args: &[Value]) -> Result<Option<Value>, FfiError> {
@@ -240,25 +236,15 @@ mod tests {
         let mut reg = Natives::new();
         let plain = reg.register(Arc::new(HostClosureFn::unary_i64("plain", |x| x)));
         let direct = reg.register(Arc::new(HostClosureFn::new_direct(sig.clone(), twice)));
-        let special = reg.register(Arc::new(
-            HostClosureFn::new_direct(sig, twice).with_host_op(HostOp::Collect),
-        ));
+        let special = reg.register(Arc::new(HostClosureFn::new_direct(sig, twice).with_host_op(HostOp::Collect)));
         assert!(reg.direct_by_id(plain).is_none());
-        assert!(
-            reg.direct_by_id(special).is_none(),
-            "a special host op never runs as a plain call"
-        );
+        assert!(reg.direct_by_id(special).is_none(), "a special host op never runs as a plain call");
         assert!(reg.direct_by_id(99).is_none());
         let mut heap = Heap::default();
         let args = [Value::from(21_i64)];
         let f = reg.direct_by_id(direct).expect("direct native");
         assert_eq!(f(&mut heap, &args).as_int(), 42);
-        let via_invoke = reg
-            .get_by_id(direct)
-            .unwrap()
-            .invoke(&mut heap, &args)
-            .unwrap()
-            .unwrap();
+        let via_invoke = reg.get_by_id(direct).unwrap().invoke(&mut heap, &args).unwrap().unwrap();
         assert_eq!(via_invoke.as_int(), 42);
     }
 
@@ -278,24 +264,17 @@ mod tests {
         let mut reg = Natives::new();
         reg.register(Arc::new(HostClosureFn::unary_i64("a", |x| x)));
         let worker = reg.clone_registry();
-        assert!(
-            Arc::ptr_eq(&reg.by_id, &worker.by_id),
-            "clone shares tables"
-        );
+        assert!(Arc::ptr_eq(&reg.by_id, &worker.by_id), "clone shares tables");
         reg.register(Arc::new(HostClosureFn::unary_i64("b", |x| x)));
-        assert_eq!(
-            worker.len(),
-            1,
-            "later registration does not leak into a clone"
-        );
+        assert_eq!(worker.len(), 1, "later registration does not leak into a clone");
         assert!(worker.get("b").is_none());
         assert_eq!(reg.len(), 2);
     }
 
     #[test]
     fn arity_range_accepts_min_through_max() {
-        let sig =
-            FfiSignature::from_parts("packed_like", vec![FfiType::Int; 3], FfiType::Int).unwrap();
+        let sig = FfiSignature::from_parts("packed_like", vec![FfiType::Int; 3], FfiType::Int)
+            .unwrap();
         let native = HostClosureFn::new_with_arity_range(sig, 2, 3, |_heap, args| {
             Ok(Some(Value::from(args.len() as i64)))
         });
@@ -319,7 +298,9 @@ mod tests {
                 .as_int(),
             3
         );
-        let err = native.invoke(&mut heap, &[Value::from(1_i64)]).unwrap_err();
+        let err = native
+            .invoke(&mut heap, &[Value::from(1_i64)])
+            .unwrap_err();
         assert!(matches!(
             err,
             FfiError::ArityMismatch {

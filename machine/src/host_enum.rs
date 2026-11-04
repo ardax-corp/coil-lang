@@ -12,8 +12,8 @@
 use std::cell::Cell;
 
 use common::{
-    HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE, HOST_ENUM_LAYOUT_RESULT_NICHE, Value,
-    host_invoke_enum_layout,
+    host_invoke_enum_layout, Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
+    HOST_ENUM_LAYOUT_RESULT_NICHE,
 };
 
 use crate::io::{alloc_option_none, alloc_option_some, alloc_result_err, alloc_result_ok};
@@ -152,19 +152,15 @@ pub fn pack_result(
             Err(payload) => pack_result_niche_err(heap, payload),
         },
         // `Result<(), E>` is Option-shaped: Ok = 0, Err = heap pointer.
-        HostEnumLayout::OptionNiche => pack_result_unit(
-            heap,
-            layout,
-            match value {
-                Ok(payload) if payload.is_zero() => Ok(()),
-                Ok(_) => {
-                    return Err(HostEnumMismatch(
-                        "pack_result OptionNiche Ok payload is not unit",
-                    ));
-                }
-                Err(payload) => Err(payload),
-            },
-        ),
+        HostEnumLayout::OptionNiche => pack_result_unit(heap, layout, match value {
+            Ok(payload) if payload.is_zero() => Ok(()),
+            Ok(_) => {
+                return Err(HostEnumMismatch(
+                    "pack_result OptionNiche Ok payload is not unit",
+                ));
+            }
+            Err(payload) => Err(payload),
+        }),
     }
 }
 
@@ -193,7 +189,11 @@ pub fn pack_result_unit(
             HostEnumLayout::Boxed,
             value.map(|()| Value::default()),
         ),
-        HostEnumLayout::OptionNiche => pack_option(heap, HostEnumLayout::OptionNiche, value.err()),
+        HostEnumLayout::OptionNiche => pack_option(
+            heap,
+            HostEnumLayout::OptionNiche,
+            value.err(),
+        ),
         HostEnumLayout::ResultNiche => Err(HostEnumMismatch(
             "pack_result_unit called with ResultNiche layout",
         )),
@@ -255,7 +255,9 @@ fn unpack_option_niche(heap: &Heap, value: Value) -> Result<Option<Value>, HostE
         return Ok(None);
     }
     if raw & 1 != 0 {
-        return Err(HostEnumMismatch("OptionNiche word has Result Err bit set"));
+        return Err(HostEnumMismatch(
+            "OptionNiche word has Result Err bit set",
+        ));
     }
     if heap.find_object_by_addr(raw).is_none() {
         return Err(HostEnumMismatch(
@@ -295,9 +297,7 @@ fn pack_result_niche_ok(heap: &Heap, payload: Value) -> Result<Value, HostEnumMi
         ));
     }
     if heap.find_object_by_addr(raw).is_none() {
-        return Err(HostEnumMismatch(
-            "ResultNiche Ok payload is not a heap object",
-        ));
+        return Err(HostEnumMismatch("ResultNiche Ok payload is not a heap object"));
     }
     Ok(payload)
 }
@@ -327,10 +327,7 @@ fn unpack_result_unit_niche(
     }
 }
 
-fn unpack_result_niche(
-    heap: &Heap,
-    value: Value,
-) -> Result<Result<Value, Value>, HostEnumMismatch> {
+fn unpack_result_niche(heap: &Heap, value: Value) -> Result<Result<Value, Value>, HostEnumMismatch> {
     let raw = value.bits();
     let err = raw & 1 != 0;
     let addr = raw & !1;
@@ -338,7 +335,9 @@ fn unpack_result_niche(
         return Err(HostEnumMismatch("ResultNiche word is null"));
     }
     if heap.find_object_by_addr(addr).is_none() {
-        return Err(HostEnumMismatch("ResultNiche payload is not a heap object"));
+        return Err(HostEnumMismatch(
+            "ResultNiche payload is not a heap object",
+        ));
     }
     let payload = Value::from(addr);
     if err {
@@ -348,10 +347,7 @@ fn unpack_result_niche(
     }
 }
 
-fn unpack_boxed_result(
-    heap: &Heap,
-    value: Value,
-) -> Result<Result<Value, Value>, HostEnumMismatch> {
+fn unpack_boxed_result(heap: &Heap, value: Value) -> Result<Result<Value, Value>, HostEnumMismatch> {
     let Some(Object::Enum(gc)) = heap.find_object_by_addr(value.bits()) else {
         return Err(HostEnumMismatch("boxed Result is not an ObjEnum"));
     };
@@ -402,11 +398,9 @@ mod tests {
 
         let none = pack_option(&mut heap, HostEnumLayout::OptionNiche, None).unwrap();
         assert_eq!(none.as_int(), 0);
-        assert!(
-            unpack_option(&heap, HostEnumLayout::OptionNiche, none)
-                .unwrap()
-                .is_none()
-        );
+        assert!(unpack_option(&heap, HostEnumLayout::OptionNiche, none)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -423,15 +417,16 @@ mod tests {
             ObjEnum::new(0, EnumPayload::one(Value::from(1i64))),
             Object::Enum,
         );
-        assert!(
-            unpack_option(
-                &heap,
-                HostEnumLayout::Boxed,
-                Value::from(none_with_payload.addr())
-            )
-            .is_err()
+        assert!(unpack_option(
+            &heap,
+            HostEnumLayout::Boxed,
+            Value::from(none_with_payload.addr())
+        )
+        .is_err());
+        let (bad_tag, _) = heap.alloc(
+            ObjEnum::new(2, EnumPayload::empty()),
+            Object::Enum,
         );
-        let (bad_tag, _) = heap.alloc(ObjEnum::new(2, EnumPayload::empty()), Object::Enum);
         assert!(unpack_option(&heap, HostEnumLayout::Boxed, Value::from(bad_tag.addr())).is_err());
         assert!(unpack_option(&heap, HostEnumLayout::Boxed, Value::from(0i64)).is_err());
     }
@@ -439,14 +434,12 @@ mod tests {
     #[test]
     fn pack_option_niche_refuses_immediate() {
         let mut heap = Heap::default();
-        assert!(
-            pack_option(
-                &mut heap,
-                HostEnumLayout::OptionNiche,
-                Some(Value::from(7i64))
-            )
-            .is_err()
-        );
+        assert!(pack_option(
+            &mut heap,
+            HostEnumLayout::OptionNiche,
+            Some(Value::from(7i64))
+        )
+        .is_err());
     }
 
     #[test]
@@ -483,11 +476,7 @@ mod tests {
         let err = pack_result_unit(&mut heap, HostEnumLayout::OptionNiche, Err(err_s)).unwrap();
         assert_eq!(ok.as_int(), 0);
         assert_eq!(err.bits(), err_s.bits());
-        assert_eq!(
-            heap.live_object_count(),
-            live,
-            "unit Result niche must not box"
-        );
+        assert_eq!(heap.live_object_count(), live, "unit Result niche must not box");
         assert_eq!(
             unpack_result(&heap, HostEnumLayout::OptionNiche, ok).unwrap(),
             Ok(Value::default())
@@ -496,7 +485,12 @@ mod tests {
             unpack_result(&heap, HostEnumLayout::OptionNiche, err).unwrap(),
             Err(err_s)
         );
-        assert!(pack_result(&mut heap, HostEnumLayout::OptionNiche, Ok(err_s)).is_err());
+        assert!(pack_result(
+            &mut heap,
+            HostEnumLayout::OptionNiche,
+            Ok(err_s)
+        )
+        .is_err());
         assert!(pack_result_unit(&mut heap, HostEnumLayout::ResultNiche, Ok(())).is_err());
     }
 

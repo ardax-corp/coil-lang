@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[cfg(target_family = "wasm")]
-use super::nolib::Library;
 #[cfg(not(target_family = "wasm"))]
 use libloading::Library;
+#[cfg(target_family = "wasm")]
+use super::nolib::Library;
 
 use super::gate::DloadGate;
 use super::signature::FfiError;
@@ -625,16 +625,17 @@ mod tests {
             let path = missing_abs_lib(stem);
             match resolve_library(&path, None, &[], &gate) {
                 Err(FfiError::LibraryDenied { stem: got, .. }) => assert_eq!(got, *stem),
-                other => {
-                    panic!("expected LibraryDenied for {stem} without hash|trusted, got {other:?}")
-                }
+                other => panic!("expected LibraryDenied for {stem} without hash|trusted, got {other:?}"),
             }
         }
     }
 
     #[test]
     fn first_party_allow_plus_trusted_missing_file_is_not_found() {
-        let gate = DloadGate::from_consumer_trusted(&[], ["crypto", "tls", "regex", "time"]);
+        let gate = DloadGate::from_consumer_trusted(
+            &[],
+            ["crypto", "tls", "regex", "time"],
+        );
         for stem in DLOAD_PRODUCTION_STEMS {
             let path = missing_abs_lib(stem);
             match resolve_library(&path, None, &[], &gate) {

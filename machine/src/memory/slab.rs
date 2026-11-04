@@ -40,12 +40,7 @@ struct PageMeta {
 
 impl PageMeta {
     fn new(slot_size: u32, slot_align: u32, first_off: u32) -> Self {
-        Self {
-            slot_size,
-            slot_align,
-            first_off,
-            slot_magic: (u64::MAX / u64::from(slot_size)).wrapping_add(1),
-        }
+        Self { slot_size, slot_align, first_off, slot_magic: (u64::MAX / u64::from(slot_size)).wrapping_add(1) }
     }
 
     /// Whether `rel` (an offset from the first slot) starts a slot.
@@ -497,10 +492,7 @@ impl Slab {
         let chunks = &self.chunks;
         // A held chunk is not allocated into; its hole waits for a reset.
         if let Some(class) = self.young.iter_mut().find(|c| c.key == key)
-            && !class
-                .held
-                .iter()
-                .any(|&(i, _)| chunks.get(i).is_some_and(|c| c.ptr as u64 == start))
+            && !class.held.iter().any(|&(i, _)| chunks.get(i).is_some_and(|c| c.ptr as u64 == start))
         {
             class.freed.push(ptr.as_ptr() as u64);
         }
@@ -525,8 +517,7 @@ impl Slab {
             return;
         }
         for class in &mut self.young {
-            let (gone, kept): (Vec<_>, Vec<_>) =
-                class.held.drain(..).partition(|h| chunks.contains(&h.0));
+            let (gone, kept): (Vec<_>, Vec<_>) = class.held.drain(..).partition(|h| chunks.contains(&h.0));
             class.held = kept;
             class.spare.extend(gone.into_iter().map(|h| h.0));
         }
@@ -540,12 +531,7 @@ impl Slab {
         for class in &self.young {
             for &(i, end) in &class.held {
                 if let Some(c) = self.chunks.get(i) {
-                    out.push((
-                        i,
-                        c.ptr as u64 + u64::from(c.meta.first_off),
-                        end,
-                        u64::from(c.meta.slot_size),
-                    ));
+                    out.push((i, c.ptr as u64 + u64::from(c.meta.first_off), end, u64::from(c.meta.slot_size)));
                 }
             }
         }
@@ -588,12 +574,7 @@ impl Slab {
                 let Some(c) = self.chunks.get(i) else {
                     continue;
                 };
-                out.push((
-                    i,
-                    c.ptr as u64 + u64::from(c.meta.first_off),
-                    end,
-                    u64::from(c.meta.slot_size),
-                ));
+                out.push((i, c.ptr as u64 + u64::from(c.meta.first_off), end, u64::from(c.meta.slot_size)));
             }
         }
         out
@@ -603,9 +584,7 @@ impl Slab {
     pub fn chunk_slots_end(&self, i: usize) -> u64 {
         let c = self.chunks.get(i).expect("chunk");
         let size = u64::from(c.meta.slot_size);
-        c.ptr as u64
-            + u64::from(c.meta.first_off)
-            + (CHUNK as u64 - u64::from(c.meta.first_off)) / size * size
+        c.ptr as u64 + u64::from(c.meta.first_off) + (CHUNK as u64 - u64::from(c.meta.first_off)) / size * size
     }
 
     /// End a minor collection: `promoted` chunks join the old space with
@@ -614,12 +593,7 @@ impl Slab {
     /// pinned survivors, and every other chunk in use is reset for reuse
     /// (its slots must already be poisoned). The current chunks restart
     /// empty.
-    pub fn finish_young(
-        &mut self,
-        promoted: &[usize],
-        held: &[(usize, u64)],
-        free: Vec<NonNull<u8>>,
-    ) {
+    pub fn finish_young(&mut self, promoted: &[usize], held: &[(usize, u64)], free: Vec<NonNull<u8>>) {
         let had = self.young_in_use != 0;
         for class in &mut self.young {
             let was_held: Vec<usize> = class.held.drain(..).map(|(i, _)| i).collect();
@@ -783,17 +757,12 @@ impl Slab {
     /// already knows its class, so no chunk lookup.
     pub fn free_at_cursor(&mut self, cur: &mut SlotCursor, ptr: NonNull<u8>) {
         debug_assert_eq!(
-            self.chunk_for(ptr.as_ptr() as u64)
-                .map(|(_, m)| (m.slot_size, m.slot_align)),
+            self.chunk_for(ptr.as_ptr() as u64).map(|(_, m)| (m.slot_size, m.slot_align)),
             Some(cur.class)
         );
         if cur.free_class == 0 {
             self.free_in_class(cur.class, ptr);
-            cur.free_class = 1 + self
-                .free
-                .iter()
-                .position(|c| c.key == cur.class)
-                .expect("class just used");
+            cur.free_class = 1 + self.free.iter().position(|c| c.key == cur.class).expect("class just used");
             return;
         }
         self.free[cur.free_class - 1].slots.push(ptr);
@@ -903,11 +872,7 @@ impl Slab {
             (addr < s + CHUNK as u64).then_some(i)
         };
         let mut free_slots = vec![0usize; n];
-        for class in self
-            .free
-            .iter()
-            .filter(|c| budget.iter().any(|(k, _)| *k == c.key))
-        {
+        for class in self.free.iter().filter(|c| budget.iter().any(|(k, _)| *k == c.key)) {
             for p in &class.slots {
                 if let Some(i) = chunk_of(p.as_ptr() as u64) {
                     free_slots[i] += 1;
@@ -1022,9 +987,7 @@ impl Slab {
         }
         let starts = self.chunk_starts(emptied);
         for class in &mut self.free {
-            class
-                .slots
-                .retain(|p| !in_chunks(&starts, p.as_ptr() as u64));
+            class.slots.retain(|p| !in_chunks(&starts, p.as_ptr() as u64));
             class.low_water = class.low_water.min(class.slots.len());
         }
         released_bytes
@@ -1064,13 +1027,7 @@ impl Slab {
         self.carve_slots(ptr, slot_size, align, true)
     }
 
-    fn carve_slots(
-        &mut self,
-        ptr: *mut u8,
-        slot_size: usize,
-        align: usize,
-        new_chunk: bool,
-    ) -> NonNull<u8> {
+    fn carve_slots(&mut self, ptr: *mut u8, slot_size: usize, align: usize, new_chunk: bool) -> NonNull<u8> {
         let first = align_up(ptr as usize, align);
         let first_off = first - ptr as usize;
         let end = ptr as usize + CHUNK;
@@ -1129,8 +1086,7 @@ impl Slab {
     #[inline(never)]
     fn chunk_for_slow(&self, addr: u64) -> Option<(u64, &PageMeta)> {
         let c = self.chunks.get(self.chunks.position(addr)?)?;
-        self.recent[Self::recent_index(addr)]
-            .store(std::ptr::from_ref(c).cast_mut(), Ordering::Relaxed);
+        self.recent[Self::recent_index(addr)].store(std::ptr::from_ref(c).cast_mut(), Ordering::Relaxed);
         Some((c.ptr as u64, &c.meta))
     }
 
@@ -1176,10 +1132,7 @@ fn map_chunk(len: usize) -> *mut u8 {
         // alone does not tell an exhausted map count from exhausted memory
         // (coil-lang#804).
         let err = std::io::Error::last_os_error();
-        eprintln!(
-            "coil: mmap of a {len}-byte heap chunk failed: {err}{}",
-            process_memory_note()
-        );
+        eprintln!("coil: mmap of a {len}-byte heap chunk failed: {err}{}", process_memory_note());
         std::alloc::handle_alloc_error(Layout::from_size_align(len, 4096).expect("layout"));
     }
     ptr.cast()
@@ -1201,11 +1154,7 @@ fn process_memory_note() -> String {
     if status.is_empty() {
         return String::new();
     }
-    format!(
-        " (VmSize {}, VmRSS {}, {maps} mappings)",
-        field("VmSize:"),
-        field("VmRSS:")
-    )
+    format!(" (VmSize {}, VmRSS {}, {maps} mappings)", field("VmSize:"), field("VmRSS:"))
 }
 
 #[cfg(unix)]
@@ -1253,11 +1202,7 @@ mod tests {
         for size in [1u32, 8, 16, 24, 40, 48, 56, 72, 96, 120, 136, 4096, 65536] {
             let meta = PageMeta::new(size, 8, 0);
             for rel in (0..70_000u32).chain([u32::MAX - 7, u32::MAX]) {
-                assert_eq!(
-                    meta.is_slot_offset(rel),
-                    rel % size == 0,
-                    "size {size} rel {rel}"
-                );
+                assert_eq!(meta.is_slot_offset(rel), rel % size == 0, "size {size} rel {rel}");
             }
         }
     }

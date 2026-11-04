@@ -8,8 +8,8 @@ use common::Value;
 
 use crate::host_enum::pack_result_or_panic;
 use crate::io::{
-    IoErrorTag, alloc_io_error, alloc_result_err, alloc_result_ok, as_result_unit, as_result_value,
-    value_as_string,
+    IoErrorTag, alloc_io_error, alloc_result_err, alloc_result_ok, as_result_unit,
+    as_result_value, value_as_string,
 };
 use crate::memory::{Heap, ObjArray, ObjInstance, Object};
 
@@ -55,10 +55,7 @@ fn alloc_metadata_record(heap: &mut Heap, meta: &Metadata) -> Value {
         Value::from(modified_unix),
         Value::from(meta.len() as i64),
     ];
-    let (obj, _) = heap.alloc(
-        ObjInstance::with_slots(common::FS_METADATA_TYPE_ID, slots),
-        Object::Instance,
-    );
+    let (obj, _) = heap.alloc(ObjInstance::with_slots(common::FS_METADATA_TYPE_ID, slots), Object::Instance);
     Value::from(obj.addr())
 }
 

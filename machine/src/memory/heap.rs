@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{promise, unlikely};
 
-use super::AddrHashBuilder;
 use super::slab::Slab;
+use super::AddrHashBuilder;
 
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
 const GC_GROWTH_FACTOR: usize = 2;
@@ -99,9 +99,7 @@ pub struct EpochBatchStash(Option<EpochBatch>);
 
 /// Set aside this thread's epoch batch until the returned stash drops.
 pub fn stash_epoch_batch() -> EpochBatchStash {
-    EpochBatchStash(Some(
-        EPOCH_BATCH_TLS.with(|cell| std::mem::take(&mut *cell.borrow_mut())),
-    ))
+    EpochBatchStash(Some(EPOCH_BATCH_TLS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))))
 }
 
 impl Drop for EpochBatchStash {
@@ -111,10 +109,7 @@ impl Drop for EpochBatchStash {
         };
         EPOCH_BATCH_TLS.with(|cell| {
             let mut batch = cell.borrow_mut();
-            debug_assert!(
-                batch.is_empty(),
-                "a helped job left its epoch batch unflushed"
-            );
+            debug_assert!(batch.is_empty(), "a helped job left its epoch batch unflushed");
             *batch = saved;
         });
     }
@@ -379,6 +374,7 @@ impl Default for Heap {
     }
 }
 
+
 impl HeapSlot {
     pub fn get(&self) -> &Heap {
         match self.borrowed {
@@ -518,11 +514,7 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
-        debug_assert_eq!(
-            self.gc_phase,
-            GcPhase::Idle,
-            "steal epochs open with GC idle"
-        );
+        debug_assert_eq!(self.gc_phase, GcPhase::Idle, "steal epochs open with GC idle");
         let layout = Layout::new::<GcData<T>>();
         let key = Slab::class_of(layout);
         let me: *const Heap = self;
@@ -620,12 +612,7 @@ impl Heap {
 
     /// [`Self::alloc_unlocked`]; `may_young: false` puts it in the old space
     /// whatever its kind (an interned string, which the intern table names).
-    fn alloc_unlocked_in<T: GcSized, F>(
-        &mut self,
-        data: T,
-        map: F,
-        may_young: bool,
-    ) -> (Object, Gc<T>)
+    fn alloc_unlocked_in<T: GcSized, F>(&mut self, data: T, map: F, may_young: bool) -> (Object, Gc<T>)
     where
         F: Fn(Gc<T>) -> Object,
     {
@@ -639,14 +626,8 @@ impl Heap {
             && self.pretenure_bytes == 0
             && self.gc_phase != GcPhase::Marking
             && (self.finalizer_types.is_empty()
-                || data
-                    .finalizer_type_id()
-                    .is_none_or(|t| !self.has_finalizer(t)));
-        let slot = if young {
-            self.slab.alloc_young(layout)
-        } else {
-            self.slab.alloc(layout)
-        };
+                || data.finalizer_type_id().is_none_or(|t| !self.has_finalizer(t)));
+        let slot = if young { self.slab.alloc_young(layout) } else { self.slab.alloc(layout) };
         let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
         let size = object.size();
         self.alloc_bytes += size;
@@ -796,9 +777,7 @@ impl Heap {
     /// `true` when it marked an object.
     #[inline]
     pub fn cow_share(&self, v: Value) -> bool {
-        if let Some(obj @ (Object::Instance(_) | Object::Array(_))) =
-            self.find_object_by_addr(v.heap_addr())
-        {
+        if let Some(obj @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(v.heap_addr()) {
             obj.set_shared();
             return true;
         }
@@ -822,11 +801,7 @@ impl Heap {
                     return None;
                 }
                 let slots = inst.storage.as_slice()?.to_vec();
-                self.alloc(
-                    ObjInstance::with_slots(inst.type_id, slots),
-                    Object::Instance,
-                )
-                .0
+                self.alloc(ObjInstance::with_slots(inst.type_id, slots), Object::Instance).0
             }
             Object::Array(gc) => {
                 let copy = gc.as_ref().copy();
@@ -835,9 +810,7 @@ impl Heap {
             _ => return None,
         };
         copy.for_each_reference(self, &mut |addr, _| {
-            if let Some(child @ (Object::Instance(_) | Object::Array(_))) =
-                self.find_object_by_addr(addr)
-            {
+            if let Some(child @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(addr) {
                 child.set_shared();
             }
         });
@@ -852,12 +825,7 @@ impl Heap {
         self.deep_copy_in(v, &mut seen, 0)
     }
 
-    fn deep_copy_in(
-        &mut self,
-        v: Value,
-        seen: &mut std::collections::HashMap<u64, Value>,
-        depth: u32,
-    ) -> Value {
+    fn deep_copy_in(&mut self, v: Value, seen: &mut std::collections::HashMap<u64, Value>, depth: u32) -> Value {
         let addr = v.heap_addr();
         if addr == 0 || depth > 10_000 {
             return v;
@@ -871,9 +839,7 @@ impl Heap {
                 if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
                     return v;
                 }
-                let Some(slots) = inst.storage.as_slice() else {
-                    return v;
-                };
+                let Some(slots) = inst.storage.as_slice() else { return v };
                 (Some(inst.type_id), slots.to_vec())
             }
             Some(Object::Array(gc)) => match &gc.as_ref().data {
@@ -893,19 +859,12 @@ impl Heap {
             _ => None,
         };
         for w in &mut slots {
-            if matches!(
-                self.find_object_by_addr(w.heap_addr()),
-                Some(Object::Instance(_) | Object::Array(_))
-            ) {
+            if matches!(self.find_object_by_addr(w.heap_addr()), Some(Object::Instance(_) | Object::Array(_))) {
                 *w = self.deep_copy_in(*w, seen, depth + 1);
             }
         }
         let c = match type_id {
-            Some(t) => Value::from(
-                self.alloc(ObjInstance::with_slots(t, slots), Object::Instance)
-                    .0
-                    .addr(),
-            ),
+            Some(t) => Value::from(self.alloc(ObjInstance::with_slots(t, slots), Object::Instance).0.addr()),
             None => {
                 let mut a = ObjArray::new(slots);
                 if let Some(k) = kind {
@@ -1288,10 +1247,7 @@ impl Heap {
         // What the mark kept, not what a lazy sweep let the program allocate
         // meanwhile: counting those (pretenured objects, mostly) as live
         // would push the next collection out by the growth factor.
-        let survived = self
-            .gc_sweep_start_bytes
-            .saturating_sub(self.gc_sweep_freed)
-            .min(self.alloc_bytes);
+        let survived = self.gc_sweep_start_bytes.saturating_sub(self.gc_sweep_freed).min(self.alloc_bytes);
         self.gc_next_threshold = (survived.saturating_sub(self.young_bytes))
             .saturating_mul(growth)
             .max(GC_NEXT_THRESHOLD)
@@ -1327,13 +1283,7 @@ impl Heap {
     /// open. `check` frees nothing and records the objects instead, which
     /// the next mark must not reach. Returns how many objects it freed.
     /// [`Self::early_freed`] lists the addresses it freed.
-    pub fn free_early(
-        &mut self,
-        v: Value,
-        deep: bool,
-        check: bool,
-        keep: &dyn Fn(u64) -> bool,
-    ) -> usize {
+    pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool) -> usize {
         self.early_freed.clear();
         let Some((found, reaches_drop, _)) = self.early_walk(v, deep, keep) else {
             return 0;
@@ -1361,12 +1311,7 @@ impl Heap {
     /// reaches): `None` when the free would free nothing, or when one of
     /// them has a `drop` that may not run there. Empty when no `drop` is
     /// pending. The VM runs these `drop`s, then calls [`Self::free_early`].
-    pub fn early_drops(
-        &mut self,
-        v: Value,
-        deep: bool,
-        keep: &dyn Fn(u64) -> bool,
-    ) -> Option<Vec<Object>> {
+    pub fn early_drops(&mut self, v: Value, deep: bool, keep: &dyn Fn(u64) -> bool) -> Option<Vec<Object>> {
         if self.finalizer_types.is_empty() {
             return Some(Vec::new());
         }
@@ -1394,12 +1339,7 @@ impl Heap {
     /// it reaches stays behind (shared or kept). `None` when it
     /// frees nothing (a collection is under way, the root is kept or not
     /// freeable). A pending `drop` object is walked like any other.
-    fn early_walk(
-        &mut self,
-        v: Value,
-        deep: bool,
-        keep: &dyn Fn(u64) -> bool,
-    ) -> Option<(Vec<Object>, bool, bool)> {
+    fn early_walk(&mut self, v: Value, deep: bool, keep: &dyn Fn(u64) -> bool) -> Option<(Vec<Object>, bool, bool)> {
         if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
             return None;
         }
@@ -1472,8 +1412,7 @@ impl Heap {
 
     /// Whether `obj` is an object of a type with a `drop`.
     fn finalizer_object(&self, obj: Object) -> bool {
-        !self.finalizer_types.is_empty()
-            && Self::finalizer_type_of(obj).is_some_and(|t| self.has_finalizer(t))
+        !self.finalizer_types.is_empty() && Self::finalizer_type_of(obj).is_some_and(|t| self.has_finalizer(t))
     }
 
     /// Whether `obj` has a `drop` that has not run yet.
@@ -1492,11 +1431,7 @@ impl Heap {
             Object::String(s) => {
                 // Interning hashes a string first; an unhashed one is not interned.
                 let s_ref = s.as_ref();
-                !s_ref.hash_set()
-                    || self
-                        .strings
-                        .find(&s_ref.data, s_ref.hash_code())
-                        .is_none_or(|i| i.as_ptr() != s.as_ptr())
+                !s_ref.hash_set() || self.strings.find(&s_ref.data, s_ref.hash_code()).is_none_or(|i| i.as_ptr() != s.as_ptr())
             }
             Object::Array(_) => true,
             Object::Tuple(t) => !t.as_ref().elements().is_empty(),
@@ -1521,14 +1456,11 @@ impl Heap {
                 for o in self.objects() {
                     o.for_each_reference(self, &mut |a, precise| {
                         if a == addr {
-                            holders
-                                .push(format!("{o}{}", if precise { "" } else { " (imprecise)" }));
+                            holders.push(format!("{o}{}", if precise { "" } else { " (imprecise)" }));
                         }
                     });
                 }
-                eprintln!(
-                    "early free check: {obj} at {addr:#x} was freed while still reachable (root: {root}, held by: {holders:?})"
-                );
+                eprintln!("early free check: {obj} at {addr:#x} was freed while still reachable (root: {root}, held by: {holders:?})");
                 std::process::abort();
             }
         }
@@ -1591,8 +1523,7 @@ impl Heap {
     #[inline]
     pub fn should_collect_young(&self) -> bool {
         self.nursery
-            && (cfg!(feature = "gc-stress")
-                || self.slab.young_chunks_in_use() >= self.nursery_chunks)
+            && (cfg!(feature = "gc-stress") || self.slab.young_chunks_in_use() >= self.nursery_chunks)
     }
 
     /// A minor collection that could not move promoted the nursery in
@@ -1615,8 +1546,7 @@ impl Heap {
         }
         if survivors * 2 > objects {
             self.pretenure_streak = (self.pretenure_streak + 1).min(6);
-            self.pretenure_bytes =
-                (self.nursery_chunks * super::slab::CHUNK_BYTES) << (self.pretenure_streak - 1);
+            self.pretenure_bytes = (self.nursery_chunks * super::slab::CHUNK_BYTES) << (self.pretenure_streak - 1);
         } else {
             self.pretenure_streak = 0;
         }
@@ -1989,13 +1919,7 @@ impl Heap {
             .map(|&(used, live_slots, per)| used - live_slots.div_ceil(per.max(1)).min(used))
             .sum();
         let chunk = mapped.checked_div(total_chunks).unwrap_or(0);
-        let pct = |a: usize, b: usize| {
-            if b == 0 {
-                0.0
-            } else {
-                100.0 * a as f64 / b as f64
-            }
-        };
+        let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
         format!(
             "gc-stats: rss={}KiB mapped={}KiB released={}KiB chunks={} live={} ({}KiB, {:.1}% of mapped) | \
              reclaim unmap-empty={}KiB compact={}KiB | \
@@ -2137,8 +2061,7 @@ impl Heap {
         let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) else {
             return;
         };
-        gc.as_mut()
-            .overwrite_prefix(values.iter().map(|&v| Value::from(v)));
+        gc.as_mut().overwrite_prefix(values.iter().map(|&v| Value::from(v)));
     }
 
     /// Write `bytes` back into the array at `addr`, one byte per element
@@ -2390,9 +2313,7 @@ impl Object {
     fn mark_member(heap: &Heap, member: &Member, grey_objects: &mut Vec<Self>) {
         match member {
             // A dead object may still name a slot an early free gave back.
-            Member::Object(o) if heap.freed_early => {
-                heap.mark_value(Value::from(o.addr()), grey_objects)
-            }
+            Member::Object(o) if heap.freed_early => heap.mark_value(Value::from(o.addr()), grey_objects),
             Member::Object(o) => o.mark(grey_objects),
             Member::Value(v) => heap.mark_value(*v, grey_objects),
         }
@@ -2425,12 +2346,7 @@ impl Object {
                     for v in a.as_ref().words().unwrap_or_default() {
                         #[cfg(feature = "gc-stress")]
                         if pointers {
-                            heap.verify_kinded_word(
-                                "a pointer-kind array",
-                                0,
-                                common::WORD_POINTER,
-                                *v,
-                            );
+                            heap.verify_kinded_word("a pointer-kind array", 0, common::WORD_POINTER, *v);
                         }
                         // Pointer kind: `0` or an object, no classification.
                         if (pointers && v.heap_addr() != 0) || (!pointers && heap.may_be_ref(*v)) {
@@ -2539,10 +2455,7 @@ impl Object {
                 let a = a.as_ref();
                 if a.may_hold_refs() {
                     let precise = a.elem_kind() == common::WORD_POINTER;
-                    a.words()
-                        .unwrap_or_default()
-                        .iter()
-                        .for_each(|v| word(*v, precise, visit));
+                    a.words().unwrap_or_default().iter().for_each(|v| word(*v, precise, visit));
                 }
             }
             Self::Coroutine(c) => {
@@ -2571,11 +2484,7 @@ impl Object {
                 for v in f.captures.iter().chain(f.captured_args.iter()) {
                     word(*v, false, visit);
                 }
-                f.dicts
-                    .iter()
-                    .flatten()
-                    .flatten()
-                    .for_each(|m| member(m, visit));
+                f.dicts.iter().flatten().flatten().for_each(|m| member(m, visit));
             }
             Self::String(_)
             | Self::Library(_)
@@ -2593,16 +2502,12 @@ impl Object {
     #[inline]
     pub(crate) fn generation(&self) -> u8 {
         // SAFETY: every kind shares the `repr(C)` header at the slot start.
-        unsafe { &*(self.addr() as *const GcHeader) }
-            .generation
-            .get()
+        unsafe { &*(self.addr() as *const GcHeader) }.generation.get()
     }
 
     #[inline]
     pub(crate) fn set_generation(&self, bits: u8) {
-        unsafe { &*(self.addr() as *const GcHeader) }
-            .generation
-            .set(bits);
+        unsafe { &*(self.addr() as *const GcHeader) }.generation.set(bits);
     }
 
     /// Copy-on-write: whether a second place may name this object.
@@ -2614,9 +2519,7 @@ impl Object {
 
     #[inline]
     pub(crate) fn set_shared(&self) {
-        unsafe { &*(self.addr() as *const GcHeader) }
-            .shared
-            .set(true);
+        unsafe { &*(self.addr() as *const GcHeader) }.shared.set(true);
     }
 
     #[must_use]
@@ -2894,6 +2797,7 @@ impl Default for ObjInstance {
 }
 
 impl ObjInstance {
+
     #[must_use]
     pub fn with_type_id(type_id: u32) -> Self {
         Self::with_type_id_and_fields(type_id, 0)
@@ -2942,10 +2846,9 @@ impl ObjInstance {
 
     pub fn set_slot(&mut self, index: usize, value: Value) {
         if let Some(slots) = self.storage.as_mut_slice()
-            && let Some(slot) = slots.get_mut(index)
-        {
-            *slot = value;
-        }
+            && let Some(slot) = slots.get_mut(index) {
+                *slot = value;
+            }
     }
 
     pub fn slot_len(&self) -> Option<usize> {
@@ -3031,7 +2934,8 @@ impl GcSized for ObjInstance {
 
     fn size(&self) -> usize {
         // `Table` / inline slots live in the object; only a spill `Vec` is extra.
-        std::mem::size_of::<Self>() + self.storage.spill_capacity() * std::mem::size_of::<Value>()
+        std::mem::size_of::<Self>()
+            + self.storage.spill_capacity() * std::mem::size_of::<Value>()
     }
 }
 
@@ -3383,11 +3287,7 @@ enum ArrayData {
 #[inline(always)]
 fn byte_of(v: Value) -> Option<u8> {
     let raw = v.bits();
-    if raw <= u8::MAX as u64 {
-        Some(raw as u8)
-    } else {
-        None
-    }
+    if raw <= u8::MAX as u64 { Some(raw as u8) } else { None }
 }
 
 #[inline(always)]
@@ -4561,9 +4461,7 @@ pub(super) fn relog_all(slab: &super::slab::Slab) {
         // SAFETY: `next_slot` yields slot starts in mapped chunks.
         let header = unsafe { &*(addr as *const GcHeader) };
         if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
-            header
-                .generation
-                .set(header.generation.get() | GEN_UNLOGGED);
+            header.generation.set(header.generation.get() | GEN_UNLOGGED);
         }
     }
 }
@@ -4581,9 +4479,7 @@ pub(super) fn relog_quiet(slab: &super::slab::Slab) {
             // object, and an extra log bit only costs one more record.
             let header = unsafe { &*(addr as *const GcHeader) };
             if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
-                header
-                    .generation
-                    .set(header.generation.get() | GEN_UNLOGGED);
+                header.generation.set(header.generation.get() | GEN_UNLOGGED);
             }
             false
         });
@@ -4592,22 +4488,14 @@ pub(super) fn relog_quiet(slab: &super::slab::Slab) {
 
 /// A heap on this thread started (`true`) or stopped using nursery chunks.
 pub(super) fn note_young_heap(on: bool) {
-    YOUNG_HEAPS.with(|n| {
-        n.set(if on {
-            n.get() + 1
-        } else {
-            n.get().saturating_sub(1)
-        })
-    });
+    YOUNG_HEAPS.with(|n| n.set(if on { n.get() + 1 } else { n.get().saturating_sub(1) }));
 }
 
 /// Slow path of the write barrier in [`GcData::as_mut`].
 #[cold]
 #[inline(never)]
 fn remember_written(header: &GcHeader) {
-    header
-        .generation
-        .set(header.generation.get() & !GEN_UNLOGGED);
+    header.generation.set(header.generation.get() & !GEN_UNLOGGED);
     let addr = header as *const GcHeader as u64;
     if YOUNG_HEAPS.with(Cell::get) == 0 {
         QUIET.with_borrow_mut(|q| {
@@ -5006,9 +4894,7 @@ impl<V> Store<V> {
             let entry = unsafe { entry_ptr.as_ref() };
             match entry {
                 Entry::Free => return None,
-                Entry::Live(entry)
-                    if coil_simd::bytes::eq(entry.key.as_ref().data.as_bytes(), s.as_bytes()) =>
-                {
+                Entry::Live(entry) if coil_simd::bytes::eq(entry.key.as_ref().data.as_bytes(), s.as_bytes()) => {
                     return Some(entry.key);
                 }
                 _ => {}
@@ -5141,11 +5027,7 @@ fn resident_kib() -> usize {
     #[cfg(target_os = "linux")]
     {
         let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
-        let pages: usize = statm
-            .split_whitespace()
-            .nth(1)
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(0);
+        let pages: usize = statm.split_whitespace().nth(1).and_then(|p| p.parse().ok()).unwrap_or(0);
         pages * 4
     }
     #[cfg(not(target_os = "linux"))]
@@ -5153,6 +5035,7 @@ fn resident_kib() -> usize {
         0
     }
 }
+
 
 #[path = "compact.rs"]
 mod compact;
@@ -5229,8 +5112,10 @@ mod tests {
         let mut heap = Heap::default();
 
         // Inner enum: empty payload.
-        let (inner_obj, _inner_ref) =
-            heap.alloc(ObjEnum::new(1, EnumPayload::empty()), Object::Enum);
+        let (inner_obj, _inner_ref) = heap.alloc(
+            ObjEnum::new(1, EnumPayload::empty()),
+            Object::Enum,
+        );
         let inner_addr = inner_obj.addr();
 
         // Outer enum: payload contains the inner enum as a
@@ -5270,7 +5155,13 @@ mod tests {
     fn enum_payload_inlines_upto_cap_and_spills_above() {
         assert!(EnumPayload::empty().is_inline());
         assert!(EnumPayload::one(Value::from(1i64)).is_inline());
-        assert!(EnumPayload::two(Value::from(1i64), Value::from(2i64),).is_inline());
+        assert!(
+            EnumPayload::two(
+                Value::from(1i64),
+                Value::from(2i64),
+            )
+            .is_inline()
+        );
         let four: Vec<Value> = (0..ENUM_INLINE_ARITY as i64).map(Value::from).collect();
         assert!(EnumPayload::from_vec(four).is_inline());
         let spilled =
@@ -5294,7 +5185,10 @@ mod tests {
         assert!(!spilled.slots_are_inline());
         assert_eq!(spilled.slot_len(), Some(INSTANCE_INLINE_FIELDS + 1));
 
-        let from_vec = ObjInstance::with_slots(2, vec![Value::from(1i64), Value::from(2i64)]);
+        let from_vec = ObjInstance::with_slots(
+            2,
+            vec![Value::from(1i64), Value::from(2i64)],
+        );
         assert!(from_vec.slots_are_inline());
         assert_eq!(from_vec.slot(1).map(|v| v.as_int()), Some(2));
     }
@@ -5304,7 +5198,10 @@ mod tests {
         let mut heap = Heap::default();
         let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
         let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
-        let inst = ObjInstance::with_slots(3, vec![Value::from(a.addr()), Value::from(b.addr())]);
+        let inst = ObjInstance::with_slots(
+            3,
+            vec![Value::from(a.addr()), Value::from(b.addr())],
+        );
         assert!(inst.slots_are_inline());
         let (obj, _) = heap.alloc(inst, Object::Instance);
 
@@ -5352,10 +5249,7 @@ mod tests {
         unsafe { heap.sweep() };
         let live = live_object_addrs(&heap);
         assert!(live.contains(&kept.addr()));
-        assert!(
-            !live.contains(&lookalike.addr()),
-            "a scalar field is not a root"
-        );
+        assert!(!live.contains(&lookalike.addr()), "a scalar field is not a root");
     }
 
     /// Payload / element word kinds from the construction site: a scalar
@@ -5371,10 +5265,7 @@ mod tests {
             ObjEnum::new(1, EnumPayload::from_slice(&words).with_kinds(kinds)),
             Object::Enum,
         );
-        let (tup, _) = heap.alloc(
-            ObjTuple::from_slice(&words).with_kinds(kinds),
-            Object::Tuple,
-        );
+        let (tup, _) = heap.alloc(ObjTuple::from_slice(&words).with_kinds(kinds), Object::Tuple);
 
         for obj in [en, tup] {
             let mut seen = Vec::new();
@@ -5393,10 +5284,7 @@ mod tests {
         unsafe { heap.sweep() };
         let live = live_object_addrs(&heap);
         assert!(live.contains(&kept.addr()));
-        assert!(
-            !live.contains(&lookalike.addr()),
-            "a scalar payload word is not a root"
-        );
+        assert!(!live.contains(&lookalike.addr()), "a scalar payload word is not a root");
     }
 
     #[test]
@@ -5405,11 +5293,7 @@ mod tests {
         let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
         let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
         let (c, _) = heap.alloc(ObjString::from("c"), Object::String);
-        let mut words = vec![
-            Value::from(a.addr()),
-            Value::from(b.addr()),
-            Value::from(c.addr()),
-        ];
+        let mut words = vec![Value::from(a.addr()), Value::from(b.addr()), Value::from(c.addr())];
         words.resize(INSTANCE_INLINE_FIELDS + 1, Value::from(7i64));
         let inst = ObjInstance::with_slots(3, words);
         assert!(!inst.slots_are_inline());
@@ -5436,11 +5320,7 @@ mod tests {
         let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
         let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
         let (c, _) = heap.alloc(ObjString::from("c"), Object::String);
-        let mut words = vec![
-            Value::from(a.addr()),
-            Value::from(b.addr()),
-            Value::from(c.addr()),
-        ];
+        let mut words = vec![Value::from(a.addr()), Value::from(b.addr()), Value::from(c.addr())];
         words.resize(ENUM_INLINE_ARITY + 1, Value::from(9i64));
         let payload = EnumPayload::from_vec(words);
         assert!(!payload.is_inline());
@@ -5580,10 +5460,7 @@ mod tests {
         }
         heap.trace(&keep);
         unsafe { heap.sweep() };
-        assert_eq!(
-            heap.gc_next_threshold,
-            heap.size() * GC_GROWTH_FACTOR_SURVIVING
-        );
+        assert_eq!(heap.gc_next_threshold, heap.size() * GC_GROWTH_FACTOR_SURVIVING);
 
         let live = heap.size();
         while heap.size() < live * 4 {
@@ -5591,10 +5468,7 @@ mod tests {
         }
         heap.trace(&keep);
         unsafe { heap.sweep() };
-        assert_eq!(
-            heap.gc_next_threshold,
-            (heap.size() * GC_GROWTH_FACTOR).max(GC_NEXT_THRESHOLD)
-        );
+        assert_eq!(heap.gc_next_threshold, (heap.size() * GC_GROWTH_FACTOR).max(GC_NEXT_THRESHOLD));
     }
 
     /// Immortal arity-0 enums are seeded as GC roots and must not be swept,
@@ -5697,34 +5571,21 @@ mod tests {
             addrs.push(obj.addr());
         }
         let mapped = heap.slab.mapped_bytes();
-        assert!(
-            mapped >= 4 * 64 * 1024,
-            "test needs several chunks: {mapped}"
-        );
+        assert!(mapped >= 4 * 64 * 1024, "test needs several chunks: {mapped}");
         // Sweep everything, then idle: the first window still saw the
         // allocation phase drain the list, the second finds it idle.
         for _ in 0..2 * super::super::slab::RELEASE_WINDOW_FOR_TEST {
             unsafe { heap.sweep() };
         }
-        assert!(
-            heap.slab.released_bytes() > 0,
-            "idle chunks must be released"
-        );
+        assert!(heap.slab.released_bytes() > 0, "idle chunks must be released");
         for &a in addrs.iter().step_by(997) {
             assert!(heap.slot_mapped_for_test(a), "released chunk stays mapped");
-            assert!(
-                heap.find_object_by_addr(a).is_none(),
-                "released slot reads poisoned"
-            );
+            assert!(heap.find_object_by_addr(a).is_none(), "released slot reads poisoned");
         }
         for i in 0..20_000 {
             let _ = heap.alloc(ObjString::from(format!("t{i}").as_str()), Object::String);
         }
-        assert_eq!(
-            heap.slab.mapped_bytes(),
-            mapped,
-            "reuse released chunks, map nothing new"
-        );
+        assert_eq!(heap.slab.mapped_bytes(), mapped, "reuse released chunks, map nothing new");
         assert_eq!(heap.slab.released_bytes(), 0);
     }
 
@@ -5757,19 +5618,13 @@ mod tests {
             unsafe { heap.sweep() };
         };
         root(&mut heap);
-        assert!(
-            !gc.as_ref().may_hold_refs(),
-            "no element looked like a reference"
-        );
+        assert!(!gc.as_ref().may_hold_refs(), "no element looked like a reference");
         let (s, _) = heap.alloc(ObjString::from("kept"), Object::String);
         let mut gc = gc;
         gc.as_mut().set(3, Value::from(s.addr()));
         assert!(gc.as_ref().may_hold_refs(), "a write reopens the scan");
         root(&mut heap);
-        assert!(
-            heap.find_object_by_addr(s.addr()).is_some(),
-            "stored reference survives"
-        );
+        assert!(heap.find_object_by_addr(s.addr()).is_some(), "stored reference survives");
         assert!(gc.as_ref().may_hold_refs());
     }
 
@@ -5788,18 +5643,11 @@ mod tests {
         gc.as_mut().set_elem_kind(common::WORD_POINTER);
         let mut seen = Vec::new();
         arr.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
-        assert_eq!(
-            seen,
-            vec![(s.addr(), true)],
-            "`0` is a hole, not a reference"
-        );
+        assert_eq!(seen, vec![(s.addr(), true)], "`0` is a hole, not a reference");
         heap.begin_mark(&[arr.addr()]);
         while !heap.mark_quantum(usize::MAX) {}
         unsafe { heap.sweep() };
-        assert!(
-            heap.find_object_by_addr(s.addr()).is_some(),
-            "element survives"
-        );
+        assert!(heap.find_object_by_addr(s.addr()).is_some(), "element survives");
     }
 
     /// Array elements and enum payloads are raw words (ambiguous).
@@ -5811,17 +5659,10 @@ mod tests {
             ObjArray::new(vec![Value::from(s.addr()), Value::from(7i64)]),
             Object::Array,
         );
-        let (en, _) = heap.alloc(
-            ObjEnum::new(0, EnumPayload::one(Value::from(s.addr()))),
-            Object::Enum,
-        );
+        let (en, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(s.addr()))), Object::Enum);
         let mut seen = Vec::new();
         arr.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
-        assert_eq!(
-            seen,
-            vec![(s.addr(), false)],
-            "immediate 7 is not a reference"
-        );
+        assert_eq!(seen, vec![(s.addr(), false)], "immediate 7 is not a reference");
         seen.clear();
         en.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
         assert_eq!(seen, vec![(s.addr(), false)]);
@@ -5831,7 +5672,10 @@ mod tests {
     fn cstr_from_addr_string_hit_and_type_miss() {
         let mut heap = Heap::default();
         let (s_obj, _) = heap.alloc(ObjString::from("coil"), Object::String);
-        let (arr_obj, _) = heap.alloc(ObjArray::new(vec![Value::from(1i64)]), Object::Array);
+        let (arr_obj, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(1i64)]),
+            Object::Array,
+        );
 
         let ptr = heap
             .cstr_from_addr(s_obj.addr())
@@ -5947,10 +5791,7 @@ mod tests {
     }
 
     fn weak_to(heap: &mut Heap, target: Object) -> Object {
-        let weak = ObjWeak {
-            target: Cell::new(Value::from(target.addr())),
-            cleared: Cell::new(false),
-        };
+        let weak = ObjWeak { target: Cell::new(Value::from(target.addr())), cleared: Cell::new(false) };
         heap.alloc(weak, Object::Weak).0
     }
 
@@ -5985,51 +5826,30 @@ mod tests {
         heap.register_finalizer_type(7);
         let keep = |_: u64| false;
         let (plain, _) = heap.alloc(ObjInstance::with_type_id_and_fields(8, 1), Object::Instance);
-        assert_eq!(
-            heap.free_early(Value::from(plain.addr()), false, false, &keep),
-            1
-        );
+        assert_eq!(heap.free_early(Value::from(plain.addr()), false, false, &keep), 1);
         assert!(heap.find_object_by_addr(plain.addr()).is_none());
 
-        let (tagged, tagged_gc) = heap.alloc(
-            ObjEnum::new(1, EnumPayload::one(Value::from(1i64))),
-            Object::Enum,
-        );
+        let (tagged, tagged_gc) = heap.alloc(ObjEnum::new(1, EnumPayload::one(Value::from(1i64))), Object::Enum);
         tagged_gc.payload_mut().type_id = 9;
-        assert_eq!(
-            heap.free_early(Value::from(tagged.addr()), true, false, &keep),
-            1
-        );
+        assert_eq!(heap.free_early(Value::from(tagged.addr()), true, false, &keep), 1);
 
         let (dropped, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
-        assert_eq!(
-            heap.free_early(Value::from(dropped.addr()), true, false, &keep),
-            0
-        );
+        assert_eq!(heap.free_early(Value::from(dropped.addr()), true, false, &keep), 0);
         assert!(heap.find_object_by_addr(dropped.addr()).is_some());
 
         // A parent reaching a `drop` object keeps both: the `drop` runs
         // later and may read what the walk would free.
-        let (child, child_gc) = heap.alloc(
-            ObjEnum::new(0, EnumPayload::one(Value::from(2i64))),
-            Object::Enum,
-        );
+        let (child, child_gc) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(2i64))), Object::Enum);
         child_gc.payload_mut().type_id = 7;
         heap.note_enum_type(child, 7);
         let mut kinds: Vec<Box<[u8]>> = vec![Box::new([]); common::type_kinds_index(10) + 1];
         kinds[common::type_kinds_index(10)] = Box::new([common::WORD_POINTER]);
         heap.set_class_word_kinds(std::sync::Arc::new(kinds));
-        let (parent, _) = heap.alloc(
-            ObjInstance::with_slots(10, vec![Value::from(child.addr())]),
-            Object::Instance,
-        );
+        let (parent, _) = heap.alloc(ObjInstance::with_slots(10, vec![Value::from(child.addr())]), Object::Instance);
         let mut seen = Vec::new();
         parent.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
         assert_eq!(seen, vec![(child.addr(), true)]);
-        assert_eq!(
-            heap.free_early(Value::from(parent.addr()), true, false, &keep),
-            0
-        );
+        assert_eq!(heap.free_early(Value::from(parent.addr()), true, false, &keep), 0);
         for obj in [parent, child] {
             assert!(heap.find_object_by_addr(obj.addr()).is_some());
         }
@@ -6043,35 +5863,16 @@ mod tests {
         heap.register_finalizer_type(7);
         let keep = |_: u64| false;
         let (late, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
-        assert!(
-            heap.early_drops(Value::from(late.addr()), false, &keep)
-                .is_none(),
-            "not an early drop type"
-        );
+        assert!(heap.early_drops(Value::from(late.addr()), false, &keep).is_none(), "not an early drop type");
         heap.register_early_drop_type(7);
-        let drops = heap
-            .early_drops(Value::from(late.addr()), false, &keep)
-            .expect("listed");
-        assert_eq!(
-            drops.iter().map(|o| o.addr()).collect::<Vec<_>>(),
-            vec![late.addr()]
-        );
-        assert_eq!(
-            heap.free_early(Value::from(late.addr()), false, false, &keep),
-            0,
-            "its drop has not run"
-        );
+        let drops = heap.early_drops(Value::from(late.addr()), false, &keep).expect("listed");
+        assert_eq!(drops.iter().map(|o| o.addr()).collect::<Vec<_>>(), vec![late.addr()]);
+        assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 0, "its drop has not run");
         if let Object::Instance(gc) = late {
             gc.payload_mut().finalized = true;
         }
-        assert!(
-            heap.early_drops(Value::from(late.addr()), false, &keep)
-                .is_some_and(|d| d.is_empty())
-        );
-        assert_eq!(
-            heap.free_early(Value::from(late.addr()), false, false, &keep),
-            1
-        );
+        assert!(heap.early_drops(Value::from(late.addr()), false, &keep).is_some_and(|d| d.is_empty()));
+        assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 1);
     }
 
     /// Objects of a `drop` type are listed from their allocation (or from
@@ -6083,38 +5884,21 @@ mod tests {
         let (_other, _) = heap.alloc(ObjInstance::with_type_id_and_fields(8, 1), Object::Instance);
         heap.register_finalizer_type(7);
         let (late, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
-        let (tagged, tagged_gc) = heap.alloc(
-            ObjEnum::new(1, EnumPayload::one(Value::from(1i64))),
-            Object::Enum,
-        );
+        let (tagged, tagged_gc) = heap.alloc(ObjEnum::new(1, EnumPayload::one(Value::from(1i64))), Object::Enum);
         tagged_gc.payload_mut().type_id = 7;
         heap.note_enum_type(tagged, 7);
         heap.begin_mark(&[late.addr()]);
         while !heap.mark_quantum(usize::MAX) {}
-        let mut got: Vec<u64> = heap
-            .unmarked_finalizable()
-            .iter()
-            .map(|o| o.addr())
-            .collect();
+        let mut got: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
         got.sort_unstable();
         let mut want = vec![early.addr(), tagged.addr()];
         want.sort_unstable();
         assert_eq!(got, want);
-        let Object::Instance(gc) = early else {
-            unreachable!()
-        };
+        let Object::Instance(gc) = early else { unreachable!() };
         gc.payload_mut().finalized = true;
-        let left: Vec<u64> = heap
-            .unmarked_finalizable()
-            .iter()
-            .map(|o| o.addr())
-            .collect();
+        let left: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
         assert_eq!(left, vec![tagged.addr()]);
-        assert_eq!(
-            heap.finalizable.len(),
-            2,
-            "finalized entries leave the list"
-        );
+        assert_eq!(heap.finalizable.len(), 2, "finalized entries leave the list");
     }
 
     #[test]
@@ -6154,23 +5938,15 @@ mod tests {
     fn object_allocated_behind_the_sweep_is_traced_next_cycles() {
         let mut heap = Heap::default();
         // Garbage in `P`'s size class, swept first so its slot is reused.
-        let (garbage, _) = heap.alloc(
-            ObjInstance::with_slots(1, vec![Value::from(0i64)]),
-            Object::Instance,
-        );
+        let (garbage, _) = heap.alloc(ObjInstance::with_slots(1, vec![Value::from(0i64)]), Object::Instance);
         heap.mark_from_roots(&[]);
         heap.begin_sweep();
         while heap.find_object_by_addr(garbage.addr()).is_some() {
-            assert!(
-                !heap.sweep_quantum(1),
-                "sweep ended before freeing the garbage"
-            );
+            assert!(!heap.sweep_quantum(1), "sweep ended before freeing the garbage");
         }
         // Allocated mid-sweep into the freed slot, behind the cursor.
-        let (parent, mut parent_gc) = heap.alloc(
-            ObjInstance::with_slots(1, vec![Value::from(0i64)]),
-            Object::Instance,
-        );
+        let (parent, mut parent_gc) =
+            heap.alloc(ObjInstance::with_slots(1, vec![Value::from(0i64)]), Object::Instance);
         assert_eq!(parent.addr(), garbage.addr());
         heap.finish_sweep();
 
@@ -6262,11 +6038,7 @@ mod tests {
         assert!(Gc::ptr_eq(heap.intern_ref(runtime), lit));
 
         let fresh = heap.alloc_string("only-runtime".to_owned());
-        assert!(
-            heap.strings
-                .find("only-runtime", ObjString::hash("only-runtime"))
-                .is_none()
-        );
+        assert!(heap.strings.find("only-runtime", ObjString::hash("only-runtime")).is_none());
         assert!(Gc::ptr_eq(heap.intern_ref(fresh), fresh));
     }
 
@@ -6280,18 +6052,12 @@ mod tests {
         heap.alloc_bytes = GC_NEXT_THRESHOLD + 1;
         assert!(heap.should_collect());
         heap.enter_epoch_stw(&lock);
-        assert!(
-            !heap.should_collect(),
-            "past threshold, under epoch ceiling"
-        );
+        assert!(!heap.should_collect(), "past threshold, under epoch ceiling");
         heap.alloc_bytes = heap.epoch_gc_ceiling + 1;
         assert!(heap.should_collect(), "past the epoch ceiling");
         heap.exit_epoch_stw();
         heap.alloc_bytes = GC_NEXT_THRESHOLD + 1;
-        assert!(
-            heap.should_collect(),
-            "normal threshold again after the epoch"
-        );
+        assert!(heap.should_collect(), "normal threshold again after the epoch");
         heap.alloc_bytes = 0;
     }
 
@@ -6539,10 +6305,7 @@ mod tests {
         let mut a = ObjArray::new(words(&[0]));
         a.set_elem_kind(common::WORD_POINTER);
         assert_eq!(a.copy().elem_kind(), common::WORD_POINTER);
-        assert_eq!(
-            ObjArray::new(words(&[0])).copy().elem_kind(),
-            common::WORD_UNKNOWN
-        );
+        assert_eq!(ObjArray::new(words(&[0])).copy().elem_kind(), common::WORD_UNKNOWN);
     }
 
     #[test]

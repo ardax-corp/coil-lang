@@ -13,20 +13,15 @@ use std::sync::{Arc, Mutex};
 use common::Value;
 
 use crate::memory::{Heap, Object};
-use crate::thread::{ThreadProgram, is_immediate_value};
+use crate::thread::{is_immediate_value, ThreadProgram};
 
 /// GC frame maps are mandatory for shared-heap steal: S2b stack maps or
 /// precise frame maps (archive minor 21+). A program with neither (pre-14,
 /// or empty) spawns isolate.
 pub fn program_has_real_maps(program: &ThreadProgram) -> bool {
-    program
-        .stack_maps
-        .iter()
-        .any(|m| !m.frame_slots.is_empty() || m.safepoints.iter().any(|s| !s.slots.is_empty()))
-        || program
-            .precise_frames
-            .iter()
-            .any(|m| m.any_pc.is_some() || !m.at_pc.is_empty())
+    program.stack_maps.iter().any(|m| {
+        !m.frame_slots.is_empty() || m.safepoints.iter().any(|s| !s.slots.is_empty())
+    }) || program.precise_frames.iter().any(|m| m.any_pc.is_some() || !m.at_pc.is_empty())
 }
 
 /// C1 share whitelist: immediates, immortal unit enums, Arc handles already
@@ -127,10 +122,7 @@ mod tests {
                 entry_pc: 0,
                 end_pc: 4,
                 any_pc: None,
-                at_pc: vec![common::SlotMap {
-                    pc: 2,
-                    slots: vec![0],
-                }],
+                at_pc: vec![common::SlotMap { pc: 2, slots: vec![0] }],
                 frame_words: 0,
             }]),
             class_word_kinds: Arc::default(),

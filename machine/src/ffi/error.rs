@@ -2,9 +2,9 @@
 
 use common::{BUILTIN_FFI_ERROR_KIND_VARIANTS, BUILTIN_FFI_ERROR_VARIANT, Value};
 
-use crate::memory::Heap;
 #[cfg(test)]
 use crate::memory::Object;
+use crate::memory::Heap;
 
 use super::signature::FfiError;
 
@@ -35,9 +35,7 @@ impl FfiErrorKindTag {
             | FfiError::EmptyName => Self::InvalidSignature,
             FfiError::Unsupported(_) | FfiError::InteriorNul => Self::Unsupported,
             FfiError::InvalidHandle(_) => Self::InvalidHandle,
-            FfiError::LibraryDenied { .. } | FfiError::IntTrap(_) | FfiError::Panic(_) => {
-                Self::Other
-            }
+            FfiError::LibraryDenied { .. } | FfiError::IntTrap(_) | FfiError::Panic(_) => Self::Other,
         }
     }
 }
@@ -55,7 +53,14 @@ pub fn alloc_ffi_error(heap: &mut Heap, kind: FfiErrorKindTag, message: String) 
     let msg_gc = heap.intern(message);
     let msg_val = Value::from(msg_gc.as_ptr() as *mut u8 as u64);
     // Record payload in declaration order: kind (0), message (1).
-    alloc_enum(heap, 0, crate::EnumPayload::two(kind_val, msg_val))
+    alloc_enum(
+        heap,
+        0,
+        crate::EnumPayload::two(
+            kind_val,
+            msg_val,
+        ),
+    )
 }
 
 /// Allocate `Result::Err(ffi::Error { kind, message })`.

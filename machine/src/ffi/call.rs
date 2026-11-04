@@ -1,6 +1,6 @@
 //! libffi call preparation and invocation.
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 
 use common::Value;
 use libffi::middle::{Arg, Cif, CodePtr, Type};
@@ -62,7 +62,9 @@ fn ffi_type_to_libffi(ty: FfiType, layouts: &[CStructLayout]) -> Result<Type, Ff
         | FfiType::Ptr
         | FfiType::Bytes
         | FfiType::ConstBytes
-        | FfiType::Callback(_) => Ok(Type::pointer()),
+        | FfiType::Callback(_) => {
+            Ok(Type::pointer())
+        }
         FfiType::Void => Ok(Type::void()),
         FfiType::Bool => Ok(Type::u8()),
         FfiType::Int8 => Ok(Type::i8()),
@@ -200,12 +202,7 @@ fn struct_record_slot(layout: &CStructLayout, i: usize) -> usize {
     layout.fields.iter().filter(|(f, _)| f < name).count()
 }
 
-fn instance_field(
-    heap: &mut Heap,
-    addr: u64,
-    layout: &CStructLayout,
-    i: usize,
-) -> Result<Value, FfiError> {
+fn instance_field(heap: &mut Heap, addr: u64, layout: &CStructLayout, i: usize) -> Result<Value, FfiError> {
     let fname = &layout.fields[i].0;
     let obj = heap
         .find_object_by_addr(addr)
@@ -258,7 +255,9 @@ fn write_field_at(
         FfiType::UInt64 => put_bytes(buf, offset, &(val.as_int() as u64).to_ne_bytes()),
         FfiType::Float => put_bytes(buf, offset, &val.as_float().to_ne_bytes()),
         FfiType::Bool => put_bytes(buf, offset, &[if val.as_bool() { 1 } else { 0 }]),
-        FfiType::Ptr | FfiType::Callback(_) => put_bytes(buf, offset, &(val.bits()).to_ne_bytes()),
+        FfiType::Ptr | FfiType::Callback(_) => {
+            put_bytes(buf, offset, &(val.bits()).to_ne_bytes())
+        }
         FfiType::String => {
             let p = intern_string_arg(heap, val)? as usize as u64;
             put_bytes(buf, offset, &p.to_ne_bytes())
@@ -372,10 +371,7 @@ fn unpack_struct(
     use crate::memory::ObjInstance;
     // A record: a slotted object, its slots the fields sorted by name.
     let slots = vec![Value::default(); layout.fields.len()];
-    let (obj, mut gc) = heap.alloc(
-        ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots),
-        Object::Instance,
-    );
+    let (obj, mut gc) = heap.alloc(ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots), Object::Instance);
     for (i, (_, fty)) in layout.fields.iter().enumerate() {
         let off = *layout
             .offsets
@@ -454,14 +450,9 @@ fn byte_arg_from_value(
             }
             (gc.as_ref().to_byte_vec(), writable)
         }
-        Some(Object::Tuple(gc)) => (
-            gc.as_ref()
-                .elements()
-                .iter()
-                .map(|v| v.as_int() as u8)
-                .collect(),
-            false,
-        ),
+        Some(Object::Tuple(gc)) => {
+            (gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(), false)
+        }
         _ => {
             return Err(FfiError::Unsupported(if writable {
                 "Bytes argument must be a Vec<byte>".into()
@@ -591,7 +582,10 @@ pub fn invoke_via_libffi(
 
     fn value_is_stream(heap: &Heap, value: &Value) -> bool {
         let v = crate::io::peel_one_boxed(heap, *value);
-        matches!(heap.find_object_by_addr(v.bits()), Some(Object::Stream(_)))
+        matches!(
+            heap.find_object_by_addr(v.bits()),
+            Some(Object::Stream(_))
+        )
     }
 
     fn int_from_value(heap: &Heap, value: &Value) -> Result<i64, FfiError> {
@@ -806,9 +800,9 @@ pub fn invoke_via_libffi(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::Member;
     use crate::ffi::FfiSignatureBuilder;
     use crate::ffi::library_candidates;
-    use crate::memory::Member;
 
     fn open_libc_ungated() -> Option<std::sync::Arc<libloading::Library>> {
         for c in library_candidates("c", None, &[]) {
@@ -897,11 +891,7 @@ mod tests {
         prepared.addr = CodePtr::from_ptr(sum_then_fill as *mut c_void);
         let mut heap = Heap::default();
         let (obj, gc) = heap.alloc(
-            ObjArray::new(vec![
-                Value::from(1_i64),
-                Value::from(2_i64),
-                Value::from(255_i64),
-            ]),
+            ObjArray::new(vec![Value::from(1_i64), Value::from(2_i64), Value::from(255_i64)]),
             Object::Array,
         );
         let args = [Value::from(obj.addr()), Value::from(3_i64)];
@@ -951,14 +941,7 @@ mod tests {
         prepared.addr = CodePtr::from_ptr(sum_const_bytes as *mut c_void);
         let mut ctx = InvokeContext::new(heap, &[]);
         let mut closures = Vec::new();
-        invoke_via_libffi(
-            &prepared,
-            &sig,
-            &[arg, Value::from(n)],
-            None,
-            &mut ctx,
-            &mut closures,
-        )
+        invoke_via_libffi(&prepared, &sig, &[arg, Value::from(n)], None, &mut ctx, &mut closures)
     }
 
     #[test]
@@ -966,9 +949,7 @@ mod tests {
         use crate::memory::ObjString;
         let mut heap = Heap::default();
         let (obj, gc) = heap.alloc(ObjString::from("AB\u{e9}"), Object::String);
-        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 4)
-            .unwrap()
-            .unwrap();
+        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 4).unwrap().unwrap();
         assert_eq!(ret.as_int(), 65 + 66 + 0xc3 + 0xa9);
         let data = gc.as_ref().data.as_bytes().as_ptr() as usize;
         assert_eq!(CONST_BYTES_SEEN.get(), data);
@@ -979,16 +960,10 @@ mod tests {
         use crate::memory::ObjArray;
         let mut heap = Heap::default();
         let (obj, gc) = heap.alloc(
-            ObjArray::new(vec![
-                Value::from(1_i64),
-                Value::from(2_i64),
-                Value::from(255_i64),
-            ]),
+            ObjArray::new(vec![Value::from(1_i64), Value::from(2_i64), Value::from(255_i64)]),
             Object::Array,
         );
-        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 3)
-            .unwrap()
-            .unwrap();
+        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 3).unwrap().unwrap();
         assert_eq!(ret.as_int(), 258);
         let after: Vec<i64> = gc.as_ref().iter().map(|v| v.as_int()).collect();
         assert_eq!(after, vec![1, 2, 255]);
@@ -1073,9 +1048,7 @@ mod tests {
         use crate::memory::ObjString;
         let mut heap = Heap::default();
         let (obj, _gc) = heap.alloc(ObjString::from(""), Object::String);
-        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 0)
-            .unwrap()
-            .unwrap();
+        let ret = const_bytes_call(&mut heap, Value::from(obj.addr()), 0).unwrap().unwrap();
         assert_eq!(ret.as_int(), 0);
         assert_ne!(CONST_BYTES_SEEN.get(), 0);
     }

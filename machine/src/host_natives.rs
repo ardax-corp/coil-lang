@@ -9,13 +9,13 @@ use common::Value;
 
 use crate::math_libm::{MATH_LIBM_M1_REMOVED, MATH_LIBM_REMOVED};
 use crate::{
-    CLOCK_WIRING, ENV_WIRING, FS_WIRING, FfiError, FfiSignature, FfiType, HostClosureFn, HostOp,
-    NativeFn, PACKED_DOT, PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH,
-    packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
+    packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith, FfiError,
+    FfiSignature, FfiType, HostClosureFn, HostOp, NativeFn, CLOCK_WIRING, ENV_WIRING, FS_WIRING,
+    PACKED_DOT, PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH,
 };
 
-use crate::GC_WIRING;
 use crate::vec_ops::VEC_WIRING;
+use crate::GC_WIRING;
 
 /// Removed virtual-time HostInvoke names/arities (COI-257). Same 16 slots as
 /// the old `TIME_WIRING` table, after FS and before ENV, so later ids stay put.
@@ -123,54 +123,25 @@ pub fn build_standard_host_natives(
     // Append-only after string_compare: `black_box` (minor 43).
     push_black_box(&mut out, &mut register_id);
     // Append-only after black_box: `io::capture_begin` / `capture_end` (minor 44).
-    push_wiring(
-        &mut out,
-        &mut register_id,
-        crate::io::IO_CAPTURE_WIRING,
-        "io capture",
-    );
+    push_wiring(&mut out, &mut register_id, crate::io::IO_CAPTURE_WIRING, "io capture");
     // Append-only after io capture: `io::tty` (minor 47).
     push_wiring(&mut out, &mut register_id, crate::tty::TTY_WIRING, "io tty");
     // Append-only after io tty: bulk Vec copy / fill (major 6 minor 1).
-    push_wiring(
-        &mut out,
-        &mut register_id,
-        crate::vec_ops::VEC_BULK_WIRING,
-        "vec bulk",
-    );
+    push_wiring(&mut out, &mut register_id, crate::vec_ops::VEC_BULK_WIRING, "vec bulk");
     // Append-only after vec bulk: `from_bytes` taking a dead buffer (major 6 minor 4).
     push_from_bytes_take(&mut out, &mut register_id);
     // Append-only after from_bytes_take: `region` enter / exit (major 6 minor 5).
     push_region(&mut out, &mut register_id);
     // Append-only after region: `symbol::next_id` (major 6 minor 9).
-    push_wiring(
-        &mut out,
-        &mut register_id,
-        crate::symbol::SYMBOL_WIRING,
-        "symbol",
-    );
+    push_wiring(&mut out, &mut register_id, crate::symbol::SYMBOL_WIRING, "symbol");
     // Append-only after symbol: the `process` module (major 6 minor 10).
-    push_wiring(
-        &mut out,
-        &mut register_id,
-        crate::process::PROCESS_WIRING,
-        "process",
-    );
+    push_wiring(&mut out, &mut register_id, crate::process::PROCESS_WIRING, "process");
     // Append-only after process: `coro_close` (major 6 minor 14), run by the VM.
-    push_task_natives(
-        &mut out,
-        &mut register_id,
-        common::CORO_CLOSE_ID..=common::CORO_CLOSE_ID,
-    );
+    push_task_natives(&mut out, &mut register_id, common::CORO_CLOSE_ID..=common::CORO_CLOSE_ID);
     // Append-only after coro_close: `entropy::bytes` (major 6 minor 15).
     push_entropy(&mut out, &mut register_id);
     // Append-only after entropy: `key_index::*` (major 6 minor 18).
-    push_wiring(
-        &mut out,
-        &mut register_id,
-        crate::key_index::KEY_INDEX_WIRING,
-        "key_index",
-    );
+    push_wiring(&mut out, &mut register_id, crate::key_index::KEY_INDEX_WIRING, "key_index");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -189,6 +160,7 @@ pub fn build_standard_host_natives(
 pub fn stream_first(name: &str) -> bool {
     STREAM_FIRST_NATIVES.contains(&name)
 }
+
 
 /// Natives whose first argument is a `Stream`.
 const STREAM_FIRST_NATIVES: &[&str] = &[
@@ -263,7 +235,7 @@ fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
     let id = out.len();
     register_id(STREAM_ATTACH_NATIVE, id);
     out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
-        use crate::stream_attach::{StreamVTable, typed_fn_from_hashed_dload};
+        use crate::stream_attach::{typed_fn_from_hashed_dload, StreamVTable};
         let r = (|| {
             let vtable = StreamVTable {
                 read: typed_fn_from_hashed_dload(args[2].as_int())?,
@@ -281,7 +253,7 @@ fn push_result_unit_probe(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
 ) {
-    use crate::io::{IoErrorTag, as_result_unit};
+    use crate::io::{as_result_unit, IoErrorTag};
     let sig = FfiSignature::from_parts(
         common::RESULT_UNIT_PROBE_NATIVE.to_string(),
         vec![FfiType::Int],
@@ -350,8 +322,9 @@ fn push_thread_spawn_shared(
     .expect("thread_spawn_shared signature");
     let id = out.len();
     register_id(common::THREAD_SPAWN_SHARED_NATIVE, id);
-    let closure =
-        |heap: &mut crate::Heap, args: &[Value]| Ok(Some(thread::thread_spawn_shared(heap, args)));
+    let closure = |heap: &mut crate::Heap, args: &[Value]| {
+        Ok(Some(thread::thread_spawn_shared(heap, args)))
+    };
     out.push(Arc::new(HostClosureFn::new_with_arity_range(
         sig,
         1,
@@ -387,7 +360,7 @@ fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
 }
 
 fn push_stream_fd(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    use crate::io::{IoErrorTag, as_result_value};
+    use crate::io::{as_result_value, IoErrorTag};
     let sig = FfiSignature::from_parts(
         STREAM_FD_NATIVE.to_string(),
         vec![FfiType::Int],
@@ -405,7 +378,10 @@ fn push_stream_fd(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
     })));
 }
 
-fn push_string_bytes(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_string_bytes(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
     use crate::str_bytes::{
         string_byte_at, string_find_from, string_match_at, string_rfind, string_slice_bytes,
     };
@@ -417,9 +393,8 @@ fn push_string_bytes(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl Fn
         ("string_match_at", 3, string_match_at),
     ];
     for &(name, arity, host) in specs {
-        let sig =
-            FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; arity], FfiType::Int)
-                .expect("string byte native signature");
+        let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; arity], FfiType::Int)
+            .expect("string byte native signature");
         let id = out.len();
         register_id(name, id);
         out.push(Arc::new(HostClosureFn::new_direct(sig, host)));
@@ -430,13 +405,9 @@ fn push_string_bytes(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl Fn
 /// through.
 /// `from_bytes_take(buf) -> Result<string, StringError>`: `from_bytes`
 /// that moves the bytes out of a buffer nothing reads again.
-fn push_from_bytes_take(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
+fn push_from_bytes_take(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let name = common::FROM_BYTES_TAKE_NATIVE;
-    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int)
-        .expect("from_bytes_take signature");
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("from_bytes_take signature");
     let id = out.len();
     register_id(name, id);
     out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
@@ -451,36 +422,27 @@ fn push_region(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&s
         (common::GC_REGION_ENTER_NATIVE, HostOp::RegionEnter),
         (common::GC_REGION_EXIT_NATIVE, HostOp::RegionExit),
     ] {
-        let sig = FfiSignature::from_parts(name.to_string(), vec![], FfiType::Int)
-            .expect("region signature");
+        let sig = FfiSignature::from_parts(name.to_string(), vec![], FfiType::Int).expect("region signature");
         let id = out.len();
         register_id(name, id);
         out.push(Arc::new(
-            HostClosureFn::new(sig, move |_heap, _args| {
-                Err(FfiError::Unsupported(format!("{name} is a VM hook only")))
-            })
-            .with_host_op(op),
+            HostClosureFn::new(sig, move |_heap, _args| Err(FfiError::Unsupported(format!("{name} is a VM hook only"))))
+                .with_host_op(op),
         ));
     }
 }
 
 fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let name = common::BLACK_BOX_NATIVE;
-    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int)
-        .expect("black_box signature");
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("black_box signature");
     let id = out.len();
     register_id(name, id);
-    out.push(Arc::new(HostClosureFn::new_direct(sig, |_heap, args| {
-        args[0]
-    })));
+    out.push(Arc::new(HostClosureFn::new_direct(sig, |_heap, args| args[0])));
 }
 
 /// `values_eq_shaped(a, b, shape) -> bool`: `==` on an aggregate whose
 /// `float` leaves compare by IEEE ([`crate::value_eq::values_eq_shaped`]).
-fn push_values_eq_shaped(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
+fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let name = common::VALUES_EQ_SHAPED_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 3], FfiType::Int)
         .expect("values_eq_shaped signature");
@@ -488,12 +450,9 @@ fn push_values_eq_shaped(
     register_id(name, id);
     out.push(Arc::new(HostClosureFn::new_direct(sig, |heap, args| {
         let eq = match heap.find_object_by_addr(args[2].bits()) {
-            Some(crate::memory::Object::String(gc)) => crate::value_eq::values_eq_shaped(
-                heap,
-                args[0],
-                args[1],
-                gc.as_ref().data.as_bytes(),
-            ),
+            Some(crate::memory::Object::String(gc)) => {
+                crate::value_eq::values_eq_shaped(heap, args[0], args[1], gc.as_ref().data.as_bytes())
+            }
             _ => crate::value_eq::values_eq(heap, args[0], args[1]),
         };
         Value::from(i64::from(eq))
@@ -503,10 +462,7 @@ fn push_values_eq_shaped(
 /// `string_compare(a, b) -> int`: `-1`, `0` or `1` as `a` orders before,
 /// equal to or after `b` by UTF-8 bytes (a prefix first), for `<` / `<=` /
 /// `>` / `>=` on `string` (coil-stdlib#48).
-fn push_string_compare(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
+fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let name = common::STRING_COMPARE_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 2], FfiType::Int)
         .expect("string_compare signature");
@@ -515,11 +471,10 @@ fn push_string_compare(
     // Direct (native code calls it in place): the checker passes only
     // strings; anything else orders before every string.
     out.push(Arc::new(HostClosureFn::new_direct(sig, |heap, args| {
-        let text =
-            |v: Value| match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, v).bits()) {
-                Some(crate::memory::Object::String(gc)) => Some(gc),
-                _ => None,
-            };
+        let text = |v: Value| match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, v).bits()) {
+            Some(crate::memory::Object::String(gc)) => Some(gc),
+            _ => None,
+        };
         let order = match (text(args[0]), text(args[1])) {
             (Some(a), Some(b)) => a.as_ref().data.as_bytes().cmp(b.as_ref().data.as_bytes()),
             (a, b) => a.is_some().cmp(&b.is_some()),
@@ -571,15 +526,12 @@ fn push_task_natives(
 /// `unwind_resume` ends a `defer` cleanup pad; the VM runs it (`HostOp::Unwind`).
 fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let name = common::UNWIND_RESUME_NATIVE;
-    let sig = FfiSignature::from_parts(name.to_string(), vec![], FfiType::Int)
-        .expect("unwind_resume signature");
+    let sig = FfiSignature::from_parts(name.to_string(), vec![], FfiType::Int).expect("unwind_resume signature");
     assert_eq!(out.len(), common::UNWIND_RESUME_ID as usize);
     register_id(name, out.len());
     out.push(Arc::new(
         HostClosureFn::new(sig, move |_heap, _args| {
-            Err(FfiError::Unsupported(format!(
-                "{name} is HostOp::Unwind (VM hook only)"
-            )))
+            Err(FfiError::Unsupported(format!("{name} is HostOp::Unwind (VM hook only)")))
         })
         .with_host_op(HostOp::Unwind),
     ));
@@ -671,9 +623,7 @@ fn push_wiring(
         }
         if common::host_native_id(name) == Some(common::CLOCK_SLEEP_MS_ID as usize) {
             // Inside a scope the VM suspends the task instead of calling it.
-            out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-                Ok(Some(host(heap, args)))
-            })));
+            out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| Ok(Some(host(heap, args))))));
             continue;
         }
         out.push(Arc::new(HostClosureFn::new_direct(sig, host)));
@@ -744,10 +694,7 @@ fn push_prelude_char_ord(
     .expect("hash_string signature");
     let hash_id = out.len();
     register_id("hash_string", hash_id);
-    out.push(Arc::new(HostClosureFn::new_direct(
-        hash_sig,
-        prelude_hash_string,
-    )));
+    out.push(Arc::new(HostClosureFn::new_direct(hash_sig, prelude_hash_string)));
 }
 
 fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
@@ -782,11 +729,7 @@ fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
         vec_sig,
         2,
         3,
-        |heap, args| {
-            packed_vec_arith(heap, args)
-                .map(Some)
-                .map_err(FfiError::IntTrap)
-        },
+        |heap, args| packed_vec_arith(heap, args).map(Some).map_err(FfiError::IntTrap),
     )));
 }
 
@@ -1391,20 +1334,11 @@ mod tests {
     fn every_compiler_direct_native_has_a_direct_function() {
         let natives = build_standard_host_natives(|_, _| {});
         for name in common::DIRECT_HOST_NATIVES {
-            let id = common::host_native_id(name)
-                .unwrap_or_else(|| panic!("`{name}` is not a standard native"));
+            let id = common::host_native_id(name).unwrap_or_else(|| panic!("`{name}` is not a standard native"));
             assert!(common::host_native_is_direct(id), "`{name}`");
-            assert!(
-                natives[id].direct().is_some(),
-                "`{name}` (id {id}) has no direct function"
-            );
+            assert!(natives[id].direct().is_some(), "`{name}` (id {id}) has no direct function");
         }
-        assert!(
-            natives[common::CLOCK_SLEEP_MS_ID as usize]
-                .direct()
-                .is_none(),
-            "sleep suspends a task"
-        );
+        assert!(natives[common::CLOCK_SLEEP_MS_ID as usize].direct().is_none(), "sleep suspends a task");
     }
 
     /// must accept 1..=1+MAX args and still reject garbage beyond that.

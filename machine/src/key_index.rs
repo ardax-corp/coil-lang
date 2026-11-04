@@ -129,18 +129,10 @@ fn probe(table: &[Value], hashes: &[Value], cap: usize, h: i64, after: i64) -> i
 /// mode finds nothing, so the caller compares with `probe` itself.
 pub fn host_find(heap: &mut Heap, args: &[Value]) -> Value {
     let arg = |i: usize| args.get(i).copied().unwrap_or(Value::from(0i64));
-    let (Some(tg), Some(hg), Some(kg)) = (
-        array(heap, arg(0)),
-        array(heap, arg(1)),
-        array(heap, arg(2)),
-    ) else {
+    let (Some(tg), Some(hg), Some(kg)) = (array(heap, arg(0)), array(heap, arg(1)), array(heap, arg(2))) else {
         return Value::from(-1i64);
     };
-    let (Some(table), Some(hashes), Some(keys)) = (
-        tg.as_ref().words(),
-        hg.as_ref().words(),
-        kg.as_ref().words(),
-    ) else {
+    let (Some(table), Some(hashes), Some(keys)) = (tg.as_ref().words(), hg.as_ref().words(), kg.as_ref().words()) else {
         return Value::from(-1i64);
     };
     let Some(cap) = cells(table) else {
@@ -161,9 +153,7 @@ pub fn host_find(heap: &mut Heap, args: &[Value]) -> Value {
         }
         if e > 0 {
             let s = (e - 1) as usize;
-            if hashes.get(s).is_some_and(|x| x.as_int() == h)
-                && keys.get(s).is_some_and(|&x| same(x))
-            {
+            if hashes.get(s).is_some_and(|x| x.as_int() == h) && keys.get(s).is_some_and(|&x| same(x)) {
                 return Value::from(s as i64);
             }
         }
@@ -174,13 +164,8 @@ pub fn host_find(heap: &mut Heap, args: &[Value]) -> Value {
 
 /// Whether `a` and `b` are strings with the same contents.
 fn string_eq(heap: &Heap, a: Value, b: Value) -> bool {
-    match (
-        heap.find_object_by_addr(a.bits()),
-        heap.find_object_by_addr(b.bits()),
-    ) {
-        (Some(Object::String(ga)), Some(Object::String(gb))) => {
-            ga.as_ref().data == gb.as_ref().data
-        }
+    match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
+        (Some(Object::String(ga)), Some(Object::String(gb))) => ga.as_ref().data == gb.as_ref().data,
         _ => false,
     }
 }
@@ -275,8 +260,7 @@ pub fn host_remove(heap: &mut Heap, args: &[Value]) -> Value {
     let (Some(tg), Some(hg), Some(lg)) = (array(heap, t), array(heap, hs), array(heap, lv)) else {
         return Value::from(false);
     };
-    let (Some(table), Some(hashes), Some(live)) = (words(&tg), hg.as_ref().words(), words(&lg))
-    else {
+    let (Some(table), Some(hashes), Some(live)) = (words(&tg), hg.as_ref().words(), words(&lg)) else {
         return Value::from(false);
     };
     let Some(cap) = cells(table) else {

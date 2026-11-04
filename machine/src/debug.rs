@@ -19,12 +19,15 @@ pub enum StopReason {
 }
 
 /// Single-step / finish bookkeeping.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum StepMode {
     #[default]
     None,
     /// Run one insn then stop before the next (`armed` flips after the first check).
-    Stepi { armed: bool },
+    Stepi {
+        armed: bool,
+    },
     /// Stop when source line changes (step into).
     StepLine {
         file: u32,
@@ -38,7 +41,9 @@ pub enum StepMode {
         start_depth: usize,
     },
     /// Stop when frame depth drops to `target_depth` or below.
-    Finish { target_depth: usize },
+    Finish {
+        target_depth: usize,
+    },
 }
 
 /// Attached to a [`crate::Machine`] for interactive / scripted debugging.
@@ -49,6 +54,7 @@ pub struct DebugController {
     /// Ignore a breakpoint at this PC once (continue / stepi from a hit).
     skip_bp_pc: Option<usize>,
 }
+
 
 impl DebugController {
     pub fn new() -> Self {
@@ -267,16 +273,10 @@ mod tests {
 pub enum DebugObject {
     Str(String),
     /// Class instance in slot mode: fields in declaration order.
-    Instance {
-        type_id: u32,
-        fields: Vec<common::Value>,
-    },
+    Instance { type_id: u32, fields: Vec<common::Value> },
     Array(Vec<common::Value>),
     Tuple(Vec<common::Value>),
-    Enum {
-        tag: u32,
-        payload: Vec<common::Value>,
-    },
+    Enum { tag: u32, payload: Vec<common::Value> },
     /// Boxed scalar (`int` / `float` / `bool` payload word).
     Boxed(common::Value),
     /// Some other object kind (stream, thread, …).

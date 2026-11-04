@@ -56,10 +56,9 @@ fn max_worker_threads() -> usize {
     static MAX: OnceLock<usize> = OnceLock::new();
     *MAX.get_or_init(|| {
         if let Ok(raw) = std::env::var("COIL_MAX_WORKER_THREADS")
-            && let Ok(n) = raw.parse::<usize>()
-        {
-            return n.clamp(1, 512);
-        }
+            && let Ok(n) = raw.parse::<usize>() {
+                return n.clamp(1, 512);
+            }
         thread::available_parallelism()
             .map(|n| n.get().max(2))
             .unwrap_or(8)
@@ -349,16 +348,9 @@ impl PartialEq for PortableValue {
                     type_id: y2,
                 },
             ) => t1 == t2 && p1 == p2 && y1 == y2,
-            (
-                Self::Instance {
-                    type_id: t1,
-                    fields: f1,
-                },
-                Self::Instance {
-                    type_id: t2,
-                    fields: f2,
-                },
-            ) => t1 == t2 && f1 == f2,
+            (Self::Instance { type_id: t1, fields: f1 }, Self::Instance { type_id: t2, fields: f2 }) => {
+                t1 == t2 && f1 == f2
+            }
             (Self::Boxed(t1, a), Self::Boxed(t2, b)) => t1 == t2 && a == b,
             (Self::Sender(a), Self::Sender(b)) => Arc::ptr_eq(a, b),
             (Self::Receiver(a), Self::Receiver(b)) => Arc::ptr_eq(a, b),
@@ -416,10 +408,7 @@ pub(crate) struct JoinStateInner {
 impl JoinState {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Mutex::new(JoinStateInner {
-                result: None,
-                panic_message: None,
-            }),
+            inner: Mutex::new(JoinStateInner { result: None, panic_message: None }),
             finished: Condvar::new(),
             join_handle: Mutex::new(None),
             detached: AtomicBool::new(false),
@@ -628,8 +617,7 @@ thread_local! {
 pub(crate) struct MachineHostState {
     raw: *mut (),
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
-    begin_shared_steal:
-        unsafe fn(*mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
+    begin_shared_steal: unsafe fn(*mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
     end_shared_steal: unsafe fn(*mut (), Value),
     debugger_attached: bool,
     // Built on demand from `raw`: `execute` is re-entered after every FFI
@@ -737,11 +725,7 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
 
 /// The running VM's static words as they are now.
 fn host_static_words() -> Option<Arc<Vec<u64>>> {
-    HOST_STATE.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|s| unsafe { (s.static_words)(s.raw) })
-    })
+    HOST_STATE.with(|c| c.borrow().as_ref().map(|s| unsafe { (s.static_words)(s.raw) }))
 }
 
 fn host_debugger_attached() -> bool {
@@ -788,9 +772,7 @@ pub(crate) fn host_io_wait(
         }
     });
     match (io, cpu) {
-        (Some(io), Some(cpu)) => {
-            io.wait_fd_helping(handle, interest, timeout, || cpu.help_off_stack())
-        }
+        (Some(io), Some(cpu)) => io.wait_fd_helping(handle, interest, timeout, || cpu.help_off_stack()),
         (Some(io), None) => io.wait_fd(handle, interest, timeout),
         (None, _) => IoReactor::new().wait_fd(handle, interest, timeout),
     }
@@ -808,7 +790,11 @@ pub(crate) fn host_io_wait_no_help(
 ) -> Result<(), crate::io::IoErrorTag> {
     use crate::io_reactor::IoReactor;
 
-    let io = HOST_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.io_reactor.clone()));
+    let io = HOST_STATE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|s| s.io_reactor.clone())
+    });
     match io {
         Some(io) => io.wait_fd(handle, interest, timeout),
         None => IoReactor::new().wait_fd(handle, interest, timeout),
@@ -890,15 +876,15 @@ fn mapped_module_path(ptr: *const std::ffi::c_void) -> Option<String> {
             lp: *const u16,
             module: *mut *mut std::ffi::c_void,
         ) -> i32;
-        fn GetModuleFileNameW(module: *mut std::ffi::c_void, buf: *mut u16, len: u32) -> u32;
+        fn GetModuleFileNameW(
+            module: *mut std::ffi::c_void,
+            buf: *mut u16,
+            len: u32,
+        ) -> u32;
     }
     let mut module: *mut std::ffi::c_void = std::ptr::null_mut();
     let ok = unsafe {
-        GetModuleHandleExW(
-            FROM_ADDRESS | UNCHANGED_REFCOUNT,
-            ptr as *const u16,
-            &mut module,
-        )
+        GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, ptr as *const u16, &mut module)
     };
     if ok == 0 || module.is_null() {
         return None;
@@ -918,7 +904,11 @@ fn mapped_module_path(ptr: *const std::ffi::c_void) -> Option<String> {
 /// Drop async waiters registered on `handle` (stream close).
 pub(crate) fn host_cancel_waiters_for(handle: crate::io_handle::WaitHandle) {
     HOST_STATE.with(|c| {
-        if let Some(io) = c.borrow().as_ref().and_then(|s| s.io_reactor.as_ref()) {
+        if let Some(io) = c
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.io_reactor.as_ref())
+        {
             io.cancel_waits_for(handle);
         }
     });
@@ -950,9 +940,7 @@ pub(crate) fn host_io_wait_ready() -> usize {
 pub fn alloc_thread_error(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -> Value {
     let _ = common::BUILTIN_THREAD_ERROR_ENUMS;
     if (set, tag) == (ErrorSet::Thread, ThreadErrorTag::Panicked) {
-        let message = JOIN_PANIC
-            .with(|p| p.borrow_mut().take())
-            .unwrap_or_default();
+        let message = JOIN_PANIC.with(|p| p.borrow_mut().take()).unwrap_or_default();
         let gc = heap.intern(message);
         let message = Value::from(gc.as_ptr() as *mut u8 as u64);
         return alloc_enum(heap, tag.tag_in(set), vec![message]);
@@ -1144,11 +1132,7 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
     }
 }
 
-fn encode_object(
-    heap: &Heap,
-    obj: Object,
-    cx: &mut Encode,
-) -> Result<PortableValue, ThreadErrorTag> {
+fn encode_object(heap: &Heap, obj: Object, cx: &mut Encode) -> Result<PortableValue, ThreadErrorTag> {
     encode_value(heap, Value::from(obj.addr()), cx)
 }
 
@@ -1244,7 +1228,10 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let v = decode_portable(heap, *inner)?;
             // Keep the tag: `UnboxValue` yields null on a tag mismatch.
             let payload = member_from_value(heap, v);
-            let (obj, _) = heap.alloc(crate::memory::ObjBoxed { tag, payload }, Object::Boxed);
+            let (obj, _) = heap.alloc(
+                crate::memory::ObjBoxed { tag, payload },
+                Object::Boxed,
+            );
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Sender(inner) => {
@@ -1388,12 +1375,7 @@ fn fn_entry_from_value(heap: &Heap, v: Value) -> Result<(u32, u32), ThreadErrorT
         return Err(ThreadErrorTag::NotSendable);
     };
     let f = gc.as_ref();
-    if f.is_rest
-        || !f.captures.is_empty()
-        || !f.captured_args.is_empty()
-        || f.filled_mask != 0
-        || f.dicts.is_some()
-    {
+    if f.is_rest || !f.captures.is_empty() || !f.captured_args.is_empty() || f.filled_mask != 0 || f.dicts.is_some() {
         return Err(ThreadErrorTag::NotSendable);
     }
     Ok((f.entry, f.arity))
@@ -1502,8 +1484,7 @@ fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<Spaw
 
 pub fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_spawn(heap, args);
-    as_result_value(heap, ErrorSet::Thread, r)
-}
+    as_result_value(heap, ErrorSet::Thread, r)}
 
 fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
     // A closure's frame starts with its captures, then its parameters.
@@ -1521,8 +1502,12 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
     let reactor = Arc::clone(&ctx.reactor);
     let state = Arc::new(JoinState::new());
     let statics = copy_statics_out(heap, &ctx.statics, &ctx.program.static_word_kinds);
-    let mut job =
-        crate::reactor::job_from_spawn_context(ctx, entry, spawn_args, Arc::clone(&state));
+    let mut job = crate::reactor::job_from_spawn_context(
+        ctx,
+        entry,
+        spawn_args,
+        Arc::clone(&state),
+    );
     job.statics = Some(crate::reactor::JobStatics::Copied(statics));
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
@@ -1532,8 +1517,7 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
 
 pub fn host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_spawn_shared(heap, args);
-    as_result_value(heap, ErrorSet::Thread, r)
-}
+    as_result_value(heap, ErrorSet::Thread, r)}
 
 fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
     if host_debugger_attached() {
@@ -1566,8 +1550,12 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     // Opening the epoch may collect and move objects, so the statics are
     // read again after it: `ctx`'s copy can name a moved object's old slot.
     let statics = host_static_words().unwrap_or_else(|| Arc::clone(&ctx.statics));
-    let mut job =
-        crate::reactor::job_from_spawn_context(ctx, entry, spawn_args, Arc::clone(&state));
+    let mut job = crate::reactor::job_from_spawn_context(
+        ctx,
+        entry,
+        spawn_args,
+        Arc::clone(&state),
+    );
     job.epoch = Some(epoch);
     job.statics = Some(crate::reactor::JobStatics::Shared(statics));
     reactor.submit(job);
@@ -1581,8 +1569,7 @@ pub fn host_join(heap: &mut Heap, args: &[Value]) -> Value {
     if crate::task::thread_parked() {
         return Value::default();
     }
-    as_result_value(heap, ErrorSet::Thread, r)
-}
+    as_result_value(heap, ErrorSet::Thread, r)}
 
 fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag> {
     let Some(Object::Thread(gc)) = heap.find_object_by_addr(handle.bits()) else {
@@ -1633,8 +1620,7 @@ fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag
 
 pub fn host_detach(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_detach(heap, args[0]);
-    as_result_unit(heap, ErrorSet::Thread, r)
-}
+    as_result_unit(heap, ErrorSet::Thread, r)}
 
 fn try_host_detach(heap: &mut Heap, handle: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Thread(gc)) = heap.find_object_by_addr(handle.bits()) else {
@@ -1663,13 +1649,11 @@ pub fn host_channel(heap: &mut Heap, _args: &[Value]) -> Value {
     let pair = vec![Value::from(tx_obj.addr()), Value::from(rx_obj.addr())];
     let (tup, _) = heap.alloc(ObjTuple::new(pair), Object::Tuple);
     let v = Value::from(tup.addr());
-    as_result_value(heap, ErrorSet::Channel, Ok(v))
-}
+    as_result_value(heap, ErrorSet::Channel, Ok(v))}
 
 pub fn host_send(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_send(heap, args[0], args[1]);
-    as_result_unit(heap, ErrorSet::Channel, r)
-}
+    as_result_unit(heap, ErrorSet::Channel, r)}
 
 fn try_host_send(heap: &mut Heap, tx: Value, value: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Sender(gc)) = heap.find_object_by_addr(tx.bits()) else {
@@ -1696,8 +1680,7 @@ pub fn host_recv(heap: &mut Heap, args: &[Value]) -> Value {
     if crate::task::thread_parked() {
         return Value::default();
     }
-    as_result_value(heap, ErrorSet::Channel, r)
-}
+    as_result_value(heap, ErrorSet::Channel, r)}
 
 fn try_host_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag> {
     let Some(Object::Receiver(gc)) = heap.find_object_by_addr(rx.bits()) else {
@@ -1762,8 +1745,7 @@ fn help_while_blocked() {
 
 pub fn host_try_send(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_send(heap, args[0], args[1]);
-    as_result_unit(heap, ErrorSet::Channel, r)
-}
+    as_result_unit(heap, ErrorSet::Channel, r)}
 
 /// Non-blocking send. The channel is unbounded today, so this matches `try_host_send`.
 fn try_host_try_send(heap: &mut Heap, tx: Value, value: Value) -> Result<(), ThreadErrorTag> {
@@ -1772,8 +1754,7 @@ fn try_host_try_send(heap: &mut Heap, tx: Value, value: Value) -> Result<(), Thr
 
 pub fn host_try_recv(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_recv(heap, args[0]);
-    as_result_value(heap, ErrorSet::Channel, r)
-}
+    as_result_value(heap, ErrorSet::Channel, r)}
 
 fn try_host_try_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag> {
     let Some(Object::Receiver(gc)) = heap.find_object_by_addr(rx.bits()) else {
@@ -1793,8 +1774,7 @@ fn try_host_try_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag
 
 pub fn host_close(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_close(heap, args[0]);
-    as_result_unit(heap, ErrorSet::Channel, r)
-}
+    as_result_unit(heap, ErrorSet::Channel, r)}
 
 fn try_host_close(heap: &mut Heap, tx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Sender(gc)) = heap.find_object_by_addr(tx.bits()) else {
@@ -1806,8 +1786,7 @@ fn try_host_close(heap: &mut Heap, tx: Value) -> Result<(), ThreadErrorTag> {
 
 pub fn host_mutex(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_mutex(heap, args[0]);
-    as_result_value(heap, ErrorSet::Lock, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_mutex(heap: &mut Heap, initial: Value) -> Result<Value, ThreadErrorTag> {
     let pv = value_to_portable(heap, initial)?;
@@ -1841,8 +1820,7 @@ pub fn host_with_lock(heap: &mut Heap, args: &[Value]) -> Value {
     if crate::task::thread_parked() {
         return Value::default();
     }
-    as_result_value(heap, ErrorSet::Lock, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_with_lock(
     heap: &mut Heap,
@@ -1882,8 +1860,7 @@ pub fn host_lock(heap: &mut Heap, args: &[Value]) -> Value {
     if crate::task::thread_parked() {
         return Value::default();
     }
-    as_result_unit(heap, ErrorSet::Lock, r)
-}
+    as_result_unit(heap, ErrorSet::Lock, r)}
 
 fn try_host_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.bits()) else {
@@ -1906,8 +1883,7 @@ fn try_host_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
 
 pub fn host_unlock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_unlock(heap, args[0]);
-    as_result_unit(heap, ErrorSet::Lock, r)
-}
+    as_result_unit(heap, ErrorSet::Lock, r)}
 
 fn try_host_unlock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.bits()) else {
@@ -1932,8 +1908,7 @@ fn try_host_unlock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
 
 pub fn host_try_lock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_lock(heap, args[0]);
-    as_result_unit(heap, ErrorSet::Lock, r)
-}
+    as_result_unit(heap, ErrorSet::Lock, r)}
 
 fn try_host_try_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.bits()) else {
@@ -1956,8 +1931,7 @@ fn try_host_try_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> 
 
 pub fn host_rwlock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_rwlock(heap, args[0]);
-    as_result_value(heap, ErrorSet::Lock, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_rwlock(heap: &mut Heap, initial: Value) -> Result<Value, ThreadErrorTag> {
     let pv = value_to_portable(heap, initial)?;
@@ -1968,8 +1942,7 @@ fn try_host_rwlock(heap: &mut Heap, initial: Value) -> Result<Value, ThreadError
 
 pub fn host_with_read(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_with_read(heap, args[0], args[1]);
-    as_result_value(heap, ErrorSet::Lock, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_with_read(
     heap: &mut Heap,
@@ -1994,8 +1967,7 @@ fn try_host_with_read(
 
 pub fn host_with_write(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_with_write(heap, args[0], args[1]);
-    as_result_value(heap, ErrorSet::Lock, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_with_write(
     heap: &mut Heap,
@@ -2017,8 +1989,7 @@ fn try_host_with_write(
 
 pub fn host_try_read(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_read(heap, args[0], args[1]);
-    as_result_value(heap, ErrorSet::Lock, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_try_read(
     heap: &mut Heap,
@@ -2042,8 +2013,7 @@ fn try_host_try_read(
 
 pub fn host_try_write(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_write(heap, args[0], args[1]);
-    as_result_value(heap, ErrorSet::Lock, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_try_write(
     heap: &mut Heap,
@@ -2207,10 +2177,11 @@ mod tests {
         assert_eq!(pv, PortableValue::String("hi".into()));
         let back = portable_to_value(&mut heap, pv).unwrap();
         assert_eq!(
-            heap.find_object_by_addr(back.bits()).and_then(|o| match o {
-                Object::String(g) => Some(g.as_ref().data.to_string()),
-                _ => None,
-            }),
+            heap.find_object_by_addr(back.bits())
+                .and_then(|o| match o {
+                    Object::String(g) => Some(g.as_ref().data.to_string()),
+                    _ => None,
+                }),
             Some("hi".into())
         );
     }
@@ -2278,10 +2249,7 @@ mod tests {
         let mut heap = Heap::default();
         let leaf = heap.immortal_unit_enum(0);
         let (node, _) = heap.alloc(
-            ObjEnum::new(
-                1,
-                EnumPayload::two(Value::from(leaf.addr()), Value::from(leaf.addr())),
-            ),
+            ObjEnum::new(1, EnumPayload::two(Value::from(leaf.addr()), Value::from(leaf.addr()))),
             Object::Enum,
         );
         let pv = value_to_portable(&heap, Value::from(node.addr())).expect("shared Leaf DAG");
@@ -2311,10 +2279,7 @@ mod tests {
             Object::Enum,
         );
         let (node, _) = heap.alloc(
-            ObjEnum::new(
-                1,
-                EnumPayload::two(Value::from(shared.addr()), Value::from(shared.addr())),
-            ),
+            ObjEnum::new(1, EnumPayload::two(Value::from(shared.addr()), Value::from(shared.addr()))),
             Object::Enum,
         );
         assert_eq!(
@@ -2353,10 +2318,7 @@ mod tests {
             Object::Tuple,
         );
         let v = Value::from(tup.addr());
-        assert_eq!(
-            value_to_portable(&heap, v),
-            Err(ThreadErrorTag::NotSendable)
-        );
+        assert_eq!(value_to_portable(&heap, v), Err(ThreadErrorTag::NotSendable));
         assert!(value_to_spawn_arg(&heap, v).is_err());
         let Ok(SpawnArg::Value(PortableValue::Tuple(elems))) = value_to_static_arg(&heap, v) else {
             panic!("expected a copied tuple");
@@ -2369,10 +2331,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(
-            elems[1],
-            PortableValue::Immediate(Value::from(1_i64).bits())
-        );
+        assert_eq!(elems[1], PortableValue::Immediate(Value::from(1_i64).bits()));
         assert_eq!(elems[2], PortableValue::UnsentStream);
         let mut worker = Heap::default();
         let copy = portable_to_value(&mut worker, PortableValue::Tuple(elems)).unwrap();
@@ -2425,8 +2384,7 @@ mod tests {
         let Object::Enum(gc) = heap.find_object_by_addr(rw.bits()).unwrap() else {
             panic!("expected Result");
         };
-        let Member::Object(obj @ Object::RwLock(_)) = &heap.member_of(gc.as_ref().payload[0])
-        else {
+        let Member::Object(obj @ Object::RwLock(_)) = &heap.member_of(gc.as_ref().payload[0]) else {
             panic!("expected RwLock");
         };
         let rw_val = Value::from(obj.addr());
@@ -2434,7 +2392,10 @@ mod tests {
         assert!(matches!(rw_pv, PortableValue::RwLockHandle(_)));
 
         // Nested in a tuple (request/reply spawn arg shape).
-        let (tup, _) = heap.alloc(ObjTuple::new(vec![tx, rx]), Object::Tuple);
+        let (tup, _) = heap.alloc(
+            ObjTuple::new(vec![tx, rx]),
+            Object::Tuple,
+        );
         let tup_pv = value_to_portable(&heap, Value::from(tup.addr())).unwrap();
         let PortableValue::Tuple(elems) = tup_pv else {
             panic!("expected tuple");

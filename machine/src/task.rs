@@ -299,11 +299,7 @@ impl Scheduler {
         let joiners = std::mem::take(&mut rec.joiners);
         let scope = rec.scope;
         for j in joiners {
-            if self
-                .tasks
-                .get(&j)
-                .is_some_and(|r| r.block == Some(Block::Join(id)))
-            {
+            if self.tasks.get(&j).is_some_and(|r| r.block == Some(Block::Join(id))) {
                 self.make_ready(j, Wake::Status(status));
             }
         }
@@ -416,11 +412,7 @@ impl Scheduler {
     /// Wake every task waiting on condition `cond`.
     pub(crate) fn notify_cond(&mut self, cond: CondId) {
         for id in self.cond_waits.remove(&cond).unwrap_or_default() {
-            if self
-                .tasks
-                .get(&id)
-                .is_some_and(|r| r.block == Some(Block::Cond(cond)))
-            {
+            if self.tasks.get(&id).is_some_and(|r| r.block == Some(Block::Cond(cond))) {
                 self.make_ready(id, Wake::Status(STATUS_OK));
             }
         }
@@ -431,10 +423,7 @@ impl Scheduler {
         let mut any = false;
         for key in self.waker.take() {
             if let Some(id) = self.thread_waits.remove(&key)
-                && self
-                    .tasks
-                    .get(&id)
-                    .is_some_and(|r| r.block == Some(Block::Thread(key)))
+                && self.tasks.get(&id).is_some_and(|r| r.block == Some(Block::Thread(key)))
             {
                 self.make_ready(id, Wake::Retry);
                 any = true;
@@ -465,11 +454,7 @@ impl Scheduler {
     /// Earliest live timer deadline.
     pub(crate) fn next_deadline(&mut self) -> Option<Instant> {
         while let Some(Reverse((deadline, seq, task))) = self.timers.peek().copied() {
-            if self
-                .tasks
-                .get(&task)
-                .is_some_and(|r| r.timer_seq == Some(seq))
-            {
+            if self.tasks.get(&task).is_some_and(|r| r.timer_seq == Some(seq)) {
                 return Some(deadline);
             }
             self.timers.pop();
@@ -543,10 +528,7 @@ impl ThreadWaiters {
         let Some(waiter) = TASK_WAITER.with(|w| w.borrow().clone()) else {
             return false;
         };
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(waiter);
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(waiter);
         THREAD_PARKED.with(|p| p.set(true));
         true
     }
@@ -746,11 +728,7 @@ pub(crate) fn connect_in_task(host: &str, port: i64, ms: i64) -> Option<Option<C
     if let Some(lookup) = p.lookup.take() {
         let mut done = None;
         let ready = lookup.waiters.park_unless(|| {
-            done = lookup
-                .result
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
+            done = lookup.result.lock().unwrap_or_else(|e| e.into_inner()).take();
             done.is_some()
         })?;
         if !ready {
@@ -881,10 +859,7 @@ mod tests {
         assert_eq!(s.live, 0);
         // Linear work takes milliseconds even in a debug build; the old
         // quadratic scan took minutes.
-        assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "{n} spawn + finish took {elapsed:?}"
-        );
+        assert!(elapsed < std::time::Duration::from_secs(5), "{n} spawn + finish took {elapsed:?}");
     }
 
     #[test]
@@ -965,13 +940,8 @@ mod tests {
         set_task_waiter(None);
         // `localhost` comes from the hosts file, so a resolver thread that is
         // already running can answer before the task would park on it.
-        assert!(
-            lookup_waits <= 1,
-            "parked {lookup_waits} times on one lookup"
-        );
-        let threads = RESOLVER.get().map_or(0, |r| {
-            r.queue.lock().unwrap_or_else(|e| e.into_inner()).threads
-        });
+        assert!(lookup_waits <= 1, "parked {lookup_waits} times on one lookup");
+        let threads = RESOLVER.get().map_or(0, |r| r.queue.lock().unwrap_or_else(|e| e.into_inner()).threads);
         assert!(threads > 0, "the lookup ran on a resolver thread");
         assert_eq!(
             stream.peer_addr().expect("peer").port(),

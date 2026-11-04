@@ -157,9 +157,7 @@ impl StrData {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Owned(s) => s,
-            Self::Shared {
-                buf, start, len, ..
-            } => {
+            Self::Shared { buf, start, len, .. } => {
                 // SAFETY: `[start, start + len)` was written before this
                 // string existed, is never written again, and is valid UTF-8
                 // (built from `&str` parts, cut on char boundaries).
@@ -186,9 +184,7 @@ impl StrData {
     /// tail, otherwise copying both into a new buffer with spare capacity.
     pub fn concat(&self, tail: &str) -> Self {
         let head_len = self.as_str().len();
-        if let Self::Shared {
-            buf, start, len, ..
-        } = self
+        if let Self::Shared { buf, start, len, .. } = self
             && buf.try_append_at(start + len, tail.as_bytes())
         {
             return Self::Shared {

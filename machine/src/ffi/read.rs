@@ -29,10 +29,7 @@ pub fn read_ints(heap: &mut Heap, args: &[Value]) -> Value {
 
 fn words_at(heap: &Heap, args: &[Value]) -> Result<Vec<i64>, (FfiErrorKindTag, String)> {
     let [lib, ptr, count] = args else {
-        return Err((
-            FfiErrorKindTag::ArityMismatch,
-            "read_ints takes 3 arguments".into(),
-        ));
+        return Err((FfiErrorKindTag::ArityMismatch, "read_ints takes 3 arguments".into()));
     };
     if !matches!(
         heap.find_object_by_addr(lib.bits()),
@@ -55,10 +52,7 @@ fn words_at(heap: &Heap, args: &[Value]) -> Result<Vec<i64>, (FfiErrorKindTag, S
     }
     let ptr = ptr.as_int() as usize as *const i64;
     if ptr.is_null() {
-        return Err((
-            FfiErrorKindTag::Unsupported,
-            "read_ints: null pointer".into(),
-        ));
+        return Err((FfiErrorKindTag::Unsupported, "read_ints: null pointer".into()));
     }
     Ok((0..count as usize)
         // SAFETY: the caller vouches for `count` words at `ptr`, as for any
@@ -104,11 +98,7 @@ mod tests {
         let words = [7_i64, 8];
         let got = words_at(
             &heap,
-            &[
-                Value::from(0_i64),
-                Value::from(words.as_ptr() as i64),
-                Value::from(2_i64),
-            ],
+            &[Value::from(0_i64), Value::from(words.as_ptr() as i64), Value::from(2_i64)],
         );
         assert!(matches!(got, Err((FfiErrorKindTag::InvalidHandle, _))));
     }
@@ -117,10 +107,7 @@ mod tests {
     fn rejects_negative_and_huge_counts() {
         let heap = Heap::default();
         for count in [-1, MAX_WORDS + 1] {
-            let err = words_at(
-                &heap,
-                &[Value::from(0_i64), Value::from(8_i64), Value::from(count)],
-            );
+            let err = words_at(&heap, &[Value::from(0_i64), Value::from(8_i64), Value::from(count)]);
             assert!(err.is_err());
         }
     }

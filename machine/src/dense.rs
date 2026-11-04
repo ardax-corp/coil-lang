@@ -34,15 +34,7 @@ pub fn eval_bin(kind: u8, a: Value, b: Value) -> Result<Value, IntTrap> {
         dense::ISUB32 => return i32_bin(a, b, i32::checked_sub),
         dense::IMUL32 => return i32_bin(a, b, i32::checked_mul),
         dense::IDIV32 => return i32_bin(a, b, i32::checked_div),
-        dense::IREM32 => {
-            return i32_bin(a, b, |x, y| {
-                if y == 0 {
-                    None
-                } else {
-                    Some(x.wrapping_rem(y))
-                }
-            });
-        }
+        dense::IREM32 => return i32_bin(a, b, |x, y| if y == 0 { None } else { Some(x.wrapping_rem(y)) }),
         dense::FADD32 => f32_bin(a, b, |x, y| x + y),
         dense::FSUB32 => f32_bin(a, b, |x, y| x - y),
         dense::FMUL32 => f32_bin(a, b, |x, y| x * y),
@@ -63,6 +55,7 @@ fn i32_bin(a: Value, b: Value, f: fn(i32, i32) -> Option<i32>) -> Result<Value, 
         None => Err(IntTrap::Overflow),
     }
 }
+
 
 #[inline]
 fn f32_bin(a: Value, b: Value, f: fn(f32, f32) -> f32) -> Value {
@@ -150,36 +143,11 @@ mod tests {
         // VM LogNot is `!(as_int() != 0)`. Dense UNARY_NOT used to use
         // `as_bool` (`raw as u8 == 1`), so a heap pointer looked like None.
         let ptr = Value::from(0x1000i64);
-        assert_eq!(
-            eval_unary(dense::UNARY_NOT, Value::from(0i64))
-                .unwrap()
-                .as_int(),
-            1
-        );
-        assert_eq!(
-            eval_unary(dense::UNARY_NOT, Value::from(1i64))
-                .unwrap()
-                .as_int(),
-            0
-        );
-        assert_eq!(
-            eval_unary(dense::UNARY_NOT, Value::from(42i64))
-                .unwrap()
-                .as_int(),
-            0
-        );
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(0i64)).unwrap().as_int(), 1);
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(1i64)).unwrap().as_int(), 0);
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(42i64)).unwrap().as_int(), 0);
         assert_eq!(eval_unary(dense::UNARY_NOT, ptr).unwrap().as_int(), 0);
-        assert_eq!(
-            eval_unary(dense::UNARY_NOT, Value::from(true))
-                .unwrap()
-                .as_int(),
-            0
-        );
-        assert_eq!(
-            eval_unary(dense::UNARY_NOT, Value::from(false))
-                .unwrap()
-                .as_int(),
-            1
-        );
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(true)).unwrap().as_int(), 0);
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(false)).unwrap().as_int(), 1);
     }
 }

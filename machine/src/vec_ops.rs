@@ -75,9 +75,7 @@ pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, String>
     };
     let len = gc.as_ref().len();
     if index < 0 || (index as usize) > len {
-        return Err(format!(
-            "Vec::insert: index {index} out of bounds (len {len})"
-        ));
+        return Err(format!("Vec::insert: index {index} out of bounds (len {len})"));
     }
     gc.as_mut().insert(index as usize, value);
     heap.account_array(gc.as_mut());
@@ -133,9 +131,7 @@ pub fn host_vec_extend_range(heap: &mut Heap, args: &[Value]) -> Value {
         return Value::from(from);
     };
     match heap.find_object_by_addr(src) {
-        Some(Object::Array(inp)) if lo <= hi && hi <= inp.as_ref().len() => {
-            out.as_mut().extend_from(inp.as_ref(), lo, hi)
-        }
+        Some(Object::Array(inp)) if lo <= hi && hi <= inp.as_ref().len() => out.as_mut().extend_from(inp.as_ref(), lo, hi),
         Some(Object::String(s)) => match s.as_ref().data.as_bytes().get(lo..hi) {
             Some(bytes) => out.as_mut().extend_bytes(bytes),
             None => return Value::from(from),
@@ -227,24 +223,23 @@ mod tests {
 
     #[test]
     fn pop_heap_item_under_option_niche_does_not_box() {
-        use crate::host_enum::{HostEnumLayout, with_host_enum_layout};
+        use crate::host_enum::{with_host_enum_layout, HostEnumLayout};
         let mut heap = Heap::default();
         let s = {
             let gc = heap.intern("x".to_string());
             Value::from(gc.as_ptr() as *mut u8 as u64)
         };
-        let (obj, _) = heap.alloc(ObjArray::new(vec![s]), Object::Array);
+        let (obj, _) = heap.alloc(
+            ObjArray::new(vec![s]),
+            Object::Array,
+        );
         let handle = Value::from(obj.addr());
         let live = heap.live_object_count();
         let some = with_host_enum_layout(HostEnumLayout::OptionNiche, || {
             host_vec_pop(&mut heap, &[handle])
         });
         assert_eq!(some.bits(), s.bits());
-        assert_eq!(
-            heap.live_object_count(),
-            live,
-            "niche pop must not alloc Option"
-        );
+        assert_eq!(heap.live_object_count(), live, "niche pop must not alloc Option");
         let none = with_host_enum_layout(HostEnumLayout::OptionNiche, || {
             host_vec_pop(&mut heap, &[handle])
         });
@@ -267,13 +262,23 @@ mod tests {
     fn insert_in_range_and_rejects_oob() {
         let mut heap = Heap::default();
         let v = make_array(&mut heap, &[2, 3]);
-        host_vec_insert(&mut heap, &[v, Value::from(0i64), Value::from(1i64)])
-            .expect("insert at 0");
-        host_vec_insert(&mut heap, &[v, Value::from(3i64), Value::from(4i64)])
-            .expect("append at len");
+        host_vec_insert(
+            &mut heap,
+            &[v, Value::from(0i64), Value::from(1i64)],
+        )
+        .expect("insert at 0");
+        host_vec_insert(
+            &mut heap,
+            &[v, Value::from(3i64), Value::from(4i64)],
+        )
+        .expect("append at len");
         assert_eq!(array_ints(&heap, v), vec![1, 2, 3, 4]);
-        assert!(host_vec_insert(&mut heap, &[v, Value::from(-1i64), Value::from(0i64)]).is_err());
-        assert!(host_vec_insert(&mut heap, &[v, Value::from(99i64), Value::from(0i64)]).is_err());
+        assert!(
+            host_vec_insert(&mut heap, &[v, Value::from(-1i64), Value::from(0i64)]).is_err()
+        );
+        assert!(
+            host_vec_insert(&mut heap, &[v, Value::from(99i64), Value::from(0i64)]).is_err()
+        );
     }
 
     #[test]

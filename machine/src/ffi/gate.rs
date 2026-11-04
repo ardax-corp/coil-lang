@@ -415,7 +415,10 @@ mod tests {
 
     #[test]
     fn first_party_trusted_skips_native_hash() {
-        let g = DloadGate::from_consumer_trusted(&[], ["crypto", "tls", "regex", "time"]);
+        let g = DloadGate::from_consumer_trusted(
+            &[],
+            ["crypto", "tls", "regex", "time"],
+        );
         let missing = Path::new("/coil-dload-missing/libcrypto.dylib");
         for stem in DLOAD_PRODUCTION_STEMS {
             g.check_request(stem)

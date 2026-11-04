@@ -160,11 +160,7 @@ pub fn set_shared_stderr_redirect(
 
 /// Copy a captured stdout (or stderr) write into that stream's own capture.
 fn mirror_captured(kind: StreamKind, bytes: &[u8]) {
-    let cell = if kind == StreamKind::Stdout {
-        &SHARED_STDOUT
-    } else {
-        &SHARED_STDERR
-    };
+    let cell = if kind == StreamKind::Stdout { &SHARED_STDOUT } else { &SHARED_STDERR };
     cell.with(|cell| {
         if let Some(buf) = cell.borrow().as_ref()
             && let Ok(mut g) = buf.lock()
@@ -510,7 +506,8 @@ worker; open the stream in the worker, or send the data to the thread that \
 owns it over a channel";
 
 pub fn stream_open(heap: &mut Heap, path: &str, mode: &str) -> Result<Value, IoErrorTag> {
-    let handle = NativeHandle::open_file(path, mode).map_err(|e| IoErrorTag::from_error(&e))?;
+    let handle =
+        NativeHandle::open_file(path, mode).map_err(|e| IoErrorTag::from_error(&e))?;
     alloc_stream(heap, handle, StreamKind::File).map_err(|e| IoErrorTag::from_error(&e))
 }
 
@@ -722,7 +719,8 @@ pub fn stream_read_exact(
                 wait_readable(heap, stream)?;
             }
             Ok(Some(n)) => {
-                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.bits()) else {
+                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.bits())
+                else {
                     return Err(IoErrorTag::Other);
                 };
                 let chunk = src.as_ref().to_byte_vec();
@@ -752,7 +750,8 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
             Ok(None) => break,
             Ok(Some(0)) => wait_readable(heap, stream)?,
             Ok(Some(n)) => {
-                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.bits()) else {
+                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.bits())
+                else {
                     return Err(IoErrorTag::Other);
                 };
                 match src.as_ref().bytes() {
@@ -908,6 +907,7 @@ pub(crate) fn stream_wait_handle(heap: &mut Heap, stream: Value) -> Result<WaitH
     })?
 }
 
+
 pub fn tcp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoErrorTag> {
     tcp_connect_timeout(heap, host, port, 0)
 }
@@ -929,10 +929,7 @@ pub fn tcp_connect_timeout(
 
 /// The connect address when `host` is an IP literal (`[…]` allowed for
 /// IPv6); `None` when it is a name the resolver must look up.
-pub(crate) fn connect_literal_addr(
-    host: &str,
-    port: i64,
-) -> Result<Option<SocketAddr>, IoErrorTag> {
+pub(crate) fn connect_literal_addr(host: &str, port: i64) -> Result<Option<SocketAddr>, IoErrorTag> {
     if !(0..=65535).contains(&port) {
         return Err(IoErrorTag::InvalidInput);
     }
@@ -1070,8 +1067,7 @@ pub(crate) fn connect_start(addr: SocketAddr) -> Result<TcpStream, IoErrorTag> {
     #[link(name = "ws2_32")]
     unsafe extern "system" {
         fn WSAStartup(version: u16, data: *mut u8) -> i32;
-        fn WSASocketW(af: i32, ty: i32, proto: i32, info: *mut u8, group: u32, flags: u32)
-        -> usize;
+        fn WSASocketW(af: i32, ty: i32, proto: i32, info: *mut u8, group: u32, flags: u32) -> usize;
         fn connect(s: usize, name: *const u8, len: i32) -> i32;
         fn WSAGetLastError() -> i32;
     }
@@ -1381,17 +1377,25 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
             .as_mut()
             .and_then(NativeHandle::as_tcp_mut)
             .ok_or(IoErrorTag::InvalidInput)?;
-        sock.shutdown(mode).map_err(|e| IoErrorTag::from_error(&e))
+        sock.shutdown(mode)
+            .map_err(|e| IoErrorTag::from_error(&e))
     })?
 }
 
+
 fn alloc_tuple2(heap: &mut Heap, a: Value, b: Value) -> Value {
-    let (obj, _) = heap.alloc(ObjTuple::new(vec![a, b]), Object::Tuple);
+    let (obj, _) = heap.alloc(
+        ObjTuple::new(vec![a, b]),
+        Object::Tuple,
+    );
     Value::from(obj.addr())
 }
 
 fn alloc_tuple3(heap: &mut Heap, a: Value, b: Value, c: Value) -> Value {
-    let (obj, _) = heap.alloc(ObjTuple::new(vec![a, b, c]), Object::Tuple);
+    let (obj, _) = heap.alloc(
+        ObjTuple::new(vec![a, b, c]),
+        Object::Tuple,
+    );
     Value::from(obj.addr())
 }
 
@@ -1439,7 +1443,8 @@ pub fn udp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoEr
     let peer = parse_socket_addr(host, port)?;
     // Ephemeral local bind, then connect for a default peer.
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| IoErrorTag::from_error(&e))?;
-    sock.connect(peer).map_err(|e| IoErrorTag::from_error(&e))?;
+    sock.connect(peer)
+        .map_err(|e| IoErrorTag::from_error(&e))?;
     sock.set_nonblocking(true)
         .map_err(|e| IoErrorTag::from_error(&e))?;
     alloc_stream(heap, NativeHandle::Udp(sock), StreamKind::Udp)
@@ -1622,10 +1627,7 @@ pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_bytes
 /// [`from_bytes`] of a buffer the compiler proved dead after the call: the
 /// string takes the buffer's bytes instead of copying them, and the buffer
 /// is left empty. Invalid UTF-8 puts the bytes back.
-pub fn from_bytes_take(
-    heap: &mut Heap,
-    buf: Value,
-) -> Result<Value, crate::str_bytes::StringErrorTag> {
+pub fn from_bytes_take(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_bytes::StringErrorTag> {
     use crate::str_bytes::StringErrorTag;
     let Some(Object::Array(mut arr_gc)) = heap.find_object_by_addr(buf.bits()) else {
         return Err(StringErrorTag::InvalidUtf8);
@@ -1724,7 +1726,11 @@ mod tests {
 
     fn array_bytes(heap: &Heap, v: Value) -> Vec<u8> {
         match heap.find_object_by_addr(v.bits()) {
-            Some(Object::Array(gc)) => gc.as_ref().iter().map(|e| e.as_int() as u8).collect(),
+            Some(Object::Array(gc)) => gc
+                .as_ref()
+                .iter()
+                .map(|e| e.as_int() as u8)
+                .collect(),
             _ => panic!("expected array"),
         }
     }
@@ -1900,13 +1906,7 @@ mod tests {
     #[test]
     fn from_bytes_take_moves_the_bytes_and_restores_them_on_an_error() {
         let mut heap = Heap::default();
-        let packed = |heap: &mut Heap, b: &[u8]| {
-            Value::from(
-                heap.alloc(ObjArray::from_bytes(b.to_vec()), Object::Array)
-                    .0
-                    .addr(),
-            )
-        };
+        let packed = |heap: &mut Heap, b: &[u8]| Value::from(heap.alloc(ObjArray::from_bytes(b.to_vec()), Object::Array).0.addr());
         let buf = packed(&mut heap, b"hello");
         let s = from_bytes_take(&mut heap, buf).expect("utf-8");
         assert_eq!(value_as_string(&heap, s).unwrap(), "hello");
@@ -2267,7 +2267,10 @@ mod tests {
             IoErrorTag::from_abi_name("Certificate"),
             IoErrorTag::Protocol
         );
-        assert_eq!(IoErrorTag::from_abi_name("Handshake"), IoErrorTag::Protocol);
+        assert_eq!(
+            IoErrorTag::from_abi_name("Handshake"),
+            IoErrorTag::Protocol
+        );
         assert_eq!(IoErrorTag::from_abi_name("TimedOut"), IoErrorTag::TimedOut);
         assert_eq!(IoErrorTag::from_abi_name("not-a-tag"), IoErrorTag::Other);
         assert_eq!(
@@ -2340,8 +2343,12 @@ mod tests {
     /// macOS loopback can lag a tick after `write_all` before poll sees POLLIN.
     fn wait_loopback_readable(heap: &mut Heap, stream: Value) {
         let handle = stream_wait_handle(heap, stream).expect("wait handle");
-        reactor_wait_fd(handle, Interest::Readable, Some(Duration::from_millis(250)))
-            .expect("loopback write should become readable");
+        reactor_wait_fd(
+            handle,
+            Interest::Readable,
+            Some(Duration::from_millis(250)),
+        )
+        .expect("loopback write should become readable");
     }
 
     #[test]

@@ -64,11 +64,7 @@ fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
         }
         (Object::Array(_) | Object::Tuple(_) | Object::Boxed(_), _) => None,
         (Object::Instance(ga), Object::Instance(gb)) => {
-            if record_slots(ga.as_ref(), gb.as_ref()).is_some() {
-                None
-            } else {
-                Some(false)
-            }
+            if record_slots(ga.as_ref(), gb.as_ref()).is_some() { None } else { Some(false) }
         }
         _ => Some(false),
     }
@@ -150,15 +146,10 @@ fn values_eq_rec(
         (Object::Boxed(ga), Object::Boxed(gb)) => {
             members_eq(heap, &ga.as_ref().payload, &gb.as_ref().payload, fwd, rev)
         }
-        (Object::Instance(ga), Object::Instance(gb)) => {
-            match record_slots(ga.as_ref(), gb.as_ref()) {
-                Some((sa, sb)) => sa
-                    .iter()
-                    .zip(sb)
-                    .all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev)),
-                None => false,
-            }
-        }
+        (Object::Instance(ga), Object::Instance(gb)) => match record_slots(ga.as_ref(), gb.as_ref()) {
+            Some((sa, sb)) => sa.iter().zip(sb).all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev)),
+            None => false,
+        },
         _ => false,
     }
 }
@@ -198,20 +189,12 @@ fn parse_shape(bytes: &[u8], pos: &mut usize) -> Option<Shape> {
         b't' => {
             let n = bytes.get(*pos)?.checked_sub(b'0')?;
             *pos += 1;
-            Shape::Tuple(
-                (0..n)
-                    .map(|_| parse_shape(bytes, pos))
-                    .collect::<Option<_>>()?,
-            )
+            Shape::Tuple((0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?)
         }
         b'r' => {
             let n = bytes.get(*pos)?.checked_sub(b'0')?;
             *pos += 1;
-            Shape::Record(
-                (0..n)
-                    .map(|_| parse_shape(bytes, pos))
-                    .collect::<Option<_>>()?,
-            )
+            Shape::Record((0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?)
         }
         _ => return None,
     })
@@ -233,53 +216,29 @@ fn shaped_eq(heap: &Heap, a: Value, b: Value, shape: &Shape) -> bool {
     match shape {
         Shape::Float => f64::from_bits(a.bits()) == f64::from_bits(b.bits()),
         Shape::Word => values_eq(heap, a, b),
-        Shape::Array(elem) => match (
-            heap.find_object_by_addr(a.bits()),
-            heap.find_object_by_addr(b.bits()),
-        ) {
+        Shape::Array(elem) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
             (Some(Object::Array(ga)), Some(Object::Array(gb))) => {
                 let (ea, eb) = (ga.as_ref(), gb.as_ref());
-                ea.len() == eb.len()
-                    && ea
-                        .iter()
-                        .zip(eb.iter())
-                        .all(|(x, y)| shaped_eq(heap, x, y, elem))
+                ea.len() == eb.len() && ea.iter().zip(eb.iter()).all(|(x, y)| shaped_eq(heap, x, y, elem))
             }
             _ => values_eq(heap, a, b),
         },
-        Shape::Tuple(items) => match (
-            heap.find_object_by_addr(a.bits()),
-            heap.find_object_by_addr(b.bits()),
-        ) {
+        Shape::Tuple(items) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
             (Some(Object::Tuple(ga)), Some(Object::Tuple(gb))) => {
                 let (ea, eb) = (ga.as_ref().elements(), gb.as_ref().elements());
                 ea.len() == items.len()
                     && eb.len() == items.len()
-                    && ea
-                        .iter()
-                        .zip(eb.iter())
-                        .zip(items)
-                        .all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
+                    && ea.iter().zip(eb.iter()).zip(items).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
             }
             _ => values_eq(heap, a, b),
         },
-        Shape::Record(slots) => match (
-            heap.find_object_by_addr(a.bits()),
-            heap.find_object_by_addr(b.bits()),
-        ) {
-            (Some(Object::Instance(ga)), Some(Object::Instance(gb))) => {
-                match record_slots(ga.as_ref(), gb.as_ref()) {
-                    Some((sa, sb)) => {
-                        sa.len() == slots.len()
-                            && sa
-                                .iter()
-                                .zip(sb)
-                                .zip(slots)
-                                .all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
-                    }
-                    None => values_eq(heap, a, b),
+        Shape::Record(slots) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
+            (Some(Object::Instance(ga)), Some(Object::Instance(gb))) => match record_slots(ga.as_ref(), gb.as_ref()) {
+                Some((sa, sb)) => {
+                    sa.len() == slots.len() && sa.iter().zip(sb).zip(slots).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
                 }
-            }
+                None => values_eq(heap, a, b),
+            },
             _ => values_eq(heap, a, b),
         },
     }
@@ -294,13 +253,9 @@ fn members_eq(
 ) -> bool {
     match (a, b) {
         (Member::Value(va), Member::Value(vb)) => values_eq_rec(heap, *va, *vb, fwd, rev),
-        (Member::Object(oa), Member::Object(ob)) => values_eq_rec(
-            heap,
-            Value::from(oa.addr()),
-            Value::from(ob.addr()),
-            fwd,
-            rev,
-        ),
+        (Member::Object(oa), Member::Object(ob)) => {
+            values_eq_rec(heap, Value::from(oa.addr()), Value::from(ob.addr()), fwd, rev)
+        }
         (Member::Value(va), Member::Object(ob)) => {
             values_eq_rec(heap, *va, Value::from(ob.addr()), fwd, rev)
         }
@@ -343,7 +298,10 @@ mod tests {
     #[test]
     fn array_deep_ne_different_len() {
         let mut heap = Heap::default();
-        let (oa, _) = heap.alloc(ObjArray::new(vec![Value::from(1_i64)]), Object::Array);
+        let (oa, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(1_i64)]),
+            Object::Array,
+        );
         let (ob, _) = heap.alloc(
             ObjArray::new(vec![Value::from(1_i64), Value::from(2_i64)]),
             Object::Array,
@@ -380,16 +338,8 @@ mod tests {
         let some = |heap: &mut Heap, addr: u64| {
             heap.alloc_enum_value(0, EnumPayload::one(Value::from(addr)))
         };
-        let (e1, e2, e3) = (
-            some(&mut heap, a1),
-            some(&mut heap, a2),
-            some(&mut heap, a3),
-        );
-        assert_eq!(
-            flat_eq(&heap, e1, e2),
-            None,
-            "array payload needs the cycle-aware walk"
-        );
+        let (e1, e2, e3) = (some(&mut heap, a1), some(&mut heap, a2), some(&mut heap, a3));
+        assert_eq!(flat_eq(&heap, e1, e2), None, "array payload needs the cycle-aware walk");
         assert!(values_eq(&heap, e1, e2));
         assert!(!values_eq(&heap, e1, e3));
 
@@ -407,24 +357,14 @@ mod tests {
         let (sa, _) = heap.alloc(ObjString::from("q"), Object::String);
         let (sb, _) = heap.alloc(ObjString::from("q"), Object::String);
         let inst = |heap: &mut Heap, id: u32, s: u64, n: i64| {
-            let (o, _) = heap.alloc(
-                ObjInstance::with_slots(id, vec![Value::from(n), Value::from(s)]),
-                Object::Instance,
-            );
+            let (o, _) = heap.alloc(ObjInstance::with_slots(id, vec![Value::from(n), Value::from(s)]), Object::Instance);
             Value::from(o.addr())
         };
         let rec = common::RECORD_TYPE_ID_BASE;
-        let (r1, r2, r3) = (
-            inst(&mut heap, rec, sa.addr(), 1),
-            inst(&mut heap, rec, sb.addr(), 1),
-            inst(&mut heap, rec, sb.addr(), 2),
-        );
+        let (r1, r2, r3) = (inst(&mut heap, rec, sa.addr(), 1), inst(&mut heap, rec, sb.addr(), 1), inst(&mut heap, rec, sb.addr(), 2));
         assert!(values_eq(&heap, r1, r2));
         assert!(!values_eq(&heap, r1, r3));
-        let (c1, c2) = (
-            inst(&mut heap, 1, sa.addr(), 1),
-            inst(&mut heap, 1, sa.addr(), 1),
-        );
+        let (c1, c2) = (inst(&mut heap, 1, sa.addr(), 1), inst(&mut heap, 1, sa.addr(), 1));
         assert!(!values_eq(&heap, c1, c2));
         assert!(values_eq(&heap, c1, c1));
         assert!(values_eq_shaped(&heap, r1, r2, b"r2ww"));
@@ -465,8 +405,14 @@ mod tests {
     #[test]
     fn self_loop_arrays_are_equal() {
         let mut heap = Heap::default();
-        let (oa, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
-        let (ob, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
+        let (oa, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
+        let (ob, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
         set_array_elem(&heap, oa.addr(), 0, Value::from(oa.addr()));
         set_array_elem(&heap, ob.addr(), 0, Value::from(ob.addr()));
         assert!(values_eq(
@@ -480,9 +426,18 @@ mod tests {
     fn one_cycle_ne_two_cycle() {
         // a = [a]  vs  b = [c], c = [b]
         let mut heap = Heap::default();
-        let (oa, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
-        let (ob, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
-        let (oc, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
+        let (oa, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
+        let (ob, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
+        let (oc, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
         set_array_elem(&heap, oa.addr(), 0, Value::from(oa.addr()));
         set_array_elem(&heap, ob.addr(), 0, Value::from(oc.addr()));
         set_array_elem(&heap, oc.addr(), 0, Value::from(ob.addr()));
@@ -497,10 +452,22 @@ mod tests {
     fn matching_two_cycles_are_equal() {
         // a=[b], b=[a]  vs  c=[d], d=[c]
         let mut heap = Heap::default();
-        let (oa, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
-        let (ob, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
-        let (oc, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
-        let (od, _) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
+        let (oa, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
+        let (ob, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
+        let (oc, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
+        let (od, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(0_i64)]),
+            Object::Array,
+        );
         set_array_elem(&heap, oa.addr(), 0, Value::from(ob.addr()));
         set_array_elem(&heap, ob.addr(), 0, Value::from(oa.addr()));
         set_array_elem(&heap, oc.addr(), 0, Value::from(od.addr()));
@@ -537,8 +504,14 @@ mod tests {
         let mut heap = Heap::default();
         let (payload, _) = heap.alloc(ObjString::from("n"), Object::String);
         let member = Value::from(payload.addr());
-        let (ok, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(member)), Object::Enum);
-        let (err, _) = heap.alloc(ObjEnum::new(1, EnumPayload::one(member)), Object::Enum);
+        let (ok, _) = heap.alloc(
+            ObjEnum::new(0, EnumPayload::one(member)),
+            Object::Enum,
+        );
+        let (err, _) = heap.alloc(
+            ObjEnum::new(1, EnumPayload::one(member)),
+            Object::Enum,
+        );
         assert!(!values_eq(
             &heap,
             Value::from(ok.addr()),
