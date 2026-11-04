@@ -2307,6 +2307,7 @@ impl<const S: usize> Machine<S> {
                 host: Self::native_host_vm,
                 ffi: Self::native_ffi_vm,
                 vector: Self::native_vector,
+                invoke: Self::native_invoke,
             },
         }
     }
@@ -2442,6 +2443,229 @@ impl<const S: usize> Machine<S> {
         vm.native_roots.pop();
         *panicked = vm.panicked;
         Some(out.bits())
+    }
+
+    /// [`crate::native::NativeHost::invoke`]: the ordinary host native
+    /// `id`, as `HostInvoke` runs it (`exec_rest.rs`), from native code: a
+    /// wait parks the fiber the call runs on ([`Self::native_park`]) where
+    /// the VM would suspend the task, then the native runs again or the
+    /// wake is its result.
+    unsafe fn native_invoke(
+        raw: *mut c_void,
+        ctx: *mut crate::native::NativeCtx,
+        id: u64,
+        layout: u64,
+        args: &[Value],
+    ) -> Option<crate::native::Invoked> {
+        use crate::native::Invoked;
+        // SAFETY: native code passes back the machine `try_native_call` gave it.
+        let vm = unsafe { &mut *raw.cast::<Self>() };
+        let fn_id = id as usize;
+        match vm.natives.get_by_id(fn_id)?.host_op() {
+            crate::HostOp::Ordinary => {}
+            crate::HostOp::Task => return vm.native_task_op(ctx, fn_id, args),
+            _ => return None,
+        }
+        // Where tasks switch, a wait must park a fiber: off one (no task
+        // may switch under native frames there), the stub runs it.
+        let park_tasks = vm.tasks_can_switch();
+        if park_tasks && vm.fiber_switch_depth.is_none() {
+            return None;
+        }
+        let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
+        if fn_id == common::CLOCK_SLEEP_MS_ID as usize && park_tasks {
+            // Inside a scope, `clock::sleep_ms` suspends the task.
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(
+                    args.first().map_or(0, |v| v.as_int()).max(0) as u64
+                );
+            let s = vm.sched.as_mut().expect("tasks_can_switch");
+            let current = s.current;
+            s.add_timer(current, deadline);
+            return Some(
+                match vm.native_park(ctx, Some(crate::task::Block::Sleep), true) {
+                    Some(_) => Invoked::Value(0),
+                    None => Invoked::Unwound,
+                },
+            );
+        }
+        let opens_fd =
+            fn_id == common::IO_OPEN_ID as usize || fn_id == common::TCP_ACCEPT_ID as usize;
+        loop {
+            let park_tasks = vm.tasks_can_switch();
+            if park_tasks {
+                crate::task::set_task_waiter(vm.task_waiter());
+            }
+            if opens_fd {
+                let _ = crate::io::take_fd_exhausted();
+            }
+            let native = vm.natives.get_by_id(fn_id).expect("checked above");
+            let mut invoked = crate::host_enum::with_host_enum_layout(layout, || {
+                native.invoke(&mut vm.heap, args)
+            });
+            if opens_fd && crate::io::take_fd_exhausted() {
+                // Streams nothing reaches may hold the descriptors:
+                // collect (native frames' words pinned) and try once more.
+                let roots_len = vm.ffi_arg_roots.len();
+                vm.ffi_arg_roots.extend_from_slice(args);
+                let mut panicked = false;
+                // SAFETY: as above.
+                unsafe { Self::native_gc(raw, ctx, &mut panicked) };
+                vm.ffi_arg_roots.truncate(roots_len);
+                let native = vm.natives.get_by_id(fn_id).expect("checked above");
+                invoked = crate::host_enum::with_host_enum_layout(layout, || {
+                    native.invoke(&mut vm.heap, args)
+                });
+            }
+            if park_tasks {
+                crate::task::set_task_waiter(None);
+            }
+            match invoked {
+                Ok(Some(v)) => return Some(Invoked::Value(v.bits())),
+                Ok(None) if park_tasks && crate::task::take_thread_parked() => {
+                    // Runs again when another thread posts the wake.
+                    let s = vm.sched.as_mut().expect("tasks_can_switch");
+                    let key = s.peek_thread_key();
+                    let current = s.current;
+                    s.add_thread_wait(current, key);
+                    vm.native_park(ctx, Some(crate::task::Block::Thread(key)), false)?;
+                }
+                Ok(None) if park_tasks && crate::task::io_retry_parked() => {
+                    // A connect in progress: runs again on readiness.
+                    let req = crate::task::take_io_retry_park().expect("checked");
+                    let token = vm.native_io_wait(&req);
+                    vm.native_park(ctx, Some(crate::task::Block::IoRetry(token)), false)?;
+                }
+                Ok(None) => {
+                    let Some(req) = crate::io::take_pending_io_park() else {
+                        return Some(Invoked::Value(0));
+                    };
+                    if !park_tasks {
+                        // No other task: block the thread.
+                        let wait =
+                            crate::thread::host_io_wait(req.handle, req.interest, req.timeout);
+                        let v = crate::host_enum::with_host_enum_layout(layout, || {
+                            crate::io::as_result_unit(&mut vm.heap, wait)
+                        });
+                        return Some(Invoked::Value(v.bits()));
+                    }
+                    let token = vm.native_io_wait(&req);
+                    return Some(
+                        match vm.native_park(ctx, Some(crate::task::Block::Io(token, layout)), true)
+                        {
+                            Some(v) => Invoked::Value(v.bits()),
+                            None => Invoked::Unwound,
+                        },
+                    );
+                }
+                Err(crate::FfiError::IntTrap(t)) => {
+                    return Some(Invoked::Panic(t.message().to_string()));
+                }
+                Err(crate::FfiError::Panic(msg)) => return Some(Invoked::Panic(msg)),
+                Err(e) => {
+                    let name = vm
+                        .natives
+                        .get_by_id(fn_id)
+                        .map_or("?", |n| n.name())
+                        .to_string();
+                    return Some(Invoked::Panic(format!(
+                        "HostInvoke failed for `{name}`: {e}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// A task op (`HostOp::Task`) from native code, as `HostInvoke` runs
+    /// it: one that may suspend the task does so inside the fiber the
+    /// call runs on, then returns the wake or runs again. `None` (the stub
+    /// runs it): a suspending op off a fiber, or a generator close.
+    fn native_task_op(&mut self, ctx: *mut crate::native::NativeCtx, fn_id: usize, args: &[Value]) -> Option<crate::native::Invoked> {
+        use crate::native::Invoked;
+        let op = fn_id.saturating_sub(common::TASK_SCOPE_OPEN_ID as usize);
+        // scope open/close, join, sleep, yield, shield exit, cond wait.
+        let suspends = matches!(op, 0 | 1 | 4 | 6 | 7 | 11 | 13);
+        let plain = matches!(op, 2 | 3 | 5 | 9 | 10 | 12 | 14 | 15);
+        let in_fiber = self.fiber_switch_depth.is_some_and(|d| d == self.nested_depth);
+        if !(plain || suspends && in_fiber) {
+            return None;
+        }
+        let mut words = [Value::default(); 2];
+        let n = args.len().min(2);
+        words[..n].copy_from_slice(&args[..n]);
+        loop {
+            let (mut ip, mut sp) = (self.frames.get().tell(), self.frames.get().get());
+            let before = self.stack.tell();
+            self.native_roots.push((ctx, self.frames.len()));
+            // A failed `requires` blames the native function's caller, as
+            // from its stub (`contract_failure`).
+            let saved = (op == 15).then(|| std::mem::replace(&mut self.host_stub_frame, self.frames.len()));
+            let flow = self.task_host_op(fn_id, &words[..n], &mut ip, &mut sp);
+            if let Some(saved) = saved {
+                self.host_stub_frame = saved;
+            }
+            self.native_roots.pop();
+            match flow {
+                TaskFlow::Value(v) => return Some(Invoked::Value(v.bits())),
+                TaskFlow::Panic(msg) => return Some(Invoked::Panic(msg)),
+                TaskFlow::Unwind => return Some(Invoked::Unwound),
+                TaskFlow::Switched => {
+                    if std::mem::take(&mut self.fiber_stop) {
+                        return Some(Invoked::Unwound);
+                    }
+                    if self.stack.tell() > before {
+                        return Some(Invoked::Value(self.stack.pop().bits()));
+                    }
+                    // Woken to run the op again.
+                }
+            }
+        }
+    }
+
+    /// Register the current task's wait for `req`'s readiness (and its
+    /// timeout), as [`Self::task_suspend_io`] does; returns the token.
+    fn native_io_wait(&mut self, req: &crate::io::IoParkRequest) -> crate::io_reactor::WaitToken {
+        let s = self.sched.as_mut().expect("tasks_can_switch");
+        let token = s.reactor.register_wait(req.handle, req.interest);
+        let current = s.current;
+        s.io_waits.insert(token, current);
+        if let Some(t) = req.timeout {
+            s.add_timer(current, std::time::Instant::now() + t);
+        }
+        token
+    }
+
+    /// From native code inside a fiber: suspend the task on `block` (the
+    /// switch happens at the `CALL` that started the fiber), with `ctx`'s
+    /// words rooted meanwhile. Returns the wake (the result slot's word
+    /// when `result_slot`), or `None` when a cancel came instead: the
+    /// unwind is armed.
+    fn native_park(
+        &mut self,
+        ctx: *mut crate::native::NativeCtx,
+        block: Option<crate::task::Block>,
+        result_slot: bool,
+    ) -> Option<Value> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let (mut ip, mut sp) = (self.frames.get().tell(), self.frames.get().get());
+            self.native_roots.push((ctx, self.frames.len()));
+            let cancelled = self.fiber_park(block, result_slot, &mut ip, &mut sp);
+            self.native_roots.pop();
+            if cancelled {
+                return None;
+            }
+            Some(if result_slot {
+                self.stack.pop()
+            } else {
+                Value::default()
+            })
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (ctx, block, result_slot);
+            unreachable!("no fibers on wasm: tasks never switch under native frames")
+        }
     }
 
     /// [`crate::native::NativeHost::ffi`]: the FFI op `op` (`operand`)

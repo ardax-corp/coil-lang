@@ -1,4 +1,3 @@
-
 use common::{
     ArchivedByte as Byte, ArchivedInstruction as Instruction, Byte as RawByte, Value,
     pack_init_typed, pack_set_field_slot,

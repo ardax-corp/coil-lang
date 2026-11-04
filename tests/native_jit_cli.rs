@@ -1078,7 +1078,7 @@ fn a_pure_native_run_reports_no_vm_dependence() {
 fn a_native_run_counts_its_vm_entries() {
     // `yield_now` is a task op, which runs on the VM.
     let src = format!(
-        "{HEADER}#[inline(never)]\nfn show(int i) {{ task::yield_now(); let _ = println(format(\"%i\", i)); }}\n\
+        "{HEADER}use task::yield_now;\n#[inline(never)]\nfn show(int i) {{ yield_now(); let _ = println(format(\"%i\", i)); }}\n\
          fn main() {{ let i = 0; while i < 3 {{ show(i); i = i + 1; }} }}\n"
     );
     let stats = same_as_vm("counts_vm", &src);

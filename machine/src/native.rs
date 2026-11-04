@@ -246,6 +246,25 @@ pub struct NativeHost {
     /// runs it there; the slots come back as the op left them. `None`:
     /// no room for the frame (nothing ran).
     pub vector: VectorFn,
+    /// Run the ordinary host native `id` on `args` in `layout` as the VM's
+    /// `HostInvoke` does, without bytecode: a native that would block the
+    /// task parks the fiber the call runs on. `None`: it is no ordinary
+    /// native (nothing ran).
+    pub invoke: InvokeFn,
+}
+
+/// [`NativeHost::invoke`]: machine, context, native id, layout, arguments.
+pub type InvokeFn =
+    unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64, &[common::Value]) -> Option<Invoked>;
+
+/// What [`NativeHost::invoke`] did.
+pub enum Invoked {
+    /// It returned this word.
+    Value(u64),
+    /// It panicked with this message (not reported yet).
+    Panic(String),
+    /// The task was cancelled while it waited: the VM armed the unwind.
+    Unwound,
 }
 
 /// [`NativeHost::vector`]: machine, scan, flags, body, slots, from, bound.
@@ -283,6 +302,7 @@ impl NativeHost {
         host: |_, _, _, _, _, _| None,
         ffi: |_, _, _, _, _, _| None,
         vector: |_, _, _, _, _, _, _| None,
+        invoke: |_, _, _, _, _| None,
     };
 }
 
@@ -1872,6 +1892,9 @@ pub unsafe extern "C" fn coil_native_host(
         .get(id as usize)
         .is_some_and(|h| h.via_vm)
     {
+        if let Some(out) = unsafe { host_invoke(ctx, id, layout, args, n) } {
+            return out;
+        }
         let host = unsafe { (*ctx).host.host };
         return unsafe { host_via_vm(ctx, host, id, layout, args, n) };
     }
@@ -2015,6 +2038,67 @@ pub(crate) fn is_ffi_op(op: common::Instruction) -> bool {
             | common::Instruction::DeclareFFI
             | common::Instruction::FfiInvoke
     )
+}
+
+/// [`coil_native_host`] of an ordinary native that is no plain function:
+/// the machine runs it in Rust ([`NativeHost::invoke`]), no bytecode. Its
+/// effects cannot be taken back: the call commits first. `None`: it is
+/// no ordinary native, and its stub runs it.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
+unsafe fn host_invoke(
+    ctx: *mut NativeCtx,
+    id: u64,
+    layout: u64,
+    args: *const u64,
+    n: u64,
+) -> Option<u64> {
+    let c = unsafe { &mut *ctx };
+    let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
+    let words = buf.get_mut(..n as usize)?;
+    if c.machine.is_null() || c.heap.is_null() {
+        return None;
+    }
+    for (i, w) in words.iter_mut().enumerate() {
+        // SAFETY: `args` holds `n` words.
+        *w = common::Value::from(unsafe { *args.add(i) });
+    }
+    // SAFETY: the context's heap is the machine's.
+    let live_before = unsafe { &*c.heap }.live_object_count();
+    let committed = std::mem::replace(&mut c.committed, 1);
+    // A wait lets other tasks run, and they may collect.
+    c.gc_epoch += 1;
+    let (machine, invoke) = (c.machine, c.host.invoke);
+    // SAFETY: `machine` is the live machine `host` was made for.
+    let out = unsafe { invoke(machine, ctx, id, layout, words) };
+    let c = unsafe { &mut *ctx };
+    match out {
+        None => {
+            c.committed = committed;
+            None
+        }
+        Some(Invoked::Value(v)) => {
+            // SAFETY: as above.
+            let heap = unsafe { &*c.heap };
+            let made = heap.live_object_count().saturating_sub(live_before) as u64;
+            if made != 0 {
+                c.allocs += made - 1;
+                unsafe { note_alloc(ctx, heap) };
+            }
+            Some(v)
+        }
+        Some(Invoked::Panic(msg)) => {
+            c.trap = TRAP_MESSAGE;
+            // SAFETY: `call` set `message` for the call.
+            unsafe { *c.message = msg };
+            Some(unsafe { bail(ctx) })
+        }
+        Some(Invoked::Unwound) => {
+            c.trap = TRAP_VM_PANIC;
+            Some(unsafe { bail(ctx) })
+        }
+    }
 }
 
 /// [`coil_native_host`] of a native that needs the VM: its stub runs in a
