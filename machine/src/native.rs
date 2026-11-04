@@ -221,7 +221,7 @@ pub struct NativeHost {
     /// when the machine has no stub for it (nothing ran).
     pub host: HostViaVmFn,
     /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
-    /// byte) with its operand on `args` through its stub, as `host` does.
+    /// byte) with its operand on `args`, on the runtime.
     pub ffi: HostViaVmFn,
     /// Run the ordinary host native `id` on `args` in `layout` as the VM's
     /// `HostInvoke` does, without bytecode: a native that would block the
@@ -1727,9 +1727,8 @@ impl Drop for GenFiber {
 }
 
 /// An FFI op from native code (`MirInst::Ffi`): opcode byte `op` with
-/// `operand` on the `n` words at `args`, through its stub in a nested VM
-/// execution ([`NativeHost::ffi`]), as [`coil_native_host`] runs a host
-/// call that needs the VM.
+/// `operand` on the `n` words at `args`, on the runtime
+/// ([`NativeHost::ffi`]), with the commit and panic rules of a host call.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
@@ -1738,7 +1737,7 @@ pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: 
     let ffi = unsafe { (*ctx).host.ffi };
     let kind = [common::Instruction::FfiLoad as u8, common::Instruction::DeclareFFI as u8].iter().position(|o| u64::from(*o) == op).unwrap_or(2);
     FFI_CALLS[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { host_via_vm(ctx, ffi, op, operand, args, n) }
+    unsafe { host_on_machine(ctx, ffi, op, operand, args, n, false) }
 }
 
 /// The opcodes of FFI ops, which get a stub per operand the program uses.
@@ -1814,6 +1813,15 @@ unsafe fn host_invoke(
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
 unsafe fn host_via_vm(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
+    unsafe { host_on_machine(ctx, host, id, layout, args, n, true) }
+}
+
+/// [`host_via_vm`], or (`!via_vm`) a host entry that runs in Rust and
+/// enters no VM stub.
+///
+/// # Safety
+/// As [`host_via_vm`].
+unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u64, args: *const u64, n: u64, via_vm: bool) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
     let Some(words) = buf.get_mut(..n as usize) else {
@@ -1827,8 +1835,11 @@ unsafe fn host_via_vm(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u
         *w = common::Value::from(unsafe { *args.add(i) });
     }
     let committed = std::mem::replace(&mut c.committed, 1);
+    // It may allocate (the call reports `allocated`).
     c.vm_calls += 1;
-    HOST_VIA_VM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if via_vm {
+        HOST_VIA_VM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     c.gc_epoch += 1;
     let mut panicked = false;
     let machine = c.machine;
@@ -2057,7 +2068,7 @@ pub fn vm_use_counts() -> Vec<(String, u64)> {
     }
     for (op, n) in ["ffi_load", "ffi_declare", "ffi_call"].into_iter().zip(FFI_CALLS.iter().map(|n| n.load(Relaxed))) {
         if n != 0 {
-            out.push((format!("host_machine:{op}"), n));
+            out.push((format!("host_runtime:{op}"), n));
         }
     }
     let hosts = direct_host_natives();

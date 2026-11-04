@@ -320,6 +320,22 @@ struct FfiCall {
 }
 
 impl FfiCall {
+    /// The call from its operand words: library, function id, argument
+    /// tuple and, for a variadic call, the argument tags tuple.
+    fn from_words(heap: &Heap, words: &[Value]) -> Self {
+        let tuple = |v: Option<&Value>| match v.and_then(|v| heap.find_object_by_addr(v.bits())) {
+            Some(Object::Tuple(gc)) => Some(gc.as_ref().elements().to_vec()),
+            _ => None,
+        };
+        let arg_types = (words.len() > 3).then(|| tuple(words.get(3)).unwrap_or_default().iter().map(|v| ffi_type_from_value(v, heap)).collect());
+        FfiCall {
+            lib_addr: words.first().map_or(0, |v| v.bits()),
+            function_id: words.get(1).map_or(0, |v| v.as_int() as usize),
+            args: tuple(words.get(2)).unwrap_or_default(),
+            arg_types,
+        }
+    }
+
     /// The call, run once the VM pauses (`ip` / `sp`: where it resumes).
     fn pending(self, resume_ip: usize, resume_sp: usize) -> PendingFfiInvoke {
         PendingFfiInvoke {
@@ -329,6 +345,140 @@ impl FfiCall {
             arg_types: self.arg_types,
             resume_ip,
             resume_sp,
+        }
+    }
+}
+
+/// An FFI type tag word (`ffi::Type`) as the type it names.
+fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {
+    let raw = v.bits();
+    let (tag, aux) = if raw <= common::tag::LAST as u64 {
+        (raw as u32, 0)
+    } else if raw > 0xFFFF {
+        ((raw & 0xFFFF) as u32, (raw >> 16) as u32)
+    } else if let Some(crate::memory::Object::Enum(gc)) = heap.find_object_by_addr(raw) {
+        (gc.as_ref().tag, 0)
+    } else {
+        (common::tag::INT, 0)
+    };
+    crate::memory::FfiType::from_tag(tag, aux)
+}
+
+/// Register a new FFI function on the given library `Object`.
+fn register_signature_on_object(obj: &mut Object, sig: crate::ffi::FfiSignature, layouts: &[CStructLayout]) -> Result<usize, crate::ffi::FfiError> {
+    if let crate::memory::Object::Library(gc) = obj {
+        let obj_lib: &mut crate::memory::ObjLibrary = (**gc).as_mut();
+        crate::ffi::register_on_library(obj_lib, sig, layouts)
+    } else {
+        Err(crate::ffi::FfiError::InvalidHandle("not a library object".into()))
+    }
+}
+
+/// The FFI ops (`FfiLoad`, `DeclareFFI`, `FfiInvoke`) on the runtime: each
+/// returns the `Result` value the op pushes.
+impl crate::runtime::Runtime {
+    fn ffi_tuple_types(&self, tuple: Value) -> Vec<crate::memory::FfiType> {
+        match self.heap.find_object_by_addr(tuple.bits()) {
+            Some(Object::Tuple(gc)) => gc.as_ref().elements().iter().map(|v| ffi_type_from_value(v, &self.heap)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn ffi_err(&mut self, kind: crate::ffi::FfiErrorKindTag, message: String) -> Value {
+        crate::ffi::alloc_result_ffi_err(&mut self.heap, kind, message)
+    }
+
+    fn ffi_error(&mut self, err: crate::ffi::FfiError) -> Value {
+        let kind = crate::ffi::FfiErrorKindTag::from_ffi_error(&err);
+        self.ffi_err(kind, err.to_string())
+    }
+
+    /// `FfiLoad`: load the library at the string `path`.
+    pub(crate) fn ffi_load(&mut self, path: Value) -> Value {
+        let path = match self.heap.find_object_by_addr(path.bits()) {
+            Some(Object::String(gc)) => gc.as_ref().data.to_string(),
+            _ => String::new(),
+        };
+        match crate::ffi::resolve_library(&path, self.ffi.base_dir.as_deref(), &self.ffi.search_paths, &self.ffi.dload_gate) {
+            Ok(lib_arc) => {
+                self.ffi.libraries.entry(path.clone()).or_insert_with(|| lib_arc.clone());
+                let (object, lib) = self.heap.alloc_library(lib_arc);
+                lib.payload_mut().static_symbols = crate::ffi::static_library(&path);
+                let addr = object.addr();
+                self.ffi.userland_libraries.insert(addr, object);
+                crate::io::alloc_result_ok(&mut self.heap, Value::from(addr))
+            }
+            Err(e) => self.ffi_error(e),
+        }
+    }
+
+    /// `DeclareFFI` (operand `raw`): declare `name` in library `lib` with
+    /// the argument tags tuple `args` and return tag `ret`.
+    pub(crate) fn ffi_declare(&mut self, raw: u32, lib: Value, name: Value, args: Value, ret: Value) -> Value {
+        let variadic = (raw & (1 << 16)) != 0;
+        let ret = ffi_type_from_value(&ret, &self.heap);
+        let args = self.ffi_tuple_types(args);
+        let name = match self.heap.find_object_by_addr(name.bits()) {
+            Some(Object::String(gc)) => gc.as_ref().data.to_string(),
+            _ => String::new(),
+        };
+        let lib_addr = lib.bits();
+        let Some(mut owned) = self.ffi.userland_libraries.get(&lib_addr).copied() else {
+            return self.ffi_err(crate::ffi::FfiErrorKindTag::InvalidHandle, format!("FFI declare: library at 0x{lib_addr:x} is not loaded"));
+        };
+        let sig = crate::ffi::FfiSignature { name, args, ret, variadic };
+        match register_signature_on_object(&mut owned, sig, &self.ffi.struct_layouts) {
+            Ok(id) => {
+                self.ffi.userland_libraries.insert(lib_addr, owned);
+                crate::io::alloc_result_ok(&mut self.heap, Value::from(id as i64))
+            }
+            Err(e) => self.ffi_error(e),
+        }
+    }
+
+    /// `FfiInvoke`: call the declared function. `callback` makes the C
+    /// trampoline for a callback argument (the function at that offset).
+    pub(crate) fn ffi_invoke(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Value {
+        let lib = match self.ffi.userland_libraries.get(&lib_addr).copied() {
+            Some(Object::Library(gc)) => gc,
+            Some(_) => return self.ffi_err(crate::ffi::FfiErrorKindTag::InvalidHandle, "invalid library handle (not a loaded library)".into()),
+            None => return self.ffi_error(crate::ffi::FfiError::InvalidHandle("invalid library handle".into())),
+        };
+        let lib_ref: &crate::memory::ObjLibrary = lib.as_ref();
+        let Some(registered) = lib_ref.signatures.get(function_id) else {
+            return self.ffi_error(crate::ffi::FfiError::InvalidHandle("function id out of range".into()));
+        };
+        let sig = registered.ffi_signature();
+        let mut owned_args;
+        let mut args = args;
+        if sig.args.iter().any(|ty| matches!(ty, crate::memory::FfiType::Callback(_))) {
+            owned_args = args.to_vec();
+            for (i, ty) in sig.args.iter().enumerate() {
+                if let crate::memory::FfiType::Callback(_) = ty {
+                    let made = callback(owned_args[i].as_int() as u32);
+                    match made {
+                        Ok(closure) => {
+                            owned_args[i] = Value::from(closure.code_ptr_usize() as u64);
+                            self.ffi.closures.push(closure);
+                        }
+                        Err(e) => return self.ffi_error(e),
+                    }
+                }
+            }
+            args = &owned_args;
+        }
+        // No coil callback can run during the call without a closure:
+        // packed byte arrays can be lent in place.
+        let mut ctx = crate::ffi::InvokeContext::new(self.heap.get_mut() as *mut Heap, &self.ffi.struct_layouts).lending_arrays(self.ffi.closures.is_empty());
+        let mut closure_ptrs = Vec::new();
+        let roots_len = self.ffi_arg_roots.len();
+        self.ffi_arg_roots.extend_from_slice(args);
+        let result = crate::ffi::invoke_via_libffi(&registered.prepared, sig, args, arg_types, &mut ctx, &mut closure_ptrs);
+        self.ffi_arg_roots.truncate(roots_len);
+        match result {
+            Ok(Some(v)) => crate::io::alloc_result_ok(&mut self.heap, v),
+            Ok(None) => crate::io::alloc_result_ok(&mut self.heap, Value::default()),
+            Err(e) => self.ffi_error(e),
         }
     }
 }
@@ -2359,7 +2509,8 @@ impl<const S: usize> Machine<S> {
     }
 
     /// [`crate::native::NativeHost::ffi`]: the FFI op `op` (`operand`) on
-    /// `args`, as the VM runs it (no bytecode).
+    /// `args` on the runtime ([`crate::runtime::Runtime::ffi_load`] and
+    /// the rest); only a callback the C function makes enters the VM.
     unsafe fn native_ffi_vm(
         raw: *mut c_void,
         ctx: *mut crate::native::NativeCtx,
@@ -2370,34 +2521,22 @@ impl<const S: usize> Machine<S> {
     ) -> Option<u64> {
         // SAFETY: native code passes back the machine `try_native_call` gave it.
         let vm = unsafe { &mut *raw.cast::<Self>() };
-        if !vm.reserve_operand_words(args.len() + 1) {
-            return None;
-        }
         let operand = operand as u32;
-        let before = vm.stack.tell();
-        for &a in args {
-            vm.stack.push(a);
-        }
-        // A callback the C function makes may collect: the native frames'
-        // words stay pinned.
-        vm.rt.native_roots.push((ctx, vm.frames.len()));
-        match op as u8 {
-            o if o == common::Instruction::FfiLoad as u8 => vm.ffi_load_top(),
-            o if o == common::Instruction::DeclareFFI as u8 => vm.declare_ffi_top(operand),
+        let arg = |i: usize| args.get(i).copied().unwrap_or_default();
+        let out = match op as u8 {
+            o if o == common::Instruction::FfiLoad as u8 => vm.rt.ffi_load(arg(0)),
+            o if o == common::Instruction::DeclareFFI as u8 => vm.rt.ffi_declare(operand, arg(0), arg(1), arg(2), arg(3)),
             _ => {
-                let call = vm.ffi_invoke_take(operand);
-                let sp = vm.frames.get().get();
-                vm.native_reenter(|vm| vm.finish_pending_ffi_invoke(call.pending(0, sp)));
+                let call = FfiCall::from_words(&vm.rt.heap, args);
+                // A callback the C function makes may collect: the native
+                // frames' words stay pinned.
+                vm.rt.native_roots.push((ctx, vm.frames.len()));
+                let v = vm.native_reenter(|vm| vm.ffi_invoke(call.lib_addr, call.function_id, &call.args, call.arg_types.as_deref()));
+                vm.rt.native_roots.pop();
+                v
             }
-        }
-        vm.rt.native_roots.pop();
-        *panicked = vm.panicked;
-        let out = if vm.stack.tell() > before {
-            vm.stack.pop()
-        } else {
-            Value::default()
         };
-        vm.stack.seek(before);
+        *panicked = vm.panicked;
         Some(out.bits())
     }
 
@@ -3588,26 +3727,6 @@ impl<const S: usize> Machine<S> {
         vstore_lanes(gc.as_mut(), &self.vregs[vsrc], index)
     }
 
-    fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {
-        let (tag, aux) = Self::decode_ffi_type_tag(v, heap);
-        crate::memory::FfiType::from_tag(tag, aux)
-    }
-
-    fn decode_ffi_type_tag(v: &Value, heap: &Heap) -> (u32, u32) {
-        let raw = v.bits();
-        if raw <= common::tag::LAST as u64 {
-            return (raw as u32, 0);
-        }
-        if raw > 0xFFFF {
-            return ((raw & 0xFFFF) as u32, (raw >> 16) as u32);
-        }
-        if let Some(crate::memory::Object::Enum(gc)) = Self::find_object_by_addr(heap, raw) {
-            (gc.as_ref().tag, 0)
-        } else {
-            (common::tag::INT, 0)
-        }
-    }
-
     pub(crate) fn object_string_value(heap: &Heap, v: &Value) -> String {
         let addr = v.bits();
         let obj = Self::find_object_by_addr(heap, addr);
@@ -3678,48 +3797,6 @@ impl<const S: usize> Machine<S> {
             }
             Some(Object::String(gc)) => gc.as_ref().data.to_string(),
             Some(_) | None => v.as_int().to_string(),
-        }
-    }
-
-    fn materialize_callback_args<'a>(
-        &mut self,
-        sig: &crate::ffi::FfiSignature,
-        args: &'a [Value],
-    ) -> Result<std::borrow::Cow<'a, [Value]>, crate::ffi::FfiError> {
-        use crate::ffi::{callback_cif, make_int_callback, VmCallFn};
-        use crate::memory::FfiType;
-        if !sig.args.iter().any(|ty| matches!(ty, FfiType::Callback(_))) {
-            return Ok(std::borrow::Cow::Borrowed(args));
-        }
-        let mut out = args.to_vec();
-        let vm_ptr = self as *mut Self as *mut c_void;
-        let call_fn: VmCallFn = Self::invoke_call;
-        for (i, ty) in sig.args.iter().enumerate() {
-            if let FfiType::Callback(_) = ty {
-                let offset = out[i].as_int() as u32;
-                let cif = callback_cif(&[FfiType::Int], FfiType::Int, &self.rt.ffi.struct_layouts)?;
-                let closure = make_int_callback(vm_ptr, offset, call_fn, cif)?;
-                let ptr = closure.code_ptr_usize();
-                self.rt.ffi.closures.push(closure);
-                out[i] = Value::from(ptr as u64);
-            }
-        }
-        Ok(std::borrow::Cow::Owned(out))
-    }
-
-    /// Register a new FFI function on the given library `Object`.
-    fn register_signature_on_object(
-        obj: &mut Object,
-        sig: crate::ffi::FfiSignature,
-        layouts: &[CStructLayout],
-    ) -> Result<usize, crate::ffi::FfiError> {
-        if let crate::memory::Object::Library(gc) = obj {
-            let obj_lib: &mut crate::memory::ObjLibrary = (**gc).as_mut();
-            crate::ffi::register_on_library(obj_lib, sig, layouts)
-        } else {
-            Err(crate::ffi::FfiError::InvalidHandle(
-                "not a library object".into(),
-            ))
         }
     }
 
@@ -5967,219 +6044,50 @@ impl<const S: usize> Machine<S> {
     /// `FfiLoad` on the path on top of the stack: pops it, pushes the
     /// `Result` of loading the library.
     fn ffi_load_top(&mut self) {
-        // Inlined to split-borrow `heap`/`libraries` from `frames`.
-        let path_val = self.stack.pop();
-        let path = {
-            let addr = path_val.bits();
-            match Self::find_object_by_addr(&self.rt.heap, addr) {
-                Some(crate::memory::Object::String(gc)) => gc.as_ref().data.to_string(),
-                _ => String::new(),
-            }
-        };
-        match crate::ffi::resolve_library(
-            &path,
-            self.rt.ffi.base_dir.as_deref(),
-            &self.rt.ffi.search_paths,
-            &self.rt.ffi.dload_gate,
-        ) {
-            Ok(lib_arc) => {
-                self.rt.ffi.libraries
-                    .entry(path.clone())
-                    .or_insert_with(|| lib_arc.clone());
-                let (object, lib) = self.rt.heap.alloc_library(lib_arc);
-                lib.payload_mut().static_symbols = crate::ffi::static_library(&path);
-                let addr = object.addr();
-                self.rt.ffi.userland_libraries.insert(addr, object);
-                self.push_result_ok(Value::from(addr));
-            }
-            Err(e) => {
-                self.push_ffi_error(e);
-            }
-        }
+        let path = self.stack.pop();
+        let v = self.rt.ffi_load(path);
+        self.stack.push(v);
     }
 
     /// `FfiInvoke` (operand `raw`): pops the library, function id,
     /// argument tuple and argument tags it takes, for the call.
     fn ffi_invoke_take(&mut self, raw: u32) -> FfiCall {
-        let _arity = (raw & 0xFFFF) as usize;
-        let has_arg_tags = (raw & (1 << 16)) != 0;
-
         // Stack (bottom → top): lib, fn_id, args_tuple [, tags_tuple].
-        let arg_types = if has_arg_tags {
-            let tags_val = self.stack.pop();
-            let tags_addr = tags_val.bits();
-            let tags: Vec<crate::memory::FfiType> =
-                match Self::find_object_by_addr(&self.rt.heap, tags_addr) {
-                    Some(crate::memory::Object::Tuple(gc)) => gc
-                        .as_ref()
-                        .elements()
-                        .iter()
-                        .map(|v| Self::ffi_type_from_value(v, &self.rt.heap))
-                        .collect(),
-                    _ => Vec::new(),
-                };
-            Some(tags)
-        } else {
-            None
-        };
-
-        let tuple_val = self.stack.pop();
-        let tuple_addr = tuple_val.bits();
-
-        let function_id_val = self.stack.pop();
-        let function_id = function_id_val.as_int() as usize;
-
-        let lib_val = self.stack.pop();
-        let lib_addr = lib_val.bits();
-
-        let args: Vec<Value> = match Self::find_object_by_addr(&self.rt.heap, tuple_addr) {
-            Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
-            _ => Vec::new(),
-        };
-        FfiCall {
-            lib_addr,
-            function_id,
-            args,
-            arg_types,
-        }
+        let n = if raw & (1 << 16) != 0 { 4 } else { 3 };
+        let base = self.stack.tell() - n;
+        let words: Vec<Value> = (0..n).map(|i| self.stack[base + i]).collect();
+        self.stack.seek(base);
+        FfiCall::from_words(&self.rt.heap, &words)
     }
 
     /// `DeclareFFI` (operand `raw`): pops the library, name, argument and
     /// return tags, pushes the `Result` of declaring the function.
     fn declare_ffi_top(&mut self, raw: u32) {
-        let _arity = (raw & 0xFFFF) as usize;
-        let variadic = (raw & (1 << 16)) != 0;
-
         // Stack (bottom → top): lib, name, args_tuple, ret_tag.
-        let ret_tag_val = self.stack.pop();
-        let ret_type = Self::ffi_type_from_value(&ret_tag_val, &self.rt.heap);
-
-        // Pop args tuple, then name, then lib handle.
-        let args_tuple_val = self.stack.pop();
-        let args_tuple_addr = args_tuple_val.bits();
-
-        let arg_types: Vec<crate::memory::FfiType> =
-            match Self::find_object_by_addr(&self.rt.heap, args_tuple_addr) {
-                Some(crate::memory::Object::Tuple(gc)) => gc
-                    .as_ref()
-                    .elements()
-                    .iter()
-                    .map(|v| Self::ffi_type_from_value(v, &self.rt.heap))
-                    .collect(),
-                _ => Vec::new(),
-            };
-        let name_val = self.stack.pop();
-        let name = Self::object_string_value(&self.rt.heap, &name_val);
-        let lib_val = self.stack.pop();
-        let lib_addr = lib_val.bits();
-        let lib_obj = self.rt.ffi.userland_libraries.get(&lib_addr).copied();
-        match lib_obj {
-            Some(mut owned) => {
-                let ffi_sig = crate::ffi::FfiSignature {
-                    name,
-                    args: arg_types,
-                    ret: ret_type,
-                    variadic,
-                };
-                match Self::register_signature_on_object(&mut owned, ffi_sig, &self.rt.ffi.struct_layouts)
-                {
-                    Ok(id) => {
-                        self.rt.ffi.userland_libraries.insert(lib_addr, owned);
-                        self.push_result_ok(Value::from(id as i64));
-                    }
-                    Err(e) => {
-                        self.push_ffi_error(e);
-                    }
-                }
-            }
-            None => {
-                self.push_result_err(
-                    crate::ffi::FfiErrorKindTag::InvalidHandle,
-                    format!("FFI declare: library at 0x{:x} is not loaded", lib_addr),
-                );
-            }
-        }
+        let ret = self.stack.pop();
+        let args = self.stack.pop();
+        let name = self.stack.pop();
+        let lib = self.stack.pop();
+        let v = self.rt.ffi_declare(raw, lib, name, args, ret);
+        self.stack.push(v);
     }
 
     fn finish_pending_ffi_invoke(&mut self, pending: PendingFfiInvoke) {
         self.frames.get_mut().set(pending.resume_sp);
-        let lib_obj = self.rt.ffi.userland_libraries.get(&pending.lib_addr).copied();
-        let invoke_result = match lib_obj {
-            Some(obj) => {
-                let l = match &obj {
-                    crate::memory::Object::Library(gc) => gc,
-                    _ => {
-                        self.push_result_err(
-                            crate::ffi::FfiErrorKindTag::InvalidHandle,
-                            "invalid library handle (not a loaded library)".into(),
-                        );
-                        return;
-                    }
-                };
-                let lib_ref: &crate::memory::ObjLibrary = l.as_ref();
-                if pending.function_id < lib_ref.signatures.len() {
-                    let registered = &lib_ref.signatures[pending.function_id];
-                    let ffi_sig = registered.ffi_signature();
-                    let args = match self.materialize_callback_args(ffi_sig, &pending.args) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            self.push_ffi_error(e);
-                            return;
-                        }
-                    };
-                    // No coil callback can run during the call without a
-                    // closure: packed byte arrays can be lent in place.
-                    let mut ctx = crate::ffi::InvokeContext::new(
-                        self.rt.heap.get_mut() as *mut Heap,
-                        &self.rt.ffi.struct_layouts,
-                    )
-                    .lending_arrays(self.rt.ffi.closures.is_empty());
-                    let mut closure_ptrs = Vec::new();
-                    let roots_len = self.rt.ffi_arg_roots.len();
-                    self.rt.ffi_arg_roots.extend_from_slice(&args);
-                    let result = crate::ffi::invoke_via_libffi(
-                        &registered.prepared,
-                        ffi_sig,
-                        &args,
-                        pending.arg_types.as_deref(),
-                        &mut ctx,
-                        &mut closure_ptrs,
-                    );
-                    self.rt.ffi_arg_roots.truncate(roots_len);
-                    result
-                } else {
-                    Err(crate::ffi::FfiError::InvalidHandle(
-                        "function id out of range".into(),
-                    ))
-                }
-            }
-            None => Err(crate::ffi::FfiError::InvalidHandle(
-                "invalid library handle".into(),
-            )),
+        let v = self.ffi_invoke(pending.lib_addr, pending.function_id, &pending.args, pending.arg_types.as_deref());
+        self.stack.push(v);
+    }
+
+    /// [`crate::runtime::Runtime::ffi_invoke`], a callback argument calling
+    /// back into this machine.
+    fn ffi_invoke(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>) -> Value {
+        let vm_ptr = self as *mut Self as *mut c_void;
+        let layouts = Arc::clone(&self.rt.ffi.struct_layouts);
+        let mut callback = |offset: u32| {
+            let cif = crate::ffi::callback_cif(&[crate::memory::FfiType::Int], crate::memory::FfiType::Int, &layouts)?;
+            crate::ffi::make_int_callback(vm_ptr, offset, Self::invoke_call, cif)
         };
-        match invoke_result {
-            Ok(Some(v)) => self.push_result_ok(v),
-            Ok(None) => self.push_result_ok(Value::default()),
-            Err(e) => self.push_ffi_error(e),
-        }
-    }
-
-    /// Push `Result::Ok(payload)` for userland FFI builtins.
-    fn push_result_ok(&mut self, payload: Value) {
-        let v = crate::io::alloc_result_ok(&mut self.rt.heap, payload);
-        self.stack.push(v);
-    }
-
-    /// Push `Result::Err(ffi::Error)` for userland FFI builtins.
-    fn push_result_err(&mut self, kind: crate::ffi::FfiErrorKindTag, message: String) {
-        let v = crate::ffi::alloc_result_ffi_err(&mut self.rt.heap, kind, message);
-        self.stack.push(v);
-    }
-
-    /// Map an [`FfiError`](crate::ffi::FfiError) into `Result::Err(ffi::Error)`.
-    fn push_ffi_error(&mut self, err: crate::ffi::FfiError) {
-        let kind = crate::ffi::FfiErrorKindTag::from_ffi_error(&err);
-        self.push_result_err(kind, err.to_string());
+        self.rt.ffi_invoke(lib_addr, function_id, args, arg_types, &mut callback)
     }
 
     /// Make room for `words` more operand words plus [`Self::frame_reserve`]
