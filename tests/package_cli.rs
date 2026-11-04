@@ -632,12 +632,12 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The AOT runtime has no bytecode VM: a program with a body native code
-/// does not compile (a function of 17 parameters) packages the VM runner
-/// instead, with a warning, and runs the same.
+/// The AOT runtime has no bytecode VM: a body native code does not
+/// compile (a function of 17 parameters) fails `coil package` with an
+/// error naming it, and `--no-aot` packages the VM runner, which runs it.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_body_native_code_refuses_packages_the_vm_runner() {
+fn a_body_native_code_refuses_fails_an_aot_package() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let embed = build_matching_coil_embed(Path::new(&bin));
     let rt = build_matching_coil_rt(Path::new(&bin));
@@ -656,20 +656,22 @@ fn a_body_native_code_refuses_packages_the_vm_runner() {
     let entry = dir.join("app.coil");
     std::fs::write(&entry, src).unwrap();
     let out = dir.join("app");
-    // The fallback takes the runner beside `coil`: link both into `dir`.
-    let coil = dir.join("coil");
-    std::fs::hard_link(&bin, &coil).or_else(|_| std::fs::copy(&bin, &coil).map(|_| ())).unwrap();
-    std::fs::hard_link(&embed, dir.join("coil-embed")).or_else(|_| std::fs::copy(&embed, dir.join("coil-embed")).map(|_| ())).unwrap();
-    let mut cmd = Command::new(&coil);
-    cmd.arg("package");
-    for root in compiler::Pipeline::workspace_language_extra_roots() {
-        cmd.arg("--root").arg(root);
-    }
-    cmd.arg(&entry).arg("-o").arg(&out).env("COIL_RT_LIB", &rt);
-    let o = cmd.output().expect("spawn coil package");
-    let said = String::from_utf8_lossy(&o.stderr);
-    assert!(o.status.success(), "package failed: {said}");
-    assert!(said.contains("native code does not cover") && said.contains("packaging the VM runner instead"), "no fallback warning: {said}");
+    let package = |extra: &[&std::ffi::OsStr]| {
+        let mut cmd = Command::new(&bin);
+        cmd.arg("package");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        cmd.arg(&entry).arg("-o").arg(&out).args(extra).env("COIL_RT_LIB", &rt);
+        cmd.output().expect("spawn coil package")
+    };
+    let aot = package(&[]);
+    let said = String::from_utf8_lossy(&aot.stderr);
+    assert_eq!(aot.status.code(), Some(1), "stderr: {said}");
+    assert!(said.contains("error: `wide` cannot compile to native code: more than 16 parameters"), "stderr: {said}");
+    assert!(said.contains("--no-aot"), "stderr: {said}");
+    let vm = package(&["--no-aot".as_ref(), "--runner".as_ref(), embed.as_os_str()]);
+    assert!(vm.status.success(), "package failed: {}", String::from_utf8_lossy(&vm.stderr));
     let run = run_with_timeout(&out, 60);
     assert_eq!(String::from_utf8_lossy(&run.stdout), "153\n");
     assert_eq!(run.status.code(), Some(0));

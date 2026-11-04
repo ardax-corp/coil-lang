@@ -598,9 +598,10 @@ counters (`NativeTable`).
    world). Build it in its own cargo invocation (`cargo build -p
    coil-rt`): a build with `coil` unifies `vm` back in.
 
-If native code refuses a body, or the object or the link fails (no `cc`,
-no `libcoil_rt.a`, Windows), the package warns and falls back to the
-`coil-embed` runner, whose VM runs it.
+A body native code refuses is an error naming it and why (`--no-aot`
+packages the `coil-embed` runner, whose VM runs it). If the object or the
+link fails (no `cc`, no `libcoil_rt.a`, Windows) the package warns and
+falls back to the runner.
 
 ### Static `extern` libraries
 
