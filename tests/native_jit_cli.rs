@@ -1172,3 +1172,26 @@ fn a_drop_the_collector_runs_enters_native_code() {
     let stats = same_as_vm("native_drop", &src);
     assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
 }
+
+#[test]
+fn generators_with_defers_run_natively_and_close() {
+    // `nums` has a `defer`: a loop that leaves early closes it (the defer
+    // runs natively), one that runs it out runs the defer on return, and
+    // the collector closes one nothing reaches. `loud`'s defer panics in
+    // the close: the panic goes on to the loop's caller.
+    let src = format!(
+        "{HEADER}use gc::collect;\nstatic let LOG: string = \"\";\nfn say(string s) {{ LOG = LOG + s; }}\n\
+         gen fn nums(int n) {{ defer {{ say(\"[d]\"); }} let i = 0; while i < n {{ say(format(\"%i\", i)); yield i; i = i + 1; }} return 0; }}\n\
+         gen fn loud() {{ defer {{ say(\"[loud]\"); panic \"in close\"; }} yield 1; yield 2; return 0; }}\n\
+         #[inline(never)]\nfn early() -> int {{ let t = 0; for v in nums(5) {{ if v == 2 {{ break; }} t = t + v; }} return t; }}\n\
+         #[inline(never)]\nfn full() -> int {{ let t = 0; for v in nums(3) {{ t = t + v; }} return t; }}\n\
+         #[inline(never)]\nfn dropped() {{ let g = nums(4); let _ = resume g; }}\n\
+         #[inline(never)]\nfn closes_loud() -> int {{ for v in loud() {{ break; }} say(\"unreached\"); return 0; }}\n\
+         fn main() {{ let a = early(); let b = full(); dropped(); collect(); let _ = println(format(\"%i %i %s\", a, b, LOG)); let _ = closes_loud(); }}\n"
+    );
+    let stats = same_as_vm("gen_defers", &src);
+    for f in ["nums", "loud"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert_eq!(vm_dependence(&stats).map(|d| d.1), Some(0), "stats: {stats}");
+}
