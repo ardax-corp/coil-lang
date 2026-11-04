@@ -1034,6 +1034,8 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             let mut arr = ObjArray::from_values(values, heap);
             if extra != 0 {
                 arr.set_elem_kind(extra as u8 & 0x3);
+                // Not allocated yet: the allocation counts the packed size.
+                let _ = arr.take_resize();
             }
             heap.alloc(arr, Object::Array).0.addr()
         }

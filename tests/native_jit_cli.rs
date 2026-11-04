@@ -1347,3 +1347,59 @@ fn a_generic_body_with_an_int_defer_home_compiles() {
     );
     assert!(refused.is_empty(), "refused: {refused:#?}");
 }
+
+#[test]
+fn native_frames_root_only_what_they_still_hold() {
+    // A native frame's root record must not keep a dead temporary, a
+    // rebound local's old object or a match binding past its scrutinee
+    // alive, and must keep a local and an enum payload used later, as the
+    // VM's frame does: each line prints `true` on both engines.
+    let src = format!(
+        "{HEADER}use gc::{{collect, upgrade, weak, Weak}};\n\
+         class Node {{ pub v: int, pub next: Option<Node> }}\n\
+         enum Holder {{ One(Node), Empty }}\n\
+         enum Slot {{ Full(Node, int), Empty }}\n\
+         fn gone<T>(Weak<T> w) -> bool {{ return match upgrade(w) {{ Option::Some(_) => false, Option::None => true }}; }}\n\
+         fn node(int v) -> Node {{ return new Node(v, Option::None); }}\n\
+         #[inline(never)]\nfn weak_to(Node n) -> Weak<Node> {{ return weak(n); }}\n\
+         fn make(int k) -> Holder {{ return Holder::One(node(k)); }}\n\
+         #[inline(never)]\nfn weak_in(Holder h) -> Weak<Node> {{ return match h {{ Holder::One(n) => weak(n), Holder::Empty => weak(node(-1)) }}; }}\n\
+         #[inline(never)]\nfn temp_dropped() -> bool {{ let w = weak_to(node(1)); collect(); return gone(w); }}\n\
+         #[inline(never)]\nfn local_kept() -> bool {{ let n = node(2); let w = weak(n); collect(); return !gone(w); }}\n\
+         #[inline(never)]\nfn rebound_dropped() -> bool {{\n  let junk: Option<Node> = Option::Some(node(3));\n\
+           let w = match junk {{ Option::Some(n) => weak_to(n), Option::None => weak_to(node(-1)) }};\n\
+           junk = Option::None;\n  collect();\n  return gone(w);\n}}\n\
+         #[inline(never)]\nfn boxed_arm_dropped() -> bool {{\n  let junk = Slot::Empty;\n  let i = 0;\n  let ok = true;\n\
+           while i < 3 {{\n    junk = Slot::Full(node(i), i);\n\
+             let w = match junk {{ Slot::Full(n, _) => weak(n), Slot::Empty => weak(node(-1)) }};\n\
+             junk = Slot::Empty;\n    collect();\n    ok = ok && gone(w);\n    i = i + 1;\n  }}\n  return ok;\n}}\n\
+         #[inline(never)]\nfn payload_kept() -> bool {{\n  let h = Holder::One(node(4));\n  let w = weak_in(h);\n  collect();\n\
+           if gone(w) {{ return false; }}\n  return match h {{ Holder::One(n) => n.v == 4, Holder::Empty => false }};\n}}\n\
+         #[inline(never)]\nfn pair_dropped() -> bool {{ let w = weak_in(make(5)); collect(); return gone(w); }}\n\
+         fn yes(bool b) -> string {{ if b {{ return \"true\"; }} return \"false\"; }}\n\
+         fn main() {{\n  let _ = println(yes(temp_dropped()));\n  let _ = println(yes(local_kept()));\n  let _ = println(yes(rebound_dropped()));\n\
+           let _ = println(yes(boxed_arm_dropped()));\n  let _ = println(yes(payload_kept()));\n  let _ = println(yes(pair_dropped()));\n}}\n"
+    );
+    let stats = same_as_vm("frame_roots", &src);
+    for f in ["temp_dropped", "local_kept", "rebound_dropped", "boxed_arm_dropped", "payload_kept", "pair_dropped"] {
+        assert!(compiled(&stats, f), "{f} not native; stats: {stats}");
+    }
+    let vm = run("frame_roots_vm", &src, false);
+    assert_eq!(String::from_utf8_lossy(&vm.stdout), "true\n".repeat(6));
+}
+
+#[test]
+fn byte_array_literals_are_packed_natively() {
+    // A `Vec<byte>` literal native code builds is packed one byte per
+    // element, and the heap counts it so, as the VM's `MakeArrayK` does.
+    let src = format!(
+        "{HEADER}use gc::{{collect, heap_bytes}};\n\
+         #[inline(never)]\nfn row(int i) -> Vec<byte> {{ return [(i % 256) as byte, 1 as byte, 2 as byte, 3 as byte, 4 as byte, 5 as byte, 6 as byte, 7 as byte, \
+         8 as byte, 9 as byte, 10 as byte, 11 as byte, 12 as byte, 13 as byte, 14 as byte, 15 as byte]; }}\n\
+         #[inline(never)]\nfn grown() -> int {{\n  collect();\n  let before = heap_bytes();\n  let rows: Vec<Vec<byte>> = Vec::with_capacity(10000);\n  let i = 0;\n\
+           while i < 10000 {{ rows.push(row(i)); i = i + 1; }}\n  return heap_bytes() - before;\n}}\n\
+         fn main() {{ let g = grown(); let _ = println(if g < 1400000 {{ \"packed\" }} else {{ format(\"%i bytes\", g) }}); }}\n"
+    );
+    let stats = same_as_vm("packed_bytes", &src);
+    assert!(compiled(&stats, "row") && compiled(&stats, "grown"), "stats: {stats}");
+}
