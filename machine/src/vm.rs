@@ -4351,19 +4351,6 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn saved_stack_live_mask(heap: &Heap, values: &[Value]) -> u64 {
-        let mut mask = 0u64;
-        for (i, v) in values.iter().enumerate() {
-            if i >= 64 {
-                break;
-            }
-            let addr = v.heap_addr();
-            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                mask |= 1u64 << i;
-            }
-        }
-        mask
-    }
 
     /// Intern `data`, push the GC pointer, then maybe collect.
     ///
@@ -4768,7 +4755,7 @@ impl<const S: usize> Machine<S> {
             saved_frames.last_mut().unwrap().0 = ip;
         }
 
-        let live_mask = Self::saved_stack_live_mask(&self.rt.heap, &segment);
+        let live_mask = crate::gen_fiber::saved_stack_live_mask(&self.rt.heap, &segment);
         Self::with_coroutine_mut(coro_gc, |coro| {
             coro.saved_stack = segment;
             coro.saved_live_mask = live_mask;
@@ -5054,7 +5041,7 @@ impl<const S: usize> Machine<S> {
             saved_frames.last_mut().unwrap().0 = *ip;
         }
 
-        let live_mask = Self::saved_stack_live_mask(&self.rt.heap, &segment);
+        let live_mask = crate::gen_fiber::saved_stack_live_mask(&self.rt.heap, &segment);
         Self::with_coroutine_mut(coro_gc, |coro| {
             coro.saved_stack = segment;
             coro.saved_live_mask = live_mask;

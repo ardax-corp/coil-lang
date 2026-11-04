@@ -1094,7 +1094,7 @@ impl<const S: usize> Machine<S> {
                     }
                     values.reverse();
 
-                    let live_mask = Self::saved_stack_live_mask(&self.rt.heap, &values);
+                    let live_mask = crate::gen_fiber::saved_stack_live_mask(&self.rt.heap, &values);
                     let obj_coro = ObjCoroutine {
                         state: CoroState::Suspended,
                         resume_ip: target,

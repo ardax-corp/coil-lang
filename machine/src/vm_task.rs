@@ -393,7 +393,7 @@ impl<const S: usize> Machine<S> {
             Some(last) => *last = (ip, sp - base_sp),
             None => saved_frames.push((ip, sp - base_sp)),
         }
-        let live_mask = Self::saved_stack_live_mask(&self.rt.heap, &segment);
+        let live_mask = crate::gen_fiber::saved_stack_live_mask(&self.rt.heap, &segment);
         Self::with_coroutine_mut(coro, |c| {
             c.saved_stack = segment;
             c.saved_live_mask = live_mask;

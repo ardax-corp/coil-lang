@@ -4,6 +4,7 @@ mod apply;
 mod arith;
 mod collect;
 mod driver;
+mod gen_fiber;
 mod locate;
 pub mod char_ord;
 pub mod clock;

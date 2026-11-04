@@ -7,7 +7,7 @@
 //! values run natively, host natives on the Runtime, collections over the
 //! native frames' root records ([`GcHost`]).
 //!
-//! Not yet: tasks, generators and FFI callbacks (each reports a panic
+//! Not yet: tasks and FFI callbacks (each reports a panic
 //! naming the gap).
 
 use std::ffi::c_void;
@@ -18,6 +18,10 @@ use common::{Instruction, ProgramDebug, Value};
 use crate::collect::{GcHost, HostRoot};
 use crate::native::{Invoked, NativeCode, NativeCtx, NativeEnv, NativeHost, NativeOutcome, NativePanic};
 use crate::runtime::{HostEnv, Runtime};
+
+/// `gen_close`, the generator close native code calls when a loop leaves
+/// a generator early: its offset from `TASK_SCOPE_OPEN_ID`.
+const GEN_CLOSE_OP: usize = 45;
 
 /// The program a driver runs: its code (for the prologue and the
 /// snapshot pool), the native code for it and its debug tables.
@@ -40,6 +44,11 @@ pub(crate) struct Driver<'a> {
     /// Native calls in progress (what a [`Runtime::native_roots`] entry
     /// records).
     depth: usize,
+    /// Stacks of finished generator fibers, for the next ones.
+    #[cfg(not(target_family = "wasm"))]
+    gen_stacks: Vec<corosensei::stack::DefaultStack>,
+    /// Generators whose body runs now, innermost last (roots meanwhile).
+    gen_running: Vec<Value>,
 }
 
 impl<'a> Driver<'a> {
@@ -58,7 +67,16 @@ impl<'a> Driver<'a> {
     };
 
     pub(crate) fn new(rt: &'a mut Runtime, program: DriverProgram) -> Self {
-        Self { rt, program, panicked: false, finalizer_aborted: false, depth: 0 }
+        Self {
+            rt,
+            program,
+            panicked: false,
+            finalizer_aborted: false,
+            depth: 0,
+            #[cfg(not(target_family = "wasm"))]
+            gen_stacks: Vec::new(),
+            gen_running: Vec::new(),
+        }
     }
 
     pub(crate) fn panicked(&self) -> bool {
@@ -242,6 +260,74 @@ impl<'a> Driver<'a> {
                 }
             }
         }
+    }
+
+    /// Resume generator `handle` with `send`: the word it yields or
+    /// returns, `None` when it panicked.
+    fn resume(&mut self, handle: Value, send: Value) -> Option<Value> {
+        let Some(crate::memory::Object::Coroutine(gc)) = self.rt.heap.find_object_by_addr(handle.bits()) else {
+            self.report("resumed invalid coroutine handle", None, Vec::new(), false);
+            return None;
+        };
+        match crate::gen_fiber::step(self, gc, send) {
+            Some(crate::gen_fiber::GenStep::Yielded(v) | crate::gen_fiber::GenStep::Returned(v)) => Some(v),
+            Some(crate::gen_fiber::GenStep::Panicked(p)) => {
+                self.native_panic(p);
+                None
+            }
+            None => {
+                self.report("native driver: a generator without native code", None, Vec::new(), false);
+                None
+            }
+        }
+    }
+
+    /// `coro_close` of `handle` (a loop left a generator early): its body
+    /// unwinds from its yield, running its armed `defer`s. `false` when one
+    /// panicked (reported).
+    fn close_now(&mut self, handle: Value) -> bool {
+        let Some(crate::memory::Object::Coroutine(gc)) = self.rt.heap.find_object_by_addr(handle.bits()) else {
+            return true;
+        };
+        // A delegating generator is suspended in its innermost delegate.
+        let mut target = gc;
+        while let Some(sub) = target.as_ref().yield_from {
+            target = sub;
+        }
+        #[cfg(not(target_family = "wasm"))]
+        let pads = crate::gen_fiber::close(self, target);
+        #[cfg(target_family = "wasm")]
+        let pads: Option<Vec<crate::native::NativePad>> = None;
+        let mut link = Some(gc);
+        while let Some(c) = link {
+            link = c.as_ref().yield_from;
+            crate::gen_fiber::finish(c);
+        }
+        if let Some(pads) = pads {
+            self.run_pads(pads);
+        }
+        !self.panicked
+    }
+
+    /// Close generator `val` nothing reaches any more: its armed `defer`s
+    /// run; a panic in one ends the program, as one in a `drop` does.
+    fn close_generator(&mut self, val: Value) {
+        if self.finalizer_aborted {
+            return;
+        }
+        let Some(crate::memory::Object::Coroutine(gc)) = self.rt.heap.find_object_by_addr(val.bits()) else { return };
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(pads) = crate::gen_fiber::close(self, gc) {
+            let was = std::mem::replace(&mut self.panicked, false);
+            self.run_pads(pads);
+            if self.panicked {
+                self.abort_after_finalizer_panic();
+                return;
+            }
+            self.panicked = was;
+        }
+        #[cfg(target_family = "wasm")]
+        crate::gen_fiber::finish(gc);
     }
 
     /// A native panic, unless it is one a nested call already reported
@@ -442,12 +528,12 @@ impl<'a> Driver<'a> {
         if d.rt.claim_finalizer(Value::from(word)) { 2 } else { 0 }
     }
 
-    unsafe fn host_resume(raw: *mut c_void, _ctx: *mut NativeCtx, _handle: u64, _send: Option<u64>, panicked: &mut bool) -> u64 {
+    unsafe fn host_resume(raw: *mut c_void, ctx: *mut NativeCtx, handle: u64, send: Option<u64>, panicked: &mut bool) -> u64 {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
-        d.report("native driver: generators are not supported yet", None, Vec::new(), false);
-        *panicked = true;
-        0
+        let out = d.rooted(ctx, |d| d.resume(Value::from(handle), send.map_or_else(|| Value::from(0_i64), Value::from)));
+        *panicked = out.is_none();
+        out.unwrap_or_default().bits()
     }
 
     unsafe fn host_collect(raw: *mut c_void, ctx: *mut NativeCtx) {
@@ -505,6 +591,10 @@ impl<'a> Driver<'a> {
                 d.rooted(ctx, |d| crate::collect::region(d, op == crate::HostOp::RegionEnter));
                 Some(if d.panicked { Invoked::Unwound } else { Invoked::Value(0) })
             }
+            crate::HostOp::Task if fn_id == common::TASK_SCOPE_OPEN_ID as usize + GEN_CLOSE_OP => {
+                let handle = args.first().copied().unwrap_or_default();
+                Some(if d.rooted(ctx, |d| d.close_now(handle)) { Invoked::Value(0) } else { Invoked::Unwound })
+            }
             _ => Some(Invoked::Panic("native driver: tasks are not supported yet".into())),
         };
         if out.is_some() {
@@ -523,9 +613,13 @@ impl GcHost for Driver<'_> {
         self.rt
     }
 
-    /// The driver holds no words of its own: native frames' records and
-    /// the Runtime's roots are all.
-    fn host_roots(&self, _visit: &mut dyn FnMut(HostRoot)) {}
+    /// The generators whose fibers run now: native frames' records and
+    /// the Runtime's roots are the rest.
+    fn host_roots(&self, visit: &mut dyn FnMut(HostRoot)) {
+        for v in &self.gen_running {
+            visit(HostRoot::Handle(v.heap_addr(), crate::memory::RootKind::Ambiguous));
+        }
+    }
 
     fn slot(&self, _idx: usize) -> Value {
         Value::default()
@@ -539,8 +633,7 @@ impl GcHost for Driver<'_> {
 
     fn run_pending(&mut self, val: Value, pc: Option<u32>) {
         let Some(pc) = pc else {
-            // A generator's close: none runs natively yet.
-            return;
+            return self.close_generator(val);
         };
         if self.finalizer_aborted || !self.rt.claim_finalizer(val) {
             return;
@@ -555,6 +648,29 @@ impl GcHost for Driver<'_> {
             return;
         }
         self.panicked = was;
+    }
+}
+
+impl crate::gen_fiber::GenHost for Driver<'_> {
+    fn rt(&mut self) -> &mut Runtime {
+        self.rt
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn gen_stacks(&mut self) -> &mut Vec<corosensei::stack::DefaultStack> {
+        &mut self.gen_stacks
+    }
+
+    fn gen_running(&mut self) -> &mut Vec<Value> {
+        &mut self.gen_running
+    }
+
+    fn native_env(&mut self) -> NativeEnv {
+        self.env()
+    }
+
+    fn free_early(&mut self, v: Value, deep: bool) {
+        let _ = Driver::free_early(self, v, deep);
     }
 }
 

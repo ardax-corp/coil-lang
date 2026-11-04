@@ -32,7 +32,7 @@ const FIBER_STACK_BYTES: usize = 32 << 20;
 /// A generator fiber's machine stack: programs keep many generators live,
 /// so theirs stays small.
 #[cfg(not(target_family = "wasm"))]
-const GEN_STACK_BYTES: usize = 8 << 20;
+pub(crate) const GEN_STACK_BYTES: usize = 8 << 20;
 
 /// The VM execution state a fiber runs its VM calls on, or the task's own
 /// while the fiber runs ([`Machine::swap_exec`] trades them).
@@ -151,7 +151,7 @@ impl<const S: usize> Drop for NativeFiber<S> {
 
 thread_local! {
     /// The running fiber's stack limit, for native calls on it.
-    static FIBER_STACK_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static FIBER_STACK_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The stack native calls made on a thread's own stack run on (a thread's
