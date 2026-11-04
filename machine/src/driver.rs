@@ -121,6 +121,8 @@ pub(crate) struct Driver<'a> {
     /// The next panic reported prints no location (a contract failure
     /// names its call site in the message).
     panic_without_location: bool,
+    /// The last panic's message.
+    panic_message: String,
 }
 
 impl<'a> Driver<'a> {
@@ -156,7 +158,13 @@ impl<'a> Driver<'a> {
             task_yielder: std::ptr::null(),
             task_panic: None,
             panic_without_location: false,
+            panic_message: String::new(),
         }
+    }
+
+    /// The last panic's message (a thread job's join reports it).
+    pub(crate) fn take_panic_message(&mut self) -> String {
+        std::mem::take(&mut self.panic_message)
     }
 
     pub(crate) fn panicked(&self) -> bool {
@@ -503,6 +511,7 @@ impl<'a> Driver<'a> {
     fn report(&mut self, message: &str, loc: Option<String>, frames: Vec<String>, explicit: bool) {
         use std::io::Write;
         self.panicked = true;
+        self.panic_message = message.to_string();
         let without_location = std::mem::take(&mut self.panic_without_location);
         if self.rt.sched.as_ref().is_some_and(|s| s.current != crate::task::ROOT) {
             // A child task's panic fails its scope, which reports it.

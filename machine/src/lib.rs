@@ -35,6 +35,7 @@ pub mod runtime_wire;
 mod runtime;
 mod stacks;
 mod start;
+mod worker;
 mod runtime_ffi;
 mod format;
 pub mod shared_heap;

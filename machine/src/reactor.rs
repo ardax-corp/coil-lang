@@ -699,6 +699,10 @@ fn wait_join_on_worker(
 }
 
 fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
+    // Native code that covers the program runs the job with no VM.
+    if crate::worker::runs_natively(&job) {
+        return crate::worker::run_native_job(job);
+    }
     let Job {
         entry,
         args,

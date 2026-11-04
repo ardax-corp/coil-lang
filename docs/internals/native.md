@@ -535,7 +535,11 @@ no `Machine` at all: `coil_cli::execute_archived_program` calls
 for the program and runs the driver over it, and builds a `Machine` only
 when that returns `None` (incomplete code, or the driver off). The AOT
 link passes `--gc-sections` (`-dead_strip` on macOS), so code nothing
-references is left out of the executable.
+references is left out of the executable. A reactor job (a thread, an
+auto-par body, a harness case) runs the same way when its native code
+covers the program: `machine/src/worker.rs` sets up a `Runtime` of the
+worker's own (pooled per thread, reset between jobs) and calls the entry
+on the driver, where `run_job_on_vm` would set up a `Machine`.
 
 ### VM ↔ native
 
