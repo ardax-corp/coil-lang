@@ -2521,6 +2521,9 @@ impl<const S: usize> Machine<S> {
             if opens_fd {
                 let _ = crate::io::take_fd_exhausted();
             }
+            // A native may collect (a shared-heap spawn opens its epoch):
+            // the native frames' words stay rooted.
+            vm.native_roots.push((ctx, vm.frames.len()));
             let native = vm.natives.get_by_id(fn_id).expect("checked above");
             let mut invoked = crate::host_enum::with_host_enum_layout(layout, || {
                 native.invoke(&mut vm.heap, args)
@@ -2539,6 +2542,7 @@ impl<const S: usize> Machine<S> {
                     native.invoke(&mut vm.heap, args)
                 });
             }
+            vm.native_roots.pop();
             if park_tasks {
                 crate::task::set_task_waiter(None);
             }
