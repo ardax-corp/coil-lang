@@ -171,6 +171,7 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
         native_mir: Vec::new(),
     };
     let full = pipeline.program_debug_full();
+    let level = native_debug_level(pipeline.debug_level(), compiler::native_mir::native_capture_active());
     #[cfg(not(target_family = "wasm"))]
     if compiler::native_mir::native_capture_active() {
         // `coil compile --jit`: keep the MIR native code is made from.
@@ -179,7 +180,7 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
             &entry_pcs(&full),
         );
     }
-    program.set_debug(full, pipeline.debug_level());
+    program.set_debug(full, level);
 
     match rkyv::to_bytes::<Error>(&program) {
         Ok(b) => b.to_vec(),
@@ -1193,4 +1194,11 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// The debug level an archive with native code keeps: native code finds a
+/// panic's location by its byte span (`Machine::native_site_location`), so
+/// `-g1` (lines only) keeps the spans too; `-g0` stays bare.
+pub(crate) fn native_debug_level(level: common::DebugLevel, native: bool) -> common::DebugLevel {
+    if native && level == common::DebugLevel::Lines { common::DebugLevel::Full } else { level }
 }
