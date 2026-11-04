@@ -6,11 +6,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use parking_lot::RawMutex;
 use parking_lot::lock_api::RawMutex as RawMutexOps;
+use parking_lot::lock_api::{RawRwLock as RawRwLockOps, RawRwLockTimed};
+use parking_lot::{RawMutex, RawRwLock};
 use parking_lot::lock_api::RawMutexTimed as _;
 
 use crate::AddrHashBuilder;
@@ -596,16 +597,86 @@ impl Drop for RawUnlock<'_> {
     }
 }
 
-/// Host readers-writer lock cell.
+/// Host readers-writer lock cell: a raw lock over the value, so a held
+/// lock outlives one native (`rw_acquire_*` / `rw_release_*`, the Coil
+/// `with_read` / `with_write`) as a `Mutex`'s does.
 pub struct RwLockInner {
-    pub cell: RwLock<PortableValue>,
+    lock: RawRwLock,
+    value: UnsafeCell<PortableValue>,
+    /// Tasks waiting to lock it (woken by every release).
+    waiters: ThreadWaiters,
 }
+
+unsafe impl Send for RwLockInner {}
+unsafe impl Sync for RwLockInner {}
 
 impl RwLockInner {
     fn new(initial: PortableValue) -> Self {
         Self {
-            cell: RwLock::new(initial),
+            lock: RawRwLock::INIT,
+            value: UnsafeCell::new(initial),
+            waiters: ThreadWaiters::default(),
         }
+    }
+
+    /// Take it shared (`write` false) or exclusive, or (under a task
+    /// scheduler, when it is held the other way) park the running task
+    /// until a release. False when it parked.
+    fn lock_or_park_task(&self, write: bool) -> bool {
+        let try_lock = || if write { self.lock.try_lock_exclusive() } else { self.lock.try_lock_shared() };
+        if try_lock() {
+            return true;
+        }
+        match self.waiters.park_unless(try_lock) {
+            Some(locked) => locked,
+            None => {
+                // The holder may be a queued job (see `help_while_blocked`).
+                loop {
+                    let locked = if write {
+                        self.lock.try_lock_exclusive_for(HELP_SLICE)
+                    } else {
+                        self.lock.try_lock_shared_for(HELP_SLICE)
+                    };
+                    if locked {
+                        return true;
+                    }
+                    help_while_blocked();
+                }
+            }
+        }
+    }
+
+    fn try_lock(&self, write: bool) -> bool {
+        if write { self.lock.try_lock_exclusive() } else { self.lock.try_lock_shared() }
+    }
+
+    /// Release a hold taken with `write` as given.
+    ///
+    /// # Safety
+    /// The caller holds the lock that way.
+    pub(crate) unsafe fn unlock(&self, write: bool) {
+        unsafe {
+            if write {
+                self.lock.unlock_exclusive();
+            } else {
+                self.lock.unlock_shared();
+            }
+        }
+        self.waiters.wake_all();
+    }
+
+    /// Payload pointer while `lock` is held (written only exclusive).
+    fn value(&self) -> *mut PortableValue {
+        self.value.get()
+    }
+}
+
+/// Releases a [`RwLockInner`] hold on drop.
+struct RwUnlock<'a>(&'a RwLockInner, bool);
+
+impl Drop for RwUnlock<'_> {
+    fn drop(&mut self) {
+        unsafe { self.0.unlock(self.1) }
     }
 }
 
@@ -1996,100 +2067,209 @@ fn try_host_rwlock(heap: &mut Heap, initial: Value) -> Result<Value, ThreadError
 
 pub fn host_with_read(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_with_read(heap, args[0], args[1]);
+    if crate::task::thread_parked() {
+        return Value::default();
+    }
     as_result_value(heap, ErrorSet::Lock, r)}
 
-fn try_host_with_read(
-    heap: &mut Heap,
-    lock: Value,
-    callback: Value,
-) -> Result<Value, ThreadErrorTag> {
-    let (entry, captures) = lock_callback(heap, callback)?;
+/// `RwLock` `lock`'s inner cell, or `Other` for any other handle.
+fn rwlock_inner(heap: &Heap, lock: Value) -> Result<Arc<RwLockInner>, ThreadErrorTag> {
     let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.bits()) else {
         return Err(ThreadErrorTag::Other);
     };
-    let guard = gc
-        .as_ref()
-        .inner
-        .cell
-        .read()
-        .map_err(|_| ThreadErrorTag::Poisoned)?;
-    let t_val = portable_to_value(heap, guard.clone())?;
-    drop(guard);
+    Ok(Arc::clone(&gc.as_ref().inner))
+}
+
+/// Run a lock callback on a copy of the value under a shared hold, taken
+/// parking (`try_only` false) or not at all; the hold ends before the
+/// callback runs.
+fn read_with(heap: &mut Heap, lock: Value, callback: Value, try_only: bool) -> Result<Value, ThreadErrorTag> {
+    let (entry, captures) = lock_callback(heap, callback)?;
+    let inner = rwlock_inner(heap, lock)?;
+    let locked = if try_only { inner.try_lock(false) } else { inner.lock_or_park_task(false) };
+    if !locked {
+        // Parked: the task runs it again after a release.
+        return Err(ThreadErrorTag::WouldBlock);
+    }
+    let value = {
+        let _unlock = RwUnlock(&inner, false);
+        unsafe { (*inner.value()).clone() }
+    };
+    let t_val = portable_to_value(heap, value)?;
+    host_call_function(entry, &callback_args(captures, t_val))
+}
+
+/// Run a `(T) -> (T, R)` lock callback under an exclusive hold, taken
+/// parking (`try_only` false) or not at all, and store its new value.
+fn write_with(heap: &mut Heap, lock: Value, callback: Value, try_only: bool) -> Result<Value, ThreadErrorTag> {
+    let (entry, captures) = lock_callback(heap, callback)?;
+    let inner = rwlock_inner(heap, lock)?;
+    let locked = if try_only { inner.try_lock(true) } else { inner.lock_or_park_task(true) };
+    if !locked {
+        return Err(ThreadErrorTag::WouldBlock);
+    }
+    let _unlock = RwUnlock(&inner, true);
+    let t_val = portable_to_value(heap, unsafe { (*inner.value()).clone() })?;
     let ret = host_call_function(entry, &callback_args(captures, t_val))?;
-    Ok(ret)
+    let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
+    unsafe { *inner.value() = value_to_portable(heap, new_t)? };
+    Ok(out_r)
+}
+
+fn try_host_with_read(heap: &mut Heap, lock: Value, callback: Value) -> Result<Value, ThreadErrorTag> {
+    read_with(heap, lock, callback, false)
 }
 
 pub fn host_with_write(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_with_write(heap, args[0], args[1]);
+    let r = write_with(heap, args[0], args[1], false);
+    if crate::task::thread_parked() {
+        return Value::default();
+    }
     as_result_value(heap, ErrorSet::Lock, r)}
-
-fn try_host_with_write(
-    heap: &mut Heap,
-    lock: Value,
-    callback: Value,
-) -> Result<Value, ThreadErrorTag> {
-    let (entry, captures) = lock_callback(heap, callback)?;
-    let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.bits()) else {
-        return Err(ThreadErrorTag::Other);
-    };
-    let inner = Arc::clone(&gc.as_ref().inner);
-    let mut guard = inner.cell.write().map_err(|_| ThreadErrorTag::Poisoned)?;
-    let t_val = portable_to_value(heap, guard.clone())?;
-    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
-    let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
-    *guard = value_to_portable(heap, new_t)?;
-    Ok(out_r)
-}
 
 pub fn host_try_read(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_try_read(heap, args[0], args[1]);
+    let r = read_with(heap, args[0], args[1], true);
     as_result_value(heap, ErrorSet::Lock, r)}
-
-fn try_host_try_read(
-    heap: &mut Heap,
-    lock: Value,
-    callback: Value,
-) -> Result<Value, ThreadErrorTag> {
-    let (entry, captures) = lock_callback(heap, callback)?;
-    let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.bits()) else {
-        return Err(ThreadErrorTag::Other);
-    };
-    let guard = match gc.as_ref().inner.cell.try_read() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::WouldBlock) => return Err(ThreadErrorTag::WouldBlock),
-        Err(std::sync::TryLockError::Poisoned(_)) => return Err(ThreadErrorTag::Poisoned),
-    };
-    let t_val = portable_to_value(heap, guard.clone())?;
-    drop(guard);
-    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
-    Ok(ret)
-}
 
 pub fn host_try_write(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_try_write(heap, args[0], args[1]);
+    let r = write_with(heap, args[0], args[1], true);
     as_result_value(heap, ErrorSet::Lock, r)}
 
-fn try_host_try_write(
-    heap: &mut Heap,
-    lock: Value,
-    callback: Value,
-) -> Result<Value, ThreadErrorTag> {
-    let (entry, captures) = lock_callback(heap, callback)?;
-    let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.bits()) else {
-        return Err(ThreadErrorTag::Other);
-    };
-    let inner = Arc::clone(&gc.as_ref().inner);
-    let mut guard = match inner.cell.try_write() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::WouldBlock) => return Err(ThreadErrorTag::WouldBlock),
-        Err(std::sync::TryLockError::Poisoned(_)) => return Err(ThreadErrorTag::Poisoned),
-    };
-    let t_val = portable_to_value(heap, guard.clone())?;
-    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
-    let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
-    *guard = value_to_portable(heap, new_t)?;
-    Ok(out_r)
+// Lock primitives the Coil `with_lock` family builds on (`prelude::thread`).
+// A hold taken here outlives the native: the Coil caller releases it, in a
+// `defer` right after the acquire, so a panic or a cancel releases it too.
+// Acquires park the running task as `lock` does and run again from the
+// start after the wake; they never block a thread a scope's tasks share.
+
+/// `Mutex` `m`'s inner cell.
+fn mutex_inner(heap: &Heap, m: Value) -> Option<Arc<MutexInner>> {
+    match heap.find_object_by_addr(m.bits()) {
+        Some(Object::Mutex(gc)) => Some(Arc::clone(&gc.as_ref().inner)),
+        _ => None,
+    }
 }
+
+/// `lock_acquire(m)`: lock `m`, parking the task while another holds it.
+pub fn host_lock_acquire(heap: &mut Heap, args: &[Value]) -> Value {
+    if let Some(inner) = mutex_inner(heap, args[0]) {
+        // False: parked, and run again after an unlock.
+        let _ = inner.lock_or_park_task();
+    }
+    Value::from(0i64)
+}
+
+/// `lock_release(m)`: unlock `m` (a no-op when it is not locked).
+pub fn host_lock_release(heap: &mut Heap, args: &[Value]) -> Value {
+    if let Some(inner) = mutex_inner(heap, args[0])
+        && inner.lock.is_locked()
+    {
+        unsafe { inner.unlock() };
+    }
+    Value::from(0i64)
+}
+
+/// `lock_load(m) -> Result<T, LockError>`: a copy of the value `m` guards.
+/// The caller holds `m`.
+pub fn host_lock_load(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = match mutex_inner(heap, args[0]) {
+        Some(inner) => portable_to_value(heap, unsafe { (*inner.value()).clone() }),
+        None => Err(ThreadErrorTag::Other),
+    };
+    as_result_value(heap, ErrorSet::Lock, r)
+}
+
+/// `lock_store(m, v) -> Result<(), LockError>`: make `v` the value `m`
+/// guards. The caller holds `m`.
+pub fn host_lock_store(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = match mutex_inner(heap, args[0]) {
+        Some(inner) => value_to_portable(heap, args[1]).map(|pv| unsafe { *inner.value() = pv }),
+        None => Err(ThreadErrorTag::Other),
+    };
+    as_result_unit(heap, ErrorSet::Lock, r)
+}
+
+fn rw_acquire(heap: &mut Heap, lock: Value, write: bool) -> Value {
+    if let Ok(inner) = rwlock_inner(heap, lock) {
+        // False: parked, and run again after a release.
+        let _ = inner.lock_or_park_task(write);
+    }
+    Value::from(0i64)
+}
+
+fn rw_try(heap: &mut Heap, lock: Value, write: bool) -> Value {
+    Value::from(rwlock_inner(heap, lock).is_ok_and(|inner| inner.try_lock(write)))
+}
+
+fn rw_release(heap: &mut Heap, lock: Value, write: bool) -> Value {
+    if let Ok(inner) = rwlock_inner(heap, lock) {
+        let held = if write { inner.lock.is_locked_exclusive() } else { inner.lock.is_locked() && !inner.lock.is_locked_exclusive() };
+        if held {
+            unsafe { inner.unlock(write) };
+        }
+    }
+    Value::from(0i64)
+}
+
+/// `rw_acquire_read(l)`: a shared hold, parking while a writer holds `l`.
+pub fn host_rw_acquire_read(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_acquire(heap, args[0], false)
+}
+
+/// `rw_acquire_write(l)`: the exclusive hold, parking while any holds `l`.
+pub fn host_rw_acquire_write(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_acquire(heap, args[0], true)
+}
+
+/// `rw_try_read(l) -> bool`: a shared hold if one is free now.
+pub fn host_rw_try_read(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_try(heap, args[0], false)
+}
+
+/// `rw_try_write(l) -> bool`: the exclusive hold if it is free now.
+pub fn host_rw_try_write(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_try(heap, args[0], true)
+}
+
+/// `rw_release_read(l)`: end a shared hold.
+pub fn host_rw_release_read(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_release(heap, args[0], false)
+}
+
+/// `rw_release_write(l)`: end the exclusive hold.
+pub fn host_rw_release_write(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_release(heap, args[0], true)
+}
+
+/// `rw_load(l) -> Result<T, LockError>`: a copy of `l`'s value. The caller
+/// holds `l`.
+pub fn host_rw_load(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = rwlock_inner(heap, args[0]).and_then(|inner| portable_to_value(heap, unsafe { (*inner.value()).clone() }));
+    as_result_value(heap, ErrorSet::Lock, r)
+}
+
+/// `rw_store(l, v) -> Result<(), LockError>`: make `v` `l`'s value. The
+/// caller holds `l` exclusive.
+pub fn host_rw_store(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = rwlock_inner(heap, args[0])
+        .and_then(|inner| value_to_portable(heap, args[1]).map(|pv| unsafe { *inner.value() = pv }));
+    as_result_unit(heap, ErrorSet::Lock, r)
+}
+
+/// HostInvoke wiring for the lock primitives (archive 6.21), last.
+pub const LOCK_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
+    ("lock_acquire", 1, host_lock_acquire),
+    ("lock_release", 1, host_lock_release),
+    ("lock_load", 1, host_lock_load),
+    ("lock_store", 2, host_lock_store),
+    ("rw_acquire_read", 1, host_rw_acquire_read),
+    ("rw_acquire_write", 1, host_rw_acquire_write),
+    ("rw_try_read", 1, host_rw_try_read),
+    ("rw_try_write", 1, host_rw_try_write),
+    ("rw_release_read", 1, host_rw_release_read),
+    ("rw_release_write", 1, host_rw_release_write),
+    ("rw_load", 1, host_rw_load),
+    ("rw_store", 2, host_rw_store),
+];
 
 // Pipeline registry names (`thread_spawn`, …).
 pub use host_channel as thread_channel;

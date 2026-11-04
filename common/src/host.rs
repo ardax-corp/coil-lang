@@ -1467,6 +1467,89 @@ pub const HOST_NATIVES: &[HostNative] = &[
         id: 199,
         effects: PURE,
         caps: NO_CAP,
+    },    HostNative {
+        name: "lock_acquire",
+        arity: 1,
+        id: 200,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "lock_release",
+        arity: 1,
+        id: 201,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "lock_load",
+        arity: 1,
+        id: 202,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "lock_store",
+        arity: 2,
+        id: 203,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_acquire_read",
+        arity: 1,
+        id: 204,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_acquire_write",
+        arity: 1,
+        id: 205,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_try_read",
+        arity: 1,
+        id: 206,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_try_write",
+        arity: 1,
+        id: 207,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_release_read",
+        arity: 1,
+        id: 208,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_release_write",
+        arity: 1,
+        id: 209,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_load",
+        arity: 1,
+        id: 210,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_store",
+        arity: 2,
+        id: 211,
+        effects: THREAD_R,
+        caps: NO_CAP,
     },
 ];
 
@@ -1709,8 +1792,15 @@ pub const PACKED_VEC_ARITH: &str = "packed_vec_arith";
 pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
+/// `prelude::thread::lock_acquire`, the first lock primitive (archive 6.21).
+pub const LOCK_ACQUIRE_ID: u16 = 200;
+/// `prelude::thread::rw_store`, the last lock primitive.
+pub const RW_STORE_ID: u16 = 211;
+
 const _: () = {
-    assert!(HOST_NATIVES.len() == 200);
+    assert!(HOST_NATIVES.len() == 212);
+    assert!(HOST_NATIVES[LOCK_ACQUIRE_ID as usize].id == LOCK_ACQUIRE_ID);
+    assert!(HOST_NATIVES[RW_STORE_ID as usize].id == RW_STORE_ID);
     assert!(HOST_NATIVES[KEY_INDEX_EQ_MODE_ID as usize].id == KEY_INDEX_EQ_MODE_ID);
     assert!(HOST_NATIVES[CORO_CLOSE_ID as usize].id == CORO_CLOSE_ID);
     assert!(HOST_NATIVES[KEY_INDEX_TABLE_ID as usize].id == KEY_INDEX_TABLE_ID);
