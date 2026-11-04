@@ -114,8 +114,32 @@ mod tests {
 
     use crate::Heap;
 
-    const INTS: [i64; 12] = [i64::MIN, i64::MIN + 1, -64, -2, -1, 0, 1, 2, 63, 64, i64::MAX - 1, i64::MAX];
-    const FLOATS: [f64; 10] = [f64::NEG_INFINITY, -1.5, -0.0, 0.0, 0.5, 1.0, 3.0, f64::INFINITY, f64::NAN, -f64::NAN];
+    const INTS: [i64; 12] = [
+        i64::MIN,
+        i64::MIN + 1,
+        -64,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        63,
+        64,
+        i64::MAX - 1,
+        i64::MAX,
+    ];
+    const FLOATS: [f64; 10] = [
+        f64::NEG_INFINITY,
+        -1.5,
+        -0.0,
+        0.0,
+        0.5,
+        1.0,
+        3.0,
+        f64::INFINITY,
+        f64::NAN,
+        -f64::NAN,
+    ];
 
     fn bits(r: Result<Value, IntTrap>) -> Result<u64, IntTrap> {
         r.map(|v| v.as_int() as u64)
@@ -174,14 +198,36 @@ mod tests {
     #[test]
     fn compares_agree() {
         let heap = Heap::default();
-        let preds = [dense::CMP_LT, dense::CMP_LE, dense::CMP_GT, dense::CMP_GE, dense::CMP_EQ, dense::CMP_NE];
-        let int_ops = [Instruction::LE, Instruction::LEQ, Instruction::GT, Instruction::GEQ, Instruction::EQ, Instruction::NEQ];
-        let float_ops = [Instruction::LEF, Instruction::LEQF, Instruction::GTF, Instruction::GEQF, Instruction::EQF, Instruction::NEQF];
+        let preds = [
+            dense::CMP_LT,
+            dense::CMP_LE,
+            dense::CMP_GT,
+            dense::CMP_GE,
+            dense::CMP_EQ,
+            dense::CMP_NE,
+        ];
+        let int_ops = [
+            Instruction::LE,
+            Instruction::LEQ,
+            Instruction::GT,
+            Instruction::GEQ,
+            Instruction::EQ,
+            Instruction::NEQ,
+        ];
+        let float_ops = [
+            Instruction::LEF,
+            Instruction::LEQF,
+            Instruction::GTF,
+            Instruction::GEQF,
+            Instruction::EQF,
+            Instruction::NEQF,
+        ];
         for (i, pred) in preds.into_iter().enumerate() {
             for a in INTS {
                 for b in INTS {
                     let (a, b) = (Value::from(a), Value::from(b));
-                    let d = crate::dense::eval_cmp(dense::pack_cmp(dense::CMP_I64, pred), a, b).as_int();
+                    let d = crate::dense::eval_cmp(dense::pack_cmp(dense::CMP_I64, pred), a, b)
+                        .as_int();
                     let op = int_ops[i] as u8;
                     assert_eq!(d, crate::fused::eval_bin(op, a, b, &heap).unwrap().as_int());
                     assert_eq!(d == 1, crate::fused::eval_cmp(op, a, b, &heap));
@@ -190,7 +236,8 @@ mod tests {
             for a in FLOATS {
                 for b in FLOATS {
                     let (a, b) = (Value::from(a), Value::from(b));
-                    let d = crate::dense::eval_cmp(dense::pack_cmp(dense::CMP_F64, pred), a, b).as_int();
+                    let d = crate::dense::eval_cmp(dense::pack_cmp(dense::CMP_F64, pred), a, b)
+                        .as_int();
                     let op = float_ops[i] as u8;
                     assert_eq!(d, crate::fused::eval_bin(op, a, b, &heap).unwrap().as_int());
                     assert_eq!(d == 1, crate::fused::eval_cmp(op, a, b, &heap));
@@ -198,9 +245,24 @@ mod tests {
             }
         }
         let nan = Value::from(f64::NAN);
-        assert!(!crate::fused::eval_cmp(Instruction::EQF as u8, nan, nan, &heap));
-        assert!(crate::fused::eval_cmp(Instruction::NEQF as u8, nan, nan, &heap));
-        assert!(crate::fused::eval_cmp(Instruction::EQF as u8, Value::from(-0.0), Value::from(0.0), &heap));
+        assert!(!crate::fused::eval_cmp(
+            Instruction::EQF as u8,
+            nan,
+            nan,
+            &heap
+        ));
+        assert!(crate::fused::eval_cmp(
+            Instruction::NEQF as u8,
+            nan,
+            nan,
+            &heap
+        ));
+        assert!(crate::fused::eval_cmp(
+            Instruction::EQF as u8,
+            Value::from(-0.0),
+            Value::from(0.0),
+            &heap
+        ));
     }
 
     /// A fused bool / bitwise branch reads the word `eval_bin` would push,
@@ -208,13 +270,23 @@ mod tests {
     #[test]
     fn branch_reads_bin_result() {
         let heap = Heap::default();
-        let ops = [Instruction::AND, Instruction::OR, Instruction::BITAND, Instruction::BITOR, Instruction::XOR];
+        let ops = [
+            Instruction::AND,
+            Instruction::OR,
+            Instruction::BITAND,
+            Instruction::BITOR,
+            Instruction::XOR,
+        ];
         for op in ops {
             for a in [0i64, 1, 2, 3, -1] {
                 for b in [0i64, 1, 2, 3, -1] {
                     let (a, b) = (Value::from(a), Value::from(b));
                     let pushed = crate::fused::eval_bin(op as u8, a, b, &heap).unwrap();
-                    assert_eq!(pushed.as_bool(), crate::fused::eval_cmp(op as u8, a, b, &heap), "{op:?}");
+                    assert_eq!(
+                        pushed.as_bool(),
+                        crate::fused::eval_cmp(op as u8, a, b, &heap),
+                        "{op:?}"
+                    );
                 }
             }
         }

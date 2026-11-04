@@ -66,7 +66,10 @@ fn match_at(hay: &[u8], needle: &[u8], at: i64) -> bool {
 /// The byte at offset `i` of `s`, or `-1` out of range.
 #[inline]
 pub(crate) fn byte_at(s: &[u8], i: i64) -> i64 {
-    usize::try_from(i).ok().and_then(|i| s.get(i)).map_or(-1, |&b| b as i64)
+    usize::try_from(i)
+        .ok()
+        .and_then(|i| s.get(i))
+        .map_or(-1, |&b| b as i64)
 }
 
 /// [`string_byte_at`] on a word that is not a string object itself (a

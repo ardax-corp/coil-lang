@@ -7,8 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use common::Value;
 
-use crate::memory::Heap;
 use crate::HostValueFn;
+use crate::memory::Heap;
 
 /// UTC/unix wall time as nanoseconds since the Unix epoch.
 pub fn wall_nanos() -> i64 {
@@ -30,16 +30,17 @@ pub fn mono_nanos() -> i64 {
 /// `poll_oneoff`, coil-lang#2052), so a short wake sleeps again for the rest.
 pub fn sleep_ms(ms: i64) {
     if let Ok(ms) = u64::try_from(ms)
-        && ms > 0 {
-            let deadline = Instant::now() + Duration::from_millis(ms);
-            loop {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                std::thread::sleep(left);
+        && ms > 0
+    {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
             }
+            std::thread::sleep(left);
         }
+    }
 }
 
 fn mono_origin() -> Instant {

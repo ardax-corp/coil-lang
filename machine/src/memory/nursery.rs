@@ -13,8 +13,11 @@ use std::ptr::NonNull;
 
 use common::Value;
 
-use super::compact::{forward, AddrMap};
-use super::{GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, QUIET, REMEMBERED};
+use super::compact::{AddrMap, forward};
+use super::{
+    GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, GcHeader, GcPhase, GcSized, Heap, Member, Object, QUIET,
+    REMEMBERED,
+};
 
 /// A minor collection between its copy and its reset step.
 pub struct MinorPlan {
@@ -59,9 +62,15 @@ impl Heap {
     pub(super) fn live_objects(&self) -> Vec<Object> {
         // The sweep's walk: every chunk but the nursery's.
         let cur = crate::memory::slab::SlotCursor::sweep();
-        let mut out: Vec<Object> = super::HeapIter { slab: &self.slab, cur }.collect();
+        let mut out: Vec<Object> = super::HeapIter {
+            slab: &self.slab,
+            cur,
+        }
+        .collect();
         for (_, first, end, size) in self.slab.young_spans() {
-            out.extend(slots(first, end, size).filter_map(|addr| unsafe { Object::from_header(addr) }));
+            out.extend(
+                slots(first, end, size).filter_map(|addr| unsafe { Object::from_header(addr) }),
+            );
         }
         out
     }
@@ -80,7 +89,10 @@ impl Heap {
                 if !self.slab.contains_slot(addr) {
                     return true;
                 }
-                if self.find_object_by_addr(addr).is_some_and(|o| o.generation() & GEN_YOUNG == 0) {
+                if self
+                    .find_object_by_addr(addr)
+                    .is_some_and(|o| o.generation() & GEN_YOUNG == 0)
+                {
                     mine.push(addr);
                 }
                 false
@@ -189,7 +201,9 @@ impl Heap {
                 }
             }
             let tail = self.slab.chunk_slots_end(chunk);
-            free.extend(slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }));
+            free.extend(
+                slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }),
+            );
         }
         self.young_bytes = 0;
         self.slab.finish_young(&promoted, &[], free);
@@ -202,7 +216,11 @@ impl Heap {
     /// it. The VM then rewrites its precise roots and calls
     /// [`Self::minor_finish`].
     pub fn minor_plan(&mut self, pins: &[u64], precise: &[u64]) -> MinorPlan {
-        debug_assert_eq!(self.gc_phase, GcPhase::Idle, "minor collections run between cycles");
+        debug_assert_eq!(
+            self.gc_phase,
+            GcPhase::Idle,
+            "minor collections run between cycles"
+        );
         let spans = self.slab.young_spans();
         let remembered = self.take_remembered();
         let mut gray: Vec<Object> = Vec::new();
@@ -293,7 +311,10 @@ impl Heap {
 
         // Copy the survivors nothing ambiguous names.
         let mut fwd = AddrMap::default();
-        let mut ranges: Vec<(u64, u64)> = spans.iter().map(|&(_, first, end, _)| (first, end)).collect();
+        let mut ranges: Vec<(u64, u64)> = spans
+            .iter()
+            .map(|&(_, first, end, _)| (first, end))
+            .collect();
         ranges.sort_unstable();
         let in_use = |addr: u64| {
             let i = ranges.partition_point(|&(first, _)| first <= addr);
@@ -341,7 +362,11 @@ impl Heap {
             }
             self.forward_side_lists(&fwd);
         }
-        MinorPlan { fwd, remembered, spans }
+        MinorPlan {
+            fwd,
+            remembered,
+            spans,
+        }
     }
 
     /// Copy `obj`, a young survivor, to an old slot unless something
@@ -350,7 +375,10 @@ impl Heap {
     #[inline]
     fn copy_survivor(&mut self, obj: Object, fwd: &mut AddrMap, moved: bool) {
         let addr = obj.addr();
-        if !obj.is_marked() || obj.generation() & GEN_PINNED != 0 || moved && fwd.contains_key(&addr) {
+        if !obj.is_marked()
+            || obj.generation() & GEN_PINNED != 0
+            || moved && fwd.contains_key(&addr)
+        {
             return;
         }
         let Some(layout) = obj.movable_layout() else {
@@ -374,7 +402,11 @@ impl Heap {
     /// chunks with pinned survivors in the nursery and reset the rest.
     /// Returns how many objects moved.
     pub fn minor_finish(&mut self, plan: MinorPlan) -> usize {
-        let MinorPlan { fwd, remembered, spans } = plan;
+        let MinorPlan {
+            fwd,
+            remembered,
+            spans,
+        } = plan;
         let mut held = Vec::new();
         let (mut kept, mut kept_bytes, mut dead) = (0, 0, 0);
         for (chunk, first, end, size) in spans {
@@ -415,7 +447,9 @@ impl Heap {
             }
         }
         for &to in fwd.values() {
-            unsafe { &*(to as *const GcHeader) }.generation.set(GEN_UNLOGGED);
+            unsafe { &*(to as *const GcHeader) }
+                .generation
+                .set(GEN_UNLOGGED);
         }
         for addr in remembered {
             if let Some(obj) = self.find_object_by_addr(addr)
@@ -486,10 +520,16 @@ mod tests {
         heap.register_finalizer_type(7);
         let head = cons_list(&mut heap, 1);
         let obj = heap.find_object_by_addr(head).expect("enum");
-        let Object::Enum(gc) = obj else { unreachable!() };
+        let Object::Enum(gc) = obj else {
+            unreachable!()
+        };
         gc.payload_mut().type_id = 7;
         heap.note_enum_type(obj, 7);
-        assert_eq!(minor(&mut heap, &[], &mut []), 1, "it moves instead of dying");
+        assert_eq!(
+            minor(&mut heap, &[], &mut []),
+            1,
+            "it moves instead of dying"
+        );
         assert_eq!(heap.live_object_count(), 1);
         let copy = heap.unmarked_finalizable();
         assert_eq!(copy.len(), 1, "the finalizable list names the copy");
@@ -520,8 +560,15 @@ mod tests {
         assert_eq!(heap.live_object_count(), 500);
         assert!(!heap.has_young());
         let copy = heap.find_object_by_addr(roots[0]).expect("copy");
-        assert_eq!(copy.generation(), GEN_UNLOGGED, "a copy is old and not remembered");
-        assert!(heap.find_object_by_addr(head).is_none(), "the young slot is poisoned");
+        assert_eq!(
+            copy.generation(),
+            GEN_UNLOGGED,
+            "a copy is old and not remembered"
+        );
+        assert!(
+            heap.find_object_by_addr(head).is_none(),
+            "the young slot is poisoned"
+        );
     }
 
     #[test]
@@ -531,9 +578,17 @@ mod tests {
         let before = walk(&heap, head);
         let moved = minor(&mut heap, &[head], &mut []);
         assert_eq!(moved, 99, "everything but the pinned head moves");
-        assert_eq!(walk(&heap, head), before, "the pinned head's link is rewritten");
+        assert_eq!(
+            walk(&heap, head),
+            before,
+            "the pinned head's link is rewritten"
+        );
         let obj = heap.find_object_by_addr(head).expect("pinned head stays");
-        assert_eq!(obj.generation(), GEN_YOUNG, "it stays young in a held chunk");
+        assert_eq!(
+            obj.generation(),
+            GEN_YOUNG,
+            "it stays young in a held chunk"
+        );
         assert!(heap.has_young());
         // New young objects go to other chunks; the held one stays intact,
         // and later minors keep it where it is even unpinned.
@@ -560,12 +615,23 @@ mod tests {
         heap.minor_finish(plan);
         let old = cons_list(&mut heap, 1);
         let obj = heap.find_object_by_addr(old).expect("old");
-        assert_eq!(obj.generation() & GEN_YOUNG, 0, "allocated old after a surviving minor");
-        assert_eq!(obj.generation(), GEN_UNLOGGED, "nothing young to name: unlogged, not remembered");
+        assert_eq!(
+            obj.generation() & GEN_YOUNG,
+            0,
+            "allocated old after a surviving minor"
+        );
+        assert_eq!(
+            obj.generation(),
+            GEN_UNLOGGED,
+            "nothing young to name: unlogged, not remembered"
+        );
         assert!(heap.find_object_by_addr(head).is_some());
         heap.pretenure_bytes = 0;
         let young = cons_list(&mut heap, 1);
-        assert_eq!(heap.find_object_by_addr(young).expect("young").generation(), GEN_YOUNG);
+        assert_eq!(
+            heap.find_object_by_addr(young).expect("young").generation(),
+            GEN_YOUNG
+        );
     }
 
     #[test]
@@ -573,7 +639,10 @@ mod tests {
         let mut heap = nursery_heap();
         let mut made = Vec::new();
         for v in 0..64 {
-            let (e, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(v)).with_kinds(1)), Object::Enum);
+            let (e, _) = heap.alloc(
+                ObjEnum::new(0, EnumPayload::one(Value::from(v)).with_kinds(1)),
+                Object::Enum,
+            );
             made.push(e.addr());
         }
         // The array holds them last allocated first.
@@ -592,7 +661,10 @@ mod tests {
             };
             assert_eq!(e.as_ref().payload[0].as_int(), 63 - k as i64);
         }
-        assert!(addrs.windows(2).all(|w| w[0] < w[1]), "copies follow the array's order");
+        assert!(
+            addrs.windows(2).all(|w| w[0] < w[1]),
+            "copies follow the array's order"
+        );
     }
 
     #[test]
@@ -618,7 +690,9 @@ mod tests {
     fn a_young_object_stored_into_an_old_one_survives_through_the_barrier() {
         let mut heap = nursery_heap();
         let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64)]), Object::Array);
-        let Object::Array(mut gc) = arr else { unreachable!() };
+        let Object::Array(mut gc) = arr else {
+            unreachable!()
+        };
         gc.as_mut().set_elem_kind(common::WORD_POINTER);
         // The array survives a collection as a root and becomes old.
         let mut roots = [arr.addr()];
@@ -646,7 +720,9 @@ mod tests {
     fn an_old_object_written_while_the_quiet_log_overflowed_is_still_remembered() {
         let mut heap = nursery_heap();
         let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64)]), Object::Array);
-        let Object::Array(mut gc) = arr else { unreachable!() };
+        let Object::Array(mut gc) = arr else {
+            unreachable!()
+        };
         gc.as_mut().set_elem_kind(common::WORD_POINTER);
         let mut roots = [arr.addr()];
         minor(&mut heap, &[], &mut roots);
@@ -694,8 +770,13 @@ mod tests {
         heap.begin_mark(&[head]);
         while !heap.mark_quantum(usize::MAX) {}
         unsafe { heap.sweep() };
-        let obj = heap.find_object_by_addr(head).expect("young head survives a major cycle");
-        assert!(!obj.is_marked(), "the sweep skipped it, so its mark was cleared");
+        let obj = heap
+            .find_object_by_addr(head)
+            .expect("young head survives a major cycle");
+        assert!(
+            !obj.is_marked(),
+            "the sweep skipped it, so its mark was cleared"
+        );
         let mut roots = [head];
         minor(&mut heap, &[], &mut roots);
         assert_eq!(walk(&heap, roots[0]).len(), 10);

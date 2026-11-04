@@ -3,34 +3,34 @@
 mod arith;
 pub mod char_ord;
 pub mod clock;
-pub mod entropy;
-pub mod key_index;
-pub mod symbol;
 #[cfg(any(test, feature = "debugger"))]
 pub mod debug;
-pub mod env;
 mod dense;
-mod simd;
-mod fused;
+pub mod entropy;
+pub mod env;
 mod ffi;
 pub mod fs;
+mod fused;
 pub mod gc_handles;
 pub mod host_enum;
 pub mod host_natives;
 pub mod io;
 mod io_handle;
 pub mod io_reactor;
+pub mod key_index;
 pub mod math_libm;
 mod memory;
 pub mod native;
 mod opcode;
 pub mod packed_la;
+pub mod process;
 pub mod reactor;
 pub mod runtime_wire;
 pub mod shared_heap;
-pub mod process;
+mod simd;
 pub mod str_bytes;
 pub mod stream_attach;
+pub mod symbol;
 mod task;
 pub mod thread;
 pub mod tty;
@@ -42,17 +42,16 @@ mod vm;
 /// zero-arg clocks and three-arg vec helpers share this function type.
 pub type HostValueFn = fn(&mut memory::Heap, &[common::Value]) -> common::Value;
 
+pub use clock::CLOCK_WIRING;
 #[cfg(any(test, feature = "debugger"))]
 pub use debug::{DebugController, DebugObject, DebugTask, DebugTaskFrames, StepMode, StopReason};
-pub use clock::CLOCK_WIRING;
 pub use env::ENV_WIRING;
 pub use ffi::*;
 pub use fs::FS_WIRING;
 pub use gc_handles::{GC_COLLECT_NATIVE, GC_REGISTER_FINALIZER_NATIVE, GC_WIRING};
 pub use host_natives::{
-    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE,
-    STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE, build_standard_host_natives,
-    wire_standard_host_natives,
+    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE, STREAM_ATTACH_NATIVE,
+    STREAM_PARK_NATIVE, build_standard_host_natives, wire_standard_host_natives,
 };
 pub use memory::*;
 pub use opcode::*;
@@ -61,8 +60,8 @@ pub use packed_la::{
     packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
 };
 pub use runtime_wire::{
-    VmHostSpec, WireThreadProgramWithMapsArgs, class_kind_table, wire_thread_program, wire_thread_program_with_maps,
-    wire_vm_host,
+    VmHostSpec, WireThreadProgramWithMapsArgs, class_kind_table, wire_thread_program,
+    wire_thread_program_with_maps, wire_vm_host,
 };
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{

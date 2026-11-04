@@ -49,7 +49,10 @@ fn entry(id: i64) -> Result<Entry, IoErrorTag> {
     table.get(&id).cloned().ok_or(IoErrorTag::AlreadyClosed)
 }
 
-fn with_child<T>(id: i64, f: impl FnOnce(&mut Child) -> Result<T, IoErrorTag>) -> Result<T, IoErrorTag> {
+fn with_child<T>(
+    id: i64,
+    f: impl FnOnce(&mut Child) -> Result<T, IoErrorTag>,
+) -> Result<T, IoErrorTag> {
     let entry = entry(id)?;
     let mut child = entry.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut child)
@@ -171,7 +174,9 @@ fn pipe_handle(pipe: impl Into<std::os::fd::OwnedFd>) -> Result<NativeHandle, Io
 }
 
 #[cfg(windows)]
-fn pipe_handle(pipe: impl Into<std::os::windows::io::OwnedHandle>) -> Result<NativeHandle, IoErrorTag> {
+fn pipe_handle(
+    pipe: impl Into<std::os::windows::io::OwnedHandle>,
+) -> Result<NativeHandle, IoErrorTag> {
     Ok(NativeHandle::File(std::fs::File::from(pipe.into())))
 }
 
@@ -190,7 +195,9 @@ pub fn wait(id: i64) -> Result<i64, IoErrorTag> {
 
 /// The exit code if the child has ended, without waiting.
 pub fn try_wait(id: i64) -> Result<Option<i64>, IoErrorTag> {
-    with_child(id, |child| child.try_wait().map(|s| s.map(exit_code)).map_err(io_tag))
+    with_child(id, |child| {
+        child.try_wait().map(|s| s.map(exit_code)).map_err(io_tag)
+    })
 }
 
 /// Read the stdout / stderr pipes still held here to their end and wait:
@@ -264,7 +271,10 @@ pub fn pid(id: i64) -> Result<i64, IoErrorTag> {
 /// Forget the child (its class's finalizer). A child still running keeps
 /// running; its pipes still held here close.
 pub fn release(id: i64) {
-    children().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    children()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
 }
 
 fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
@@ -381,9 +391,17 @@ mod tests {
 
     #[test]
     fn output_collects_both_pipes_and_the_code() {
-        let id = spawn(&spec("sh", &["-c", "printf out; printf err >&2; exit 3"], PIPED)).unwrap();
+        let id = spawn(&spec(
+            "sh",
+            &["-c", "printf out; printf err >&2; exit 3"],
+            PIPED,
+        ))
+        .unwrap();
         let (code, out, err) = output(id).unwrap();
-        assert_eq!((code, out.as_slice(), err.as_slice()), (3, &b"out"[..], &b"err"[..]));
+        assert_eq!(
+            (code, out.as_slice(), err.as_slice()),
+            (3, &b"out"[..], &b"err"[..])
+        );
         release(id);
         assert_eq!(wait(id), Err(IoErrorTag::AlreadyClosed));
     }
@@ -393,18 +411,28 @@ mod tests {
         let id = spawn(&spec("sleep", &["5"], 0)).unwrap();
         signal(id, libc::SIGTERM as i64).unwrap();
         assert_eq!(wait(id), Ok(128 + libc::SIGTERM as i64));
-        assert_eq!(signal(id, libc::SIGTERM as i64), Err(IoErrorTag::InvalidInput));
+        assert_eq!(
+            signal(id, libc::SIGTERM as i64),
+            Err(IoErrorTag::InvalidInput)
+        );
         release(id);
     }
 
     #[test]
     fn a_missing_program_is_not_found() {
-        assert_eq!(spawn(&spec("/nonexistent/coil-no-such-program", &[], 0)), Err(IoErrorTag::NotFound));
+        assert_eq!(
+            spawn(&spec("/nonexistent/coil-no-such-program", &[], 0)),
+            Err(IoErrorTag::NotFound)
+        );
     }
 
     #[test]
     fn env_and_cwd_reach_the_child() {
-        let mut s = spec("sh", &["-c", "printf '%s:%s' \"$COIL_P\" \"$(pwd)\""], STDIO_PIPE << 2);
+        let mut s = spec(
+            "sh",
+            &["-c", "printf '%s:%s' \"$COIL_P\" \"$(pwd)\""],
+            STDIO_PIPE << 2,
+        );
         s.env = vec!["COIL_P".into(), "v".into()];
         s.cwd = "/".into();
         let id = spawn(&s).unwrap();

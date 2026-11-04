@@ -58,7 +58,10 @@ impl InvokeContext {
     }
 }
 
-pub fn prepare_cif(_sig: &FfiSignature, _layouts: &[CStructLayout]) -> Result<PreparedCall, FfiError> {
+pub fn prepare_cif(
+    _sig: &FfiSignature,
+    _layouts: &[CStructLayout],
+) -> Result<PreparedCall, FfiError> {
     Err(unsupported())
 }
 

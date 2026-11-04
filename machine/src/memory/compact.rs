@@ -99,7 +99,9 @@ impl Object {
             Self::Enum(e) if !e.as_ref().payload.is_empty() => Layout::new::<GcData<ObjEnum>>(),
             Self::Boxed(_) => Layout::new::<GcData<ObjBoxed>>(),
             // `()` is a shared immortal.
-            Self::Tuple(t) if !t.as_ref().elements().is_empty() => Layout::new::<GcData<ObjTuple>>(),
+            Self::Tuple(t) if !t.as_ref().elements().is_empty() => {
+                Layout::new::<GcData<ObjTuple>>()
+            }
             Self::Array(_) => Layout::new::<GcData<ObjArray>>(),
             _ => return None,
         })
@@ -172,7 +174,10 @@ impl Object {
             Self::Array(a) => {
                 let a = a.payload_mut();
                 if a.may_hold_refs() && a.elem_kind() == common::WORD_POINTER {
-                    a.gc_words_mut().unwrap_or_default().iter_mut().for_each(fix);
+                    a.gc_words_mut()
+                        .unwrap_or_default()
+                        .iter_mut()
+                        .for_each(fix);
                 }
             }
             Self::Coroutine(c) => {
@@ -255,7 +260,11 @@ impl Heap {
         let mut per_chunk: Vec<(usize, usize)> = vec![(0, 0); nchunks];
         for obj in &live {
             // The nursery empties young chunks itself.
-            if let Some(i) = self.slab.chunk_of(obj.addr()).filter(|&i| !self.slab.is_young_chunk(i)) {
+            if let Some(i) = self
+                .slab
+                .chunk_of(obj.addr())
+                .filter(|&i| !self.slab.is_young_chunk(i))
+            {
                 per_chunk[i].0 += 1;
                 per_chunk[i].1 += usize::from(movable(obj));
             }
@@ -400,7 +409,8 @@ impl Heap {
             // SAFETY: `old` is a live slot origin copied above; poisoning the
             // header makes it a free slot without dropping the moved payload.
             unsafe { (*(old as *const GcHeader)).kind.set(0) };
-            self.slab.free(unsafe { NonNull::new_unchecked(old as *mut u8) });
+            self.slab
+                .free(unsafe { NonNull::new_unchecked(old as *mut u8) });
         }
         for p in parked {
             self.slab.free(p);
@@ -491,14 +501,20 @@ mod tests {
             Object::Enum,
         );
         // Unknown-kind array words are ambiguous.
-        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(target.addr())]), Object::Array);
+        let (arr, _) = heap.alloc(
+            ObjArray::new(vec![Value::from(target.addr())]),
+            Object::Array,
+        );
         full_collect(&mut heap, &[arr.addr()]);
         let plan = heap.evacuate_plan(&[arr.addr()], true);
         if let Some(plan) = plan {
             assert!(!plan.moved().contains_key(&target.addr()));
             heap.evacuate_finish(plan);
         }
-        assert!(matches!(heap.find_object_by_addr(target.addr()), Some(Object::Enum(_))));
+        assert!(matches!(
+            heap.find_object_by_addr(target.addr()),
+            Some(Object::Enum(_))
+        ));
     }
 
     /// Pointer-kind array elements move and are rewritten, keeping the
@@ -540,7 +556,10 @@ mod tests {
         let mut heap = Heap::default();
         let mut by_chunk: std::collections::BTreeMap<usize, Vec<u64>> = Default::default();
         for i in 0..400_000 {
-            let (s, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(i))), Object::Enum);
+            let (s, _) = heap.alloc(
+                ObjEnum::new(0, EnumPayload::one(Value::from(i))),
+                Object::Enum,
+            );
             let chunk = heap.slab.chunk_of(s.addr()).expect("slab object");
             by_chunk.entry(chunk).or_default().push(s.addr());
         }
@@ -550,7 +569,12 @@ mod tests {
         let (last, rest) = chunks.split_last().expect("chunks");
         let (dense, sparse) = rest.split_last().expect("two chunks");
         let _ = last;
-        assert!(dense.len() > sparse.len() + 1, "{} slots, {} sparse chunks", dense.len(), sparse.len());
+        assert!(
+            dense.len() > sparse.len() + 1,
+            "{} slots, {} sparse chunks",
+            dense.len(),
+            sparse.len()
+        );
         let mut roots: Vec<u64> = sparse.iter().map(|c| c[0]).collect();
         roots.extend(&dense[sparse.len()..]);
         full_collect(&mut heap, &roots);

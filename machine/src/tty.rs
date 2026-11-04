@@ -88,7 +88,10 @@ fn stream_os(heap: &mut Heap, stream: Value) -> Result<(os::Raw, StreamKind), Io
 }
 
 fn is_std(kind: StreamKind) -> bool {
-    matches!(kind, StreamKind::Stdin | StreamKind::Stdout | StreamKind::Stderr)
+    matches!(
+        kind,
+        StreamKind::Stdin | StreamKind::Stdout | StreamKind::Stderr
+    )
 }
 
 /// `io::tty::is_tty(s)`. A stdout / stderr stream whose writes an open
@@ -597,7 +600,10 @@ mod os {
         ) -> i32;
         fn GetTickCount64() -> u64;
         fn Sleep(ms: u32);
-        fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> i32>, add: i32) -> i32;
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
     }
 
     unsafe extern "C" {
@@ -647,10 +653,19 @@ mod os {
     static LAST_SIZE: AtomicU64 = AtomicU64::new(0);
 
     fn std_handles() -> (Handle, Handle) {
-        unsafe { (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE)) }
+        unsafe {
+            (
+                GetStdHandle(STD_INPUT_HANDLE),
+                GetStdHandle(STD_OUTPUT_HANDLE),
+            )
+        }
     }
 
-    pub fn enter_raw(_h: Raw, keep_signals: bool, _keep_output: bool) -> Result<(), super::TtyFail> {
+    pub fn enter_raw(
+        _h: Raw,
+        keep_signals: bool,
+        _keep_output: bool,
+    ) -> Result<(), super::TtyFail> {
         install_restore();
         let (input, output) = std_handles();
         let mut saved = SAVED.lock().unwrap_or_else(|e| e.into_inner());
@@ -757,7 +772,14 @@ mod os {
         if n == 0 {
             return Ok(false);
         }
-        let mut recs = vec![InputRecord { event_type: 0, _pad: 0, event: [0; 4] }; n as usize];
+        let mut recs = vec![
+            InputRecord {
+                event_type: 0,
+                _pad: 0,
+                event: [0; 4]
+            };
+            n as usize
+        ];
         let mut got = 0u32;
         if unsafe { PeekConsoleInputW(h, recs.as_mut_ptr(), n, &mut got) } == 0 {
             return Err(IoErrorTag::from_error(&std::io::Error::last_os_error()));
@@ -833,8 +855,10 @@ mod os {
     pub fn enable_vt(h: Raw) -> bool {
         match console_mode(h) {
             Some(m) => unsafe {
-                SetConsoleMode(h, m | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
-                    != 0
+                SetConsoleMode(
+                    h,
+                    m | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+                ) != 0
             },
             None => false,
         }
@@ -865,7 +889,11 @@ mod os {
         None
     }
 
-    pub fn enter_raw(_raw: Raw, _keep_signals: bool, _keep_output: bool) -> Result<(), super::TtyFail> {
+    pub fn enter_raw(
+        _raw: Raw,
+        _keep_signals: bool,
+        _keep_output: bool,
+    ) -> Result<(), super::TtyFail> {
         Err(super::TtyFail::NotATerminal)
     }
 
@@ -938,9 +966,17 @@ mod tests {
         let mut heap = Heap::default();
         let (master, slave) = pty(&mut heap);
         assert!(tty_is_tty(&mut heap, slave));
-        let ws = libc::winsize { ws_row: 40, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+        let ws = libc::winsize {
+            ws_row: 40,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         // SAFETY: TIOCSWINSZ reads one `winsize`.
-        assert_eq!(unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) }, 0);
+        assert_eq!(
+            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) },
+            0
+        );
         assert_eq!(tty_size(&mut heap, slave), Ok((100, 40)));
     }
 
@@ -954,7 +990,10 @@ mod tests {
 
         tty_enter_raw(&mut heap, slave, false, false).unwrap();
         let raw = termios_of(&mut heap, slave);
-        assert_eq!(raw.c_lflag & (libc::ECHO | libc::ICANON | libc::IEXTEN | libc::ISIG), 0);
+        assert_eq!(
+            raw.c_lflag & (libc::ECHO | libc::ICANON | libc::IEXTEN | libc::ISIG),
+            0
+        );
         assert_eq!(raw.c_iflag & (libc::ICRNL | libc::IXON), 0);
         assert_eq!(raw.c_oflag & libc::OPOST, 0);
         assert_eq!(raw.c_cc[libc::VMIN], 1);
@@ -970,7 +1009,10 @@ mod tests {
         tty_leave_raw(&mut heap, slave).unwrap();
         let after = termios_of(&mut heap, slave);
         // PENDIN is kernel state: macOS sets it when leaving non-canonical mode.
-        assert_eq!(after.c_lflag & !libc::PENDIN, before.c_lflag & !libc::PENDIN);
+        assert_eq!(
+            after.c_lflag & !libc::PENDIN,
+            before.c_lflag & !libc::PENDIN
+        );
         assert_eq!(after.c_iflag, before.c_iflag);
         assert_eq!(after.c_oflag, before.c_oflag);
         assert!(!tty_is_raw(&mut heap, slave));
@@ -1009,7 +1051,10 @@ mod tests {
         let f = crate::io::stream_open(&mut heap, path.to_str().unwrap(), "r").unwrap();
         assert!(!tty_is_tty(&mut heap, f));
         assert_eq!(tty_size(&mut heap, f), Err(TtyFail::NotATerminal));
-        assert_eq!(tty_enter_raw(&mut heap, f, true, true), Err(TtyFail::NotATerminal));
+        assert_eq!(
+            tty_enter_raw(&mut heap, f, true, true),
+            Err(TtyFail::NotATerminal)
+        );
         assert_eq!(tty_leave_raw(&mut heap, f), Ok(()));
         let _ = std::fs::remove_file(&path);
     }

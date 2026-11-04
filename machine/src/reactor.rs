@@ -25,7 +25,8 @@ use crate::vm::Machine;
 /// No OS threads on this target (wasm without the atomics feature): the pool
 /// starts no workers, and a joiner runs queued jobs itself, so a spawned
 /// thread runs when it is joined (or when a wait helps).
-pub(crate) const NO_THREADS: bool = cfg!(all(target_family = "wasm", not(target_feature = "atomics")));
+pub(crate) const NO_THREADS: bool =
+    cfg!(all(target_family = "wasm", not(target_feature = "atomics")));
 
 /// `COIL_PAR_STATS=1`: count and print reactor steal/idle/join counters.
 /// Read by this crate's unit tests only; other builds never count.
@@ -529,7 +530,10 @@ fn machine_for_program(program: &ThreadProgram) -> Box<Machine<WORKER_STACK_SLOT
 }
 
 /// Checkout a TLS helper VM, run `f`, then return it with a bounded heap.
-fn with_help_vm<R>(program: &ThreadProgram, f: impl FnOnce(&mut Machine<WORKER_STACK_SLOTS>) -> R) -> R {
+fn with_help_vm<R>(
+    program: &ThreadProgram,
+    f: impl FnOnce(&mut Machine<WORKER_STACK_SLOTS>) -> R,
+) -> R {
     let mut vm = HELP_VMS
         .with(|slot| slot.borrow_mut().pop())
         .unwrap_or_else(|| machine_for_program(program));
@@ -619,9 +623,9 @@ fn park_idle_worker(reactor: &Reactor) -> Option<Job> {
     if reactor.inflight() > 0
         && let Some(job) =
             with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref)).flatten()
-        {
-            return Some(job);
-        }
+    {
+        return Some(job);
+    }
     reactor.idle_waits.fetch_add(1, Ordering::Relaxed);
     match reactor.sleep_cvar.wait(g) {
         Ok(guard) => drop(guard),
@@ -744,7 +748,8 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     // `set_thread_program` installs the job's static word kinds on this
     // thread; a VM waiting here in a join reads its own statics by the ones
     // it had (#2053).
-    let outer_static_kinds = crate::vm::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
+    let outer_static_kinds =
+        crate::vm::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
     let mut panic_message = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.install_natives(&natives);
@@ -871,11 +876,7 @@ impl TestHandle {
     /// a failed case, not a harness abort.
     pub fn wait(self) -> TestReport {
         let joined = self.reactor.wait_join(&self.state);
-        let report = self
-            .report
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        let report = self.report.lock().unwrap_or_else(|e| e.into_inner()).take();
         match (joined, report) {
             (Ok(_), Some(report)) => report,
             _ => TestReport {
@@ -1166,7 +1167,11 @@ mod tests {
             expect_ok_result: true,
             ..case
         };
-        assert!(!reactor.run_test_here(test_ctx(&reactor, 5), strict, Arc::default()).passed);
+        assert!(
+            !reactor
+                .run_test_here(test_ctx(&reactor, 5), strict, Arc::default())
+                .passed
+        );
         reactor.shutdown();
     }
 
@@ -1221,7 +1226,11 @@ mod tests {
             coverage: false,
             step_budget: None,
         };
-        assert!(reactor.run_test_here(program_ctx(&reactor, other), case, Arc::default()).passed);
+        assert!(
+            reactor
+                .run_test_here(program_ctx(&reactor, other), case, Arc::default())
+                .passed
+        );
         let after = crate::vm::swap_static_word_kinds(outer);
         assert_eq!(*after, *mine);
         reactor.shutdown();
@@ -1262,11 +1271,7 @@ mod tests {
         }
         reactor.shutdown();
         assert!(
-            reactor
-                .worker_handles
-                .lock()
-                .unwrap()
-                .is_empty(),
+            reactor.worker_handles.lock().unwrap().is_empty(),
             "shutdown must drain the handle list it joined"
         );
         // Idempotent: a second shutdown on an already-stopped pool is a no-op.
@@ -1277,9 +1282,7 @@ mod tests {
     fn submit_join_returns_immediate_and_clears_inflight() {
         let reactor = Reactor::new(2);
         let state = submit_const_job(&reactor, 42);
-        let pv = reactor
-            .wait_join(&state)
-            .expect("job should complete");
+        let pv = reactor.wait_join(&state).expect("job should complete");
         assert_eq!(pv, PortableValue::Immediate(42));
         // Allow a brief drain window if notify races the atomic.
         for _ in 0..50 {
@@ -1485,11 +1488,15 @@ mod tests {
         with_help_vm(&prog, |_| {});
         assert_eq!(help_vm_pool_len(), 1);
         let first = HELP_VMS.with(|slot| {
-            slot.borrow().last().map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
+            slot.borrow()
+                .last()
+                .map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
         });
         with_help_vm(&prog, |_| {});
         let second = HELP_VMS.with(|slot| {
-            slot.borrow().last().map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
+            slot.borrow()
+                .last()
+                .map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
         });
         assert_eq!(first, second, "idle helper must be reused");
 
