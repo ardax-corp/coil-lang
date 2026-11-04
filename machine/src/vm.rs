@@ -12,7 +12,7 @@ use std::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{
-    LineIndex, byte_to_position, likely, promise, set_field_slot_index, unlikely, unpack_init_typed,
+    LineIndex, likely, promise, set_field_slot_index, unlikely, unpack_init_typed,
     ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Byte as RawByte,
     ProgramDebug, Value,
 };
@@ -2928,14 +2928,7 @@ impl<const S: usize> Machine<S> {
     /// time (dense or run table), else read from the source file (archives
     /// before minor 30).
     fn pc_file_line_column(&self, pc: usize) -> Option<(u32, u32, u32)> {
-        if let Some((file, line)) = self.program_debug.file_line_at(pc) {
-            return Some((file, line.line, line.column));
-        }
-        let loc = self.program_debug.loc_at(pc)?;
-        let path = self.program_debug.source_files.get(loc.file as usize)?;
-        let text = std::fs::read_to_string(self.resolve_source_path(path)).ok()?;
-        let pos = byte_to_position(&text, loc.start_byte as usize);
-        Some((loc.file, pos.line, pos.column))
+        self.locator().pc_file_line_column(pc)
     }
 
     /// Resolve PC → `(path, line, column)` when debug locs are known.
@@ -3145,25 +3138,16 @@ impl<const S: usize> Machine<S> {
     }
 
     fn resolve_source_path(&self, path: &str) -> PathBuf {
-        let p = PathBuf::from(path);
-        if p.is_absolute() {
-            return p;
+        self.locator().resolve_source_path(path)
+    }
+
+    /// The program's debug tables, as panic reports read them.
+    fn locator(&self) -> crate::locate::Locator<'_> {
+        crate::locate::Locator {
+            debug: &self.program_debug,
+            code_len: self.program_code.len(),
+            base_dir: self.rt.ffi.base_dir.as_deref(),
         }
-        if std::fs::metadata(&p).is_ok() {
-            return p;
-        }
-        if let Some(base) = &self.rt.ffi.base_dir {
-            let root = base.parent().unwrap_or(base.as_path());
-            let from_root = root.join(path);
-            if std::fs::metadata(&from_root).is_ok() {
-                return from_root;
-            }
-            let from_base = base.join(path);
-            if std::fs::metadata(&from_base).is_ok() {
-                return from_base;
-            }
-        }
-        p
     }
 
     /// `COIL_COW_REPORT`: the copies copy-on-write made, by source line,
@@ -3200,29 +3184,13 @@ impl<const S: usize> Machine<S> {
         if self.in_host_stub(panic_insn_ip) {
             return self.native_caller_location();
         }
-        let (file, line, column) = self.pc_file_line_column(panic_insn_ip)?;
-        let path = self.program_debug.source_files.get(file as usize)?;
-        Some(format!("{}:{}:{}", path, line, column))
+        self.locator().location(panic_insn_ip)
     }
 
     fn fn_symbol_at_ip(&self, ip: usize) -> Option<&str> {
         let syms = &self.program_debug.fn_symbols;
-        if syms.is_empty() {
-            return None;
-        }
-        let mut lo = 0usize;
-        let mut hi = syms.len();
-        let mut best = None;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if syms[mid].entry_pc as usize <= ip {
-                best = Some(mid);
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        best.map(|i| syms[i].name.as_str())
+        let i = syms.partition_point(|s| s.entry_pc as usize <= ip);
+        (i > 0).then(|| syms[i - 1].name.as_str())
     }
 
     /// `COIL_BACKTRACE=1`: explicit `panic` also prints the call stack
@@ -3356,12 +3324,7 @@ impl<const S: usize> Machine<S> {
 
     /// The backtrace line of native site `s`: `  in name at loc`.
     fn native_site_line(&self, code: &crate::native::NativeCode, s: u32) -> Option<String> {
-        let site = code.site(s)?;
-        let name = self.fn_symbol_at_ip(site.entry_pc as usize).unwrap_or("<unknown>");
-        Some(match self.native_site_location(site) {
-            Some(loc) => format!("  in {name} at {loc}"),
-            None => format!("  in {name}"),
-        })
+        self.locator().native_site_line(code, s)
     }
 
     /// When native code made the VM call the running frame belongs to:
@@ -3394,29 +3357,7 @@ impl<const S: usize> Machine<S> {
     /// `path:line:col` of a native panic site: the location the VM records
     /// for the same op, found among the PCs of the site's function.
     fn native_site_location(&self, site: crate::native::NativeSite) -> Option<String> {
-        let start = site.entry_pc as usize;
-        let syms = &self.program_debug.fn_symbols;
-        let end = syms
-            .iter()
-            .map(|s| s.entry_pc as usize)
-            .filter(|&pc| pc > start)
-            .min()
-            .unwrap_or(self.program_code.len());
-        let want = site.loc;
-        if !want.is_known() {
-            return None;
-        }
-        let mut near = None;
-        for pc in start..end {
-            let Some(l) = self.program_debug.loc_at(pc) else { continue };
-            if l.file == want.file && l.start_byte == want.start_byte {
-                if l.end_byte == want.end_byte {
-                    return self.format_panic_location(pc);
-                }
-                near.get_or_insert(pc);
-            }
-        }
-        near.and_then(|pc| self.format_panic_location(pc))
+        self.locator().native_site_location(site)
     }
 
     /// An explicit `panic(msg)` at `panic_ip` (`Instruction::Panic`, or

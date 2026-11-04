@@ -2,6 +2,7 @@
 
 mod arith;
 mod collect;
+mod locate;
 pub mod char_ord;
 pub mod clock;
 pub mod entropy;
