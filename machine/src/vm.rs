@@ -2337,14 +2337,24 @@ impl<const S: usize> Machine<S> {
     /// Run the cleanup pads of the native frames a panic unwound (the
     /// panic already reported), as the VM runs a frame's pad on its way
     /// out.
-    fn run_native_pads(&mut self, pads: Vec<crate::native::NativePad>) {
+    /// A panic in a pad is reported as the VM reports a panic in a `defer`
+    /// while unwinding: it becomes the panic the unwind carries on with,
+    /// and the pads of the frames it left still run.
+    fn run_native_pads(&mut self, pads: Vec<crate::native::NativePad>, call_ip: usize) {
         if pads.is_empty() {
             return;
         }
         let was_panicked = self.panicked;
         self.panicked = false;
         let env = self.native_env();
-        crate::native::run_pads(pads, &env, &mut |_| {});
+        let mut raised = Vec::new();
+        crate::native::run_pads(pads, &env, &mut |p| raised.push(p));
+        for p in raised {
+            if p.code != crate::native::TRAP_VM_PANIC {
+                self.native_panic(&p, call_ip);
+            }
+            self.run_native_pads(p.pads, call_ip);
+        }
         self.panicked |= was_panicked;
     }
 
@@ -2961,7 +2971,7 @@ impl<const S: usize> Machine<S> {
                     } else {
                         self.native_panic(&p, call_ip.saturating_sub(1));
                     }
-                    self.run_native_pads(p.pads);
+                    self.run_native_pads(p.pads, call_ip.saturating_sub(1));
                     return Value::default();
                 }
                 None => {}
@@ -7048,7 +7058,7 @@ impl<const S: usize> Machine<S> {
                 } else {
                     self.native_panic(&p, call_ip.saturating_sub(1));
                 }
-                self.run_native_pads(p.pads);
+                self.run_native_pads(p.pads, call_ip.saturating_sub(1));
                 return Some(Value::default());
             }
         };
@@ -7391,12 +7401,12 @@ impl<const S: usize> Machine<S> {
                             // reported it: go on unwinding from this call.
                             Err(p) if p.code == crate::native::TRAP_VM_PANIC => {
                                 self.rearm_unwind_after_early_drop(ip.saturating_sub(1));
-                                self.run_native_pads(p.pads);
+                                self.run_native_pads(p.pads, ip.saturating_sub(1));
                                 return false;
                             }
                             Err(p) => {
                                 let out = self.native_panic(&p, ip.saturating_sub(1));
-                                self.run_native_pads(p.pads);
+                                self.run_native_pads(p.pads, ip.saturating_sub(1));
                                 return out;
                             }
                         };

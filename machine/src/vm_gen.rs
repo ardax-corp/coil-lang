@@ -281,11 +281,11 @@ impl<const S: usize> Machine<S> {
     fn native_gen_panic(&mut self, p: crate::native::NativePanic, ip: usize) -> bool {
         if p.code == crate::native::TRAP_VM_PANIC {
             self.rearm_unwind_after_early_drop(ip.saturating_sub(1));
-            self.run_native_pads(p.pads);
+            self.run_native_pads(p.pads, ip.saturating_sub(1));
             return false;
         }
         let out = self.native_panic(&p, ip.saturating_sub(1));
-        self.run_native_pads(p.pads);
+        self.run_native_pads(p.pads, ip.saturating_sub(1));
         out
     }
 }
