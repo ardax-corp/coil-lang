@@ -8,7 +8,7 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 - Type aliases: `type Name = T;` — lexically scoped; inner may shadow outer.
 - `never` from `return`/`raise`/`panic` and proven-infinite loops absorbs in joins.
 - Path completeness: concrete non-unit returns need all paths to exit (`E0111`).
-- Casts: `expr as T` — see [casts](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/casts.md) (`/docs/references/casts`).
+- Casts: `expr as T` — see [casts](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/casts.md) (`/docs/language/casts`).
 - Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status::Ok`, `Status::Ok + 1`). Show of a scalar case is the backing (`Status::Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
 - Payload enums are not heap-only: heap `Option<T>` / heap-heap `Result<T,E>` are pointer niches; `Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums use two-slot `[payload, tag]` on a *direct* `CALL`/`RETURN`. Arity-2 immediate products use `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)). Nested, `CallIndirect`, and unsure consumers stay boxed `ObjEnum`.
 
@@ -61,7 +61,7 @@ close(s)?;
 
 Buffers are `Vec<byte>`, not `string`. Convert via `string::to_bytes` / `from_bytes`.
 
-Sync adapters exist for blocking-style loops on non-blocking streams — see [io](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/io.md) (`/docs/references/io`).
+Sync adapters exist for blocking-style loops on non-blocking streams — see [io](https://github.com/ardax-corp/coil-website/blob/main/src/content/reference/io/index.md) (`/docs/reference/io`).
 
 ## Error handling patterns
 
@@ -135,4 +135,4 @@ let f = declare(lib, "strlen", (String,), Int)?;
 
 ## What does NOT exist
 
-See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/not-builtins.md) (`/docs/references/not-builtins`): no general `sort`, string slice/trim builtins, HTTP in VM, manual alloc/free.
+See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/not-builtins.md) (`/docs/language/not-builtins`): no general `sort`, string slice/trim builtins, HTTP in VM, manual alloc/free.

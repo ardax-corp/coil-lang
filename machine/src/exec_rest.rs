@@ -265,8 +265,7 @@ impl<const S: usize> Machine<S> {
                     let (_, mut r) = self.heap.alloc(ObjInstance::default(), Object::Instance);
                     let _ = r.as_mut();
                     // Root before GC, same rule as `push_new_string`.
-                    self.stack.push(Value::from(r.as_ptr().addr() as u64));
-                    self.maybe_gc_after_alloc(ip);
+                    self.push_fresh(r.as_ptr().addr() as u64, ip);
                 }
                 Instruction::InitTyped => {
                     let (type_id, nfields) = unpack_init_typed(opcode.operand_u32());
@@ -275,8 +274,7 @@ impl<const S: usize> Machine<S> {
                         Object::Instance,
                     );
                     let _ = r.as_mut();
-                    self.stack.push(Value::from(r.as_ptr().addr() as u64));
-                    self.maybe_gc_after_alloc(ip);
+                    self.push_fresh(r.as_ptr().addr() as u64, ip);
                 }
                 Instruction::BinSlotSlot => {
                     let (op, a, b) = opcode.bin_slot_slot_parts();
@@ -590,8 +588,7 @@ impl<const S: usize> Machine<S> {
                         object.addr()
                     };
                     self.stack.seek(base);
-                    self.stack.push(Value::from(addr));
-                    self.maybe_gc_after_alloc(ip);
+                    self.push_fresh(addr, ip);
                 }
                 Instruction::ArrayPin => {
                     let slot = opcode.operand_u32();
@@ -664,8 +661,7 @@ impl<const S: usize> Machine<S> {
                             instance.set(key, member);
                         }
                     }
-                    self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc(ip);
+                    self.push_fresh(object.addr(), ip);
                 }
                 Instruction::GetField => {
                     let name_val = self.stack.pop();
@@ -918,7 +914,7 @@ impl<const S: usize> Machine<S> {
                     );
                     let _ = r.as_mut();
                     self.stack[sp + dest] = Value::from(r.as_ptr().addr() as u64);
-                    self.maybe_gc_after_alloc(ip);
+                    self.maybe_gc_after_fresh(ip, sp + dest);
                 }
                 Instruction::ArrayPush => {
                     // Stack discipline matches `StoreIndex`: codegen emits
@@ -975,8 +971,7 @@ impl<const S: usize> Machine<S> {
                         ObjArray::new(pair_addrs),
                         Object::Array,
                     );
-                    self.stack.push(Value::from(array_obj.addr()));
-                    self.maybe_gc_after_alloc(ip);
+                    self.push_fresh(array_obj.addr(), ip);
                 }
                 Instruction::JumpIfMatch => {
                     // Tag in operands[31:16]; pool index in operands[15:0]
@@ -1125,8 +1120,7 @@ impl<const S: usize> Machine<S> {
                     };
                     let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
 
-                    self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc(ip);
+                    self.push_fresh(object.addr(), ip);
                 }
                 Instruction::ResumeCoro => {
                     promise!(self.stack.tell() > 0);
@@ -1273,31 +1267,35 @@ impl<const S: usize> Machine<S> {
 
                     let entry = self.stack.pop().as_int() as u32;
                     let filled_mask = self.stack.pop().as_int() as u64;
+                    if n_captures == 0 && n_filled == 0 && filled_mask == 0 {
+                        // Nothing captured or filled: one shared value per entry.
+                        let object = self.heap.immortal_plain_fn(entry, arity, is_rest);
+                        self.stack.push(Value::from(object.addr()));
+                    } else {
+                        let mut filled_vals = Vec::with_capacity(n_filled);
+                        for _ in 0..n_filled {
+                            filled_vals.push(self.stack.pop());
+                        }
+                        filled_vals.reverse();
 
-                    let mut filled_vals = Vec::with_capacity(n_filled);
-                    for _ in 0..n_filled {
-                        filled_vals.push(self.stack.pop());
+                        let mut captures = Vec::with_capacity(n_captures);
+                        for _ in 0..n_captures {
+                            captures.push(self.stack.pop());
+                        }
+                        captures.reverse();
+
+                        let pfn = ObjFn {
+                            entry,
+                            arity,
+                            is_rest,
+                            filled_mask,
+                            captured_args: filled_vals,
+                            captures,
+                            dicts: None,
+                        };
+                        let (object, _) = self.heap.alloc(pfn, Object::Fn);
+                        self.push_fresh(object.addr(), ip);
                     }
-                    filled_vals.reverse();
-
-                    let mut captures = Vec::with_capacity(n_captures);
-                    for _ in 0..n_captures {
-                        captures.push(self.stack.pop());
-                    }
-                    captures.reverse();
-
-                    let pfn = ObjFn {
-                        entry,
-                        arity,
-                        is_rest,
-                        filled_mask,
-                        captured_args: filled_vals,
-                        captures,
-                        dicts: None,
-                    };
-                    let (object, _) = self.heap.alloc(pfn, Object::Fn);
-                    self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::LoadStatic => {
                     let slot = opcode.operand_u32() as usize;
@@ -1338,8 +1336,7 @@ impl<const S: usize> Machine<S> {
                         let boxed = ObjBoxed { tag, payload };
                         let (object, _) = self.heap.alloc(boxed, Object::Boxed);
                         // Root before GC: an unpushed fresh box would be swept.
-                        self.stack.push(Value::from(object.addr()));
-                        self.maybe_gc_after_alloc(ip);
+                        self.push_fresh(object.addr(), ip);
                     }
                 }
                 Instruction::RestoreSnapshot => {
@@ -1417,8 +1414,7 @@ impl<const S: usize> Machine<S> {
                 Instruction::MakePolyFn => {
                     let entry = opcode.operand_u32();
                     let (object, _) = self.heap.alloc(ObjFn::poly(entry, 0, Vec::new()), Object::Fn);
-                    self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc(ip);
+                    self.push_fresh(object.addr(), ip);
                 }
                 Instruction::MakePolyFnCapture => {
                     let count = (opcode.operand_u32() & 0xFF) as usize;
@@ -1438,8 +1434,7 @@ impl<const S: usize> Machine<S> {
                         };
                     }
                     let (object, _) = self.heap.alloc(ObjFn::poly(entry, arity, captured_dicts), Object::Fn);
-                    self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc(ip);
+                    self.push_fresh(object.addr(), ip);
                 }
                 Instruction::DynAdd
                 | Instruction::DynSub

@@ -1,20 +1,23 @@
 //! Nursery minor collection (`feature/escape-memory` step 4).
 //!
-//! Instances, payload enums, boxes, tuples and arrays are bump-allocated
-//! into young slab chunks ([`super::Slab::alloc_young`]). A minor collection
+//! Instances, payload enums, boxes, tuples, arrays and closures are
+//! bump-allocated into young slab chunks ([`super::Slab::alloc_young`]). A minor collection
 //! traces young objects from the VM roots and the remembered set (old
 //! objects written since the last one, see the barrier in
 //! [`super::GcData`]'s `as_mut`), copies every survivor only precise words
 //! name into an old slot, rewrites those words, and resets the young chunks.
-//! A survivor an ambiguous word names is pinned: its chunk is promoted in
-//! place. See `docs/internals/escape-memory.md`.
+//! A survivor an ambiguous word names is pinned: it stays where it is and
+//! its chunk is held until a major frees it. See `docs/internals/escape-memory.md`.
 
 use std::ptr::NonNull;
 
 use common::Value;
 
 use super::compact::{forward, AddrMap};
-use super::{GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, QUIET, REMEMBERED};
+use super::{
+    barriered, GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_HELD, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, QUIET,
+    REMEMBERED,
+};
 
 /// A minor collection between its copy and its reset step.
 pub struct MinorPlan {
@@ -44,11 +47,12 @@ fn slots(first: u64, end: u64, size: u64) -> impl Iterator<Item = u64> {
 }
 
 impl Heap {
-    /// The young object at `addr` (a `Result` `Err` tag bit is ignored).
+    /// The young object at `addr` (a `Result` `Err` tag bit is ignored),
+    /// not counting a held one, which minors treat as old.
     #[inline]
     fn young_object(&self, addr: u64) -> Option<Object> {
         let obj = self.find_object_by_addr(addr & !1)?;
-        (obj.generation() & GEN_YOUNG != 0).then_some(obj)
+        (obj.generation() & (GEN_YOUNG | GEN_HELD) == GEN_YOUNG).then_some(obj)
     }
 
     /// Every live object: the old chunks' slots, then the written slots of
@@ -66,13 +70,20 @@ impl Heap {
         out
     }
 
-    /// Whether any young chunk is in use.
+    /// Whether any nursery chunk holds young objects (in use or held).
     pub fn has_young(&self) -> bool {
         self.slab.has_young_chunks()
     }
 
+    /// Whether a minor collection has work: a nursery chunk allocated into
+    /// since the last one. Held chunks alone need none, since minors do not
+    /// trace held objects and only a major frees them.
+    pub fn has_young_in_use(&self) -> bool {
+        self.slab.young_chunks_in_use() != 0
+    }
+
     /// Take this heap's entries off the thread's remembered set: the live
-    /// old objects among them. Entries of other heaps stay.
+    /// old and held objects among them. Entries of other heaps stay.
     fn take_remembered(&self) -> Vec<u64> {
         let mut mine = REMEMBERED.with_borrow_mut(|r| {
             let mut mine = Vec::new();
@@ -80,7 +91,7 @@ impl Heap {
                 if !self.slab.contains_slot(addr) {
                     return true;
                 }
-                if self.find_object_by_addr(addr).is_some_and(|o| o.generation() & GEN_YOUNG == 0) {
+                if self.find_object_by_addr(addr).is_some_and(|o| barriered(o.generation())) {
                     mine.push(addr);
                 }
                 false
@@ -141,7 +152,6 @@ impl Heap {
                     let obj = unsafe { Object::from_header(addr) }.expect("live held slot");
                     let bytes = obj.size();
                     self.alloc_bytes -= bytes;
-                    self.young_bytes = self.young_bytes.saturating_sub(bytes);
                     debug_assert!(self.live_count > 0);
                     self.live_count -= 1;
                     unsafe { obj.recycle_payload() };
@@ -218,15 +228,6 @@ impl Heap {
         for &addr in pins {
             reach(self, &mut gray, addr, false);
         }
-        // Held objects stay put and live until a major cycle says otherwise;
-        // they may name young objects (nothing logs a write to one).
-        for (_, first, end, size) in self.slab.held_spans() {
-            for addr in slots(first, end, size) {
-                if unsafe { &*(addr as *const GcHeader) }.kind.get() != 0 {
-                    reach(self, &mut gray, addr, false);
-                }
-            }
-        }
         for &addr in precise {
             reach(self, &mut gray, addr, true);
         }
@@ -300,8 +301,8 @@ impl Heap {
             i > 0 && addr < ranges[i - 1].1
         };
         for obj in by_index {
-            // A held survivor (pinned by an earlier minor) is young too but
-            // stays where it is.
+            // A held object (pinned by an earlier minor) is never marked by
+            // a minor, so it stays where it is.
             if in_use(obj.addr()) {
                 self.copy_survivor(obj, &mut fwd, true);
             }
@@ -376,7 +377,7 @@ impl Heap {
     pub fn minor_finish(&mut self, plan: MinorPlan) -> usize {
         let MinorPlan { fwd, remembered, spans } = plan;
         let mut held = Vec::new();
-        let (mut kept, mut kept_bytes, mut dead) = (0, 0, 0);
+        let (mut kept, mut dead) = (0, 0);
         for (chunk, first, end, size) in spans {
             let mut keep = false;
             for addr in slots(first, end, size) {
@@ -392,13 +393,16 @@ impl Heap {
                     continue;
                 }
                 let obj = unsafe { Object::from_header(addr) }.expect("live young slot");
-                if header.marked.get() {
-                    // Pinned: held where it is, young, until a major cycle
-                    // finds it dead ([`Self::unmark_young`]); its chunk
-                    // stays out of reuse until then.
+                if header.generation.get() & GEN_HELD != 0 {
+                    // Held by an earlier minor: not traced, kept as it is.
+                    keep = true;
+                } else if header.marked.get() {
+                    // Pinned: held where it is until a major cycle finds it
+                    // dead ([`Self::unmark_young`]); its chunk stays out of
+                    // reuse until then. Later minors treat it as old, so
+                    // the barrier records writes to it.
                     header.marked.set(false);
-                    header.generation.set(GEN_YOUNG);
-                    kept_bytes += obj.size();
+                    header.generation.set(GEN_YOUNG | GEN_HELD | GEN_UNLOGGED);
                     kept += 1;
                     keep = true;
                 } else {
@@ -419,12 +423,13 @@ impl Heap {
         }
         for addr in remembered {
             if let Some(obj) = self.find_object_by_addr(addr)
-                && obj.generation() & GEN_YOUNG == 0
+                && barriered(obj.generation())
             {
-                obj.set_generation(GEN_UNLOGGED);
+                obj.set_generation(obj.generation() & (GEN_YOUNG | GEN_HELD) | GEN_UNLOGGED);
             }
         }
-        self.young_bytes = kept_bytes;
+        // Held objects count as old: only a major frees them.
+        self.young_bytes = 0;
         self.note_survival(fwd.len() + kept, fwd.len() + kept + dead);
         self.slab.finish_young(&[], &held, Vec::new());
         fwd.len()
@@ -524,6 +529,27 @@ mod tests {
         assert!(heap.find_object_by_addr(head).is_none(), "the young slot is poisoned");
     }
 
+    /// A pinned object that dies gives its chunk back to the nursery once a
+    /// major frees it. A stale stack word pins one object per minor: if
+    /// each such chunk stayed in the old space, a churn loop's footprint
+    /// would grow with its run time (`result_heap_churn`, #2255).
+    #[test]
+    fn a_dead_pinned_objects_chunk_returns_to_the_nursery() {
+        let mut heap = nursery_heap();
+        let mut most = 0;
+        for _ in 0..200 {
+            let head = cons_list(&mut heap, 100);
+            minor(&mut heap, &[head], &mut []);
+            heap.begin_mark(&[]);
+            while !heap.mark_quantum(usize::MAX) {}
+            unsafe { heap.sweep() };
+            let _ = cons_list(&mut heap, 1);
+            minor(&mut heap, &[], &mut []);
+            most = most.max(heap.slab.chunk_count());
+        }
+        assert!(most <= 8, "chunks stay bounded: {most}");
+    }
+
     #[test]
     fn an_ambiguous_root_pins_its_target_and_holds_its_chunk() {
         let mut heap = nursery_heap();
@@ -533,7 +559,7 @@ mod tests {
         assert_eq!(moved, 99, "everything but the pinned head moves");
         assert_eq!(walk(&heap, head), before, "the pinned head's link is rewritten");
         let obj = heap.find_object_by_addr(head).expect("pinned head stays");
-        assert_eq!(obj.generation(), GEN_YOUNG, "it stays young in a held chunk");
+        assert_eq!(obj.generation(), GEN_YOUNG | GEN_HELD | GEN_UNLOGGED, "it is held, behind the barrier");
         assert!(heap.has_young());
         // New young objects go to other chunks; the held one stays intact,
         // and later minors keep it where it is even unpinned.
@@ -640,6 +666,30 @@ mod tests {
         let new_head = a.as_ref().iter().next().expect("element").bits();
         assert_ne!(new_head, head, "the precise element was rewritten");
         assert_eq!(walk(&heap, new_head), before);
+    }
+
+    /// Minors do not trace a held object (#2255: a held 1M-element array cost
+    /// a full scan per minor), so a young object stored into one later is
+    /// found through the barrier, as for an old object.
+    #[test]
+    fn a_young_object_stored_into_a_held_one_survives_through_the_barrier() {
+        let mut heap = nursery_heap();
+        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64)]), Object::Array);
+        let Object::Array(mut gc) = arr else { unreachable!() };
+        gc.as_mut().set_elem_kind(common::WORD_POINTER);
+        // An ambiguous root pins the array: it is held where it is.
+        minor(&mut heap, &[arr.addr()], &mut []);
+        assert_eq!(arr.generation(), GEN_YOUNG | GEN_HELD | GEN_UNLOGGED);
+        let head = cons_list(&mut heap, 20);
+        let before = walk(&heap, head);
+        unsafe { gc.as_mut().set_unchecked(0, Value::from(head)) };
+        // No root names the array or the list: the held array stays until a
+        // major, and the barrier's record keeps the list.
+        minor(&mut heap, &[], &mut []);
+        let new_head = gc.as_ref().iter().next().expect("element").bits();
+        assert_ne!(new_head, head, "the precise element was rewritten");
+        assert_eq!(walk(&heap, new_head), before);
+        assert_eq!(arr.generation(), GEN_YOUNG | GEN_HELD | GEN_UNLOGGED, "logged again after the minor");
     }
 
     #[test]

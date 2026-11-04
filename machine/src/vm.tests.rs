@@ -4,8 +4,8 @@
     };
 
     use super::{
-        alloc_count, dispatch_count, intern_str_count, make_fast_count, reset_alloc_profile,
-        reset_dispatch_count,
+        alloc_count, dispatch_count, gc_count, intern_str_count, make_fast_count, minor_gc_count,
+        reset_alloc_profile, reset_dispatch_count,
     };
     use crate::{Heap, Machine, ObjArray, ObjEnum, Object};
     use std::sync::{Arc, Mutex};
@@ -4519,6 +4519,107 @@
         let mut vm = Machine::<16>::default();
         vm.run(&code);
         assert_eq!(vm.pop().as_int(), 30);
+    }
+
+    /// The object an allocation just pushed is the VM's own word, not a
+    /// guess: the minor collection that allocation triggers moves it like
+    /// any precise root. Pinned instead, every minor would hold a nursery
+    /// chunk until a major cycle, and a loop of short-lived objects would
+    /// run major cycles it never needs.
+    #[test]
+    fn a_minor_at_an_allocation_moves_the_fresh_object() {
+        let code = vec![
+            const_int(3_000_000),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            // 2: loop head
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(0),
+            Byte::new(Instruction::LEQ),
+            Byte::new(Instruction::JMPF).with_operand_u32(7),
+            Byte::new(Instruction::HALT),
+            // 7: body, one short-lived enum per pass
+            const_int(1),
+            make_enum(0, 1),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(1),
+            Byte::new(Instruction::SUB),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            Byte::new(Instruction::JMP).with_operand_u32(2),
+        ];
+        let mut vm = Machine::<16>::default();
+        vm.heap.set_nursery(true);
+        reset_alloc_profile();
+        vm.run(&code);
+        assert!(minor_gc_count() >= 40, "the loop fills the nursery many times: {}", minor_gc_count());
+        assert_eq!(gc_count(), 0, "nothing survives a minor, so no major cycle runs");
+    }
+
+    /// A function value that captures nothing and fills nothing is the same
+    /// value every time it is built: a lambda in a loop (`and_modify(fn (int
+    /// c) => c + 1)` once per word) must not allocate a closure per pass,
+    /// which no minor collection reclaims.
+    #[test]
+    fn make_fn_without_captures_allocates_once() {
+        let body_entry = 13u32;
+        let code = vec![
+            const_int(0),
+            const_int(body_entry as i64),
+            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_op(0, 0, 2, false)),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            const_int(0),
+            const_int(body_entry as i64),
+            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_op(0, 0, 2, false)),
+            Byte::new(Instruction::StorePop).with_operand_u32(1),
+            const_int(10),
+            const_int(20),
+            Byte::new(Instruction::LOAD).with_operand_u32(1),
+            Byte::new(Instruction::CallIndirect).with_operand_u32(2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            Byte::new(Instruction::LOAD).with_operand_u32(1),
+            Byte::new(Instruction::ADD),
+            Byte::new(Instruction::RETURN),
+        ];
+        assert!(matches!(code[body_entry as usize].bytecode(), Instruction::LOAD));
+        let mut vm = Machine::<16>::default();
+        let before = vm.heap.live_object_count();
+        vm.run(&code);
+        assert_eq!(vm.pop().as_int(), 30);
+        assert_eq!(vm.heap.live_object_count(), before + 1, "both builds share one function object");
+    }
+
+    /// A closure built and dropped once per loop pass dies young (#2252):
+    /// minor collections reclaim it, so the loop runs no major cycle.
+    #[test]
+    fn a_short_lived_closure_dies_in_the_nursery() {
+        let code = vec![
+            const_int(3_000_000),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            // 2: loop head
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(0),
+            Byte::new(Instruction::LEQ),
+            Byte::new(Instruction::JMPF).with_operand_u32(7),
+            Byte::new(Instruction::HALT),
+            // 7: body, one closure capturing the counter per pass
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(0),
+            const_int(0),
+            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_op(1, 0, 1, false)),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            const_int(1),
+            Byte::new(Instruction::SUB),
+            Byte::new(Instruction::StorePop).with_operand_u32(0),
+            Byte::new(Instruction::JMP).with_operand_u32(2),
+        ];
+        let mut vm = Machine::<16>::default();
+        vm.heap.set_nursery(true);
+        reset_alloc_profile();
+        vm.run(&code);
+        assert!(minor_gc_count() >= 40, "the closures fill the nursery many times: {}", minor_gc_count());
+        assert_eq!(gc_count(), 0, "no closure survives a minor, so no major cycle runs");
     }
 
     #[test]

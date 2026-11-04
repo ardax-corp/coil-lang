@@ -26,6 +26,10 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use std::{fmt, mem, ptr, slice, str};
 
+/// Longest string stored in the object itself ([`StrData::Inline`]): the
+/// rest of the 32 bytes after the tag and the length.
+pub const INLINE_MAX: usize = 30;
+
 /// Smallest capacity of a buffer created by concat.
 const MIN_SHARED_CAP: usize = 32;
 
@@ -137,25 +141,67 @@ impl Drop for SharedBuf {
     }
 }
 
-/// UTF-8 content of an `ObjString`.
+/// UTF-8 content of an `ObjString`. 32 bytes: a string of up to
+/// [`INLINE_MAX`] bytes lives inline, without an allocation of its own.
+#[repr(u8)]
 pub enum StrData {
-    /// Exact-size string (literals, `format`, decoded bytes).
+    /// Up to [`INLINE_MAX`] bytes, `bytes[..len]`.
+    Inline { len: u8, bytes: [u8; INLINE_MAX] },
+    /// Exact-size string longer than [`INLINE_MAX`] (literals, `format`,
+    /// decoded bytes).
     Owned(String),
     /// `[start, start + len)` of a growable buffer (concat results and
     /// slices of them). `accounted` is the part of the buffer this string is
     /// charged for in heap accounting.
+    ///
+    /// `len` and `accounted` are 32-bit so the variant fits beside the tag;
+    /// a longer result is [`Self::Owned`] instead.
     Shared {
         buf: SharedBuf,
         start: usize,
-        len: usize,
-        accounted: usize,
+        len: u32,
+        accounted: u32,
     },
 }
 
+const _: () = assert!(mem::size_of::<StrData>() == 32);
+
 impl StrData {
+    /// A copy of `s`: inline when it fits, else an exact-size `String`.
+    #[inline]
+    pub fn copy_of(s: &str) -> Self {
+        Self::inline(s).unwrap_or_else(|| Self::Owned(s.to_owned()))
+    }
+
+    /// `s` inline, or `None` when it is longer than [`INLINE_MAX`].
+    #[inline]
+    fn inline(s: &str) -> Option<Self> {
+        if s.len() > INLINE_MAX {
+            return None;
+        }
+        let mut bytes = [0u8; INLINE_MAX];
+        bytes[..s.len()].copy_from_slice(s.as_bytes());
+        Some(Self::Inline { len: s.len() as u8, bytes })
+    }
+
+    /// A shared view, or `None` when `len` or `accounted` needs more than
+    /// 32 bits.
+    fn shared(buf: SharedBuf, start: usize, len: usize, accounted: usize) -> Option<Self> {
+        Some(Self::Shared {
+            buf,
+            start,
+            len: u32::try_from(len).ok()?,
+            accounted: u32::try_from(accounted).ok()?,
+        })
+    }
+
     #[inline]
     pub fn as_str(&self) -> &str {
         match self {
+            Self::Inline { len, bytes } => {
+                // SAFETY: built from a `&str` of exactly `len` bytes.
+                unsafe { str::from_utf8_unchecked(bytes.get_unchecked(..usize::from(*len))) }
+            }
             Self::Owned(s) => s,
             Self::Shared { buf, start, len, .. } => {
                 // SAFETY: `[start, start + len)` was written before this
@@ -164,7 +210,7 @@ impl StrData {
                 unsafe {
                     str::from_utf8_unchecked(slice::from_raw_parts(
                         buf.bytes_ptr().add(*start),
-                        *len,
+                        *len as usize,
                     ))
                 }
             }
@@ -175,34 +221,39 @@ impl StrData {
     #[inline]
     pub fn accounted_bytes(&self) -> usize {
         match self {
+            Self::Inline { .. } => 0,
             Self::Owned(s) => s.len(),
-            Self::Shared { accounted, .. } => *accounted,
+            Self::Shared { accounted, .. } => *accounted as usize,
         }
     }
 
     /// `self + tail`, appending in place when `self` ends at its buffer's
     /// tail, otherwise copying both into a new buffer with spare capacity.
+    /// A result of up to [`INLINE_MAX`] bytes is inline.
     pub fn concat(&self, tail: &str) -> Self {
-        let head_len = self.as_str().len();
+        let head = self.as_str();
+        let total = head.len() + tail.len();
+        if total <= INLINE_MAX {
+            let mut bytes = [0u8; INLINE_MAX];
+            bytes[..head.len()].copy_from_slice(head.as_bytes());
+            bytes[head.len()..total].copy_from_slice(tail.as_bytes());
+            return Self::Inline { len: total as u8, bytes };
+        }
         if let Self::Shared { buf, start, len, .. } = self
-            && buf.try_append_at(start + len, tail.as_bytes())
+            && u32::try_from(total).is_ok()
+            && buf.try_append_at(start + *len as usize, tail.as_bytes())
         {
             return Self::Shared {
                 buf: buf.clone(),
                 start: *start,
-                len: head_len + tail.len(),
-                accounted: tail.len(),
+                len: total as u32,
+                // `tail` fits in `total`, which fits in 32 bits.
+                accounted: tail.len() as u32,
             };
         }
-        let total = head_len + tail.len();
         let cap = total.saturating_mul(2).max(MIN_SHARED_CAP);
-        let buf = SharedBuf::with_parts(cap, &[self.as_str().as_bytes(), tail.as_bytes()]);
-        Self::Shared {
-            buf,
-            start: 0,
-            len: total,
-            accounted: cap,
-        }
+        let buf = SharedBuf::with_parts(cap, &[head.as_bytes(), tail.as_bytes()]);
+        Self::shared(buf, 0, total, cap).unwrap_or_else(|| Self::Owned([head, tail].concat()))
     }
 
     /// Bytes `[from, to)`, or `None` when an offset is out of range or not on
@@ -213,26 +264,17 @@ impl StrData {
     pub fn slice(&self, from: usize, to: usize) -> Option<Self> {
         let part = self.as_str().get(from..to)?;
         if part.len() < VIEW_MIN_LEN {
-            return Some(Self::Owned(part.to_owned()));
+            return Some(Self::copy_of(part));
         }
         if let Self::Shared { buf, start, .. } = self
             && part.len().saturating_mul(VIEW_RETAIN_MAX) >= buf.header().cap
+            // The buffer is charged to the strings that grew it.
+            && let Some(view) = Self::shared(buf.clone(), start + from, part.len(), 0)
         {
-            return Some(Self::Shared {
-                buf: buf.clone(),
-                start: start + from,
-                len: part.len(),
-                // The buffer is charged to the strings that grew it.
-                accounted: 0,
-            });
+            return Some(view);
         }
         let buf = SharedBuf::with_parts(part.len(), &[part.as_bytes()]);
-        Some(Self::Shared {
-            buf,
-            start: 0,
-            len: part.len(),
-            accounted: part.len(),
-        })
+        Some(Self::shared(buf, 0, part.len(), part.len()).unwrap_or_else(|| Self::Owned(part.to_owned())))
     }
 }
 
@@ -247,7 +289,16 @@ impl Deref for StrData {
 
 impl From<String> for StrData {
     fn from(s: String) -> Self {
-        Self::Owned(s)
+        match Self::inline(&s) {
+            Some(inline) => inline,
+            None => Self::Owned(s),
+        }
+    }
+}
+
+impl From<&str> for StrData {
+    fn from(s: &str) -> Self {
+        Self::copy_of(s)
     }
 }
 
@@ -285,30 +336,63 @@ impl fmt::Debug for StrData {
 mod tests {
     use super::*;
 
+    /// A shared string with spare room, as a long concat makes.
     fn shared(s: &str) -> StrData {
-        StrData::Owned(String::new()).concat(s)
+        let cap = (s.len() * 2).max(MIN_SHARED_CAP);
+        StrData::shared(SharedBuf::with_parts(cap, &[s.as_bytes()]), 0, s.len(), cap).unwrap()
+    }
+
+    /// 31 bytes: one past what fits inline.
+    const L: &str = "0123456789012345678901234567890";
+
+    /// Short strings need no allocation of their own (word_freq: 2M words
+    /// of a few bytes each).
+    #[test]
+    fn short_strings_are_inline() {
+        assert_eq!(mem::size_of::<StrData>(), 32);
+        for s in ["", "w4711", &L[..INLINE_MAX]] {
+            let d = StrData::from(s);
+            assert!(matches!(d, StrData::Inline { .. }), "{s:?} is inline");
+            assert_eq!(d.as_str(), s);
+            assert_eq!(d.accounted_bytes(), 0);
+            assert!(matches!(StrData::from(s.to_owned()), StrData::Inline { .. }));
+        }
+        assert!(matches!(StrData::from(L), StrData::Owned(_)), "31 bytes is not");
+        let ab = StrData::from("ab").concat("cd");
+        assert!(matches!(ab, StrData::Inline { .. }));
+        assert_eq!(ab.as_str(), "abcd");
+        let long = StrData::from("ab").concat(L);
+        assert!(matches!(long, StrData::Shared { .. }));
+        assert_eq!(long.as_str(), format!("ab{L}"));
+        // A short piece of a long string is an inline copy.
+        let piece = long.slice(2, 7).unwrap();
+        assert!(matches!(piece, StrData::Inline { .. }));
+        assert_eq!(piece.as_str(), "01234");
+        let wide = StrData::from("é".repeat(15));
+        assert!(matches!(wide, StrData::Inline { .. }));
+        assert_eq!(wide.slice(2, 6).unwrap().as_str(), "éé");
     }
 
     #[test]
     fn concat_appends_in_place_at_the_tail() {
-        let a = shared("ab");
+        let a = shared(L);
         let b = a.concat("cd");
         let (StrData::Shared { buf: ba, .. }, StrData::Shared { buf: bb, .. }) = (&a, &b) else {
             panic!("expected shared");
         };
         assert_eq!(ba.0, bb.0, "second concat reuses the buffer");
-        assert_eq!(a.as_str(), "ab");
-        assert_eq!(b.as_str(), "abcd");
+        assert_eq!(a.as_str(), L);
+        assert_eq!(b.as_str(), format!("{L}cd"));
     }
 
     #[test]
     fn concat_off_the_tail_copies() {
-        let a = shared("ab");
+        let a = shared(L);
         let b = a.concat("cd");
         // `a` no longer ends at the tail: appending to it must not clobber `b`.
         let c = a.concat("XY");
-        assert_eq!(b.as_str(), "abcd");
-        assert_eq!(c.as_str(), "abXY");
+        assert_eq!(b.as_str(), format!("{L}cd"));
+        assert_eq!(c.as_str(), format!("{L}XY"));
         let (StrData::Shared { buf: ba, .. }, StrData::Shared { buf: bc, .. }) = (&a, &c) else {
             panic!("expected shared");
         };
@@ -329,14 +413,14 @@ mod tests {
 
     #[test]
     fn self_concat_reads_before_it_writes() {
-        let a = shared("xyz");
+        let a = shared(L);
         let b = a.concat(a.as_str());
-        assert_eq!(b.as_str(), "xyzxyz");
+        assert_eq!(b.as_str(), format!("{L}{L}"));
     }
 
     #[test]
     fn concurrent_appends_to_one_tail_stay_disjoint() {
-        let base = shared("base:");
+        let base = shared(&format!("{L}:"));
         let results: Vec<String> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
                 .map(|t| {
@@ -347,15 +431,15 @@ mod tests {
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         for (t, r) in results.iter().enumerate() {
-            assert_eq!(r, &format!("base:{t}"));
+            assert_eq!(r, &format!("{L}:{t}"));
         }
-        assert_eq!(base.as_str(), "base:");
+        assert_eq!(base.as_str(), format!("{L}:"));
     }
 
     fn buf_of(s: &StrData) -> *mut Header {
         match s {
             StrData::Shared { buf, .. } => buf.0.as_ptr(),
-            StrData::Owned(_) => panic!("expected shared"),
+            _ => panic!("expected shared"),
         }
     }
 
@@ -376,7 +460,8 @@ mod tests {
     #[test]
     fn short_or_small_share_slices_copy() {
         let a = shared(&"z".repeat(1000));
-        assert!(matches!(a.slice(0, 10).unwrap(), StrData::Owned(_)));
+        assert!(matches!(a.slice(0, 10).unwrap(), StrData::Inline { .. }));
+        assert!(matches!(a.slice(0, 40).unwrap(), StrData::Owned(_)));
         // 100 bytes of a 2000-byte buffer would pin 20x its size: copy it.
         let b = a.slice(0, 100).unwrap();
         assert_ne!(buf_of(&a), buf_of(&b));

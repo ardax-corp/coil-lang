@@ -305,18 +305,19 @@ object at all.
 
 Design (copying nursery, decided 2026-10-27):
 
-- **Young chunks.** Instances, payload enums, boxes, tuples and arrays,
-  the kinds evacuation may move, are bump-allocated into *young* slab
-  chunks, one current chunk per size class. Every other kind (strings,
-  closures, coroutines, handles) and every allocation in a shared-heap
+- **Young chunks.** Instances, payload enums, boxes, tuples, arrays and
+  closures, the kinds evacuation may move, are bump-allocated into *young*
+  slab chunks, one current chunk per size class (closures since #2252: a
+  closure made per loop pass used to wait for a major). Every other kind
+  (strings, coroutines, handles) and every allocation in a shared-heap
   epoch goes to the old space as before. The nursery holds a fixed number
   of chunks; filling it asks for a minor collection at the next
   safepoint.
 - **Write barrier.** An old object is *remembered* when its payload is
   written: every payload write goes through `GcData::as_mut`, which tests
   one header bit and, the first time, records the object's address. An
-  old object allocated with references (a closure, a coroutine) is
-  remembered when it is born. A prototype of the barrier measured within
+  old object allocated with references (a coroutine, a pretenured
+  closure) is remembered when it is born. A prototype of the barrier measured within
   noise (0 to 3%).
 - **Minor collection.** Trace young objects from the VM roots and the
   remembered objects, never into old ones. A young object reached through
@@ -330,12 +331,15 @@ Design (copying nursery, decided 2026-10-27):
 - **Reset.** A young chunk without pinned objects is reused whole: each
   dead object only has its payload dropped (a no-op for inline payloads)
   and its header poisoned. A chunk with a pinned object is *held*: the
-  pinned objects stay young where they are, later minors treat them as
-  roots and never move them, and only a major cycle frees them (its mark
-  sees every young object). The chunk is reused once a major empties it;
-  enough held chunks ask for a major. (Promoting such a chunk instead
-  left a 64 KiB chunk per stale stack word: result_heap_churn grew from
-  12 to 31 MB.)
+  pinned objects stay where they are and are marked held, which puts them
+  behind the write barrier like old objects. Later minors neither trace
+  nor move them; a young object stored into one is found through the
+  remembered set, so a pinned 1M-element array costs nothing per minor
+  (#2255). Only a major cycle frees held objects (its mark sees every
+  young object). The chunk is reused once a major empties it; enough held
+  chunks ask for a major. (Promoting such a chunk to the old space
+  instead left a 64 KiB chunk per stale stack word: result_heap_churn
+  grew from 11 to 69 MB over 30M iterations.)
 - **Early frees** of young objects (step 2) put the slot on a per-class
   list that the bump allocator hands out first, so a nursery does not
   undo early freeing's reuse.

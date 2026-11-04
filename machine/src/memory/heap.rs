@@ -261,6 +261,9 @@ pub struct Heap {
     unit_enum: Option<(u32, Object)>,
     /// Shared `()` ([`Self::immortal_empty_tuple`]), never swept or moved.
     empty_tuple: Option<Object>,
+    /// Shared function values that capture and fill nothing, by entry,
+    /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
+    immortal_fns: HashMap<(u32, u32, bool), Object>,
     /// Reused gray worklist / root buffers across collections.
     gc_gray: Vec<Object>,
     gc_root_objects: Vec<Object>,
@@ -347,6 +350,7 @@ impl Default for Heap {
             immortal_enums: HashMap::default(),
             unit_enum: None,
             empty_tuple: None,
+            immortal_fns: HashMap::new(),
             gc_gray: Vec::new(),
             gc_root_objects: Vec::new(),
             gc_roots: Vec::new(),
@@ -1541,7 +1545,9 @@ impl Heap {
     /// them buys nothing: allocate old for a while, longer each time in a
     /// row, and try the nursery again after.
     pub(super) fn note_survival(&mut self, survivors: usize, objects: usize) {
-        if self.region_depth != 0 {
+        // A minor that found nothing young (only held chunks) says nothing
+        // about survival.
+        if self.region_depth != 0 || objects == 0 {
             return;
         }
         if survivors * 2 > objects {
@@ -1593,8 +1599,8 @@ impl Heap {
             || self.slab.held_chunks() >= self.nursery_chunks
     }
 
-    /// Allocate instances, enums, boxes, tuples and arrays in the nursery
-    /// (the VM turns it on; `--nursery off` keeps it off).
+    /// Allocate instances, enums, boxes, tuples, arrays and closures in the
+    /// nursery (the VM turns it on; `--nursery off` keeps it off).
     pub fn set_nursery(&mut self, on: bool) {
         self.nursery = on;
     }
@@ -1808,7 +1814,24 @@ impl Heap {
         if let Some(obj) = self.empty_tuple {
             roots.push(obj.addr());
         }
+        roots.extend(self.immortal_fns.values().map(Object::addr));
         roots
+    }
+
+    /// The shared function value at `entry` that captures and fills
+    /// nothing. Such a value holds only its entry and arity, so every
+    /// evaluation of a lambda without captures (one per loop pass) can be
+    /// one object instead of a nursery allocation per pass (#2251).
+    pub fn immortal_plain_fn(&mut self, entry: u32, arity: u32, is_rest: bool) -> Object {
+        if let Some(obj) = self.immortal_fns.get(&(entry, arity, is_rest)) {
+            return *obj;
+        }
+        let _epoch_guard = self.epoch_guard();
+        let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None };
+        // Old: a root for the VM's lifetime, never worth a nursery copy.
+        let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
+        self.immortal_fns.insert((entry, arity, is_rest), object);
+        object
     }
 
     /// The shared empty tuple `()`. It has no elements to change, so every
@@ -3227,7 +3250,7 @@ impl GcSized for ObjString {
 
 impl From<&str> for ObjString {
     fn from(value: &str) -> Self {
-        Self::new(String::from(value))
+        Self::from_data(value.into())
     }
 }
 
@@ -4173,6 +4196,8 @@ impl GcSized for ObjWeak {
 }
 
 impl GcSized for ObjFn {
+    const NURSERY: bool = true;
+
     fn size(&self) -> usize {
         // Vec payloads use Rust's allocator (same as ObjArray elements).
         mem::size_of::<Self>()
@@ -4422,6 +4447,18 @@ pub(crate) const GEN_UNLOGGED: u8 = 2;
 /// [`GcHeader::generation`]: a young object a minor collection may not
 /// move (an ambiguous word names it). Only set during a minor collection.
 pub(crate) const GEN_PINNED: u8 = 4;
+/// [`GcHeader::generation`]: a young object a minor pinned, held in its
+/// chunk until a major frees it. Minors treat it as old: they do not trace
+/// it, and the write barrier records it ([`GEN_UNLOGGED`]) like any old
+/// object (#2255).
+pub(crate) const GEN_HELD: u8 = 8;
+
+/// Generation bits of an object the write barrier covers: an old one or a
+/// held one.
+#[inline]
+pub(crate) fn barriered(generation: u8) -> bool {
+    generation & GEN_YOUNG == 0 || generation & GEN_HELD != 0
+}
 
 thread_local! {
     /// Old objects written since the last minor collection (the nursery's
@@ -4460,7 +4497,7 @@ pub(super) fn relog_all(slab: &super::slab::Slab) {
     while let Some(addr) = slab.next_slot(&mut cur) {
         // SAFETY: `next_slot` yields slot starts in mapped chunks.
         let header = unsafe { &*(addr as *const GcHeader) };
-        if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
+        if header.kind.get() != 0 && barriered(header.generation.get()) {
             header.generation.set(header.generation.get() | GEN_UNLOGGED);
         }
     }
@@ -4478,7 +4515,7 @@ pub(super) fn relog_quiet(slab: &super::slab::Slab) {
             // freed or re-carved slot reads as free or as another old
             // object, and an extra log bit only costs one more record.
             let header = unsafe { &*(addr as *const GcHeader) };
-            if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
+            if header.kind.get() != 0 && barriered(header.generation.get()) {
                 header.generation.set(header.generation.get() | GEN_UNLOGGED);
             }
             false

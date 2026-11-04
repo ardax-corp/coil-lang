@@ -63,7 +63,7 @@ Opt prove rule: [optimization-roadmap.md](docs/internals/optimization-roadmap.md
 | Tree | When to update |
 |------|----------------|
 | [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/manual/` | Tutorials, getting started, examples catalog (`/docs/manual/…`) |
-| [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/references/` | Syntax, per-API **builtin** pages, error codes (`/docs/references/…`) |
+| [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/language/` | Syntax, types, error codes (`/docs/language/…`). Per-API **builtin** pages are generated from the `///` stubs into `src/content/reference/` (`/docs/reference/…`) |
 | `docs/internals/` | Pipeline, VM, tooling (this repo) |
 | [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) | Userland API docs (`docs/` in that repo); `///` on public `.coil` |
 
