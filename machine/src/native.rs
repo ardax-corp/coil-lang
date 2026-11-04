@@ -223,11 +223,6 @@ pub struct NativeHost {
     /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
     /// byte) with its operand on `args` through its stub, as `host` does.
     pub ffi: HostViaVmFn,
-    /// Run a `VScan` (`true`) or `VLoop` body over `slots` laid out as a
-    /// dense frame, with its flags byte and the two bound words, as the VM
-    /// runs it there; the slots come back as the op left them. `None`:
-    /// no room for the frame (nothing ran).
-    pub vector: VectorFn,
     /// Run the ordinary host native `id` on `args` in `layout` as the VM's
     /// `HostInvoke` does, without bytecode: a native that would block the
     /// task parks the fiber the call runs on. `None`: it is no ordinary
@@ -249,8 +244,6 @@ pub enum Invoked {
     Unwound,
 }
 
-/// [`NativeHost::vector`]: machine, scan, flags, body, slots, from, bound.
-pub type VectorFn = unsafe fn(*mut std::ffi::c_void, bool, u8, &[common::Byte], &mut [u64], i64, i64) -> Option<Result<i64, &'static str>>;
 
 /// [`NativeHost::host`]: machine, context, native id, layout, arguments,
 /// panicked flag.
@@ -268,7 +261,6 @@ impl NativeHost {
         free: |_, _, _, _| true,
         host: |_, _, _, _, _, _| None,
         ffi: |_, _, _, _, _, _| None,
-        vector: |_, _, _, _, _, _, _| None,
         invoke: |_, _, _, _, _| None,
     };
 }
@@ -2053,7 +2045,7 @@ pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flag
     let Some(code) = words.get_mut(..nbody as usize) else {
         return unsafe { bail(ctx) };
     };
-    if c.machine.is_null() {
+    if c.heap.is_null() {
         return unsafe { bail(ctx) };
     }
     for (i, w) in code.iter_mut().enumerate() {
@@ -2063,18 +2055,14 @@ pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flag
     }
     // SAFETY: `slots` holds `nslots` words.
     let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };
-    if kind & 2 != 0 {
-        c.committed = 1;
-    }
-    let (machine, vector) = (c.machine, c.host.vector);
-    // SAFETY: `machine` is the live machine `vector` was made for.
-    match unsafe { vector(machine, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64) } {
-        None => unsafe { bail(ctx) },
-        Some(Ok(p)) => {
+    // SAFETY: `call` set `heap` to the machine's live heap.
+    let heap = unsafe { &mut *c.heap };
+    match crate::vm::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64) {
+        Ok(p) => {
             VECTOR_OPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             p as u64
         }
-        Some(Err(msg)) => {
+        Err(msg) => {
             let c = unsafe { &mut *ctx };
             c.trap = TRAP_MESSAGE;
             // SAFETY: `call` set `message` for the call.

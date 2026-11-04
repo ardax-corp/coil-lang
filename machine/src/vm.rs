@@ -537,6 +537,40 @@ fn vpush_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES]) {
     }
 }
 
+/// `VScan` (`scan`) / `VLoop` `body` over `slots` (the op's frame, as
+/// native code lays it out), on `heap` alone: native code's lane loops
+/// run here, without a machine.
+pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[common::Byte], slots: &mut [u64], from: i64, bound: i64) -> Result<i64, &'static str> {
+    // SAFETY: the archived word has the plain word's layout, as the
+    // program code's casts rely on.
+    let body: &[Byte] = unsafe { std::slice::from_raw_parts(body.as_ptr().cast(), body.len()) };
+    thread_local! {
+        static VREGS: std::cell::RefCell<[[u64; common::simd::LANES]; common::simd::NREGS]> =
+            const { std::cell::RefCell::new([[0; common::simd::LANES]; common::simd::NREGS]) };
+    }
+    let mut frame: Vec<Value> = slots.iter().map(|&w| Value::from(w)).collect();
+    let out = VREGS.with(|r| {
+        let mut regs = r.borrow_mut();
+        if scan {
+            let inclusive = flags & common::simd::SCAN_INCLUSIVE != 0;
+            let backward = flags & common::simd::SCAN_BACKWARD != 0;
+            vscan(heap, &frame[..], 0, &mut regs, body, from, bound, inclusive, backward)
+        } else {
+            let pos = flags & common::simd::LOOP_POS != 0;
+            vloop(heap, &mut frame[..], 0, &mut regs, body, usize::from(pos), from, bound, pos).map(|()| 0)
+        }
+    });
+    for (w, v) in slots.iter_mut().zip(&frame) {
+        *w = v.bits();
+    }
+    out
+}
+
+/// The operand words lane code reads and writes, at `sp + slot`: the VM's
+/// stack, or the frame native code passes (`coil_native_vector`).
+pub(crate) trait LaneSlots: std::ops::Index<usize, Output = Value> + std::ops::IndexMut<usize> {}
+impl<T: std::ops::Index<usize, Output = Value> + std::ops::IndexMut<usize> + ?Sized> LaneSlots for T {}
+
 /// A decoded `VLoop` body word.
 #[derive(Clone, Copy)]
 enum VloopOp {
@@ -557,9 +591,9 @@ enum VloopOp {
 /// and the only resize is an append (`STORE_PUSH`) to an array the body
 /// does not read (the compiler guards that). `Err` on a malformed body, a lane out of range or a trap.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn vloop(
+pub(crate) fn vloop<S: LaneSlots + ?Sized>(
     heap: &mut Heap,
-    stack: &mut Stack<Value>,
+    stack: &mut S,
     sp: usize,
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
     body: &[Byte],
@@ -606,9 +640,9 @@ impl VloopScratch {
 
 /// [`vloop`]'s loop; `scratch.pushed` gets the arrays the body appends to.
 #[allow(clippy::too_many_arguments)]
-fn vloop_run(
+fn vloop_run<S: LaneSlots + ?Sized>(
     heap: &Heap,
-    stack: &mut Stack<Value>,
+    stack: &mut S,
     sp: usize,
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
     body: &[Byte],
@@ -825,7 +859,7 @@ impl VloopWide {
     /// The lane-wise body `ops` over lanes `p .. p + n` (`n` a multiple of
     /// 8; every load in range, checked by the caller); `Ok(false)` on a
     /// trap, with nothing stored.
-    fn run(&mut self, stack: &Stack<Value>, sp: usize, ops: &[VloopOp], p: i64, n: usize) -> Result<bool, &'static str> {
+    fn run<S: LaneSlots + ?Sized>(&mut self, stack: &S, sp: usize, ops: &[VloopOp], p: i64, n: usize) -> Result<bool, &'static str> {
         use common::simd;
         const OOB: &str = "VLoop out of bounds";
         const WIDE: usize = crate::simd::WIDE;
@@ -940,8 +974,8 @@ impl VloopWide {
 /// runs the lanes one at a time.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn vloop_short_block(
-    stack: &mut Stack<Value>,
+fn vloop_short_block<S: LaneSlots + ?Sized>(
+    stack: &mut S,
     sp: usize,
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
     ops: &[VloopOp],
@@ -1049,8 +1083,8 @@ fn vloop_short_block(
 }
 
 /// One `VBin` of a `VLoop` body over whole vector registers.
-fn vbin_block(
-    stack: &Stack<Value>,
+fn vbin_block<S: LaneSlots + ?Sized>(
+    stack: &S,
     sp: usize,
     regs: &[[u64; common::simd::LANES]; common::simd::NREGS],
     kind: u8,
@@ -1073,8 +1107,8 @@ fn vbin_block(
 /// writes element `p + j + off`, a fold takes lane `j` alone. `Err` is the
 /// trap of the first lane that traps, after the lanes before it stored
 /// and folded.
-fn vloop_lanes(
-    stack: &mut Stack<Value>,
+fn vloop_lanes<S: LaneSlots + ?Sized>(
+    stack: &mut S,
     sp: usize,
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
     ops: &[VloopOp],
@@ -1169,9 +1203,9 @@ const TAIL_MIN_LANES: i64 = 2;
 /// here without dispatch, its strings resolved once. `Err` on a body
 /// that is not a byte scan.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn vscan(
+pub(crate) fn vscan<S: LaneSlots + ?Sized>(
     heap: &Heap,
-    stack: &Stack<Value>,
+    stack: &S,
     sp: usize,
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
     body: &[Byte],
@@ -2118,7 +2152,6 @@ impl<const S: usize> Machine<S> {
                 free: Self::native_free,
                 host: Self::native_host_vm,
                 ffi: Self::native_ffi_vm,
-                vector: Self::native_vector,
                 invoke: Self::native_invoke,
             },
         }
@@ -2571,44 +2604,6 @@ impl<const S: usize> Machine<S> {
         };
         vm.stack.seek(before);
         Some(out.bits())
-    }
-
-    /// [`crate::native::NativeHost::vector`]: `body` over `slots`, pushed
-    /// as a frame on top of the stack, by [`vscan`] / [`vloop`].
-    unsafe fn native_vector(
-        raw: *mut c_void,
-        scan: bool,
-        flags: u8,
-        body: &[common::Byte],
-        slots: &mut [u64],
-        from: i64,
-        bound: i64,
-    ) -> Option<Result<i64, &'static str>> {
-        // SAFETY: native code passes back the machine `try_native_call` gave it.
-        let vm = unsafe { &mut *raw.cast::<Self>() };
-        // SAFETY: the archived word has the plain word's layout, as the
-        // program code's casts rely on.
-        let body: &[Byte] = unsafe { std::slice::from_raw_parts(body.as_ptr().cast(), body.len()) };
-        let sp = vm.stack.tell();
-        if sp + slots.len() > vm.stack.capacity() {
-            return None;
-        }
-        for &w in slots.iter() {
-            vm.stack.push(Value::from(w));
-        }
-        let out = if scan {
-            let inclusive = flags & common::simd::SCAN_INCLUSIVE != 0;
-            let backward = flags & common::simd::SCAN_BACKWARD != 0;
-            vscan(&vm.heap, &vm.stack, sp, &mut vm.vregs, body, from, bound, inclusive, backward)
-        } else {
-            let pos = flags & common::simd::LOOP_POS != 0;
-            vloop(&mut vm.heap, &mut vm.stack, sp, &mut vm.vregs, body, usize::from(pos), from, bound, pos).map(|()| 0)
-        };
-        for (i, w) in slots.iter_mut().enumerate() {
-            *w = vm.stack[sp + i].bits();
-        }
-        vm.stack.seek(sp);
-        Some(out)
     }
 
     /// [`crate::native::NativeHost::claim`]: the finalizer claim `CALL`

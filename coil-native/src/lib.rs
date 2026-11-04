@@ -964,8 +964,8 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(value)?;
                     }
                     MirInst::Panic { msg, .. } => need(msg)?,
-                    // The VM's `VScan` / `VLoop` over a frame of the
-                    // values' words (`coil_native_vector`).
+                    // The runtime's lane code (`VScan` / `VLoop`) over a
+                    // frame of the values' words (`coil_native_vector`).
                     MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
                         for v in inst.dests().chain(inst.operands()) {
                             need(&v)?;
@@ -1698,7 +1698,7 @@ impl<'a> Lower<'a> {
     /// A `VecLoop` reduce with no stores as a native loop over its lanes,
     /// one lane at a time, folding left to right as the VM does. Anything
     /// the VM's lanes would trap on, or a load outside its array's view,
-    /// leaves the loop and runs the whole op on the VM's lane code from the
+    /// leaves the loop and runs the whole op on the runtime's lane code from the
     /// start (a pure reduce: nothing it did shows), which gives the VM's
     /// own result or trap. `false`: not such a reduce (nothing emitted).
     fn native_reduce(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
@@ -1768,7 +1768,7 @@ impl<'a> Lower<'a> {
         self.b.ins().jump(lp, &[p1.into(), next.into()]);
         self.b.switch_to_block(slow);
         // The loop's result is its `dest` slot, as `VLoop` leaves it.
-        let (_, frame) = self.vector_via_vm(f, inst);
+        let (_, frame) = self.vector_lanes(f, inst);
         let w = self.b.ins().stack_load(types::I64, lane_ty, frame, 0);
         self.b.ins().jump(exit, &[w.into()]);
         self.b.switch_to_block(exit);
@@ -1979,9 +1979,10 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(next);
     }
 
-    /// A `ByteScan` / `VecLoop` through the VM's lane code: the helper's
-    /// result word and the frame the slots came back in.
-    fn vector_via_vm(&mut self, f: &MirFunc, inst: &MirInst) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::StackSlot) {
+    /// A `ByteScan` / `VecLoop` through the runtime's lane code (the
+    /// interpreter's `VScan` / `VLoop` kernels, which need no machine): the
+    /// helper's result word and the frame the slots came back in.
+    fn vector_lanes(&mut self, f: &MirFunc, inst: &MirInst) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::StackSlot) {
         let op = compiler::native_mir::vector_op(inst).expect("a vector op checked at planning");
         let t = MemFlagsData::trusted();
         let n = op.inputs.len() + 2;
@@ -2412,11 +2413,11 @@ impl<'a> Lower<'a> {
             }
             MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
                 // A pure reduce compiles to a native loop; the rest runs the
-                // VM's `VScan` / `VLoop` body (`coil_native_vector`).
+                // runtime's `VScan` / `VLoop` kernels (`coil_native_vector`).
                 if self.native_reduce(f, inst)? {
                     return Ok(());
                 }
-                let (w, frame) = self.vector_via_vm(f, inst);
+                let (w, frame) = self.vector_lanes(f, inst);
                 match inst {
                     MirInst::ByteScan { dest, .. } => self.set(f, *dest, w),
                     MirInst::VecLoop { dest, pos, .. } => {
