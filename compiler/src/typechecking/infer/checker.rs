@@ -5834,6 +5834,20 @@ impl Checker {
                 Some(format!("add `use math::{{{ident}}};`")),
             );
         }
+        // `ord` / `char` left the prelude for coil-stdlib's `text`.
+        if crate::typechecking::virtual_modules::REMOVED_PRELUDE_TEXT_FNS.contains(&ident.as_str())
+            && self.lookup_fn_scheme(&ident).is_none()
+        {
+            for arg in raw_args {
+                let _ = self.infer(arg);
+            }
+            return self.error_with_help(
+                ErrorCode::UnknownFunction,
+                format!("there is no built-in `{ident}`; `ord` and `char` moved from the prelude to coil-stdlib's `text` module"),
+                range,
+                Some(format!("add `use text::{{{ident}}};`, or use `string::to_bytes` / `from_bytes` for UTF-8 bytes")),
+            );
+        }
         // The free `len(x)` was removed: a length is the method `x.len()`.
         if ident == "len" && self.lookup_fn_scheme(&ident).is_none() {
             for arg in raw_args {
@@ -5924,10 +5938,8 @@ impl Checker {
                         self.infer_matrix_cells_call(&reordered, id, range, "intersect")
                     }
                     PreludeFn::Diff => self.infer_matrix_cells_call(&reordered, id, range, "diff"),
-                    PreludeFn::Ord => self.infer_ord(&reordered, range),
                     PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
                     PreludeFn::FnKey => self.infer_fn_key(&reordered, range),
-                    PreludeFn::Char => self.infer_char(&reordered, range),
                 };
             }
             let arg_slice = args.as_deref().unwrap_or(&[]);
@@ -5940,10 +5952,8 @@ impl Checker {
                     self.infer_matrix_cells_call(arg_slice, id, range, "intersect")
                 }
                 PreludeFn::Diff => self.infer_matrix_cells_call(arg_slice, id, range, "diff"),
-                PreludeFn::Ord => self.infer_ord(arg_slice, range),
                 PreludeFn::BlackBox => self.infer_black_box(arg_slice, range),
                 PreludeFn::FnKey => self.infer_fn_key(arg_slice, range),
-                PreludeFn::Char => self.infer_char(arg_slice, range),
             };
         }
         // `dload` / `declare` / `invoke` after `use ffi::{…}`.
@@ -8605,47 +8615,6 @@ impl Checker {
             );
         }
         int()
-    }
-
-    fn infer_ord(&mut self, args: &[Output], range: Range<usize>) -> Ty {
-        use crate::typechecking::ty::byte;
-        if args.len() != 1 {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("ord expects 1 argument, got {}", args.len()),
-                range,
-                Some("use `ord(s)` with a single-character string".to_string()),
-            );
-        }
-        let s_ty = self.infer(&args[0]);
-        self.unify(&s_ty, &string(), &args[0].0.into_range(), "ord argument");
-        result_app_ty(byte(), string())
-    }
-
-    /// `char(byte) -> Result<string, string>`.
-    fn infer_char(&mut self, args: &[Output], range: Range<usize>) -> Ty {
-        use crate::typechecking::ty::byte;
-        if args.len() != 1 {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("char expects 1 argument, got {}", args.len()),
-                range,
-                Some("use `char(b)` with a `byte` value".to_string()),
-            );
-        }
-        // `byte` is expected, so an int literal coerces as for a user
-        // function's `byte` parameter (#1175).
-        let prev_expected = self.current_expected.replace(byte());
-        let b_ty = self.infer(&args[0]);
-        self.current_expected = prev_expected;
-        self.unify(&b_ty, &byte(), &args[0].0.into_range(), "char argument");
-        result_app_ty(string(), string())
     }
 
     /// `dot(a, b)`, equal-length homogeneous numeric vectors → scalar.
