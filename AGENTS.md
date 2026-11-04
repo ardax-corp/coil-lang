@@ -51,10 +51,10 @@ Codegen / match / `STORE`: `.claude/skills/coil-contributor/reference.md`.
 
 ## Commands (reference; CI runs these)
 
-- Full suite: `cargo test --workspace --lib --tests --bins` (use `--lib --tests --bins`, not `--all-targets`: Criterion benches abort on test argv). Default features are empty and the tooling crates unify `dissect` / `debugger` / `coverage`, so feature variants build the same thing; one run covers them.
+- Full suite: `cargo test --workspace --lib --tests --bins` (use `--lib --tests --bins`, not `--all-targets`: Criterion benches abort on test argv). CI runs its two corpus-wide tests, `hir_corpus` and `fmt_round_trip`, in a separate `test corpus` job. Default features are empty and the tooling crates unify `dissect` / `debugger` / `coverage`, so feature variants build the same thing; one run covers them.
 - VM-wire suites (`required-features = ["vm-wire"]`, skipped silently otherwise): `cargo test -p compiler --features vm-wire --tests`.
 - `.coil` corpus: `./target/debug/coil test` (or a path).
-- Leak smoke and GC stress: the `harness` matrix in `.github/workflows/ci.yml` (`scripts/test_corpora.py`; leak smoke is `-j 1 --limit-as-kb <code size + 128 MiB>`, GC stress is `coil-test` built with `--features gc-stress --target-dir target/gc-stress`, release cells only since #2131).
+- Leak smoke and GC stress: the `harness-*` jobs in `.github/workflows/ci.yml` (`scripts/test_corpora.py`; leak smoke is `-j 1 --limit-as-kb <code size + 128 MiB>`, GC stress is `coil-test` built with `--features gc-stress --target-dir target/gc-stress`, release cells only since #2131).
 - Soft CPU baseline: `./scripts/poop_baseline.sh`.
 - Under cargo the reactor runs one worker (`COIL_MAX_WORKER_THREADS=1` in `.cargo/config.toml`); override it when profiling auto-par.
 
