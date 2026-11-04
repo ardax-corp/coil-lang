@@ -6,9 +6,13 @@ use std::sync::Arc;
 
 use common::{Byte, ProgramDebug};
 
+#[cfg(feature = "vm")]
 use crate::ffi::DloadGate;
+#[cfg(feature = "vm")]
 use crate::memory::CStructLayout;
+#[cfg(feature = "vm")]
 use crate::thread::ThreadProgram;
+#[cfg(feature = "vm")]
 use crate::Machine;
 
 /// Inputs the compiler can supply without depending on `machine`.
@@ -23,6 +27,7 @@ pub struct VmHostSpec<'a> {
     pub c_structs: &'a [common::CStructLayout],
 }
 
+#[cfg(feature = "vm")]
 /// Standard natives, dload integrity gate, FFI search, C layouts.
 pub fn wire_vm_host<const N: usize>(vm: &mut Machine<N>, spec: &VmHostSpec<'_>) {
     crate::wire_standard_host_natives(vm);
@@ -52,6 +57,7 @@ pub fn wire_vm_host<const N: usize>(vm: &mut Machine<N>, spec: &VmHostSpec<'_>) 
     }
 }
 
+#[cfg(feature = "vm")]
 /// Shared bytecode for `thread::spawn` workers.
 pub fn wire_thread_program<const N: usize>(
     machine: &mut Machine<N>,
@@ -77,6 +83,7 @@ pub fn wire_thread_program<const N: usize>(
     })
 }
 
+#[cfg(feature = "vm")]
 /// Arguments for [`wire_thread_program_with_maps`].
 pub struct WireThreadProgramWithMapsArgs<'a, const N: usize> {
     pub machine: &'a mut Machine<N>,
@@ -93,6 +100,7 @@ pub struct WireThreadProgramWithMapsArgs<'a, const N: usize> {
     pub static_word_kinds: Vec<u8>,
 }
 
+#[cfg(feature = "vm")]
 /// Like [`wire_thread_program`], attaching S2b maps for compile-and-run
 /// and archive/embed load.
 pub fn wire_thread_program_with_maps<const N: usize>(args: WireThreadProgramWithMapsArgs<'_, N>) {

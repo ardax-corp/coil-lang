@@ -3,8 +3,9 @@
 //! `coil_native::aot` made, which defines the compiled bodies and their
 //! tables, and `coil package` appends the program's archive as it does to
 //! a `coil-embed` runner. `main` installs the linked code, then runs the
-//! archive as `coil-embed` does: native code where the object has it, the
-//! VM for everything else.
+//! archive on the native driver: `coil-rt` builds `machine` without the
+//! `vm` feature, so the executable carries no interpreter, and `coil
+//! package` links one only when native code covers every body.
 
 // The libtest build leaves out `main`, so its imports and tables go unused.
 #![cfg_attr(test, allow(dead_code, unused_imports))]

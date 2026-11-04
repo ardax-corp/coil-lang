@@ -18,7 +18,7 @@ coil-build-id = { path = "../coil-build-id" }
 common = { path = "../common" }
 parser = { path = "../parser" }
 compiler = { path = "../compiler", default-features = false }
-machine = { path = "../machine", default-features = false, features = ["coverage"] }
+machine = { path = "../machine", default-features = false, features = ["coverage", "vm"] }
 reporting = { path = "../reporting" }
 coil-host = { path = "../coil-host" }
 coil-args = { path = "../coil-args" }

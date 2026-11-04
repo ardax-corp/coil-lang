@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+# The bytecode interpreter (`Machine`). Off, a program runs only on the
+# native driver (`docs/internals/native.md`): the AOT runtime `coil-rt`.
+default = ["vm"]
+vm = []
 # `debugger` / `coverage` gate the hook state and APIs only. The dispatch
 # loop picks its hooked instantiation (`execute::<true>`) only while a
 # controller / collector is attached, so workspace feature unification adds

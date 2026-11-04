@@ -130,10 +130,13 @@ jobs:
 
       - name: Build release binaries
         if: runner.os != 'Windows' && matrix.libc != 'musl'
-        # Two invocations: a workspace-wide build unifies helper-only `machine`
-        # features (`debugger`, `coverage`) into `coil` / `coil-embed`.
+        # Separate invocations: a workspace-wide build unifies helper-only
+        # `machine` features (`debugger`, `coverage`) into `coil` /
+        # `coil-embed`, and the `vm` feature into `coil-rt`, whose AOT
+        # executables run with no interpreter.
         run: |
-          cargo build --release -p coil -p coil-embed -p coil-rt
+          cargo build --release -p coil -p coil-embed
+          cargo build --release -p coil-rt
           cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
 
       - name: Build release binaries (musl / Alpine)
@@ -160,7 +163,8 @@ jobs:
               # Do not set +crt-static here: it forbids proc-macro dylibs
               # (bytecheck_derive / rkyv) on this target (COI-100).
               # Split so helper-only machine features stay out of coil / coil-embed.
-              cargo build --release -p coil -p coil-embed -p coil-rt
+              cargo build --release -p coil -p coil-embed
+              cargo build --release -p coil-rt
               cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
             '
           mkdir -p target/release
@@ -190,7 +194,8 @@ jobs:
           command -v cmp
           make --version | head -n 1
           # Split so helper-only machine features stay out of coil / coil-embed.
-          cargo build --release -p coil -p coil-embed -p coil-rt
+          cargo build --release -p coil -p coil-embed
+          cargo build --release -p coil-rt
           cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
 
       - name: Stage embed binary and toolkit archive

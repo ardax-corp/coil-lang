@@ -8,7 +8,7 @@ name = "coil-embed"
 path = "src/main.rs"
 
 [dependencies]
-coil-cli = { path = "../coil-cli", default-features = false }
+coil-cli = { path = "../coil-cli", default-features = false, features = ["vm"] }
 
 [features]
 default = []

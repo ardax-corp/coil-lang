@@ -33,11 +33,11 @@ edition = "2024"
 
 [dependencies]
 common = { path = "common" }
-machine = { path = "machine", default-features = false }
+machine = { path = "machine", default-features = false, features = ["vm"] }
 parser = { path = "parser" }
 compiler = { path = "compiler", default-features = false }
 reporting = { path = "reporting" }
-coil-cli = { path = "coil-cli", default-features = false }
+coil-cli = { path = "coil-cli", default-features = false, features = ["vm"] }
 coil-args = { path = "coil-args" }
 comptime = { path = "comptime" }
 coil-host = { path = "coil-host" }

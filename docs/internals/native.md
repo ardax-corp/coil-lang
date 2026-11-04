@@ -576,7 +576,8 @@ counters (`NativeTable`).
    with `cranelift-object` (PIC) into `program.o`. The object defines
    `coil_aot_entries` / `coil_aot_entry_count` (one `AotEntry` per
    compiled body, the function address relocated in) and
-   `coil_aot_sites` / `coil_aot_site_count` (call-site words), and imports
+   `coil_aot_sites` / `coil_aot_site_count` (call-site words) and
+   `coil_aot_refused_count` (bodies left out), and imports
    the runtime helpers by name (`machine::native::helper_symbols()`, all
    `#[unsafe(no_mangle)]`).
 2. `cc` links `program.o` with `libcoil_rt.a` (the `coil-rt` staticlib):
@@ -590,11 +591,16 @@ counters (`NativeTable`).
    program's line table (`-g`), so stripping keeps them. `coil-rt`'s
    `main` calls `machine::native::install_aot` with those symbols, then
    runs the embedded payload like `coil-embed`.
-3. The archive payload is appended as for a runner package; the VM runs
-   every body the object does not hold.
+3. The archive payload is appended as for a runner package. The driver
+   runs it (`machine::run_natively`): `coil-rt` builds `machine` and
+   `coil-cli` without their `vm` feature, so the executable holds no
+   interpreter (CI gates `machine::vm` symbols at 0 on a packaged hello
+   world). Build it in its own cargo invocation (`cargo build -p
+   coil-rt`): a build with `coil` unifies `vm` back in.
 
-If the object or the link fails (no `cc`, no `libcoil_rt.a`, Windows) the
-package warns and falls back to the runner.
+If native code refuses a body, or the object or the link fails (no `cc`,
+no `libcoil_rt.a`, Windows), the package warns and falls back to the
+`coil-embed` runner, whose VM runs it.
 
 ### Static `extern` libraries
 

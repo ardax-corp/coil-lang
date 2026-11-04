@@ -10,10 +10,9 @@ use common::{
     embedded_archive_slice, format_archive_version, read_embedded_native_lock,
     read_package_trailer, resolve_archive_operand_slots,
 };
-use machine::{
-    DloadGate, Machine, WireThreadProgramWithMapsArgs, wire_standard_host_natives,
-    wire_thread_program_with_maps,
-};
+use machine::DloadGate;
+#[cfg(feature = "vm")]
+use machine::{Machine, WireThreadProgramWithMapsArgs, wire_standard_host_natives, wire_thread_program_with_maps};
 
 /// Errors loading a `.ccoil` / embedded archive blob.
 #[derive(Debug)]
@@ -147,6 +146,18 @@ pub fn execute_archived_program(
     if let Some(panicked) = machine::run_natively(program, start) {
         return panicked;
     }
+    #[cfg(not(feature = "vm"))]
+    {
+        eprintln!("coil: native code does not cover this program, and this runtime has no bytecode VM to run it");
+        true
+    }
+    #[cfg(feature = "vm")]
+    run_on_vm(loaded, slots, base_dir, ffi_search_paths, dload_gate)
+}
+
+/// [`execute_archived_program`] on the bytecode VM.
+#[cfg(feature = "vm")]
+fn run_on_vm(loaded: &LoadedArchive, slots: usize, base_dir: Option<PathBuf>, ffi_search_paths: Vec<PathBuf>, dload_gate: Option<DloadGate>) -> bool {
     let mut machine = Machine::<256>::with_operand_capacity(slots);
     wire_standard_host_natives(&mut machine);
     if let Some(gate) = dload_gate {

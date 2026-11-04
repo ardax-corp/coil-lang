@@ -9,7 +9,7 @@ edition = "2024"
 [dependencies]
 common = { path = "../common" }
 compiler = { path = "../compiler", default-features = false }
-machine = { path = "../machine", default-features = false }
+machine = { path = "../machine", default-features = false, features = ["vm"] }
 
 [features]
 default = []
