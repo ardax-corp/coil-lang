@@ -174,7 +174,7 @@ thread_local! {
 /// use (a nested call), the call is on a fiber, or no stack could be
 /// reserved.
 #[cfg(not(target_family = "wasm"))]
-fn on_deep_stack<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn on_deep_stack<R>(f: impl FnOnce() -> R) -> R {
     if FIBER_STACK_LIMIT.get() != 0 {
         return f();
     }

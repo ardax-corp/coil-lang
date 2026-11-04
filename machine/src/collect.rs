@@ -193,6 +193,24 @@ impl Runtime {
             .collect()
     }
 
+    /// Mark the finalizer of `v` as run; `false` when it ran already.
+    pub(crate) fn claim_finalizer(&self, v: Value) -> bool {
+        use crate::memory::Object;
+        match self.heap.find_object_by_addr(v.bits()) {
+            Some(Object::Instance(gc)) => {
+                let inst = gc.payload_mut();
+                !std::mem::replace(&mut inst.finalized, true)
+            }
+            // Untagged enums (unit variants: shared immortals) are never
+            // finalized, so an explicit `drop()` on one just runs the body.
+            Some(Object::Enum(gc)) => {
+                let e = gc.payload_mut();
+                e.type_id == 0 || !std::mem::replace(&mut e.finalized, true)
+            }
+            _ => false,
+        }
+    }
+
     /// Interned string handles are not roots: a sweep may have freed them.
     pub(crate) fn invalidate_program_string_cache(&mut self) {
         self.program_string_cache.fill(Value::default());

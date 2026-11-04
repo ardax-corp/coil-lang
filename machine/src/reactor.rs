@@ -979,6 +979,9 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
         vm.begin_coverage();
     }
     vm.set_step_budget(test.step_budget);
+    if let Some(report) = run_test_job_natively(vm, entry, test) {
+        return report;
+    }
     if let Some(ip) = test.init_ip {
         vm.run_from(ip as usize);
     }
@@ -1022,6 +1025,38 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
     };
     *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
     PortableValue::Immediate(u64::from(passed))
+}
+
+/// [`run_test_job`] on the native driver, when the program's native code
+/// covers the case (`None`: the VM runs it).
+fn run_test_job_natively(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> Option<PortableValue> {
+    let start = test.init_ip.unwrap_or(entry) as usize;
+    let ret = vm.with_native_driver(start, |d| {
+        if let Some(ip) = test.init_ip {
+            d.run_from(ip as usize);
+        }
+        if d.panicked() {
+            return None;
+        }
+        let ret = d.call(entry as usize, &[]);
+        if !test.expect_ok_result {
+            d.run_remaining_finalizers();
+        }
+        ret.map(|(lo, _)| common::Value::from(lo))
+    })?;
+    let (mut passed, reason) = match ret {
+        _ if vm.panicked() => (false, None),
+        Some(_) if !test.expect_ok_result => (true, None),
+        Some(v) if vm.result_is_ok(v) => (true, None),
+        Some(v) => (false, vm.result_err_text(v)),
+        None => (false, None),
+    };
+    if let Some(code) = crate::env::take_exit_request() {
+        passed = !test.expect_ok_result && code == 0;
+    }
+    let report = TestReport { passed, reason, hits: None, steps: 0, timed_out: false };
+    *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+    Some(PortableValue::Immediate(u64::from(passed)))
 }
 
 /// Build a [`Job`] from spawn context + decoded args.

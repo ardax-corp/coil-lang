@@ -241,6 +241,13 @@ thread_local! {
 
 use crate::collect::STATIC_KINDS;
 
+/// `COIL_NATIVE_DRIVER=1`: programs whose native code covers them run on
+/// the native driver, without the interpreter (`driver.rs`).
+fn native_driver_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_NATIVE_DRIVER").is_some_and(|v| v != "0"))
+}
+
 #[inline(always)]
 fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
     // Lowering may target `code.len()` as “fall out of the loop” (next `while`
@@ -299,17 +306,17 @@ struct PendingFfiInvoke {
 }
 
 /// An `FfiInvoke`'s operands, taken off the stack.
-struct FfiCall {
-    lib_addr: u64,
-    function_id: usize,
-    args: Vec<Value>,
-    arg_types: Option<Vec<crate::memory::FfiType>>,
+pub(crate) struct FfiCall {
+    pub(crate) lib_addr: u64,
+    pub(crate) function_id: usize,
+    pub(crate) args: Vec<Value>,
+    pub(crate) arg_types: Option<Vec<crate::memory::FfiType>>,
 }
 
 impl FfiCall {
     /// The call from its operand words: library, function id, argument
     /// tuple and, for a variadic call, the argument tags tuple.
-    fn from_words(heap: &Heap, words: &[Value]) -> Self {
+    pub(crate) fn from_words(heap: &Heap, words: &[Value]) -> Self {
         let tuple = |v: Option<&Value>| match v.and_then(|v| heap.find_object_by_addr(v.bits())) {
             Some(Object::Tuple(gc)) => Some(gc.as_ref().elements().to_vec()),
             _ => None,
@@ -2043,6 +2050,31 @@ impl<const S: usize> Machine<S> {
     /// of its own (its caller is native code).
     fn in_host_stub(&self, ip: usize) -> bool {
         self.rt.native.as_ref().is_some_and(|t| ip >= t.code.code_len() && ip < self.program_code.len())
+    }
+
+    /// Run `f` on a native driver over this machine's Runtime (no
+    /// interpreter), when the program's native code covers what starts at
+    /// `start` (a prologue from there, or a body) and `COIL_NATIVE_DRIVER`
+    /// is set. `None`: the machine runs it.
+    pub(crate) fn with_native_driver<R>(&mut self, start: usize, f: impl FnOnce(&mut crate::driver::Driver<'_>) -> R) -> Option<R> {
+        if !native_driver_enabled() {
+            return None;
+        }
+        let native = std::sync::Arc::clone(&self.rt.native.as_ref()?.code);
+        if native.lookup(start).is_none() && !crate::driver::Driver::can_start(&self.program_code, &native, start) {
+            return None;
+        }
+        let program = crate::driver::DriverProgram {
+            code: Arc::clone(&self.program_code),
+            constants: Arc::clone(&self.program_constants),
+            native,
+            debug: self.program_debug.clone(),
+            base_dir: self.rt.ffi.base_dir.clone(),
+        };
+        let mut driver = crate::driver::Driver::new(&mut self.rt, program);
+        let out = f(&mut driver);
+        self.panicked |= driver.panicked();
+        Some(out)
     }
 
     /// The installed native code, for a machine that runs this program.
@@ -4121,19 +4153,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn claim_finalizer(&self, v: Value) -> bool {
-        match Self::find_object_by_addr(&self.rt.heap, v.bits()) {
-            Some(Object::Instance(gc)) => {
-                let inst = gc.payload_mut();
-                !std::mem::replace(&mut inst.finalized, true)
-            }
-            // Untagged enums (unit variants: shared immortals) are never
-            // finalized, so an explicit `drop()` on one just runs the body.
-            Some(Object::Enum(gc)) => {
-                let e = gc.payload_mut();
-                e.type_id == 0 || !std::mem::replace(&mut e.finalized, true)
-            }
-            _ => false,
-        }
+        self.rt.claim_finalizer(v)
     }
 
     fn run_finalizer(&mut self, self_val: Value, pc: u32) {
