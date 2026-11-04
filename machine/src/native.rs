@@ -1865,9 +1865,11 @@ pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes
     if c.bail != BAIL_PANIC || c.pads.is_null() || func == 0 {
         return;
     }
-    let mut rec = vec![0, n.min(64) | ROOTS_MASKED, mask];
+    // `n` may carry `ROOTS_AMBIGUOUS` (an opaque body's `int` homes).
+    let (flags, n) = (n & ROOTS_AMBIGUOUS, (n & !ROOTS_AMBIGUOUS).min(64));
+    let mut rec = vec![0, n | ROOTS_MASKED | flags, mask];
     // SAFETY: `homes` holds `n` words.
-    rec.extend((0..n.min(64) as usize).map(|i| unsafe { *homes.add(i) }));
+    rec.extend((0..n as usize).map(|i| unsafe { *homes.add(i) }));
     // SAFETY: the backend passes a function with the `NativePadFn` ABI.
     let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
     unsafe { (*c.pads).push(NativePad { func, homes: rec }) };

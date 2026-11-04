@@ -703,11 +703,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
     if let Some(why) = f.emit_refusal {
         return Err(format!("no emission: {why}"));
     }
-    // An opaque body's `int` words may be objects: roots name them
-    // ambiguously, but a pad's masked homes record has no such kind.
-    if f.opaque_words && f.homes.contains(&MirTy::I64) {
-        return Err("opaque defer home".into());
-    }
     if f.homes.len() > 64 {
         return Err("more than 64 defer homes".into());
     }
@@ -1357,6 +1352,9 @@ struct Lower<'a> {
     homes_ptr: Option<cranelift_codegen::ir::Value>,
     /// Homes holding heap words, rooted with the body's heap values.
     heap_homes: Vec<u16>,
+    /// An opaque body's `int` homes, which may hold objects: rooted
+    /// ambiguously.
+    amb_homes: Vec<u16>,
     /// The [`Self::push_call`] record of this frame.
     calls_slot: Option<cranelift_codegen::ir::StackSlot>,
     /// An opaque body's `int` words that may be objects: rooted in an
@@ -1503,6 +1501,7 @@ impl<'a> Lower<'a> {
             homes_slot: None,
             homes_ptr: None,
             heap_homes: Vec::new(),
+            amb_homes: Vec::new(),
             opaque: Vec::new(),
             calls_slot: None,
             defer,
@@ -1572,8 +1571,9 @@ impl<'a> Lower<'a> {
             .filter(|&v| heap_word(ty_of(f, v)))
             .collect();
         let homes = if self.homes_slot.is_some() { self.heap_homes.clone() } else { Vec::new() };
+        let amb_homes = if self.homes_slot.is_some() { self.amb_homes.clone() } else { Vec::new() };
         let opaque = self.opaque.clone();
-        if words.is_empty() && homes.is_empty() && opaque.is_empty() {
+        if words.is_empty() && homes.is_empty() && opaque.is_empty() && amb_homes.is_empty() {
             return None;
         }
         let t = MemFlagsData::trusted();
@@ -1581,8 +1581,8 @@ impl<'a> Lower<'a> {
         // The ambiguous record links behind the precise one; nothing
         // rewrites it, so nothing reloads from it.
         let mut next = prev;
-        if !opaque.is_empty() {
-            let amb = self.record(f, next, &opaque, ROOTS_AMBIGUOUS);
+        if !opaque.is_empty() || !amb_homes.is_empty() {
+            let amb = self.record(f, next, &opaque, &amb_homes, ROOTS_AMBIGUOUS);
             next = self.b.ins().stack_addr(types::I64, amb, 0);
         }
         let total = words.len() + homes.len();
@@ -1610,20 +1610,28 @@ impl<'a> Lower<'a> {
         Some(Roots { prev, slot, words, homes, epoch })
     }
 
-    /// A root record `[next, n | flags, words...]` of `vals` in a new slot.
-    fn record(&mut self, f: &MirFunc, next: cranelift_codegen::ir::Value, vals: &[ValueId], flags: u64) -> cranelift_codegen::ir::StackSlot {
+    /// A root record `[next, n | flags, words...]` of `vals` and then of
+    /// the words in `homes`, in a new slot.
+    fn record(&mut self, f: &MirFunc, next: cranelift_codegen::ir::Value, vals: &[ValueId], homes: &[u16], flags: u64) -> cranelift_codegen::ir::StackSlot {
+        let total = vals.len() + homes.len();
         let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            ((vals.len() + 2) * 8) as u32,
+            ((total + 2) * 8) as u32,
             3,
         ));
         self.b.ins().stack_store(types::I64, next, slot, 0);
-        let n = self.b.ins().iconst(types::I64, (vals.len() as u64 | flags) as i64);
+        let n = self.b.ins().iconst(types::I64, (total as u64 | flags) as i64);
         self.b.ins().stack_store(types::I64, n, slot, 8);
         for (i, v) in vals.iter().enumerate() {
             let x = self.get(f, *v);
             let x = self.coerce(x, types::I64);
             self.b.ins().stack_store(types::I64, x, slot, ((i + 2) * 8) as i32);
+        }
+        let t = MemFlagsData::trusted();
+        for (k, &h) in homes.iter().enumerate() {
+            let (base, off) = self.home_at(h).expect("homes slot");
+            let x = self.b.ins().load(types::I64, t, base, off);
+            self.b.ins().stack_store(types::I64, x, slot, ((vals.len() + k + 2) * 8) as i32);
         }
         slot
     }
@@ -2117,6 +2125,9 @@ impl<'a> Lower<'a> {
                 }
                 self.homes_slot = Some(slot);
                 self.heap_homes = (0..f.homes.len() as u16).filter(|&h| heap_word(f.homes[h as usize])).collect();
+                if f.opaque_words {
+                    self.amb_homes = (0..f.homes.len() as u16).filter(|&h| f.homes[h as usize] == MirTy::I64).collect();
+                }
             }
             self.pad_fn = self.body_index.and_then(|i| self.pad_refs.get(&i).copied());
         }
@@ -2204,8 +2215,11 @@ impl<'a> Lower<'a> {
         if let (Some(pad), Some(slot)) = (self.pad_fn, self.homes_slot) {
             let fp = self.b.ins().func_addr(types::I64, pad);
             let at = self.b.ins().stack_addr(types::I64, slot, 0);
-            let n = self.b.ins().iconst(types::I64, f.homes.len() as i64);
-            let mask = self.heap_homes.iter().fold(0u64, |m, &h| m | (1 << h));
+            // An opaque body's `int` homes go in the record too, which then
+            // roots every home ambiguously.
+            let amb = if self.amb_homes.is_empty() { 0 } else { ROOTS_AMBIGUOUS };
+            let n = self.b.ins().iconst(types::I64, (f.homes.len() as u64 | amb) as i64);
+            let mask = self.heap_homes.iter().chain(&self.amb_homes).fold(0u64, |m, &h| m | (1 << h));
             let mask = self.b.ins().iconst(types::I64, mask as i64);
             self.b.ins().call(self.defer, &[self.ctx, fp, at, n, mask]);
         }
