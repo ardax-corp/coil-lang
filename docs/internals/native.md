@@ -22,7 +22,17 @@ not compile, re-runs after a bail); `M` counts bytecode executions started
 under a native frame (`VM_ENTRIES`, counted in `run_execute` while
 `native_roots` is non-empty). Every program in `examples/` and
 `examples/perf` reports `0` and `0`: once `main` is native, no bytecode
-runs.
+runs after module setup.
+
+The prologue reaches `main` by a `JMP` (after a `CALL` with no target, or
+at the end of module setup: statics, `extern` blocks), never by a `CALL`.
+With native code installed, `Machine::ensure_host_stubs` points that jump
+at an appended `CALL main; RETURN` (`main_entry_jmp`), so `main` enters
+natively like any call; the run executes the loaded image. Module setup
+itself stays bytecode.
+
+An archive or package with native code keeps byte spans at `-g1`
+(`native_debug_level`): native code finds a panic's location by span.
 
 `--jit` skips the build cache (it needs this compile's MIR).
 
@@ -245,8 +255,15 @@ the VM's message) or an unwind the VM already reported (`TRAP_VM_PANIC`).
 
 The *host-call stubs* (`native::host_stubs`, `Machine::ensure_host_stubs`:
 `HostInvoke; RETURN` per enum layout and arity, run as a VM call through
-`NativeHost::host`) remain as the fallback for a suspending task op that
-is not on a fiber; no example reaches them.
+`NativeHost::host`) remain only for a wait in code the VM itself runs one
+nesting level down (a finalizer or FFI callback inside a scope), where the
+stub's execution is the scheduler loop; neither the examples nor the
+corpus reach them.
+
+A scope opened under a task fiber gets its scheduler at the fiber's base
+level (`fiber_base`), the level the task parks back to, even when native
+code opened it from a deeper level (a VM call under native code, a
+generator body).
 
 ### Function values and indirect calls
 
