@@ -1,16 +1,39 @@
 name: CI
 
+# Two stages. Linux runs first, on every push to a pull request (drafts
+# included) and on main. Windows and macOS start only once every Linux job
+# is green, and on a pull request only once it is ready for review: a change
+# that breaks Linux almost always breaks the other two as well, and their
+# runners are the slow, scarce ones. Marking a draft ready for review
+# (`ready_for_review`) starts a full run.
+#
+#   stage 1 (Linux):  clippy, fmt, test, test corpus, test-release, harness
+#                     builds and cells, wasm  ->  `linux-ok`
+#   stage 2:          Windows (clippy, test, test corpus, harness) and macOS
+#                     (test with the corpus tests, harness builds and cells)
+#   `ci-ok`:          the one check branch protection requires: Linux and
+#                     Windows green (Windows skipped is fine on a draft).
+#                     macOS stays out of it: its runners are capped and can
+#                     queue for a long time, and a PR may merge with macOS
+#                     still queued (a macOS job that failed still needs a
+#                     look).
+#
+# Every job sets its own `timeout-minutes`; a job's limit covers that job
+# only, so splitting slow platforms into several jobs gives each part its
+# own budget.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # A new push to a pull request cancels that PR's older runs, so stale runs
 # don't fill the runner queue. Pushes to main share one group: the running
 # main run always finishes, and a newer push replaces any main run still
 # pending, so a burst of merges queues one run, not one per commit. edge.yml
-# builds from the newest green main run.
+# builds from the newest green main run. cancel-closed-pr.yml joins the PR
+# group (`CI-<number>`) to cancel a closed PR's runs.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -21,11 +44,20 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CI: "true"
+  # The two corpus-wide tests, which compile or format every `.coil` file
+  # and take about half of the workspace suite's run time. They run in their
+  # own `test corpus` job beside `test`, and `test` skips them. Renaming
+  # either test only makes it run in both jobs.
+  CORPUS_TESTS_SKIP: >-
+    --skip positive_corpus_builds_hir_without_problems
+    --skip fmt_is_idempotent_and_keeps_the_ast_on_the_corpus
 
 # Prefer `--lib --tests --bins` over `--all-targets`: Criterion benches under
 # `[[bench]]` treat argv after `--` as their own CLI and abort the suite.
 
 jobs:
+  # ───────────────────────────── stage 1: Linux ─────────────────────────────
+
   # Every crate's default feature set is empty, and `coil-debug` /
   # `coil-dissect` / `coil-test` already turn on `compiler/dissect` and
   # `machine/{debugger,coverage}` for the whole workspace, so one feature set
@@ -34,6 +66,7 @@ jobs:
   clippy:
     name: clippy (ubuntu-latest)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -56,53 +89,6 @@ jobs:
         run: cargo clippy --workspace --lib --tests --bins -- -D warnings
 
 
-  # `cfg(windows)` host code (machine io / fs / reactor / threads) is only
-  # linted here.
-  clippy-windows-gnu:
-    name: clippy (windows-gnu)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system deps (Windows)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
-
-      - name: Configure pkg-config (Windows)
-        shell: msys2 {0}
-        run: |
-          echo "PKG_CONFIG=$MINGW_PREFIX/bin/pkgconf.exe" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$MINGW_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
-          pkgconf --exists libffi
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable-x86_64-pc-windows-gnu
-          components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-windows-gnu-clippy
-
-      - name: Clippy
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          cargo clippy --workspace --lib --tests --bins -- -D warnings
-
-
   # `.coil` sources must be `coil fmt`-clean. `compile_fail/` directories hold
   # deliberately broken programs; `coil fmt` skips them when walking. The embedded prelude
   # (`compiler/src/prelude`) and the comptime fixtures are. A `compile_fail/` test is
@@ -111,6 +97,7 @@ jobs:
   fmt:
     name: coil fmt --check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -146,19 +133,24 @@ jobs:
         run: python3 scripts/gen_rep_matrix.py --check
 
 
+  # The workspace suite minus the two corpus-wide tests (`test corpus`).
+  # Linux here; macOS runs the same steps in stage 2 (`test-macos`), with
+  # the corpus-wide tests included.
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
+        os: [ubuntu-latest]
+    steps: &test-steps
       - uses: actions/checkout@v4
 
       # A PR pairs with the coil-stdlib branch of the same name when one
       # exists (a feature branch that changes both); otherwise the default.
-      - name: Pick the coil-stdlib branch
+      - &pick-stdlib
+        name: Pick the coil-stdlib branch
         id: stdlib
         shell: bash
         env:
@@ -171,19 +163,22 @@ jobs:
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - &checkout-stdlib
+        uses: actions/checkout@v4
         with:
           repository: ardax-corp/coil-stdlib
           path: .deps/coil-stdlib
           ref: ${{ steps.stdlib.outputs.ref }}
 
-      - name: Install system deps (Ubuntu)
+      - &deps-ubuntu
+        name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libffi-dev build-essential z3
 
-      - name: Install system deps (macOS)
+      - &deps-macos
+        name: Install system deps (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install libffi
@@ -191,10 +186,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # `test corpus` restores this cache too; only this job saves it.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: test
+          shared-key: test
 
       - name: Build all CLI binaries
         run: cargo build
@@ -206,10 +202,17 @@ jobs:
           if [ "${{ runner.os }}" = "macOS" ]; then
             ulimit -n 65536 || true
           fi
+          # macOS keeps the corpus-wide tests in this job: a second macOS
+          # job would only queue for another of the capped runners.
+          skip="$CORPUS_TESTS_SKIP"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            skip=""
+          fi
           # A FAILED summary with exit 0 must still fail the job.
           log="$(mktemp)"
           set +e
-          cargo test --workspace --lib --tests --bins 2>&1 | tee "$log"
+          # shellcheck disable=SC2086 # a word list
+          cargo test --workspace --lib --tests --bins -- $skip 2>&1 | tee "$log"
           code="${PIPESTATUS[0]}"
           set -e
           if grep -E -q 'test result: FAILED|error: test failed' "$log" && [ "$code" -eq 0 ]; then
@@ -223,34 +226,50 @@ jobs:
           BIN=./target/debug/coil ./examples/projects/run-tests.sh
 
 
+  # The two corpus-wide tests `test` skips: HIR for every positive `.coil`
+  # program, and the `coil fmt` round trip over the corpus. Each already
+  # spreads its files over every core.
+  test-corpus:
+    name: test corpus (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps: &test-corpus-steps
+      - uses: actions/checkout@v4
+      - *pick-stdlib
+      - *checkout-stdlib
+      - *deps-ubuntu
+      - *deps-macos
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
+
+      - name: HIR over the corpus
+        run: cargo test -p compiler --test hir_corpus
+
+      - name: coil fmt round trip over the corpus
+        run: cargo test -p parser --test fmt_round_trip
+
+
   # Release-profile and VM-wire checks: Linux only, beside `test` instead of
   # after its workspace suite.
   test-release:
     name: test (release checks, vm-wire)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
-      # A PR pairs with the coil-stdlib branch of the same name when one
-      # exists (a feature branch that changes both); otherwise the default.
-      - name: Pick the coil-stdlib branch
-        id: stdlib
-        shell: bash
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          ref=""
-          if [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads \
-              https://github.com/ardax-corp/coil-stdlib "$HEAD_REF" >/dev/null; then
-            ref="$HEAD_REF"
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ardax-corp/coil-stdlib
-          path: .deps/coil-stdlib
-          ref: ${{ steps.stdlib.outputs.ref }}
+      - *pick-stdlib
+      - *checkout-stdlib
 
       - name: Install system deps
         run: |
@@ -315,24 +334,25 @@ jobs:
           cargo test -p compiler --features vm-wire \
             --test pipeline --test perf_metrics --test namespace
 
-  # The `.coil` harness binaries, built once per OS and build mode (debug and
-  # release: the same corpus must pass in both, so a build-mode difference
-  # such as an optimizer or overflow-check bug shows up) and cached by
-  # rust-cache. Every `harness` cell below downloads them instead of
+  # The `.coil` harness binaries, built once per OS and build: `debug` and
+  # `release` (the same corpus must pass in both, so a build-mode difference
+  # such as an optimizer or overflow-check bug shows up) and `gc-stress`, the
+  # release `coil-test` that collects at every allocation. Each build is
+  # cached by rust-cache, and every `harness` cell downloads one instead of
   # building its own.
   #
-  # Linux and macOS are separate jobs so the Linux harness cells start as soon
-  # as the Linux builds finish: macOS runners are capped and can queue for a
-  # long time, and a `needs:` on one matrix job waits for all of its cells.
-  # The macOS jobs reuse the Linux jobs' steps through YAML anchors.
-  harness-build:
+  # On Linux each build is its own job and each group of cells waits only
+  # for its own build (a `needs:` on a matrix job waits for every cell), so
+  # the debug cells start after the short debug build instead of after the
+  # release and GC-stress builds. macOS runs the same steps in stage 2.
+  harness-build-debug:
     name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        mode: [debug, release]
+        mode: [debug]
     steps: &harness-build-steps
       - uses: actions/checkout@v4
 
@@ -342,10 +362,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libffi-dev build-essential
 
-      - name: Install system deps (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install libffi
+      - *deps-macos
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -354,24 +371,27 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: harness-build-${{ matrix.mode }}
-          cache-directories: target/gc-stress
+          cache-directories: ${{ matrix.mode == 'gc-stress' && 'target/gc-stress' || '' }}
 
       - name: Build coil and coil-test
+        if: matrix.mode != 'gc-stress'
         run: cargo build ${{ matrix.mode == 'release' && '--release' || '' }} --bin coil --bin coil-test
 
+      # `coil test` re-execs `coil-test`; the GC-stress cells run this
+      # harness directly. Release only: the debug GC-stress cells are off
+      # (#2131).
       - name: Build coil-test with GC stress
-        # `coil test` re-execs `coil-test`; build the harness itself with the feature.
-        # Release only: the debug GC-stress cells are off (#2131).
-        if: matrix.mode == 'release'
-        run: cargo build ${{ matrix.mode == 'release' && '--release' || '' }} -p coil-test --features gc-stress --target-dir target/gc-stress
+        if: matrix.mode == 'gc-stress'
+        run: cargo build --release -p coil-test --features gc-stress --target-dir target/gc-stress
 
       - name: Collect binaries
         run: |
           mkdir -p harness-bin
-          cp target/${{ matrix.mode }}/coil target/${{ matrix.mode }}/coil-test harness-bin/
-          if [ "${{ matrix.mode }}" = release ]; then
+          if [ "${{ matrix.mode }}" = gc-stress ]; then
             mkdir -p harness-bin/gc-stress
             cp target/gc-stress/release/coil-test harness-bin/gc-stress/
+          else
+            cp target/${{ matrix.mode }}/coil target/${{ matrix.mode }}/coil-test harness-bin/
           fi
 
       - uses: actions/upload-artifact@v4
@@ -380,14 +400,35 @@ jobs:
           path: harness-bin
           retention-days: 1
 
+  harness-build-release:
+    name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        mode: [release]
+    steps: *harness-build-steps
+
+  harness-build-gc-stress:
+    name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        mode: [gc-stress]
+    steps: *harness-build-steps
+
 
   # The `.coil` corpora under each compiler / VM setting and build mode, one
   # cell each so debug and release run side by side.
   # `scripts/test_corpora.py` runs each `tests/<corpus>` as its own process,
-  # in parallel.
-  harness:
+  # in parallel. A GC-stress cell is named `(release, …)` and runs the
+  # `gc-stress` build.
+  harness-debug:
     name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
-    needs: harness-build
+    needs: harness-build-debug
     runs-on: ${{ matrix.os }}
     # The last resort for a hang: `coil test --wall-timeout` (600 s; 1200 s
     # in the GC-stress cells, see below) ends a run whose case never
@@ -400,43 +441,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        mode: [debug, release]
-        variant: [default, O0, leak-smoke, gc-stress, native]
-        # GC stress runs in release only. The debug cells took over 30
-        # minutes even split in three and kept timing out on a stall
-        # (#2131), so PRs ignored them; restore them once that is fixed.
-        # Native code runs in release only: the debug cell would test the
-        # same Cranelift output at a fraction of the speed.
-        exclude:
-          - { mode: debug, variant: gc-stress }
-          - { mode: debug, variant: native }
+        mode: [debug]
+        variant: [default, O0, leak-smoke]
     env: &harness-env
       # A worker abort (coil-lang#804) prints where it happened.
       RUST_BACKTRACE: "1"
       FLAGS: --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
     steps: &harness-steps
       - uses: actions/checkout@v4
-
-      # A PR pairs with the coil-stdlib branch of the same name when one
-      # exists (a feature branch that changes both); otherwise the default.
-      - name: Pick the coil-stdlib branch
-        id: stdlib
-        shell: bash
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          ref=""
-          if [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads \
-              https://github.com/ardax-corp/coil-stdlib "$HEAD_REF" >/dev/null; then
-            ref="$HEAD_REF"
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ardax-corp/coil-stdlib
-          path: .deps/coil-stdlib
-          ref: ${{ steps.stdlib.outputs.ref }}
+      - *pick-stdlib
+      - *checkout-stdlib
 
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
@@ -444,29 +458,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libffi-dev
 
-      - name: Install system deps (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install libffi
+      - *deps-macos
 
       - uses: actions/download-artifact@v4
         with:
-          name: harness-bin-${{ matrix.os }}-${{ matrix.mode }}
+          name: harness-bin-${{ matrix.os }}-${{ matrix.variant == 'gc-stress' && 'gc-stress' || matrix.mode }}
           path: harness-bin
 
       - name: Language harness (${{ matrix.variant }}, ${{ matrix.mode }})
         run: |
-          chmod +x harness-bin/coil harness-bin/coil-test
-          if [ -f harness-bin/gc-stress/coil-test ]; then chmod +x harness-bin/gc-stress/coil-test; fi
+          find harness-bin -type f -exec chmod +x {} +
           run="python3 scripts/test_corpora.py --bin harness-bin"
           case "${{ matrix.variant }}" in
             default) $run -- $FLAGS ;;
             # Optimizations hide codegen bugs (LICM materializes invariants,
             # inlining drops CALL targets); run the unoptimized pipeline too.
             O0) $run -- -O 0 $FLAGS ;;
-            # Every corpus again with native code where the backend compiles
-            # a body (`docs/internals/native.md`): it must pass as the VM does.
-            native) $run -- --engine native $FLAGS ;;
             leak-smoke)
               # Each corpus process gets 128 MiB of address space above the
               # harness's own code, and one job: every extra thread reserves
@@ -487,6 +494,9 @@ jobs:
             gc-stress)
               $run --harness harness-bin/gc-stress/coil-test -- --wall-timeout 1200 $FLAGS
               $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
+            # Every corpus again with native code where the backend compiles
+            # a body (`docs/internals/native.md`): it must pass as the VM does.
+            native) $run -- --engine native $FLAGS ;;
           esac
 
       # The examples in the builtin doc stubs (compiler/src/builtin_docs/)
@@ -509,6 +519,39 @@ jobs:
           path: target/corpora
           retention-days: 7
 
+  harness-release:
+    name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
+    needs: harness-build-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        mode: [release]
+        # Native code runs in release only: a debug cell would test the
+        # same Cranelift output at a fraction of the speed.
+        variant: [default, O0, leak-smoke, native]
+    env: *harness-env
+    steps: *harness-steps
+
+  # GC stress runs in release only. The debug cells took over 30 minutes
+  # even split in three and kept timing out on a stall (#2131), so PRs
+  # ignored them; restore them once that is fixed.
+  harness-gc-stress:
+    name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
+    needs: harness-build-gc-stress
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        mode: [release]
+        variant: [gc-stress]
+    env: *harness-env
+    steps: *harness-steps
+
 
   # coil for wasm32-wasip1, the build the website playground runs in the
   # browser: clippy for that target, then every corpus under Node's WASI.
@@ -519,27 +562,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
-      # A PR pairs with the coil-stdlib branch of the same name when one
-      # exists (a feature branch that changes both); otherwise the default.
-      - name: Pick the coil-stdlib branch
-        id: stdlib
-        shell: bash
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          ref=""
-          if [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads \
-              https://github.com/ardax-corp/coil-stdlib "$HEAD_REF" >/dev/null; then
-            ref="$HEAD_REF"
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ardax-corp/coil-stdlib
-          path: .deps/coil-stdlib
-          ref: ${{ steps.stdlib.outputs.ref }}
+      - *pick-stdlib
+      - *checkout-stdlib
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -589,14 +613,259 @@ jobs:
           retention-days: 7
 
 
-  harness-build-macos:
-    name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
+  # Every Linux job green. Stage 2 waits on this one job instead of listing
+  # all of stage 1 in each `needs:`.
+  linux-ok:
+    name: linux ok
+    if: always()
+    needs:
+      - clippy
+      - fmt
+      - test
+      - test-corpus
+      - test-release
+      - harness-build-debug
+      - harness-build-release
+      - harness-build-gc-stress
+      - harness-debug
+      - harness-release
+      - harness-gc-stress
+      - wasm
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every Linux job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
+          bad=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')
+          if [ -n "$bad" ]; then
+            echo "::error::Linux jobs not green: $bad"
+            exit 1
+          fi
+
+
+  # ──────────────────────── stage 2: Windows and macOS ────────────────────────
+  #
+  # Each job needs `linux-ok` (it is skipped when Linux fails) and, on a pull
+  # request, runs only once the PR is out of draft.
+
+  # `cfg(windows)` host code (machine io / fs / reactor / threads) is only
+  # linted here.
+  clippy-windows-gnu:
+    name: clippy (windows-gnu)
+    needs: linux-ok
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - &msys2
+        name: Install system deps (Windows)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-pkgconf
+
+      - &msys2-pkgconfig
+        name: Configure pkg-config (Windows)
+        shell: msys2 {0}
+        run: |
+          echo "PKG_CONFIG=$MINGW_PREFIX/bin/pkgconf.exe" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$MINGW_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
+          pkgconf --exists libffi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-windows-gnu-clippy
+
+      - name: Clippy
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          cargo clippy --workspace --lib --tests --bins -- -D warnings
+
+
+  # MinGW host matches release-binaries (COI-100/102): MSVC cannot link the
+  # MSYS2 libffi package. Keep this on PRs so Unix-only host APIs fail
+  # here instead of only on the main-only zip cell.
+  #
+  # Windows is split three ways (the workspace suite, the two corpus-wide
+  # tests, the `.coil` harness), each with its own runner and time limit:
+  # in one job they took 37 minutes, most of it the suite and the harness
+  # one after the other. All three restore the `test` job's cargo cache;
+  # only `test` saves it.
+  test-windows-gnu:
+    name: test (windows-gnu, default)
+    needs: linux-ok
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - *pick-stdlib
+      - *checkout-stdlib
+      - *msys2
+      - *msys2-pkgconfig
+
+      - &rust-windows-gnu
+        name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+
+      - &verify-host-triple
+        name: Verify host triple
+        shell: bash
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          echo "rustc host=$host"
+          if [[ "$host" != "x86_64-pc-windows-gnu" ]]; then
+            echo "::error::runner host triple '$host' is not x86_64-pc-windows-gnu"
+            exit 1
+          fi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-windows-gnu-default
+
+      - &build-windows-gnu
+        name: Build all CLI binaries
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          rustc -vV
+          command -v make
+          command -v cmp
+          cargo build
+
+      - name: Workspace tests (default)
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          # shellcheck disable=SC2086 # CORPUS_TESTS_SKIP is a word list
+          cargo test --workspace --lib --tests --bins -- $CORPUS_TESTS_SKIP
+
+      - name: Showcase project tests
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          BIN=./target/debug/coil.exe bash ./examples/projects/run-tests.sh
+
+  test-corpus-windows-gnu:
+    name: test corpus (windows-gnu)
+    needs: linux-ok
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - *pick-stdlib
+      - *checkout-stdlib
+      - *msys2
+      - *msys2-pkgconfig
+      - *rust-windows-gnu
+      - *verify-host-triple
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-windows-gnu-default
+          save-if: false
+
+      - name: HIR and coil fmt round trip over the corpus
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          cargo test -p compiler --test hir_corpus
+          cargo test -p parser --test fmt_round_trip
+
+  harness-windows-gnu:
+    name: harness default (debug, windows-gnu)
+    needs: linux-ok
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - *pick-stdlib
+      - *checkout-stdlib
+      - *msys2
+      - *msys2-pkgconfig
+      - *rust-windows-gnu
+      - *verify-host-triple
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-windows-gnu-default
+          save-if: false
+
+      - name: Build coil and coil-test
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          cargo build --bin coil --bin coil-test
+
+      - name: Language harness (`coil test`)
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          ./target/debug/coil.exe test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+
+
+  test-macos:
+    name: test (${{ matrix.os }})
+    needs: linux-ok
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest]
-        mode: [debug, release]
+    steps: *test-steps
+
+  harness-build-macos:
+    name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
+    needs: linux-ok
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      # macOS runners are capped: with `test` this holds three at a time.
+      max-parallel: 2
+      matrix:
+        os: [macos-latest]
+        mode: [debug, release, gc-stress]
     steps: *harness-build-steps
 
   # macOS (aarch64): stack scanning and the frame maps are per target, the
@@ -617,104 +886,37 @@ jobs:
     env: *harness-env
     steps: *harness-steps
 
-  # MinGW host matches release-binaries (COI-100/102): MSVC cannot link the
-  # MSYS2 libffi package. Keep this on PRs so Unix-only host APIs fail
-  # here instead of only on the main-only zip cell.
-  test-windows-gnu:
-    name: test (windows-gnu, default)
-    runs-on: windows-latest
+
+  # The one check for branch protection to require. Green when Linux is
+  # green and either every Windows job is green or, on a draft PR, they were
+  # skipped. macOS is left out (see the top of this file).
+  ci-ok:
+    name: ci ok
+    if: always()
+    needs:
+      - linux-ok
+      - clippy-windows-gnu
+      - test-windows-gnu
+      - test-corpus-windows-gnu
+      - harness-windows-gnu
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-
-      # A PR pairs with the coil-stdlib branch of the same name when one
-      # exists (a feature branch that changes both); otherwise the default.
-      - name: Pick the coil-stdlib branch
-        id: stdlib
-        shell: bash
+      - name: Linux green, Windows green or skipped on a draft
         env:
-          HEAD_REF: ${{ github.head_ref }}
+          NEEDS: ${{ toJSON(needs) }}
+          DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
         run: |
-          ref=""
-          if [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads \
-              https://github.com/ardax-corp/coil-stdlib "$HEAD_REF" >/dev/null; then
-            ref="$HEAD_REF"
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ardax-corp/coil-stdlib
-          path: .deps/coil-stdlib
-          ref: ${{ steps.stdlib.outputs.ref }}
-
-      - name: Install system deps (Windows)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
-
-      - name: Configure pkg-config (Windows)
-        shell: msys2 {0}
-        run: |
-          echo "PKG_CONFIG=$MINGW_PREFIX/bin/pkgconf.exe" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$MINGW_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
-          pkgconf --exists libffi
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable-x86_64-pc-windows-gnu
-
-      - name: Verify host triple
-        shell: bash
-        run: |
-          host="$(rustc -vV | sed -n 's/^host: //p')"
-          echo "rustc host=$host"
-          if [[ "$host" != "x86_64-pc-windows-gnu" ]]; then
-            echo "::error::runner host triple '$host' is not x86_64-pc-windows-gnu"
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
+          if [ "$(echo "$NEEDS" | jq -r '."linux-ok".result')" != success ]; then
+            echo "::error::Linux jobs not green"
             exit 1
           fi
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-windows-gnu-default
-
-      - name: Build all CLI binaries
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          rustc -vV
-          command -v make
-          command -v cmp
-          cargo build
-
-      - name: Workspace tests (default)
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          cargo test --workspace --lib --tests --bins
-
-      - name: Language harness (`coil test`)
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          ./target/debug/coil.exe test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
-      - name: Showcase project tests
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          BIN=./target/debug/coil.exe bash ./examples/projects/run-tests.sh
-
+          # A draft PR skips Windows; anything else must run it green.
+          if [ "$DRAFT" = true ]; then ok='["success","skipped"]'; else ok='["success"]'; fi
+          bad=$(echo "$NEEDS" | jq -r --argjson ok "$ok" \
+            '[to_entries[] | select(.value.result as $r | $ok | index($r) | not) | .key] | join(", ")')
+          if [ -n "$bad" ]; then
+            echo "::error::not green: $bad"
+            exit 1
+          fi
