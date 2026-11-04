@@ -952,7 +952,9 @@ fn vector_loops_and_byte_scans_run_from_native_code() {
     for f in ["sum", "dot", "scale", "find", "copy"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
-    assert!(vector_ops(&stats) >= 4, "stats: {stats}");
+    // `scale` (a store loop) and `find` (a scan, run twice) go through the
+    // VM's lane code; the reduces compile to native loops.
+    assert!(vector_ops(&stats) >= 3, "stats: {stats}");
 }
 
 #[test]
@@ -986,7 +988,7 @@ fn an_archive_carries_generators_and_vector_loops() {
     assert_eq!(program_stderr(&jit), program_stderr(&vm));
     assert_eq!(jit.status.code(), vm.status.code());
     let stats = String::from_utf8_lossy(&jit.stderr);
-    assert!(stats.contains("calls ran natively") && vector_ops(&stats) >= 2, "stats: {stats}");
+    assert!(stats.contains("calls ran natively") && vector_ops(&stats) >= 1, "stats: {stats}");
 }
 
 #[test]
@@ -1002,4 +1004,39 @@ fn region_blocks_run_from_native_code() {
     );
     let stats = same_as_vm("native_region", &src);
     assert!(compiled(&stats, "rounds"), "stats: {stats}");
+}
+
+#[test]
+fn reduce_loops_compile_to_native_loops() {
+    // Counted reduces (a sum over an index expression as spectral_norm's,
+    // a float dot, an int max, a xor, a NaN-aware float max) run as native
+    // loops: no vector op goes through the VM's lane code. Results match
+    // the VM's left-to-right folds bit for bit.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn row(Vec<float> v, int i) -> float {{ let s = 0.0; let j = 0; while j < v.len() {{ let ij = i + j; s = s + 1.0 / (((ij * (ij + 1)) / 2 + i + 1) as float) * v[j]; j = j + 1; }} return s; }}\n\
+         #[inline(never)]\nfn dot(Vec<float> a, Vec<float> b) -> float {{ let s = 0.0; let i = 0; while i < a.len() {{ s = s + a[i] * b[i]; i = i + 1; }} return s; }}\n\
+         #[inline(never)]\nfn vmax(Vec<int> xs) -> int {{ let m = xs[0]; let i = 1; while i < xs.len() {{ if xs[i] > m {{ m = xs[i]; }} i = i + 1; }} return m; }}\n\
+         #[inline(never)]\nfn xor(Vec<int> xs) -> int {{ let h = 0; let i = 0; while i < xs.len() {{ h = h ^ (xs[i] * 3); i = i + 1; }} return h; }}\n\
+         #[inline(never)]\nfn fmax(Vec<float> xs) -> float {{ let m = xs[0]; let i = 1; while i < xs.len() {{ if xs[i] > m {{ m = xs[i]; }} i = i + 1; }} return m; }}\n\
+         fn main() {{\n  let v: Vec<float> = Vec::new(); let xs: Vec<int> = Vec::new(); let j = 0;\n  while j < 203 {{ v.push((j % 7) as float * 0.1 + 0.3); xs.push(j * 7919 % 1009 - 500); j = j + 1; }}\n  let w: Vec<float> = Vec::new(); j = 0;\n  while j < 37 {{ if j == 11 {{ w.push(0.0 / 0.0); }} else {{ w.push((j * 13 % 17) as float); }} j = j + 1; }}\n  let _ = println(format(\"%f %f %i %i %f\", row(v, 3), dot(v, v), vmax(xs), xor(xs), fmax(w)));\n}}\n"
+    );
+    let stats = same_as_vm("native_reduce_loops", &src);
+    for f in ["row", "dot", "vmax", "xor", "fmax"] {
+        assert!(compiled(&stats, f), "{f}: {stats}");
+    }
+    assert_eq!(vector_ops(&stats), 0, "stats: {stats}");
+}
+
+#[test]
+fn a_trap_in_a_native_reduce_reports_the_vm_lane_trap() {
+    // A lane's term divides by zero after an earlier partial sum would
+    // overflow: the VM evaluates a block's terms before it folds, so the
+    // panic is the division's. Native code re-runs the op on the VM's
+    // lanes when anything traps.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs, Vec<int> ds) -> int {{ let s = 0; let i = 0; while i < xs.len() {{ s = s + xs[i] / ds[i]; i = i + 1; }} return s; }}\n\
+         fn main() {{\n  let xs: Vec<int> = Vec::new(); let ds: Vec<int> = Vec::new(); let j = 0;\n  while j < 16 {{ xs.push(9223372036854775807); if j == 5 {{ ds.push(0); }} else {{ ds.push(1); }} j = j + 1; }}\n  let _ = println(\"start\");\n  let _ = println(format(\"%i\", sum(xs, ds)));\n}}\n"
+    );
+    let stats = same_as_vm("native_reduce_trap", &src);
+    assert!(compiled(&stats, "sum"), "stats: {stats}");
 }
