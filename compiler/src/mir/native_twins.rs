@@ -23,10 +23,6 @@ pub const NATIVE_TWINS: &[(&str, &str)] = &[
     (common::STRING_COMPARE_NATIVE, "string_compare"),
 ];
 
-/// Twins with no host native of their own: helpers the native expansions
-/// call ([`super::native_expand`]).
-pub const TWIN_HELPERS: &[&str] = &[super::native_expand::INSERT_OOB_TWIN];
-
 /// The compiler's function name of twin `twin`.
 pub fn twin_fn_name(twin: &str) -> String {
     format!("{}::{twin}", crate::macros::TWINS_MODULE)
@@ -35,7 +31,7 @@ pub fn twin_fn_name(twin: &str) -> String {
 /// Every twin's function name (the compile keeps them live while a
 /// native capture is open: no bytecode calls them).
 pub fn twin_fn_names() -> impl Iterator<Item = String> {
-    NATIVE_TWINS.iter().map(|&(_, twin)| twin).chain(TWIN_HELPERS.iter().copied()).map(twin_fn_name)
+    NATIVE_TWINS.iter().map(|&(_, twin)| twin_fn_name(twin))
 }
 
 /// Host id → twin function name, for the natives above.
@@ -89,7 +85,7 @@ mod tests {
 
     #[test]
     fn every_twin_is_defined_in_the_twins_module() {
-        for twin in NATIVE_TWINS.iter().map(|&(_, twin)| twin).chain(TWIN_HELPERS.iter().copied()) {
+        for &(_, twin) in NATIVE_TWINS {
             assert!(
                 crate::macros::TWINS_SOURCE.contains(&format!("fn {twin}(")),
                 "`{twin}` is not a `fn` of prelude/twins.coil"

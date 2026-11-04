@@ -1,30 +1,24 @@
 //! Vec natives native code runs as MIR.
 //!
 //! The VM keeps `vec_insert` and `vec_remove` in the runtime. In a captured
-//! native body [`apply`] writes each `HostInvoke` of them out as the loop it stands for, over the MIR array ops native code
-//! already compiles (`ArrayLen`, `Index`, `StoreIndex`, `ArrayPush`), so a
-//! native build does not need them in `libcoil_rt`. The element moves are
+//! native body [`apply`] writes each `HostInvoke` of them out as the loop it
+//! stands for, over the MIR array ops native code already compiles
+//! (`ArrayLen`, `Index`, `StoreIndex`, `ArrayPush`). The element moves are
 //! word copies, so one expansion serves every element type: a word whose
 //! type the call does not say is moved as an `i64`, with no safepoint
 //! between its load and its store (a push roots the word it pushes).
 //!
 //! What stays a runtime call: `vec_from_array`, the copy primitive (it
 //! keeps the source's representation, a packed byte or float array stays
-//! packed, which the MIR array ops cannot ask for); `vec_pop`, the shrink primitive (`remove`
-//! rotates the element to the end and pops it, which also packs the
-//! `Option` in the call's layout), and the out-of-bounds message of
-//! `insert`, which the twin `native_twins::vec_insert_oob` formats so the
-//! panic reads as the VM's. A call whose operand or result types the
-//! expansion does not cover stays a `HostInvoke`.
-
-use std::collections::HashMap;
+//! packed, which the MIR array ops cannot ask for); `vec_pop`, the shrink
+//! primitive (`remove` rotates the element to the end and pops it, which
+//! also packs the `Option` in the call's layout); and `vec_insert` itself
+//! on the out-of-range path only, so its panic is the host native's, as on
+//! the VM (its message alone, no Coil frames). A call whose operand or
+//! result types the expansion does not cover stays a `HostInvoke`.
 
 use super::inst::{MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst};
 use super::{BlockId, MirBlock, MirFunc, MirInst, MirTy, Terminator, ValueId};
-use crate::il::Label;
-
-/// The twin that formats `Vec::insert`'s out-of-bounds message.
-pub const INSERT_OOB_TWIN: &str = "vec_insert_oob";
 
 #[derive(Clone, Copy)]
 enum VecNative {
@@ -53,21 +47,23 @@ impl Ids {
     }
 }
 
-/// Expand each `HostInvoke` of `vec_insert` / `vec_remove` in `func`. `insert_oob` is the entry of
-/// [`INSERT_OOB_TWIN`]; without it `vec_insert` stays a call.
-pub fn apply(func: &mut MirFunc, insert_oob: Option<Label>) {
+/// Expand each `HostInvoke` of `vec_insert` / `vec_remove` in `func`.
+pub fn apply(func: &mut MirFunc) {
     let ids = Ids::get();
+    // A call an expansion writes (out-of-range `insert`) defines a value
+    // past the body's own: it stays a call.
+    let own = func.types.len();
     let mut b = 0;
     while b < func.blocks.len() {
         let found = func.blocks[b].insts.iter().enumerate().find_map(|(k, inst)| match inst {
-            MirInst::HostInvoke { dest, native_id, layout, args } => {
+            MirInst::HostInvoke { dest, native_id, layout, args } if dest.index() < own => {
                 let which = ids.which(*native_id)?;
-                expandable(func, which, *dest, *layout, args, insert_oob).then_some((k, which))
+                expandable(func, which, *dest, *layout, args).then_some((k, which))
             }
             _ => None,
         });
         match found {
-            Some((k, which)) => expand(func, BlockId(b as u32), k, which, &ids, insert_oob),
+            Some((k, which)) => expand(func, BlockId(b as u32), k, which, &ids),
             None => b += 1,
         }
     }
@@ -75,14 +71,13 @@ pub fn apply(func: &mut MirFunc, insert_oob: Option<Label>) {
 
 /// Whether the call's operand and result types are ones the expansion
 /// writes code for.
-fn expandable(func: &MirFunc, which: VecNative, dest: ValueId, layout: u8, args: &[ValueId], insert_oob: Option<Label>) -> bool {
+fn expandable(func: &MirFunc, which: VecNative, dest: ValueId, layout: u8, args: &[ValueId]) -> bool {
     let arg = |i: usize| args.get(i).map(|v| func.ty(*v));
     let heap = |t: Option<MirTy>| t == Some(MirTy::HeapRef);
     let int = |t: Option<MirTy>| t == Some(MirTy::I64);
     match which {
         VecNative::Insert => {
-            insert_oob.is_some()
-                && args.len() == 3
+            args.len() == 3
                 && heap(arg(0))
                 && int(arg(1))
                 && arg(2).is_some_and(MirTy::is_specialized)
@@ -182,7 +177,7 @@ impl Ex<'_> {
 
 /// Split block `b` at its instruction `k` (the call) and write the call
 /// out between the two halves.
-fn expand(func: &mut MirFunc, b: BlockId, k: usize, which: VecNative, ids: &Ids, insert_oob: Option<Label>) {
+fn expand(func: &mut MirFunc, b: BlockId, k: usize, which: VecNative, ids: &Ids) {
     let block = &mut func.blocks[b.index()];
     let MirInst::HostInvoke { dest, layout, args, .. } = block.insts[k].clone() else {
         unreachable!("expand at a HostInvoke");
@@ -211,14 +206,14 @@ fn expand(func: &mut MirFunc, b: BlockId, k: usize, which: VecNative, ids: &Ids,
         }
     }
     match which {
-        VecNative::Insert => insert(&mut ex, b, rest, dest, &args, insert_oob.expect("checked by `expandable`")),
+        VecNative::Insert => insert(&mut ex, b, rest, dest, layout, &args, ids.insert),
         VecNative::Remove => remove(&mut ex, b, rest, dest, layout, &args, ids.pop),
     }
 }
 
-/// `v.insert(i, x)`: panic unless `0 <= i <= len`, push `x`, shift
-/// `v[i..len]` up one, store `x` at `i`.
-fn insert(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, args: &[ValueId], insert_oob: Label) {
+/// `v.insert(i, x)`: unless `0 <= i <= len` the runtime's `vec_insert`
+/// panics; else push `x`, shift `v[i..len]` up one, store `x` at `i`.
+fn insert(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, args: &[ValueId], native: u16) {
     let (v, i, x) = (args[0], args[1], args[2]);
     let elem = ex.f.ty(x);
     let check_hi = ex.block();
@@ -237,10 +232,9 @@ fn insert(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, args: &[ValueId
     let above = ex.cmp(check_hi, MirCmpOp::Gt, i, n);
     ex.br(check_hi, above, oob, grow);
 
-    let msg = ex.value(MirTy::HeapRef);
-    ex.push(oob, MirInst::Call { dest: msg, dest_hi: None, target: insert_oob, args: vec![i, n] });
-    let p = ex.value(MirTy::Bool);
-    ex.push(oob, MirInst::Panic { dest: p, msg });
+    // Out of range: the native panics, as the VM's call does.
+    let failed = ex.value(ex.f.ty(dest));
+    ex.push(oob, MirInst::HostInvoke { dest: failed, native_id: native, layout, args: args.to_vec() });
     ex.end(oob, Terminator::Unreachable);
 
     let grown = ex.value(MirTy::HeapRef);
@@ -324,12 +318,11 @@ fn remove(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
 }
 
 /// Expand the Vec natives in every captured body but the twins' own.
-pub fn apply_all<'a>(bodies: impl Iterator<Item = (&'a str, &'a mut MirFunc)>, entries: &HashMap<String, Label>) {
-    let insert_oob = entries.get(&super::native_twins::twin_fn_name(INSERT_OOB_TWIN)).copied();
+pub fn apply_all<'a>(bodies: impl Iterator<Item = (&'a str, &'a mut MirFunc)>) {
     let prefix = format!("{}::", crate::macros::TWINS_MODULE);
     for (name, func) in bodies {
         if !name.starts_with(&prefix) {
-            apply(func, insert_oob);
+            apply(func);
         }
     }
 }
