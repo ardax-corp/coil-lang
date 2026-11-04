@@ -292,6 +292,26 @@ level (`fiber_base`), the level the task parks back to, even when native
 code opened it from a deeper level (a VM call under native code, a
 generator body).
 
+### Coil twins of host natives
+
+Some host natives are plain Coil over primitives the runtime keeps anyway.
+The VM keeps them as natives; native code calls a Coil *twin* instead, so a
+native build does not need them in `libcoil_rt`. The twins live in the
+embedded module `native_twins` (`compiler/src/prelude/twins.coil`), which a
+compile builds, and keeps live, only while a native capture is open.
+`compiler/src/mir/native_twins.rs` holds the table (host native → twin);
+`take_native_capture` turns each captured `HostInvoke` of a listed native
+into a `Call` of its twin. A twin returns the word its native returns
+(VM and native code share those values: a string's hash keys a map either
+side), so only natives whose result is a plain word, not a host enum
+layout, are listed. A `HostInvoke` with neither a twin nor a direct host
+stays one, and the backend refuses it, so a gap shows in the inventory.
+
+| Native | Twin |
+|---|---|
+| `hash_string` | `native_twins::hash_string` (FNV-1a, 32 bits) |
+| `string_compare` | `native_twins::string_compare` |
+
 ### Function values and indirect calls
 
 `Alloc` of a function value (`Fn`, `PolyFn`, `PolyFnCapture`) builds the
@@ -427,9 +447,12 @@ site (`native_caller_location`).
 Each captured body (`compiler/src/mir/native_capture.rs`) first runs the
 MIR passes the dense tier runs (`mir::specialize::optimize_mir`, at the
 compile's `-O` level): SCCP, the loop passes, SROA, and the loop rewrites
-`copy_until`, `byte_scan`, `bulk_push` and `vec_loops`. Native code then
-gets the same bulk copies (host calls) and the same vector ops as the VM.
-Two exceptions: `promote_fields` does not run (its `PanicStore`s would need
+`byte_scan` and `vec_loops`. Native code then gets the same vector ops as
+the VM. The rewrites that end in a runtime kernel call (`copy_until` and
+`bulk_push`: `vec_extend_range` / `vec_fill`) run for the VM only
+(`OptimizeOptions::host_loop_calls` off): native code compiles those loops
+as written, so the kernels need not be in the runtime. Two more
+exceptions: `promote_fields` does not run (its `PanicStore`s would need
 the native unwinder to write promoted fields back), and generators, bodies
 with a cleanup pad, debugger and coverage builds keep their MIR as lowered.
 

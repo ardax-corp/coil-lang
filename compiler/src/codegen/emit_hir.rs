@@ -6132,7 +6132,7 @@ impl Compiler {
                 PreludeFn::Dot | PreludeFn::MatMul | PreludeFn::Cross | PreludeFn::Intersect | PreludeFn::Diff => {
                     Ok(HirBuiltin::LinAlg)
                 }
-                PreludeFn::Ord | PreludeFn::Char | PreludeFn::BlackBox => host(Some(kind.as_str())),
+                PreludeFn::BlackBox => host(Some(kind.as_str())),
                 // The HIR builder already wrote the key in place of the call.
                 PreludeFn::FnKey => Err("callee-builtin"),
             });

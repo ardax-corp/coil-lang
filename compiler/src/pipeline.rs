@@ -1034,6 +1034,13 @@ impl Pipeline {
         }
         self.record_module_dep(from, &core);
         self.enqueue_file(core);
+        // Native code calls the Coil twins of some host natives
+        // (`mir::native_twins`): a native compile builds them too.
+        let twins = crate::macros::twins_module_path();
+        if crate::mir::native_capture_active() && from != twins {
+            self.record_module_dep(from, &twins);
+            self.enqueue_file(twins);
+        }
     }
 
     /// Record that `from` `use`s/`mod`s `on` (compile `on` first).
@@ -1148,6 +1155,8 @@ impl Pipeline {
         // The embedded core prelude is `core` wherever the roots are.
         let ns = if file == crate::macros::core_module_path() {
             Some(crate::macros::CORE_MODULE.to_string())
+        } else if file == crate::macros::twins_module_path() {
+            Some(crate::macros::TWINS_MODULE.to_string())
         } else {
             namespace_of_in_roots(&self.roots, &self.project_root, &file)
         };

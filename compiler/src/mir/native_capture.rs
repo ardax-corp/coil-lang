@@ -43,19 +43,26 @@ pub fn native_capture_active() -> bool {
     NATIVE_CAPTURE.with(|c| c.borrow().is_some())
 }
 
-/// End the capture and return its bodies.
+/// End the capture and return its bodies, each call of a twinned host
+/// native now a call of its Coil twin ([`super::native_twins`]).
 pub fn take_native_capture() -> Vec<NativeBody> {
-    NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default()
+    let mut bodies = NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default();
+    let entries = bodies.iter().filter_map(|b| Some((b.name.clone(), b.entry?))).collect();
+    super::native_twins::apply(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)), &entries);
+    bodies
 }
 
 /// Record `bodies` when a capture is open, each after the MIR passes the
 /// dense tier runs ([`super::specialize::optimize_mir`]) at `opts`' level:
-/// native code gets the same loop rewrites (vector loops, byte scans, bulk
-/// copies). A generator, a body with a cleanup pad, a debugger's or a
+/// native code gets the same loop rewrites (vector loops, byte scans), but
+/// not the ones that end in a runtime kernel call (`host_loop_calls`:
+/// bulk copies and fills), which the VM keeps. A generator, a body with a cleanup pad, a debugger's or a
 /// coverage build's keep their MIR as lowered.
 pub fn capture_native_bodies<'a>(bodies: impl Iterator<Item = (&'a str, Option<Label>, &'a MirFunc)>, opts: &crate::il::opt::OptimizeOptions) {
     NATIVE_CAPTURE.with(|c| {
         if let Some(list) = c.borrow_mut().as_mut() {
+            // Loops copy and fill as written: no runtime kernel call.
+            let opts = &crate::il::opt::OptimizeOptions { host_loop_calls: false, ..opts.clone() };
             list.extend(bodies.map(|(name, entry, mir)| {
                 let mut mir = mir.clone();
                 if optimizable(&mir) {

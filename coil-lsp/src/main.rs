@@ -2341,8 +2341,6 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("io::net::udp", "send_to") => "Sends a datagram to an explicit UDP peer.".into(),
         ("io::net::udp", "recv_from") => "Receives a UDP datagram without waiting.".into(),
         ("io::net::udp", "local_port") => "Returns the local UDP port.".into(),
-        ("prelude", "ord") => "Returns the first UTF-8 code unit of a string.".into(),
-        ("prelude", "char") => "Builds a one-code-unit string from a byte.".into(),
         ("prelude::math", "dot") => "Computes the dot product of two numeric vectors.".into(),
         ("prelude::math", "matmul") => "Multiplies two compatible matrices.".into(),
         ("prelude::math", "cross") => "Computes the three-dimensional cross product.".into(),

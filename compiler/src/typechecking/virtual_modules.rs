@@ -110,10 +110,6 @@ pub enum PreludeFn {
     Intersect,
     /// Cells present in the left matrix and absent from the right → `byte` mask.
     Diff,
-    /// Construct a single UTF-8 code unit as `Result<string, string>`.
-    Char,
-    /// First code unit of a `string` as `Result<byte, string>`.
-    Ord,
     /// The identity, through the `black_box` host native the optimizer
     /// cannot see through.
     BlackBox,
@@ -131,8 +127,6 @@ impl PreludeFn {
             Self::Matrix => "matrix",
             Self::Intersect => "intersect",
             Self::Diff => "diff",
-            Self::Char => "char",
-            Self::Ord => "ord",
             Self::BlackBox => "black_box",
             Self::FnKey => "fn_key",
         }
@@ -146,8 +140,6 @@ impl PreludeFn {
             "matrix" => Some(Self::Matrix),
             "intersect" => Some(Self::Intersect),
             "diff" => Some(Self::Diff),
-            "char" => Some(Self::Char),
-            "ord" => Some(Self::Ord),
             "black_box" => Some(Self::BlackBox),
             "fn_key" => Some(Self::FnKey),
             _ => None,
@@ -164,6 +156,10 @@ pub const REMOVED_MATH_FNS: &[&str] = &[
 /// [`REMOVED_MATH_FNS`] are coil-stdlib's `math` module now.
 const REMOVED_MATH_HELP: &str =
     "the float functions moved from `prelude::math` to coil-stdlib's `math` module: write `use math::{sin, sqrt};` (any of `sin` … `tanh`)";
+
+/// `ord` / `char` left the prelude for coil-stdlib's `text` module (host
+/// natives 65 / 66 stay for older archives).
+pub const REMOVED_PRELUDE_TEXT_FNS: &[&str] = &["ord", "char"];
 
 /// `prelude::math::pow` was removed in favour of the `**` operator.
 const REMOVED_POW_HELP: &str =
@@ -680,12 +676,6 @@ impl VirtualModules {
                 BuiltinExport::TypeClass { name: "Iterator" },
                 BuiltinExport::TypeClass {
                     name: "IntoIterator",
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Ord,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Char,
                 },
                 BuiltinExport::Fn {
                     kind: PreludeFn::BlackBox,

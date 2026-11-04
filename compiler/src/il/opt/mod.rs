@@ -75,6 +75,12 @@ pub struct OptimizeOptions {
     /// raw stack IL (the fuse tier) is an internal error. The compiler sets
     /// this when codegen reported no errors; IL-only modules leave it off.
     pub require_mir: bool,
+    /// The MIR loop rewrites that end in a runtime kernel call
+    /// (`copy_until`, `bulk_push`: `vec_extend_range` / `vec_fill`). On
+    /// for the VM; the native capture turns it off, so native code
+    /// compiles the loop as written and needs no such kernel
+    /// (`mir::native_capture`).
+    pub host_loop_calls: bool,
 }
 
 // Default is `OptLevel::Standard.options()`.
