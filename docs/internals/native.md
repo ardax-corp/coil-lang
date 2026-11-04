@@ -321,8 +321,10 @@ the first yield, and the VM then runs the body from the start.
 While the fiber runs, the generator's handle is a pinned root
 (`gen_running`) and VM code under it runs one nesting level deeper, so it
 never switches tasks; a body that may run VM code therefore stays on the
-VM when a scheduler exists. Refused: `yield from` in the body, a body with
-`defer` (a close would have to unwind it), and two-word returns. A
+VM when a scheduler exists. `yield from h` in a native body is a loop
+of resume, done check and yield, the sends passed through (the delegation
+links of the VM's `yield from` are not set). Refused: a body with `defer`
+(a close would have to unwind it) and two-word returns. A
 generator collected while suspended drops its fiber unwound
 (`GenFiber::drop`).
 

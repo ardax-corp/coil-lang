@@ -887,9 +887,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                     // A generator body: it runs on a fiber of its own and a
                     // yield suspends it (`machine::native_gen`).
                     MirInst::Yield { dest, value, from, .. } => {
-                        if *from {
-                            return Err("yield from".into());
-                        }
+                        let _ = from;
                         if f.cleanup.is_some() {
                             return Err("generator with a defer".into());
                         }
@@ -1985,6 +1983,46 @@ impl<'a> Lower<'a> {
                 self.drop_views();
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
+            }
+            MirInst::Yield { dest, value, from: true, .. } => {
+                // `yield from h`: resume `h` (sending what this generator's
+                // resumer sent) and yield what it yields until it is done.
+                let t = MemFlagsData::trusted();
+                let (lp, more, exit) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.append_block_param(lp, types::I64);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.b.ins().jump(lp, &[zero.into()]);
+                self.b.switch_to_block(lp);
+                let send = self.b.block_params(lp)[0];
+                let h = self.get(f, *value);
+                let h = self.coerce(h, types::I64);
+                let has = self.b.ins().iconst(types::I64, 1);
+                let roots = self.push_roots(f);
+                let prev = self.push_call();
+                let call = self.b.ins().call(self.resume, &[self.ctx, h, send, has]);
+                self.pop_call(prev);
+                let w = self.b.inst_results(call)[0];
+                self.pop_roots(f, roots);
+                let flag = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
+                self.drop_views();
+                let h = self.get(f, *value);
+                let h = self.coerce(h, types::I64);
+                let call = self.b.ins().call(self.coro_done, &[self.ctx, h]);
+                let done = self.b.inst_results(call)[0];
+                self.b.ins().brif(done, exit, &[], more, &[]);
+                self.b.switch_to_block(more);
+                let roots = self.push_roots(f);
+                let prev = self.push_call();
+                let call = self.b.ins().call(self.gen_yield, &[self.ctx, w]);
+                self.pop_call(prev);
+                let sent = self.b.inst_results(call)[0];
+                self.pop_roots(f, roots);
+                self.drop_views();
+                self.b.ins().jump(lp, &[sent.into()]);
+                self.b.switch_to_block(exit);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set_word(f, *dest, zero);
             }
             MirInst::Yield { dest, value, .. } => {
                 // The fiber suspends here; the resumer forwards the frame's
