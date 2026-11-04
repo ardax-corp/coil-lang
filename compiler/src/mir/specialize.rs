@@ -531,7 +531,7 @@ pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions, prom
     }
     // A loop that pushes each byte until one stops it: a scan for the
     // stop (which `byte_scan` takes next) and one copy of the run.
-    if opts.mir_loop && crate::mir::copy_until(func) > 0 {
+    if opts.mir_loop && opts.host_loop_calls && crate::mir::copy_until(func) > 0 {
         check_after(func, "copy_until");
     }
     // Early-exit byte loops skip 64 no-op iterations at a time. Their
@@ -541,7 +541,7 @@ pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions, prom
         check_after(func, "byte_scan");
     }
     // Counted copy and fill loops run as one call.
-    if opts.mir_loop && crate::mir::bulk_push(func) > 0 {
+    if opts.mir_loop && opts.host_loop_calls && crate::mir::bulk_push(func) > 0 {
         check_after(func, "bulk_push");
     }
     // Counted map and reduce loops run 8 lanes at a time in one op.
