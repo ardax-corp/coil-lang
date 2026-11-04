@@ -15,13 +15,13 @@ use std::collections::HashMap;
 use common::DebugLoc;
 
 use compiler::native_mir::{
-    BlockId, Label, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFunc, MirGcKind, MirInst, MirTy,
-    MirUnaryOp, NativeBody, Terminator, ValueId,
+    BlockId, Label, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc,
+    MirGcKind, MirInst, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
 };
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 6;
+const FORMAT: u8 = 7;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for the bodies of `bodies` the backend compiles, keyed to
@@ -165,6 +165,17 @@ const I_KEEP_ALIVE: u8 = 31;
 const I_CODE_PTR: u8 = 32;
 const I_HOME_LOAD: u8 = 33;
 const I_HOME_STORE: u8 = 34;
+const I_RESUME: u8 = 35;
+const I_DONE: u8 = 36;
+const I_YIELD: u8 = 37;
+const I_FFI: u8 = 38;
+const I_BYTE_SCAN: u8 = 39;
+const I_VEC_LOOP: u8 = 40;
+
+const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
+/// Deepest lane / vector expression tree a reader takes (a corrupt section
+/// cannot recurse without bound).
+const MAX_TREE_DEPTH: u32 = 64;
 
 const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
@@ -439,7 +450,10 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                     w.u32(target.0);
                     w.u32(params);
                 }
-                _ => unreachable!("native section: allocation outside the native tier"),
+                MirAllocKind::Coro { target } => {
+                    w.u8(8);
+                    w.u32(target.0);
+                }
             }
             w.u32(elems.len() as u32);
             for e in elems {
@@ -555,8 +569,162 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u8(I_GC_BARRIER);
             w.v(*dest);
         }
+        MirInst::ResumeCoro { dest, handle, send } => {
+            w.u8(I_RESUME);
+            w.v(*dest);
+            w.v(*handle);
+            w.opt_v(*send);
+        }
+        MirInst::DoneCoro { dest, handle } => {
+            w.u8(I_DONE);
+            w.v(*dest);
+            w.v(*handle);
+        }
+        MirInst::Yield { dest, value, from, receive } => {
+            w.u8(I_YIELD);
+            w.v(*dest);
+            w.v(*value);
+            w.u8(u8::from(*from));
+            w.u8(u8::from(*receive));
+        }
+        MirInst::Ffi { dest, op, operand, args } => {
+            w.u8(I_FFI);
+            w.u8(idx(&FFI_OPS, op));
+            w.u32(*operand);
+            w.v(*dest);
+            w.vs(args);
+        }
+        MirInst::ByteScan { dest, from, bound, inclusive, backward, streams, scalars, expr } => {
+            w.u8(I_BYTE_SCAN);
+            w.v(*dest);
+            w.v(*from);
+            w.v(*bound);
+            w.u8(u8::from(*inclusive) | u8::from(*backward) << 1);
+            w.u32(streams.len() as u32);
+            for &(a, i) in streams {
+                w.v(a);
+                w.v(i);
+            }
+            w.vs(scalars);
+            lane_expr(w, expr);
+        }
+        MirInst::VecLoop { dest, pos, from, to, kind } => {
+            w.u8(I_VEC_LOOP);
+            w.v(*dest);
+            w.opt_v(*pos);
+            w.v(*from);
+            w.v(*to);
+            match kind {
+                VecLoopKind::Reduce { init, ty, fold, term, stores } => {
+                    w.u8(0);
+                    w.v(*init);
+                    w.u8(*ty);
+                    w.u8(*fold);
+                    vec_expr(w, term);
+                    vec_stores(w, stores);
+                }
+                VecLoopKind::Store { stores } => {
+                    w.u8(1);
+                    vec_stores(w, stores);
+                }
+                VecLoopKind::Push { out, ty, value } => {
+                    w.u8(2);
+                    w.v(*out);
+                    w.u8(*ty);
+                    vec_expr(w, value);
+                }
+            }
+        }
         // `plan` admits nothing else, and `func` drops `Deopt`.
         _ => unreachable!("native section: instruction outside the numeric tier"),
+    }
+}
+
+fn lane_val(w: &mut Writer, v: LaneVal) {
+    match v {
+        LaneVal::Stream(s) => {
+            w.u8(0);
+            w.u8(s);
+        }
+        LaneVal::Scalar(k) => {
+            w.u8(1);
+            w.u8(k);
+        }
+    }
+}
+
+fn lane_expr(w: &mut Writer, e: &LaneExpr) {
+    match e {
+        LaneExpr::Const(b) => {
+            w.u8(0);
+            w.u8(u8::from(*b));
+        }
+        LaneExpr::Cmp { op, lhs, rhs } => {
+            w.u8(1);
+            w.u8(idx(&CMP_OPS, op));
+            lane_val(w, *lhs);
+            lane_val(w, *rhs);
+        }
+        LaneExpr::And(a, b) | LaneExpr::Or(a, b) => {
+            w.u8(if matches!(e, LaneExpr::And(..)) { 2 } else { 3 });
+            lane_expr(w, a);
+            lane_expr(w, b);
+        }
+        LaneExpr::Not(a) => {
+            w.u8(4);
+            lane_expr(w, a);
+        }
+    }
+}
+
+fn vec_expr(w: &mut Writer, e: &VecExpr) {
+    match e {
+        VecExpr::Splat { v, ty } => {
+            w.u8(0);
+            w.v(*v);
+            w.u8(*ty);
+        }
+        VecExpr::Index => w.u8(1),
+        VecExpr::Load { array, off, ty } => {
+            w.u8(2);
+            w.v(*array);
+            w.v(*off);
+            w.u8(*ty);
+        }
+        VecExpr::Bin { kind, lhs, rhs } => {
+            w.u8(3);
+            w.u8(*kind);
+            vec_expr(w, lhs);
+            vec_expr(w, rhs);
+        }
+        VecExpr::Unary { kind, src } => {
+            w.u8(4);
+            w.u8(*kind);
+            vec_expr(w, src);
+        }
+        VecExpr::Select { mask, then, els } => {
+            w.u8(5);
+            vec_expr(w, mask);
+            vec_expr(w, then);
+            vec_expr(w, els);
+        }
+        VecExpr::Fma { ty, a, b, c } => {
+            w.u8(6);
+            w.u8(*ty);
+            vec_expr(w, a);
+            vec_expr(w, b);
+            vec_expr(w, c);
+        }
+    }
+}
+
+fn vec_stores(w: &mut Writer, stores: &[(ValueId, ValueId, u8, VecExpr)]) {
+    w.u32(stores.len() as u32);
+    for (array, off, ty, value) in stores {
+        w.v(*array);
+        w.v(*off);
+        w.u8(*ty);
+        vec_expr(w, value);
     }
 }
 
@@ -746,6 +914,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
                 7 => MirAllocKind::DropEnum { tag: r.u32()?, type_id: r.u32()? },
                 5 => MirAllocKind::PolyFn { target: Label(r.u32()?) },
                 6 => MirAllocKind::PolyFnCapture { target: Label(r.u32()?), params: r.u32()? },
+                8 => MirAllocKind::Coro { target: Label(r.u32()?) },
                 k => return Err(format!("native MIR: bad allocation kind {k}")),
             };
             let n = r.len()?;
@@ -785,8 +954,85 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let field = Some(r.u32()?).filter(|&f| f != u32::MAX);
             MirInst::Cow { dest, src, unique, field }
         }
+        I_RESUME => MirInst::ResumeCoro { dest: r.v()?, handle: r.v()?, send: r.opt_v()? },
+        I_DONE => MirInst::DoneCoro { dest: r.v()?, handle: r.v()? },
+        I_YIELD => MirInst::Yield { dest: r.v()?, value: r.v()?, from: r.u8()? != 0, receive: r.u8()? != 0 },
+        I_FFI => {
+            let (op, operand) = (r.pick(&FFI_OPS, "FFI op")?, r.u32()?);
+            MirInst::Ffi { op, operand, dest: r.v()?, args: r.vs()? }
+        }
+        I_BYTE_SCAN => {
+            let (dest, from, bound, flags) = (r.v()?, r.v()?, r.v()?, r.u8()?);
+            let n = r.len()?;
+            let streams = (0..n).map(|_| Ok((r.v()?, r.v()?))).collect::<Result<Vec<_>, String>>()?;
+            let scalars = r.vs()?;
+            let expr = read_lane_expr(r, 0)?;
+            MirInst::ByteScan { dest, from, bound, inclusive: flags & 1 != 0, backward: flags & 2 != 0, streams, scalars, expr }
+        }
+        I_VEC_LOOP => {
+            let (dest, pos, from, to) = (r.v()?, r.opt_v()?, r.v()?, r.v()?);
+            let kind = match r.u8()? {
+                0 => {
+                    let (init, ty, fold) = (r.v()?, r.u8()?, r.u8()?);
+                    let term = read_vec_expr(r, 0)?;
+                    VecLoopKind::Reduce { init, ty, fold, term, stores: read_vec_stores(r)? }
+                }
+                1 => VecLoopKind::Store { stores: read_vec_stores(r)? },
+                2 => {
+                    let (out, ty) = (r.v()?, r.u8()?);
+                    VecLoopKind::Push { out, ty, value: read_vec_expr(r, 0)? }
+                }
+                k => return Err(format!("native MIR: bad vector loop {k}")),
+            };
+            MirInst::VecLoop { dest, pos, from, to, kind }
+        }
         t => return Err(format!("native MIR: bad instruction {t}")),
     })
+}
+
+fn read_lane_val(r: &mut Reader) -> Result<LaneVal, String> {
+    Ok(match r.u8()? {
+        0 => LaneVal::Stream(r.u8()?),
+        1 => LaneVal::Scalar(r.u8()?),
+        t => return Err(format!("native MIR: bad lane value {t}")),
+    })
+}
+
+fn read_lane_expr(r: &mut Reader, depth: u32) -> Result<LaneExpr, String> {
+    if depth > MAX_TREE_DEPTH {
+        return Err("native MIR: lane expression too deep".into());
+    }
+    let sub = |r: &mut Reader| read_lane_expr(r, depth + 1).map(Box::new);
+    Ok(match r.u8()? {
+        0 => LaneExpr::Const(r.u8()? != 0),
+        1 => LaneExpr::Cmp { op: r.pick(&CMP_OPS, "compare")?, lhs: read_lane_val(r)?, rhs: read_lane_val(r)? },
+        2 => LaneExpr::And(sub(r)?, sub(r)?),
+        3 => LaneExpr::Or(sub(r)?, sub(r)?),
+        4 => LaneExpr::Not(sub(r)?),
+        t => return Err(format!("native MIR: bad lane expression {t}")),
+    })
+}
+
+fn read_vec_expr(r: &mut Reader, depth: u32) -> Result<VecExpr, String> {
+    if depth > MAX_TREE_DEPTH {
+        return Err("native MIR: vector expression too deep".into());
+    }
+    let sub = |r: &mut Reader| read_vec_expr(r, depth + 1).map(Box::new);
+    Ok(match r.u8()? {
+        0 => VecExpr::Splat { v: r.v()?, ty: r.u8()? },
+        1 => VecExpr::Index,
+        2 => VecExpr::Load { array: r.v()?, off: r.v()?, ty: r.u8()? },
+        3 => VecExpr::Bin { kind: r.u8()?, lhs: sub(r)?, rhs: sub(r)? },
+        4 => VecExpr::Unary { kind: r.u8()?, src: sub(r)? },
+        5 => VecExpr::Select { mask: sub(r)?, then: sub(r)?, els: sub(r)? },
+        6 => VecExpr::Fma { ty: r.u8()?, a: sub(r)?, b: sub(r)?, c: sub(r)? },
+        t => return Err(format!("native MIR: bad vector expression {t}")),
+    })
+}
+
+fn read_vec_stores(r: &mut Reader) -> Result<Vec<(ValueId, ValueId, u8, VecExpr)>, String> {
+    let n = r.len()?;
+    (0..n).map(|_| Ok((r.v()?, r.v()?, r.u8()?, read_vec_expr(r, 0)?))).collect()
 }
 
 #[cfg(test)]

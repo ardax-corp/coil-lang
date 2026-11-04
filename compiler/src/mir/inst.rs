@@ -311,6 +311,7 @@ impl LaneExpr {
         Self::not(self.clone()) == *other || Self::not(other.clone()) == *self
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn not(a: Self) -> Self {
         match a {
             Self::Const(b) => Self::Const(!b),
