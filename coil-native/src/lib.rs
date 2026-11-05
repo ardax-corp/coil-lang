@@ -37,8 +37,7 @@ use machine::native::{
 struct Roots {
     prev: cranelift_codegen::ir::Value,
     slot: cranelift_codegen::ir::StackSlot,
-    words: Vec<ValueId>,
-    /// Heap homes listed after `words`, written back with them.
+    /// Heap homes the record lists, written back from it.
     homes: Vec<u16>,
     /// `NativeCtx::gc_epoch` when it was linked.
     epoch: cranelift_codegen::ir::Value,
@@ -93,7 +92,8 @@ fn inline_shape(kind: MirAllocKind, n: usize, extra: u64) -> Option<machine::nat
 /// What [`aot`] produced: a relocatable object for the host target that
 /// defines the compiled bodies and the tables `machine::native::install_aot`
 /// reads (`coil_aot_entries`, `coil_aot_entry_count`, `coil_aot_sites`,
-/// `coil_aot_site_count`, `coil_aot_refused_count`, `coil_aot_layout`), importing the runtime helpers by name, and the
+/// `coil_aot_site_count`, `coil_aot_refused_count`, `coil_aot_layout`,
+/// `coil_aot_stack_maps`, `coil_aot_stack_map_count`), importing the runtime helpers by name, and the
 /// statically linked `extern` symbols' table `machine::install_static_symbols` reads
 /// (`coil_static_syms`, `coil_static_sym_count`).
 pub struct AotObject {
@@ -116,13 +116,14 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
         // Executables are position independent on most hosts.
         flags.set("is_pic", "true").map_err(|e| e.to_string())?;
+        flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
         let isa = cranelift_native::builder()
             .map_err(|e| e.to_string())?
             .finish(settings::Flags::new(flags))
             .map_err(|e| e.to_string())?;
         let builder = cranelift_object::ObjectBuilder::new(isa, "coil_aot", default_libcall_names()).map_err(|e| e.to_string())?;
         let mut module = cranelift_object::ObjectModule::new(builder);
-        let (ids, defined, sites) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
+        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
             Ok(done) => done,
             Err((i, why)) => {
                 excluded.insert(i, why);
@@ -164,6 +165,38 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         }
         let table_id = module.declare_data("coil_aot_entries", Linkage::Export, false, false).map_err(e)?;
         module.define_data(table_id, &table).map_err(e)?;
+        // The stack maps: `machine::native::AotStackMap` records, each
+        // followed by its offsets, the function address relocated.
+        let mut map_bytes = Vec::new();
+        let mut map_relocs = Vec::new();
+        let mut map_count = 0u64;
+        for (id, (size, fmaps)) in &maps {
+            map_relocs.push((map_bytes.len(), *id));
+            map_bytes.extend_from_slice(&0u64.to_le_bytes());
+            map_bytes.extend_from_slice(&size.to_le_bytes());
+            map_bytes.extend_from_slice(&(fmaps.len() as u32).to_le_bytes());
+            for (ra, offs) in fmaps {
+                map_bytes.extend_from_slice(&ra.to_le_bytes());
+                map_bytes.extend_from_slice(&(offs.len() as u32).to_le_bytes());
+                for o in offs {
+                    map_bytes.extend_from_slice(&o.to_le_bytes());
+                }
+            }
+            map_bytes.resize(map_bytes.len().next_multiple_of(8), 0);
+            map_count += 1;
+        }
+        if map_bytes.is_empty() {
+            map_bytes.resize(16, 0);
+        }
+        let mut map_table = cranelift_module::DataDescription::new();
+        map_table.define(map_bytes.into_boxed_slice());
+        map_table.set_align(8);
+        for (off, id) in map_relocs {
+            let f = module.declare_func_in_data(id, &mut map_table);
+            map_table.write_function_addr(off as u32, f);
+        }
+        let map_id = module.declare_data("coil_aot_stack_maps", Linkage::Export, false, false).map_err(e)?;
+        module.define_data(map_id, &map_table).map_err(e)?;
         let mut words = |name: &str, data: Vec<u8>| -> Result<(), String> {
             let mut d = cranelift_module::DataDescription::new();
             d.define(data.into_boxed_slice());
@@ -186,6 +219,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         words("coil_aot_site_count", site_count.to_le_bytes().to_vec())?;
         words("coil_aot_refused_count", (refused.len() as u64).to_le_bytes().to_vec())?;
         words("coil_aot_layout", machine::native::layout_fingerprint().to_le_bytes().to_vec())?;
+        words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
@@ -263,6 +297,8 @@ fn jit_once(
 
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
+    // The collector walks native frames by their frame pointers.
+    flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
     let isa = isa_builder
         .finish(settings::Flags::new(flags))
@@ -273,11 +309,14 @@ fn jit_once(
     }
     let mut module = JITModule::new(jb);
 
-    let (ids, defined, sites) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
+    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
         Ok(done) => done,
         Err((i, why)) => return Ok(Attempt::Without(i, why)),
     };
     module.finalize_definitions().map_err(|e| e.to_string())?;
+    for (id, (size, fmaps)) in maps {
+        machine::native::register_stack_maps(module.get_finalized_function(id) as u64, size, fmaps);
+    }
 
     let mut entries = Vec::new();
     let mut compiled = Vec::new();
@@ -345,9 +384,9 @@ fn vm_callable(b: &NativeBody, entry_pcs: &HashMap<String, u32>) -> Option<u32> 
 }
 
 
-/// What [`define_all`] made: the declared ids, the bodies defined, and
-/// the panic sites their code names.
-type Defined = (Ids, Vec<usize>, Vec<NativeSite>);
+/// What [`define_all`] made: the declared ids, the bodies defined, the
+/// panic sites their code names, and the stack maps of each function.
+type Defined = (Ids, Vec<usize>, Vec<NativeSite>, Vec<(FuncId, FuncMaps)>);
 
 /// Declare and define every body `plan` compiles (its implementation,
 /// cleanup pad and VM entry) in `module`. `Ok(Err((i, why)))` when body
@@ -360,11 +399,13 @@ fn define_all<M: Module>(
     plan: &Plan,
 ) -> Result<Result<Defined, (usize, String)>, String> {
     let ids = declare(module, bodies, &plan.compile)?;
+    define_trampolines(module, &ids.tramps)?;
     let fcfg = module.isa().frontend_config();
     let mut fbc = FunctionBuilderContext::new();
     let mut ctx = module.make_context();
     let mut defined = Vec::new();
     let mut sites = Vec::new();
+    let mut maps = Vec::new();
     for &i in &plan.compile {
         let body = &bodies[i];
         ctx.func.signature = impl_signature(&*module, &body.mir);
@@ -384,6 +425,7 @@ fn define_all<M: Module>(
         if let Err(e) = module.define_function(ids.imp[&i], &mut ctx) {
             return Ok(Err((i, format!("cranelift: {e:?}"))));
         }
+        maps.push((ids.imp[&i], stack_maps(&ctx)));
         module.clear_context(&mut ctx);
 
         if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
@@ -405,6 +447,7 @@ fn define_all<M: Module>(
             if let Err(e) = module.define_function(pad_id, &mut ctx) {
                 return Ok(Err((i, format!("cranelift pad: {e:?}"))));
             }
+            maps.push((pad_id, stack_maps(&ctx)));
             module.clear_context(&mut ctx);
         }
 
@@ -416,7 +459,20 @@ fn define_all<M: Module>(
         module.clear_context(&mut ctx);
         defined.push(i);
     }
-    Ok(Ok((ids, defined, sites)))
+    Ok(Ok((ids, defined, sites, maps)))
+}
+
+/// A compiled function's code size and stack maps: per call that holds
+/// heap words across it, the return address's offset in the function and
+/// the stack-pointer offsets of the slots that hold them.
+type FuncMaps = (u32, Vec<(u32, Vec<u32>)>);
+
+fn stack_maps(ctx: &cranelift_codegen::Context) -> FuncMaps {
+    let Some(code) = ctx.compiled_code() else {
+        return (0, Vec::new());
+    };
+    let maps = code.buffer.user_stack_maps().iter().map(|(ra, _, map)| (*ra, map.entries().map(|(_, off)| off).collect())).collect();
+    (code.code_info().total_size, maps)
 }
 
 /// [`plan`] with `excluded` bodies refused for the given reason.
@@ -641,6 +697,19 @@ fn scalar(t: MirTy) -> bool {
 }
 
 /// A heap object word (a pointer, or a niche `Option` / `Result` word).
+/// The `gc::root` handles `f` makes (the results of its `gc_root` host
+/// calls).
+fn root_handles(f: &MirFunc) -> Vec<ValueId> {
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::HostInvoke { dest, native_id, .. } if *native_id == common::GC_ROOT_ID => Some(*dest),
+            _ => None,
+        })
+        .collect()
+}
+
 fn heap_word(t: MirTy) -> bool {
     matches!(t, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes)
 }
@@ -1190,6 +1259,9 @@ fn inst_name(i: &MirInst) -> String {
 // Declarations
 
 struct Ids {
+    /// The trampolines to helpers that may collect, with the helper and
+    /// their signature ([`trampoline`]).
+    tramps: Vec<(FuncId, FuncId, Signature)>,
     /// Native-convention body: `(ctx, params..) -> ret`.
     imp: HashMap<usize, FuncId>,
     /// VM entry: `(ctx, *const u64) -> u64`.
@@ -1273,8 +1345,47 @@ fn entry_signature(module: &impl Module) -> Signature {
     sig
 }
 
+/// Declare the helper `symbol` and a local trampoline to it with the same
+/// signature: native code calls a helper that may collect through its
+/// trampoline, which records its frame pointer in the context so the
+/// collector can walk the native frames ([`define_trampolines`]).
+fn trampoline(module: &mut impl Module, symbol: &str, sig: &Signature, tramps: &mut Vec<(FuncId, FuncId, Signature)>) -> Result<FuncId, String> {
+    let e = |e: cranelift_module::ModuleError| e.to_string();
+    let helper = module.declare_function(symbol, Linkage::Import, sig).map_err(e)?;
+    let tramp = module.declare_function(&format!("{symbol}_t"), Linkage::Local, sig).map_err(e)?;
+    tramps.push((tramp, helper, sig.clone()));
+    Ok(tramp)
+}
+
+/// Define [`trampoline`]s: `ctx.native_fp = fp; return helper(args...)`.
+fn define_trampolines<M: Module>(module: &mut M, tramps: &[(FuncId, FuncId, Signature)]) -> Result<(), String> {
+    let fcfg = module.isa().frontend_config();
+    let mut fbc = FunctionBuilderContext::new();
+    let mut ctx = module.make_context();
+    for (tramp, helper, sig) in tramps {
+        ctx.func.signature = sig.clone();
+        let callee = module.declare_func_in_func(*helper, &mut ctx.func);
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let blk = b.create_block();
+        b.append_block_params_for_function_params(blk);
+        b.switch_to_block(blk);
+        let args = b.block_params(blk).to_vec();
+        let fp = b.ins().get_frame_pointer(types::I64);
+        b.ins().store(MemFlagsData::trusted(), fp, args[0], machine::native::NATIVE_CTX_NATIVE_FP);
+        let call = b.ins().call(callee, &args);
+        let rets = b.inst_results(call).to_vec();
+        b.ins().return_(&rets);
+        b.seal_all_blocks();
+        b.finalize(fcfg);
+        module.define_function(*tramp, &mut ctx).map_err(|e| format!("cranelift trampoline: {e:?}"))?;
+        module.clear_context(&mut ctx);
+    }
+    Ok(())
+}
+
 fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -> Result<Ids, String> {
     let e = |e: cranelift_module::ModuleError| e.to_string();
+    let mut tramps = Vec::new();
     let mut imp = HashMap::new();
     let mut entry = HashMap::new();
     let mut pad = HashMap::new();
@@ -1316,7 +1427,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
-    let free_early = module.declare_function("coil_native_free_early", Linkage::Import, &s3).map_err(e)?;
+    let free_early = trampoline(module, "coil_native_free_early", &s3, &mut tramps)?;
     let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
     let stringify = module.declare_function("coil_native_stringify", Linkage::Import, &s3).map_err(e)?;
     let eq = module.declare_function("coil_native_eq", Linkage::Import, &s3).map_err(e)?;
@@ -1327,26 +1438,27 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     s3v.params.extend((0..3).map(|_| AbiParam::new(types::I64)));
     let unwind = module.declare_function("coil_native_unwind", Linkage::Import, &s3v).map_err(e)?;
     let print = module.declare_function("coil_native_print", Linkage::Import, &s2).map_err(e)?;
-    let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
-    let ffi = module.declare_function("coil_native_ffi", Linkage::Import, &s5).map_err(e)?;
+    let host = trampoline(module, "coil_native_host", &s5, &mut tramps)?;
+    let ffi = trampoline(module, "coil_native_ffi", &s5, &mut tramps)?;
     let mut s9 = module.make_signature();
     s9.params.extend((0..9).map(|_| AbiParam::new(types::I64)));
     s9.returns.push(AbiParam::new(types::I64));
     let vector = module.declare_function("coil_native_vector", Linkage::Import, &s9).map_err(e)?;
-    let call_vm = module.declare_function("coil_native_call_vm", Linkage::Import, &s4).map_err(e)?;
-    let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
-    let resume = module.declare_function("coil_native_resume", Linkage::Import, &s4).map_err(e)?;
+    let call_vm = trampoline(module, "coil_native_call_vm", &s4, &mut tramps)?;
+    let call_value = trampoline(module, "coil_native_call_value", &s5, &mut tramps)?;
+    let resume = trampoline(module, "coil_native_resume", &s4, &mut tramps)?;
     let coro_done = module.declare_function("coil_native_coro_done", Linkage::Import, &s2).map_err(e)?;
-    let gen_yield = module.declare_function("coil_native_yield", Linkage::Import, &s2).map_err(e)?;
+    let gen_yield = trampoline(module, "coil_native_yield", &s2, &mut tramps)?;
     let mut s5v = module.make_signature();
     s5v.params.extend((0..5).map(|_| AbiParam::new(types::I64)));
     let defer = module.declare_function("coil_native_defer", Linkage::Import, &s5v).map_err(e)?;
     let claim = module.declare_function("coil_native_claim", Linkage::Import, &s3).map_err(e)?;
     let mut s1v2 = module.make_signature();
     s1v2.params.push(AbiParam::new(types::I64));
-    let collect = module.declare_function("coil_native_collect", Linkage::Import, &s1v2).map_err(e)?;
+    let collect = trampoline(module, "coil_native_collect", &s1v2, &mut tramps)?;
     let panic = module.declare_function("coil_native_panic", Linkage::Import, &s2).map_err(e)?;
     Ok(Ids {
+        tramps,
         imp,
         entry,
         pad,
@@ -1493,6 +1605,11 @@ struct Lower<'a> {
     /// Words of a non-heap type that hold an object for sure
     /// ([`pointer_words`]): rooted precisely, as heap words are.
     ptr_words: HashSet<ValueId>,
+    /// `gc::root` handles the body makes: kept alive until it returns
+    /// ([`Self::keep_roots`]), where other words die at their last use.
+    root_handles: Vec<ValueId>,
+    /// Where [`Self::keep_roots`] stores them (made on first use).
+    keep_slot: Option<cranelift_codegen::ir::StackSlot>,
     /// Low words of pairs calls return that may carry an object
     /// ([`MirFunc::heap_pair_calls`]): rooted ambiguously.
     pair_words: Vec<ValueId>,
@@ -1645,6 +1762,8 @@ impl<'a> Lower<'a> {
             amb_homes: Vec::new(),
             opaque: Vec::new(),
             ptr_words: HashSet::new(),
+            root_handles: Vec::new(),
+            keep_slot: None,
             pair_words: Vec::new(),
             calls_slot: None,
             defer,
@@ -1679,6 +1798,11 @@ impl<'a> Lower<'a> {
             return var;
         }
         let var = self.b.declare_var(cl_ty(ty_of(f, v)));
+        // The collector finds and rewrites heap words in native frames by
+        // their stack maps, live at last use.
+        if heap_word(ty_of(f, v)) || self.ptr_words.contains(&v) {
+            self.b.declare_var_needs_stack_map(var);
+        }
         self.vars[v.index()] = Some(var);
         var
     }
@@ -1705,15 +1829,14 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Before a call in which a collection may run: link a record of every
-    /// heap word this body holds into the context's root chain (the VM
-    /// pins them; see `machine::native::NativeCtx::roots`). Returns the
-    /// chain's previous head, for [`Self::pop_roots`].
+    /// Before a call in which a collection may run: link a record of the
+    /// heap words the stack maps cannot describe into the context's root
+    /// chain (see `machine::native::NativeCtx::roots`): the heap homes,
+    /// which live in memory, and the ambiguous words, which are pinned.
+    /// Heap words in values are the stack maps'
+    /// (`declare_var_needs_stack_map`). Returns the chain's previous head,
+    /// for [`Self::pop_roots`].
     fn push_roots(&mut self, f: &MirFunc) -> Option<Roots> {
-        let words: Vec<ValueId> = (0..f.types.len() as u32)
-            .map(ValueId)
-            .filter(|&v| (heap_word(ty_of(f, v)) || self.ptr_words.contains(&v)) && self.live.as_ref().is_none_or(|l| l.contains(&v)))
-            .collect();
         let homes = if self.homes_slot.is_some() { self.heap_homes.clone() } else { Vec::new() };
         let amb_homes = if self.homes_slot.is_some() { self.amb_homes.clone() } else { Vec::new() };
         let opaque: Vec<ValueId> = self
@@ -1723,7 +1846,7 @@ impl<'a> Lower<'a> {
             .copied()
             .filter(|v| self.live.as_ref().is_none_or(|l| l.contains(v)))
             .collect();
-        if words.is_empty() && homes.is_empty() && opaque.is_empty() && amb_homes.is_empty() {
+        if homes.is_empty() && opaque.is_empty() && amb_homes.is_empty() {
             return None;
         }
         let t = MemFlagsData::trusted();
@@ -1735,29 +1858,11 @@ impl<'a> Lower<'a> {
             let amb = self.record(f, next, &opaque, &amb_homes, ROOTS_AMBIGUOUS);
             next = self.b.ins().stack_addr(types::I64, amb, 0);
         }
-        let total = words.len() + homes.len();
-        let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            ((total + 2) * 8) as u32,
-            3,
-        ));
-        self.b.ins().stack_store(types::I64, next, slot, 0);
-        let n = self.b.ins().iconst(types::I64, total as i64);
-        self.b.ins().stack_store(types::I64, n, slot, 8);
-        for (i, v) in words.iter().enumerate() {
-            let x = self.get(f, *v);
-            let x = self.coerce(x, types::I64);
-            self.b.ins().stack_store(types::I64, x, slot, ((i + 2) * 8) as i32);
-        }
-        for (k, &h) in homes.iter().enumerate() {
-            let (base, off) = self.home_at(h).expect("homes slot");
-            let x = self.b.ins().load(types::I64, t, base, off);
-            self.b.ins().stack_store(types::I64, x, slot, ((words.len() + k + 2) * 8) as i32);
-        }
+        let slot = self.record(f, next, &[], &homes, 0);
         let at = self.b.ins().stack_addr(types::I64, slot, 0);
         self.b.ins().store(t, at, self.ctx, NATIVE_CTX_ROOTS);
         let epoch = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
-        Some(Roots { prev, slot, words, homes, epoch })
+        Some(Roots { prev, slot, homes, epoch })
     }
 
     /// A root record `[next, n | flags, words...]` of `vals` and then of
@@ -1787,10 +1892,11 @@ impl<'a> Lower<'a> {
     }
 
     /// Unlink [`Self::push_roots`]'s record. When a collection may have run
-    /// meanwhile, reload the words (a minor collection moves young objects
-    /// and rewrites the record) and re-read every array view.
-    fn pop_roots(&mut self, f: &MirFunc, roots: Option<Roots>) {
-        let Some(Roots { prev, slot, words, homes, epoch }) = roots else {
+    /// meanwhile, write the heap homes back from it (a minor collection
+    /// moves young objects and rewrites the record) and re-read every
+    /// array view.
+    fn pop_roots(&mut self, roots: Option<Roots>) {
+        let Some(Roots { prev, slot, homes, epoch }) = roots else {
             return;
         };
         let t = MemFlagsData::trusted();
@@ -1802,12 +1908,8 @@ impl<'a> Lower<'a> {
         self.b.ins().brif(moved, cold, &[], go, &[]);
         self.b.set_cold_block(cold);
         self.b.switch_to_block(cold);
-        for (i, v) in words.iter().enumerate() {
-            let x = self.b.ins().stack_load(types::I64, types::I64, slot, ((i + 2) * 8) as i32);
-            self.set(f, *v, x);
-        }
         for (k, &h) in homes.iter().enumerate() {
-            let x = self.b.ins().stack_load(types::I64, types::I64, slot, ((words.len() + k + 2) * 8) as i32);
+            let x = self.b.ins().stack_load(types::I64, types::I64, slot, ((k + 2) * 8) as i32);
             let (base, off) = self.home_at(h).expect("homes slot");
             self.b.ins().store(t, x, base, off);
         }
@@ -1827,7 +1929,7 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(cold);
         let roots = self.push_roots(f);
         self.b.ins().call(self.collect, &[self.ctx]);
-        self.pop_roots(f, roots);
+        self.pop_roots(roots);
         self.b.ins().jump(go, &[]);
         self.b.switch_to_block(go);
     }
@@ -2234,6 +2336,7 @@ impl<'a> Lower<'a> {
         self.barriers = barrier_pairs(f);
         self.opaque = opaque_words(f);
         self.ptr_words = pointer_words(f);
+        self.root_handles = root_handles(f);
         self.pair_words = f.heap_pair_calls.iter().copied().filter(|&v| !heap_word(ty_of(f, v)) && !self.ptr_words.contains(&v)).collect();
         self.pair_words.sort_unstable_by_key(|v| v.0);
         for blk in &f.blocks {
@@ -2551,7 +2654,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.call_value, &[self.ctx, c, p, n, d]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(f, roots);
+                self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
@@ -2576,7 +2679,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.resume, &[self.ctx, h, sv, has]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(f, roots);
+                self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
@@ -2615,7 +2718,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
                 let w = self.b.inst_results(call)[0];
                 self.pop_call(prev);
-                self.pop_roots(f, roots);
+                self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
@@ -2640,7 +2743,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.resume, &[self.ctx, h, send, has]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(f, roots);
+                self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
@@ -2655,7 +2758,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.gen_yield, &[self.ctx, w]);
                 self.pop_call(prev);
                 let sent = self.b.inst_results(call)[0];
-                self.pop_roots(f, roots);
+                self.pop_roots(roots);
                 // A close unwinds from the yield (`coil_native_yield`).
                 let flag = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
@@ -2675,7 +2778,7 @@ impl<'a> Lower<'a> {
                 let call = self.b.ins().call(self.gen_yield, &[self.ctx, v]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(f, roots);
+                self.pop_roots(roots);
                 // A close unwinds from the yield (`coil_native_yield`).
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
@@ -2876,7 +2979,7 @@ impl<'a> Lower<'a> {
                 if let Some(prev) = prev {
                     self.pop_call(prev);
                 }
-                self.pop_roots(f, roots);
+                self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
@@ -2919,7 +3022,7 @@ impl<'a> Lower<'a> {
                 let prev = self.push_call();
                 self.b.ins().call(self.free_early, &[self.ctx, v, d]);
                 self.pop_call(prev);
-                self.pop_roots(f, roots);
+                self.pop_roots(roots);
                 self.drop_views();
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(fast);
@@ -3050,7 +3153,7 @@ impl<'a> Lower<'a> {
             let call = self.b.ins().call(self.call_vm, &[self.ctx, pcv, p, n]);
             let w = self.b.inst_results(call)[0];
             self.pop_call(prev);
-            self.pop_roots(f, roots);
+            self.pop_roots(roots);
             let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
             self.bail_if(flag, TRAP_HELPER);
             self.drop_views();
@@ -3084,7 +3187,7 @@ impl<'a> Lower<'a> {
         if let Some(prev) = prev {
             self.pop_call(prev);
         }
-        self.pop_roots(f, roots);
+        self.pop_roots(roots);
         let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
         self.bail_if(flag, TRAP_HELPER);
         if self.plan.moves.contains(&callee) {
@@ -3206,6 +3309,23 @@ impl<'a> Lower<'a> {
         }
         self.b.ins().jump(join, &[at.into()]);
         self.b.switch_to_block(slow);
+    }
+
+    /// Before a return: use every `gc::root` handle, so the stack maps keep
+    /// each one (and what it roots) alive until the body returns, as an
+    /// unused `let r = root(h)` asks.
+    fn keep_roots(&mut self, f: &MirFunc) {
+        if self.root_handles.is_empty() {
+            return;
+        }
+        let slot = *self.keep_slot.get_or_insert_with(|| {
+            self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 8, 3))
+        });
+        for v in self.root_handles.clone() {
+            let x = self.get(f, v);
+            let x = self.coerce(x, types::I64);
+            self.b.ins().stack_store(types::I64, x, slot, 0);
+        }
     }
 
     fn words_slot(&mut self, f: &MirFunc, vs: &[ValueId]) -> cranelift_codegen::ir::Value {
@@ -3422,6 +3542,7 @@ impl<'a> Lower<'a> {
                 }
             }
             Terminator::Return { lo, hi } => {
+                self.keep_roots(f);
                 let x = match lo {
                     Some(v) => self.get(f, *v),
                     None => self.b.ins().iconst(types::I64, 0),
