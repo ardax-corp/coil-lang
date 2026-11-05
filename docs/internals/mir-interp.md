@@ -68,8 +68,9 @@ vectors, not on the thread's stack:
   `ROOTS_SCAN` record per activation hands the collector a callback: a call pays
   nothing for roots, and nothing is reloaded after one. `SITES_SCAN` does the
   same for backtraces.
-- `RootMaps` (liveness and held words) is built the first time a collection finds
-  a body on the stack, so a run with no collection computes none.
+- `RootMaps` is built the first time a collection finds a body on the stack, so a
+  run with no collection computes none. The rule is native code's: a word lives
+  until its last use, and a `gc::root` handle until the function returns.
 
 Side tables (`Exec`: block positions, φ moves, loop headers) are built on a
 body's first call. Sites are built eagerly, because `NativeCode` holds them.

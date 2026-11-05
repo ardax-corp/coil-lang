@@ -276,7 +276,7 @@ and relocate mapped slots on collect.
   emission lists the two-word expressions whose enum has a payload that
   is no scalar word (`HirMirInput::heap_pairs`, from the same variant
   payloads as `hir_mir_pair_tys`); `from_hir` marks such a call's low
-  dest (`MirFunc::heap_pair_calls`), and `payload_words` takes it as a
+  dest (`MirFunc::heap_pair_words`), and `payload_words` takes it as a
   payload word. A number pair (`Option<int>`, an enum of ints) is not
   marked: zeroing every call's pair put two dead zeros in the hot loop of
   `examples/perf/match_enum_loop` at `-O0`. `Gathers` also take payload
