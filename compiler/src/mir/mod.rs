@@ -72,6 +72,7 @@ pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
 pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]
 pub use inst::LocalId;
+pub mod archive;
 mod frame_words;
 mod native_capture;
 pub mod native_expand;
