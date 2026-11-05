@@ -1294,15 +1294,18 @@ fn a_lines_only_archive_locates_native_panics() {
 
 #[test]
 fn module_setup_runs_natively() {
-    // Statics computed at run time and a class with a `drop` (its
-    // finalizer is registered in setup): the setup body is native code.
+    // A static that prints, so only a run can compute it, and a class with
+    // a `drop` (its finalizer is registered before any initializer): both
+    // setup bodies are native code.
     let src = format!(
-        "{HEADER}static let base: int = 40;\nstatic let words: Vec<int> = [1, 2, 3];\n\
+        "{HEADER}#[inline(never)]\nfn start(int n) -> int {{ let _ = println(\"start\"); return n; }}\n\
+         static let base: int = start(40);\nstatic let words: Vec<int> = [1, 2, 3];\n\
          class Res {{\n    pub id: int,\n}}\nimpl Res {{\n    fn drop() {{ let _ = println(format(\"drop %i\", self.id)); }}\n}}\n\
          fn main() {{ let r = new Res(7); let _ = println(format(\"%i %i %i\", base + 2, words.len(), r.id)); }}\n"
     );
     let stats = same_as_vm("module_setup", &src);
     assert!(compiled(&stats, "__module_setup"), "stats: {stats}");
+    assert!(compiled(&stats, "__finalizer_setup"), "stats: {stats}");
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
