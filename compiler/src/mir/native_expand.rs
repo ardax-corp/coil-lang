@@ -6,7 +6,11 @@
 //! (`ArrayLen`, `Index`, `StoreIndex`, `ArrayPush`). The element moves are
 //! word copies, so one expansion serves every element type: a word whose
 //! type the call does not say is moved as an `i64`, with no safepoint
-//! between its load and its store (a push roots the word it pushes).
+//! between its load and its store (a push roots the word it pushes). The
+//! element `insert` adds and `remove` takes out is the exception: it stays
+//! in a value across the shifting loop, whose header is a safepoint, and
+//! the array no longer holds it. As an `i64` it may be an object, so it is
+//! listed in [`MirFunc::heap_pair_words`].
 //!
 //! What stays a runtime call: `vec_from_array`, the copy primitive (it
 //! keeps the source's representation, a packed byte or float array stays
@@ -216,6 +220,9 @@ fn expand(func: &mut MirFunc, b: BlockId, k: usize, which: VecNative, ids: &Ids)
 fn insert(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, args: &[ValueId], native: u16) {
     let (v, i, x) = (args[0], args[1], args[2]);
     let elem = ex.f.ty(x);
+    if elem == MirTy::I64 {
+        ex.f.heap_pair_words.insert(x);
+    }
     let check_hi = ex.block();
     let oob = ex.block();
     let grow = ex.block();
@@ -294,6 +301,7 @@ fn remove(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
 
     // x = v[i]; for j = i; j < n - 1; j += 1 { v[j] = v[j + 1] }; v[n - 1] = x
     let x = ex.index(take, v, i, MirTy::I64);
+    ex.f.heap_pair_words.insert(x);
     let last = ex.bin(take, MirBinOp::Sub, n, one);
     ex.jump(take, head);
 
