@@ -243,9 +243,29 @@ fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mu
     Body { mir, program, pc: code, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), roots: OnceLock::new() }
 }
 
+/// `COIL_MIR_ARCHIVE_CHECK`: what comes back from the archive format, which
+/// must be what went in. Running that copy tests the format on a whole
+/// corpus.
+fn through_archive(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> Vec<NativeBody> {
+    use compiler::native_mir::archive::{self, ArchiveEntry};
+    let entries: Vec<ArchiveEntry<'_>> =
+        bodies.iter().map(|body| ArchiveEntry { body, pc: entry_pcs.get(&body.name).copied(), stub: false }).collect();
+    let bytes = archive::encode(&entries);
+    let (back, pcs) = archive::decode(&bytes).expect("the archive format reads what it wrote");
+    assert_eq!(back.len(), bodies.len(), "bodies through the archive format");
+    for (a, b) in bodies.iter().zip(&back) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.entry, b.entry, "{}", a.name);
+        assert!(a.mir == b.mir, "{} changed through the archive format", a.name);
+        assert_eq!(entry_pcs.get(&a.name), pcs.get(&a.name), "{}", a.name);
+    }
+    back
+}
+
 /// Make `bodies` runnable. `entry_pcs` maps a body's name to its bytecode
 /// entry PC, as for `coil_native::jit`.
 pub fn prepare(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> InterpProgram {
+    let bodies = if std::env::var_os("COIL_MIR_ARCHIVE_CHECK").is_some() { through_archive(bodies, entry_pcs) } else { bodies };
     let mut sites = Vec::new();
     let mut compiled = Vec::new();
     let mut refused = Vec::new();

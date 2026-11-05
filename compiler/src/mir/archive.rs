@@ -7,23 +7,32 @@
 //! lives beside MIR, not in the backend, because anything that runs MIR
 //! needs it, and the backend is empty on wasm.
 //!
+//! A full body comes back equal to what went in: every field of
+//! [`MirFunc`], every instruction. `COIL_MIR_ARCHIVE_CHECK` runs a corpus
+//! that way (`coil_mir_interp::prepare`). Sets and maps are written sorted,
+//! so the same MIR gives the same bytes.
+//!
 //! Layout (little-endian): the magic `CNMIR`, a format byte, then the
 //! bodies. Each body is its name, bytecode entry PC (`u32::MAX`: none),
-//! entry label, signature, value types and blocks. Labels are the
-//! compile's own `Label` numbers; a call names its callee by label.
+//! entry label, then the function. Labels are the compile's own `Label`
+//! numbers; a call names its callee by label.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use common::DebugLoc;
 
 use crate::il::Label;
+use crate::layout::MirLayout;
+use crate::mir::func::DeoptSite;
+use crate::mir::gc::LiveRootSet;
+use crate::mir::inst::{LocalId, MirDeoptKind};
 use crate::mir::{
     BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
 };
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 8;
+const FORMAT: u8 = 9;
 const NO_PC: u32 = u32::MAX;
 
 /// One body of a section.
@@ -80,7 +89,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
         let pc = r.u32()?;
         let label = r.u32()?;
         let mir = match r.u8()? {
-            BODY_FULL => read_func(&mut r, &name)?,
+            BODY_FULL => read_func(&mut r)?,
             BODY_STUB => {
                 // A body that stays on the VM: native code calls it there.
                 let mut f = MirFunc::new(&name);
@@ -108,7 +117,20 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
 // ---------------------------------------------------------------------------
 // Encoding
 
-const TYS: [MirTy; 6] = [MirTy::I64, MirTy::F64, MirTy::Bool, MirTy::HeapRef, MirTy::NicheOpt, MirTy::NicheRes];
+const TYS: [MirTy; 8] = [
+    MirTy::I64,
+    MirTy::F64,
+    MirTy::Bool,
+    MirTy::HeapRef,
+    MirTy::NicheOpt,
+    MirTy::NicheRes,
+    MirTy::Bottom,
+    MirTy::Value,
+];
+const LAYOUTS: [MirLayout; 3] = [MirLayout::Word, MirLayout::TwoSlot, MirLayout::HeapNiche];
+const DEOPTS: [MirDeoptKind; 2] = [MirDeoptKind::Stop, MirDeoptKind::Deopt];
+/// Every reason a body refuses emission: the field is a `&'static str`.
+const REFUSALS: [&str; 2] = ["runs on the VM", "existential pack"];
 const BIN_OPS: [MirBinOp; 11] = [
     MirBinOp::Add,
     MirBinOp::Sub,
@@ -126,8 +148,8 @@ const CMP_OPS: [MirCmpOp; 6] = [MirCmpOp::Lt, MirCmpOp::Le, MirCmpOp::Gt, MirCmp
 const UNARY_OPS: [MirUnaryOp; 2] = [MirUnaryOp::Neg, MirUnaryOp::Not];
 const CASTS: [MirCastKind; 3] = [MirCastKind::IntToFloat, MirCastKind::FloatToInt, MirCastKind::Word];
 
-/// Index of `x` in `table`. Types outside the numeric tier encode as
-/// `0xff`, which [`Reader::pick`] refuses, so they never come back.
+/// Index of `x` in `table`; `0xff`, which [`Reader::pick`] refuses, when
+/// it is not there.
 fn idx<T: PartialEq>(table: &[T], x: &T) -> u8 {
     table.iter().position(|t| t == x).map_or(0xff, |i| i as u8)
 }
@@ -173,6 +195,8 @@ const I_YIELD: u8 = 37;
 const I_FFI: u8 = 38;
 const I_BYTE_SCAN: u8 = 39;
 const I_VEC_LOOP: u8 = 40;
+const I_PANIC_STORE: u8 = 41;
+const I_DEOPT: u8 = 42;
 
 const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -183,6 +207,7 @@ const T_JUMP: u8 = 0;
 const T_BR: u8 = 1;
 const T_RETURN: u8 = 2;
 const T_UNREACHABLE: u8 = 3;
+const T_NONE: u8 = 5;
 const T_MATCH: u8 = 4;
 /// No result type ([`Writer::opt_ty`]), or a return without that word.
 const NONE: u8 = 0xff;
@@ -202,6 +227,48 @@ impl Writer {
     fn str(&mut self, s: &str) {
         self.u32(s.len() as u32);
         self.0.extend_from_slice(s.as_bytes());
+    }
+    fn loc(&mut self, l: DebugLoc) {
+        self.u32(l.file);
+        self.u32(l.start_byte);
+        self.u32(l.end_byte);
+    }
+    /// A map keyed by a `u32` id, sorted.
+    fn locs(&mut self, locs: impl Iterator<Item = (u32, DebugLoc)>) {
+        let mut locs: Vec<_> = locs.collect();
+        locs.sort_unstable_by_key(|&(k, _)| k);
+        self.u32(locs.len() as u32);
+        for (k, l) in locs {
+            self.u32(k);
+            self.loc(l);
+        }
+    }
+    fn words(&mut self, words: impl Iterator<Item = (u32, u64)>) {
+        let mut words: Vec<_> = words.collect();
+        words.sort_unstable_by_key(|&(k, _)| k);
+        self.u32(words.len() as u32);
+        for (k, x) in words {
+            self.u32(k);
+            self.u64(x);
+        }
+    }
+    fn locals(&mut self, locals: impl ExactSizeIterator<Item = LocalId>) {
+        self.u32(locals.len() as u32);
+        for l in locals {
+            self.u32(l.0);
+        }
+    }
+    fn binds(&mut self, binds: &[(LocalId, ValueId)]) {
+        self.u32(binds.len() as u32);
+        for &(l, v) in binds {
+            self.u32(l.0);
+            self.v(v);
+        }
+    }
+    fn value_set(&mut self, set: &HashSet<ValueId>) {
+        let mut vs: Vec<ValueId> = set.iter().copied().collect();
+        vs.sort_unstable_by_key(|v| v.0);
+        self.vs(&vs);
     }
     fn ty(&mut self, t: MirTy) {
         self.u8(idx(&TYS, &t));
@@ -233,24 +300,21 @@ impl Writer {
 }
 
 fn func(w: &mut Writer, f: &MirFunc) {
+    w.str(&f.name);
     w.u32(f.entry.0);
     w.u32(f.types.len() as u32);
     for &t in &f.types {
-        // Unused value slots may hold any type; they stay `Bottom`.
-        w.u8(if super::numeric(t) { idx(&TYS, &t) } else { 0xfe });
+        w.ty(t);
     }
     w.vs(&f.params);
     w.opt_ty(f.ret_ty);
     w.opt_ty(f.ret_hi_ty);
-    let mut pair_words: Vec<ValueId> = f.heap_pair_words.iter().copied().collect();
-    pair_words.sort_unstable_by_key(|v| v.0);
-    w.vs(&pair_words);
+    w.u8(idx(&LAYOUTS, &f.ret_layout));
     w.u32(f.blocks.len() as u32);
     for b in &f.blocks {
         w.u32(b.id.0);
-        let insts: Vec<&MirInst> = b.insts.iter().filter(|i| !matches!(i, MirInst::Deopt { .. })).collect();
-        w.u32(insts.len() as u32);
-        for inst in insts {
+        w.u32(b.insts.len() as u32);
+        for inst in &b.insts {
             self::inst(w, inst);
         }
         match &b.term {
@@ -269,7 +333,6 @@ fn func(w: &mut Writer, f: &MirFunc) {
                 w.opt_v(*lo);
                 w.opt_v(*hi);
             }
-            // `plan` admits no other terminator.
             Some(Terminator::JumpIfMatch { scrutinee, tag, payloads, taken, not_taken }) => {
                 w.u8(T_MATCH);
                 w.v(*scrutinee);
@@ -281,31 +344,72 @@ fn func(w: &mut Writer, f: &MirFunc) {
                 w.u32(taken.0);
                 w.u32(not_taken.0);
             }
-            _ => w.u8(T_UNREACHABLE),
+            Some(Terminator::Unreachable) => w.u8(T_UNREACHABLE),
+            None => w.u8(T_NONE),
         }
     }
-    // Source locations of the ops a native panic names (see
-    // `coil_native::Lower::site`): each instruction's own location, when known.
-    let locs: Vec<(ValueId, DebugLoc)> = f
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .map(|i| (i.dest(), f.op_loc(i.dest())))
-        .filter(|(_, l)| l.is_known())
-        .collect();
-    w.u32(locs.len() as u32);
-    for (v, l) in locs {
-        w.v(v);
-        w.u32(l.file);
-        w.u32(l.start_byte);
-        w.u32(l.end_byte);
+    w.locs(f.value_locs.iter().map(|(v, l)| (v.0, *l)));
+    w.locs(f.op_locs.iter().map(|(v, l)| (v.0, *l)));
+    w.locs(f.term_locs.iter().map(|(b, l)| (b.0, *l)));
+    // The tables the root analyses and the passes read.
+    let mut slot_env: Vec<_> = f.slot_env.iter().collect();
+    slot_env.sort_unstable_by_key(|(v, _)| v.0);
+    w.u32(slot_env.len() as u32);
+    for (v, binds) in slot_env {
+        w.v(*v);
+        w.binds(binds);
     }
+    w.u32(f.gc_roots.len() as u32);
+    for set in &f.gc_roots {
+        w.v(set.at);
+        w.vs(&set.values);
+        w.locals(set.slots.iter().copied());
+    }
+    let mut debug_slots: Vec<_> = f.debug_slots.iter().map(|(&l, &v)| (l, v)).collect();
+    debug_slots.sort_unstable_by_key(|(l, _)| l.0);
+    w.binds(&debug_slots);
+    w.u32(f.deopt_sites.len() as u32);
+    for site in &f.deopt_sites {
+        w.u8(idx(&DEOPTS, &site.kind));
+        w.opt_v(site.at);
+        w.loc(site.loc);
+        w.binds(&site.slots);
+    }
+    w.locals(f.heap_slots.iter().copied());
+    w.locals(f.word_slots.iter().copied());
+    w.binds(&f.local_binds);
+    w.u8(f.emit_refusal.map_or(NONE, |why| {
+        let at = REFUSALS.iter().position(|r| *r == why);
+        at.expect("a refusal reason the format lists") as u8
+    }));
+    let flags = [f.debug_keep, f.keep_lines, f.opaque_words, f.lengths_steady];
+    w.u8(flags.iter().enumerate().fold(0, |bits, (i, &on)| bits | (u8::from(on) << i)));
+    let mut tail_targets: Vec<u32> = f.tail_targets.iter().map(|l| l.0).collect();
+    tail_targets.sort_unstable();
+    w.u32(tail_targets.len() as u32);
+    for t in tail_targets {
+        w.u32(t);
+    }
+    for set in [
+        &f.heap_pair_words,
+        &f.pure_calls,
+        &f.invariant_loads,
+        &f.byte_loads,
+        &f.prefetch_loads,
+        &f.steady_calls,
+        &f.bound_words,
+    ] {
+        w.value_set(set);
+    }
+    w.words(f.call_fields.iter().map(|(v, x)| (v.0, *x)));
+    w.words(f.slot_fields.iter().map(|(k, x)| (*k, *x)));
     // `defer` homes, and the cleanup pad that reads them.
     w.u32(f.homes.len() as u32);
     for &t in &f.homes {
         w.ty(t);
     }
-    w.u8(f.home_base.map_or(NONE, |b| b.min(NONE - 1)));
+    w.u8(u8::from(f.home_base.is_some()));
+    w.u8(f.home_base.unwrap_or(0));
     match f.cleanup.as_deref() {
         Some(pad) => {
             w.u8(1);
@@ -569,10 +673,10 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*scrutinee);
             w.u32(*index);
         }
-        MirInst::GcBarrier { dest, .. } => {
-            // Native code only needs the pairing, which order gives.
+        MirInst::GcBarrier { dest, kind: MirGcKind::Safepoint, roots } => {
             w.u8(I_GC_BARRIER);
             w.v(*dest);
+            w.vs(roots);
         }
         MirInst::ResumeCoro { dest, handle, send } => {
             w.u8(I_RESUME);
@@ -640,8 +744,19 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                 }
             }
         }
-        // `plan` admits nothing else, and `func` drops `Deopt`.
-        _ => unreachable!("native section: instruction outside the numeric tier"),
+        MirInst::PanicStore { dest, object, value, index } => {
+            w.u8(I_PANIC_STORE);
+            w.v(*dest);
+            w.v(*object);
+            w.v(*value);
+            w.u32(*index);
+        }
+        MirInst::Deopt { dest, kind, loc } => {
+            w.u8(I_DEOPT);
+            w.v(*dest);
+            w.u8(idx(&DEOPTS, kind));
+            w.loc(*loc);
+        }
     }
 }
 
@@ -771,9 +886,31 @@ impl<'a> Reader<'a> {
         let n = self.len()?;
         String::from_utf8(self.take(n)?.to_vec()).map_err(|_| "native MIR name is not UTF-8".into())
     }
-    fn pick<T: Copy>(&mut self, table: &[T], what: &str) -> Result<T, String> {
+    fn loc(&mut self) -> Result<DebugLoc, String> {
+        Ok(DebugLoc { file: self.u32()?, start_byte: self.u32()?, end_byte: self.u32()? })
+    }
+    fn locs(&mut self) -> Result<Vec<(u32, DebugLoc)>, String> {
+        let n = self.len()?;
+        (0..n).map(|_| Ok((self.u32()?, self.loc()?))).collect()
+    }
+    fn words(&mut self) -> Result<Vec<(u32, u64)>, String> {
+        let n = self.len()?;
+        (0..n).map(|_| Ok((self.u32()?, self.u64()?))).collect()
+    }
+    fn locals(&mut self) -> Result<Vec<LocalId>, String> {
+        let n = self.len()?;
+        (0..n).map(|_| self.u32().map(LocalId)).collect()
+    }
+    fn binds(&mut self) -> Result<Vec<(LocalId, ValueId)>, String> {
+        let n = self.len()?;
+        (0..n).map(|_| Ok((LocalId(self.u32()?), self.v()?))).collect()
+    }
+    fn value_set(&mut self) -> Result<HashSet<ValueId>, String> {
+        Ok(self.vs()?.into_iter().collect())
+    }
+    fn pick<T: Clone>(&mut self, table: &[T], what: &str) -> Result<T, String> {
         let i = self.u8()?;
-        table.get(i as usize).copied().ok_or_else(|| format!("native MIR: bad {what} {i}"))
+        table.get(i as usize).cloned().ok_or_else(|| format!("native MIR: bad {what} {i}"))
     }
     fn ty(&mut self) -> Result<MirTy, String> {
         self.pick(&TYS, "type")
@@ -801,21 +938,17 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
-    let mut f = MirFunc::new(name);
+fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
+    let name = r.str()?;
+    let mut f = MirFunc::new(&name);
     f.blocks.clear();
     f.entry = BlockId(r.u32()?);
     let n = r.len()?;
-    f.types = (0..n)
-        .map(|_| match r.u8()? {
-            0xfe => Ok(MirTy::Bottom),
-            i => TYS.get(i as usize).copied().ok_or_else(|| format!("native MIR: bad type {i}")),
-        })
-        .collect::<Result<_, String>>()?;
+    f.types = (0..n).map(|_| r.ty()).collect::<Result<_, _>>()?;
     f.params = r.vs()?;
     f.ret_ty = r.opt_ty()?;
     f.ret_hi_ty = r.opt_ty()?;
-    f.heap_pair_words = r.vs()?.into_iter().collect();
+    f.ret_layout = r.pick(&LAYOUTS, "layout")?;
     let nb = r.len()?;
     for _ in 0..nb {
         let mut b = MirBlock::new(BlockId(r.u32()?));
@@ -823,32 +956,70 @@ fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
         for _ in 0..ni {
             b.insts.push(read_inst(r)?);
         }
-        b.term = Some(match r.u8()? {
-            T_JUMP => Terminator::Jump { dest: BlockId(r.u32()?) },
-            T_BR => Terminator::Br { cond: r.v()?, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) },
-            T_RETURN => Terminator::Return { lo: r.opt_v()?, hi: r.opt_v()? },
-            T_UNREACHABLE => Terminator::Unreachable,
+        b.term = match r.u8()? {
+            T_JUMP => Some(Terminator::Jump { dest: BlockId(r.u32()?) }),
+            T_BR => Some(Terminator::Br { cond: r.v()?, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) }),
+            T_RETURN => Some(Terminator::Return { lo: r.opt_v()?, hi: r.opt_v()? }),
+            T_UNREACHABLE => Some(Terminator::Unreachable),
             T_MATCH => {
                 let (scrutinee, tag) = (r.v()?, r.u32()?);
                 let n = r.len()?;
                 let payloads = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
-                Terminator::JumpIfMatch { scrutinee, tag, payloads, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) }
+                Some(Terminator::JumpIfMatch { scrutinee, tag, payloads, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) })
             }
+            T_NONE => None,
             t => return Err(format!("native MIR: bad terminator {t}")),
-        });
+        };
         f.blocks.push(b);
     }
-    let nl = r.len()?;
-    for _ in 0..nl {
+    f.value_locs = r.locs()?.into_iter().map(|(k, l)| (ValueId(k), l)).collect();
+    f.op_locs = r.locs()?.into_iter().map(|(k, l)| (ValueId(k), l)).collect();
+    f.term_locs = r.locs()?.into_iter().map(|(k, l)| (BlockId(k), l)).collect();
+    let n = r.len()?;
+    for _ in 0..n {
         let v = r.v()?;
-        let loc = DebugLoc { file: r.u32()?, start_byte: r.u32()?, end_byte: r.u32()? };
-        f.op_locs.insert(v, loc);
+        f.slot_env.insert(v, r.binds()?);
     }
+    let n = r.len()?;
+    for _ in 0..n {
+        f.gc_roots.push(LiveRootSet { at: r.v()?, values: r.vs()?, slots: r.locals()? });
+    }
+    f.debug_slots = r.binds()?.into_iter().collect();
+    let n = r.len()?;
+    for _ in 0..n {
+        let kind = r.pick(&DEOPTS, "deopt kind")?;
+        f.deopt_sites.push(DeoptSite { kind, at: r.opt_v()?, loc: r.loc()?, slots: r.binds()? });
+    }
+    f.heap_slots = r.locals()?.into_iter().collect::<BTreeSet<_>>();
+    f.word_slots = r.locals()?.into_iter().collect::<BTreeSet<_>>();
+    f.local_binds = r.binds()?;
+    f.emit_refusal = match r.u8()? {
+        NONE => None,
+        i => Some(*REFUSALS.get(i as usize).ok_or_else(|| format!("native MIR: bad refusal {i}"))?),
+    };
+    let flags = r.u8()?;
+    f.debug_keep = flags & 1 != 0;
+    f.keep_lines = flags & 2 != 0;
+    f.opaque_words = flags & 4 != 0;
+    f.lengths_steady = flags & 8 != 0;
+    let n = r.len()?;
+    f.tail_targets = (0..n).map(|_| r.u32().map(Label)).collect::<Result<_, _>>()?;
+    f.heap_pair_words = r.value_set()?;
+    f.pure_calls = r.value_set()?;
+    f.invariant_loads = r.value_set()?;
+    f.byte_loads = r.value_set()?;
+    f.prefetch_loads = r.value_set()?;
+    f.steady_calls = r.value_set()?;
+    f.bound_words = r.value_set()?;
+    f.call_fields = r.words()?.into_iter().map(|(k, x)| (ValueId(k), x)).collect();
+    f.slot_fields = r.words()?.into_iter().collect();
     let nh = r.len()?;
     f.homes = (0..nh).map(|_| r.ty()).collect::<Result<_, _>>()?;
-    f.home_base = Some(r.u8()?).filter(|&b| b != NONE);
+    let has_base = r.u8()? != 0;
+    let base = r.u8()?;
+    f.home_base = has_base.then_some(base);
     if r.u8()? == 1 {
-        f.cleanup = Some(Box::new(read_func(r, &format!("{name}$pad"))?));
+        f.cleanup = Some(Box::new(read_func(r)?));
     }
     Ok(f)
 }
@@ -954,7 +1125,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         },
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
-        I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: Vec::new() },
+        I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: r.vs()? },
         I_COW => {
             let (dest, src, unique) = (r.v()?, r.v()?, r.u8()? != 0);
             let field = Some(r.u32()?).filter(|&f| f != u32::MAX);
@@ -992,6 +1163,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             };
             MirInst::VecLoop { dest, pos, from, to, kind }
         }
+        I_PANIC_STORE => MirInst::PanicStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()? },
+        I_DEOPT => MirInst::Deopt { dest: r.v()?, kind: r.pick(&DEOPTS, "deopt kind")?, loc: r.loc()? },
         t => return Err(format!("native MIR: bad instruction {t}")),
     })
 }
@@ -1039,4 +1212,93 @@ fn read_vec_expr(r: &mut Reader, depth: u32) -> Result<VecExpr, String> {
 fn read_vec_stores(r: &mut Reader) -> Result<Vec<(ValueId, ValueId, u8, VecExpr)>, String> {
     let n = r.len()?;
     (0..n).map(|_| Ok((r.v()?, r.v()?, r.u8()?, read_vec_expr(r, 0)?))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A body with a value in the fields the bytecode tiers and the root
+    /// analyses read, and a cleanup pad of its own name.
+    fn body() -> NativeBody {
+        let mut pad = MirFunc::new("pad of f");
+        pad.homes = vec![MirTy::HeapRef];
+        pad.home_base = Some(255);
+        let mut f = MirFunc::new("f");
+        f.blocks.clear();
+        f.types = vec![MirTy::Value, MirTy::Bottom, MirTy::I64];
+        f.params = vec![ValueId(0)];
+        f.ret_ty = Some(MirTy::I64);
+        f.ret_layout = MirLayout::TwoSlot;
+        let loc = DebugLoc { file: 1, start_byte: 2, end_byte: 3 };
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::Deopt { dest: ValueId(1), kind: MirDeoptKind::Stop, loc });
+        b.insts.push(MirInst::PanicStore { dest: ValueId(2), object: ValueId(0), value: ValueId(0), index: 4 });
+        b.insts.push(MirInst::GcBarrier { dest: ValueId(2), kind: MirGcKind::Safepoint, roots: vec![ValueId(0)] });
+        f.blocks.push(b);
+        let mut last = MirBlock::new(BlockId(1));
+        last.term = Some(Terminator::Unreachable);
+        f.blocks.push(last);
+        f.value_locs.insert(ValueId(1), loc);
+        f.op_locs.insert(ValueId(2), loc);
+        f.term_locs.insert(BlockId(1), loc);
+        f.slot_env.insert(ValueId(1), vec![(LocalId(3), ValueId(0))]);
+        f.gc_roots.push(LiveRootSet { at: ValueId(1), values: vec![ValueId(0)], slots: vec![LocalId(3)] });
+        f.debug_slots.insert(LocalId(3), ValueId(0));
+        f.deopt_sites.push(DeoptSite { kind: MirDeoptKind::Deopt, at: None, loc, slots: vec![(LocalId(3), ValueId(0))] });
+        f.heap_slots.insert(LocalId(3));
+        f.word_slots.insert(LocalId(4));
+        f.local_binds.push((LocalId(3), ValueId(0)));
+        f.emit_refusal = Some("existential pack");
+        f.debug_keep = true;
+        f.opaque_words = true;
+        f.tail_targets.insert(Label(9));
+        f.heap_pair_words.extend([ValueId(0), ValueId(2), ValueId(1)]);
+        f.pure_calls.insert(ValueId(1));
+        f.call_fields.insert(ValueId(1), 7);
+        f.slot_fields.insert(3, 8);
+        f.cleanup = Some(Box::new(pad));
+        NativeBody { name: "f".into(), entry: Some(Label(7)), mir: f }
+    }
+
+    fn bytes(b: &NativeBody) -> Vec<u8> {
+        encode(&[ArchiveEntry { body: b, pc: Some(42), stub: false }])
+    }
+
+    #[test]
+    fn a_full_body_comes_back_equal() {
+        let b = body();
+        let (back, pcs) = decode(&bytes(&b)).expect("decode");
+        assert_eq!(pcs.get("f"), Some(&42));
+        assert_eq!(back[0].entry, b.entry);
+        assert_eq!(back[0].mir, b.mir);
+    }
+
+    #[test]
+    fn the_same_mir_gives_the_same_bytes() {
+        // Each `body()` has its own hash seeds, so a set written in hash
+        // order would differ between them.
+        let first = bytes(&body());
+        for _ in 0..16 {
+            assert_eq!(bytes(&body()), first);
+        }
+    }
+
+    #[test]
+    fn a_stub_keeps_only_what_a_call_needs() {
+        let b = body();
+        let section = encode(&[ArchiveEntry { body: &b, pc: None, stub: true }]);
+        let (back, pcs) = decode(&section).expect("decode");
+        assert!(pcs.is_empty());
+        assert_eq!(back[0].mir.params.len(), 1);
+        assert_eq!(back[0].mir.emit_refusal, Some("runs on the VM"));
+    }
+
+    #[test]
+    fn a_truncated_section_is_refused_at_every_length() {
+        let section = bytes(&body());
+        for end in 0..section.len() {
+            assert!(decode(&section[..end]).is_err(), "at {end} of {}", section.len());
+        }
+    }
 }
