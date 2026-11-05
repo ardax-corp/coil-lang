@@ -42,7 +42,7 @@ pub(crate) enum Command {
         natives: Vec<FfiNative>,
         check_native: bool,
         strip_debug: bool,
-        /// Native code or the VM runner, static libraries and linker
+        /// Native code or the JIT runner, static libraries and linker
         /// arguments for the executable.
         link: LinkInputs,
     },
@@ -254,7 +254,7 @@ enum RawCommand {
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
-        /// Package the VM runner with the program instead of linking native
+        /// Package the JIT runner with the program instead of linking native
         /// code for it (the default links an AOT executable with `cc`)
         #[arg(long)]
         no_aot: bool,

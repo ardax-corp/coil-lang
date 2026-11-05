@@ -9,7 +9,7 @@ use coil_cli::resolve_default_runner;
 use common::{
     append_package_payload_with_natives, bytecode_uses_ffi, dload_request_stem,
     ffi_library_names_from_bytecode,
-    is_packaged_executable, is_system_ffi_stem, ArchivedArchivedProgram, ArchivedProgram, Byte,
+    is_packaged_executable, is_system_ffi_stem, ArchivedProgram, Byte,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
 use compiler::Pipeline;
@@ -20,9 +20,9 @@ use sha2::{Digest, Sha256};
 
 use crate::fail_and_exit;
 
-/// Compile `filename` to archive bytes at the pipeline's `-g` level
+/// Compile `filename` to an archive at the pipeline's `-g` level
 /// (`coil package` defaults to `-g1`; `--strip-debug` is `-g0`).
-fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Result<Vec<u8>, ()> {
+fn compile_program(pipeline: &mut Pipeline, filename: &str) -> Result<ArchivedProgram, ()> {
     let (bytecode, constants) = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
@@ -51,19 +51,49 @@ fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Res
     // spans with the lines.
     let level = pipeline.debug_level();
     program.set_debug(pipeline.program_debug_full(), level);
-    rkyv::to_bytes::<Error>(&program)
-        .map(|b| b.as_slice().to_vec())
-        .map_err(|_| ())
+    Ok(program)
+}
+
+/// The payload bytes of `program`.
+fn payload_bytes(pipeline: &mut Pipeline, program: &ArchivedProgram) -> Vec<u8> {
+    match rkyv::to_bytes::<Error>(program) {
+        Ok(b) => b.as_slice().to_vec(),
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("Unable to serialize bytecode archive: {e}")),
+    }
+}
+
+/// `program` with its native MIR, for the runner to JIT. The runner has no VM
+/// to run what does not compile, so that shows here and not on the target.
+#[cfg(not(target_family = "wasm"))]
+fn add_native_mir(pipeline: &mut Pipeline, program: &mut ArchivedProgram, bodies: &[compiler::native_mir::NativeBody]) {
+    let pcs = pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    match coil_native::jit(bodies, &pcs) {
+        Ok(jitted) if jitted.refused.is_empty() => program.native_mir = coil_native::section::encode(bodies, &pcs),
+        Ok(jitted) => refused_exit(&jitted.refused),
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("native code for the package failed ({e})")),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn add_native_mir(_: &mut Pipeline, _: &mut ArchivedProgram, _: &[compiler::native_mir::NativeBody]) {}
+
+/// A package has no bytecode VM: a body native code refuses is an error.
+#[cfg(not(target_family = "wasm"))]
+fn refused_exit(refused: &[(String, String)]) -> ! {
+    for (name, why) in refused {
+        eprintln!("error: `{name}` cannot compile to native code: {why}");
+    }
+    eprintln!("  help: a package has no bytecode VM; `coil FILE` still runs the program");
+    exit(1);
 }
 
 /// Link an AOT executable for the program just compiled: its MIR through
 /// `coil_native::aot`, then `cc` with the runtime library (`libcoil_rt.a`
 /// beside `coil`, or `COIL_RT_LIB`). Returns the image, how many functions
 /// compiled and the runtime used; `None` (with a warning) when this host
-/// cannot link one, and the VM runner is packaged instead.
+/// cannot link one, and the JIT runner is packaged instead.
 #[cfg(not(target_family = "wasm"))]
-fn link_aot_executable(pipeline: &Pipeline, link: &LinkInputs) -> Option<(Vec<u8>, usize, PathBuf)> {
-    let bodies = compiler::native_mir::take_native_capture();
+fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs) -> Option<(Vec<u8>, usize, PathBuf)> {
     let debug = pipeline.program_debug_full();
     let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
     let fallback = |why: String| {
@@ -72,7 +102,7 @@ fn link_aot_executable(pipeline: &Pipeline, link: &LinkInputs) -> Option<(Vec<u8
             eprintln!("error: {why}; `--link-static` needs the AOT executable");
             exit(1);
         }
-        eprintln!("warning: {why}; packaging the VM runner instead (pass `--no-aot` to skip linking)");
+        eprintln!("warning: {why}; packaging the JIT runner instead (pass `--no-aot` to skip linking)");
         None
     };
     let linked: Vec<(String, String)> = pipeline
@@ -88,7 +118,7 @@ fn link_aot_executable(pipeline: &Pipeline, link: &LinkInputs) -> Option<(Vec<u8
             eprintln!("warning: `--link-static {}`: no `extern \"{}\"` block declares a function", s.path.display(), s.stem);
         }
     }
-    let object = match coil_native::aot(&bodies, &pcs, &linked) {
+    let object = match coil_native::aot(bodies, &pcs, &linked) {
         Ok(o) => o,
         Err(e) => return fallback(format!("native code for the package failed ({e})")),
     };
@@ -97,14 +127,8 @@ fn link_aot_executable(pipeline: &Pipeline, link: &LinkInputs) -> Option<(Vec<u8
             eprintln!("  vm: {name}: {why}");
         }
     }
-    // The AOT runtime has no bytecode VM: a body native code refuses is an
-    // error (plan decision 1); `--no-aot` packages the VM runner.
     if !object.refused.is_empty() {
-        for (name, why) in &object.refused {
-            eprintln!("error: `{name}` cannot compile to native code: {why}");
-        }
-        eprintln!("  help: an AOT executable has no bytecode VM; pass `--no-aot` to package the VM runner instead");
-        exit(1);
+        refused_exit(&object.refused);
     }
     let rt = match runtime_library() {
         Ok(p) => p,
@@ -117,7 +141,7 @@ fn link_aot_executable(pipeline: &Pipeline, link: &LinkInputs) -> Option<(Vec<u8
 }
 
 #[cfg(target_family = "wasm")]
-fn link_aot_executable(_: &Pipeline, _: &LinkInputs) -> Option<(Vec<u8>, usize, PathBuf)> {
+fn link_aot_executable(_: &Pipeline, _: &[compiler::native_mir::NativeBody], _: &LinkInputs) -> Option<(Vec<u8>, usize, PathBuf)> {
     None
 }
 
@@ -125,7 +149,7 @@ fn link_aot_executable(_: &Pipeline, _: &LinkInputs) -> Option<(Vec<u8>, usize, 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LinkInputs {
     /// Link native code for the program (an AOT executable); `false` with
-    /// `--no-aot` or `--runner`: the VM runner runs it.
+    /// `--no-aot` or `--runner`: the JIT runner runs it.
     pub aot: bool,
     /// Static libraries for `extern` blocks (`--link-static`).
     pub statics: Vec<StaticLink>,
@@ -553,29 +577,24 @@ pub fn cmd_package(
             "`--link-static` links into the AOT executable; it cannot be used with `--no-aot` or `--runner`".to_string(),
         );
     }
-    // An AOT executable is linked from this compile's MIR.
+    // Both kinds of executable are made from this compile's MIR.
     #[cfg(not(target_family = "wasm"))]
-    if aot {
+    {
         pipeline.set_runs_mir();
         compiler::native_mir::start_native_capture();
     }
-    let archive_bytes = compile_program_archive_bytes(pipeline, filename);
+    let program = compile_program(pipeline, filename);
     // Notes below and errors go to a clean line.
     crate::end_compile_progress();
-    let archive_bytes = match archive_bytes {
-        Ok(b) => b,
+    let mut program = match program {
+        Ok(p) => p,
         Err(()) => {
             let _ = pipeline.finish_reporting();
             exit(1);
         }
     };
-
-    let program = rkyv::access::<ArchivedArchivedProgram, Error>(&archive_bytes)
-        .expect("freshly serialized archive");
-    let bytecode: Vec<Byte> =
-        rkyv::deserialize::<Vec<Byte>, Error>(&program.bytecode).expect("bytecode");
-    let strings: Vec<String> =
-        rkyv::deserialize::<Vec<String>, Error>(&program.strings).expect("strings");
+    let bodies = compiler::native_mir::take_native_capture();
+    let (bytecode, strings) = (program.bytecode.clone(), program.strings.clone());
     let uses_ffi = bytecode_uses_ffi(&bytecode);
     let mut flags = 0u32;
     if uses_ffi {
@@ -635,10 +654,11 @@ pub fn cmd_package(
     }
 
     // The executable the payload goes on: one linked from native code for
-    // the program, or the VM runner (`--no-aot`, `--runner`, or when
+    // the program, or the JIT runner (`--no-aot`, `--runner`, or when
     // linking is not possible here).
-    let linked = if aot { link_aot_executable(pipeline, link) } else { None };
+    let linked = if aot { link_aot_executable(pipeline, &bodies, link) } else { None };
     if let Some((exe, compiled, rt)) = linked {
+        let archive_bytes = payload_bytes(pipeline, &program);
         let lock_json = (!native_lock.entries.is_empty()).then(|| native_lock.to_json());
         let packaged = append_package_payload_with_natives(
             &exe,
@@ -702,6 +722,8 @@ pub fn cmd_package(
         );
     }
 
+    add_native_mir(pipeline, &mut program, &bodies);
+    let archive_bytes = payload_bytes(pipeline, &program);
     let lock_json = if native_lock.entries.is_empty() {
         None
     } else {

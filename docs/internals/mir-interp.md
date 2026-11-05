@@ -113,7 +113,7 @@ no machine code, and the VM goes. It lands here rather than on a later
 | 2. Glue as MIR | Mostly done already (below) |
 | 3. Comptime and macros on the interpreter | Done, on a `Machine` that holds the runtime (below) |
 | 4. JIT by default | Done: `coil FILE`, `coil compile`, `coil run` and `coil test`; `--no-jit` and `--engine vm` keep the VM |
-| 5. Packaging without the VM | Open |
+| 5. Packaging without the VM | Done in coil: `coil-embed` is the JIT runner. Open: spool's `--vm` maps to it; AOT on macOS and Windows is untried |
 | 6. Debugger and coverage | Open: `Deopt` stops, names at a stop, MIR probes |
 | 7. wasm | Open: `Yield` detaches its frame, a task parks an activation; then comptime leaves `Machine<256>` |
 | 8. Delete the VM | Bodies by index, not bytecode PC; archive major 7, MIR and data only |

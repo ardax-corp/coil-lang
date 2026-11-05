@@ -5,7 +5,7 @@ Coil can run functions as machine code made by
 all compile runs on the native driver with no interpreter, and an AOT
 executable (`coil package`) links no bytecode VM at all. Comptime and macros
 run on the MIR interpreter (`docs/internals/mir-interp.md`). The VM stays for
-`coil debug`, coverage, wasm, `--no-aot` packages, and `coil --jit` runs of a program with a body native code refuses. The
+`coil debug`, coverage, wasm, and runs of a program with a body native code refuses. The
 plans (native compilation, then native without the VM) are in the
 project's plan docs; this page describes what is implemented.
 
@@ -632,7 +632,7 @@ alive until its function returns, as on the VM.
 ## AOT `coil package`
 
 `coil package` links a native executable by default (`--no-aot` or
-`--runner` keep the old runner + payload):
+`--runner` package the [JIT runner](#jit-runner) instead):
 
 1. The build captures MIR as for `--jit`; `coil_native::aot()` lowers it
    with `cranelift-object` (PIC) into `program.o`. The object defines
@@ -660,10 +660,27 @@ alive until its function returns, as on the VM.
    world). Build it in its own cargo invocation (`cargo build -p
    coil-rt`): a build with `coil` unifies `vm` back in.
 
-A body native code refuses is an error naming it and why (`--no-aot`
-packages the `coil-embed` runner, whose VM runs it). If the object or the
-link fails (no `cc`, no `libcoil_rt.a`, Windows) the package warns and
-falls back to the runner.
+A body native code refuses is an error naming it and why, at package time on
+both kinds of executable: neither has a VM to run it. Direct calls take any
+number of parameters. What is left is a closure with 16 or more captures and a
+generator with 16 or more arguments, whose `Alloc` the backend refuses. If the
+object or the link fails (no `cc`, no `libcoil_rt.a`, Windows) the package warns
+and falls back to the runner.
+
+### JIT runner
+
+`coil-embed` is the runtime and Cranelift, with no VM, parser or linker. `coil
+package --no-aot` appends the program with its native MIR section, and the
+runner JITs it at start (`coil_native::install_section`, through
+`coil_cli::try_run_embedded_with`) and runs it on the driver. Nothing about it
+needs `cc`, so it is what a host that cannot link gets. `coil package` compiles
+the MIR once itself, so a body that does not compile fails there and not on the
+target. An AOT payload has no section: its code is in the executable.
+
+The runner is about 6.3 MB against 2.1 MB for the old VM runner, the difference
+being Cranelift, and a program pays the JIT at every start (a few ms for a small
+one). Build it in its own cargo invocation, as `coil-rt`: a build with `coil`
+unifies `vm` back in (`coil_embed_resolves_no_vm`).
 
 ### Size and speed
 

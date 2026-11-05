@@ -547,7 +547,8 @@ fn main() {
     }
     let [default, g2, g1, g0] = sizes[..] else { unreachable!() };
     assert_eq!(default, g1, "package defaults to -g1");
-    assert!(g0 < g1 && g1 < g2, "sizes -g0 {g0}, -g1 {g1}, -g2 {g2}");
+    // The runner's native code finds a panic by byte span, so `-g1` keeps them.
+    assert!(g0 < g1 && g1 == g2, "sizes -g0 {g0}, -g1 {g1}, -g2 {g2}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -632,16 +633,73 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The AOT runtime has no bytecode VM: a body native code does not
-/// compile (a function of 17 parameters) fails `coil package` with an
-/// error naming it, and `--no-aot` packages the VM runner, which runs it.
+/// `coil-embed` is a runner with no VM, and a stripped binary cannot show it:
+/// its own build resolves `machine` without the feature. A workspace build
+/// unifies it back, so releases build it alone.
+#[test]
+fn coil_embed_resolves_no_vm() {
+    let out = Command::new("cargo")
+        .args(["tree", "--offline", "-p", "coil-embed", "-e", "features", "-i", "machine"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("spawn cargo tree");
+    let tree = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(tree.contains("coil-embed"), "{tree}");
+    assert!(!tree.contains("feature \"vm\""), "{tree}");
+}
+
+/// A package has no bytecode VM: a body native code does not compile (a
+/// closure of 17 captures) fails `coil package` with an error naming it, on
+/// both kinds of executable, rather than on the target.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_body_native_code_refuses_fails_an_aot_package() {
+fn a_body_native_code_refuses_fails_a_package() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let embed = build_matching_coil_embed(Path::new(&bin));
     let rt = build_matching_coil_rt(Path::new(&bin));
     let dir = std::env::temp_dir().join(format!("coil_aot_refused_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lets: Vec<String> = (0..17).map(|i| format!("    let c{i} = {i};\n")).collect();
+    let names: Vec<String> = (0..17).map(|i| format!("c{i}")).collect();
+    let src = format!(
+        "use io::sync::println;\nuse string::format;\nfn main() {{\n{}    let f = fn () use ({}) => {};\n    let _ = println(format(\"%i\", f()));\n}}\n",
+        lets.concat(),
+        names.join(", "),
+        names.join(" + "),
+    );
+    let entry = dir.join("app.coil");
+    std::fs::write(&entry, src).unwrap();
+    let out = dir.join("app");
+    let package = |extra: &[&std::ffi::OsStr]| {
+        let mut cmd = Command::new(&bin);
+        cmd.arg("package");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        cmd.arg(&entry).arg("-o").arg(&out).args(extra).env("COIL_RT_LIB", &rt);
+        cmd.output().expect("spawn coil package")
+    };
+    for extra in [&[][..], &["--no-aot".as_ref(), "--runner".as_ref(), embed.as_os_str()]] {
+        let run = package(extra);
+        let said = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.code(), Some(1), "{extra:?}: {said}");
+        assert!(said.contains("error: `main` cannot compile to native code"), "{extra:?}: {said}");
+        assert!(said.contains("has no bytecode VM"), "{extra:?}: {said}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// More parameters than registers need no VM: both kinds of executable run
+/// such a body.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_package_runs_a_body_of_many_parameters() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed(Path::new(&bin));
+    let rt = build_matching_coil_rt(Path::new(&bin));
+    let dir = std::env::temp_dir().join(format!("coil_many_params_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let params: Vec<String> = (0..17).map(|i| format!("int a{i}")).collect();
@@ -656,25 +714,18 @@ fn a_body_native_code_refuses_fails_an_aot_package() {
     let entry = dir.join("app.coil");
     std::fs::write(&entry, src).unwrap();
     let out = dir.join("app");
-    let package = |extra: &[&std::ffi::OsStr]| {
+    for extra in [&[][..], &["--no-aot".as_ref(), "--runner".as_ref(), embed.as_os_str()]] {
         let mut cmd = Command::new(&bin);
         cmd.arg("package");
         for root in compiler::Pipeline::workspace_language_extra_roots() {
             cmd.arg("--root").arg(root);
         }
-        cmd.arg(&entry).arg("-o").arg(&out).args(extra).env("COIL_RT_LIB", &rt);
-        cmd.output().expect("spawn coil package")
-    };
-    let aot = package(&[]);
-    let said = String::from_utf8_lossy(&aot.stderr);
-    assert_eq!(aot.status.code(), Some(1), "stderr: {said}");
-    assert!(said.contains("error: `wide` cannot compile to native code: more than 16 parameters"), "stderr: {said}");
-    assert!(said.contains("--no-aot"), "stderr: {said}");
-    let vm = package(&["--no-aot".as_ref(), "--runner".as_ref(), embed.as_os_str()]);
-    assert!(vm.status.success(), "package failed: {}", String::from_utf8_lossy(&vm.stderr));
-    let run = run_with_timeout(&out, 60);
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "153\n");
-    assert_eq!(run.status.code(), Some(0));
+        let made = cmd.arg(&entry).arg("-o").arg(&out).args(extra).env("COIL_RT_LIB", &rt).output().expect("spawn coil package");
+        assert!(made.status.success(), "{extra:?}: {}", String::from_utf8_lossy(&made.stderr));
+        let run = run_with_timeout(&out, 60);
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "153\n", "{extra:?}");
+        assert_eq!(run.status.code(), Some(0), "{extra:?}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
