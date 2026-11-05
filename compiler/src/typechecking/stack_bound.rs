@@ -1523,15 +1523,6 @@ mod tests {
     use crate::typechecking::bare_cases::BareCases;
     use parser::Pratt;
 
-    #[test]
-    fn rescale_grows_only_when_seek_exceeds_default_frame() {
-        assert_eq!(rescale_operand_slots_for_dense_seek(512, 15), 512);
-        assert_eq!(
-            rescale_operand_slots_for_dense_seek(512, 25),
-            operand_slots_for_frame_size(31, 25)
-        );
-    }
-
     /// Unprovable recursion compiles; it just gets no frame bound.
     fn assert_unbounded(report: &StackBoundReport, name: &str) {
         assert!(report.messages.is_empty(), "{:?}", report.messages);

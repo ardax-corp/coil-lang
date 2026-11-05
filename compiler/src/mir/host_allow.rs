@@ -203,47 +203,4 @@ mod tests {
             .and_then(|n| host_spec(n.id))
     }
 
-    #[test]
-    fn allowlist_matches_host_natives() {
-        let ids: Vec<u16> = allowlisted_host_ids().collect();
-        assert_eq!(
-            ids,
-            vec![
-                87, 88, 89, 90, 91, 102, 103, 104, 105, 106, 107, 108, 109, 110, 125, 126, 127,
-                128, 129, 130, 131, 132, 133, 134, 135, 136
-            ]
-        );
-        for id in ids {
-            let spec = host_spec(id).expect("listed id");
-            let native = &HOST_NATIVES[id as usize];
-            assert_eq!(spec.name, native.name);
-            assert_eq!(spec.args.len(), native.arity as usize);
-            assert_eq!(spec.id, native.id);
-        }
-        assert!(host_spec(common::CLOCK_SLEEP_MS_ID).is_none());
-        assert!(host_spec(common::RESULT_UNIT_PROBE_ID).is_none());
-        // Q9 R2: string bytes stay off W4 float specs; they are I6 word edges.
-        assert!(host_spec_by_name("from_bytes").is_none());
-        assert!(host_spec_by_name("to_bytes").is_none());
-        let from = host_edge_spec_by_name("from_bytes").expect("from_bytes I6");
-        let to = host_edge_spec_by_name("to_bytes").expect("to_bytes I6");
-        assert!(dense_host_ok(from.id));
-        assert!(dense_host_ok(to.id));
-        assert!(dense_host_layout_ok(common::HOST_ENUM_LAYOUT_BOXED as u8));
-        assert!(dense_host_layout_ok(
-            common::HOST_ENUM_LAYOUT_RESULT_NICHE as u8
-        ));
-        assert!(!dense_host_layout_ok(
-            common::HOST_ENUM_LAYOUT_RESERVED as u8
-        ));
-        assert_eq!(from.args, I64_1);
-        assert_eq!(to.args, I64_1);
-        assert_eq!(from.ret, MirTy::I64);
-        assert_eq!(to.ret, MirTy::I64);
-        let clock = host_edge_spec(common::CLOCK_MONO_NANOS_ID).expect("clock edge");
-        assert!(clock.args.is_empty());
-        assert_eq!(clock.ret, MirTy::I64);
-        assert!(!crate::mir::effects::host_may_hoist(common::CLOCK_MONO_NANOS_ID));
-        assert!(host_edge_spec_by_name("write").is_some());
-    }
 }

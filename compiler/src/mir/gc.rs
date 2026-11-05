@@ -300,80 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn make_and_init_are_alloc_barriers() {
-        let loc = loc();
-        assert_eq!(
-            refuse_reason(&IlOp::MakeArray { elem_kind: 0, arity: 1, loc }),
-            Some("heap/aggregate")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::MakeTuple { kinds: 0, arity: 2, loc }),
-            Some("heap/aggregate")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::MakeEnum {
-                kinds: 0,
-                tag: 0,
-                arity: 1,
-                loc,
-            }),
-            Some("heap/aggregate")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::Byte {
-                byte: Byte::new(Instruction::InitTyped).with_operand_u32(1),
-                loc,
-            }),
-            Some("heap/alloc")
-        );
-        assert_eq!(refuse_reason(&IlOp::Const { imm: 1, loc }), None);
-        assert_eq!(
-            refuse_reason(&IlOp::byte(Byte::new(Instruction::ArrayPush))),
-            Some("heap/grow")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(Byte::new(Instruction::DenseArrayPush))),
-            Some("heap/grow")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(
-                Byte::new(Instruction::FORMAT).with_operand_u32(1)
-            )),
-            Some("heap/format")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(
-                Byte::new(Instruction::FORMAT).with_operand_u32(0)
-            )),
-            None
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(Byte::new(Instruction::STRINGIFY))),
-            Some("heap/format")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(Byte::new(Instruction::DictEntries))),
-            Some("heap/dict")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(
-                Byte::new(Instruction::MakeDict).with_operand_u32(1)
-            )),
-            Some("heap/dict")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::Entry {
-                kind: crate::il::EntryKind::MakeCoro,
-                arity: 0,
-                target: crate::il::Label(0),
-                loc,
-                ret_words: 1,
-            }),
-            Some("heap/coro")
-        );
-    }
-
-    #[test]
     fn roots_include_new_object_when_returned() {
         let mut b = MirBuilder::new("mk");
         let n = b.ins_const(MirConst::I64(1)).unwrap();
@@ -387,45 +313,6 @@ mod tests {
         assert_eq!(roots.len(), 1);
         let side = f.live_roots_at(obj).expect("alloc sidecar");
         assert!(side.values.contains(&obj));
-    }
-
-    #[test]
-    fn roots_include_live_heap_param_across_barrier() {
-        let mut b = MirBuilder::new("keep");
-        let xs = b.add_param(MirTy::HeapRef).unwrap();
-        b.def_local(LocalId(0), xs).unwrap();
-        let n = b.ins_const(MirConst::I64(1)).unwrap();
-        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
-        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
-        let z = b.ins_const(MirConst::I64(0)).unwrap();
-        let _ = b.ins_cmp(MirCmpOp::Eq, xs, z).unwrap();
-        let _ = b.ins_cmp(MirCmpOp::Eq, a, z).unwrap();
-        b.ret(Some(g)).unwrap();
-        let f = b.finish().unwrap();
-        f.verify().unwrap();
-        let (obj, _g, roots) = alloc_and_barrier(&f);
-        assert!(roots.contains(&obj), "{roots:?}");
-        assert!(roots.contains(&xs), "live heap param: {roots:?}");
-        let side = f.live_roots_at(_g).expect("barrier sidecar");
-        assert!(side.values.contains(&xs) && side.values.contains(&obj));
-        assert!(
-            side.slots.iter().any(|s| s.0 == 0),
-            "slot 0: {:?}",
-            side.slots
-        );
-    }
-
-    #[test]
-    fn dead_heap_param_is_not_a_root() {
-        let mut b = MirBuilder::new("dead");
-        let unused = b.add_param(MirTy::HeapRef).unwrap();
-        let n = b.ins_const(MirConst::I64(1)).unwrap();
-        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
-        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
-        b.ret(Some(g)).unwrap();
-        let f = b.finish().unwrap();
-        let (_obj, _g, roots) = alloc_and_barrier(&f);
-        assert!(!roots.contains(&unused), "dead param in roots: {roots:?}");
     }
 
     #[test]

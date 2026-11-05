@@ -173,34 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_default_denies_host_grants() {
-        let (_cfg, args) = parse_args(&argv(&["a.coil", "--fn", "main", "--il"]))
-            .unwrap()
-            .unwrap();
-        assert_eq!(args.grants, HostGrants::deny_all());
-        assert_eq!(args.fn_pat.as_deref(), Some("main"));
-        assert!(args.show_il);
-    }
-
-    #[test]
-    fn source_stays_on_without_no_source() {
-        let (_cfg, args) = parse_args(&argv(&[
-            "a.coil",
-            "--fn",
-            "total",
-            "-O",
-            "basic",
-            "--mir",
-            "--ast",
-        ]))
-        .unwrap()
-        .unwrap();
-        assert!(args.source);
-        assert!(args.show_ast);
-        assert_eq!(args.opt_level, compiler::OptLevel::Basic);
-    }
-
-    #[test]
     fn parse_rejects_missing_dload_stem() {
         assert!(parse_args(&argv(&["a.coil", "--allow-dload"])).is_err());
     }

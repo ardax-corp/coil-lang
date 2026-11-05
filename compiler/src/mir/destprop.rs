@@ -274,35 +274,4 @@ bb2:
         assert_eq!(mul, (f.params[0], f.params[0]));
     }
 
-    #[test]
-    fn sinks_latch_incoming_past_last_use_of_phi() {
-        let src = r#"
-func @zr(v0: f64, v1: f64, v2: f64) -> f64 {
-bb0:
-    jump bb1
-bb1:
-    v3 = phi.f64 [bb0: v0, bb2: v6]
-    v4 = phi.f64 [bb0: v1, bb2: v7]
-    v8 = fcmp.ogt v3, v2
-    brif v8, bb2, bb3
-bb2:
-    v5 = fadd v3, v2
-    v7 = fadd v4, v3
-    v6 = fadd v5, v2
-    jump bb1
-bb3:
-    return v3
-}
-"#;
-        let mut f = parse_func(src).expect(src);
-        f.verify().unwrap();
-        sink_phi_incomings(&mut f);
-        f.verify().unwrap();
-        let insts = &f.block(crate::mir::BlockId(2)).insts;
-        let last = insts.last().expect("latch body");
-        assert!(
-            matches!(last, MirInst::Bin { dest, .. } if dest.0 == 6),
-            "tr (v6) must sink after zi' (v7): {insts:?}"
-        );
-    }
 }

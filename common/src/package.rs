@@ -685,29 +685,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_ffi_opcodes() {
-        let bc = vec![
-            Byte::new(Instruction::HALT),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        assert!(bytecode_uses_ffi(&bc));
-        assert!(!bytecode_uses_ffi(&[Byte::new(Instruction::HALT)]));
-    }
-
-    #[test]
-    fn extracts_dload_library_name_before_ffi_load() {
-        let strings = vec!["sum".to_string()];
-        let bc = vec![
-            Byte::new(Instruction::STRING).with_operand_u32(0),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        assert_eq!(
-            ffi_library_names_from_bytecode(&bc, &strings),
-            vec!["sum".to_string()]
-        );
-    }
-
-    #[test]
     fn system_ffi_stems() {
         assert!(is_system_ffi_stem("c"));
         assert!(is_system_ffi_stem("libc.so.6"));

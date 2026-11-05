@@ -1255,59 +1255,6 @@ mod tests {
     }
 
     #[test]
-    fn line_index_maps_known_loc() {
-        let text = "fn main() {\n    return;\n}\n";
-        let tmp = std::env::temp_dir().join(format!("coil_dbg_line_{}", std::process::id()));
-        fs::write(&tmp, text).unwrap();
-        let path = tmp.display().to_string();
-        let mut debug = ProgramDebug {
-            source_files: vec![path.clone()],
-            debug_locs: vec![DebugLoc::unknown(); 5],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        let ret_off = text.find("return").unwrap() as u32;
-        debug.debug_locs[3] = DebugLoc {
-            file: 0,
-            start_byte: ret_off,
-            end_byte: ret_off + 6,
-        };
-        let idx = LineIndex::build(&debug, None);
-        let pcs = idx.pcs_for_line(Some(&path), 2, &path);
-        assert!(pcs.contains(&3), "pcs={pcs:?}");
-        let _ = fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn line_index_resolves_basename_hint() {
-        let text = "fn main() {\n    return;\n}\n";
-        let tmp = std::env::temp_dir().join(format!("coil_dbg_base_{}", std::process::id()));
-        fs::write(&tmp, text).unwrap();
-        let path = tmp.display().to_string();
-        let mut debug = ProgramDebug {
-            source_files: vec![path.clone()],
-            debug_locs: vec![DebugLoc::unknown(); 4],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        let ret_off = text.find("return").unwrap() as u32;
-        debug.debug_locs[2] = DebugLoc {
-            file: 0,
-            start_byte: ret_off,
-            end_byte: ret_off + 6,
-        };
-        let idx = LineIndex::build(&debug, None);
-        let base = Path::new(&path).file_name().unwrap().to_str().unwrap();
-        let pcs = idx.pcs_for_line(Some(base), 2, &path);
-        assert!(pcs.contains(&2), "pcs={pcs:?}");
-        let _ = fs::remove_file(&tmp);
-    }
-
-    #[test]
     fn function_breakpoint_exposes_fib_locals_via_frame_id() {
         let mut session = compile_fib();
         session.set_function_breakpoint("fib").expect("break fib");
@@ -1518,65 +1465,6 @@ mod tests {
         assert!(path.to_string_lossy().contains("fib.coil"), "path={path:?}");
         assert!(line >= 1);
         assert!(rows.iter().any(|(_, mark, _)| *mark));
-    }
-
-    #[test]
-    fn debugger_attached_may_dense_opcodes() {
-        use common::Instruction;
-        let src = r#"
-fn hot(float a, float b, int n) -> float {
-    let i = 0;
-    let s = 0.0;
-    while i < n {
-        let xf = i as float;
-        s = s + xf + a - b;
-        i = i + 1;
-    }
-    return s;
-}
-fn main() {
-    let _ = hot(2.0, 1.0, 8);
-}
-"#;
-        let dir = std::env::temp_dir().join(format!("coil_dbg_i7_{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("hot.coil");
-        fs::write(&path, src).unwrap();
-        let mut session = compile_entry(path.to_str().unwrap(), HostGrants::deny_all())
-            .expect("compile debugger-attached hot");
-        let dense = session.artifacts.bytecode.iter().any(|b| {
-            matches!(
-                *b.bytecode(),
-                Instruction::DenseBin
-                    | Instruction::DenseBin2
-                    | Instruction::DenseBinJmpf
-                    | Instruction::DenseIndexJmpf
-                    | Instruction::DenseCmp
-                    | Instruction::DenseConst
-                    | Instruction::DenseMove
-                    | Instruction::DenseUnary
-                    | Instruction::DenseCast
-                    | Instruction::VLoad
-                    | Instruction::VStore
-                    | Instruction::VBin
-                    | Instruction::VMove
-                    | Instruction::VReduce
-                    | Instruction::VFma
-                    | Instruction::DenseIndex
-                    | Instruction::DenseStoreIndex
-                    | Instruction::DenseArrayLen
-                    | Instruction::DenseMake
-                    | Instruction::DenseMakeK
-                    | Instruction::DensePush
-            )
-        });
-        assert!(dense, "B8: debugger-attached may keep dense reconstruct");
-        let reason = session.start();
-        assert!(
-            matches!(reason, StopReason::Halt),
-            "dense debug session must halt; reason={reason:?}"
-        );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

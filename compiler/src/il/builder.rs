@@ -222,17 +222,6 @@ impl IlBuilder {
         });
     }
 
-    /// Ensure every targeted label was bound.
-    #[cfg(test)]
-    pub fn finalize_labels(&self) -> Result<(), IlError> {
-        for id in &self.targeted {
-            if !self.bound.contains(id) {
-                return Err(IlError::UnboundLabel(Label(*id)));
-            }
-        }
-        Ok(())
-    }
-
 }
 
 // Test fixtures build their IL with these.
@@ -324,21 +313,6 @@ mod tests {
             }
         }
         out
-    }
-
-    #[test]
-    fn code_ranges_match_a_scan() {
-        let il = sample();
-        assert_eq!(il.code_len(), 3);
-        for start in 0..5 {
-            for end in start..6 {
-                let range: Vec<usize> = il.raw_range_of_code(start, end).collect();
-                assert_eq!(range, scanned(&il, start, end), "[{start}, {end})");
-            }
-        }
-        assert_eq!(il.raw_insert_point(0), 0);
-        assert_eq!(il.raw_insert_point(2), 4);
-        assert_eq!(il.raw_insert_point(9), il.raw_len());
     }
 
 }

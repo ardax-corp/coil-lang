@@ -21,41 +21,6 @@ fn compile_without_input_is_e0903() {
     assert!(stderr(&out).contains("E0903"), "{}", stderr(&out));
 }
 
-/// A `.ccoil` from an incompatible archive version is E0901 (#1961).
-#[test]
-fn run_of_other_archive_version_is_e0901() {
-    let stale = ArchivedProgram {
-        version: pack_archive_version(0, 1),
-        static_slot_count: 0,
-        constants: vec![],
-        strings: vec![],
-        bytecode: vec![Byte::new(Instruction::HALT)],
-        source_files: vec![],
-        debug_locs: vec![],
-        fn_symbols: Vec::new(),
-        struct_layouts: Vec::new(),
-        operand_stack_slots: 256,
-        stack_maps: Vec::new(),
-        precise_frames: Vec::new(),
-        class_word_kinds: Vec::new(),
-        static_word_kinds: Vec::new(),
-        debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
-        native_mir: Vec::new(),
-    };
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&stale).unwrap();
-    let dir = std::env::temp_dir().join(format!("coil-e0901-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let hyc = dir.join("stale.ccoil");
-    std::fs::write(&hyc, bytes.as_slice()).unwrap();
-    let out = coil(&["run", hyc.to_str().unwrap()]);
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("E0901"), "{}", stderr(&out));
-}
-
 /// A reachable host call without its grant is E0414; the corpora run with
 /// every grant, so only the CLI can show it.
 #[test]

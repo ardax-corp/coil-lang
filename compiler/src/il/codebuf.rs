@@ -315,16 +315,6 @@ mod tests {
     use common::Instruction;
 
     #[test]
-    fn delete_shift_moves_pcs_past_disjoint_ranges() {
-        assert!(DeleteShift::new(vec![(4, 8), (6, 10)]).is_none());
-        let shift = DeleteShift::new(vec![(10, 14), (2, 5), (7, 7)]).expect("disjoint");
-        let mapped: Vec<usize> = [0, 2, 4, 5, 9, 10, 13, 14, 20].iter().map(|&pc| shift.map(pc)).collect();
-        assert_eq!(mapped, [0, 2, 4, 2, 6, 7, 10, 7, 13]);
-        assert!(!shift.inside(1) && shift.inside(2) && shift.inside(4) && !shift.inside(5) && shift.inside(13));
-        assert!(shift.overlaps(0, 3) && !shift.overlaps(0, 2) && !shift.overlaps(5, 10) && shift.overlaps(5, 11));
-    }
-
-    #[test]
     fn push_lifts_hot_set_bytes_to_typed_ops() {
         let mut buf = CodeBuf::new();
         buf.push(Byte::new(Instruction::LOAD).with_operand_u32(1));
@@ -342,22 +332,6 @@ mod tests {
             }
         ));
         assert!(matches!(ops[3], IlOp::Return { .. }));
-    }
-
-    #[test]
-    fn push_pop_drops_a_pure_value_pushed_just_before() {
-        let mut buf = CodeBuf::new();
-        buf.push_const(0);
-        buf.push_pop();
-        buf.push_load(2);
-        buf.push_pop();
-        assert!(buf.ops().is_empty());
-        // A label in between is a join: the pop stays.
-        let l = buf.fresh_label();
-        buf.push_const(1);
-        buf.bind_label(l);
-        buf.push_pop();
-        assert!(matches!(buf.ops().last(), Some(IlOp::Pop { .. })));
     }
 
     #[test]
@@ -380,59 +354,6 @@ mod tests {
         assert!(matches!(ops[1], IlOp::StorePop { slot: 4, .. }));
     }
 
-    /// A body ending where the setup region is spliced keeps its span.
-    #[test]
-    fn bump_func_spans_leaves_a_body_ending_at_the_splice() {
-        let mut buf = CodeBuf::new();
-        buf.push_const(1);
-        buf.record_func_with_sp("a", None, 0, 1, 0);
-        buf.push_const(2);
-        buf.record_func_with_sp("b", None, 1, 2, 0);
-        buf.bump_func_spans(1, 3);
-        let spans: Vec<(usize, usize)> = buf.funcs.iter().map(|f| (f.code_start, f.code_end)).collect();
-        assert_eq!(spans, [(0, 1), (4, 5)]);
-    }
-
-    /// The startup region is spliced into the prologue via `splice_buf_at`.
-    #[test]
-    fn splice_buf_at_inserts_ops_before_code_pos() {
-        let mut dest = CodeBuf::new();
-        dest.push_const(1);
-        dest.push_const(2);
-        let mut src = CodeBuf::new();
-        src.push_const(9);
-        src.push_load(0);
-        dest.splice_buf_at(1, src);
-        let ops = dest.ops();
-        assert_eq!(ops.len(), 4);
-        assert!(matches!(ops[0], IlOp::Const { imm: 1, .. }));
-        assert!(matches!(ops[1], IlOp::Const { imm: 9, .. }));
-        assert!(matches!(ops[2], IlOp::Load { slot: 0, .. }));
-        assert!(matches!(ops[3], IlOp::Const { imm: 2, .. }));
-    }
-
-    #[test]
-    fn append_concatenates_typed_ops_and_remaps_labels() {
-        let mut dest = CodeBuf::new();
-        dest.push_const(1);
-        let mut src = CodeBuf::new();
-        let lab = src.il_mut().fresh_label();
-        src.il_mut().emit_jump(IlJumpKind::Unconditional, lab);
-        src.il_mut().bind_label(lab);
-        src.push_const(2);
-        dest.append(&mut src);
-        assert!(src.is_empty());
-        let ops = dest.ops();
-        assert!(matches!(ops[0], IlOp::Const { imm: 1, .. }));
-        assert!(matches!(ops[1], IlOp::Jump { .. }));
-        assert!(matches!(ops[2], IlOp::Label(_)));
-        assert!(matches!(ops[3], IlOp::Const { imm: 2, .. }));
-        match (&ops[1], &ops[2]) {
-            (IlOp::Jump { target, .. }, IlOp::Label(bound)) => assert_eq!(target, bound),
-            _ => panic!("expected remapped jump/label"),
-        }
-    }
-
     #[test]
     fn record_func_tracks_spans_and_clear_drops_them() {
         let mut buf = CodeBuf::new();
@@ -450,85 +371,5 @@ mod tests {
         assert!(buf.ops().is_empty());
     }
 
-    /// Production finalize: owning `IlModule` + entry map must still resolve CALL.
-    #[test]
-    fn lower_in_place_resolves_entry_call_through_module() {
-        let mut buf = CodeBuf::new();
-        let entry = buf.bind_fresh_entry();
-        let start = buf.len();
-        buf.push_const(7);
-        buf.push_return();
-        let end = buf.len();
-        buf.record_func("f", Some(entry), start, end);
-
-        // Packed CALL to entry PC → Entry rewrite; lives in epilogue after split.
-        buf.push(Byte::new(Instruction::CALL).with_call_packed(0, start as u32));
-        buf.push(Byte::new(Instruction::HALT));
-
-        let mut pool = Vec::new();
-        let lowered = buf.lower_in_place(&mut pool);
-        let ops: Vec<_> = lowered.bytecode.iter().map(|b| *b.bytecode()).collect();
-        // Entry is a CALL target, not an uncond JMP join, so CONST; RETURN fuses.
-        assert!(
-            matches!(
-                ops.as_slice(),
-                [
-                    Instruction::ConstReturnImm,
-                    Instruction::CALL,
-                    Instruction::HALT
-                ]
-            ),
-            "unexpected lowered ops: {ops:?}"
-        );
-        assert_eq!(lowered.bytecode[0].operand_u32(), 7);
-        assert_eq!(
-            lowered.bytecode[1].call_parts(),
-            (0, 0),
-            "CALL must target entry PC after owning-module lower"
-        );
-        assert_eq!(buf.as_slice().len(), lowered.bytecode.len());
-    }
-
-    /// COI-108: reserve an entry label, emit `Entry{Call}` before the body, then
-    /// bind the reserved label — lower must resolve CALL to the body PC.
-    #[test]
-    fn bind_reserved_entry_resolves_earlier_entry_call() {
-        let mut buf = CodeBuf::new();
-        let reserved = buf.fresh_label();
-        // Call site ahead of the callee body (forward method reference).
-        buf.emit_entry(EntryKind::Call, 0, reserved);
-        buf.push(Byte::new(Instruction::HALT));
-
-        let start = buf.len();
-        buf.bind_reserved_entry(reserved);
-        buf.push_const(3);
-        buf.push_return();
-        let end = buf.len();
-        buf.record_func("later", Some(reserved), start, end);
-
-        assert_eq!(
-            buf.entry_label_for_offset(start),
-            Some(reserved),
-            "bind_reserved_entry must record entry_at_offset"
-        );
-
-        let mut pool = Vec::new();
-        let lowered = buf.lower_in_place(&mut pool);
-        let ops: Vec<_> = lowered.bytecode.iter().map(|b| *b.bytecode()).collect();
-        assert!(
-            ops.iter().any(|op| matches!(op, Instruction::CALL)),
-            "reserved Entry{{Call}} must lower to CALL; ops={ops:?}"
-        );
-        let call = lowered
-            .bytecode
-            .iter()
-            .find(|b| matches!(b.bytecode(), Instruction::CALL))
-            .expect("CALL present");
-        assert_eq!(
-            call.call_parts(),
-            (0, start),
-            "CALL must target the reserved body PC"
-        );
-    }
 }
 

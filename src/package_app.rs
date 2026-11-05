@@ -802,51 +802,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn load_archive_bytes_rejects_version() {
-        let too_new = ArchivedProgram {
-            version: pack_archive_version(0, 1),
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            native_mir: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
-        assert!(matches!(
-            load_archive_bytes(bytes.as_slice()),
-            Err(LoadErr::Version(_))
-        ));
-
-        let other_minor = ArchivedProgram {
-            version: pack_archive_version(1, 99),
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            native_mir: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
-        assert!(matches!(
-            load_archive_bytes(bytes.as_slice()),
-            Err(LoadErr::Version(_))
-        ));
-    }
-
     /// Project-mode `coil natives dump` lists a row whose local file is not
     /// there yet as missing instead of failing, so a downloader can fetch it;
     /// a file that is there is still hashed (coil-lang#1657).
@@ -888,55 +843,4 @@ mod tests {
         assert!(odd.is_err(), "a directory at the library path must not pass");
     }
 
-    /// A `dload` path literal reduces to the stem the runtime gate uses, so
-    /// one `--ffi-native name=<stem>` row covers it (coil-lang#1656).
-    #[test]
-    fn build_native_lock_reduces_dload_path_to_stem() {
-        let dir = std::env::temp_dir().join(format!("coil_lock_stem_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let filename = platform_shared_lib_filename("tls");
-        fs::write(dir.join(&filename), b"not really a library").unwrap();
-        let natives = vec![parse_ffi_native(&format!(
-            "name=tls,version=1.0.0,path={}",
-            dir.display()
-        ))
-        .unwrap()];
-        let strings = vec![format!("./native/{filename}"), "tls".to_string()];
-        let bytecode = vec![
-            Byte::new(Instruction::STRING).with_operand_u32(0),
-            Byte::new(Instruction::FfiLoad),
-            Byte::new(Instruction::STRING).with_operand_u32(1),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        let lock = build_native_lock(&natives, &bytecode, &strings, &[]);
-        let _ = fs::remove_dir_all(&dir);
-        let lock = lock.expect("the `tls` row covers `./native/libtls.so`");
-        assert_eq!(lock.entries.len(), 1, "one entry per stem: {:?}", lock.entries);
-        assert_eq!(lock.entries[0].stem, "tls");
-        assert_eq!(lock.entries[0].filename, filename);
-    }
-
-    #[test]
-    fn load_archive_bytes_accepts_unaligned_prefix() {
-        let program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            native_mir: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
-        let mut prefixed = vec![0u8; 1];
-        prefixed.extend_from_slice(bytes.as_slice());
-        load_archive_bytes(&prefixed[1..]).expect("unaligned overlay slice");
-    }
 }

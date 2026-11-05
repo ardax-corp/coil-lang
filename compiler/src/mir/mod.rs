@@ -68,8 +68,6 @@ pub(crate) use native_capture::capture_open;
 pub use native_capture::{ComptimeCapture, ConstArg, ConstCall, ConstResult, NativeBody, VectorOp, ffi_use, capture_const_calls, replace_const_calls, capture_native_bodies, vector_op, native_capture_active, peek_native_capture, start_native_capture, start_raw_capture, take_native_capture, without_native_capture};
 pub use instcombine::{instcombine, };
 pub use licm::{licm, mark_frozen_arrays};
-#[cfg(test)]
-pub use error::LowerError;
 pub use sccp::sccp;
 pub use sroa::sroa;
 pub use bool_thread::thread_bool_phis;
