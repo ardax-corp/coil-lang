@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 common = { path = "../common" }
 compiler = { path = "../compiler", default-features = false }
-machine = { path = "../machine", default-features = false, features = ["vm"] }
+machine = { path = "../machine", default-features = false }
 coil-build-id = { path = "../coil-build-id" }
 coil-mir-interp = { path = "../coil-mir-interp" }
 

@@ -119,7 +119,7 @@ struct TestCli {
     /// What runs the compiled code: native (Cranelift where the backend
     /// compiles a body, the VM elsewhere; the default), vm, or mir (the
     /// interpreter)
-    #[arg(long, value_name = "vm|native|mir", value_parser = Engine::parse)]
+    #[arg(long, value_name = "native|mir", value_parser = Engine::parse)]
     engine: Option<Engine>,
     /// Test root (default: ./tests)
     #[arg(value_name = "PATH")]
@@ -291,7 +291,8 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         doc_tests: DocTests::Off,
         // The parent kills a mutant's worker after `--wall-timeout`.
         wall_timeout: 0,
-        engine: Engine::Vm,
+        // Only the interpreter charges steps, which the budget counts.
+        engine: Engine::Mir,
     })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {

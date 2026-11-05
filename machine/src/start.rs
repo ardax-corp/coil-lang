@@ -70,6 +70,20 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
     Some(panicked)
 }
 
+/// What a job needs to run `program`, for a host that only submits jobs (the
+/// test harness).
+pub fn spawn_context(
+    program: Arc<ThreadProgram>,
+    start: NativeStart,
+    reactor: Arc<crate::reactor::Reactor>,
+    native: Option<Arc<crate::native::NativeCode>>,
+) -> Option<crate::thread::ThreadSpawnContext> {
+    let mut rt = runtime_for(&program, start);
+    rt.reactor = reactor;
+    rt.native = native.map(|n| Box::new(crate::native::NativeTable::new(n)));
+    rt.thread_spawn_context(program, None)
+}
+
 /// The runtime `program` runs over: the standard host natives, its FFI
 /// paths and layouts, its statics, strings and word kinds.
 fn runtime_for(program: &ThreadProgram, start: NativeStart) -> Runtime {

@@ -545,14 +545,6 @@ fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
     ));
 }
 
-#[cfg(any(test, feature = "vm"))]
-/// Register each native on `machine` (same order as [`build_standard_host_natives`]).
-pub fn wire_standard_host_natives<const N: usize>(machine: &mut crate::Machine<N>) {
-    for native in build_standard_host_natives(|_name, _id| {}) {
-        machine.register_native(native);
-    }
-}
-
 fn push_removed_time_stubs(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),

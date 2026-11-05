@@ -11,8 +11,6 @@ use common::{
     read_package_trailer, resolve_archive_operand_slots,
 };
 use machine::DloadGate;
-#[cfg(feature = "vm")]
-use machine::{Machine, WireThreadProgramWithMapsArgs, wire_standard_host_natives, wire_thread_program_with_maps};
 
 /// Errors loading a `.ccoil` / embedded archive blob.
 #[derive(Debug)]
@@ -138,59 +136,17 @@ pub fn execute_archived_program(
         static_word_kinds: std::sync::Arc::new(loaded.static_word_kinds.clone()),
     });
     let start = machine::NativeStart {
-        base_dir: base_dir.clone(),
-        ffi_search_paths: ffi_search_paths.clone(),
-        dload_gate: dload_gate.clone(),
+        base_dir,
+        ffi_search_paths,
+        dload_gate,
         struct_layouts: loaded.struct_layouts.iter().map(machine::CStructLayout::from_archive).collect(),
         shared_print: None,
     };
     if let Some(panicked) = machine::run_natively(program, start) {
         return panicked;
     }
-    #[cfg(not(feature = "vm"))]
-    {
-        eprintln!("coil: native code does not cover this program, and this runtime has no bytecode VM to run it");
-        true
-    }
-    #[cfg(feature = "vm")]
-    run_on_vm(loaded, slots, base_dir, ffi_search_paths, dload_gate)
-}
-
-/// [`execute_archived_program`] on the bytecode VM.
-#[cfg(feature = "vm")]
-fn run_on_vm(loaded: &LoadedArchive, slots: usize, base_dir: Option<PathBuf>, ffi_search_paths: Vec<PathBuf>, dload_gate: Option<DloadGate>) -> bool {
-    let mut machine = Machine::<256>::with_operand_capacity(slots);
-    wire_standard_host_natives(&mut machine);
-    if let Some(gate) = dload_gate {
-        machine.set_dload_gate(gate);
-    }
-
-    machine.set_ffi_paths(base_dir, ffi_search_paths);
-    for layout in &loaded.struct_layouts {
-        machine.register_struct_layout(machine::CStructLayout::from_archive(layout));
-    }
-
-    wire_thread_program_with_maps(WireThreadProgramWithMapsArgs {
-        machine: &mut machine,
-        bytecode: &loaded.bytecode,
-        constants: &loaded.constants,
-        strings: &loaded.strings,
-        static_slot_count: loaded.static_slots,
-        debug: loaded.debug.clone(),
-        operand_stack_slots: slots as u32,
-        stack_maps: loaded.stack_maps.clone(),
-        precise_frames: loaded.precise_frames.clone(),
-        class_word_kinds: loaded.class_word_kinds.clone(),
-        static_word_kinds: loaded.static_word_kinds.clone(),
-    });
-    machine.set_program_debug(loaded.debug.clone());
-    machine.run_raw(
-        &loaded.bytecode,
-        &loaded.constants,
-        &loaded.strings,
-        loaded.static_slots,
-    );
-    machine.panicked()
+    eprintln!("coil: this archive's code does not cover the program");
+    true
 }
 
 /// Natives-cache directories that hold a lock entry's library (size checked).

@@ -234,7 +234,6 @@ fn cache_options(cli: &CliArgs) -> Option<String> {
         "{:?}",
         (
             cli.include_tests,
-            cli.jit,
             cli.opt_level,
             cli.debug_level,
             cli.contracts,
@@ -394,17 +393,14 @@ fn cmd_build_and_run(
     opt_stats: bool,
     opt_stats_json: bool,
     cache: Option<BuildCache>,
-    jit: bool,
 ) {
     // The interpreter runs every body, and an archive's section holds only
     // what native code compiles.
     let cache = if interprets() { None } else { cache };
-    if jit {
-        pipeline.set_runs_mir();
-    }
+    pipeline.set_runs_mir();
     if RAW_MIR.load(std::sync::atomic::Ordering::Relaxed) {
         compiler::native_mir::start_raw_capture();
-    } else if jit {
+    } else {
         compiler::native_mir::start_native_capture();
     }
     if let Some(cache) = &cache
@@ -445,9 +441,7 @@ fn cmd_build_and_run(
     }
 
     maybe_warn_stale_default_out(pipeline, filename, &full);
-    if jit {
-        install_native(bodies, &full);
-    }
+    install_native(bodies, &full);
     let entry = ffi_entry_path(Path::new(filename));
     let panicked = execute_pipeline(ExecutePipelineArgs {
         pipeline,
@@ -588,12 +582,9 @@ fn cmd_compile(
     opt_stats: bool,
     opt_stats_json: bool,
     cache: Option<BuildCache>,
-    jit: bool,
 ) {
-    if jit {
-        pipeline.set_runs_mir();
-        compiler::native_mir::start_native_capture();
-    }
+    pipeline.set_runs_mir();
+    compiler::native_mir::start_native_capture();
     compile_to_archive(pipeline, filename, output, cache);
     end_compile_progress();
     print_opt_stats(opt_stats, opt_stats_json);
@@ -606,7 +597,7 @@ fn cmd_compile(
     }
 }
 
-fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
+fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
     if common::ext::is_source_path(Path::new(archive)) {
         fail_and_exit(
             pipeline,
@@ -654,14 +645,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
         let _ = pipeline.finish_reporting();
     }
 
-    if !no_jit {
-        install_section(archive, &loaded.native_mir);
-        if loaded.native_mir.is_empty() && jit {
-            eprintln!(
-                "warning: `{archive}` carries no native MIR (build it with `coil compile --jit`); running on the VM"
-            );
-        }
-    }
+    install_section(archive, &loaded.native_mir);
 
     // Weak base_dir: archive parent, for relative FFI dload paths.
     // Allow flags are compile-time only; the artifact is the grant.
@@ -869,7 +853,7 @@ fn main() {
                     };
                     set_program_args(&filename, &cli.program_args);
                     let cache = BuildCache::new(cache_options.as_deref(), &filename);
-                    RUN_ON_MIR.store(cli.mir, std::sync::atomic::Ordering::Relaxed);
+                    RUN_ON_MIR.store(cli.mir || cli.cow_report, std::sync::atomic::Ordering::Relaxed);
                     // Only `-O 0` is raw: above it the interpreter runs what
                     // native code compiles.
                     RAW_MIR.store(cli.mir && cli.opt_level == compiler::OptLevel::None, std::sync::atomic::Ordering::Relaxed);
@@ -879,7 +863,6 @@ fn main() {
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
-                        cli.jit || cli.mir,
                     );
                 }
                 Command::Compile { filename, output } => {
@@ -895,12 +878,11 @@ fn main() {
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
-                        cli.jit,
                     );
                 }
                 Command::Run { archive } => {
                     set_program_args(&archive, &cli.program_args);
-                    cmd_run(&mut pipeline, &archive, cli.jit, cli.no_jit);
+                    cmd_run(&mut pipeline, &archive);
                 }
                 Command::Package {
                     filename,

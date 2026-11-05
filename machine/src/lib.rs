@@ -1,7 +1,5 @@
 //! Stack VM, managed heap, and FFI runtime for coil bytecode.
-// Without the `vm` feature (the AOT runtime) the interpreter's helpers in
-// the shared modules go unused.
-#![cfg_attr(not(any(test, feature = "vm")), allow(dead_code, unused_imports))]
+#![allow(dead_code, unused_imports)]
 
 mod apply;
 mod arith;
@@ -52,8 +50,6 @@ pub mod thread;
 pub mod tty;
 pub mod value_eq;
 pub mod vec_ops;
-#[cfg(any(test, feature = "vm"))]
-mod vm;
 
 /// Host native `(heap, args) -> value`. Arity lives in the wiring column, so
 /// zero-arg clocks and three-arg vec helpers share this function type.
@@ -70,8 +66,6 @@ pub use host_natives::{
     CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE,
     STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE, build_standard_host_natives,
 };
-#[cfg(any(test, feature = "vm"))]
-pub use host_natives::wire_standard_host_natives;
 pub use memory::*;
 pub use opcode::*;
 pub use packed_la::{
@@ -79,18 +73,14 @@ pub use packed_la::{
     packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
 };
 pub use runtime_wire::{VmHostSpec, class_kind_table};
-#[cfg(any(test, feature = "vm"))]
-pub use runtime_wire::{WireThreadProgramWithMapsArgs, wire_thread_program, wire_thread_program_with_maps, wire_vm_host};
 pub use profile::*;
 pub use isolate::{Isolate, IsolateProgram};
-pub use start::{NativeStart, run_natively};
+pub use start::{NativeStart, run_natively, spawn_context};
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{
     LiveThreadRegistry, ThreadErrorTag, ThreadProgram, join_undetached_threads,
     new_live_thread_registry,
 };
-#[cfg(any(test, feature = "vm"))]
-pub use vm::*;
 
 /// Default operand-stack capacity when analysis does not request more.
 pub const DEFAULT_OPERAND_STACK_SLOTS: usize = 256;

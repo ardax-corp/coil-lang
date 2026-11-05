@@ -92,12 +92,6 @@ pub(crate) struct CliArgs {
     pub nursery: Option<bool>,
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
-    /// Run with native code where the backend can compile it; on `coil
-    /// compile`, store the MIR for it in the archive. On by default; a host
-    /// with no native code interprets the MIR.
-    pub jit: bool,
-    /// `--no-jit`: run on the VM, and `coil compile` stores no MIR.
-    pub no_jit: bool,
     /// `--mir`: `coil FILE` runs on the MIR interpreter.
     pub mir: bool,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
@@ -183,13 +177,6 @@ enum RawCommand {
         /// Output archive path
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<String>,
-        /// Store the MIR of what native code can run, so `coil run` JITs it
-        /// (the default)
-        #[arg(long)]
-        jit: bool,
-        /// Store no MIR: `coil run` runs the archive on the VM
-        #[arg(long, conflicts_with = "jit")]
-        no_jit: bool,
         /// Entry `.coil` (or `--entry`)
         file: Option<String>,
     },
@@ -418,8 +405,6 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             early_free: None,
             nursery: None,
             cow_report: false,
-            jit: false,
-            no_jit: false,
             mir: false,
             auto_par: None,
             opt_stats: false,
@@ -486,8 +471,6 @@ fn cli_from(
         early_free: opt.early_free,
         nursery: None,
         cow_report: false,
-        jit: false,
-        no_jit: false,
         mir: false,
         auto_par: opt.auto_par,
         opt_stats: profile.opt_stats,
@@ -513,8 +496,6 @@ impl RawCli {
             || self.opt.is_set()
             || self.nursery.nursery.is_some()
             || self.nursery.cow_report
-            || self.nursery.jit
-            || self.nursery.no_jit
             || self.nursery.mir
             || self.debug.is_set()
             || self.profile.is_set()
@@ -544,8 +525,6 @@ impl RawCli {
                     debug_level: self.debug.level(),
                     nursery: self.nursery.nursery,
                     cow_report: self.nursery.cow_report,
-                    jit: !(self.nursery.no_jit || self.nursery.cow_report),
-                    no_jit: self.nursery.no_jit,
                     mir: self.nursery.mir,
                     ..cli_from(
                         Command::BuildAndRun { filename },
@@ -619,8 +598,6 @@ impl RawCli {
                 entry_flag,
                 include_tests,
                 output,
-                jit: _,
-                no_jit,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -630,7 +607,6 @@ impl RawCli {
                 }
                 CliArgs {
                     debug_level: debug.level(),
-                    jit: !no_jit,
                     ..cli_from(
                         Command::Compile {
                             filename,
@@ -653,8 +629,6 @@ impl RawCli {
             }) => CliArgs {
                 nursery: nursery.nursery,
                 cow_report: nursery.cow_report,
-                jit: nursery.jit,
-                no_jit: nursery.no_jit,
                 ..cli_from(
                     Command::Run { archive },
                     log,

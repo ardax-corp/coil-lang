@@ -137,8 +137,6 @@ use crate::memory::{
     EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
     ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
 };
-#[cfg(any(test, feature = "vm"))]
-use crate::vm::Machine;
 
 /// Operand-stack slots for worker VMs (same default as `execute_archive` in `src/main.rs`).
 pub const WORKER_STACK_SLOTS: usize = 256;
@@ -711,37 +709,6 @@ pub(crate) struct HostStateGuard {
 }
 
 impl HostStateGuard {
-    #[cfg(any(test, feature = "vm"))]
-    pub fn enter<const N: usize>(vm: &mut Machine<N>) -> Self {
-        let prev = HOST_STATE.with(|c| c.borrow_mut().take());
-        let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
-        let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
-        let debugger_attached = {
-            #[cfg(any(test, feature = "debugger"))]
-            {
-                vm.debug_is_attached()
-            }
-            #[cfg(not(any(test, feature = "debugger")))]
-            {
-                false
-            }
-        };
-        HOST_STATE.with(|c| {
-            *c.borrow_mut() = Some(MachineHostState {
-                raw: (vm as *mut Machine<N>).cast(),
-                call_function: Self::call::<N>,
-                begin_shared_steal: Self::begin_steal::<N>,
-                end_shared_steal: Self::end_steal::<N>,
-                debugger_attached,
-                spawn_context: Self::spawn_context::<N>,
-                static_words: Self::static_words::<N>,
-                dload_gate: Self::dload_gate::<N>,
-                io_reactor,
-                cpu_reactor,
-            });
-        });
-        Self { prev }
-    }
 
     /// Bind the native driver `d`: host natives on this thread spawn,
     /// steal and call back through it.
@@ -797,37 +764,6 @@ impl HostStateGuard {
         crate::collect::end_shared_steal(unsafe { Self::driver(raw) }, published);
     }
 
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn call<const N: usize>(raw: *mut (), offset: u32, args: &[Value]) -> Value {
-        unsafe { (*(raw.cast::<Machine<N>>())).call_function(offset, args) }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn spawn_context<const N: usize>(raw: *mut ()) -> Option<ThreadSpawnContext> {
-        unsafe { (*(raw.cast::<Machine<N>>())).thread_spawn_context() }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn static_words<const N: usize>(raw: *mut ()) -> Arc<Vec<u64>> {
-        unsafe { (*(raw.cast::<Machine<N>>())).static_words() }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn dload_gate<const N: usize>(raw: *mut ()) -> *const crate::ffi::DloadGate {
-        unsafe { (*(raw.cast::<Machine<N>>())).dload_gate() as *const _ }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn begin_steal<const N: usize>(
-        raw: *mut (),
-    ) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
-        unsafe { (*(raw.cast::<Machine<N>>())).begin_shared_steal() }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn end_steal<const N: usize>(raw: *mut (), extra: Value) {
-        unsafe { (*(raw.cast::<Machine<N>>())).end_shared_steal(extra) }
-    }
 }
 
 impl Drop for HostStateGuard {

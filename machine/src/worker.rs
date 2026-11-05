@@ -139,9 +139,12 @@ fn run_on(rt: &mut Runtime, job: Job) {
         let out = (|| {
             if let Some(test) = &test {
                 d.rt.begin_probes(test.probes);
+                d.rt.set_step_budget(test.step_budget);
                 let ret = crate::reactor::test_on_driver(&mut d, entry, test);
                 let hits = d.rt.take_probes();
-                return Ok(crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits));
+                let steps = (d.rt.steps_charged(), d.rt.step_budget_hit);
+                d.rt.set_step_budget(None);
+                return Ok(crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits, steps));
             }
             let mut child_args = Vec::with_capacity(args.len());
             for a in args {

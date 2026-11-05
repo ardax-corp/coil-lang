@@ -20,8 +20,6 @@ use crate::thread::{
     ThreadErrorTag, ThreadProgram, ThreadSpawnContext, WORKER_STACK_SLOTS, spawn_arg_to_value,
     value_to_portable,
 };
-#[cfg(any(test, feature = "vm"))]
-use crate::vm::Machine;
 
 /// No OS threads on this target (wasm without the atomics feature): the pool
 /// starts no workers, and a joiner runs queued jobs itself, so a spawned
@@ -482,13 +480,6 @@ thread_local! {
     static LOCAL_WORKER: std::cell::RefCell<Option<LocalWorkerBinding>> =
         const { std::cell::RefCell::new(None) };
     static IS_POOL_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Reused join-help VMs (one live checkout per nested steal on this thread).
-    /// Boxed so checking one out moves a pointer, not the VM (clippy only
-    /// sees the VM as small on 32-bit targets).
-    #[cfg(any(test, feature = "vm"))]
-    #[allow(clippy::vec_box)]
-    static HELP_VMS: std::cell::RefCell<Vec<Box<Machine<WORKER_STACK_SLOTS>>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// TLS binding of a work-stealing deque to the reactor that registered it.
@@ -533,51 +524,14 @@ fn with_owned_local_worker<R>(reactor: &Reactor, f: impl FnOnce(&Worker<Job>) ->
     })
 }
 
-#[cfg(any(test, feature = "vm"))]
-fn machine_for_program(program: &ThreadProgram) -> Box<Machine<WORKER_STACK_SLOTS>> {
-    Box::new(Machine::with_operand_capacity(
-        program.operand_stack_slots as usize,
-    ))
-}
-
-#[cfg(any(test, feature = "vm"))]
-/// Checkout a TLS helper VM, run `f`, then return it with a bounded heap.
-fn with_help_vm<R>(program: &ThreadProgram, f: impl FnOnce(&mut Machine<WORKER_STACK_SLOTS>) -> R) -> R {
-    let mut vm = HELP_VMS
-        .with(|slot| slot.borrow_mut().pop())
-        .unwrap_or_else(|| machine_for_program(program));
-    ensure_operand_capacity(&mut vm, program.operand_stack_slots);
-    let out = f(&mut vm);
-    vm.reset_isolate_heap();
-    HELP_VMS.with(|slot| {
-        let mut pool = slot.borrow_mut();
-        pool.push(vm);
-        // Nested steal can check out several VMs; keep one idle helper so
-        // peak RSS is not the high-water of every nest depth for the thread.
-        pool.truncate(1);
-    });
-    out
-}
-
 #[cfg(test)]
 fn help_vm_pool_len() -> usize {
     HELP_VMS.with(|slot| slot.borrow().len())
 }
 
-#[cfg(any(test, feature = "vm"))]
-fn ensure_operand_capacity(vm: &mut Machine<WORKER_STACK_SLOTS>, slots: u32) {
-    let need = (slots as usize).max(1);
-    if vm.operand_stack_capacity() < need {
-        *vm = Machine::with_operand_capacity(need);
-    }
-}
-
 fn worker_loop(reactor: Arc<Reactor>) {
     let local = Worker::new_fifo();
     reactor.register_stealer(local.stealer());
-
-    #[cfg(any(test, feature = "vm"))]
-    let mut vm = Machine::<WORKER_STACK_SLOTS>::default();
 
     IS_POOL_WORKER.with(|c| c.set(true));
     let binding_id = Arc::as_ptr(&reactor);
@@ -605,13 +559,6 @@ fn worker_loop(reactor: Arc<Reactor>) {
                 crate::worker::run_native_job(job);
                 continue;
             }
-            #[cfg(any(test, feature = "vm"))]
-            {
-                ensure_operand_capacity(&mut vm, job.program.operand_stack_slots);
-                vm.set_reactor(Arc::clone(&reactor));
-                run_job_on_vm(&mut vm, job);
-            }
-            #[cfg(not(any(test, feature = "vm")))]
             refuse_job(job);
         }
     }
@@ -637,17 +584,10 @@ fn run_job_here(job: Job) {
     if crate::worker::runs_natively(&job) {
         return crate::worker::run_native_job(job);
     }
-    #[cfg(any(test, feature = "vm"))]
-    {
-        let program = Arc::clone(&job.program);
-        with_help_vm(&program, |vm| run_job_on_vm(vm, job));
-    }
-    #[cfg(not(any(test, feature = "vm")))]
     refuse_job(job);
 }
 
 /// Without the VM, a job native code does not cover fails its join.
-#[cfg(not(any(test, feature = "vm")))]
 fn refuse_job(job: Job) {
     eprintln!("coil: a thread's code needs the bytecode VM, which this runtime leaves out");
     job.state.store_result_with_panic(Err(ThreadErrorTag::JoinFailed), None);
@@ -735,156 +675,6 @@ fn wait_join_on_worker(
             .flatten()
             .or_else(|| reactor.steal_job())
     })
-}
-
-#[cfg(any(test, feature = "vm"))]
-fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
-    let Job {
-        entry,
-        args,
-        state,
-        program,
-        natives,
-        shared_print,
-        shared_stdout,
-        shared_stderr,
-        live_threads,
-        reactor,
-        io_reactor,
-        ffi_base_dir,
-        ffi_search_paths,
-        dload_gate,
-        epoch,
-        struct_layouts,
-        test,
-        statics,
-        native,
-    } = job;
-
-    // A joining root help-steals jobs onto its *own* thread, so the print
-    // redirects have to be saved and put back: `OUTPUT_REDIRECT` points into
-    // `vm`'s boxed writer, which dies with `vm` at the end of this call.
-    let redirected = shared_print.is_some();
-    let prev_output = redirected
-        .then(|| crate::io::set_output_redirect(None))
-        .flatten();
-    let prev_shared_print = redirected
-        .then(|| crate::io::set_shared_print_redirect(None))
-        .flatten();
-    let prev_shared_stdout = redirected
-        .then(|| crate::io::set_shared_stdout_redirect(None))
-        .flatten();
-    let prev_shared_stderr = redirected
-        .then(|| crate::io::set_shared_stderr_redirect(None))
-        .flatten();
-    // A job starts with no `io::capture_begin()` open, and one it leaves
-    // open (an `assert!` between begin and end) ends with it.
-    let prev_captures = crate::io::take_captures();
-    if let Some(e) = &epoch {
-        vm.bind_shared_heap(e);
-    }
-    let shared = epoch.is_some();
-    // A trapped `env::exit` belongs to the job that made it; a job this
-    // thread runs while helping a join neither sees nor clears it.
-    let outer_exit = crate::env::take_exit_request();
-    // `set_thread_program` installs the job's static word kinds on this
-    // thread; a VM waiting here in a join reads its own statics by the ones
-    // it had (#2053).
-    let outer_static_kinds = crate::collect::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
-    let mut panic_message = None;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        vm.install_natives(&natives);
-        vm.set_thread_program(Arc::clone(&program));
-        vm.set_program_debug(program.debug.clone());
-        vm.set_live_threads(Arc::clone(&live_threads));
-        vm.set_reactor(Arc::clone(&reactor));
-        vm.set_io_reactor(Arc::clone(&io_reactor));
-        vm.set_worker_cap(crate::thread::WorkerCap::from_count(reactor.worker_count()));
-        vm.set_ffi_paths(ffi_base_dir, ffi_search_paths);
-        vm.set_dload_gate(dload_gate);
-        if let Some(buf) = &shared_print {
-            vm.set_shared_print(Arc::clone(buf));
-            vm.with_output(SharedPrintWriter(Arc::clone(buf)));
-            crate::io::set_shared_print_redirect(Some(Arc::clone(buf)));
-            vm.set_shared_stdout(shared_stdout.clone());
-            vm.set_shared_stderr(shared_stderr.clone());
-        }
-        vm.load_shared_program(
-            Arc::clone(&program.code),
-            Arc::clone(&program.constants),
-            Arc::clone(&program.strings),
-        );
-        vm.set_struct_layouts(struct_layouts);
-        vm.install_native(native);
-        // A job reads the spawner's statics (startup `const`s, tables built
-        // once): a shared-heap job its words as they are, an isolate job
-        // the copies made into its own heap.
-        match statics {
-            Some(JobStatics::Shared(words)) if shared => vm.load_shared_statics(&words),
-            statics => {
-                vm.init_static_slots(program.static_slot_count);
-                if let Some(JobStatics::Copied(slots)) = statics {
-                    vm.load_copied_statics(slots);
-                }
-            }
-        }
-
-        let _guard = HostStateGuard::enter(vm);
-        // Debug / gc-stress: a shared-heap job may write only objects of its
-        // epoch; any other job on this thread (help-steal) writes freely.
-        let _write_scope = crate::memory::EpochWriteScope::enter(vm.heap(), shared);
-        if let Some(test) = &test {
-            return Ok(run_test_job(vm, entry, test));
-        }
-        let mut child_args = Vec::with_capacity(args.len());
-        for a in args {
-            child_args.push(spawn_arg_to_value(vm.heap_mut(), a)?);
-        }
-        // A reused worker VM still holds its last job's panic message.
-        let _ = vm.take_panic_message();
-        let ret = vm.call_function(entry, &child_args);
-        if epoch.as_ref().is_some_and(|e| e.is_aborted()) {
-            return Err(ThreadErrorTag::JoinFailed);
-        }
-        if vm.panicked() {
-            panic_message = Some(vm.take_panic_message());
-            return Err(ThreadErrorTag::Panicked);
-        }
-        if shared {
-            Ok(PortableValue::Immediate(ret.bits()))
-        } else {
-            value_to_portable(vm.heap(), ret)
-        }
-    }));
-    crate::env::restore_exit_request(outer_exit);
-    crate::collect::swap_static_word_kinds(outer_static_kinds);
-    crate::io::flush_open_captures();
-    if redirected {
-        crate::io::set_output_redirect(prev_output);
-        crate::io::set_shared_print_redirect(prev_shared_print);
-        crate::io::set_shared_stdout_redirect(prev_shared_stdout);
-        crate::io::set_shared_stderr_redirect(prev_shared_stderr);
-    }
-    crate::io::restore_captures(prev_captures);
-
-    let stored = match result {
-        Ok(Ok(pv)) => Ok(pv),
-        Ok(Err(tag)) => Err(tag),
-        Err(_) => Err(ThreadErrorTag::JoinFailed),
-    };
-    if shared {
-        // Before the joiner can see the result and close the epoch.
-        vm.heap_mut().flush_epoch_batch();
-    }
-    state.store_result_with_panic(stored, panic_message);
-    reactor.job_done();
-    if shared {
-        vm.clear_statics();
-        vm.unbind_shared_heap();
-        vm.reset_shared_stack();
-    } else {
-        vm.reset_isolate_heap();
-    }
 }
 
 /// A submitted [`TestJob`]; [`Self::wait`] blocks (help-stealing) until it ends.
@@ -1016,76 +806,6 @@ pub struct TestCase {
     pub step_budget: Option<u64>,
 }
 
-#[cfg(any(test, feature = "vm"))]
-/// Static init, then the case; the report is stored before the join completes.
-fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> PortableValue {
-    // A case's GC roots must not depend on which job this worker ran before
-    // (#1006): no stale word from it may pass for a root.
-    vm.clear_operand_stack();
-    #[cfg(feature = "coverage")]
-    if test.coverage {
-        vm.begin_coverage();
-    }
-    vm.begin_probes(test.probes);
-    vm.set_step_budget(test.step_budget);
-    if let Some(report) = run_test_job_natively(vm, entry, test) {
-        return report;
-    }
-    if let Some(ip) = test.init_ip {
-        vm.run_from(ip as usize);
-    }
-    let (mut passed, reason) = if vm.panicked() {
-        (false, None)
-    } else {
-        let ret = vm.call_function(entry, &[]);
-        if !test.expect_ok_result {
-            // A `main` case is a whole program: as with `coil FILE`, the
-            // finalizers still pending run before exit, while their output
-            // is still captured (the worker heap is reset after the job).
-            vm.run_remaining_finalizers();
-        }
-        if vm.panicked() {
-            (false, None)
-        } else if !test.expect_ok_result || vm.result_is_ok(ret) {
-            (true, None)
-        } else {
-            (false, vm.result_err_text(ret))
-        }
-    };
-    // A trapped `env::exit` (#1401) panicked the job. A `main` case is a
-    // program, so `exit(0)` is its clean end; a `test` case that exits
-    // skipped the rest of its body, so it fails whatever the code.
-    if let Some(code) = crate::env::take_exit_request() {
-        passed = !test.expect_ok_result && code == 0 && !vm.step_budget_exhausted();
-    }
-    #[cfg(feature = "coverage")]
-    let hits = vm.take_coverage();
-    #[cfg(not(feature = "coverage"))]
-    let hits = None;
-    let (steps, timed_out) = (vm.steps_charged(), vm.step_budget_exhausted());
-    // The worker VM runs other jobs next.
-    vm.set_step_budget(None);
-    let report = TestReport {
-        passed,
-        reason,
-        hits,
-        steps,
-        timed_out,
-    };
-    *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
-    PortableValue::Immediate(u64::from(passed))
-}
-
-/// [`run_test_job`] on the native driver, when the program's native code
-/// covers the case (`None`: the VM runs it).
-#[cfg(any(test, feature = "vm"))]
-fn run_test_job_natively(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> Option<PortableValue> {
-    let start = test.init_ip.unwrap_or(entry) as usize;
-    let ret = vm.with_native_driver(start, |d| test_on_driver(d, entry, test))?;
-    let hits = vm.take_probes();
-    Some(finish_test(vm.panicked(), ret, vm.heap(), test, hits))
-}
-
 /// A harness case on the driver: its static init, then the case, then
 /// (for a file's `main`) the finalizers left. The case's return, `None`
 /// when it panicked.
@@ -1105,7 +825,14 @@ pub(crate) fn test_on_driver(d: &mut crate::driver::Driver<'_>, entry: u32, test
 
 /// Store a finished case's report: whether it passed, by `ret` (its
 /// return) and whether it `panicked`.
-pub(crate) fn finish_test(panicked: bool, ret: Option<common::Value>, heap: &crate::memory::Heap, test: &TestJob, hits: Option<Vec<u32>>) -> PortableValue {
+pub(crate) fn finish_test(
+    panicked: bool,
+    ret: Option<common::Value>,
+    heap: &crate::memory::Heap,
+    test: &TestJob,
+    hits: Option<Vec<u32>>,
+    (steps, timed_out): (u64, bool),
+) -> PortableValue {
     let (mut passed, reason) = match ret {
         _ if panicked => (false, None),
         Some(_) if !test.expect_ok_result => (true, None),
@@ -1113,10 +840,13 @@ pub(crate) fn finish_test(panicked: bool, ret: Option<common::Value>, heap: &cra
         Some(v) => (false, crate::format::result_err_text(heap, v)),
         None => (false, None),
     };
+    // A trapped `env::exit` (#1401) panicked the job. A `main` case is a
+    // program, so `exit(0)` is its clean end; a `test` case that exits
+    // skipped the rest of its body, so it fails whatever the code.
     if let Some(code) = crate::env::take_exit_request() {
-        passed = !test.expect_ok_result && code == 0;
+        passed = !test.expect_ok_result && code == 0 && !timed_out;
     }
-    let report = TestReport { passed, reason, hits, steps: 0, timed_out: false };
+    let report = TestReport { passed, reason, hits, steps, timed_out };
     *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
     PortableValue::Immediate(u64::from(passed))
 }
