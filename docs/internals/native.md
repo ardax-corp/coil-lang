@@ -3,9 +3,9 @@
 Coil can run functions as machine code made by
 [Cranelift](https://cranelift.dev) from their MIR. A program whose bodies
 all compile runs on the native driver with no interpreter, and an AOT
-executable (`coil package`) links no bytecode VM at all. The VM stays for
-comptime and macros, `coil debug`, coverage, wasm, `--no-aot` packages,
-and `coil --jit` runs of a program with a body native code refuses. The
+executable (`coil package`) links no bytecode VM at all. Comptime and macros
+run on the MIR interpreter (`docs/internals/mir-interp.md`). The VM stays for
+`coil debug`, coverage, wasm, `--no-aot` packages, and `coil --jit` runs of a program with a body native code refuses. The
 plans (native compilation, then native without the VM) are in the
 project's plan docs; this page describes what is implemented.
 

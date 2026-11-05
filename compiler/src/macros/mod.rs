@@ -473,7 +473,7 @@ pub trait MacroHost: Send + Sync {
         io: &ComptimeIo,
     ) -> Vec<MacroRun>;
 
-    /// Compute `consts` in order on a compile-time VM of `program`: call
+    /// Compute `consts` in order on a compile-time run of `program`: call
     /// each initializer, store its value to its static slot (later
     /// initializers may read earlier ones), then capture every value as one
     /// snapshot, so values shared between them stay shared. An explicit

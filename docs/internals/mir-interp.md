@@ -90,7 +90,7 @@ Most ops map one to one onto Cranelift's lowering. These needed a decision.
 | `Yield`, `ResumeCoro` | `coil_native_yield` and fibers, as native code | Open (wasm) |
 | `CodePtr`, `Alloc` of `Fn` / `PolyFn` / `Coro` | The word is the body's bytecode entry PC | Open (no bytecode) |
 | `Deopt` | No code; only tests build one | Open (debugger) |
-| `HostInvoke`, `Ffi` | The helpers, every native allowed | Open (comptime) |
+| `HostInvoke`, `Ffi` | The helpers. A native the runtime's table replaced goes through that table, so the comptime sandbox holds | Settled |
 
 ### Words with no static type
 
@@ -111,7 +111,7 @@ no machine code, and the VM goes. It lands here rather than on a later
 |---|---|
 | 1. MIR interpreter | Done: every corpus, every level, CI cells |
 | 2. Glue as MIR | Mostly done already (below) |
-| 3. Comptime and macros on the interpreter | Next |
+| 3. Comptime and macros on the interpreter | Done, on a `Machine` that holds the runtime (below) |
 | 4. JIT by default | Open |
 | 5. Packaging without the VM | Open |
 | 6. Debugger and coverage | Open: `Deopt` stops, names at a stop, MIR probes |
@@ -133,18 +133,48 @@ the corpus so. The section is the larger part of a `--jit` archive (125 KB
 against 18 KB of bytecode on `examples/perf/vec_lanes.coil`), because locations
 and tables are stored as they are; step 5 will want to look at that.
 
-**Step 3.** The three places that build a `CompiledExpansion` (a fresh
-expansion, one from the disk cache, const evaluation) need its MIR. A compile
-inside a compile already saves the outer capture (`without_native_capture`). The
-order that keeps the corpus green at each step:
+**Step 3.** Macros, consts and call folding run on the interpreter.
 
-1. Carry raw MIR in `CompiledExpansion` and install it on the comptime `Machine`
-   with `install_native`: bodies run on the interpreter, the rest of the host
-   stays.
-2. Fuel counted per block and call (the step budget), and the heap cap.
-3. Replace `Machine<256>` with a driver host: the sandboxed native table
-   (`native_allowed_at_compile_time`, `io_gate`), statics, `restore_snapshot`
-   and `SnapRoot`, output capture, and reuse between calls.
+- **Capture.** A `CompiledExpansion` carries raw MIR. An expansion program takes
+  it from a `ComptimeCapture` of its own (a compile inside a compile saves the
+  outer capture), and the disk cache stores it in the archive format. Const
+  evaluation runs in the middle of a compile, so it reads the open capture without
+  ending it: `Pipeline::comptime_capture` opens one before the bodies are lowered,
+  unless a native build already has one. Evaluation then runs that build's MIR, at
+  its level. A `ComptimeCapture` adds no twins: the interpreter runs a twinned
+  native as the host call it is, so a plain compile's bytecode does not change.
+- **Host.** `call_limited` calls `Machine::call_on_driver`: a driver over the
+  machine's `Runtime`. Natives, statics, snapshots, output capture and reuse
+  between calls stay as they were, because they live in the `Runtime`. It is a
+  driver and not `install_native` under the VM because native code under a machine
+  never collects, so a macro that allocates would never free anything.
+- **Limits.** The budget and the cap live in the `Runtime`. The interpreter
+  charges a step per call and per edge back in block order, as the VM does, and a
+  zero stops the call with `TRAP_BUDGET`. Cranelift's code charges nothing:
+  nothing with a budget runs on it. `collect::over_cap` serves both hosts.
+- **Sandbox.** `coil_native_host` used to call a direct function from the global
+  table, past the runtime's own, so a macro read the environment with no grant.
+  It now asks the runtime's table, and a native with no direct function there goes
+  through the table, which holds the sandbox's stubs. This fails closed: a host
+  that replaces a native needs no other step. FFI goes through `Runtime::ffi_load`
+  and its gate on both engines.
+- **What the VM still runs.** A body the interpreter refuses (none in the corpus),
+  every wasm build until step 7, and everything under `COIL_NATIVE_DRIVER=0`.
+  `comptime::engine_calls` counts both, and `comptime/tests/macro_engine.rs` fails
+  on any fallback, from a fresh compile or from the disk cache.
+
+`COIL_NATIVE_DRIVER=0` is the A/B switch: compiling with and without it must give
+the same archive, apart from the folds below.
+
+**Folds at the limit.** Steps are counted on raw MIR, which has more of them than
+the VM's optimized bytecode: `N` iterations of a `while` take `N` back-edges there
+and `N - 1` once the loop is rotated. A call right at `SILENT_CALL_STEPS` used to fold and now stays a call,
+with E0138. The value is the same; five of the 365 examples changed this way.
+
+**`Machine<256>` stays for now.** The host's other work is already on the
+`Runtime`; what is left is only the type that holds it. wasm needs the VM until
+step 7, so swapping it now would mean two hosts, and step 8 shrinks `Machine` to
+that holder anyway.
 
 ## Open problems
 

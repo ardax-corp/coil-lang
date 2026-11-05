@@ -549,7 +549,7 @@ the consts (so the call can read them):
   (`common::jump_targets`): on every path those words are its arguments.
   A call to an auto-par worker computes the function it runs, without the
   worker's depth argument.
-- Each distinct call runs once on the compile-time VM within the silent
+- Each distinct call runs once on the compile-time host within the silent
   tier (sharing its 20M-step pool with the silent static lets). One that
   panics, runs out or returns a non-string where a string is expected
   stays a call.

@@ -106,7 +106,7 @@ unused `env::exit` helper needs no grant. A build with no `main` and
 no tests (a library) reports nothing. Two gates stay at the call site in
 typecheck, because they have no IL call to tag: the `stream.attach(…)` method
 form and FFI (`dload`, process-exec symbols). Macro sub-programs are granted
-everything: the macro VM refuses host calls at run time (`E0119`).
+everything: the macro host refuses host calls at run time (`E0119`).
 
 Flags: `--allow-read`, `--allow-write`, `--allow-net`, `--allow-env`,
 `--allow-exec`, `--allow-exit`, `--allow-attach`, `--allow-ffi-exec`, and
