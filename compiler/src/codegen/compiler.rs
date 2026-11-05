@@ -8146,13 +8146,12 @@ impl Compiler {
         self.emit_module_setup();
 
         // Drop unused function bodies (eager builtin thunks, unreferenced user
-        // fns) before IL opts / lower. Without a `main`, snippet / unit-test
-        // compiles keep their bodies, except the ones below.
+        // fns). Without a `main`, snippet / unit-test compiles keep their
+        // bodies, except the ones below.
         //
         // A body direct MIR does not lower (a shared generic one a clone
         // stands in for, as a derived `Eq for Box<T>`'s `ne`, or one that
-        // builds a `T`-dependent payload) is never a root: kept with nothing
-        // calling it, it would be a stack-lowered body (#1192, #1424).
+        // builds a `T`-dependent payload) is never a root (#1192, #1424).
         let no_mir: HashSet<String> = self
             .bytecode
             .funcs()
@@ -8162,7 +8161,7 @@ impl Compiler {
             .collect();
         let has_main = self.functions.contains_key("main");
         if has_main || !no_mir.is_empty() {
-            let roots = if has_main {
+            let mut roots = if has_main {
                 let mut roots = vec!["main".to_string()];
                 // Startup calls these; no body does.
                 roots.extend(self.startup_steps.iter().map(|s| s.body.clone()));
@@ -8170,56 +8169,27 @@ impl Compiler {
                     roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name)));
                 }
                 // Native code calls the twins in place of their host
-                // natives (`mir::native_twins`): no bytecode does.
+                // natives (`mir::native_twins`).
                 if crate::mir::native_capture_active() {
                     roots.extend(crate::mir::native_twins::twin_fn_names().filter(|name| self.functions.contains_key(name)));
                 }
                 roots
             } else {
-                let mut roots: Vec<String> =
-                    self.functions.keys().filter(|name| !no_mir.contains(*name)).cloned().collect();
-                roots.sort();
-                roots
+                self.functions.keys().filter(|name| !no_mir.contains(*name)).cloned().collect()
             };
-            let (_dropped, shrinks) = crate::il::prune_unused_functions(
-                &mut self.bytecode,
-                crate::il::TreeshakeInput {
-                    functions: &mut self.functions,
-                    fn_entry_labels: &mut self.fn_entry_labels,
-                    fn_debug_locals: &mut self.fn_debug_locals,
-                    test_cases: &mut self.test_cases,
-                    root_names: &roots,
-                    include_tests: self.include_tests,
-                    preserve_emit_start: None,
-                },
-            );
-            for (threshold, delta) in shrinks {
-                for pc in self.mono_offsets.values_mut() {
-                    if *pc >= threshold {
-                        *pc -= delta;
-                    }
-                }
-                if (self.program_start_offset as usize) >= threshold {
-                    self.program_start_offset -= delta as u32;
-                }
-                if (self.setup_entry_offset as usize) >= threshold {
-                    self.setup_entry_offset -= delta as u32;
-                }
+            if self.include_tests {
+                roots.extend(self.test_body_names());
             }
-            let live_pcs: std::collections::HashSet<usize> =
-                self.functions.values().copied().collect();
-            self.mono_offsets.retain(|_, pc| live_pcs.contains(pc));
+            let live = self.reachable_bodies(roots);
+            self.functions.retain(|name, _| live.contains_key(name));
+            let functions = &self.functions;
+            self.fn_entry_labels.retain(|name, _| functions.contains_key(name));
+            self.fn_debug_locals.retain(|name, _| functions.contains_key(name));
+            let offsets: HashSet<usize> = functions.values().copied().collect();
+            self.test_cases.retain(|(_, offset)| offsets.contains(&(*offset as usize)));
+            self.mono_offsets.retain(|_, offset| offsets.contains(offset));
+            self.bytecode.retain_funcs(|f| functions.contains_key(&f.name));
         }
-
-        #[cfg(any(test, feature = "dissect"))]
-        let il_snapshot = if capture_il {
-            Some(crate::dissect::IlSnapshot::new(
-                self.bytecode.ops().to_vec(),
-                self.bytecode.funcs().to_vec(),
-            ))
-        } else {
-            None
-        };
 
         // A panic site names a location: each one the bodies use, once.
         let mut locs: Vec<DebugLoc> =
@@ -8229,69 +8199,26 @@ impl Compiler {
         self.debug_locs = locs;
 
         // A body without direct MIR is an internal error once codegen is
-        // clean; a module with errors still lowers (its bodies may be
-        // `report_unlowered` stubs) but never runs.
-        let mut opts = self.opt_options.clone();
-        opts.require_mir = !self
-            .messages
-            .iter()
-            .any(|m| *m.kind() == reporting::MessageKind::ERROR);
-        opts.vm_refusal_message = Some(self.intern_string("this function does not fit the VM's bytecode: run the program on native code"));
-        self.bytecode.set_opt_options(opts);
-        let entry_sps: HashMap<String, u32> = self
+        // clean; a module with errors never runs.
+        let clean = !self.messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR);
+        let missing: Vec<String> = self
             .bytecode
             .funcs()
             .iter()
-            .map(|f| (f.name.clone(), f.entry_sp))
+            .filter(|f| f.hir_mir.is_none() && (clean || f.hir_mir_why.is_some()))
+            .map(|f| format!("`{}` ({})", f.name, f.hir_mir_why.as_deref().unwrap_or("no MIR from HIR")))
             .collect();
-        #[cfg_attr(not(any(test, feature = "dissect")), allow(unused_mut))]
-        let mut lowered = if capture_il {
-            self.bytecode.lower_in_place_capturing(&mut self.constants)
-        } else {
-            self.bytecode.lower_in_place(&mut self.constants)
-        };
-        #[cfg(any(test, feature = "dissect"))]
-        let cursor_ops = lowered.pre_fuse_ops.take();
-        let funcs = self.bytecode.funcs();
-        let func_label_maps = &lowered.func_label_maps;
-        let flat_label = |func_idx: usize, emit_id: u32| -> u32 {
-            func_label_maps
-                .get(func_idx)
-                .and_then(|m| m.get(&emit_id).copied())
-                .unwrap_or(emit_id)
-        };
-        // `dissect --il-post`: the optimized, pre-fuse IL, split per function
-        // at each function's (flattened) entry label.
-        #[cfg(any(test, feature = "dissect"))]
-        if capture_il && let Some(ops) = cursor_ops.as_ref() {
-            let entries: HashMap<u32, usize> = funcs
-                .iter()
-                .enumerate()
-                .filter_map(|(i, f)| f.entry.map(|l| (flat_label(i, l.0), i)))
-                .collect();
-            let mut post_funcs: Vec<crate::il::IlFunc> = Vec::new();
-            let mut emitting = 0usize;
-            for op in ops {
-                if let IlOp::Label(l) = op
-                    && let Some(&i) = entries.get(&l.0)
-                {
-                    if let Some(prev) = post_funcs.last_mut() {
-                        prev.code_end = emitting;
-                    }
-                    let mut f = funcs[i].clone();
-                    f.code_start = emitting;
-                    post_funcs.push(f);
-                }
-                if op.emits_code() {
-                    emitting += 1;
-                }
-            }
-            if let Some(prev) = post_funcs.last_mut() {
-                prev.code_end = emitting;
-            }
-            self.post_il_snapshot =
-                Some(crate::dissect::IlSnapshot::new(ops.clone(), post_funcs));
+        if clean && !missing.is_empty() {
+            panic!("internal compiler error: {} bod{} without MIR: {}", missing.len(), if missing.len() == 1 { "y" } else { "ies" }, missing.join(", "));
         }
+        if crate::mir::capture_open() {
+            let opts = self.opt_options.clone();
+            crate::mir::capture_native_bodies(
+                self.bytecode.funcs().iter().filter_map(|f| Some((f.name.as_str(), f.entry, f.hir_mir.as_deref()?))),
+                &opts,
+            );
+        }
+
         // A body is named by its entry label; 0 names nothing.
         let entry_of = |label: crate::il::Label| label.0 as usize + 1;
         let by_offset = |bytecode: &CodeBuf, offset: usize| bytecode.entry_label_for_offset(offset).map_or(0, entry_of);
@@ -8321,28 +8248,11 @@ impl Compiler {
             .collect();
         self.cleanup_ranges = Vec::new();
 
-
-        let dense_seek = self
-            .bytecode
-            .as_slice()
-            .iter()
-            .filter(|b| *b.bytecode() == Instruction::Seek)
-            .map(|b| b.operand_u32())
-            .max()
-            .unwrap_or(0);
-        if !self.recursive_fns.is_empty() && dense_seek > 16 {
-            self.operand_stack_slots = crate::typechecking::rescale_operand_slots_for_dense_seek(
-                self.operand_stack_slots,
-                dense_seek,
-            );
-        }
         self.operand_stack_slots = self
             .operand_stack_slots
             .min(crate::typechecking::MAX_OPERAND_STACK_SLOTS);
-
-
         #[cfg(any(test, feature = "dissect"))]
-        return il_snapshot;
+        return capture_il.then(|| crate::dissect::IlSnapshot::new(self.bytecode.ops().to_vec(), self.bytecode.funcs().to_vec()));
         #[cfg(not(any(test, feature = "dissect")))]
         debug_assert!(!capture_il);
     }
