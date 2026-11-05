@@ -99,28 +99,69 @@ in it moved the object. `MirFunc::heap_pair_words` now lists these parameters
 beside call results, and `pair_words` follows the φs and casts that copy one. Both
 engines root them ambiguously (pinned, never rewritten).
 
-## What is left
+## Retiring the VM
 
-In the order they unblock the removal of the VM.
+This branch carries option C of the "Retiring the VM: options" doc (one MIR, two
+executors): native code runs programs, this interpreter serves everything with
+no machine code, and the VM goes. It lands here rather than on a later
+`feature/one-engine`. Each step leaves the VM runnable until the last.
 
-1. **Comptime and macros.** `CompiledExpansion` carries bytecode, and the host
-   runs it on `Machine<256>`. It needs the program's MIR, a step budget in the
-   loop, the heap cap, `native_allowed_at_compile_time` on host calls, and
-   `SnapRoot` snapshots, which read only the heap.
-2. **Debugger.** Stops and variables come from bytecode PCs and `debug_vars`.
-   Raw MIR needs a stop per statement and a way from names to values at a stop.
-   `MirInst::Deopt` with `DeoptSite::slots` was built for this and is unused.
-3. **Tasks and generators on wasm.** There are no fibers there. A generator is one
-   frame, so `Yield` can detach it; a task is an activation that parks. Frames
-   already live outside the thread's stack, which is why this is possible.
-4. **Function identity without bytecode.** Entry PCs still name bodies in
-   `CodePtr`, `ObjFn`, `ObjCoroutine::resume_ip`, `finalizer_by_type`, `NativeSite`
-   and the prologue the driver walks. They become body indices once nothing
-   emits bytecode, and the startup steps need a form of their own.
-5. **Coverage and `coil mutate`**, which count what the VM runs.
-6. **Speed.** It runs `MirInst` directly. On a call and loop mix (`fib(38)` and a
-   200M iteration loop) raw `-O 0` took 7.4 s, the VM at the default level 3.2 s
-   and the JIT 0.7 s. A flat decoded form is the next step, if comptime needs it.
+| Step | State |
+|---|---|
+| 1. MIR interpreter | Done: every corpus, every level, CI cells |
+| 2. Glue as MIR | Mostly done already (below) |
+| 3. Comptime and macros on the interpreter | Next |
+| 4. JIT by default | Needs the MIR archive format |
+| 5. Packaging without the VM | Needs the MIR archive format |
+| 6. Debugger and coverage | Open: `Deopt` stops, names at a stop, MIR probes |
+| 7. wasm | Open: `Yield` detaches its frame, a task parks an activation |
+| 8. Delete the VM | Last: bodies by index, not bytecode PC |
+
+**Step 2.** A clean compile panics on a body with no MIR (`require_mir`), and
+thunks are built as HIR (`hir::synth`), so every function body already has MIR.
+What is left is about 30 direct `bytecode.push_*` sites in `codegen`, not yet
+sorted into prologue steps and dead paths, plus the startup region the driver
+walks.
+
+**The MIR archive format comes first.** Steps 3, 4 and 5 all need MIR on disk:
+the compile-time program cache stores `CompiledExpansion`, and `.ccoil` becomes
+MIR and data only. `coil_native::section` is the start of it, but it lives in a
+crate that is empty on wasm, stores only what `coil_native::plan` admits, and
+leaves out `opaque_words` and `local_binds`. It should move beside MIR and carry
+every body whole.
+
+**Step 3.** The three places that build a `CompiledExpansion` (a fresh
+expansion, one from the disk cache, const evaluation) need its MIR. A compile
+inside a compile already saves the outer capture (`without_native_capture`). The
+order that keeps the corpus green at each step:
+
+1. Carry raw MIR in `CompiledExpansion` and install it on the comptime `Machine`
+   with `install_native`: bodies run on the interpreter, the rest of the host
+   stays.
+2. Fuel counted per block and call (the step budget), and the heap cap.
+3. Replace `Machine<256>` with a driver host: the sandboxed native table
+   (`native_allowed_at_compile_time`, `io_gate`), statics, `restore_snapshot`
+   and `SnapRoot`, output capture, and reuse between calls.
+
+## Open problems
+
+- **Harness SIGSEGV.** 2 of 18 corpus runs of one grid died on a reactor thread
+  (`-O0` native, `-O2` interpreter); an earlier grid of 18 and about 50 reruns of
+  the same seeds had none. The fault is a fiber switch to a stack that is no longer mapped,
+  inlined into `collect::collect::<Driver>`, with the current stack pointer on a
+  different stack from the one being left. It is not in the interpreter, and the
+  branch does not touch the fiber or collector code, but whether `feature/native`
+  has it too is unknown.
+- **Cranelift relocation panic.** One `--engine native` run aborted in
+  `cranelift-jit` (`compiled_blob.rs`, a relocation out of range). `jit` leaks
+  each module, so a harness that compiles thousands of files spreads them past
+  a 32-bit reach. Step 4's code cache has to settle this.
+- **GC stress.** `tests/comptime/drop_not_folded.coil` fails on native and the
+  interpreter at every level and passes on the VM.
+- **Speed.** It runs `MirInst` directly. On a call and loop mix (`fib(38)` and a
+  200M iteration loop) raw `-O 0` took 7.4 s, the VM at the default level 3.2 s
+  and the JIT 0.7 s. The doc says speed is not a goal; comptime's step limits
+  count steps, not time.
 
 ## Where the pieces are
 
