@@ -96,7 +96,7 @@ backend lowers are stored, so the encoder never meets an instruction
 outside the tier; the format grows with the tiers and bumps its format byte
 when the layout changes. A reader refuses any other format, a truncated
 section or trailing bytes, and the run falls back to the VM with a
-warning. Format 7 carries the coroutine ops (`ResumeCoro`, `DoneCoro`,
+warning. Format 8 carries each body's pair words (`MirFunc::heap_pair_words`), the coroutine ops (`ResumeCoro`, `DoneCoro`,
 `Yield`, coroutine allocations), FFI ops and the vector ops (`ByteScan`
 with its lane expression, `VecLoop` with its vector expression trees, at
 most 64 deep). The section is compiled again on every run: the archive carries
@@ -278,9 +278,10 @@ its frames are walked the same way.
 Two kinds of word stay in a record linked into `NativeCtx::roots`
 (`[next, n, words…]` on the stack): the heap homes, which live in memory
 and are written back when `NativeCtx::gc_epoch` moved (array views are then
-re-read), and the ambiguous words: a call's pair low word that may carry an
-object (`MirFunc::heap_pair_calls`) and an opaque body's `int` words, which
-are pinned and never rewritten.
+re-read), and the ambiguous words: the low word of a pair that may carry an
+object, a call's result or a parameter (`MirFunc::heap_pair_words`, and the
+φs that copy one: `pair_words`), and an opaque body's `int` words, which are
+pinned and never rewritten.
 
 ### Host calls
 

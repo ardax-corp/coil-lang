@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use compiler::native_mir::{
     BlockId, Label, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
-    NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pointer_words, scalar,
+    NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pair_words, pointer_words, scalar,
     ty_of, root_handles, used_params, word_kind,
 };
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -1354,8 +1354,8 @@ struct Lower<'a> {
     root_handles: Vec<ValueId>,
     /// Where [`Self::keep_roots`] stores them (made on first use).
     keep_slot: Option<cranelift_codegen::ir::StackSlot>,
-    /// Low words of pairs calls return that may carry an object
-    /// ([`MirFunc::heap_pair_calls`]): rooted ambiguously.
+    /// Words of pairs that may carry an object ([`pair_words`]): rooted
+    /// ambiguously.
     pair_words: Vec<ValueId>,
     defer: FuncRef,
     claim: FuncRef,
@@ -2081,8 +2081,7 @@ impl<'a> Lower<'a> {
         self.opaque = opaque_words(f);
         self.ptr_words = pointer_words(f);
         self.root_handles = root_handles(f);
-        self.pair_words = f.heap_pair_calls.iter().copied().filter(|&v| !heap_word(ty_of(f, v)) && !self.ptr_words.contains(&v)).collect();
-        self.pair_words.sort_unstable_by_key(|v| v.0);
+        self.pair_words = pair_words(f, &self.ptr_words);
         for blk in &f.blocks {
             for inst in &blk.insts {
                 let array = match inst {

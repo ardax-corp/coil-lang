@@ -21,7 +21,7 @@ use compiler::native_mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 7;
+const FORMAT: u8 = 8;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for the bodies of `bodies` the backend compiles, keyed to
@@ -240,6 +240,9 @@ fn func(w: &mut Writer, f: &MirFunc) {
     w.vs(&f.params);
     w.opt_ty(f.ret_ty);
     w.opt_ty(f.ret_hi_ty);
+    let mut pair_words: Vec<ValueId> = f.heap_pair_words.iter().copied().collect();
+    pair_words.sort_unstable_by_key(|v| v.0);
+    w.vs(&pair_words);
     w.u32(f.blocks.len() as u32);
     for b in &f.blocks {
         w.u32(b.id.0);
@@ -810,6 +813,7 @@ fn read_func(r: &mut Reader, name: &str) -> Result<MirFunc, String> {
     f.params = r.vs()?;
     f.ret_ty = r.opt_ty()?;
     f.ret_hi_ty = r.opt_ty()?;
+    f.heap_pair_words = r.vs()?.into_iter().collect();
     let nb = r.len()?;
     for _ in 0..nb {
         let mut b = MirBlock::new(BlockId(r.u32()?));

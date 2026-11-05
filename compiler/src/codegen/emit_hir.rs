@@ -1844,6 +1844,12 @@ impl Compiler {
             .filter(|(i, e)| pair_tys.contains_key(&(*i as u32)) && e.ty.as_ref().is_some_and(|t| self.hir_pair_holds_heap(t)))
             .map(|(i, _)| i as u32)
             .collect();
+        let heap_pair_params = hir
+            .params
+            .iter()
+            .filter(|p| hir.local(**p).ty.as_ref().is_some_and(|t| self.hir_pair_holds_heap(t)))
+            .map(|p| p.0)
+            .collect();
         // The locals of outlined parallel loop bodies live in their chunk
         // worker's frame, not this body's.
         let mut outlined = HashSet::new();
@@ -2334,6 +2340,7 @@ impl Compiler {
             pair_locals,
             pair_tys,
             heap_pairs,
+            heap_pair_params,
             ret_pair,
             stacks,
             sroa,

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::ffi::c_void;
 
-use compiler::native_mir::{MirFunc, MirInst, MirTy, Terminator, ValueId, heap_word, held_words, liveness, opaque_words, pointer_words, ty_of};
+use compiler::native_mir::{MirFunc, MirInst, MirTy, Terminator, ValueId, heap_word, held_words, liveness, opaque_words, pair_words, pointer_words, ty_of};
 use machine::native::{NativeCtx, ROOTS_SCAN, SITES_SCAN};
 
 use crate::Body;
@@ -109,7 +109,7 @@ impl RootMaps {
         let (live_in, live_after) = liveness(f);
         let pointers = pointer_words(f);
         let mut ambiguous = opaque_words(f);
-        ambiguous.extend(f.heap_pair_calls.iter().copied().filter(|&v| !heap_word(ty_of(f, v)) && !pointers.contains(&v)));
+        ambiguous.extend(pair_words(f, &pointers));
         let heap_homes = (0..f.homes.len() as u16).filter(|&h| heap_word(f.homes[h as usize])).collect();
         let ambiguous_homes = if f.opaque_words { (0..f.homes.len() as u16).filter(|&h| f.homes[h as usize] == MirTy::I64).collect() } else { Vec::new() };
         Self { live_in, live_after, held: held_words(f), pointers, ambiguous, heap_homes, ambiguous_homes }
@@ -181,12 +181,16 @@ unsafe fn scan_roots(data: *mut c_void, visit: &mut dyn FnMut(*mut u64, bool)) {
             for &v in maps.ambiguous.iter().filter(|v| live.contains(v)) {
                 visit(at.add(v.index()), true);
             }
-            let homes = frame_homes(frame, at, f);
-            for &h in &maps.heap_homes {
-                visit(homes.add(usize::from(h)), false);
-            }
-            for &h in &maps.ambiguous_homes {
-                visit(homes.add(usize::from(h)), true);
+            // A pad's homes are the unwound frame's, in a record of the
+            // runtime's: visited here too, they would be forwarded twice.
+            if frame.homes.is_null() {
+                let homes = frame_homes(frame, at, f);
+                for &h in &maps.heap_homes {
+                    visit(homes.add(usize::from(h)), false);
+                }
+                for &h in &maps.ambiguous_homes {
+                    visit(homes.add(usize::from(h)), true);
+                }
             }
         }
     }

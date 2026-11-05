@@ -424,8 +424,10 @@ pub struct HirMirInput<'a> {
     /// Word types of each expression of a two-word type.
     pub pair_tys: HashMap<u32, (MirTy, MirTy)>,
     /// Calls returning a two-word enum whose low word may carry a heap
-    /// payload ([`MirFunc::heap_pair_calls`]).
+    /// payload ([`MirFunc::heap_pair_words`]).
     pub heap_pairs: HashSet<u32>,
+    /// Pair parameters (by local) whose low word may carry a heap payload.
+    pub heap_pair_params: HashSet<u32>,
     /// Word types of a two-word result.
     pub ret_pair: Option<(MirTy, MirTy)>,
     /// Stack arrays kept in frame slots: first slot, length and element
@@ -1094,9 +1096,13 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
                 vec![word.ok_or_else(|| format!("param type {}", ty_kind(ty)))?]
             }
         };
-        for ty in words {
+        let heap_pair = inp.heap_pair_params.contains(&param.0);
+        for (i, ty) in words.into_iter().enumerate() {
             let v = b.add_param(ty).map_err(mir)?;
             b.def_local(LocalId(next), v).map_err(mir)?;
+            if heap_pair && i == 0 {
+                b.mark_heap_pair_word(v);
+            }
             next += 1;
         }
     }
@@ -4451,7 +4457,7 @@ impl Lower<'_> {
             return self.unbox_niche(dest, want);
         }
         if dest_hi.is_some() && self.inp.heap_pairs.contains(&id.0) {
-            self.b.mark_heap_pair_call(dest);
+            self.b.mark_heap_pair_word(dest);
         }
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),
