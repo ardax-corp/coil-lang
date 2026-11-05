@@ -20,13 +20,28 @@ pub struct NativeBody {
     pub mir: MirFunc,
 }
 
-thread_local! {
-    static NATIVE_CAPTURE: RefCell<Option<Vec<NativeBody>>> = const { RefCell::new(None) };
+/// An open capture.
+struct Capture {
+    bodies: Vec<NativeBody>,
+    /// Keep each body as lowered, with no MIR pass run on it.
+    raw: bool,
 }
 
-/// Start capturing (drops an earlier capture).
+thread_local! {
+    static NATIVE_CAPTURE: RefCell<Option<Capture>> = const { RefCell::new(None) };
+}
+
+/// Start capturing for a backend that optimizes (drops an earlier capture).
 pub fn start_native_capture() {
-    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: false }));
+}
+
+/// Start capturing bodies as lowered from HIR, with no MIR pass run on them
+/// (drops an earlier capture): what the MIR interpreter runs, so that its
+/// output is the reference the optimized engines are compared against. A
+/// bug in a pass cannot then hide on both sides of the comparison.
+pub fn start_raw_capture() {
+    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true }));
 }
 
 /// Run `f` with the capture closed: a program compiled inside another
@@ -46,25 +61,27 @@ pub fn native_capture_active() -> bool {
 /// End the capture and return its bodies, each call of a twinned host
 /// native now a call of its Coil twin ([`super::native_twins`]).
 pub fn take_native_capture() -> Vec<NativeBody> {
-    let mut bodies = NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default();
+    let mut bodies = NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).map(|c| c.bodies).unwrap_or_default();
     let entries = bodies.iter().filter_map(|b| Some((b.name.clone(), b.entry?))).collect();
     super::native_twins::apply(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)), &entries);
     super::native_expand::apply_all(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)));
     bodies
 }
 
-/// Record `bodies` when a capture is open, each after the MIR passes the
-/// dense tier runs ([`super::specialize::optimize_mir`]) at `opts`' level:
-/// native code gets the same loop rewrites (vector loops, byte scans, bulk
-/// copies and fills, which call the runtime's kernels). A generator, a
-/// body with a cleanup pad, a debugger's or a coverage build's keep their
-/// MIR as lowered.
+/// Record `bodies` when a capture is open. Unless it is a raw one
+/// ([`start_raw_capture`]), each comes after the MIR passes the dense tier
+/// runs ([`super::specialize::optimize_mir`]) at `opts`' level: native code
+/// gets the same loop rewrites (vector loops, byte scans, bulk copies and
+/// fills, which call the runtime's kernels). A generator, a body with a
+/// cleanup pad, a debugger's or a coverage build's keep their MIR as
+/// lowered.
 pub fn capture_native_bodies<'a>(bodies: impl Iterator<Item = (&'a str, Option<Label>, &'a MirFunc)>, opts: &crate::il::opt::OptimizeOptions) {
     NATIVE_CAPTURE.with(|c| {
-        if let Some(list) = c.borrow_mut().as_mut() {
-            list.extend(bodies.map(|(name, entry, mir)| {
+        if let Some(capture) = c.borrow_mut().as_mut() {
+            let raw = capture.raw;
+            capture.bodies.extend(bodies.map(|(name, entry, mir)| {
                 let mut mir = mir.clone();
-                if optimizable(&mir) {
+                if !raw && optimizable(&mir) {
                     super::specialize::optimize_mir(&mut mir, opts, false);
                 }
                 NativeBody { name: name.to_string(), entry, mir }

@@ -399,7 +399,9 @@ fn cmd_build_and_run(
 ) {
     // `--jit` needs this compile's MIR, so it skips the build cache.
     let cache = if jit { None } else { cache };
-    if jit {
+    if RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed) {
+        compiler::native_mir::start_raw_capture();
+    } else if jit {
         compiler::native_mir::start_native_capture();
     }
     if let Some(cache) = &cache

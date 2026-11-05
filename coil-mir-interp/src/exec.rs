@@ -2,8 +2,7 @@
 //! does, through the same helpers.
 
 use compiler::native_mir::{
-    MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, VecLoopKind, heap_word, ty_of,
-    vector_op, word_kind,
+    MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, word_kind,
 };
 use machine::native::{
     self as rt, ALLOC_ARRAY, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE, NOT_AN_ENUM, NativeCtx,
@@ -557,34 +556,6 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 check!();
                 set_word(f, regs, *dest, w);
             }
-            MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
-                let Some(op) = vector_op(inst) else { return Flow::Trap(TRAP_HELPER) };
-                let mut frame = vec![0u64; op.inputs.len() + 2];
-                frame[0] = op.start.map_or(0, |v| get!(v));
-                for (i, v) in op.inputs.iter().enumerate() {
-                    frame[i + 2] = get!(*v);
-                }
-                let (kind, lo, hi) = match inst {
-                    MirInst::ByteScan { from, bound, .. } => (0, *from, *bound),
-                    MirInst::VecLoop { from, to, kind, .. } => {
-                        let writes = !matches!(kind, VecLoopKind::Reduce { stores, .. } if stores.is_empty());
-                        (1 | if writes { 2 } else { 0 }, *from, *to)
-                    }
-                    _ => unreachable!(),
-                };
-                let w = rt::coil_native_vector(ctx, kind, u64::from(op.flags), op.body.as_ptr(), op.body.len() as u64, frame.as_mut_ptr(), frame.len() as u64, get!(lo), get!(hi));
-                check!();
-                match inst {
-                    MirInst::ByteScan { dest, .. } => set!(*dest, w),
-                    MirInst::VecLoop { dest, pos, .. } => {
-                        set!(*dest, frame[0]);
-                        if let Some(p) = pos {
-                            set!(*p, frame[1]);
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-            }
             MirInst::Ffi { dest, op, operand, args } => {
                 let w = rt::coil_native_ffi(ctx, u64::from(op.instruction() as u8), u64::from(*operand), words!(args), args.len() as u64);
                 check!();
@@ -745,7 +716,8 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 check!();
                 set_word(f, regs, *dest, w);
             }
-            MirInst::PanicStore { .. } => return Flow::Trap(TRAP_HELPER),
+            // Passes make these; `refusal` keeps them off raw MIR.
+            MirInst::PanicStore { .. } | MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => return Flow::Trap(TRAP_HELPER),
         }
         Flow::Next
     }

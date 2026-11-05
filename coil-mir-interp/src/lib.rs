@@ -2,6 +2,10 @@
 //! (the playground, the debugger, compile-time code). See
 //! `docs/internals/mir-interp.md`.
 //!
+//! It runs MIR as lowered, with no MIR pass on it
+//! (`compiler::native_mir::start_raw_capture`): with `-O 0` that is the
+//! reference output the optimized engines are compared against.
+//!
 //! It is one more backend of the runtime's native ABI: [`prepare`] turns a
 //! program's captured MIR into [`NativeEntry`]s, as `coil_native::jit`
 //! does, and each op does what Cranelift's lowering of it does, through
@@ -15,6 +19,11 @@
 //! [`ROOTS_SCAN`] record per activation, so a call pays nothing for roots,
 //! and the liveness that says which registers count is computed only for
 //! the bodies a collection finds on the stack.
+
+// Activations are reached through raw pointers (the collector walks them while
+// the loop runs). A method call through one must spell its borrow out, or
+// rustc's `dangerous_implicit_autorefs` fires; clippy then calls it needless.
+#![allow(clippy::needless_borrow)]
 
 mod exec;
 mod frame;
@@ -176,9 +185,11 @@ fn refusal(f: &MirFunc) -> Option<String> {
     let insts = f.blocks.iter().flat_map(|b| &b.insts);
     for inst in insts {
         match inst {
-            // `promote_fields` does not run on captured bodies: what a panic
-            // owes the heap has no way to reach the unwinder.
-            MirInst::PanicStore { .. } => return Some("PanicStore".to_string()),
+            // Only passes make these, and the interpreter runs raw MIR
+            // (`start_raw_capture`).
+            MirInst::PanicStore { .. } | MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
+                return Some("an op only a MIR pass makes".to_string());
+            }
             MirInst::Alloc { kind: compiler::native_mir::MirAllocKind::Object { .. }, elems, .. } if !elems.is_empty() => {
                 return Some("an object allocated with its fields".to_string());
             }

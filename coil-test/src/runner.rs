@@ -108,6 +108,16 @@ impl Engine {
     pub fn runs_mir(self) -> bool {
         self != Self::Vm
     }
+
+    /// Open the capture this engine runs from: the interpreter takes MIR
+    /// as lowered, the reference native code is compared against.
+    fn start_capture(self) {
+        if self == Self::Mir {
+            compiler::native_mir::start_raw_capture();
+        } else {
+            compiler::native_mir::start_native_capture();
+        }
+    }
 }
 
 /// No native code on wasm: the file runs on the VM.
@@ -848,7 +858,7 @@ pub(crate) fn compile_test_file(
     // compile_fail fixtures must reject via Ok(Err(_)), not panic.
     let native = options.engine.runs_mir() && !expect_compile_fail;
     if native {
-        compiler::native_mir::start_native_capture();
+        options.engine.start_capture();
     }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&display)
@@ -1279,7 +1289,7 @@ fn start_doc_case(
     pipeline.set_file_text(entry.clone(), program);
     let native = run.options.engine.runs_mir();
     if native {
-        compiler::native_mir::start_native_capture();
+        run.options.engine.start_capture();
     }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&entry.display().to_string())
