@@ -2,9 +2,11 @@
 //! (the playground, the debugger, compile-time code). See
 //! `docs/internals/mir-interp.md`.
 //!
-//! It runs MIR as lowered, with no MIR pass on it
-//! (`compiler::native_mir::start_raw_capture`): with `-O 0` that is the
-//! reference output the optimized engines are compared against.
+//! At `-O 0` it runs MIR as lowered, with no MIR pass on it
+//! (`compiler::native_mir::start_raw_capture`): the reference output every
+//! other level and engine is compared against. At any other level it runs
+//! the MIR native code compiles, so a difference from the reference is a
+//! pass's and a difference from native code at the same level the backend's.
 //!
 //! It is one more backend of the runtime's native ABI: [`prepare`] turns a
 //! program's captured MIR into [`NativeEntry`]s, as `coil_native::jit`
@@ -185,10 +187,11 @@ fn refusal(f: &MirFunc) -> Option<String> {
     let insts = f.blocks.iter().flat_map(|b| &b.insts);
     for inst in insts {
         match inst {
-            // Only passes make these, and the interpreter runs raw MIR
-            // (`start_raw_capture`).
-            MirInst::PanicStore { .. } | MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
-                return Some("an op only a MIR pass makes".to_string());
+            // `promote_fields` does not run on a capture, as for native
+            // code: what a panic owes the heap has no way to the unwinder.
+            MirInst::PanicStore { .. } => return Some("PanicStore".to_string()),
+            MirInst::ByteScan { .. } | MirInst::VecLoop { .. } if compiler::native_mir::vector_op(inst).is_none() => {
+                return Some("a vector op the runtime's encoding cannot hold".to_string());
             }
             MirInst::Alloc { kind: compiler::native_mir::MirAllocKind::Object { .. }, elems, .. } if !elems.is_empty() => {
                 return Some("an object allocated with its fields".to_string());

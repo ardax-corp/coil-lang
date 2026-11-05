@@ -399,7 +399,7 @@ fn cmd_build_and_run(
 ) {
     // `--jit` needs this compile's MIR, so it skips the build cache.
     let cache = if jit { None } else { cache };
-    if RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed) {
+    if RAW_MIR.load(std::sync::atomic::Ordering::Relaxed) {
         compiler::native_mir::start_raw_capture();
     } else if jit {
         compiler::native_mir::start_native_capture();
@@ -459,6 +459,8 @@ fn cmd_build_and_run(
     }
 }
 
+/// `coil FILE --mir -O 0`: capture MIR with no MIR pass run on it.
+static RAW_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// `coil FILE --mir`: the captured MIR goes to the interpreter, not to
 /// Cranelift.
 static RUN_ON_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -842,6 +844,9 @@ fn main() {
                     set_program_args(&filename, &cli.program_args);
                     let cache = BuildCache::new(cache_options.as_deref(), &filename);
                     RUN_ON_MIR.store(cli.mir, std::sync::atomic::Ordering::Relaxed);
+                    // Only `-O 0` is raw: above it the interpreter runs what
+                    // native code compiles.
+                    RAW_MIR.store(cli.mir && cli.opt_level == compiler::OptLevel::None, std::sync::atomic::Ordering::Relaxed);
                     cmd_build_and_run(
                         &mut pipeline,
                         &filename,

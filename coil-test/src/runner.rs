@@ -109,10 +109,11 @@ impl Engine {
         self != Self::Vm
     }
 
-    /// Open the capture this engine runs from: the interpreter takes MIR
-    /// as lowered, the reference native code is compared against.
-    fn start_capture(self) {
-        if self == Self::Mir {
+    /// Open the capture this engine runs from at `level`: at `-O 0` the
+    /// interpreter takes MIR as lowered, the reference the rest is compared
+    /// against; otherwise it takes what native code compiles.
+    fn start_capture(self, level: compiler::OptLevel) {
+        if self == Self::Mir && level == compiler::OptLevel::None {
             compiler::native_mir::start_raw_capture();
         } else {
             compiler::native_mir::start_native_capture();
@@ -858,7 +859,7 @@ pub(crate) fn compile_test_file(
     // compile_fail fixtures must reject via Ok(Err(_)), not panic.
     let native = options.engine.runs_mir() && !expect_compile_fail;
     if native {
-        options.engine.start_capture();
+        options.engine.start_capture(options.opt_level);
     }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&display)
@@ -1289,7 +1290,7 @@ fn start_doc_case(
     pipeline.set_file_text(entry.clone(), program);
     let native = run.options.engine.runs_mir();
     if native {
-        run.options.engine.start_capture();
+        run.options.engine.start_capture(run.options.opt_level);
     }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&entry.display().to_string())
