@@ -90,6 +90,8 @@ pub enum Engine {
     #[default]
     Vm,
     Native,
+    /// The MIR interpreter (`docs/internals/mir-interp.md`).
+    Mir,
 }
 
 impl Engine {
@@ -97,24 +99,40 @@ impl Engine {
         match text {
             "vm" => Ok(Self::Vm),
             "native" => Ok(Self::Native),
-            _ => Err(format!("invalid --engine `{text}` (expected vm|native)")),
+            "mir" => Ok(Self::Mir),
+            _ => Err(format!("invalid --engine `{text}` (expected vm|native|mir)")),
         }
+    }
+
+    /// Whether a compile hands this engine its MIR.
+    pub fn runs_mir(self) -> bool {
+        self != Self::Vm
     }
 }
 
 /// No native code on wasm: the file runs on the VM.
 #[cfg(target_family = "wasm")]
-fn native_code(_: &Pipeline, _: usize, _: &str) -> Option<Arc<machine::native::NativeCode>> {
+fn native_code(_: &Pipeline, _: usize, _: &str, _: Engine) -> Option<Arc<machine::native::NativeCode>> {
     None
 }
 
 /// JIT what this compile captured. `None` when nothing compiles or the
 /// backend fails (the file then runs on the VM, as `coil --jit` does).
 #[cfg(not(target_family = "wasm"))]
-fn native_code(pipeline: &Pipeline, code_len: usize, file: &str) -> Option<Arc<machine::native::NativeCode>> {
+fn native_code(pipeline: &Pipeline, code_len: usize, file: &str, engine: Engine) -> Option<Arc<machine::native::NativeCode>> {
     let bodies = compiler::native_mir::take_native_capture();
     let debug = pipeline.program_debug_full();
     let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    if engine == Engine::Mir {
+        let program = coil_mir_interp::prepare(bodies, &pcs);
+        inventory(&format!("file\t{file}\t{}\t{}", program.compiled.len(), program.refused.len()));
+        for (name, why) in &program.refused {
+            inventory(&format!("refused\t{file}\t{name}\t{why}"));
+        }
+        let complete = program.refused.is_empty();
+        let code = machine::native::NativeCode::new(code_len, program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+        return (!code.is_empty()).then(|| Arc::new(code));
+    }
     let program = match coil_native::jit(&bodies, &pcs) {
         Ok(p) => p,
         Err(e) => {
@@ -159,7 +177,7 @@ fn inventory(line: &str) {
 /// The run's VM-use counts as a `counts` inventory line.
 #[cfg(not(target_family = "wasm"))]
 fn inventory_counts(options: &TestOptions) {
-    if options.engine != Engine::Native {
+    if !options.engine.runs_mir() {
         return;
     }
     let counts: Vec<String> = machine::native::vm_use_counts().iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -828,7 +846,7 @@ pub(crate) fn compile_test_file(
     // catch_unwind isolates a compiler ICE from aborting the whole
     // harness under panic=unwind. Release builds use panic=abort, so
     // compile_fail fixtures must reject via Ok(Err(_)), not panic.
-    let native = options.engine == Engine::Native && !expect_compile_fail;
+    let native = options.engine.runs_mir() && !expect_compile_fail;
     if native {
         compiler::native_mir::start_native_capture();
     }
@@ -836,7 +854,7 @@ pub(crate) fn compile_test_file(
         pipeline.compile_src_from_file(&display)
     }));
     let native = match &compiled {
-        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len(), &display),
+        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len(), &display, options.engine),
         _ => {
             let _ = compiler::native_mir::take_native_capture();
             None
@@ -1259,7 +1277,7 @@ fn start_doc_case(
     let diagnostics = Captured::default();
     let mut pipeline = run_pipeline(run.config, run.options, Box::new(diagnostics.clone()));
     pipeline.set_file_text(entry.clone(), program);
-    let native = run.options.engine == Engine::Native;
+    let native = run.options.engine.runs_mir();
     if native {
         compiler::native_mir::start_native_capture();
     }
@@ -1267,7 +1285,7 @@ fn start_doc_case(
         pipeline.compile_src_from_file(&entry.display().to_string())
     }));
     let native = match &compiled {
-        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len(), &entry.display().to_string()),
+        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len(), &entry.display().to_string(), run.options.engine),
         _ => {
             let _ = compiler::native_mir::take_native_capture();
             None

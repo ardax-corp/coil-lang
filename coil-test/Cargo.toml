@@ -24,6 +24,7 @@ coil-host = { path = "../coil-host" }
 coil-args = { path = "../coil-args" }
 comptime = { path = "../comptime" }
 coil-native = { path = "../coil-native" }
+coil-mir-interp = { path = "../coil-mir-interp" }
 clap = { version = "4.5", features = ["derive"] }
 
 [features]

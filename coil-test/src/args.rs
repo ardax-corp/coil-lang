@@ -118,7 +118,7 @@ struct TestCli {
     doc_tests_only: bool,
     /// What runs the compiled code: vm, or native (Cranelift where the
     /// backend compiles a body, the VM elsewhere)
-    #[arg(long, value_name = "vm|native", value_parser = Engine::parse, default_value = "vm")]
+    #[arg(long, value_name = "vm|native|mir", value_parser = Engine::parse, default_value = "vm")]
     engine: Engine,
     /// Test root (default: ./tests)
     #[arg(value_name = "PATH")]
@@ -352,7 +352,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
     if coverage && parts.debug.is_some_and(|l| l != compiler::DebugLevel::Full) {
         return Err("coverage needs byte spans: drop -g0 / -g1 (or pass -g2)".into());
     }
-    if coverage && parts.engine == Engine::Native {
+    if coverage && parts.engine != Engine::Vm {
         return Err("--coverage counts lines the VM runs: use --engine vm".into());
     }
     let order = resolve_order(parts.seed, parts.no_shuffle, fresh_seed)?;
