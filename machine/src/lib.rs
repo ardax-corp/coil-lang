@@ -15,7 +15,6 @@ pub mod clock;
 pub mod entropy;
 pub mod key_index;
 pub mod symbol;
-#[cfg(any(test, feature = "debugger"))]
 pub mod debug;
 pub mod env;
 mod dense;
@@ -59,7 +58,6 @@ mod vm;
 /// zero-arg clocks and three-arg vec helpers share this function type.
 pub type HostValueFn = fn(&mut memory::Heap, &[common::Value]) -> common::Value;
 
-#[cfg(any(test, feature = "debugger"))]
 pub use debug::{DebugController, DebugObject, DebugTask, DebugTaskFrames, StepMode, StopReason};
 pub use clock::CLOCK_WIRING;
 pub use collect::swap_static_word_kinds;

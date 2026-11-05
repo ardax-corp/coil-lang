@@ -142,6 +142,7 @@ pub fn execute_archived_program(
         ffi_search_paths: ffi_search_paths.clone(),
         dload_gate: dload_gate.clone(),
         struct_layouts: loaded.struct_layouts.iter().map(machine::CStructLayout::from_archive).collect(),
+        shared_print: None,
     };
     if let Some(panicked) = machine::run_natively(program, start) {
         return panicked;

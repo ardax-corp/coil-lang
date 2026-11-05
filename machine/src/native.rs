@@ -358,6 +358,9 @@ pub const NATIVE_CTX_VM_HI: i32 = std::mem::offset_of!(NativeCtx, vm_hi) as i32;
 pub struct NativeHost {
     /// Write `text` as `PRINT` does.
     pub print: unsafe fn(*mut std::ffi::c_void, &str),
+    /// The running task and the live ones, for a debugger: see
+    /// [`debug_tasks`].
+    pub tasks: unsafe fn(*mut std::ffi::c_void) -> DebugTasks,
     /// Run the bytecode function at `pc` on `args` and return its result
     /// word; sets the `bool` when it panicked (the VM reported it).
     /// The second result word goes to the last `u64`.
@@ -413,6 +416,34 @@ pub enum Invoked {
 }
 
 
+/// The running task's id and each live task's `(id, name, state)`.
+pub type DebugTasks = (u64, Vec<(u64, String, String)>);
+
+/// The tasks of the run `ctx` belongs to. No scheduler: task `0` and no list.
+///
+/// # Safety
+/// `ctx` is a live call's [`NativeCtx`].
+pub unsafe fn debug_tasks(ctx: *mut NativeCtx) -> DebugTasks {
+    let c = unsafe { &*ctx };
+    if c.machine.is_null() {
+        return (0, Vec::new());
+    }
+    // SAFETY: `machine` is the live machine `host` was made for.
+    unsafe { (c.host.tasks)(c.machine) }
+}
+
+/// The message of the trap `code` stopped the call with.
+///
+/// # Safety
+/// `ctx` is a live call's [`NativeCtx`].
+pub unsafe fn trap_text(ctx: *mut NativeCtx, code: u64) -> String {
+    let c = unsafe { &*ctx };
+    let code = if code == TRAP_HELPER { c.trap } else { code };
+    // SAFETY: `call` set `message` for the call.
+    let message = if c.message.is_null() { String::new() } else { unsafe { (*c.message).clone() } };
+    NativePanic { code, message, trace: Vec::new(), pads: Vec::new() }.message().to_string()
+}
+
 /// [`NativeHost::host`]: machine, context, native id, layout, arguments,
 /// panicked flag.
 pub type HostViaVmFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64, &[common::Value], &mut bool) -> Option<u64>;
@@ -420,6 +451,7 @@ pub type HostViaVmFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64
 impl NativeHost {
     const NONE: Self = Self {
         print: |_, _| {},
+        tasks: |_| (0, Vec::new()),
         call: |_, _, _, _, _| 0,
         call_value: |_, _, _, _, _, _| 0,
         resume: |_, _, _, _, _| 0,

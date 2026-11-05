@@ -8496,9 +8496,12 @@ impl Compiler {
             .map(|(n, pc)| (n.clone(), *pc as u32))
             .collect();
         self.deopt_map_drafts = lowered.deopt_map_drafts.clone();
-        apply_debug_slot_remaps(&mut self.fn_debug_locals, &lowered.debug_slot_remaps);
+        // A debugger reads a local by the slot MIR's `local_binds` name, not
+        // by the register bytecode gave it.
+        let remaps = if self.debugger_attached { Default::default() } else { lowered.debug_slot_remaps.clone() };
+        apply_debug_slot_remaps(&mut self.fn_debug_locals, &remaps);
         for (fn_name, vars) in self.fn_debug_vars.iter_mut() {
-            if let Some(remap) = lowered.debug_slot_remaps.get(fn_name) {
+            if let Some(remap) = remaps.get(fn_name) {
                 for v in vars.iter_mut() {
                     // A body emitted from MIR assigns its own registers: a
                     // local the remap leaves out holds no value there, and
@@ -8596,7 +8599,7 @@ impl Compiler {
             .map(|s| s.entry_pc)
             .chain(std::iter::once(bytecode.len() as u32))
             .collect();
-        for sym in &mut syms {
+        for sym in syms.iter_mut().filter(|_| !self.debugger_attached) {
             let end = ends
                 .iter()
                 .copied()

@@ -133,6 +133,7 @@ pub(crate) struct Driver<'a> {
 impl<'a> Driver<'a> {
     const HOST: NativeHost = NativeHost {
         print: Driver::host_print,
+        tasks: Driver::host_tasks,
         call: Driver::host_call,
         call_value: Driver::host_call_value,
         claim: Driver::host_claim,
@@ -163,6 +164,13 @@ impl<'a> Driver<'a> {
             panic_without_location: false,
             panic_message: String::new(),
         }
+    }
+
+    /// [`NativeHost::tasks`].
+    unsafe fn host_tasks(raw: *mut c_void) -> crate::native::DebugTasks {
+        // SAFETY: native code passes back the driver it was given.
+        let d = unsafe { Self::from_raw(raw) };
+        d.rt.sched.as_ref().map_or((crate::task::ROOT, Vec::new()), |s| (s.current, s.debug_states()))
     }
 
     /// The last panic's message (a thread job's join reports it).

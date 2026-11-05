@@ -27,6 +27,7 @@
 // rustc's `dangerous_implicit_autorefs` fires; clippy then calls it needless.
 #![allow(clippy::needless_borrow)]
 
+pub mod debug;
 mod exec;
 mod frame;
 
@@ -89,6 +90,8 @@ pub(crate) struct Body {
     exec: OnceLock<Exec>,
     /// Filled by the first collection that finds the body on the stack.
     pub(crate) roots: OnceLock<RootMaps>,
+    /// Under a debugger: its op numbers and locals.
+    pub(crate) ops: Option<debug::BodyOps>,
 }
 
 // SAFETY: `program` points at the `Program` that owns this body, which is
@@ -244,7 +247,7 @@ fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mu
     let is_drop = mir.name.ends_with("::drop") && mir.params.len() == 1;
     let (op_sites, entry_site) = if pc.is_some() { body_sites(&mir, code, sites) } else { (mir.blocks.iter().map(|b| vec![machine::native::NO_SITE as u32; b.insts.len() + 1]).collect(), machine::native::NO_SITE as u32) };
     mir.shrink_to_fit();
-    Body { mir, program, pc: code, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), roots: OnceLock::new() }
+    Body { mir, program, pc: code, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), roots: OnceLock::new(), ops: None }
 }
 
 /// `COIL_MIR_ARCHIVE_CHECK`: what comes back from the archive format, which
@@ -269,6 +272,12 @@ fn through_archive(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) ->
 /// Make `bodies` runnable. `entry_pcs` maps a body's name to its bytecode
 /// entry PC, as for `coil_native::jit`.
 pub fn prepare(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> InterpProgram {
+    prepare_with(bodies, entry_pcs, None)
+}
+
+/// [`prepare`], each body with its [`debug::BodyOps`] when a debugger runs it.
+pub(crate) fn prepare_with(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>, ops: Option<Vec<debug::BodyOps>>) -> InterpProgram {
+    let mut ops = ops.map(Vec::into_iter);
     let bodies = if std::env::var_os("COIL_MIR_ARCHIVE_CHECK").is_some() { through_archive(bodies, entry_pcs) } else { bodies };
     let mut sites = Vec::new();
     let mut compiled = Vec::new();
@@ -288,7 +297,9 @@ pub fn prepare(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> Int
             None => compiled.push(b.name.clone()),
         }
         let pc = entry_pcs.get(&b.name).copied();
-        built.push(build_body(b.mir, at, pc, &mut sites));
+        let mut body = build_body(b.mir, at, pc, &mut sites);
+        body.ops = ops.as_mut().and_then(Iterator::next);
+        built.push(body);
     }
     let p = Arc::get_mut(&mut program).expect("a program nothing else holds yet");
     p.bodies = built;

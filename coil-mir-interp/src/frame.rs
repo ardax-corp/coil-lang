@@ -36,6 +36,8 @@ pub(crate) struct Activation {
     pub(crate) regs: Vec<u64>,
     /// Argument words of the op running.
     pub(crate) scratch: Vec<u64>,
+    /// Under a debugger: each frame's locals.
+    pub(crate) locals: Vec<crate::debug::FrameLocals>,
     root_record: [u64; 4],
     site_record: [u64; 4],
 }
@@ -43,7 +45,7 @@ pub(crate) struct Activation {
 impl Activation {
     pub(crate) fn new(ctx: *mut NativeCtx) -> Self {
         let (frames, regs, scratch) = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
-        Self { ctx, frames, regs, scratch, root_record: [0; 4], site_record: [0; 4] }
+        Self { ctx, frames, regs, scratch, locals: Vec::new(), root_record: [0; 4], site_record: [0; 4] }
     }
 
     /// Link this activation's records into the context, for as long as it
@@ -72,6 +74,7 @@ impl Activation {
         self.frames.clear();
         self.regs.clear();
         self.scratch.clear();
+        self.locals.clear();
         let parts = (std::mem::take(&mut self.frames), std::mem::take(&mut self.regs), std::mem::take(&mut self.scratch));
         POOL.with(|p| {
             let mut pool = p.borrow_mut();

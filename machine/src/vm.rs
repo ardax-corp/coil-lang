@@ -793,6 +793,7 @@ impl<const S: usize> Machine<S> {
             machine: std::ptr::from_mut(self).cast(),
             host: crate::native::NativeHost {
                 print: Self::native_print,
+                tasks: |_| (0, Vec::new()),
                 call: Self::native_vm_call,
                 call_value: Self::native_call_value,
                 resume: Self::native_resume,
@@ -1570,41 +1571,7 @@ impl<const S: usize> Machine<S> {
     /// The heap object at `v` (a bare or `| 1`-tagged address), if any.
     #[cfg(any(test, feature = "debugger"))]
     pub fn debug_object(&self, v: Value) -> Option<crate::debug::DebugObject> {
-        use crate::debug::DebugObject;
-        use crate::memory::Object;
-        let addr = v.bits() & !1;
-        if addr == 0 {
-            return None;
-        }
-        Some(match Self::find_object_by_addr(&self.rt.heap, addr)? {
-            Object::String(gc) => DebugObject::Str(gc.as_ref().data.to_string()),
-            Object::Instance(gc) => {
-                let inst = gc.as_ref();
-                match inst.slots() {
-                    Some(fields) => DebugObject::Instance {
-                        type_id: inst.type_id,
-                        fields: fields.to_vec(),
-                    },
-                    None => DebugObject::Other("dict"),
-                }
-            }
-            Object::Array(gc) => DebugObject::Array(gc.as_ref().to_vec()),
-            Object::Tuple(gc) => DebugObject::Tuple(gc.as_ref().elements().to_vec()),
-            Object::Enum(gc) => {
-                let e = gc.as_ref();
-                DebugObject::Enum {
-                    tag: e.tag,
-                    payload: e.payload.to_vec(),
-                }
-            }
-            Object::Boxed(gc) => match &gc.as_ref().payload {
-                crate::memory::Member::Value(inner) => DebugObject::Boxed(*inner),
-                _ => DebugObject::Other("boxed"),
-            },
-            Object::Coroutine(_) => DebugObject::Other("coroutine"),
-            Object::Fn(_) => DebugObject::Other("fn"),
-            _ => DebugObject::Other("object"),
-        })
+        crate::debug::object_view(&self.rt.heap, v)
     }
 
     pub fn debug_format_value(&self, v: Value) -> String {

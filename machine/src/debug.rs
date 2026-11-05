@@ -77,6 +77,11 @@ impl DebugController {
         self.breakpoints.clear();
     }
 
+    /// Stop before the next instruction, the first one of a run.
+    pub fn stop_at_next(&mut self) {
+        self.step_mode = StepMode::Stepi { armed: true };
+    }
+
     pub fn set_stepi(&mut self) {
         self.step_mode = StepMode::Stepi { armed: false };
     }
@@ -302,4 +307,41 @@ pub enum DebugTaskFrames {
     Live(std::ops::Range<usize>),
     /// A suspended child task's saved frames: their pcs, bottom first.
     Saved(Vec<usize>),
+}
+
+/// The heap object at `v` (a bare or `| 1`-tagged address), if any.
+pub fn object_view(heap: &crate::memory::Heap, v: common::Value) -> Option<DebugObject> {
+    use crate::memory::Object;
+    let addr = v.bits() & !1;
+    if addr == 0 {
+        return None;
+    }
+    Some(match heap.find_object_by_addr(addr)? {
+        Object::String(gc) => DebugObject::Str(gc.as_ref().data.to_string()),
+        Object::Instance(gc) => {
+            let inst = gc.as_ref();
+            match inst.slots() {
+                Some(fields) => DebugObject::Instance { type_id: inst.type_id, fields: fields.to_vec() },
+                None => DebugObject::Other("dict"),
+            }
+        }
+        Object::Array(gc) => DebugObject::Array(gc.as_ref().to_vec()),
+        Object::Tuple(gc) => DebugObject::Tuple(gc.as_ref().elements().to_vec()),
+        Object::Enum(gc) => {
+            let e = gc.as_ref();
+            DebugObject::Enum { tag: e.tag, payload: e.payload.to_vec() }
+        }
+        Object::Boxed(gc) => match &gc.as_ref().payload {
+            crate::memory::Member::Value(inner) => DebugObject::Boxed(*inner),
+            _ => DebugObject::Other("boxed"),
+        },
+        Object::Coroutine(_) => DebugObject::Other("coroutine"),
+        Object::Fn(_) => DebugObject::Other("fn"),
+        _ => DebugObject::Other("object"),
+    })
+}
+
+/// `v` as `print` shows a word of no known type.
+pub fn format_word(heap: &crate::memory::Heap, v: common::Value) -> String {
+    crate::format::stringify_value(heap, v)
 }

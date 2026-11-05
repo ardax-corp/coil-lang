@@ -38,7 +38,14 @@ pub(crate) unsafe extern "C" fn entry(ctx: *mut NativeCtx, args: *const u64) -> 
                     let w = *args.add(i);
                     act.regs[base + reg(p)] = if ty_of(f, p) == MirTy::Bool { as_bool(w) } else { w };
                 }
-                run(&raw mut act)
+                if body.ops.is_some() && crate::debug::active() {
+                    crate::debug::enter(&raw mut act);
+                    let out = run::<true>(&raw mut act);
+                    crate::debug::leave(&raw mut act);
+                    out
+                } else {
+                    run::<false>(&raw mut act)
+                }
             }
             false => {
                 rt::coil_native_unwind(ctx, TRAP_STACK, u64::from(body.entry_site));
@@ -61,7 +68,7 @@ unsafe extern "C" fn pad_entry(ctx: *mut NativeCtx, homes: *const u64) -> u64 {
         let body = &*((*ctx).entry_data as *const Body);
         let mut act = Activation::new(ctx);
         act.link();
-        let out = if push(&mut act, body, homes.cast_mut()) { run(&raw mut act) } else { 0 };
+        let out = if push(&mut act, body, homes.cast_mut()) { run::<false>(&raw mut act) } else { 0 };
         act.unlink();
         act.release();
         out
@@ -192,6 +199,7 @@ enum Flow {
 unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
     // SAFETY: the running activation.
     unsafe {
+        crate::debug::panicking(act, code);
         let ctx = (*act).ctx;
         let mut code = code;
         while let Some(frame) = (&(*act).frames).last() {
@@ -217,6 +225,23 @@ unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
     }
 }
 
+/// Yield `word`. Under a debugger the generator's frames leave the task's
+/// stack meanwhile: a resume may come from another task, or never.
+unsafe fn yield_word(act: *mut Activation, ctx: *mut NativeCtx, word: u64) -> u64 {
+    // SAFETY: the running activation and its context.
+    unsafe {
+        let debug = crate::debug::active();
+        if debug {
+            crate::debug::leave(act);
+        }
+        let send = rt::coil_native_yield(ctx, word);
+        if debug {
+            crate::debug::enter(act);
+        }
+        send
+    }
+}
+
 /// Charge one step (a call or a taken back-edge, as the VM counts them):
 /// `false` when the budget ran out.
 #[inline(always)]
@@ -230,7 +255,7 @@ unsafe fn charge(ctx: *mut NativeCtx) -> bool {
 }
 
 /// Run the activation's top frame until the activation ends.
-unsafe fn run(act: *mut Activation) -> u64 {
+unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
     // SAFETY: `act` is the running activation; `Frame::body` a body of the
     // live program. `regs` is re-read after anything that may grow the
     // register file; a collection rewrites words in place.
@@ -247,6 +272,9 @@ unsafe fn run(act: *mut Activation) -> u64 {
             // Where the frame stood: at its start, or past the call that
             // just returned.
             let mut ip = if (*frame).ip == AT_BLOCK_START {
+                if DEBUG {
+                    crate::debug::frame_entered(act);
+                }
                 if !charge(ctx) {
                     return unwind(act, TRAP_BUDGET);
                 }
@@ -261,6 +289,9 @@ unsafe fn run(act: *mut Activation) -> u64 {
                 let blk = &f.blocks[block];
                 while let Some(inst) = blk.insts.get(ip) {
                     (*frame).ip = ip as u32;
+                    if DEBUG {
+                        crate::debug::before(act, block, ip);
+                    }
                     match step(act, ctx, f, body, block, regs, inst) {
                         Flow::Next => ip += 1,
                         Flow::Trap(code) => return unwind(act, code),
@@ -268,6 +299,9 @@ unsafe fn run(act: *mut Activation) -> u64 {
                     }
                 }
                 (*frame).ip = ip as u32;
+                if DEBUG {
+                    crate::debug::before(act, block, ip);
+                }
                 let term = blk.term.as_ref().expect("a checked body");
                 let edge = match term {
                     Terminator::Jump { .. } => 0,
@@ -567,14 +601,14 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                     if rt::coil_native_coro_done(ctx, get!(*value)) != 0 {
                         break;
                     }
-                    send = rt::coil_native_yield(ctx, w);
+                    send = yield_word(act, ctx, w);
                     // A close unwinds from the yield.
                     check!();
                 }
                 set_word(f, regs, *dest, 0);
             }
             MirInst::Yield { dest, value, .. } => {
-                let w = rt::coil_native_yield(ctx, get!(*value));
+                let w = yield_word(act, ctx, get!(*value));
                 check!();
                 set_word(f, regs, *dest, w);
             }
