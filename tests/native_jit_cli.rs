@@ -1311,6 +1311,33 @@ fn module_setup_runs_natively() {
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
+/// Past the registers, arguments go on the stack: a body of many parameters
+/// still runs natively, and the objects among them survive a collection, in
+/// the callee and across a tail call. A package has no VM to run it instead.
+#[test]
+fn many_parameters_run_natively() {
+    let params: Vec<String> = (0..20).map(|i| format!("Box a{i}")).collect();
+    let args: Vec<String> = (0..20).map(|i| format!("new Box({i})")).collect();
+    let names: Vec<String> = (0..20).map(|i| format!("a{i}")).collect();
+    let sum: Vec<String> = (0..20).map(|i| format!("a{i}.n")).collect();
+    let src = format!(
+        "{HEADER}use gc::collect;\nclass Box {{\n    pub n: int,\n}}\n\
+         #[inline(never)]\nfn wide({params}) -> int {{ collect(); let junk = new Box(1); collect(); return {sum} + junk.n; }}\n\
+         #[inline(never)]\nfn relay({params}) -> int {{ return wide({names}); }}\n\
+         #[inline(never)]\nfn ints(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j, int k, int l, int m, int n, int o, int p, int q) -> int {{ return a - b + c - d + e - f + g - h + i - j + k - l + m - n + o - p + q; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", relay({args}))); let _ = println(format(\"%i\", ints(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))); }}\n",
+        params = params.join(", "),
+        args = args.join(", "),
+        names = names.join(", "),
+        sum = sum.join(" + "),
+    );
+    let stats = same_as_vm("many_parameters", &src);
+    assert!(compiled(&stats, "wide"), "stats: {stats}");
+    assert!(compiled(&stats, "relay"), "stats: {stats}");
+    assert!(compiled(&stats, "ints"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
 /// A repeat `--jit` run takes its archive, MIR included, from the build
 /// cache and still runs natively. A VM run of the same file has an entry of
 /// its own: that archive has no MIR.

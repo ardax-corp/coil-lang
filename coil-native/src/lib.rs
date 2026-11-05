@@ -73,6 +73,24 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
     }
 }
 
+/// JIT an archive's native MIR section for the coming run, for a host with
+/// no VM to run what does not compile: every body must.
+pub fn install_section(bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Err("the program carries no native MIR; build it again with `coil package`".to_string());
+    }
+    let (bodies, pcs) = section::decode(bytes)?;
+    let program = jit(&bodies, &pcs)?;
+    if let Some((name, why)) = program.refused.first() {
+        return Err(format!("`{name}` cannot compile to native code: {why}"));
+    }
+    if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+        eprintln!("{}", describe(&program));
+    }
+    machine::native::install_for_next_run(program.entries, program.sites, true);
+    Ok(())
+}
+
 /// The [`machine::native::InlineShape`] of an `Alloc` of `kind` with `n`
 /// words and the helper's `extra` word, when native code may allocate it
 /// inline (`COIL_NATIVE_INLINE_ALLOC=0` turns that off, for A/B runs).
@@ -665,9 +683,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
     }
     if let Some(t) = f.homes.iter().find(|t| !numeric(**t)) {
         return Err(format!("defer home of {t:?}"));
-    }
-    if f.params.len() > 16 {
-        return Err("more than 16 parameters".into());
     }
     for &p in &f.params {
         if !numeric(ty_of(f, p)) {

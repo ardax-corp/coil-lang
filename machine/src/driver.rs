@@ -291,11 +291,18 @@ impl<'a> Driver<'a> {
             return None;
         };
         let params = entry.arity as usize;
-        if params > 16 || args.len() < entry.reads as usize {
-            self.report("native driver: a call with more than 16 words", None, Vec::new(), false);
+        if args.len() < entry.reads as usize {
+            self.report("native driver: a call with too few words", None, Vec::new(), false);
             return None;
         }
-        let mut words = [0u64; 16];
+        let mut few = [0u64; 16];
+        let mut many = Vec::new();
+        let words: &mut [u64] = if params <= few.len() {
+            &mut few[..params]
+        } else {
+            many.resize(params, 0);
+            &mut many
+        };
         for (w, a) in words.iter_mut().zip(args.iter().take(params)) {
             *w = a.bits();
         }
@@ -305,9 +312,9 @@ impl<'a> Driver<'a> {
         let env = self.env();
         self.depth += 1;
         #[cfg(not(target_family = "wasm"))]
-        let out = crate::stacks::on_deep_stack(|| crate::native::call(&entry, &words[..params], &env));
+        let out = crate::stacks::on_deep_stack(|| crate::native::call(&entry, words, &env));
         #[cfg(target_family = "wasm")]
-        let out = crate::native::call(&entry, &words[..params], &env);
+        let out = crate::native::call(&entry, words, &env);
         self.depth -= 1;
         match out {
             NativeOutcome::Done(r) => {
@@ -1118,10 +1125,10 @@ impl Driver<'_> {
     fn new_task_fiber(&mut self, coro: crate::memory::RefCoroutine) -> Option<Box<TaskFiber>> {
         let c = coro.as_ref();
         let entry = self.program.native.lookup(c.resume_ip)?;
-        if c.saved_stack.len() < entry.reads as usize || entry.arity as usize > 16 {
+        if c.saved_stack.len() < entry.reads as usize {
             return None;
         }
-        let mut words = [0u64; 16];
+        let mut words = vec![0u64; entry.arity as usize];
         for (w, v) in words.iter_mut().zip(c.saved_stack.iter()) {
             *w = v.bits();
         }
@@ -1138,7 +1145,7 @@ impl Driver<'_> {
             let d = unsafe { &mut *me.cast::<Driver<'static>>() };
             TASK_YIELDER.set(std::ptr::from_ref(yielder).cast());
             let env = d.env();
-            let out = crate::native::call(&entry, &words[..entry.arity as usize], &env);
+            let out = crate::native::call(&entry, &words, &env);
             d.task_body_done(out);
         });
         Some(Box::new(TaskFiber { coro: Some(coro), stack_limit, yielder: std::ptr::null(), native_roots: Vec::new(), arg_roots: Vec::new(), depth: 0, gen_running: Vec::new() }))

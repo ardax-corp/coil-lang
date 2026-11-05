@@ -211,11 +211,11 @@ fn new_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Box<cra
         return None;
     }
     let n = coro.saved_stack.len();
-    if n < entry.reads as usize || entry.arity as usize > 16 {
+    if n < entry.reads as usize {
         return None;
     }
     table.hits += 1;
-    let mut words = [0u64; 16];
+    let mut words = vec![0u64; entry.arity as usize];
     for (w, v) in words.iter_mut().zip(coro.saved_stack.iter()) {
         *w = v.bits();
     }
@@ -228,7 +228,7 @@ fn new_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Box<cra
     let env = h.native_env();
     let coro = crate::native::GenCoro::with_stack(stack, move |yielder, _first| {
         crate::native::GEN_YIELDER.set(std::ptr::from_ref(yielder).cast());
-        crate::native::call(&entry, &words[..entry.arity as usize], &env)
+        crate::native::call(&entry, &words, &env)
     });
     let cleanup = entry.cleanup;
     Some(Box::new(crate::native::GenFiber { coro: Some(coro), stack_limit, yielder: std::ptr::null(), parked: std::ptr::null_mut(), cleanup }))
