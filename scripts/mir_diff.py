@@ -5,9 +5,9 @@
 
 `coil FILE --mir` runs MIR as lowered at `-O 0` (docs/internals/mir-interp.md).
 Each `.coil` with a `main` under PATH (default: examples) runs that way, then
-at each level on the interpreter, the VM and with `--jit`. Timings in the
+at each level on the interpreter and as native code. Timings in the
 output (`1234 ns`) are masked. A difference in stdout or exit status from the
-reference on the interpreter is a MIR or HIR pass's; on `--jit` alone, at a level
+reference on the interpreter is a MIR or HIR pass's; on native code alone, at a level
 where the interpreter agrees, the backend's; on every engine at once it may be a
 program whose output is not deterministic. Exits 1 when any program differs.
 """
@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 TIMING = re.compile(rb"\d+(\.\d+)? ?(ns|us|ms|s)\b")
-ENGINES = {"mir": ["--mir"], "vm": ["--no-jit"], "jit": ["--jit"]}
+ENGINES = {"mir": ["--mir"], "jit": []}
 
 
 def run(bin_dir, roots, path, flags, timeout):

@@ -373,8 +373,7 @@ fn coverage_reports_project_lines() {
         "use mathx::{clamp};\n\ntest(\"clamps low\") {\n    if !(clamp(-5, 0, 10) == 0) { raise \"assertion failed\"; }\n}\n\ntest(\"passes through\") {\n    if !(clamp(5, 0, 10) == 5) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
-    // The VM counts PCs; the engines that run MIR count its probes.
-    for (jobs, engine) in [(1, Engine::Vm), (2, Engine::Vm), (1, Engine::Native), (2, Engine::Mir)] {
+    for (jobs, engine) in [(1, Engine::Native), (2, Engine::Native), (1, Engine::Mir), (2, Engine::Mir)] {
         let opts = TestOptions {
             jobs,
             engine,

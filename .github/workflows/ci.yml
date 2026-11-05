@@ -479,18 +479,20 @@ jobs:
           find harness-bin -type f -exec chmod +x {} +
           run="python3 scripts/test_corpora.py --bin harness-bin"
           case "${{ matrix.variant }}" in
-            default) $run -- --engine vm $FLAGS ;;
+            default) $run -- --engine native $FLAGS ;;
             # Optimizations hide codegen bugs (LICM materializes invariants,
             # inlining drops CALL targets); run the unoptimized pipeline too.
-            O0) $run -- --engine vm -O 0 $FLAGS ;;
+            O0) $run -- --engine native -O 0 $FLAGS ;;
             leak-smoke)
               # Each corpus process gets 256 MiB of address space above the
               # harness's own code, and one job: every extra thread reserves
               # a glibc malloc arena (64 MiB of address space), which alone
               # exceeds the room left. A leak grows far past this; a
               # million-frame fold on the interpreter takes about 128 MiB.
+              # Parked frames, because a fiber's reserved stack counts as
+              # address space with nothing behind it.
               code_kb=$(( $(size -d harness-bin/coil-test | awk 'NR==2 {print $4}') / 1024 ))
-              $run -j 1 --limit-as-kb $(( code_kb + 262144 )) -- --engine vm $FLAGS ;;
+              COIL_NO_FIBERS=1 $run -j 1 --limit-as-kb $(( code_kb + 262144 )) -- --engine mir $FLAGS ;;
             # Collect and evacuate at every allocation (precise-root soundness).
             # The memory corpus also at -O0: without inlining, a call's
             # result reaches its consumer on the operand stack instead of a
@@ -503,11 +505,10 @@ jobs:
             # with `collect()`. The per-case wall limit is wider than the
             # default 600 s for slow runners.
             gc-stress)
-              $run --harness harness-bin/gc-stress/coil-test -- --engine vm --wall-timeout 1200 $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test memory generics -- --engine vm -O 0 --wall-timeout 1200 $FLAGS
-              # The same on the two MIR engines, whose roots are their own:
-              # stack maps, and the interpreter's scan.
+              # On both engines, whose roots are their own: stack maps, and
+              # the interpreter's scan.
               $run --harness harness-bin/gc-stress/coil-test -- --engine native --wall-timeout 1200 $FLAGS
+              $run --harness harness-bin/gc-stress/coil-test memory generics -- --engine native -O 0 --wall-timeout 1200 $FLAGS
               $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS
               # And the frames parked on the heap, as on wasm.
               COIL_NO_FIBERS=1 $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS ;;
