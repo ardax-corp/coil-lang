@@ -1,10 +1,7 @@
-// Recursion the depth analysis cannot bound needs no attribute: the VM grows
-// its operand stack whenever a frame opens without room.
+// Recursion the depth analysis cannot bound needs no attribute: the engine
+// grows its stack whenever a frame opens without room. `black_box` keeps the
+// calls here: with constant arguments they would run while compiling.
 use tests::assert;
-
-fn noise(int n) -> int {
-    return n;
-}
 
 fn fib(int n) -> int {
     if n <= 2 {
@@ -56,19 +53,19 @@ fn countdown(int n) -> int {
 }
 
 test("dynamic entry") {
-    assert!(fib(noise(10)) == 55);
+    assert!(fib(black_box(10)) == 55);
 }
 
 test("deeper than the initial stack") {
-    assert!(depth(noise(20000)) == 20000);
+    assert!(depth(black_box(20000)) == 20000);
 }
 
 test("as deep as the frame limit allows") {
-    assert!(depth(noise(900000)) == 900000);
+    assert!(depth(black_box(900000)) == 900000);
 }
 
 test("non-tail mutual recursion") {
-    assert!(ping(noise(10001)) == 10001);
+    assert!(ping(black_box(10001)) == 10001);
 }
 
 test("recursive enum walk") {
@@ -81,5 +78,5 @@ test("recursive enum walk") {
 }
 
 test("max_depth below the real depth") {
-    assert!(countdown(noise(5000)) == 5000);
+    assert!(countdown(black_box(5000)) == 5000);
 }
