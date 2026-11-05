@@ -3275,6 +3275,24 @@
         assert_eq!(vm.heap().byte_cap(), 1 << 30, "the cap stays");
     }
 
+    /// A job's objects end with it: one left in a reused heap joins the
+    /// next program's finalizable objects, whose `drop` for the same type
+    /// id then reads an object of another program.
+    #[test]
+    fn reset_isolate_heap_leaves_no_object_of_the_last_job() {
+        let mut vm = Machine::<8>::default();
+        vm.heap_mut().set_nursery(true);
+        let payload = crate::memory::EnumPayload::one(Value::from(7u64));
+        let (young, mut gc) = vm.heap_mut().alloc(crate::memory::ObjEnum::new(0, payload), Object::Enum);
+        gc.as_mut().type_id = 1;
+        assert_ne!(young.generation() & crate::memory::GEN_YOUNG, 0, "needs a young object");
+        assert_eq!(vm.heap().slab_chunk_count(), 1, "needs a heap that is kept");
+        vm.reset_isolate_heap();
+        assert_eq!(vm.heap().objects().count(), 0, "the object went with its job");
+        vm.heap_mut().register_finalizer_type(1);
+        assert!(vm.heap_mut().unmarked_finalizable().is_empty());
+    }
+
     /// Harness soft-pass checks `Result::Ok` via tag 0.
     #[test]
     fn result_is_ok_true_for_tag_zero_enum() {
