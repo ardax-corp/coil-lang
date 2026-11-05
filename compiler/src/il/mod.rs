@@ -9,7 +9,6 @@
 
 mod builder;
 mod codebuf;
-mod emit_buf;
 mod func;
 mod lower;
 pub(crate) mod module;
@@ -27,14 +26,9 @@ pub use opt::{EarlyFree, OptLevel};
 pub(crate) use sp::stack_delta;
 
 pub use builder::IlBuilder;
-#[cfg(test)]
-pub use builder::IlError;
 pub use codebuf::CodeBuf;
-pub use emit_buf::EmitBuf;
 pub use func::IlFunc;
 pub use lower::Lowered;
-#[cfg(test)]
-pub use lower::{lower, try_lower};
 pub use module::IlModule;
 pub use op::{EntryKind, IlJumpKind, IlOp, Label};
 pub use treeshake::{TreeshakeInput, prune_unused_functions, reachable_functions};

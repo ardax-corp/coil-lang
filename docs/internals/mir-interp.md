@@ -110,7 +110,7 @@ no machine code, and the VM goes. It lands here rather than on a later
 | Step | State |
 |---|---|
 | 1. MIR interpreter | Done: every corpus, every level, CI cells |
-| 2. Glue as MIR | Mostly done already (below) |
+| 2. Glue as MIR | Done (below) |
 | 3. Comptime and macros on the interpreter | Done, on a `Machine` that holds the runtime (below) |
 | 4. JIT by default | Done: `coil FILE`, `coil compile`, `coil run` and `coil test`; `--no-jit` and `--engine vm` keep the VM |
 | 5. Packaging without the VM | Done in coil: `coil-embed` is the JIT runner. Open: spool's `--vm` maps to it; AOT on macOS and Windows is untried |
@@ -119,11 +119,22 @@ no machine code, and the VM goes. It lands here rather than on a later
 | 8. Delete the VM | Bodies by index, not bytecode PC; archive major 7, MIR and data only |
 | 9. Start-up | After the rest: lazy compile on first call and a code cache |
 
-**Step 2.** A clean compile panics on a body with no MIR (`require_mir`), and
-thunks are built as HIR (`hir::synth`), so every function body already has MIR.
-What is left is about 30 direct `bytecode.push_*` sites in `codegen`, not yet
-sorted into prologue steps and dead paths, plus the startup region the driver
-walks.
+**Step 2.** Every function body's code comes from its MIR: thunks are built as
+HIR (`hir::synth`), a clean compile panics on a body with no MIR (`require_mir`),
+and `optimize_and_flatten` keeps only the labels of what codegen wrote for a body.
+That left the compiler's hand-written stack IL with nothing to do, so it is gone
+(`BlockBuilder`, `EmitBuf`, the `extern` setup ops, `ffi_init`, the jumps over
+thunks). Three kinds of direct emission remain:
+
+- A `push_return` in each body, which only keeps its function record non-empty.
+- The prologue, `CALL; JMP; HALT`.
+- The startup region after it: a call and `StoreStatic` per `comptime` static (so
+  `compute_consts` can replace it with a snapshot), a call and `POP` per setup
+  body, and the `JMP` to `main`. The driver walks this.
+
+The last two exist because bytecode PCs name functions, and go with them in step
+8. `static_init` also stays until then: `capability_violations` reads it as a
+reachability root.
 
 **The MIR archive format** is in place for steps 3, 4 and 5, which all need MIR
 on disk: the compile-time program cache stores `CompiledExpansion`, and `.ccoil`

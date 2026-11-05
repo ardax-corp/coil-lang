@@ -61,30 +61,9 @@ impl CodeBuf {
         self.il.push_op(op);
     }
 
-    pub fn push_const(&mut self, imm: i32) {
-        self.invalidate_lowered();
-        self.il.push_const(imm);
-    }
-
     pub fn push_return(&mut self) {
         self.invalidate_lowered();
         self.il.push_return();
-    }
-
-    /// Two-slot `RETURN`: pops/pushes `[payload, tag]` instead of one word.
-    pub fn push_return_two_word(&mut self) {
-        self.invalidate_lowered();
-        self.il.push_return_two_word();
-    }
-
-    pub fn push_load(&mut self, slot: u32) {
-        self.invalidate_lowered();
-        self.il.push_load(slot);
-    }
-
-    pub fn push_store_pop(&mut self, slot: u32) {
-        self.invalidate_lowered();
-        self.il.push_store_pop(slot);
     }
 
     /// Pop the top value. A pure value pushed just before (a unit `CONST 0`
@@ -116,36 +95,6 @@ impl CodeBuf {
         let pc = self.il.code_len() - 1;
         self.entry_at_offset.keys().any(|&p| p >= pc)
             || self.funcs.iter().any(|f| f.code_end > pc)
-    }
-
-    pub fn push_array_pin(&mut self, slot: u32) {
-        self.invalidate_lowered();
-        self.il.push_array_pin(slot);
-    }
-
-    pub fn push_make_tuple(&mut self, arity: u32) {
-        self.invalidate_lowered();
-        self.il.push_make_tuple(arity);
-    }
-
-    pub fn push_make_enum(&mut self, tag: u16, arity: u16) {
-        self.invalidate_lowered();
-        self.il.push_make_enum(tag, arity);
-    }
-
-    pub fn push_load_field(&mut self, index: u32) {
-        self.invalidate_lowered();
-        self.il.push_load_field(index);
-    }
-
-    pub fn push_host_invoke(&mut self, arity: u32) {
-        self.invalidate_lowered();
-        self.il.push_host_invoke(arity);
-    }
-
-    pub fn push_string(&mut self, idx: u32) {
-        self.invalidate_lowered();
-        self.il.push_string(idx);
     }
 
     /// If `b` is a call-like op targeting a known entry PC, return Entry parts
@@ -471,10 +420,6 @@ impl CodeBuf {
         label
     }
 
-    pub fn emit_entry(&mut self, kind: EntryKind, arity: u32, target: Label) {
-        self.il.emit_entry(kind, arity, target);
-    }
-
     pub fn push_prologue_jmp(&mut self) {
         self.il.push_prologue_jmp();
     }
@@ -612,6 +557,30 @@ impl DeleteShift {
     }
 }
 
+// Test fixtures build their IL with these.
+#[cfg(test)]
+impl CodeBuf {
+    pub fn push_store_pop(&mut self, slot: u32) {
+        self.invalidate_lowered();
+        self.il.push_store_pop(slot);
+    }
+
+    pub fn emit_entry(&mut self, kind: EntryKind, arity: u32, target: Label) {
+        self.il.emit_entry(kind, arity, target);
+    }
+
+    pub fn push_const(&mut self, imm: i32) {
+        self.invalidate_lowered();
+        self.il.push_const(imm);
+    }
+
+    pub fn push_load(&mut self, slot: u32) {
+        self.invalidate_lowered();
+        self.il.push_load(slot);
+    }
+
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,7 +665,7 @@ mod tests {
         assert_eq!(spans, [(0, 1), (4, 5)]);
     }
 
-    /// COI-19: `ffi_init` is spliced into the prologue via `splice_buf_at`.
+    /// The startup region is spliced into the prologue via `splice_buf_at`.
     #[test]
     fn splice_buf_at_inserts_ops_before_code_pos() {
         let mut dest = CodeBuf::new();

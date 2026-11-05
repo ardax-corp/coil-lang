@@ -42,20 +42,20 @@ impl Compiler {
         // The setup ops are rebuilt from the steps: `static_init` only
         // served the capability scan.
         drop(std::mem::take(&mut self.static_init));
-        let mut ffi = std::mem::take(&mut self.ffi_init);
         let finalizers = self.finalizer_registry();
         let steps = std::mem::take(&mut self.setup_steps);
         let mut region = CodeBuf::new();
         let mut setup = Vec::new();
-        let mut body = CodeBuf::new();
         for step in steps {
             match step {
                 SetupStep::Static { ref init, slot, comptime } => {
                     let Some(&offset) = self.functions.get(init) else { continue };
-                    let out = if comptime { &mut region } else { &mut body };
-                    out.push(Self::packed_entry_byte_ret(crate::il::EntryKind::Call, 0, offset as u32, 1));
-                    out.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
-                    if !comptime {
+                    // A `comptime` value's call stays in the prologue, where
+                    // `compute_consts` replaces it.
+                    if comptime {
+                        region.push(Self::packed_entry_byte_ret(crate::il::EntryKind::Call, 0, offset as u32, 1));
+                        region.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
+                    } else {
                         setup.push(step);
                     }
                 }
@@ -64,14 +64,11 @@ impl Compiler {
         }
         // Statics run first, then the `extern` setup, as their ops do.
         setup.sort_by_key(|s| !matches!(s, SetupStep::Static { .. }));
-        if !body.is_empty() || !ffi.is_empty() {
+        if !setup.is_empty() {
             let name = MODULE_SETUP_FN.to_string();
             let (offset, label) = self.bind_function_entry(name.clone());
             let start = self.bytecode.len();
-            self.bytecode.append(&mut body);
-            self.bytecode.append(&mut ffi);
-            self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(0));
+            // Its code is emitted from the MIR below.
             self.bytecode.push_return();
             let end = self.bytecode.len();
             self.record_fn_span(name.clone(), start, end);
@@ -109,18 +106,7 @@ impl Compiler {
         let name = FINALIZER_SETUP_FN.to_string();
         let (offset, label) = self.bind_function_entry(name.clone());
         let start = self.bytecode.len();
-        for &(native, type_id, drop) in finalizers {
-            self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
-            self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(type_id));
-            self.bytecode
-                .emit_entry(crate::il::EntryKind::CodePtr, 0, drop);
-            self.bytecode.push_host_invoke(2);
-            self.bytecode.push_pop();
-        }
-        self.bytecode
-            .push(Byte::new(Instruction::CONST).with_value_u32(0));
+        // Its code is emitted from the MIR below.
         self.bytecode.push_return();
         let end = self.bytecode.len();
         self.record_fn_span(name.clone(), start, end);
