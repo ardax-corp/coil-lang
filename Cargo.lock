@@ -525,6 +525,7 @@ name = "comptime"
 version = "0.1.0"
 dependencies = [
  "coil-build-id",
+ "coil-mir-interp",
  "common",
  "compiler",
  "machine",

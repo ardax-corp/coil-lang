@@ -1,11 +1,17 @@
-//! Compile-time execution of user macros on the coil VM.
+//! Compile-time execution of user macros and consts.
 //!
 //! [`VmMacroHost`] implements [`compiler::macros::MacroHost`]: each expansion
-//! entry runs on a [`Machine`] with only pure host natives wired (see
+//! entry runs with only pure host natives wired (see
 //! [`compiler::macros::native_allowed_at_compile_time`]), a step budget and
 //! a heap cap ([`ComptimeLimits`], `--comptime-steps` / `--comptime-mem`),
 //! so a macro cannot touch the outside world, hang the build or exhaust its
 //! memory.
+//!
+//! A program's MIR runs on the interpreter (`coil-mir-interp`), on a driver
+//! over a [`Machine`]'s runtime. The machine holds what a run needs (natives,
+//! statics, the heap) and runs the bytecode of a body the interpreter cannot
+//! take, of a wasm build (no fibers there yet) and under
+//! `COIL_NATIVE_DRIVER=0`.
 //!
 //! Each thread keeps one VM per expansion program, with the natives and the
 //! program loaded once (#1008). After a call that returns, the VM is reset
@@ -17,6 +23,7 @@
 mod io_gate;
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use common::{Byte, Value};
@@ -25,9 +32,21 @@ use compiler::macros::{
     CompiledExpansion, ComptimeIo, ConstEval, ConstEvalError, ConstEvalOutcome, ConstRecord, FoldCall, FoldValue, MacroHost,
     MacroRun, native_allowed_at_compile_time,
 };
+use machine::native::NativeCode;
 use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object, SnapRoot};
 
-/// Runs macros in a sandboxed VM.
+/// Calls the interpreter ran.
+static MIR_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Calls the VM ran: a body the interpreter refused, or a build with no MIR.
+static VM_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// How many compile-time calls this process ran on the interpreter and on
+/// the VM. A fallback changes no result, so nothing else would show one.
+pub fn engine_calls() -> (u64, u64) {
+    (MIR_CALLS.load(Ordering::Relaxed), VM_CALLS.load(Ordering::Relaxed))
+}
+
+/// Runs macros and consts in a sandbox.
 #[derive(Default)]
 pub struct VmMacroHost;
 
@@ -45,6 +64,10 @@ pub fn install() {
 impl MacroHost for VmMacroHost {
     fn build_id(&self) -> &'static str {
         coil_build_id::BUILD_ID
+    }
+
+    fn runs_mir(&self) -> bool {
+        cfg!(not(target_family = "wasm"))
     }
 
     fn run(
@@ -361,7 +384,23 @@ fn new_vm(program: &CompiledExpansion) -> Box<Machine<256>> {
         program.constants.clone(),
         program.strings.clone(),
     );
+    vm.install_native(interpreted(program));
     vm
+}
+
+/// `program`'s MIR made runnable, once for every thread: `None` with no MIR.
+fn interpreted(program: &CompiledExpansion) -> Option<Arc<NativeCode>> {
+    if program.mir.is_empty() {
+        return None;
+    }
+    let code = program.runnable.get_or_init(|| {
+        let pcs = program.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+        let prepared = coil_mir_interp::prepare(program.mir.to_vec(), &pcs);
+        let complete = prepared.refused.is_empty();
+        let code = NativeCode::new(program.bytecode.len(), prepared.entries, prepared.sites).with_complete(complete).with_keep(prepared.keep);
+        Arc::new(code)
+    });
+    Arc::clone(code).downcast::<NativeCode>().ok()
 }
 
 /// Standard host table with every impure native replaced by a stub that
@@ -461,7 +500,16 @@ fn call_entry(vm: &mut Machine<256>, entry: u32, input: &str, limits: &ComptimeL
 fn call_limited(vm: &mut Machine<256>, entry: u32, args: &[Value], limits: &ComptimeLimits) -> Result<Value, String> {
     vm.set_step_budget(Some(limits.steps));
     vm.set_heap_cap(Some(usize::try_from(limits.heap_bytes).unwrap_or(usize::MAX)));
-    let ret: Value = vm.call_function(entry, args);
+    let ret = match vm.call_on_driver(entry, args) {
+        Some(ret) => {
+            MIR_CALLS.fetch_add(1, Ordering::Relaxed);
+            ret
+        }
+        None => {
+            VM_CALLS.fetch_add(1, Ordering::Relaxed);
+            vm.call_function(entry, args)
+        }
+    };
     if vm.step_budget_exhausted() {
         return Err(format!(
             "it ran too long: {} steps (loop iterations + calls) is the limit; \
@@ -480,4 +528,24 @@ fn call_limited(vm: &mut Machine<256>, entry: u32, args: &[Value], limits: &Comp
         return Err(String::new());
     }
     Ok(ret)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Native code calls a direct function without the table's stub in the
+    /// way, unless the table lists none (`coil_native_host`): a refused or
+    /// gated native must not list one.
+    #[test]
+    fn a_native_the_sandbox_refuses_has_no_direct_function() {
+        let natives = sandbox_natives();
+        assert!(natives.len() > 100, "the whole host table");
+        for native in natives {
+            if !native_allowed_at_compile_time(native.name()) {
+                assert!(native.direct().is_none(), "`{}` can be called past the sandbox", native.name());
+                assert!(native.guarded_direct().is_none(), "`{}` can be called past the sandbox", native.name());
+            }
+        }
+    }
 }
