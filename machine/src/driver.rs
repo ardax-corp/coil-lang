@@ -278,6 +278,7 @@ impl<'a> Driver<'a> {
             machine: std::ptr::from_mut(self).cast(),
             host: Self::HOST,
             fuel: &raw mut self.rt.fuel,
+            natives: &raw const self.rt.natives,
         }
     }
 

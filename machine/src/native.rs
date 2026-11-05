@@ -110,6 +110,9 @@ pub struct NativeCtx {
     /// an engine that counts steps: a charge that reaches zero stops the
     /// call with [`TRAP_BUDGET`].
     pub fuel: *mut u64,
+    /// The runtime's host natives: what [`coil_native_host`] may call
+    /// (null: no runtime, the standard ones).
+    pub natives: *const crate::ffi::Natives,
 }
 
 /// Byte offset of [`NativeCtx::native_fp`].
@@ -442,6 +445,7 @@ pub(crate) struct NativeEnv {
     pub(crate) machine: *mut std::ffi::c_void,
     pub(crate) host: NativeHost,
     pub(crate) fuel: *mut u64,
+    pub(crate) natives: *const crate::ffi::Natives,
 }
 
 /// Byte offset of [`NativeCtx::stack_hard`].
@@ -529,6 +533,7 @@ impl NativeCtx {
             native_fp: 0,
             entry_data: 0,
             fuel: std::ptr::null_mut(),
+            natives: std::ptr::null(),
         }
     }
 
@@ -836,6 +841,7 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     ctx.machine = env.machine;
     ctx.host = env.host;
     ctx.fuel = env.fuel;
+    ctx.natives = env.natives;
     ctx.strings = env.strings;
     ctx.string_cache = env.string_cache;
     ctx.strings_len = env.strings_len as u64;
@@ -1859,6 +1865,16 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
         return unsafe { bail(ctx) };
     };
+    // The runtime's table decides what runs: a host may have replaced this
+    // native (the compile-time sandbox refuses most of them), and the
+    // replacement is no plain function.
+    // SAFETY: when set, `natives` is the live runtime's.
+    if !c.natives.is_null() && unsafe { &*c.natives }.direct_by_id(id as usize).is_none() {
+        return match unsafe { host_invoke(ctx, id, layout, args, n) } {
+            Some(out) => out,
+            None => unsafe { bail(ctx) },
+        };
+    }
     let mut buf = [common::Value::default(); 16];
     let Some(words) = buf.get_mut(..n as usize) else {
         return unsafe { bail(ctx) };
@@ -2160,6 +2176,7 @@ pub(crate) fn run_pads(
         ctx.machine = env.machine;
         ctx.host = env.host;
         ctx.fuel = env.fuel;
+        ctx.natives = env.natives;
         ctx.strings = env.strings;
         ctx.string_cache = env.string_cache;
         ctx.strings_len = env.strings_len as u64;

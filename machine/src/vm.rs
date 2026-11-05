@@ -795,6 +795,7 @@ impl<const S: usize> Machine<S> {
                 invoke: Self::native_invoke,
             },
             fuel: &raw mut self.rt.fuel,
+            natives: &raw const self.rt.natives,
         }
     }
 
