@@ -47,6 +47,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Auto-par](auto-par.md) | Purity + parameterized AlwaysPar IPA (COI-366 F1 hop/grain); F2 broader admission (COI-368); loop IPA (COI-362 E4); C1/C2 shared-heap spawn (E6/E7); [branch-miss notes](auto-par-branch-misses.md) |
 | [Optimizer hints](opt-hints.md) | `#[inline]` / `#[cold]` / `#[hot]`: surface, precedence, cold inference, `feature/opt-hints` steps (no PGO) |
 | [Native code](native.md) | `--jit`: MIR → Cranelift numeric tier, bail-to-VM, VM ↔ native table (`feature/native`) |
+| [MIR interpreter](mir-interp.md) | `--mir`, `--engine mir`: raw MIR as the reference output; the native ABI with frames of its own; what is left before the VM goes |
 | [Par lock hints](par-lock-hints.md) | F3 (COI-369): userland locks + E0805 call-bag escape hints (no compiler locks) |
 | [Shared-heap sendability](shared-heap-sendability.md) | COI-363 C0 whitelist; C1 loop steal (E6); C2 expression IPA without PortableValue copy (E7) |
 | [Shared-heap guard](shared-heap-guard.md) | #1892: debug / gc-stress check that a shared-heap job writes only objects allocated in its epoch (header epoch stamp, per-thread job scope); mutation-path inventory; what release relies on |

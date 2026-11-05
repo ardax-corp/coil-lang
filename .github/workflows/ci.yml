@@ -508,6 +508,10 @@ jobs:
             # Each run also appends what it left on the VM to the
             # inventory (`scripts/native_inventory.py`, next step).
             native) mkdir -p target && COIL_NATIVE_INVENTORY="$PWD/target/native-inventory.tsv" $run -- --engine native $FLAGS ;;
+            # Every corpus on the MIR interpreter: raw MIR at `-O 0`, the
+            # reference the optimized engines are compared against
+            # (`docs/internals/mir-interp.md`).
+            mir) $run -- --engine mir $FLAGS ;;
           esac
 
       # What native runs still leave on the VM, and the interpreter symbols
@@ -563,7 +567,7 @@ jobs:
         mode: [release]
         # Native code runs in release only: a debug cell would test the
         # same Cranelift output at a fraction of the speed.
-        variant: [default, O0, leak-smoke, native]
+        variant: [default, O0, leak-smoke, native, mir]
     env: *harness-env
     steps: *harness-steps
 

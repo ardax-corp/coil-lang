@@ -64,6 +64,10 @@ coil run --no-jit prog.ccoil                 # VM only
 `coil run --jit` on an archive without the section warns and runs on the
 VM. `coil package` compiles ahead of time instead (see [AOT](#aot-coil-package)).
 
+The MIR interpreter (`coil FILE --mir`, [mir-interp.md](mir-interp.md)) is
+another engine on this same ABI, and its raw `-O 0` output is the reference
+native code is compared against.
+
 ### Testing against the VM
 
 ```
