@@ -97,6 +97,8 @@ pub(crate) struct CliArgs {
     pub jit: bool,
     /// `--no-jit`: `coil run` ignores an archive's native MIR.
     pub no_jit: bool,
+    /// `--mir`: `coil FILE` runs on the MIR interpreter.
+    pub mir: bool,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
     pub opt_stats: bool,
@@ -413,6 +415,7 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             cow_report: false,
             jit: false,
             no_jit: false,
+            mir: false,
             auto_par: None,
             opt_stats: false,
             opt_stats_json: false,
@@ -480,6 +483,7 @@ fn cli_from(
         cow_report: false,
         jit: false,
         no_jit: false,
+        mir: false,
         auto_par: opt.auto_par,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
@@ -506,6 +510,7 @@ impl RawCli {
             || self.nursery.cow_report
             || self.nursery.jit
             || self.nursery.no_jit
+            || self.nursery.mir
             || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
@@ -534,6 +539,7 @@ impl RawCli {
                     cow_report: self.nursery.cow_report,
                     jit: self.nursery.jit,
                     no_jit: self.nursery.no_jit,
+                    mir: self.nursery.mir,
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,

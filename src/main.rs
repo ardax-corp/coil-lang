@@ -457,9 +457,24 @@ fn cmd_build_and_run(
     }
 }
 
-/// Compile the captured MIR with Cranelift for the coming run.
+/// `coil FILE --mir`: the captured MIR goes to the interpreter, not to
+/// Cranelift.
+static RUN_ON_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Hand the captured MIR to the engine that runs it for the coming run.
 fn install_native(debug: &common::ProgramDebug) {
     let bodies = compiler::native_mir::take_native_capture();
+    if RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed) {
+        let program = coil_mir_interp::prepare(bodies, &entry_pcs(debug));
+        for (name, why) in &program.refused {
+            eprintln!("warning: --mir: `{name}` runs on the VM: {why}");
+        }
+        let complete = program.refused.is_empty();
+        // Its entries point into it for the rest of the process.
+        std::mem::forget(program.keep);
+        machine::native::install_for_next_run(program.entries, program.sites, complete);
+        return;
+    }
     install_native_bodies(&bodies, &entry_pcs(debug));
 }
 
@@ -824,13 +839,14 @@ fn main() {
                     };
                     set_program_args(&filename, &cli.program_args);
                     let cache = BuildCache::new(cache_options.as_deref(), &filename);
+                    RUN_ON_MIR.store(cli.mir, std::sync::atomic::Ordering::Relaxed);
                     cmd_build_and_run(
                         &mut pipeline,
                         &filename,
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
-                        cli.jit,
+                        cli.jit || cli.mir,
                     );
                 }
                 Command::Compile { filename, output } => {

@@ -308,6 +308,7 @@ dependencies = [
  "coil-cli",
  "coil-dissect",
  "coil-host",
+ "coil-mir-interp",
  "coil-native",
  "coil-test",
  "common",

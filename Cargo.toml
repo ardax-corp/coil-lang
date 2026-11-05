@@ -43,6 +43,7 @@ coil-args = { path = "coil-args" }
 comptime = { path = "comptime" }
 coil-host = { path = "coil-host" }
 coil-native = { path = "coil-native" }
+coil-mir-interp = { path = "coil-mir-interp" }
 coil-build-id = { path = "coil-build-id" }
 clap = { version = "4.5", features = ["derive"] }
 rkyv = "0.8.12"
