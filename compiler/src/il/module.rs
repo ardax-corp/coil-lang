@@ -342,7 +342,7 @@ impl IlModule {
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
             drop_jumps_to_next_label(&mut body.ops);
         }
-        if crate::mir::native_capture_active() {
+        if crate::mir::capture_open() {
             crate::mir::capture_native_bodies(self.funcs.iter().filter_map(|b| {
                 let mir = b.meta.hir_mir.as_deref()?;
                 Some((b.meta.name.as_str(), b.meta.entry, mir))

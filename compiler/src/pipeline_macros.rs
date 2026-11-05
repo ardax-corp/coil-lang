@@ -2076,7 +2076,12 @@ impl SubProgram {
         sub.host_grants.comptime = self.comptime;
         sub.host_grants.comptime_io = self.comptime_io;
         sub.host_grants.comptime_cache = self.comptime_cache;
-        let (bytecode, constants) = match sub.compile_src_from_file(entry.to_str().expect("utf-8 path")) {
+        // `compiled_program` closed any outer capture: this one is the
+        // expansion program's own.
+        let capture = self.host.runs_mir().then(crate::mir::ComptimeCapture::open);
+        let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
+        let mir = capture.map(crate::mir::ComptimeCapture::take).unwrap_or_default();
+        let (bytecode, constants) = match compiled {
             Ok(out) => out,
             Err(_) => {
                 let detail = sub
@@ -2118,6 +2123,8 @@ impl SubProgram {
                 program_debug: sub.program_debug(),
                 class_word_kinds: sub.class_word_kinds(),
                 static_word_kinds: std::sync::Arc::new(sub.static_word_kinds()),
+                mir: std::sync::Arc::new(mir),
+                runnable: std::sync::OnceLock::new(),
             },
             offsets,
         })
@@ -2219,7 +2226,7 @@ fn encode_program(program: &CompiledProgram) -> Option<Vec<u8>> {
         cleanup_ranges: Vec::new(),
         line_table: Vec::new(),
         span_table: Vec::new(),
-        native_mir: Vec::new(),
+        native_mir: program_mir(e),
     };
     archive.set_debug(e.program_debug.clone(), common::DebugLevel::Full);
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&archive).ok()?;
@@ -2264,6 +2271,7 @@ fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
         return None;
     }
     let program_debug = p.debug_bundle();
+    let mir = if p.native_mir.is_empty() { Vec::new() } else { crate::mir::archive::decode(&p.native_mir).ok()?.0 };
     Some(CompiledProgram {
         expansion: crate::macros::CompiledExpansion {
             bytecode: std::sync::Arc::new(p.bytecode),
@@ -2274,7 +2282,23 @@ fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
             program_debug,
             class_word_kinds: p.class_word_kinds,
             static_word_kinds: std::sync::Arc::new(p.static_word_kinds),
+            mir: std::sync::Arc::new(mir),
+            runnable: std::sync::OnceLock::new(),
         },
         offsets,
     })
+}
+
+/// `e`'s bodies in the MIR archive format (empty for none).
+fn program_mir(e: &crate::macros::CompiledExpansion) -> Vec<u8> {
+    if e.mir.is_empty() {
+        return Vec::new();
+    }
+    let pcs: HashMap<&str, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.as_str(), s.entry_pc)).collect();
+    let entries: Vec<_> = e
+        .mir
+        .iter()
+        .map(|body| crate::mir::archive::ArchiveEntry { body, pc: pcs.get(body.name.as_str()).copied(), stub: false })
+        .collect();
+    crate::mir::archive::encode(&entries)
 }

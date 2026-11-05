@@ -1595,6 +1595,7 @@ impl Pipeline {
     }
 
     pub fn compile(mut self, filename: String, output: String) {
+        let _capture = self.comptime_capture();
         // Seed the worklist with the entry file. The
         // entry is treated specially (top-level
         // namespace), see `compile_file`.
@@ -1712,6 +1713,7 @@ impl Pipeline {
     }
 
     pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
+        let _capture = self.comptime_capture();
         // Derives, attribute and function-style macros and trait contract
         // copies run in the discovery stage, which works on cached files:
         // compile such input as an in-memory file.
@@ -1795,6 +1797,13 @@ impl Pipeline {
         Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
     }
 
+    /// A capture for [`Self::compute_consts`], when the macro host runs MIR:
+    /// it has to open before the bodies are lowered, and it closes with the
+    /// compile however that ends.
+    fn comptime_capture(&self) -> Option<crate::mir::ComptimeCapture> {
+        self.macro_host.as_ref().is_some_and(|h| h.runs_mir()).then(crate::mir::ComptimeCapture::open)
+    }
+
     /// Compute every `const` and pure `static let` initializer on the
     /// compile-time VM and replace its startup call with the computed value
     /// (`RestoreSnapshot`). A const's failure is E0134 at the const; a
@@ -1858,6 +1867,8 @@ impl Pipeline {
             program_debug: self.program_debug(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: std::sync::Arc::new(kinds.clone()),
+            mir: std::sync::Arc::new(if host.runs_mir() { crate::mir::peek_native_capture() } else { Vec::new() }),
+            runnable: std::sync::OnceLock::new(),
         };
         let limits = self.host_grants.comptime;
         // One evaluation per distinct call.
@@ -2129,6 +2140,7 @@ impl Pipeline {
     ///
     /// Multi-file entry point: discovers and compiles the module graph from disk.
     pub fn compile_src_from_file(&mut self, file: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
+        let _capture = self.comptime_capture();
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
@@ -2189,6 +2201,7 @@ impl Pipeline {
         file: &str,
         capture_il: bool,
     ) -> Result<crate::DissectArtifacts, CompileFail> {
+        let _capture = self.comptime_capture();
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
