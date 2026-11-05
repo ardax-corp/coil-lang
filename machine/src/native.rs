@@ -98,6 +98,80 @@ pub struct NativeCtx {
     /// heap.
     pub alloc_counts: *mut crate::memory::HeapCounts,
     pub alloc_bumps: *mut crate::memory::Bump,
+    /// While the call is in a helper that may collect: the frame pointer
+    /// of the trampoline native code called it through. The collector
+    /// walks the native frames from there ([`register_stack_maps`]).
+    pub native_fp: u64,
+}
+
+/// Byte offset of [`NativeCtx::native_fp`].
+pub const NATIVE_CTX_NATIVE_FP: i32 = std::mem::offset_of!(NativeCtx, native_fp) as i32;
+
+/// Native code's stack maps (Cranelift user stack maps): the code ranges
+/// of the compiled bodies, and per call that holds heap words across it,
+/// its return address and the offsets from the stack pointer at that call
+/// of the slots holding them. Code is never unmapped, so both only grow.
+#[derive(Default)]
+struct StackMaps {
+    /// Start → end of each compiled body's code.
+    code: std::collections::BTreeMap<u64, u64>,
+    maps: std::collections::HashMap<u64, Box<[u32]>>,
+}
+
+static STACK_MAPS: std::sync::LazyLock<std::sync::RwLock<StackMaps>> = std::sync::LazyLock::new(Default::default);
+
+impl StackMaps {
+    fn in_code(&self, ra: u64) -> bool {
+        self.code.range(..=ra).next_back().is_some_and(|(_, &end)| ra < end)
+    }
+}
+
+/// Add a compiled body's code (`size` bytes at `start`) and its stack maps:
+/// `(return address offset, slot offsets)`. A frame walk goes on through
+/// a body's frame whose call holds no heap word, and stops at the first
+/// return address outside every body (the entry wrapper or a helper).
+pub fn register_stack_maps(start: u64, size: u32, maps: impl IntoIterator<Item = (u32, Vec<u32>)>) {
+    let mut table = STACK_MAPS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    table.code.insert(start, start + u64::from(size));
+    for (ra, offsets) in maps {
+        table.maps.insert(start + u64::from(ra), offsets.into_boxed_slice());
+    }
+}
+
+/// One AOT stack map record, as `coil_native::aot` writes it: a body's
+/// address and code size and the count of its maps, then each map as its
+/// return address's offset, its slot count and the slot offsets (`u32`
+/// each), the record padded to 8 bytes.
+#[repr(C)]
+pub struct AotStackMap {
+    pub func: u64,
+    pub size: u32,
+    pub count: u32,
+}
+
+/// Register the stack maps an AOT object defines: `n` [`AotStackMap`]
+/// records.
+///
+/// # Safety
+/// `maps` points at `n` records as `coil_native::aot` wrote them.
+pub unsafe fn install_aot_stack_maps(maps: *const u8, n: usize) {
+    let mut at = maps;
+    for _ in 0..n {
+        // SAFETY: the caller's.
+        unsafe {
+            let rec = &*at.cast::<AotStackMap>();
+            let mut w = at.add(std::mem::size_of::<AotStackMap>()).cast::<u32>();
+            let mut out = Vec::with_capacity(rec.count as usize);
+            for _ in 0..rec.count {
+                let (ra, k) = (*w, *w.add(1) as usize);
+                out.push((ra, std::slice::from_raw_parts(w.add(2), k).to_vec()));
+                w = w.add(2 + k);
+            }
+            register_stack_maps(rec.func, rec.size, out);
+            let used = w as usize - at as usize;
+            at = at.add(used.next_multiple_of(8));
+        }
+    }
 }
 
 /// A `defer` cleanup pad: called with its frame's homes.
@@ -173,6 +247,7 @@ impl NativeCtx {
     }
 
     pub(crate) fn for_each_root(&self, mut visit: impl FnMut(*mut u64, bool)) {
+        self.for_each_frame_root(&mut visit);
         let mut at = self.roots as *mut u64;
         while !at.is_null() {
             // SAFETY: native code links only live records of its frames.
@@ -200,6 +275,35 @@ impl NativeCtx {
             for (w, _) in unsafe { &mut *self.frees } {
                 visit(w, false);
             }
+        }
+    }
+}
+
+impl NativeCtx {
+    /// The heap words the native frames of this call hold while it is in
+    /// a helper that may collect: from the trampoline's frame
+    /// ([`Self::native_fp`]) up the frame-pointer chain, each frame's
+    /// stack map at the call it is in. A collection may rewrite the slots
+    /// (native code reloads them after the call).
+    fn for_each_frame_root(&self, visit: &mut impl FnMut(*mut u64, bool)) {
+        let mut fp = self.native_fp;
+        if fp == 0 {
+            return;
+        }
+        let maps = STACK_MAPS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while fp != 0 {
+            // SAFETY: native code keeps frame pointers: `[fp]` is the
+            // caller's frame pointer, `[fp + 8]` the return address into
+            // it, and the caller's stack pointer at that call is `fp + 16`.
+            let (next, ra) = unsafe { (*(fp as *const u64), *(fp as *const u64).add(1)) };
+            if !maps.in_code(ra) {
+                break;
+            }
+            let sp = fp + 16;
+            for &off in maps.maps.get(&ra).into_iter().flatten() {
+                visit((sp + u64::from(off)) as *mut u64, false);
+            }
+            fp = next;
         }
     }
 }
@@ -383,6 +487,7 @@ impl NativeCtx {
             calls: 0,
             alloc_counts: std::ptr::null_mut(),
             alloc_bumps: std::ptr::null_mut(),
+            native_fp: 0,
         }
     }
 

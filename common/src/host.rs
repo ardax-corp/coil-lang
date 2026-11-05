@@ -1670,6 +1670,8 @@ pub const TTY_ENABLE_VT_NATIVE: &str = "tty_enable_vt";
 /// compiler swaps it in for `from_bytes`.
 pub const FROM_BYTES_TAKE_ID: u16 = 176;
 pub const FROM_BYTES_TAKE_NATIVE: &str = "from_bytes_take";
+/// `gc::root` (its id in the table above).
+pub const GC_ROOT_ID: u16 = 94;
 /// HostInvoke ids around a `region { ... }` block (escape step 5, archive
 /// 6.2): enter starts a fresh nursery for the block, exit collects it.
 /// Never named in source; the compiler emits them for `region`.
@@ -1813,6 +1815,7 @@ const _: () = {
     assert!(HOST_NATIVES[SYMBOL_NEXT_ID_ID as usize].id == SYMBOL_NEXT_ID_ID);
     assert!(HOST_NATIVES[VEC_EXTEND_RANGE_ID as usize].id == VEC_EXTEND_RANGE_ID);
     assert!(HOST_NATIVES[VEC_FILL_ID as usize].id == VEC_FILL_ID);
+    assert!(HOST_NATIVES[GC_ROOT_ID as usize].id == GC_ROOT_ID);
     assert!(HOST_NATIVES[GC_REGION_ENTER_ID as usize].id == GC_REGION_ENTER_ID);
     assert!(HOST_NATIVES[GC_REGION_EXIT_ID as usize].id == GC_REGION_EXIT_ID);
     assert!(HOST_NATIVES[FROM_BYTES_TAKE_ID as usize].id == FROM_BYTES_TAKE_ID);
