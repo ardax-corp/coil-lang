@@ -102,6 +102,10 @@ pub struct NativeCtx {
     /// of the trampoline native code called it through. The collector
     /// walks the native frames from there ([`register_stack_maps`]).
     pub native_fp: u64,
+    /// The running entry's [`NativeEntry::data`] (or a pad's
+    /// [`NativePad::data`]): an engine with one entry function for every
+    /// body reads which body to run here.
+    pub entry_data: u64,
 }
 
 /// Byte offset of [`NativeCtx::native_fp`].
@@ -177,6 +181,15 @@ pub unsafe fn install_aot_stack_maps(maps: *const u8, n: usize) {
 /// A `defer` cleanup pad: called with its frame's homes.
 pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u64) -> u64;
 
+/// Walks an engine's own frames for [`NativeCtx::for_each_root`]: `data`
+/// is the record's, and each word the frames hold goes to `visit`, with
+/// whether it is ambiguous.
+pub type RootScanFn = unsafe fn(data: *mut std::ffi::c_void, visit: &mut dyn FnMut(*mut u64, bool));
+
+/// Walks an engine's own frames for [`NativeCtx::call_sites`]: `data` is
+/// the record's, and each frame's call site goes to `out`, innermost first.
+pub type SiteScanFn = unsafe fn(data: *mut std::ffi::c_void, out: &mut Vec<u32>);
+
 /// The pad of one native frame a panic unwound, with a copy of its homes
 /// laid out as a masked root record (`[next, n | ROOTS_MASKED, mask,
 /// words...]`, see [`NativeCtx::roots`]): a collection while pads run
@@ -184,6 +197,8 @@ pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u
 pub struct NativePad {
     pub func: NativePadFn,
     pub homes: Vec<u64>,
+    /// Copied to [`NativeCtx::entry_data`] for the pad.
+    pub data: usize,
 }
 
 /// Set in a root record's count: the next word is a mask of which words
@@ -194,6 +209,14 @@ pub const ROOTS_MASKED: u64 = 1 << 63;
 /// of a generic body may be an immediate), so the collector pins what they
 /// hit instead of moving it, and never rewrites them.
 pub const ROOTS_AMBIGUOUS: u64 = 1 << 62;
+/// A [`NativeCtx::roots`] record of an engine that keeps its frames itself:
+/// `[next, ROOTS_SCAN, RootScanFn, data]`. Native code copies its words
+/// into a record around each call; such an engine has them in place, so
+/// the collector asks for them only when it runs.
+pub const ROOTS_SCAN: u64 = 1 << 61;
+/// In a [`NativeCtx::calls`] record's site word: `[next, SITES_SCAN,
+/// SiteScanFn, data]`, as [`ROOTS_SCAN`] for call sites.
+pub const SITES_SCAN: u64 = u64::MAX;
 
 /// Byte offset of [`NativeCtx::gc_epoch`].
 pub const NATIVE_CTX_GC_EPOCH: i32 = std::mem::offset_of!(NativeCtx, gc_epoch) as i32;
@@ -239,7 +262,13 @@ impl NativeCtx {
         while !at.is_null() {
             // SAFETY: native code links only live records of its frames.
             unsafe {
-                out.push(*at.add(1) as u32);
+                let site = *at.add(1);
+                if site == SITES_SCAN {
+                    let scan = std::mem::transmute::<usize, SiteScanFn>(*at.add(2) as usize);
+                    scan(*at.add(3) as *mut std::ffi::c_void, &mut out);
+                } else {
+                    out.push(site as u32);
+                }
                 at = *at as *const u64;
             }
         }
@@ -255,7 +284,10 @@ impl NativeCtx {
                 let n = *at.add(1);
                 let ambiguous = n & ROOTS_AMBIGUOUS != 0;
                 let count = n & !(ROOTS_MASKED | ROOTS_AMBIGUOUS);
-                if n & ROOTS_MASKED != 0 {
+                if n & ROOTS_SCAN != 0 {
+                    let scan = std::mem::transmute::<usize, RootScanFn>(*at.add(2) as usize);
+                    scan(*at.add(3) as *mut std::ffi::c_void, &mut visit);
+                } else if n & ROOTS_MASKED != 0 {
                     let mask = *at.add(2);
                     for i in 0..count.min(64) as usize {
                         if mask & (1 << i) != 0 {
@@ -488,6 +520,7 @@ impl NativeCtx {
             alloc_counts: std::ptr::null_mut(),
             alloc_bumps: std::ptr::null_mut(),
             native_fp: 0,
+            entry_data: 0,
         }
     }
 
@@ -540,6 +573,9 @@ pub struct NativeEntry {
     /// fiber to unwind them (`vm_gen.rs`).
     pub cleanup: bool,
     pub entry: NativeEntryFn,
+    /// Copied to [`NativeCtx::entry_data`] for the call (`0` for machine
+    /// code, whose `entry` is the body).
+    pub data: usize,
 }
 
 /// A [`NativeEntry`] as an AOT object's `coil_aot_entries` table lays it
@@ -589,6 +625,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
             generator: e.generator != 0,
             cleanup: e.cleanup != 0,
             entry: e.entry,
+            data: 0,
         })
         .collect();
     let sites = words
@@ -620,6 +657,8 @@ pub struct NativeCode {
     sites: Vec<NativeSite>,
     /// Every body of the program compiled: the driver can run all of it.
     complete: bool,
+    /// What [`NativeEntry::data`] points into, kept for as long as the code.
+    keep: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl NativeCode {
@@ -634,7 +673,14 @@ impl NativeCode {
                 *slot = kept.len() as u32;
             }
         }
-        Self { by_pc, entries: kept, sites, complete: true }
+        Self { by_pc, entries: kept, sites, complete: true, keep: None }
+    }
+
+    /// The code, keeping `owner` alive with it: an engine's entries point
+    /// into it ([`NativeEntry::data`]).
+    pub fn with_keep(mut self, owner: std::sync::Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        self.keep = Some(owner);
+        self
     }
 
     /// The code, marked as covering every body of the program or not
@@ -793,6 +839,7 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     // the call back to the VM.
     ctx.committed = 1;
     ctx.stack_limit = ctx.stack_hard;
+    ctx.entry_data = entry.data as u64;
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
@@ -2047,8 +2094,23 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layou
 /// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, mask: u64) {
+    if func == 0 {
+        return;
+    }
+    // SAFETY: the backend passes a function with the `NativePadFn` ABI.
+    let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
+    // SAFETY: as this function's.
+    unsafe { defer_pad(ctx, func, 0, homes, n, mask) };
+}
+
+/// [`coil_native_defer`] of a pad that reads `data` from
+/// [`NativeCtx::entry_data`].
+///
+/// # Safety
+/// As [`coil_native_defer`].
+pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64, mask: u64) {
     let c = unsafe { &mut *ctx };
-    if c.bail != BAIL_PANIC || c.pads.is_null() || func == 0 {
+    if c.bail != BAIL_PANIC || c.pads.is_null() {
         return;
     }
     // `n` may carry `ROOTS_AMBIGUOUS` (an opaque body's `int` homes).
@@ -2056,9 +2118,7 @@ pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes
     let mut rec = vec![0, n | ROOTS_MASKED | flags, mask];
     // SAFETY: `homes` holds `n` words.
     rec.extend((0..n as usize).map(|i| unsafe { *homes.add(i) }));
-    // SAFETY: the backend passes a function with the `NativePadFn` ABI.
-    let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
-    unsafe { (*c.pads).push(NativePad { func, homes: rec }) };
+    unsafe { (*c.pads).push(NativePad { func, homes: rec, data }) };
 }
 
 /// Run the cleanup pads of a native panic, innermost first, on `env`'s
@@ -2104,6 +2164,7 @@ pub(crate) fn run_pads(
         ctx.roots = pads[last].homes.as_mut_ptr() as u64;
         let mut inner = Vec::new();
         ctx.pads = &mut inner;
+        ctx.entry_data = pads[i].data as u64;
         let homes = pads[i].homes[3..].as_ptr();
         // SAFETY: the backend compiled `func` as this frame's pad.
         let _ = unsafe { (pads[i].func)(&mut ctx, homes) };

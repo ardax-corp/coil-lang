@@ -334,7 +334,7 @@ fn jit_once(
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
         let generator = is_generator(&body.mir);
         let cleanup = body.mir.cleanup.is_some();
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, cleanup, entry });
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 });
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
