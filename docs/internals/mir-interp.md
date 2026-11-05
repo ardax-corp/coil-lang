@@ -146,32 +146,14 @@ order that keeps the corpus green at each step:
 
 ## Open problems
 
-- **Harness SIGSEGV.** 2 of 18 corpus runs of one grid died on a reactor thread
-  (`-O0` native, `-O2` interpreter); an earlier grid of 18 and about 50 reruns of
-  the same seeds had none. The fault is a fiber switch to a stack that is no longer mapped,
-  inlined into `collect::collect::<Driver>`, with the current stack pointer on a
-  different stack from the one being left. It is not in the interpreter, and the
-  branch does not touch the fiber or collector code, but whether `feature/native`
-  has it too is unknown.
-- **Cranelift relocation panic.** One `--engine native` run aborted in
-  `cranelift-jit` (`compiled_blob.rs`, a relocation out of range). `jit` leaks
-  each module, so a harness that compiles thousands of files spreads them past
-  a 32-bit reach. Step 4's code cache has to settle this.
-- **GC stress.** Since stack maps and inline allocation landed, the collections,
-  comptime, host, memory and tasks corpora fail under `gc-stress` on native and
-  the interpreter at every level (`feature/native` alone fails 8 at `-O2` and 12
-  at `-O0`). The interpreter has neither stack maps nor inline allocation, so at
-  least part of this is in the shared heap: one failure is `pointer word 0 of a
-  pointer-kind array holds a non-object` at `heap.rs:2054`. CI's GC stress cell
-  runs the VM only, so it does not show.
-- **`tests/memory/finalizer_lifetimes.coil`** fails on native at `-O0` and `-Og`
-  and passes on the interpreter at every level: Cranelift's lowering, by the table
-  above. The likely cause, not yet confirmed: `KeepAlive` lowers to nothing, and
-  under stack maps nothing else keeps the word live.
 - **Speed.** It runs `MirInst` directly. On a call and loop mix (`fib(38)` and a
   200M iteration loop) raw `-O 0` took 7.4 s, the VM at the default level 3.2 s
   and the JIT 0.7 s. The doc says speed is not a goal; comptime's step limits
   count steps, not time.
+- **Words with no static type.** Three bugs came from an `int` typed word holding
+  an object: a pair parameter, a `Vec` expansion's element, and a φ of an object
+  and a number. `pair_words` now covers each, but the rule is a list of known
+  cases. A type for "word that may be an object" in MIR would end the family.
 
 ## Where the pieces are
 

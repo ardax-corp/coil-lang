@@ -423,6 +423,9 @@ stack as before.
   fiber's defers, then its native frames' pads (`TRAP_VM_PANIC`), then the
   task's own frames. `rearm_unwind_after_early_drop` leaves a cancel
   without a message, so the task ends `Cancelled`, not `Panicked`.
+- A switch fences its owner (`stacks::fiber_switch_fence`): what runs on the
+  other side reaches the same object through a raw pointer, which `&mut`'s
+  `noalias` does not account for.
 - GC: a parked fiber's VM state and native roots, and the task's own
   state while a fiber runs, are scanned as ambiguous (pinned) roots
   (`for_each_fiber_word`). A parked fiber's executions stay counted in
