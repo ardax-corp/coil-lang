@@ -268,10 +268,10 @@ struct Launch {
 impl Launch {
     fn new(pipeline: &Pipeline, artifacts: &DissectArtifacts, entry: &Path) -> Self {
         let program = Arc::new(machine::ThreadProgram {
-            code: Arc::new(artifacts.bytecode.clone()),
+            code: Arc::default(),
             startup: Arc::new(pipeline.startup()),
             main: pipeline.main_offset(),
-            constants: Arc::new(artifacts.constants.clone()),
+            constants: Arc::new(pipeline.constants().to_vec()),
             strings: Arc::new(artifacts.strings.clone()),
             static_slot_count: pipeline.static_slot_count(),
             debug: pipeline.program_debug_full(),
@@ -378,7 +378,7 @@ impl DebugSession {
         let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         pipeline.bind_project_roots_with_default(dir, extra_roots);
         compiler::native_mir::start_raw_capture();
-        let mut artifacts = match pipeline.compile_dissect(filename, false) {
+        let mut artifacts = match pipeline.compile_dissect(filename) {
             Ok(a) => a,
             Err(_) => {
                 let _ = compiler::native_mir::take_native_capture();
@@ -396,7 +396,7 @@ impl DebugSession {
         let mir_text = bodies.iter().map(|b| (b.name.clone(), b.mir.to_string())).collect();
         let pcs = launch.program.debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
         let debug_program = coil_mir_interp::debug::prepare_debug(bodies, &pcs);
-        let launch = launch.with_code(debug_program.program, artifacts.bytecode.len());
+        let launch = launch.with_code(debug_program.program, 0);
         number_ops(&mut artifacts, debug_program.locs, &debug_program.entries);
         let op_lines = op_lines(&artifacts.debug, Some(&base_dir));
         let line_index = LineIndex::build(&artifacts.debug, Some(&base_dir));

@@ -17,10 +17,6 @@ mod eq_glue;
 #[path = "module_setup.rs"]
 pub(super) mod module_setup;
 
-#[cfg(any(test, feature = "dissect"))]
-type FinalizeIlOut = Option<crate::dissect::IlSnapshot>;
-#[cfg(not(any(test, feature = "dissect")))]
-type FinalizeIlOut = ();
 
 fn apply_debug_slot_remaps(
     locals: &mut HashMap<String, HashMap<String, u32>>,
@@ -5323,101 +5319,6 @@ impl Compiler {
         scheme.bounds.iter().any(|bound| free.contains(bound))
     }
 
-    /// Parameter / return word kinds of every emitted function, from its
-    /// checked scheme. Types are curried (`Fun(param, ret)`), so the walk
-    /// takes exactly the entry height's worth of params (a zero-arity fn has
-    /// one `unit` param); a scheme shorter than the entry (dictionary params)
-    /// is skipped. Generic parameters and returns stay unknown.
-    fn fn_word_kinds(
-        &self,
-        entries: &[(String, u32)],
-        entry_sps: &HashMap<String, u32>,
-    ) -> HashMap<String, super::precise_frames::FnWordKinds> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::layout::word_kind;
-        let mut out = HashMap::new();
-        for (name, _) in entries {
-            if out.contains_key(name) {
-                continue;
-            }
-            let Some(&arity) = entry_sps.get(name) else {
-                continue;
-            };
-            // `Vec` constructor thunks always return an array.
-            let ctor = name
-                .strip_prefix(common::BUILTIN_VEC_TYPE)
-                .and_then(|n| n.strip_prefix("::"))
-                .map(|n| n.strip_suffix("$ptr").or_else(|| n.strip_suffix("$bytes")).unwrap_or(n));
-            if matches!(ctor, Some("new" | "with_capacity" | "from")) {
-                let params = match ctor {
-                    Some("with_capacity") => vec![common::WORD_SCALAR],
-                    Some("from") => vec![common::WORD_POINTER],
-                    _ => Vec::new(),
-                };
-                if params.len() == arity as usize {
-                    out.insert(
-                        name.clone(),
-                        super::precise_frames::FnWordKinds {
-                            params,
-                            ret: common::WORD_POINTER,
-                        },
-                    );
-                }
-                continue;
-            }
-            // A fork worker (`__coil_par_f`) returns what `f` returns and
-            // takes `f`'s params plus an int hop count.
-            let par_base = name
-                .strip_prefix("__coil_par_")
-                .filter(|_| !name.starts_with("__coil_par_loop_"));
-            let base = par_base.unwrap_or(name);
-            let Some(scheme) = self.checker.env().lookup(base) else {
-                continue;
-            };
-            let Some(declared) = (arity as usize).checked_sub(usize::from(par_base.is_some()))
-            else {
-                continue;
-            };
-            let mut params = Vec::with_capacity(declared);
-            let mut current = &scheme.ty;
-            for _ in 0..declared.max(1) {
-                let Ty::Fun(param, ret) = current else {
-                    break;
-                };
-                // A `()` parameter holds the empty tuple object, a pointer,
-                // as a tuple's `()` item does (#1465).
-                params.push(if crate::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
-                    common::WORD_POINTER
-                } else {
-                    word_kind(&self.checker, param)
-                });
-                current = ret;
-            }
-            if params.len() != declared.max(1) {
-                continue;
-            }
-            if declared == 0 {
-                if !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT)) {
-                    continue;
-                }
-                params.clear();
-            }
-            if par_base.is_some() {
-                params.push(common::WORD_SCALAR);
-            }
-            let ret = if self.generic_return_is_boxed(base) {
-                common::WORD_UNKNOWN
-            } else {
-                word_kind(&self.checker, current)
-            };
-            out.insert(
-                name.clone(),
-                super::precise_frames::FnWordKinds { params, ret },
-            );
-        }
-        out
-    }
-
     /// Whether a generic call's return value is boxed at the ABI boundary.
     ///
     /// Direct type-parameter arguments (`id<T>(T x) -> T`) are boxed at the
@@ -8125,24 +8026,14 @@ impl Compiler {
     /// of single-file [`compile`] so unit tests observe fused output.
     pub fn finalize_bytecode(&mut self) {
         self.emit_foreign_clone_thunks();
-        #[cfg(any(test, feature = "dissect"))]
-        let _ = self.finalize_bytecode_inner(false);
-        #[cfg(not(any(test, feature = "dissect")))]
-        self.finalize_bytecode_inner(false);
+        self.finalize_bytecode_inner();
         if !self.skipped_contract_cases.is_empty() {
             let skipped = std::mem::take(&mut self.skipped_contract_cases);
             self.test_cases.retain(|(desc, _)| !skipped.contains(desc));
         }
     }
 
-    /// Like [`finalize_bytecode`], but also returns a pre-opt IL snapshot for dissect.
-    #[cfg(any(test, feature = "dissect"))]
-    pub fn finalize_bytecode_capturing_il(&mut self) -> crate::dissect::IlSnapshot {
-        self.finalize_bytecode_inner(true)
-            .expect("capture_il requested")
-    }
-
-    fn finalize_bytecode_inner(&mut self, capture_il: bool) -> FinalizeIlOut {
+    fn finalize_bytecode_inner(&mut self) {
         self.emit_module_setup();
 
         // Drop unused function bodies (eager builtin thunks, unreferenced user
@@ -8251,10 +8142,6 @@ impl Compiler {
         self.operand_stack_slots = self
             .operand_stack_slots
             .min(crate::typechecking::MAX_OPERAND_STACK_SLOTS);
-        #[cfg(any(test, feature = "dissect"))]
-        return capture_il.then(|| crate::dissect::IlSnapshot::new(self.bytecode.ops().to_vec(), self.bytecode.funcs().to_vec()));
-        #[cfg(not(any(test, feature = "dissect")))]
-        debug_assert!(!capture_il);
     }
 
     /// Post-lower function symbols sorted by entry PC (for dissect / debug).
@@ -8279,35 +8166,7 @@ impl Compiler {
             })
             .collect();
         syms.sort_by_key(|s| s.entry_pc);
-        // Location lists over each body's final bytecode.
-        let bytecode = self.bytecode.as_slice();
-        let ends: Vec<u32> = syms
-            .iter()
-            .map(|s| s.entry_pc)
-            .chain(std::iter::once(bytecode.len() as u32))
-            .collect();
-        for sym in syms.iter_mut().filter(|_| !self.debugger_attached) {
-            let end = ends
-                .iter()
-                .copied()
-                .find(|&e| e > sym.entry_pc)
-                .unwrap_or(bytecode.len() as u32);
-            crate::debug_vars::location_lists(
-                bytecode,
-                self.constants(),
-                &self.debug_locs,
-                sym.entry_pc as usize,
-                end as usize,
-                &mut sym.vars,
-            );
-        }
         syms
-    }
-
-    /// Post-opt IL captured by the last [`Self::finalize_bytecode_capturing_il`].
-    #[cfg(any(test, feature = "dissect"))]
-    pub fn take_post_il_snapshot(&mut self) -> Option<crate::dissect::IlSnapshot> {
-        self.post_il_snapshot.take()
     }
 
     /// Class field and enum variant tables for rendering heap values.

@@ -379,9 +379,6 @@ pub struct Compiler {
     /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
     precise_frame_fns: HashSet<String>,
     precise_frames: Vec<common::PreciseFrameMap>,
-    /// What finalize built [`Self::precise_frames`] from besides the code,
-    /// to build them again after a compile-time patch of the code.
-    frame_inputs: Option<Box<FrameInputs>>,
 
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
@@ -583,9 +580,6 @@ pub struct Compiler {
     fn_bytecode_spans: HashMap<String, (usize, usize)>,
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
-    /// `dissect --il-post` snapshot from the last capturing finalize.
-    #[cfg(any(test, feature = "dissect"))]
-    post_il_snapshot: Option<crate::dissect::IlSnapshot>,
     /// Debug variables per function (see [`crate::debug_vars`]).
     fn_debug_vars: HashMap<String, Vec<crate::debug_vars::DebugVar>>,
     /// Source end offset of each enclosing scope (block / function body).
@@ -796,7 +790,6 @@ impl Default for Compiler {
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
             precise_frames: Vec::new(),
-            frame_inputs: None,
             codegen_depth: 0,
             cleanup_pads: Vec::new(),
             cleanup_ranges: Vec::new(),
@@ -866,8 +859,6 @@ impl Default for Compiler {
             current_function_table_key: None,
             fn_bytecode_spans: HashMap::new(),
             fn_debug_locals: HashMap::new(),
-            #[cfg(any(test, feature = "dissect"))]
-            post_il_snapshot: None,
             fn_debug_vars: HashMap::new(),
             debug_scope_ends: Vec::new(),
             debug_stmt_start: 0,
@@ -944,8 +935,6 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 
 mod compiler;
 mod inline_cost;
-mod precise_frames;
-pub(crate) use precise_frames::jump_target as jump_target_of;
 
 /// One `defer` thunk of the function being compiled.
 /// A generic-head instance method that ground call sites clone.
@@ -1062,17 +1051,6 @@ pub(crate) struct GatedHostCall {
     pub caps: common::Caps,
     /// The native's name (`open`, `env_exit`).
     pub native: &'static str,
-}
-
-/// The inputs of [`precise_frames::bind_precise_frames`] other than the
-/// code and the constant pool.
-struct FrameInputs {
-    needs_extent: HashSet<String>,
-    temp_words: HashMap<String, Vec<u16>>,
-    match_arities: HashMap<u32, u32>,
-    entries: Vec<(String, u32)>,
-    entry_sps: HashMap<String, u32>,
-    fn_kinds: HashMap<String, precise_frames::FnWordKinds>,
 }
 
 /// A `const` (or, `silent`, a pure `static let`) computed at compile time:

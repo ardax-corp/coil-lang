@@ -54,12 +54,6 @@ struct DissectCli {
     /// Filter functions by FQN substring / trailing name
     #[arg(long = "fn", value_name = "PAT")]
     fn_pat: Option<String>,
-    /// Also print pre-opt stack IL
-    #[arg(long)]
-    il: bool,
-    /// Also print the optimized IL (before fuse / lowering)
-    #[arg(long)]
-    il_post: bool,
     /// Compile `test` cases too (`__zs_test_N`), like `coil test`
     #[arg(long = "tests")]
     include_tests: bool,
@@ -69,19 +63,16 @@ struct DissectCli {
     /// Also print each function's effects and why auto-par left loops sequential
     #[arg(long)]
     effects: bool,
-    /// Also print the MIR of numeric bodies (dense / LIR)
+    /// Print the MIR the engines run (the default)
     #[arg(long)]
     mir: bool,
-    /// Do not interleave source lines in the bytecode listing
-    #[arg(long)]
-    no_source: bool,
     /// Also print the entry-file AST
     #[arg(long)]
     ast: bool,
-    /// Print the entry file after macro expansion (no bytecode)
+    /// Print the entry file after macro expansion (no MIR)
     #[arg(long)]
     expand: bool,
-    /// Entry `.coil` file, or a compiled `.ccoil` archive (bytecode only)
+    /// Entry `.coil` file, or a compiled `.ccoil` archive (MIR only)
     #[arg(value_name = "FILE")]
     file: Option<String>,
 }
@@ -107,16 +98,12 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DissectArgs)>, St
         DissectArgs {
             filename,
             fn_pat: cli.fn_pat,
-            show_il: cli.il,
             show_ast: cli.ast,
             show_expand: cli.expand,
             extra_roots: cli.roots.root,
             grants: cli.grants.into_grants(),
-            show_mir: cli.mir,
             show_hir: cli.hir,
             show_effects: cli.effects,
-            show_il_post: cli.il_post,
-            source: !cli.no_source,
             opt_level: cli.opt.level(),
             contracts: cli.opt.contracts,
             fold_calls: cli.opt.fold_calls,
@@ -203,14 +190,13 @@ mod tests {
             "total",
             "-O",
             "basic",
-            "--il-post",
             "--mir",
             "--ast",
         ]))
         .unwrap()
         .unwrap();
         assert!(args.source);
-        assert!(args.show_il_post && args.show_mir && args.show_ast);
+        assert!(args.show_ast);
         assert_eq!(args.opt_level, compiler::OptLevel::Basic);
     }
 

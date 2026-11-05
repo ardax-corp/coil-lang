@@ -2172,11 +2172,7 @@ impl Pipeline {
     ///
     /// When `capture_il` is true, retains pre-opt stack IL after finalize splices.
     #[cfg(any(test, feature = "dissect"))]
-    pub fn compile_dissect(
-        &mut self,
-        file: &str,
-        capture_il: bool,
-    ) -> Result<crate::DissectArtifacts, CompileFail> {
+    pub fn compile_dissect(&mut self, file: &str) -> Result<crate::DissectArtifacts, CompileFail> {
         let _capture = self.comptime_capture();
         let entry = PathBuf::from(file);
         self.reset_session();
@@ -2196,17 +2192,11 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
-        let il = if capture_il {
-            Some(self.compiler_lazy_mut().finalize_bytecode_capturing_il())
-        } else {
-            self.compiler_lazy_mut().finalize_bytecode();
-            None
-        };
+        self.compiler_lazy_mut().finalize_bytecode();
         self.compute_consts(None);
         if self.failed || self.had_errors() {
             return Err(CompileFail);
         }
-        self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
 
         // Warnings are kept for callers to inspect; only hard errors fail.
@@ -2218,14 +2208,9 @@ impl Pipeline {
         // The listing interleaves source whatever `-g` the archive would keep.
         let debug = self.program_debug_full();
         let (classes, enums) = self.compiler_lazy().debug_type_tables();
-        let il_post = self.compiler_lazy_mut().take_post_il_snapshot();
         Ok(crate::DissectArtifacts {
-            bytecode: std::mem::take(&mut self.bytecode),
-            constants: self.compiler_lazy_mut().constants().to_vec(),
             strings: self.compiler_lazy_mut().strings().to_vec(),
             functions,
-            il,
-            il_post,
             debug,
             classes,
             enums,

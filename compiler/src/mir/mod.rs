@@ -31,7 +31,6 @@ mod error;
 mod gc;
 mod gates;
 mod host_allow;
-mod emit_lir;
 mod func;
 mod inst;
 mod instcombine;
@@ -56,8 +55,6 @@ pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;
 pub use emit::PanicPads;
-#[cfg(test)]
-pub use emit_lir::emit_lir;
 #[cfg(test)]
 pub use entry::LirRefuse;
 pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirRetItem, HirRetItems, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
@@ -86,10 +83,6 @@ pub use instcombine::{instcombine, instcombine_lir};
 pub use licm::{licm, mark_frozen_arrays};
 #[cfg(test)]
 pub use error::LowerError;
-pub use specialize::{
-    fuse_fallback, lower_abi_body_reusing, take_dense_refusal, take_lir_refusal,
-    try_specialize_body_side, BodyLabels, BodySidecar, LirDraft,
-};
 pub use sccp::sccp;
 pub use sroa::sroa;
 pub use bool_thread::thread_bool_phis;

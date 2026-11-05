@@ -51,21 +51,12 @@ pub mod verify;
 mod codegen;
 
 #[cfg(any(test, feature = "dissect"))]
-pub use dissect::{
-    DissectArtifacts, FnSym, IlSnapshot, filter_symbols, format_bytecode, format_bytecode_annotated,
-    format_bytecode_section,
-    format_il, format_symbol_index, matches_fn_pat,
-};
+pub use dissect::{DissectArtifacts, FnSym, filter_symbols, format_symbol_index, matches_fn_pat};
 pub use host_grants::{ComptimeGrants, ComptimeLimits, HostGrants, Scoped};
 pub use module_roots::{default_module_roots, resolve_use_in_roots};
 pub use pipeline::*;
 pub use project_index::ProjectIndex;
 
-/// COI-407: trailing `if` end-label stays bound after the next body is replaced.
-#[doc(hidden)]
-pub fn prove_coi407_trailing_if_end() {
-    crate::il::module::prove_trailing_if_end_after_next_body_replace();
-}
 pub use reporting::{ErrorCode, Label, Message, MessageKind};
 pub use typechecking::env::{Env, Frame};
 pub use typechecking::pretty::format_ty_for_diag;

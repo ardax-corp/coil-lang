@@ -10,15 +10,12 @@
 mod builder;
 mod codebuf;
 mod func;
-mod lower;
-pub(crate) mod module;
 mod op;
 pub(crate) mod opt;
 pub(crate) mod pure_call;
 // Stack-height deltas, for `coil dissect`'s depth column.
 #[cfg(any(test, feature = "dissect"))]
 mod sp;
-mod treeshake;
 
 pub use opt::{EarlyFree, OptLevel};
 #[cfg(any(test, feature = "dissect"))]
@@ -28,7 +25,4 @@ pub(crate) use sp::stack_delta;
 pub use builder::IlBuilder;
 pub use codebuf::CodeBuf;
 pub use func::IlFunc;
-pub use lower::Lowered;
-pub use module::IlModule;
 pub use op::{EntryKind, IlJumpKind, IlOp, Label};
-pub use treeshake::{TreeshakeInput, prune_unused_functions, reachable_functions};

@@ -422,22 +422,6 @@ pub(super) fn stringify_byte(tag: Option<u32>) -> Byte {
     }
 }
 
-pub(super) fn dense_sidecars(func: &MirFunc, entry_label: Option<Label>) -> super::emit_lir::LirSidecars {
-    let Ok(DenseLayout { func, plan, regs, shared, .. }) = dense_layout(func, entry_label) else {
-        let mut func = func.clone();
-        sink_phi_incomings(&mut func);
-        let plan = ConvoyPlan::new(&func, entry_label);
-        let mut draft = super::deopt::encode_draft(&func, &[], &plan.need_slot);
-        draft.complete = false;
-        return (super::deopt::debug_slot_remap(&func, &[], &plan.need_slot), draft);
-    };
-    let mut draft = super::deopt::encode_draft(&func, &regs, &plan.need_slot);
-    // A shared register holds whichever value is live there, not every
-    // name the site lists.
-    draft.complete &= !shared;
-    (super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot), draft)
-}
-
 /// Frame words of the dense body for `func` that no local holds: its
 /// temporaries' registers. The precise frame map lets them die at their
 /// last read instead of at the return ([`crate::codegen`]'s liveness), so a
