@@ -130,7 +130,9 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str, cac
             exit(1);
         }
     };
-    let bytes = archive_bytes(pipeline, bytecode, constants);
+    // `coil compile --jit`: keep the MIR native code is made from.
+    let bodies = compiler::native_mir::take_native_capture();
+    let bytes = archive_bytes(pipeline, bytecode, constants, &bodies);
     write_archive(pipeline, output, &bytes);
     if let Some(cache) = &cache {
         cache.store(pipeline, filename, &bytes);
@@ -147,8 +149,9 @@ fn write_archive(pipeline: &mut Pipeline, output: &str, bytes: &[u8]) {
     }
 }
 
-/// The `.ccoil` bytes of the program `pipeline` just compiled.
-fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants: Vec<u64>) -> Vec<u8> {
+/// The `.ccoil` bytes of the program `pipeline` just compiled, with a native
+/// MIR section when it has `bodies`.
+fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants: Vec<u64>, bodies: &[compiler::native_mir::NativeBody]) -> Vec<u8> {
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
@@ -173,13 +176,11 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
     let full = pipeline.program_debug_full();
     let level = pipeline.debug_level();
     #[cfg(not(target_family = "wasm"))]
-    if compiler::native_mir::native_capture_active() {
-        // `coil compile --jit`: keep the MIR native code is made from.
-        program.native_mir = coil_native::section::encode(
-            &compiler::native_mir::take_native_capture(),
-            &entry_pcs(&full),
-        );
+    if !bodies.is_empty() {
+        program.native_mir = coil_native::section::encode(bodies, &entry_pcs(&full));
     }
+    #[cfg(target_family = "wasm")]
+    let _ = bodies;
     program.set_debug(full, level);
 
     match rkyv::to_bytes::<Error>(&program) {
@@ -236,6 +237,7 @@ fn cache_options(cli: &CliArgs) -> Option<String> {
         "{:?}",
         (
             cli.include_tests,
+            cli.jit,
             cli.opt_level,
             cli.debug_level,
             cli.contracts,
@@ -397,8 +399,9 @@ fn cmd_build_and_run(
     cache: Option<BuildCache>,
     jit: bool,
 ) {
-    // `--jit` needs this compile's MIR, so it skips the build cache.
-    let cache = if jit { None } else { cache };
+    // The interpreter runs every body, and an archive's section holds only
+    // what native code compiles.
+    let cache = if RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed) { None } else { cache };
     if jit {
         pipeline.set_runs_mir();
     }
@@ -410,6 +413,7 @@ fn cmd_build_and_run(
     if let Some(cache) = &cache
         && let Some(loaded) = cache.load().and_then(|b| load_archive_bytes(&b).ok())
     {
+        install_section(filename, &loaded.native_mir);
         run_cached(pipeline, filename, &loaded);
         return;
     }
@@ -423,8 +427,9 @@ fn cmd_build_and_run(
         }
     };
     print_opt_stats(opt_stats, opt_stats_json);
+    let bodies = compiler::native_mir::take_native_capture();
     if let Some(cache) = &cache {
-        let bytes = archive_bytes(pipeline, bytecode.clone(), constants.clone());
+        let bytes = archive_bytes(pipeline, bytecode.clone(), constants.clone(), &bodies);
         cache.store(pipeline, filename, &bytes);
     }
 
@@ -444,7 +449,7 @@ fn cmd_build_and_run(
 
     maybe_warn_stale_default_out(pipeline, filename, &full);
     if jit {
-        install_native(&full);
+        install_native(bodies, &full);
     }
     let entry = ffi_entry_path(Path::new(filename));
     let panicked = execute_pipeline(ExecutePipelineArgs {
@@ -469,8 +474,7 @@ static RAW_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 static RUN_ON_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Hand the captured MIR to the engine that runs it for the coming run.
-fn install_native(debug: &common::ProgramDebug) {
-    let bodies = compiler::native_mir::take_native_capture();
+fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common::ProgramDebug) {
     if RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed) {
         let program = coil_mir_interp::prepare(bodies, &entry_pcs(debug));
         for (name, why) in &program.refused {
@@ -483,6 +487,21 @@ fn install_native(debug: &common::ProgramDebug) {
         return;
     }
     install_native_bodies(&bodies, &entry_pcs(debug));
+}
+
+/// JIT an archive's native MIR section for the coming run; a section that
+/// cannot be read leaves the run on the VM. `name` is what the warning says.
+fn install_section(name: &str, section: &[u8]) {
+    if section.is_empty() {
+        return;
+    }
+    #[cfg(not(target_family = "wasm"))]
+    match coil_native::section::decode(section) {
+        Ok((bodies, pcs)) => install_native_bodies(&bodies, &pcs),
+        Err(e) => eprintln!("warning: `{name}`: {e}; running on the VM"),
+    }
+    #[cfg(target_family = "wasm")]
+    let _ = name;
 }
 
 /// Function name to bytecode entry PC.
@@ -561,8 +580,6 @@ fn cmd_compile(
     cache: Option<BuildCache>,
     jit: bool,
 ) {
-    // The build cache holds archives without MIR.
-    let cache = if jit { None } else { cache };
     if jit {
         pipeline.set_runs_mir();
         compiler::native_mir::start_native_capture();
@@ -628,13 +645,8 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
     }
 
     if !no_jit {
-        if !loaded.native_mir.is_empty() {
-            #[cfg(not(target_family = "wasm"))]
-            match coil_native::section::decode(&loaded.native_mir) {
-                Ok((bodies, pcs)) => install_native_bodies(&bodies, &pcs),
-                Err(e) => eprintln!("warning: `{archive}`: {e}; running on the VM"),
-            }
-        } else if jit {
+        install_section(archive, &loaded.native_mir);
+        if loaded.native_mir.is_empty() && jit {
             eprintln!(
                 "warning: `{archive}` carries no native MIR (build it with `coil compile --jit`); running on the VM"
             );

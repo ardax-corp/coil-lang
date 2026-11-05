@@ -1309,6 +1309,45 @@ fn module_setup_runs_natively() {
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
 }
 
+/// A repeat `--jit` run takes its archive, MIR included, from the build
+/// cache and still runs natively. A VM run of the same file has an entry of
+/// its own: that archive has no MIR.
+#[test]
+fn a_jit_run_comes_from_the_build_cache() {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-build-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("cached.coil");
+    let src = format!("{HEADER}#[inline(never)]\nfn work(int n) -> int {{ return n * 2; }}\nfn main() {{ let _ = println(format(\"%i\", work(21))); }}\n");
+    std::fs::write(&file, src).expect("write source");
+    let run = |jit: bool| {
+        let mut cmd = Command::new(coil_bin());
+        cmd.arg(&file).args(["--fold-calls", "off"]).env("XDG_CACHE_HOME", dir.join("cache")).env("COIL_NATIVE_STATS", "2");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        if jit {
+            cmd.arg("--jit");
+        }
+        let out = cmd.output().expect("spawn coil");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let entries = || std::fs::read_dir(dir.join("cache/coil/build")).map_or(0, Iterator::count);
+    let first = run(true);
+    assert!(compiled(&first, "work"), "stats: {first}");
+    let cached = entries();
+    assert!(cached > 0, "the run stored its archive");
+    let second = run(true);
+    assert!(compiled(&second, "work"), "a cached run stays native: {second}");
+    assert_eq!(entries(), cached, "the second run was a hit");
+    let vm = run(false);
+    assert!(!compiled(&vm, "work"), "the VM run took no native code: {vm}");
+    assert!(entries() > cached, "the VM run has an entry of its own");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `coil test --engine native` over a directory holding `src` as
 /// `name.coil`, with a cold cache: the bodies native code refused.
 fn native_test_refusals(name: &str, src: &str) -> Vec<String> {
