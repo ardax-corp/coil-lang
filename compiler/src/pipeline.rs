@@ -1634,15 +1634,6 @@ impl Pipeline {
         }
         self.bytecode = self.compiler_lazy().bytecode_vec();
 
-        // Patch the JMP at offset 1 to point to the
-        // user-program's `main`. If the source had at
-        // least one `extern` block or module statics,
-        // jump to `program_start_offset` so setup runs
-        // before `main`. Otherwise jump straight to `main`.
-        let jmp_target = self.compiler_lazy().prologue_jmp_target();
-        if let Some(byte) = self.bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP).with_operand_u32(jmp_target);
-        }
 
         // Wrap the bytecode in the versioned `ArchivedProgram` envelope
         // so that older `.ccoil` files can be rejected at load time via
@@ -1668,6 +1659,8 @@ impl Pipeline {
             line_table: Vec::new(),
             span_table: Vec::new(),
             native_mir: Vec::new(),
+            startup: self.startup(),
+            main: self.main_offset(),
             bytecode: self.bytecode,
         };
         program.set_debug(debug, level);
@@ -1700,13 +1693,6 @@ impl Pipeline {
             .any(|m| *m.kind() == reporting::MessageKind::ERROR);
         if rejected {
             return (Vec::new(), Vec::new());
-        }
-
-        // Patch the JMP at offset 1 (the second prologue
-        // instruction).
-        if let Some(byte) = bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP)
-                .with_operand_u32(self.compiler_lazy().prologue_jmp_target());
         }
 
         (bytecode, self.compiler_lazy_mut().constants().to_vec())
@@ -1782,11 +1768,6 @@ impl Pipeline {
         self.compiler_lazy_mut().finalize_bytecode();
         self.compute_consts(Some((path, src)));
         let mut bytecode = self.compiler_lazy_mut().bytecode_vec();
-
-        if let Some(byte) = bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP)
-                .with_operand_u32(self.compiler_lazy().prologue_jmp_target());
-        }
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {
@@ -2174,11 +2155,6 @@ impl Pipeline {
         self.compute_consts(None);
         self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
-        // Patch the JMP at offset 1.
-        let jmp_target = self.compiler_lazy().prologue_jmp_target();
-        if let Some(byte) = self.bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP).with_operand_u32(jmp_target);
-        }
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {
@@ -2232,10 +2208,6 @@ impl Pipeline {
         }
         self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
-        let jmp_target = self.compiler_lazy().prologue_jmp_target();
-        if let Some(byte) = self.bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP).with_operand_u32(jmp_target);
-        }
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {
@@ -2424,8 +2396,9 @@ impl Pipeline {
         self.compiler_lazy().static_slot_count()
     }
 
-    pub fn prologue_jmp_target(&self) -> u32 {
-        self.compiler_lazy().prologue_jmp_target()
+    /// What runs before `main`.
+    pub fn startup(&self) -> Vec<common::StartupOp> {
+        self.compiler_lazy().startup().to_vec()
     }
 
     pub fn main_offset(&self) -> Option<u32> {
@@ -2472,6 +2445,9 @@ impl Pipeline {
             cleanup: self.compiler_lazy().cleanup_ranges().to_vec(),
             table: Default::default(),
         };
+        // A panic site looks its location up as the MIR has it, so the
+        // table stays keyed by that; its lines are the remapped ones.
+        let keys = debug.debug_locs.clone();
         self.remap_generated_debug_locs(&mut debug);
         // Lines are resolved now, while the sources exist, so archives and
         // packaged binaries never read them back (#580).
@@ -2482,6 +2458,7 @@ impl Pipeline {
                 .cloned()
                 .or_else(|| std::fs::read_to_string(path).ok())
         });
+        debug.debug_locs = keys;
         debug
     }
 

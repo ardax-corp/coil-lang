@@ -741,18 +741,6 @@ fn push_stream(block: &mut String, name: &str, bytes: &[u8]) {
     block.push_str(&format!("\n{name}:\n{}", text.trim_end_matches('\n')));
 }
 
-/// Replace the first `JMP target` at or after `from` with `HALT` (the static-init
-/// prologue's jump into `main`), like [`Machine::halt_first_jump_to`] on a copy.
-fn halt_first_jump_in(code: &mut [Byte], from: usize, target: u32) -> bool {
-    for b in code.iter_mut().skip(from) {
-        if matches!(b.bytecode(), Instruction::JMP) && b.operand_u32() == target {
-            *b = Byte::new(Instruction::HALT);
-            return true;
-        }
-    }
-    false
-}
-
 /// Queue cases on the pool, or run them right here (`--jobs 1`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dispatch {
@@ -766,7 +754,6 @@ pub(crate) struct Prepared {
     /// `(name, entry)` in run order. A file without cases runs `main` once
     /// as a single case named after the file.
     pub cases: Vec<(String, u32)>,
-    pub init_ip: Option<u32>,
     /// See [`TestCase::expect_ok_result`].
     pub expect_ok_result: bool,
     pub debug: ProgramDebug,
@@ -778,7 +765,6 @@ impl Prepared {
     pub fn case(&self, entry: u32, coverage: bool, step_budget: Option<u64>) -> TestCase {
         TestCase {
             entry,
-            init_ip: self.init_ip,
             expect_ok_result: self.expect_ok_result,
             coverage: coverage && self.probes.is_none(),
             probes: self.probes.as_ref().filter(|_| coverage).map_or(0, |p| p.locs.len() as u32),
@@ -963,7 +949,7 @@ pub(crate) fn compile_test_file(
         return Compiled::Decided(ok, (!ok).then(|| format!("> Test \"{display}\" failed")));
     }
 
-    let Some((ctx, init_ip, debug)) = wire_program(pipeline, bytecode, constants, path, reactor, native) else {
+    let Some((ctx, debug)) = wire_program(pipeline, bytecode, constants, path, reactor, native) else {
         let m = format!("> Test \"{display}\" failed (no thread program)");
         return Compiled::Decided(false, Some(m));
     };
@@ -979,7 +965,6 @@ pub(crate) fn compile_test_file(
         probes,
         ctx,
         cases,
-        init_ip,
         expect_ok_result,
         debug,
     }))
@@ -1040,16 +1025,9 @@ fn wire_program(
     path: &Path,
     reactor: &Arc<Reactor>,
     native: Option<Arc<machine::native::NativeCode>>,
-) -> Option<(ThreadSpawnContext, Option<u32>, ProgramDebug)> {
+) -> Option<(ThreadSpawnContext, ProgramDebug)> {
     let strings = pipeline.strings().to_vec();
-    let main = pipeline.main_offset();
-    // Stop the static-init prologue before it jumps into `main`; each job
-    // runs it on a fresh VM, then calls its case.
-    let mut code = bytecode;
-    let init_ip = main.and_then(|main| {
-        let setup = pipeline.prologue_jmp_target();
-        (setup != main && halt_first_jump_in(&mut code, setup as usize, main)).then_some(setup)
-    });
+    let code = bytecode;
     let debug = pipeline.program_debug();
     let start = coil_host::native_start(&pipeline, &pipeline.archived_struct_layouts(), Some(path));
     // The same word maps as `coil <file>`, so a case's `collect()` exercises
@@ -1067,7 +1045,7 @@ fn wire_program(
     );
     let ctx = machine::spawn_context(Arc::new(program), start, Arc::clone(reactor), native);
     drop(pipeline);
-    Some((ctx?, init_ip, debug))
+    Some((ctx?, debug))
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1346,7 +1324,7 @@ fn start_doc_case(
         let why = "example has no `main` to run".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };
-    let Some((ctx, init_ip, _debug)) = wire_program(pipeline, bytecode, constants, &entry, run.reactor, native) else {
+    let Some((ctx, _debug)) = wire_program(pipeline, bytecode, constants, &entry, run.reactor, native) else {
         let why = "no thread program".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };
@@ -1354,7 +1332,6 @@ fn start_doc_case(
     // `assert!` in the example fails it.
     let case = TestCase {
         entry: main,
-        init_ip,
         expect_ok_result: false,
         coverage: false,
         probes: 0,

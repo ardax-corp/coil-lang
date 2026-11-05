@@ -335,26 +335,12 @@ impl Compiler {
         self.checker.static_slot_count()
     }
 
-    /// Prologue `JMP` target: static initializers and/or `extern` setup
-    /// run at `setup_entry_offset`; otherwise jump straight to `main`, or,
-    /// with no `main`, to the prologue's `HALT` (there is nothing to run).
-    pub fn prologue_jmp_target(&self) -> u32 {
-        // Interned dictionaries and local `const` tables start zeroed and
-        // are built on first use: they need no setup.
-        if self.static_slot_count() > (self.interned_dicts.len() + self.interned_tables.len()) as u32
-            || self.has_extern_block()
-            || self.checker.classes_with_drop().next().is_some()
-        {
-            self.setup_entry_offset
-        } else {
-            self.functions
-                .get("main")
-                .copied()
-                .unwrap_or(PROLOGUE_HALT_OFFSET) as u32
-        }
+    /// What runs before `main`.
+    pub fn startup(&self) -> &[common::StartupOp] {
+        &self.startup
     }
 
-    /// Bytecode offset of `main`, if bound.
+    /// `main`'s body, if bound.
     pub fn main_offset(&self) -> Option<u32> {
         self.functions.get("main").copied().map(|o| o as u32)
     }
@@ -8157,81 +8143,7 @@ impl Compiler {
     }
 
     fn finalize_bytecode_inner(&mut self, capture_il: bool) -> FinalizeIlOut {
-        // Splice static initializers + `extern` setup into the IL before lower.
-        // Order: user static inits, then FFI dlopen/declare, then JMP → main.
-        // Right after the prologue `HALT`, ahead of every body, so the
-        // setup is prologue code: its labels keep their ids when the module
-        // flattens. Glue after a body shares that body's relabelling, and
-        // an id the body minted could claim the setup's entry or its jumps.
-        let setup_pos = PROLOGUE_HALT_OFFSET + 1;
-        let mut init_len = 0usize;
-
-        if let Some(n) = self.emit_module_setup(setup_pos) {
-            self.setup_entry_offset = setup_pos as u32;
-            self.bytecode.bump_absolute_entry_targets(setup_pos, n);
-            self.bytecode.bump_func_spans(setup_pos, n);
-            init_len += n;
-        }
-
-        let static_init_region = if init_len > 0 {
-            self.bytecode.entry_label_at(setup_pos);
-            self.program_start_offset += init_len as u32;
-            for offset in self.functions.values_mut() {
-                if *offset >= setup_pos {
-                    *offset += init_len;
-                }
-            }
-            for (_, offset) in self.test_cases.iter_mut() {
-                if (*offset as usize) >= setup_pos {
-                    *offset += init_len as u32;
-                }
-            }
-            for offset in self.mono_offsets.values_mut() {
-                if *offset >= setup_pos {
-                    *offset += init_len;
-                }
-            }
-            Some((setup_pos, init_len))
-        } else {
-            None
-        };
-
-        // After setup region, insert JMP → main (or, with no `main`, → the
-        // prologue HALT rather than falling into the first function).
-        let main_off = self.functions.get("main").copied();
-        if let Some((pos, init_len)) = static_init_region {
-            let jmp_pos = pos + init_len;
-            // `main`'s own entry label, which flattening maps to its body:
-            // the first label at its offset may be a neighbour's, and a
-            // label put there is private to whichever chunk holds it.
-            let target_label = match main_off.and_then(|_| self.fn_entry_labels.get("main").copied()) {
-                Some(label) => label,
-                None => self
-                    .bytecode
-                    .entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET)),
-            };
-            self.bytecode.insert_jump_at(jmp_pos, target_label);
-            self.bytecode.bump_absolute_entry_targets(jmp_pos, 1);
-            self.bytecode.bump_func_spans(jmp_pos, 1);
-            for offset in self.functions.values_mut() {
-                if *offset >= jmp_pos {
-                    *offset += 1;
-                }
-            }
-            for (_, offset) in self.test_cases.iter_mut() {
-                if (*offset as usize) >= jmp_pos {
-                    *offset += 1;
-                }
-            }
-            for offset in self.mono_offsets.values_mut() {
-                if *offset >= jmp_pos {
-                    *offset += 1;
-                }
-            }
-            if (self.program_start_offset as usize) > jmp_pos {
-                self.program_start_offset += 1;
-            }
-        }
+        self.emit_module_setup();
 
         // Drop unused function bodies (eager builtin thunks, unreferenced user
         // fns) before IL opts / lower. Without a `main`, snippet / unit-test
@@ -8252,6 +8164,8 @@ impl Compiler {
         if has_main || !no_mir.is_empty() {
             let roots = if has_main {
                 let mut roots = vec!["main".to_string()];
+                // Startup calls these; no body does.
+                roots.extend(self.startup_steps.iter().map(|s| s.body.clone()));
                 if let Some(keep) = &self.keep_fns_in {
                     roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name)));
                 }
@@ -8276,7 +8190,7 @@ impl Compiler {
                     test_cases: &mut self.test_cases,
                     root_names: &roots,
                     include_tests: self.include_tests,
-                    preserve_emit_start: Some(self.setup_entry_offset as usize),
+                    preserve_emit_start: None,
                 },
             );
             for (threshold, delta) in shrinks {
@@ -8307,6 +8221,13 @@ impl Compiler {
             None
         };
 
+        // A panic site names a location: each one the bodies use, once.
+        let mut locs: Vec<DebugLoc> =
+            self.bytecode.funcs().iter().filter_map(|f| f.hir_mir.as_deref()).flat_map(|m| m.value_locs.values().chain(m.op_locs.values()).chain(m.term_locs.values())).copied().filter(|l| l.is_known()).collect();
+        locs.sort_unstable_by_key(|l| (l.file, l.start_byte, l.end_byte));
+        locs.dedup();
+        self.debug_locs = locs;
+
         // A body without direct MIR is an internal error once codegen is
         // clean; a module with errors still lowers (its bodies may be
         // `report_unlowered` stubs) but never runs.
@@ -8331,23 +8252,8 @@ impl Compiler {
         };
         #[cfg(any(test, feature = "dissect"))]
         let cursor_ops = lowered.pre_fuse_ops.take();
-        let map = |t: usize| -> usize {
-            if let Some(&p) = lowered.pre_to_post.get(&t) {
-                return p;
-            }
-            let mut best = lowered.code_len;
-            for (&pre, &post) in &lowered.pre_to_post {
-                if pre >= t && post < best {
-                    best = post;
-                }
-            }
-            best
-        };
-        // Prefer entry labels: MIR specialization and fuse shift emitting
-        // indices, so raw `functions` / `test_cases` PCs are stale.
-        // Per-function chunk remaps avoid collisions in the cumulative map.
-        let func_label_maps = &lowered.func_label_maps;
         let funcs = self.bytecode.funcs();
+        let func_label_maps = &lowered.func_label_maps;
         let flat_label = |func_idx: usize, emit_id: u32| -> u32 {
             func_label_maps
                 .get(func_idx)
@@ -8386,158 +8292,35 @@ impl Compiler {
             self.post_il_snapshot =
                 Some(crate::dissect::IlSnapshot::new(ops.clone(), post_funcs));
         }
-        let func_idx_for_pre = |pre: usize| -> Option<usize> {
-            funcs
-                .iter()
-                .position(|f| pre >= f.code_start && pre < f.code_end)
-        };
-        let func_idx_for_name =
-            |name: &str| -> Option<usize> { funcs.iter().position(|f| f.name == name) };
-        let resolve_fn_label_pc = |name: &str, emit_id: u32| -> Option<usize> {
-            let idx = func_idx_for_name(name)?;
-            let flat_id = flat_label(idx, emit_id);
-            lowered.label_pcs.get(&flat_id).copied()
-        };
-        let first_body = funcs.iter().map(|f| f.code_start).min().unwrap_or(usize::MAX);
-        let resolve_entry = |pre: usize| -> usize {
-            if let Some(label) = self.bytecode.entry_label_for_offset(pre) {
-                if let Some(idx) = func_idx_for_pre(pre) {
-                    let flat_id = flat_label(idx, label.0);
-                    if let Some(pc) = lowered.label_pcs.get(&flat_id).copied() {
-                        return pc;
-                    }
-                }
-                // The prologue (static / extern setup) keeps its emit-time
-                // ids when flattened; a body's private label space may reuse
-                // one, so `label_remap` would land inside that body.
-                if pre < first_body
-                    && let Some(&pc) = lowered.label_pcs.get(&label.0)
-                {
-                    return pc;
-                }
-                let global_flat = lowered
-                    .label_remap
-                    .get(&label.0)
-                    .copied()
-                    .unwrap_or(label.0);
-                if let Some(pc) = lowered.label_pcs.get(&global_flat).copied() {
-                    return pc;
-                }
-                if let Some(&pc) = lowered.label_pcs.get(&label.0) {
-                    return pc;
-                }
-            }
-            map(pre)
-        };
+        // A body is named by its entry label; 0 names nothing.
+        let entry_of = |label: crate::il::Label| label.0 as usize + 1;
+        let by_offset = |bytecode: &CodeBuf, offset: usize| bytecode.entry_label_for_offset(offset).map_or(0, entry_of);
         for (name, offset) in self.functions.iter_mut() {
-            if let Some(label) = self.fn_entry_labels.get(name)
-                && let Some(pc) = resolve_fn_label_pc(name, label.0) {
-                    *offset = pc;
-                    continue;
-                }
-            *offset = resolve_entry(*offset);
+            *offset = match self.fn_entry_labels.get(name) {
+                Some(&label) => entry_of(label),
+                None => by_offset(&self.bytecode, *offset),
+            };
         }
         for (_, offset) in self.test_cases.iter_mut() {
-            *offset = resolve_entry(*offset as usize) as u32;
+            *offset = by_offset(&self.bytecode, *offset as usize) as u32;
         }
         for offset in self.mono_offsets.values_mut() {
-            *offset = resolve_entry(*offset);
+            *offset = by_offset(&self.bytecode, *offset);
         }
-        self.program_start_offset = resolve_entry(self.program_start_offset as usize) as u32;
-        self.setup_entry_offset = resolve_entry(self.setup_entry_offset as usize) as u32;
-        let mut cleanup = Vec::new();
-        for pad in &self.cleanup_pads {
-            // A body the LIR tier took emits its own pad from its MIR, with
-            // its `defer`s inline.
-            let lir = lowered.lir_cleanup_pads.get(&pad.func);
-            let (pad_label, frame_words) = match lir {
-                Some(&(label, words)) => (label, words),
-                None => (pad.pad, pad.frame_words),
-            };
-            let ranges = (|| {
-                let start = self
-                    .fn_entry_labels
-                    .get(&pad.func)
-                    .and_then(|l| resolve_fn_label_pc(&pad.func, l.0))
-                    .or_else(|| self.functions.get(&pad.func).copied())?;
-                let pad_pc = resolve_fn_label_pc(&pad.func, pad_label.0)?;
-                Some(cleanup_ranges_for(start, pad_pc, frame_words))
-            })();
-            // A body that is not its own IL function (a generic template:
-            // its instances carry their own pads) resolves to nothing.
-            cleanup.extend(ranges.unwrap_or_default());
-        }
-        // A promoted field's write-backs: a range per stretch of the loop
-        // between two of the source's stores ([`crate::mir::PanicPads`]).
-        for (func, pads) in &lowered.panic_pads {
-            for &(start, end, pad) in &pads.ranges {
-                let pcs = (|| Some((resolve_fn_label_pc(func, start.0)?, resolve_fn_label_pc(func, end.0)?, resolve_fn_label_pc(func, pad.0)?)))();
-                // A range the body's labels do not resolve would leave its
-                // traps without the stores they owe: the build stops.
-                let (start_pc, end_pc, pad_pc) = pcs.unwrap_or_else(|| panic!("panic pad of {func} does not resolve"));
-                if start_pc < end_pc {
-                    cleanup.push(common::CleanupRange {
-                        start_pc: start_pc as u32,
-                        end_pc: end_pc as u32,
-                        pad_pc: pad_pc as u32,
-                        frame_words: pads.frame,
-                    });
-                }
-            }
-        }
-        cleanup.sort_unstable_by_key(|r: &common::CleanupRange| r.start_pc);
-        self.cleanup_ranges = cleanup;
-
-        self.debug_locs = lowered.debug_locs;
-
-        let entries: Vec<(String, u32)> = self
-            .functions
+        self.program_start_offset = by_offset(&self.bytecode, self.program_start_offset as usize) as u32;
+        self.startup = self
+            .startup_steps
             .iter()
-            .map(|(n, pc)| (n.clone(), *pc as u32))
+            .filter_map(|s| {
+                let entry = *self.functions.get(&s.body)? as u32;
+                Some(match s.slot {
+                    Some(slot) => common::StartupOp::Init { entry, slot },
+                    None => common::StartupOp::Call { entry },
+                })
+            })
             .collect();
-        self.deopt_map_drafts = lowered.deopt_map_drafts.clone();
-        // A debugger reads a local by the slot MIR's `local_binds` name, not
-        // by the register bytecode gave it.
-        let remaps = if self.debugger_attached { Default::default() } else { lowered.debug_slot_remaps.clone() };
-        apply_debug_slot_remaps(&mut self.fn_debug_locals, &remaps);
-        for (fn_name, vars) in self.fn_debug_vars.iter_mut() {
-            if let Some(remap) = remaps.get(fn_name) {
-                for v in vars.iter_mut() {
-                    // A body emitted from MIR assigns its own registers: a
-                    // local the remap leaves out holds no value there, and
-                    // its old slot may now hold another value.
-                    if let crate::debug_vars::DebugVarLoc::Slot(home) = v.loc
-                        && !remap.contains_key(&home)
-                    {
-                        v.validated = true;
-                        v.ranges.clear();
-                    }
-                    // So does a split local's component: each lives in the
-                    // register the remap names for the whole body, or
-                    // nowhere. Its stores carry no def-site tags there.
-                    let comps = v.component_slots();
-                    if !comps.is_empty() {
-                        v.def_sites.clear();
-                        v.validated = true;
-                        v.comp_ranges = comps
-                            .iter()
-                            .map(|c| remap.get(c).map(|&r| vec![(0, u32::MAX, r)]).unwrap_or_default())
-                            .collect();
-                    }
-                    v.loc.remap(remap);
-                }
-            }
-        }
-        let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
-        self.frame_inputs = Some(Box::new(super::FrameInputs {
-            needs_extent: lowered.needs_frame_extent.clone(),
-            temp_words: lowered.temp_words.clone(),
-            match_arities: lowered.match_arities.clone(),
-            entries,
-            entry_sps,
-            fn_kinds,
-        }));
-        self.bind_precise_frames();
+        self.cleanup_ranges = Vec::new();
+
 
         let dense_seek = self
             .bytecode
@@ -8556,12 +8339,6 @@ impl Compiler {
         self.operand_stack_slots = self
             .operand_stack_slots
             .min(crate::typechecking::MAX_OPERAND_STACK_SLOTS);
-
-        debug_assert_eq!(
-            self.debug_locs.len(),
-            self.bytecode.len(),
-            "debug_locs / bytecode length mismatch after finalize"
-        );
 
 
         #[cfg(any(test, feature = "dissect"))]
@@ -8792,26 +8569,6 @@ impl Compiler {
             .collect()
     }
 
-    /// Build [`Self::precise_frames`] from the finalized code: at finalize,
-    /// and again after a compile-time patch changes what a frame holds.
-    fn bind_precise_frames(&mut self) {
-        let Some(inputs) = self.frame_inputs.as_ref() else {
-            return;
-        };
-        self.precise_frames = super::precise_frames::bind_precise_frames(
-            &self.precise_frame_fns,
-            &inputs.needs_extent,
-            self.bytecode.as_slice(),
-            &self.constants,
-            &inputs.match_arities,
-            &inputs.entries,
-            &inputs.entry_sps,
-            self.prologue_jmp_target(),
-            &inputs.fn_kinds,
-            &inputs.temp_words,
-        );
-    }
-
     /// Whether [`Self::fold_sites`] are computed at this level.
     pub fn call_fold_on(&self) -> bool {
         self.opt_options.call_fold && !self.debugger_attached
@@ -8969,28 +8726,16 @@ impl Compiler {
             }
             code[*pc] = word;
         }
-        // A folded `CALL` is no longer a safepoint, and its value is no
-        // call result.
-        self.bind_precise_frames();
     }
 
-    /// Replace the setup region's `CALL init; StoreStatic slot` for each of
-    /// `consts` (`(entry, slot)`) with one `RestoreSnapshot` of `snapshot`
-    /// (appended to the pool), at the first const's place, and `NOOP`s.
-    /// False, changing nothing, when a const's setup pair is not found.
+    /// Replace the startup step of each of `consts` (`(entry, slot)`) with
+    /// one restore of `snapshot` (appended to the pool), at the first const's
+    /// place. False, changing nothing, when a const's step is not found.
     pub fn apply_const_snapshot(&mut self, consts: &[(u32, u32)], snapshot: &[u64]) -> bool {
-        let Some(code) = self.bytecode.lowered_mut() else {
-            return false;
-        };
+        use common::StartupOp as Op;
         let mut sites = Vec::with_capacity(consts.len());
         for &(entry, slot) in consts {
-            let found = code.windows(2).position(|w| {
-                *w[0].bytecode() == Instruction::CALL
-                    && w[0].call_parts().1 == entry as usize
-                    && *w[1].bytecode() == Instruction::StoreStatic
-                    && w[1].operand_u32() == slot
-            });
-            match found {
+            match self.startup.iter().position(|op| *op == Op::Init { entry, slot }) {
                 Some(at) => sites.push(at),
                 None => return false,
             }
@@ -8999,11 +8744,15 @@ impl Compiler {
             return false;
         };
         let at = self.constants.len() as u32;
-        for &site in &sites {
-            code[site] = Byte::new(Instruction::NOOP);
-            code[site + 1] = Byte::new(Instruction::NOOP);
-        }
-        code[first] = Byte::new(Instruction::RestoreSnapshot).with_operand_u32(at);
+        let mut i = 0;
+        self.startup.retain_mut(|op| {
+            let keep = i == first || !sites.contains(&i);
+            if i == first {
+                *op = Op::Restore { at };
+            }
+            i += 1;
+            keep
+        });
         self.constants.extend_from_slice(snapshot);
         true
     }

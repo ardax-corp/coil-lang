@@ -25,6 +25,8 @@ pub enum LoadErr {
 /// Owned archive payload restored by CLI and packaged execute.
 pub struct LoadedArchive {
     pub bytecode: Vec<Byte>,
+    pub startup: Vec<common::StartupOp>,
+    pub main: Option<u32>,
     pub constants: Vec<u64>,
     pub strings: Vec<String>,
     pub static_slots: u32,
@@ -83,6 +85,8 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
         class_word_kinds: program.class_word_kinds,
         static_word_kinds: program.static_word_kinds,
         native_mir: program.native_mir,
+        startup: program.startup,
+        main: program.main,
     })
 }
 
@@ -92,24 +96,6 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
     let mut buffer = Vec::with_capacity(1024);
     f.read_to_end(&mut buffer).map_err(|_| LoadErr::Corrupt)?;
     load_archive_bytes(&buffer)
-}
-
-/// Run archived bytecode with standard host natives (no compiler).
-///
-/// Returns `true` when a language-level `panic` aborted.
-/// `raise` is catchable (`Result.Err`); it does not set this flag (Q5).
-///
-/// Restores [`common::CStructLayout`] from the archive (CLI `.ccoil` and packaged
-/// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
-///
-/// Host capability flags are **not** stored in `.ccoil` and are **not** re-applied
-/// here. If the bytecode has the op, it runs. `dload` still uses pin /
-/// trusted integrity when `dload_gate` is supplied.
-/// Minor 13+ stores the compiler stack bound. Minor 14+ stores S2b maps;
-/// older archives keep empty maps (conservative stack GC). Seek+CALL
-/// archives still grow to [`machine::MAX_OPERAND_STACK_SLOTS`].
-pub fn archive_operand_slots(bytecode: &[Byte]) -> usize {
-    common::legacy_archive_operand_slots(bytecode) as usize
 }
 
 pub fn execute_archived_program(
@@ -125,6 +111,8 @@ pub fn execute_archived_program(
     // program on the driver, with no interpreter.
     let program = std::sync::Arc::new(machine::ThreadProgram {
         code: std::sync::Arc::new(loaded.bytecode.clone()),
+        startup: std::sync::Arc::new(loaded.startup.clone()),
+        main: loaded.main,
         constants: std::sync::Arc::new(loaded.constants.clone()),
         strings: std::sync::Arc::new(loaded.strings.clone()),
         static_slot_count: loaded.static_slots,

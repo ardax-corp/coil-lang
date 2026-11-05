@@ -95,10 +95,6 @@ pub struct Job {
 
 /// A `test("…")` case (or a case-less file's `main`) run as a reactor job.
 pub struct TestJob {
-    /// Start of the static-init prologue. The job's program must have the
-    /// prologue's final `JMP main` patched to `HALT` (as
-    /// [`Machine::halt_first_jump_to`] does); `None` when there is no prologue.
-    pub init_ip: Option<u32>,
     /// `true`: pass means "returned `Result::Ok`" (a `test` case).
     /// `false`: pass means "did not panic" (a file's `main`).
     pub expect_ok_result: bool,
@@ -773,7 +769,6 @@ impl Reactor {
         job.reactor = Arc::clone(self);
         job.shared_print = Some(print);
         job.test = Some(TestJob {
-            init_ip: case.init_ip,
             expect_ok_result: case.expect_ok_result,
             coverage: case.coverage,
             probes: case.probes,
@@ -789,8 +784,6 @@ impl Reactor {
 pub struct TestCase {
     /// Function to call (a `test("…")` body, or `main`).
     pub entry: u32,
-    /// See [`TestJob::init_ip`].
-    pub init_ip: Option<u32>,
     /// See [`TestJob::expect_ok_result`].
     pub expect_ok_result: bool,
     /// See [`TestJob::coverage`].
@@ -805,9 +798,7 @@ pub struct TestCase {
 /// (for a file's `main`) the finalizers left. The case's return, `None`
 /// when it panicked.
 pub(crate) fn test_on_driver(d: &mut crate::driver::Driver<'_>, entry: u32, test: &TestJob) -> Option<common::Value> {
-    if let Some(ip) = test.init_ip {
-        d.run_from(ip as usize);
-    }
+    d.run_startup();
     if d.panicked() {
         return None;
     }
@@ -888,6 +879,8 @@ mod tests {
         ];
         Arc::new(ThreadProgram {
             code: Arc::new(code),
+            startup: Arc::default(),
+            main: None,
             constants: Arc::new(Vec::new()),
             strings: Arc::new(Vec::new()),
             static_slot_count: 0,
@@ -987,7 +980,6 @@ mod tests {
         let reactor = Reactor::new(2);
         let case = TestCase {
             entry: 0,
-            init_ip: None,
             expect_ok_result: false,
             coverage: false,
             probes: 0,
@@ -1030,7 +1022,6 @@ mod tests {
         });
         let case = TestCase {
             entry: 0,
-            init_ip: None,
             expect_ok_result: false,
             coverage: false,
             probes: 0,

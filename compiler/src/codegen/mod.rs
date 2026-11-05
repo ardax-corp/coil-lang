@@ -421,6 +421,10 @@ pub struct Compiler {
     /// Module setup's steps (static stores, `extern` loads and
     /// declarations), from which `__module_setup`'s MIR is built.
     setup_steps: Vec<compiler::module_setup::SetupStep>,
+    /// The bodies startup calls, by name, until they have entries.
+    startup_steps: Vec<compiler::module_setup::StartupStep>,
+    /// What runs before `main`.
+    startup: Vec<common::StartupOp>,
 
     /// True while compiling an `impl` method. Function resets locals
     /// and reserves slot 0 for `self`.
@@ -849,6 +853,8 @@ impl Default for Compiler {
             fold_fns: HashMap::new(),
             par_worker_of: HashMap::new(),
             setup_steps: Vec::new(),
+            startup_steps: Vec::new(),
+            startup: Vec::new(),
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),
             source_file_list: Vec::new(),

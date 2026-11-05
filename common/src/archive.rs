@@ -13,7 +13,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use crate::debug::{DebugLine, DebugLoc, ProgramDebug};
 
 /// Archive ABI major. Bump (and reset minor to 0) on incompatible layout/opcode changes.
-pub const ARCHIVE_MAJOR: u16 = 6;
+pub const ARCHIVE_MAJOR: u16 = 7;
 
 /// Archive ABI minor. Bump on additive, append-only bytecode changes.
 ///
@@ -274,7 +274,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.ccoil`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 21;
+pub const ARCHIVE_MINOR: u16 = 0;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -457,7 +457,7 @@ pub struct ArchivedProgram {
     pub constants: Vec<u64>,
     /// Interned program string literals. `STRING` operands index this table.
     pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
+    pub bytecode: Vec<crate::Byte>,
     /// Paths in stable order (project-relative when compiled from disk).
     pub source_files: Vec<String>,
     /// One [`DebugLoc`] per bytecode slot after finalize (same length as `bytecode`).
@@ -489,203 +489,14 @@ pub struct ArchivedProgram {
     /// Encoded byte-span runs (minor 40+, [`crate::LineTable::encode_spans`]);
     /// written only at `-g2`.
     pub span_table: Vec<u8>,
+    /// What runs before `main`, in order.
+    pub startup: Vec<crate::StartupOp>,
+    /// `main`'s body, when the program has one.
+    pub main: Option<u32>,
     /// Typed MIR of the bodies a native backend compiles (major 6 minor
     /// 20+, `coil compile --jit`); empty runs on the VM alone. The bytes are
     /// the `coil-native` section format, opaque to this crate.
     pub native_mir: Vec<u8>,
-}
-
-/// Major 6 minor 0–19 envelope (no native MIR section).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV6m19 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
-    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
-    pub class_word_kinds: Vec<ClassWordKinds>,
-    pub static_word_kinds: Vec<u8>,
-    pub debug_lines: Vec<DebugLine>,
-    pub cleanup_ranges: Vec<crate::debug::CleanupRange>,
-    pub line_table: Vec<u8>,
-    pub span_table: Vec<u8>,
-}
-
-/// First major-6 minor that stores [`ArchivedProgram::native_mir`].
-pub const NATIVE_MIR_MINOR: u16 = 20;
-
-/// Minor 33–39 envelope (dense debug tables, no run tables).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV39 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
-    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
-    pub class_word_kinds: Vec<ClassWordKinds>,
-    pub static_word_kinds: Vec<u8>,
-    pub debug_lines: Vec<DebugLine>,
-    pub cleanup_ranges: Vec<crate::debug::CleanupRange>,
-}
-
-/// Minor 30–32 envelope (no cleanup ranges).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV32 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
-    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
-    pub class_word_kinds: Vec<ClassWordKinds>,
-    pub static_word_kinds: Vec<u8>,
-    pub debug_lines: Vec<DebugLine>,
-}
-
-/// Minor 29 envelope (no debug lines).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV29 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
-    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
-    pub class_word_kinds: Vec<ClassWordKinds>,
-    pub static_word_kinds: Vec<u8>,
-}
-
-/// Minor 24–28 envelope (no static word kinds).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV28 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
-    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
-    pub class_word_kinds: Vec<ClassWordKinds>,
-}
-
-/// Minor 22–23 envelope (no class word kinds).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV23 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
-    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
-}
-
-/// Minor-21 envelope (precise frame maps without `frame_words`).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV21 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
-    pub precise_frames: Vec<crate::stack_map::PreciseFrameMapV21>,
-}
-
-/// Minor 14–20 envelope (S2b maps, no precise frame maps).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV20 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
-}
-
-/// Minor-13 envelope (`operand_stack_slots`, no S2b maps).
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV13 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
-    pub operand_stack_slots: u32,
-}
-
-/// Pre-minor-13 envelope. Loader fallback so older `.ccoil` stay readable.
-#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[rkyv(compare(PartialEq))]
-pub struct ArchivedProgramV12 {
-    pub version: u32,
-    pub static_slot_count: u32,
-    pub constants: Vec<u64>,
-    pub strings: Vec<String>,
-    pub bytecode: Vec<Byte>,
-    pub source_files: Vec<String>,
-    pub debug_locs: Vec<DebugLoc>,
-    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
-    pub struct_layouts: Vec<CStructLayout>,
 }
 
 /// Failed `.ccoil` / embed envelope access.
@@ -703,42 +514,6 @@ pub struct DecodedArchive {
     pub operand_stack_slots_persisted: bool,
     pub stack_maps_persisted: bool,
 }
-
-/// Default operand-stack guess for envelopes that omit the analyzed bound.
-pub const LEGACY_DEFAULT_OPERAND_STACK_SLOTS: u32 = 256;
-
-/// Hard ceiling matching the VM operand-stack limit (1 048 576 slots).
-pub const LEGACY_MAX_OPERAND_STACK_SLOTS: u32 = 1_048_576;
-
-/// First minor that stores [`ArchivedProgram::operand_stack_slots`].
-pub const OPERAND_STACK_SLOTS_MINOR: u16 = 13;
-
-/// First minor that stores [`ArchivedProgram::stack_maps`].
-pub const STACK_MAPS_MINOR: u16 = 14;
-
-/// First minor that stores [`ArchivedProgram::precise_frames`].
-pub const PRECISE_FRAMES_MINOR: u16 = 21;
-
-/// First minor whose precise frame rows carry `frame_words`.
-pub const FRAME_WORDS_MINOR: u16 = 22;
-
-/// First minor that stores [`ArchivedProgram::class_word_kinds`].
-pub const CLASS_WORD_KINDS_MINOR: u16 = 24;
-
-/// First minor that stores [`ArchivedProgram::static_word_kinds`].
-pub const STATIC_WORD_KINDS_MINOR: u16 = 29;
-
-/// First minor that stores [`ArchivedProgram::debug_lines`].
-pub const DEBUG_LINES_MINOR: u16 = 30;
-
-/// First minor that stores [`ArchivedProgram::cleanup_ranges`].
-pub const CLEANUP_RANGES_MINOR: u16 = 33;
-
-/// First minor that stores [`ArchivedProgram::line_table`] and
-/// [`ArchivedProgram::span_table`].
-pub const LINE_TABLE_MINOR: u16 = 40;
-
-pub use crate::opcode::Byte;
 
 impl ArchivedProgram {
     pub fn debug_bundle(&self) -> ProgramDebug {
@@ -758,308 +533,22 @@ impl ArchivedProgram {
     pub fn decode_line_table(&self) -> Result<crate::LineTable, crate::LineTableError> {
         let table =
             crate::LineTable::decode(&self.line_table, &self.span_table, self.source_files.len())?;
-        if !table.is_empty() && table.len as usize != self.bytecode.len() {
-            return Err(crate::LineTableError("line table length differs from bytecode"));
-        }
         Ok(table)
     }
 
-    /// Fill the debug sections from `debug` at `level`: source paths,
-    /// function names and the encoded run tables. The dense per-slot tables
-    /// stay empty (minor 40+); cleanup ranges are always kept.
+    /// Fill the debug sections from `debug` at `level`.
     pub fn set_debug(&mut self, debug: ProgramDebug, level: crate::DebugLevel) {
         let debug = debug.with_level(level);
-        let table = debug.line_table(level == crate::DebugLevel::Full);
-        self.line_table = table.encode_lines();
-        self.span_table = table.encode_spans();
         self.source_files = debug.source_files;
         self.fn_symbols = debug.fn_symbols;
-        self.cleanup_ranges = debug.cleanup;
-        self.debug_locs = Vec::new();
-        self.debug_lines = Vec::new();
+        self.debug_locs = debug.debug_locs;
+        self.debug_lines = debug.debug_lines;
     }
 }
 
-impl ArchivedProgramV6m19 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: self.stack_maps,
-            precise_frames: self.precise_frames,
-            class_word_kinds: self.class_word_kinds,
-            static_word_kinds: self.static_word_kinds,
-            debug_lines: self.debug_lines,
-            cleanup_ranges: self.cleanup_ranges,
-            line_table: self.line_table,
-            span_table: self.span_table,
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV39 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: self.stack_maps,
-            precise_frames: self.precise_frames,
-            class_word_kinds: self.class_word_kinds,
-            static_word_kinds: self.static_word_kinds,
-            debug_lines: self.debug_lines,
-            cleanup_ranges: self.cleanup_ranges,
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV32 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: self.stack_maps,
-            precise_frames: self.precise_frames,
-            class_word_kinds: self.class_word_kinds,
-            static_word_kinds: self.static_word_kinds,
-            debug_lines: self.debug_lines,
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV29 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: self.stack_maps,
-            precise_frames: self.precise_frames,
-            class_word_kinds: self.class_word_kinds,
-            static_word_kinds: self.static_word_kinds,
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV12 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: 0,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV21 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: self.stack_maps,
-            precise_frames: self.precise_frames.into_iter().map(Into::into).collect(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV28 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: self.stack_maps,
-            precise_frames: self.precise_frames,
-            class_word_kinds: self.class_word_kinds,
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV23 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: self.stack_maps,
-            precise_frames: self.precise_frames,
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV20 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: self.stack_maps,
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-impl ArchivedProgramV13 {
-    fn into_program(self) -> ArchivedProgram {
-        ArchivedProgram {
-            version: self.version,
-            static_slot_count: self.static_slot_count,
-            constants: self.constants,
-            strings: self.strings,
-            bytecode: self.bytecode,
-            source_files: self.source_files,
-            debug_locs: self.debug_locs,
-            fn_symbols: self.fn_symbols,
-            struct_layouts: self.struct_layouts,
-            operand_stack_slots: self.operand_stack_slots,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        }
-    }
-}
-
-/// Seek+CALL heuristic used when the envelope has no persisted slot count.
-pub fn legacy_archive_operand_slots(bytecode: &[Byte]) -> u32 {
-    use crate::opcode::Instruction;
-    let has_seek = bytecode.iter().any(|b| *b.bytecode() == Instruction::Seek);
-    let has_call = bytecode
-        .iter()
-        .any(|b| matches!(*b.bytecode(), Instruction::CALL | Instruction::TailCall));
-    if has_seek && has_call {
-        LEGACY_MAX_OPERAND_STACK_SLOTS
-    } else {
-        LEGACY_DEFAULT_OPERAND_STACK_SLOTS
-    }
-}
-
-/// Prefer the persisted compiler bound; otherwise the pre-13 heuristic.
-pub fn resolve_archive_operand_slots(persisted: Option<u32>, bytecode: &[Byte]) -> u32 {
-    match persisted {
-        Some(slots) => slots.clamp(1, LEGACY_MAX_OPERAND_STACK_SLOTS),
-        None => legacy_archive_operand_slots(bytecode),
-    }
+/// The operand-stack capacity a program asks for.
+pub fn resolve_archive_operand_slots(persisted: Option<u32>, _: &[crate::Byte]) -> u32 {
+    persisted.unwrap_or(256)
 }
 
 /// Access a `.ccoil` blob. Same major + archive minor ≤ runtime; older
@@ -1085,190 +574,14 @@ pub fn decode_archived_program(buffer: &[u8]) -> Result<DecodedArchive, ArchiveD
 fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> {
     use rkyv::rancor::Error;
 
-    let current = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
+    let program = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
         .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgram, Error>(archived).ok());
-    let v6m19 = rkyv::access::<ArchivedArchivedProgramV6m19, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV6m19, Error>(archived).ok());
-    let v39 = rkyv::access::<ArchivedArchivedProgramV39, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV39, Error>(archived).ok());
-    let v32 = rkyv::access::<ArchivedArchivedProgramV32, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV32, Error>(archived).ok());
-    let v29 = rkyv::access::<ArchivedArchivedProgramV29, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV29, Error>(archived).ok());
-    let v28 = rkyv::access::<ArchivedArchivedProgramV28, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV28, Error>(archived).ok());
-    let v23 = rkyv::access::<ArchivedArchivedProgramV23, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV23, Error>(archived).ok());
-    let v21 = rkyv::access::<ArchivedArchivedProgramV21, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV21, Error>(archived).ok());
-    let v20 = rkyv::access::<ArchivedArchivedProgramV20, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV20, Error>(archived).ok());
-    let v13 = rkyv::access::<ArchivedArchivedProgramV13, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV13, Error>(archived).ok());
-    let v12 = rkyv::access::<ArchivedArchivedProgramV12, Error>(buffer)
-        .ok()
-        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV12, Error>(archived).ok());
-
-    // Every major-5+ archive carries the full current envelope. The legacy
-    // envelopes below are major-4 layouts: they no longer load, but probing
-    // them still reports a version error instead of a corrupt archive.
-    if let Some(program) = current {
-        if archive_version_compatible(program.version, ARCHIVE_VERSION) {
-            return Ok(DecodedArchive {
-                program,
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: true,
-            });
-        }
-        if archive_major(program.version) != 4
-            || archive_minor(program.version) >= LINE_TABLE_MINOR
-        {
-            return Err(ArchiveDecodeError::Version(program.version));
-        }
+        .and_then(|archived| rkyv::deserialize::<ArchivedProgram, Error>(archived).ok())
+        .ok_or(ArchiveDecodeError::Corrupt)?;
+    if !archive_version_compatible(program.version, ARCHIVE_VERSION) {
+        return Err(ArchiveDecodeError::Version(program.version));
     }
-    if let Some(old) = v6m19
-        && archive_major(old.version) == ARCHIVE_MAJOR
-        && archive_minor(old.version) < NATIVE_MIR_MINOR
-    {
-        return Ok(DecodedArchive {
-            program: old.into_program(),
-            operand_stack_slots_persisted: true,
-            stack_maps_persisted: true,
-        });
-    }
-    if let Some(old) = v39 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION)
-            && archive_minor(old.version) >= CLEANUP_RANGES_MINOR
-        {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: true,
-            });
-        }
-        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Err(ArchiveDecodeError::Version(old.version));
-        }
-    }
-    if let Some(old) = v32 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION)
-            && archive_minor(old.version) >= DEBUG_LINES_MINOR
-        {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: true,
-            });
-        }
-        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Err(ArchiveDecodeError::Version(old.version));
-        }
-    }
-    if let Some(old) = v29 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION)
-            && archive_minor(old.version) >= STATIC_WORD_KINDS_MINOR
-        {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: true,
-            });
-        }
-        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Err(ArchiveDecodeError::Version(old.version));
-        }
-    }
-    if let Some(old) = v28 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION)
-            && archive_minor(old.version) >= CLASS_WORD_KINDS_MINOR
-        {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: true,
-            });
-        }
-        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Err(ArchiveDecodeError::Version(old.version));
-        }
-    }
-    if let Some(old) = v23 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION)
-            && archive_minor(old.version) >= FRAME_WORDS_MINOR
-        {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: true,
-            });
-        }
-        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Err(ArchiveDecodeError::Version(old.version));
-        }
-    }
-    if let Some(old) = v21 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION)
-            && archive_minor(old.version) >= PRECISE_FRAMES_MINOR
-        {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: true,
-            });
-        }
-        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Err(ArchiveDecodeError::Version(old.version));
-        }
-    }
-    if let Some(old) = v20 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION)
-            && archive_minor(old.version) >= STACK_MAPS_MINOR
-        {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: true,
-            });
-        }
-        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Err(ArchiveDecodeError::Version(old.version));
-        }
-    }
-    if let Some(old) = v13 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION)
-            && archive_minor(old.version) >= OPERAND_STACK_SLOTS_MINOR
-        {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: true,
-                stack_maps_persisted: false,
-            });
-        }
-        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Err(ArchiveDecodeError::Version(old.version));
-        }
-    }
-    if let Some(old) = v12 {
-        if archive_version_compatible(old.version, ARCHIVE_VERSION) {
-            return Ok(DecodedArchive {
-                program: old.into_program(),
-                operand_stack_slots_persisted: false,
-                stack_maps_persisted: false,
-            });
-        }
-        return Err(ArchiveDecodeError::Version(old.version));
-    }
-    Err(ArchiveDecodeError::Corrupt)
+    Ok(DecodedArchive { program, operand_stack_slots_persisted: true, stack_maps_persisted: true })
 }
 
 #[cfg(test)]

@@ -118,6 +118,20 @@ impl ProgramDebug {
         self.table.span_at(pc)
     }
 
+    /// Line and column of `loc`, in a table sorted by location (a compiled
+    /// program's: each location its bodies use, once). A span that differs
+    /// only in its end stands in for it.
+    pub fn line_of(&self, loc: DebugLoc) -> Option<(u32, DebugLine)> {
+        if !loc.is_known() {
+            return None;
+        }
+        let key = |l: &DebugLoc| (l.file, l.start_byte, l.end_byte);
+        let at = self.debug_locs.partition_point(|l| key(l) < (loc.file, loc.start_byte, 0));
+        let near = self.debug_locs[at..].iter().take_while(|l| l.file == loc.file && l.start_byte == loc.start_byte);
+        let i = near.clone().position(|l| l.end_byte == loc.end_byte).or_else(|| near.clone().next().map(|_| 0))?;
+        self.debug_lines.get(at + i).map(|line| (loc.file, *line))
+    }
+
     /// File index and line/column recorded for `pc`, without reading any
     /// source (archives before minor 30 recorded none: see [`Self::loc_at`]).
     pub fn file_line_at(&self, pc: usize) -> Option<(u32, DebugLine)> {
@@ -148,17 +162,7 @@ impl ProgramDebug {
     pub fn with_level(self, level: crate::DebugLevel) -> Self {
         match level {
             crate::DebugLevel::Full => self,
-            crate::DebugLevel::Lines => {
-                let table = self.line_table(false);
-                Self {
-                    source_files: self.source_files,
-                    debug_locs: Vec::new(),
-                    fn_symbols: self.fn_symbols,
-                    debug_lines: Vec::new(),
-                    cleanup: self.cleanup,
-                    table,
-                }
-            }
+            crate::DebugLevel::Lines => self,
             crate::DebugLevel::None => Self {
                 cleanup: self.cleanup,
                 ..Self::default()

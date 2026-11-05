@@ -95,6 +95,8 @@ pub(crate) fn enabled() -> bool {
 /// snapshot pool), the native code for it and its debug tables.
 pub(crate) struct DriverProgram {
     pub(crate) code: Arc<Vec<common::Byte>>,
+    pub(crate) startup: Arc<Vec<common::StartupOp>>,
+    pub(crate) main: Option<u32>,
     pub(crate) constants: Arc<Vec<u64>>,
     pub(crate) native: Arc<NativeCode>,
     pub(crate) debug: ProgramDebug,
@@ -199,7 +201,7 @@ impl<'a> Driver<'a> {
         use crate::native::Applied;
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
-        let code_len = d.program.code.len();
+        let code_len = d.program.native.code_len();
         match crate::apply::apply(&mut d.rt.heap, Value::from(callee), args, dicts, code_len) {
             crate::apply::Apply::Value(v) => Applied::Value(v.bits()),
             crate::apply::Apply::Call { pc, args, extras } if extras.is_empty() => Applied::Call { pc, args },
@@ -228,70 +230,45 @@ impl<'a> Driver<'a> {
         self.rt.thread_spawn_context(self.program.thread_program.clone()?, self.program.shared_print.clone())
     }
 
-    /// Whether the driver can run the program that starts at `ip`: its
-    /// prologue holds only startup ops, and every body it calls compiled.
-    pub(crate) fn can_start(code: &[common::Byte], native: &NativeCode, ip: usize) -> bool {
-        let mut pc = ip;
-        for _ in 0..code.len() {
-            let Some(b) = code.get(pc) else { return false };
-            match *b.bytecode() {
-                Instruction::CALL => {
-                    // `CALL 0`: the prologue's bootstrap frame, no call.
-                    let t = b.call_parts().1;
-                    if t != 0 && native.lookup(t).is_none() {
-                        return false;
-                    }
-                }
-                Instruction::StoreStatic | Instruction::POP | Instruction::NOOP | Instruction::RestoreSnapshot => {}
-                // The prologue's end, or the `CALL main; RETURN` its jump
-                // into `main` leads to with native code.
-                Instruction::HALT | Instruction::RETURN => return true,
-                Instruction::JMP => {
-                    let t = b.operand_u32() as usize;
-                    if native.lookup(t).is_some() {
-                        return true;
-                    }
-                    pc = t;
-                    continue;
-                }
-                _ => return false,
-            }
-            pc += 1;
-        }
-        false
+    /// Whether `native` covers `program`: its startup and its `main`.
+    pub(crate) fn covers(startup: &[common::StartupOp], main: Option<u32>, native: &NativeCode) -> bool {
+        use common::StartupOp as Op;
+        native.is_complete()
+            && main.is_none_or(|m| native.lookup(m as usize).is_some())
+            && startup.iter().all(|op| match *op {
+                Op::Call { entry } | Op::Init { entry, .. } => native.lookup(entry as usize).is_some(),
+                Op::Restore { .. } => true,
+            })
     }
 
-    /// Run the prologue from `ip` (as [`Self::can_start`] checked it):
-    /// the startup ops, until its `HALT` or its jump into `main`, which
-    /// is called. Stops at a panic.
-    pub(crate) fn run_from(&mut self, ip: usize) {
-        let code = Arc::clone(&self.program.code);
-        let mut pc = ip;
-        let mut last = Value::default();
-        while !self.panicked {
-            let Some(b) = code.get(pc) else { return };
-            match *b.bytecode() {
-                Instruction::CALL if b.call_parts().1 == 0 => {}
-                Instruction::CALL => last = self.call(b.call_parts().1, &[]).map_or_else(Value::default, |(lo, _)| Value::from(lo)),
-                Instruction::StoreStatic => {
-                    if let Some(s) = self.rt.statics.get_mut(b.operand_u32() as usize) {
-                        *s = last;
-                    }
-                }
-                Instruction::POP | Instruction::NOOP => {}
-                Instruction::RestoreSnapshot => self.restore_snapshot(b.operand_u32() as usize),
-                Instruction::JMP => {
-                    let t = b.operand_u32() as usize;
-                    if self.program.native.lookup(t).is_some() {
-                        let _ = self.call(t, &[]);
-                        return;
-                    }
-                    pc = t;
-                    continue;
-                }
-                _ => return,
+    /// What runs before `main`. A panic stops it.
+    pub(crate) fn run_startup(&mut self) {
+        use common::StartupOp as Op;
+        let ops = Arc::clone(&self.program.startup);
+        for op in ops.iter() {
+            if self.panicked {
+                return;
             }
-            pc += 1;
+            match *op {
+                Op::Call { entry } => {
+                    let _ = self.call(entry as usize, &[]);
+                }
+                Op::Init { entry, slot } => {
+                    let word = self.call(entry as usize, &[]).map_or_else(Value::default, |(lo, _)| Value::from(lo));
+                    if let Some(s) = self.rt.statics.get_mut(slot as usize) {
+                        *s = word;
+                    }
+                }
+                Op::Restore { at } => self.restore_snapshot(at as usize),
+            }
+        }
+    }
+
+    /// The whole program: its startup, then `main`.
+    pub(crate) fn run_program(&mut self) {
+        self.run_startup();
+        if let Some(main) = self.program.main.filter(|_| !self.panicked) {
+            let _ = self.call(main as usize, &[]);
         }
     }
 
@@ -407,7 +384,7 @@ impl<'a> Driver<'a> {
     pub(crate) fn call_value(&mut self, callee: Value, args: &[Value], dicts: usize) -> Option<Value> {
         let (mut callee, mut args, mut dicts) = (callee, args.to_vec(), dicts);
         loop {
-            let code_len = self.program.code.len();
+            let code_len = self.program.native.code_len();
             match crate::apply::apply(&mut self.rt.heap, callee, &args, dicts, code_len) {
                 crate::apply::Apply::Value(v) => return Some(v),
                 crate::apply::Apply::Bad(msg) => {
@@ -636,7 +613,7 @@ impl<'a> Driver<'a> {
     }
 
     fn locator(&self) -> crate::locate::Locator<'_> {
-        crate::locate::Locator { debug: &self.program.debug, code_len: self.program.code.len(), base_dir: self.program.base_dir.as_deref() }
+        crate::locate::Locator { debug: &self.program.debug, base_dir: self.program.base_dir.as_deref() }
     }
 
     /// `--cow-report`: the copies copy-on-write made, by source line, most

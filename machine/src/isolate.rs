@@ -111,8 +111,7 @@ impl Isolate {
     /// nothing ran.
     pub fn call(&mut self, offset: u32, args: &[Value]) -> Option<Value> {
         let start = offset as usize;
-        let covered = self.native.lookup(start).is_some() || Driver::can_start(&self.code, &self.native, start);
-        if !covered || !self.native.is_complete() {
+        if self.native.lookup(start).is_none() || !self.native.is_complete() {
             return None;
         }
         let out = self.on_driver(|d| d.call(start, args));
@@ -122,6 +121,8 @@ impl Isolate {
     fn on_driver<R>(&mut self, f: impl FnOnce(&mut Driver<'_>) -> R) -> R {
         let program = DriverProgram {
             code: Arc::clone(&self.code),
+            startup: Arc::default(),
+            main: None,
             constants: Arc::clone(&self.constants),
             native: Arc::clone(&self.native),
             debug: self.debug.clone(),

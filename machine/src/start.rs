@@ -33,8 +33,8 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
     if !crate::driver::enabled() || !crate::native::pending_is_complete() {
         return None;
     }
-    let native = crate::native::take_pending()?.into_code(program.code.len());
-    if native.lookup(0).is_none() && !Driver::can_start(&program.code, &native, 0) {
+    let native = crate::native::take_pending()?.into_code(0);
+    if !Driver::covers(&program.startup, program.main, &native) {
         crate::native::install_shared_for_next_run(native);
         return None;
     }
@@ -46,6 +46,8 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
     rt.native = Some(Box::new(crate::native::NativeTable::new(Arc::clone(&native))));
     let driver_program = DriverProgram {
         code: Arc::clone(&program.code),
+        startup: Arc::clone(&program.startup),
+        main: program.main,
         constants: Arc::clone(&program.constants),
         native,
         debug: program.debug.clone(),
@@ -58,7 +60,7 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
     }
     let mut driver = Driver::new(&mut rt, driver_program);
     let guard = crate::thread::HostStateGuard::enter_driver(&mut driver);
-    driver.run_from(0);
+    driver.run_program();
     driver.run_remaining_finalizers();
     driver.print_cow_report();
     drop(guard);

@@ -172,6 +172,8 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
         line_table: Vec::new(),
         span_table: Vec::new(),
         native_mir: Vec::new(),
+        startup: pipeline.startup(),
+        main: pipeline.main_offset(),
     };
     let full = pipeline.program_debug_full();
     let level = pipeline.debug_level();
@@ -558,6 +560,8 @@ fn run_cached(pipeline: &mut Pipeline, filename: &str, loaded: &LoadedArchive) {
         pipeline,
         CachedProgram {
             bytecode: &loaded.bytecode,
+            startup: &loaded.startup,
+            main: loaded.main,
             constants: &loaded.constants,
             strings: &loaded.strings,
             static_slots: loaded.static_slots,

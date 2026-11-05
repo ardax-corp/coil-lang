@@ -2230,6 +2230,8 @@ fn encode_program(program: &CompiledProgram) -> Option<Vec<u8>> {
         line_table: Vec::new(),
         span_table: Vec::new(),
         native_mir: program_mir(e),
+        startup: Vec::new(),
+        main: None,
     };
     archive.set_debug(e.program_debug.clone(), common::DebugLevel::Full);
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&archive).ok()?;

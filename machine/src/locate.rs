@@ -8,8 +8,6 @@ use common::ProgramDebug;
 /// A program's debug tables, as panic reports read them.
 pub(crate) struct Locator<'a> {
     pub(crate) debug: &'a ProgramDebug,
-    /// Bytecode length: a function's span ends there at the latest.
-    pub(crate) code_len: usize,
     /// Directory of the entry script (relative source paths).
     pub(crate) base_dir: Option<&'a Path>,
 }
@@ -62,33 +60,11 @@ impl Locator<'_> {
         (i > 0).then(|| syms[i - 1].name.as_str())
     }
 
-    /// `path:line:col` of a native panic site: the location the VM records
-    /// for the same op, found among the PCs of the site's function.
+    /// `path:line:col` of a native panic site.
     pub(crate) fn native_site_location(&self, site: crate::native::NativeSite) -> Option<String> {
-        let start = site.entry_pc as usize;
-        let end = self
-            .debug
-            .fn_symbols
-            .iter()
-            .map(|s| s.entry_pc as usize)
-            .filter(|&pc| pc > start)
-            .min()
-            .unwrap_or(self.code_len);
-        let want = site.loc;
-        if !want.is_known() {
-            return None;
-        }
-        let mut near = None;
-        for pc in start..end {
-            let Some(l) = self.debug.loc_at(pc) else { continue };
-            if l.file == want.file && l.start_byte == want.start_byte {
-                if l.end_byte == want.end_byte {
-                    return self.location(pc);
-                }
-                near.get_or_insert(pc);
-            }
-        }
-        near.and_then(|pc| self.location(pc))
+        let (file, line) = self.debug.line_of(site.loc)?;
+        let path = self.debug.source_files.get(file as usize)?;
+        Some(format!("{path}:{}:{}", line.line, line.column))
     }
 
     /// The backtrace line of native site `s`: `  in name at loc`.

@@ -269,6 +269,8 @@ impl Launch {
     fn new(pipeline: &Pipeline, artifacts: &DissectArtifacts, entry: &Path) -> Self {
         let program = Arc::new(machine::ThreadProgram {
             code: Arc::new(artifacts.bytecode.clone()),
+            startup: Arc::new(pipeline.startup()),
+            main: pipeline.main_offset(),
             constants: Arc::new(artifacts.constants.clone()),
             strings: Arc::new(artifacts.strings.clone()),
             static_slot_count: pipeline.static_slot_count(),

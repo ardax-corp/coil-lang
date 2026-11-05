@@ -44,6 +44,8 @@ fn compile_program(pipeline: &mut Pipeline, filename: &str) -> Result<ArchivedPr
         line_table: Vec::new(),
         span_table: Vec::new(),
         native_mir: Vec::new(),
+        startup: pipeline.startup(),
+        main: pipeline.main_offset(),
     };
     // Cleanup ranges are behaviour (panics run `defer`s), not debug info:
     // `set_debug` keeps them at every level.

@@ -52,6 +52,8 @@ pub struct CompiledProgram<'a> {
 pub fn thread_program(pipeline: &Pipeline, program: CompiledProgram<'_>) -> ThreadProgram {
     ThreadProgram {
         code: Arc::new(program.bytecode.to_vec()),
+        startup: Arc::new(pipeline.startup()),
+        main: pipeline.main_offset(),
         constants: Arc::new(program.constants.to_vec()),
         strings: Arc::new(program.strings.to_vec()),
         static_slot_count: program.static_slots,
@@ -101,6 +103,8 @@ pub fn execute_pipeline(args: ExecutePipelineArgs<'_>) -> bool {
 /// FFI search paths) still come from the pipeline's flags.
 pub struct CachedProgram<'a> {
     pub bytecode: &'a [Byte],
+    pub startup: &'a [common::StartupOp],
+    pub main: Option<u32>,
     pub constants: &'a [u64],
     pub strings: &'a [String],
     pub static_slots: u32,
@@ -120,6 +124,8 @@ pub fn execute_cached(pipeline: &Pipeline, program: CachedProgram<'_>, entry: Op
     run(
         ThreadProgram {
             code: Arc::new(program.bytecode.to_vec()),
+            startup: Arc::new(program.startup.to_vec()),
+            main: program.main,
             constants: Arc::new(program.constants.to_vec()),
             strings: Arc::new(program.strings.to_vec()),
             static_slot_count: program.static_slots,

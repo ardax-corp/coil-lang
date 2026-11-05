@@ -25,8 +25,8 @@ pub(crate) fn runs_natively(job: &Job) -> bool {
     let Some(native) = job.native.as_ref().filter(|n| crate::driver::enabled() && n.is_complete()) else {
         return false;
     };
-    let init = job.test.as_ref().and_then(|t| t.init_ip).map(|ip| ip as usize);
-    native.lookup(job.entry as usize).is_some() && init.is_none_or(|ip| native.lookup(ip).is_some() || Driver::can_start(&job.program.code, native, ip))
+    let startup = job.test.is_none() || Driver::covers(&job.program.startup, None, native);
+    native.lookup(job.entry as usize).is_some() && startup
 }
 
 /// Run `job` (one [`runs_natively`] accepts) on the driver and store its
@@ -126,6 +126,8 @@ fn run_on(rt: &mut Runtime, job: Job) {
         }
         let driver_program = DriverProgram {
             code: Arc::clone(&program.code),
+            startup: Arc::clone(&program.startup),
+            main: program.main,
             constants: Arc::clone(&program.constants),
             native,
             debug: program.debug.clone(),

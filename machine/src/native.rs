@@ -768,6 +768,7 @@ impl NativeCode {
     /// `code_len` is the program's bytecode length; entries past it are
     /// dropped. `sites` are the panic sites the code names.
     pub fn new(code_len: usize, entries: Vec<NativeEntry>, sites: Vec<NativeSite>) -> Self {
+        let code_len = entries.iter().map(|e| e.pc as usize + 1).max().unwrap_or(0).max(code_len);
         let mut by_pc = vec![0u32; code_len];
         let mut kept = Vec::with_capacity(entries.len());
         for e in entries {
