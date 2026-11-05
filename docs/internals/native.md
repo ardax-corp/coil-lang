@@ -248,25 +248,37 @@ native frames in between.
 
 A collection can run inside such a call, and at a *safepoint*: the entry
 and loop headers of a body that may allocate, taken when an allocation
-after the commit found a collection due (`NativeCtx::gc_due`). Before
-either, native code links a record of the heap words the frame still
-holds into `NativeCtx::roots` (`[next, n, words…]` on its stack); callers
-of a body where a collection may run (`Plan::may_gc`) do the same around
-the call. The VM treats those words as precise roots: a minor collection
-forwards them in place. After the call, when `NativeCtx::gc_epoch` moved,
-native code reloads the words and drops its array views.
+found a collection due (`NativeCtx::gc_due`).
 
-A record holds what the VM's frame would: the values live after the op
-(`mir::liveness`) and those it reads, and the words locals hold
-(`MirFunc::local_binds`): a local's word from its definition until the
-local is rebound or a `ClearWord` drops it, even past its last use; a
-match binding only through its scrutinee; where paths that left a local
-different words meet with no φ, neither. A heap word moved into an `int`
-value (an enum payload) is rooted precisely; a call's pair low word that
-may carry an object (`MirFunc::heap_pair_calls`), and an opaque body's
-`int` words, go in an ambiguous record (pinned, never rewritten). So a
-dead temporary or a rebound local's old object is not kept alive, and a
-weak to it is cleared by `collect` as on the VM.
+Native frames hand the collector their heap words through Cranelift stack
+maps. Every value of a heap type (and every `int` value a heap word moved
+into, `pointer_words`) is declared `declare_var_needs_stack_map`: Cranelift
+keeps it in a stack slot across each call and records, per call's return
+address, which slots hold live heap words. Liveness is Cranelift's, at last
+use: a dead temporary or a local past its last use is not kept alive, so
+native frames may let an object go earlier than the VM's frame does. A
+`gc::root` handle is the exception: `keep_roots` uses each one before every
+return, so an unused `let r = root(h)` keeps `h` until the function returns.
+
+Code is compiled with frame pointers. Native code calls a helper that may
+collect (`call_vm`, `call_value`, `resume`, `collect`, `free_early`, `ffi`,
+`host`, `yield`) through a local trampoline that stores its frame pointer in
+`NativeCtx::native_fp`. The collector walks from there: `[fp + 8]` is the
+return address into the caller, `fp + 16` the caller's stack pointer at that
+call, `[fp]` the caller's frame pointer. Each return address inside a
+compiled body looks up its stack map (`machine::native::register_stack_maps`;
+an AOT object carries them as `coil_aot_stack_maps`); the walk stops at the
+first return address outside every body. The slots are precise roots: a
+minor collection forwards them in place, and native code reloads them after
+the call. A suspended task or generator keeps its context's `native_fp`, so
+its frames are walked the same way.
+
+Two kinds of word stay in a record linked into `NativeCtx::roots`
+(`[next, n, words…]` on the stack): the heap homes, which live in memory
+and are written back when `NativeCtx::gc_epoch` moved (array views are then
+re-read), and the ambiguous words: a call's pair low word that may carry an
+object (`MirFunc::heap_pair_calls`) and an opaque body's `int` words, which
+are pinned and never rewritten.
 
 ### Host calls
 
