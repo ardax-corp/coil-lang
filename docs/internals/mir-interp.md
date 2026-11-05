@@ -115,7 +115,7 @@ no machine code, and the VM goes. It lands here rather than on a later
 | 4. JIT by default | Open |
 | 5. Packaging without the VM | Open |
 | 6. Debugger and coverage | Open: `Deopt` stops, names at a stop, MIR probes |
-| 7. wasm | Open: `Yield` detaches its frame, a task parks an activation |
+| 7. wasm | Open: `Yield` detaches its frame, a task parks an activation; then comptime leaves `Machine<256>` |
 | 8. Delete the VM | Last: bodies by index, not bytecode PC |
 
 **Step 2.** A clean compile panics on a body with no MIR (`require_mir`), and
@@ -171,10 +171,22 @@ the VM's optimized bytecode: `N` iterations of a `while` take `N` back-edges the
 and `N - 1` once the loop is rotated. A call right at `SILENT_CALL_STEPS` used to fold and now stays a call,
 with E0138. The value is the same; five of the 365 examples changed this way.
 
-**`Machine<256>` stays for now.** The host's other work is already on the
+**`Machine<256>` stays until step 7.** The host's other work is already on the
 `Runtime`; what is left is only the type that holds it. wasm needs the VM until
-step 7, so swapping it now would mean two hosts, and step 8 shrinks `Machine` to
-that holder anyway.
+then, so swapping it now would mean two hosts. Step 7 ends with comptime on a
+holder that has no VM in it, and with the fallback to `call_function` gone, so
+step 8 deletes the VM with nothing in comptime depending on it.
+
+**Decisions for steps 4 and 5** (the options doc's 3 and 4):
+
+- Packages without AOT, and spool `--vm`, become a **JIT runner**: `coil-rt`,
+  Cranelift and a MIR payload, with no linker. This replaces the earlier plan for
+  spool to keep VM packaging long-term.
+- `.ccoil` stays, as a **MIR archive that JITs on load**, so archives are portable
+  across hosts and `coil run x.ccoil` keeps working.
+
+Decision 5 (keep the VM-observable rules, or define them anew on MIR) is open.
+Until it is made, today's rules stand and tests do not change.
 
 ## Open problems
 
