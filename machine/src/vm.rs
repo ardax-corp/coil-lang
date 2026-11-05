@@ -637,15 +637,6 @@ impl<const S: usize> Machine<S> {
         self.rt.take_probes()
     }
 
-    /// Call the body at `offset` on a native driver over this machine, as
-    /// [`Self::call_function`] does on the VM: a panic leaves
-    /// [`Self::panicked`] set and returns the default word. `None`: the
-    /// installed native code does not cover it, and nothing ran.
-    pub fn call_on_driver(&mut self, offset: u32, args: &[Value]) -> Option<Value> {
-        let out = self.with_native_driver(offset as usize, |d| d.call(offset as usize, args))?;
-        Some(out.map_or(Value::default(), |(lo, _)| Value::from(lo)))
-    }
-
     /// The installed native code, for a machine that runs this program.
     pub fn native_code(&self) -> Option<std::sync::Arc<crate::native::NativeCode>> {
         self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
@@ -1301,16 +1292,13 @@ impl<const S: usize> Machine<S> {
     /// `None` (the default) removes the limit. The budget spans every run on
     /// this machine until set again; spawned worker machines never inherit it.
     pub fn set_step_budget(&mut self, budget: Option<u64>) {
-        // `budget` charges succeed; the next one reaches zero.
-        self.rt.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
-        self.rt.fuel_start = self.rt.fuel;
-        self.rt.step_budget_hit = false;
+        self.rt.set_step_budget(budget);
     }
 
     /// Steps charged since [`Self::set_step_budget`] was last called (with or
     /// without a limit), capped at the budget when it ran out.
     pub fn steps_charged(&self) -> u64 {
-        self.rt.fuel_start - self.rt.fuel.min(self.rt.fuel_start)
+        self.rt.steps_charged()
     }
 
     /// True once the budget from [`Self::set_step_budget`] ran out.
@@ -1324,9 +1312,7 @@ impl<const S: usize> Machine<S> {
     /// become true). `None` (the default) removes the limit. Like the step
     /// budget, it spans every run until set again.
     pub fn set_heap_cap(&mut self, cap: Option<usize>) {
-        self.rt.heap_cap = cap.unwrap_or(usize::MAX);
-        self.rt.heap_cap_hit = false;
-        self.rt.heap.get_mut().set_byte_cap(self.rt.heap_cap);
+        self.rt.set_heap_cap(cap);
     }
 
     /// True once the heap outgrew the cap from [`Self::set_heap_cap`].
@@ -2894,20 +2880,14 @@ impl<const S: usize> Machine<S> {
 
     /// Redirect `PRINT` output (used by pipeline tests).
     pub fn with_output<W: IoWrite + Send + 'static>(&mut self, writer: W) -> Option<OutputSink> {
-        let prev = self.rt.output.take();
-        self.rt.output = Some(Box::new(writer));
-        if let Some(out) = self.rt.output.as_mut() {
-            crate::io::set_output_redirect(Some(out.as_mut() as *mut (dyn IoWrite + Send)));
-        }
-        prev
+        self.rt.with_output(writer)
     }
 
     /// Reset the output sink back to stdout. Returns the previous
     /// sink so the caller can recover it (useful in tests that
     /// want to scope the redirection).
     pub fn restore_output(&mut self) -> Option<OutputSink> {
-        crate::io::set_output_redirect(None);
-        self.rt.output.take()
+        self.rt.restore_output()
     }
 
     /// Register a host native with an explicit signature via the

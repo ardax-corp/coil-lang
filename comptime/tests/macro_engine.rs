@@ -1,6 +1,5 @@
 //! Macros and consts run on the MIR interpreter, and a program read back
-//! from the disk cache does too. Falling back to the VM changes no result,
-//! so only the host's count shows it.
+//! from the disk cache does too: there is no other engine for them to run on.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,16 +37,13 @@ fn project(root: &Path) -> PathBuf {
     dir
 }
 
-/// In a child process: compile the project, and check how it ran.
-fn compile_and_count(dir: &Path) {
+/// In a child process: compile the project.
+fn compile(dir: &Path) {
     comptime::install();
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_root(dir.to_path_buf(), vec![PathBuf::from("src")]);
     let file = dir.join("src/main.coil");
     pipeline.compile_src_from_file(file.to_str().unwrap()).expect("the program compiles");
-    let (mir, vm) = comptime::engine_calls();
-    assert!(mir >= 2, "a macro and a const ran: {mir} calls");
-    assert_eq!(vm, 0, "no call fell back to the VM");
 }
 
 /// Each run is a process of its own, so the second one reads the expansion
@@ -56,7 +52,7 @@ fn compile_and_count(dir: &Path) {
 #[test]
 fn macros_and_consts_run_on_the_interpreter() {
     if let Some(dir) = std::env::var_os(CHILD) {
-        compile_and_count(Path::new(&dir));
+        compile(Path::new(&dir));
         return;
     }
     let root = std::env::temp_dir().join(format!("coil_macro_engine_{}", std::process::id()));

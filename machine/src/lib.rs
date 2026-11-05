@@ -8,6 +8,7 @@ mod arith;
 mod collect;
 mod driver;
 mod gen_fiber;
+mod isolate;
 mod lanes;
 mod locate;
 pub mod char_ord;
@@ -81,6 +82,7 @@ pub use runtime_wire::{VmHostSpec, class_kind_table};
 #[cfg(any(test, feature = "vm"))]
 pub use runtime_wire::{WireThreadProgramWithMapsArgs, wire_thread_program, wire_thread_program_with_maps, wire_vm_host};
 pub use profile::*;
+pub use isolate::{Isolate, IsolateProgram};
 pub use start::{NativeStart, run_natively};
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{

@@ -180,6 +180,42 @@ impl Runtime {
         self.gc_deferred = false;
     }
 
+    /// Send `print` to `writer`; the sink it replaces.
+    pub(crate) fn with_output<W: std::io::Write + Send + 'static>(&mut self, writer: W) -> Option<OutputSink> {
+        let prev = self.output.take();
+        self.output = Some(Box::new(writer));
+        if let Some(out) = self.output.as_mut() {
+            crate::io::set_output_redirect(Some(out.as_mut() as *mut (dyn std::io::Write + Send)));
+        }
+        prev
+    }
+
+    /// Back to stdout; the sink it replaces.
+    pub(crate) fn restore_output(&mut self) -> Option<OutputSink> {
+        crate::io::set_output_redirect(None);
+        self.output.take()
+    }
+
+    /// Allow `budget` steps; `None` removes the limit.
+    pub(crate) fn set_step_budget(&mut self, budget: Option<u64>) {
+        // `budget` charges succeed; the next one reaches zero.
+        self.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
+        self.fuel_start = self.fuel;
+        self.step_budget_hit = false;
+    }
+
+    /// Steps charged since [`Self::set_step_budget`].
+    pub(crate) fn steps_charged(&self) -> u64 {
+        self.fuel_start - self.fuel.min(self.fuel_start)
+    }
+
+    /// Limit the heap to `cap` bytes of objects; `None` removes the limit.
+    pub(crate) fn set_heap_cap(&mut self, cap: Option<usize>) {
+        self.heap_cap = cap.unwrap_or(usize::MAX);
+        self.heap_cap_hit = false;
+        self.heap.get_mut().set_byte_cap(self.heap_cap);
+    }
+
     /// Start counting `n` coverage probes; `0` counts none.
     pub(crate) fn begin_probes(&mut self, n: u32) {
         self.probes = vec![0; n as usize];
