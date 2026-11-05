@@ -609,11 +609,14 @@ fn generic_bodies_keep_their_opaque_words_across_collections() {
 #[test]
 fn gc_collect_runs_from_native_code_with_its_words_rooted() {
     // `churn` holds heap words across `collect()`; the collection must
-    // keep (and may move) them, and run the drops it owes.
+    // keep (and may move) them, and run the drops it owes. The handles are
+    // made in `drop_one`, so no frame holds one at the collection (native
+    // frames free a local at its last use, the VM's frame when rebound).
     let src = format!(
         "{HEADER}use gc::collect;\nstatic let drops: int = 0;\nclass Handle {{ pub fd: int }}\nimpl Handle {{ fn drop() {{ drops = drops + 1; }} }}\n\
+         #[inline(never)]\nfn drop_one(int i) {{ let _h = new Handle(i); }}\n\
          #[inline(never)]\nfn churn(int n) -> int {{\n  let keep = format(\"keep %i\", n);\n  let parts: Vec<string> = [];\n  let i = 0;\n\
-           while i < n {{ parts.push(format(\"%i\", i)); let _h = new Handle(i); i = i + 1; }}\n\
+           while i < n {{ parts.push(format(\"%i\", i)); drop_one(i); i = i + 1; }}\n\
            let freed = collect();\n  return parts.len() + keep.len() + (if freed >= 0 {{ 1 }} else {{ 0 }});\n}}\n\
          fn main() {{ let t = 0; let k = 0; while k < 4 {{ t = t + churn(3000); k = k + 1; }} let _ = println(format(\"%i %i\", t, drops)); }}\n"
     );
@@ -1348,10 +1351,10 @@ fn a_generic_body_with_an_int_defer_home_compiles() {
 
 #[test]
 fn native_frames_root_only_what_they_still_hold() {
-    // A native frame's root record must not keep a dead temporary, a
-    // rebound local's old object or a match binding past its scrutinee
-    // alive, and must keep a local and an enum payload used later, as the
-    // VM's frame does: each line prints `true` on both engines.
+    // A native frame must not keep a dead temporary, a rebound local's old
+    // object or a match binding past its scrutinee alive, and must keep a
+    // local and an enum payload used later: each line prints `true` on
+    // both engines.
     let src = format!(
         "{HEADER}use gc::{{collect, upgrade, weak, Weak}};\n\
          class Node {{ pub v: int, pub next: Option<Node> }}\n\
@@ -1363,7 +1366,7 @@ fn native_frames_root_only_what_they_still_hold() {
          fn make(int k) -> Holder {{ return Holder::One(node(k)); }}\n\
          #[inline(never)]\nfn weak_in(Holder h) -> Weak<Node> {{ return match h {{ Holder::One(n) => weak(n), Holder::Empty => weak(node(-1)) }}; }}\n\
          #[inline(never)]\nfn temp_dropped() -> bool {{ let w = weak_to(node(1)); collect(); return gone(w); }}\n\
-         #[inline(never)]\nfn local_kept() -> bool {{ let n = node(2); let w = weak(n); collect(); return !gone(w); }}\n\
+         #[inline(never)]\nfn local_kept() -> bool {{ let n = node(2); let w = weak(n); collect(); return !gone(w) && n.v == 2; }}\n\
          #[inline(never)]\nfn rebound_dropped() -> bool {{\n  let junk: Option<Node> = Option::Some(node(3));\n\
            let w = match junk {{ Option::Some(n) => weak_to(n), Option::None => weak_to(node(-1)) }};\n\
            junk = Option::None;\n  collect();\n  return gone(w);\n}}\n\
