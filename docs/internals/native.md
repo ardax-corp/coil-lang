@@ -93,19 +93,15 @@ the VM out of native binaries drive every total to 0.
 ### The native MIR section
 
 `ArchivedProgram::native_mir` (archive 6.20; 6.0 to 6.19 archives load
-with it empty) holds bytes in the `coil-native` section format
-(`coil-native/src/section.rs`): the magic `CNMIR`, a format byte, then each
-body the backend compiles with its name, bytecode entry PC, entry label,
-signature, value types and blocks. Only those bodies and only the MIR the
-backend lowers are stored, so the encoder never meets an instruction
-outside the tier; the format grows with the tiers and bumps its format byte
-when the layout changes. A reader refuses any other format, a truncated
-section or trailing bytes, and the run falls back to the VM with a
-warning. Format 8 carries each body's pair words (`MirFunc::heap_pair_words`), the coroutine ops (`ResumeCoro`, `DoneCoro`,
-`Yield`, coroutine allocations), FFI ops and the vector ops (`ByteScan`
-with its lane expression, `VecLoop` with its vector expression trees, at
-most 64 deep). The section is compiled again on every run: the archive carries
-MIR, not machine code.
+with it empty) holds bytes in the MIR archive format
+(`compiler/src/mir/archive.rs`): the magic `CNMIR`, a format byte, then each
+body with its name, bytecode entry PC and entry label. `coil_native::section`
+chooses the bodies: those the backend compiles, and a stub of each body they
+call on the VM. A full body is stored whole, every field and instruction, and
+comes back equal; `COIL_MIR_ARCHIVE_CHECK` runs a corpus on the copies that
+come back. A reader refuses any other format, a truncated section or trailing
+bytes, and the run falls back to the VM with a warning. The section is
+compiled again on every run: the archive carries MIR, not machine code.
 
 ## Numeric tier (step 2)
 

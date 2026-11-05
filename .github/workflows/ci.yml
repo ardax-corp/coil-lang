@@ -516,7 +516,9 @@ jobs:
             # Every corpus on the MIR interpreter: raw MIR at `-O 0`, the
             # reference the optimized engines are compared against
             # (`docs/internals/mir-interp.md`).
-            mir) $run -- --engine mir $FLAGS ;;
+            # Every body also goes through the MIR archive format and must
+            # come back equal: the run uses the copy.
+            mir) COIL_MIR_ARCHIVE_CHECK=1 $run -- --engine mir $FLAGS ;;
             # And each level above it, on the MIR native code compiles: a
             # failure here and not in `mir` is a pass's.
             mir-opt) for level in 1 2 3 s g; do $run -- --engine mir -O $level $FLAGS; done ;;

@@ -112,8 +112,8 @@ no machine code, and the VM goes. It lands here rather than on a later
 | 1. MIR interpreter | Done: every corpus, every level, CI cells |
 | 2. Glue as MIR | Mostly done already (below) |
 | 3. Comptime and macros on the interpreter | Next |
-| 4. JIT by default | Needs the MIR archive format |
-| 5. Packaging without the VM | Needs the MIR archive format |
+| 4. JIT by default | Open |
+| 5. Packaging without the VM | Open |
 | 6. Debugger and coverage | Open: `Deopt` stops, names at a stop, MIR probes |
 | 7. wasm | Open: `Yield` detaches its frame, a task parks an activation |
 | 8. Delete the VM | Last: bodies by index, not bytecode PC |
@@ -124,12 +124,14 @@ What is left is about 30 direct `bytecode.push_*` sites in `codegen`, not yet
 sorted into prologue steps and dead paths, plus the startup region the driver
 walks.
 
-**The MIR archive format comes first.** Steps 3, 4 and 5 all need MIR on disk:
-the compile-time program cache stores `CompiledExpansion`, and `.ccoil` becomes
-MIR and data only. `coil_native::section` is the start of it, but it lives in a
-crate that is empty on wasm, stores only what `coil_native::plan` admits, and
-leaves out `opaque_words` and `local_binds`. It should move beside MIR and carry
-every body whole.
+**The MIR archive format** is in place for steps 3, 4 and 5, which all need MIR
+on disk: the compile-time program cache stores `CompiledExpansion`, and `.ccoil`
+becomes MIR and data only. `compiler/src/mir/archive.rs` builds for wasm and
+carries a body whole. `COIL_MIR_ARCHIVE_CHECK=1` makes `prepare` send every body
+through it, assert it comes back equal and run that copy; CI's `mir` cell runs
+the corpus so. The section is the larger part of a `--jit` archive (125 KB
+against 18 KB of bytecode on `examples/perf/vec_lanes.coil`), because locations
+and tables are stored as they are; step 5 will want to look at that.
 
 **Step 3.** The three places that build a `CompiledExpansion` (a fresh
 expansion, one from the disk cache, const evaluation) need its MIR. A compile
@@ -163,4 +165,5 @@ order that keeps the corpus green at each step:
 | Raw capture | `compiler/src/mir/native_capture.rs` (`start_raw_capture`) |
 | Frame word analyses, shared with Cranelift | `compiler/src/mir/frame_words.rs` |
 | Scan records, `NativeEntry::data` | `machine/src/native.rs` |
+| MIR on disk | `compiler/src/mir/archive.rs` |
 | Tests | `tests/mir_interp_cli.rs`, every corpus through `--engine mir` |
