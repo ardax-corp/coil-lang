@@ -7,8 +7,7 @@ use std::process::exit;
 
 use coil_cli::resolve_default_runner;
 use common::{
-    append_package_payload_with_natives, bytecode_uses_ffi, dload_request_stem,
-    ffi_library_names_from_bytecode,
+    append_package_payload_with_natives, dload_request_stem,
     is_packaged_executable, is_system_ffi_stem, ArchivedProgram, Byte,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
@@ -439,21 +438,20 @@ pub fn parse_ffi_native(spec: &str) -> Result<FfiNative, String> {
     })
 }
 
-/// Build a [`NativeLock`] from bytecode `dload` stems and `--ffi-native` rows.
+/// Build a [`NativeLock`] from `dload` stems and `--ffi-native` rows.
 pub fn build_native_lock(
     natives: &[FfiNative],
-    bytecode: &[Byte],
-    strings: &[String],
+    libraries: &[String],
     linked: &[StaticLink],
 ) -> Result<NativeLock, String> {
     // Reduce each literal to the stem the runtime dload gate uses
     // (`./native/libtls.so` → `tls`), so one `--ffi-native name=tls` row covers
     // every spelling of that library.
     let mut stems: Vec<(String, String)> = Vec::new();
-    for literal in ffi_library_names_from_bytecode(bytecode, strings) {
-        let stem = dload_request_stem(&literal);
+    for literal in libraries {
+        let stem = dload_request_stem(literal);
         if !stems.iter().any(|(s, _)| *s == stem) {
-            stems.push((stem, literal));
+            stems.push((stem, literal.clone()));
         }
     }
     let mut entries = Vec::new();
@@ -596,14 +594,13 @@ pub fn cmd_package(
         }
     };
     let bodies = compiler::native_mir::take_native_capture();
-    let (bytecode, strings) = (program.bytecode.clone(), program.strings.clone());
-    let uses_ffi = bytecode_uses_ffi(&bytecode);
+    let (uses_ffi, libraries) = compiler::native_mir::ffi_use(&bodies, &program.strings);
     let mut flags = 0u32;
     if uses_ffi {
         flags |= PACKAGE_FLAG_USES_FFI;
     }
 
-    let native_lock = match build_native_lock(natives, &bytecode, &strings, &link.statics) {
+    let native_lock = match build_native_lock(natives, &libraries, &link.statics) {
         Ok(lock) => lock,
         Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
     };
@@ -630,7 +627,7 @@ pub fn cmd_package(
         .parent()
         .filter(|p| !p.as_os_str().is_empty());
     if check_native && uses_ffi {
-        let libs = ffi_library_names_from_bytecode(&bytecode, &strings);
+        let libs = libraries;
     let mut gate = machine::DloadGate::from_consumer_trusted(
         &pipeline.dload_native_pins(),
         pipeline.dload_trusted_stems(),

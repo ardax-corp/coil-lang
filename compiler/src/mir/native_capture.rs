@@ -211,3 +211,37 @@ pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
         _ => None,
     }
 }
+
+/// What `bodies` load through FFI: whether any calls into a shared library,
+/// and the names `dload` is given as literals, in order, once each. `strings`
+/// is the program's string table.
+pub fn ffi_use(bodies: &[NativeBody], strings: &[String]) -> (bool, Vec<String>) {
+    let mut uses = false;
+    let mut names: Vec<String> = Vec::new();
+    for b in bodies {
+        let literals: std::collections::HashMap<super::ValueId, u32> = b
+            .mir
+            .blocks
+            .iter()
+            .flat_map(|blk| &blk.insts)
+            .filter_map(|i| match i {
+                super::MirInst::String { dest, idx } => Some((*dest, *idx)),
+                _ => None,
+            })
+            .collect();
+        for inst in b.mir.blocks.iter().flat_map(|blk| &blk.insts) {
+            let super::MirInst::Ffi { op, args, .. } = inst else { continue };
+            uses = true;
+            if *op != super::MirFfiOp::Load {
+                continue;
+            }
+            let name = args.first().and_then(|a| literals.get(a)).and_then(|&s| strings.get(s as usize));
+            if let Some(name) = name
+                && !names.contains(name)
+            {
+                names.push(name.clone());
+            }
+        }
+    }
+    (uses, names)
+}
