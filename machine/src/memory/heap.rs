@@ -1536,6 +1536,11 @@ impl Heap {
         self.gc_next_threshold = self.gc_next_threshold.min(cap);
     }
 
+    /// The cap from [`Self::set_byte_cap`].
+    pub fn byte_cap(&self) -> usize {
+        self.byte_cap
+    }
+
     /// True when the heap holds more than [`Self::set_byte_cap`] allows.
     #[inline]
     pub fn over_byte_cap(&self) -> bool {

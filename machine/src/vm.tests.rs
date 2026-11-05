@@ -3257,6 +3257,24 @@
         assert_eq!(vm.heap().size(), 0);
     }
 
+    /// A worker reuses its machine: a job that grew the heap must not leave
+    /// the next one a heap with other settings, or every job after the
+    /// first big one on a worker runs without the nursery.
+    #[test]
+    fn reset_isolate_heap_keeps_the_heap_settings() {
+        let mut vm = Machine::<8>::default();
+        vm.heap_mut().set_nursery(true);
+        vm.set_heap_cap(Some(1 << 30));
+        for i in 0..4000u32 {
+            let _ = vm.heap_mut().intern(format!("s{i}"));
+        }
+        assert!(vm.heap().slab_chunk_count() > 1, "need a heap that gets replaced");
+        vm.reset_isolate_heap();
+        assert_eq!(vm.heap().slab_chunk_count(), 0);
+        assert!(vm.heap().nursery(), "the nursery stays on");
+        assert_eq!(vm.heap().byte_cap(), 1 << 30, "the cap stays");
+    }
+
     /// Harness soft-pass checks `Result::Ok` via tag 0.
     #[test]
     fn result_is_ok_true_for_tag_zero_enum() {
