@@ -6,15 +6,6 @@ use common::{ArchivedByte as Byte, ArchivedInstruction as Instruction, Value};
 
 use crate::{Heap, ObjArray, Object};
 
-/// Eight numeric words of the array at `addr` from `index` into `reg`;
-/// `false` past either end.
-pub(crate) fn vload_words_into(heap: &Heap, reg: &mut [u64; common::simd::LANES], addr: u64, index: i64) -> bool {
-    let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
-        return false;
-    };
-    vload_lanes(gc.as_ref(), reg, index)
-}
-
 /// 8 word lanes of `arr` from `index` into `reg`; `false` past either end.
 pub(crate) fn vload_lanes(arr: &ObjArray, reg: &mut [u64; common::simd::LANES], index: i64) -> bool {
     let n = common::simd::LANES;

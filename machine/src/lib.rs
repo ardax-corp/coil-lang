@@ -1,5 +1,4 @@
 //! Stack VM, managed heap, and FFI runtime for coil bytecode.
-#![allow(dead_code, unused_imports)]
 
 mod apply;
 mod arith;

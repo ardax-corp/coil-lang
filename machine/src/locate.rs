@@ -13,45 +13,6 @@ pub(crate) struct Locator<'a> {
 }
 
 impl Locator<'_> {
-    /// Where source file `path` is: as given, or under the entry's
-    /// directory or its parent.
-    pub(crate) fn resolve_source_path(&self, path: &str) -> PathBuf {
-        let p = PathBuf::from(path);
-        if p.is_absolute() || std::fs::metadata(&p).is_ok() {
-            return p;
-        }
-        if let Some(base) = self.base_dir {
-            let root = base.parent().unwrap_or(base);
-            let from_root = root.join(path);
-            if std::fs::metadata(&from_root).is_ok() {
-                return from_root;
-            }
-            let from_base = base.join(path);
-            if std::fs::metadata(&from_base).is_ok() {
-                return from_base;
-            }
-        }
-        p
-    }
-
-    /// `(file, line, column)` of the op at `pc`.
-    pub(crate) fn pc_file_line_column(&self, pc: usize) -> Option<(u32, u32, u32)> {
-        if let Some((file, line)) = self.debug.file_line_at(pc) {
-            return Some((file, line.line, line.column));
-        }
-        let loc = self.debug.loc_at(pc)?;
-        let path = self.debug.source_files.get(loc.file as usize)?;
-        let text = std::fs::read_to_string(self.resolve_source_path(path)).ok()?;
-        let pos = common::byte_to_position(&text, loc.start_byte as usize);
-        Some((loc.file, pos.line, pos.column))
-    }
-
-    /// `path:line:col` of the op at `pc`.
-    pub(crate) fn location(&self, pc: usize) -> Option<String> {
-        let (file, line, column) = self.pc_file_line_column(pc)?;
-        let path = self.debug.source_files.get(file as usize)?;
-        Some(format!("{path}:{line}:{column}"))
-    }
 
     /// The name of the function whose body holds `ip`.
     pub(crate) fn fn_symbol_at(&self, ip: usize) -> Option<&str> {

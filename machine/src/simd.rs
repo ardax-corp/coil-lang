@@ -254,13 +254,6 @@ fn byte_cmp_scalar(pred: u8, a: &bytes64::Block, s: i64) -> bytes64::Block {
     bytes64::splat(if all { 0xFF } else { 0 })
 }
 
-/// A byte-lane `VBin` on the register file: `regs[dest] = regs[a] op
-/// regs[b]`, or lane `regs[b]` against `scalar` for `BS_CMP` kinds.
-#[inline]
-pub fn vbin_bytes_in(regs: &mut [[u64; LANES]; simd::NREGS], kind: u8, dest: usize, a: usize, b: usize, scalar: Value) {
-    ByteOp::new(kind, dest, a, b, scalar).run(regs);
-}
-
 /// `VScan` with one stream compared against one byte: from `p = from` in
 /// steps of 64 while `p <= hi` and lanes `p + off ..` lie in `bytes`, the
 /// first `p + k` where `bytes[p + off + k] pred b`, else where it stopped.

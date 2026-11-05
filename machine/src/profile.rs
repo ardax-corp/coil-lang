@@ -150,10 +150,6 @@ pub(crate) fn note_make_fast() {
     });
 }
 
-#[cfg(not(any(test, feature = "vm_profile")))]
-#[inline]
-pub(crate) fn note_make_fast() {}
-
 /// Record one `Heap::intern_str` (hash + intern table probe).
 #[cfg(any(test, feature = "vm_profile"))]
 #[inline]

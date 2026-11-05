@@ -879,11 +879,6 @@ pub(crate) struct NativePanic {
 }
 
 impl NativePanic {
-    /// A fiber parked ([`TRAP_PARKED`]).
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    pub(crate) fn parked() -> Self {
-        Self { code: TRAP_PARKED, trace: Vec::new(), message: String::new(), pads: Vec::new() }
-    }
 
     /// The VM's message for the same trap.
     pub(crate) fn message(&self) -> &str {
@@ -2055,31 +2050,6 @@ pub struct DirectHost {
 
 /// Arities a host-call stub exists for (the words after the native id).
 pub(crate) const HOST_STUB_ARITIES: usize = 16;
-/// Enum layouts a host-call stub exists for (`common::HOST_ENUM_LAYOUT_*`
-/// below the reserved one).
-const HOST_STUB_LAYOUTS: usize = 3;
-/// Code words the stubs take past the program.
-pub(crate) const HOST_STUBS_LEN: usize = 2 * HOST_STUB_ARITIES * HOST_STUB_LAYOUTS;
-
-/// The host-call stubs a machine with native code appends to its program:
-/// for each layout and arity, `HostInvoke; RETURN`. Called with the native
-/// id and the arguments as its frame, a stub runs the host call as a VM
-/// body would: parking, retries and panics as in the VM.
-pub(crate) fn host_stubs() -> Vec<common::Byte> {
-    let mut out = Vec::with_capacity(HOST_STUBS_LEN);
-    for layout in 0..HOST_STUB_LAYOUTS as u32 {
-        for arity in 0..HOST_STUB_ARITIES as u32 {
-            out.push(common::Byte::new(common::Instruction::HostInvoke).with_operand_u32(common::pack_host_invoke_operand(arity, layout)));
-            out.push(common::Byte::new(common::Instruction::RETURN));
-        }
-    }
-    out
-}
-
-/// Where the stub for `arity` words in `layout` starts, past the program.
-pub(crate) fn host_stub_offset(arity: usize, layout: u64) -> Option<usize> {
-    (arity < HOST_STUB_ARITIES && (layout as usize) < HOST_STUB_LAYOUTS).then(|| 2 * (layout as usize * HOST_STUB_ARITIES + arity))
-}
 
 /// `HostInvoke` of the direct host native `id` ([`direct_host_natives`])
 /// on the `n` words at `args`, constructing enums in `layout`
@@ -2267,11 +2237,6 @@ pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: 
     let kind = [common::Instruction::FfiLoad as u8, common::Instruction::DeclareFFI as u8].iter().position(|o| u64::from(*o) == op).unwrap_or(2);
     FFI_CALLS[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe { host_on_machine(ctx, ffi, op, operand, args, n, false) }
-}
-
-/// The opcodes of FFI ops, which get a stub per operand the program uses.
-pub(crate) fn is_ffi_op(op: common::Instruction) -> bool {
-    matches!(op, common::Instruction::FfiLoad | common::Instruction::DeclareFFI | common::Instruction::FfiInvoke)
 }
 
 /// [`coil_native_host`] of an ordinary native that is no plain function:
