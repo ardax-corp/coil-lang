@@ -177,7 +177,7 @@ then, so swapping it now would mean two hosts. Step 7 ends with comptime on a
 holder that has no VM in it, and with the fallback to `call_function` gone, so
 step 8 deletes the VM with nothing in comptime depending on it.
 
-**Decisions for steps 4 and 5** (the options doc's 3 and 4):
+**Decisions for the steps ahead** (the options doc's 3, 4 and 5):
 
 - Packages without AOT, and spool `--vm`, become a **JIT runner**: `coil-rt`,
   Cranelift and a MIR payload, with no linker. This replaces the earlier plan for
@@ -185,8 +185,9 @@ step 8 deletes the VM with nothing in comptime depending on it.
 - `.ccoil` stays, as a **MIR archive that JITs on load**, so archives are portable
   across hosts and `coil run x.ccoil` keeps working.
 
-Decision 5 (keep the VM-observable rules, or define them anew on MIR) is open.
-Until it is made, today's rules stand and tests do not change.
+- The **VM-observable rules stay as the spec** for now (a local holds its object
+  until rebound, about 1M frames of recursion, the panic format), so tests do not
+  change. They are revisited after step 8.
 
 ## Open problems
 
