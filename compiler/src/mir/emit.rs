@@ -3385,7 +3385,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             out.push(byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot)));
         }
         // Emitted where it stands (`cleared_words`).
-        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } | MirInst::Probe { .. } => {}
         // Gathered into panic pads (`emit_dense_padded`).
         MirInst::PanicStore { .. } => {
             return Err(LowerError::Refused("panic store outside a body".into()));

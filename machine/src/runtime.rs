@@ -75,6 +75,8 @@ pub(crate) struct Runtime {
     /// `fuel` as [`crate::Machine::set_step_budget`] last set it
     /// ([`crate::Machine::steps_charged`]).
     pub(crate) fuel_start: u64,
+    /// Runs of each coverage probe ([`crate::native::coil_native_probe`]).
+    pub(crate) probes: Vec<u32>,
     /// Heap cap from [`crate::Machine::set_heap_cap`] (`usize::MAX`: none).
     pub(crate) heap_cap: usize,
     /// Set once the live heap outgrew [`Self::heap_cap`] after a full
@@ -178,12 +180,23 @@ impl Runtime {
         self.gc_deferred = false;
     }
 
+    /// Start counting `n` coverage probes; `0` counts none.
+    pub(crate) fn begin_probes(&mut self, n: u32) {
+        self.probes = vec![0; n as usize];
+    }
+
+    /// The counts since [`Self::begin_probes`], when it counted any.
+    pub(crate) fn take_probes(&mut self) -> Option<Vec<u32>> {
+        let hits = std::mem::take(&mut self.probes);
+        (!hits.is_empty()).then_some(hits)
+    }
+
     /// A runtime with nothing loaded: its own reactors, thread registry
     /// and worker cap.
     pub(crate) fn new() -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None, fuel: u64::MAX, step_budget_hit: false, fuel_start: u64::MAX, heap_cap: usize::MAX, heap_cap_hit: false }
+        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None, probes: Vec::new(), fuel: u64::MAX, step_budget_hit: false, fuel_start: u64::MAX, heap_cap: usize::MAX, heap_cap_hit: false }
     }
 }
 

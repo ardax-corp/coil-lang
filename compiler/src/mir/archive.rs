@@ -197,6 +197,7 @@ const I_BYTE_SCAN: u8 = 39;
 const I_VEC_LOOP: u8 = 40;
 const I_PANIC_STORE: u8 = 41;
 const I_DEOPT: u8 = 42;
+const I_PROBE: u8 = 43;
 
 const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -619,6 +620,11 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u8(I_KEEP_ALIVE);
             w.v(*dest);
             w.v(*value);
+        }
+        MirInst::Probe { dest, id } => {
+            w.u8(I_PROBE);
+            w.v(*dest);
+            w.u32(*id);
         }
         MirInst::CallIndirect { dest, callee, args, dicts } => {
             w.u8(I_CALL_INDIRECT);
@@ -1116,6 +1122,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_STR_EQ => MirInst::StrEq { dest: r.v()?, lhs: r.v()?, rhs: r.v()?, ne: r.u8()? != 0 },
         I_CLEAR_WORD => MirInst::ClearWord { dest: r.v()?, value: r.v()? },
         I_KEEP_ALIVE => MirInst::KeepAlive { dest: r.v()?, value: r.v()? },
+        I_PROBE => MirInst::Probe { dest: r.v()?, id: r.u32()? },
         I_CODE_PTR => MirInst::CodePtr { dest: r.v()?, target: Label(r.u32()?) },
         I_HOME_LOAD => MirInst::HomeLoad { dest: r.v()?, home: u16::try_from(r.u32()?).map_err(|_| "native MIR: bad home")? },
         I_HOME_STORE => MirInst::HomeStore {
@@ -1233,6 +1240,7 @@ mod tests {
         let loc = DebugLoc { file: 1, start_byte: 2, end_byte: 3 };
         let mut b = MirBlock::new(BlockId(0));
         b.insts.push(MirInst::Deopt { dest: ValueId(1), kind: MirDeoptKind::Stop, loc });
+        b.insts.push(MirInst::Probe { dest: ValueId(1), id: 7 });
         b.insts.push(MirInst::PanicStore { dest: ValueId(2), object: ValueId(0), value: ValueId(0), index: 4 });
         b.insts.push(MirInst::GcBarrier { dest: ValueId(2), kind: MirGcKind::Safepoint, roots: vec![ValueId(0)] });
         f.blocks.push(b);

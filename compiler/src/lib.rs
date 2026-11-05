@@ -22,6 +22,7 @@ pub use mir::{start_mir_capture, take_mir_capture};
 pub mod native_mir {
     pub use crate::il::Label;
     pub use crate::mir::archive;
+    pub use crate::mir::coverage;
     pub use crate::mir::{
         BlockId, LaneExpr, LaneVal, MirAllocKind, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirTy,
         MirUnaryOp, NativeBody, Terminator, ValueId, VectorOp, native_capture_active, start_native_capture, start_raw_capture, vector_op,

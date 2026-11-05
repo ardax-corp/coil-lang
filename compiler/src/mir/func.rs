@@ -852,6 +852,11 @@ impl MirFunc {
                     return Err(format!("{dest} PanicStore value type"));
                 }
             }
+            MirInst::Probe { dest, .. } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} Probe dest is not bool"));
+                }
+            }
             MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} ClearWord dest is not bool"));

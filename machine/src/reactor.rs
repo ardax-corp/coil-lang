@@ -106,6 +106,8 @@ pub struct TestJob {
     pub expect_ok_result: bool,
     /// Count executed instructions (`coverage` feature; ignored without it).
     pub coverage: bool,
+    /// Coverage probes in the program's MIR (`compiler::native_mir::coverage`).
+    pub probes: u32,
     /// Step budget for static init + case ([`Machine::set_step_budget`]);
     /// `None` = unlimited. Threads the case spawns are not limited.
     pub step_budget: Option<u64>,
@@ -120,7 +122,8 @@ pub struct TestReport {
     /// Why it failed when it returned `Err(reason)` (a panic's message is in
     /// the job's print buffer instead).
     pub reason: Option<String>,
-    /// Hit count per PC (static init + case) when the job asked for coverage.
+    /// Hit count per PC, or per probe with native code (static init + case)
+    /// when the job asked for coverage.
     /// Threads the case spawns run on other VMs and are not counted.
     pub hits: Option<Vec<u32>>,
     /// Steps charged (static init + case; see [`Machine::set_step_budget`]).
@@ -988,6 +991,7 @@ impl Reactor {
             init_ip: case.init_ip,
             expect_ok_result: case.expect_ok_result,
             coverage: case.coverage,
+            probes: case.probes,
             step_budget: case.step_budget,
             report: Arc::clone(&report),
         });
@@ -1006,6 +1010,8 @@ pub struct TestCase {
     pub expect_ok_result: bool,
     /// See [`TestJob::coverage`].
     pub coverage: bool,
+    /// See [`TestJob::probes`].
+    pub probes: u32,
     /// See [`TestJob::step_budget`].
     pub step_budget: Option<u64>,
 }
@@ -1020,6 +1026,7 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
     if test.coverage {
         vm.begin_coverage();
     }
+    vm.begin_probes(test.probes);
     vm.set_step_budget(test.step_budget);
     if let Some(report) = run_test_job_natively(vm, entry, test) {
         return report;
@@ -1075,7 +1082,8 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
 fn run_test_job_natively(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> Option<PortableValue> {
     let start = test.init_ip.unwrap_or(entry) as usize;
     let ret = vm.with_native_driver(start, |d| test_on_driver(d, entry, test))?;
-    Some(finish_test(vm.panicked(), ret, vm.heap(), test))
+    let hits = vm.take_probes();
+    Some(finish_test(vm.panicked(), ret, vm.heap(), test, hits))
 }
 
 /// A harness case on the driver: its static init, then the case, then
@@ -1097,7 +1105,7 @@ pub(crate) fn test_on_driver(d: &mut crate::driver::Driver<'_>, entry: u32, test
 
 /// Store a finished case's report: whether it passed, by `ret` (its
 /// return) and whether it `panicked`.
-pub(crate) fn finish_test(panicked: bool, ret: Option<common::Value>, heap: &crate::memory::Heap, test: &TestJob) -> PortableValue {
+pub(crate) fn finish_test(panicked: bool, ret: Option<common::Value>, heap: &crate::memory::Heap, test: &TestJob, hits: Option<Vec<u32>>) -> PortableValue {
     let (mut passed, reason) = match ret {
         _ if panicked => (false, None),
         Some(_) if !test.expect_ok_result => (true, None),
@@ -1108,7 +1116,7 @@ pub(crate) fn finish_test(panicked: bool, ret: Option<common::Value>, heap: &cra
     if let Some(code) = crate::env::take_exit_request() {
         passed = !test.expect_ok_result && code == 0;
     }
-    let report = TestReport { passed, reason, hits: None, steps: 0, timed_out: false };
+    let report = TestReport { passed, reason, hits, steps: 0, timed_out: false };
     *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
     PortableValue::Immediate(u64::from(passed))
 }
@@ -1237,6 +1245,7 @@ mod tests {
             init_ip: None,
             expect_ok_result: false,
             coverage: false,
+            probes: 0,
             step_budget: None,
         };
         let pooled = reactor.submit_test(test_ctx(&reactor, 3), case, Arc::default());
@@ -1273,6 +1282,7 @@ mod tests {
             init_ip: None,
             expect_ok_result: false,
             coverage: false,
+            probes: 0,
             step_budget: Some(50),
         };
         let report = reactor.run_test_here(program_ctx(&reactor, spin), case, Arc::default());
@@ -1308,6 +1318,7 @@ mod tests {
             init_ip: None,
             expect_ok_result: false,
             coverage: false,
+            probes: 0,
             step_budget: None,
         };
         assert!(reactor.run_test_here(program_ctx(&reactor, other), case, Arc::default()).passed);
@@ -1326,6 +1337,7 @@ mod tests {
             init_ip: None,
             expect_ok_result: false,
             coverage: true,
+            probes: 0,
             step_budget: None,
         };
         let report = reactor.run_test_here(test_ctx(&reactor, 1), case, Arc::default());

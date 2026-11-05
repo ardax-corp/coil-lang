@@ -118,7 +118,7 @@ struct TestCli {
     doc_tests_only: bool,
     /// What runs the compiled code: native (Cranelift where the backend
     /// compiles a body, the VM elsewhere; the default), vm, or mir (the
-    /// interpreter). `--coverage` runs on the VM
+    /// interpreter)
     #[arg(long, value_name = "vm|native|mir", value_parser = Engine::parse)]
     engine: Option<Engine>,
     /// Test root (default: ./tests)
@@ -225,7 +225,6 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
     let Some(cli) = parse_with::<TestCli>(named(TestCli::command(), "coil test"), args)? else {
         return Ok(Parsed::Help);
     };
-    let coverage_asked = cli.coverage || cli.coverage_out.is_some() || cli.coverage_per_test.is_some();
     let (config, test) = assemble(RunParts {
         log: cli.log,
         opt: cli.opt,
@@ -253,7 +252,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
             DocTests::On
         },
         wall_timeout: cli.wall_timeout,
-        engine: cli.engine.unwrap_or(if coverage_asked { Engine::Vm } else { Engine::host_default() }),
+        engine: cli.engine.unwrap_or_else(Engine::host_default),
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -353,9 +352,6 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
     let coverage = parts.coverage || parts.coverage_out.is_some() || parts.per_test_out.is_some();
     if coverage && parts.debug.is_some_and(|l| l != compiler::DebugLevel::Full) {
         return Err("coverage needs byte spans: drop -g0 / -g1 (or pass -g2)".into());
-    }
-    if coverage && parts.engine != Engine::Vm {
-        return Err("--coverage counts lines the VM runs: use --engine vm".into());
     }
     let order = resolve_order(parts.seed, parts.no_shuffle, fresh_seed)?;
     Ok((

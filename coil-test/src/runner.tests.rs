@@ -373,9 +373,11 @@ fn coverage_reports_project_lines() {
         "use mathx::{clamp};\n\ntest(\"clamps low\") {\n    if !(clamp(-5, 0, 10) == 0) { raise \"assertion failed\"; }\n}\n\ntest(\"passes through\") {\n    if !(clamp(5, 0, 10) == 5) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
-    for jobs in [1, 2] {
+    // The VM counts PCs; the engines that run MIR count its probes.
+    for (jobs, engine) in [(1, Engine::Vm), (2, Engine::Vm), (1, Engine::Native), (2, Engine::Mir)] {
         let opts = TestOptions {
             jobs,
+            engine,
             extra_roots: vec![root.join("src")],
             coverage: Some(CoverageOptions {
                 lcov_out: root.join("unused.info"),
@@ -390,7 +392,7 @@ fn coverage_reports_project_lines() {
         assert_eq!(
             cov.lcov(),
             "TN:\nSF:src/mathx.coil\nDA:2,2\nDA:3,1\nDA:5,1\nDA:6,0\nDA:8,1\nDA:12,0\nDA:13,0\nLF:7\nLH:4\nend_of_record\n",
-            "jobs={jobs}"
+            "jobs={jobs} engine={engine:?}"
         );
         let json = cov.per_test_json().unwrap();
         assert!(

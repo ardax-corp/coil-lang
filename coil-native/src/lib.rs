@@ -748,6 +748,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(dest)?;
                         need(value)?;
                     }
+                    MirInst::Probe { dest, .. } => need(dest)?,
                     // `!w` is `w == 0`, exact on any word (`None` is 0).
                     MirInst::Unary { dest, op: MirUnaryOp::Not, src } if ty_of(f, *src) != MirTy::F64 => {
                         need_scalar(dest)?;
@@ -1054,6 +1055,7 @@ struct Ids {
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
     array_push: FuncId,
+    probe: FuncId,
     /// Boxed enum matches.
     enum_tag: FuncId,
     enum_payload: FuncId,
@@ -1195,6 +1197,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
+    let probe = module.declare_function("coil_native_probe", Linkage::Import, &s2).map_err(e)?;
     let free_early = trampoline(module, "coil_native_free_early", &s3, &mut tramps)?;
     let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
     let stringify = module.declare_function("coil_native_stringify", Linkage::Import, &s3).map_err(e)?;
@@ -1245,6 +1248,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
         cow_field,
         alloc,
         array_push,
+        probe,
         enum_tag,
         enum_payload,
         string,
@@ -1333,6 +1337,7 @@ struct Lower<'a> {
     cow_field: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
+    probe: FuncRef,
     enum_tag: FuncRef,
     enum_payload: FuncRef,
     string: FuncRef,
@@ -1454,6 +1459,7 @@ impl<'a> Lower<'a> {
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
+        let probe = module.declare_func_in_func(ids.probe, func);
         let enum_tag = module.declare_func_in_func(ids.enum_tag, func);
         let enum_payload = module.declare_func_in_func(ids.enum_payload, func);
         let string = module.declare_func_in_func(ids.string, func);
@@ -1508,6 +1514,7 @@ impl<'a> Lower<'a> {
             cow_field,
             alloc,
             array_push,
+            probe,
             enum_tag,
             enum_payload,
             string,
@@ -2394,6 +2401,12 @@ impl<'a> Lower<'a> {
                     let zero = self.b.ins().iconst(types::I64, 0);
                     self.set(f, *dest, zero);
                 }
+            }
+            MirInst::Probe { dest, id } => {
+                let id = self.b.ins().iconst(types::I64, i64::from(*id));
+                self.b.ins().call(self.probe, &[self.ctx, id]);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
             }
             MirInst::Call { dest, dest_hi, target, args } => {
                 // A `drop` called as a method: claim its finalizer first, as

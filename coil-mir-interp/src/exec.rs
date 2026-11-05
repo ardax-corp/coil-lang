@@ -481,6 +481,10 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set!(*dest, 0);
             }
             MirInst::KeepAlive { dest, .. } | MirInst::ClearWord { dest, .. } => set!(*dest, 0),
+            MirInst::Probe { dest, id } => {
+                rt::coil_native_probe(ctx, u64::from(*id));
+                set!(*dest, 0);
+            }
             MirInst::Call { dest, dest_hi, target, args } => {
                 let Some(callee) = program(body).body_at(*target) else {
                     return Flow::Trap(TRAP_HELPER);

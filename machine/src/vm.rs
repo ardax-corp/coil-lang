@@ -627,6 +627,16 @@ impl<const S: usize> Machine<S> {
         Some(out)
     }
 
+    /// See [`crate::runtime::Runtime::begin_probes`].
+    pub(crate) fn begin_probes(&mut self, n: u32) {
+        self.rt.begin_probes(n);
+    }
+
+    /// See [`crate::runtime::Runtime::take_probes`].
+    pub(crate) fn take_probes(&mut self) -> Option<Vec<u32>> {
+        self.rt.take_probes()
+    }
+
     /// Call the body at `offset` on a native driver over this machine, as
     /// [`Self::call_function`] does on the VM: a panic leaves
     /// [`Self::panicked`] set and returns the default word. `None`: the
@@ -796,6 +806,7 @@ impl<const S: usize> Machine<S> {
             },
             fuel: &raw mut self.rt.fuel,
             natives: &raw const self.rt.natives,
+            probes: &raw mut self.rt.probes,
         }
     }
 

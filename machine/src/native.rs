@@ -113,6 +113,8 @@ pub struct NativeCtx {
     /// The runtime's host natives: what [`coil_native_host`] may call
     /// (null: no runtime, the standard ones).
     pub natives: *const crate::ffi::Natives,
+    /// The runtime's coverage counters ([`coil_native_probe`]).
+    pub probes: *mut Vec<u32>,
 }
 
 /// Byte offset of [`NativeCtx::native_fp`].
@@ -446,6 +448,7 @@ pub(crate) struct NativeEnv {
     pub(crate) host: NativeHost,
     pub(crate) fuel: *mut u64,
     pub(crate) natives: *const crate::ffi::Natives,
+    pub(crate) probes: *mut Vec<u32>,
 }
 
 /// Byte offset of [`NativeCtx::stack_hard`].
@@ -534,6 +537,7 @@ impl NativeCtx {
             entry_data: 0,
             fuel: std::ptr::null_mut(),
             natives: std::ptr::null(),
+            probes: std::ptr::null_mut(),
         }
     }
 
@@ -842,6 +846,7 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     ctx.host = env.host;
     ctx.fuel = env.fuel;
     ctx.natives = env.natives;
+    ctx.probes = env.probes;
     ctx.strings = env.strings;
     ctx.string_cache = env.string_cache;
     ctx.strings_len = env.strings_len as u64;
@@ -1392,6 +1397,20 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
     };
     unsafe { note_alloc(ctx, heap) };
     addr
+}
+
+/// `Probe`: count one more run of coverage probe `id`. A runtime with no
+/// counters (a thread the case spawned) counts nothing.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_probe(ctx: *mut NativeCtx, id: u64) -> u64 {
+    // SAFETY: when set, `probes` is the live runtime's.
+    if let Some(n) = unsafe { (*ctx).probes.as_mut() }.and_then(|p| p.get_mut(id as usize)) {
+        *n = n.wrapping_add(1);
+    }
+    0
 }
 
 /// `ArrayPush`: append `value` to the array `addr` and return `addr`. Not an array: bail, where the VM panics.
@@ -2183,6 +2202,7 @@ pub(crate) fn run_pads(
         ctx.host = env.host;
         ctx.fuel = env.fuel;
         ctx.natives = env.natives;
+        ctx.probes = env.probes;
         ctx.strings = env.strings;
         ctx.string_cache = env.string_cache;
         ctx.strings_len = env.strings_len as u64;
@@ -2426,6 +2446,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
+        ("coil_native_probe", coil_native_probe as *const u8),
         ("coil_native_free_early", coil_native_free_early as *const u8),
         ("coil_native_format", coil_native_format as *const u8),
         ("coil_native_stringify", coil_native_stringify as *const u8),
@@ -2451,4 +2472,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 34;
+const HELPERS: usize = 35;

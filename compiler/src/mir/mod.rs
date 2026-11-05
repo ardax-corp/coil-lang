@@ -75,6 +75,7 @@ pub use inst::LocalId;
 pub mod archive;
 mod frame_words;
 mod native_capture;
+pub mod coverage;
 pub mod native_expand;
 pub mod native_twins;
 pub use frame_words::{allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pointer_words, root_handles, scalar, ty_of, used_params, word_kind, pair_words};

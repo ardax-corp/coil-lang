@@ -279,6 +279,7 @@ impl<'a> Driver<'a> {
             host: Self::HOST,
             fuel: &raw mut self.rt.fuel,
             natives: &raw const self.rt.natives,
+            probes: &raw mut self.rt.probes,
         }
     }
 
