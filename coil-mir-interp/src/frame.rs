@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::ffi::c_void;
 
-use compiler::native_mir::{MirFunc, MirInst, MirTy, Terminator, ValueId, heap_word, held_words, liveness, opaque_words, pair_words, pointer_words, ty_of};
+use compiler::native_mir::{MirFunc, MirInst, MirTy, Terminator, ValueId, heap_word, liveness, opaque_words, pair_words, pointer_words, root_handles, ty_of};
 use machine::native::{NativeCtx, ROOTS_SCAN, SITES_SCAN};
 
 use crate::Body;
@@ -90,15 +90,18 @@ thread_local! {
     static POOL: std::cell::RefCell<Vec<Parts>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The words a collection must see at each point of a body, by position.
+/// The words a collection must see at each point of a body, by position:
+/// as for native code, a word lives until its last use, and a `gc::root`
+/// handle until the function returns.
 pub(crate) struct RootMaps {
     live_in: Vec<HashSet<ValueId>>,
     live_after: Vec<Vec<HashSet<ValueId>>>,
-    held: Vec<Vec<HashSet<ValueId>>>,
     /// Non-heap values that hold an object for sure.
     pointers: HashSet<ValueId>,
     /// Values that may hold one: the collector pins, never rewrites.
     ambiguous: Vec<ValueId>,
+    /// `gc::root` handles: `0` until made, then kept.
+    handles: Vec<ValueId>,
     /// Homes holding a heap word, and in an opaque body the `int` ones.
     heap_homes: Vec<u16>,
     ambiguous_homes: Vec<u16>,
@@ -112,38 +115,34 @@ impl RootMaps {
         ambiguous.extend(pair_words(f, &pointers));
         let heap_homes = (0..f.homes.len() as u16).filter(|&h| heap_word(f.homes[h as usize])).collect();
         let ambiguous_homes = if f.opaque_words { (0..f.homes.len() as u16).filter(|&h| f.homes[h as usize] == MirTy::I64).collect() } else { Vec::new() };
-        Self { live_in, live_after, held: held_words(f), pointers, ambiguous, heap_homes, ambiguous_homes }
+        Self { live_in, live_after, pointers, ambiguous, handles: root_handles(f), heap_homes, ambiguous_homes }
     }
 
     /// What lives at `ip` of block `bi`: past the φs at a safepoint; else
-    /// what lives after the op and what it reads, which the call it makes
-    /// may move.
+    /// what lives after the op. Not the op's own results: they are not made
+    /// yet, and in a loop their registers hold the last iteration's words,
+    /// which nothing has kept valid.
     fn live_at(&self, f: &MirFunc, bi: usize, ip: u32) -> HashSet<ValueId> {
         let b = &f.blocks[bi];
         if ip == AT_BLOCK_START {
             let phis = b.insts.iter().take_while(|i| i.is_phi()).count();
-            let mut live = if phis == 0 { self.live_in[bi].clone() } else { self.live_after[bi][phis - 1].clone() };
-            live.extend(self.held[bi][phis].iter().copied());
-            return live;
+            return if phis == 0 { self.live_in[bi].clone() } else { self.live_after[bi][phis - 1].clone() };
         }
         let ip = ip as usize;
         let Some(inst) = b.insts.get(ip) else {
             // At the terminator: nothing runs there that collects.
-            let mut live: HashSet<ValueId> = self.held[bi].last().cloned().unwrap_or_default();
-            if let Some(t) = &b.term {
-                live.extend(term_uses(t));
-            }
-            return live;
+            return b.term.as_ref().map(term_uses).unwrap_or_default().into_iter().collect();
         };
         let mut live = self.live_after[bi][ip].clone();
-        live.extend(operands(inst));
-        live.extend(self.held[bi][ip].iter().copied());
+        for d in inst.dests() {
+            live.remove(&d);
+        }
+        // `yield from` reads its handle again after each resume.
+        if let MirInst::Yield { value, from: true, .. } = inst {
+            live.insert(*value);
+        }
         live
     }
-}
-
-fn operands(inst: &MirInst) -> impl Iterator<Item = ValueId> {
-    inst.operands().into_iter()
 }
 
 fn term_uses(t: &Terminator) -> Vec<ValueId> {
@@ -169,7 +168,8 @@ unsafe fn scan_roots(data: *mut c_void, visit: &mut dyn FnMut(*mut u64, bool)) {
             let body = &*frame.body;
             let f = &body.mir;
             let maps = body.roots.get_or_init(|| RootMaps::new(f));
-            let live = maps.live_at(f, frame.block as usize, frame.ip);
+            let mut live = maps.live_at(f, frame.block as usize, frame.ip);
+            live.extend(maps.handles.iter().copied());
             let at = regs.add(frame.base);
             // A stable order: a generator's parked words are written back
             // by position.
