@@ -512,6 +512,9 @@ jobs:
             # reference the optimized engines are compared against
             # (`docs/internals/mir-interp.md`).
             mir) $run -- --engine mir $FLAGS ;;
+            # And each level above it, on the MIR native code compiles: a
+            # failure here and not in `mir` is a pass's.
+            mir-opt) for level in 1 2 3 s g; do $run -- --engine mir -O $level $FLAGS; done ;;
           esac
 
       # What native runs still leave on the VM, and the interpreter symbols
@@ -567,7 +570,7 @@ jobs:
         mode: [release]
         # Native code runs in release only: a debug cell would test the
         # same Cranelift output at a fraction of the speed.
-        variant: [default, O0, leak-smoke, native, mir]
+        variant: [default, O0, leak-smoke, native, mir, mir-opt]
     env: *harness-env
     steps: *harness-steps
 

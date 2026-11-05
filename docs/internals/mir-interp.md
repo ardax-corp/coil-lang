@@ -6,29 +6,48 @@ macros. Cranelift keeps running everything else from the same MIR.
 
 ```
 coil prog.coil --mir              # raw MIR at -O 0: the reference output
-coil prog.coil --mir -O 2         # raw MIR of an HIR-optimized compile
+coil prog.coil --mir -O 2         # the MIR native code compiles at -O 2
 coil test --engine mir [PATH]     # a suite on it, -O 0 unless -O says otherwise
-scripts/mir_diff.py [PATH ...]    # raw output against the optimized engines
+scripts/mir_diff.py [PATH ...]    # every level and engine against the reference
 ```
 
 ## The reference output
 
-The interpreter runs **raw MIR**: bodies as `from_hir` lowered them, with no MIR
-pass run (`compiler::native_mir::start_raw_capture`). With `-O 0`, which also
-leaves HIR unoptimized, that output is the reference. JIT and AOT start from the
-same lowering and run `optimize_mir` on it, so they must give the same result.
+At `-O 0` the interpreter runs **raw MIR**: bodies as `from_hir` lowered them,
+with no MIR pass run (`compiler::native_mir::start_raw_capture`), and HIR
+unoptimized too. That output is the reference.
 
 `-O 0` alone is not raw on the other captures: `optimize_mir` skips the folds and
 loop passes there, but `sroa` and `phi_sroa` run at every level. A bug in either
-would show on both sides of a comparison, so the interpreter's capture skips
-`optimize_mir` altogether.
+would show on both sides of a comparison, so the raw capture skips `optimize_mir`
+altogether.
 
-What still happens to a raw body is lowering, not optimization: `native_twins`
-and `native_expand` replace some host calls with Coil code in every capture.
+At every other level the interpreter runs the capture Cranelift compiles, so
+each engine and level says something different:
+
+| Compared | A difference is |
+|---|---|
+| `--mir -O N` against the reference | a pass's (HIR or MIR) |
+| `--jit -O N` against `--mir -O N` | Cranelift's lowering |
+| The VM at `-O N` against the reference | the bytecode tiers' |
+| Every engine against the reference, at once | a program that is not deterministic |
+
+| Level | What the interpreter runs |
+|---|---|
+| `-O0` | Raw MIR |
+| `-Og` | HIR folds; `sroa`, `phi_sroa` |
+| `-O1` | HIR small inlining; SCCP, InstCombine, DestProp, `sroa`, `phi_sroa` |
+| `-O2`, `-O3`, `-Os` | The HIR passes of the level; every MIR pass but `promote_fields` |
+
+Generators, bodies with a cleanup pad and debugger or coverage builds keep their
+MIR as lowered at every level, as for native code.
+
+What still happens to any body is lowering, not optimization: `native_twins` and
+`native_expand` replace some host calls with Coil code in every capture.
 
 `scripts/mir_diff.py` compares program by program (stdout and exit status, with
 timings masked). `tests/mir_interp_cli.rs` does the same for stderr on a few
-programs, and checks that a loop the JIT vectorizes stays scalar in the raw run.
+programs, and checks which levels run a loop as a vector op.
 
 ## How it runs
 
@@ -61,7 +80,8 @@ Most ops map one to one onto Cranelift's lowering. These needed a decision.
 
 | Op | Handling | Status |
 |---|---|---|
-| `ByteScan`, `VecLoop`, `PanicStore` | Only passes make them, so raw MIR has none; `prepare` refuses a body that holds one | Settled |
+| `ByteScan`, `VecLoop` | Only passes make them, so raw MIR has none. Above `-O 0` they run the runtime's lane code (`coil_native_vector`), as native code does; the raw run of the same source is their independent check | Settled |
+| `PanicStore` | Only `promote_fields` makes it, which no capture runs; `prepare` refuses a body that holds one | Open (VM only) |
 | `Call` to a tail target | Takes the frame | Settled |
 | `Call` of a `drop` | Claims the finalizer first, as Cranelift | Settled |
 | `GcBarrier`, `KeepAlive`, `ClearWord` | No code; they matter only through the root maps | Settled |
