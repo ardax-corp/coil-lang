@@ -212,7 +212,7 @@ jobs:
           log="$(mktemp)"
           set +e
           # shellcheck disable=SC2086 # a word list
-          cargo test --workspace --lib --tests --bins -- $skip 2>&1 | tee "$log"
+          cargo test --workspace --lib --tests --bins --no-fail-fast -- $skip 2>&1 | tee "$log"
           code="${PIPESTATUS[0]}"
           set -e
           if grep -E -q 'test result: FAILED|error: test failed' "$log" && [ "$code" -eq 0 ]; then
@@ -484,12 +484,13 @@ jobs:
             # inlining drops CALL targets); run the unoptimized pipeline too.
             O0) $run -- --engine vm -O 0 $FLAGS ;;
             leak-smoke)
-              # Each corpus process gets 128 MiB of address space above the
+              # Each corpus process gets 256 MiB of address space above the
               # harness's own code, and one job: every extra thread reserves
               # a glibc malloc arena (64 MiB of address space), which alone
-              # exceeds the room left.
+              # exceeds the room left. A leak grows far past this; a
+              # million-frame fold on the interpreter takes about 128 MiB.
               code_kb=$(( $(size -d harness-bin/coil-test | awk 'NR==2 {print $4}') / 1024 ))
-              $run -j 1 --limit-as-kb $(( code_kb + 131072 )) -- --engine vm $FLAGS ;;
+              $run -j 1 --limit-as-kb $(( code_kb + 262144 )) -- --engine vm $FLAGS ;;
             # Collect and evacuate at every allocation (precise-root soundness).
             # The memory corpus also at -O0: without inlining, a call's
             # result reaches its consumer on the operand stack instead of a
