@@ -116,7 +116,8 @@ test("a binding gathered with other arguments is dropped") {
         ok = ok && gone(w);
         i = i + 1;
     }
-    assert!(ok && !gone(weak(other)));
+    // Used after the check: an object lives until its last use.
+    assert!(ok && !gone(weak(other)) && other.v == 7);
 }
 
 test("an if let binding passed to a call is dropped") {
