@@ -98,9 +98,9 @@ In the order they unblock the removal of the VM.
    and the prologue the driver walks. They become body indices once nothing
    emits bytecode, and the startup steps need a form of their own.
 5. **Coverage and `coil mutate`**, which count what the VM runs.
-6. **Speed.** It runs `MirInst` directly, about 2x the VM's time on a call and
-   loop mix before the raw capture. A flat decoded form is the next step, if
-   comptime needs it.
+6. **Speed.** It runs `MirInst` directly. On a call and loop mix (`fib(38)` and a
+   200M iteration loop) raw `-O 0` took 7.4 s, the VM at the default level 3.2 s
+   and the JIT 0.7 s. A flat decoded form is the next step, if comptime needs it.
 
 ## Where the pieces are
 
