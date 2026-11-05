@@ -157,8 +157,17 @@ order that keeps the corpus green at each step:
   `cranelift-jit` (`compiled_blob.rs`, a relocation out of range). `jit` leaks
   each module, so a harness that compiles thousands of files spreads them past
   a 32-bit reach. Step 4's code cache has to settle this.
-- **GC stress.** `tests/comptime/drop_not_folded.coil` fails on native and the
-  interpreter at every level and passes on the VM.
+- **GC stress.** Since stack maps and inline allocation landed, the collections,
+  comptime, host, memory and tasks corpora fail under `gc-stress` on native and
+  the interpreter at every level (`feature/native` alone fails 8 at `-O2` and 12
+  at `-O0`). The interpreter has neither stack maps nor inline allocation, so at
+  least part of this is in the shared heap: one failure is `pointer word 0 of a
+  pointer-kind array holds a non-object` at `heap.rs:2054`. CI's GC stress cell
+  runs the VM only, so it does not show.
+- **`tests/memory/finalizer_lifetimes.coil`** fails on native at `-O0` and `-Og`
+  and passes on the interpreter at every level: Cranelift's lowering, by the table
+  above. The likely cause, not yet confirmed: `KeepAlive` lowers to nothing, and
+  under stack maps nothing else keeps the word live.
 - **Speed.** It runs `MirInst` directly. On a call and loop mix (`fib(38)` and a
   200M iteration loop) raw `-O 0` took 7.4 s, the VM at the default level 3.2 s
   and the JIT 0.7 s. The doc says speed is not a goal; comptime's step limits
