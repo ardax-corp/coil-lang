@@ -5,7 +5,7 @@ use compiler::native_mir::{
     MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, VecLoopKind, heap_word, ty_of, vector_op, word_kind,
 };
 use machine::native::{
-    self as rt, ALLOC_ARRAY, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE, NOT_AN_ENUM, NativeCtx,
+    self as rt, ALLOC_ARRAY, Applied, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE, NOT_AN_ENUM, NativeCtx,
     ROOTS_AMBIGUOUS, TRAP_BUDGET, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -21,6 +21,9 @@ use crate::{Body, reg};
 pub(crate) unsafe extern "C" fn entry(ctx: *mut NativeCtx, args: *const u64) -> u64 {
     // SAFETY: as this function's.
     unsafe {
+        if !(*ctx).resume.is_null() {
+            return resume(ctx);
+        }
         let body = &*((*ctx).entry_data as *const Body);
         // Frames cost no thread stack, but a callback nests an activation.
         let marker = 0u8;
@@ -52,8 +55,73 @@ pub(crate) unsafe extern "C" fn entry(ctx: *mut NativeCtx, args: *const u64) -> 
                 0
             }
         };
+        finish(act, ctx);
+        out
+    }
+}
+
+/// The activation is done with this call: gone, or parked for the host to
+/// resume.
+unsafe fn finish(mut act: Activation, ctx: *mut NativeCtx) {
+    // SAFETY: the activation of the call `ctx` belongs to.
+    unsafe {
         act.unlink();
-        act.release();
+        if act.parked {
+            act.parked = false;
+            (*ctx).parked = Box::into_raw(Box::new(act)).cast();
+            (*ctx).park_scan = Some(crate::frame::scan_roots);
+            (*ctx).park_free = Some(free_parked);
+        } else {
+            act.release();
+        }
+    }
+}
+
+/// Drop a parked activation that will not run again.
+unsafe fn free_parked(state: *mut std::ffi::c_void) {
+    // SAFETY: what [`finish`] boxed.
+    drop(unsafe { Box::from_raw(state.cast::<Activation>()) });
+}
+
+/// Go on with the activation `ctx` resumes.
+unsafe fn resume(ctx: *mut NativeCtx) -> u64 {
+    // SAFETY: what [`finish`] boxed, and the op it parked at.
+    unsafe {
+        let mut act = *Box::from_raw((*ctx).resume.cast::<Activation>());
+        (*ctx).resume = std::ptr::null_mut();
+        act.ctx = ctx;
+        act.link();
+        let out = match (*ctx).resume_how {
+            rt::RESUME_CLOSE => {
+                act.rerun_op = false;
+                rt::raise_close(ctx);
+                unwind(&raw mut act, TRAP_HELPER)
+            }
+            rt::RESUME_CANCEL => {
+                act.rerun_op = false;
+                rt::raise_cancel(ctx);
+                unwind(&raw mut act, TRAP_HELPER)
+            }
+            rt::RESUME_RETRY => {
+                act.rerun = true;
+                run::<false>(&raw mut act)
+            }
+            _ => {
+                let word = (*ctx).resume_word;
+                if std::mem::take(&mut act.rerun_op) {
+                    act.send = Some(word);
+                    act.rerun = true;
+                } else {
+                    let top = act.frames.last().expect("a parked frame");
+                    let f = &(*top.body).mir;
+                    let dest = f.blocks[top.block as usize].insts[top.ip as usize].dest();
+                    let regs = act.regs.as_mut_ptr().add(top.base);
+                    set_word(f, regs, dest, word);
+                }
+                run::<false>(&raw mut act)
+            }
+        };
+        finish(act, ctx);
         out
     }
 }
@@ -199,8 +267,15 @@ enum Flow {
 unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
     // SAFETY: the running activation.
     unsafe {
-        crate::debug::panicking(act, code);
         let ctx = (*act).ctx;
+        if (*ctx).park != 0 {
+            // No unwind: the frames stay, for a resume.
+            (*ctx).park_kind = std::mem::take(&mut (*ctx).park);
+            (*ctx).bail = 0;
+            (*act).parked = true;
+            return 0;
+        }
+        crate::debug::panicking(act, code);
         let mut code = code;
         while let Some(frame) = (&(*act).frames).last() {
             let body = &*frame.body;
@@ -282,6 +357,8 @@ unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
                     rt::coil_native_collect(ctx);
                 }
                 exec.blocks[block].first as usize
+            } else if std::mem::take(&mut (*act).rerun) {
+                (*frame).ip as usize
             } else {
                 (*frame).ip as usize + 1
             };
@@ -351,11 +428,15 @@ unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
                         // The caller stands at its `Call`.
                         let cf = &(*caller.body).mir;
                         let at = (*act).regs.as_mut_ptr().add(caller.base);
-                        if let MirInst::Call { dest, dest_hi, .. } = &cf.blocks[caller.block as usize].insts[caller.ip as usize] {
-                            *at.add(reg(*dest)) = lo;
-                            if let Some(d) = dest_hi {
-                                *at.add(reg(*d)) = hi.unwrap_or(0);
+                        match &cf.blocks[caller.block as usize].insts[caller.ip as usize] {
+                            MirInst::Call { dest, dest_hi, .. } => {
+                                *at.add(reg(*dest)) = lo;
+                                if let Some(d) = dest_hi {
+                                    *at.add(reg(*d)) = hi.unwrap_or(0);
+                                }
                             }
+                            MirInst::CallIndirect { dest, .. } => set_word(cf, at, *dest, lo),
+                            _ => {}
                         }
                         continue 'frame;
                     }
@@ -577,6 +658,31 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             }
             MirInst::CallIndirect { dest, callee, args, dicts } => {
                 let c = get!(*callee);
+                // A body runs as a frame of this activation: nothing of the
+                // host stands between it and its caller, so it may park.
+                match rt::apply_value(ctx, c, words!(args), args.len() as u64, u64::from(*dicts)) {
+                    Applied::Value(w) => {
+                        set_word(f, regs_now(act), *dest, w);
+                        return Flow::Next;
+                    }
+                    Applied::Call { pc, args } => {
+                        if let Some(callee) = program(body).body_at_pc(pc) {
+                            if !push(&mut *act, callee, std::ptr::null_mut()) {
+                                rt::coil_native_unwind(ctx, TRAP_STACK, u64::from(callee.entry_site));
+                                return Flow::Trap(TRAP_HELPER);
+                            }
+                            let cf = &callee.mir;
+                            let at = (&(*act).frames).last().expect("the frame just pushed").base;
+                            let new = (*act).regs.as_mut_ptr().add(at);
+                            for (i, &p) in cf.params.iter().enumerate() {
+                                let w = args.get(i).map_or(0, |v| v.bits());
+                                *new.add(reg(p)) = if ty_of(cf, p) == MirTy::Bool { as_bool(w) } else { w };
+                            }
+                            return Flow::Entered;
+                        }
+                    }
+                    Applied::Other => {}
+                }
                 let w = rt::coil_native_call_value(ctx, c, words!(args), args.len() as u64, u64::from(*dicts));
                 check!();
                 set_word(f, regs_now(act), *dest, w);
@@ -594,13 +700,14 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             MirInst::Yield { dest, value, from: true, .. } => {
                 // `yield from h`: resume `h` (sending what this generator's
                 // resumer sent) and yield what it yields until it is done.
-                let mut send = 0;
+                let mut send = (*act).send.take().unwrap_or(0);
                 loop {
                     let w = rt::coil_native_resume(ctx, get!(*value), send, 1);
                     check!();
                     if rt::coil_native_coro_done(ctx, get!(*value)) != 0 {
                         break;
                     }
+                    (*act).rerun_op = rt::parks();
                     send = yield_word(act, ctx, w);
                     // A close unwinds from the yield.
                     check!();

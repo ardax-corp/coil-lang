@@ -354,13 +354,17 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
                 let key = s.peek_thread_key();
                 let current = s.current;
                 s.add_thread_wait(current, key);
-                h.park(ctx, Some(crate::task::Block::Thread(key)), false)?;
+                if h.park(ctx, Some(crate::task::Block::Thread(key)), false).is_none() {
+                    return Some(Invoked::Unwound);
+                }
             }
             Ok(None) if park_tasks && crate::task::io_retry_parked() => {
                 // A connect in progress: runs again on readiness.
                 let req = crate::task::take_io_retry_park().expect("checked");
                 let token = h.rt().io_wait(&req);
-                h.park(ctx, Some(crate::task::Block::IoRetry(token)), false)?;
+                if h.park(ctx, Some(crate::task::Block::IoRetry(token)), false).is_none() {
+                    return Some(Invoked::Unwound);
+                }
             }
             Ok(None) => {
                 let Some(req) = crate::io::take_pending_io_park() else {

@@ -60,9 +60,15 @@ pub struct Program {
     bodies: Vec<Body>,
     /// By [`Label`], `u32::MAX` for a label with no body.
     by_label: Vec<u32>,
+    /// By entry PC: the bodies a function value may run as a frame.
+    by_pc: HashMap<usize, u32>,
 }
 
 impl Program {
+    fn body_at_pc(&self, pc: usize) -> Option<&Body> {
+        self.bodies.get(*self.by_pc.get(&pc)? as usize)
+    }
+
     fn body_at(&self, target: Label) -> Option<&Body> {
         let i = *self.by_label.get(target.0 as usize)?;
         self.bodies.get(i as usize)
@@ -284,7 +290,7 @@ pub(crate) fn prepare_with(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, 
     let mut refused = Vec::new();
     let labels = bodies.iter().filter_map(|b| b.entry).map(|l| l.0 as usize + 1).max().unwrap_or(0);
     let mut by_label = vec![u32::MAX; labels];
-    let mut program = Arc::new(Program { bodies: Vec::new(), by_label: Vec::new() });
+    let mut program = Arc::new(Program { bodies: Vec::new(), by_label: Vec::new(), by_pc: HashMap::new() });
     let at = Arc::as_ptr(&program);
     let mut built = Vec::with_capacity(bodies.len());
     for (i, b) in bodies.into_iter().enumerate() {
@@ -302,6 +308,7 @@ pub(crate) fn prepare_with(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, 
         built.push(body);
     }
     let p = Arc::get_mut(&mut program).expect("a program nothing else holds yet");
+    p.by_pc = built.iter().enumerate().filter(|(_, b)| b.pc != u32::MAX && !b.refused && !is_generator(&b.mir)).map(|(i, b)| (b.pc as usize, i as u32)).collect();
     p.bodies = built;
     p.by_label = by_label;
     let entries = program

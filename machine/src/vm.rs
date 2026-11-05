@@ -752,6 +752,7 @@ impl<const S: usize> Machine<S> {
                 table.hits += 1;
                 Some(Err(p))
             }
+            crate::native::NativeOutcome::Parked(..) => unreachable!("a parked call under the VM"),
             crate::native::NativeOutcome::Bailed => {
                 table.bails += 1;
                 crate::native::BAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -794,6 +795,7 @@ impl<const S: usize> Machine<S> {
             host: crate::native::NativeHost {
                 print: Self::native_print,
                 tasks: |_| (0, Vec::new()),
+                apply: |_, _, _, _| crate::native::Applied::Other,
                 call: Self::native_vm_call,
                 call_value: Self::native_call_value,
                 resume: Self::native_resume,
@@ -1224,6 +1226,7 @@ impl<const S: usize> Machine<S> {
                     self.run_native_pads(p.pads, call_ip.saturating_sub(1));
                     return Value::default();
                 }
+                Some(GenStep::Waiting) => unreachable!("only a driver parks a task"),
                 None => {}
             }
         }

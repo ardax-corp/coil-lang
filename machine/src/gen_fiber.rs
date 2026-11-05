@@ -12,9 +12,7 @@
 
 use common::Value;
 
-use crate::memory::{CoroState, Heap, RefCoroutine};
-#[cfg(not(target_family = "wasm"))]
-use crate::memory::{Object, ObjCoroutine};
+use crate::memory::{CoroState, Heap, ObjCoroutine, Object, RefCoroutine};
 use crate::runtime::Runtime;
 
 /// What a native generator's resume gave.
@@ -26,6 +24,8 @@ pub(crate) enum GenStep {
     Returned(Value),
     /// Its body panicked after it committed (it is done).
     Panicked(crate::native::NativePanic),
+    /// Its task waits inside it: the resume happens again on the wake.
+    Waiting,
 }
 
 /// What generator fibers need from the host that runs them.
@@ -45,6 +45,10 @@ pub(crate) trait GenHost {
     fn nest(&mut self, _entered: bool) {}
     /// An early free the body's return queued.
     fn free_early(&mut self, v: Value, deep: bool);
+    /// The wake (word and `RESUME_*`) on its way down to a parked wait.
+    fn pending_wake(&mut self) -> Option<&mut Option<(u64, u64)>> {
+        None
+    }
     /// Whether a task may switch from inside a generator's fiber (the
     /// native driver's tasks can; the VM's cannot).
     fn switches_in_fibers(&self) -> bool {
@@ -61,7 +65,6 @@ pub(crate) fn finish(coro: RefCoroutine) {
     c.yield_from = None;
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn with_mut(coro: RefCoroutine, f: impl FnOnce(&mut ObjCoroutine)) {
     f(coro.payload_mut());
 }
@@ -122,8 +125,146 @@ fn run_fiber<H: GenHost + ?Sized>(
 /// Resume generator `gc` with `send` when its body runs natively: `None`
 /// when the host's other engine runs it (no native body, started there,
 /// or the body bailed before its first yield).
-#[cfg(not(target_family = "wasm"))]
 pub(crate) fn step<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> Option<GenStep> {
+    if crate::native::parks() {
+        return step_parked(h, gc, send);
+    }
+    #[cfg(not(target_family = "wasm"))]
+    return step_fiber(h, gc, send);
+    #[cfg(target_family = "wasm")]
+    None
+}
+
+/// Run `gc`'s body on from `call`, or from the start.
+fn run_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, go: impl FnOnce(&crate::native::NativeEnv) -> crate::native::NativeOutcome) -> crate::native::NativeOutcome {
+    h.gen_running().push(Value::from(gc.as_ptr() as u64));
+    h.nest(true);
+    let env = h.native_env();
+    let out = go(&env);
+    h.nest(false);
+    h.gen_running().pop();
+    out
+}
+
+/// A parked call's root words, back from `gc`'s saved words, forwarded.
+fn restore_parked(gc: RefCoroutine, call: &mut crate::native::ParkedCall) {
+    let words = std::mem::take(&mut gc.payload_mut().saved_stack);
+    let mut i = 0;
+    call.for_each_root(|w, _| {
+        if let Some(v) = words.get(i) {
+            // SAFETY: a root slot of the parked call.
+            unsafe { *w = v.bits() };
+        }
+        i += 1;
+    });
+}
+
+/// [`step`] where generators park: a resume runs the body until a yield
+/// leaves its frames on the heap.
+fn step_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> Option<GenStep> {
+    let parked = gc.payload_mut().native.take().and_then(|mut f| f.call.take());
+    let (outcome, cleanup) = match parked {
+        Some(mut call) => {
+            let wake = h.pending_wake().and_then(|w| if call.kind == crate::native::PARK_WAIT { w.take() } else { *w });
+            let (word, how) = match (call.kind, wake) {
+                (crate::native::PARK_YIELD, _) => (send.bits(), crate::native::RESUME_VALUE),
+                (crate::native::PARK_WAIT, Some(wake)) => wake,
+                (_, Some(_)) => (0, crate::native::RESUME_RETRY),
+                (_, None) => {
+                    // Its task waits in it: this resume is someone else's.
+                    gc.payload_mut().native = Some(Box::new(crate::native::GenFiber::parked(call)));
+                    return None;
+                }
+            };
+            restore_parked(gc, &mut call);
+            let cleanup = call.cleanup();
+            (run_parked(h, gc, |env| call.resume(word, how, env)), cleanup)
+        }
+        None => {
+            let coro = gc.as_ref();
+            if coro.started || coro.state != CoroState::Suspended || coro.yield_from.is_some() {
+                return None;
+            }
+            let table = h.rt().native.as_deref_mut()?;
+            // A `gen fn` with no `yield` is a plain body: it runs the same way,
+            // so a wait in it parks with its task.
+            let entry = table.lookup(coro.resume_ip)?;
+            if coro.saved_stack.len() < entry.reads as usize {
+                return None;
+            }
+            table.hits += 1;
+            let mut words = vec![0u64; entry.arity as usize];
+            for (w, v) in words.iter_mut().zip(coro.saved_stack.iter()) {
+                *w = v.bits();
+            }
+            (run_parked(h, gc, |env| crate::native::call(&entry, &words, env)), entry.cleanup)
+        }
+    };
+    with_mut(gc, |c| c.started = true);
+    match outcome {
+        crate::native::NativeOutcome::Parked(mut call, word) => {
+            let mut words = Vec::new();
+            let mut ambiguous = false;
+            call.for_each_root(|w, a| {
+                // SAFETY: a root slot of the parked call.
+                words.push(Value::from(unsafe { *w }));
+                ambiguous |= a;
+            });
+            let mask = if ambiguous { 0 } else { saved_stack_live_mask(&h.rt().heap, &words) };
+            let waiting = call.kind != crate::native::PARK_YIELD;
+            with_mut(gc, |c| {
+                c.saved_stack = words;
+                c.saved_live_mask = mask;
+                c.saved_frames.clear();
+                c.state = CoroState::Suspended;
+                c.native = Some(Box::new(crate::native::GenFiber::parked(call)));
+            });
+            // Its `defer`s run when the collector closes it.
+            if cleanup && !gc.as_ref().closeable {
+                with_mut(gc, |c| c.closeable = true);
+                let rt = h.rt();
+                rt.closeables = true;
+                rt.heap.note_closeable(Object::Coroutine(gc));
+            }
+            Some(if waiting { GenStep::Waiting } else { GenStep::Yielded(Value::from(word)) })
+        }
+        crate::native::NativeOutcome::Done(r) => {
+            finish(gc);
+            for (w, deep) in r.frees {
+                h.free_early(Value::from(w), deep);
+            }
+            Some(GenStep::Returned(Value::from(r.lo)))
+        }
+        crate::native::NativeOutcome::Panicked(p) => {
+            finish(gc);
+            Some(GenStep::Panicked(p))
+        }
+        crate::native::NativeOutcome::Bailed => None,
+    }
+}
+
+/// [`close`] where generators park.
+fn close_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Vec<crate::native::NativePad>> {
+    let parked = gc.payload_mut().native.take().and_then(|mut f| f.call.take());
+    let Some(mut call) = parked else {
+        finish(gc);
+        return None;
+    };
+    if !call.cleanup() {
+        finish(gc);
+        return None;
+    }
+    restore_parked(gc, &mut call);
+    let out = run_parked(h, gc, |env| call.resume(0, crate::native::RESUME_CLOSE, env));
+    finish(gc);
+    match out {
+        crate::native::NativeOutcome::Panicked(p) if !p.pads.is_empty() => Some(p.pads),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn step_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> Option<GenStep> {
     let mut fiber = match gc.payload_mut().native.take() {
         Some(f) => {
             restore_words(gc, &f);
@@ -176,6 +317,8 @@ pub(crate) fn step<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value
                     finish(gc);
                     Some(GenStep::Panicked(p))
                 }
+                // Fibers switch: nothing parks on one.
+                crate::native::NativeOutcome::Parked(..) => unreachable!("a parked call on a fiber"),
                 // Before its first yield: nothing it did shows, and the
                 // other engine runs the body from the start.
                 crate::native::NativeOutcome::Bailed => {
@@ -188,11 +331,6 @@ pub(crate) fn step<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value
             }
         }
     }
-}
-
-#[cfg(target_family = "wasm")]
-pub(crate) fn step<H: GenHost + ?Sized>(_h: &mut H, _gc: RefCoroutine, _send: Value) -> Option<GenStep> {
-    None
 }
 
 /// A fiber for unstarted generator `gc`, when its body compiled.
@@ -231,15 +369,25 @@ fn new_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Box<cra
         crate::native::call(&entry, &words, &env)
     });
     let cleanup = entry.cleanup;
-    Some(Box::new(crate::native::GenFiber { coro: Some(coro), stack_limit, yielder: std::ptr::null(), parked: std::ptr::null_mut(), cleanup }))
+    Some(Box::new(crate::native::GenFiber { coro: Some(coro), stack_limit, yielder: std::ptr::null(), parked: std::ptr::null_mut(), call: None, cleanup }))
 }
 
 /// Close suspended generator `gc`, whose body runs natively: resume its
 /// fiber to unwind from the yield it waits at. The armed `defer`s it
 /// collected are the host's to run (`None`: there are none). The
 /// generator is done either way.
-#[cfg(not(target_family = "wasm"))]
 pub(crate) fn close<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Vec<crate::native::NativePad>> {
+    if crate::native::parks() {
+        return close_parked(h, gc);
+    }
+    #[cfg(not(target_family = "wasm"))]
+    return close_fiber(h, gc);
+    #[cfg(target_family = "wasm")]
+    None
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn close_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Vec<crate::native::NativePad>> {
     let Some(mut fiber) = gc.payload_mut().native.take() else {
         finish(gc);
         return None;

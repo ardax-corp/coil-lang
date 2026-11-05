@@ -38,6 +38,15 @@ pub(crate) struct Activation {
     pub(crate) scratch: Vec<u64>,
     /// Under a debugger: each frame's locals.
     pub(crate) locals: Vec<crate::debug::FrameLocals>,
+    /// It stopped at a yield or a wait: its frames stay ([`crate::exec::entry`]).
+    pub(crate) parked: bool,
+    /// The top frame runs its op again, not the one after it.
+    pub(crate) rerun: bool,
+    /// The op parked at takes the resume's word as its `send` and runs again
+    /// (`yield from`).
+    pub(crate) rerun_op: bool,
+    /// What the resumer sent to an op that runs again.
+    pub(crate) send: Option<u64>,
     root_record: [u64; 4],
     site_record: [u64; 4],
 }
@@ -45,7 +54,7 @@ pub(crate) struct Activation {
 impl Activation {
     pub(crate) fn new(ctx: *mut NativeCtx) -> Self {
         let (frames, regs, scratch) = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
-        Self { ctx, frames, regs, scratch, locals: Vec::new(), root_record: [0; 4], site_record: [0; 4] }
+        Self { ctx, frames, regs, scratch, locals: Vec::new(), parked: false, rerun: false, rerun_op: false, send: None, root_record: [0; 4], site_record: [0; 4] }
     }
 
     /// Link this activation's records into the context, for as long as it
@@ -158,7 +167,7 @@ fn term_uses(t: &Terminator) -> Vec<ValueId> {
 }
 
 /// [`machine::native::RootScanFn`] of an [`Activation`].
-unsafe fn scan_roots(data: *mut c_void, visit: &mut dyn FnMut(*mut u64, bool)) {
+pub(crate) unsafe fn scan_roots(data: *mut c_void, visit: &mut dyn FnMut(*mut u64, bool)) {
     let act = data.cast::<Activation>();
     // SAFETY: the record is linked while the activation runs, and it keeps
     // its frames as they are while anything can reach here. Raw accesses:
