@@ -1,6 +1,7 @@
 //! `coil FILE --mir`: the interpreter runs MIR as lowered, at `-O 0` unless
-//! told otherwise. That output is the reference: the VM and native code,
-//! optimized, must give the same stdout, panic and exit status.
+//! told otherwise. That output is the reference: every level, on the
+//! interpreter, the VM and native code, must give the same stdout, panic and
+//! exit status.
 
 use std::process::{Command, Output};
 
@@ -26,14 +27,18 @@ fn program_stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).lines().filter(|l| !l.starts_with("native:")).collect::<Vec<_>>().join("\n")
 }
 
-/// The optimized engines match the raw run; returns the raw run's output.
+/// Every level on every engine matches the raw run; returns the raw run's
+/// output.
 fn same_as_raw(name: &str, src: &str) -> Output {
     let raw = run(name, src, &["--mir"]);
-    for engine in [&["-O", "2"][..], &["-O", "2", "--jit"]] {
-        let other = run(name, src, engine);
-        assert_eq!(String::from_utf8_lossy(&raw.stdout), String::from_utf8_lossy(&other.stdout), "{name} {engine:?}: stdout differs");
-        assert_eq!(program_stderr(&raw), program_stderr(&other), "{name} {engine:?}: stderr differs");
-        assert_eq!(raw.status.code(), other.status.code(), "{name} {engine:?}: exit status differs");
+    for level in ["0", "1", "2", "3", "s", "g"] {
+        for engine in [&["--mir"][..], &[], &["--jit"]] {
+            let args = [&["-O", level], engine].concat();
+            let other = run(name, src, &args);
+            assert_eq!(String::from_utf8_lossy(&raw.stdout), String::from_utf8_lossy(&other.stdout), "{name} {args:?}: stdout differs");
+            assert_eq!(program_stderr(&raw), program_stderr(&other), "{name} {args:?}: stderr differs");
+            assert_eq!(raw.status.code(), other.status.code(), "{name} {args:?}: exit status differs");
+        }
     }
     raw
 }
@@ -70,9 +75,9 @@ fn a_panic_and_its_backtrace_match_the_raw_output() {
 }
 
 #[test]
-fn raw_mir_keeps_a_loop_the_optimized_build_vectorizes() {
-    // The point of the raw run: no MIR pass has touched it. The same source
-    // optimized runs its loop as a vector op, with the same result.
+fn only_the_levels_with_loop_passes_vectorize_on_the_interpreter() {
+    // The point of the raw run: no MIR pass has touched it. From `-O 2` the
+    // interpreter runs the loop as the vector op native code gets.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs, int from) -> int {{ let s = 0; let i = from; while i < xs.len() {{ s = s + xs[i]; i = i + 1; }} return s; }}\n\
          fn main() {{\n\
@@ -83,14 +88,14 @@ fn raw_mir_keeps_a_loop_the_optimized_build_vectorizes() {
          }}\n"
     );
     let vector_ops = |out: &Output| {
-        String::from_utf8_lossy(&out.stderr).lines().find_map(|l| l.strip_prefix("native: ")?.strip_suffix(" vector ops ran natively")?.parse::<u64>().ok())
+        String::from_utf8_lossy(&out.stderr).lines().find_map(|l| l.strip_prefix("native: ")?.strip_suffix(" vector ops ran natively")?.parse::<u64>().ok()).unwrap_or(0)
     };
-    let raw = run("vector", &src, &["--mir"]);
-    let jit = run("vector", &src, &["-O", "2", "--jit"]);
-    assert_eq!(String::from_utf8_lossy(&raw.stdout).trim(), "8386560", "stderr: {}", String::from_utf8_lossy(&raw.stderr));
-    assert_eq!(String::from_utf8_lossy(&jit.stdout).trim(), "8386560", "stderr: {}", String::from_utf8_lossy(&jit.stderr));
-    assert!(vector_ops(&jit).is_some_and(|n| n > 0), "jit stderr: {}", String::from_utf8_lossy(&jit.stderr));
-    assert!(vector_ops(&raw).unwrap_or(0) == 0, "raw stderr: {}", String::from_utf8_lossy(&raw.stderr));
+    for (level, vectorized) in [("0", false), ("1", false), ("g", false), ("2", true), ("3", true), ("s", true)] {
+        let out = run("vector", &src, &["--mir", "-O", level]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "8386560", "-O{level}: {stderr}");
+        assert_eq!(vector_ops(&out) > 0, vectorized, "-O{level}: {stderr}");
+    }
 }
 
 #[test]

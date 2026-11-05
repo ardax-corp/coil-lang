@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Compare optimized output against the raw reference, program by program.
+"""Compare every level and engine against the raw reference, program by program.
 
-    scripts/mir_diff.py [--bin DIR] [--root DIR ...] [PATH ...]
+    scripts/mir_diff.py [--bin DIR] [--root DIR ...] [--levels 0,1,2,3,s,g] [PATH ...]
 
 `coil FILE --mir` runs MIR as lowered at `-O 0` (docs/internals/mir-interp.md).
 Each `.coil` with a `main` under PATH (default: examples) runs that way, then
-at `-O 2` on the VM and with `--jit`. Timings in the output (`1234 ns`) are
-masked; any other difference in stdout or exit status is an optimizer or
-backend bug, or a program whose output is not deterministic. Exits 1 when any
-program differs.
+at each level on the interpreter, the VM and with `--jit`. Timings in the
+output (`1234 ns`) are masked. A difference in stdout or exit status from the
+reference on the interpreter is a MIR or HIR pass's; on `--jit` alone, at a level
+where the interpreter agrees, the backend's; on every engine at once it may be a
+program whose output is not deterministic. Exits 1 when any program differs.
 """
 
 import argparse
@@ -19,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 TIMING = re.compile(rb"\d+(\.\d+)? ?(ns|us|ms|s)\b")
-ENGINES = {"vm -O2": ["-O", "2"], "jit -O2": ["-O", "2", "--jit"]}
+ENGINES = {"mir": ["--mir"], "vm": [], "jit": ["--jit"]}
 
 
 def run(bin_dir, roots, path, flags, timeout):
@@ -34,16 +35,20 @@ def run(bin_dir, roots, path, flags, timeout):
 
 
 def compare(args, path):
-    raw = run(args.bin, args.root, path, ["--mir"], args.timeout)
+    raw = run(args.bin, args.root, path, ["--mir", "-O", "0"], args.timeout)
     if raw[0] == "timeout":
         return (path, "skipped", ["raw run timed out"])
     if b"" == raw[1] and raw[0] not in (0, 1):
         return (path, "crashed", [f"raw exit {raw[0]}"])
     out = []
-    for name, flags in ENGINES.items():
-        got = run(args.bin, args.root, path, flags, args.timeout)
-        if got != raw:
-            out.append(f"{name}: exit {got[0]} vs {raw[0]}" if got[0] != raw[0] else f"{name}: stdout differs")
+    for level in args.levels.split(","):
+        for name, flags in ENGINES.items():
+            if name == "mir" and level == "0":
+                continue
+            got = run(args.bin, args.root, path, flags + ["-O", level], args.timeout)
+            if got != raw:
+                what = f"exit {got[0]} vs {raw[0]}" if got[0] != raw[0] else "stdout differs"
+                out.append(f"{name} -O{level}: {what}")
     return (path, "differs" if out else "same", out)
 
 
@@ -52,6 +57,7 @@ def main():
     ap.add_argument("paths", nargs="*", default=["examples"])
     ap.add_argument("--bin", type=Path, default=Path("target/release"))
     ap.add_argument("--root", action="append", default=[])
+    ap.add_argument("--levels", default="0,1,2,3,s,g")
     ap.add_argument("--timeout", type=int, default=60)
     ap.add_argument("-j", type=int, default=8)
     args = ap.parse_args()
