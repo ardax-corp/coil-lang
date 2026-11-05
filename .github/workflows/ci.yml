@@ -496,10 +496,11 @@ jobs:
             # local, so the roots differ from the default level (#1481).
             # Generics too: uninlined calls through `forall` parameters
             # pass dictionaries the default level folds away (#1530).
-            # A full cycle per allocation makes allocation-heavy cases cost
-            # minutes each (heap_churn_checksums.coil, bare_unit_case_in_pure_fn.coil:
-            # 3 to 4 minutes alone on one core), so the per-case wall limit
-            # is wider than the default 600 s.
+            # A full cycle per allocation costs time quadratic in what a
+            # case keeps live, so a case holds thousands of objects, not
+            # hundreds of thousands, and forces the collection it needs
+            # with `collect()`. The per-case wall limit is wider than the
+            # default 600 s for slow runners.
             gc-stress)
               $run --harness harness-bin/gc-stress/coil-test -- --wall-timeout 1200 $FLAGS
               $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS
