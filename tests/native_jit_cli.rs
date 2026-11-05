@@ -21,6 +21,8 @@ fn run(name: &str, src: &str, jit: bool) -> Output {
     }
     if jit {
         cmd.arg("--jit").env("COIL_NATIVE_STATS", "2");
+    } else {
+        cmd.arg("--no-jit");
     }
     cmd.output().expect("spawn coil")
 }
@@ -369,9 +371,7 @@ fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
     let out = dir.join(format!("{name}.ccoil"));
     let mut cmd = Command::new(coil_bin());
     cmd.args(["compile", "--no-build-cache", "--fold-calls", "off", "-o"]).arg(&out).arg(&file);
-    if jit {
-        cmd.arg("--jit");
-    }
+    cmd.arg(if jit { "--jit" } else { "--no-jit" });
     for root in compiler::Pipeline::workspace_language_extra_roots() {
         cmd.arg("--root").arg(root);
     }
@@ -927,6 +927,8 @@ fn ffi_calls_run_from_native_code() {
         }
         if jit {
             cmd.arg("--jit").env("COIL_NATIVE_STATS", "2");
+        } else {
+            cmd.arg("--no-jit");
         }
         cmd.output().expect("spawn coil")
     };
@@ -1326,8 +1328,8 @@ fn a_jit_run_comes_from_the_build_cache() {
         for root in compiler::Pipeline::workspace_language_extra_roots() {
             cmd.arg("--root").arg(root);
         }
-        if jit {
-            cmd.arg("--jit");
+        if !jit {
+            cmd.arg("--no-jit");
         }
         let out = cmd.output().expect("spawn coil");
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));

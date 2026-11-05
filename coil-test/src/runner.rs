@@ -104,6 +104,12 @@ impl Engine {
         }
     }
 
+    /// What runs a suite unless asked otherwise: native code where there
+    /// is any.
+    pub fn host_default() -> Self {
+        if cfg!(target_family = "wasm") { Self::Vm } else { Self::Native }
+    }
+
     /// Whether a compile hands this engine its MIR.
     pub fn runs_mir(self) -> bool {
         self != Self::Vm

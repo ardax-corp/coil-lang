@@ -116,10 +116,11 @@ struct TestCli {
     /// (the files are parsed, not compiled)
     #[arg(long)]
     doc_tests_only: bool,
-    /// What runs the compiled code: vm, or native (Cranelift where the
-    /// backend compiles a body, the VM elsewhere)
-    #[arg(long, value_name = "vm|native|mir", value_parser = Engine::parse, default_value = "vm")]
-    engine: Engine,
+    /// What runs the compiled code: native (Cranelift where the backend
+    /// compiles a body, the VM elsewhere; the default), vm, or mir (the
+    /// interpreter). `--coverage` runs on the VM
+    #[arg(long, value_name = "vm|native|mir", value_parser = Engine::parse)]
+    engine: Option<Engine>,
     /// Test root (default: ./tests)
     #[arg(value_name = "PATH")]
     path: Option<String>,
@@ -224,6 +225,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
     let Some(cli) = parse_with::<TestCli>(named(TestCli::command(), "coil test"), args)? else {
         return Ok(Parsed::Help);
     };
+    let coverage_asked = cli.coverage || cli.coverage_out.is_some() || cli.coverage_per_test.is_some();
     let (config, test) = assemble(RunParts {
         log: cli.log,
         opt: cli.opt,
@@ -251,7 +253,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
             DocTests::On
         },
         wall_timeout: cli.wall_timeout,
-        engine: cli.engine,
+        engine: cli.engine.unwrap_or(if coverage_asked { Engine::Vm } else { Engine::host_default() }),
     })?;
     Ok(Parsed::Run(config, test))
 }

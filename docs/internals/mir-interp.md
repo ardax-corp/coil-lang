@@ -112,7 +112,7 @@ no machine code, and the VM goes. It lands here rather than on a later
 | 1. MIR interpreter | Done: every corpus, every level, CI cells |
 | 2. Glue as MIR | Mostly done already (below) |
 | 3. Comptime and macros on the interpreter | Done, on a `Machine` that holds the runtime (below) |
-| 4. JIT by default | Next: `coil FILE`, `coil compile`, `coil run` and `coil test` |
+| 4. JIT by default | Done: `coil FILE`, `coil compile`, `coil run` and `coil test`; `--no-jit` and `--engine vm` keep the VM |
 | 5. Packaging without the VM | Open |
 | 6. Debugger and coverage | Open: `Deopt` stops, names at a stop, MIR probes |
 | 7. wasm | Open: `Yield` detaches its frame, a task parks an activation; then comptime leaves `Machine<256>` |
@@ -177,6 +177,11 @@ with E0138. The value is the same; five of the 365 examples changed this way.
 then, so swapping it now would mean two hosts. Step 7 ends with comptime on a
 holder that has no VM in it, and with the fallback to `call_function` gone, so
 step 8 deletes the VM with nothing in comptime depending on it.
+
+**Step 4.** The VM stays runnable and tested: CI's `default`, `O0`, leak-smoke and
+GC stress cells name `--engine vm`, and a test that compares against the VM has to
+say `--no-jit`, since no flag now means native code. Comparing two runs with no
+flag passes and proves nothing.
 
 **Decisions for the steps ahead** (the options doc's 3, 4, 5 and 7):
 

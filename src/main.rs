@@ -517,7 +517,7 @@ fn install_native_bodies(
     #[cfg(target_family = "wasm")]
     {
         let _ = (bodies, pcs);
-        eprintln!("warning: --jit: no native code on wasm; running on the VM");
+        eprintln!("warning: no native code on wasm; running on the VM");
     }
     #[cfg(not(target_family = "wasm"))]
     match coil_native::jit(bodies, pcs) {
@@ -536,7 +536,7 @@ fn install_native_bodies(
             let complete = program.refused.is_empty();
             machine::native::install_for_next_run(program.entries, program.sites, complete);
         }
-        Err(e) => eprintln!("warning: --jit: native compile failed ({e}); running on the VM"),
+        Err(e) => eprintln!("warning: native compile failed ({e}); running on the VM"),
     }
 }
 

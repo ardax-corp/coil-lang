@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 TIMING = re.compile(rb"\d+(\.\d+)? ?(ns|us|ms|s)\b")
-ENGINES = {"mir": ["--mir"], "vm": [], "jit": ["--jit"]}
+ENGINES = {"mir": ["--mir"], "vm": ["--no-jit"], "jit": ["--jit"]}
 
 
 def run(bin_dir, roots, path, flags, timeout):

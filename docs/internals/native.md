@@ -12,10 +12,17 @@ project's plan docs; this page describes what is implemented.
 ## Using it
 
 ```
-coil prog.coil --jit          # compile, JIT what it can, run
-COIL_NATIVE_STATS=1 coil prog.coil --jit   # counts on stderr
-COIL_NATIVE_STATS=2 coil prog.coil --jit   # plus why each body stays on the VM
+coil prog.coil                # compile, JIT what it can, run
+coil prog.coil --no-jit       # run on the VM
+COIL_NATIVE_STATS=1 coil prog.coil   # counts on stderr
+COIL_NATIVE_STATS=2 coil prog.coil   # plus why each body stays on the VM
 ```
+
+Native code is the default where there is any: `coil FILE`, `coil compile` and
+`coil test` use it, and a wasm build stays on the VM. `--jit` still asks for it,
+and `--cow-report` and `coil test --coverage` run on the VM because only the VM
+serves them. At `-g1` a program that runs native code keeps its byte spans, so
+only `--no-jit` makes `-g1` smaller than `-g2`.
 
 The stats end with the run's dependence on the VM:
 `native: N calls ran on the VM, M VM entries from native code`. `N` counts
@@ -54,10 +61,13 @@ entry. Native code registers a finalizer through the machine
 An archive or package with native code keeps byte spans at `-g1`
 (`Pipeline::set_runs_mir`), and so does a direct run: native code finds a panic's location by span.
 
-`--jit` skips the build cache (it needs this compile's MIR).
+A run takes its archive from the build cache as any other does: the cached
+archive keeps its MIR section, under a key of its own. `--mir` skips the cache,
+since the section holds only what native code compiles.
 
 ```
-coil compile --jit prog.coil -o prog.ccoil   # archive with a native MIR section
+coil compile prog.coil -o prog.ccoil   # archive with a native MIR section
+coil compile --no-jit prog.coil -o prog.ccoil   # archive with none
 coil run prog.ccoil                          # JITs the section, then runs
 coil run --no-jit prog.ccoil                 # VM only
 ```
@@ -72,7 +82,8 @@ native code is compared against.
 ### Testing against the VM
 
 ```
-coil test --engine native [PATH]
+coil test [PATH]               # the same as --engine native
+coil test --engine vm [PATH]
 ```
 
 runs a suite with native code: each file's MIR is captured and JIT
