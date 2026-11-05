@@ -99,6 +99,29 @@ fn only_the_levels_with_loop_passes_vectorize_on_the_interpreter() {
 }
 
 #[test]
+fn an_inlined_results_low_word_survives_a_region() {
+    // With `parse` inlined, the low word of `Result<int, string>` merges
+    // `Ok`'s int with `Err`'s string: only a root keeps the string when the
+    // region ends.
+    let src = format!(
+        "{HEADER}fn parse(int n) -> Result<int, string> {{\n\
+           if n < 0 {{ return Result::Err(format(\"negative %i\", n)); }}\n\
+           return Result::Ok(n);\n\
+         }}\n\
+         fn checked(int n) -> Result<int, string> {{\n\
+           let v = region {{ let w = parse(n)?; w + 1 }};\n\
+           return Result::Ok(v);\n\
+         }}\n\
+         fn main() {{\n\
+           let e = match checked(-4) {{ Result::Err(e) => e, Result::Ok(_) => \"\" }};\n\
+           let _ = println(e);\n\
+         }}\n"
+    );
+    let out = same_as_raw("region_result", &src);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "negative -4", "stderr: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn an_explicit_level_overrides_the_raw_default() {
     let src = format!("{HEADER}fn main() {{ let _ = println(format(\"%i\", 6 * 7)); }}\n");
     let out = run("level", &src, &["--mir", "-O", "2"]);

@@ -152,17 +152,20 @@ pub fn pointer_words(f: &MirFunc) -> HashSet<ValueId> {
 
 /// The `int` words that may hold an object with no static type to say so:
 /// the low word of a pair that may carry a heap payload
-/// ([`MirFunc::heap_pair_words`]) and the φs and casts that copy one. An
-/// engine roots them ambiguously (a pair of numbers reads the same).
-/// `pointers` are [`pointer_words`], which are precise roots already.
+/// ([`MirFunc::heap_pair_words`]), the φs and casts that copy one, and a φ
+/// that merges an object with a number (an inlined `Result<int, string>`'s
+/// low word: `Ok`'s `int`, `Err`'s string). An engine roots them ambiguously
+/// (a pair of numbers reads the same). `pointers` are [`pointer_words`],
+/// which are precise roots already.
 pub fn pair_words(f: &MirFunc, pointers: &HashSet<ValueId>) -> Vec<ValueId> {
     let mut out: HashSet<ValueId> = f.heap_pair_words.iter().copied().filter(|&v| !heap_word(ty_of(f, v))).collect();
-    let mut changed = !out.is_empty();
+    let object = |v: &ValueId, out: &HashSet<ValueId>| out.contains(v) || pointers.contains(v) || heap_word(ty_of(f, *v));
+    let mut changed = true;
     while changed {
         changed = false;
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             let copies = match inst {
-                MirInst::Phi { dest, args, .. } => ty_of(f, *dest) == MirTy::I64 && args.iter().any(|(_, a)| out.contains(a)),
+                MirInst::Phi { dest, args, .. } => ty_of(f, *dest) == MirTy::I64 && args.iter().any(|(_, a)| object(a, &out)),
                 MirInst::Cast { dest, src, .. } => ty_of(f, *dest) == MirTy::I64 && out.contains(src),
                 _ => false,
             };
