@@ -1117,12 +1117,16 @@ fn a_pure_native_run_reports_no_vm_dependence() {
 
 #[test]
 fn a_native_run_counts_its_vm_entries() {
-    // `wide` takes more words than native code passes: it and its caller
-    // stay on the VM.
+    // A closure of 17 captures is more than native code allocates: `show`
+    // stays on the VM.
+    let names: Vec<String> = (0..17).map(|i| format!("c{i}")).collect();
+    let lets: Vec<String> = (0..17).map(|i| format!("let c{i} = k + {i}; ")).collect();
     let src = format!(
-        "{HEADER}#[inline(never)]\nfn wide(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16) -> int {{ return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16; }}\n\
-         #[inline(never)]\nfn show(int k) {{ let _ = println(format(\"%i\", k + wide(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))); }}\n\
-         fn main() {{ show(1); show(2); }}\n"
+        "{HEADER}#[inline(never)]\nfn show(int k) {{ {}let f = fn () use ({}) => {}; let _ = println(format(\"%i\", f())); }}\n\
+         fn main() {{ show(1); show(2); }}\n",
+        lets.concat(),
+        names.join(", "),
+        names.join(" + "),
     );
     let stats = same_as_vm("counts_vm", &src);
     let (calls, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
