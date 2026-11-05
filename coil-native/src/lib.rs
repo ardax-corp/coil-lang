@@ -2364,7 +2364,8 @@ impl<'a> Lower<'a> {
                     self.set(f, *dest, zero);
                 }
             }
-            MirInst::KeepAlive { dest, .. } => {
+            MirInst::KeepAlive { dest, value } => {
+                self.keep_word(f, *value);
                 if numeric(ty_of(f, *dest)) {
                     let zero = self.b.ins().iconst(types::I64, 0);
                     self.set(f, *dest, zero);
@@ -3073,17 +3074,20 @@ impl<'a> Lower<'a> {
     /// each one (and what it roots) alive until the body returns, as an
     /// unused `let r = root(h)` asks.
     fn keep_roots(&mut self, f: &MirFunc) {
-        if self.root_handles.is_empty() {
-            return;
+        for v in self.root_handles.clone() {
+            self.keep_word(f, v);
         }
+    }
+
+    /// A use of `v` that does nothing else: its word stays live to here,
+    /// so the stack maps hold it.
+    fn keep_word(&mut self, f: &MirFunc, v: ValueId) {
         let slot = *self.keep_slot.get_or_insert_with(|| {
             self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 8, 3))
         });
-        for v in self.root_handles.clone() {
-            let x = self.get(f, v);
-            let x = self.coerce(x, types::I64);
-            self.b.ins().stack_store(types::I64, x, slot, 0);
-        }
+        let x = self.get(f, v);
+        let x = self.coerce(x, types::I64);
+        self.b.ins().stack_store(types::I64, x, slot, 0);
     }
 
     fn words_slot(&mut self, f: &MirFunc, vs: &[ValueId]) -> cranelift_codegen::ir::Value {
