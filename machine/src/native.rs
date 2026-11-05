@@ -806,17 +806,25 @@ pub(crate) enum NativeOutcome {
     Panicked(NativePanic),
 }
 
+/// Set [`NativeCtx::stack_hard`] to the real end of the stack `sp` is on,
+/// when it is known. Not the lower of that and the budget: near the end,
+/// `sp` less the budget is past it, and each nested entry would then get a
+/// limit it can never reach.
+fn set_stack_hard(ctx: &mut NativeCtx, sp: u64) {
+    if let Some(limit) = crate::stacks::fiber_stack_limit() {
+        ctx.stack_hard = limit as u64;
+    } else if let Some(left) = stacker::remaining_stack() {
+        ctx.stack_hard = sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD));
+    }
+}
+
 /// Run `entry` with `args`.
 #[inline(never)]
 pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> NativeOutcome {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
     let mut ctx = unsafe { NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap) };
-    if let Some(limit) = crate::stacks::fiber_stack_limit() {
-        ctx.stack_hard = ctx.stack_hard.min(limit as u64);
-    } else if let Some(left) = stacker::remaining_stack() {
-        ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
-    }
+    set_stack_hard(&mut ctx, sp);
     ctx.machine = env.machine;
     ctx.host = env.host;
     ctx.strings = env.strings;
@@ -2139,11 +2147,7 @@ pub(crate) fn run_pads(
     }
     for i in 0..pads.len() {
         let mut ctx = unsafe { NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap) };
-        if let Some(limit) = crate::stacks::fiber_stack_limit() {
-            ctx.stack_hard = ctx.stack_hard.min(limit as u64);
-        } else if let Some(left) = stacker::remaining_stack() {
-            ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
-        }
+        set_stack_hard(&mut ctx, sp);
         ctx.machine = env.machine;
         ctx.host = env.host;
         ctx.strings = env.strings;
