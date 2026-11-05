@@ -375,7 +375,8 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
                 per_test_out: parts.per_test_out,
                 project_root: std::env::current_dir().unwrap_or_default(),
             }),
-            opt_level: parts.opt.level(),
+            // The interpreter is the raw reference unless `-O` says otherwise.
+            opt_level: if parts.engine == Engine::Mir && parts.opt.opt_level.is_none() { compiler::OptLevel::None } else { parts.opt.level() },
             debug_level: parts.debug,
             contracts: parts.opt.contracts,
             fold_calls: parts.opt.fold_calls,

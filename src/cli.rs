@@ -533,7 +533,9 @@ impl RawCli {
                 if is_reserved(&filename) {
                     return Err("missing input file (pass a .coil file or `--entry`)".into());
                 }
-                CliArgs {
+                // `--mir` is the raw reference unless `-O` says otherwise.
+                let mir_level = (self.nursery.mir && self.opt.opt_level.is_none()).then_some(OptLevel::None);
+                let cli = CliArgs {
                     debug_level: self.debug.level(),
                     nursery: self.nursery.nursery,
                     cow_report: self.nursery.cow_report,
@@ -549,7 +551,8 @@ impl RawCli {
                         self.grants,
                         self.roots.root,
                     )
-                }
+                };
+                CliArgs { opt_level: mir_level.unwrap_or(cli.opt_level), ..cli }
             }
             Some(RawCommand::Lsp { args: _ }) => cli_from(
                 Command::Lsp,
