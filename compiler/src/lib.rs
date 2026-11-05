@@ -1,6 +1,5 @@
 mod ast_cache;
 mod attrs;
-mod block_builder;
 pub mod builtin_docs;
 pub(crate) mod escape;
 pub mod comptime_cache;
@@ -22,11 +21,14 @@ pub use mir::{start_mir_capture, take_mir_capture};
 /// MIR for a native backend (`coil-native`): the capture and the types it reads.
 pub mod native_mir {
     pub use crate::il::Label;
+    pub use crate::mir::archive;
+    pub use crate::mir::coverage;
     pub use crate::mir::{
         BlockId, LaneExpr, LaneVal, MirAllocKind, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirTy,
-        MirUnaryOp, NativeBody, Terminator, ValueId, VectorOp, native_capture_active, start_native_capture, vector_op,
+        MirUnaryOp, NativeBody, Terminator, ValueId, VectorOp, native_capture_active, start_native_capture, start_raw_capture, vector_op,
         VecExpr, VecLoopKind, liveness,
         take_native_capture,
+        allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pointer_words, root_handles, scalar, ty_of, used_params, word_kind, is_tail_call_inst, pair_words,
     };
 }
 pub(crate) mod hir;

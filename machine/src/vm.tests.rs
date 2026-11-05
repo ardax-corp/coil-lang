@@ -3257,6 +3257,59 @@
         assert_eq!(vm.heap().size(), 0);
     }
 
+    /// A worker reuses its machine: a job that grew the heap must not leave
+    /// the next one a heap with other settings, or every job after the
+    /// first big one on a worker runs without the nursery.
+    #[test]
+    fn reset_isolate_heap_keeps_the_heap_settings() {
+        let mut vm = Machine::<8>::default();
+        vm.heap_mut().set_nursery(true);
+        vm.set_heap_cap(Some(1 << 30));
+        for i in 0..4000u32 {
+            let _ = vm.heap_mut().intern(format!("s{i}"));
+        }
+        assert!(vm.heap().slab_chunk_count() > 1, "need a heap that gets replaced");
+        vm.reset_isolate_heap();
+        assert_eq!(vm.heap().slab_chunk_count(), 0);
+        assert!(vm.heap().nursery(), "the nursery stays on");
+        assert_eq!(vm.heap().byte_cap(), 1 << 30, "the cap stays");
+    }
+
+    /// A job's objects end with it: one left in a reused heap joins the
+    /// next program's finalizable objects, whose `drop` for the same type
+    /// id then reads an object of another program.
+    #[test]
+    fn reset_isolate_heap_leaves_no_object_of_the_last_job() {
+        let mut vm = Machine::<8>::default();
+        vm.heap_mut().set_nursery(true);
+        let payload = crate::memory::EnumPayload::one(Value::from(7u64));
+        let (young, mut gc) = vm.heap_mut().alloc(crate::memory::ObjEnum::new(0, payload), Object::Enum);
+        gc.as_mut().type_id = 1;
+        assert_ne!(young.generation() & crate::memory::GEN_YOUNG, 0, "needs a young object");
+        assert_eq!(vm.heap().slab_chunk_count(), 1, "needs a heap that is kept");
+        vm.reset_isolate_heap();
+        assert_eq!(vm.heap().objects().count(), 0, "the object went with its job");
+        vm.heap_mut().register_finalizer_type(1);
+        assert!(vm.heap_mut().unmarked_finalizable().is_empty());
+    }
+
+    /// The same for an object an earlier minor pinned, which only a major
+    /// collection frees.
+    #[test]
+    fn reset_isolate_heap_leaves_no_held_object_of_the_last_job() {
+        let mut vm = Machine::<8>::default();
+        vm.heap_mut().set_nursery(true);
+        let payload = crate::memory::EnumPayload::one(Value::from(7u64));
+        let (held, mut gc) = vm.heap_mut().alloc(crate::memory::ObjEnum::new(0, payload), Object::Enum);
+        gc.as_mut().type_id = 1;
+        let plan = vm.heap_mut().minor_plan(&[held.addr()], &[]);
+        vm.heap_mut().minor_finish(plan);
+        assert_ne!(held.generation() & crate::memory::GEN_HELD, 0, "needs a held object");
+        assert_eq!(vm.heap().slab_chunk_count(), 1, "needs a heap that is kept");
+        vm.reset_isolate_heap();
+        assert_eq!(vm.heap().objects().count(), 0, "the object went with its job");
+    }
+
     /// Harness soft-pass checks `Result::Ok` via tag 0.
     #[test]
     fn result_is_ok_true_for_tag_zero_enum() {

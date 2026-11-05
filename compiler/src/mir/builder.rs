@@ -166,10 +166,10 @@ impl MirBuilder {
         *self.func.slot_fields.entry(slot).or_insert(0) |= bits;
     }
 
-    /// `dest` is the low word of a pair a call returns that may carry a
-    /// heap payload ([`MirFunc::heap_pair_calls`]).
-    pub fn mark_heap_pair_call(&mut self, dest: ValueId) {
-        self.func.heap_pair_calls.insert(dest);
+    /// `dest` is the low word of a pair that may carry a heap payload: a
+    /// call's result or a parameter ([`MirFunc::heap_pair_words`]).
+    pub fn mark_heap_pair_word(&mut self, dest: ValueId) {
+        self.func.heap_pair_words.insert(dest);
     }
 
     pub fn entry(&self) -> BlockId {

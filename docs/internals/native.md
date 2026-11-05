@@ -3,19 +3,26 @@
 Coil can run functions as machine code made by
 [Cranelift](https://cranelift.dev) from their MIR. A program whose bodies
 all compile runs on the native driver with no interpreter, and an AOT
-executable (`coil package`) links no bytecode VM at all. The VM stays for
-comptime and macros, `coil debug`, coverage, wasm, `--no-aot` packages,
-and `coil --jit` runs of a program with a body native code refuses. The
+executable (`coil package`) links no bytecode VM at all. Comptime and macros
+run on the MIR interpreter (`docs/internals/mir-interp.md`), as do `coil debug`,
+coverage on it and every wasm build. The VM stays for `--no-jit`, `--cow-report` and
+runs of a program with a body native code refuses. The
 plans (native compilation, then native without the VM) are in the
 project's plan docs; this page describes what is implemented.
 
 ## Using it
 
 ```
-coil prog.coil --jit          # compile, JIT what it can, run
-COIL_NATIVE_STATS=1 coil prog.coil --jit   # counts on stderr
-COIL_NATIVE_STATS=2 coil prog.coil --jit   # plus why each body stays on the VM
+coil prog.coil                # compile, JIT what it can, run
+coil prog.coil --no-jit       # run on the VM
+COIL_NATIVE_STATS=1 coil prog.coil   # counts on stderr
+COIL_NATIVE_STATS=2 coil prog.coil   # plus why each body stays on the VM
 ```
+
+Native code is the default where there is any: `coil FILE`, `coil compile` and
+`coil test` use it, and a wasm build runs the MIR interpreter. `--jit` still asks
+for it, and `--cow-report` runs on the VM because only the VM serves it. At `-g1` a program that runs native code keeps its byte spans, so
+only `--no-jit` makes `-g1` smaller than `-g2`.
 
 The stats end with the run's dependence on the VM:
 `native: N calls ran on the VM, M VM entries from native code`. `N` counts
@@ -38,8 +45,9 @@ Module setup is a function, `__module_setup`
 (`compiler/src/codegen/module_setup.rs`): the stores of the statics
 computed at run time, each `extern` library's load and declarations
 (`FfiLoad` / `DeclareFFI`, a failure panicking with the error's message)
-and the finalizer registry (`gc_register_finalizer` per class with a
-`drop`). Codegen records the steps (`SetupStep`) as it emits them and
+but not the finalizer registry (`gc_register_finalizer` per class with a
+`drop`): that is `__finalizer_setup`, the prologue's first call, since a
+collection during any initializer must find the `drop` of what it made. Codegen records the steps (`SetupStep`) as it emits them and
 builds the function's MIR from them, so the register tiers emit it and
 native code compiles it like any body. The setup region the prologue
 jumps to is `CALL __module_setup; POP; JMP main`, after the calls of the
@@ -51,12 +59,15 @@ entry. Native code registers a finalizer through the machine
 (`HostOp::RegisterFinalizer` in `Machine::native_invoke`).
 
 An archive or package with native code keeps byte spans at `-g1`
-(`native_debug_level`): native code finds a panic's location by span.
+(`Pipeline::set_runs_mir`), and so does a direct run: native code finds a panic's location by span.
 
-`--jit` skips the build cache (it needs this compile's MIR).
+A run takes its archive from the build cache as any other does: the cached
+archive keeps its MIR section, under a key of its own. `--mir` skips the cache,
+since the section holds only what native code compiles.
 
 ```
-coil compile --jit prog.coil -o prog.ccoil   # archive with a native MIR section
+coil compile prog.coil -o prog.ccoil   # archive with a native MIR section
+coil compile --no-jit prog.coil -o prog.ccoil   # archive with none
 coil run prog.ccoil                          # JITs the section, then runs
 coil run --no-jit prog.ccoil                 # VM only
 ```
@@ -64,10 +75,15 @@ coil run --no-jit prog.ccoil                 # VM only
 `coil run --jit` on an archive without the section warns and runs on the
 VM. `coil package` compiles ahead of time instead (see [AOT](#aot-coil-package)).
 
+The MIR interpreter (`coil FILE --mir`, [mir-interp.md](mir-interp.md)) is
+another engine on this same ABI, and its raw `-O 0` output is the reference
+native code is compared against.
+
 ### Testing against the VM
 
 ```
-coil test --engine native [PATH]
+coil test [PATH]               # the same as --engine native
+coil test --engine vm [PATH]
 ```
 
 runs a suite with native code: each file's MIR is captured and JIT
@@ -88,19 +104,15 @@ the VM out of native binaries drive every total to 0.
 ### The native MIR section
 
 `ArchivedProgram::native_mir` (archive 6.20; 6.0 to 6.19 archives load
-with it empty) holds bytes in the `coil-native` section format
-(`coil-native/src/section.rs`): the magic `CNMIR`, a format byte, then each
-body the backend compiles with its name, bytecode entry PC, entry label,
-signature, value types and blocks. Only those bodies and only the MIR the
-backend lowers are stored, so the encoder never meets an instruction
-outside the tier; the format grows with the tiers and bumps its format byte
-when the layout changes. A reader refuses any other format, a truncated
-section or trailing bytes, and the run falls back to the VM with a
-warning. Format 7 carries the coroutine ops (`ResumeCoro`, `DoneCoro`,
-`Yield`, coroutine allocations), FFI ops and the vector ops (`ByteScan`
-with its lane expression, `VecLoop` with its vector expression trees, at
-most 64 deep). The section is compiled again on every run: the archive carries
-MIR, not machine code.
+with it empty) holds bytes in the MIR archive format
+(`compiler/src/mir/archive.rs`): the magic `CNMIR`, a format byte, then each
+body with its name, bytecode entry PC and entry label. `coil_native::section`
+chooses the bodies: those the backend compiles, and a stub of each body they
+call on the VM. A full body is stored whole, every field and instruction, and
+comes back equal; `COIL_MIR_ARCHIVE_CHECK` runs a corpus on the copies that
+come back. A reader refuses any other format, a truncated section or trailing
+bytes, and the run falls back to the VM with a warning. The section is
+compiled again on every run: the archive carries MIR, not machine code.
 
 ## Numeric tier (step 2)
 
@@ -278,9 +290,10 @@ its frames are walked the same way.
 Two kinds of word stay in a record linked into `NativeCtx::roots`
 (`[next, n, words…]` on the stack): the heap homes, which live in memory
 and are written back when `NativeCtx::gc_epoch` moved (array views are then
-re-read), and the ambiguous words: a call's pair low word that may carry an
-object (`MirFunc::heap_pair_calls`) and an opaque body's `int` words, which
-are pinned and never rewritten.
+re-read), and the ambiguous words: the low word of a pair that may carry an
+object, a call's result or a parameter (`MirFunc::heap_pair_words`, and the
+φs that copy one: `pair_words`), and an opaque body's `int` words, which are
+pinned and never rewritten.
 
 ### Host calls
 
@@ -417,6 +430,9 @@ stack as before.
   fiber's defers, then its native frames' pads (`TRAP_VM_PANIC`), then the
   task's own frames. `rearm_unwind_after_early_drop` leaves a cancel
   without a message, so the task ends `Cancelled`, not `Panicked`.
+- A switch fences its owner (`stacks::fiber_switch_fence`): what runs on the
+  other side reaches the same object through a raw pointer, which `&mut`'s
+  `noalias` does not account for.
 - GC: a parked fiber's VM state and native roots, and the task's own
   state while a fiber runs, are scanned as ambiguous (pinned) roots
   (`for_each_fiber_word`). A parked fiber's executions stay counted in
@@ -426,8 +442,8 @@ stack as before.
 - A task that never resumes (its scope torn down after a root panic)
   drops its fiber with `force_reset`: native frames have no unwind tables,
   so what they own leaks, as a VM coroutine dropped mid-way does.
-- wasm has no fibers: there, under a scheduler, only bodies that reach no
-  VM code run natively.
+- wasm has no fibers and no native code: the interpreter parks its frames on
+  the heap there (`docs/internals/mir-interp.md`, step 7).
 
 ### Generators
 
@@ -616,7 +632,7 @@ alive until its function returns, as on the VM.
 ## AOT `coil package`
 
 `coil package` links a native executable by default (`--no-aot` or
-`--runner` keep the old runner + payload):
+`--runner` package the [JIT runner](#jit-runner) instead):
 
 1. The build captures MIR as for `--jit`; `coil_native::aot()` lowers it
    with `cranelift-object` (PIC) into `program.o`. The object defines
@@ -644,10 +660,29 @@ alive until its function returns, as on the VM.
    world). Build it in its own cargo invocation (`cargo build -p
    coil-rt`): a build with `coil` unifies `vm` back in.
 
-A body native code refuses is an error naming it and why (`--no-aot`
-packages the `coil-embed` runner, whose VM runs it). If the object or the
-link fails (no `cc`, no `libcoil_rt.a`, Windows) the package warns and
-falls back to the runner.
+A body native code refuses is an error naming it and why, at package time on
+both kinds of executable: neither has a VM to run it. No source program reaches
+one today: parameters, captures, generator arguments and live words have no
+limit in native code, and the corpus reports no refusal. The one limit left is a
+function value of 256 or more parameters, whose arity `ObjFn` keeps in the 8
+bits of bytecode's `MakeFn` operand: calling it panics. If the object or the
+link fails (no `cc`, no `libcoil_rt.a`, Windows) the package warns
+and falls back to the runner.
+
+### JIT runner
+
+`coil-embed` is the runtime and Cranelift, with no VM, parser or linker. `coil
+package --no-aot` appends the program with its native MIR section, and the
+runner JITs it at start (`coil_native::install_section`, through
+`coil_cli::try_run_embedded_with`) and runs it on the driver. Nothing about it
+needs `cc`, so it is what a host that cannot link gets. `coil package` compiles
+the MIR once itself, so a body that does not compile fails there and not on the
+target. An AOT payload has no section: its code is in the executable.
+
+The runner is about 6.3 MB against 2.1 MB for the old VM runner, the difference
+being Cranelift, and a program pays the JIT at every start (a few ms for a small
+one). Build it in its own cargo invocation, as `coil-rt`: a build with `coil`
+unifies `vm` back in (`coil_embed_resolves_no_vm`).
 
 ### Size and speed
 

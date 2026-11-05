@@ -129,9 +129,9 @@ if command -v poop >/dev/null 2>&1; then
         echo "-- $name"
         hyc="$POOP_DIR/${name}.ccoil"
         if [[ "$name" == "fib" ]]; then
-            "$BIN" compile --auto-par off "examples/perf/${name}.coil" -o "$hyc" >/dev/null
+            "$BIN" compile --no-jit --auto-par off "examples/perf/${name}.coil" -o "$hyc" >/dev/null
         else
-            "$BIN" compile "examples/perf/${name}.coil" -o "$hyc" >/dev/null
+            "$BIN" compile --no-jit "examples/perf/${name}.coil" -o "$hyc" >/dev/null
         fi
         cmds=("$BIN run $hyc" "lua benchmarks/${name}.lua")
         if command -v node >/dev/null 2>&1; then
@@ -146,9 +146,9 @@ if command -v poop >/dev/null 2>&1; then
         hyc="$POOP_DIR/${name}.ccoil"
         echo "-- $path"
         if [[ "$name" == "fib" ]]; then
-            "$BIN" compile --auto-par off "$path" -o "$hyc" >/dev/null
+            "$BIN" compile --no-jit --auto-par off "$path" -o "$hyc" >/dev/null
         else
-            "$BIN" compile "$path" -o "$hyc" >/dev/null
+            "$BIN" compile --no-jit "$path" -o "$hyc" >/dev/null
         fi
         poop -d 3000 "$BIN run $hyc" || true
     done
@@ -167,7 +167,7 @@ if command -v valgrind >/dev/null 2>&1; then
     POOP_DIR="${POOP_DIR:-/tmp/coil_vm_bench}"
     mkdir -p "$POOP_DIR"
     hyc="$POOP_DIR/mandelbrot.ccoil"
-    "$BIN" compile examples/perf/mandelbrot.coil -o "$hyc" >/dev/null
+    "$BIN" compile --no-jit examples/perf/mandelbrot.coil -o "$hyc" >/dev/null
     rm -f callgrind.out.*
     valgrind --tool=callgrind --callgrind-out-file=callgrind.out "$BIN" run "$hyc" >/dev/null 2>&1 || true
     if command -v callgrind_annotate >/dev/null 2>&1; then

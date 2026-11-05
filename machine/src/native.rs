@@ -102,6 +102,34 @@ pub struct NativeCtx {
     /// of the trampoline native code called it through. The collector
     /// walks the native frames from there ([`register_stack_maps`]).
     pub native_fp: u64,
+    /// The running entry's [`NativeEntry::data`] (or a pad's
+    /// [`NativePad::data`]): an engine with one entry function for every
+    /// body reads which body to run here.
+    pub entry_data: u64,
+    /// The runtime's step budget ([`crate::Machine::set_step_budget`]), for
+    /// an engine that counts steps: a charge that reaches zero stops the
+    /// call with [`TRAP_BUDGET`].
+    pub fuel: *mut u64,
+    /// The runtime's host natives: what [`coil_native_host`] may call
+    /// (null: no runtime, the standard ones).
+    pub natives: *const crate::ffi::Natives,
+    /// The runtime's coverage counters ([`coil_native_probe`]).
+    pub probes: *mut Vec<u32>,
+    /// Non-zero when the call is to park instead of unwinding: see
+    /// [`ParkedCall`].
+    pub park: u64,
+    /// The word a parking call yields.
+    pub park_word: u64,
+    /// Why the call parked (`PARK_*`), once it did.
+    pub park_kind: u64,
+    /// What a parked call left, for [`ParkedCall`] (null: it did not park).
+    pub parked: *mut std::ffi::c_void,
+    pub park_scan: Option<RootScanFn>,
+    pub park_free: Option<unsafe fn(*mut std::ffi::c_void)>,
+    /// A parked call this one goes on with (null: a new call), and how.
+    pub resume: *mut std::ffi::c_void,
+    pub resume_word: u64,
+    pub resume_how: u64,
 }
 
 /// Byte offset of [`NativeCtx::native_fp`].
@@ -177,6 +205,15 @@ pub unsafe fn install_aot_stack_maps(maps: *const u8, n: usize) {
 /// A `defer` cleanup pad: called with its frame's homes.
 pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u64) -> u64;
 
+/// Walks an engine's own frames for [`NativeCtx::for_each_root`]: `data`
+/// is the record's, and each word the frames hold goes to `visit`, with
+/// whether it is ambiguous.
+pub type RootScanFn = unsafe fn(data: *mut std::ffi::c_void, visit: &mut dyn FnMut(*mut u64, bool));
+
+/// Walks an engine's own frames for [`NativeCtx::call_sites`]: `data` is
+/// the record's, and each frame's call site goes to `out`, innermost first.
+pub type SiteScanFn = unsafe fn(data: *mut std::ffi::c_void, out: &mut Vec<u32>);
+
 /// The pad of one native frame a panic unwound, with a copy of its homes
 /// laid out as a masked root record (`[next, n | ROOTS_MASKED, mask,
 /// words...]`, see [`NativeCtx::roots`]): a collection while pads run
@@ -184,6 +221,8 @@ pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u
 pub struct NativePad {
     pub func: NativePadFn,
     pub homes: Vec<u64>,
+    /// Copied to [`NativeCtx::entry_data`] for the pad.
+    pub data: usize,
 }
 
 /// Set in a root record's count: the next word is a mask of which words
@@ -194,6 +233,14 @@ pub const ROOTS_MASKED: u64 = 1 << 63;
 /// of a generic body may be an immediate), so the collector pins what they
 /// hit instead of moving it, and never rewrites them.
 pub const ROOTS_AMBIGUOUS: u64 = 1 << 62;
+/// A [`NativeCtx::roots`] record of an engine that keeps its frames itself:
+/// `[next, ROOTS_SCAN, RootScanFn, data]`. Native code copies its words
+/// into a record around each call; such an engine has them in place, so
+/// the collector asks for them only when it runs.
+pub const ROOTS_SCAN: u64 = 1 << 61;
+/// In a [`NativeCtx::calls`] record's site word: `[next, SITES_SCAN,
+/// SiteScanFn, data]`, as [`ROOTS_SCAN`] for call sites.
+pub const SITES_SCAN: u64 = u64::MAX;
 
 /// Byte offset of [`NativeCtx::gc_epoch`].
 pub const NATIVE_CTX_GC_EPOCH: i32 = std::mem::offset_of!(NativeCtx, gc_epoch) as i32;
@@ -239,7 +286,13 @@ impl NativeCtx {
         while !at.is_null() {
             // SAFETY: native code links only live records of its frames.
             unsafe {
-                out.push(*at.add(1) as u32);
+                let site = *at.add(1);
+                if site == SITES_SCAN {
+                    let scan = std::mem::transmute::<usize, SiteScanFn>(*at.add(2) as usize);
+                    scan(*at.add(3) as *mut std::ffi::c_void, &mut out);
+                } else {
+                    out.push(site as u32);
+                }
                 at = *at as *const u64;
             }
         }
@@ -255,7 +308,10 @@ impl NativeCtx {
                 let n = *at.add(1);
                 let ambiguous = n & ROOTS_AMBIGUOUS != 0;
                 let count = n & !(ROOTS_MASKED | ROOTS_AMBIGUOUS);
-                if n & ROOTS_MASKED != 0 {
+                if n & ROOTS_SCAN != 0 {
+                    let scan = std::mem::transmute::<usize, RootScanFn>(*at.add(2) as usize);
+                    scan(*at.add(3) as *mut std::ffi::c_void, &mut visit);
+                } else if n & ROOTS_MASKED != 0 {
                     let mask = *at.add(2);
                     for i in 0..count.min(64) as usize {
                         if mask & (1 << i) != 0 {
@@ -317,6 +373,12 @@ pub const NATIVE_CTX_VM_HI: i32 = std::mem::offset_of!(NativeCtx, vm_hi) as i32;
 pub struct NativeHost {
     /// Write `text` as `PRINT` does.
     pub print: unsafe fn(*mut std::ffi::c_void, &str),
+    /// The running task and the live ones, for a debugger: see
+    /// [`debug_tasks`].
+    pub tasks: unsafe fn(*mut std::ffi::c_void) -> DebugTasks,
+    /// What a call of function word `callee` on the words comes to, the last
+    /// `usize` of them dictionaries: see [`apply_value`].
+    pub apply: unsafe fn(*mut std::ffi::c_void, u64, &[common::Value], usize) -> Applied,
     /// Run the bytecode function at `pc` on `args` and return its result
     /// word; sets the `bool` when it panicked (the VM reported it).
     /// The second result word goes to the last `u64`.
@@ -372,6 +434,60 @@ pub enum Invoked {
 }
 
 
+/// What calling a function value comes to.
+pub enum Applied {
+    /// A value at once (a partial application).
+    Value(u64),
+    /// A call of the body at `pc` on these words, for an engine to run as
+    /// one of its own frames.
+    Call { pc: usize, args: Vec<common::Value> },
+    /// Anything else: [`coil_native_call_value`] does it.
+    Other,
+}
+
+/// See [`Applied`].
+///
+/// # Safety
+/// `ctx` is a live call's [`NativeCtx`]; `args` points at `n` words.
+pub unsafe fn apply_value(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, dicts: u64) -> Applied {
+    let c = unsafe { &*ctx };
+    if c.machine.is_null() {
+        return Applied::Other;
+    }
+    // SAFETY: as this function's.
+    let words: Vec<common::Value> = (0..n as usize).map(|i| common::Value::from(unsafe { *args.add(i) })).collect();
+    // SAFETY: `machine` is the live machine `host` was made for.
+    unsafe { (c.host.apply)(c.machine, callee, &words, dicts as usize) }
+}
+
+/// The running task's id and each live task's `(id, name, state)`.
+pub type DebugTasks = (u64, Vec<(u64, String, String)>);
+
+/// The tasks of the run `ctx` belongs to. No scheduler: task `0` and no list.
+///
+/// # Safety
+/// `ctx` is a live call's [`NativeCtx`].
+pub unsafe fn debug_tasks(ctx: *mut NativeCtx) -> DebugTasks {
+    let c = unsafe { &*ctx };
+    if c.machine.is_null() {
+        return (0, Vec::new());
+    }
+    // SAFETY: `machine` is the live machine `host` was made for.
+    unsafe { (c.host.tasks)(c.machine) }
+}
+
+/// The message of the trap `code` stopped the call with.
+///
+/// # Safety
+/// `ctx` is a live call's [`NativeCtx`].
+pub unsafe fn trap_text(ctx: *mut NativeCtx, code: u64) -> String {
+    let c = unsafe { &*ctx };
+    let code = if code == TRAP_HELPER { c.trap } else { code };
+    // SAFETY: `call` set `message` for the call.
+    let message = if c.message.is_null() { String::new() } else { unsafe { (*c.message).clone() } };
+    NativePanic { code, message, trace: Vec::new(), pads: Vec::new() }.message().to_string()
+}
+
 /// [`NativeHost::host`]: machine, context, native id, layout, arguments,
 /// panicked flag.
 pub type HostViaVmFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64, &[common::Value], &mut bool) -> Option<u64>;
@@ -379,6 +495,8 @@ pub type HostViaVmFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64
 impl NativeHost {
     const NONE: Self = Self {
         print: |_, _| {},
+        tasks: |_| (0, Vec::new()),
+        apply: |_, _, _, _| Applied::Other,
         call: |_, _, _, _, _| 0,
         call_value: |_, _, _, _, _, _| 0,
         resume: |_, _, _, _, _| 0,
@@ -405,6 +523,9 @@ pub(crate) struct NativeEnv {
     pub(crate) statics_len: usize,
     pub(crate) machine: *mut std::ffi::c_void,
     pub(crate) host: NativeHost,
+    pub(crate) fuel: *mut u64,
+    pub(crate) natives: *const crate::ffi::Natives,
+    pub(crate) probes: *mut Vec<u32>,
 }
 
 /// Byte offset of [`NativeCtx::stack_hard`].
@@ -434,6 +555,8 @@ pub const TRAP_PARKED: u64 = 10;
 /// Not a panic: a generator's close unwinds its body from the yield it is
 /// suspended at, collecting its armed `defer`s (`vm_gen.rs`).
 pub const TRAP_CLOSE: u64 = 11;
+/// The step budget ran out, or the heap outgrew its cap, which drains it.
+pub const TRAP_BUDGET: u64 = 12;
 /// No site: a frame that pushes nothing onto the panic's trace.
 pub const NO_SITE: u64 = u32::MAX as u64;
 
@@ -488,6 +611,19 @@ impl NativeCtx {
             alloc_counts: std::ptr::null_mut(),
             alloc_bumps: std::ptr::null_mut(),
             native_fp: 0,
+            entry_data: 0,
+            fuel: std::ptr::null_mut(),
+            natives: std::ptr::null(),
+            probes: std::ptr::null_mut(),
+            park: 0,
+            park_word: 0,
+            park_kind: 0,
+            parked: std::ptr::null_mut(),
+            park_scan: None,
+            park_free: None,
+            resume: std::ptr::null_mut(),
+            resume_word: 0,
+            resume_how: 0,
         }
     }
 
@@ -540,6 +676,9 @@ pub struct NativeEntry {
     /// fiber to unwind them (`vm_gen.rs`).
     pub cleanup: bool,
     pub entry: NativeEntryFn,
+    /// Copied to [`NativeCtx::entry_data`] for the call (`0` for machine
+    /// code, whose `entry` is the body).
+    pub data: usize,
 }
 
 /// A [`NativeEntry`] as an AOT object's `coil_aot_entries` table lays it
@@ -589,6 +728,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
             generator: e.generator != 0,
             cleanup: e.cleanup != 0,
             entry: e.entry,
+            data: 0,
         })
         .collect();
     let sites = words
@@ -620,6 +760,8 @@ pub struct NativeCode {
     sites: Vec<NativeSite>,
     /// Every body of the program compiled: the driver can run all of it.
     complete: bool,
+    /// What [`NativeEntry::data`] points into, kept for as long as the code.
+    keep: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl NativeCode {
@@ -634,7 +776,14 @@ impl NativeCode {
                 *slot = kept.len() as u32;
             }
         }
-        Self { by_pc, entries: kept, sites, complete: true }
+        Self { by_pc, entries: kept, sites, complete: true, keep: None }
+    }
+
+    /// The code, keeping `owner` alive with it: an engine's entries point
+    /// into it ([`NativeEntry::data`]).
+    pub fn with_keep(mut self, owner: std::sync::Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        self.keep = Some(owner);
+        self
     }
 
     /// The code, marked as covering every body of the program or not
@@ -758,25 +907,159 @@ pub(crate) enum NativeOutcome {
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     Bailed,
     Panicked(NativePanic),
+    /// It parked ([`parks`]): the word it yielded, if any.
+    Parked(ParkedCall, u64),
+}
+
+/// Set [`NativeCtx::stack_hard`] to the real end of the stack `sp` is on,
+/// when it is known. Not the lower of that and the budget: near the end,
+/// `sp` less the budget is past it, and each nested entry would then get a
+/// limit it can never reach.
+fn set_stack_hard(ctx: &mut NativeCtx, sp: u64) {
+    if let Some(limit) = crate::stacks::fiber_stack_limit() {
+        ctx.stack_hard = limit as u64;
+    } else if let Some(left) = stacker::remaining_stack() {
+        ctx.stack_hard = sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD));
+    }
+}
+
+/// Whether generators and tasks park their calls on the heap instead of
+/// running on fibers: where there are none (wasm), and for a run of the
+/// interpreter under `COIL_NO_FIBERS`, which tests that path natively.
+pub fn parks() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cfg!(target_family = "wasm") || *ON.get_or_init(|| std::env::var_os("COIL_NO_FIBERS").is_some())
+}
+
+/// [`NativeCtx::park`]: the call yielded.
+pub const PARK_YIELD: u64 = 1;
+/// The call's task waits, at this op.
+pub const PARK_WAIT: u64 = 2;
+/// The call's task waits, in a generator this op resumed: the op runs again
+/// on the wake, and the wake goes on down to the wait.
+pub const PARK_BELOW: u64 = 3;
+
+/// [`ParkedCall::resume`]: the op it parked at gets this word.
+pub const RESUME_VALUE: u64 = 1;
+/// Run the op it parked at again.
+pub const RESUME_RETRY: u64 = 2;
+/// Unwind from it: a generator closed.
+pub const RESUME_CLOSE: u64 = 3;
+/// Unwind from it: a task cancelled.
+pub const RESUME_CANCEL: u64 = 4;
+
+/// A call that stopped at a yield or a wait with its frames on the heap, for
+/// an engine that keeps them there (the interpreter): what a fiber is where
+/// the stack can be switched.
+pub(crate) struct ParkedCall {
+    entry: NativeEntry,
+    /// Why it parked (`PARK_*`).
+    pub(crate) kind: u64,
+    state: *mut std::ffi::c_void,
+    scan: RootScanFn,
+    free: unsafe fn(*mut std::ffi::c_void),
+    /// The early frees it queued.
+    frees: Vec<(u64, bool)>,
+}
+
+impl GenFiber {
+    /// The side of a generator whose call parked.
+    pub(crate) fn parked(call: ParkedCall) -> Self {
+        let cleanup = call.cleanup();
+        Self {
+            #[cfg(not(target_family = "wasm"))]
+            coro: None,
+            stack_limit: 0,
+            yielder: std::ptr::null(),
+            parked: std::ptr::null_mut(),
+            call: Some(call),
+            cleanup,
+        }
+    }
+}
+
+impl ParkedCall {
+    /// Whether its body has `defer`s, which a close must run.
+    pub(crate) fn cleanup(&self) -> bool {
+        self.entry.cleanup
+    }
+
+    /// Its heap words, for a root that pins them.
+    pub(crate) fn for_each_word(&self, mut visit: impl FnMut(u64)) {
+        // SAFETY: the engine's own state, read only.
+        unsafe { (self.scan)(self.state, &mut |w, _| visit(*w)) };
+        for (w, _) in &self.frees {
+            visit(*w);
+        }
+    }
+
+    /// Its heap words, as [`NativeCtx::for_each_root`] walks a live call's.
+    pub(crate) fn for_each_root(&mut self, mut visit: impl FnMut(*mut u64, bool)) {
+        // SAFETY: the engine's own state, which nothing else runs.
+        unsafe { (self.scan)(self.state, &mut visit) };
+        for (w, _) in &mut self.frees {
+            visit(w, false);
+        }
+    }
+
+    /// Go on, in the way `how` says (`RESUME_*`) with `word`.
+    pub(crate) fn resume(mut self, word: u64, how: u64, env: &NativeEnv) -> NativeOutcome {
+        let entry = self.entry;
+        let frees = std::mem::take(&mut self.frees);
+        let state = std::mem::replace(&mut self.state, std::ptr::null_mut());
+        run_call(&entry, &[], Some((state, word, how)), frees, env)
+    }
+}
+
+impl Drop for ParkedCall {
+    fn drop(&mut self) {
+        if !self.state.is_null() {
+            // SAFETY: it never runs again.
+            unsafe { (self.free)(self.state) };
+        }
+    }
+}
+
+/// Unwind from a parked generator's yield: it closed.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+pub unsafe fn raise_close(ctx: *mut NativeCtx) {
+    let c = unsafe { &mut *ctx };
+    c.trap = TRAP_CLOSE;
+    c.bail = BAIL_PANIC;
+}
+
+/// Unwind from a parked task's wait: it was cancelled.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+pub unsafe fn raise_cancel(ctx: *mut NativeCtx) {
+    let c = unsafe { &mut *ctx };
+    c.trap = TRAP_VM_PANIC;
+    c.bail = 1;
 }
 
 /// Run `entry` with `args`.
-#[inline(never)]
 pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> NativeOutcome {
+    run_call(entry, args, None, Vec::new(), env)
+}
+
+/// Run `entry` with `args`, or go on with parked state `(state, word, how)`.
+#[inline(never)]
+fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_void, u64, u64)>, mut frees: Vec<(u64, bool)>, env: &NativeEnv) -> NativeOutcome {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
     let mut ctx = unsafe { NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap) };
-    if let Some(limit) = crate::stacks::fiber_stack_limit() {
-        ctx.stack_hard = ctx.stack_hard.min(limit as u64);
-    } else if let Some(left) = stacker::remaining_stack() {
-        ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
-    }
+    set_stack_hard(&mut ctx, sp);
     ctx.machine = env.machine;
     ctx.host = env.host;
+    ctx.fuel = env.fuel;
+    ctx.natives = env.natives;
+    ctx.probes = env.probes;
     ctx.strings = env.strings;
     ctx.string_cache = env.string_cache;
     ctx.strings_len = env.strings_len as u64;
-    let mut frees = Vec::new();
     ctx.frees = &mut frees;
     ctx.has_finalizers = u64::from(env.has_finalizers);
     ctx.statics = env.statics;
@@ -787,15 +1070,28 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     ctx.message = &mut message;
     let mut pads = Vec::new();
     ctx.pads = &mut pads;
+    if let Some((state, word, how)) = resume {
+        ctx.resume = state;
+        ctx.resume_word = word;
+        ctx.resume_how = how;
+    }
     // One mode: the call is committed from its first instruction. A trap
     // panics natively with the VM's message, the stack runs to the
     // thread's real end, and collections run at safepoints; nothing hands
     // the call back to the VM.
     ctx.committed = 1;
     ctx.stack_limit = ctx.stack_hard;
+    ctx.entry_data = entry.data as u64;
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
+    if !ctx.parked.is_null() {
+        let (Some(scan), Some(free)) = (ctx.park_scan, ctx.park_free) else {
+            unreachable!("a parked call names its engine's hooks");
+        };
+        let call = ParkedCall { entry: *entry, kind: ctx.park_kind, state: ctx.parked, scan, free, frees };
+        return NativeOutcome::Parked(call, ctx.park_word);
+    }
     match ctx.bail {
         0 => {
             let hi = (entry.ret_words == 2).then_some(ctx.ret_hi);
@@ -1285,13 +1581,15 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
         }
         ALLOC_FN => {
             let op = (extra >> 32) as u32;
-            let (n_captures, n_filled) = ((op & 0xFF) as usize, ((op >> 8) & 0xFF) as usize);
+            let n_filled = ((op >> 8) & 0xFF) as usize;
             let Some((&mask, rest)) = values.split_last() else {
                 return unsafe { bail(ctx) };
             };
-            if rest.len() != n_captures + n_filled {
+            // The words say how many captures: their 8 bits in `op` are the
+            // bytecode's.
+            let Some(n_captures) = rest.len().checked_sub(n_filled) else {
                 return unsafe { bail(ctx) };
-            }
+            };
             let (captures, filled) = rest.split_at(n_captures);
             let pfn = crate::memory::ObjFn {
                 entry: extra as u32,
@@ -1320,6 +1618,20 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
     };
     unsafe { note_alloc(ctx, heap) };
     addr
+}
+
+/// `Probe`: count one more run of coverage probe `id`. A runtime with no
+/// counters (a thread the case spawned) counts nothing.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_probe(ctx: *mut NativeCtx, id: u64) -> u64 {
+    // SAFETY: when set, `probes` is the live runtime's.
+    if let Some(n) = unsafe { (*ctx).probes.as_mut() }.and_then(|p| p.get_mut(id as usize)) {
+        *n = n.wrapping_add(1);
+    }
+    0
 }
 
 /// `ArrayPush`: append `value` to the array `addr` and return `addr`. Not an array: bail, where the VM panics.
@@ -1586,7 +1898,9 @@ pub unsafe extern "C" fn coil_native_call_vm(ctx: *mut NativeCtx, pc: u64, args:
     let out = unsafe { call(machine, ctx, pc as u32, words, &mut panicked) };
     let c = unsafe { &mut *ctx };
     if panicked {
-        c.trap = TRAP_VM_PANIC;
+        if c.park == 0 {
+            c.trap = TRAP_VM_PANIC;
+        }
         return unsafe { bail(ctx) };
     }
     out
@@ -1602,13 +1916,17 @@ pub unsafe extern "C" fn coil_native_call_vm(ctx: *mut NativeCtx, pc: u64, args:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, dicts: u64) -> u64 {
     let c = unsafe { &mut *ctx };
-    let mut buf = [common::Value::default(); 16];
-    let Some(words) = buf.get_mut(..n as usize) else {
-        return unsafe { bail(ctx) };
-    };
     if c.machine.is_null() || dicts > n {
         return unsafe { bail(ctx) };
     }
+    let mut few = [common::Value::default(); 16];
+    let mut many = Vec::new();
+    let words: &mut [common::Value] = if n as usize <= few.len() {
+        &mut few[..n as usize]
+    } else {
+        many.resize(n as usize, common::Value::default());
+        &mut many
+    };
     for (i, w) in words.iter_mut().enumerate() {
         // SAFETY: `args` holds `n` words.
         *w = common::Value::from(unsafe { *args.add(i) });
@@ -1795,6 +2113,16 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
         return unsafe { bail(ctx) };
     };
+    // The runtime's table decides what runs: a host may have replaced this
+    // native (the compile-time sandbox refuses most of them), and the
+    // replacement is no plain function.
+    // SAFETY: when set, `natives` is the live runtime's.
+    if !c.natives.is_null() && unsafe { &*c.natives }.direct_by_id(id as usize).is_none() {
+        return match unsafe { host_invoke(ctx, id, layout, args, n) } {
+            Some(out) => out,
+            None => unsafe { bail(ctx) },
+        };
+    }
     let mut buf = [common::Value::default(); 16];
     let Some(words) = buf.get_mut(..n as usize) else {
         return unsafe { bail(ctx) };
@@ -1833,6 +2161,12 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_yield(ctx: *mut NativeCtx, value: u64) -> u64 {
     unsafe { (*ctx).committed = 1 };
+    if parks() {
+        let c = unsafe { &mut *ctx };
+        c.park = PARK_YIELD;
+        c.park_word = value;
+        return unsafe { bail(ctx) };
+    }
     let send = gen_suspend(ctx, value);
     let c = unsafe { &mut *ctx };
     // The words may have moved while it was away.
@@ -1887,6 +2221,8 @@ pub struct GenFiber {
     /// The context of the call suspended at a yield (its root words are
     /// the generator's saved words meanwhile).
     pub(crate) parked: *mut NativeCtx,
+    /// The call, where it parks ([`parks`]) instead of holding a fiber.
+    pub(crate) call: Option<ParkedCall>,
     /// Its body has `defer`s: a close resumes it to unwind them.
     pub(crate) cleanup: bool,
 }
@@ -2047,8 +2383,23 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layou
 /// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, mask: u64) {
+    if func == 0 {
+        return;
+    }
+    // SAFETY: the backend passes a function with the `NativePadFn` ABI.
+    let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
+    // SAFETY: as this function's.
+    unsafe { defer_pad(ctx, func, 0, homes, n, mask) };
+}
+
+/// [`coil_native_defer`] of a pad that reads `data` from
+/// [`NativeCtx::entry_data`].
+///
+/// # Safety
+/// As [`coil_native_defer`].
+pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64, mask: u64) {
     let c = unsafe { &mut *ctx };
-    if c.bail != BAIL_PANIC || c.pads.is_null() || func == 0 {
+    if c.bail != BAIL_PANIC || c.pads.is_null() {
         return;
     }
     // `n` may carry `ROOTS_AMBIGUOUS` (an opaque body's `int` homes).
@@ -2056,9 +2407,7 @@ pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes
     let mut rec = vec![0, n | ROOTS_MASKED | flags, mask];
     // SAFETY: `homes` holds `n` words.
     rec.extend((0..n as usize).map(|i| unsafe { *homes.add(i) }));
-    // SAFETY: the backend passes a function with the `NativePadFn` ABI.
-    let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
-    unsafe { (*c.pads).push(NativePad { func, homes: rec }) };
+    unsafe { (*c.pads).push(NativePad { func, homes: rec, data }) };
 }
 
 /// Run the cleanup pads of a native panic, innermost first, on `env`'s
@@ -2079,13 +2428,12 @@ pub(crate) fn run_pads(
     }
     for i in 0..pads.len() {
         let mut ctx = unsafe { NativeCtx::with_heap(sp.saturating_sub(NATIVE_STACK_BUDGET), env.heap) };
-        if let Some(limit) = crate::stacks::fiber_stack_limit() {
-            ctx.stack_hard = ctx.stack_hard.min(limit as u64);
-        } else if let Some(left) = stacker::remaining_stack() {
-            ctx.stack_hard = ctx.stack_hard.min(sp.saturating_sub((left as u64).saturating_sub(NATIVE_STACK_GUARD)));
-        }
+        set_stack_hard(&mut ctx, sp);
         ctx.machine = env.machine;
         ctx.host = env.host;
+        ctx.fuel = env.fuel;
+        ctx.natives = env.natives;
+        ctx.probes = env.probes;
         ctx.strings = env.strings;
         ctx.string_cache = env.string_cache;
         ctx.strings_len = env.strings_len as u64;
@@ -2104,6 +2452,7 @@ pub(crate) fn run_pads(
         ctx.roots = pads[last].homes.as_mut_ptr() as u64;
         let mut inner = Vec::new();
         ctx.pads = &mut inner;
+        ctx.entry_data = pads[i].data as u64;
         let homes = pads[i].homes[3..].as_ptr();
         // SAFETY: the backend compiled `func` as this frame's pad.
         let _ = unsafe { (pads[i].func)(&mut ctx, homes) };
@@ -2328,6 +2677,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
+        ("coil_native_probe", coil_native_probe as *const u8),
         ("coil_native_free_early", coil_native_free_early as *const u8),
         ("coil_native_format", coil_native_format as *const u8),
         ("coil_native_stringify", coil_native_stringify as *const u8),
@@ -2353,4 +2703,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 34;
+const HELPERS: usize = 35;

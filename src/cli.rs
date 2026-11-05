@@ -42,7 +42,7 @@ pub(crate) enum Command {
         natives: Vec<FfiNative>,
         check_native: bool,
         strip_debug: bool,
-        /// Native code or the VM runner, static libraries and linker
+        /// Native code or the JIT runner, static libraries and linker
         /// arguments for the executable.
         link: LinkInputs,
     },
@@ -92,11 +92,14 @@ pub(crate) struct CliArgs {
     pub nursery: Option<bool>,
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
-    /// `--jit`: run with native code where the backend can compile it;
-    /// on `coil compile`, store the MIR for it in the archive.
+    /// Run with native code where the backend can compile it; on `coil
+    /// compile`, store the MIR for it in the archive. On by default; a host
+    /// with no native code interprets the MIR.
     pub jit: bool,
-    /// `--no-jit`: `coil run` ignores an archive's native MIR.
+    /// `--no-jit`: run on the VM, and `coil compile` stores no MIR.
     pub no_jit: bool,
+    /// `--mir`: `coil FILE` runs on the MIR interpreter.
+    pub mir: bool,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
     pub opt_stats: bool,
@@ -181,8 +184,12 @@ enum RawCommand {
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<String>,
         /// Store the MIR of what native code can run, so `coil run` JITs it
+        /// (the default)
         #[arg(long)]
         jit: bool,
+        /// Store no MIR: `coil run` runs the archive on the VM
+        #[arg(long, conflicts_with = "jit")]
+        no_jit: bool,
         /// Entry `.coil` (or `--entry`)
         file: Option<String>,
     },
@@ -247,7 +254,7 @@ enum RawCommand {
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
-        /// Package the VM runner with the program instead of linking native
+        /// Package the JIT runner with the program instead of linking native
         /// code for it (the default links an AOT executable with `cc`)
         #[arg(long)]
         no_aot: bool,
@@ -413,6 +420,7 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             cow_report: false,
             jit: false,
             no_jit: false,
+            mir: false,
             auto_par: None,
             opt_stats: false,
             opt_stats_json: false,
@@ -480,6 +488,7 @@ fn cli_from(
         cow_report: false,
         jit: false,
         no_jit: false,
+        mir: false,
         auto_par: opt.auto_par,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
@@ -506,6 +515,7 @@ impl RawCli {
             || self.nursery.cow_report
             || self.nursery.jit
             || self.nursery.no_jit
+            || self.nursery.mir
             || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
@@ -528,12 +538,15 @@ impl RawCli {
                 if is_reserved(&filename) {
                     return Err("missing input file (pass a .coil file or `--entry`)".into());
                 }
-                CliArgs {
+                // `--mir` is the raw reference unless `-O` says otherwise.
+                let mir_level = (self.nursery.mir && self.opt.opt_level.is_none()).then_some(OptLevel::None);
+                let cli = CliArgs {
                     debug_level: self.debug.level(),
                     nursery: self.nursery.nursery,
                     cow_report: self.nursery.cow_report,
-                    jit: self.nursery.jit,
+                    jit: !(self.nursery.no_jit || self.nursery.cow_report),
                     no_jit: self.nursery.no_jit,
+                    mir: self.nursery.mir,
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -543,7 +556,8 @@ impl RawCli {
                         self.grants,
                         self.roots.root,
                     )
-                }
+                };
+                CliArgs { opt_level: mir_level.unwrap_or(cli.opt_level), ..cli }
             }
             Some(RawCommand::Lsp { args: _ }) => cli_from(
                 Command::Lsp,
@@ -605,7 +619,8 @@ impl RawCli {
                 entry_flag,
                 include_tests,
                 output,
-                jit,
+                jit: _,
+                no_jit,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -615,7 +630,7 @@ impl RawCli {
                 }
                 CliArgs {
                     debug_level: debug.level(),
-                    jit,
+                    jit: !no_jit,
                     ..cli_from(
                         Command::Compile {
                             filename,

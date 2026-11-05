@@ -1339,7 +1339,7 @@ fn emit_stored(
             out.push(IlOp::StorePop { slot: plan.home_slot(*home), loc });
         }
         // Emitted where it stands (`cleared_words`).
-        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } | MirInst::Probe { .. } => {}
         // Promotion runs for the dense tier only.
         MirInst::PanicStore { .. } => {
             return Err(LowerError::Refused("panic store in LIR".into()));
@@ -2013,7 +2013,7 @@ fn emit_stack(
             out.push(IlOp::StorePop { slot: plan.home_slot(*home), loc });
             Ok(())
         }
-        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => Ok(()),
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } | MirInst::Probe { .. } => Ok(()),
         MirInst::PanicStore { .. } => Err(LowerError::Refused("panic store in LIR".into())),
         MirInst::ArrayPush {
             dest,

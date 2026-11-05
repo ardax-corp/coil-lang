@@ -130,7 +130,9 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str, cac
             exit(1);
         }
     };
-    let bytes = archive_bytes(pipeline, bytecode, constants);
+    // `coil compile --jit`: keep the MIR native code is made from.
+    let bodies = compiler::native_mir::take_native_capture();
+    let bytes = archive_bytes(pipeline, bytecode, constants, &bodies);
     write_archive(pipeline, output, &bytes);
     if let Some(cache) = &cache {
         cache.store(pipeline, filename, &bytes);
@@ -147,8 +149,9 @@ fn write_archive(pipeline: &mut Pipeline, output: &str, bytes: &[u8]) {
     }
 }
 
-/// The `.ccoil` bytes of the program `pipeline` just compiled.
-fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants: Vec<u64>) -> Vec<u8> {
+/// The `.ccoil` bytes of the program `pipeline` just compiled, with a native
+/// MIR section when it has `bodies`.
+fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants: Vec<u64>, bodies: &[compiler::native_mir::NativeBody]) -> Vec<u8> {
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
@@ -171,14 +174,9 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
         native_mir: Vec::new(),
     };
     let full = pipeline.program_debug_full();
-    let level = native_debug_level(pipeline.debug_level(), compiler::native_mir::native_capture_active());
-    #[cfg(not(target_family = "wasm"))]
-    if compiler::native_mir::native_capture_active() {
-        // `coil compile --jit`: keep the MIR native code is made from.
-        program.native_mir = coil_native::section::encode(
-            &compiler::native_mir::take_native_capture(),
-            &entry_pcs(&full),
-        );
+    let level = pipeline.debug_level();
+    if !bodies.is_empty() {
+        program.native_mir = encode_section(bodies, &entry_pcs(&full));
     }
     program.set_debug(full, level);
 
@@ -236,6 +234,7 @@ fn cache_options(cli: &CliArgs) -> Option<String> {
         "{:?}",
         (
             cli.include_tests,
+            cli.jit,
             cli.opt_level,
             cli.debug_level,
             cli.contracts,
@@ -397,14 +396,21 @@ fn cmd_build_and_run(
     cache: Option<BuildCache>,
     jit: bool,
 ) {
-    // `--jit` needs this compile's MIR, so it skips the build cache.
-    let cache = if jit { None } else { cache };
+    // The interpreter runs every body, and an archive's section holds only
+    // what native code compiles.
+    let cache = if interprets() { None } else { cache };
     if jit {
+        pipeline.set_runs_mir();
+    }
+    if RAW_MIR.load(std::sync::atomic::Ordering::Relaxed) {
+        compiler::native_mir::start_raw_capture();
+    } else if jit {
         compiler::native_mir::start_native_capture();
     }
     if let Some(cache) = &cache
         && let Some(loaded) = cache.load().and_then(|b| load_archive_bytes(&b).ok())
     {
+        install_section(filename, &loaded.native_mir);
         run_cached(pipeline, filename, &loaded);
         return;
     }
@@ -418,8 +424,9 @@ fn cmd_build_and_run(
         }
     };
     print_opt_stats(opt_stats, opt_stats_json);
+    let bodies = compiler::native_mir::take_native_capture();
     if let Some(cache) = &cache {
-        let bytes = archive_bytes(pipeline, bytecode.clone(), constants.clone());
+        let bytes = archive_bytes(pipeline, bytecode.clone(), constants.clone(), &bodies);
         cache.store(pipeline, filename, &bytes);
     }
 
@@ -439,7 +446,7 @@ fn cmd_build_and_run(
 
     maybe_warn_stale_default_out(pipeline, filename, &full);
     if jit {
-        install_native(&full);
+        install_native(bodies, &full);
     }
     let entry = ffi_entry_path(Path::new(filename));
     let panicked = execute_pipeline(ExecutePipelineArgs {
@@ -457,10 +464,59 @@ fn cmd_build_and_run(
     }
 }
 
-/// Compile the captured MIR with Cranelift for the coming run.
-fn install_native(debug: &common::ProgramDebug) {
-    let bodies = compiler::native_mir::take_native_capture();
-    install_native_bodies(&bodies, &entry_pcs(debug));
+/// `coil FILE --mir -O 0`: capture MIR with no MIR pass run on it.
+static RAW_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `coil FILE --mir`: the captured MIR goes to the interpreter, not to
+/// Cranelift.
+static RUN_ON_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the interpreter runs this process's MIR: `--mir`, or a host with
+/// no native code.
+fn interprets() -> bool {
+    cfg!(target_family = "wasm") || RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The section of a `.ccoil` for `bodies`, for the engine this host runs.
+fn encode_section(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>) -> Vec<u8> {
+    #[cfg(not(target_family = "wasm"))]
+    return coil_native::section::encode(bodies, pcs);
+    #[cfg(target_family = "wasm")]
+    coil_mir_interp::encode_section(bodies, pcs)
+}
+
+/// Hand the captured MIR to the engine that runs it for the coming run.
+fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common::ProgramDebug) {
+    install_bodies(bodies, &entry_pcs(debug));
+}
+
+/// Hand `bodies` to the engine that runs them.
+fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::collections::HashMap<String, u32>) {
+    if !interprets() {
+        #[cfg(not(target_family = "wasm"))]
+        install_native_bodies(&bodies, pcs);
+        return;
+    }
+    let program = coil_mir_interp::prepare(bodies, pcs);
+    for (name, why) in &program.refused {
+        eprintln!("warning: `{name}` runs on the VM: {why}");
+    }
+    let complete = program.refused.is_empty();
+    // Its entries point into it for the rest of the process.
+    std::mem::forget(program.keep);
+    machine::native::install_for_next_run(program.entries, program.sites, complete);
+}
+
+/// Install an archive's native MIR section for the coming run; a section
+/// that cannot be read leaves the run on the VM. `name` is what the warning
+/// says.
+fn install_section(name: &str, section: &[u8]) {
+    if section.is_empty() {
+        return;
+    }
+    match compiler::native_mir::archive::decode(section) {
+        Ok((bodies, pcs)) => install_bodies(bodies, &pcs),
+        Err(e) => eprintln!("warning: `{name}`: {e}; running on the VM"),
+    }
 }
 
 /// Function name to bytecode entry PC.
@@ -469,16 +525,11 @@ fn entry_pcs(debug: &common::ProgramDebug) -> std::collections::HashMap<String, 
 }
 
 /// JIT `bodies` and install them for the coming run.
+#[cfg(not(target_family = "wasm"))]
 fn install_native_bodies(
     bodies: &[compiler::native_mir::NativeBody],
     pcs: &std::collections::HashMap<String, u32>,
 ) {
-    #[cfg(target_family = "wasm")]
-    {
-        let _ = (bodies, pcs);
-        eprintln!("warning: --jit: no native code on wasm; running on the VM");
-    }
-    #[cfg(not(target_family = "wasm"))]
     match coil_native::jit(bodies, pcs) {
         Ok(program) => {
             if std::env::var_os("COIL_NATIVE_STATS").is_some() {
@@ -495,7 +546,7 @@ fn install_native_bodies(
             let complete = program.refused.is_empty();
             machine::native::install_for_next_run(program.entries, program.sites, complete);
         }
-        Err(e) => eprintln!("warning: --jit: native compile failed ({e}); running on the VM"),
+        Err(e) => eprintln!("warning: native compile failed ({e}); running on the VM"),
     }
 }
 
@@ -539,9 +590,8 @@ fn cmd_compile(
     cache: Option<BuildCache>,
     jit: bool,
 ) {
-    // The build cache holds archives without MIR.
-    let cache = if jit { None } else { cache };
     if jit {
+        pipeline.set_runs_mir();
         compiler::native_mir::start_native_capture();
     }
     compile_to_archive(pipeline, filename, output, cache);
@@ -605,13 +655,8 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
     }
 
     if !no_jit {
-        if !loaded.native_mir.is_empty() {
-            #[cfg(not(target_family = "wasm"))]
-            match coil_native::section::decode(&loaded.native_mir) {
-                Ok((bodies, pcs)) => install_native_bodies(&bodies, &pcs),
-                Err(e) => eprintln!("warning: `{archive}`: {e}; running on the VM"),
-            }
-        } else if jit {
+        install_section(archive, &loaded.native_mir);
+        if loaded.native_mir.is_empty() && jit {
             eprintln!(
                 "warning: `{archive}` carries no native MIR (build it with `coil compile --jit`); running on the VM"
             );
@@ -824,13 +869,17 @@ fn main() {
                     };
                     set_program_args(&filename, &cli.program_args);
                     let cache = BuildCache::new(cache_options.as_deref(), &filename);
+                    RUN_ON_MIR.store(cli.mir, std::sync::atomic::Ordering::Relaxed);
+                    // Only `-O 0` is raw: above it the interpreter runs what
+                    // native code compiles.
+                    RAW_MIR.store(cli.mir && cli.opt_level == compiler::OptLevel::None, std::sync::atomic::Ordering::Relaxed);
                     cmd_build_and_run(
                         &mut pipeline,
                         &filename,
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
-                        cli.jit,
+                        cli.jit || cli.mir,
                     );
                 }
                 Command::Compile { filename, output } => {
@@ -890,13 +939,6 @@ fn main() {
             }
         }
     }
-}
-
-/// The debug level an archive with native code keeps: native code finds a
-/// panic's location by its byte span (`Machine::native_site_location`), so
-/// `-g1` (lines only) keeps the spans too; `-g0` stays bare.
-pub(crate) fn native_debug_level(level: common::DebugLevel, native: bool) -> common::DebugLevel {
-    if native && level == common::DebugLevel::Lines { common::DebugLevel::Full } else { level }
 }
 
 #[cfg(test)]

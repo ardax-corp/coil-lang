@@ -99,7 +99,12 @@ fn hyc_panic_output_at_each_debug_level() {
         // `coil compile` defaults to `-g2`.
         let size = |p: &Path| std::fs::metadata(p).unwrap().len();
         assert_eq!(size(&default), size(&g2), "-O{opt}: default is -g2");
-        assert!(size(&g0) < size(&g1) && size(&g1) < size(&g2), "-O{opt}: sizes {} {} {}", size(&g0), size(&g1), size(&g2));
+        // Native code finds a location by its byte span, so only an archive
+        // with no MIR drops them at `-g1`.
+        assert!(size(&g0) < size(&g1), "-O{opt}: sizes {} {}", size(&g0), size(&g1));
+        let vm_g2 = compile(&bin, &dir, &format!("O{opt}_vm_g2"), &["-O", opt, "-g2", "--no-jit"]);
+        let vm_g1 = compile(&bin, &dir, &format!("O{opt}_vm_g1"), &["-O", opt, "-g1", "--no-jit"]);
+        assert!(size(&vm_g1) < size(&vm_g2), "-O{opt}: sizes {} {}", size(&vm_g1), size(&vm_g2));
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

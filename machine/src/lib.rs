@@ -8,6 +8,7 @@ mod arith;
 mod collect;
 mod driver;
 mod gen_fiber;
+mod isolate;
 mod lanes;
 mod locate;
 pub mod char_ord;
@@ -15,7 +16,6 @@ pub mod clock;
 pub mod entropy;
 pub mod key_index;
 pub mod symbol;
-#[cfg(any(test, feature = "debugger"))]
 pub mod debug;
 pub mod env;
 mod dense;
@@ -59,7 +59,6 @@ mod vm;
 /// zero-arg clocks and three-arg vec helpers share this function type.
 pub type HostValueFn = fn(&mut memory::Heap, &[common::Value]) -> common::Value;
 
-#[cfg(any(test, feature = "debugger"))]
 pub use debug::{DebugController, DebugObject, DebugTask, DebugTaskFrames, StepMode, StopReason};
 pub use clock::CLOCK_WIRING;
 pub use collect::swap_static_word_kinds;
@@ -83,6 +82,7 @@ pub use runtime_wire::{VmHostSpec, class_kind_table};
 #[cfg(any(test, feature = "vm"))]
 pub use runtime_wire::{WireThreadProgramWithMapsArgs, wire_thread_program, wire_thread_program_with_maps, wire_vm_host};
 pub use profile::*;
+pub use isolate::{Isolate, IsolateProgram};
 pub use start::{NativeStart, run_natively};
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{

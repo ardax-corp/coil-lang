@@ -20,6 +20,8 @@ pub struct NativeStart {
     pub ffi_search_paths: Vec<PathBuf>,
     pub dload_gate: Option<crate::ffi::DloadGate>,
     pub struct_layouts: Vec<crate::CStructLayout>,
+    /// Where `print` goes instead of stdout (a debugger's client).
+    pub shared_print: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 /// Run `program` on the native driver with the native code installed for
@@ -36,6 +38,10 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
         crate::native::install_shared_for_next_run(native);
         return None;
     }
+    let shared_print = start.shared_print.clone();
+    if shared_print.is_some() {
+        crate::io::set_shared_print_redirect(shared_print.clone());
+    }
     let mut rt = runtime_for(&program, start);
     rt.native = Some(Box::new(crate::native::NativeTable::new(Arc::clone(&native))));
     let driver_program = DriverProgram {
@@ -45,7 +51,7 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
         debug: program.debug.clone(),
         base_dir: rt.ffi.base_dir.clone(),
         thread_program: Some(Arc::clone(&program)),
-        shared_print: None,
+        shared_print,
     };
     let mut driver = Driver::new(&mut rt, driver_program);
     let guard = crate::thread::HostStateGuard::enter_driver(&mut driver);

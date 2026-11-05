@@ -64,7 +64,31 @@ pub(crate) struct Runtime {
     /// The open shared-heap steal epoch (auto-par workers run on this heap
     /// meanwhile): nothing moves.
     pub(crate) shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
+    /// Step budget fuel: charged once per taken back-edge and per call by
+    /// whatever counts steps (the VM, the MIR interpreter); zero means
+    /// exhausted. `u64::MAX` when no budget is set (2^64 charges cannot
+    /// happen), so a charge is one decrement and one never-taken branch
+    /// either way.
+    pub(crate) fuel: u64,
+    /// Set once the budget ran out ([`crate::Machine::step_budget_exhausted`]).
+    pub(crate) step_budget_hit: bool,
+    /// `fuel` as [`crate::Machine::set_step_budget`] last set it
+    /// ([`crate::Machine::steps_charged`]).
+    pub(crate) fuel_start: u64,
+    /// Runs of each coverage probe ([`crate::native::coil_native_probe`]).
+    pub(crate) probes: Vec<u32>,
+    /// Heap cap from [`crate::Machine::set_heap_cap`] (`usize::MAX`: none).
+    pub(crate) heap_cap: usize,
+    /// Set once the live heap outgrew [`Self::heap_cap`] after a full
+    /// collection ([`crate::Machine::heap_cap_exceeded`]).
+    pub(crate) heap_cap_hit: bool,
 }
+
+/// Panic when [`crate::Machine::set_step_budget`]'s budget runs out.
+pub(crate) const STEP_BUDGET_EXHAUSTED: &str = "step budget exhausted: execution exceeded its back-edge / call limit";
+
+/// Panic when the heap outgrows [`crate::Machine::set_heap_cap`]'s cap.
+pub(crate) const HEAP_CAP_EXCEEDED: &str = "heap limit exceeded: live objects outgrew the memory cap";
 
 /// What the `ffi::` natives keep between calls.
 #[derive(Default)]
@@ -140,9 +164,11 @@ impl Runtime {
         }
         self.heap.owned_mut().clear_finalizer_types();
         if self.heap.owned_mut().slab_chunk_count() > 1 {
-            *self.heap.owned_mut() = crate::memory::Heap::default();
+            let emptied = self.heap.owned_mut().emptied();
+            *self.heap.owned_mut() = emptied;
         } else if self.heap.owned_mut().slab_chunk_count() == 1 {
             self.heap.owned_mut().collect(&[]);
+            self.heap.owned_mut().clear_young();
             self.program_string_cache.fill(Value::default());
         }
     }
@@ -154,12 +180,59 @@ impl Runtime {
         self.gc_deferred = false;
     }
 
+    /// Send `print` to `writer`; the sink it replaces.
+    pub(crate) fn with_output<W: std::io::Write + Send + 'static>(&mut self, writer: W) -> Option<OutputSink> {
+        let prev = self.output.take();
+        self.output = Some(Box::new(writer));
+        if let Some(out) = self.output.as_mut() {
+            crate::io::set_output_redirect(Some(out.as_mut() as *mut (dyn std::io::Write + Send)));
+        }
+        prev
+    }
+
+    /// Back to stdout; the sink it replaces.
+    pub(crate) fn restore_output(&mut self) -> Option<OutputSink> {
+        crate::io::set_output_redirect(None);
+        self.output.take()
+    }
+
+    /// Allow `budget` steps; `None` removes the limit.
+    pub(crate) fn set_step_budget(&mut self, budget: Option<u64>) {
+        // `budget` charges succeed; the next one reaches zero.
+        self.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
+        self.fuel_start = self.fuel;
+        self.step_budget_hit = false;
+    }
+
+    /// Steps charged since [`Self::set_step_budget`].
+    pub(crate) fn steps_charged(&self) -> u64 {
+        self.fuel_start - self.fuel.min(self.fuel_start)
+    }
+
+    /// Limit the heap to `cap` bytes of objects; `None` removes the limit.
+    pub(crate) fn set_heap_cap(&mut self, cap: Option<usize>) {
+        self.heap_cap = cap.unwrap_or(usize::MAX);
+        self.heap_cap_hit = false;
+        self.heap.get_mut().set_byte_cap(self.heap_cap);
+    }
+
+    /// Start counting `n` coverage probes; `0` counts none.
+    pub(crate) fn begin_probes(&mut self, n: u32) {
+        self.probes = vec![0; n as usize];
+    }
+
+    /// The counts since [`Self::begin_probes`], when it counted any.
+    pub(crate) fn take_probes(&mut self) -> Option<Vec<u32>> {
+        let hits = std::mem::take(&mut self.probes);
+        (!hits.is_empty()).then_some(hits)
+    }
+
     /// A runtime with nothing loaded: its own reactors, thread registry
     /// and worker cap.
     pub(crate) fn new() -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None }
+        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None, probes: Vec::new(), fuel: u64::MAX, step_budget_hit: false, fuel_start: u64::MAX, heap_cap: usize::MAX, heap_cap_hit: false }
     }
 }
 
@@ -317,13 +390,17 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
                 let key = s.peek_thread_key();
                 let current = s.current;
                 s.add_thread_wait(current, key);
-                h.park(ctx, Some(crate::task::Block::Thread(key)), false)?;
+                if h.park(ctx, Some(crate::task::Block::Thread(key)), false).is_none() {
+                    return Some(Invoked::Unwound);
+                }
             }
             Ok(None) if park_tasks && crate::task::io_retry_parked() => {
                 // A connect in progress: runs again on readiness.
                 let req = crate::task::take_io_retry_park().expect("checked");
                 let token = h.rt().io_wait(&req);
-                h.park(ctx, Some(crate::task::Block::IoRetry(token)), false)?;
+                if h.park(ctx, Some(crate::task::Block::IoRetry(token)), false).is_none() {
+                    return Some(Invoked::Unwound);
+                }
             }
             Ok(None) => {
                 let Some(req) = crate::io::take_pending_io_park() else {

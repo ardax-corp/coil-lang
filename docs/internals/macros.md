@@ -1,7 +1,7 @@
 # Macros: derives, attribute macros and function-style macros
 
 Packages define `derive`s, attribute macros and function-style macros in coil.
-The compiler runs them in the VM at compile time, after parsing and before
+The compiler runs them on the MIR interpreter at compile time, after parsing and before
 typechecking, and splices their output next to (derive) or in place of
 (attribute macro) the declaration, or in place of the `name!(…)` call.
 The built-in derives (`Show`, `Eq`, `Ord`, `Hash`, `Default`, `Send`,
@@ -9,7 +9,7 @@ The built-in derives (`Show`, `Eq`, `Ord`, `Hash`, `Default`, `Send`,
 
 Code: `compiler/src/macros/` (lowering, input encoding, `MacroHost`),
 `compiler/src/pipeline_macros.rs` (the pipeline stage), `compiler/src/prelude/macro.coil`
-(the embedded `macro` module), `comptime/` (the VM host).
+(the embedded `macro` module), `comptime/` (the host).
 
 ## Surface
 
@@ -195,7 +195,7 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    attribute arguments in parameter order; a call's arguments are
    `(kind, source text)` each, the rest as a count then its items.
    `macro::Reader` (`r.type_decl()`, `r.fn_decl()`, `r.expr()`, `r.exprs()`,
-   `r.str()`, `r.int()`, `r.bool()`) decodes it in the VM. Attribute-macro
+   `r.str()`, `r.int()`, `r.bool()`) decodes it in the macro. Attribute-macro
    parameters are `string`, `int` or `bool`.
 4. **Compile** the expansion program for the round's provider modules
    (`<coil>/expand.coil`: `use` of every macro function each provider declares,
@@ -255,7 +255,7 @@ instructions):
 | 1600 | 1.82 s, 13.1 G  | 1.07 s, 7.67 G  |
 
 `coil compile` output is byte-identical. What is left per call is constant:
-the macro's VM run (about half at N = 1600, including zeroing fresh heap
+the macro's run (about half at N = 1600, including zeroing fresh heap
 chunks) and building the parser for each output.
 
 `coil dissect --expand FILE` prints the entry file after expansion. Each run
@@ -337,13 +337,14 @@ error is the only one reported.
 ## Compile-time host
 
 `MacroHost` (`compiler::macros`) keeps the compiler free of `machine`; binaries
-call `comptime::install()` at startup and pipelines pick it up. `VmMacroHost`
-keeps one `Machine` per compiled expansion program per thread (#1008). The
+call `comptime::install()` at startup and pipelines pick it up. `IsolateMacroHost`
+keeps one `machine::Isolate` per compiled expansion program per thread (#1008):
+a runtime with no VM, whose calls run the program's MIR on the interpreter. The
 natives, statics and program are loaded once; each call resets the step
 budget and calls the entry, and a call that returns normally ends with
-`Machine::reset_isolate_heap` so the next one starts from a clean heap. A call
-that panics, errors or runs out of steps drops the machine, and the next call
-builds a fresh one. The sandboxed native table is built once per process.
+`Isolate::reset` so the next one starts from a clean heap. A call that panics,
+errors or runs out of steps drops the isolate, and the next call builds a fresh
+one. The sandboxed native table is built once per process.
 
 - The host natives are the standard table in ABI order. The fs, `open`,
   stream and `env_var` natives are gated (`comptime::io_gate`, see
@@ -361,7 +362,7 @@ builds a fresh one. The sandboxed native table is built once per process.
   call. Expansion sub-pipelines inherit the parent's limits.
 - A panic fails the macro with its message, so `panic "…"` is the way to
   inspect what a macro received.
-- The VM's thread-local output redirect is restored before the machine drops.
+- The thread-local output redirect is restored before the isolate drops.
 
 ## Compile-time IO
 
@@ -416,7 +417,7 @@ again:
   one-root heap snapshot) and a macro call (its output text) whose
   evaluation made at least one granted IO call and wrote no file. Pure
   evaluations are always computed: they cannot change between builds. The
-  VM notes each granted call (`io_gate::start_recording`), with the sha256 of
+  run notes each granted call (`io_gate::start_recording`), with the sha256 of
   what a read saw (`path_digest`: a file's bytes, a directory's sorted names,
   `missing`, plus a symlink's target).
 - Key (sha256): cache format, archive version, OS and arch, the const's
@@ -450,7 +451,7 @@ again:
   missing or stale entry is a diagnostic that says how to refresh it.
   `--comptime-refresh` is ignored there. A cache made by `coil` in the same
   working directory with the same grants is the one the editor reads.
-- A cached const is restored into the evaluating VM instead of calling its
+- A cached const is restored into the evaluating isolate instead of calling its
   initializer (`ConstEval::cached`), so later consts read it as usual and
   the program's snapshot is captured as before.
 
@@ -507,7 +508,7 @@ while compiling, on the same host (`MacroHost::eval_consts`):
 - Its initializer must be pure (the HIR effect summary of its `Static` body):
   a read or write of a `static let`, or any IO, is E0134 naming the cause.
 - After `finalize_bytecode`, `Pipeline::compute_consts` runs every const's
-  `__static_init$NAME` in setup order on one fresh VM, each within
+  `__static_init$NAME` in setup order on one fresh isolate, each within
   `ComptimeLimits`, storing each value to its slot so later consts can read
   earlier ones. A panic or a limit is E0134 at the const.
 - The values are captured as one `common::HeapSnapshot` (sharing and cycles
@@ -522,14 +523,14 @@ while compiling, on the same host (`MacroHost::eval_consts`):
 - The setup region's `CALL init; StoreStatic slot` pairs become `NOOP`s and
   one `RestoreSnapshot` (snapshot appended to the constant pool) at the first
   const's place. The initializer bodies stay in the program.
-- Without a host (a pipeline built with no VM linked) consts keep their
+- Without a host (a pipeline built with no host linked) consts keep their
   startup initializers.
 - A `static let` with a pure initializer is computed the same way, silently
   (`ConstEval::silent`): within the silent tier
   (`ComptimeLimits::SILENT_CALL_STEPS` each, `SILENT_MODULE_STEPS` for the
   module), and one that panics, runs out or has no snapshot form keeps its
-  startup initializer. A failed call leaves the VM in an unknown state, so
-  the values computed so far move to a fresh VM through a snapshot. The
+  startup initializer. A failed call leaves the isolate in an unknown state, so
+  the values computed so far move to a fresh isolate through a snapshot. The
   restored value is an ordinary heap object, so the static stays mutable.
 
 ## Compile-time calls
@@ -549,7 +550,7 @@ the consts (so the call can read them):
   (`common::jump_targets`): on every path those words are its arguments.
   A call to an auto-par worker computes the function it runs, without the
   worker's depth argument.
-- Each distinct call runs once on the compile-time VM within the silent
+- Each distinct call runs once on the compile-time host within the silent
   tier (sharing its 20M-step pool with the silent static lets). One that
   panics, runs out or returns a non-string where a string is expected
   stays a call.

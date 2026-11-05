@@ -146,6 +146,8 @@ pub struct Pipeline {
     contracts: Option<crate::ContractLevel>,
     /// `-g0` / `-g1` / `-g2`; `None` derives it from the opt level.
     debug_level: Option<common::DebugLevel>,
+    /// [`Self::set_runs_mir`].
+    runs_mir: bool,
     /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
@@ -761,6 +763,7 @@ impl Pipeline {
             opt_level: crate::OptLevel::Standard,
             contracts: None,
             debug_level: None,
+            runs_mir: false,
             debugger_attached: false,
             collect_opt_stats: false,
             call_fold: true,
@@ -1592,6 +1595,7 @@ impl Pipeline {
     }
 
     pub fn compile(mut self, filename: String, output: String) {
+        let _capture = self.comptime_capture();
         // Seed the worklist with the entry file. The
         // entry is treated specially (top-level
         // namespace), see `compile_file`.
@@ -1709,6 +1713,7 @@ impl Pipeline {
     }
 
     pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
+        let _capture = self.comptime_capture();
         // Derives, attribute and function-style macros and trait contract
         // copies run in the discovery stage, which works on cached files:
         // compile such input as an in-memory file.
@@ -1792,6 +1797,13 @@ impl Pipeline {
         Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
     }
 
+    /// A capture for [`Self::compute_consts`], when the macro host runs MIR:
+    /// it has to open before the bodies are lowered, and it closes with the
+    /// compile however that ends.
+    fn comptime_capture(&self) -> Option<crate::mir::ComptimeCapture> {
+        self.macro_host.as_ref().is_some_and(|h| h.runs_mir()).then(crate::mir::ComptimeCapture::open)
+    }
+
     /// Compute every `const` and pure `static let` initializer on the
     /// compile-time VM and replace its startup call with the computed value
     /// (`RestoreSnapshot`). A const's failure is E0134 at the const; a
@@ -1855,6 +1867,8 @@ impl Pipeline {
             program_debug: self.program_debug(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: std::sync::Arc::new(kinds.clone()),
+            mir: std::sync::Arc::new(if host.runs_mir() { crate::mir::peek_native_capture() } else { Vec::new() }),
+            runnable: std::sync::OnceLock::new(),
         };
         let limits = self.host_grants.comptime;
         // One evaluation per distinct call.
@@ -2126,6 +2140,7 @@ impl Pipeline {
     ///
     /// Multi-file entry point: discovers and compiles the module graph from disk.
     pub fn compile_src_from_file(&mut self, file: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
+        let _capture = self.comptime_capture();
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
@@ -2186,6 +2201,7 @@ impl Pipeline {
         file: &str,
         capture_il: bool,
     ) -> Result<crate::DissectArtifacts, CompileFail> {
+        let _capture = self.comptime_capture();
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
@@ -2416,12 +2432,25 @@ impl Pipeline {
         self.compiler_lazy().main_offset()
     }
 
-    /// `-g` level: the one set, else `-g1` at `-Os` and `-g2` otherwise.
+    /// `-g` level: the one set, else `-g1` at `-Os` and `-g2` otherwise. An
+    /// engine that runs MIR finds a panic's location by its byte span
+    /// (`Locator::native_site_location`), so there `-g1` keeps the spans
+    /// too; `-g0` stays bare.
     pub fn debug_level(&self) -> common::DebugLevel {
-        self.debug_level.unwrap_or(match self.opt_level {
+        let level = self.debug_level.unwrap_or(match self.opt_level {
             crate::OptLevel::Size => common::DebugLevel::Lines,
             _ => common::DebugLevel::Full,
-        })
+        });
+        match level {
+            common::DebugLevel::Lines if self.runs_mir => common::DebugLevel::Full,
+            level => level,
+        }
+    }
+
+    /// The program runs on an engine that runs MIR, or an archive carries
+    /// MIR for one: see [`Self::debug_level`].
+    pub fn set_runs_mir(&mut self) {
+        self.runs_mir = true;
     }
 
     pub fn set_debug_level(&mut self, level: common::DebugLevel) {

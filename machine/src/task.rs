@@ -194,6 +194,35 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
+    /// The tasks a debugger lists: `(id, name, state)`, live ones only, by id.
+    pub(crate) fn debug_states(&self) -> Vec<(u64, String, String)> {
+        let mut ids: Vec<_> = self.tasks.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| {
+                let rec = &self.tasks[&id];
+                if rec.state.finished() {
+                    return None;
+                }
+                let state = match (rec.state, rec.block) {
+                    (TaskState::Running, _) => "running".to_string(),
+                    (TaskState::Ready, _) => "ready".to_string(),
+                    (TaskState::Ending, _) => "ending".to_string(),
+                    (_, Some(Block::Io(..) | Block::IoRetry(_))) => "blocked (IO)".to_string(),
+                    (_, Some(Block::Join(t))) => format!("blocked (join task {t})"),
+                    (_, Some(Block::Scope(_))) => "blocked (end of scope)".to_string(),
+                    (_, Some(Block::Sleep)) => "blocked (sleep)".to_string(),
+                    (_, Some(Block::Cancel)) => "blocked (cancelling)".to_string(),
+                    (_, Some(Block::Cond(_))) => "blocked (channel)".to_string(),
+                    (_, Some(Block::Thread(_))) => "blocked (thread)".to_string(),
+                    _ => "blocked".to_string(),
+                };
+                let name = if id == ROOT { "main".to_string() } else { format!("task {id}") };
+                Some((id, name, state))
+            })
+            .collect()
+    }
+
     pub(crate) fn new(base_nested: u32) -> Self {
         let mut tasks = HashMap::new();
         let mut root = TaskRec::new(None, 0);

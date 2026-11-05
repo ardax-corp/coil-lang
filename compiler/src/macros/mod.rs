@@ -438,6 +438,12 @@ pub struct CompiledExpansion {
     pub class_word_kinds: Vec<common::ClassWordKinds>,
     /// Word kind of each static slot (`common::WORD_*`).
     pub static_word_kinds: std::sync::Arc<Vec<u8>>,
+    /// The program's bodies for a host that runs MIR
+    /// ([`MacroHost::runs_mir`]), else empty.
+    pub mir: std::sync::Arc<Vec<crate::mir::NativeBody>>,
+    /// What the host made of [`Self::mir`], made once for every thread that
+    /// runs the program.
+    pub runnable: std::sync::OnceLock<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
@@ -447,6 +453,12 @@ pub trait MacroHost: Send + Sync {
     /// on-disk cache of compiled expansion programs; empty keeps none.
     fn build_id(&self) -> &'static str {
         ""
+    }
+
+    /// The host runs a program's MIR: compiles keep it for
+    /// [`CompiledExpansion::mir`].
+    fn runs_mir(&self) -> bool {
+        false
     }
 
     /// Call each `(entry, input)`: `entry` is the offset of a
@@ -461,7 +473,7 @@ pub trait MacroHost: Send + Sync {
         io: &ComptimeIo,
     ) -> Vec<MacroRun>;
 
-    /// Compute `consts` in order on a compile-time VM of `program`: call
+    /// Compute `consts` in order on a compile-time run of `program`: call
     /// each initializer, store its value to its static slot (later
     /// initializers may read earlier ones), then capture every value as one
     /// snapshot, so values shared between them stay shared. An explicit

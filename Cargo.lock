@@ -308,6 +308,7 @@ dependencies = [
  "coil-cli",
  "coil-dissect",
  "coil-host",
+ "coil-mir-interp",
  "coil-native",
  "coil-test",
  "common",
@@ -351,6 +352,7 @@ dependencies = [
  "coil-args",
  "coil-build-id",
  "coil-cli",
+ "coil-mir-interp",
  "common",
  "compiler",
  "comptime",
@@ -380,6 +382,7 @@ name = "coil-embed"
 version = "0.1.0"
 dependencies = [
  "coil-cli",
+ "coil-native",
 ]
 
 [[package]]
@@ -420,6 +423,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "coil-mir-interp"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "compiler",
+ "machine",
+]
+
+[[package]]
 name = "coil-native"
 version = "0.1.0"
 dependencies = [
@@ -457,6 +469,7 @@ dependencies = [
  "coil-args",
  "coil-build-id",
  "coil-host",
+ "coil-mir-interp",
  "coil-native",
  "common",
  "compiler",
@@ -514,6 +527,7 @@ name = "comptime"
 version = "0.1.0"
 dependencies = [
  "coil-build-id",
+ "coil-mir-interp",
  "common",
  "compiler",
  "machine",

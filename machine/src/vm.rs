@@ -250,12 +250,7 @@ fn resolve_dense_index_object_in(
 
 use crate::stacks::STACK_OVERFLOW;
 
-/// Panic when [`Machine::set_step_budget`]'s budget runs out.
-pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
-    "step budget exhausted: execution exceeded its back-edge / call limit";
-
-/// Panic when the heap outgrows [`Machine::set_heap_cap`]'s cap.
-pub(crate) const HEAP_CAP_EXCEEDED: &str = "heap limit exceeded: live objects outgrew the memory cap";
+use crate::runtime::{HEAP_CAP_EXCEEDED, STEP_BUDGET_EXHAUSTED};
 
 /// Call depths [`Machine::rearm_call_window`] reserves ahead of the current one.
 const CALL_WINDOW: usize = 32;
@@ -422,21 +417,6 @@ pub struct Machine<const S: usize> {
     call_hot_depth: usize,
     /// Stack end the current window was reserved up to (`<= capacity`).
     call_window_end: usize,
-    /// Step budget fuel: charged once per taken back-edge (jump target `<=`
-    /// the jump's PC) and per call; zero means exhausted. `u64::MAX` when no
-    /// budget is set (2^64 charges cannot happen), so the hot path is one
-    /// decrement and one never-taken branch either way.
-    fuel: u64,
-    /// Set once the budget ran out (see [`Self::step_budget_exhausted`]).
-    step_budget_hit: bool,
-    /// `fuel` as [`Self::set_step_budget`] last set it (see
-    /// [`Self::steps_charged`]).
-    fuel_start: u64,
-    /// Heap cap from [`Self::set_heap_cap`] (`usize::MAX`: none).
-    heap_cap: usize,
-    /// Set once the live heap outgrew [`Self::heap_cap`] after a full
-    /// collection (see [`Self::heap_cap_exceeded`]).
-    heap_cap_hit: bool,
 }
 
 
@@ -521,11 +501,6 @@ impl<const S: usize> Machine<S> {
             unary_bases: dispatch::UnaryBaseTable::default(),
             call_hot_depth: 0,
             call_window_end: 0,
-            fuel: u64::MAX,
-            step_budget_hit: false,
-            fuel_start: u64::MAX,
-            heap_cap: usize::MAX,
-            heap_cap_hit: false,
         }
     }
 
@@ -652,6 +627,16 @@ impl<const S: usize> Machine<S> {
         Some(out)
     }
 
+    /// See [`crate::runtime::Runtime::begin_probes`].
+    pub(crate) fn begin_probes(&mut self, n: u32) {
+        self.rt.begin_probes(n);
+    }
+
+    /// See [`crate::runtime::Runtime::take_probes`].
+    pub(crate) fn take_probes(&mut self) -> Option<Vec<u32>> {
+        self.rt.take_probes()
+    }
+
     /// The installed native code, for a machine that runs this program.
     pub fn native_code(&self) -> Option<std::sync::Arc<crate::native::NativeCode>> {
         self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
@@ -758,6 +743,7 @@ impl<const S: usize> Machine<S> {
                 table.hits += 1;
                 Some(Err(p))
             }
+            crate::native::NativeOutcome::Parked(..) => unreachable!("a parked call under the VM"),
             crate::native::NativeOutcome::Bailed => {
                 table.bails += 1;
                 crate::native::BAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -799,6 +785,8 @@ impl<const S: usize> Machine<S> {
             machine: std::ptr::from_mut(self).cast(),
             host: crate::native::NativeHost {
                 print: Self::native_print,
+                tasks: |_| (0, Vec::new()),
+                apply: |_, _, _, _| crate::native::Applied::Other,
                 call: Self::native_vm_call,
                 call_value: Self::native_call_value,
                 resume: Self::native_resume,
@@ -810,6 +798,9 @@ impl<const S: usize> Machine<S> {
                 ffi: Self::native_ffi_vm,
                 invoke: Self::native_invoke,
             },
+            fuel: &raw mut self.rt.fuel,
+            natives: &raw const self.rt.natives,
+            probes: &raw mut self.rt.probes,
         }
     }
 
@@ -1198,8 +1189,8 @@ impl<const S: usize> Machine<S> {
             Self::with_coroutine_mut(target, |c| c.pending_send = send_val);
             target = sub;
         }
-        self.fuel = self.fuel.wrapping_sub(1);
-        if unlikely(self.fuel == 0) {
+        self.rt.fuel = self.rt.fuel.wrapping_sub(1);
+        if unlikely(self.rt.fuel == 0) {
             self.step_budget_out(call_ip);
             return Value::default();
         }
@@ -1226,6 +1217,7 @@ impl<const S: usize> Machine<S> {
                     self.run_native_pads(p.pads, call_ip.saturating_sub(1));
                     return Value::default();
                 }
+                Some(GenStep::Waiting) => unreachable!("only a driver parks a task"),
                 None => {}
             }
         }
@@ -1300,21 +1292,18 @@ impl<const S: usize> Machine<S> {
     /// `None` (the default) removes the limit. The budget spans every run on
     /// this machine until set again; spawned worker machines never inherit it.
     pub fn set_step_budget(&mut self, budget: Option<u64>) {
-        // `budget` charges succeed; the next one reaches zero.
-        self.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
-        self.fuel_start = self.fuel;
-        self.step_budget_hit = false;
+        self.rt.set_step_budget(budget);
     }
 
     /// Steps charged since [`Self::set_step_budget`] was last called (with or
     /// without a limit), capped at the budget when it ran out.
     pub fn steps_charged(&self) -> u64 {
-        self.fuel_start - self.fuel.min(self.fuel_start)
+        self.rt.steps_charged()
     }
 
     /// True once the budget from [`Self::set_step_budget`] ran out.
     pub fn step_budget_exhausted(&self) -> bool {
-        self.step_budget_hit
+        self.rt.step_budget_hit
     }
 
     /// Limit the heap to `cap` bytes of objects, checked at GC safepoints
@@ -1323,55 +1312,37 @@ impl<const S: usize> Machine<S> {
     /// become true). `None` (the default) removes the limit. Like the step
     /// budget, it spans every run until set again.
     pub fn set_heap_cap(&mut self, cap: Option<usize>) {
-        self.heap_cap = cap.unwrap_or(usize::MAX);
-        self.heap_cap_hit = false;
-        self.rt.heap.get_mut().set_byte_cap(self.heap_cap);
+        self.rt.set_heap_cap(cap);
     }
 
     /// True once the heap outgrew the cap from [`Self::set_heap_cap`].
     pub fn heap_cap_exceeded(&self) -> bool {
-        self.heap_cap_hit
-    }
-
-    /// At a GC safepoint: collect fully when the heap is over its cap, and if
-    /// it still is, stop at the next charge (the fuel check is the only
-    /// place the dispatch loop looks, so the hot path pays nothing).
-    #[cold]
-    #[inline(never)]
-    fn heap_cap_safepoint(&mut self) {
-        if !self.heap_cap_hit {
-            self.gc_collect();
-            if !self.rt.heap.get().over_byte_cap() {
-                return;
-            }
-            self.heap_cap_hit = true;
-        }
-        self.fuel = 1;
+        self.rt.heap_cap_hit
     }
 
     /// Fuel reached zero: panic with [`STEP_BUDGET_EXHAUSTED`] at `pc` (or
-    /// [`HEAP_CAP_EXCEEDED`] when [`Self::heap_cap_safepoint`] drained it).
+    /// [`HEAP_CAP_EXCEEDED`] when `collect::over_cap` drained it).
     /// Returns `false` (stop), like [`Self::runtime_panic`]. Leaves one unit
     /// so any later charge (host re-entry after the panic) stops again.
     #[cold]
     #[inline(never)]
     fn step_budget_out(&mut self, pc: usize) -> bool {
-        self.fuel = 1;
+        self.rt.fuel = 1;
         if self.finalizer_aborted {
             self.panicked = true;
             return false;
         }
-        if self.heap_cap_hit {
+        if self.rt.heap_cap_hit {
             if self.panicked {
                 return false;
             }
             return self.runtime_panic(HEAP_CAP_EXCEEDED, pc);
         }
-        if self.step_budget_hit {
+        if self.rt.step_budget_hit {
             self.panicked = true;
             return false;
         }
-        self.step_budget_hit = true;
+        self.rt.step_budget_hit = true;
         self.runtime_panic(STEP_BUDGET_EXHAUSTED, pc)
     }
 
@@ -1380,7 +1351,7 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn hot_streak_panic(&mut self, msg: &'static str, pc: usize) -> bool {
-        if self.fuel == 0 {
+        if self.rt.fuel == 0 {
             return self.step_budget_out(pc);
         }
         self.runtime_panic(msg, pc)
@@ -1589,41 +1560,7 @@ impl<const S: usize> Machine<S> {
     /// The heap object at `v` (a bare or `| 1`-tagged address), if any.
     #[cfg(any(test, feature = "debugger"))]
     pub fn debug_object(&self, v: Value) -> Option<crate::debug::DebugObject> {
-        use crate::debug::DebugObject;
-        use crate::memory::Object;
-        let addr = v.bits() & !1;
-        if addr == 0 {
-            return None;
-        }
-        Some(match Self::find_object_by_addr(&self.rt.heap, addr)? {
-            Object::String(gc) => DebugObject::Str(gc.as_ref().data.to_string()),
-            Object::Instance(gc) => {
-                let inst = gc.as_ref();
-                match inst.slots() {
-                    Some(fields) => DebugObject::Instance {
-                        type_id: inst.type_id,
-                        fields: fields.to_vec(),
-                    },
-                    None => DebugObject::Other("dict"),
-                }
-            }
-            Object::Array(gc) => DebugObject::Array(gc.as_ref().to_vec()),
-            Object::Tuple(gc) => DebugObject::Tuple(gc.as_ref().elements().to_vec()),
-            Object::Enum(gc) => {
-                let e = gc.as_ref();
-                DebugObject::Enum {
-                    tag: e.tag,
-                    payload: e.payload.to_vec(),
-                }
-            }
-            Object::Boxed(gc) => match &gc.as_ref().payload {
-                crate::memory::Member::Value(inner) => DebugObject::Boxed(*inner),
-                _ => DebugObject::Other("boxed"),
-            },
-            Object::Coroutine(_) => DebugObject::Other("coroutine"),
-            Object::Fn(_) => DebugObject::Other("fn"),
-            _ => DebugObject::Other("object"),
-        })
+        crate::debug::object_view(&self.rt.heap, v)
     }
 
     pub fn debug_format_value(&self, v: Value) -> String {
@@ -1899,6 +1836,9 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn native_panic(&mut self, p: &crate::native::NativePanic, call_ip: usize) -> bool {
+        if p.code == crate::native::TRAP_BUDGET {
+            return self.step_budget_out(call_ip);
+        }
         let Some(code) = self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code)) else {
             return self.runtime_panic(p.message(), call_ip);
         };
@@ -2705,7 +2645,7 @@ impl<const S: usize> Machine<S> {
             std::process::exit(1);
         }
         self.finalizer_aborted = true;
-        self.fuel = 1;
+        self.rt.fuel = 1;
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
@@ -2940,20 +2880,14 @@ impl<const S: usize> Machine<S> {
 
     /// Redirect `PRINT` output (used by pipeline tests).
     pub fn with_output<W: IoWrite + Send + 'static>(&mut self, writer: W) -> Option<OutputSink> {
-        let prev = self.rt.output.take();
-        self.rt.output = Some(Box::new(writer));
-        if let Some(out) = self.rt.output.as_mut() {
-            crate::io::set_output_redirect(Some(out.as_mut() as *mut (dyn IoWrite + Send)));
-        }
-        prev
+        self.rt.with_output(writer)
     }
 
     /// Reset the output sink back to stdout. Returns the previous
     /// sink so the caller can recover it (useful in tests that
     /// want to scope the redirection).
     pub fn restore_output(&mut self) -> Option<OutputSink> {
-        crate::io::set_output_redirect(None);
-        self.rt.output.take()
+        self.rt.restore_output()
     }
 
     /// Register a host native with an explicit signature via the
@@ -4040,8 +3974,8 @@ impl<const S: usize> Machine<S> {
             )
         };
         self.bind_frame_reserve(code, constants);
-        self.fuel = self.fuel.wrapping_sub(1);
-        if unlikely(self.fuel == 0) {
+        self.rt.fuel = self.rt.fuel.wrapping_sub(1);
+        if unlikely(self.rt.fuel == 0) {
             self.step_budget_out(offset as usize);
             return Value::default();
         }
@@ -4133,8 +4067,8 @@ impl<const S: usize> Machine<S> {
         // Where a panic in the call itself (stack, bad target) points: the
         // native code's caller, as for its other panics.
         let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
-        self.fuel = self.fuel.wrapping_sub(1);
-        if unlikely(self.fuel == 0) {
+        self.rt.fuel = self.rt.fuel.wrapping_sub(1);
+        if unlikely(self.rt.fuel == 0) {
             self.step_budget_out(call_ip);
             return Value::default();
         }
@@ -4412,7 +4346,7 @@ impl<const S: usize> Machine<S> {
                         vregs: &mut self.vregs,
                         natives: &self.rt.natives,
                         host_alloc: &mut self.streak_host_alloc,
-                        fuel: &mut self.fuel,
+                        fuel: &mut self.rt.fuel,
                         stack_cap,
                     },
                 ) {
@@ -4434,8 +4368,8 @@ impl<const S: usize> Machine<S> {
         // the zero check is the only branch.
         macro_rules! charge_step {
             ($back:expr) => {
-                self.fuel = self.fuel.wrapping_sub(($back) as u64);
-                if unlikely(self.fuel == 0) {
+                self.rt.fuel = self.rt.fuel.wrapping_sub(($back) as u64);
+                if unlikely(self.rt.fuel == 0) {
                     return self.step_budget_out(ip.saturating_sub(1));
                 }
             };
@@ -5309,10 +5243,6 @@ impl<const S: usize> crate::collect::GcHost for Machine<S> {
 
     fn borrowed_heap_wants_collect(&mut self) {
         self.panicked = true;
-    }
-
-    fn over_cap(&mut self) {
-        self.heap_cap_safepoint();
     }
 
     #[cfg(any(test, feature = "vm_profile"))]

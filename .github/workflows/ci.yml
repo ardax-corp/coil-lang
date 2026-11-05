@@ -479,35 +479,54 @@ jobs:
           find harness-bin -type f -exec chmod +x {} +
           run="python3 scripts/test_corpora.py --bin harness-bin"
           case "${{ matrix.variant }}" in
-            default) $run -- $FLAGS ;;
+            default) $run -- --engine vm $FLAGS ;;
             # Optimizations hide codegen bugs (LICM materializes invariants,
             # inlining drops CALL targets); run the unoptimized pipeline too.
-            O0) $run -- -O 0 $FLAGS ;;
+            O0) $run -- --engine vm -O 0 $FLAGS ;;
             leak-smoke)
               # Each corpus process gets 128 MiB of address space above the
               # harness's own code, and one job: every extra thread reserves
               # a glibc malloc arena (64 MiB of address space), which alone
               # exceeds the room left.
               code_kb=$(( $(size -d harness-bin/coil-test | awk 'NR==2 {print $4}') / 1024 ))
-              $run -j 1 --limit-as-kb $(( code_kb + 131072 )) -- $FLAGS ;;
+              $run -j 1 --limit-as-kb $(( code_kb + 131072 )) -- --engine vm $FLAGS ;;
             # Collect and evacuate at every allocation (precise-root soundness).
             # The memory corpus also at -O0: without inlining, a call's
             # result reaches its consumer on the operand stack instead of a
             # local, so the roots differ from the default level (#1481).
             # Generics too: uninlined calls through `forall` parameters
             # pass dictionaries the default level folds away (#1530).
-            # A full cycle per allocation makes allocation-heavy cases cost
-            # minutes each (heap_churn_checksums.coil, bare_unit_case_in_pure_fn.coil:
-            # 3 to 4 minutes alone on one core), so the per-case wall limit
-            # is wider than the default 600 s.
+            # A full cycle per allocation costs time quadratic in what a
+            # case keeps live, so a case holds thousands of objects, not
+            # hundreds of thousands, and forces the collection it needs
+            # with `collect()`. The per-case wall limit is wider than the
+            # default 600 s for slow runners.
             gc-stress)
-              $run --harness harness-bin/gc-stress/coil-test -- --wall-timeout 1200 $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
+              $run --harness harness-bin/gc-stress/coil-test -- --engine vm --wall-timeout 1200 $FLAGS
+              $run --harness harness-bin/gc-stress/coil-test memory generics -- --engine vm -O 0 --wall-timeout 1200 $FLAGS
+              # The same on the two MIR engines, whose roots are their own:
+              # stack maps, and the interpreter's scan.
+              $run --harness harness-bin/gc-stress/coil-test -- --engine native --wall-timeout 1200 $FLAGS
+              $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS
+              # And the frames parked on the heap, as on wasm.
+              COIL_NO_FIBERS=1 $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS ;;
             # Every corpus again with native code where the backend compiles
             # a body (`docs/internals/native.md`): it must pass as the VM does.
             # Each run also appends what it left on the VM to the
             # inventory (`scripts/native_inventory.py`, next step).
             native) mkdir -p target && COIL_NATIVE_INVENTORY="$PWD/target/native-inventory.tsv" $run -- --engine native $FLAGS ;;
+            # Every corpus on the MIR interpreter: raw MIR at `-O 0`, the
+            # reference the optimized engines are compared against
+            # (`docs/internals/mir-interp.md`).
+            # Every body also goes through the MIR archive format and must
+            # come back equal: the run uses the copy.
+            mir) COIL_MIR_ARCHIVE_CHECK=1 $run -- --engine mir $FLAGS ;;
+            # And each level above it, on the MIR native code compiles: a
+            # failure here and not in `mir` is a pass's.
+            mir-opt) for level in 1 2 3 s g; do $run -- --engine mir -O $level $FLAGS; done ;;
+            # Generators and tasks parked on the heap instead of on fibers:
+            # what wasm runs, where a failure is harder to read.
+            mir-parked) COIL_NO_FIBERS=1 $run -- --engine mir $FLAGS ;;
           esac
 
       # What native runs still leave on the VM, and the interpreter symbols
@@ -563,7 +582,7 @@ jobs:
         mode: [release]
         # Native code runs in release only: a debug cell would test the
         # same Cranelift output at a fraction of the speed.
-        variant: [default, O0, leak-smoke, native]
+        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked]
     env: *harness-env
     steps: *harness-steps
 

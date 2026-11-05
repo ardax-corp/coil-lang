@@ -21,6 +21,8 @@ fn run(name: &str, src: &str, jit: bool) -> Output {
     }
     if jit {
         cmd.arg("--jit").env("COIL_NATIVE_STATS", "2");
+    } else {
+        cmd.arg("--no-jit");
     }
     cmd.output().expect("spawn coil")
 }
@@ -118,6 +120,19 @@ fn unbounded_recursion_overflows_at_the_vm_location() {
     assert_eq!(head(&vm), head(&jit));
     assert!(head(&jit)[0].starts_with("panic: stack overflow"), "{:?}", head(&jit));
     assert_eq!(vm.status.code(), jit.status.code());
+}
+
+#[test]
+fn unbounded_recursion_through_a_function_value_panics() {
+    // Each call nests a native entry on the thread's stack: past the stack's
+    // end it must panic as the VM does, not run off it.
+    let src = "fn apply(fn(int) -> int f, int n) -> int { return f(n) + 1; }\n\
+         fn rec(int n) -> int { return apply(rec, n + 1); }\n\
+         fn main() { let _ = rec(0); }\n";
+    let out = run("closure_overflow", src, true);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("stack overflow: recursion exceeds"), "stderr: {stderr}");
 }
 
 #[test]
@@ -356,9 +371,7 @@ fn compile(name: &str, src: &str, jit: bool) -> PathBuf {
     let out = dir.join(format!("{name}.ccoil"));
     let mut cmd = Command::new(coil_bin());
     cmd.args(["compile", "--no-build-cache", "--fold-calls", "off", "-o"]).arg(&out).arg(&file);
-    if jit {
-        cmd.arg("--jit");
-    }
+    cmd.arg(if jit { "--jit" } else { "--no-jit" });
     for root in compiler::Pipeline::workspace_language_extra_roots() {
         cmd.arg("--root").arg(root);
     }
@@ -914,6 +927,8 @@ fn ffi_calls_run_from_native_code() {
         }
         if jit {
             cmd.arg("--jit").env("COIL_NATIVE_STATS", "2");
+        } else {
+            cmd.arg("--no-jit");
         }
         cmd.output().expect("spawn coil")
     };
@@ -1101,20 +1116,6 @@ fn a_pure_native_run_reports_no_vm_dependence() {
 }
 
 #[test]
-fn a_native_run_counts_its_vm_entries() {
-    // `wide` takes more words than native code passes: it and its caller
-    // stay on the VM.
-    let src = format!(
-        "{HEADER}#[inline(never)]\nfn wide(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16) -> int {{ return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16; }}\n\
-         #[inline(never)]\nfn show(int k) {{ let _ = println(format(\"%i\", k + wide(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))); }}\n\
-         fn main() {{ show(1); show(2); }}\n"
-    );
-    let stats = same_as_vm("counts_vm", &src);
-    let (calls, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
-    assert!(calls + entries >= 2, "stats: {stats}");
-}
-
-#[test]
 fn ordinary_host_natives_run_without_the_vm() {
     // Writing to stdout, `Vec::insert` and `clock::sleep_ms` are host
     // natives that are no plain functions: native code runs them itself.
@@ -1281,16 +1282,115 @@ fn a_lines_only_archive_locates_native_panics() {
 
 #[test]
 fn module_setup_runs_natively() {
-    // Statics computed at run time and a class with a `drop` (its
-    // finalizer is registered in setup): the setup body is native code.
+    // A static that prints, so only a run can compute it, and a class with
+    // a `drop` (its finalizer is registered before any initializer): both
+    // setup bodies are native code.
     let src = format!(
-        "{HEADER}static let base: int = 40;\nstatic let words: Vec<int> = [1, 2, 3];\n\
+        "{HEADER}#[inline(never)]\nfn start(int n) -> int {{ let _ = println(\"start\"); return n; }}\n\
+         static let base: int = start(40);\nstatic let words: Vec<int> = [1, 2, 3];\n\
          class Res {{\n    pub id: int,\n}}\nimpl Res {{\n    fn drop() {{ let _ = println(format(\"drop %i\", self.id)); }}\n}}\n\
          fn main() {{ let r = new Res(7); let _ = println(format(\"%i %i %i\", base + 2, words.len(), r.id)); }}\n"
     );
     let stats = same_as_vm("module_setup", &src);
     assert!(compiled(&stats, "__module_setup"), "stats: {stats}");
+    assert!(compiled(&stats, "__finalizer_setup"), "stats: {stats}");
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+/// Past the registers, arguments go on the stack: a body of many parameters
+/// still runs natively, and the objects among them survive a collection, in
+/// the callee and across a tail call. A package has no VM to run it instead.
+#[test]
+fn many_parameters_run_natively() {
+    let params: Vec<String> = (0..20).map(|i| format!("Box a{i}")).collect();
+    let args: Vec<String> = (0..20).map(|i| format!("new Box({i})")).collect();
+    let names: Vec<String> = (0..20).map(|i| format!("a{i}")).collect();
+    let sum: Vec<String> = (0..20).map(|i| format!("a{i}.n")).collect();
+    let src = format!(
+        "{HEADER}use gc::collect;\nclass Box {{\n    pub n: int,\n}}\n\
+         #[inline(never)]\nfn wide({params}) -> int {{ collect(); let junk = new Box(1); collect(); return {sum} + junk.n; }}\n\
+         #[inline(never)]\nfn relay({params}) -> int {{ return wide({names}); }}\n\
+         #[inline(never)]\nfn ints(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j, int k, int l, int m, int n, int o, int p, int q) -> int {{ return a - b + c - d + e - f + g - h + i - j + k - l + m - n + o - p + q; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", relay({args}))); let _ = println(format(\"%i\", ints(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))); }}\n",
+        params = params.join(", "),
+        args = args.join(", "),
+        names = names.join(", "),
+        sum = sum.join(" + "),
+    );
+    let stats = same_as_vm("many_parameters", &src);
+    assert!(compiled(&stats, "wide"), "stats: {stats}");
+    assert!(compiled(&stats, "relay"), "stats: {stats}");
+    assert!(compiled(&stats, "ints"), "stats: {stats}");
+    assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+/// Bytecode holds 127 call arguments and 255 frame words; native code holds
+/// any number. A body past those runs natively, and on the VM it panics
+/// saying so, where it used to take the arity mod 128 or stop the compile.
+#[test]
+fn a_body_too_large_for_bytecode_runs_natively() {
+    let names = |n: usize| (0..n).map(|i| format!("a{i}")).collect::<Vec<_>>();
+    let sum = |n: usize| names(n).iter().map(|a| format!("{a}.n")).collect::<Vec<_>>().join(" + ");
+    let boxes = |n: usize| (0..n).map(|i| format!("new Box({i})")).collect::<Vec<_>>().join(", ");
+    let params = |n: usize| names(n).iter().map(|a| format!("Box {a}")).collect::<Vec<_>>().join(", ");
+    let lets = |n: usize| (0..n).map(|i| format!("    let a{i} = new Box({i});\n")).collect::<String>();
+    let made = |n: usize| (0..n).map(|i| format!("    let a{i} = make({i});\n")).collect::<String>();
+    let head = format!("{HEADER}use gc::collect;\nclass Box {{\n    pub n: int,\n}}\n#[inline(never)]\nfn make(int n) -> Box {{ return new Box(n); }}\n");
+    let shapes = [
+        ("args_130", format!("#[inline(never)]\nfn f({}) -> int {{ collect(); return {}; }}\nfn main() {{ let _ = println(format(\"%i\", f({}))); }}\n", params(130), sum(130), boxes(130)), 8385),
+        ("params_300", format!("#[inline(never)]\nfn f({}) -> int {{ collect(); return {}; }}\nfn main() {{ let _ = println(format(\"%i\", f({}))); }}\n", params(300), sum(300), boxes(300)), 44850),
+        ("captures_300", format!("fn main() {{\n{}    let g = fn () use ({}) {{ collect(); return {}; }};\n    let _ = println(format(\"%i\", g()));\n}}\n", lets(300), names(300).join(", "), sum(300)), 44850),
+        ("locals_300", format!("fn main() {{\n{}    collect();\n    let _ = println(format(\"%i\", {}));\n}}\n", made(300), sum(300)), 44850),
+    ];
+    for (name, body, want) in shapes {
+        let src = format!("{head}{body}");
+        let jit = run(name, &src, true);
+        assert_eq!(String::from_utf8_lossy(&jit.stdout).trim(), want.to_string(), "{name}: {}", String::from_utf8_lossy(&jit.stderr));
+        let vm = run(name, &src, false);
+        let said = String::from_utf8_lossy(&vm.stderr);
+        assert_eq!(vm.status.code(), Some(1), "{name}: {said}");
+        assert!(vm.stdout.is_empty(), "{name}: no wrong answer");
+        assert!(said.contains("does not fit the VM's bytecode"), "{name}: {said}");
+    }
+}
+
+/// A repeat `--jit` run takes its archive, MIR included, from the build
+/// cache and still runs natively. A VM run of the same file has an entry of
+/// its own: that archive has no MIR.
+#[test]
+fn a_jit_run_comes_from_the_build_cache() {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-build-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("cached.coil");
+    let src = format!("{HEADER}#[inline(never)]\nfn work(int n) -> int {{ return n * 2; }}\nfn main() {{ let _ = println(format(\"%i\", work(21))); }}\n");
+    std::fs::write(&file, src).expect("write source");
+    let run = |jit: bool| {
+        let mut cmd = Command::new(coil_bin());
+        cmd.arg(&file).args(["--fold-calls", "off"]).env("XDG_CACHE_HOME", dir.join("cache")).env("COIL_NATIVE_STATS", "2");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        if !jit {
+            cmd.arg("--no-jit");
+        }
+        let out = cmd.output().expect("spawn coil");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let entries = || std::fs::read_dir(dir.join("cache/coil/build")).map_or(0, Iterator::count);
+    let first = run(true);
+    assert!(compiled(&first, "work"), "stats: {first}");
+    let cached = entries();
+    assert!(cached > 0, "the run stored its archive");
+    let second = run(true);
+    assert!(compiled(&second, "work"), "a cached run stays native: {second}");
+    assert_eq!(entries(), cached, "the second run was a hit");
+    let vm = run(false);
+    assert!(!compiled(&vm, "work"), "the VM run took no native code: {vm}");
+    assert!(entries() > cached, "the VM run has an entry of its own");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `coil test --engine native` over a directory holding `src` as

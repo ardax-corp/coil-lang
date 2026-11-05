@@ -173,6 +173,7 @@ impl fmt::Display for OptLevel {
 
 fn all_off() -> OptimizeOptions {
     OptimizeOptions {
+            vm_refusal_message: None,
         algebraic: false,
         loop_bounds: false,
         sink_return: false,

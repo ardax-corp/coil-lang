@@ -513,15 +513,6 @@ impl IlOp {
         }
     }
 
-    pub fn jump_hinted(kind: IlJumpKind, target: Label, loc: DebugLoc, hint: FuseHint) -> Self {
-        IlOp::Jump {
-            kind,
-            target,
-            loc,
-            hint,
-        }
-    }
-
     /// Plain one-word terminal `RETURN` (typed or residual `Byte`).
     ///
     /// Fused `*Return` variants are excluded — convoy opts and tiny-inline use
@@ -612,6 +603,20 @@ impl IlOp {
             | IlOp::Entry { loc: l, .. }
             | IlOp::PrologueJmp { loc: l } => *l = loc,
             IlOp::Label(_) => {}
+        }
+    }
+
+}
+
+// Test fixtures build their IL with these.
+#[cfg(test)]
+impl IlOp {
+    pub fn jump_hinted(kind: IlJumpKind, target: Label, loc: DebugLoc, hint: FuseHint) -> Self {
+        IlOp::Jump {
+            kind,
+            target,
+            loc,
+            hint,
         }
     }
 

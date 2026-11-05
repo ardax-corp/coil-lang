@@ -103,6 +103,7 @@ impl<const S: usize> Machine<S> {
                 None
             }
             GenStep::Panicked(p) => Some(p),
+            GenStep::Waiting => unreachable!("only a driver parks a task"),
         })
     }
 

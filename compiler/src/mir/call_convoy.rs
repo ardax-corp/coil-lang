@@ -305,7 +305,7 @@ fn is_self_call_value(
 /// `inst` is a planned tail call ([`MirFunc::tail_targets`]) whose result
 /// `block` returns: a `TailCall`. Any other call keeps the caller's frame,
 /// which a failed `requires` in the callee blames and a backtrace names.
-pub(super) fn is_tail_call_inst(func: &MirFunc, block: &super::func::MirBlock, inst: &MirInst) -> bool {
+pub fn is_tail_call_inst(func: &MirFunc, block: &super::func::MirBlock, inst: &MirInst) -> bool {
     let MirInst::Call { dest, dest_hi, target, .. } = inst else {
         return false;
     };

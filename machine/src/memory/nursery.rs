@@ -205,6 +205,19 @@ impl Heap {
         self.slab.finish_young(&promoted, &[], free);
     }
 
+    /// Free the nursery's objects: only the heap's own immortals stay. A
+    /// finished job's heap has no other roots, and [`Self::collect`] does
+    /// not reach young objects. Needs an idle collector.
+    pub fn clear_young(&mut self) {
+        if !self.has_young_in_use() {
+            return;
+        }
+        let pins = self.take_gc_roots();
+        let plan = self.minor_plan(&pins, &[]);
+        self.restore_gc_roots(pins);
+        self.minor_finish(plan);
+    }
+
     /// Trace the young objects reachable from `pins` (roots that cannot be
     /// rewritten, which pin their target), `precise` (roots the VM rewrites
     /// through [`MinorPlan::forward`]) and the remembered set; copy every

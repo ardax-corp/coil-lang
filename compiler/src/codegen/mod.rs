@@ -9,10 +9,9 @@ use common::{
 };
 use reporting::Label as DiagLabel;
 
-use crate::block_builder::{BlockBuilder, JumpKind as BbJumpKind, Label as BbLabel};
 use crate::const_fold::ConstValue;
 use crate::layout::PairKind;
-use crate::il::{CodeBuf, EmitBuf, IlOp, Label as IlLabel};
+use crate::il::{CodeBuf, IlOp, Label as IlLabel};
 use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
 use parser::{
@@ -141,10 +140,6 @@ pub(crate) fn primitive_cast_opcode(from: &str, to: &str) -> Option<Instruction>
 
 fn into_primitive_fqn(from: &str, to: &str) -> String {
     format!("Into__{}__to_{}__into", from, to)
-}
-
-fn emit_ffi_type_const(bytecode: &mut impl EmitBuf, tag: u32, aux: u32) {
-    bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(encode_tag_operand(tag, aux)));
 }
 
 fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
@@ -397,11 +392,7 @@ pub struct Compiler {
     /// the typechecker's `Checker`.
     codegen_depth: u32,
 
-    /// Active loop labels: `(continue_target, break_target)`.
-    loop_stack: Vec<(BbLabel, BbLabel)>,
 
-    /// Active loop patchers. Break/continue emit through the innermost builder.
-    loop_bbs: Vec<BlockBuilder>,
 
     /// Functions with a `defer` cleanup pad, resolved to pcs at finalize.
     cleanup_pads: Vec<CleanupPad>,
@@ -431,10 +422,6 @@ pub struct Compiler {
     /// `fib`).
     par_worker_of: HashMap<String, String>,
 
-    /// `extern` dlopen/declare setup accumulated across modules, spliced into
-    /// the prologue setup region at finalize (so imported-module `extern`
-    /// still runs before `main`).
-    ffi_init: CodeBuf,
     /// Module setup's steps (static stores, `extern` loads and
     /// declarations), from which `__module_setup`'s MIR is built.
     setup_steps: Vec<compiler::module_setup::SetupStep>,
@@ -811,8 +798,6 @@ impl Default for Compiler {
             precise_frames: Vec::new(),
             frame_inputs: None,
             codegen_depth: 0,
-            loop_stack: Vec::new(),
-            loop_bbs: Vec::new(),
             cleanup_pads: Vec::new(),
             cleanup_ranges: Vec::new(),
             active_fn_name: None,
@@ -867,7 +852,6 @@ impl Default for Compiler {
             fold_bodies: HashMap::new(),
             fold_fns: HashMap::new(),
             par_worker_of: HashMap::new(),
-            ffi_init: CodeBuf::new(),
             setup_steps: Vec::new(),
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),
@@ -1065,7 +1049,7 @@ pub(crate) struct InstClone {
 pub(crate) struct CleanupPad {
     /// Function table key (resolves labels through its IL chunk).
     pub func: String,
-    pub pad: BbLabel,
+    pub pad: IlLabel,
     /// Slots the frame uses; the unwinder raises the stack top past them.
     pub frame_words: u32,
 }

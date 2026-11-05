@@ -138,8 +138,10 @@ fn run_on(rt: &mut Runtime, job: Job) {
         let write_scope = crate::memory::EpochWriteScope::enter(d.rt.heap.get(), shared);
         let out = (|| {
             if let Some(test) = &test {
+                d.rt.begin_probes(test.probes);
                 let ret = crate::reactor::test_on_driver(&mut d, entry, test);
-                return Ok(crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test));
+                let hits = d.rt.take_probes();
+                return Ok(crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits));
             }
             let mut child_args = Vec::with_capacity(args.len());
             for a in args {

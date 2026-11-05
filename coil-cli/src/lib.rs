@@ -142,6 +142,7 @@ pub fn execute_archived_program(
         ffi_search_paths: ffi_search_paths.clone(),
         dload_gate: dload_gate.clone(),
         struct_layouts: loaded.struct_layouts.iter().map(machine::CStructLayout::from_archive).collect(),
+        shared_print: None,
     };
     if let Some(panicked) = machine::run_natively(program, start) {
         return panicked;
@@ -212,6 +213,13 @@ fn native_cache_dirs(lock: &NativeLock) -> Vec<PathBuf> {
 
 /// If this process is a packaged binary, run the embedded program and return `Some(panicked)`.
 pub fn try_run_embedded() -> Option<bool> {
+    try_run_embedded_with(|_| Ok(()))
+}
+
+/// [`try_run_embedded`] for a runner that makes its native code at start:
+/// `prepare` takes the archive's native MIR section and installs it for the
+/// run. Its error stops the program.
+pub fn try_run_embedded_with(prepare: impl FnOnce(&[u8]) -> Result<(), String>) -> Option<bool> {
     use machine::packaged_app_ffi_startup_check;
 
     let exe = std::env::current_exe().ok()?;
@@ -288,6 +296,10 @@ pub fn try_run_embedded() -> Option<bool> {
         ffi_search_paths.push(parent.join("lib"));
     }
 
+    if let Err(msg) = prepare(&loaded.native_mir) {
+        eprintln!("error: {msg}");
+        exit(1);
+    }
     let panicked =
         execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate);
     Some(panicked)

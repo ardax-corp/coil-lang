@@ -15,8 +15,8 @@ impl<const S: usize> Machine<S> {
         // Step budget charge, as `charge_step!` in `execute`.
         macro_rules! charge_step {
             ($back:expr) => {
-                self.fuel = self.fuel.wrapping_sub(($back) as u64);
-                if unlikely(self.fuel == 0) {
+                self.rt.fuel = self.rt.fuel.wrapping_sub(($back) as u64);
+                if unlikely(self.rt.fuel == 0) {
                     return dispatch::RestExit::done(self.step_budget_out(ip.saturating_sub(1)));
                 }
             };
@@ -1179,6 +1179,7 @@ impl<const S: usize> Machine<S> {
                         if unlikely(sub.as_ref().native.is_some()) {
                             self.frames.get_mut().seek(ip);
                             match self.native_gen_step(sub, Value::from(0_i64)) {
+                                Some(GenStep::Waiting) => unreachable!("only a driver parks a task"),
                                 Some(GenStep::Returned(v)) => {
                                     self.stack.push(v);
                                     break 'yield_from;

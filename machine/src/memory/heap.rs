@@ -1536,6 +1536,19 @@ impl Heap {
         self.gc_next_threshold = self.gc_next_threshold.min(cap);
     }
 
+    /// An empty heap with this one's settings.
+    pub(crate) fn emptied(&self) -> Self {
+        let mut heap = Self::default();
+        heap.set_nursery(self.nursery);
+        heap.set_byte_cap(self.byte_cap);
+        heap
+    }
+
+    /// The cap from [`Self::set_byte_cap`].
+    pub fn byte_cap(&self) -> usize {
+        self.byte_cap
+    }
+
     /// True when the heap holds more than [`Self::set_byte_cap`] allows.
     #[inline]
     pub fn over_byte_cap(&self) -> bool {

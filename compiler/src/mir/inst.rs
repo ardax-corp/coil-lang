@@ -610,6 +610,13 @@ pub enum MirInst {
         dest: ValueId,
         value: ValueId,
     },
+    /// Count one more run of coverage probe `id`
+    /// ([`super::coverage::instrument`]). Only a capture holds one, so the
+    /// bytecode tiers never see it. Dest is a `bool` unit token.
+    Probe {
+        dest: ValueId,
+        id: u32,
+    },
     /// The field store a panic in the code after this owes the heap: a
     /// field kept in a register across a loop ([`super::promote_fields`])
     /// holds `value` here, where the source had stored it. A panic between
@@ -1101,6 +1108,7 @@ impl MirInst {
             | Self::HomeStore { dest, .. }
             | Self::ClearWord { dest, .. }
             | Self::KeepAlive { dest, .. }
+            | Self::Probe { dest, .. }
             | Self::PanicStore { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
@@ -1156,7 +1164,7 @@ impl MirInst {
 
     pub fn operands(&self) -> Vec<ValueId> {
         match self {
-            Self::Const { .. } => Vec::new(),
+            Self::Const { .. } | Self::Probe { .. } => Vec::new(),
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
@@ -1205,7 +1213,7 @@ impl MirInst {
 
     pub fn rewrite_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match self {
-            Self::Const { .. } => {}
+            Self::Const { .. } | Self::Probe { .. } => {}
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => {
                 *lhs = map(*lhs);
                 *rhs = map(*rhs);

@@ -1,8 +1,9 @@
 # Comptime: code that runs while compiling
 
 Coil runs code while it compiles in a few forms. All of them use one
-compile-time VM (`MacroHost`, installed by `comptime::install()`), the same
-limits and the same IO grants. This page maps the forms and the stages and
+compile-time host (`MacroHost`, installed by `comptime::install()`) that runs
+MIR on the interpreter ([MIR interpreter](mir-interp.md)), the same limits and
+the same IO grants. This page maps the forms and the stages and
 links to the details, most of which are in [Macros](macros.md).
 
 Design: the Claude Doc "Coil comptime: compile-time code with IO" (rev 11,

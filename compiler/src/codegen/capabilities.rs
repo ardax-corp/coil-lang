@@ -127,7 +127,7 @@ impl Compiler {
             &self.fn_entry_labels,
             &roots,
             &test_pcs,
-            &[self.static_init.ops(), self.ffi_init.ops()],
+            &[self.static_init.ops()],
             // A `const` is computed while compiling, under the build's
             // `--comptime-*` grants; its initializer does not run in the program.
             &|name| {
@@ -219,7 +219,7 @@ impl Compiler {
                 visit(*loc, chain);
             }
         }
-        for op in self.static_init.ops().iter().chain(self.ffi_init.ops()) {
+        for op in self.static_init.ops() {
             if let IlOp::HostInvoke { loc, .. } = op {
                 visit(*loc, Some(Vec::new()));
             }

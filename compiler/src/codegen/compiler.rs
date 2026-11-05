@@ -289,16 +289,11 @@ impl Compiler {
         if !std::mem::take(&mut self.hir_defers) {
             return false;
         }
-        let Some(native_id) = self.native_id("unwind_resume") else {
+        if self.native_id("unwind_resume").is_none() {
             return false;
-        };
+        }
         let pad = self.bytecode.fresh_label();
         self.bytecode.bind_label(pad);
-        self.bytecode
-            .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-        self.bytecode.push_host_invoke(0);
-        // Not reached (`unwind_resume` never returns to the pad).
-        self.bytecode.push_return();
         self.cleanup_pads.push(CleanupPad {
             func: table_key.to_string(),
             pad,
@@ -497,11 +492,6 @@ impl Compiler {
         self.strings.push(value.to_string());
         self.string_indices.insert(value.to_string(), idx);
         idx
-    }
-
-    fn push_string_literal(&mut self, bytecode: &mut impl EmitBuf, value: impl AsRef<str>) {
-        let idx = self.intern_string(value);
-        bytecode.push_string(idx);
     }
 
     fn const_env(&self) -> &HashMap<String, ConstValue> {
@@ -956,48 +946,6 @@ impl Compiler {
             .ty_at_span(node.0.start, node.0.end)
             .cloned()
             .or_else(|| self.node_id_of(node).and_then(|id| self.sidecar_ty(id)))
-    }
-
-    fn fn_param_is_sidecar_pin(&self, param: &str) -> bool {
-        let mut names: Vec<&str> = Vec::new();
-        if let Some(k) = self.current_function_table_key.as_deref() {
-            names.push(k);
-        }
-        if let Some(q) = self.current_function_qualified.as_deref() {
-            names.push(q);
-        }
-        names.iter().any(|fn_name| {
-            self.typed_sidecar.is_pin_param(fn_name, param)
-                || fn_name
-                    .split("$mono$")
-                    .next()
-                    .is_some_and(|stem| self.typed_sidecar.is_pin_param(stem, param))
-        })
-    }
-
-    fn emit_sidecar_array_pins(&mut self, args: &Output<'_>) {
-        let kids: Vec<&Output<'_>> = match args.1.as_ref() {
-            Expression::Fragment(xs) => xs.iter().collect(),
-            Expression::Argument { .. } => vec![args],
-            _ => return,
-        };
-        for a in kids {
-            let Expression::Argument { name, .. } = a.1.as_ref() else {
-                continue;
-            };
-            let id_pin = self
-                .node_id_of(a)
-                .is_some_and(|id| self.typed_sidecar.is_pin_array(id));
-            let fn_pin = self.fn_param_is_sidecar_pin(name);
-            if !id_pin && !fn_pin {
-                continue;
-            }
-            let Some(slot) = self.variable_slot(name) else {
-                continue;
-            };
-            self.bytecode.push_load(slot);
-            self.bytecode.push_array_pin(slot);
-        }
     }
 
     fn unboxed_enum_info(&self, name: &str) -> Option<(u32, u32)> {
@@ -2567,28 +2515,6 @@ impl Compiler {
                 .strip_prefix("string::")
                 .and_then(crate::typechecking::StringBuiltin::from_name)
         })
-    }
-
-    /// Unwrap a `Result` on top of the stack: on `Ok`, leave the payload;
-    /// on `Err(ffi::Error)`, panic with the error's `message` string.
-    /// Used by `extern` lowering so failed `dload`/`declare`/`invoke`
-    /// never reach unsafe FFI calls.
-    fn emit_result_unwrap_or_panic(&mut self) {
-        // Result::Ok = tag 0 (arity 1), Result::Err = tag 1 (arity 1).
-        let mut bb = BlockBuilder::new();
-        let success = bb.fresh_label(self.bytecode.il_mut());
-        bb.emit_jump_to(
-            success,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            self.bytecode.il_mut(),
-        );
-        // Miss: Err still on stack, unpack `ffi::Error`, then LoadField
-        // message (field index 1: kind=0, message=1) and Panic.
-        self.bytecode
-            .push(Byte::new(Instruction::Unpack).with_operand_u32(1));
-        self.bytecode.push_load_field(1);
-        self.bytecode.push(Byte::new(Instruction::Panic));
-        bb.bind_label(success, self.bytecode.il_mut());
     }
 
     /// True when a free `fn` body calls a method declared in a user `impl`
@@ -5122,13 +5048,6 @@ impl Compiler {
         self.pin_two_word_return_kind(fqn, kind);
     }
 
-    /// Two-slot `RETURN` (operand `2`): pops the callee frame's `[payload,
-    /// tag]` and re-pushes both for the caller. Old archives never set this
-    /// operand, so they stay one word.
-    fn push_return_two_word(&mut self) {
-        self.bytecode.push_return_two_word();
-    }
-
     /// Host natives pack one word at `HostInvoke` (boxed / niche bits).
     /// Their HM type may still be two-slot (`Result<int, E>`, `Result<bool, E>`),
     /// but they never leave `[payload, tag]` the way a user `CALL` does.
@@ -5200,25 +5119,6 @@ impl Compiler {
             Some("vec_remove")
         } else {
             None
-        }
-    }
-
-    /// Emit defers + unit fall-through return when a body does not end in a return.
-    ///
-    /// Non-unit missing returns are diagnosed by HM (E0111). This epilogue only
-    /// invents a unit/`0` sentinel (plus Result Ok-wrap in result-mode) so frames
-    /// unwind and defers run. No Option/`None` invent.
-    fn emit_fallthrough_return(&mut self, _name: &str, _span: SimpleSpan) {
-        self.bytecode.push_const(0);
-        if self.compiling_two_word_enum.is_some() {
-            // Fallback two-word default: payload 0, tag 0 (HM already diagnoses non-unit fall-through).
-            self.bytecode.push_const(0);
-            self.push_return_two_word();
-        } else if self.compiling_result_mode {
-            self.wrap_result_ok_on_stack();
-            self.bytecode.push_return();
-        } else {
-            self.bytecode.push_return();
         }
     }
 
@@ -5331,7 +5231,6 @@ impl Compiler {
 
         let mut a = self.do_compile(args);
         self.bytecode.append(&mut a);
-        self.emit_sidecar_array_pins(args);
         for dict_idx in 0..dict_arity {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
@@ -5367,7 +5266,7 @@ impl Compiler {
 
         let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
         if ends_on_label || !self.region_ends_with_return(body_op_start) {
-            self.emit_fallthrough_return(name, body.0);
+            self.bytecode.push_return();
         }
         let pinned = self.finish_fn_defers(&qualified);
 
@@ -5709,7 +5608,6 @@ impl Compiler {
             }
             let mut a = self.do_compile(args);
             self.bytecode.append(&mut a);
-            self.emit_sidecar_array_pins(args);
             let clone_entry_sp = self.context.variables.len() as u32;
             let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
@@ -5724,7 +5622,7 @@ impl Compiler {
 
             let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
-                self.emit_fallthrough_return(source_name, body.0);
+                self.bytecode.push_return();
             }
             let pinned = self.finish_fn_defers(&mono_name);
             // Its own IL function: a clone left as trailing glue of the source
@@ -6086,19 +5984,9 @@ impl Compiler {
         self.field_key_slots.clear();
         for key in keys {
             let slot = self.alloc_temp_slot();
-            let idx = self.intern_string(&key);
-            self.bytecode.push_string(idx);
-            self.bytecode.push_store_pop(slot);
+            self.intern_string(&key);
             self.field_key_slots.insert(key, slot);
         }
-    }
-
-    fn emit_raw_string_literal(&mut self, bytecode: &mut impl EmitBuf, value: &str) {
-        self.push_string_literal(bytecode, value);
-    }
-
-    fn variable_slot(&mut self, name: &str) -> Option<u32> {
-        self.lookup_slot(name)
     }
 
     fn is_string_expr(&self, node: &Output) -> bool {
@@ -6479,19 +6367,6 @@ impl Compiler {
     fn return_layout(&self) -> ValueLayout {
         self.compiling_fn_return_ty()
             .map_or(ValueLayout::Boxed, |ty| self.value_layout(&ty))
-    }
-
-    /// Wrap the top-of-stack value as `Ok(v)` (Result) or `Some(v)` (Option).
-    fn emit_ok_or_some_wrap(bytecode: &mut impl EmitBuf, is_option: bool) {
-        let tag = if is_option { 1u16 } else { 0u16 }; // Some=1, Ok=0
-        bytecode.push_make_enum(tag, 1);
-    }
-
-    fn wrap_result_ok_on_stack(&mut self) {
-        if self.return_layout().is_niche_result() || self.return_layout().is_niche_unit_result() {
-            return;
-        }
-        Self::emit_ok_or_some_wrap(&mut self.bytecode, false);
     }
 
     /// The packed `HostInvoke` kernel (native id, meta word) for a
@@ -6937,7 +6812,6 @@ impl Compiler {
             self.bytecode.append(&mut a);
 
             let body_start = self.bytecode.len();
-            self.emit_sidecar_array_pins(args);
             // Provisional span so self-recursive peels can see the opening
             // predicate while the body is still streaming into `self.bytecode`.
             self.record_fn_span(table_key.clone(), body_start, body_start);
@@ -6962,7 +6836,7 @@ impl Compiler {
             // return.
             let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
-                self.emit_fallthrough_return(name, body.0);
+                self.bytecode.push_return();
             }
             let pinned = self.finish_fn_defers(&table_key);
             self.debug_scope_exit(saved_debug_scope);
@@ -7403,9 +7277,8 @@ impl Compiler {
                 library,
                 declarations,
             } => {
-                // Emit into `ffi_init` so setup is spliced into the prologue
-                // at finalize, works for `extern` in imported modules too.
-                std::mem::swap(&mut self.bytecode, &mut self.ffi_init);
+                // Recorded as setup steps, so `__module_setup` runs them for
+                // `extern` in imported modules too.
                 // Extern lib/fn-id in static slots so function locals cannot overwrite handles.
                 let lib_slot =
                     if let Some(&existing) = self.extern_runtime_libs.get(library.as_str()) {
@@ -7421,13 +7294,6 @@ impl Compiler {
                 // dlopen once per library short name for the compile unit.
                 if !self.extern_runtime_libs_loaded.contains(library.as_str()) {
                     self.extern_runtime_libs_loaded.insert(library.clone());
-                    let mut bc = CodeBuf::new();
-                    self.emit_raw_string_literal(&mut bc, &unescape_coil_string(library));
-                    self.bytecode.append(&mut bc);
-                    self.bytecode.push(Byte::new(Instruction::FfiLoad));
-                    self.emit_result_unwrap_or_panic();
-                    self.bytecode
-                        .push(Byte::new(Instruction::StoreStatic).with_operand_u32(lib_slot));
                     let name = self.intern_string(unescape_coil_string(library));
                     self.setup_steps
                         .push(module_setup::SetupStep::Load { name, slot: lib_slot });
@@ -7459,14 +7325,9 @@ impl Compiler {
                     let fn_id_slot = self
                         .checker
                         .alloc_synthetic_static_slot(fn_id_fqn, crate::typechecking::ty::int());
-                    self.bytecode
-                        .push(Byte::new(Instruction::LoadStatic).with_operand_u32(lib_slot));
                     let sym = decl.symbol.unwrap_or(decl.name);
                     let sym_idx = self.intern_string(unescape_coil_string(sym));
                     let mut tag_words: Vec<u32> = Vec::new();
-                    let mut name_bc = CodeBuf::new();
-                    self.emit_raw_string_literal(&mut name_bc, &unescape_coil_string(sym));
-                    self.bytecode.append(&mut name_bc);
                     let mut arg_type_tags: Vec<u32> = Vec::new();
                     if let Expression::Fragment(items) = decl.args.1.as_ref() {
                         for arg in items {
@@ -7476,7 +7337,6 @@ impl Compiler {
                                 if let Some((tag, aux)) =
                                     ffi_type_tag_from_output(&self.checker, type_expr)
                                 {
-                                    emit_ffi_type_const(&mut self.bytecode, tag, aux);
                                     tag_words.push(encode_tag_operand(tag, aux));
                                     arg_type_tags.push(tag);
                                 } else {
@@ -7511,23 +7371,16 @@ impl Compiler {
                         }
                     }
                     let arity = arg_type_tags.len() as u32;
-                    self.bytecode.push_make_tuple(arity);
                     let (ret_tag, ret_aux) = decl
                         .returns
                         .as_ref()
                         .and_then(|r| ffi_type_tag_from_output(&self.checker, r))
                         .unwrap_or((tag::VOID, 0));
-                    emit_ffi_type_const(&mut self.bytecode, ret_tag, ret_aux);
                     // DeclareFFI: bit 16 = C varargs.
                     let mut operand = arity & 0xFFFF;
                     if decl.variadic {
                         operand |= 1 << 16;
                     }
-                    self.bytecode
-                        .push(Byte::new(Instruction::DeclareFFI).with_operand_u32(operand));
-                    self.emit_result_unwrap_or_panic();
-                    self.bytecode
-                        .push(Byte::new(Instruction::StoreStatic).with_operand_u32(fn_id_slot));
                     self.extern_symbols
                         .push((unescape_coil_string(library), unescape_coil_string(sym)));
                     self.setup_steps.push(module_setup::SetupStep::Declare {
@@ -7541,7 +7394,6 @@ impl Compiler {
                     self.extern_runtime_functions
                         .insert(table_name, (lib_slot, fn_id_slot));
                 }
-                std::mem::swap(&mut self.bytecode, &mut self.ffi_init);
             }
             Expression::EnumDecl {
                 docs: _,
@@ -7609,7 +7461,7 @@ impl Compiler {
                 let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
                 if ends_on_label || !self.region_ends_with_return(body_op_start) {
                     // Test cases are typed as unit / Result<(), string>, zero is safe.
-                    self.emit_fallthrough_return(&fn_name, body.0);
+                    self.bytecode.push_return();
                 }
                 let pinned = self.finish_fn_defers(&fn_name);
 
@@ -7719,8 +7571,6 @@ impl Compiler {
         // `use` aliases are per-module; leftovers from a prior
         // `compile_module` would otherwise redirect bare names.
         self.aliases.clear();
-        self.loop_stack.clear();
-        self.loop_bbs.clear();
         // Shared constant pool across `compile_module` calls. Clearing between
         // modules orphans JumpIfMatch/CONST indices (VM panic). Reset only on
         // a fresh prologue (CALL/JMP/HALT).
@@ -7987,7 +7837,7 @@ impl Compiler {
     }
 
     /// Emit the reserved `Show` thunks of the builtin error enums that this
-    /// module called (behind a jump, so control never falls into them):
+    /// module called:
     /// each is HIR ([`crate::hir::synth::builtin_enum_show`]) that unboxes
     /// its argument (dict ABI; enums box as `Instance`, an unboxed value
     /// passes through) and returns the variant's name.
@@ -8010,21 +7860,16 @@ impl Compiler {
         if due.is_empty() {
             return;
         }
-        let mut skip = BlockBuilder::new();
-        let after = skip.fresh_label(self.bytecode.il_mut());
-        skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         // `TtyError::Io(e)` shows its payload with `format("Io(%v)", e)`.
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
         for (fqn, enum_name, variants) in due {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
             self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
         }
-        skip.bind_label(after, self.bytecode.il_mut());
     }
 
     /// Emit the reserved structural thunks of ground tuples, records and
-    /// arrays (#1451, #1479) behind a jump, as
-    /// [`Self::emit_used_builtin_show_thunks`]: the raw entry takes the
+    /// arrays (#1451, #1479), as [`Self::emit_used_builtin_show_thunks`]: the raw entry takes the
     /// value's word and its `$dict` adapter the boxed one. `show` is
     /// `format("%v", v)` over its argument, an array's its elements'.
     fn emit_structural_thunks(&mut self) {
@@ -8041,9 +7886,6 @@ impl Compiler {
         }
         let string = crate::typechecking::ty::string();
         let int = crate::typechecking::ty::int();
-        let mut skip = BlockBuilder::new();
-        let after = skip.fresh_label(self.bytecode.il_mut());
-        skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
         // A glue body reserves its parts' glue as it is planned (#1629):
         // emitted in the next round.
@@ -8129,7 +7971,6 @@ impl Compiler {
             self.emit_structural_tuple_show(&fqn, arity);
         }
         self.hir_synth_callees.clear();
-        skip.bind_label(after, self.bytecode.il_mut());
     }
 
     /// Structural `Length` shape `ty` (`Vec<a>`, `(a, b)`, #1542) with its
@@ -8474,6 +8315,7 @@ impl Compiler {
             .messages
             .iter()
             .any(|m| *m.kind() == reporting::MessageKind::ERROR);
+        opts.vm_refusal_message = Some(self.intern_string("this function does not fit the VM's bytecode: run the program on native code"));
         self.bytecode.set_opt_options(opts);
         let entry_sps: HashMap<String, u32> = self
             .bytecode
@@ -8654,9 +8496,12 @@ impl Compiler {
             .map(|(n, pc)| (n.clone(), *pc as u32))
             .collect();
         self.deopt_map_drafts = lowered.deopt_map_drafts.clone();
-        apply_debug_slot_remaps(&mut self.fn_debug_locals, &lowered.debug_slot_remaps);
+        // A debugger reads a local by the slot MIR's `local_binds` name, not
+        // by the register bytecode gave it.
+        let remaps = if self.debugger_attached { Default::default() } else { lowered.debug_slot_remaps.clone() };
+        apply_debug_slot_remaps(&mut self.fn_debug_locals, &remaps);
         for (fn_name, vars) in self.fn_debug_vars.iter_mut() {
-            if let Some(remap) = lowered.debug_slot_remaps.get(fn_name) {
+            if let Some(remap) = remaps.get(fn_name) {
                 for v in vars.iter_mut() {
                     // A body emitted from MIR assigns its own registers: a
                     // local the remap leaves out holds no value there, and
@@ -8754,7 +8599,7 @@ impl Compiler {
             .map(|s| s.entry_pc)
             .chain(std::iter::once(bytecode.len() as u32))
             .collect();
-        for sym in &mut syms {
+        for sym in syms.iter_mut().filter(|_| !self.debugger_attached) {
             let end = ends
                 .iter()
                 .copied()

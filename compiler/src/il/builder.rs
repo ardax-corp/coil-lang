@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::{Byte, DebugLoc};
 
-use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
+#[cfg(test)]
+use super::op::{FuseHint, IlJumpKind};
+use super::op::{EntryKind, IlOp, Label};
 
 /// Error from IL finalize / lower.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,33 +180,6 @@ impl IlBuilder {
         self.ops.insert(raw_idx, IlOp::Label(label));
     }
 
-    pub fn emit_jump(&mut self, kind: IlJumpKind, target: Label) {
-        self.emit_jump_at(kind, target, DebugLoc::unknown());
-    }
-
-    pub fn emit_jump_at(&mut self, kind: IlJumpKind, target: Label, loc: DebugLoc) {
-        self.emit_jump_hinted(kind, target, loc, FuseHint::default());
-    }
-
-    pub fn emit_jump_hinted(
-        &mut self,
-        kind: IlJumpKind,
-        target: Label,
-        loc: DebugLoc,
-        hint: FuseHint,
-    ) {
-        self.targeted.insert(target.0);
-        self.ops.push(IlOp::jump_hinted(kind, target, loc, hint));
-    }
-
-    pub fn emit_entry(&mut self, kind: EntryKind, arity: u32, target: Label) {
-        self.emit_entry_at(kind, arity, target, DebugLoc::unknown());
-    }
-
-    pub fn emit_entry_at(&mut self, kind: EntryKind, arity: u32, target: Label, loc: DebugLoc) {
-        self.emit_entry_ret_at(kind, arity, target, loc, 1);
-    }
-
     /// `EntryKind::Call` with an explicit return width (`1` or `2` words).
     /// Every other kind should keep `ret_words = 1`.
     pub fn emit_entry_ret_at(
@@ -234,13 +209,6 @@ impl IlBuilder {
         self.ops.push(op);
     }
 
-    pub fn push_const(&mut self, imm: i32) {
-        self.push_op(IlOp::Const {
-            imm,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
     pub fn push_return(&mut self) {
         self.push_op(IlOp::Return {
             loc: DebugLoc::unknown(),
@@ -248,90 +216,8 @@ impl IlBuilder {
         });
     }
 
-    /// Two-slot `RETURN`: pops/pushes `[payload, tag]` instead of one word.
-    pub fn push_return_two_word(&mut self) {
-        self.push_op(IlOp::Return {
-            loc: DebugLoc::unknown(),
-            ret_words: 2,
-        });
-    }
-
-    pub fn push_load(&mut self, slot: u32) {
-        self.push_op(IlOp::Load {
-            slot,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_store_pop(&mut self, slot: u32) {
-        self.push_op(IlOp::StorePop {
-            slot,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
     pub fn push_pop(&mut self) {
         self.push_op(IlOp::Pop {
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_array_pin(&mut self, slot: u32) {
-        self.push_op(IlOp::ArrayPin {
-            slot,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_make_tuple(&mut self, arity: u32) {
-        self.push_make_tuple_kinds(arity, 0);
-    }
-
-    /// `MakeTuple` with element word kinds (`common::pack_word_kinds`).
-    pub fn push_make_tuple_kinds(&mut self, arity: u32, kinds: u8) {
-        self.push_op(IlOp::MakeTuple {
-            kinds,
-            arity,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_make_enum(&mut self, tag: u16, arity: u16) {
-        self.push_make_enum_kinds(tag, arity, 0);
-    }
-
-    /// `MakeEnum` with payload word kinds (`common::pack_word_kinds`).
-    pub fn push_make_enum_kinds(&mut self, tag: u16, arity: u16, kinds: u8) {
-        self.push_op(IlOp::MakeEnum {
-            kinds,
-            tag,
-            arity,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_load_field(&mut self, index: u32) {
-        self.push_op(IlOp::LoadField {
-            index,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_host_invoke(&mut self, arity: u32) {
-        self.push_host_invoke_layout(arity, common::HOST_ENUM_LAYOUT_BOXED);
-    }
-
-    pub fn push_host_invoke_layout(&mut self, arity: u32, layout: u32) {
-        self.push_op(IlOp::HostInvoke {
-            arity,
-            layout: layout as u8,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_string(&mut self, idx: u32) {
-        self.push_op(IlOp::String {
-            idx,
             loc: DebugLoc::unknown(),
         });
     }
@@ -454,6 +340,59 @@ impl IlBuilder {
         }
         self.ops.splice(raw_idx..raw_idx, chunk);
     }
+}
+
+// Test fixtures build their IL with these.
+#[cfg(test)]
+impl IlBuilder {
+    pub fn emit_entry_at(&mut self, kind: EntryKind, arity: u32, target: Label, loc: DebugLoc) {
+        self.emit_entry_ret_at(kind, arity, target, loc, 1);
+    }
+
+    pub fn push_store_pop(&mut self, slot: u32) {
+        self.push_op(IlOp::StorePop {
+            slot,
+            loc: DebugLoc::unknown(),
+        });
+    }
+
+    pub fn emit_jump_at(&mut self, kind: IlJumpKind, target: Label, loc: DebugLoc) {
+        self.emit_jump_hinted(kind, target, loc, FuseHint::default());
+    }
+
+    pub fn push_load(&mut self, slot: u32) {
+        self.push_op(IlOp::Load {
+            slot,
+            loc: DebugLoc::unknown(),
+        });
+    }
+
+    pub fn emit_entry(&mut self, kind: EntryKind, arity: u32, target: Label) {
+        self.emit_entry_at(kind, arity, target, DebugLoc::unknown());
+    }
+
+    pub fn push_const(&mut self, imm: i32) {
+        self.push_op(IlOp::Const {
+            imm,
+            loc: DebugLoc::unknown(),
+        });
+    }
+
+    pub fn emit_jump_hinted(
+        &mut self,
+        kind: IlJumpKind,
+        target: Label,
+        loc: DebugLoc,
+        hint: FuseHint,
+    ) {
+        self.targeted.insert(target.0);
+        self.ops.push(IlOp::jump_hinted(kind, target, loc, hint));
+    }
+
+    pub fn emit_jump(&mut self, kind: IlJumpKind, target: Label) {
+        self.emit_jump_at(kind, target, DebugLoc::unknown());
+    }
+
 }
 
 #[cfg(test)]

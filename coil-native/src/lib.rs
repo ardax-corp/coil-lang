@@ -11,7 +11,8 @@
 //! [`jit`] compiles in memory for `coil --jit`. An object-file driver for
 //! `coil package` reuses the same lowering later.
 //!
-//! Empty on wasm: the playground has no native code and runs the VM.
+//! Empty on wasm: the playground has no native code and runs the MIR
+//! interpreter.
 #![cfg(not(target_family = "wasm"))]
 
 pub mod section;
@@ -20,7 +21,8 @@ use std::collections::{HashMap, HashSet};
 
 use compiler::native_mir::{
     BlockId, Label, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
-    NativeBody, Terminator, ValueId,
+    NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pair_words, pointer_words, scalar,
+    ty_of, root_handles, used_params, word_kind,
 };
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{AbiParam, Block, FuncRef, InstBuilder, MemFlagsData, Signature, Type, types};
@@ -70,6 +72,24 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
             }
         }
     }
+}
+
+/// JIT an archive's native MIR section for the coming run, for a host with
+/// no VM to run what does not compile: every body must.
+pub fn install_section(bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Err("the program carries no native MIR; build it again with `coil package`".to_string());
+    }
+    let (bodies, pcs) = section::decode(bytes)?;
+    let program = jit(&bodies, &pcs)?;
+    if let Some((name, why)) = program.refused.first() {
+        return Err(format!("`{name}` cannot compile to native code: {why}"));
+    }
+    if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+        eprintln!("{}", describe(&program));
+    }
+    machine::native::install_for_next_run(program.entries, program.sites, true);
+    Ok(())
 }
 
 /// The [`machine::native::InlineShape`] of an `Alloc` of `kind` with `n`
@@ -307,6 +327,12 @@ fn jit_once(
     for &(name, ptr) in machine::native::helper_symbols() {
         jb.symbol(name, ptr);
     }
+    // One reservation: code reaches its read-only data by 32-bit offsets, and
+    // the default provider maps each section where the system puts it, which
+    // beside a process's big fiber stacks may be out of reach.
+    if let Ok(arena) = cranelift_jit::ArenaMemoryProvider::new_with_size(jit_reserve(bodies, &plan)) {
+        jb.memory_provider(Box::new(arena));
+    }
     let mut module = JITModule::new(jb);
 
     let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
@@ -333,11 +359,19 @@ fn jit_once(
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
         let generator = is_generator(&body.mir);
         let cleanup = body.mir.cleanup.is_some();
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, cleanup, entry });
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 });
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
     Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites }))
+}
+
+/// Address space to reserve for the code and data of `plan`'s bodies: far
+/// more than they take (it is committed as used), within a 32-bit offset.
+fn jit_reserve(bodies: &[NativeBody], plan: &Plan) -> usize {
+    const BYTES_PER_OP: usize = 4096;
+    let ops: usize = plan.compile.iter().map(|&i| bodies[i].mir.blocks.iter().map(|b| b.insts.len() + 1).sum::<usize>()).sum();
+    (ops.saturating_mul(BYTES_PER_OP)).clamp(64 << 20, 1 << 30)
 }
 
 // ---------------------------------------------------------------------------
@@ -622,32 +656,6 @@ fn compile_used_params<'a>(bodies: &[NativeBody], which: impl Iterator<Item = &'
     which.map(|&i| (i, used_params(&bodies[i].mir))).collect()
 }
 
-/// One past the last parameter `f` reads. A `CALL` passes the words its
-/// arity says, which a body's MIR parameters may outnumber (an unread
-/// trait-method parameter) or fall short of: native code passes zero for
-/// the unread ones and drops the extra words, as the VM's frame ignores
-/// them.
-fn used_params(f: &MirFunc) -> usize {
-    let mut used: HashSet<ValueId> = HashSet::new();
-    for b in &f.blocks {
-        for inst in &b.insts {
-            used.extend(inst.operands());
-        }
-        match &b.term {
-            Some(Terminator::Br { cond, .. }) => {
-                used.insert(*cond);
-            }
-            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
-                used.insert(*scrutinee);
-                used.extend(payloads.iter().copied());
-            }
-            Some(Terminator::Return { lo, hi }) => used.extend(lo.iter().chain(hi.iter()).copied()),
-            _ => {}
-        }
-    }
-    f.params.iter().rposition(|p| used.contains(p)).map_or(0, |i| i + 1)
-}
-
 /// Whether any instruction or terminator of `f` reads `v`.
 fn value_used(f: &MirFunc, v: ValueId) -> bool {
     f.blocks.iter().any(|b| {
@@ -659,237 +667,6 @@ fn value_used(f: &MirFunc, v: ValueId) -> bool {
                 _ => false,
             }
     })
-}
-
-/// A generator's body: it yields.
-fn is_generator(f: &MirFunc) -> bool {
-    f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MirInst::Yield { .. }))
-}
-
-/// An instruction whose helper may allocate.
-fn allocates(inst: &MirInst) -> bool {
-    matches!(
-        inst,
-        MirInst::Alloc { .. }
-            | MirInst::ArrayPush { .. }
-            | MirInst::String { .. }
-            | MirInst::Format { .. }
-            | MirInst::Stringify { .. }
-            | MirInst::Cow { .. }
-            | MirInst::HostInvoke { .. }
-            | MirInst::CallIndirect { .. }
-            | MirInst::ResumeCoro { .. }
-            | MirInst::FreeEarly { .. }
-            | MirInst::Yield { .. }
-            | MirInst::Ffi { .. }
-    )
-}
-
-/// A value native code holds: a scalar, or a heap word it passes along and
-/// reads through (heap tier).
-fn numeric(t: MirTy) -> bool {
-    scalar(t) || heap_word(t)
-}
-
-/// A value native arithmetic works on.
-fn scalar(t: MirTy) -> bool {
-    matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool)
-}
-
-/// A heap object word (a pointer, or a niche `Option` / `Result` word).
-/// The `gc::root` handles `f` makes (the results of its `gc_root` host
-/// calls).
-fn root_handles(f: &MirFunc) -> Vec<ValueId> {
-    f.blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match i {
-            MirInst::HostInvoke { dest, native_id, .. } if *native_id == common::GC_ROOT_ID => Some(*dest),
-            _ => None,
-        })
-        .collect()
-}
-
-fn heap_word(t: MirTy) -> bool {
-    matches!(t, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes)
-}
-
-/// The `int` words of an [`MirFunc::opaque_words`] body that may hold an
-/// object (a type variable's word): all but those an arithmetic, compare,
-/// constant or code pointer defines.
-fn opaque_words(f: &MirFunc) -> Vec<ValueId> {
-    if !f.opaque_words {
-        return Vec::new();
-    }
-    let scalar: HashSet<ValueId> = f
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match i {
-            MirInst::Const { dest, .. }
-            | MirInst::CodePtr { dest, .. }
-            | MirInst::Bin { dest, .. }
-            | MirInst::Cmp { dest, .. }
-            | MirInst::Unary { dest, .. }
-            | MirInst::ArrayLen { dest, .. } => Some(*dest),
-            _ => None,
-        })
-        .collect();
-    (0..f.types.len() as u32)
-        .map(ValueId)
-        .filter(|v| ty_of(f, *v) == MirTy::I64 && !scalar.contains(v))
-        .collect()
-}
-
-fn ty_of(f: &MirFunc, v: ValueId) -> MirTy {
-    f.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
-}
-
-/// A word's kind for an object's packed word kinds, as the VM's emission
-/// records them.
-fn word_kind(t: MirTy) -> u8 {
-    match t {
-        MirTy::I64 | MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
-        MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => common::WORD_POINTER,
-        MirTy::Value | MirTy::Bottom => common::WORD_UNKNOWN,
-    }
-}
-
-/// Each `GcBarrier`'s object: the dest of the allocating instruction right
-/// before it in its block, as the VM's emission pairs them. Native code
-/// never collects during a call, so the barrier only names that word.
-/// The words of a non-heap type that hold an object for sure: a heap
-/// word moved into an `int` value (an enum payload's word,
-/// `Holder::One(n)`), and the φs merging only such words.
-fn pointer_words(f: &MirFunc) -> HashSet<ValueId> {
-    let mut out = HashSet::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            let (dest, ok) = match inst {
-                MirInst::Cast { dest, kind: MirCastKind::Word, src, .. } => (*dest, heap_word(ty_of(f, *src)) || out.contains(src)),
-                MirInst::Phi { dest, args, .. } => (*dest, !args.is_empty() && args.iter().all(|(_, a)| heap_word(ty_of(f, *a)) || out.contains(a))),
-                _ => continue,
-            };
-            if ok && !heap_word(ty_of(f, dest)) && ty_of(f, dest) == MirTy::I64 && out.insert(dest) {
-                changed = true;
-            }
-        }
-    }
-    out
-}
-
-/// `held[block][inst]`: the heap words locals hold just before that inst
-/// (one past the last: at the terminator), by block position. As in the
-/// VM's frame, a local holds the word it was bound to
-/// ([`MirFunc::local_binds`]) from the word's definition until another of
-/// the same local's is defined or a `ClearWord` drops it, even past its
-/// last use; a match binding holds its word only through its scrutinee.
-/// Where paths that
-/// left a local different words meet with no φ to merge them (the φ was
-/// dead), it holds neither: what is live stays rooted anyway.
-fn held_words(f: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
-    let mut locals: HashMap<ValueId, Vec<u32>> = HashMap::new();
-    for &(l, v) in &f.local_binds {
-        locals.entry(v).or_default().push(l.0);
-    }
-    let mut held: Vec<Vec<HashSet<ValueId>>> = f.blocks.iter().map(|b| vec![HashSet::new(); b.insts.len() + 1]).collect();
-    if locals.is_empty() {
-        return held;
-    }
-    let pos: HashMap<BlockId, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
-    for (i, b) in f.blocks.iter().enumerate() {
-        for s in b.term.as_ref().map(|t| t.succs()).unwrap_or_default() {
-            if let Some(&j) = pos.get(&s) {
-                preds[j].push(i);
-            }
-        }
-    }
-    // Local -> the word it holds; `None`: not reached yet.
-    type State = HashMap<u32, ValueId>;
-    let bind = |st: &mut State, v: ValueId| {
-        for &l in locals.get(&v).into_iter().flatten() {
-            st.insert(l, v);
-        }
-    };
-    // A match binding's word is its scrutinee's payload: the scrutinee
-    // holds it, and once that is rebound, the binding holds nothing.
-    let payloads: HashSet<ValueId> = f
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match i {
-            MirInst::MatchPayload { dest, .. } | MirInst::Cast { dest, .. } => Some(*dest),
-            _ => None,
-        })
-        .collect();
-    let words = |st: &State| -> HashSet<ValueId> { st.values().copied().filter(|&v| heap_word(ty_of(f, v)) && !payloads.contains(&v)).collect() };
-    let entry = pos.get(&f.entry).copied();
-    let mut out: Vec<Option<State>> = vec![None; f.blocks.len()];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (bi, b) in f.blocks.iter().enumerate() {
-            let mut reached = preds[bi].iter().filter_map(|&p| out[p].as_ref());
-            let mut st: State = match reached.next() {
-                Some(first) => {
-                    let mut st = first.clone();
-                    for o in reached {
-                        st.retain(|l, v| o.get(l) == Some(v));
-                    }
-                    st
-                }
-                None if Some(bi) == entry => State::new(),
-                None => continue,
-            };
-            if Some(bi) == entry {
-                for &p in &f.params {
-                    bind(&mut st, p);
-                }
-            }
-            for (ii, inst) in b.insts.iter().enumerate() {
-                held[bi][ii] = words(&st);
-                // A local rebound to a word that holds no object.
-                if let MirInst::ClearWord { value, .. } = inst {
-                    st.retain(|_, v| v != value);
-                }
-                for d in inst.dests() {
-                    bind(&mut st, d);
-                }
-            }
-            held[bi][b.insts.len()] = words(&st);
-            if out[bi].as_ref() != Some(&st) {
-                out[bi] = Some(st);
-                changed = true;
-            }
-        }
-    }
-    held
-}
-
-fn barrier_pairs(f: &MirFunc) -> HashMap<ValueId, ValueId> {
-    let mut out = HashMap::new();
-    for b in &f.blocks {
-        let mut pending = None;
-        for inst in &b.insts {
-            match inst {
-                MirInst::Alloc { dest, .. }
-                | MirInst::ArrayPush { dest, .. }
-                | MirInst::Format { dest, .. }
-                | MirInst::Stringify { dest, .. }
-                | MirInst::Cow { dest, .. } => pending = Some(*dest),
-                MirInst::GcBarrier { dest, .. } => {
-                    if let Some(obj) = pending.take() {
-                        out.entry(*dest).or_insert(obj);
-                    }
-                }
-                _ => pending = None,
-            }
-        }
-    }
-    out
 }
 
 /// The callees of `f` when its body is in the numeric tier.
@@ -907,9 +684,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
     }
     if let Some(t) = f.homes.iter().find(|t| !numeric(**t)) {
         return Err(format!("defer home of {t:?}"));
-    }
-    if f.params.len() > 16 {
-        return Err("more than 16 parameters".into());
     }
     for &p in &f.params {
         if !numeric(ty_of(f, p)) {
@@ -975,6 +749,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(dest)?;
                         need(value)?;
                     }
+                    MirInst::Probe { dest, .. } => need(dest)?,
                     // `!w` is `w == 0`, exact on any word (`None` is 0).
                     MirInst::Unary { dest, op: MirUnaryOp::Not, src } if ty_of(f, *src) != MirTy::F64 => {
                         need_scalar(dest)?;
@@ -1024,16 +799,14 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         }
                         match kind {
                             MirAllocKind::Array | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
-                            MirAllocKind::DropEnum { .. } if elems.len() < 16 => {}
+                            MirAllocKind::DropEnum { .. } => {}
                             MirAllocKind::Object { .. } if elems.is_empty() => {}
                             // A function value: its body must have an entry
                             // PC, so it counts as a callee.
                             MirAllocKind::Fn { target, .. }
                             | MirAllocKind::PolyFn { target }
                             | MirAllocKind::PolyFnCapture { target, .. }
-                            | MirAllocKind::Coro { target }
-                                if elems.len() < 16 =>
-                            {
+                            | MirAllocKind::Coro { target } => {
                                 let Some(&callee) = by_label.get(target) else {
                                     return Err("function value of an unknown body".into());
                                 };
@@ -1126,9 +899,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(callee)?;
                         for a in args {
                             need(a)?;
-                        }
-                        if args.len() > 16 {
-                            return Err("indirect call of more than 16 words".into());
                         }
                     }
                     MirInst::ResumeCoro { dest, handle, send } => {
@@ -1286,6 +1056,7 @@ struct Ids {
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
     array_push: FuncId,
+    probe: FuncId,
     /// Boxed enum matches.
     enum_tag: FuncId,
     enum_payload: FuncId,
@@ -1427,6 +1198,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
+    let probe = module.declare_function("coil_native_probe", Linkage::Import, &s2).map_err(e)?;
     let free_early = trampoline(module, "coil_native_free_early", &s3, &mut tramps)?;
     let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
     let stringify = module.declare_function("coil_native_stringify", Linkage::Import, &s3).map_err(e)?;
@@ -1477,6 +1249,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
         cow_field,
         alloc,
         array_push,
+        probe,
         enum_tag,
         enum_payload,
         string,
@@ -1565,6 +1338,7 @@ struct Lower<'a> {
     cow_field: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
+    probe: FuncRef,
     enum_tag: FuncRef,
     enum_payload: FuncRef,
     string: FuncRef,
@@ -1610,9 +1384,14 @@ struct Lower<'a> {
     root_handles: Vec<ValueId>,
     /// Where [`Self::keep_roots`] stores them (made on first use).
     keep_slot: Option<cranelift_codegen::ir::StackSlot>,
-    /// Low words of pairs calls return that may carry an object
-    /// ([`MirFunc::heap_pair_calls`]): rooted ambiguously.
+    /// Words of pairs that may carry an object ([`pair_words`]): rooted
+    /// ambiguously.
     pair_words: Vec<ValueId>,
+    /// The heap words the op being lowered hands the runtime. The runtime
+    /// holds its own copy of them, and a word past its last use is in no
+    /// stack map: rooted ambiguously, so the object stays where it is. A
+    /// direct call hands its words to a frame that roots them.
+    op_words: Vec<ValueId>,
     defer: FuncRef,
     claim: FuncRef,
     /// This body's cleanup pad.
@@ -1681,6 +1460,7 @@ impl<'a> Lower<'a> {
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
+        let probe = module.declare_func_in_func(ids.probe, func);
         let enum_tag = module.declare_func_in_func(ids.enum_tag, func);
         let enum_payload = module.declare_func_in_func(ids.enum_payload, func);
         let string = module.declare_func_in_func(ids.string, func);
@@ -1735,6 +1515,7 @@ impl<'a> Lower<'a> {
             cow_field,
             alloc,
             array_push,
+            probe,
             enum_tag,
             enum_payload,
             string,
@@ -1765,6 +1546,7 @@ impl<'a> Lower<'a> {
             root_handles: Vec::new(),
             keep_slot: None,
             pair_words: Vec::new(),
+            op_words: Vec::new(),
             calls_slot: None,
             defer,
             claim,
@@ -1843,6 +1625,7 @@ impl<'a> Lower<'a> {
             .opaque
             .iter()
             .chain(&self.pair_words)
+            .chain(&self.op_words)
             .copied()
             .filter(|v| self.live.as_ref().is_none_or(|l| l.contains(v)))
             .collect();
@@ -2337,8 +2120,7 @@ impl<'a> Lower<'a> {
         self.opaque = opaque_words(f);
         self.ptr_words = pointer_words(f);
         self.root_handles = root_handles(f);
-        self.pair_words = f.heap_pair_calls.iter().copied().filter(|&v| !heap_word(ty_of(f, v)) && !self.ptr_words.contains(&v)).collect();
-        self.pair_words.sort_unstable_by_key(|v| v.0);
+        self.pair_words = pair_words(f, &self.ptr_words);
         for blk in &f.blocks {
             for inst in &blk.insts {
                 let array = match inst {
@@ -2475,7 +2257,15 @@ impl<'a> Lower<'a> {
                 live.extend(held[bi][ii].iter().copied());
                 self.live = Some(live);
                 self.at(Some(f.op_loc(inst.dest())));
+                self.op_words.clear();
+                if !matches!(inst, MirInst::Call { .. }) {
+                    let held = inst.operands().into_iter().filter(|v| heap_word(ty_of(f, *v)) || self.ptr_words.contains(v));
+                    self.op_words.extend(held);
+                    self.op_words.sort_unstable_by_key(|v| v.0);
+                    self.op_words.dedup();
+                }
                 self.inst(f, inst)?;
+                self.op_words.clear();
             }
             self.live = None;
             self.at(None);
@@ -2606,11 +2396,18 @@ impl<'a> Lower<'a> {
                     self.set(f, *dest, zero);
                 }
             }
-            MirInst::KeepAlive { dest, .. } => {
+            MirInst::KeepAlive { dest, value } => {
+                self.keep_word(f, *value);
                 if numeric(ty_of(f, *dest)) {
                     let zero = self.b.ins().iconst(types::I64, 0);
                     self.set(f, *dest, zero);
                 }
+            }
+            MirInst::Probe { dest, id } => {
+                let id = self.b.ins().iconst(types::I64, i64::from(*id));
+                self.b.ins().call(self.probe, &[self.ctx, id]);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
             }
             MirInst::Call { dest, dest_hi, target, args } => {
                 // A `drop` called as a method: claim its finalizer first, as
@@ -3315,17 +3112,20 @@ impl<'a> Lower<'a> {
     /// each one (and what it roots) alive until the body returns, as an
     /// unused `let r = root(h)` asks.
     fn keep_roots(&mut self, f: &MirFunc) {
-        if self.root_handles.is_empty() {
-            return;
+        for v in self.root_handles.clone() {
+            self.keep_word(f, v);
         }
+    }
+
+    /// A use of `v` that does nothing else: its word stays live to here,
+    /// so the stack maps hold it.
+    fn keep_word(&mut self, f: &MirFunc, v: ValueId) {
         let slot = *self.keep_slot.get_or_insert_with(|| {
             self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 8, 3))
         });
-        for v in self.root_handles.clone() {
-            let x = self.get(f, v);
-            let x = self.coerce(x, types::I64);
-            self.b.ins().stack_store(types::I64, x, slot, 0);
-        }
+        let x = self.get(f, v);
+        let x = self.coerce(x, types::I64);
+        self.b.ins().stack_store(types::I64, x, slot, 0);
     }
 
     fn words_slot(&mut self, f: &MirFunc, vs: &[ValueId]) -> cranelift_codegen::ir::Value {

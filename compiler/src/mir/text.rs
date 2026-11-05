@@ -267,6 +267,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::HomeStore { dest, home, value } => write!(f, "{dest} = homestore {home}, {value}"),
         MirInst::ClearWord { dest, value } => write!(f, "{dest} = clearword {value}"),
         MirInst::KeepAlive { dest, value } => write!(f, "{dest} = keepalive {value}"),
+        MirInst::Probe { dest, id } => write!(f, "{dest} = probe {id}"),
         MirInst::PanicStore { dest, object, value, index } => write!(f, "{dest} = panicstore {object}, {value}, {index}"),
         MirInst::ArrayPush {
             dest,
@@ -648,6 +649,11 @@ impl<'a> Parser<'a> {
             let handle = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::DoneCoro { dest, handle });
+        }
+        if op == "probe" {
+            let id = self.uint()? as u32;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::Probe { dest, id });
         }
         if op == "loadstatic" {
             let slot = self.uint()? as u32;

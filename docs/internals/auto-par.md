@@ -137,6 +137,7 @@ site's path guards, codegen emits **one** parameterized worker
    (help-steals), apply the site's combine. Shared join publishes raw `Value` bits
    (no graph copy).
 5. On `Err` (spawn or non-sendable join): sequential fallback of all arms + combine.
+   Compile-time code takes this path: its `thread_spawn_shared` always fails.
 
 The worker is a HIR body the compiler builds itself
 ([`hir::synth`](../../compiler/src/hir/synth.rs),

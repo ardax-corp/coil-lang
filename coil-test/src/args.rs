@@ -116,10 +116,11 @@ struct TestCli {
     /// (the files are parsed, not compiled)
     #[arg(long)]
     doc_tests_only: bool,
-    /// What runs the compiled code: vm, or native (Cranelift where the
-    /// backend compiles a body, the VM elsewhere)
-    #[arg(long, value_name = "vm|native", value_parser = Engine::parse, default_value = "vm")]
-    engine: Engine,
+    /// What runs the compiled code: native (Cranelift where the backend
+    /// compiles a body, the VM elsewhere; the default), vm, or mir (the
+    /// interpreter)
+    #[arg(long, value_name = "vm|native|mir", value_parser = Engine::parse)]
+    engine: Option<Engine>,
     /// Test root (default: ./tests)
     #[arg(value_name = "PATH")]
     path: Option<String>,
@@ -251,7 +252,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
             DocTests::On
         },
         wall_timeout: cli.wall_timeout,
-        engine: cli.engine,
+        engine: cli.engine.unwrap_or_else(Engine::host_default),
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -352,9 +353,6 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
     if coverage && parts.debug.is_some_and(|l| l != compiler::DebugLevel::Full) {
         return Err("coverage needs byte spans: drop -g0 / -g1 (or pass -g2)".into());
     }
-    if coverage && parts.engine == Engine::Native {
-        return Err("--coverage counts lines the VM runs: use --engine vm".into());
-    }
     let order = resolve_order(parts.seed, parts.no_shuffle, fresh_seed)?;
     Ok((
         config,
@@ -375,7 +373,8 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
                 per_test_out: parts.per_test_out,
                 project_root: std::env::current_dir().unwrap_or_default(),
             }),
-            opt_level: parts.opt.level(),
+            // The interpreter is the raw reference unless `-O` says otherwise.
+            opt_level: if parts.engine == Engine::Mir && parts.opt.opt_level.is_none() { compiler::OptLevel::None } else { parts.opt.level() },
             debug_level: parts.debug,
             contracts: parts.opt.contracts,
             fold_calls: parts.opt.fold_calls,

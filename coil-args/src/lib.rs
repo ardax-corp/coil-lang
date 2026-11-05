@@ -83,6 +83,9 @@ pub struct NurseryFlag {
     /// Run on the VM alone, even when the archive carries native MIR
     #[arg(long, conflicts_with = "jit")]
     pub no_jit: bool,
+    /// Run on the MIR interpreter instead of the VM
+    #[arg(long, conflicts_with_all = ["jit", "no_jit"])]
+    pub mir: bool,
 }
 
 fn parse_nursery(s: &str) -> Result<bool, String> {
