@@ -144,6 +144,7 @@ impl Runtime {
             *self.heap.owned_mut() = emptied;
         } else if self.heap.owned_mut().slab_chunk_count() == 1 {
             self.heap.owned_mut().collect(&[]);
+            self.heap.owned_mut().clear_young();
             self.program_string_cache.fill(Value::default());
         }
     }

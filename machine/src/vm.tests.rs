@@ -3293,6 +3293,23 @@
         assert!(vm.heap_mut().unmarked_finalizable().is_empty());
     }
 
+    /// The same for an object an earlier minor pinned, which only a major
+    /// collection frees.
+    #[test]
+    fn reset_isolate_heap_leaves_no_held_object_of_the_last_job() {
+        let mut vm = Machine::<8>::default();
+        vm.heap_mut().set_nursery(true);
+        let payload = crate::memory::EnumPayload::one(Value::from(7u64));
+        let (held, mut gc) = vm.heap_mut().alloc(crate::memory::ObjEnum::new(0, payload), Object::Enum);
+        gc.as_mut().type_id = 1;
+        let plan = vm.heap_mut().minor_plan(&[held.addr()], &[]);
+        vm.heap_mut().minor_finish(plan);
+        assert_ne!(held.generation() & crate::memory::GEN_HELD, 0, "needs a held object");
+        assert_eq!(vm.heap().slab_chunk_count(), 1, "needs a heap that is kept");
+        vm.reset_isolate_heap();
+        assert_eq!(vm.heap().objects().count(), 0, "the object went with its job");
+    }
+
     /// Harness soft-pass checks `Result::Ok` via tag 0.
     #[test]
     fn result_is_ok_true_for_tag_zero_enum() {
