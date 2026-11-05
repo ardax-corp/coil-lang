@@ -81,7 +81,6 @@ pub(crate) trait GcHost {
     /// A safepoint wanted a collection while the heap is borrowed.
     fn borrowed_heap_wants_collect(&mut self) {}
     /// The heap is over its byte cap after a safepoint.
-    fn over_cap(&mut self) {}
     /// A cycle starts: a major one, or a minor one that runs.
     fn note_cycle(&self, _minor: bool) {}
 }
@@ -589,8 +588,24 @@ pub(crate) fn safepoint<H: GcHost + ?Sized>(h: &mut H) {
         crate::memory::GcPhase::Sweeping => sweep_slice(h),
     }
     if h.rt().heap.get().over_byte_cap() {
-        h.over_cap();
+        over_cap(h);
     }
+}
+
+/// At a safepoint with the heap over its cap: collect fully, and if it
+/// still is, stop at the next step charge (the one place a run looks, so
+/// the hot path pays nothing).
+#[cold]
+#[inline(never)]
+fn over_cap<H: GcHost + ?Sized>(h: &mut H) {
+    if !h.rt().heap_cap_hit {
+        collect(h);
+        if !h.rt().heap.get().over_byte_cap() {
+            return;
+        }
+        h.rt_mut().heap_cap_hit = true;
+    }
+    h.rt_mut().fuel = 1;
 }
 
 /// Open a cycle: mark to completion now, leave the sweep to later

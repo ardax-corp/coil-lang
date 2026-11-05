@@ -277,6 +277,7 @@ impl<'a> Driver<'a> {
             statics_len: self.rt.statics.len(),
             machine: std::ptr::from_mut(self).cast(),
             host: Self::HOST,
+            fuel: &raw mut self.rt.fuel,
         }
     }
 
@@ -471,10 +472,26 @@ impl<'a> Driver<'a> {
                 }
             }
             let explicit = p.code == crate::native::TRAP_EXPLICIT;
-            self.report(p.message(), loc, frames, explicit);
+            let message = if p.code == crate::native::TRAP_BUDGET { self.budget_panic() } else { Some(p.message()) };
+            if let Some(message) = message {
+                self.report(message, loc, frames, explicit);
+            }
         }
         self.panicked = true;
         self.run_pads(p.pads);
+    }
+
+    /// Fuel reached zero: the panic to report, `None` when it was reported
+    /// already. Leaves one unit, so any later charge stops again.
+    fn budget_panic(&mut self) -> Option<&'static str> {
+        self.rt.fuel = 1;
+        if self.rt.heap_cap_hit {
+            return (!self.panicked).then_some(crate::runtime::HEAP_CAP_EXCEEDED);
+        }
+        if std::mem::replace(&mut self.rt.step_budget_hit, true) {
+            return None;
+        }
+        Some(crate::runtime::STEP_BUDGET_EXHAUSTED)
     }
 
     /// A panic the driver raises for the host call native code makes

@@ -106,6 +106,10 @@ pub struct NativeCtx {
     /// [`NativePad::data`]): an engine with one entry function for every
     /// body reads which body to run here.
     pub entry_data: u64,
+    /// The runtime's step budget ([`crate::Machine::set_step_budget`]), for
+    /// an engine that counts steps: a charge that reaches zero stops the
+    /// call with [`TRAP_BUDGET`].
+    pub fuel: *mut u64,
 }
 
 /// Byte offset of [`NativeCtx::native_fp`].
@@ -437,6 +441,7 @@ pub(crate) struct NativeEnv {
     pub(crate) statics_len: usize,
     pub(crate) machine: *mut std::ffi::c_void,
     pub(crate) host: NativeHost,
+    pub(crate) fuel: *mut u64,
 }
 
 /// Byte offset of [`NativeCtx::stack_hard`].
@@ -466,6 +471,8 @@ pub const TRAP_PARKED: u64 = 10;
 /// Not a panic: a generator's close unwinds its body from the yield it is
 /// suspended at, collecting its armed `defer`s (`vm_gen.rs`).
 pub const TRAP_CLOSE: u64 = 11;
+/// The step budget ran out, or the heap outgrew its cap, which drains it.
+pub const TRAP_BUDGET: u64 = 12;
 /// No site: a frame that pushes nothing onto the panic's trace.
 pub const NO_SITE: u64 = u32::MAX as u64;
 
@@ -521,6 +528,7 @@ impl NativeCtx {
             alloc_bumps: std::ptr::null_mut(),
             native_fp: 0,
             entry_data: 0,
+            fuel: std::ptr::null_mut(),
         }
     }
 
@@ -827,6 +835,7 @@ pub(crate) fn call(entry: &NativeEntry, args: &[u64], env: &NativeEnv) -> Native
     set_stack_hard(&mut ctx, sp);
     ctx.machine = env.machine;
     ctx.host = env.host;
+    ctx.fuel = env.fuel;
     ctx.strings = env.strings;
     ctx.string_cache = env.string_cache;
     ctx.strings_len = env.strings_len as u64;
@@ -2150,6 +2159,7 @@ pub(crate) fn run_pads(
         set_stack_hard(&mut ctx, sp);
         ctx.machine = env.machine;
         ctx.host = env.host;
+        ctx.fuel = env.fuel;
         ctx.strings = env.strings;
         ctx.string_cache = env.string_cache;
         ctx.strings_len = env.strings_len as u64;

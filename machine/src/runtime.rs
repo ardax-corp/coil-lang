@@ -82,6 +82,12 @@ pub(crate) struct Runtime {
     pub(crate) heap_cap_hit: bool,
 }
 
+/// Panic when [`crate::Machine::set_step_budget`]'s budget runs out.
+pub(crate) const STEP_BUDGET_EXHAUSTED: &str = "step budget exhausted: execution exceeded its back-edge / call limit";
+
+/// Panic when the heap outgrows [`crate::Machine::set_heap_cap`]'s cap.
+pub(crate) const HEAP_CAP_EXCEEDED: &str = "heap limit exceeded: live objects outgrew the memory cap";
+
 /// What the `ffi::` natives keep between calls.
 #[derive(Default)]
 pub(crate) struct FfiState {

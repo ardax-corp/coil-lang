@@ -250,12 +250,7 @@ fn resolve_dense_index_object_in(
 
 use crate::stacks::STACK_OVERFLOW;
 
-/// Panic when [`Machine::set_step_budget`]'s budget runs out.
-pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
-    "step budget exhausted: execution exceeded its back-edge / call limit";
-
-/// Panic when the heap outgrows [`Machine::set_heap_cap`]'s cap.
-pub(crate) const HEAP_CAP_EXCEEDED: &str = "heap limit exceeded: live objects outgrew the memory cap";
+use crate::runtime::{HEAP_CAP_EXCEEDED, STEP_BUDGET_EXHAUSTED};
 
 /// Call depths [`Machine::rearm_call_window`] reserves ahead of the current one.
 const CALL_WINDOW: usize = 32;
@@ -632,6 +627,15 @@ impl<const S: usize> Machine<S> {
         Some(out)
     }
 
+    /// Call the body at `offset` on a native driver over this machine, as
+    /// [`Self::call_function`] does on the VM: a panic leaves
+    /// [`Self::panicked`] set and returns the default word. `None`: the
+    /// installed native code does not cover it, and nothing ran.
+    pub fn call_on_driver(&mut self, offset: u32, args: &[Value]) -> Option<Value> {
+        let out = self.with_native_driver(offset as usize, |d| d.call(offset as usize, args))?;
+        Some(out.map_or(Value::default(), |(lo, _)| Value::from(lo)))
+    }
+
     /// The installed native code, for a machine that runs this program.
     pub fn native_code(&self) -> Option<std::sync::Arc<crate::native::NativeCode>> {
         self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code))
@@ -790,6 +794,7 @@ impl<const S: usize> Machine<S> {
                 ffi: Self::native_ffi_vm,
                 invoke: Self::native_invoke,
             },
+            fuel: &raw mut self.rt.fuel,
         }
     }
 
@@ -1313,24 +1318,8 @@ impl<const S: usize> Machine<S> {
         self.rt.heap_cap_hit
     }
 
-    /// At a GC safepoint: collect fully when the heap is over its cap, and if
-    /// it still is, stop at the next charge (the fuel check is the only
-    /// place the dispatch loop looks, so the hot path pays nothing).
-    #[cold]
-    #[inline(never)]
-    fn heap_cap_safepoint(&mut self) {
-        if !self.rt.heap_cap_hit {
-            self.gc_collect();
-            if !self.rt.heap.get().over_byte_cap() {
-                return;
-            }
-            self.rt.heap_cap_hit = true;
-        }
-        self.rt.fuel = 1;
-    }
-
     /// Fuel reached zero: panic with [`STEP_BUDGET_EXHAUSTED`] at `pc` (or
-    /// [`HEAP_CAP_EXCEEDED`] when [`Self::heap_cap_safepoint`] drained it).
+    /// [`HEAP_CAP_EXCEEDED`] when `collect::over_cap` drained it).
     /// Returns `false` (stop), like [`Self::runtime_panic`]. Leaves one unit
     /// so any later charge (host re-entry after the panic) stops again.
     #[cold]
@@ -1879,6 +1868,9 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn native_panic(&mut self, p: &crate::native::NativePanic, call_ip: usize) -> bool {
+        if p.code == crate::native::TRAP_BUDGET {
+            return self.step_budget_out(call_ip);
+        }
         let Some(code) = self.rt.native.as_ref().map(|t| std::sync::Arc::clone(&t.code)) else {
             return self.runtime_panic(p.message(), call_ip);
         };
@@ -5289,10 +5281,6 @@ impl<const S: usize> crate::collect::GcHost for Machine<S> {
 
     fn borrowed_heap_wants_collect(&mut self) {
         self.panicked = true;
-    }
-
-    fn over_cap(&mut self) {
-        self.heap_cap_safepoint();
     }
 
     #[cfg(any(test, feature = "vm_profile"))]

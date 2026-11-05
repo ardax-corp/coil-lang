@@ -6,7 +6,7 @@ use compiler::native_mir::{
 };
 use machine::native::{
     self as rt, ALLOC_ARRAY, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE, NOT_AN_ENUM, NativeCtx,
-    ROOTS_AMBIGUOUS, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
+    ROOTS_AMBIGUOUS, TRAP_BUDGET, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
 use crate::frame::{AT_BLOCK_START, Activation, Frame, MAX_WORDS, frame_homes};
@@ -217,6 +217,18 @@ unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
     }
 }
 
+/// Charge one step (a call or a taken back-edge, as the VM counts them):
+/// `false` when the budget ran out.
+#[inline(always)]
+unsafe fn charge(ctx: *mut NativeCtx) -> bool {
+    // SAFETY: a live context; `fuel` points into the runtime that runs it.
+    unsafe {
+        let fuel = (*ctx).fuel;
+        *fuel = (*fuel).wrapping_sub(1);
+        *fuel != 0
+    }
+}
+
 /// Run the activation's top frame until the activation ends.
 unsafe fn run(act: *mut Activation) -> u64 {
     // SAFETY: `act` is the running activation; `Frame::body` a body of the
@@ -235,6 +247,9 @@ unsafe fn run(act: *mut Activation) -> u64 {
             // Where the frame stood: at its start, or past the call that
             // just returned.
             let mut ip = if (*frame).ip == AT_BLOCK_START {
+                if !charge(ctx) {
+                    return unwind(act, TRAP_BUDGET);
+                }
                 if (*ctx).gc_due != 0 {
                     rt::coil_native_collect(ctx);
                 }
@@ -315,6 +330,9 @@ unsafe fn run(act: *mut Activation) -> u64 {
                 let Some(e) = &exec.blocks[block].edges[edge] else {
                     return unwind(act, TRAP_HELPER);
                 };
+                if e.back && !charge(ctx) {
+                    return unwind(act, TRAP_BUDGET);
+                }
                 match e.moves.as_slice() {
                     [] => {}
                     [(d, s)] => *regs.add(*d as usize) = *regs.add(*s as usize),

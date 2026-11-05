@@ -112,6 +112,8 @@ pub(crate) struct ExecBlock {
 pub(crate) struct Edge {
     pub(crate) to: u32,
     pub(crate) moves: Vec<(u32, u32)>,
+    /// It goes back in block order: a step, as a taken back-edge is the VM's.
+    pub(crate) back: bool,
 }
 
 pub(crate) struct Exec {
@@ -147,7 +149,7 @@ impl Exec {
                     _ => None,
                 })
                 .collect();
-            Some(Edge { to: at, moves })
+            Some(Edge { to: at, moves, back: false })
         };
         let mut blocks: Vec<ExecBlock> = f
             .blocks
@@ -168,10 +170,12 @@ impl Exec {
         // Loop headers: the targets of edges back in block order.
         for i in 0..blocks.len() {
             for e in 0..2 {
-                if let Some(to) = blocks[i].edges[e].as_ref().map(|e| e.to)
-                    && to as usize <= i
+                if let Some(edge) = &mut blocks[i].edges[e]
+                    && edge.to as usize <= i
                 {
-                    blocks[to as usize].header = true;
+                    edge.back = true;
+                    let to = edge.to as usize;
+                    blocks[to].header = true;
                 }
             }
         }
