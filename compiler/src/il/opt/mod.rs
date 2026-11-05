@@ -5,7 +5,6 @@
 //! emits is only fuse-selected in `lower_optimized`. See `README.md` in
 //! this directory.
 
-use super::op::IlOp;
 
 /// Optimization switches, set per [`OptLevel`].
 #[derive(Clone, PartialEq, Eq, Debug)]

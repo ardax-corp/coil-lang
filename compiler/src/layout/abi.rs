@@ -54,11 +54,10 @@
 //! SSA models at most dest + `dest_hi`. N>2 is the same `ret_words` field
 //! but needs extra dests + archive encoding — not a self-vs-helper wall.
 
-use std::collections::HashMap;
 
 use super::rep::{Layout, PairKind, is_immediate, of_resolved};
 use crate::typechecking::infer::Checker;
-use crate::mir::{MirFunc, MirTy};
+use crate::mir::MirTy;
 use crate::typechecking::ty::{Ty, range_app};
 
 /// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.

@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 
-use common::{Byte, DebugLoc};
 
 use crate::typechecking::ty::Ty;
 

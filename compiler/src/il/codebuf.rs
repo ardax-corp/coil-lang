@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use common::{Byte, DebugLoc, Instruction};
 
-use super::{EntryKind, IlBuilder, IlFunc, IlJumpKind, IlOp, Label};
+use super::{EntryKind, IlBuilder, IlFunc, IlOp, Label};
 
 /// Compile-time code buffer: IL during emit, `Vec<Byte>` after lower.
 #[derive(Clone, Default)]

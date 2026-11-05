@@ -1685,7 +1685,7 @@ impl Pipeline {
         ast: &mut (SimpleSpan, Box<Expression<'_>>),
     ) -> (Vec<Byte>, Vec<u64>) {
         crate::hir::set_contract_level(self.contracts());
-        let mut bytecode = self.compiler_lazy_mut().compile(module, ast);
+        let bytecode = self.compiler_lazy_mut().compile(module, ast);
         let rejected = self
             .compiler_lazy()
             .get_messages()
@@ -1767,7 +1767,7 @@ impl Pipeline {
 
         self.compiler_lazy_mut().finalize_bytecode();
         self.compute_consts(Some((path, src)));
-        let mut bytecode = self.compiler_lazy_mut().bytecode_vec();
+        let bytecode = self.compiler_lazy_mut().bytecode_vec();
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {

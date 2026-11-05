@@ -3,8 +3,7 @@
 
 use common::{Byte, Instruction, dense};
 
-use super::inst::{MirBinOp, MirCastKind, MirCmpOp, ValueId};
-use super::ty::MirTy;
+use super::inst::{MirCmpOp, ValueId};
 
 /// A `VecLoop`'s `VLoop` body: each tree node into the next free vector
 /// register (freed again after the node), a reduce's `VReduce` into the

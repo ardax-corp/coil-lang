@@ -6,9 +6,7 @@
 //! `coil dissect`'s operand-depth column. Do not substitute tell here — a
 //! STORE floor is not height (COI-81).
 
-use common::Instruction;
 
-use super::op::{EntryKind, IlJumpKind, IlOp};
 
 #[cfg(test)]
 mod tests {

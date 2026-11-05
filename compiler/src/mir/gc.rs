@@ -17,13 +17,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use common::Instruction;
 
-use crate::il::IlOp;
 
 use super::func::MirFunc;
 use super::inst::{BlockId, LocalId, MirInst, Terminator, ValueId};
-use super::ty::MirTy;
 
 /// Live heap words at one Alloc or GcBarrier dest (S2a).
 #[derive(Clone, Debug, PartialEq, Eq)]

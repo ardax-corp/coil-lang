@@ -4,7 +4,6 @@
 
 use crate::il::opt::OptimizeOptions;
 
-use std::collections::HashMap;
 
 
 /// `(function, "dense" | "lir", MIR text)` captured for `coil dissect --mir`.
