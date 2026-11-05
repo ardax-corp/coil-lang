@@ -15,13 +15,13 @@ pub struct Renderer<'a> {
 }
 
 impl Renderer<'_> {
-    /// Value of `var` in frame `frame` stopped at `pc`, or `<optimized out>`.
+    /// Value of `var` in frame `frame` stopped at `pc`, or `<not set>` before anything bound it.
     pub fn var(&self, var: &DebugVar, frame: usize, pc: u32) -> String {
         let word = |slot: u32| self.dbg.local(frame, slot);
         match &var.loc {
             DebugVarLoc::Slot(_) => match var.slot_at(pc).and_then(word) {
                 Some(w) => self.value(w, &var.ty, 0),
-                None => "<optimized out>".into(),
+                None => "<not set>".into(),
             },
             DebugVarLoc::Fields { class, fields } => {
                 let parts: Vec<String> = fields
@@ -29,7 +29,7 @@ impl Renderer<'_> {
                     .enumerate()
                     .map(|(i, (name, _, ty))| match var.component_slot(i, pc).and_then(word) {
                         Some(w) => format!("{name}: {}", self.value(w, ty, 1)),
-                        None => format!("{name}: <optimized out>"),
+                        None => format!("{name}: <not set>"),
                     })
                     .collect();
                 format!("{class} {{ {} }}", parts.join(", "))
@@ -38,7 +38,7 @@ impl Renderer<'_> {
                 let parts: Vec<String> = (0..slots.len())
                     .map(|i| match var.component_slot(i, pc).and_then(word) {
                         Some(w) => self.value(w, elem, 1),
-                        None => "<optimized out>".into(),
+                        None => "<not set>".into(),
                     })
                     .collect();
                 format!("[{}]", parts.join(", "))
@@ -52,7 +52,7 @@ impl Renderer<'_> {
                     var.component_slot(0, pc).and_then(word),
                     var.component_slot(1, pc).and_then(word),
                 ) else {
-                    return "<optimized out>".into();
+                    return "<not set>".into();
                 };
                 let variant = self.variant_name(enum_name, t.as_int() as u32);
                 if self.variant_is_unit(enum_name, &variant) {
@@ -245,7 +245,7 @@ pub fn eval_path(
                 .position(|(name, _, _)| name == f)
                 .ok_or_else(|| format!("`{class}` has no field `{f}`"))?;
             let Some(slot) = var.component_slot(i, pc) else {
-                return Ok("<optimized out>".into());
+                return Ok("<not set>".into());
             };
             (word(slot)?, fields[i].2.clone())
         }
@@ -255,14 +255,14 @@ pub fn eval_path(
                 return Err(format!("index {i} out of bounds (len {})", slots.len()));
             }
             let Some(slot) = var.component_slot(*i, pc) else {
-                return Ok("<optimized out>".into());
+                return Ok("<not set>".into());
             };
             (word(slot)?, elem.clone())
         }
         (DebugVarLoc::Slot(_), _) => {
             let slot = var
                 .slot_at(pc)
-                .ok_or_else(|| format!("`{}` is optimized out here", var.name))?;
+                .ok_or_else(|| format!("`{}` is not set here", var.name))?;
             (word(slot)?, var.ty.clone())
         }
         _ => return Err(format!("cannot index into `{}` this way", var.name)),

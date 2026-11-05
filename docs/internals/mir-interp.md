@@ -89,7 +89,8 @@ Most ops map one to one onto Cranelift's lowering. These needed a decision.
 | `HomeLoad`, `HomeStore` | Homes follow the registers; a pad reads its frame's copy, which a runtime record roots | Settled |
 | `Yield`, `ResumeCoro` | `coil_native_yield` and fibers, as native code | Open (wasm) |
 | `CodePtr`, `Alloc` of `Fn` / `PolyFn` / `Coro` | The word is the body's bytecode entry PC | Open (no bytecode) |
-| `Deopt` | No code; only tests build one | Open (debugger) |
+| `Deopt` | No code; only tests build one. The debugger stops at any op, so it needs none | Settled |
+| `Probe` | Counts through `coil_native_probe`, as Cranelift's code does | Settled |
 | `HostInvoke`, `Ffi` | The helpers. A native the runtime's table replaced goes through that table, so the comptime sandbox holds | Settled |
 
 ### Words with no static type
@@ -114,7 +115,7 @@ no machine code, and the VM goes. It lands here rather than on a later
 | 3. Comptime and macros on the interpreter | Done, on a `Machine` that holds the runtime (below) |
 | 4. JIT by default | Done: `coil FILE`, `coil compile`, `coil run` and `coil test`; `--no-jit` and `--engine vm` keep the VM |
 | 5. Packaging without the VM | Done in coil: `coil-embed` is the JIT runner. Open: spool's `--vm` maps to it; AOT on macOS and Windows is untried |
-| 6. Debugger and coverage | Open: `Deopt` stops, names at a stop, MIR probes |
+| 6. Debugger and coverage | Done (below) |
 | 7. wasm | Open: `Yield` detaches its frame, a task parks an activation; then comptime leaves `Machine<256>` |
 | 8. Delete the VM | Bodies by index, not bytecode PC; archive major 7, MIR and data only |
 | 9. Start-up | After the rest: lazy compile on first call and a code cache |
@@ -193,6 +194,23 @@ step 8 deletes the VM with nothing in comptime depending on it.
 GC stress cells name `--engine vm`, and a test that compares against the VM has to
 say `--no-jit`, since no flag now means native code. Comparing two runs with no
 flag passes and proves nothing.
+
+**Step 6.** `coil debug` and `--coverage` no longer need the VM.
+
+- **Stops.** The program runs raw MIR on a thread of its own, on the `DEBUG`
+  instantiation of the loop (`coil_mir_interp::debug`). A stop waits on that
+  thread with the frames as they are, so nested activations, generators and task
+  fibers need nothing special, and `DebugSession` keeps its pull API.
+- **Op numbers.** `prepare_debug` numbers every op and builds a `ProgramDebug` over
+  them, so breakpoints, `DebugController`, `LineIndex`, the REPL and DAP work on
+  them as they did on PCs.
+- **Locals.** At each op the loop notes what the op before bound, by `local_binds`.
+  Codegen leaves a debugged program's variables on their own slots, which are the
+  `LocalId`s, instead of bytecode's registers.
+- **Coverage.** A coverage build's captured bodies get a `Probe` per source location
+  (`mir::coverage`), and the probe table stands where the PC table stood, on either
+  engine. It sees lines the VM's bytecode had folded away. `--engine vm` still
+  counts PCs.
 
 **What bytecode cannot hold.** It has 7 bits of call arity and `u8` frame
 registers, and every body still gets bytecode. A body past either becomes a stub
