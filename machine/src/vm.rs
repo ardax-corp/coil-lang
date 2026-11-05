@@ -422,21 +422,6 @@ pub struct Machine<const S: usize> {
     call_hot_depth: usize,
     /// Stack end the current window was reserved up to (`<= capacity`).
     call_window_end: usize,
-    /// Step budget fuel: charged once per taken back-edge (jump target `<=`
-    /// the jump's PC) and per call; zero means exhausted. `u64::MAX` when no
-    /// budget is set (2^64 charges cannot happen), so the hot path is one
-    /// decrement and one never-taken branch either way.
-    fuel: u64,
-    /// Set once the budget ran out (see [`Self::step_budget_exhausted`]).
-    step_budget_hit: bool,
-    /// `fuel` as [`Self::set_step_budget`] last set it (see
-    /// [`Self::steps_charged`]).
-    fuel_start: u64,
-    /// Heap cap from [`Self::set_heap_cap`] (`usize::MAX`: none).
-    heap_cap: usize,
-    /// Set once the live heap outgrew [`Self::heap_cap`] after a full
-    /// collection (see [`Self::heap_cap_exceeded`]).
-    heap_cap_hit: bool,
 }
 
 
@@ -521,11 +506,6 @@ impl<const S: usize> Machine<S> {
             unary_bases: dispatch::UnaryBaseTable::default(),
             call_hot_depth: 0,
             call_window_end: 0,
-            fuel: u64::MAX,
-            step_budget_hit: false,
-            fuel_start: u64::MAX,
-            heap_cap: usize::MAX,
-            heap_cap_hit: false,
         }
     }
 
@@ -1198,8 +1178,8 @@ impl<const S: usize> Machine<S> {
             Self::with_coroutine_mut(target, |c| c.pending_send = send_val);
             target = sub;
         }
-        self.fuel = self.fuel.wrapping_sub(1);
-        if unlikely(self.fuel == 0) {
+        self.rt.fuel = self.rt.fuel.wrapping_sub(1);
+        if unlikely(self.rt.fuel == 0) {
             self.step_budget_out(call_ip);
             return Value::default();
         }
@@ -1301,20 +1281,20 @@ impl<const S: usize> Machine<S> {
     /// this machine until set again; spawned worker machines never inherit it.
     pub fn set_step_budget(&mut self, budget: Option<u64>) {
         // `budget` charges succeed; the next one reaches zero.
-        self.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
-        self.fuel_start = self.fuel;
-        self.step_budget_hit = false;
+        self.rt.fuel = budget.map_or(u64::MAX, |b| b.saturating_add(1));
+        self.rt.fuel_start = self.rt.fuel;
+        self.rt.step_budget_hit = false;
     }
 
     /// Steps charged since [`Self::set_step_budget`] was last called (with or
     /// without a limit), capped at the budget when it ran out.
     pub fn steps_charged(&self) -> u64 {
-        self.fuel_start - self.fuel.min(self.fuel_start)
+        self.rt.fuel_start - self.rt.fuel.min(self.rt.fuel_start)
     }
 
     /// True once the budget from [`Self::set_step_budget`] ran out.
     pub fn step_budget_exhausted(&self) -> bool {
-        self.step_budget_hit
+        self.rt.step_budget_hit
     }
 
     /// Limit the heap to `cap` bytes of objects, checked at GC safepoints
@@ -1323,14 +1303,14 @@ impl<const S: usize> Machine<S> {
     /// become true). `None` (the default) removes the limit. Like the step
     /// budget, it spans every run until set again.
     pub fn set_heap_cap(&mut self, cap: Option<usize>) {
-        self.heap_cap = cap.unwrap_or(usize::MAX);
-        self.heap_cap_hit = false;
-        self.rt.heap.get_mut().set_byte_cap(self.heap_cap);
+        self.rt.heap_cap = cap.unwrap_or(usize::MAX);
+        self.rt.heap_cap_hit = false;
+        self.rt.heap.get_mut().set_byte_cap(self.rt.heap_cap);
     }
 
     /// True once the heap outgrew the cap from [`Self::set_heap_cap`].
     pub fn heap_cap_exceeded(&self) -> bool {
-        self.heap_cap_hit
+        self.rt.heap_cap_hit
     }
 
     /// At a GC safepoint: collect fully when the heap is over its cap, and if
@@ -1339,14 +1319,14 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn heap_cap_safepoint(&mut self) {
-        if !self.heap_cap_hit {
+        if !self.rt.heap_cap_hit {
             self.gc_collect();
             if !self.rt.heap.get().over_byte_cap() {
                 return;
             }
-            self.heap_cap_hit = true;
+            self.rt.heap_cap_hit = true;
         }
-        self.fuel = 1;
+        self.rt.fuel = 1;
     }
 
     /// Fuel reached zero: panic with [`STEP_BUDGET_EXHAUSTED`] at `pc` (or
@@ -1356,22 +1336,22 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn step_budget_out(&mut self, pc: usize) -> bool {
-        self.fuel = 1;
+        self.rt.fuel = 1;
         if self.finalizer_aborted {
             self.panicked = true;
             return false;
         }
-        if self.heap_cap_hit {
+        if self.rt.heap_cap_hit {
             if self.panicked {
                 return false;
             }
             return self.runtime_panic(HEAP_CAP_EXCEEDED, pc);
         }
-        if self.step_budget_hit {
+        if self.rt.step_budget_hit {
             self.panicked = true;
             return false;
         }
-        self.step_budget_hit = true;
+        self.rt.step_budget_hit = true;
         self.runtime_panic(STEP_BUDGET_EXHAUSTED, pc)
     }
 
@@ -1380,7 +1360,7 @@ impl<const S: usize> Machine<S> {
     #[cold]
     #[inline(never)]
     fn hot_streak_panic(&mut self, msg: &'static str, pc: usize) -> bool {
-        if self.fuel == 0 {
+        if self.rt.fuel == 0 {
             return self.step_budget_out(pc);
         }
         self.runtime_panic(msg, pc)
@@ -2705,7 +2685,7 @@ impl<const S: usize> Machine<S> {
             std::process::exit(1);
         }
         self.finalizer_aborted = true;
-        self.fuel = 1;
+        self.rt.fuel = 1;
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
@@ -4040,8 +4020,8 @@ impl<const S: usize> Machine<S> {
             )
         };
         self.bind_frame_reserve(code, constants);
-        self.fuel = self.fuel.wrapping_sub(1);
-        if unlikely(self.fuel == 0) {
+        self.rt.fuel = self.rt.fuel.wrapping_sub(1);
+        if unlikely(self.rt.fuel == 0) {
             self.step_budget_out(offset as usize);
             return Value::default();
         }
@@ -4133,8 +4113,8 @@ impl<const S: usize> Machine<S> {
         // Where a panic in the call itself (stack, bad target) points: the
         // native code's caller, as for its other panics.
         let call_ip = if self.frames.is_empty() { 1 } else { self.frames.get().tell() };
-        self.fuel = self.fuel.wrapping_sub(1);
-        if unlikely(self.fuel == 0) {
+        self.rt.fuel = self.rt.fuel.wrapping_sub(1);
+        if unlikely(self.rt.fuel == 0) {
             self.step_budget_out(call_ip);
             return Value::default();
         }
@@ -4412,7 +4392,7 @@ impl<const S: usize> Machine<S> {
                         vregs: &mut self.vregs,
                         natives: &self.rt.natives,
                         host_alloc: &mut self.streak_host_alloc,
-                        fuel: &mut self.fuel,
+                        fuel: &mut self.rt.fuel,
                         stack_cap,
                     },
                 ) {
@@ -4434,8 +4414,8 @@ impl<const S: usize> Machine<S> {
         // the zero check is the only branch.
         macro_rules! charge_step {
             ($back:expr) => {
-                self.fuel = self.fuel.wrapping_sub(($back) as u64);
-                if unlikely(self.fuel == 0) {
+                self.rt.fuel = self.rt.fuel.wrapping_sub(($back) as u64);
+                if unlikely(self.rt.fuel == 0) {
                     return self.step_budget_out(ip.saturating_sub(1));
                 }
             };

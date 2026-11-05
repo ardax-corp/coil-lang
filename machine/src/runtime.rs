@@ -64,6 +64,22 @@ pub(crate) struct Runtime {
     /// The open shared-heap steal epoch (auto-par workers run on this heap
     /// meanwhile): nothing moves.
     pub(crate) shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
+    /// Step budget fuel: charged once per taken back-edge and per call by
+    /// whatever counts steps (the VM, the MIR interpreter); zero means
+    /// exhausted. `u64::MAX` when no budget is set (2^64 charges cannot
+    /// happen), so a charge is one decrement and one never-taken branch
+    /// either way.
+    pub(crate) fuel: u64,
+    /// Set once the budget ran out ([`crate::Machine::step_budget_exhausted`]).
+    pub(crate) step_budget_hit: bool,
+    /// `fuel` as [`crate::Machine::set_step_budget`] last set it
+    /// ([`crate::Machine::steps_charged`]).
+    pub(crate) fuel_start: u64,
+    /// Heap cap from [`crate::Machine::set_heap_cap`] (`usize::MAX`: none).
+    pub(crate) heap_cap: usize,
+    /// Set once the live heap outgrew [`Self::heap_cap`] after a full
+    /// collection ([`crate::Machine::heap_cap_exceeded`]).
+    pub(crate) heap_cap_hit: bool,
 }
 
 /// What the `ffi::` natives keep between calls.
@@ -161,7 +177,7 @@ impl Runtime {
     pub(crate) fn new() -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None }
+        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None, fuel: u64::MAX, step_budget_hit: false, fuel_start: u64::MAX, heap_cap: usize::MAX, heap_cap_hit: false }
     }
 }
 

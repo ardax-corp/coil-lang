@@ -15,8 +15,8 @@ impl<const S: usize> Machine<S> {
         // Step budget charge, as `charge_step!` in `execute`.
         macro_rules! charge_step {
             ($back:expr) => {
-                self.fuel = self.fuel.wrapping_sub(($back) as u64);
-                if unlikely(self.fuel == 0) {
+                self.rt.fuel = self.rt.fuel.wrapping_sub(($back) as u64);
+                if unlikely(self.rt.fuel == 0) {
                     return dispatch::RestExit::done(self.step_budget_out(ip.saturating_sub(1)));
                 }
             };
