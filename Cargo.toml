@@ -20,6 +20,7 @@ members = [
     "coil-simd",
     "comptime",
     "coil-native",
+    "coil-mir-interp",
     "coil-rt",
 ]
 # Plain `cargo build` / `cargo test` at the repo root builds all CLI binaries

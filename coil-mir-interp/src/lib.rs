@@ -1,0 +1,282 @@
+//! An interpreter of MIR: the engine for what has no machine code to run
+//! (the playground, the debugger, compile-time code). See
+//! `docs/internals/mir-interp.md`.
+//!
+//! It is one more backend of the runtime's native ABI: [`prepare`] turns a
+//! program's captured MIR into [`NativeEntry`]s, as `coil_native::jit`
+//! does, and each op does what Cranelift's lowering of it does, through
+//! the same `coil_native_*` helpers. The driver, the collector, tasks and
+//! generators see no difference.
+//!
+//! What differs from machine code is the frames. They live in an
+//! [`Activation`], not on the thread's stack: a direct call pushes a frame
+//! and the loop goes on, so recursion costs no Rust stack, and the words a
+//! frame holds stay where they are. The collector reaches them through one
+//! [`ROOTS_SCAN`] record per activation, so a call pays nothing for roots,
+//! and the liveness that says which registers count is computed only for
+//! the bodies a collection finds on the stack.
+
+mod exec;
+mod frame;
+
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+use common::DebugLoc;
+use compiler::native_mir::{BlockId, Label, MirFunc, MirInst, NativeBody, Terminator, ValueId, is_generator, is_tail_call_inst, used_params};
+use machine::native::{NativeEntry, NativeSite};
+
+use frame::RootMaps;
+
+/// What [`prepare`] produced.
+pub struct InterpProgram {
+    /// Entries to install, as `coil_native::NativeProgram`'s.
+    pub entries: Vec<NativeEntry>,
+    /// Bodies the interpreter runs.
+    pub compiled: Vec<String>,
+    /// Bodies it cannot run, with the reason.
+    pub refused: Vec<(String, String)>,
+    /// The panic sites the bodies name.
+    pub sites: Vec<NativeSite>,
+    /// What `entries` point into: keep it for as long as they run
+    /// (`machine::native::NativeCode::with_keep`).
+    pub keep: Arc<Program>,
+}
+
+/// The bodies of a program.
+pub struct Program {
+    bodies: Vec<Body>,
+    /// By [`Label`], `u32::MAX` for a label with no body.
+    by_label: Vec<u32>,
+}
+
+impl Program {
+    fn body_at(&self, target: Label) -> Option<&Body> {
+        let i = *self.by_label.get(target.0 as usize)?;
+        self.bodies.get(i as usize)
+    }
+}
+
+/// One body, as it runs.
+pub(crate) struct Body {
+    pub(crate) mir: MirFunc,
+    pub(crate) program: *const Program,
+    /// Bytecode entry PC (`u32::MAX`: none).
+    pub(crate) pc: u32,
+    /// Its cleanup pad, run as a body of its own.
+    pub(crate) pad: Option<Box<Body>>,
+    /// Why it cannot run: a call goes through the host.
+    pub(crate) refused: bool,
+    /// A `drop`: a call claims the finalizer first.
+    pub(crate) is_drop: bool,
+    /// `sites[block][op]`: the op's site; one past the last is the
+    /// terminator's.
+    sites: Vec<Vec<u32>>,
+    /// The site of a frame with no op running (a stack overflow on entry).
+    pub(crate) entry_site: u32,
+    /// Filled by the body's first call.
+    exec: OnceLock<Exec>,
+    /// Filled by the first collection that finds the body on the stack.
+    pub(crate) roots: OnceLock<RootMaps>,
+}
+
+// SAFETY: `program` points at the `Program` that owns this body, which is
+// immutable once built and outlives every call; all else is `Sync`.
+unsafe impl Sync for Body {}
+unsafe impl Send for Body {}
+
+/// A block's control flow, resolved to block positions.
+pub(crate) struct ExecBlock {
+    /// The first op past the φs.
+    pub(crate) first: u32,
+    /// A loop header: a safepoint.
+    pub(crate) header: bool,
+    /// It ends in a tail call: its last op takes the frame.
+    pub(crate) tail: bool,
+    /// Where each successor leads (`taken` first), with its φ moves.
+    pub(crate) edges: [Option<Edge>; 2],
+}
+
+/// A CFG edge: the block it reaches and the φ moves it makes.
+pub(crate) struct Edge {
+    pub(crate) to: u32,
+    pub(crate) moves: Vec<(u32, u32)>,
+}
+
+pub(crate) struct Exec {
+    pub(crate) blocks: Vec<ExecBlock>,
+    pub(crate) entry: u32,
+}
+
+impl Body {
+    pub(crate) fn exec(&self) -> &Exec {
+        self.exec.get_or_init(|| Exec::new(&self.mir))
+    }
+
+    /// The site of op `ip` of `block` (the terminator's past the last).
+    pub(crate) fn site_at(&self, block: u32, ip: u32) -> u32 {
+        let ops = &self.sites[block as usize];
+        ops.get(ip as usize).copied().unwrap_or(self.entry_site)
+    }
+}
+
+impl Exec {
+    fn new(f: &MirFunc) -> Self {
+        let pos: HashMap<BlockId, u32> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i as u32)).collect();
+        let edge = |from: BlockId, to: BlockId| -> Option<Edge> {
+            let at = *pos.get(&to)?;
+            let moves = f.blocks[at as usize]
+                .insts
+                .iter()
+                .filter_map(|i| match i {
+                    MirInst::Phi { dest, args, .. } => {
+                        let (_, v) = args.iter().find(|(p, _)| *p == from)?;
+                        Some((dest.0, v.0))
+                    }
+                    _ => None,
+                })
+                .collect();
+            Some(Edge { to: at, moves })
+        };
+        let mut blocks: Vec<ExecBlock> = f
+            .blocks
+            .iter()
+            .map(|b| {
+                let edges = match &b.term {
+                    Some(Terminator::Jump { dest }) => [edge(b.id, *dest), None],
+                    Some(Terminator::Br { taken, not_taken, .. } | Terminator::JumpIfMatch { taken, not_taken, .. }) => {
+                        [edge(b.id, *taken), edge(b.id, *not_taken)]
+                    }
+                    _ => [None, None],
+                };
+                let first = b.insts.iter().take_while(|i| i.is_phi()).count() as u32;
+                let tail = b.insts.last().is_some_and(|i| is_tail_call_inst(f, b, i));
+                ExecBlock { first, header: false, tail, edges }
+            })
+            .collect();
+        // Loop headers: the targets of edges back in block order.
+        for i in 0..blocks.len() {
+            for e in 0..2 {
+                if let Some(to) = blocks[i].edges[e].as_ref().map(|e| e.to)
+                    && to as usize <= i
+                {
+                    blocks[to as usize].header = true;
+                }
+            }
+        }
+        Self { blocks, entry: pos.get(&f.entry).copied().unwrap_or(0) }
+    }
+}
+
+/// Why a body cannot run here.
+fn refusal(f: &MirFunc) -> Option<String> {
+    if let Some(why) = f.emit_refusal {
+        return Some(format!("no emission: {why}"));
+    }
+    let insts = f.blocks.iter().flat_map(|b| &b.insts);
+    for inst in insts {
+        match inst {
+            // `promote_fields` does not run on captured bodies: what a panic
+            // owes the heap has no way to reach the unwinder.
+            MirInst::PanicStore { .. } => return Some("PanicStore".to_string()),
+            MirInst::Alloc { kind: compiler::native_mir::MirAllocKind::Object { .. }, elems, .. } if !elems.is_empty() => {
+                return Some("an object allocated with its fields".to_string());
+            }
+            _ => {}
+        }
+    }
+    if f.blocks.iter().any(|b| b.term.is_none()) {
+        return Some("block without terminator".to_string());
+    }
+    None
+}
+
+/// Each op's site in `f`, adding to `sites`: what `coil_native`'s
+/// lowering records, shared by the ops of one location.
+fn body_sites(f: &MirFunc, pc: u32, sites: &mut Vec<NativeSite>) -> (Vec<Vec<u32>>, u32) {
+    let mut seen: HashMap<(u32, u32, u32), u32> = HashMap::new();
+    let mut site = |loc: DebugLoc, sites: &mut Vec<NativeSite>| -> u32 {
+        *seen.entry((loc.file, loc.start_byte, loc.end_byte)).or_insert_with(|| {
+            sites.push(NativeSite { entry_pc: pc, loc });
+            (sites.len() - 1) as u32
+        })
+    };
+    let entry = site(DebugLoc::unknown(), sites);
+    let ops = f
+        .blocks
+        .iter()
+        .map(|b| {
+            let mut ops: Vec<u32> = b.insts.iter().map(|i| site(f.op_loc(i.dest()), sites)).collect();
+            ops.push(entry);
+            ops
+        })
+        .collect();
+    (ops, entry)
+}
+
+fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mut Vec<NativeSite>) -> Body {
+    let (mut mir, cleanup) = {
+        let mut m = mir;
+        let c = m.cleanup.take();
+        (m, c)
+    };
+    let refused = refusal(&mir).is_some();
+    let code = pc.unwrap_or(u32::MAX);
+    let pad = cleanup.map(|c| Box::new(build_body(*c, program, pc, sites)));
+    let is_drop = mir.name.ends_with("::drop") && mir.params.len() == 1;
+    let (op_sites, entry_site) = if pc.is_some() { body_sites(&mir, code, sites) } else { (mir.blocks.iter().map(|b| vec![machine::native::NO_SITE as u32; b.insts.len() + 1]).collect(), machine::native::NO_SITE as u32) };
+    mir.shrink_to_fit();
+    Body { mir, program, pc: code, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), roots: OnceLock::new() }
+}
+
+/// Make `bodies` runnable. `entry_pcs` maps a body's name to its bytecode
+/// entry PC, as for `coil_native::jit`.
+pub fn prepare(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> InterpProgram {
+    let mut sites = Vec::new();
+    let mut compiled = Vec::new();
+    let mut refused = Vec::new();
+    let labels = bodies.iter().filter_map(|b| b.entry).map(|l| l.0 as usize + 1).max().unwrap_or(0);
+    let mut by_label = vec![u32::MAX; labels];
+    let mut program = Arc::new(Program { bodies: Vec::new(), by_label: Vec::new() });
+    let at = Arc::as_ptr(&program);
+    let mut built = Vec::with_capacity(bodies.len());
+    for (i, b) in bodies.into_iter().enumerate() {
+        if let Some(l) = b.entry {
+            by_label[l.0 as usize] = i as u32;
+        }
+        let why = refusal(&b.mir);
+        match why {
+            Some(why) => refused.push((b.name.clone(), why)),
+            None => compiled.push(b.name.clone()),
+        }
+        let pc = entry_pcs.get(&b.name).copied();
+        built.push(build_body(b.mir, at, pc, &mut sites));
+    }
+    let p = Arc::get_mut(&mut program).expect("a program nothing else holds yet");
+    p.bodies = built;
+    p.by_label = by_label;
+    let entries = program
+        .bodies
+        .iter()
+        .filter(|b| b.pc != u32::MAX && !b.refused)
+        .map(|b| NativeEntry {
+            pc: b.pc,
+            arity: b.mir.params.len() as u16,
+            // Any call may reach a host call that waits.
+            suspends: true,
+            reads: used_params(&b.mir) as u16,
+            ret_words: if b.mir.ret_hi_ty.is_some() { 2 } else { 1 },
+            generator: is_generator(&b.mir),
+            cleanup: b.pad.is_some(),
+            entry: exec::entry,
+            data: std::ptr::from_ref(b) as usize,
+        })
+        .collect();
+    InterpProgram { entries, compiled, refused, sites, keep: program }
+}
+
+/// `value`'s position in a frame's registers.
+#[inline(always)]
+pub(crate) fn reg(v: ValueId) -> usize {
+    v.index()
+}

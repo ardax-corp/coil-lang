@@ -420,6 +420,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "coil-mir-interp"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "compiler",
+ "machine",
+]
+
+[[package]]
 name = "coil-native"
 version = "0.1.0"
 dependencies = [
@@ -457,6 +466,7 @@ dependencies = [
  "coil-args",
  "coil-build-id",
  "coil-host",
+ "coil-mir-interp",
  "coil-native",
  "common",
  "compiler",
