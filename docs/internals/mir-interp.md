@@ -112,11 +112,12 @@ no machine code, and the VM goes. It lands here rather than on a later
 | 1. MIR interpreter | Done: every corpus, every level, CI cells |
 | 2. Glue as MIR | Mostly done already (below) |
 | 3. Comptime and macros on the interpreter | Done, on a `Machine` that holds the runtime (below) |
-| 4. JIT by default | Open |
+| 4. JIT by default | Next: `coil FILE`, `coil compile`, `coil run` and `coil test` |
 | 5. Packaging without the VM | Open |
 | 6. Debugger and coverage | Open: `Deopt` stops, names at a stop, MIR probes |
 | 7. wasm | Open: `Yield` detaches its frame, a task parks an activation; then comptime leaves `Machine<256>` |
-| 8. Delete the VM | Last: bodies by index, not bytecode PC |
+| 8. Delete the VM | Bodies by index, not bytecode PC; archive major 7, MIR and data only |
+| 9. Start-up | After the rest: lazy compile on first call and a code cache |
 
 **Step 2.** A clean compile panics on a body with no MIR (`require_mir`), and
 thunks are built as HIR (`hir::synth`), so every function body already has MIR.
@@ -177,7 +178,7 @@ then, so swapping it now would mean two hosts. Step 7 ends with comptime on a
 holder that has no VM in it, and with the fallback to `call_function` gone, so
 step 8 deletes the VM with nothing in comptime depending on it.
 
-**Decisions for the steps ahead** (the options doc's 3, 4 and 5):
+**Decisions for the steps ahead** (the options doc's 3, 4, 5 and 7):
 
 - Packages without AOT, and spool `--vm`, become a **JIT runner**: `coil-rt`,
   Cranelift and a MIR payload, with no linker. This replaces the earlier plan for
@@ -185,6 +186,14 @@ step 8 deletes the VM with nothing in comptime depending on it.
 - `.ccoil` stays, as a **MIR archive that JITs on load**, so archives are portable
   across hosts and `coil run x.ccoil` keeps working.
 
+- **The archive is reworked once**, in step 8. `.ccoil` keeps its bytecode section
+  until then, because bodies are keyed by bytecode PC and the VM stays runnable
+  until the last step.
+- **Start-up is not a step 4 gate.** Run time should stay close to the VM's; the
+  JIT's overhead on small programs is accepted for now and tuned in step 9, once
+  the rest is done.
+- **VM-only work on `main` is frozen:** no VM performance work and no new parity
+  bridges. Bug fixes still go in.
 - The **VM-observable rules stay as the spec** for now (a local holds its object
   until rebound, about 1M frames of recursion, the panic format), so tests do not
   change. They are revisited after step 8.
