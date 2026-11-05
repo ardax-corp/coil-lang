@@ -175,12 +175,9 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
     };
     let full = pipeline.program_debug_full();
     let level = pipeline.debug_level();
-    #[cfg(not(target_family = "wasm"))]
     if !bodies.is_empty() {
-        program.native_mir = coil_native::section::encode(bodies, &entry_pcs(&full));
+        program.native_mir = encode_section(bodies, &entry_pcs(&full));
     }
-    #[cfg(target_family = "wasm")]
-    let _ = bodies;
     program.set_debug(full, level);
 
     match rkyv::to_bytes::<Error>(&program) {
@@ -401,7 +398,7 @@ fn cmd_build_and_run(
 ) {
     // The interpreter runs every body, and an archive's section holds only
     // what native code compiles.
-    let cache = if RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed) { None } else { cache };
+    let cache = if interprets() { None } else { cache };
     if jit {
         pipeline.set_runs_mir();
     }
@@ -473,12 +470,31 @@ static RAW_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// Cranelift.
 static RUN_ON_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether the interpreter runs this process's MIR: `--mir`, or a host with
+/// no native code.
+fn interprets() -> bool {
+    cfg!(target_family = "wasm") || RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The section of a `.ccoil` for `bodies`, for the engine this host runs.
+fn encode_section(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>) -> Vec<u8> {
+    #[cfg(not(target_family = "wasm"))]
+    return coil_native::section::encode(bodies, pcs);
+    #[cfg(target_family = "wasm")]
+    coil_mir_interp::encode_section(bodies, pcs)
+}
+
 /// Hand the captured MIR to the engine that runs it for the coming run.
 fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common::ProgramDebug) {
-    if RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed) {
-        let program = coil_mir_interp::prepare(bodies, &entry_pcs(debug));
+    install_bodies(bodies, &entry_pcs(debug));
+}
+
+/// Hand `bodies` to the engine that runs them.
+fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::collections::HashMap<String, u32>) {
+    if interprets() {
+        let program = coil_mir_interp::prepare(bodies, pcs);
         for (name, why) in &program.refused {
-            eprintln!("warning: --mir: `{name}` runs on the VM: {why}");
+            eprintln!("warning: `{name}` runs on the VM: {why}");
         }
         let complete = program.refused.is_empty();
         // Its entries point into it for the rest of the process.
@@ -486,22 +502,21 @@ fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common:
         machine::native::install_for_next_run(program.entries, program.sites, complete);
         return;
     }
-    install_native_bodies(&bodies, &entry_pcs(debug));
+    #[cfg(not(target_family = "wasm"))]
+    install_native_bodies(&bodies, pcs);
 }
 
-/// JIT an archive's native MIR section for the coming run; a section that
-/// cannot be read leaves the run on the VM. `name` is what the warning says.
+/// Install an archive's native MIR section for the coming run; a section
+/// that cannot be read leaves the run on the VM. `name` is what the warning
+/// says.
 fn install_section(name: &str, section: &[u8]) {
     if section.is_empty() {
         return;
     }
-    #[cfg(not(target_family = "wasm"))]
-    match coil_native::section::decode(section) {
-        Ok((bodies, pcs)) => install_native_bodies(&bodies, &pcs),
+    match compiler::native_mir::archive::decode(section) {
+        Ok((bodies, pcs)) => install_bodies(bodies, &pcs),
         Err(e) => eprintln!("warning: `{name}`: {e}; running on the VM"),
     }
-    #[cfg(target_family = "wasm")]
-    let _ = name;
 }
 
 /// Function name to bytecode entry PC.
@@ -510,16 +525,11 @@ fn entry_pcs(debug: &common::ProgramDebug) -> std::collections::HashMap<String, 
 }
 
 /// JIT `bodies` and install them for the coming run.
+#[cfg(not(target_family = "wasm"))]
 fn install_native_bodies(
     bodies: &[compiler::native_mir::NativeBody],
     pcs: &std::collections::HashMap<String, u32>,
 ) {
-    #[cfg(target_family = "wasm")]
-    {
-        let _ = (bodies, pcs);
-        eprintln!("warning: no native code on wasm; running on the VM");
-    }
-    #[cfg(not(target_family = "wasm"))]
     match coil_native::jit(bodies, pcs) {
         Ok(program) => {
             if std::env::var_os("COIL_NATIVE_STATS").is_some() {

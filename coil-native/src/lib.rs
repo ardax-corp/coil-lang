@@ -11,7 +11,8 @@
 //! [`jit`] compiles in memory for `coil --jit`. An object-file driver for
 //! `coil package` reuses the same lowering later.
 //!
-//! Empty on wasm: the playground has no native code and runs the VM.
+//! Empty on wasm: the playground has no native code and runs the MIR
+//! interpreter.
 #![cfg(not(target_family = "wasm"))]
 
 pub mod section;

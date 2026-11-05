@@ -109,7 +109,7 @@ impl Engine {
     /// What runs a suite unless asked otherwise: native code where there
     /// is any.
     pub fn host_default() -> Self {
-        if cfg!(target_family = "wasm") { Self::Vm } else { Self::Native }
+        if cfg!(target_family = "wasm") { Self::Mir } else { Self::Native }
     }
 
     /// Whether a compile hands this engine its MIR.
@@ -129,15 +129,8 @@ impl Engine {
     }
 }
 
-/// No native code on wasm: the file runs on the VM.
-#[cfg(target_family = "wasm")]
-fn native_code(_: &Pipeline, _: usize, _: &str, _: Engine, _: bool) -> (Option<Arc<machine::native::NativeCode>>, Option<Probes>) {
-    (None, None)
-}
-
-/// JIT what this compile captured. `None` when nothing compiles or the
-/// backend fails (the file then runs on the VM, as `coil --jit` does).
-#[cfg(not(target_family = "wasm"))]
+/// Make what this compile captured runnable. `None` when nothing compiles
+/// or the backend fails (the file then runs on the VM, as `coil --jit` does).
 fn native_code(pipeline: &Pipeline, code_len: usize, file: &str, engine: Engine, coverage: bool) -> (Option<Arc<machine::native::NativeCode>>, Option<Probes>) {
     let mut bodies = compiler::native_mir::take_native_capture();
     let probes = coverage.then(|| compiler::native_mir::coverage::instrument(&mut bodies));
@@ -146,12 +139,11 @@ fn native_code(pipeline: &Pipeline, code_len: usize, file: &str, engine: Engine,
     (code, probes)
 }
 
-/// Make `bodies` runnable on `engine`.
-#[cfg(not(target_family = "wasm"))]
+/// Make `bodies` runnable on `engine`; a host with no native code interprets.
 fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBody>, code_len: usize, file: &str, engine: Engine) -> Option<Arc<machine::native::NativeCode>> {
     let debug = pipeline.program_debug_full();
     let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
-    if engine == Engine::Mir {
+    if engine == Engine::Mir || cfg!(target_family = "wasm") {
         let program = coil_mir_interp::prepare(bodies, &pcs);
         inventory(&format!("file\t{file}\t{}\t{}", program.compiled.len(), program.refused.len()));
         for (name, why) in &program.refused {
@@ -161,7 +153,18 @@ fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBo
         let code = machine::native::NativeCode::new(code_len, program.entries, program.sites).with_complete(complete).with_keep(program.keep);
         return (!code.is_empty()).then(|| Arc::new(code));
     }
-    let program = match coil_native::jit(&bodies, &pcs) {
+    jitted_code(&bodies, &pcs, code_len, file)
+}
+
+#[cfg(target_family = "wasm")]
+fn jitted_code(_: &[compiler::native_mir::NativeBody], _: &std::collections::HashMap<String, u32>, _: usize, _: &str) -> Option<Arc<machine::native::NativeCode>> {
+    None
+}
+
+/// JIT `bodies`.
+#[cfg(not(target_family = "wasm"))]
+fn jitted_code(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>, code_len: usize, file: &str) -> Option<Arc<machine::native::NativeCode>> {
+    let program = match coil_native::jit(bodies, pcs) {
         Ok(p) => p,
         Err(e) => {
             inventory(&format!("failed\t{file}\t{e}"));
@@ -189,7 +192,6 @@ fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBo
 /// (`scripts/native_inventory.py` sums them): what a `--engine native` run
 /// left on the VM. Tab-separated: `file`, `refused`, `failed` per compile,
 /// `counts` once per run. No variable: nothing is written.
-#[cfg(not(target_family = "wasm"))]
 fn inventory(line: &str) {
     use std::io::Write;
     let Some(path) = std::env::var_os("COIL_NATIVE_INVENTORY") else {
@@ -203,7 +205,6 @@ fn inventory(line: &str) {
 }
 
 /// The run's VM-use counts as a `counts` inventory line.
-#[cfg(not(target_family = "wasm"))]
 fn inventory_counts(options: &TestOptions) {
     if !options.engine.runs_mir() {
         return;
@@ -211,9 +212,6 @@ fn inventory_counts(options: &TestOptions) {
     let counts: Vec<String> = machine::native::vm_use_counts().iter().map(|(k, v)| format!("{k}={v}")).collect();
     inventory(&format!("counts\t{}\t{}", options.root.display(), counts.join("\t")));
 }
-
-#[cfg(target_family = "wasm")]
-fn inventory_counts(_: &TestOptions) {}
 
 /// Whether a run includes doc-tests (the code examples in `///` comments).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

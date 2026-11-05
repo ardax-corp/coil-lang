@@ -93,8 +93,8 @@ pub(crate) struct CliArgs {
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
     /// Run with native code where the backend can compile it; on `coil
-    /// compile`, store the MIR for it in the archive. On by default where
-    /// there is native code ([`jit_on`]).
+    /// compile`, store the MIR for it in the archive. On by default; a host
+    /// with no native code interprets the MIR.
     pub jit: bool,
     /// `--no-jit`: run on the VM, and `coil compile` stores no MIR.
     pub no_jit: bool,
@@ -507,13 +507,6 @@ fn require_hy_entry(filename: &str) -> Result<(), String> {
     }
 }
 
-/// Whether a compile runs on native code: yes unless `--no-jit` (or a flag
-/// only the VM serves) says otherwise. `--jit` asks for it even with no
-/// native code, which warns.
-fn jit_on(asked: bool, vm_only: bool) -> bool {
-    !vm_only && (asked || cfg!(not(target_family = "wasm")))
-}
-
 impl RawCli {
     fn parent_run_flags_set(&self) -> bool {
         self.log.is_set()
@@ -551,7 +544,7 @@ impl RawCli {
                     debug_level: self.debug.level(),
                     nursery: self.nursery.nursery,
                     cow_report: self.nursery.cow_report,
-                    jit: jit_on(self.nursery.jit, self.nursery.no_jit || self.nursery.cow_report),
+                    jit: !(self.nursery.no_jit || self.nursery.cow_report),
                     no_jit: self.nursery.no_jit,
                     mir: self.nursery.mir,
                     ..cli_from(
@@ -626,7 +619,7 @@ impl RawCli {
                 entry_flag,
                 include_tests,
                 output,
-                jit,
+                jit: _,
                 no_jit,
                 file,
             }) => {
@@ -637,7 +630,7 @@ impl RawCli {
                 }
                 CliArgs {
                     debug_level: debug.level(),
-                    jit: jit_on(jit, no_jit),
+                    jit: !no_jit,
                     ..cli_from(
                         Command::Compile {
                             filename,

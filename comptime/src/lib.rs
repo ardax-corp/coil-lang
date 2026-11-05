@@ -67,7 +67,7 @@ impl MacroHost for VmMacroHost {
     }
 
     fn runs_mir(&self) -> bool {
-        cfg!(not(target_family = "wasm"))
+        true
     }
 
     fn run(

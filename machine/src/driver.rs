@@ -496,7 +496,6 @@ impl<'a> Driver<'a> {
             return;
         }
         let Some(crate::memory::Object::Coroutine(gc)) = self.rt.heap.find_object_by_addr(val.bits()) else { return };
-        #[cfg(not(target_family = "wasm"))]
         if let Some(pads) = crate::gen_fiber::close(self, gc) {
             let was = std::mem::replace(&mut self.panicked, false);
             self.run_pads(pads);
@@ -506,8 +505,6 @@ impl<'a> Driver<'a> {
             }
             self.panicked = was;
         }
-        #[cfg(target_family = "wasm")]
-        crate::gen_fiber::finish(gc);
     }
 
     /// A native panic, unless it is one a nested call already reported
