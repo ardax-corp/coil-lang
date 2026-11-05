@@ -271,6 +271,10 @@ pub struct Heap {
     identity_types: Vec<u64>,
     /// Objects [`Self::cow_unique`] copied.
     cow_copies: u64,
+    /// Objects `Cow` shared.
+    cow_shares: u64,
+    /// `--cow-report`: copies by native site.
+    cow_sites: Option<std::collections::HashMap<u32, u64>>,
     /// Every object of a [`Self::finalizer_types`] type, a superset pruned
     /// by [`Self::unmarked_finalizable`] like [`Self::weaks`].
     finalizable: Vec<u64>,
@@ -362,6 +366,8 @@ impl Default for Heap {
             early_drop_types: Vec::new(),
             identity_types: Vec::new(),
             cow_copies: 0,
+            cow_shares: 0,
+            cow_sites: None,
             finalizable: Vec::new(),
             immortal_enums: HashMap::default(),
             unit_enum: None,
@@ -870,69 +876,41 @@ impl Heap {
         Some(Value::from(copy.addr()))
     }
 
-    /// Measuring only (`COIL_COW_EAGER`): a deep copy of `v`'s class
-    /// instances and arrays, as a design that copies on assignment makes.
-    pub fn cow_deep_copy(&mut self, v: Value) -> Value {
-        let mut seen: std::collections::HashMap<u64, Value> = std::collections::HashMap::new();
-        self.deep_copy_in(v, &mut seen, 0)
-    }
-
-    fn deep_copy_in(&mut self, v: Value, seen: &mut std::collections::HashMap<u64, Value>, depth: u32) -> Value {
-        let addr = v.heap_addr();
-        if addr == 0 || depth > 10_000 {
-            return v;
-        }
-        if let Some(&c) = seen.get(&addr) {
-            return c;
-        }
-        let words = match self.find_object_by_addr(addr) {
-            Some(Object::Instance(gc)) => {
-                let inst = gc.as_ref();
-                if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
-                    return v;
-                }
-                let Some(slots) = inst.storage.as_slice() else { return v };
-                (Some(inst.type_id), slots.to_vec())
-            }
-            Some(Object::Array(gc)) => match &gc.as_ref().data {
-                ArrayData::Words(w) => (None, w.clone()),
-                ArrayData::Bytes(_) => {
-                    let copy = gc.as_ref().copy();
-                    let c = Value::from(self.alloc(copy, Object::Array).0.addr());
-                    seen.insert(addr, c);
-                    return c;
-                }
-            },
-            _ => return v,
-        };
-        let (type_id, mut slots) = words;
-        let kind = match self.find_object_by_addr(addr) {
-            Some(Object::Array(gc)) => Some(gc.as_ref().elem_kind),
-            _ => None,
-        };
-        for w in &mut slots {
-            if matches!(self.find_object_by_addr(w.heap_addr()), Some(Object::Instance(_) | Object::Array(_))) {
-                *w = self.deep_copy_in(*w, seen, depth + 1);
-            }
-        }
-        let c = match type_id {
-            Some(t) => Value::from(self.alloc(ObjInstance::with_slots(t, slots), Object::Instance).0.addr()),
-            None => {
-                let mut a = ObjArray::new(slots);
-                if let Some(k) = kind {
-                    a.elem_kind = k;
-                }
-                Value::from(self.alloc(a, Object::Array).0.addr())
-            }
-        };
-        self.cow_copies += 1;
-        seen.insert(addr, c);
-        c
-    }
-
     /// How many objects [`Self::cow_unique`] copied.
     pub fn cow_copies(&self) -> u64 {
         self.cow_copies
+    }
+
+    /// `--cow-report`: count the copies each site makes from now on.
+    pub fn report_cow(&mut self) {
+        self.cow_sites = Some(std::collections::HashMap::new());
+    }
+
+    pub fn cow_report_on(&self) -> bool {
+        self.cow_sites.is_some()
+    }
+
+    /// A `Cow` at `site` ran; `mark` is [`Self::cow_copies`] before it.
+    pub fn cow_report_note(&mut self, mark: u64, site: u32) {
+        if self.cow_copies > mark
+            && let Some(sites) = self.cow_sites.as_mut()
+        {
+            *sites.entry(site).or_insert(0) += 1;
+        }
+    }
+
+    /// A `Cow` shared an object.
+    pub fn note_cow_share(&mut self) {
+        self.cow_shares += 1;
+    }
+
+    pub fn cow_shares(&self) -> u64 {
+        self.cow_shares
+    }
+
+    /// The copies by site since [`Self::report_cow`].
+    pub fn take_cow_sites(&mut self) -> Option<std::collections::HashMap<u32, u64>> {
+        self.cow_sites.take()
     }
 
     /// A generator suspended with a `defer` armed: it owes a close, which

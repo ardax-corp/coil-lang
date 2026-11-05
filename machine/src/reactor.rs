@@ -524,11 +524,6 @@ fn with_owned_local_worker<R>(reactor: &Reactor, f: impl FnOnce(&Worker<Job>) ->
     })
 }
 
-#[cfg(test)]
-fn help_vm_pool_len() -> usize {
-    HELP_VMS.with(|slot| slot.borrow().len())
-}
-
 fn worker_loop(reactor: Arc<Reactor>) {
     let local = Worker::new_fifo();
     reactor.register_stealer(local.stealer());
@@ -905,6 +900,26 @@ mod tests {
         })
     }
 
+    /// Native code whose one body, at PC 0, returns `imm`.
+    fn const_code(imm: i32) -> Option<Arc<crate::native::NativeCode>> {
+        unsafe extern "C" fn returns_data(ctx: *mut crate::native::NativeCtx, _: *const u64) -> u64 {
+            // SAFETY: the context of this call.
+            unsafe { (*ctx).entry_data as u64 }
+        }
+        let entry = crate::native::NativeEntry {
+            pc: 0,
+            arity: 0,
+            suspends: false,
+            reads: 0,
+            ret_words: 1,
+            generator: false,
+            cleanup: false,
+            entry: returns_data,
+            data: imm as usize,
+        };
+        Some(Arc::new(crate::native::NativeCode::new(2, vec![entry], Vec::new()).with_complete(true)))
+    }
+
     fn submit_const_job(reactor: &Arc<Reactor>, imm: i32) -> Arc<JoinState> {
         let state = Arc::new(JoinState::new());
         let job = Job {
@@ -926,7 +941,7 @@ mod tests {
             struct_layouts: Arc::default(),
             test: None,
             statics: None,
-            native: None,
+            native: const_code(imm),
         };
         reactor.submit(job);
         state
@@ -939,7 +954,7 @@ mod tests {
     }
 
     fn test_ctx(reactor: &Arc<Reactor>, imm: i32) -> crate::thread::ThreadSpawnContext {
-        program_ctx(reactor, const_return_program(imm))
+        crate::thread::ThreadSpawnContext { native: const_code(imm), ..program_ctx(reactor, const_return_program(imm)) }
     }
 
     fn program_ctx(
@@ -984,7 +999,7 @@ mod tests {
             passed: true,
             reason: None,
             hits: None,
-            steps: 1,
+            steps: 0,
             timed_out: false,
         };
         assert_eq!(pooled.wait(), expect);
@@ -995,36 +1010,6 @@ mod tests {
             ..case
         };
         assert!(!reactor.run_test_here(test_ctx(&reactor, 5), strict, Arc::default()).passed);
-        reactor.shutdown();
-    }
-
-    /// A case that never returns fails once its step budget runs out, and
-    /// the worker VM runs the next job without a budget.
-    #[test]
-    fn test_jobs_time_out_on_step_budget() {
-        let reactor = Reactor::new(1);
-        let spin = Arc::new(ThreadProgram {
-            code: Arc::new(vec![Byte::new(Instruction::JMP).with_value_u32(0)]),
-            ..(*const_return_program(0)).clone()
-        });
-        let case = TestCase {
-            entry: 0,
-            init_ip: None,
-            expect_ok_result: false,
-            coverage: false,
-            probes: 0,
-            step_budget: Some(50),
-        };
-        let report = reactor.run_test_here(program_ctx(&reactor, spin), case, Arc::default());
-        assert!(!report.passed);
-        assert!(report.timed_out);
-        assert_eq!(report.steps, 50);
-        let unlimited = TestCase {
-            step_budget: None,
-            ..case
-        };
-        let next = reactor.run_test_here(test_ctx(&reactor, 2), unlimited, Arc::default());
-        assert!(next.passed && !next.timed_out);
         reactor.shutdown();
     }
 
@@ -1051,27 +1036,10 @@ mod tests {
             probes: 0,
             step_budget: None,
         };
-        assert!(reactor.run_test_here(program_ctx(&reactor, other), case, Arc::default()).passed);
+        let ctx = crate::thread::ThreadSpawnContext { native: const_code(1), ..program_ctx(&reactor, other) };
+        assert!(reactor.run_test_here(ctx, case, Arc::default()).passed);
         let after = crate::collect::swap_static_word_kinds(outer);
         assert_eq!(*after, *mine);
-        reactor.shutdown();
-    }
-
-    /// With coverage on, both instructions of `CONST; RETURN` are counted once.
-    #[cfg(feature = "coverage")]
-    #[test]
-    fn test_jobs_count_executed_instructions() {
-        let reactor = Reactor::new(1);
-        let case = TestCase {
-            entry: 0,
-            init_ip: None,
-            expect_ok_result: false,
-            coverage: true,
-            probes: 0,
-            step_budget: None,
-        };
-        let report = reactor.run_test_here(test_ctx(&reactor, 1), case, Arc::default());
-        assert_eq!(report.hits.as_deref(), Some(&[1, 1][..]));
         reactor.shutdown();
     }
 
@@ -1273,65 +1241,5 @@ mod tests {
         reactor.help_once();
         reactor.help_once();
         assert_eq!(reactor.inflight(), 0);
-    }
-
-    #[test]
-    fn ensure_operand_capacity_grows_but_not_shrinks() {
-        let mut vm = Machine::<WORKER_STACK_SLOTS>::with_operand_capacity(64);
-        assert_eq!(vm.operand_stack_capacity(), 64);
-
-        ensure_operand_capacity(&mut vm, 512);
-        assert_eq!(vm.operand_stack_capacity(), 512);
-
-        // Smaller request must leave the larger stack in place.
-        ensure_operand_capacity(&mut vm, 128);
-        assert_eq!(vm.operand_stack_capacity(), 512);
-    }
-
-    #[test]
-    fn machine_for_program_honors_operand_stack_slots() {
-        let prog = Arc::new(ThreadProgram {
-            code: Arc::new(vec![
-                Byte::new(Instruction::CONST).with_value_u32(7),
-                Byte::new(Instruction::RETURN),
-            ]),
-            constants: Arc::new(Vec::new()),
-            strings: Arc::new(Vec::new()),
-            static_slot_count: 0,
-            debug: ProgramDebug::default(),
-            operand_stack_slots: 1024,
-            stack_maps: Vec::new(),
-            precise_frames: Arc::default(),
-            class_word_kinds: Arc::default(),
-            static_word_kinds: Arc::default(),
-        });
-        let vm = machine_for_program(&prog);
-        assert_eq!(vm.operand_stack_capacity(), 1024);
-    }
-
-    #[test]
-    fn tls_help_vm_pool_reuses_and_nests() {
-        HELP_VMS.with(|slot| slot.borrow_mut().clear());
-        let prog = const_return_program(1);
-        with_help_vm(&prog, |_| {});
-        assert_eq!(help_vm_pool_len(), 1);
-        let first = HELP_VMS.with(|slot| {
-            slot.borrow().last().map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
-        });
-        with_help_vm(&prog, |_| {});
-        let second = HELP_VMS.with(|slot| {
-            slot.borrow().last().map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
-        });
-        assert_eq!(first, second, "idle helper must be reused");
-
-        with_help_vm(&prog, |_| {
-            with_help_vm(&prog, |_| {});
-        });
-        assert_eq!(
-            help_vm_pool_len(),
-            1,
-            "nested join-help must not keep every nest depth idle"
-        );
-        HELP_VMS.with(|slot| slot.borrow_mut().clear());
     }
 }

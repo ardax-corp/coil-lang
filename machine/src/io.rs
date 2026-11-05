@@ -2417,15 +2417,14 @@ mod tests {
 
     #[test]
     fn stream_close_cancels_reactor_waiters() {
-        let mut vm = crate::Machine::<64>::default();
-        let io = std::sync::Arc::clone(vm.io_reactor());
+        let io = crate::io_reactor::IoReactor::new();
         let (r, w) = tcp_connected_pair();
         let wait = WaitHandle::from_tcp(&r);
         let mut heap = Heap::default();
         let stream = alloc_stream(&mut heap, NativeHandle::Tcp(r), StreamKind::Tcp).unwrap();
         let tok = io.register_wait(wait, Interest::Readable);
         assert!(io.has_wait(tok));
-        let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+        let _guard = crate::thread::HostStateGuard::enter_io(std::sync::Arc::clone(&io));
         stream_close(&mut heap, stream).unwrap();
         assert!(!io.has_wait(tok));
         drop(w);
@@ -2433,11 +2432,10 @@ mod tests {
 
     #[test]
     fn io_drive_with_host_state_counts_ready_waiters() {
-        let mut vm = crate::Machine::<64>::default();
-        let io = std::sync::Arc::clone(vm.io_reactor());
+        let io = crate::io_reactor::IoReactor::new();
         let (r, mut w) = tcp_connected_pair();
         let tok = io.register_wait(WaitHandle::from_tcp(&r), Interest::Readable);
-        let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+        let _guard = crate::thread::HostStateGuard::enter_io(std::sync::Arc::clone(&io));
         let mut heap = Heap::default();
         assert_eq!(io_drive(&mut heap).as_int(), 0);
         w.write_all(b"q").expect("write");
@@ -2465,11 +2463,10 @@ mod tests {
 
     #[test]
     fn io_wait_ready_blocks_until_waiter_ready() {
-        let mut vm = crate::Machine::<64>::default();
-        let io = std::sync::Arc::clone(vm.io_reactor());
+        let io = crate::io_reactor::IoReactor::new();
         let (r, mut w) = tcp_connected_pair();
         let tok = io.register_wait(WaitHandle::from_tcp(&r), Interest::Readable);
-        let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+        let _guard = crate::thread::HostStateGuard::enter_io(std::sync::Arc::clone(&io));
         let mut heap = Heap::default();
         // Make readable before wait so we don't hang the unit test.
         w.write_all(b"q").expect("write");

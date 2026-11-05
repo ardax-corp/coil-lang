@@ -432,8 +432,3 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
 /// Where a program's output goes when it is captured.
 pub(crate) type OutputSink = Box<dyn std::io::Write + Send>;
 
-/// `COIL_COW_EAGER=1` (measuring only): every copy-on-write share copies.
-pub(crate) fn cow_eager() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_COW_EAGER").is_some())
-}

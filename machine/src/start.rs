@@ -53,10 +53,14 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
         thread_program: Some(Arc::clone(&program)),
         shared_print,
     };
+    if std::env::var_os("COIL_COW_REPORT").is_some() {
+        rt.heap.get_mut().report_cow();
+    }
     let mut driver = Driver::new(&mut rt, driver_program);
     let guard = crate::thread::HostStateGuard::enter_driver(&mut driver);
     driver.run_from(0);
     driver.run_remaining_finalizers();
+    driver.print_cow_report();
     drop(guard);
     let panicked = driver.panicked();
     drop(driver);

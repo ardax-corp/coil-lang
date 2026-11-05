@@ -1405,6 +1405,22 @@ pub unsafe extern "C" fn coil_native_collect(ctx: *mut NativeCtx) {
     unsafe { collect(machine, ctx) };
 }
 
+/// `--cow-report`: the copies `ctx`'s heap had made, when it counts them.
+pub fn cow_report_mark(ctx: *mut NativeCtx) -> Option<u64> {
+    // SAFETY: the running call's context.
+    let heap = unsafe { heap(ctx) }?;
+    heap.cow_report_on().then(|| heap.cow_copies())
+}
+
+/// `--cow-report`: the `Cow` at `site` ran; `mark` is what
+/// [`cow_report_mark`] said before it.
+pub fn cow_report_note(ctx: *mut NativeCtx, mark: u64, site: u32) {
+    // SAFETY: the running call's context.
+    if let Some(heap) = unsafe { heap(ctx) } {
+        heap.cow_report_note(mark, site);
+    }
+}
+
 /// `Cow` without a field: share `word` (`unique == 0`) or return a unique
 /// copy of it when it is shared (`unique != 0`), as the VM's `Cow` does.
 ///
@@ -1412,15 +1428,14 @@ pub unsafe extern "C" fn coil_native_collect(ctx: *mut NativeCtx) {
 /// `ctx` is the call's [`NativeCtx`]; `word` is a heap word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique: u64) -> u64 {
-    if crate::runtime::cow_eager() {
-        return unsafe { bail(ctx) };
-    }
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
     };
     let v = common::Value::from(word);
     if unique == 0 {
-        heap.cow_share(v);
+        if heap.cow_share(v) {
+            heap.note_cow_share();
+        }
         return word;
     }
     match heap.cow_unique(v) {
@@ -1440,9 +1455,6 @@ pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique:
 /// `ctx` is the call's [`NativeCtx`]; `obj` is a heap word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, field: u64) -> u64 {
-    if crate::runtime::cow_eager() {
-        return unsafe { bail(ctx) };
-    }
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
     };

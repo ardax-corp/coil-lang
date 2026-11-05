@@ -639,6 +639,37 @@ impl<'a> Driver<'a> {
         crate::locate::Locator { debug: &self.program.debug, code_len: self.program.code.len(), base_dir: self.program.base_dir.as_deref() }
     }
 
+    /// `--cow-report`: the copies copy-on-write made, by source line, most
+    /// first, on stderr.
+    pub(crate) fn print_cow_report(&mut self) {
+        let Some(sites) = self.rt.heap.get_mut().take_cow_sites() else { return };
+        let code = Arc::clone(&self.program.native);
+        let locator = self.locator();
+        let mut by_line: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for (s, n) in sites {
+            let at = code.site(s).and_then(|site| locator.native_site_location(site)).unwrap_or_else(|| format!("site {s}"));
+            // The report is by line.
+            let at = at.rsplit_once(':').filter(|(line, _)| line.contains(':')).map_or(at.clone(), |(line, _)| line.to_string());
+            *by_line.entry(at).or_insert(0) += n;
+        }
+        let mut rows: Vec<(String, u64)> = by_line.into_iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let total: u64 = rows.iter().map(|r| r.1).sum();
+        let heap = self.rt.heap.get();
+        eprintln!(
+            "cow-report: {total} copies for {} shares ({} objects copied; each share is a copy a copy-on-assign design makes)",
+            heap.cow_shares(),
+            heap.cow_copies()
+        );
+        // A line that copies over and over (a write in a loop to a value
+        // something else shares) is worth a borrow or a `Ref<T>`.
+        const HOT: u64 = 100;
+        for (at, n) in &rows {
+            let hint = if *n >= HOT { "  <- copied repeatedly: borrow with `let x = mut …` or share through a `Ref<T>`" } else { "" };
+            eprintln!("  {n:>10}  {at}{hint}");
+        }
+    }
+
     /// `FreeEarly` of `v`: the `drop`s it owes run first. `false` when one
     /// panicked.
     fn free_early(&mut self, v: Value, deep: bool) -> bool {

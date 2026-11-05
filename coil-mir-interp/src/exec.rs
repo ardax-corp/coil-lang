@@ -900,11 +900,16 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             }
             MirInst::Cow { dest, src, unique, field } => {
                 let s = get!(*src);
+                let mark = rt::cow_report_mark(ctx);
                 let w = match field {
                     Some(i) => rt::coil_native_cow_field(ctx, s, u64::from(*i)),
                     None => rt::coil_native_cow(ctx, s, u64::from(*unique)),
                 };
                 check!();
+                if let Some(mark) = mark {
+                    let top = (&(*act).frames).last().expect("a running frame");
+                    rt::cow_report_note(ctx, mark, body.site_at(top.block, top.ip));
+                }
                 set_word(f, regs, *dest, w);
             }
             // `promote_fields` does not run on a capture; `refusal` says so.

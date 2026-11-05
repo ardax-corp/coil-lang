@@ -709,6 +709,42 @@ pub(crate) struct HostStateGuard {
 }
 
 impl HostStateGuard {
+    /// Bind only `io`, for a test of the IO natives.
+    #[cfg(test)]
+    pub(crate) fn enter_io(io: Arc<crate::io_reactor::IoReactor>) -> Self {
+        unsafe fn no_call(_: *mut (), _: u32, _: &[Value]) -> Value {
+            Value::default()
+        }
+        unsafe fn no_steal(_: *mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
+            Err(ThreadErrorTag::Other)
+        }
+        unsafe fn no_end(_: *mut (), _: Value) {}
+        unsafe fn no_context(_: *mut ()) -> Option<ThreadSpawnContext> {
+            None
+        }
+        unsafe fn no_statics(_: *mut ()) -> Arc<Vec<u64>> {
+            Arc::default()
+        }
+        unsafe fn no_gate(_: *mut ()) -> *const crate::ffi::DloadGate {
+            std::ptr::null()
+        }
+        let prev = HOST_STATE.with(|c| c.borrow_mut().take());
+        HOST_STATE.with(|c| {
+            *c.borrow_mut() = Some(MachineHostState {
+                raw: std::ptr::null_mut(),
+                call_function: no_call,
+                begin_shared_steal: no_steal,
+                end_shared_steal: no_end,
+                debugger_attached: false,
+                spawn_context: no_context,
+                static_words: no_statics,
+                dload_gate: no_gate,
+                io_reactor: Some(io),
+                cpu_reactor: None,
+            });
+        });
+        Self { prev }
+    }
 
     /// Bind the native driver `d`: host natives on this thread spawn,
     /// steal and call back through it.
@@ -2244,26 +2280,26 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn live_thread_registries_are_per_machine() {
-        let m1 = Machine::<WORKER_STACK_SLOTS>::default();
-        let m2 = Machine::<WORKER_STACK_SLOTS>::default();
+    fn live_thread_registries_are_per_runtime() {
+        let r1 = crate::runtime::Runtime::new();
+        let r2 = crate::runtime::Runtime::new();
         assert!(
-            !std::sync::Arc::ptr_eq(m1.live_threads(), m2.live_threads()),
-            "each Machine must own a distinct live-thread registry"
+            !std::sync::Arc::ptr_eq(&r1.live_threads, &r2.live_threads),
+            "each runtime must own a distinct live-thread registry"
         );
-        // Joining an empty registry must not touch another Machine's list.
+        // Joining an empty registry must not touch another runtime's list.
         let sentinel = Arc::new(JoinState::new());
-        register_live_thread(m2.live_threads(), Arc::clone(&sentinel));
-        join_undetached_threads(m1.live_threads());
+        register_live_thread(&r2.live_threads, Arc::clone(&sentinel));
+        join_undetached_threads(&r1.live_threads);
         assert_eq!(
-            m2.live_threads().lock().unwrap().len(),
+            r2.live_threads.lock().unwrap().len(),
             1,
-            "joining m1 must not drain m2's undetached spawns"
+            "joining r1 must not drain r2's undetached spawns"
         );
         // Avoid leaving a JoinState that never finishes: mark detached so a
         // later join skips waiting.
         sentinel.detached.store(true, Ordering::SeqCst);
-        join_undetached_threads(m2.live_threads());
+        join_undetached_threads(&r2.live_threads);
     }
 
     #[test]
