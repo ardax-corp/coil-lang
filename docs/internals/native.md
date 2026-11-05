@@ -38,8 +38,9 @@ Module setup is a function, `__module_setup`
 (`compiler/src/codegen/module_setup.rs`): the stores of the statics
 computed at run time, each `extern` library's load and declarations
 (`FfiLoad` / `DeclareFFI`, a failure panicking with the error's message)
-and the finalizer registry (`gc_register_finalizer` per class with a
-`drop`). Codegen records the steps (`SetupStep`) as it emits them and
+but not the finalizer registry (`gc_register_finalizer` per class with a
+`drop`): that is `__finalizer_setup`, the prologue's first call, since a
+collection during any initializer must find the `drop` of what it made. Codegen records the steps (`SetupStep`) as it emits them and
 builds the function's MIR from them, so the register tiers emit it and
 native code compiles it like any body. The setup region the prologue
 jumps to is `CALL __module_setup; POP; JMP main`, after the calls of the

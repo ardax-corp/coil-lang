@@ -1,6 +1,7 @@
 //! Module setup as a function of its own (`__module_setup`): the static
-//! initializers' stores, each `extern` library's load and declarations,
-//! and the finalizer registry. The prologue calls it before `main`
+//! initializers' stores and each `extern` library's load and declarations.
+//! The finalizer registry is one more (`__finalizer_setup`), called first of
+//! all. The prologue calls them before `main`
 //! (`CALL __module_setup; POP; JMP main`), so it is a body like any other:
 //! the register tiers emit it from its MIR and native code compiles it
 //! (`docs/internals/native.md`, "Module setup").
@@ -16,6 +17,9 @@ use crate::mir::{MirAllocKind, MirBuilder, MirConst, MirFfiOp, MirFunc, MirGcKin
 
 /// The setup function's name.
 pub(crate) const MODULE_SETUP_FN: &str = "__module_setup";
+
+/// The finalizer registry's function name.
+const FINALIZER_SETUP_FN: &str = "__finalizer_setup";
 
 /// One step of module setup, in the order its ops run.
 pub(crate) enum SetupStep {
@@ -60,29 +64,19 @@ impl Compiler {
         }
         // Statics run first, then the `extern` setup, as their ops do.
         setup.sort_by_key(|s| !matches!(s, SetupStep::Static { .. }));
-        if !body.is_empty() || !ffi.is_empty() || !finalizers.is_empty() {
+        if !body.is_empty() || !ffi.is_empty() {
             let name = MODULE_SETUP_FN.to_string();
             let (offset, label) = self.bind_function_entry(name.clone());
             let start = self.bytecode.len();
             self.bytecode.append(&mut body);
             self.bytecode.append(&mut ffi);
-            for &(native, type_id, drop) in &finalizers {
-                self.bytecode
-                    .push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
-                self.bytecode
-                    .push(Byte::new(Instruction::CONST).with_value_u32(type_id));
-                self.bytecode
-                    .emit_entry(crate::il::EntryKind::CodePtr, 0, drop);
-                self.bytecode.push_host_invoke(2);
-                self.bytecode.push_pop();
-            }
             self.bytecode
                 .push(Byte::new(Instruction::CONST).with_value_u32(0));
             self.bytecode.push_return();
             let end = self.bytecode.len();
             self.record_fn_span(name.clone(), start, end);
             self.bytecode.record_func_with_sp(name, Some(label), start, end, 0);
-            match self.module_setup_mir(&setup, &finalizers) {
+            match self.module_setup_mir(&setup) {
                 Ok(mut func) => {
                     func.shrink_to_fit();
                     self.bytecode.set_last_func_hir_mir(func);
@@ -92,12 +86,68 @@ impl Compiler {
             region.push(Self::packed_entry_byte_ret(crate::il::EntryKind::Call, 0, offset as u32, 1));
             region.push_pop();
         }
+        // The registry runs before every initializer, the prologue's included:
+        // a collection while one runs must find the `drop` of what it made.
+        if !finalizers.is_empty() {
+            let offset = self.emit_finalizer_setup(&finalizers);
+            let mut first = CodeBuf::new();
+            first.push(Self::packed_entry_byte_ret(crate::il::EntryKind::Call, 0, offset as u32, 1));
+            first.push_pop();
+            first.append(&mut region);
+            region = first;
+        }
         if region.is_empty() {
             return None;
         }
         let n = region.len();
         self.bytecode.splice_buf_at(insert_at, region);
         Some(n)
+    }
+
+    /// Emit `__finalizer_setup`, the registry of `finalizers`; its entry.
+    fn emit_finalizer_setup(&mut self, finalizers: &[(usize, u32, crate::il::Label)]) -> usize {
+        let name = FINALIZER_SETUP_FN.to_string();
+        let (offset, label) = self.bind_function_entry(name.clone());
+        let start = self.bytecode.len();
+        for &(native, type_id, drop) in finalizers {
+            self.bytecode
+                .push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
+            self.bytecode
+                .push(Byte::new(Instruction::CONST).with_value_u32(type_id));
+            self.bytecode
+                .emit_entry(crate::il::EntryKind::CodePtr, 0, drop);
+            self.bytecode.push_host_invoke(2);
+            self.bytecode.push_pop();
+        }
+        self.bytecode
+            .push(Byte::new(Instruction::CONST).with_value_u32(0));
+        self.bytecode.push_return();
+        let end = self.bytecode.len();
+        self.record_fn_span(name.clone(), start, end);
+        self.bytecode.record_func_with_sp(name, Some(label), start, end, 0);
+        match Self::finalizer_setup_mir(finalizers) {
+            Ok(mut func) => {
+                func.shrink_to_fit();
+                self.bytecode.set_last_func_hir_mir(func);
+            }
+            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+        }
+        offset
+    }
+
+    /// `__finalizer_setup`'s MIR.
+    fn finalizer_setup_mir(finalizers: &[(usize, u32, crate::il::Label)]) -> Result<MirFunc, String> {
+        let mir = |e: crate::mir::MirError| e.to_string();
+        let mut b = MirBuilder::new(FINALIZER_SETUP_FN);
+        b.allow_host_edges = true;
+        for &(native, type_id, drop) in finalizers {
+            let type_id = b.ins_const(MirConst::I64(i64::from(type_id))).map_err(mir)?;
+            let drop = b.ins_code_ptr(drop).map_err(mir)?;
+            b.ins_host_invoke(native as u16, vec![type_id, drop]).map_err(mir)?;
+        }
+        let zero = b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        b.ret(Some(zero)).map_err(mir)?;
+        b.finish().map_err(mir)
     }
 
     /// Keep the initializer of static `fqn` in the prologue: its value is
@@ -137,7 +187,7 @@ impl Compiler {
 
     /// `__module_setup`'s MIR: each step as its ops run, an `extern`'s
     /// failed load or declaration panicking with the error's message.
-    fn module_setup_mir(&self, steps: &[SetupStep], finalizers: &[(usize, u32, crate::il::Label)]) -> Result<MirFunc, String> {
+    fn module_setup_mir(&self, steps: &[SetupStep]) -> Result<MirFunc, String> {
         let mir = |e: crate::mir::MirError| e.to_string();
         let mut b = MirBuilder::new(MODULE_SETUP_FN);
         b.allow_host_edges = true;
@@ -178,11 +228,6 @@ impl Compiler {
                     b.ins_store_static(*slot, id).map_err(mir)?;
                 }
             }
-        }
-        for &(native, type_id, drop) in finalizers {
-            let type_id = b.ins_const(MirConst::I64(i64::from(type_id))).map_err(mir)?;
-            let drop = b.ins_code_ptr(drop).map_err(mir)?;
-            b.ins_host_invoke(native as u16, vec![type_id, drop]).map_err(mir)?;
         }
         let zero = b.ins_const(MirConst::I64(0)).map_err(mir)?;
         b.ret(Some(zero)).map_err(mir)?;
