@@ -1,0 +1,8 @@
+// A macro runs on the MIR interpreter under the moving collector: what it
+// holds has to survive every collection (GC stress runs one per allocation).
+use tests::assert;
+use macro_keeps_objects::churn;
+
+test("a macro's objects outlive collections") {
+    assert!(churn!(0) == 2001000);
+}
