@@ -1,11 +1,13 @@
 # Native code (`feature/native`)
 
-Coil can run some functions as machine code made by
-[Cranelift](https://cranelift.dev) from their MIR. The VM stays: it runs
-comptime and macros, `coil debug`, coverage, wasm, and every body the native
-backend does not compile. The plan (AOT `coil package`, heap and task
-tiers) is in the project's native-compilation assessment; this page
-describes what is implemented.
+Coil can run functions as machine code made by
+[Cranelift](https://cranelift.dev) from their MIR. A program whose bodies
+all compile runs on the native driver with no interpreter, and an AOT
+executable (`coil package`) links no bytecode VM at all. The VM stays for
+comptime and macros, `coil debug`, coverage, wasm, `--no-aot` packages,
+and `coil --jit` runs of a program with a body native code refuses. The
+plans (native compilation, then native without the VM) are in the
+project's plan docs; this page describes what is implemented.
 
 ## Using it
 
@@ -604,6 +606,13 @@ counters (`NativeTable`).
 | float `!=` | true when unordered (Rust `!=`), `==` / `<` ordered |
 | `float as int` | `fcvt_to_sint_sat` (Rust `as`: saturating, NaN is 0) |
 
+One rule differs on purpose: a heap value in a native frame is live until
+its last use (Cranelift's liveness), where a VM frame holds a local's value
+until the local is rebound or the function returns. A weak reference or a
+finalizer can therefore see an object die earlier under native code. A
+local holding a `gc::root` handle is the exception: `keep_roots` keeps it
+alive until its function returns, as on the VM.
+
 ## AOT `coil package`
 
 `coil package` links a native executable by default (`--no-aot` or
@@ -639,6 +648,25 @@ A body native code refuses is an error naming it and why (`--no-aot`
 packages the `coil-embed` runner, whose VM runs it). If the object or the
 link fails (no `cc`, no `libcoil_rt.a`, Windows) the package warns and
 falls back to the runner.
+
+### Size and speed
+
+Measured on feature/native 544b4ba (2026-11-05, x86_64 Linux, release
+`coil` and `coil-rt`). A packaged hello world is 1.58 MB with
+`--strip-symbols all` (1.85 MB by default) and holds no `machine::vm`
+symbol; the `--no-aot` runner of the same program is 2.07 MB, as was the
+AOT executable before the interpreter left it (8764f32). What remains is
+the runtime the host-native table reaches (heap, driver, host natives,
+FFI, threads, reactor, archive reader): `--gc-sections` cannot drop a
+native the table names, so a smaller executable needs a per-program
+native table.
+
+Across the 18 cross-language benches, an AOT executable takes 0.37x the
+wall time of the `--no-aot` runner (geomean, best of 5) and 2.7x Rust's
+(Go: 1.4-1.5x). Stack maps and inline allocation left the AOT geomean
+flat on a same-host A/B against 8764f32 (most benches within ±5%; nsieve
+-14%, match_enum -12%; binary_trees -5% instructions but +7% wall time,
+grid_map +4% instructions from spills in its hot loop).
 
 ### Static `extern` libraries
 
@@ -679,5 +707,8 @@ the runner package.
 | AOT object | `coil_native::aot` (`coil-native/src/lib.rs`), `src/package_app.rs` `link_aot_executable` |
 | AOT runtime | `coil-rt/` (staticlib with `main`), `machine::native::install_aot` |
 | Module setup | `compiler/src/codegen/module_setup.rs` (`__module_setup`) |
+| Native driver, machine-less start | `machine/src/driver.rs`, `machine/src/start.rs` (`run_natively`), `machine/src/worker.rs` |
+| Stack maps, frame walk | `coil-native` (`stack_maps`, `define_trampolines`), `machine::native` (`register_stack_maps`, `install_aot_stack_maps`, `for_each_frame_root`) |
+| Inline allocation | `machine/src/memory/inline.rs` (`inline_object`, `layout_fingerprint`), `HeapCounts` |
 | Static `extern` libraries | `--link-static` in `src/cli.rs`, `src/package_app.rs` (`LinkInputs`), `coil-native` `static_symbol_table`, `machine/src/ffi/static_libs.rs` |
 | Tests | `tests/native_jit_cli.rs` (JIT output equals VM output), `tests/package_cli.rs` (AOT package equals runner; `aot_package_links_extern_libraries_statically`) |
