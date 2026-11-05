@@ -121,6 +121,19 @@ fn unbounded_recursion_overflows_at_the_vm_location() {
 }
 
 #[test]
+fn unbounded_recursion_through_a_function_value_panics() {
+    // Each call nests a native entry on the thread's stack: past the stack's
+    // end it must panic as the VM does, not run off it.
+    let src = "fn apply(fn(int) -> int f, int n) -> int { return f(n) + 1; }\n\
+         fn rec(int n) -> int { return apply(rec, n + 1); }\n\
+         fn main() { let _ = rec(0); }\n";
+    let out = run("closure_overflow", src, true);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("stack overflow: recursion exceeds"), "stderr: {stderr}");
+}
+
+#[test]
 fn floats_and_bools_match_the_vm() {
     let src = format!(
         "{HEADER}#[inline(never)]\nfn f(float a, float b) -> int {{\n  let r = 0;\n  if a != b {{ r = r + 1; }}\n  if a == b {{ r = r + 2; }}\n  if a < b {{ r = r + 4; }}\n  return r * 1000 + ((a / b) as int) % 1000;\n}}\n\
