@@ -188,7 +188,7 @@ pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
     let words = |body: Vec<common::Byte>| body.iter().map(|b| u64::from(*b.bytecode() as u8) | (u64::from(b.operand_u32()) << 32)).collect::<Vec<_>>();
     match inst {
         super::MirInst::ByteScan { inclusive, backward, streams, scalars, expr, .. } => {
-            let body = super::emit::byte_scan_body(expr, streams, scalars, &regs)?;
+            let body = super::vector_body::byte_scan_body(expr, streams, scalars, &regs)?;
             let mut flags = body.len() as u8;
             if *inclusive {
                 flags |= common::simd::SCAN_INCLUSIVE;
@@ -200,7 +200,7 @@ pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
         }
         super::MirInst::VecLoop { pos, kind, .. } => {
             let p = if pos.is_some() { 1 } else { 0 };
-            let body = super::emit::vec_loop_body(kind, &regs, 0, p)?;
+            let body = super::vector_body::vec_loop_body(kind, &regs, 0, p)?;
             let start = match kind {
                 VecLoopKind::Reduce { init, .. } | VecLoopKind::Push { out: init, .. } => Some(*init),
                 VecLoopKind::Store { .. } => None,

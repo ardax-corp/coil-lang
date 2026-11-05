@@ -1326,7 +1326,6 @@ impl MirBuilder {
         if self.func.has_gc_edge() {
             super::gc::fill_live_roots(&mut self.func);
         }
-        super::deopt::fill_deopt_maps(&mut self.func);
         self.func.verify().map_err(MirError::msg)?;
         Ok(self.func)
     }

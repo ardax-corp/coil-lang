@@ -1038,3 +1038,24 @@ impl MirFunc {
         Ok(())
     }
 }
+
+/// `inst` is a planned tail call ([`MirFunc::tail_targets`]) whose result
+/// `block` returns. Any other call keeps the caller's frame, which a failed
+/// `requires` in the callee blames and a backtrace names.
+pub fn is_tail_call_inst(func: &MirFunc, block: &MirBlock, inst: &MirInst) -> bool {
+    let MirInst::Call { dest, dest_hi, target, .. } = inst else {
+        return false;
+    };
+    if !func.tail_targets.contains(target) {
+        return false;
+    }
+    match block.term {
+        Some(Terminator::Return { lo: Some(v), hi }) if v == *dest && hi == *dest_hi => {
+            matches!(
+                block.insts.last(),
+                Some(MirInst::Call { dest: d, dest_hi: h, .. }) if d == dest && h == dest_hi
+            )
+        }
+        _ => false,
+    }
+}

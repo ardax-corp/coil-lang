@@ -228,11 +228,6 @@ impl Compiler {
         &self.precise_frames
     }
 
-    /// I7 / C3 deopt resume drafts (empty when no specialized body).
-    pub fn deopt_map_drafts(&self) -> &[crate::mir::DraftDeoptMap] {
-        &self.deopt_map_drafts
-    }
-
     /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
     pub fn fn_debug_symbols(&self) -> Vec<FnDebugSym> {
         let mut syms: Vec<FnDebugSym> = self

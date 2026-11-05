@@ -651,8 +651,6 @@ pub struct Compiler {
     /// Cost budgets for typed inlining (COI-124).
     pub inline_cost: inline_cost::InlineCostOptions,
 
-    deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
-
     /// Why the last [`Self::try_lower_hir_function`] did not lower its body.
     hir_refusal: Option<&'static str>,
     /// MIR of the last body HIR lowered, waiting for its function record.
@@ -884,7 +882,6 @@ impl Default for Compiler {
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
             opt_options: crate::il::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
-            deopt_map_drafts: Vec::new(),
             hir_refusal: None,
             hir_module: None,
             hir_fns: HashMap::new(),

@@ -2497,10 +2497,6 @@ impl Pipeline {
         self.compiler_lazy().checker().class_word_kinds()
     }
 
-    pub fn deopt_map_drafts(&self) -> &[crate::mir::DraftDeoptMap] {
-        self.compiler_lazy().deopt_map_drafts()
-    }
-
     pub fn debug_locs(&self) -> &[common::DebugLoc] {
         self.compiler_lazy().debug_locs()
     }
