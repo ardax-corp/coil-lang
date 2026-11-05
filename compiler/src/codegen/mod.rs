@@ -172,14 +172,10 @@ fn strip_overload_key(name: &str) -> &str {
 
 /// `MakeFn` operand: `[7:0]=n_cap [15:8]=n_filled [23:16]=arity [24]=is_rest`.
                         ///
-/// `n_cap` and `n_filled` are packed into 8-bit fields (max 255). Callers with
-/// larger values must not reach here, partial-application arity is already
-/// capped at 32 for `filled_mask`.
+/// `n_cap` and `n_filled` are packed into 8-bit fields (max 255), and the
+/// mask drops the rest: a closure past that runs natively, where the operand
+/// means nothing, and its body on the VM is a `stub_for_vm` panic.
 fn make_fn_operand(n_cap: u32, n_filled: u32, arity: u32, is_rest: bool) -> u32 {
-    debug_assert!(
-        n_cap <= 0xFF && n_filled <= 0xFF,
-        "MakeFn n_cap/n_filled overflow 8-bit fields: n_cap={n_cap} n_filled={n_filled}"
-    );
     (n_cap & 0xFF) | ((n_filled & 0xFF) << 8) | (arity << 16) | if is_rest { 1 << 24 } else { 0 }
 }
 
