@@ -491,19 +491,19 @@ fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common:
 
 /// Hand `bodies` to the engine that runs them.
 fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::collections::HashMap<String, u32>) {
-    if interprets() {
-        let program = coil_mir_interp::prepare(bodies, pcs);
-        for (name, why) in &program.refused {
-            eprintln!("warning: `{name}` runs on the VM: {why}");
-        }
-        let complete = program.refused.is_empty();
-        // Its entries point into it for the rest of the process.
-        std::mem::forget(program.keep);
-        machine::native::install_for_next_run(program.entries, program.sites, complete);
+    if !interprets() {
+        #[cfg(not(target_family = "wasm"))]
+        install_native_bodies(&bodies, pcs);
         return;
     }
-    #[cfg(not(target_family = "wasm"))]
-    install_native_bodies(&bodies, pcs);
+    let program = coil_mir_interp::prepare(bodies, pcs);
+    for (name, why) in &program.refused {
+        eprintln!("warning: `{name}` runs on the VM: {why}");
+    }
+    let complete = program.refused.is_empty();
+    // Its entries point into it for the rest of the process.
+    std::mem::forget(program.keep);
+    machine::native::install_for_next_run(program.entries, program.sites, complete);
 }
 
 /// Install an archive's native MIR section for the coming run; a section

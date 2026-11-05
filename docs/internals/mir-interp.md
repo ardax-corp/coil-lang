@@ -87,7 +87,7 @@ Most ops map one to one onto Cranelift's lowering. These needed a decision.
 | `Call` of a `drop` | Claims the finalizer first, as Cranelift | Settled |
 | `GcBarrier`, `KeepAlive`, `ClearWord` | No code; they matter only through the root maps | Settled |
 | `HomeLoad`, `HomeStore` | Homes follow the registers; a pad reads its frame's copy, which a runtime record roots | Settled |
-| `Yield`, `ResumeCoro` | `coil_native_yield` and fibers, as native code | Open (wasm) |
+| `Yield`, `ResumeCoro` | `coil_native_yield`: on a fiber as native code does, or parked on the heap where there are no fibers (below) | Settled |
 | `CodePtr`, `Alloc` of `Fn` / `PolyFn` / `Coro` | The word is the body's bytecode entry PC | Open (no bytecode) |
 | `Deopt` | No code; only tests build one. The debugger stops at any op, so it needs none | Settled |
 | `Probe` | Counts through `coil_native_probe`, as Cranelift's code does | Settled |
@@ -112,11 +112,11 @@ no machine code, and the VM goes. It lands here rather than on a later
 |---|---|
 | 1. MIR interpreter | Done: every corpus, every level, CI cells |
 | 2. Glue as MIR | Done (below) |
-| 3. Comptime and macros on the interpreter | Done, on a `Machine` that holds the runtime (below) |
+| 3. Comptime and macros on the interpreter | Done (below) |
 | 4. JIT by default | Done: `coil FILE`, `coil compile`, `coil run` and `coil test`; `--no-jit` and `--engine vm` keep the VM |
 | 5. Packaging without the VM | Done in coil: `coil-embed` is the JIT runner. Open: spool's `--vm` maps to it; AOT on macOS and Windows is untried |
 | 6. Debugger and coverage | Done (below) |
-| 7. wasm | Open: `Yield` detaches its frame, a task parks an activation; then comptime leaves `Machine<256>` |
+| 7. wasm | Done: the interpreter runs programs, tests and comptime in `coil.wasm`, generators and tasks park on the heap, and comptime runs on an `Isolate` (below) |
 | 8. Delete the VM | Bodies by index, not bytecode PC; archive major 7, MIR and data only |
 | 9. Start-up | After the rest: lazy compile on first call and a code cache |
 
@@ -171,24 +171,17 @@ and tables are stored as they are; step 5 will want to look at that.
   through the table, which holds the sandbox's stubs. This fails closed: a host
   that replaces a native needs no other step. FFI goes through `Runtime::ffi_load`
   and its gate on both engines.
-- **What the VM still runs.** A body the interpreter refuses (none in the corpus),
-  every wasm build until step 7, and everything under `COIL_NATIVE_DRIVER=0`.
-  `comptime::engine_calls` counts both, and `comptime/tests/macro_engine.rs` fails
-  on any fallback, from a fresh compile or from the disk cache.
-
-`COIL_NATIVE_DRIVER=0` is the A/B switch: compiling with and without it must give
-the same archive, apart from the folds below.
+- **Nothing else runs it.** Comptime has no second engine: a body the interpreter
+  refuses (none in the corpus) fails the call, and an `Isolate` holds no VM.
 
 **Folds at the limit.** Steps are counted on raw MIR, which has more of them than
 the VM's optimized bytecode: `N` iterations of a `while` take `N` back-edges there
 and `N - 1` once the loop is rotated. A call right at `SILENT_CALL_STEPS` used to fold and now stays a call,
 with E0138. The value is the same; five of the 365 examples changed this way.
 
-**`Machine<256>` stays until step 7.** The host's other work is already on the
-`Runtime`; what is left is only the type that holds it. wasm needs the VM until
-then, so swapping it now would mean two hosts. Step 7 ends with comptime on a
-holder that has no VM in it, and with the fallback to `call_function` gone, so
-step 8 deletes the VM with nothing in comptime depending on it.
+**`machine::Isolate`** (step 7) is what comptime holds: a `Runtime`, the program's
+tables and a call that opens a driver. So step 8 deletes the VM with nothing in
+comptime depending on it.
 
 **Step 4.** The VM stays runnable and tested: CI's `default`, `O0`, leak-smoke and
 GC stress cells name `--engine vm`, and a test that compares against the VM has to
@@ -238,6 +231,37 @@ stubs) only serves `--no-jit` and is ready to go in step 8.
 - The **VM-observable rules stay as the spec** for now (a local holds its object
   until rebound, about 1M frames of recursion, the panic format), so tests do not
   change. They are revisited after step 8.
+
+**Step 7.** wasm has no stacks to switch, so nothing can leave a frame on one. The
+interpreter's frames are already on the heap: a yield or a task's wait *parks* the
+activation instead.
+
+- A park rides the error path. The helper sets `ctx.park` and bails, `check!()`
+  gives `Flow::Trap`, and `unwind` sees the park and keeps the frames: `finish`
+  boxes the `Activation` and the call ends as `NativeOutcome::Parked`, a
+  `ParkedCall` whose `resume` goes on with a word (`RESUME_VALUE`), the op again
+  (`RESUME_RETRY`), a close or a cancel.
+- A generator keeps its `ParkedCall` in its `GenFiber`, and its root words in
+  `saved_stack`, so the collector sees it as it sees a fiber's. A task's waits on
+  the driver's `parked_tasks`, and `host_roots` visits them.
+- A wait inside a generator parks twice. The generator parks with `PARK_WAIT`, and
+  `GenStep::Waiting` makes the op that resumed it park with `PARK_BELOW`, up to
+  the task. The wake re-runs each resume op, with the wake in `pending_wake`, until
+  the wait takes it. Another resume of that generator meanwhile finds no wake and
+  is refused.
+- Closures run as interpreter frames (`rt::apply_value`), not through a nested
+  call, so a yield or a wait inside one parks like any other.
+- What cannot park: a host frame between the task and the wait, a native callback,
+  panics with "a task cannot wait inside a native callback here". A wait in a
+  `defer` pad runs the scheduler nested, and so does the root's wait.
+
+`machine::native::parks()` is true on wasm, and natively under `COIL_NO_FIBERS=1`
+with `--engine mir`, which is how a parking bug gets a native debugger. CI runs
+that as the `mir-parked` cell and in GC stress. Cranelift's code cannot park.
+
+`coil compile` on wasm stores every body in the MIR section
+(`coil_mir_interp::encode_section`), so a wasm `.ccoil` runs on the interpreter
+and on native code. `--no-jit` still runs the VM there until step 8.
 
 ## Open problems
 

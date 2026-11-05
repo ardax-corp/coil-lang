@@ -4,8 +4,9 @@ Coil can run functions as machine code made by
 [Cranelift](https://cranelift.dev) from their MIR. A program whose bodies
 all compile runs on the native driver with no interpreter, and an AOT
 executable (`coil package`) links no bytecode VM at all. Comptime and macros
-run on the MIR interpreter (`docs/internals/mir-interp.md`). The VM stays for
-`coil debug`, coverage, wasm, and runs of a program with a body native code refuses. The
+run on the MIR interpreter (`docs/internals/mir-interp.md`), as do `coil debug`,
+coverage on it and every wasm build. The VM stays for `--no-jit`, `--cow-report` and
+runs of a program with a body native code refuses. The
 plans (native compilation, then native without the VM) are in the
 project's plan docs; this page describes what is implemented.
 
@@ -19,9 +20,8 @@ COIL_NATIVE_STATS=2 coil prog.coil   # plus why each body stays on the VM
 ```
 
 Native code is the default where there is any: `coil FILE`, `coil compile` and
-`coil test` use it, and a wasm build stays on the VM. `--jit` still asks for it,
-and `--cow-report` and `coil test --coverage` run on the VM because only the VM
-serves them. At `-g1` a program that runs native code keeps its byte spans, so
+`coil test` use it, and a wasm build runs the MIR interpreter. `--jit` still asks
+for it, and `--cow-report` runs on the VM because only the VM serves it. At `-g1` a program that runs native code keeps its byte spans, so
 only `--no-jit` makes `-g1` smaller than `-g2`.
 
 The stats end with the run's dependence on the VM:
@@ -442,8 +442,8 @@ stack as before.
 - A task that never resumes (its scope torn down after a root panic)
   drops its fiber with `force_reset`: native frames have no unwind tables,
   so what they own leaks, as a VM coroutine dropped mid-way does.
-- wasm has no fibers: there, under a scheduler, only bodies that reach no
-  VM code run natively.
+- wasm has no fibers and no native code: the interpreter parks its frames on
+  the heap there (`docs/internals/mir-interp.md`, step 7).
 
 ### Generators
 

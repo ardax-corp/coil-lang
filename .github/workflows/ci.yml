@@ -507,7 +507,9 @@ jobs:
               # The same on the two MIR engines, whose roots are their own:
               # stack maps, and the interpreter's scan.
               $run --harness harness-bin/gc-stress/coil-test -- --engine native --wall-timeout 1200 $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS ;;
+              $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS
+              # And the frames parked on the heap, as on wasm.
+              COIL_NO_FIBERS=1 $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS ;;
             # Every corpus again with native code where the backend compiles
             # a body (`docs/internals/native.md`): it must pass as the VM does.
             # Each run also appends what it left on the VM to the
@@ -522,6 +524,9 @@ jobs:
             # And each level above it, on the MIR native code compiles: a
             # failure here and not in `mir` is a pass's.
             mir-opt) for level in 1 2 3 s g; do $run -- --engine mir -O $level $FLAGS; done ;;
+            # Generators and tasks parked on the heap instead of on fibers:
+            # what wasm runs, where a failure is harder to read.
+            mir-parked) COIL_NO_FIBERS=1 $run -- --engine mir $FLAGS ;;
           esac
 
       # What native runs still leave on the VM, and the interpreter symbols
@@ -577,7 +582,7 @@ jobs:
         mode: [release]
         # Native code runs in release only: a debug cell would test the
         # same Cranelift output at a fraction of the speed.
-        variant: [default, O0, leak-smoke, native, mir, mir-opt]
+        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked]
     env: *harness-env
     steps: *harness-steps
 
