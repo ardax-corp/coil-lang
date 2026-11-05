@@ -399,6 +399,9 @@ fn build_sandbox_natives() -> Vec<Arc<dyn NativeFn>> {
         .map(|(native, name)| {
             if native_allowed_at_compile_time(&name) {
                 native
+            } else if name == common::THREAD_SPAWN_SHARED_NATIVE {
+                // Only auto-par calls it, and a failed spawn is its way out.
+                machine::host_natives::refused_spawn_shared()
             } else if let Some(gated) = io_gate::gated(&name, native.clone()) {
                 gated
             } else {

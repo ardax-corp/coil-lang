@@ -311,28 +311,34 @@ fn push_simd_axpy_reduce(
     })));
 }
 
-fn push_thread_spawn_shared(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
-    use crate::thread;
+/// `thread_spawn_shared` running `spawn`.
+fn spawn_shared_native(spawn: impl Fn(&mut crate::Heap, &[Value]) -> Value + Send + Sync + 'static) -> Arc<dyn NativeFn> {
     let sig = FfiSignature::from_parts(
         common::THREAD_SPAWN_SHARED_NATIVE.to_string(),
         vec![FfiType::Int],
         FfiType::Int,
     )
     .expect("thread_spawn_shared signature");
+    Arc::new(HostClosureFn::new_with_arity_range(sig, 1, 1 + common::MAX_THREAD_SPAWN_ARGS, move |heap: &mut crate::Heap, args: &[Value]| {
+        Ok(Some(spawn(heap, args)))
+    }))
+}
+
+/// `thread_spawn_shared` where there are no threads to use: every spawn
+/// fails, and auto-par's fork runs its range on this thread, as it does at
+/// any failed spawn.
+pub fn refused_spawn_shared() -> Arc<dyn NativeFn> {
+    use crate::thread::{ErrorSet, ThreadErrorTag, as_result_value};
+    spawn_shared_native(|heap, _| as_result_value(heap, ErrorSet::Thread, Err(ThreadErrorTag::Other)))
+}
+
+fn push_thread_spawn_shared(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
     let id = out.len();
     register_id(common::THREAD_SPAWN_SHARED_NATIVE, id);
-    let closure = |heap: &mut crate::Heap, args: &[Value]| {
-        Ok(Some(thread::thread_spawn_shared(heap, args)))
-    };
-    out.push(Arc::new(HostClosureFn::new_with_arity_range(
-        sig,
-        1,
-        1 + common::MAX_THREAD_SPAWN_ARGS,
-        closure,
-    )));
+    out.push(spawn_shared_native(crate::thread::thread_spawn_shared));
 }
 
 fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
