@@ -308,6 +308,12 @@ fn jit_once(
     for &(name, ptr) in machine::native::helper_symbols() {
         jb.symbol(name, ptr);
     }
+    // One reservation: code reaches its read-only data by 32-bit offsets, and
+    // the default provider maps each section where the system puts it, which
+    // beside a process's big fiber stacks may be out of reach.
+    if let Ok(arena) = cranelift_jit::ArenaMemoryProvider::new_with_size(jit_reserve(bodies, &plan)) {
+        jb.memory_provider(Box::new(arena));
+    }
     let mut module = JITModule::new(jb);
 
     let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
@@ -339,6 +345,14 @@ fn jit_once(
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
     Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites }))
+}
+
+/// Address space to reserve for the code and data of `plan`'s bodies: far
+/// more than they take (it is committed as used), within a 32-bit offset.
+fn jit_reserve(bodies: &[NativeBody], plan: &Plan) -> usize {
+    const BYTES_PER_OP: usize = 4096;
+    let ops: usize = plan.compile.iter().map(|&i| bodies[i].mir.blocks.iter().map(|b| b.insts.len() + 1).sum::<usize>()).sum();
+    (ops.saturating_mul(BYTES_PER_OP)).clamp(64 << 20, 1 << 30)
 }
 
 // ---------------------------------------------------------------------------
