@@ -740,7 +740,10 @@ impl Pipeline {
     /// Feed a result-cache key the sources of `files` and every module they
     /// use, each with the macro output spliced into it.
     pub(crate) fn key_sources(&self, files: &[PathBuf], key: &mut crate::comptime_cache::Key) {
-        let closure = self.source_closure(files);
+        let mut closure = self.source_closure(files);
+        // Only a native compile loads the twins, and no result depends on
+        // them: the editor, which has none, must find what a build cached.
+        closure.retain(|f| *f != crate::macros::twins_module_path());
         key.u64(closure.len() as u64);
         for file in &closure {
             key.path(file);
