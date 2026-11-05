@@ -51,7 +51,7 @@ entry. Native code registers a finalizer through the machine
 (`HostOp::RegisterFinalizer` in `Machine::native_invoke`).
 
 An archive or package with native code keeps byte spans at `-g1`
-(`native_debug_level`): native code finds a panic's location by span.
+(`Pipeline::set_runs_mir`), and so does a direct run: native code finds a panic's location by span.
 
 `--jit` skips the build cache (it needs this compile's MIR).
 

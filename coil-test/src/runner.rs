@@ -964,6 +964,9 @@ pub(crate) fn compile_test_file(
 fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn Write + Send>) -> Pipeline {
     let mut pipeline = Pipeline::with_reporter(config.clone(), reporter);
     pipeline.set_opt_level(options.opt_level);
+    if options.engine.runs_mir() {
+        pipeline.set_runs_mir();
+    }
     if let Some(level) = options.debug_level {
         pipeline.set_debug_level(level);
     } else if options.coverage.is_some() {

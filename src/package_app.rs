@@ -49,7 +49,7 @@ fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Res
     // `set_debug` keeps them at every level.
     // Native code locates its panics by byte span: an AOT payload keeps the
     // spans with the lines.
-    let level = crate::native_debug_level(pipeline.debug_level(), compiler::native_mir::native_capture_active());
+    let level = pipeline.debug_level();
     program.set_debug(pipeline.program_debug_full(), level);
     rkyv::to_bytes::<Error>(&program)
         .map(|b| b.as_slice().to_vec())
@@ -556,6 +556,7 @@ pub fn cmd_package(
     // An AOT executable is linked from this compile's MIR.
     #[cfg(not(target_family = "wasm"))]
     if aot {
+        pipeline.set_runs_mir();
         compiler::native_mir::start_native_capture();
     }
     let archive_bytes = compile_program_archive_bytes(pipeline, filename);

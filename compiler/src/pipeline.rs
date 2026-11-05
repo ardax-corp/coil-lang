@@ -146,6 +146,8 @@ pub struct Pipeline {
     contracts: Option<crate::ContractLevel>,
     /// `-g0` / `-g1` / `-g2`; `None` derives it from the opt level.
     debug_level: Option<common::DebugLevel>,
+    /// [`Self::set_runs_mir`].
+    runs_mir: bool,
     /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
@@ -761,6 +763,7 @@ impl Pipeline {
             opt_level: crate::OptLevel::Standard,
             contracts: None,
             debug_level: None,
+            runs_mir: false,
             debugger_attached: false,
             collect_opt_stats: false,
             call_fold: true,
@@ -2416,12 +2419,25 @@ impl Pipeline {
         self.compiler_lazy().main_offset()
     }
 
-    /// `-g` level: the one set, else `-g1` at `-Os` and `-g2` otherwise.
+    /// `-g` level: the one set, else `-g1` at `-Os` and `-g2` otherwise. An
+    /// engine that runs MIR finds a panic's location by its byte span
+    /// (`Locator::native_site_location`), so there `-g1` keeps the spans
+    /// too; `-g0` stays bare.
     pub fn debug_level(&self) -> common::DebugLevel {
-        self.debug_level.unwrap_or(match self.opt_level {
+        let level = self.debug_level.unwrap_or(match self.opt_level {
             crate::OptLevel::Size => common::DebugLevel::Lines,
             _ => common::DebugLevel::Full,
-        })
+        });
+        match level {
+            common::DebugLevel::Lines if self.runs_mir => common::DebugLevel::Full,
+            level => level,
+        }
+    }
+
+    /// The program runs on an engine that runs MIR, or an archive carries
+    /// MIR for one: see [`Self::debug_level`].
+    pub fn set_runs_mir(&mut self) {
+        self.runs_mir = true;
     }
 
     pub fn set_debug_level(&mut self, level: common::DebugLevel) {
