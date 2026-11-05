@@ -1357,6 +1357,11 @@ struct Lower<'a> {
     /// Words of pairs that may carry an object ([`pair_words`]): rooted
     /// ambiguously.
     pair_words: Vec<ValueId>,
+    /// The heap words the op being lowered hands the runtime. The runtime
+    /// holds its own copy of them, and a word past its last use is in no
+    /// stack map: rooted ambiguously, so the object stays where it is. A
+    /// direct call hands its words to a frame that roots them.
+    op_words: Vec<ValueId>,
     defer: FuncRef,
     claim: FuncRef,
     /// This body's cleanup pad.
@@ -1509,6 +1514,7 @@ impl<'a> Lower<'a> {
             root_handles: Vec::new(),
             keep_slot: None,
             pair_words: Vec::new(),
+            op_words: Vec::new(),
             calls_slot: None,
             defer,
             claim,
@@ -1587,6 +1593,7 @@ impl<'a> Lower<'a> {
             .opaque
             .iter()
             .chain(&self.pair_words)
+            .chain(&self.op_words)
             .copied()
             .filter(|v| self.live.as_ref().is_none_or(|l| l.contains(v)))
             .collect();
@@ -2218,7 +2225,15 @@ impl<'a> Lower<'a> {
                 live.extend(held[bi][ii].iter().copied());
                 self.live = Some(live);
                 self.at(Some(f.op_loc(inst.dest())));
+                self.op_words.clear();
+                if !matches!(inst, MirInst::Call { .. }) {
+                    let held = inst.operands().into_iter().filter(|v| heap_word(ty_of(f, *v)) || self.ptr_words.contains(v));
+                    self.op_words.extend(held);
+                    self.op_words.sort_unstable_by_key(|v| v.0);
+                    self.op_words.dedup();
+                }
                 self.inst(f, inst)?;
+                self.op_words.clear();
             }
             self.live = None;
             self.at(None);

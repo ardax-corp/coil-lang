@@ -181,6 +181,19 @@ unsafe fn scan_roots(data: *mut c_void, visit: &mut dyn FnMut(*mut u64, bool)) {
             for &v in maps.ambiguous.iter().filter(|v| live.contains(v)) {
                 visit(at.add(v.index()), true);
             }
+            // What an op handed the host: the host holds its own copy of the
+            // words, so their objects must stay where they are. A `Call`
+            // hands its words to a frame the collector sees.
+            if let Some(inst) = f.blocks[frame.block as usize].insts.get(frame.ip as usize)
+                && !matches!(inst, MirInst::Call { .. })
+            {
+                let mut args: Vec<ValueId> = inst.operands().into_iter().filter(|&v| heap_word(ty_of(f, v)) || maps.pointers.contains(&v)).collect();
+                args.sort_unstable();
+                args.dedup();
+                for v in args {
+                    visit(at.add(v.index()), true);
+                }
+            }
             // A pad's homes are the unwound frame's, in a record of the
             // runtime's: visited here too, they would be forwarded twice.
             if frame.homes.is_null() {
