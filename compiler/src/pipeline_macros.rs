@@ -2084,7 +2084,7 @@ impl SubProgram {
         let capture = self.host.runs_mir().then(crate::mir::ComptimeCapture::open);
         let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
         let mir = capture.map(crate::mir::ComptimeCapture::take).unwrap_or_default();
-        let (bytecode, constants) = match compiled {
+        let constants = match compiled {
             Ok(out) => out,
             Err(_) => {
                 let detail = sub
@@ -2118,11 +2118,9 @@ impl SubProgram {
         }
         Ok(CompiledProgram {
             expansion: crate::macros::CompiledExpansion {
-                bytecode: std::sync::Arc::new(bytecode),
                 constants: std::sync::Arc::new(constants),
                 strings: std::sync::Arc::new(sub.strings().to_vec()),
                 static_slot_count: sub.static_slot_count(),
-                operand_stack_slots: sub.operand_stack_slots(),
                 program_debug: sub.program_debug(),
                 class_word_kinds: sub.class_word_kinds(),
                 static_word_kinds: std::sync::Arc::new(sub.static_word_kinds()),
@@ -2215,20 +2213,13 @@ fn encode_program(program: &CompiledProgram) -> Option<Vec<u8>> {
         static_slot_count: e.static_slot_count,
         constants: e.constants.to_vec(),
         strings: e.strings.to_vec(),
-        bytecode: e.bytecode.to_vec(),
         source_files: Vec::new(),
         debug_locs: Vec::new(),
         fn_symbols: Vec::new(),
         struct_layouts: Vec::new(),
-        operand_stack_slots: e.operand_stack_slots,
-        stack_maps: Vec::new(),
-        precise_frames: Vec::new(),
         class_word_kinds: e.class_word_kinds.clone(),
         static_word_kinds: e.static_word_kinds.to_vec(),
         debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
         native_mir: program_mir(e),
         startup: Vec::new(),
         main: None,
@@ -2270,8 +2261,7 @@ fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
     // rkyv needs the archive aligned.
     let mut aligned = rkyv::util::AlignedVec::<16>::new();
     aligned.extend_from_slice(rest);
-    let decoded = common::decode_archived_program(&aligned).ok()?;
-    let p = decoded.program;
+    let p = common::decode_archived_program(&aligned).ok()?;
     if p.version != common::ARCHIVE_VERSION {
         return None;
     }
@@ -2279,11 +2269,9 @@ fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
     let mir = if p.native_mir.is_empty() { Vec::new() } else { crate::mir::archive::decode(&p.native_mir).ok()?.0 };
     Some(CompiledProgram {
         expansion: crate::macros::CompiledExpansion {
-            bytecode: std::sync::Arc::new(p.bytecode),
             constants: std::sync::Arc::new(p.constants),
             strings: std::sync::Arc::new(p.strings),
             static_slot_count: p.static_slot_count,
-            operand_stack_slots: p.operand_stack_slots,
             program_debug,
             class_word_kinds: p.class_word_kinds,
             static_word_kinds: std::sync::Arc::new(p.static_word_kinds),

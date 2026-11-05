@@ -3,7 +3,7 @@
 use std::io::Write as IoWrite;
 use std::sync::Arc;
 
-use common::{Byte, ProgramDebug, Value};
+use common::{ProgramDebug, Value};
 
 use crate::driver::{Driver, DriverProgram};
 use crate::memory::Heap;
@@ -12,7 +12,6 @@ use crate::runtime::{OutputSink, Runtime};
 
 /// What an [`Isolate`] runs.
 pub struct IsolateProgram {
-    pub code: Arc<Vec<Byte>>,
     pub constants: Arc<Vec<u64>>,
     pub strings: Arc<Vec<String>>,
     pub debug: ProgramDebug,
@@ -24,7 +23,6 @@ pub struct IsolateProgram {
 /// driver. It keeps its heap between calls until [`Self::reset`].
 pub struct Isolate {
     rt: Runtime,
-    code: Arc<Vec<Byte>>,
     constants: Arc<Vec<u64>>,
     debug: ProgramDebug,
     native: Arc<NativeCode>,
@@ -38,7 +36,7 @@ impl Isolate {
         rt.program_string_cache = vec![Value::default(); program.strings.len()];
         rt.program_strings = program.strings;
         rt.native = Some(Box::new(NativeTable::new(Arc::clone(&program.native))));
-        Self { rt, code: program.code, constants: program.constants, debug: program.debug, native: program.native, panicked: false }
+        Self { rt, constants: program.constants, debug: program.debug, native: program.native, panicked: false }
     }
 
     pub fn register_native(&mut self, native: Arc<dyn crate::ffi::NativeFn>) {
@@ -120,7 +118,6 @@ impl Isolate {
 
     fn on_driver<R>(&mut self, f: impl FnOnce(&mut Driver<'_>) -> R) -> R {
         let program = DriverProgram {
-            code: Arc::clone(&self.code),
             startup: Arc::default(),
             main: None,
             constants: Arc::clone(&self.constants),

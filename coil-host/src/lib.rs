@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use common::Byte;
 use compiler::Pipeline;
 use machine::{CStructLayout, DloadGate, NativeStart, ThreadProgram};
 
@@ -40,27 +39,21 @@ pub fn native_start(pipeline: &Pipeline, structs: &[common::CStructLayout], entr
 
 /// What a pipeline hands the runtime after a compile.
 pub struct CompiledProgram<'a> {
-    pub bytecode: &'a [Byte],
     pub constants: &'a [u64],
     pub strings: &'a [String],
     pub static_slots: u32,
     pub debug: common::ProgramDebug,
-    pub operand_stack_slots: u32,
 }
 
 /// `program` as jobs and the driver take it, with `pipeline`'s word maps.
 pub fn thread_program(pipeline: &Pipeline, program: CompiledProgram<'_>) -> ThreadProgram {
     ThreadProgram {
-        code: Arc::new(program.bytecode.to_vec()),
         startup: Arc::new(pipeline.startup()),
         main: pipeline.main_offset(),
         constants: Arc::new(program.constants.to_vec()),
         strings: Arc::new(program.strings.to_vec()),
         static_slot_count: program.static_slots,
         debug: program.debug,
-        operand_stack_slots: program.operand_stack_slots,
-        stack_maps: Vec::new(),
-        precise_frames: Arc::new(pipeline.precise_frames().to_vec()),
         class_word_kinds: machine::class_kind_table(&pipeline.class_word_kinds()),
         static_word_kinds: Arc::new(pipeline.static_word_kinds()),
     }
@@ -80,21 +73,19 @@ pub fn bind_cli_roots(pipeline: &mut Pipeline, extra: Vec<PathBuf>) {
 /// Inputs for [`execute_pipeline`]: an in-memory compile, never a `.ccoil` round trip.
 pub struct ExecutePipelineArgs<'a> {
     pub pipeline: &'a Pipeline,
-    pub bytecode: &'a [Byte],
     pub constants: &'a [u64],
     pub strings: &'a [String],
     pub static_slots: u32,
     pub debug: common::ProgramDebug,
     pub entry: Option<&'a Path>,
-    pub operand_stack_slots: u32,
 }
 
 /// Run a compiled program from `main`. Returns `true` when a language-level `panic` aborted.
 /// Uncaught `raise` from `main` is a `Result.Err` return and is not an abort (Q5).
 pub fn execute_pipeline(args: ExecutePipelineArgs<'_>) -> bool {
-    let ExecutePipelineArgs { pipeline, bytecode, constants, strings, static_slots, debug, entry, operand_stack_slots } = args;
+    let ExecutePipelineArgs { pipeline, constants, strings, static_slots, debug, entry } = args;
     let entry = entry.map(ffi_entry_path);
-    let program = thread_program(pipeline, CompiledProgram { bytecode, constants, strings, static_slots, debug, operand_stack_slots });
+    let program = thread_program(pipeline, CompiledProgram { constants, strings, static_slots, debug });
     run(program, native_start(pipeline, &pipeline.archived_struct_layouts(), entry.as_deref()))
 }
 
@@ -102,16 +93,13 @@ pub fn execute_pipeline(args: ExecutePipelineArgs<'_>) -> bool {
 /// takes from the pipeline after a compile. The run-time grants (dload pins,
 /// FFI search paths) still come from the pipeline's flags.
 pub struct CachedProgram<'a> {
-    pub bytecode: &'a [Byte],
     pub startup: &'a [common::StartupOp],
     pub main: Option<u32>,
     pub constants: &'a [u64],
     pub strings: &'a [String],
     pub static_slots: u32,
     pub debug: common::ProgramDebug,
-    pub operand_stack_slots: u32,
     pub struct_layouts: &'a [common::CStructLayout],
-    pub precise_frames: Vec<common::PreciseFrameMap>,
     pub class_word_kinds: Vec<common::ClassWordKinds>,
     pub static_word_kinds: Vec<u8>,
 }
@@ -123,16 +111,12 @@ pub fn execute_cached(pipeline: &Pipeline, program: CachedProgram<'_>, entry: Op
     let start = native_start(pipeline, program.struct_layouts, entry.as_deref());
     run(
         ThreadProgram {
-            code: Arc::new(program.bytecode.to_vec()),
-            startup: Arc::new(program.startup.to_vec()),
+                startup: Arc::new(program.startup.to_vec()),
             main: program.main,
             constants: Arc::new(program.constants.to_vec()),
             strings: Arc::new(program.strings.to_vec()),
             static_slot_count: program.static_slots,
             debug: program.debug,
-            operand_stack_slots: program.operand_stack_slots,
-            stack_maps: Vec::new(),
-            precise_frames: Arc::new(program.precise_frames),
             class_word_kinds: machine::class_kind_table(&program.class_word_kinds),
             static_word_kinds: Arc::new(program.static_word_kinds),
         },

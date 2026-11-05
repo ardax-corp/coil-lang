@@ -45,7 +45,6 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
     let mut rt = runtime_for(&program, start);
     rt.native = Some(Box::new(crate::native::NativeTable::new(Arc::clone(&native))));
     let driver_program = DriverProgram {
-        code: Arc::clone(&program.code),
         startup: Arc::clone(&program.startup),
         main: program.main,
         constants: Arc::clone(&program.constants),

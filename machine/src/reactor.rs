@@ -870,24 +870,16 @@ pub fn job_from_spawn_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Byte, Instruction, ProgramDebug};
+    use common::ProgramDebug;
 
-    fn const_return_program(imm: i32) -> Arc<ThreadProgram> {
-        let code = vec![
-            Byte::new(Instruction::CONST).with_value_u32(imm as u32),
-            Byte::new(Instruction::RETURN),
-        ];
+    fn const_return_program(_: i32) -> Arc<ThreadProgram> {
         Arc::new(ThreadProgram {
-            code: Arc::new(code),
             startup: Arc::default(),
             main: None,
             constants: Arc::new(Vec::new()),
             strings: Arc::new(Vec::new()),
             static_slot_count: 0,
             debug: ProgramDebug::default(),
-            operand_stack_slots: crate::DEFAULT_OPERAND_STACK_SLOTS as u32,
-            stack_maps: Vec::new(),
-            precise_frames: Arc::default(),
             class_word_kinds: Arc::default(),
             static_word_kinds: Arc::default(),
         })

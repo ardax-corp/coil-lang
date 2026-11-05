@@ -94,7 +94,6 @@ pub(crate) fn enabled() -> bool {
 /// The program a driver runs: its code (for the prologue and the
 /// snapshot pool), the native code for it and its debug tables.
 pub(crate) struct DriverProgram {
-    pub(crate) code: Arc<Vec<common::Byte>>,
     pub(crate) startup: Arc<Vec<common::StartupOp>>,
     pub(crate) main: Option<u32>,
     pub(crate) constants: Arc<Vec<u64>>,

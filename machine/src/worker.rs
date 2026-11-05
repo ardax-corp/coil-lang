@@ -125,7 +125,6 @@ fn run_on(rt: &mut Runtime, job: Job) {
             }
         }
         let driver_program = DriverProgram {
-            code: Arc::clone(&program.code),
             startup: Arc::clone(&program.startup),
             main: program.main,
             constants: Arc::clone(&program.constants),

@@ -144,7 +144,6 @@ pub const WORKER_STACK_SLOTS: usize = 256;
 /// Immutable program image shared across OS threads.
 #[derive(Clone)]
 pub struct ThreadProgram {
-    pub code: Arc<Vec<Byte>>,
     /// What runs before `main`.
     pub startup: Arc<Vec<common::StartupOp>>,
     /// `main`'s body, when the program has one.
@@ -153,13 +152,6 @@ pub struct ThreadProgram {
     pub strings: Arc<Vec<String>>,
     pub static_slot_count: u32,
     pub debug: ProgramDebug,
-    /// Operand-stack capacity for worker VMs running this program.
-    pub operand_stack_slots: u32,
-    /// S2b slot / frame maps of an older archive (empty when it had none, and
-    /// for every program compiled now).
-    pub stack_maps: Vec<common::FrameStackMap>,
-    /// Complete frame maps; frames without one keep the conservative scan.
-    pub precise_frames: Arc<Vec<common::PreciseFrameMap>>,
     /// Per class `type_id`: field word kinds (see [`crate::class_kind_table`]).
     pub class_word_kinds: Arc<Vec<Box<[u8]>>>,
     /// Per static slot word kind (`common::WORD_*`); empty = all ambiguous.

@@ -7,6 +7,8 @@
 
 use std::cell::RefCell;
 
+use std::collections::HashMap;
+
 use super::MirFunc;
 use crate::il::Label;
 
@@ -244,4 +246,90 @@ pub fn ffi_use(bodies: &[NativeBody], strings: &[String]) -> (bool, Vec<String>)
         }
     }
     (uses, names)
+}
+
+/// A `Call` of a captured body whose arguments are all constants.
+#[derive(Clone, Debug)]
+pub struct ConstCall {
+    /// Index of its body in the capture, and its block and op there.
+    at: (usize, usize, usize),
+    /// The body it is in.
+    pub body: String,
+    pub target: Label,
+    pub args: Vec<ConstArg>,
+    pub loc: common::DebugLoc,
+}
+
+/// A constant argument: a word, or an index in the string table.
+#[derive(Clone, Copy, Debug)]
+pub enum ConstArg {
+    Word(u64),
+    Text(u32),
+}
+
+/// What a [`ConstCall`] computed.
+pub enum ConstResult {
+    Word(u64),
+    Text(u32),
+}
+
+/// The one-word `Call`s of the open capture with constant arguments.
+pub fn capture_const_calls() -> Vec<ConstCall> {
+    NATIVE_CAPTURE.with(|c| {
+        let c = c.borrow();
+        let Some(capture) = c.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        for (bi, b) in capture.bodies.iter().enumerate() {
+            let consts: HashMap<super::ValueId, ConstArg> = b
+                .mir
+                .blocks
+                .iter()
+                .flat_map(|blk| &blk.insts)
+                .filter_map(|i| match i {
+                    super::MirInst::Const { dest, c } => Some((*dest, ConstArg::Word(const_word(*c)))),
+                    super::MirInst::String { dest, idx } => Some((*dest, ConstArg::Text(*idx))),
+                    _ => None,
+                })
+                .collect();
+            for (blk_i, blk) in b.mir.blocks.iter().enumerate() {
+                for (i, inst) in blk.insts.iter().enumerate() {
+                    let super::MirInst::Call { dest, dest_hi: None, target, args } = inst else { continue };
+                    let Some(args) = args.iter().map(|a| consts.get(a).copied()).collect::<Option<Vec<_>>>() else { continue };
+                    out.push(ConstCall { at: (bi, blk_i, i), body: b.name.clone(), target: *target, args, loc: b.mir.op_loc(*dest) });
+                }
+            }
+        }
+        out
+    })
+}
+
+fn const_word(c: super::MirConst) -> u64 {
+    match c {
+        super::MirConst::I64(v) => v as u64,
+        super::MirConst::F64(bits) => bits,
+        super::MirConst::Bool(b) => u64::from(b),
+    }
+}
+
+/// Replace each call with what it computed, in the open capture.
+pub fn replace_const_calls(results: &[(ConstCall, ConstResult)]) {
+    NATIVE_CAPTURE.with(|c| {
+        let mut c = c.borrow_mut();
+        let Some(capture) = c.as_mut() else { return };
+        for (call, result) in results {
+            let (bi, blk, i) = call.at;
+            let mir = &mut capture.bodies[bi].mir;
+            let super::MirInst::Call { dest, .. } = mir.blocks[blk].insts[i] else { continue };
+            let by_type = match (result, mir.ty(dest)) {
+                (ConstResult::Text(idx), _) => Some(super::MirInst::String { dest, idx: *idx }),
+                (ConstResult::Word(w), super::MirTy::F64) => Some(super::MirInst::Const { dest, c: super::MirConst::F64(*w) }),
+                (ConstResult::Word(w), super::MirTy::Bool) => Some(super::MirInst::Const { dest, c: super::MirConst::Bool(*w != 0) }),
+                (ConstResult::Word(w), super::MirTy::I64) => Some(super::MirInst::Const { dest, c: super::MirConst::I64(*w as i64) }),
+                _ => None,
+            };
+            if let Some(inst) = by_type {
+                mir.blocks[blk].insts[i] = inst;
+            }
+        }
+    });
 }

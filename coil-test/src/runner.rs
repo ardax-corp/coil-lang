@@ -783,7 +783,7 @@ impl Prepared {
             .filter_map(|e| self.debug.fn_symbols.iter().find(|s| s.entry_pc == e).map(|s| s.name.as_str()))
             .collect();
         let tests = probes.bodies.iter().filter(|(name, _)| names.contains(&name.as_str())).map(|(_, r)| r.clone()).collect();
-        let mut debug = ProgramDebug::empty_for_bytecode_len(0);
+        let mut debug = ProgramDebug::default();
         debug.source_files = self.debug.source_files.clone();
         debug.debug_locs = probes.locs.clone();
         (std::borrow::Cow::Owned(debug), tests)
@@ -875,7 +875,7 @@ pub(crate) fn compile_test_file(
         pipeline.compile_src_from_file(&display)
     }));
     let native = match &compiled {
-        Ok(Ok((code, _))) if native => native_code(&pipeline, code.len(), &display, options.engine, options.coverage.is_some()),
+        Ok(Ok(_)) if native => native_code(&pipeline, 0, &display, options.engine, options.coverage.is_some()),
         _ => {
             let _ = compiler::native_mir::take_native_capture();
             (None, None)
@@ -911,7 +911,7 @@ pub(crate) fn compile_test_file(
         let message = why.map(|why| format!("> Test \"{display}\" failed ({why})"));
         return Compiled::Decided(ok, message);
     }
-    let (bytecode, constants) = match compiled {
+    let constants = match compiled {
         Err(_) => {
             let m = format!("> Test \"{display}\" failed (compiler panicked)");
             return Compiled::Decided(false, Some(m));
@@ -936,20 +936,18 @@ pub(crate) fn compile_test_file(
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             execute_pipeline(ExecutePipelineArgs {
                 pipeline: &pipeline,
-                bytecode: &bytecode,
                 constants: &constants,
                 strings: &strings,
                 static_slots: pipeline.static_slot_count(),
                 debug: pipeline.program_debug(),
                 entry: Some(path),
-                operand_stack_slots: pipeline.operand_stack_slots(),
-            })
+                })
         }));
         let ok = matches!(result, Ok(false));
         return Compiled::Decided(ok, (!ok).then(|| format!("> Test \"{display}\" failed")));
     }
 
-    let Some((ctx, debug)) = wire_program(pipeline, bytecode, constants, path, reactor, native) else {
+    let Some((ctx, debug)) = wire_program(pipeline, constants, path, reactor, native) else {
         let m = format!("> Test \"{display}\" failed (no thread program)");
         return Compiled::Decided(false, Some(m));
     };
@@ -1020,14 +1018,12 @@ fn search_roots(options: &TestOptions) -> Vec<PathBuf> {
 /// and the debug info. `None` when the program has no thread context.
 fn wire_program(
     pipeline: Pipeline,
-    bytecode: Vec<Byte>,
     constants: Vec<u64>,
     path: &Path,
     reactor: &Arc<Reactor>,
     native: Option<Arc<machine::native::NativeCode>>,
 ) -> Option<(ThreadSpawnContext, ProgramDebug)> {
     let strings = pipeline.strings().to_vec();
-    let code = bytecode;
     let debug = pipeline.program_debug();
     let start = coil_host::native_start(&pipeline, &pipeline.archived_struct_layouts(), Some(path));
     // The same word maps as `coil <file>`, so a case's `collect()` exercises
@@ -1035,12 +1031,10 @@ fn wire_program(
     let program = coil_host::thread_program(
         &pipeline,
         coil_host::CompiledProgram {
-            bytecode: &code,
             constants: &constants,
             strings: &strings,
             static_slots: pipeline.static_slot_count(),
             debug: debug.clone(),
-            operand_stack_slots: pipeline.operand_stack_slots(),
         },
     );
     let ctx = machine::spawn_context(Arc::new(program), start, Arc::clone(reactor), native);
@@ -1299,14 +1293,14 @@ fn start_doc_case(
         pipeline.compile_src_from_file(&entry.display().to_string())
     }));
     let native = match &compiled {
-        Ok(Ok((code, _))) => native_code(&pipeline, code.len(), &entry.display().to_string(), run.options.engine, false).0,
+        Ok(Ok(_)) => native_code(&pipeline, 0, &entry.display().to_string(), run.options.engine, false).0,
         _ => {
             let _ = compiler::native_mir::take_native_capture();
             None
         }
     };
     let _ = pipeline.finish_reporting();
-    let (bytecode, constants) = match compiled {
+    let constants = match compiled {
         Ok(Ok(ok)) => ok,
         Ok(Err(_)) => {
             let why = "example does not compile".to_string();
@@ -1324,7 +1318,7 @@ fn start_doc_case(
         let why = "example has no `main` to run".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };
-    let Some((ctx, _debug)) = wire_program(pipeline, bytecode, constants, &entry, run.reactor, native) else {
+    let Some((ctx, _debug)) = wire_program(pipeline, constants, &entry, run.reactor, native) else {
         let why = "no thread program".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };

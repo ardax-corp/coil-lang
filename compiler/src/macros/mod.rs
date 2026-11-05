@@ -427,11 +427,9 @@ pub struct PendingMacro {
 /// It depends only on the providing modules, so one is compiled per provider
 /// set and reused for every macro call (see `pipeline_macros`).
 pub struct CompiledExpansion {
-    pub bytecode: std::sync::Arc<Vec<Byte>>,
     pub constants: std::sync::Arc<Vec<u64>>,
     pub strings: std::sync::Arc<Vec<String>>,
     pub static_slot_count: u32,
-    pub operand_stack_slots: u32,
     pub program_debug: common::ProgramDebug,
     /// Per-class field word kinds, so captured instances know which fields
     /// are scalars.

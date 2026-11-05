@@ -268,16 +268,12 @@ struct Launch {
 impl Launch {
     fn new(pipeline: &Pipeline, artifacts: &DissectArtifacts, entry: &Path) -> Self {
         let program = Arc::new(machine::ThreadProgram {
-            code: Arc::default(),
             startup: Arc::new(pipeline.startup()),
             main: pipeline.main_offset(),
             constants: Arc::new(pipeline.constants().to_vec()),
             strings: Arc::new(artifacts.strings.clone()),
             static_slot_count: pipeline.static_slot_count(),
             debug: pipeline.program_debug_full(),
-            operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: Arc::new(pipeline.precise_frames().to_vec()),
             class_word_kinds: machine::class_kind_table(&pipeline.class_word_kinds()),
             static_word_kinds: Arc::new(pipeline.static_word_kinds()),
         });

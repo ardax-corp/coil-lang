@@ -374,7 +374,6 @@ pub struct Compiler {
     /// Top-level functions whose frames can never hold a heap word
     /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
     precise_frame_fns: HashSet<String>,
-    precise_frames: Vec<common::PreciseFrameMap>,
 
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
@@ -385,8 +384,6 @@ pub struct Compiler {
 
     /// Functions with a `defer` cleanup pad, resolved to pcs at finalize.
     cleanup_pads: Vec<CleanupPad>,
-    /// [`Self::cleanup_pads`] resolved at finalize (sorted by `start_pc`).
-    cleanup_ranges: Vec<common::CleanupRange>,
 
     /// Name of the function currently being codegen'd (for ctor/Instantiate routing).
     active_fn_name: Option<String>,
@@ -783,10 +780,8 @@ impl Default for Compiler {
             field_key_slots: HashMap::new(),
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
-            precise_frames: Vec::new(),
             codegen_depth: 0,
             cleanup_pads: Vec::new(),
-            cleanup_ranges: Vec::new(),
             active_fn_name: None,
             compiling_method: false,
             compiling_mono_clone: false,

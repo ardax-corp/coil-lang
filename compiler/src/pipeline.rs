@@ -7,7 +7,7 @@ use std::{
 };
 
 use common::{
-    decode_archived_program, ArchivedProgram, Byte, Instruction, ProgramDebug, ARCHIVE_VERSION,
+    decode_archived_program, ArchivedProgram, ProgramDebug, ARCHIVE_VERSION,
 };
 #[cfg(any(test, feature = "vm-wire"))]
 use machine::{FfiError, FfiSignature, FfiType, Heap, HostClosureFn, NativeFn};
@@ -32,7 +32,7 @@ mod contract_tests;
 pub use contract_tests::CASE_PREFIX as CONTRACT_CASE_PREFIX;
 
 /// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
-type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
+type RunArtifacts = (Vec<u64>, Vec<String>, u32, ProgramDebug);
 
 /// Compile failed. Diagnostics are already on the pipeline; the error carries no extra payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,6 @@ pub struct Pipeline {
     project_root: PathBuf,
     /// `use`/`mod` search roots, relative to [`Self::project_root`] or absolute.
     roots: Vec<PathBuf>,
-    bytecode: Vec<Byte>,
     /// Set of files already visited (used to short-circuit
     /// diamond dependencies in the worklist).
     ///
@@ -260,44 +259,11 @@ impl Pipeline {
         });
     }
 
-    /// Wire the standard HostInvoke table plus any extra test natives.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn wire_host_natives<const N: usize>(&self, machine: &mut machine::Machine<N>) {
-        machine::wire_standard_host_natives(machine);
-        for native in &self.host_natives {
-            machine.register_native(std::sync::Arc::clone(native));
-        }
-    }
-
     /// Record HostInvoke ids from [`common::HOST_NATIVES`] (no VM closures).
     fn register_standard_host_natives(&mut self) {
         self.pending_native_ids = common::host_native_ids()
             .map(|(name, id)| (name.to_string(), id))
             .collect();
-    }
-
-    /// Install shared bytecode on `machine` for `thread::spawn` workers.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn wire_thread_program<const N: usize>(
-        &self,
-        machine: &mut machine::Machine<N>,
-        bytecode: &[Byte],
-        constants: &[u64],
-        strings: &[String],
-    ) {
-        machine::wire_thread_program_with_maps(machine::WireThreadProgramWithMapsArgs {
-            machine,
-            bytecode,
-            constants,
-            strings,
-            static_slot_count: self.static_slot_count(),
-            debug: self.program_debug(),
-            operand_stack_slots: self.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: self.precise_frames().to_vec(),
-            class_word_kinds: self.class_word_kinds(),
-            static_word_kinds: self.static_word_kinds(),
-        });
     }
 
     /// Bytecode entry offset for a registered function (for tests).
@@ -658,25 +624,6 @@ impl Pipeline {
         gate
     }
 
-    /// Wire FFI library resolution paths and C struct layouts into the VM.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn wire_vm_ffi<const N: usize>(
-        &self,
-        vm: &mut machine::Machine<N>,
-        entry_path: Option<&std::path::Path>,
-    ) {
-        use machine::CStructLayout;
-        let base_dir = entry_path
-            .and_then(|p| p.parent())
-            .map(std::path::PathBuf::from);
-        let search = self.ffi_search_path_bufs();
-        vm.set_ffi_paths(base_dir, search);
-        vm.set_dload_gate(self.build_dload_gate());
-        for layout in self.archived_struct_layouts() {
-            vm.register_struct_layout(CStructLayout::from_archive(&layout));
-        }
-    }
-
     /// Compute C align/pad once for every `extern struct` (declaration order).
     pub fn archived_struct_layouts(&self) -> Vec<common::CStructLayout> {
         let defs = self.compiler_lazy().c_structs().iter().map(|d| {
@@ -722,17 +669,11 @@ impl Pipeline {
         // patches the JMP at offset 1 to point at `main`
         // (or `program_start_offset` if `extern` blocks ran
         // first). See `Self::prologue` for the layout.
-        let bytecode = vec![
-            Byte::new(Instruction::CALL),
-            Byte::new(Instruction::JMP).with_operand_u32(u32::MAX),
-            Byte::new(Instruction::HALT),
-        ];
 
         let mut pipeline = Self {
             failed: false,
             project_root: cwd,
             roots: default_module_roots(),
-            bytecode,
             processed: Vec::new(),
             worklist: VecDeque::new(),
             module_deps: HashMap::new(),
@@ -1527,9 +1468,7 @@ impl Pipeline {
             .set_source_file(rel);
 
         // `compile_prepared_module`: expand/check already ran.
-        let bytecode = if check_failed {
-            Vec::new()
-        } else {
+        if !check_failed {
             let compiler = self.compiler.get_mut().expect("compiler initialized");
             let cached = self
                 .ast_cache
@@ -1549,21 +1488,16 @@ impl Pipeline {
                 .get_mut(&file)
                 .expect("parse_expand_check_file filled cache");
             let ast = cached.ast_mut().expect("parsed");
-            let bytecode = if begun {
-                compiler.compile_prepared_module_finish(namespace.as_str(), ast)
-            } else {
-                Vec::new()
-            };
+            if begun {
+                compiler.compile_prepared_module_finish(namespace.as_str(), ast);
+            }
             let seq = compiler.program_seq();
             if !compiler.may_clone_from(seq) {
                 cached.release_tree();
             }
             self.program_files.insert(seq, file.clone());
             self.emit_foreign_clones();
-            bytecode
-        };
-
-        self.bytecode.extend(bytecode);
+        }
 
         let src = self
             .ast_cache
@@ -1632,8 +1566,6 @@ impl Pipeline {
         if self.failed || self.had_errors() {
             return;
         }
-        self.bytecode = self.compiler_lazy().bytecode_vec();
-
 
         // Wrap the bytecode in the versioned `ArchivedProgram` envelope
         // so that older `.ccoil` files can be rejected at load time via
@@ -1649,19 +1581,12 @@ impl Pipeline {
             debug_locs: Vec::new(),
             fn_symbols: Vec::new(),
             struct_layouts: self.archived_struct_layouts(),
-            operand_stack_slots: self.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: self.precise_frames().to_vec(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: self.static_word_kinds(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
             startup: self.startup(),
             main: self.main_offset(),
-            bytecode: self.bytecode,
         };
         program.set_debug(debug, level);
 
@@ -1683,22 +1608,22 @@ impl Pipeline {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'_>>),
-    ) -> (Vec<Byte>, Vec<u64>) {
+    ) -> Vec<u64> {
         crate::hir::set_contract_level(self.contracts());
-        let bytecode = self.compiler_lazy_mut().compile(module, ast);
+        self.compiler_lazy_mut().compile(module, ast);
         let rejected = self
             .compiler_lazy()
             .get_messages()
             .iter()
             .any(|m| *m.kind() == reporting::MessageKind::ERROR);
         if rejected {
-            return (Vec::new(), Vec::new());
+            return Vec::new();
         }
 
-        (bytecode, self.compiler_lazy_mut().constants().to_vec())
+        self.compiler_lazy_mut().constants().to_vec()
     }
 
-    pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
+    pub fn compile_src(&mut self, src: &str) -> Result<Vec<u64>, CompileFail> {
         let _capture = self.comptime_capture();
         // Derives, attribute and function-style macros and trait contract
         // copies run in the discovery stage, which works on cached files:
@@ -1767,15 +1692,13 @@ impl Pipeline {
 
         self.compiler_lazy_mut().finalize_bytecode();
         self.compute_consts(Some((path, src)));
-        let bytecode = self.compiler_lazy_mut().bytecode_vec();
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {
             return Err(CompileFail);
         }
 
-        self.debug_verify(&bytecode);
-        Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
+        Ok(self.compiler_lazy_mut().constants().to_vec())
     }
 
     /// A capture for [`Self::compute_consts`], when the macro host runs MIR:
@@ -1803,13 +1726,9 @@ impl Pipeline {
         let mut sites = if self.call_fold && self.compiler_lazy().call_fold_on() { self.compiler_lazy().fold_sites() } else { Vec::new() };
         // A call in a `const` or `comptime` initializer is computed with it,
         // within the explicit budget (coil-lang#1918).
-        let explicit: Vec<std::ops::Range<usize>> = consts
-            .iter()
-            .filter(|c| !c.silent)
-            .filter_map(|c| c.entry.map(|e| e as usize))
-            .map(|e| e..self.compiler_lazy().function_end(e))
-            .collect();
-        sites.retain(|(pc, _, _)| !explicit.iter().any(|r| r.contains(pc)));
+        let explicit: HashSet<u32> = consts.iter().filter(|c| !c.silent).filter_map(|c| c.entry).collect();
+        let symbols = self.compiler_lazy().fn_debug_symbols();
+        sites.retain(|(call, _)| !symbols.iter().any(|s| s.name == call.body && explicit.contains(&s.entry_pc)));
         if consts.is_empty() && sites.is_empty() {
             return;
         }
@@ -1840,11 +1759,9 @@ impl Pipeline {
         let mut cache = ConstCache::default();
         self.load_cached_consts(&consts, &mut evals, &io, &mut cache);
         let program = crate::macros::CompiledExpansion {
-            bytecode: std::sync::Arc::new(self.compiler_lazy().bytecode_vec()),
             constants: std::sync::Arc::new(self.compiler_lazy().constants().to_vec()),
             strings: std::sync::Arc::new(self.compiler_lazy().strings().to_vec()),
             static_slot_count: self.compiler_lazy().static_slot_count(),
-            operand_stack_slots: self.operand_stack_slots(),
             program_debug: self.program_debug(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: std::sync::Arc::new(kinds.clone()),
@@ -1857,7 +1774,7 @@ impl Pipeline {
         let mut index: HashMap<crate::macros::FoldCall, usize> = HashMap::new();
         let site_calls: Vec<usize> = sites
             .iter()
-            .map(|(_, _, call)| {
+            .map(|(_, call)| {
                 *index.entry(call.clone()).or_insert_with(|| {
                     folds.push(call.clone());
                     folds.len() - 1
@@ -1873,9 +1790,9 @@ impl Pipeline {
                 let folded: Vec<_> = sites
                     .iter()
                     .zip(&site_calls)
-                    .filter_map(|((pc, arity, _), &i)| Some((*pc, *arity, outcome.folded.get(i)?.clone()?)))
+                    .filter_map(|((call, _), &i)| Some((call.clone(), outcome.folded.get(i)?.clone()?)))
                     .collect();
-                self.compiler_lazy_mut().apply_call_folds(&folded);
+                self.compiler_lazy_mut().apply_call_folds(folded);
                 self.note_fold_budget(&sites, &site_calls, &outcome.over_budget, entry_src);
                 let const_sites: Vec<(u32, u32)> = evals
                     .iter()
@@ -2038,7 +1955,7 @@ impl Pipeline {
     /// each ran before it stopped.
     fn note_fold_budget(
         &mut self,
-        sites: &[(usize, usize, crate::macros::FoldCall)],
+        sites: &[(crate::mir::ConstCall, crate::macros::FoldCall)],
         site_calls: &[usize],
         over: &[(usize, u64)],
         entry_src: Option<(&Path, &str)>,
@@ -2048,9 +1965,12 @@ impl Pipeline {
         }
         let files = self.compiler_lazy().source_files_list();
         let mut seen = HashSet::new();
-        for ((pc, _, _), call) in sites.iter().zip(site_calls) {
+        for ((site, _), call) in sites.iter().zip(site_calls) {
             let Some(&(_, micros)) = over.iter().find(|(i, _)| i == call) else { continue };
-            let Some(loc) = self.debug_locs().get(*pc).copied().filter(|l| l.is_known()) else { continue };
+            let loc = site.loc;
+            if !loc.is_known() {
+                continue;
+            }
             if !seen.insert((loc.file, loc.start_byte, loc.end_byte)) {
                 continue;
             }
@@ -2100,27 +2020,12 @@ impl Pipeline {
         }
     }
 
-    /// Debug builds verify every compiled program the way archive load does,
-    /// so the test suite catches codegen that emits out-of-range operands.
-    fn debug_verify(&self, bytecode: &[Byte]) {
-        if cfg!(debug_assertions) {
-            let c = self.compiler_lazy();
-            let limits = common::VerifyLimits {
-                strings: c.strings().len(),
-                static_slots: c.static_slot_count() as usize,
-            };
-            if let Err(e) = common::verify_bytecode(bytecode, c.constants(), limits) {
-                panic!("compiler emitted {e}");
-            }
-        }
-    }
-
     /// Compile a single source file in-memory and return the
     /// resulting bytecode, resolving `use` and `mod`
     /// declarations by reading the referenced files from disk.
     ///
     /// Multi-file entry point: discovers and compiles the module graph from disk.
-    pub fn compile_src_from_file(&mut self, file: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
+    pub fn compile_src_from_file(&mut self, file: &str) -> Result<Vec<u64>, CompileFail> {
         let _capture = self.comptime_capture();
         let entry = PathBuf::from(file);
         self.reset_session();
@@ -2153,7 +2058,6 @@ impl Pipeline {
         self.step(CompileStep::Link);
         self.compiler_lazy_mut().finalize_bytecode();
         self.compute_consts(None);
-        self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
 
         // Warnings are kept for callers to inspect; only hard errors fail.
@@ -2161,11 +2065,7 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
-        self.debug_verify(&self.bytecode);
-        Ok((
-            std::mem::take(&mut self.bytecode),
-            self.compiler_lazy_mut().constants().to_vec(),
-        ))
+        Ok(self.compiler_lazy_mut().constants().to_vec())
     }
 
     /// Compile a source entry in-memory for `coil dissect` (never writes an archive).
@@ -2427,8 +2327,6 @@ impl Pipeline {
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             debug_lines: Vec::new(),
-            cleanup: self.compiler_lazy().cleanup_ranges().to_vec(),
-            table: Default::default(),
         };
         // A panic site looks its location up as the MIR has it, so the
         // table stays keyed by that; its lines are the remapped ones.
@@ -2484,10 +2382,6 @@ impl Pipeline {
         }
     }
 
-    pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
-        self.compiler_lazy().precise_frames()
-    }
-
     /// Per-class field word kinds from the checked program (archive minor 24).
     pub fn static_word_kinds(&self) -> Vec<u8> {
         self.compiler_lazy().checker().static_word_kinds()
@@ -2519,19 +2413,17 @@ impl Pipeline {
         let mut buffer = Vec::with_capacity(1024);
         f.read_to_end(&mut buffer).expect("Unable to read file");
 
-        let decoded = decode_archived_program(&buffer).map_err(|_| CompileFail)?;
+        let program = decode_archived_program(&buffer).map_err(|_| CompileFail)?;
 
         if self.failed {
             return Err(CompileFail);
         }
 
-        let program = decoded.program;
         let debug = ProgramDebug {
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             ..program.debug_bundle()
         };
         Ok((
-            program.bytecode,
             program.constants,
             program.strings,
             program.static_slot_count,
@@ -2825,15 +2717,9 @@ fn main() {
             debug_locs: debug.debug_locs,
             fn_symbols: debug.fn_symbols,
             struct_layouts: pipeline.archived_struct_layouts(),
-            operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
@@ -2874,15 +2760,9 @@ fn main() {
             debug_locs: debug.debug_locs,
             fn_symbols: debug.fn_symbols,
             struct_layouts: pipeline.archived_struct_layouts(),
-            operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");

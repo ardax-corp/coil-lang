@@ -5,11 +5,9 @@ mod array_vec;
 mod builtins;
 mod caps;
 mod debug;
-mod line_table;
 mod effects;
 pub mod ext;
 mod ffi;
-mod frame_bound;
 mod host;
 mod interner;
 pub mod int_arith;
@@ -19,9 +17,7 @@ mod seekable_iter;
 mod snapshot;
 mod source_pos;
 mod startup;
-mod stack_map;
 mod value;
-mod verify;
 
 pub use archive::*;
 pub use array_vec::*;
@@ -29,11 +25,9 @@ pub use builtins::*;
 pub use caps::{Caps, open_mode_caps};
 pub use debug::*;
 pub use startup::StartupOp;
-pub use line_table::*;
 pub use effects::EffectFlags;
 pub use ffi::tag;
 pub use ffi::*;
-pub use frame_bound::{FrameReserve, frame_reserve, frame_roots, jump_targets};
 pub use host::*;
 pub use interner::*;
 pub use opcode::*;
@@ -41,9 +35,7 @@ pub use package::*;
 pub use seekable_iter::*;
 pub use snapshot::*;
 pub use source_pos::*;
-pub use stack_map::*;
 pub use value::*;
-pub use verify::*;
 
 #[macro_export]
 macro_rules! promise {

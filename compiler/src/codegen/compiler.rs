@@ -219,15 +219,6 @@ impl Compiler {
         &self.debug_locs
     }
 
-    /// `defer` cleanup ranges for the VM unwinder.
-    pub fn cleanup_ranges(&self) -> &[common::CleanupRange] {
-        &self.cleanup_ranges
-    }
-
-    pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
-        &self.precise_frames
-    }
-
     /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
     pub fn fn_debug_symbols(&self) -> Vec<FnDebugSym> {
         let mut syms: Vec<FnDebugSym> = self
@@ -8116,7 +8107,6 @@ impl Compiler {
                 })
             })
             .collect();
-        self.cleanup_ranges = Vec::new();
 
         self.operand_stack_slots = self
             .operand_stack_slots
@@ -8175,11 +8165,10 @@ impl Compiler {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ){
         self.compile_unfused(module, ast, false);
         self.report_capability_violations();
         self.finalize_bytecode();
-        self.bytecode.clone_bytes()
     }
 
     /// Append this module's IL to the shared buffer (multi-file pipeline).
@@ -8190,7 +8179,7 @@ impl Compiler {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ){
         self.compile_module_inner(module, ast, false)
     }
 
@@ -8201,7 +8190,7 @@ impl Compiler {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ){
         self.compile_module_inner(module, ast, true)
     }
 
@@ -8251,12 +8240,11 @@ impl Compiler {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ){
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.compile_unfused_finish(module, ast);
         }));
         Self::rethrow_unless_recursion_limit(result);
-        Vec::new()
     }
 
     /// Only our own recursion-limit signal is swallowed (its message is
@@ -8274,7 +8262,7 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
         prepared: bool,
-    ) -> Vec<Byte> {
+    ){
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.compile_unfused(module, ast, prepared);
         }));
@@ -8287,16 +8275,6 @@ impl Compiler {
             // recorded in `do_compile`), any other panic is a real bug.
             std::panic::resume_unwind(payload);
         }
-        Vec::new()
-    }
-
-    /// Final lowered bytecode after [`finalize_bytecode`].
-    pub fn bytecode_slice(&self) -> &[Byte] {
-        self.bytecode.as_slice()
-    }
-
-    pub fn bytecode_vec(&self) -> Vec<Byte> {
-        self.bytecode.clone_bytes()
     }
 
     /// `const`s to compute at compile time, in setup order, with their
@@ -8322,158 +8300,69 @@ impl Compiler {
         self.opt_options.call_fold && !self.debugger_attached
     }
 
-    /// Pure calls with constant arguments in the finalized code, as
-    /// `(pc of the CALL, the argument words before it, the call)`: a `CALL`
-    /// to a function [`Self::fold_fns`] lists, one word back, whose
-    /// arguments are the `CONST` / `STRING` words right before it, or a
-    /// dense `DensePush` of registers the `DenseConst`s right before it set,
-    /// with no branch landing among them (so they are its arguments on every
-    /// path). Folding clears the argument words; a dense call's registers
-    /// keep their constants. A call to an
-    /// auto-par worker computes the function it runs (its last argument is
-    /// the worker's depth).
-    pub fn fold_sites(&self) -> Vec<(usize, usize, crate::macros::FoldCall)> {
-        use crate::macros::FoldCall;
+    /// Pure calls with constant arguments in the captured bodies: a one-word
+    /// call of a function [`Self::fold_fns`] lists. A call to an auto-par
+    /// worker computes the function it runs (its last argument is the
+    /// worker's depth).
+    pub fn fold_sites(&self) -> Vec<(crate::mir::ConstCall, crate::macros::FoldCall)> {
+        use crate::macros::{FoldCall, FoldValue};
+        use crate::mir::ConstArg;
         // A call computed at compile time drops its values there, so a
         // program with a `fn drop()` would miss those finalizers.
         if self.fold_fns.is_empty() || self.checker.any_drop() {
             return Vec::new();
         }
-        let mut entries: HashMap<usize, (usize, bool, bool)> = HashMap::new();
+        let label_of = |name: &str| self.fn_entry_labels.get(name).map(|l| l.0);
+        let mut targets: HashMap<u32, (u32, bool, bool)> = HashMap::new();
         for (name, &text) in &self.fold_fns {
-            if let Some(entry) = self.function_offset(name) {
-                entries.insert(entry, (entry, text, false));
+            if let (Some(label), Some(entry)) = (label_of(name), self.function_offset(name)) {
+                targets.insert(label, (entry as u32, text, false));
             }
         }
         for (worker, func) in &self.par_worker_of {
-            if let (Some(w), Some(&text)) = (self.function_offset(worker), self.fold_fns.get(func))
-                && let Some(entry) = self.function_offset(func)
-            {
-                entries.insert(w, (entry, text, true));
+            if let (Some(label), Some(&text), Some(entry)) = (label_of(worker), self.fold_fns.get(func), self.function_offset(func)) {
+                targets.insert(label, (entry as u32, text, true));
             }
         }
-        let code = self.bytecode.as_slice();
-        let Some(targets) = common::jump_targets(code, &self.constants) else {
-            return Vec::new();
-        };
         let mut out = Vec::new();
-        for (pc, b) in code.iter().enumerate() {
-            if *b.bytecode() != Instruction::CALL || b.call_ret_words() != 1 {
+        for call in crate::mir::capture_const_calls() {
+            let Some(&(entry, text, worker)) = targets.get(&call.target.0) else { continue };
+            if worker && call.args.is_empty() {
                 continue;
             }
-            let (arity, target) = b.call_parts();
-            let Some(&(entry, text, worker)) = entries.get(&target) else {
-                continue;
-            };
-            if worker && arity == 0 {
-                continue;
-            }
-            let Some((words, mut args)) = self
-                .stack_fold_args(code, &targets, pc, arity)
-                .or_else(|| self.dense_fold_args(code, &targets, pc, arity))
-            else {
-                continue;
-            };
+            let args: Option<Vec<FoldValue>> = call
+                .args
+                .iter()
+                .map(|a| match *a {
+                    ConstArg::Word(w) => Some(FoldValue::Word(w)),
+                    ConstArg::Text(i) => self.strings.get(i as usize).cloned().map(FoldValue::Text),
+                })
+                .collect();
+            let Some(mut args) = args else { continue };
             if worker {
                 args.pop();
             }
-            out.push((pc, words, FoldCall { entry: entry as u32, args, text }));
+            out.push((call, FoldCall { entry, args, text }));
         }
         out
     }
 
-    /// The `CONST` / `STRING` words right before the `CALL` at `pc`.
-    fn stack_fold_args(
-        &self,
-        code: &[Byte],
-        targets: &[bool],
-        pc: usize,
-        arity: usize,
-    ) -> Option<(usize, Vec<crate::macros::FoldValue>)> {
+    /// Replace each folded call with its value, in the bodies the program
+    /// runs.
+    pub fn apply_call_folds(&mut self, folds: Vec<(crate::mir::ConstCall, crate::macros::FoldValue)>) {
         use crate::macros::FoldValue;
-        if arity > pc || targets[pc + 1 - arity..=pc].iter().any(|&t| t) {
-            return None;
-        }
-        let args = code[pc - arity..pc]
-            .iter()
-            .map(|w| match *w.bytecode() {
-                Instruction::CONST => Some(FoldValue::Word(w.constant(&self.constants))),
-                Instruction::STRING => self.strings.get(w.operand_u32() as usize).cloned().map(FoldValue::Text),
-                _ => None,
+        use crate::mir::ConstResult;
+        let results: Vec<_> = folds
+            .into_iter()
+            .map(|(call, value)| {
+                let result = match value {
+                    FoldValue::Word(w) => ConstResult::Word(w),
+                    FoldValue::Text(s) => ConstResult::Text(self.intern_string(&s)),
+                };
+                (call, result)
             })
-            .collect::<Option<Vec<_>>>()?;
-        Some((arity, args))
-    }
-
-    /// A dense call's arguments: `DenseConst`s right before the
-    /// `DensePush` that feeds the `CALL` at `pc`, one per pushed register.
-    /// Only the push is an argument word.
-    fn dense_fold_args(
-        &self,
-        code: &[Byte],
-        targets: &[bool],
-        pc: usize,
-        arity: usize,
-    ) -> Option<(usize, Vec<crate::macros::FoldValue>)> {
-        use crate::macros::FoldValue;
-        let push = code.get(pc.checked_sub(1)?)?;
-        if *push.bytecode() != Instruction::DensePush || arity == 0 || arity + 1 > pc {
-            return None;
-        }
-        let (n, base) = push.dense_move_parts();
-        if n != arity || targets[pc - 1 - arity..=pc].iter().any(|&t| t) {
-            return None;
-        }
-        let mut args = vec![None; arity];
-        for w in &code[pc - 1 - arity..pc - 1] {
-            if *w.bytecode() != Instruction::DenseConst {
-                return None;
-            }
-            let (ty, dest, payload, pool) = w.dense_const_parts();
-            let slot = args.get_mut(dest.checked_sub(base)?)?;
-            if slot.is_some() || !matches!(ty, common::dense::TY_I64 | common::dense::TY_F64) {
-                return None;
-            }
-            let raw = if pool {
-                *self.constants.get(payload as usize)?
-            } else {
-                payload as i16 as i64 as u64
-            };
-            *slot = Some(FoldValue::Word(raw));
-        }
-        Some((1, args.into_iter().collect::<Option<Vec<_>>>()?))
-    }
-
-    /// Replace each folded call (`(pc of the CALL, argument words, value)`, from
-    /// [`Self::fold_sites`]) with its value: its argument words become
-    /// `NOOP`s and the `CALL` a `CONST` or `STRING`.
-    pub fn apply_call_folds(&mut self, folds: &[(usize, usize, crate::macros::FoldValue)]) {
-        use crate::macros::FoldValue;
-        let mut words = Vec::with_capacity(folds.len());
-        for (_, _, value) in folds {
-            let word = match value {
-                // An inline operand is non-negative: its top bit is the
-                // pool flag.
-                FoldValue::Word(w) => match i32::try_from(*w as i64) {
-                    Ok(small) if small >= 0 => Byte::new(Instruction::CONST).with_const_inline(small),
-                    _ => {
-                        self.constants.push(*w);
-                        Byte::new(Instruction::CONST).with_const_pool(self.constants.len() as u32 - 1)
-                    }
-                },
-                FoldValue::Text(s) => Byte::new(Instruction::STRING).with_operand_u32(self.intern_string(s)),
-            };
-            words.push(word);
-        }
-        let Some(code) = self.bytecode.lowered_mut() else {
-            return;
-        };
-        for ((pc, n, _), word) in folds.iter().zip(words) {
-            for w in &mut code[pc - n..*pc] {
-                *w = Byte::new(Instruction::NOOP);
-            }
-            code[*pc] = word;
-        }
+            .collect();
+        crate::mir::replace_const_calls(&results);
     }
 
     /// Replace the startup step of each of `consts` (`(entry, slot)`) with

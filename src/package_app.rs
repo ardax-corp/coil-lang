@@ -22,26 +22,19 @@ use crate::fail_and_exit;
 /// Compile `filename` to an archive at the pipeline's `-g` level
 /// (`coil package` defaults to `-g1`; `--strip-debug` is `-g0`).
 fn compile_program(pipeline: &mut Pipeline, filename: &str) -> Result<ArchivedProgram, ()> {
-    let (bytecode, constants) = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
+    let constants = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
         constants,
         strings: pipeline.strings().to_vec(),
-        bytecode,
         source_files: Vec::new(),
         debug_locs: Vec::new(),
         fn_symbols: Vec::new(),
         struct_layouts: pipeline.archived_struct_layouts(),
-        operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: Vec::new(),
-        precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
         native_mir: Vec::new(),
         startup: pipeline.startup(),
         main: pipeline.main_offset(),
@@ -821,15 +814,9 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
@@ -848,15 +835,9 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
@@ -948,15 +929,9 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();

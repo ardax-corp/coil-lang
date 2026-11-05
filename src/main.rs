@@ -123,7 +123,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str, cac
         return;
     }
     // Multi-file entry: discovers `use` / `mod` via bound `--root` / default `src`.
-    let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
+    let constants = match pipeline.compile_src_from_file(filename) {
         Ok(ok) => ok,
         Err(_) => {
             let _ = pipeline.finish_reporting();
@@ -132,7 +132,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str, cac
     };
     // `coil compile --jit`: keep the MIR native code is made from.
     let bodies = compiler::native_mir::take_native_capture();
-    let bytes = archive_bytes(pipeline, bytecode, constants, &bodies);
+    let bytes = archive_bytes(pipeline, constants, &bodies);
     write_archive(pipeline, output, &bytes);
     if let Some(cache) = &cache {
         cache.store(pipeline, filename, &bytes);
@@ -151,26 +151,19 @@ fn write_archive(pipeline: &mut Pipeline, output: &str, bytes: &[u8]) {
 
 /// The `.ccoil` bytes of the program `pipeline` just compiled, with a native
 /// MIR section when it has `bodies`.
-fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants: Vec<u64>, bodies: &[compiler::native_mir::NativeBody]) -> Vec<u8> {
+fn archive_bytes(pipeline: &mut Pipeline, constants: Vec<u64>, bodies: &[compiler::native_mir::NativeBody]) -> Vec<u8> {
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
         constants,
         strings: pipeline.strings().to_vec(),
-        bytecode,
         source_files: Vec::new(),
         debug_locs: Vec::new(),
         fn_symbols: Vec::new(),
         struct_layouts: pipeline.archived_struct_layouts(),
-        operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: Vec::new(),
-        precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
         native_mir: Vec::new(),
         startup: pipeline.startup(),
         main: pipeline.main_offset(),
@@ -414,7 +407,7 @@ fn cmd_build_and_run(
     }
     let compiled = pipeline.compile_src_from_file(filename);
     end_compile_progress();
-    let (bytecode, constants) = match compiled {
+    let constants = match compiled {
         Ok(ok) => ok,
         Err(_) => {
             let _ = pipeline.finish_reporting();
@@ -424,7 +417,7 @@ fn cmd_build_and_run(
     print_opt_stats(opt_stats, opt_stats_json);
     let bodies = compiler::native_mir::take_native_capture();
     if let Some(cache) = &cache {
-        let bytes = archive_bytes(pipeline, bytecode.clone(), constants.clone(), &bodies);
+        let bytes = archive_bytes(pipeline, constants.clone(), &bodies);
         cache.store(pipeline, filename, &bytes);
     }
 
@@ -447,13 +440,11 @@ fn cmd_build_and_run(
     let entry = ffi_entry_path(Path::new(filename));
     let panicked = execute_pipeline(ExecutePipelineArgs {
         pipeline,
-        bytecode: &bytecode,
         constants: &constants,
         strings: &strings,
         static_slots,
         debug,
         entry: Some(entry.as_path()),
-        operand_stack_slots: pipeline.operand_stack_slots(),
     });
     if panicked {
         exit(1);
@@ -559,16 +550,13 @@ fn run_cached(pipeline: &mut Pipeline, filename: &str, loaded: &LoadedArchive) {
     let panicked = execute_cached(
         pipeline,
         CachedProgram {
-            bytecode: &loaded.bytecode,
             startup: &loaded.startup,
             main: loaded.main,
             constants: &loaded.constants,
             strings: &loaded.strings,
             static_slots: loaded.static_slots,
             debug: loaded.debug.clone(),
-            operand_stack_slots: loaded.operand_stack_slots.unwrap_or(0),
             struct_layouts: &loaded.struct_layouts,
-            precise_frames: loaded.precise_frames.clone(),
             class_word_kinds: loaded.class_word_kinds.clone(),
             static_word_kinds: loaded.static_word_kinds.clone(),
         },
@@ -607,7 +595,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
             pipeline,
             ErrorCode::IoError,
             format!(
-                "`{archive}` is a source file, not a bytecode archive: run it with `coil {archive}`, or build one with `coil compile {archive}`"
+                "`{archive}` is a source file, not an archive: run it with `coil {archive}`, or build one with `coil compile {archive}`"
             ),
         );
     }
@@ -616,26 +604,21 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
         Err(LoadErr::Missing) => fail_and_exit(
             pipeline,
             ErrorCode::IoError,
-            format!("Bytecode archive `{archive}` not found"),
+            format!("archive `{archive}` not found"),
         ),
         Err(LoadErr::Corrupt) => fail_and_exit(
             pipeline,
             ErrorCode::IoError,
-            format!("Bytecode archive `{archive}` is corrupt"),
+            format!("archive `{archive}` is corrupt or from an older coil: rebuild it"),
         ),
         Err(LoadErr::Version(v)) => fail_and_exit(
             pipeline,
             ErrorCode::ArchiveVersionMismatch,
             format!(
-                "Bytecode archive version {} is not compatible with runtime {}. Please recompile from source.",
+                "archive version {} is not compatible with runtime {}. Please recompile from source.",
                 format_archive_version(v),
                 format_archive_version(ARCHIVE_VERSION)
             ),
-        ),
-        Err(LoadErr::Invalid(e)) => fail_and_exit(
-            pipeline,
-            ErrorCode::IoError,
-            format!("Bytecode archive `{archive}` is invalid ({e}). Please recompile from source."),
         ),
     };
 
@@ -976,15 +959,9 @@ mod tests {
             debug_locs: vec![common::DebugLoc::unknown()],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
         })
         .unwrap();
@@ -1008,15 +985,9 @@ mod tests {
             debug_locs: vec![common::DebugLoc::unknown()],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
         };
         let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();

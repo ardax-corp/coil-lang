@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 use common::{
-    ARCHIVE_VERSION, ArchiveDecodeError, ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug,
+    ARCHIVE_VERSION, ArchiveDecodeError, ArchivedArchivedProgram, NativeLock, ProgramDebug,
     archive_version_compatible, decode_archived_program, default_natives_root,
     embedded_archive_slice, format_archive_version, read_embedded_native_lock,
-    read_package_trailer, resolve_archive_operand_slots,
+    read_package_trailer,
 };
 use machine::DloadGate;
 
@@ -18,13 +18,10 @@ pub enum LoadErr {
     Missing,
     Corrupt,
     Version(u32),
-    /// Bytecode failed load-time verification.
-    Invalid(common::BytecodeError),
 }
 
 /// Owned archive payload restored by CLI and packaged execute.
 pub struct LoadedArchive {
-    pub bytecode: Vec<Byte>,
     pub startup: Vec<common::StartupOp>,
     pub main: Option<u32>,
     pub constants: Vec<u64>,
@@ -32,17 +29,10 @@ pub struct LoadedArchive {
     pub static_slots: u32,
     pub debug: ProgramDebug,
     pub struct_layouts: Vec<common::CStructLayout>,
-    /// Analyzed capacity when the envelope stored it (minor 13+).
-    pub operand_stack_slots: Option<u32>,
-    /// S2b maps when the envelope stored them (minor 14+). Empty = conservative GC.
-    pub stack_maps: Vec<common::FrameStackMap>,
-    /// Complete frame maps (minor 21+). Empty = every frame conservative.
-    pub precise_frames: Vec<common::PreciseFrameMap>,
-    /// Per-class field word kinds (minor 24+). Empty = every field unknown.
+    /// Per-class field word kinds. Empty = every field unknown.
     pub class_word_kinds: Vec<common::ClassWordKinds>,
     pub static_word_kinds: Vec<u8>,
-    /// Native MIR section (major 6 minor 20+, `coil compile --jit`); empty
-    /// when the archive has none.
+    /// The bodies' MIR.
     pub native_mir: Vec<u8>,
 }
 
@@ -59,29 +49,17 @@ pub fn load_archive_bytes(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
 }
 
 fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
-    let decoded = decode_archived_program(buffer).map_err(|e| match e {
+    let program = decode_archived_program(buffer).map_err(|e| match e {
         ArchiveDecodeError::Corrupt => LoadErr::Corrupt,
         ArchiveDecodeError::Version(v) => LoadErr::Version(v),
-        ArchiveDecodeError::Invalid(e) => LoadErr::Invalid(e),
     })?;
-    let program = decoded.program;
     let debug = program.debug_bundle();
     Ok(LoadedArchive {
-        bytecode: program.bytecode,
         constants: program.constants,
         strings: program.strings,
         static_slots: program.static_slot_count,
         debug,
         struct_layouts: program.struct_layouts,
-        operand_stack_slots: decoded
-            .operand_stack_slots_persisted
-            .then_some(program.operand_stack_slots),
-        stack_maps: if decoded.stack_maps_persisted {
-            program.stack_maps
-        } else {
-            Vec::new()
-        },
-        precise_frames: program.precise_frames,
         class_word_kinds: program.class_word_kinds,
         static_word_kinds: program.static_word_kinds,
         native_mir: program.native_mir,
@@ -104,22 +82,16 @@ pub fn execute_archived_program(
     ffi_search_paths: Vec<PathBuf>,
     dload_gate: Option<DloadGate>,
 ) -> bool {
-    let slots =
-        resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode) as usize;
     let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
     // Native code that covers every body (an AOT executable's) runs the
     // program on the driver, with no interpreter.
     let program = std::sync::Arc::new(machine::ThreadProgram {
-        code: std::sync::Arc::new(loaded.bytecode.clone()),
         startup: std::sync::Arc::new(loaded.startup.clone()),
         main: loaded.main,
         constants: std::sync::Arc::new(loaded.constants.clone()),
         strings: std::sync::Arc::new(loaded.strings.clone()),
         static_slot_count: loaded.static_slots,
         debug: loaded.debug.clone(),
-        operand_stack_slots: slots as u32,
-        stack_maps: loaded.stack_maps.clone(),
-        precise_frames: std::sync::Arc::new(loaded.precise_frames.clone()),
         class_word_kinds: machine::class_kind_table(&loaded.class_word_kinds),
         static_word_kinds: std::sync::Arc::new(loaded.static_word_kinds.clone()),
     });
@@ -173,7 +145,7 @@ pub fn try_run_embedded_with(prepare: impl FnOnce(&[u8]) -> Result<(), String>) 
 
     if !archive_version_compatible(trailer.archive_version, ARCHIVE_VERSION) {
         eprintln!(
-            "embedded bytecode version {} does not match this runner ({}); rebuild with `coil package`",
+            "embedded archive version {} does not match this runner ({}); rebuild with `coil package`",
             format_archive_version(trailer.archive_version),
             format_archive_version(ARCHIVE_VERSION)
         );
@@ -190,12 +162,8 @@ pub fn try_run_embedded_with(prepare: impl FnOnce(&[u8]) -> Result<(), String>) 
             );
             exit(1);
         }
-        Err(LoadErr::Invalid(e)) => {
-            eprintln!("embedded bytecode archive is invalid: {e}");
-            exit(1);
-        }
         Err(_) => {
-            eprintln!("embedded bytecode archive is corrupt");
+            eprintln!("embedded archive is corrupt");
             exit(1);
         }
     };
@@ -438,9 +406,6 @@ mod tests {
             static_slots: 0,
             debug: ProgramDebug::default(),
             struct_layouts: vec![],
-            operand_stack_slots: Some(512),
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             native_mir: Vec::new(),
@@ -479,15 +444,9 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: maps.clone(),
-            precise_frames: Vec::new(),
             class_word_kinds: Vec::new(),
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
             native_mir: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
