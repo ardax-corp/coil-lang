@@ -140,7 +140,8 @@ impl Runtime {
         }
         self.heap.owned_mut().clear_finalizer_types();
         if self.heap.owned_mut().slab_chunk_count() > 1 {
-            *self.heap.owned_mut() = crate::memory::Heap::default();
+            let emptied = self.heap.owned_mut().emptied();
+            *self.heap.owned_mut() = emptied;
         } else if self.heap.owned_mut().slab_chunk_count() == 1 {
             self.heap.owned_mut().collect(&[]);
             self.program_string_cache.fill(Value::default());
