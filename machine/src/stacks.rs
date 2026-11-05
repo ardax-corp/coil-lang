@@ -21,6 +21,17 @@ thread_local! {
     pub(crate) static FIBER_STACK_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Call right before switching fibers with `owner`, the `&mut` the caller
+/// holds. The code on the other side reaches the same object through a raw
+/// pointer, which the optimizer cannot see: without this, `&mut`'s `noalias`
+/// lets it treat a switch as touching nothing of `owner`, and it deleted the
+/// stores around one (a task then suspended through another fiber's yielder).
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+pub(crate) fn fiber_switch_fence<T: ?Sized>(owner: *mut T) {
+    std::hint::black_box(owner);
+}
+
 /// The stack native calls made on a thread's own stack run on (a thread's
 /// few megabytes would end native recursion far sooner than the VM's frame
 /// limit does): the size of a task's.

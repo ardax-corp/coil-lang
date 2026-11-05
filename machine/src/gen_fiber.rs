@@ -109,6 +109,7 @@ fn run_fiber<H: GenHost + ?Sized>(
     let saved_limit = crate::stacks::FIBER_STACK_LIMIT.replace(fiber.stack_limit);
     let saved_yielder = crate::native::GEN_YIELDER.replace(fiber.yielder);
     crate::native::GEN_CLOSING.set(closing);
+    crate::stacks::fiber_switch_fence(std::ptr::from_mut(h));
     let out = fiber.coro.as_mut().expect("a generator fiber").resume(send);
     crate::native::GEN_CLOSING.set(false);
     fiber.yielder = crate::native::GEN_YIELDER.replace(saved_yielder);

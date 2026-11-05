@@ -26,6 +26,14 @@ use crate::runtime::{HostEnv, Runtime};
 /// a generator early: its offset from `TASK_SCOPE_OPEN_ID`.
 const GEN_CLOSE_OP: usize = 45;
 
+#[cfg(not(target_family = "wasm"))]
+thread_local! {
+    /// The running child task's yielder (null while the root runs). Per
+    /// thread, as [`crate::native::GEN_YIELDER`]: the fiber body sets it, out
+    /// of sight of the code that resumed the fiber.
+    static TASK_YIELDER: std::cell::Cell<*const ()> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+
 /// What a task fiber is resumed with: its wait's wake, or a cancel.
 #[cfg(not(target_family = "wasm"))]
 enum TaskResume {
@@ -113,9 +121,6 @@ pub(crate) struct Driver<'a> {
     /// Stacks of finished task fibers, for the next ones.
     #[cfg(not(target_family = "wasm"))]
     task_stacks: Vec<corosensei::stack::DefaultStack>,
-    /// The running child task's yielder (null while the root runs).
-    #[cfg(not(target_family = "wasm"))]
-    task_yielder: *const (),
     /// A child task's panic message: its scope reports it.
     task_panic: Option<String>,
     /// The next panic reported prints no location (a contract failure
@@ -154,8 +159,6 @@ impl<'a> Driver<'a> {
             tasks: std::collections::HashMap::new(),
             #[cfg(not(target_family = "wasm"))]
             task_stacks: Vec::new(),
-            #[cfg(not(target_family = "wasm"))]
-            task_yielder: std::ptr::null(),
             task_panic: None,
             panic_without_location: false,
             panic_message: String::new(),
@@ -990,7 +993,8 @@ impl Driver<'_> {
             let limit = crate::stacks::FIBER_STACK_LIMIT.get();
             let gen_yielder = crate::native::GEN_YIELDER.get();
             let closing = crate::native::GEN_CLOSING.get();
-            let y = self.task_yielder.cast::<corosensei::Yielder<TaskResume, ()>>();
+            let y = TASK_YIELDER.get().cast::<corosensei::Yielder<TaskResume, ()>>();
+            crate::stacks::fiber_switch_fence(std::ptr::from_mut(self));
             // SAFETY: set by the running task fiber's body.
             let resumed = unsafe { (*y).suspend(()) };
             crate::stacks::FIBER_STACK_LIMIT.set(limit);
@@ -1114,7 +1118,7 @@ impl Driver<'_> {
         let coro = TaskCoro::with_stack(stack, move |yielder, _first| {
             // SAFETY: the driver outlives its task fibers (it drops them).
             let d = unsafe { &mut *me.cast::<Driver<'static>>() };
-            d.task_yielder = std::ptr::from_ref(yielder).cast();
+            TASK_YIELDER.set(std::ptr::from_ref(yielder).cast());
             let env = d.env();
             let out = crate::native::call(&entry, &words[..entry.arity as usize], &env);
             d.task_body_done(out);
@@ -1150,9 +1154,10 @@ impl Driver<'_> {
         self.swap_roots(f);
         let saved_limit = crate::stacks::FIBER_STACK_LIMIT.replace(f.stack_limit);
         let saved_gen = crate::native::GEN_YIELDER.get();
-        let saved_yielder = std::mem::replace(&mut self.task_yielder, f.yielder);
+        let saved_yielder = TASK_YIELDER.replace(f.yielder);
+        crate::stacks::fiber_switch_fence(std::ptr::from_mut(self));
         let out = f.coro.as_mut().expect("a parked task fiber").resume(input);
-        f.yielder = std::mem::replace(&mut self.task_yielder, saved_yielder);
+        f.yielder = TASK_YIELDER.replace(saved_yielder);
         crate::native::GEN_YIELDER.set(saved_gen);
         crate::stacks::FIBER_STACK_LIMIT.set(saved_limit);
         self.swap_roots(f);

@@ -249,6 +249,7 @@ impl<const S: usize> Machine<S> {
         let saved_yielder = std::mem::replace(&mut self.fiber_yielder, fiber.yielder);
         self.fiber_outer = Some(std::ptr::from_ref(&*fiber.exec));
         let before = IN_EXECUTE.get();
+        crate::stacks::fiber_switch_fence(std::ptr::from_mut(self));
         let out = fiber.coro.as_mut().expect("a parked fiber").resume(());
         self.fiber_outer = None;
         fiber.yielder = std::mem::replace(&mut self.fiber_yielder, saved_yielder);
@@ -304,6 +305,7 @@ impl<const S: usize> Machine<S> {
         self.frames.get_mut().set(*sp);
         self.fiber_park_request = Some((block, result_slot));
         let yielder = self.fiber_yielder.cast::<corosensei::Yielder<(), FiberParked>>();
+        crate::stacks::fiber_switch_fence(std::ptr::from_mut(self));
         // SAFETY: set by this fiber's body, which is still running.
         unsafe { (*yielder).suspend(FiberParked) };
         if let Some(w) = self.fiber_wake.take() {
