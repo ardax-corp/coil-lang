@@ -649,48 +649,6 @@ fn coil_embed_resolves_no_vm() {
     assert!(!tree.contains("feature \"vm\""), "{tree}");
 }
 
-/// A package has no bytecode VM: a body native code does not compile (a
-/// closure of 17 captures) fails `coil package` with an error naming it, on
-/// both kinds of executable, rather than on the target.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_body_native_code_refuses_fails_a_package() {
-    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
-    let embed = build_matching_coil_embed(Path::new(&bin));
-    let rt = build_matching_coil_rt(Path::new(&bin));
-    let dir = std::env::temp_dir().join(format!("coil_aot_refused_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let lets: Vec<String> = (0..17).map(|i| format!("    let c{i} = {i};\n")).collect();
-    let names: Vec<String> = (0..17).map(|i| format!("c{i}")).collect();
-    let src = format!(
-        "use io::sync::println;\nuse string::format;\nfn main() {{\n{}    let f = fn () use ({}) => {};\n    let _ = println(format(\"%i\", f()));\n}}\n",
-        lets.concat(),
-        names.join(", "),
-        names.join(" + "),
-    );
-    let entry = dir.join("app.coil");
-    std::fs::write(&entry, src).unwrap();
-    let out = dir.join("app");
-    let package = |extra: &[&std::ffi::OsStr]| {
-        let mut cmd = Command::new(&bin);
-        cmd.arg("package");
-        for root in compiler::Pipeline::workspace_language_extra_roots() {
-            cmd.arg("--root").arg(root);
-        }
-        cmd.arg(&entry).arg("-o").arg(&out).args(extra).env("COIL_RT_LIB", &rt);
-        cmd.output().expect("spawn coil package")
-    };
-    for extra in [&[][..], &["--no-aot".as_ref(), "--runner".as_ref(), embed.as_os_str()]] {
-        let run = package(extra);
-        let said = String::from_utf8_lossy(&run.stderr);
-        assert_eq!(run.status.code(), Some(1), "{extra:?}: {said}");
-        assert!(said.contains("error: `main` cannot compile to native code"), "{extra:?}: {said}");
-        assert!(said.contains("has no bytecode VM"), "{extra:?}: {said}");
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// More parameters than registers need no VM: both kinds of executable run
 /// such a body.
 #[cfg(target_os = "linux")]

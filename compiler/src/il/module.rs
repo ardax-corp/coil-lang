@@ -376,6 +376,17 @@ impl IlModule {
         // whether it had one, for the checks and stats below.
         let had_mir: Vec<bool> = self.funcs.iter().map(|b| b.meta.hir_mir.is_some()).collect();
         self.panic_pads.clear();
+        if let Some(message) = opts.vm_refusal_message {
+            pending.retain(|&i| {
+                let body = &mut self.funcs[i];
+                let fits = body.meta.hir_mir.as_deref().is_none_or(fits_call_arity);
+                if !fits {
+                    stub_for_vm(body, message);
+                    tier[i] = "vm stub";
+                }
+                fits
+            });
+        }
         while !pending.is_empty() {
             let mut next = Vec::new();
             let mut progressed = false;
@@ -486,6 +497,17 @@ impl IlModule {
                 super::opt::note_fuse_reason(why);
             }
         }
+        // A body with more live words than a frame's registers: native code
+        // has no such limit, so it runs there and only the VM refuses it.
+        if let Some(message) = opts.vm_refusal_message {
+            for i in 0..self.funcs.len() {
+                let too_many = |why: &Option<String>| why.as_deref().is_some_and(|w| w.contains("too many"));
+                if tier[i] == "fuse" && had_mir[i] && (too_many(&lir_why[i]) || too_many(&dense_why[i])) {
+                    stub_for_vm(&mut self.funcs[i], message);
+                    tier[i] = "vm stub";
+                }
+            }
+        }
         for body in &mut self.funcs {
             body.meta.hir_mir = None;
         }
@@ -552,6 +574,29 @@ impl IlModule {
         }
         .into_flat()
     }
+}
+
+/// Whether every call and generator of `func` passes few enough words for
+/// the 7 bits `CALL` and `MakeCoro` hold.
+fn fits_call_arity(func: &crate::mir::MirFunc) -> bool {
+    use crate::mir::{MirAllocKind, MirInst};
+    const MAX_ARITY: usize = 0x7F;
+    func.blocks.iter().flat_map(|b| &b.insts).all(|inst| match inst {
+        MirInst::Call { args, .. } => args.len() <= MAX_ARITY,
+        MirInst::Alloc { kind: MirAllocKind::Coro { .. }, elems, .. } => elems.len() <= MAX_ARITY,
+        _ => true,
+    })
+}
+
+/// Replace a body bytecode cannot hold with a panic, keeping its labels:
+/// native code runs it from its MIR, and the VM says why it cannot.
+fn stub_for_vm(body: &mut IlFuncBody, message: u32) {
+    use common::{Byte, Instruction};
+    let loc = common::DebugLoc::unknown();
+    body.ops.retain(|op| matches!(op, IlOp::Label(_)));
+    body.ops.push(IlOp::from_plain_byte(Byte::new(Instruction::STRING).with_operand_u32(message), loc));
+    body.ops.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
+    body.meta.hir_mir = None;
 }
 
 /// Split + simulated MIR replace of the next body, then lower.

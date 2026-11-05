@@ -183,6 +183,13 @@ GC stress cells name `--engine vm`, and a test that compares against the VM has 
 say `--no-jit`, since no flag now means native code. Comparing two runs with no
 flag passes and proves nothing.
 
+**What bytecode cannot hold.** It has 7 bits of call arity and `u8` frame
+registers, and every body still gets bytecode. A body past either becomes a stub
+(`stub_for_vm`) that panics on the VM with a message saying so; native code and
+the interpreter run its MIR. No limit of the VM reaches them. No source program
+now makes native code refuse a body, so mixed mode (`coil_native_call_vm`, host
+stubs) only serves `--no-jit` and is ready to go in step 8.
+
 **Decisions for the steps ahead** (the options doc's 3, 4, 5 and 7):
 
 - Packages without AOT, and spool `--vm`, become a **JIT runner**: `coil-rt`,

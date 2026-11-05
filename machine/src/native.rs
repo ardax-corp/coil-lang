@@ -1355,13 +1355,15 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
         }
         ALLOC_FN => {
             let op = (extra >> 32) as u32;
-            let (n_captures, n_filled) = ((op & 0xFF) as usize, ((op >> 8) & 0xFF) as usize);
+            let n_filled = ((op >> 8) & 0xFF) as usize;
             let Some((&mask, rest)) = values.split_last() else {
                 return unsafe { bail(ctx) };
             };
-            if rest.len() != n_captures + n_filled {
+            // The words say how many captures: their 8 bits in `op` are the
+            // bytecode's.
+            let Some(n_captures) = rest.len().checked_sub(n_filled) else {
                 return unsafe { bail(ctx) };
-            }
+            };
             let (captures, filled) = rest.split_at(n_captures);
             let pfn = crate::memory::ObjFn {
                 entry: extra as u32,
@@ -1672,13 +1674,17 @@ pub unsafe extern "C" fn coil_native_call_vm(ctx: *mut NativeCtx, pc: u64, args:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, dicts: u64) -> u64 {
     let c = unsafe { &mut *ctx };
-    let mut buf = [common::Value::default(); 16];
-    let Some(words) = buf.get_mut(..n as usize) else {
-        return unsafe { bail(ctx) };
-    };
     if c.machine.is_null() || dicts > n {
         return unsafe { bail(ctx) };
     }
+    let mut few = [common::Value::default(); 16];
+    let mut many = Vec::new();
+    let words: &mut [common::Value] = if n as usize <= few.len() {
+        &mut few[..n as usize]
+    } else {
+        many.resize(n as usize, common::Value::default());
+        &mut many
+    };
     for (i, w) in words.iter_mut().enumerate() {
         // SAFETY: `args` holds `n` words.
         *w = common::Value::from(unsafe { *args.add(i) });

@@ -10,6 +10,10 @@ use super::op::IlOp;
 /// Optimization switches, set per [`OptLevel`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OptimizeOptions {
+    /// The message a body bytecode cannot hold panics with on the VM
+    /// ([`super::IlModule::optimize_and_flatten`]): an index in the program's
+    /// strings. `None`: such a body is a compiler error.
+    pub vm_refusal_message: Option<u32>,
     /// Constant folding and algebraic identities in the HIR (`hir::fold`).
     pub algebraic: bool,
     /// HIR counted-loop in-bounds proofs (`hir::bounds`).

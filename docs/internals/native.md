@@ -661,10 +661,12 @@ alive until its function returns, as on the VM.
    coil-rt`): a build with `coil` unifies `vm` back in.
 
 A body native code refuses is an error naming it and why, at package time on
-both kinds of executable: neither has a VM to run it. Direct calls take any
-number of parameters. What is left is a closure with 16 or more captures and a
-generator with 16 or more arguments, whose `Alloc` the backend refuses. If the
-object or the link fails (no `cc`, no `libcoil_rt.a`, Windows) the package warns
+both kinds of executable: neither has a VM to run it. No source program reaches
+one today: parameters, captures, generator arguments and live words have no
+limit in native code, and the corpus reports no refusal. The one limit left is a
+function value of 256 or more parameters, whose arity `ObjFn` keeps in the 8
+bits of bytecode's `MakeFn` operand: calling it panics. If the object or the
+link fails (no `cc`, no `libcoil_rt.a`, Windows) the package warns
 and falls back to the runner.
 
 ### JIT runner

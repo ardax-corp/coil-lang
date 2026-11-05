@@ -37,6 +37,19 @@ mod tests {
     use compiler::native_mir::{BlockId, Label, MirBinOp, MirBlock, MirConst, MirFunc, MirInst, MirTy, Terminator, ValueId};
     use machine::native::{NATIVE_STACK_BUDGET, NativeCtx};
 
+    /// A runner has no VM: a section with a body native code refuses stops
+    /// it, naming the body, and an empty one says what to do.
+    #[test]
+    fn a_runner_refuses_what_it_cannot_compile() {
+        let mut refused = body();
+        refused.mir.emit_refusal = Some("runs on the VM");
+        let entries = [ArchiveEntry { body: &refused, pc: Some(4), stub: false }];
+        let why = crate::install_section(&archive::encode(&entries)).expect_err("a refused body");
+        assert!(why.contains("`f` cannot compile to native code"), "{why}");
+        let why = crate::install_section(&[]).expect_err("no section");
+        assert!(why.contains("no native MIR"), "{why}");
+    }
+
     /// `fn f(int a, int b) -> int { return a + b * 2; }`
     fn body() -> NativeBody {
         let mut f = MirFunc::new("f");

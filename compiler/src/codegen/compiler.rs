@@ -8474,6 +8474,7 @@ impl Compiler {
             .messages
             .iter()
             .any(|m| *m.kind() == reporting::MessageKind::ERROR);
+        opts.vm_refusal_message = Some(self.intern_string("this function does not fit the VM's bytecode: run the program on native code"));
         self.bytecode.set_opt_options(opts);
         let entry_sps: HashMap<String, u32> = self
             .bytecode

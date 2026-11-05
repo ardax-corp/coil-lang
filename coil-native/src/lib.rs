@@ -797,16 +797,14 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         }
                         match kind {
                             MirAllocKind::Array | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
-                            MirAllocKind::DropEnum { .. } if elems.len() < 16 => {}
+                            MirAllocKind::DropEnum { .. } => {}
                             MirAllocKind::Object { .. } if elems.is_empty() => {}
                             // A function value: its body must have an entry
                             // PC, so it counts as a callee.
                             MirAllocKind::Fn { target, .. }
                             | MirAllocKind::PolyFn { target }
                             | MirAllocKind::PolyFnCapture { target, .. }
-                            | MirAllocKind::Coro { target }
-                                if elems.len() < 16 =>
-                            {
+                            | MirAllocKind::Coro { target } => {
                                 let Some(&callee) = by_label.get(target) else {
                                     return Err("function value of an unknown body".into());
                                 };
@@ -899,9 +897,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(callee)?;
                         for a in args {
                             need(a)?;
-                        }
-                        if args.len() > 16 {
-                            return Err("indirect call of more than 16 words".into());
                         }
                     }
                     MirInst::ResumeCoro { dest, handle, send } => {

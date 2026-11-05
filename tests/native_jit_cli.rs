@@ -1116,24 +1116,6 @@ fn a_pure_native_run_reports_no_vm_dependence() {
 }
 
 #[test]
-fn a_native_run_counts_its_vm_entries() {
-    // A closure of 17 captures is more than native code allocates: `show`
-    // stays on the VM.
-    let names: Vec<String> = (0..17).map(|i| format!("c{i}")).collect();
-    let lets: Vec<String> = (0..17).map(|i| format!("let c{i} = k + {i}; ")).collect();
-    let src = format!(
-        "{HEADER}#[inline(never)]\nfn show(int k) {{ {}let f = fn () use ({}) => {}; let _ = println(format(\"%i\", f())); }}\n\
-         fn main() {{ show(1); show(2); }}\n",
-        lets.concat(),
-        names.join(", "),
-        names.join(" + "),
-    );
-    let stats = same_as_vm("counts_vm", &src);
-    let (calls, entries) = vm_dependence(&stats).unwrap_or_else(|| panic!("no VM dependence line: {stats}"));
-    assert!(calls + entries >= 2, "stats: {stats}");
-}
-
-#[test]
 fn ordinary_host_natives_run_without_the_vm() {
     // Writing to stdout, `Vec::insert` and `clock::sleep_ms` are host
     // natives that are no plain functions: native code runs them itself.
@@ -1340,6 +1322,36 @@ fn many_parameters_run_natively() {
     assert!(compiled(&stats, "relay"), "stats: {stats}");
     assert!(compiled(&stats, "ints"), "stats: {stats}");
     assert_eq!(vm_dependence(&stats), Some((0, 0)), "stats: {stats}");
+}
+
+/// Bytecode holds 127 call arguments and 255 frame words; native code holds
+/// any number. A body past those runs natively, and on the VM it panics
+/// saying so, where it used to take the arity mod 128 or stop the compile.
+#[test]
+fn a_body_too_large_for_bytecode_runs_natively() {
+    let names = |n: usize| (0..n).map(|i| format!("a{i}")).collect::<Vec<_>>();
+    let sum = |n: usize| names(n).iter().map(|a| format!("{a}.n")).collect::<Vec<_>>().join(" + ");
+    let boxes = |n: usize| (0..n).map(|i| format!("new Box({i})")).collect::<Vec<_>>().join(", ");
+    let params = |n: usize| names(n).iter().map(|a| format!("Box {a}")).collect::<Vec<_>>().join(", ");
+    let lets = |n: usize| (0..n).map(|i| format!("    let a{i} = new Box({i});\n")).collect::<String>();
+    let made = |n: usize| (0..n).map(|i| format!("    let a{i} = make({i});\n")).collect::<String>();
+    let head = format!("{HEADER}use gc::collect;\nclass Box {{\n    pub n: int,\n}}\n#[inline(never)]\nfn make(int n) -> Box {{ return new Box(n); }}\n");
+    let shapes = [
+        ("args_130", format!("#[inline(never)]\nfn f({}) -> int {{ collect(); return {}; }}\nfn main() {{ let _ = println(format(\"%i\", f({}))); }}\n", params(130), sum(130), boxes(130)), 8385),
+        ("params_300", format!("#[inline(never)]\nfn f({}) -> int {{ collect(); return {}; }}\nfn main() {{ let _ = println(format(\"%i\", f({}))); }}\n", params(300), sum(300), boxes(300)), 44850),
+        ("captures_300", format!("fn main() {{\n{}    let g = fn () use ({}) {{ collect(); return {}; }};\n    let _ = println(format(\"%i\", g()));\n}}\n", lets(300), names(300).join(", "), sum(300)), 44850),
+        ("locals_300", format!("fn main() {{\n{}    collect();\n    let _ = println(format(\"%i\", {}));\n}}\n", made(300), sum(300)), 44850),
+    ];
+    for (name, body, want) in shapes {
+        let src = format!("{head}{body}");
+        let jit = run(name, &src, true);
+        assert_eq!(String::from_utf8_lossy(&jit.stdout).trim(), want.to_string(), "{name}: {}", String::from_utf8_lossy(&jit.stderr));
+        let vm = run(name, &src, false);
+        let said = String::from_utf8_lossy(&vm.stderr);
+        assert_eq!(vm.status.code(), Some(1), "{name}: {said}");
+        assert!(vm.stdout.is_empty(), "{name}: no wrong answer");
+        assert!(said.contains("does not fit the VM's bytecode"), "{name}: {said}");
+    }
 }
 
 /// A repeat `--jit` run takes its archive, MIR included, from the build
