@@ -156,11 +156,10 @@ and tables are stored as they are; step 5 will want to look at that.
   unless a native build already has one. Evaluation then runs that build's MIR, at
   its level. A `ComptimeCapture` adds no twins: the interpreter runs a twinned
   native as the host call it is, so a plain compile's bytecode does not change.
-- **Host.** `call_limited` calls `Machine::call_on_driver`: a driver over the
-  machine's `Runtime`. Natives, statics, snapshots, output capture and reuse
-  between calls stay as they were, because they live in the `Runtime`. It is a
-  driver and not `install_native` under the VM because native code under a machine
-  never collects, so a macro that allocates would never free anything.
+- **Host.** `call_limited` calls `Isolate::call`: a driver over the isolate's
+  `Runtime`. Natives, statics, snapshots, output capture and reuse between calls
+  live in the `Runtime`. It is a driver, as native code with no driver never
+  collects, so a macro that allocates would never free anything.
 - **Limits.** The budget and the cap live in the `Runtime`. The interpreter
   charges a step per call and per edge back in block order, as the VM does, and a
   zero stops the call with `TRAP_BUDGET`. Cranelift's code charges nothing:
