@@ -1611,6 +1611,7 @@ mod tests {
 
     fn seek_promote_opts() -> OptimizeOptions {
         OptimizeOptions {
+        vm_refusal_message: None,
             algebraic: false,
             loop_bounds: false,
             sink_return: false,
