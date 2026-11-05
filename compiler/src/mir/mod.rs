@@ -37,7 +37,6 @@ mod instcombine;
 mod interchange;
 mod licm;
 mod from_hir;
-mod pack;
 mod prefetch;
 mod specialize;
 mod sccp;
@@ -61,9 +60,8 @@ pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, 
 pub use func::MirFunc;
 pub use gc::liveness;
 pub use func::MirBlock;
-pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
+pub use specialize::{start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
-pub use stackmap::is_alloc_opcode;
 pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
 pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
 pub use inst::{BlockId, MirUnaryOp, Terminator};
@@ -79,7 +77,7 @@ pub use frame_words::{allocates, barrier_pairs, heap_word, held_words, is_genera
 pub use call_convoy::is_tail_call_inst;
 pub(crate) use native_capture::capture_open;
 pub use native_capture::{ComptimeCapture, NativeBody, VectorOp, ffi_use, capture_native_bodies, vector_op, native_capture_active, peek_native_capture, start_native_capture, start_raw_capture, take_native_capture, without_native_capture};
-pub use instcombine::{instcombine, instcombine_lir};
+pub use instcombine::{instcombine, };
 pub use licm::{licm, mark_frozen_arrays};
 #[cfg(test)]
 pub use error::LowerError;

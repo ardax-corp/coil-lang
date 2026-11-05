@@ -518,18 +518,6 @@ mod mir_layout_tests {
     }
 }
 
-/// Extra TOS words besides the first return (`ret_words >= 2`).
-#[inline]
-pub fn is_multi_word_ret(ret_words: u32) -> bool {
-    ret_words >= 2
-}
-
-/// Width from a pair dest (`dest_hi` present → 2).
-#[inline]
-pub fn ret_words_from_hi(dest_hi: Option<impl Sized>) -> u32 {
-    if dest_hi.is_some() { 2 } else { 1 }
-}
-
 /// One-word dense callee signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DenseAbi {
@@ -539,37 +527,7 @@ pub struct DenseAbi {
     pub ret_hi: Option<MirTy>,
 }
 
-/// Entry-label id → dense ABI. Built leaf-first during specialize.
-/// Q7 self-`CALL` uses the open one-word ABI until this map records the body.
-pub type DenseCallMap = HashMap<u32, DenseAbi>;
-
 impl DenseAbi {
-    /// Word-layout params + one- or two-slot specialized return.
-    pub fn from_func(func: &MirFunc) -> Option<Self> {
-        let ret = func.ret_ty?;
-        if !ret.is_word_lane() {
-            return None;
-        }
-        let ret_hi = match func.ret_layout {
-            MirLayout::Word | MirLayout::HeapNiche => None,
-            MirLayout::TwoSlot => {
-                let hi = func.ret_hi_ty?;
-                if !hi.is_word_lane() {
-                    return None;
-                }
-                Some(hi)
-            }
-        };
-        let params: Vec<MirTy> = func.params.iter().map(|p| func.ty(*p)).collect();
-        if params.iter().any(|t| !t.is_word_lane()) {
-            return None;
-        }
-        Some(Self {
-            params,
-            ret,
-            ret_hi,
-        })
-    }
 
 }
 

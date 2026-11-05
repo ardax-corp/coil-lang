@@ -37,18 +37,6 @@ pub fn operand_slots_for_frame_size(max_frames: u32, frame_slots: u32) -> u32 {
     need.clamp(DEFAULT_OPERAND_STACK_SLOTS, MAX_OPERAND_STACK_SLOTS)
 }
 
-/// Grow a typecheck-time stack bound when dense emit used a fatter frame.
-///
-/// Recovers `max_frames` from `current` (`frames × 16 + 16`) and reapplies
-/// `seek`. No-op when `seek` fits the 16-slot estimate.
-pub fn rescale_operand_slots_for_dense_seek(current: u32, seek: u32) -> u32 {
-    if seek <= DEFAULT_FRAME_SLOTS {
-        return current;
-    }
-    let frames = current.saturating_sub(DEFAULT_FRAME_SLOTS) / DEFAULT_FRAME_SLOTS;
-    operand_slots_for_frame_size(frames.max(1), seek).max(current)
-}
-
 /// Proven or attributed max live frames for one recursive function.
 ///
 /// Recorded on [`StackBoundReport`]; frame sizing uses `operand_slots_needed` only.

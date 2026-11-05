@@ -17,9 +17,6 @@ pub struct FuseHint {
 }
 
 impl FuseHint {
-    pub fn blocks_cmp_jmp_fuse(self) -> bool {
-        self.nofuse
-    }
 
 }
 
@@ -404,113 +401,9 @@ impl IlOp {
         }
     }
 
-    /// Encode this op as a VM `Byte` for lower / round-trip. Control/label → `None`.
-    pub fn as_encode_byte(&self) -> Option<Byte> {
-        Some(match self {
-            IlOp::Byte { byte, .. } => *byte,
-            IlOp::Load { slot, .. } => Byte::new(Instruction::LOAD).with_load_store_slot(*slot),
-            IlOp::StorePop { slot, .. } => {
-                Byte::new(Instruction::STORE).with_load_store_slot(*slot)
-            }
-            IlOp::Const { imm, .. } => Byte::new(Instruction::CONST).with_const_inline(*imm),
-            IlOp::ConstPool { idx, .. } => Byte::new(Instruction::CONST).with_const_pool(*idx),
-            IlOp::String { idx, .. } => Byte::new(Instruction::STRING).with_operand_u32(*idx),
-            IlOp::Dup { .. } => Byte::new(Instruction::DUPLICATE),
-            IlOp::Pop { .. } => Byte::new(Instruction::POP),
-            IlOp::LogNot { .. } => Byte::new(Instruction::LogNot),
-            IlOp::Index { .. } => Byte::new(Instruction::Index),
-            IlOp::IndexUnchecked { .. } => Byte::new(Instruction::IndexUnchecked),
-            IlOp::ArrayPin { slot, .. } => Byte::new(Instruction::ArrayPin).with_operand_u32(*slot),
-            IlOp::MakeTuple { arity, kinds, .. } => {
-                if *kinds != 0 && *arity <= 0xFF {
-                    Byte::new(Instruction::MakeTupleK)
-                        .with_operand_u32((u32::from(*kinds) << 8) | *arity)
-                } else {
-                    Byte::new(Instruction::MakeTuple).with_operand_u32(*arity)
-                }
-            }
-            IlOp::MakeArray {
-                arity, elem_kind, ..
-            } => {
-                if matches!(*elem_kind, common::WORD_POINTER | common::WORD_BYTE) && *arity <= 0xFFFF {
-                    Byte::new(Instruction::MakeArrayK)
-                        .with_operand_u32((u32::from(*elem_kind) << 16) | *arity)
-                } else {
-                    Byte::new(Instruction::MakeArray).with_operand_u32(*arity)
-                }
-            }
-            IlOp::MakeEnum {
-                tag, arity, kinds, ..
-            } => {
-                if *kinds != 0 && *arity <= 0xFF {
-                    Byte::new(Instruction::MakeEnumK).with_make_enum_kinds(
-                        *tag,
-                        *arity as u8,
-                        *kinds,
-                    )
-                } else {
-                    Byte::new(Instruction::MakeEnum).with_operands_u16([*tag, *arity])
-                }
-            }
-            IlOp::BoxValue { tag, .. } => Byte::new(Instruction::BoxValue).with_operand_u32(*tag),
-            IlOp::UnboxValue { tag, .. } => {
-                Byte::new(Instruction::UnboxValue).with_operand_u32(*tag)
-            }
-            IlOp::LoadField { index, .. } => {
-                Byte::new(Instruction::LoadField).with_operand_u32(*index)
-            }
-            IlOp::GetField { .. } => Byte::new(Instruction::GetField),
-            IlOp::SetField { index, .. } => match index {
-                Some(i) => {
-                    Byte::new(Instruction::SetField).with_operand_u32(common::pack_set_field_slot(*i))
-                }
-                None => Byte::new(Instruction::SetField),
-            },
-            IlOp::HostInvoke { arity, layout, .. } => {
-                Byte::new(Instruction::HostInvoke)
-                    .with_operand_u32(common::pack_host_invoke_operand(*arity, *layout as u32))
-            }
-            IlOp::Print { .. } => Byte::new(Instruction::PRINT),
-            IlOp::Return { ret_words, .. } => {
-                Byte::new(Instruction::RETURN).with_operand_u32(if *ret_words >= 2 { 2 } else { 0 })
-            }
-            IlOp::Halt { .. } => Byte::new(Instruction::HALT),
-            IlOp::Bin { op, .. } => Byte::new(*op),
-            IlOp::BinSlotImm { op, slot, imm, .. } => {
-                Byte::new(Instruction::BinSlotImm).with_bin_slot_imm(*op, *slot, *imm)
-            }
-            IlOp::BinSlotSlot { op, a, b, .. } => {
-                Byte::new(Instruction::BinSlotSlot).with_bin_slot_slot(*op, *a, *b)
-            }
-            IlOp::LoadReturnSlot { slot, .. } => {
-                Byte::new(Instruction::LoadReturnSlot).with_operand_u32(*slot)
-            }
-            IlOp::ConstReturnImm { imm, .. } => {
-                Byte::new(Instruction::ConstReturnImm).with_operand_u32(*imm)
-            }
-            IlOp::BinReturn { op, .. } => {
-                Byte::new(Instruction::BinReturn).with_bin_return(*op as u8)
-            }
-            IlOp::Label(_)
-            | IlOp::Jump { .. }
-            | IlOp::Entry { .. }
-            | IlOp::PrologueJmp { .. } => {
-                return None;
-            }
-        })
-    }
-
     /// True if this op becomes one (or more) final bytecode slots.
     pub fn emits_code(&self) -> bool {
         !matches!(self, IlOp::Label(_))
-    }
-
-    /// Bind site label id, if this is a label marker.
-    pub fn bind_label(&self) -> Option<Label> {
-        match self {
-            IlOp::Label(id) => Some(*id),
-            _ => None,
-        }
     }
 
     /// Plain one-word terminal `RETURN` (typed or residual `Byte`).
@@ -526,45 +419,6 @@ impl IlOp {
                 IlOp::Byte { byte, .. }
                     if *byte.bytecode() == Instruction::RETURN && byte.return_words() == 1
             )
-    }
-
-    pub fn loc(&self) -> DebugLoc {
-        match self {
-            IlOp::Byte { loc, .. }
-            | IlOp::Load { loc, .. }
-            | IlOp::StorePop { loc, .. }
-            | IlOp::Const { loc, .. }
-            | IlOp::ConstPool { loc, .. }
-            | IlOp::String { loc, .. }
-            | IlOp::Dup { loc }
-            | IlOp::Pop { loc }
-            | IlOp::LogNot { loc }
-            | IlOp::Index { loc }
-            | IlOp::IndexUnchecked { loc }
-            | IlOp::ArrayPin { loc, .. }
-            | IlOp::MakeTuple { loc, .. }
-            | IlOp::MakeArray { loc, .. }
-            | IlOp::MakeEnum { loc, .. }
-            | IlOp::BoxValue { loc, .. }
-            | IlOp::UnboxValue { loc, .. }
-            | IlOp::LoadField { loc, .. }
-            | IlOp::GetField { loc }
-            | IlOp::SetField { loc, .. }
-            | IlOp::HostInvoke { loc, .. }
-            | IlOp::Print { loc }
-            | IlOp::Return { loc, .. }
-            | IlOp::Halt { loc }
-            | IlOp::Bin { loc, .. }
-            | IlOp::BinSlotImm { loc, .. }
-            | IlOp::BinSlotSlot { loc, .. }
-            | IlOp::LoadReturnSlot { loc, .. }
-            | IlOp::ConstReturnImm { loc, .. }
-            | IlOp::BinReturn { loc, .. }
-            | IlOp::Jump { loc, .. }
-            | IlOp::Entry { loc, .. }
-            | IlOp::PrologueJmp { loc } => *loc,
-            IlOp::Label(_) => DebugLoc::unknown(),
-        }
     }
 
     pub fn set_loc(&mut self, loc: DebugLoc) {

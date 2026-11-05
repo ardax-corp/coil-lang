@@ -328,11 +328,6 @@ fn note_reason(reasons: &mut Vec<PassHit>, name: &str, n: usize) {
     }
 }
 
-/// Count one body that stayed fuse-IL for `reason`.
-pub(crate) fn note_fuse_reason(reason: &str) {
-    with_stats(|s| note_reason(&mut s.fuse_reasons, reason, 1));
-}
-
 /// Count one function body lowered from HIR.
 pub(crate) fn note_hir_lowered() {
     with_stats(|s| s.hir_lowered += 1);
@@ -352,11 +347,6 @@ pub(crate) fn note_hir_mir(refused: Option<&str>) {
         None => s.hir_mir += 1,
         Some(why) => note_reason(&mut s.hir_mir_refused, why, 1),
     });
-}
-
-/// Count one body whose dense tier came from MIR lowered from HIR.
-pub(crate) fn note_hir_mir_kept() {
-    with_stats(|s| s.hir_mir_kept += 1);
 }
 
 /// Count `sites` call sites inlined into one HIR body.
@@ -390,20 +380,6 @@ pub(crate) fn note_comptime_consts(consts: usize, cached: usize, folds: usize, u
         s.comptime_consts_cached += cached;
         s.comptime_folds += folds;
         s.comptime_const_us += us;
-    });
-}
-
-/// Record one body's final tier and refusal reasons.
-pub(crate) fn note_body_tier(record: BodyTier) {
-    with_stats(|s| s.body_tiers.push(record));
-}
-
-/// Record which tier each function body ended in (MIR keep-rate census).
-pub(crate) fn note_body_tiers(dense: usize, lir: usize, fuse: usize) {
-    with_stats(|s| {
-        s.bodies_dense += dense;
-        s.bodies_lir += lir;
-        s.bodies_fuse += fuse;
     });
 }
 

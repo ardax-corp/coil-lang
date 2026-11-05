@@ -234,10 +234,6 @@ struct Context {
 /// fresh compile (safe to clear the shared constant pool).
 pub const PROLOGUE_BYTECODE_LEN: usize = 3;
 
-/// The prologue's `HALT`: where a program without `main` goes once its
-/// setup (if any) has run, instead of falling into its first function.
-pub const PROLOGUE_HALT_OFFSET: usize = 2;
-
 /// Target-side layouts at a trait-method call across a generic boundary;
 /// see [`Compiler::trait_method_boundary_sig`].
 pub(super) struct BoundarySig {

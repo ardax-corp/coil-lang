@@ -20,7 +20,6 @@ mod sp;
 pub use opt::{EarlyFree, OptLevel};
 #[cfg(any(test, feature = "dissect"))]
 #[cfg(any(test, feature = "dissect"))]
-pub(crate) use sp::stack_delta;
 
 pub use builder::IlBuilder;
 pub use codebuf::CodeBuf;

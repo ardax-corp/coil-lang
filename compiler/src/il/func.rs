@@ -60,17 +60,4 @@ impl IlFunc {
         }
     }
 
-    /// A copy without [`Self::hir_mir`], which is the bulk of the metadata.
-    pub fn clone_without_mir(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            entry: self.entry,
-            code_start: self.code_start,
-            code_end: self.code_end,
-            entry_sp: self.entry_sp,
-            pinned: self.pinned,
-            hir_mir: None,
-            hir_mir_why: self.hir_mir_why.clone(),
-        }
-    }
 }

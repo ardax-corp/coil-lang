@@ -18,22 +18,6 @@ mod eq_glue;
 pub(super) mod module_setup;
 
 
-fn apply_debug_slot_remaps(
-    locals: &mut HashMap<String, HashMap<String, u32>>,
-    remaps: &HashMap<String, HashMap<u32, u32>>,
-) {
-    for (fn_name, slots) in locals.iter_mut() {
-        let Some(remap) = remaps.get(fn_name) else {
-            continue;
-        };
-        for slot in slots.values_mut() {
-            if let Some(&new) = remap.get(slot) {
-                *slot = new;
-            }
-        }
-    }
-}
-
 /// Where an open dictionary goal comes from (see
 /// `Compiler::resolve_open_dict_goal`).
 enum OpenDictGoal {
@@ -8675,16 +8659,3 @@ fn pure_static_inits(checker: &crate::typechecking::infer::Checker, hir: &crate:
 #[cfg(test)]
 #[path = "lib.tests.rs"]
 mod tests;
-
-/// The body `start..pad`, unwinding through `pad`.
-fn cleanup_ranges_for(start: usize, pad: usize, frame_words: u32) -> Vec<common::CleanupRange> {
-    (start < pad)
-        .then_some(common::CleanupRange {
-            start_pc: start as u32,
-            end_pc: pad as u32,
-            pad_pc: pad as u32,
-            frame_words,
-        })
-        .into_iter()
-        .collect()
-}

@@ -36,60 +36,6 @@ pub struct LiveRootSet {
     pub slots: Vec<LocalId>,
 }
 
-/// Residual object-init opcodes (cold `IlOp::Byte`).
-pub fn is_alloc_inst(inst: Instruction) -> bool {
-    matches!(
-        inst,
-        Instruction::InitTyped | Instruction::INIT | Instruction::DenseMake
-            | Instruction::DenseMakeK
-            | Instruction::DenseMakeObject
-    )
-}
-
-/// Inventory label: `heap/aggregate` for Make*, `heap/alloc` for InitTyped.
-pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
-    match op {
-        IlOp::MakeArray { .. } | IlOp::MakeTuple { .. } | IlOp::MakeEnum { .. } => {
-            Some("heap/aggregate")
-        }
-        IlOp::Byte { byte, .. }
-            if is_alloc_inst(*byte.bytecode())
-                || matches!(*byte.bytecode(), Instruction::DenseMake | Instruction::DenseMakeK) =>
-        {
-            Some("heap/alloc")
-        }
-        IlOp::Byte { byte, .. }
-            if matches!(
-                *byte.bytecode(),
-                Instruction::ArrayPush | Instruction::DenseArrayPush
-            ) =>
-        {
-            Some("heap/grow")
-        }
-        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::STRINGIFY => {
-            Some("heap/format")
-        }
-        IlOp::Byte { byte, .. }
-            if *byte.bytecode() == Instruction::FORMAT && byte.operand_u32() > 0 =>
-        {
-            Some("heap/format")
-        }
-        IlOp::Byte { byte, .. }
-            if matches!(
-                *byte.bytecode(),
-                Instruction::DictEntries | Instruction::MakeDict
-            ) =>
-        {
-            Some("heap/dict")
-        }
-        IlOp::Entry {
-            kind: crate::il::EntryKind::MakeCoro,
-            ..
-        } => Some("heap/coro"),
-        _ => None,
-    }
-}
-
 /// Fill [`MirFunc::gc_roots`] and each `GcBarrier.roots` from SSA liveness.
 ///
 /// Roots are heap words live *after* the edge, the new `Alloc` dest, and
@@ -205,46 +151,6 @@ fn live_heap(
         .copied()
         .filter(|v| !skip.contains(v) && func.ty(*v).is_heap_word())
         .collect()
-}
-
-/// The `i64` words of an [`MirFunc::opaque_words`] body (a type
-/// variable's word may be an object) live past an instruction that can
-/// collect: anything but a constant, a code pointer (a `CodePtr`, or a
-/// `CallIndirect`'s dictionary method), a parameter or a word one of
-/// these moves consumes. A frame map lists them beside its heap words.
-pub(super) fn live_opaque_words(func: &MirFunc) -> BTreeSet<ValueId> {
-    let mut out = BTreeSet::new();
-    if !func.opaque_words {
-        return out;
-    }
-    let consts: HashSet<ValueId> = func
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match i {
-            MirInst::Const { dest, .. } | MirInst::CodePtr { dest, .. } => Some(*dest),
-            MirInst::CallIndirect { callee, .. } if func.ty(*callee) == MirTy::I64 => Some(*callee),
-            _ => None,
-        })
-        .collect();
-    let live = liveness_after(func);
-    for (b, block) in func.blocks.iter().enumerate() {
-        for (i, inst) in block.insts.iter().enumerate() {
-            if collects(inst) {
-                out.extend(live[b][i].iter().copied().filter(|v| func.ty(*v) == MirTy::I64 && !consts.contains(v) && !func.params.contains(v)));
-            }
-        }
-    }
-    out
-}
-
-/// Whether `inst` may run the collector: all but the moves of words
-/// [`live_opaque_words`] looks past.
-pub(super) fn collects(inst: &MirInst) -> bool {
-    !matches!(
-        inst,
-        MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. } | MirInst::PanicStore { .. }
-    )
 }
 
 fn barrier_dests(func: &MirFunc) -> HashSet<ValueId> {

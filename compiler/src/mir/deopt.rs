@@ -132,61 +132,6 @@ fn site_from(
     }
 }
 
-/// Original IL slot → reconstruct register for named locals that have a slot.
-pub fn debug_slot_remap(
-    func: &MirFunc,
-    regs: &[u8],
-    need_slot: &[bool],
-) -> HashMap<u32, u32> {
-    let mut out = HashMap::new();
-    for (local, val) in &func.debug_slots {
-        let idx = val.index();
-        let is_param = func.params.contains(val);
-        if !is_param && !need_slot.get(idx).copied().unwrap_or(false) {
-            continue;
-        }
-        if let Some(&r) = regs.get(idx) {
-            out.insert(local.0, u32::from(r));
-        }
-    }
-    out
-}
-
-/// Encode leave edges after register assign. Incomplete maps must not resume.
-pub fn encode_draft(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> DraftDeoptMap {
-    let mut sites = Vec::new();
-    let mut complete = true;
-    for site in &func.deopt_sites {
-        let mut il_slots = Vec::new();
-        let mut mapped = Vec::new();
-        for (local, val) in &site.slots {
-            let idx = val.index();
-            let is_param = func.params.contains(val);
-            let slotted = is_param || need_slot.get(idx).copied().unwrap_or(false);
-            if let Ok(il) = u16::try_from(local.0) {
-                il_slots.push(il);
-            }
-            if slotted
-                && let Some(&r) = regs.get(idx) {
-                    mapped.push(u16::from(r));
-                    continue;
-                }
-            complete = false;
-        }
-        sites.push(DraftDeoptSite {
-            kind: site.kind,
-            loc: site.loc,
-            il_slots,
-            regs: mapped,
-        });
-    }
-    DraftDeoptMap {
-        name: func.name.clone(),
-        sites,
-        complete,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

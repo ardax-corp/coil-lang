@@ -7,8 +7,6 @@ use crate::il::opt::OptimizeOptions;
 use std::collections::HashMap;
 
 
-type RefusalSlot = std::thread::LocalKey<std::cell::RefCell<Option<String>>>;
-
 /// `(function, "dense" | "lir", MIR text)` captured for `coil dissect --mir`.
 pub type CapturedMir = Vec<(String, &'static str, String)>;
 
@@ -29,19 +27,6 @@ pub fn start_mir_capture() {
 /// Stop recording and return `(function, "dense" | "lir", MIR text)`.
 pub fn take_mir_capture() -> CapturedMir {
     MIR_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
-}
-
-/// A pinned (`defer`) body's MIR from HIR, which no tier emits yet.
-pub fn capture_pinned_mir(name: &str, func: &crate::mir::MirFunc) {
-    capture_mir(name, "pinned", func);
-}
-
-fn capture_mir(name: &str, form: &'static str, func: &crate::mir::MirFunc) {
-    MIR_CAPTURE.with(|c| {
-        if let Some(list) = c.borrow_mut().as_mut() {
-            list.push((name.to_string(), form, func.to_string()));
-        }
-    });
 }
 
 /// The MIR passes the dense tier runs on a body, at `opts`' level: the

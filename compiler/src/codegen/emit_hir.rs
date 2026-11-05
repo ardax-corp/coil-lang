@@ -2364,7 +2364,7 @@ impl Compiler {
             poly_calls: &tables.poly_calls,
             bound_calls: &tables.bound_calls,
             existential_calls: &tables.existential_calls,
-            ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx } else { &[] },
+            ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx[..] } else { &[] },
             lens: &emit.plan.lens,
             alloc_steady: self.alloc_steady,
             pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),

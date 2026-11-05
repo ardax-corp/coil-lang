@@ -59,7 +59,6 @@ pub use purity::{
 pub use stack_bound::{
     BoundSource, DEFAULT_OPERAND_STACK_SLOTS, FnStackBound, MAX_OPERAND_STACK_SLOTS,
     StackBoundReport, analyze_stack_bounds, operand_slots_for_frames,
-    rescale_operand_slots_for_dense_seek,
 };
 #[allow(unused_imports)] // public API re-export
 pub use ty::{ScalarBacking, Ty};

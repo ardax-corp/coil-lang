@@ -9,25 +9,6 @@ use common::{Byte, DebugLoc};
 use super::op::{FuseHint, IlJumpKind};
 use super::op::{EntryKind, IlOp, Label};
 
-/// Error from IL finalize / lower.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IlError {
-    /// A jump or entry targeted a label that was never bound.
-    UnboundLabel(Label),
-}
-
-impl std::fmt::Display for IlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            IlError::UnboundLabel(label) => {
-                write!(f, "label {:?} was never bound", label)
-            }
-        }
-    }
-}
-
-impl std::error::Error for IlError {}
-
 /// Raw index of every code-emitting op in `ops[..scanned]`, extended lazily
 /// as ops are pushed. Maps a code offset (PC) to its op in O(1) instead of
 /// a scan from op 0 (#608).
@@ -60,13 +41,6 @@ impl IlBuilder {
         &self.ops
     }
 
-    /// Structural access (insert / remove / reorder ops). Drops the code
-    /// index, so prefer [`Self::ops_slice_mut`] for in-place rewrites.
-    pub fn ops_mut(&mut self) -> &mut Vec<IlOp> {
-        *self.code_index.get_mut() = CodeIndex::default();
-        &mut self.ops
-    }
-
     /// In-place access to the ops (locations, site tags, an `Entry` for an
     /// absolute CALL byte). The caller must not change which ops emit code.
     pub fn ops_slice_mut(&mut self) -> &mut [IlOp] {
@@ -90,11 +64,6 @@ impl IlBuilder {
         self.code_index.borrow()
     }
 
-    /// Raw index of the emitting op at code offset `pc`, if there is one.
-    pub fn raw_index_of_code(&self, pc: usize) -> Option<usize> {
-        self.indexed().positions.get(pc).copied()
-    }
-
     /// Raw ops range holding code offsets `[start, end)` plus the labels
     /// bound at those offsets: from just after the op at `start - 1` to just
     /// after the op at `end - 1` (labels at offset `end` excluded; past the
@@ -116,17 +85,6 @@ impl IlBuilder {
         lo..hi.max(lo)
     }
 
-    /// Where an op inserted at code offset `code_pos` goes: right after the
-    /// op at `code_pos - 1`, so labels bound at `code_pos` follow it (the
-    /// end when `code_pos` is past the last op).
-    pub fn raw_insert_point(&self, code_pos: usize) -> usize {
-        if code_pos == 0 {
-            return 0;
-        }
-        self.raw_index_of_code(code_pos - 1)
-            .map_or(self.ops.len(), |i| i + 1)
-    }
-
     pub fn clear(&mut self) {
         *self.code_index.get_mut() = CodeIndex::default();
         self.ops.clear();
@@ -142,17 +100,6 @@ impl IlBuilder {
     /// Number of code-emitting ops (labels excluded). Useful for spans.
     pub fn code_len(&self) -> usize {
         self.indexed().positions.len()
-    }
-
-    /// Remove the last op, which must emit code.
-    pub fn pop_last(&mut self) {
-        debug_assert!(self.ops.last().is_some_and(IlOp::emits_code));
-        self.ops.pop();
-        let index = self.code_index.get_mut();
-        if index.scanned > self.ops.len() {
-            index.positions.retain(|&p| p < self.ops.len());
-            index.scanned = self.ops.len();
-        }
     }
 
     /// Total IL items including label markers.
@@ -171,13 +118,6 @@ impl IlBuilder {
     pub fn bind_label(&mut self, label: Label) {
         self.bound.insert(label.0);
         self.ops.push(IlOp::Label(label));
-    }
-
-    /// Insert a bound label marker at raw op index `raw_idx` (does not append).
-    pub fn insert_bound_label_at(&mut self, raw_idx: usize, label: Label) {
-        *self.code_index.get_mut() = CodeIndex::default();
-        self.bound.insert(label.0);
-        self.ops.insert(raw_idx, IlOp::Label(label));
     }
 
     /// `EntryKind::Call` with an explicit return width (`1` or `2` words).
@@ -213,12 +153,6 @@ impl IlBuilder {
         self.push_op(IlOp::Return {
             loc: DebugLoc::unknown(),
             ret_words: 1,
-        });
-    }
-
-    pub fn push_pop(&mut self) {
-        self.push_op(IlOp::Pop {
-            loc: DebugLoc::unknown(),
         });
     }
 
@@ -299,47 +233,6 @@ impl IlBuilder {
         Ok(())
     }
 
-    /// Splice `inserted` before the first op at logical code index `code_pos`
-    /// (counting only emitting ops). Used for static-init insertion.
-    pub fn splice_code_at(&mut self, code_pos: usize, mut inserted: IlBuilder) {
-        let raw_idx = self.raw_insert_point(code_pos);
-        *self.code_index.get_mut() = CodeIndex::default();
-        let mut chunk = std::mem::take(&mut inserted.ops);
-        // Remap labels from inserted into our namespace.
-        let mut remap: BTreeMap<u32, u32> = BTreeMap::new();
-        for op in &mut chunk {
-            match op {
-                IlOp::Label(Label(id))
-                | IlOp::Jump {
-                    target: Label(id), ..
-                }
-                | IlOp::Entry {
-                    target: Label(id), .. } => {
-                    let nid = *remap.entry(*id).or_insert_with(|| {
-                        let n = self.next_label_id;
-                        self.next_label_id += 1;
-                        n
-                    });
-                    *id = nid;
-                }
-                _ => {}
-            }
-        }
-        for op in &chunk {
-            if let IlOp::Label(Label(id)) = op {
-                self.bound.insert(*id);
-            }
-            if let IlOp::Jump {
-                target: Label(id), ..
-            }
-            | IlOp::Entry {
-                target: Label(id), .. } = op
-            {
-                self.targeted.insert(*id);
-            }
-        }
-        self.ops.splice(raw_idx..raw_idx, chunk);
-    }
 }
 
 // Test fixtures build their IL with these.

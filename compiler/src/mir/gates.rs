@@ -7,8 +7,6 @@
 //! instruction for instruction.
 
 use std::collections::HashSet;
-
-use super::entry::LirRefuse;
 use super::func::MirFunc;
 use super::inst::{BlockId, MirAllocKind, MirInst};
 use super::licm::natural_loops;
@@ -27,91 +25,7 @@ pub struct GateFacts {
     pub post_loop_alloc_return: bool,
 }
 
-/// The MIR form of [`super::gc::refuse_reason`]: `Make*` / `InitTyped` /
-/// `MakeDict` / `DictEntries` / `MakeCoro`, `ArrayPush`, `STRINGIFY`, and
-/// `FORMAT` with arguments. `BoxValue` / `MakeFn` / `MakePolyFn` are not.
-pub fn refuses_alloc(inst: &MirInst) -> bool {
-    match inst {
-        MirInst::Alloc { kind, .. } => {
-            !matches!(kind, MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. })
-        }
-        MirInst::ArrayPush { .. } | MirInst::Stringify { .. } | MirInst::Cow { .. } => true,
-        MirInst::Format { args, .. } => !args.is_empty(),
-        _ => false,
-    }
-}
-
-/// `func` allocates where a stack map site binds: a [`refuses_alloc`]
-/// site, or an argless `FORMAT` ([`MirFunc::has_mapped_gc_edge`]).
-pub fn maps_allocation(func: &MirFunc) -> bool {
-    func.blocks.iter().flat_map(|b| b.insts.iter()).any(refuses_alloc) || func.has_mapped_gc_edge()
-}
-
-/// Call, host or format work (the stack IL's `CALL | HOST | FORMAT` effects).
-fn does_work(inst: &MirInst) -> bool {
-    matches!(
-        inst,
-        MirInst::Call { .. }
-            | MirInst::CallIndirect { .. }
-            | MirInst::HostInvoke { .. }
-            | MirInst::Ffi { .. }
-            | MirInst::Print { .. }
-            | MirInst::FreeEarly { .. }
-            | MirInst::Format { .. }
-            | MirInst::Stringify { .. }
-            | MirInst::Cow { .. }
-            | MirInst::ResumeCoro { .. }
-            | MirInst::Alloc {
-                kind: MirAllocKind::Coro { .. } | MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. },
-                ..
-            }
-    )
-}
-
 impl GateFacts {
-    pub fn of(func: &MirFunc) -> Self {
-        let has_alloc = func.blocks.iter().flat_map(|b| b.insts.iter()).any(refuses_alloc);
-        let loops = natural_loops(func);
-        if loops.is_empty() {
-            return Self { has_alloc, ..Self::default() };
-        }
-        let in_loop: HashSet<BlockId> = loops.iter().flat_map(|lp| lp.blocks.iter().copied()).collect();
-        let allocates = |b: BlockId| func.block(b).insts.iter().any(refuses_alloc);
-        let alloc_in_loop = in_loop.iter().any(|&b| allocates(b));
-        let post_loop_alloc_return = has_alloc && !alloc_in_loop && {
-            // Blocks no loop is reachable from: the tail after the loops.
-            let preds = func.preds();
-            let mut before: HashSet<BlockId> = in_loop.clone();
-            let mut work: Vec<BlockId> = in_loop.iter().copied().collect();
-            while let Some(b) = work.pop() {
-                for &p in &preds[b.index()] {
-                    if before.insert(p) {
-                        work.push(p);
-                    }
-                }
-            }
-            let tail = func.blocks.iter().filter(|b| !before.contains(&b.id));
-            func.blocks.iter().filter(|b| before.contains(&b.id)).all(|b| !allocates(b.id))
-                && !tail.flat_map(|b| b.insts.iter()).any(does_work)
-        };
-        Self {
-            has_alloc,
-            has_loop: true,
-            alloc_in_loop,
-            post_loop_alloc_return,
-        }
-    }
-}
-
-/// The LIR walls of a body: neither a user call nor a `BoxValue` is one
-/// (the precise frame map covers the box), only an
-/// allocation without maps (`maps_ok`).
-pub fn fuse_lir_wall(func: &MirFunc, maps_ok: bool) -> Option<LirRefuse> {
-    let insts = || func.blocks.iter().flat_map(|b| b.insts.iter());
-    if !maps_ok && insts().any(refuses_alloc) {
-        return Some(LirRefuse::Alloc);
-    }
-    None
 }
 
 #[cfg(test)]

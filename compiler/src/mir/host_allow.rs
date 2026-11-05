@@ -165,11 +165,6 @@ pub fn host_result_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
         || (packed_la(id) && matches!(actual, MirTy::I64 | MirTy::F64 | MirTy::HeapRef))
 }
 
-/// S3 / Q9 R2: any I6-typed host may sit in a dense body (box at the edge).
-pub fn dense_host_ok(id: u16) -> bool {
-    host_edge_spec(id).is_some()
-}
-
 /// One-word host Option/Result layouts the dense edge can reconstruct.
 /// Reserved (3) stays boxed-or-refuse, not a niche word.
 pub fn dense_host_layout_ok(layout: u8) -> bool {

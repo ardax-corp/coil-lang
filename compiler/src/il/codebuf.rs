@@ -54,46 +54,9 @@ impl CodeBuf {
         self.lowered_locs = None;
     }
 
-    /// Append a typed IL op (prefer for hot-set Const/Return/Load/…).
-    pub fn push_op(&mut self, op: IlOp) {
-        self.invalidate_lowered();
-        self.il.push_op(op);
-    }
-
     pub fn push_return(&mut self) {
         self.invalidate_lowered();
         self.il.push_return();
-    }
-
-    /// Pop the top value. A pure value pushed just before (a unit `CONST 0`
-    /// after `Vec::push`, a statement `x;`) is dropped instead.
-    pub fn push_pop(&mut self) {
-        self.invalidate_lowered();
-        if !self.drop_last_value() {
-            self.il.push_pop();
-        }
-    }
-
-    /// Remove a side-effect-free single-value op just pushed, when no label,
-    /// entry or function span marks the code after it.
-    fn drop_last_value(&mut self) -> bool {
-        let pure = matches!(
-            self.il.ops().last(),
-            Some(IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } | IlOp::Load { .. })
-        );
-        if !pure || self.marked_after() {
-            return false;
-        }
-        self.il.pop_last();
-        true
-    }
-
-    /// Whether a function entry or function span starts at or after the
-    /// last code op pushed: code after it is not the same straight line.
-    fn marked_after(&self) -> bool {
-        let pc = self.il.code_len() - 1;
-        self.entry_at_offset.keys().any(|&p| p >= pc)
-            || self.funcs.iter().any(|f| f.code_end > pc)
     }
 
     /// If `b` is a call-like op targeting a known entry PC, return Entry parts
@@ -190,10 +153,6 @@ impl CodeBuf {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub fn clear(&mut self) {
         self.il.clear();
         self.lowered = None;
@@ -258,107 +217,6 @@ impl CodeBuf {
         self.funcs.retain(|f| pred(f));
     }
 
-    /// Snapshot of entry-label bindings (emitting PC → label).
-    pub fn entry_labels(&self) -> impl Iterator<Item = (usize, Label)> + '_ {
-        self.entry_at_offset.iter().map(|(&pc, &l)| (pc, l))
-    }
-
-    /// Remove raw IL ops in `[raw_start, raw_end)`.
-    pub fn remove_raw_range(&mut self, raw_start: usize, raw_end: usize) {
-        self.invalidate_lowered();
-        if raw_start >= raw_end || raw_end > self.il.ops().len() {
-            return;
-        }
-        self.il.ops_mut().drain(raw_start..raw_end);
-    }
-
-    /// After deleting emitting ops `[start, end)`, drop entry PCs in that
-    /// range and subtract `end - start` from all greater PCs.
-    pub fn shift_entry_pcs_after_delete(&mut self, start: usize, end: usize) {
-        if start >= end {
-            return;
-        }
-        let delta = end - start;
-        let mut next = HashMap::with_capacity(self.entry_at_offset.len());
-        for (pc, label) in self.entry_at_offset.drain() {
-            if pc < start {
-                next.insert(pc, label);
-            } else if pc >= end {
-                next.insert(pc - delta, label);
-            }
-        }
-        self.entry_at_offset = next;
-    }
-
-    /// After deleting the disjoint emitting ranges in `shift`, drop the
-    /// entry PCs and func records inside them and move the rest down: what
-    /// [`Self::shift_entry_pcs_after_delete`] and friends do one range at a
-    /// time, in one pass over each (#1857).
-    pub fn drop_deleted_spans(&mut self, shift: &DeleteShift) {
-        if shift.is_empty() {
-            return;
-        }
-        let mut next = HashMap::with_capacity(self.entry_at_offset.len());
-        for (pc, label) in self.entry_at_offset.drain() {
-            if !shift.inside(pc) {
-                next.insert(shift.map(pc), label);
-            }
-        }
-        self.entry_at_offset = next;
-        self.funcs.retain(|f| !shift.overlaps(f.code_start, f.code_end));
-        for f in &mut self.funcs {
-            f.code_start = shift.map(f.code_start);
-            f.code_end = shift.map(f.code_end);
-        }
-    }
-
-    /// Shrink recorded func spans after deleting emitting ops `[start, end)`.
-    ///
-    /// Callers must drop overlapping records first; survivors are only those
-    /// entirely before `start` or entirely at/after `end`.
-    pub fn shrink_func_spans_after_delete(&mut self, start: usize, end: usize) {
-        if start >= end {
-            return;
-        }
-        let delta = end - start;
-        for f in &mut self.funcs {
-            if f.code_end <= start {
-                continue;
-            }
-            debug_assert!(
-                f.code_start >= end,
-                "overlapping IlFunc must be removed before shrink"
-            );
-            f.code_start -= delta;
-            f.code_end -= delta;
-        }
-    }
-
-    /// Drop func records whose span overlaps `[start, end)`.
-    pub fn remove_func_spans_overlapping(&mut self, start: usize, end: usize) {
-        self.funcs
-            .retain(|f| f.code_end <= start || f.code_start >= end);
-    }
-
-    /// Shift recorded [`IlFunc`] emitting spans after a splice at `threshold`.
-    /// A body that ends at `threshold` does not take in the spliced code:
-    /// the setup region (static initializers, `extern` setup) lands right
-    /// after the last initializer's body, and stack IL from MIR replaces a
-    /// body's ops whole, which would drop it.
-    pub fn bump_func_spans(&mut self, threshold: usize, delta: usize) {
-        if delta == 0 {
-            return;
-        }
-        for f in &mut self.funcs {
-            if f.code_end > threshold || f.code_start >= threshold {
-                f.code_end += delta;
-            }
-            if f.code_start >= threshold {
-                f.code_start += delta;
-            }
-        }
-    }
-
     pub fn fresh_label(&mut self) -> Label {
         self.il.fresh_label()
     }
@@ -391,63 +249,8 @@ impl CodeBuf {
         self.entry_at_offset.get(&pc).copied()
     }
 
-    /// Return an existing label bound at logical code index `code_pos`, or insert
-    /// and bind a fresh one. Used by static-init JMP → `main` reconciliation.
-    pub fn entry_label_at(&mut self, code_pos: usize) -> Label {
-        let mut emitting = 0usize;
-        let mut raw_idx = self.il.raw_len();
-        let mut existing: Option<Label> = None;
-        for (i, op) in self.il.ops().iter().enumerate() {
-            if emitting == code_pos {
-                if let IlOp::Label(l) = op {
-                    existing = Some(*l);
-                } else {
-                    raw_idx = i;
-                }
-                break;
-            }
-            if op.emits_code() {
-                emitting += 1;
-            }
-        }
-        if let Some(l) = existing {
-            return l;
-        }
-        let label = self.il.fresh_label();
-        self.il.insert_bound_label_at(raw_idx, label);
-        self.entry_at_offset.entry(code_pos).or_insert(label);
-        label
-    }
-
     pub fn push_prologue_jmp(&mut self) {
         self.il.push_prologue_jmp();
-    }
-
-    /// Splice another buffer's IL before logical code index `code_pos`,
-    /// remapping labels into this buffer's namespace.
-    ///
-    /// Packed CALL/CodePtr Bytes in `other` (static inits are compiled into a
-    /// side buffer with an empty entry map) are resolved against this
-    /// buffer's entry map. Call before bumping entry offsets for the splice:
-    /// the packed targets are pre-splice PCs.
-    pub fn splice_buf_at(&mut self, code_pos: usize, other: CodeBuf) {
-        self.invalidate_lowered();
-        let n = other.len();
-        self.il.splice_code_at(code_pos, other.il);
-        self.rewrite_abs_entries_in(code_pos, code_pos + n);
-    }
-
-    pub fn insert_jump_at(&mut self, code_pos: usize, target: Label) {
-        let raw_idx = self.il.raw_insert_point(code_pos);
-        self.il.ops_mut().insert(
-            raw_idx,
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target,
-                loc: DebugLoc::unknown(),
-                hint: Default::default(),
-            },
-        );
     }
 
     pub fn as_slice(&self) -> &[Byte] {
@@ -467,22 +270,6 @@ impl CodeBuf {
         self.il.ops()
     }
 
-    /// Shift [`Self::entry_at_offset`] keys after a splice that inserts `delta`
-    /// emitting ops at `threshold`. Entry ops themselves are symbolic and need
-    /// no rewrite; leftover abs CALL/CodePtr Bytes (missing fn CodePtr 0) are
-    /// below any real entry PC and are left untouched.
-    pub fn bump_absolute_entry_targets(&mut self, threshold: usize, delta: usize) {
-        if delta == 0 {
-            return;
-        }
-        let mut next = HashMap::with_capacity(self.entry_at_offset.len());
-        for (pc, label) in self.entry_at_offset.drain() {
-            let pc = if pc >= threshold { pc + delta } else { pc };
-            next.insert(pc, label);
-        }
-        self.entry_at_offset = next;
-    }
-
 }
 
 /// Disjoint deleted emitting ranges, ascending, and how far each PC after
@@ -495,45 +282,7 @@ pub struct DeleteShift {
 }
 
 impl DeleteShift {
-    /// `None` when two ranges overlap.
-    pub fn new(mut spans: Vec<(usize, usize)>) -> Option<Self> {
-        spans.retain(|(s, e)| s < e);
-        spans.sort_unstable();
-        if spans.windows(2).any(|w| w[1].0 < w[0].1) {
-            return None;
-        }
-        let mut before = Vec::with_capacity(spans.len() + 1);
-        let mut total = 0;
-        before.push(0);
-        for (s, e) in &spans {
-            total += e - s;
-            before.push(total);
-        }
-        Some(Self { spans, before })
-    }
 
-    pub fn is_empty(&self) -> bool {
-        self.spans.is_empty()
-    }
-
-    /// The ranges wholly at or before `pc`.
-    fn ended_by(&self, pc: usize) -> usize {
-        self.spans.partition_point(|&(_, e)| e <= pc)
-    }
-
-    /// `pc` less every range that ends at or before it.
-    pub fn map(&self, pc: usize) -> usize {
-        pc - self.before[self.ended_by(pc)]
-    }
-
-    pub fn inside(&self, pc: usize) -> bool {
-        self.spans.get(self.ended_by(pc)).is_some_and(|&(s, _)| s <= pc)
-    }
-
-    /// Whether `[start, end)` overlaps a range.
-    fn overlaps(&self, start: usize, end: usize) -> bool {
-        self.spans.get(self.ended_by(start)).is_some_and(|&(s, _)| s < end)
-    }
 }
 
 // Test fixtures build their IL with these.
