@@ -314,7 +314,6 @@ dependencies = [
  "common",
  "compiler",
  "comptime",
- "criterion",
  "machine",
  "parser",
  "reporting",

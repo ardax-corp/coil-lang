@@ -55,13 +55,6 @@ sha2 = "0.10"
 coil-test = { path = "coil-test" }
 coil-dissect = { path = "coil-dissect" }
 
-[dev-dependencies]
-criterion = { version = "^0.8", features = ["html_reports"] }
-
-[[bench]]
-name = "fib"
-harness = false
-
 [features]
 default = []
 gc-stress = ["machine/gc-stress"]
