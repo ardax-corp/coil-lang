@@ -325,7 +325,7 @@ pub fn embedded_runtime(exe: &Path, cache: &Path) -> Result<Option<PathBuf>, Str
 #[cfg(not(target_family = "wasm"))]
 fn system_libs() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
-        &["-Wl,-dead_strip", "-lSystem", "-lc", "-lm"]
+        &["-Wl,-dead_strip", "-liconv", "-lSystem", "-lc", "-lm"]
     } else if cfg!(windows) {
         &["-Wl,--gc-sections", "-lws2_32", "-luserenv", "-lbcrypt", "-lntdll", "-ladvapi32"]
     } else {
