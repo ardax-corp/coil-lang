@@ -120,8 +120,15 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   `r?`, `return r`, `let (a, b) = r` and `r[0]` do not allocate. `?`
   compares the tag in place and shares one fail epilogue per function
   (#297, #307).
+- A call through a function value of a two-word result is a
+  `CallIndirect` with `pair` set: a lambda whose result is a pair is
+  emitted twice, its one-word body (the value's entry) and a two-word
+  twin (`MirFunc::pair_twin`), and the call enters the twin
+  (`coil_native_fn_entry_pair`). A callee without one (a named function,
+  an adapter, a runtime call) returns its box and the call reads the two
+  words through a per-type `unpair` body (`__coil_unpair_N`).
 - Everywhere a value must be one word (a field, a capture, a container
-  element, a shared body, a dictionary or closure call, `==`, `Show`) it
+  element, a shared body, a dictionary call, `==`, `Show`) it
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
   back. One pack/unpack pair serves every consumer.
 

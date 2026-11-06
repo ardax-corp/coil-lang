@@ -607,6 +607,11 @@ pub struct Compiler {
     hir_par_tail: Option<Box<compiler::emit_hir::HirParTail>>,
     /// A body's anonymous `fn`s, emitted after its function record.
     hir_lambda_tail: Vec<compiler::emit_hir::HirLambdaTail>,
+    /// The bodies a two-word call through a function value reads a
+    /// callee's one word with (`MirInst::CallIndirect`'s `unpair`), by
+    /// type: name and entry, emitted after the body that first needs one.
+    hir_unpairs: HashMap<String, crate::bodies::Label>,
+    hir_unpair_tail: Vec<(String, crate::typechecking::Ty, crate::bodies::Label)>,
     /// Closure adapters ([`Compiler::hir_fn_adapter`]) by unboxed tags,
     /// and those still to emit after the current body.
     hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<crate::layout::ValueLayout>), crate::bodies::Label>,
@@ -837,6 +842,8 @@ impl Default for Compiler {
             loop_par_forks: 0,
             hir_par_tail: None,
             hir_lambda_tail: Vec::new(),
+            hir_unpairs: HashMap::new(),
+            hir_unpair_tail: Vec::new(),
             hir_fn_adapters: HashMap::new(),
             hir_adapter_tail: Vec::new(),
             hir_closure_adapters: HashMap::new(),

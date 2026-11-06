@@ -61,6 +61,8 @@ pub(super) struct HirMirTables {
     pub(super) op_prims: HashSet<u32>,
     /// Calls through a function value emitted as a plain `CallIndirect`.
     pub(super) value_calls: HashSet<u32>,
+    /// Of those, the calls of a two-word result: its `unpair` body.
+    pub(super) value_pair_calls: HashMap<u32, crate::bodies::Label>,
     /// Calls through a `PolyFn` local with no dictionaries.
     pub(super) poly_calls: HashMap<u32, crate::mir::HirPolyCall>,
     /// Trait methods and operators on a bound type parameter through one
@@ -691,6 +693,9 @@ impl Compiler {
                     self.hir_mir_polyfn_call(hir, emit, id, *f, args, t);
                 } else {
                     t.value_calls.insert(id.0);
+                    if let Some(unpair) = hir.expr(id).ty.clone().and_then(|ty| self.hir_unpair(&ty)) {
+                        t.value_pair_calls.insert(id.0, unpair);
+                    }
                 }
             }
             // A fixed `len` of a local, literal or literal array evaluates
