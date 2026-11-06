@@ -2079,7 +2079,10 @@ impl SubProgram {
         // `compiled_program` closed any outer capture: this one is the
         // expansion program's own.
         let capture = self.host.runs_mir().then(crate::mir::ComptimeCapture::open);
+        // The level is per thread, and the parent's compile goes on here.
+        let contracts = crate::hir::contract_level();
         let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
+        crate::hir::set_contract_level(contracts);
         let mir = capture.map(crate::mir::ComptimeCapture::take).unwrap_or_default();
         let constants = match compiled {
             Ok(out) => out,
