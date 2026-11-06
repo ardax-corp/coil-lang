@@ -3419,6 +3419,49 @@ fn main() {
     );
 }
 
+/// An inherent method's `Option<int>` parameter takes its two words: the
+/// caller passes the pair without boxing an `Option`.
+#[test]
+fn inherent_method_pair_parameter_takes_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+class H {
+    pub d: int,
+}
+impl H {
+    pub fn get(Option<int> o) -> int {
+        return match o {
+            Some(v) => v,
+            None => self.d,
+        };
+    }
+}
+fn main() {
+    let h = new H(1);
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        let o = if i % 3 == 0 { None } else { Some(i) };
+        s += h.get(o);
+        i += 1;
+    }
+    let _ = write(stdout(), to_bytes(format("%i", s)));
+}
+"#;
+    assert_eq!(run_example_src(src), "31");
+
+    let mut pipeline = test_pipeline();
+    // Keep the call: inlined, there is no edge to look at.
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("inherent pair parameter");
+    assert_eq!(compiled.body("H::get").params.len(), 3, "`get` takes `self` and `o` as two words");
+    assert!(
+        !compiled.insts("main").any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "`main` passes the pair without boxing it"
+    );
+}
+
 /// A ground trait instance method returns its `Option<int>` as two words
 /// to a direct call; its `$dict` adapter, which a dictionary holds, boxes
 /// the pair.
