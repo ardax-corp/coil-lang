@@ -577,9 +577,9 @@ fn run_job_here(job: Job) {
     refuse_job(job);
 }
 
-/// Without the VM, a job native code does not cover fails its join.
+/// A job with no code to run fails its join.
 fn refuse_job(job: Job) {
-    eprintln!("coil: a thread's code needs the bytecode VM, which this runtime leaves out");
+    eprintln!("coil: a thread's code was not compiled for this runtime");
     job.state.store_result_with_panic(Err(ThreadErrorTag::JoinFailed), None);
     job.reactor.job_done();
 }

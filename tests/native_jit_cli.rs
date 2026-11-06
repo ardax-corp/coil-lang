@@ -75,7 +75,7 @@ fn int_traps_panic_as_the_interpreter_does() {
          #[inline(never)]\nfn q(int a, int b) -> int {{ return a / b + a % b; }}\n\
          fn main() {{\n  let _ = println(format(\"%i %i\", grow(1, 10), q(-7, 2)));\n  let _ = println(format(\"%i\", q(7, 0)));\n}}\n"
     );
-    let stats = same_as_mir("traps", &src);
+    same_as_mir("traps", &src);
     let src = format!(
         "{HEADER}#[inline(never)]\nfn grow(int x, int n) -> int {{ let i = 0; while i < n {{ x = x * 3; i = i + 1; }} return x; }}\n\
          fn main() {{ let _ = println(format(\"%i\", grow(1, 50))); }}\n"
@@ -101,7 +101,7 @@ fn deep_recursion_runs_natively() {
         "{HEADER}#[inline(never)]\nfn down(int n) -> int {{ if n == 0 {{ return 0; }} return 1 + down(n - 1); }}\n\
          fn main() {{ let _ = println(format(\"%i\", down(900000))); }}\n"
     );
-    let stats = same_as_mir("deep", &src);
+    same_as_mir("deep", &src);
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn heap_stores_stay_when_native_code_panics() {
         "{HEADER}#[inline(never)]\nfn rec(Vec<int> a, int d) -> int {{ if d == 0 {{ return 0; }} a[d % 4] = a[d % 4] + 1; return 1 + rec(a, d - 1); }}\n\
          fn main() {{ let a: Vec<int> = [0, 0, 0, 0]; let n = rec(a, 50000); let _ = println(format(\"%i %i %i %i %i\", n, a[0], a[1], a[2], a[3])); }}\n"
     );
-    let stats = same_as_mir("stores_deep", &src);
+    same_as_mir("stores_deep", &src);
 }
 
 #[test]
@@ -507,7 +507,7 @@ fn an_early_freed_drop_object_drops_once() {
                class Handle { pub fd: int }\nimpl Handle { fn drop() { drops = drops + 1; } }\n\
                #[inline(never)]\nfn make() { let h = new Handle(1); }\n\
                fn main() { make(); collect(); let _ = println(format(\"%i\", drops)); }\n";
-    let _ = same_as_mir("bailed_drop", src);
+    same_as_mir("bailed_drop", src);
 }
 
 #[test]
@@ -780,7 +780,7 @@ fn native_code_resumes_generators_as_the_interpreter_does() {
     assert!(compiled(&stats, "boom"), "stats: {stats}");
     assert!(program_stderr(&run("native_resume_panic", &boom, true)).contains("division by zero"));
     let twice = format!("{defs}fn main() {{ let _ = println(format(\"%i\", twice())); }}\n");
-    let _ = same_as_mir("native_resume_done", &twice);
+    same_as_mir("native_resume_done", &twice);
 }
 
 #[test]
@@ -1145,7 +1145,7 @@ fn a_drop_the_collector_runs_enters_native_code() {
          #[inline(never)]\nfn leak(int fd) {{ let h = new Handle(fd); }}\n\
          fn main() {{ leak(3); leak(4); collect(); let _ = println(format(\"%i\", LOG)); }}\n"
     );
-    let stats = same_as_mir("native_drop", &src);
+    same_as_mir("native_drop", &src);
 }
 
 #[test]

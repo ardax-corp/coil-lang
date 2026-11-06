@@ -434,7 +434,7 @@ fn push_region(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&s
         let id = out.len();
         register_id(name, id);
         out.push(Arc::new(
-            HostClosureFn::new(sig, move |_heap, _args| Err(FfiError::Unsupported(format!("{name} is a VM hook only"))))
+            HostClosureFn::new(sig, move |_heap, _args| Err(FfiError::Unsupported(format!("{name} is a runtime hook only"))))
                 .with_host_op(op),
         ));
     }
@@ -523,7 +523,7 @@ fn push_task_natives(
         out.push(Arc::new(
             HostClosureFn::new(sig, move |_heap, _args| {
                 Err(FfiError::Unsupported(format!(
-                    "{name} is HostOp::Task (VM hook only)"
+                    "{name} is HostOp::Task (runtime hook only)"
                 )))
             })
             .with_host_op(HostOp::Task),
@@ -539,7 +539,7 @@ fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
     register_id(name, out.len());
     out.push(Arc::new(
         HostClosureFn::new(sig, move |_heap, _args| {
-            Err(FfiError::Unsupported(format!("{name} is HostOp::Unwind (VM hook only)")))
+            Err(FfiError::Unsupported(format!("{name} is HostOp::Unwind (runtime hook only)")))
         })
         .with_host_op(HostOp::Unwind),
     ));
@@ -570,7 +570,7 @@ fn push_gc_host_ops(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
     out.push(Arc::new(
         HostClosureFn::new(collect_sig, |_heap, _args| {
             Err(FfiError::Unsupported(
-                "gc_collect is HostOp::Collect (VM hook only)".into(),
+                "gc_collect is HostOp::Collect (runtime hook only)".into(),
             ))
         })
         .with_host_op(HostOp::Collect),
@@ -587,7 +587,7 @@ fn push_gc_host_ops(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
     out.push(Arc::new(
         HostClosureFn::new(register_sig, |_heap, _args| {
             Err(FfiError::Unsupported(
-                "gc_register_finalizer is HostOp::RegisterFinalizer (VM hook only)".into(),
+                "gc_register_finalizer is HostOp::RegisterFinalizer (runtime hook only)".into(),
             ))
         })
         .with_host_op(HostOp::RegisterFinalizer),

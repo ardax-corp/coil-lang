@@ -470,9 +470,9 @@ impl<'a> Driver<'a> {
     }
 
     /// A native panic, unless it is one a nested call already reported
-    /// ([`crate::native::TRAP_VM_PANIC`]); then its frames' pads run.
+    /// ([`crate::native::TRAP_PANICKED`]); then its frames' pads run.
     fn native_panic(&mut self, p: NativePanic) {
-        if p.code != crate::native::TRAP_VM_PANIC {
+        if p.code != crate::native::TRAP_PANICKED {
             let code = Arc::clone(&self.program.native);
             let locator = self.locator();
             // A stack overflow traps in the prologue of a frame that never

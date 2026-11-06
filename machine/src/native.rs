@@ -396,7 +396,7 @@ pub struct NativeHost {
     pub free: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, bool) -> bool,
     /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
     /// byte) with its operand on `args`, on the runtime.
-    pub ffi: HostViaVmFn,
+    pub ffi: MachineHostFn,
     /// Run the ordinary host native `id` on `args` in `layout` as the VM's
     /// `HostInvoke` does, without bytecode: a native that would block the
     /// task parks the fiber the call runs on. `None`: it is no ordinary
@@ -475,7 +475,7 @@ pub unsafe fn trap_text(ctx: *mut NativeCtx, code: u64) -> String {
 
 /// [`NativeHost::host`]: machine, context, native id, layout, arguments,
 /// panicked flag.
-pub type HostViaVmFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64, &[common::Value], &mut bool) -> Option<u64>;
+pub type MachineHostFn = unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, u64, &[common::Value], &mut bool) -> Option<u64>;
 
 impl NativeHost {
     const NONE: Self = Self {
@@ -529,7 +529,7 @@ pub const TRAP_STACK: u64 = 6;
 /// A panic with the message in [`NativeCtx::message`].
 pub const TRAP_MESSAGE: u64 = 7;
 /// A VM call native code made panicked; the VM already reported it.
-pub const TRAP_VM_PANIC: u64 = 8;
+pub const TRAP_PANICKED: u64 = 8;
 /// An explicit `panic(msg)`: the message in [`NativeCtx::message`].
 pub const TRAP_EXPLICIT: u64 = 9;
 /// Not a panic: the call's fiber parked (its task suspended inside it);
@@ -1003,7 +1003,7 @@ pub unsafe fn raise_close(ctx: *mut NativeCtx) {
 /// `ctx` is the call's [`NativeCtx`].
 pub unsafe fn raise_cancel(ctx: *mut NativeCtx) {
     let c = unsafe { &mut *ctx };
-    c.trap = TRAP_VM_PANIC;
+    c.trap = TRAP_PANICKED;
     c.bail = 1;
 }
 
@@ -1786,7 +1786,7 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
 /// `drop`s, which cannot be taken back: the call commits, and the VM frees
 /// it now as its `FreeEarly` does (a collection may run: native code roots
 /// its words around this call then). A `drop` that panicked unwinds with
-/// [`TRAP_VM_PANIC`].
+/// [`TRAP_PANICKED`].
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
@@ -1807,7 +1807,7 @@ pub unsafe extern "C" fn coil_native_free_early(ctx: *mut NativeCtx, word: u64, 
         // SAFETY: `machine` is the live machine `host` was made for.
         if !unsafe { free(machine, ctx, word, deep != 0) } {
             let c = unsafe { &mut *ctx };
-            c.trap = TRAP_VM_PANIC;
+            c.trap = TRAP_PANICKED;
             return unsafe { bail(ctx) };
         }
         return 0;
@@ -1875,7 +1875,7 @@ pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64
     let out = unsafe { call(machine, ctx, callee, words, dicts as u32, &mut panicked) };
     let c = unsafe { &mut *ctx };
     if panicked {
-        c.trap = TRAP_VM_PANIC;
+        c.trap = TRAP_PANICKED;
         return unsafe { bail(ctx) };
     }
     out
@@ -1915,7 +1915,7 @@ pub unsafe extern "C" fn coil_native_resume(ctx: *mut NativeCtx, handle: u64, se
     let out = unsafe { resume(machine, ctx, handle, send, &mut panicked) };
     let c = unsafe { &mut *ctx };
     if panicked {
-        c.trap = TRAP_VM_PANIC;
+        c.trap = TRAP_PANICKED;
         return unsafe { bail(ctx) };
     }
     out
@@ -1950,8 +1950,8 @@ pub fn direct_host_natives() -> &'static [DirectHost] {
                 let guarded = crate::host_natives::stream_first(n.name());
                 let func = if guarded { n.guarded_direct() } else { n.direct() };
                 let collect = n.name() == crate::gc_handles::GC_COLLECT_NATIVE;
-                let via_vm = func.is_none() && !collect && matches!(n.host_op(), crate::HostOp::Ordinary | crate::HostOp::Task | crate::HostOp::RegionEnter | crate::HostOp::RegionExit | crate::HostOp::RegisterFinalizer);
-                DirectHost { name: n.name().to_string(), func, guarded, collect, via_vm }
+                let on_machine = func.is_none() && !collect && matches!(n.host_op(), crate::HostOp::Ordinary | crate::HostOp::Task | crate::HostOp::RegionEnter | crate::HostOp::RegionExit | crate::HostOp::RegisterFinalizer);
+                DirectHost { name: n.name().to_string(), func, guarded, collect, on_machine }
             })
             .collect()
     })
@@ -1972,7 +1972,7 @@ pub struct DirectHost {
     /// or the finalizer registry's `gc_register_finalizer`:
     /// native code runs it through a host-call stub
     /// ([`host_stubs`]) in a nested VM execution, as a VM call.
-    pub via_vm: bool,
+    pub on_machine: bool,
 }
 
 /// Arities a host-call stub exists for (the words after the native id).
@@ -2004,14 +2004,14 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         let freed = unsafe { (c.host.gc)(c.machine, ctx, &mut panicked) };
         if panicked {
             let c = unsafe { &mut *ctx };
-            c.trap = TRAP_VM_PANIC;
+            c.trap = TRAP_PANICKED;
             return unsafe { bail(ctx) };
         }
         return freed;
     }
     if direct_host_natives()
         .get(id as usize)
-        .is_some_and(|h| h.via_vm)
+        .is_some_and(|h| h.on_machine)
     {
         return match unsafe { host_invoke(ctx, id, layout, args, n) } {
             Some(out) => out,
@@ -2217,7 +2217,7 @@ unsafe fn host_invoke(
             Some(unsafe { bail(ctx) })
         }
         Some(Invoked::Unwound) => {
-            c.trap = TRAP_VM_PANIC;
+            c.trap = TRAP_PANICKED;
             Some(unsafe { bail(ctx) })
         }
     }
@@ -2228,7 +2228,7 @@ unsafe fn host_invoke(
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
-unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u64, args: *const u64, n: u64, _via_vm: bool) -> u64 {
+unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, layout: u64, args: *const u64, n: u64, _via_vm: bool) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
     let Some(words) = buf.get_mut(..n as usize) else {
@@ -2256,7 +2256,7 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layou
         return unsafe { bail(ctx) };
     };
     if panicked {
-        c.trap = TRAP_VM_PANIC;
+        c.trap = TRAP_PANICKED;
         return unsafe { bail(ctx) };
     }
     out

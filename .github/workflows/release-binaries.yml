@@ -131,7 +131,7 @@ jobs:
       - name: Build release binaries
         if: runner.os != 'Windows' && matrix.libc != 'musl'
         # Separate invocations: a workspace-wide build unifies helper-only
-        # `machine` features (`debugger`, `coverage`) into `coil`.
+        # `machine` features (`debugger`) into `coil`.
         run: |
           cargo build --release -p coil
           cargo build --release -p coil-embed

@@ -168,7 +168,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
             let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
             bytes[at + 6..at + 8].copy_from_slice(&reads.to_le_bytes());
             bytes[at + 8] = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
-            bytes[at + 9] = u8::from(plan.vm_reach.contains(&i));
+            bytes[at + 9] = u8::from(plan.runtime_reach.contains(&i));
             bytes[at + std::mem::offset_of!(machine::native::AotEntry, generator)] = u8::from(is_generator(&body.mir));
             bytes[at + std::mem::offset_of!(machine::native::AotEntry, cleanup)] = u8::from(body.mir.cleanup.is_some());
             relocs.push((at + std::mem::offset_of!(machine::native::AotEntry, entry), ids.entry[&i]));
@@ -359,7 +359,7 @@ fn jit_once(
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
         let generator = is_generator(&body.mir);
         let cleanup = body.mir.cleanup.is_some();
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 });
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.runtime_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 });
     }
     // The code must outlive every `Machine` that runs it.
     std::mem::forget(module);
@@ -392,9 +392,9 @@ struct Plan {
     may_gc: HashSet<usize>,
     /// Entry PCs of the bodies by label, for function values.
     pcs: HashMap<Label, u32>,
-    /// Bodies that may reach the runtime ([`runs_vm_code`], or a call of
+    /// Bodies that may reach the runtime ([`reaches_runtime`], or a call of
     /// such a body): calls of them link a `NativeCtx::calls` record.
-    vm_reach: HashSet<usize>,
+    runtime_reach: HashSet<usize>,
     /// How many leading parameters each compiled body reads
     /// ([`used_params`]): a call may pass fewer words, as a call's
     /// arity may differ from the body's MIR parameters.
@@ -579,36 +579,36 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
     // Bodies that may run VM code (which may panic and print a
     // backtrace): their calls name themselves in `NativeCtx::calls`.
     let has_drops = bodies.iter().any(|b| b.name.ends_with("::drop") && b.mir.params.len() == 1);
-    let mut vm_reach: HashSet<usize> = ok
+    let mut runtime_reach: HashSet<usize> = ok
         .iter()
-        .filter(|(i, _)| bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| runs_vm_code(inst, has_drops)))
+        .filter(|(i, _)| bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| reaches_runtime(inst, has_drops)))
         .map(|(&i, _)| i)
         .collect();
     loop {
         let more: Vec<usize> = ok
             .iter()
-            .filter(|(i, callees)| !vm_reach.contains(i) && callees.iter().any(|c| vm_reach.contains(c)))
+            .filter(|(i, callees)| !runtime_reach.contains(i) && callees.iter().any(|c| runtime_reach.contains(c)))
             .map(|(&i, _)| i)
             .collect();
         if more.is_empty() {
             break;
         }
-        vm_reach.extend(more);
+        runtime_reach.extend(more);
     }
     let used_params = compile_used_params(bodies, ok.keys());
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused, moves, may_gc, pcs, drops, vm_reach, used_params }
+    Plan { compile, by_label, refused, moves, may_gc, pcs, drops, runtime_reach, used_params }
 }
 
 /// An instruction that may run VM code: a function value's call, a free
 /// (in a program with `drop`s) or collection that may run `drop`s.
-fn runs_vm_code(inst: &MirInst, drops: bool) -> bool {
+fn reaches_runtime(inst: &MirInst, drops: bool) -> bool {
     match inst {
         MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } => true,
         MirInst::FreeEarly { .. } => drops,
         MirInst::HostInvoke { native_id, .. } => {
-            machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.via_vm)
+            machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine)
         }
         _ => false,
     }
@@ -903,7 +903,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(&v)?;
                         }
                         if compiler::native_mir::vector_op(inst).is_none() {
-                            return Err("vector op the VM's encoding cannot hold".into());
+                            return Err("vector op the lane encoding cannot hold".into());
                         }
                     }
                     // A cleanup pad's end (lowered to nothing).
@@ -917,8 +917,8 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         }
                         match machine::native::direct_host_natives().get(usize::from(*native_id)) {
                             Some(h) if (h.func.is_some() || h.collect) && args.len() <= 16 => {}
-                            Some(h) if h.via_vm && args.len() < 16 => {}
-                            Some(h) => return Err(format!("host call `{}` runs in the VM", h.name)),
+                            Some(h) if h.on_machine && args.len() < 16 => {}
+                            Some(h) => return Err(format!("host call `{}` has no native path", h.name)),
                             None => return Err(format!("host call {native_id} outside the standard table")),
                         }
                     }
@@ -2725,7 +2725,7 @@ impl<'a> Lower<'a> {
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
                 // `gc_collect` collects, and a host call through the VM may:
                 // this frame's words are roots.
-                let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.via_vm);
+                let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine);
                 let roots = if collect { self.push_roots(f) } else { None };
                 let prev = if collect { Some(self.push_call()) } else { None };
                 let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
@@ -2914,7 +2914,7 @@ impl<'a> Lower<'a> {
             vals.push(self.coerce(x, want));
         }
         let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
-        let prev = if self.plan.vm_reach.contains(&callee) { Some(self.push_call()) } else { None };
+        let prev = if self.plan.runtime_reach.contains(&callee) { Some(self.push_call()) } else { None };
         let call = self.b.ins().call(fref, &vals);
         let results = self.b.inst_results(call).to_vec();
         if let Some(prev) = prev {
