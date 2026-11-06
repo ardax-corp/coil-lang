@@ -180,7 +180,7 @@ fn archive_bytes(pipeline: &mut Pipeline, constants: Vec<u64>, bodies: &[compile
     let full = pipeline.program_debug_full();
     let level = pipeline.debug_level();
     if !bodies.is_empty() {
-        program.native_mir = compiler::native_mir::archive::encode(bodies, &entry_pcs(&full));
+        program.native_mir = compiler::native_mir::archive::encode(bodies, &body_ids(&full));
     }
     program.set_debug(full, level);
 
@@ -481,7 +481,7 @@ fn interprets() -> bool {
 
 /// Hand the captured MIR to the engine that runs it for the coming run.
 fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common::ProgramDebug) {
-    let pcs = entry_pcs(debug);
+    let pcs = body_ids(debug);
     #[cfg(not(target_family = "wasm"))]
     let key = code_cache_on().then(|| code_cache::key(&compiler::native_mir::archive::encode(&bodies, &pcs))).flatten();
     #[cfg(target_family = "wasm")]
@@ -574,8 +574,8 @@ fn install_section(name: &str, section: &[u8]) {
 }
 
 /// Function name to body entry.
-fn entry_pcs(debug: &common::ProgramDebug) -> std::collections::HashMap<String, u32> {
-    debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect()
+fn body_ids(debug: &common::ProgramDebug) -> std::collections::HashMap<String, u32> {
+    debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect()
 }
 
 /// JIT `bodies` and install them for the coming run: `false`, with nothing

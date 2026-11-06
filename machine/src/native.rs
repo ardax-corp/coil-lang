@@ -665,7 +665,7 @@ pub struct AotEntry {
 
 /// Install the code an AOT object linked into this executable defines,
 /// for the next run: `n` entries and `n_sites` sites, each four words
-/// (`entry_pc`, then the location's file, start and end byte).
+/// (`body_id`, then the location's file, start and end byte).
 /// `complete`: the object compiled every body of the program. `layout`:
 /// the [`layout_fingerprint`] of the compiler that made the object; an
 /// object made against other object layouts is refused (`Err`), since its
@@ -699,7 +699,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|w| NativeSite { entry_pc: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
+        .map(|w| NativeSite { body_id: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
         .collect();
     install_for_next_run(entries, sites, complete);
     Ok(())
@@ -710,7 +710,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
 /// native frame, which the runtime prints as it prints its own frames.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeSite {
-    pub entry_pc: u32,
+    pub body_id: u32,
     pub loc: common::DebugLoc,
 }
 

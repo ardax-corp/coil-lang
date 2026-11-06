@@ -131,7 +131,7 @@ fn run_project_with_extra(project_root: &Path, entry: &Path, extra: &[PathBuf]) 
 /// Run `compiled` on the MIR interpreter and return what it printed.
 fn run_compiled(compiled: Compiled, pipeline: &Pipeline) -> String {
     let debug = pipeline.program_debug_full();
-    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
     let interp = coil_mir_interp::prepare(compiled.bodies, &pcs);
     assert!(interp.refused.is_empty(), "the interpreter refused {:?}", interp.refused);
     let code = NativeCode::new(interp.entries, interp.sites).with_complete(true).with_keep(interp.keep);
@@ -418,7 +418,7 @@ fn clones_of_another_modules_methods_compile_the_same_every_time() {
         bind_ns_pipeline(&mut pipeline, &[]);
         let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).expect("compiles");
         let debug = pipeline.program_debug_full();
-        let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+        let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
         compiler::native_mir::archive::encode(&compiled.bodies, &pcs)
     };
     let first = archive();

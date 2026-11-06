@@ -89,8 +89,8 @@ fn interpreted(bodies: Vec<NativeBody>, pcs: &std::collections::HashMap<String, 
 }
 
 /// Function name to body entry.
-fn entry_pcs(pipeline: &Pipeline) -> std::collections::HashMap<String, u32> {
-    pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect()
+fn body_ids(pipeline: &Pipeline) -> std::collections::HashMap<String, u32> {
+    pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect()
 }
 
 fn thread_program(constants: &[u64], pipeline: &Pipeline) -> Arc<ThreadProgram> {
@@ -129,7 +129,7 @@ fn captured_output(print: &Mutex<Vec<u8>>) -> String {
 
 /// Run `compiled` on the MIR interpreter.
 fn run(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) -> Run {
-    let code = interpreted(compiled.bodies, &entry_pcs(pipeline));
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
     let program = thread_program(&compiled.constants, pipeline);
     let entry = entry.map(coil_host::ffi_entry_path);
     let start = coil_host::native_start(pipeline, &pipeline.archived_struct_layouts(), entry.as_deref());
@@ -162,7 +162,7 @@ fn run_through_archive(compiled: Compiled, pipeline: &Pipeline) -> Run {
         static_word_kinds: pipeline.static_word_kinds(),
         startup: pipeline.startup(),
         main: pipeline.main_offset(),
-        native_mir: archive::encode(&compiled.bodies, &entry_pcs(pipeline)),
+        native_mir: archive::encode(&compiled.bodies, &body_ids(pipeline)),
     };
     program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
@@ -209,7 +209,7 @@ fn test_case(entry: u32, expect_ok_result: bool) -> TestCase {
 /// in the output.
 fn run_as_case(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) -> (Run, usize) {
     let main = pipeline.main_offset().expect("main");
-    let code = interpreted(compiled.bodies, &entry_pcs(pipeline));
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
     let program = thread_program(&compiled.constants, pipeline);
     let reactor = Reactor::new(1);
     let print = Arc::new(Mutex::new(Vec::new()));
@@ -221,7 +221,7 @@ fn run_as_case(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) ->
 
 /// Run each of `cases` alone: its name and whether it passed.
 fn run_each_case<'a>(compiled: Compiled, pipeline: &Pipeline, cases: &'a [(String, u32)]) -> Vec<(&'a str, bool)> {
-    let code = interpreted(compiled.bodies, &entry_pcs(pipeline));
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
     let program = thread_program(&compiled.constants, pipeline);
     let reactor = Reactor::new(1);
     let results = cases
@@ -4309,7 +4309,7 @@ fn compile_is_deterministic_for_many_drop_classes() {
     let compile = || {
         let mut pipeline = test_pipeline();
         let compiled = compile(&mut pipeline, &src).expect("drop classes compile");
-        compiler::native_mir::archive::encode(&compiled.bodies, &entry_pcs(&pipeline))
+        compiler::native_mir::archive::encode(&compiled.bodies, &body_ids(&pipeline))
     };
     let first = compile();
     for _ in 0..4 {

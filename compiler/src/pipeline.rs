@@ -1677,7 +1677,7 @@ impl Pipeline {
         // within the explicit budget (coil-lang#1918).
         let explicit: HashSet<u32> = consts.iter().filter(|c| !c.silent).filter_map(|c| c.entry).collect();
         let symbols = self.compiler_lazy().fn_debug_symbols();
-        sites.retain(|(call, _)| !symbols.iter().any(|s| s.name == call.body && explicit.contains(&s.entry_pc)));
+        sites.retain(|(call, _)| !symbols.iter().any(|s| s.name == call.body && explicit.contains(&s.body_id)));
         if consts.is_empty() && sites.is_empty() {
             return;
         }

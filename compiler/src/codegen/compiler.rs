@@ -215,17 +215,17 @@ impl Compiler {
         &self.debug_locs
     }
 
-    /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
+    /// Function entry symbols for panic backtraces (sorted by `body_id`).
     pub fn fn_debug_symbols(&self) -> Vec<FnDebugSym> {
         let mut syms: Vec<FnDebugSym> = self
             .functions
             .iter()
             .map(|(name, &pc)| FnDebugSym {
                 name: name.clone(),
-                entry_pc: pc as u32,
+                body_id: pc as u32,
             })
             .collect();
-        syms.sort_by_key(|s| s.entry_pc);
+        syms.sort_by_key(|s| s.body_id);
         syms
     }
 
@@ -7723,7 +7723,7 @@ impl Compiler {
 
     }
 
-    /// Post-lower function symbols sorted by entry PC (for dissect / debug).
+    /// Post-lower function symbols sorted by body id (for dissect / debug).
     #[cfg(any(test, feature = "dissect"))]
     pub fn function_symbols(&self) -> Vec<crate::dissect::FnSym> {
         let mut syms: Vec<_> = self
@@ -7738,13 +7738,13 @@ impl Compiler {
                 locals.sort_by_key(|(_, s)| *s);
                 crate::dissect::FnSym {
                     name: name.clone(),
-                    entry_pc: pc as u32,
+                    body_id: pc as u32,
                     locals,
                     vars: self.fn_debug_vars.get(name).cloned().unwrap_or_default(),
                 }
             })
             .collect();
-        syms.sort_by_key(|s| s.entry_pc);
+        syms.sort_by_key(|s| s.body_id);
         syms
     }
 

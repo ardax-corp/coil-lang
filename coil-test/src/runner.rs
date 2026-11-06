@@ -134,7 +134,7 @@ fn native_code(pipeline: &Pipeline, file: &str, engine: Engine, coverage: bool) 
 /// Make `bodies` runnable on `engine`; a host with no native code interprets.
 fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBody>, file: &str, engine: Engine) -> Option<Arc<machine::native::NativeCode>> {
     let debug = pipeline.program_debug_full();
-    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
     if engine == Engine::Mir || cfg!(target_family = "wasm") {
         let program = coil_mir_interp::prepare(bodies, &pcs);
         inventory(&format!("file\t{file}\t{}\t{}", program.compiled.len(), program.refused.len()));
@@ -774,7 +774,7 @@ impl Prepared {
             return (std::borrow::Cow::Borrowed(&self.debug), test_fn_ranges(&self.debug, entries));
         };
         let names: Vec<&str> = entries
-            .filter_map(|e| self.debug.fn_symbols.iter().find(|s| s.entry_pc == e).map(|s| s.name.as_str()))
+            .filter_map(|e| self.debug.fn_symbols.iter().find(|s| s.body_id == e).map(|s| s.name.as_str()))
             .collect();
         let tests = probes.bodies.iter().filter(|(name, _)| names.contains(&name.as_str())).map(|(_, r)| r.clone()).collect();
         let mut debug = ProgramDebug::default();

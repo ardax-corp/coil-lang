@@ -11,7 +11,7 @@ use common::ProgramDebug;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnSym {
     pub name: String,
-    pub entry_pc: u32,
+    pub body_id: u32,
     /// User-facing locals/params `(name, slot)`, sorted by slot.
     pub locals: Vec<(String, u32)>,
     /// Scoped, typed debug variables with location lists.
@@ -55,7 +55,7 @@ pub fn format_symbol_index(functions: &[FnSym]) -> String {
     syms.sort_by(|a, b| a.name.cmp(&b.name));
     let mut out = String::from(";; symbols\n");
     for s in &syms {
-        let _ = writeln!(out, "{:>6}  {}", s.entry_pc, s.name);
+        let _ = writeln!(out, "{:>6}  {}", s.body_id, s.name);
     }
     out
 }

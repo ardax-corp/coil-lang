@@ -60,7 +60,7 @@ pub struct Program {
     bodies: Vec<Body>,
     /// By [`Label`], `u32::MAX` for a label with no body.
     by_label: Vec<u32>,
-    /// By entry PC: the bodies a function value may run as a frame.
+    /// By body id: the bodies a function value may run as a frame.
     by_pc: HashMap<usize, u32>,
 }
 
@@ -224,7 +224,7 @@ fn body_sites(f: &MirFunc, pc: u32, sites: &mut Vec<NativeSite>) -> (Vec<Vec<u32
     let mut seen: HashMap<(u32, u32, u32), u32> = HashMap::new();
     let mut site = |loc: DebugLoc, sites: &mut Vec<NativeSite>| -> u32 {
         *seen.entry((loc.file, loc.start_byte, loc.end_byte)).or_insert_with(|| {
-            sites.push(NativeSite { entry_pc: pc, loc });
+            sites.push(NativeSite { body_id: pc, loc });
             (sites.len() - 1) as u32
         })
     };
@@ -259,29 +259,29 @@ fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mu
 /// `COIL_MIR_ARCHIVE_CHECK`: what comes back from the archive format, which
 /// must be what went in. Running that copy tests the format on a whole
 /// corpus.
-fn through_archive(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> Vec<NativeBody> {
-    let bytes = compiler::native_mir::archive::encode(&bodies, entry_pcs);
+fn through_archive(bodies: Vec<NativeBody>, body_ids: &HashMap<String, u32>) -> Vec<NativeBody> {
+    let bytes = compiler::native_mir::archive::encode(&bodies, body_ids);
     let (back, pcs) = compiler::native_mir::archive::decode(&bytes).expect("the archive format reads what it wrote");
     assert_eq!(back.len(), bodies.len(), "bodies through the archive format");
     for (a, b) in bodies.iter().zip(&back) {
         assert_eq!(a.name, b.name);
         assert_eq!(a.entry, b.entry, "{}", a.name);
         assert!(a.mir == b.mir, "{} changed through the archive format", a.name);
-        assert_eq!(entry_pcs.get(&a.name), pcs.get(&a.name), "{}", a.name);
+        assert_eq!(body_ids.get(&a.name), pcs.get(&a.name), "{}", a.name);
     }
     back
 }
 
-/// Make `bodies` runnable. `entry_pcs` maps a body's name to its entry
-/// entry PC, as for `coil_native::jit`.
-pub fn prepare(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> InterpProgram {
-    prepare_with(bodies, entry_pcs, None)
+/// Make `bodies` runnable. `body_ids` maps a body's name to its
+/// body id, as for `coil_native::jit`.
+pub fn prepare(bodies: Vec<NativeBody>, body_ids: &HashMap<String, u32>) -> InterpProgram {
+    prepare_with(bodies, body_ids, None)
 }
 
 /// [`prepare`], each body with its [`debug::BodyOps`] when a debugger runs it.
-pub(crate) fn prepare_with(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>, ops: Option<Vec<debug::BodyOps>>) -> InterpProgram {
+pub(crate) fn prepare_with(bodies: Vec<NativeBody>, body_ids: &HashMap<String, u32>, ops: Option<Vec<debug::BodyOps>>) -> InterpProgram {
     let mut ops = ops.map(Vec::into_iter);
-    let bodies = if std::env::var_os("COIL_MIR_ARCHIVE_CHECK").is_some() { through_archive(bodies, entry_pcs) } else { bodies };
+    let bodies = if std::env::var_os("COIL_MIR_ARCHIVE_CHECK").is_some() { through_archive(bodies, body_ids) } else { bodies };
     let mut sites = Vec::new();
     let mut compiled = Vec::new();
     let mut refused = Vec::new();
@@ -299,7 +299,7 @@ pub(crate) fn prepare_with(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, 
             Some(why) => refused.push((b.name.clone(), why)),
             None => compiled.push(b.name.clone()),
         }
-        let pc = entry_pcs.get(&b.name).copied();
+        let pc = body_ids.get(&b.name).copied();
         let mut body = build_body(b.mir, at, pc, &mut sites);
         body.ops = ops.as_mut().and_then(Iterator::next);
         built.push(body);

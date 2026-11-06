@@ -359,7 +359,7 @@ pub fn test_fn_ranges(
         .map(|entry| {
             let next = syms
                 .iter()
-                .map(|s| s.entry_pc)
+                .map(|s| s.body_id)
                 .filter(|&pc| pc > entry)
                 .min()
                 .map_or(len, |pc| pc as usize);
@@ -418,11 +418,11 @@ mod tests {
             fn_symbols: vec![
                 FnDebugSym {
                     name: "helper".into(),
-                    entry_pc: 0,
+                    body_id: 0,
                 },
                 FnDebugSym {
                     name: "t".into(),
-                    entry_pc: 1,
+                    body_id: 1,
                 },
             ],
             debug_lines: Vec::new(),
@@ -457,15 +457,15 @@ mod tests {
             fn_symbols: vec![
                 FnDebugSym {
                     name: "f".into(),
-                    entry_pc: 0,
+                    body_id: 0,
                 },
                 FnDebugSym {
                     name: "t".into(),
-                    entry_pc: 2,
+                    body_id: 2,
                 },
                 FnDebugSym {
                     name: "g".into(),
-                    entry_pc: 3,
+                    body_id: 3,
                 },
             ],
             debug_lines: Vec::new(),

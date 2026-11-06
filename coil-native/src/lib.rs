@@ -103,15 +103,15 @@ impl Drop for Code {
     }
 }
 
-/// Compile every eligible body of `bodies` in memory. `entry_pcs` maps a
+/// Compile every eligible body of `bodies` in memory. `body_ids` maps a
 /// body's name to its entry id. The code stays mapped for as long as
 /// [`NativeProgram::keep`].
 ///
 /// Under `COIL_CODE_IMAGE_CHECK` the program goes through a code image and
 /// the run uses the copy, as a code cache's next run would.
-pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<NativeProgram, String> {
+pub fn jit(bodies: &[NativeBody], body_ids: &HashMap<String, u32>) -> Result<NativeProgram, String> {
     if std::env::var_os("COIL_CODE_IMAGE_CHECK").is_some() {
-        let program = jit_keeping_image(bodies, entry_pcs)?;
+        let program = jit_keeping_image(bodies, body_ids)?;
         return match &program.image {
             Some(image) => image::load(image),
             // A refused body leaves native code incomplete, so no image.
@@ -119,21 +119,21 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
             None => Err("the code did not fit a code image".to_string()),
         };
     }
-    jit_with(bodies, entry_pcs, false)
+    jit_with(bodies, body_ids, false)
 }
 
 /// [`jit`], with [`NativeProgram::image`] for [`load_image`] when every body
 /// compiled and the code fits an image.
-pub fn jit_keeping_image(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<NativeProgram, String> {
-    jit_with(bodies, entry_pcs, true)
+pub fn jit_keeping_image(bodies: &[NativeBody], body_ids: &HashMap<String, u32>) -> Result<NativeProgram, String> {
+    jit_with(bodies, body_ids, true)
 }
 
-fn jit_with(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, keep_image: bool) -> Result<NativeProgram, String> {
+fn jit_with(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, keep_image: bool) -> Result<NativeProgram, String> {
     // A body `plan` admits may still fail to lower; its callers already
     // name it, so leave it out and build the module again.
     let mut excluded = HashMap::new();
     loop {
-        match jit_once(bodies, entry_pcs, &excluded, keep_image)? {
+        match jit_once(bodies, body_ids, &excluded, keep_image)? {
             Attempt::Done(program) => return Ok(program),
             Attempt::Without(i, why) => {
                 excluded.insert(i, why);
@@ -196,10 +196,10 @@ pub struct AotObject {
 /// functions linked into the executable, as `(library stem, C symbol)`:
 /// the object imports each symbol and records its address. `package` is
 /// the program's data (`common::linked_package`), as `coil_aot_package`.
-pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(String, String)], package: &[u8]) -> Result<AotObject, String> {
+pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(String, String)], package: &[u8]) -> Result<AotObject, String> {
     let mut excluded = HashMap::new();
     loop {
-        let plan = plan_without(bodies, &excluded, entry_pcs);
+        let plan = plan_without(bodies, &excluded, body_ids);
         let refused = plan.refused.clone();
         let mut flags = settings::builder();
         flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
@@ -214,7 +214,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         let compile_isa = isa.clone();
         let builder = cranelift_object::ObjectBuilder::new(isa, "coil_aot", default_libcall_names()).map_err(|e| e.to_string())?;
         let mut module = cranelift_object::ObjectModule::new(builder);
-        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan, &*compile_isa, None)? {
+        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, body_ids, &plan, &*compile_isa, None)? {
             Ok(done) => done,
             Err((i, why)) => {
                 excluded.insert(i, why);
@@ -231,7 +231,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         for &i in &defined {
             let body = &bodies[i];
             compiled.push(body.name.clone());
-            let Some(&pc) = entry_pcs.get(&body.name) else { continue };
+            let Some(&pc) = body_ids.get(&body.name) else { continue };
             let at = bytes.len();
             bytes.resize(at + ENTRY_BYTES, 0);
             bytes[at..at + 4].copy_from_slice(&pc.to_le_bytes());
@@ -305,7 +305,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         words("coil_aot_package_len", (package.len() as u64).to_le_bytes().to_vec())?;
         let mut site_words = Vec::with_capacity(sites.len() * 16 + 16);
         for site in &sites {
-            for w in [site.entry_pc, site.loc.file, site.loc.start_byte, site.loc.end_byte] {
+            for w in [site.body_id, site.loc.file, site.loc.start_byte, site.loc.end_byte] {
                 site_words.extend_from_slice(&w.to_le_bytes());
             }
         }
@@ -423,11 +423,11 @@ pub fn image_fingerprint() -> Result<String, String> {
 
 fn jit_once(
     bodies: &[NativeBody],
-    entry_pcs: &HashMap<String, u32>,
+    body_ids: &HashMap<String, u32>,
     excluded: &HashMap<usize, String>,
     keep_image: bool,
 ) -> Result<Attempt, String> {
-    let plan = plan_without(bodies, excluded, entry_pcs);
+    let plan = plan_without(bodies, excluded, body_ids);
     let refused = plan.refused.clone();
     if plan.compile.is_empty() {
         return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused, sites: Vec::new(), image: None, keep: Arc::new(()) }));
@@ -438,7 +438,7 @@ fn jit_once(
     let isa = jit_isa()?;
     let mut recorder = keep_image.then(image::Recorder::default);
 
-    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan, &*isa, recorder.as_mut())? {
+    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, body_ids, &plan, &*isa, recorder.as_mut())? {
         Ok(done) => done,
         Err((i, why)) => return Ok(Attempt::Without(i, why)),
     };
@@ -456,7 +456,7 @@ fn jit_once(
     for i in defined {
         let body = &bodies[i];
         compiled.push(body.name.clone());
-        let Some(&pc) = entry_pcs.get(&body.name) else {
+        let Some(&pc) = body_ids.get(&body.name) else {
             continue;
         };
         let ptr = module.get_finalized_function(ids.entry[&i]);
@@ -531,7 +531,7 @@ type Defined = (Ids, Vec<usize>, Vec<NativeSite>, Vec<(FuncId, FuncMaps)>);
 fn define_all<M: Module>(
     module: &mut M,
     bodies: &[NativeBody],
-    entry_pcs: &HashMap<String, u32>,
+    body_ids: &HashMap<String, u32>,
     plan: &Plan,
     isa: &dyn cranelift_codegen::isa::TargetIsa,
     mut recorder: Option<&mut image::Recorder>,
@@ -551,7 +551,7 @@ fn define_all<M: Module>(
             ctx.func.signature = impl_signature(&*module, &body.mir, plan.tail_conv.contains(&i));
             let lowered = {
                 let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, &body.mir);
-                lower.entry_pc = entry_pcs.get(&body.name).copied();
+                lower.body_id = body_ids.get(&body.name).copied();
                 lower.body_index = Some(i);
                 let r = lower.body(&body.mir);
                 if r.is_ok() {
@@ -570,7 +570,7 @@ fn define_all<M: Module>(
                 let lowered = {
                     // Its sites are its body's: a panic in a `defer` names it.
                     let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, pad);
-                    lower.entry_pc = entry_pcs.get(&body.name).copied();
+                    lower.body_id = body_ids.get(&body.name).copied();
                     lower.is_pad = true;
                     let r = lower.body(pad);
                     if r.is_ok() {
@@ -728,7 +728,7 @@ fn stack_maps(ctx: &cranelift_codegen::Context) -> FuncMaps {
 }
 
 /// [`plan`] with `excluded` bodies refused for the given reason.
-fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_pcs: &HashMap<String, u32>) -> Plan {
+fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_ids: &HashMap<String, u32>) -> Plan {
     let by_label: HashMap<Label, usize> = bodies
         .iter()
         .enumerate()
@@ -801,7 +801,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
     }
     let pcs = by_label
         .iter()
-        .filter_map(|(&l, &i)| Some((l, *entry_pcs.get(&bodies[i].name)?)))
+        .filter_map(|(&l, &i)| Some((l, *body_ids.get(&bodies[i].name)?)))
         .collect();
     let drops = bodies
         .iter()
@@ -1645,7 +1645,7 @@ struct Lower<'a> {
     /// index ([`Self::site`]).
     sites: &'a mut Vec<NativeSite>,
     /// This body's entry id, which its sites name (`None`: no sites).
-    entry_pc: Option<u32>,
+    body_id: Option<u32>,
     /// The location of the op being lowered, and its site once a bail
     /// path named it.
     cur_loc: Option<common::DebugLoc>,
@@ -1813,7 +1813,7 @@ impl<'a> Lower<'a> {
             pad_fn: None,
             pad_refs,
             sites,
-            entry_pc: None,
+            body_id: None,
             cur_loc: None,
             cur_site: None,
             views: HashMap::new(),
@@ -2367,12 +2367,12 @@ impl<'a> Lower<'a> {
         if let Some(s) = self.cur_site {
             return s;
         }
-        let s = match (self.entry_pc, self.cur_loc) {
+        let s = match (self.body_id, self.cur_loc) {
             // Without a location the site still names its function, as a
             // runtime frame without one does.
-            (Some(entry_pc), loc) => {
+            (Some(body_id), loc) => {
                 let loc = loc.unwrap_or(common::DebugLoc::unknown());
-                self.sites.push(NativeSite { entry_pc, loc });
+                self.sites.push(NativeSite { body_id, loc });
                 (self.sites.len() - 1) as i64
             }
             _ => NO_SITE as i64,
@@ -2657,7 +2657,7 @@ impl<'a> Lower<'a> {
             MirInst::Phi { dest, .. } => self.view_of(f, *dest),
             MirInst::Deopt { .. } => {}
             MirInst::CodePtr { dest, target } => {
-                let pc = *self.plan.pcs.get(target).ok_or("code pointer of a body with no entry PC")?;
+                let pc = *self.plan.pcs.get(target).ok_or("code pointer of a body with no body id")?;
                 let x = self.b.ins().iconst(types::I64, i64::from(pc));
                 self.set(f, *dest, x);
             }
@@ -3003,15 +3003,15 @@ impl<'a> Lower<'a> {
                         (machine::native::ALLOC_DROP_ENUM, words.len() as u64 + 1, u64::from(tag) | (u64::from(k) << 32))
                     }
                     MirAllocKind::Fn { target, operand, .. } => {
-                        let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no entry PC")?;
+                        let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no body id")?;
                         (machine::native::ALLOC_FN, words.len() as u64 + 1, u64::from(pc) | (u64::from(operand) << 32))
                     }
                     MirAllocKind::Coro { target } => {
-                        let pc = *self.plan.pcs.get(&target).ok_or("generator of a body with no entry PC")?;
+                        let pc = *self.plan.pcs.get(&target).ok_or("generator of a body with no body id")?;
                         (machine::native::ALLOC_CORO, words.len() as u64, u64::from(pc))
                     }
                     MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target, .. } => {
-                        let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no entry PC")?;
+                        let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no body id")?;
                         let params = if let MirAllocKind::PolyFnCapture { params, .. } = *kind { params } else { 0 };
                         (machine::native::ALLOC_POLY_FN, words.len() as u64, u64::from(pc) | (u64::from(params) << 32))
                     }

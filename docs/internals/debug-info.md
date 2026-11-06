@@ -13,7 +13,7 @@ compile-time ariadne diagnostics.
 | `source_files` | Project-relative paths (stable indices) |
 | `debug_locs` | Each location the bodies use, once, sorted by file, start and end |
 | `debug_lines` | Line and column of each of `debug_locs`, resolved at compile time |
-| `fn_symbols` | `(name, entry_pc)` per body, sorted by `entry_pc`; `entry_pc` holds the body's identity (`label.0 + 1`). Names backtrace frames |
+| `fn_symbols` | `(name, body_id)` per body, sorted by `body_id`; `body_id` is `label.0 + 1`. Names backtrace frames |
 
 A `DebugLoc` records:
 

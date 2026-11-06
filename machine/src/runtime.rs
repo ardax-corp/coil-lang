@@ -39,9 +39,9 @@ pub(crate) struct Runtime {
     /// operand stack, so they are rooted here until the call returns:
     /// `ConstBytes` lends a string's bytes to C for the whole call.
     pub(crate) ffi_arg_roots: Vec<Value>,
-    /// `type_id` → drop method entry PC (empty = no user finalizers).
+    /// `type_id` → drop method body id (empty = no user finalizers).
     pub(crate) finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>,
-    /// Drop entry PCs (for explicit `obj.drop()` once-bit intercept).
+    /// Drop body ids (for explicit `obj.drop()` once-bit intercept).
     pub(crate) finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>,
     /// Where `print` writes instead of the process's stdout.
     pub(crate) output: Option<OutputSink>,
