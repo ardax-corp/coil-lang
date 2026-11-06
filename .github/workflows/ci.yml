@@ -686,13 +686,13 @@ jobs:
         name: Install system deps (Windows)
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
             base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-pkgconf
 
       - &msys2-pkgconfig
         name: Configure pkg-config (Windows)
@@ -712,7 +712,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-windows-gnu-clippy
+          shared-key: ci-windows-ucrt-clippy
 
       - name: Clippy
         shell: msys2 {0}
@@ -765,7 +765,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-windows-gnu-default
+          shared-key: ci-windows-ucrt-default
 
       - &build-windows-gnu
         name: Build all CLI binaries
@@ -812,7 +812,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-windows-gnu-default
+          shared-key: ci-windows-ucrt-default
           save-if: false
 
       - name: HIR and coil fmt round trip over the corpus
@@ -842,7 +842,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-windows-gnu-default
+          shared-key: ci-windows-ucrt-default
           save-if: false
 
       - name: Build coil and coil-test

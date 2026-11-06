@@ -93,6 +93,33 @@ aot() {
 aot "$work/aot$ext" "COIL_RT_LIB=$bin/libcoil_rt.a"
 check "AOT executable" "$work/aot$ext"
 
+# What ships must run where no toolchain is installed: every test above has
+# MSYS2's or Homebrew's libraries in reach.
+standalone() {
+    local file="$1" deps
+    if [[ -n "$ext" ]]; then
+        deps="$(objdump -p "$file" | sed -n 's/^[[:space:]]*DLL Name: //p' | tr '[:upper:]' '[:lower:]' | sort -u)"
+        echo "$file needs: $(echo "$deps" | tr '\n' ' ')"
+        deps="$(echo "$deps" | grep '^lib' || true)"
+    elif [[ "$(uname)" == Darwin ]]; then
+        deps="$(otool -L "$file" | sed 1d | awk '{print $1}')"
+        echo "$file needs: $(echo "$deps" | tr '\n' ' ')"
+        deps="$(echo "$deps" | grep -vE '^(/usr/lib/|/System/)' || true)"
+    else
+        return 0
+    fi
+    if [[ -n "$deps" ]]; then
+        echo "::error::$file needs libraries a user may not have: $deps"
+        exit 1
+    fi
+}
+standalone "$work/aot$ext"
+standalone "$work/runner$ext"
+standalone "$coil"
+if [[ -n "$ext" ]]; then
+    check "AOT executable with only Windows on PATH" env PATH="$(cygpath -u "$WINDIR")/System32" "$work/aot$ext"
+fi
+
 # As a release does it: the runtime inside `coil`, with none beside it.
 mkdir "$work/release"
 cp "$coil" "$work/release/coil$ext"

@@ -49,19 +49,9 @@ jobs:
         run: cargo test -p coil --test package_cli --test native_jit_cli
 
   windows:
-    name: native (windows, ${{ matrix.msystem }})
+    name: native (windows-gnu)
     runs-on: windows-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - msystem: UCRT64
-            prefix: mingw-w64-ucrt-x86_64
-            rust: stable-x86_64-pc-windows-gnu
-          - msystem: CLANG64
-            prefix: mingw-w64-clang-x86_64
-            rust: stable-x86_64-pc-windows-gnullvm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -70,14 +60,14 @@ jobs:
           path: .deps/coil-stdlib
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: ${{ matrix.msystem }}
+          msystem: UCRT64
           update: true
           install: >-
             base-devel
             python
-            ${{ matrix.prefix }}-toolchain
-            ${{ matrix.prefix }}-libffi
-            ${{ matrix.prefix }}-pkgconf
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-pkgconf
       - name: Configure pkg-config
         shell: msys2 {0}
         run: |
@@ -86,19 +76,16 @@ jobs:
           echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: stable-x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: native-platforms-windows-${{ matrix.msystem }}
+          shared-key: native-platforms-windows-ucrt
       - name: Build
         shell: msys2 {0}
         run: |
           cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
           # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          rustc -vV
-          command -v cc ar || true
-          cc --version | head -n 1
           cargo build -p coil -p coil-embed -p coil-test
           cargo build -p coil-rt
       - name: What the runtime links
