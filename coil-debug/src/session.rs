@@ -1504,4 +1504,53 @@ mod tests {
         assert_eq!(find_fn_decl_line(text, "twice"), Some(2));
         assert_eq!(find_fn_decl_line(text, "main"), Some(3));
     }
+
+    #[test]
+    fn line_index_resolves_basename_hint() {
+        let text = "fn main() {\n    return;\n}\n";
+        let tmp = std::env::temp_dir().join(format!("coil_dbg_base_{}", std::process::id()));
+        fs::write(&tmp, text).unwrap();
+        let path = tmp.display().to_string();
+        let mut debug = ProgramDebug {
+            source_files: vec![path.clone()],
+            debug_locs: vec![DebugLoc::unknown(); 4],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        let ret_off = text.find("return").unwrap() as u32;
+        debug.debug_locs[2] = DebugLoc {
+            file: 0,
+            start_byte: ret_off,
+            end_byte: ret_off + 6,
+        };
+        let idx = LineIndex::build(&debug, None);
+        let base = Path::new(&path).file_name().unwrap().to_str().unwrap();
+        let pcs = idx.pcs_for_line(Some(base), 2, &path);
+        assert!(pcs.contains(&2), "pcs={pcs:?}");
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn line_index_maps_known_loc() {
+        let text = "fn main() {\n    return;\n}\n";
+        let tmp = std::env::temp_dir().join(format!("coil_dbg_line_{}", std::process::id()));
+        fs::write(&tmp, text).unwrap();
+        let path = tmp.display().to_string();
+        let mut debug = ProgramDebug {
+            source_files: vec![path.clone()],
+            debug_locs: vec![DebugLoc::unknown(); 5],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        let ret_off = text.find("return").unwrap() as u32;
+        debug.debug_locs[3] = DebugLoc {
+            file: 0,
+            start_byte: ret_off,
+            end_byte: ret_off + 6,
+        };
+        let idx = LineIndex::build(&debug, None);
+        let pcs = idx.pcs_for_line(Some(&path), 2, &path);
+        assert!(pcs.contains(&3), "pcs={pcs:?}");
+        let _ = fs::remove_file(&tmp);
+    }
 }

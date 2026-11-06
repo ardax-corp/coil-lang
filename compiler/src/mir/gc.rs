@@ -274,6 +274,7 @@ mod tests {
     use crate::il::IlOp;
     use crate::mir::builder::MirBuilder;
     use crate::mir::inst::{MirAllocKind, MirCmpOp, MirConst, MirGcKind};
+    use crate::mir::MirTy;
     use common::{Byte, DebugLoc};
 
     fn loc() -> DebugLoc {
@@ -342,4 +343,42 @@ mod tests {
         assert!(r2.contains(&a) && r2.contains(&c), "second: {r2:?}");
     }
 
+    #[test]
+    fn dead_heap_param_is_not_a_root() {
+        let mut b = MirBuilder::new("dead");
+        let unused = b.add_param(MirTy::HeapRef).unwrap();
+        let n = b.ins_const(MirConst::I64(1)).unwrap();
+        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
+        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
+        b.ret(Some(g)).unwrap();
+        let f = b.finish().unwrap();
+        let (_obj, _g, roots) = alloc_and_barrier(&f);
+        assert!(!roots.contains(&unused), "dead param in roots: {roots:?}");
+    }
+
+    #[test]
+    fn roots_include_live_heap_param_across_barrier() {
+        let mut b = MirBuilder::new("keep");
+        let xs = b.add_param(MirTy::HeapRef).unwrap();
+        b.def_local(LocalId(0), xs).unwrap();
+        let n = b.ins_const(MirConst::I64(1)).unwrap();
+        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
+        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
+        let z = b.ins_const(MirConst::I64(0)).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, xs, z).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, a, z).unwrap();
+        b.ret(Some(g)).unwrap();
+        let f = b.finish().unwrap();
+        f.verify().unwrap();
+        let (obj, _g, roots) = alloc_and_barrier(&f);
+        assert!(roots.contains(&obj), "{roots:?}");
+        assert!(roots.contains(&xs), "live heap param: {roots:?}");
+        let side = f.live_roots_at(_g).expect("barrier sidecar");
+        assert!(side.values.contains(&xs) && side.values.contains(&obj));
+        assert!(
+            side.slots.iter().any(|s| s.0 == 0),
+            "slot 0: {:?}",
+            side.slots
+        );
+    }
 }

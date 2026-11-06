@@ -1,0 +1,101 @@
+// Indexing a local array or string: an element computed from the loop counter
+// reads back at a computed index, byte items built from one-byte strings hold
+// their bytes, and an index out of range panics on a load, a store, and a load
+// whose value is dropped.
+use tests::assert;
+use task::{scope, Scope, TaskError};
+
+fn pack(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        let xs = [i, i + 1, i + 2];
+        s = s + xs[i % 3];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn pick(int k) -> int {
+    let xs = [1, 2, 3];
+    return xs[k];
+}
+
+fn poke(int k) -> int {
+    let xs = [1, 2, 3];
+    xs[k] = 9;
+    return xs[0];
+}
+
+fn byte_at(string s, int i) -> byte {
+    return s[i];
+}
+
+fn string_past_end() -> int {
+    let s = "ab";
+    let i = 2;
+    let _ = s[i];
+    return 0;
+}
+
+fn string_before_start() -> int {
+    let s = "ab";
+    let i = -1;
+    let _ = s[i];
+    return 0;
+}
+
+fn panicked(Result<int, TaskError> r) -> bool {
+    return match r {
+        Result::Err(TaskError::Panicked(_)) => true,
+        default => false,
+    };
+}
+
+// Run `body` as a child task; whether it panicked.
+fn panics(unit -> int body) -> bool {
+    return panicked(
+        scope(fn (Scope s) use (body) {
+            let _ = s.spawn(body);
+            0
+        }),
+    );
+}
+
+test("an element computed in a loop reads at a computed index") {
+    assert!(pack(black_box(4)) == 9);
+    assert!(pack(black_box(6)) == 21);
+}
+
+test("one-byte strings fill a byte array") {
+    let buf: [byte; 3] = ["H", "i", "\n"];
+    assert!(buf[0] == (72 as byte));
+    assert!(buf[1] == (105 as byte));
+    assert!(buf[2] == (10 as byte));
+}
+
+test("an in-range index reads and writes its slot") {
+    assert!(pick(black_box(2)) == 3);
+    assert!(poke(black_box(0)) == 9);
+    assert!(byte_at("ab", black_box(1)) == "b");
+    let s = "ab";
+    let i = 1;
+    assert!(s[i] == "b");
+}
+
+test("a load past the end of an array panics") {
+    assert!(panics(fn () => pick(3)));
+    assert!(panics(fn () => pick(black_box(3))));
+}
+
+test("a store before the start of an array panics") {
+    assert!(panics(fn () => poke(-1)));
+    assert!(panics(fn () => poke(black_box(-1))));
+}
+
+test("a string index out of range panics") {
+    assert!(panics(string_past_end));
+    assert!(panics(string_before_start));
+    assert!(panics(fn () => byte_at("ab", black_box(2)) as int));
+    assert!(panics(fn () => byte_at("ab", black_box(-1)) as int));
+}

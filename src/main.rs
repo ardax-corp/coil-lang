@@ -961,4 +961,150 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn recorded_sources_newer_only_flags_edited_sources() {
+        use super::archive_staleness::recorded_sources_newer;
+        let dir = unique_tmp("run_archive_sources");
+        std::fs::create_dir_all(dir.join("stdlib/io")).unwrap();
+        let dep = dir.join("stdlib/io/sync.coil");
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&dep, b"fn f() {}").unwrap();
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&arch, b"x").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![
+                dep.to_string_lossy().into_owned(),
+                entry.to_string_lossy().into_owned(),
+                dir.join("gone.coil").to_string_lossy().into_owned(),
+            ],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        let a = arch.to_str().unwrap();
+        assert!(!recorded_sources_newer(a, &debug), "fresh archive");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&entry, b"fn main() { /* edited */ }").unwrap();
+        assert!(recorded_sources_newer(a, &debug), "edited entry");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_is_stale_when_recorded_source_missing() {
+        let dir = unique_tmp("stale_missing_dep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::fs::write(&arch, b"x").unwrap();
+        let missing = dir.join("gone.coil");
+        let debug = ProgramDebug {
+            source_files: vec![
+                entry.to_string_lossy().into_owned(),
+                missing.to_string_lossy().into_owned(),
+            ],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        assert!(
+            archive_is_stale(entry.to_str().unwrap(), arch.to_str().unwrap(), &debug),
+            "missing recorded dependency must invalidate the archive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_is_stale_empty_source_files_uses_entry_mtime() {
+        let dir = unique_tmp("stale_empty_sources");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::fs::write(&arch, b"x").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        // Entry not newer than archive → fresh via the empty-list branch.
+        assert!(!archive_is_stale(
+            entry.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&entry, b"fn main() { /* edited */ }").unwrap();
+        assert!(archive_is_stale(
+            entry.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_is_stale_when_dependency_source_newer() {
+        let dir = unique_tmp("stale_dep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.coil");
+        let dep = dir.join("worker.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::fs::write(&dep, b"fn w() {}").unwrap();
+        std::fs::write(&arch, b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        // Touch only the dependency — entry mtime stays older than the archive.
+        std::fs::write(&dep, b"fn w() { /* edited */ }").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![
+                entry.to_string_lossy().into_owned(),
+                dep.to_string_lossy().into_owned(),
+            ],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        assert!(archive_is_stale(
+            entry.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_is_stale_when_entry_not_in_source_files() {
+        let dir = unique_tmp("stale_entry");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.coil");
+        let b = dir.join("b.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&a, b"fn main() {}").unwrap();
+        std::fs::write(&b, b"fn main() {}").unwrap();
+        std::fs::write(&arch, b"x").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![a.to_string_lossy().into_owned()],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        // Running b.coil against an archive built from a.coil must rebuild.
+        assert!(archive_is_stale(
+            b.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        // Same entry, sources not newer => fresh.
+        assert!(!archive_is_stale(
+            a.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
