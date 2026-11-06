@@ -13,6 +13,11 @@ pub const PACKAGE_FLAG_USES_FFI: u32 = 1;
 /// [`PackageTrailer::flags`]: a [`NativeLock`] blob sits between the `.ccoil` archive and the trailer.
 pub const PACKAGE_FLAG_HAS_NATIVE_LOCK: u32 = 2;
 
+/// The package is linked into the program, not appended to a file, so
+/// nothing says where in the file it starts: `archive_offset` is how far
+/// before the trailer the archive starts.
+pub const PACKAGE_FLAG_LINKED: u32 = 4;
+
 /// Metadata stored in the last 32 bytes of a packaged executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackageTrailer {
@@ -29,6 +34,16 @@ impl PackageTrailer {
 
     pub fn has_native_lock(self) -> bool {
         self.flags & PACKAGE_FLAG_HAS_NATIVE_LOCK != 0
+    }
+
+    pub fn is_linked(self) -> bool {
+        self.flags & PACKAGE_FLAG_LINKED != 0
+    }
+
+    /// Where the archive starts in `data`, which ends with this trailer.
+    fn archive_start(self, data: &[u8]) -> Option<usize> {
+        let off = usize::try_from(self.archive_offset).ok()?;
+        if self.is_linked() { data.len().checked_sub(PACKAGE_TRAILER_SIZE)?.checked_sub(off) } else { Some(off) }
     }
 
     pub fn encode(self) -> [u8; PACKAGE_TRAILER_SIZE] {
@@ -437,7 +452,7 @@ pub fn read_package_trailer(data: &[u8]) -> Option<PackageTrailer> {
 
 /// Slice of embedded archive bytes inside a packaged executable.
 pub fn embedded_archive_slice(data: &[u8], trailer: PackageTrailer) -> Option<&[u8]> {
-    let off = usize::try_from(trailer.archive_offset).ok()?;
+    let off = trailer.archive_start(data)?;
     let len = usize::try_from(trailer.archive_len).ok()?;
     let end = off.checked_add(len)?;
     if end > data.len().saturating_sub(PACKAGE_TRAILER_SIZE) {
@@ -457,7 +472,7 @@ pub fn embedded_native_lock_slice(data: &[u8], trailer: PackageTrailer) -> Optio
     if !trailer.has_native_lock() {
         return None;
     }
-    let off = usize::try_from(trailer.archive_offset).ok()?;
+    let off = trailer.archive_start(data)?;
     let len = usize::try_from(trailer.archive_len).ok()?;
     let lock_start = off.checked_add(len)?;
     let lock_end = data.len().checked_sub(PACKAGE_TRAILER_SIZE)?;
@@ -481,6 +496,38 @@ pub fn read_embedded_native_lock(data: &[u8], trailer: PackageTrailer) -> Result
     }
     let text = std::str::from_utf8(slice).map_err(|_| "native lock is not UTF-8".to_string())?;
     NativeLock::from_json(text).map(Some)
+}
+
+/// The package an AOT object carries: `archive`, optional `native_lock`
+/// JSON and a trailer, which the readers above take as they take a file.
+/// The archive comes first, so a 16-byte-aligned symbol aligns it.
+pub fn linked_package(archive: &[u8], native_lock: Option<&[u8]>, flags: u32, archive_version: u32) -> Vec<u8> {
+    let mut out = archive.to_vec();
+    let mut flags = flags | PACKAGE_FLAG_LINKED;
+    if let Some(lock) = native_lock.filter(|l| !l.is_empty()) {
+        out.extend_from_slice(lock);
+        flags |= PACKAGE_FLAG_HAS_NATIVE_LOCK;
+    }
+    let trailer = PackageTrailer {
+        archive_offset: u64::try_from(out.len()).expect("package too large"),
+        archive_len: u64::try_from(archive.len()).expect("archive too large"),
+        flags,
+        archive_version,
+    };
+    out.extend_from_slice(&trailer.encode());
+    out
+}
+
+/// The [`linked_package`] inside the executable `data`, up to the end of its
+/// trailer, for tools that read the file from outside.
+pub fn find_linked_package(data: &[u8]) -> Option<&[u8]> {
+    // The magic is also in the runtime's code, as a constant.
+    let starts = (0..data.len().saturating_sub(PACKAGE_MAGIC.len())).rev().filter(|&i| data[i..].starts_with(PACKAGE_MAGIC));
+    starts.into_iter().find_map(|at| {
+        let found = data.get(..at.checked_add(PACKAGE_TRAILER_SIZE)?)?;
+        let trailer = read_package_trailer(found).filter(|t| t.is_linked())?;
+        embedded_archive_slice(found, trailer).map(|_| found)
+    })
 }
 
 /// Whether `data` already ends with a package trailer (template is already packaged).
@@ -575,6 +622,41 @@ pub fn default_natives_root() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_linked_package_reads_as_a_file_does() {
+        let data = linked_package(b"archive", Some(b"{}"), PACKAGE_FLAG_USES_FFI, 7);
+        let trailer = read_package_trailer(&data).expect("trailer");
+        assert!(trailer.is_linked() && trailer.has_native_lock() && trailer.uses_ffi());
+        assert_eq!(embedded_archive_slice(&data, trailer), Some(&b"archive"[..]));
+        assert_eq!(embedded_native_lock_slice(&data, trailer), Some(&b"{}"[..]));
+    }
+
+    #[test]
+    fn a_linked_package_is_found_in_an_image() {
+        let package = linked_package(b"archive", None, 0, 7);
+        let mut image = b"code".to_vec();
+        image.extend_from_slice(&package);
+        image.extend_from_slice(b"more code");
+        let found = find_linked_package(&image).expect("package");
+        let trailer = read_package_trailer(found).expect("trailer");
+        assert_eq!(embedded_archive_slice(found, trailer), Some(&b"archive"[..]));
+    }
+
+    /// The runtime holds the magic as a constant, followed by anything.
+    #[test]
+    fn a_stray_magic_is_not_a_package() {
+        let package = linked_package(b"archive", None, 0, 7);
+        let mut image = package.clone();
+        image.extend_from_slice(PACKAGE_MAGIC);
+        image.extend_from_slice(&[0xff; 64]);
+        image.extend_from_slice(PACKAGE_MAGIC);
+        let found = find_linked_package(&image).expect("package");
+        assert_eq!(found, &package[..]);
+        let mut bare = PACKAGE_MAGIC.to_vec();
+        bare.extend_from_slice(&[0xff; 64]);
+        assert!(find_linked_package(&bare).is_none());
+    }
     
 
     #[test]

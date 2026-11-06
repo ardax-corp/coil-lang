@@ -123,8 +123,9 @@ pub struct AotObject {
 /// package`): the same lowering as [`jit`], linked against the runtime
 /// library instead of bound in memory. `statics` are the `extern`
 /// functions linked into the executable, as `(library stem, C symbol)`:
-/// the object imports each symbol and records its address.
-pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(String, String)]) -> Result<AotObject, String> {
+/// the object imports each symbol and records its address. `package` is
+/// the program's data (`common::linked_package`), as `coil_aot_package`.
+pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(String, String)], package: &[u8]) -> Result<AotObject, String> {
     let mut excluded = HashMap::new();
     loop {
         let plan = plan_without(bodies, &excluded, entry_pcs);
@@ -214,6 +215,12 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         }
         let map_id = module.declare_data("coil_aot_stack_maps", Linkage::Export, false, false).map_err(e)?;
         module.define_data(map_id, &map_table).map_err(e)?;
+        let mut data = cranelift_module::DataDescription::new();
+        data.define(package.to_vec().into_boxed_slice());
+        // Its archive is read in place, which rkyv's alignment asks of it.
+        data.set_align(16);
+        let id = module.declare_data("coil_aot_package", Linkage::Export, false, false).map_err(e)?;
+        module.define_data(id, &data).map_err(e)?;
         let mut words = |name: &str, data: Vec<u8>| -> Result<(), String> {
             let mut d = cranelift_module::DataDescription::new();
             d.define(data.into_boxed_slice());
@@ -222,6 +229,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
             module.define_data(id, &d).map_err(e)
         };
         words("coil_aot_entry_count", (count as u64).to_le_bytes().to_vec())?;
+        words("coil_aot_package_len", (package.len() as u64).to_le_bytes().to_vec())?;
         let mut site_words = Vec::with_capacity(sites.len() * 16 + 16);
         for site in &sites {
             for w in [site.entry_pc, site.loc.file, site.loc.start_byte, site.loc.end_byte] {

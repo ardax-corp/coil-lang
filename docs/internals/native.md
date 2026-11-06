@@ -360,8 +360,9 @@ the [JIT runner](#jit-runner) instead):
    into `program.o`. The object defines `coil_aot_entries` / `coil_aot_entry_count`
    (one `AotEntry` per compiled body, the function address relocated in),
    `coil_aot_sites` / `coil_aot_site_count` (call-site words) and
-   `coil_aot_refused_count` (bodies left out), and imports the runtime helpers by name
-   (`machine::native::helper_symbols()`, all `#[unsafe(no_mangle)]`).
+   `coil_aot_refused_count` (bodies left out), `coil_aot_package` /
+   `coil_aot_package_len` (the program's data, below), and imports the runtime helpers
+   by name (`machine::native::helper_symbols()`, all `#[unsafe(no_mangle)]`).
 2. `cc` links `program.o` with `libcoil_rt.a` (the `coil-rt` staticlib): `COIL_RT_LIB`,
    else the copy embedded at the end of `coil` (`scripts/embed_runtime.py`, which the
    release workflow runs: the library, its length, `COILRT\0\1`), written once to
@@ -369,10 +370,21 @@ the [JIT runner](#jit-runner) instead):
    beside `coil` (a cargo build). `--strip-symbols` (`debug` by default, `none`, `all`)
    sets what the linker strips: the runtime's DWARF, then its symbol table. Coil's
    backtraces read the program's line table (`-g`), so stripping keeps them. `coil-rt`'s
-   `main` calls `machine::native::install_aot` with those symbols, then runs the
-   embedded payload like `coil-embed`.
-3. The archive payload is appended as for a runner package, and the driver runs it
-   (`machine::run_natively`).
+   `main` calls `machine::native::install_aot` with those symbols, then hands
+   `coil_aot_package` to `coil_cli::run_linked_package`, and the driver runs it
+   (`machine::run_natively`). The executable does not read its own file.
+
+`coil_aot_package` is `common::linked_package`: the archive, the native lock and a
+trailer with `PACKAGE_FLAG_LINKED`, whose `archive_offset` counts back from the trailer.
+The symbol is 16-byte aligned and the archive comes first, so rkyv reads it in place.
+`common::find_linked_package` finds it from outside the program, for `coil natives dump`.
+
+`--emit` stops before the link. `--emit obj` writes the object: `cc app.o libcoil_rt.a`
+makes the program, with your own objects beside it. `--emit lib` adds the object to a copy
+of the runtime library with `ar` (`AR`), one input for the link. Either way `main` is the
+runtime's, so the result is a Coil program; calling Coil from a C `main` needs exported
+functions and a runtime lifecycle, which do not exist yet. `extern` blocks named with
+`--link-static` stay undefined symbols for that link. `coil package` prints the link line.
 
 A body native code refuses is an error naming it and why, at package time on both kinds
 of executable. No source program reaches one today: parameters, captures, generator
@@ -383,11 +395,12 @@ package warns and falls back to the runner.
 ### JIT runner
 
 `coil-embed` is the runtime and Cranelift, with no parser or linker. `coil package
---no-aot` appends the program with its MIR section, and the runner JITs it at start
-(`coil_native::install_section`, through `coil_cli::try_run_embedded_with`) and runs it
+--no-aot` appends the program with its MIR section after the runner's image, and the
+runner JITs it at start (`coil_native::install_section`, through
+`coil_cli::try_run_embedded_with`) and runs it
 on the driver. Nothing about it needs `cc`, so it is what a host that cannot link gets.
 `coil package` compiles the MIR once itself, so a body that does not compile fails
-there and not on the target. An AOT payload has no section: its code is in the
+there and not on the target. An AOT package has no section: its code is in the
 executable.
 
 A program pays the JIT at every start (a few ms for a small one).

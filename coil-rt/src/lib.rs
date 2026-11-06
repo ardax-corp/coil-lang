@@ -1,11 +1,9 @@
 //! Runtime library of an AOT executable (`coil package`, see
 //! `docs/internals/native.md`, "AOT"): `cc` links it with the object
-//! `coil_native::aot` made, which defines the compiled bodies and their
-//! tables, and `coil package` appends the program's archive as it does to
-//! a `coil-embed` runner. `main` installs the linked code, then runs the
-//! archive on the native driver: `coil-rt` builds `machine` without the
-//! `vm` feature, so the executable carries no interpreter, and `coil
-//! package` links one only when native code covers every body.
+//! `coil_native::aot` made, which defines the compiled bodies, their tables
+//! and the program's package. `main` installs the linked code, then runs the
+//! package on the native driver. `coil package` links one only when native
+//! code covers every body.
 
 // The libtest build leaves out `main`, so its imports and tables go unused.
 #![cfg_attr(test, allow(dead_code, unused_imports))]
@@ -23,6 +21,8 @@ unsafe extern "C" {
     static coil_aot_stack_map_count: u64;
     static coil_static_syms: machine::StaticSymbol;
     static coil_static_sym_count: u64;
+    static coil_aot_package: u8;
+    static coil_aot_package_len: u64;
 }
 
 /// The executable's entry (the C runtime calls it).
@@ -47,11 +47,13 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         machine::native::install_aot_stack_maps(&raw const coil_aot_stack_maps, coil_aot_stack_map_count as usize);
         machine::install_static_symbols(&raw const coil_static_syms, coil_static_sym_count as usize);
     }
-    match coil_cli::try_run_embedded() {
+    // SAFETY: the linked object defines the package as `aot` wrote it.
+    let package = unsafe { std::slice::from_raw_parts(&raw const coil_aot_package, coil_aot_package_len as usize) };
+    match coil_cli::run_linked_package(package) {
         // A language `panic` exits 1, as `coil-embed`.
         Some(panicked) => exit(i32::from(panicked)),
         None => {
-            eprintln!("coil: this AOT executable carries no program (build it with `coil package`)");
+            eprintln!("coil: this executable's package is corrupt");
             exit(1);
         }
     }

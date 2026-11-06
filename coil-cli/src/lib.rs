@@ -127,21 +127,29 @@ fn native_cache_dirs(lock: &NativeLock) -> Vec<PathBuf> {
     dirs
 }
 
-/// If this process is a packaged binary, run the embedded program and return `Some(panicked)`.
-pub fn try_run_embedded() -> Option<bool> {
-    try_run_embedded_with(|_| Ok(()))
+/// Run the package linked into this executable: `Some(panicked)`, `None` when
+/// it cannot be read.
+pub fn run_linked_package(package: &[u8]) -> Option<bool> {
+    let exe = std::env::current_exe().ok()?;
+    run_package(package, exe, |_| Ok(()))
 }
 
-/// [`try_run_embedded`] for a runner that makes its native code at start:
+/// If this process is a packaged JIT runner, run the program appended to it,
+/// `Some(panicked)`. It makes its native code at start:
 /// `prepare` takes the archive's native MIR section and installs it for the
 /// run. Its error stops the program.
 pub fn try_run_embedded_with(prepare: impl FnOnce(&[u8]) -> Result<(), String>) -> Option<bool> {
-    use machine::packaged_app_ffi_startup_check;
-
     let exe = std::env::current_exe().ok()?;
     let data = std::fs::read(&exe).ok()?;
-    let trailer = read_package_trailer(&data)?;
-    let archive = embedded_archive_slice(&data, trailer)?;
+    run_package(&data, exe, prepare)
+}
+
+/// Run the package that ends `data`; `exe` is the running executable.
+fn run_package(data: &[u8], exe: PathBuf, prepare: impl FnOnce(&[u8]) -> Result<(), String>) -> Option<bool> {
+    use machine::packaged_app_ffi_startup_check;
+
+    let trailer = read_package_trailer(data)?;
+    let archive = embedded_archive_slice(data, trailer)?;
 
     if !archive_version_compatible(trailer.archive_version, ARCHIVE_VERSION) {
         eprintln!(
@@ -175,7 +183,7 @@ pub fn try_run_embedded_with(prepare: impl FnOnce(&[u8]) -> Result<(), String>) 
 
     let mut ffi_search_paths = Vec::new();
     let mut dload_gate = None;
-    match read_embedded_native_lock(&data, trailer) {
+    match read_embedded_native_lock(data, trailer) {
         Ok(Some(lock)) if !lock.entries.is_empty() => {
             if lock.os != std::env::consts::OS || lock.arch != std::env::consts::ARCH {
                 eprintln!(
