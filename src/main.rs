@@ -117,11 +117,18 @@ fn print_opt_stats(text: bool, json: bool) {
     }
 }
 
+/// Print the diagnostics of the compile a cache hit stands for.
+fn repeat_report(report: &[u8]) {
+    use std::io::Write;
+    let _ = std::io::stderr().write_all(report);
+}
+
 fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str, cache: Option<BuildCache>) {
     if let Some(cache) = &cache
-        && let Some(bytes) = cache.load()
+        && let Some(hit) = cache.load()
     {
-        write_archive(pipeline, output, &bytes);
+        repeat_report(&hit.report);
+        write_archive(pipeline, output, &hit.archive);
         return;
     }
     // Multi-file entry: discovers `use` / `mod` via bound `--root` / default `src`.
@@ -201,21 +208,22 @@ impl BuildCache {
         Some(Self { dir: build_cache::dir()?, key: build_cache::key(Path::new(filename), options)? })
     }
 
-    fn load(&self) -> Option<Vec<u8>> {
+    fn load(&self) -> Option<build_cache::Hit> {
         build_cache::load(&self.dir, &self.key)
     }
 
-    /// Keep the archive of a compile that reported nothing: a cached run
-    /// would not repeat its warnings.
+    /// Keep the archive of a compile, with the warnings a hit repeats. A
+    /// report in a machine format is not kept, so that compile is not either.
     fn store(&self, pipeline: &Pipeline, filename: &str, archive: &[u8]) {
-        if pipeline.diagnostics_emitted() > 0 {
+        let report = build_cache::report();
+        if pipeline.diagnostics_emitted() > 0 && report.is_empty() {
             return;
         }
         let roots: Vec<std::path::PathBuf> =
             pipeline.module_roots().iter().map(|r| pipeline.project_root().join(r)).collect();
         let inputs = build_cache::inputs(Path::new(filename), pipeline.discovered_files(), &roots);
         // A cache that cannot be written only costs the next compile.
-        let _ = build_cache::store(&self.dir, &self.key, &inputs, archive);
+        let _ = build_cache::store(&self.dir, &self.key, &inputs, &report, archive);
     }
 }
 
@@ -239,6 +247,7 @@ fn cache_options(cli: &CliArgs) -> Option<String> {
             cli.auto_par,
             &cli.host_grants,
             &cli.module_roots,
+            (cli.log_json, cli.log_lsp),
         )
     ))
 }
@@ -401,8 +410,10 @@ fn cmd_build_and_run(
         compiler::native_mir::start_native_capture();
     }
     if let Some(cache) = &cache
-        && let Some(loaded) = cache.load().and_then(|b| load_archive_bytes(&b).ok())
+        && let Some((report, loaded)) = cache.load().and_then(|hit| Some((hit.report, load_archive_bytes(&hit.archive).ok()?)))
     {
+        end_compile_progress();
+        repeat_report(&report);
         install_section(filename, &loaded.native_mir);
         run_cached(pipeline, filename, &loaded);
         return;
@@ -868,6 +879,8 @@ fn main() {
             let format = config.format;
             let compiles = matches!(command, Command::BuildAndRun { .. } | Command::Compile { .. } | Command::Package { .. });
             let writer = if compiles { compile_progress(format) } else { writer_for(format) };
+            let writer: Box<dyn std::io::Write + Send> =
+                if compiles && format == ReportFormat::Pretty { Box::new(build_cache::Reported(writer)) } else { writer };
             let mut pipeline = Pipeline::with_reporter(config, writer);
             wire_compile_progress(&mut pipeline);
             pipeline.set_host_grants(cli.host_grants.clone());

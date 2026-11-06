@@ -46,8 +46,9 @@ impl TyVarCounter {
 pub struct Frame {
     /// Name, scheme, and whether the binding is a `const`.
     bindings: Vec<(String, Scheme, bool)>,
-    /// Name to the index of its latest binding in `bindings`.
-    latest: HashMap<String, usize>,
+    /// Name to the index of its latest binding in `bindings`. A name no scope
+    /// binds probes every frame, one per module: a fast hash is worth having.
+    latest: rustc_hash::FxHashMap<String, usize>,
 }
 
 impl Frame {

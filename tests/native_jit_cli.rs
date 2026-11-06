@@ -1327,6 +1327,33 @@ fn a_run_comes_from_the_build_cache() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A compile with a warning is kept too, and a hit repeats the warning.
+#[test]
+fn a_cached_run_repeats_the_compiles_warnings() {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-cached-warning", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("warns.coil");
+    let src = format!("{HEADER}class Item {{\n    pub n: int,\n}}\nfn main() {{\n    let a = new Item(1);\n    let b = a;\n    b.n = 2;\n    let _ = println(format(\"%i\", a.n + b.n));\n}}\n");
+    std::fs::write(&file, src).expect("write source");
+    let run = || {
+        let mut cmd = Command::new(coil_bin());
+        cmd.arg(&file).env("XDG_CACHE_HOME", dir.join("cache")).current_dir(&dir);
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        let out = cmd.output().expect("spawn coil");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let first = run();
+    assert!(first.contains("E0141"), "the program warns: {first}");
+    let entries = std::fs::read_dir(dir.join("cache/coil/build")).map_or(0, Iterator::count);
+    assert!(entries > 0, "the compile was kept");
+    assert_eq!(run(), first);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `coil test --engine native` over a directory holding `src` as
 /// `name.coil`, with a cold cache: the bodies native code refused.
 fn native_test_refusals(name: &str, src: &str) -> Vec<String> {
