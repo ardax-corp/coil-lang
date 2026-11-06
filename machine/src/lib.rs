@@ -74,6 +74,4 @@ pub use thread::{
     new_live_thread_registry,
 };
 
-/// Default operand-stack capacity when analysis does not request more.
-pub const DEFAULT_OPERAND_STACK_SLOTS: usize = 256;
 
