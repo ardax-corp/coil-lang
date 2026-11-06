@@ -382,7 +382,9 @@ fn bind_project_root_sets_explicit_roots_without_toml() {
 
     let mut pipeline = Pipeline::new();
     bind_ns_pipeline(&mut pipeline, &[]);
-    assert_eq!(pipeline.project_root(), root.as_path());
+    // The temp dir can be a symlink (macOS), and the root came from the cwd.
+    let same = |p: &std::path::Path| p.canonicalize().expect("canonical path");
+    assert_eq!(same(pipeline.project_root()), same(&root));
     let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).expect("bound roots should compile");
     let output = run_compiled(compiled, &pipeline);
     assert_eq!(output, "42");
