@@ -1,8 +1,8 @@
-//! What a running program needs besides an interpreter: the heap and the
-//! host natives today, the scheduler, reactor and string table as the
-//! runtime-free plan moves them (`docs/internals/native.md`). The runtime's
-//! [`crate::Machine`] owns one; native code reaches it through its
-//! context, so host functions run without the interpreter.
+//! What a running program needs besides its code: the heap, the host
+//! natives, the scheduler, reactor and string table
+//! (`docs/internals/native.md`). The native driver, the MIR interpreter and
+//! an [`crate::Isolate`] each own one; native code reaches it through its
+//! context.
 
 use std::sync::Arc;
 
@@ -238,8 +238,8 @@ impl Runtime {
 
 /// What a host call needs from whatever runs the program besides the
 /// [`Runtime`]: whether tasks may switch where it runs, parking the task
-/// it runs in, and a collection with its native frames rooted. The runtime's
-/// [`crate::Machine`] is one; host functions reach the runtime through it.
+/// it runs in, and a collection with its native frames rooted. The native
+/// driver is one; host functions reach the runtime through it.
 pub(crate) trait HostEnv {
     fn rt(&mut self) -> &mut Runtime;
     /// Calls in progress (what a [`Runtime::native_roots`] entry records).

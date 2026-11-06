@@ -70,12 +70,13 @@ impl Isolate {
         self.rt.restore_output()
     }
 
-    /// See [`crate::Machine::set_step_budget`].
+    /// Loop back-edges and calls a run may take before it panics; `None` is
+    /// unlimited.
     pub fn set_step_budget(&mut self, budget: Option<u64>) {
         self.rt.set_step_budget(budget);
     }
 
-    /// See [`crate::Machine::steps_charged`].
+    /// Steps charged since the budget was last set.
     pub fn steps_charged(&self) -> u64 {
         self.rt.steps_charged()
     }
@@ -84,7 +85,7 @@ impl Isolate {
         self.rt.step_budget_hit
     }
 
-    /// See [`crate::Machine::set_heap_cap`].
+    /// Bytes the heap may grow to before the run panics; `None` is no cap.
     pub fn set_heap_cap(&mut self, cap: Option<usize>) {
         self.rt.set_heap_cap(cap);
     }

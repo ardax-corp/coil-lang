@@ -345,7 +345,7 @@ pub struct Heap {
     epoch_gen: u8,
 }
 
-/// Machine-owned heap that can borrow the root Heap for a C1 steal job.
+/// A runtime's own heap that can borrow the root Heap for a C1 steal job.
 #[derive(Default)]
 pub struct HeapSlot {
     owned: Heap,
@@ -1808,7 +1808,7 @@ impl Heap {
         while !self.mark_quantum(usize::MAX) {}
     }
 
-    /// Complete collect without a `Machine`: mark `extra_roots` plus immortal
+    /// Complete collect with no host's roots: mark `extra_roots` plus immortal
     /// enums, clear dead weaks, sweep.
     pub fn collect(&mut self, extra_roots: &[u64]) {
         if self.epoch_stw {

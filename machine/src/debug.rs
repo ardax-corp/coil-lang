@@ -46,7 +46,7 @@ pub enum StepMode {
     },
 }
 
-/// Attached to a [`crate::Machine`] for interactive / scripted debugging.
+/// Attached to the MIR interpreter for interactive / scripted debugging.
 #[derive(Debug, Clone, Default)]
 pub struct DebugController {
     breakpoints: HashSet<usize, AddrHashBuilder>,

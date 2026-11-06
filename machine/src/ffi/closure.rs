@@ -21,7 +21,7 @@ impl OwnedClosure {
     }
 }
 
-/// Type-erased reentrant call into a `Machine<S>` (set per closure).
+/// Type-erased reentrant call into the running program (set per closure).
 pub type VmCallFn = unsafe fn(*mut c_void, u32, *const Value, usize) -> Value;
 
 /// runtime state stashed in callback userdata (single-threaded).

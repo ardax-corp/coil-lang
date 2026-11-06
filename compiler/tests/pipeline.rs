@@ -3707,7 +3707,7 @@ fn main() {
 
 #[test]
 fn nested_spawn_joins_via_shared_root_registry() {
-    // Worker mid spawns leaf on the root Machine's live-thread registry.
+    // Worker mid spawns leaf on the root runtime's live-thread registry.
     // Main returns without join; root auto-join must still wait for leaf.
     let output = run_example_src(
         r#"

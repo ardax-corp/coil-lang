@@ -1,4 +1,4 @@
-//! Host-backed OS threads, channels, and locks (isolate `Machine` per thread).
+//! Host-backed OS threads, channels, and locks (a runtime of its own per thread).
 
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::{HashSet, VecDeque};
@@ -19,7 +19,7 @@ use crate::task::ThreadWaiters;
 
 /// Per-root runtime registry of undetached spawns (shared with nested workers via
 /// [`ThreadSpawnContext`]). Process-global storage was wrong: parallel tests /
-/// multiple `Machine`s would steal each other's joins via `mem::take`.
+/// multiple runtimes would steal each other's joins via `mem::take`.
 pub type LiveThreadRegistry = Arc<Mutex<Vec<Arc<JoinState>>>>;
 
 /// Per-root runtime bound on concurrent OS **pool** threads for the work-stealing
@@ -676,7 +676,7 @@ thread_local! {
     static HELD_MUTEX: RefCell<Option<(u64, Arc<MutexInner>)>> = const { RefCell::new(None) };
 }
 
-/// Per-`execute` host runtime binding (any `Machine<const N>` frame depth).
+/// Per-run host runtime binding.
 pub(crate) struct MachineHostState {
     raw: *mut (),
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
@@ -912,7 +912,7 @@ pub(crate) fn host_code_ptr_from_hashed_dload(
         let Some(state) = state.as_ref() else {
             return Err(IoErrorTag::PermissionDenied);
         };
-        // SAFETY: `raw` is the Machine bound by the live guard.
+        // SAFETY: `raw` is the host bound by the live guard.
         let gate = unsafe { &*(state.dload_gate)(state.raw) };
         hashed_dload_code_ptr(gate, addr as *const std::ffi::c_void)
     })
@@ -1493,7 +1493,7 @@ impl Write for SharedPrintWriter {
     }
 }
 
-/// Context copied from the parent `Machine` when spawning.
+/// Context copied from the parent runtime when spawning.
 pub struct ThreadSpawnContext {
     pub program: Arc<ThreadProgram>,
     pub natives: Natives,
@@ -1506,9 +1506,9 @@ pub struct ThreadSpawnContext {
     pub worker_cap: Arc<WorkerCap>,
     pub reactor: Arc<crate::reactor::Reactor>,
     pub io_reactor: Arc<crate::io_reactor::IoReactor>,
-    /// Entry-script directory for relative `dload` (same as parent `wire_vm_ffi`).
+    /// Entry-script directory for relative `dload` (as the parent's).
     pub ffi_base_dir: Option<PathBuf>,
-    /// `--ffi-search-path` dirs from the parent Machine.
+    /// `--ffi-search-path` dirs from the parent runtime.
     pub ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` integrity (lock hash / trusted / host grants).
     pub dload_gate: crate::ffi::DloadGate,
@@ -1830,7 +1830,7 @@ const HELP_SLICE: std::time::Duration = std::time::Duration::from_millis(5);
 /// own deque, so a wait for one of them with every other executor busy or
 /// waiting the same way would never end. Off this stack, as an IO wait
 /// helps (#869): a job run under the wait could wait on the frame it sits
-/// on. A no-op without a reactor (a bare `Machine`) or nothing queued.
+/// on. A no-op without a reactor (a bare runtime) or nothing queued.
 fn help_while_blocked() {
     let reactor = HOST_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.cpu_reactor.clone()));
     if let Some(r) = reactor {

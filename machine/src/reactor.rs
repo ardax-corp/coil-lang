@@ -101,7 +101,7 @@ pub struct TestJob {
     pub coverage: bool,
     /// Coverage probes in the program's MIR (`compiler::native_mir::coverage`).
     pub probes: u32,
-    /// Step budget for static init + case ([`Machine::set_step_budget`]);
+    /// Step budget for static init + case ([`crate::Isolate::set_step_budget`]);
     /// `None` = unlimited. Threads the case spawns are not limited.
     pub step_budget: Option<u64>,
     /// Filled once the job finishes, before its join state completes.
@@ -115,11 +115,11 @@ pub struct TestReport {
     /// Why it failed when it returned `Err(reason)` (a panic's message is in
     /// the job's print buffer instead).
     pub reason: Option<String>,
-    /// Hit count per PC, or per probe with native code (static init + case)
-    /// when the job asked for coverage.
+    /// Hit count per coverage probe (static init + case) when the job asked
+    /// for coverage.
     /// Threads the case spawns run on other runtimes and are not counted.
     pub hits: Option<Vec<u32>>,
-    /// Steps charged (static init + case; see [`Machine::set_step_budget`]).
+    /// Steps charged (static init + case; see [`crate::Isolate::set_step_budget`]).
     pub steps: u64,
     /// The case ran out of [`TestJob::step_budget`] (and so failed).
     pub timed_out: bool,
