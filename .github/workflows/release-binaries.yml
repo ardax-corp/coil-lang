@@ -86,14 +86,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           # base-devel: GNU make + cmp for vendored libffi-sys ./configure
           install: >-
             base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-pkgconf
 
       - name: Configure pkg-config (Windows)
         if: runner.os == 'Windows'
@@ -218,13 +218,12 @@ jobs:
 
           # The runtime `coil package` links AOT executables against,
           # embedded in `coil` (written to its cache on first use).
-          if [[ "${{ runner.os }}" != "Windows" ]]; then
-            src="target/release/libcoil_rt.a"
-            if [[ "${{ matrix.libc }}" == "musl" ]]; then
-              src="target-musl/release/libcoil_rt.a"
-            fi
-            python3 scripts/embed_runtime.py "staging/coil-${triple}/coil" "$src"
+          src="target/release/libcoil_rt.a"
+          if [[ "${{ matrix.libc }}" == "musl" ]]; then
+            src="target-musl/release/libcoil_rt.a"
           fi
+          python="$(command -v python3 || command -v python)"
+          "$python" scripts/embed_runtime.py "staging/coil-${triple}/coil${ext}" "$src"
 
           # Standalone packaging runner (same download name as before).
           cp "target/release/coil-embed${ext}" "dist/coil-embed-${triple}${ext}"

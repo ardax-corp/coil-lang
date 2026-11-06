@@ -1354,6 +1354,76 @@ fn a_cached_run_repeats_the_compiles_warnings() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A variadic function compiles as a copy per argument shape, its spans
+/// moved out of the source's range: a panic names the line it was written on.
+#[test]
+fn a_panic_in_a_variadic_copy_names_its_line() {
+    let src = format!("{HEADER}fn first(... xs) -> int {{\n    panic \"boom\";\n}}\nfn main() {{\n    let _ = println(format(\"%i\", first(1, \"a\")));\n}}\n");
+    for native in [true, false] {
+        let err = program_stderr(&run("variadic_panic", &src, native));
+        assert!(err.contains("variadic_panic.coil:4:4"), "native={native}: {err}");
+    }
+}
+
+/// The capability check finds a gated call in the MIR by its location: one
+/// in a variadic copy is still found, and shown where it was written.
+#[test]
+fn a_capability_error_in_a_variadic_copy_names_its_line() {
+    let src = "use io::open;\nfn slurp(... xs) -> int {\n    let _ = open(\"/etc/hostname\", \"r\");\n    return 1;\n}\nfn main() {\n    let _ = slurp(1, \"a\");\n}\n";
+    let out = run("variadic_capability", src, true);
+    let err = program_stderr(&out);
+    assert!(!out.status.success(), "ran without the grant: {err}");
+    assert!(err.contains("E0414") && err.contains("--allow-read"), "{err}");
+    assert!(err.contains("variadic_capability.coil:3:13"), "{err}");
+    assert!(!err.contains("__va"), "a copy's name: {err}");
+}
+
+/// `coil compile` of `file` twice over one new cache directory, the first
+/// building the macro programs and the second reading them: both archives.
+fn archives_cold_and_warm(dir: &std::path::Path, file: &std::path::Path, roots: &[PathBuf]) -> (Vec<u8>, Vec<u8>) {
+    let compile = |name: &str| {
+        let out_path = dir.join(name);
+        let mut cmd = Command::new(coil_bin());
+        cmd.arg("compile").arg(file).arg("--no-build-cache").arg("-o").arg(&out_path).env("XDG_CACHE_HOME", dir.join("cache"));
+        for root in compiler::Pipeline::workspace_language_extra_roots().into_iter().chain(roots.iter().cloned()) {
+            cmd.arg("--root").arg(root);
+        }
+        let out = cmd.output().expect("spawn coil");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        std::fs::read(&out_path).expect("read archive")
+    };
+    (compile("cold.ccoil"), compile("warm.ccoil"))
+}
+
+/// Building a macro program must not change the contract level of the
+/// compile that asked for it (#2214).
+#[test]
+fn a_cold_macro_cache_keeps_the_compiles_contract_level() {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-cold-contracts", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("r.coil");
+    let src = format!("{HEADER}#[derive(Eq)]\nclass P {{\n    pub x: int,\n}}\n\nclass Counter\n    invariant self.n >= 0\n{{\n    n: int,\n}}\n\nimpl Counter {{\n    pub fn get() -> int {{\n        return self.n;\n    }}\n}}\n\nfn main() {{\n    let c = new Counter(1);\n    let _ = println(format(\"%i\", c.get()));\n    let _ = new P(1) == new P(1);\n}}\n");
+    std::fs::write(&file, src).expect("write source");
+    let (cold, warm) = archives_cold_and_warm(&dir, &file, &[]);
+    assert_eq!(cold.len(), warm.len(), "the invariant is checked in only one of them");
+    assert!(cold == warm, "archives differ");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A macro's output has no place in the source: what it compiles to must
+/// not record how many spans were handed out before it (#2290).
+#[test]
+fn a_cold_macro_cache_keeps_the_archives_debug_positions() {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-cold-positions", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (cold, warm) = archives_cold_and_warm(&dir, &repo.join("tests/macros/attr_macro.coil"), &[repo.join("examples/src")]);
+    assert!(cold == warm, "archives differ");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `coil test --engine native` over a directory holding `src` as
 /// `name.coil`, with a cold cache: the bodies native code refused.
 fn native_test_refusals(name: &str, src: &str) -> Vec<String> {

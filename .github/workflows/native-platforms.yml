@@ -1,0 +1,107 @@
+# Native code on the hosts CI otherwise reaches only through a ready PR into
+# `main`: JIT and AOT on macOS and Windows, for each PR into a feature branch.
+# `scripts/native_platform_smoke.sh` runs every way a program starts, and the
+# AOT tests fail on a fallback to the JIT runner.
+name: Native platforms
+
+on:
+  pull_request:
+    branches: ['feature/**']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: "true"
+
+jobs:
+  macos:
+    name: native (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ardax-corp/coil-stdlib
+          path: .deps/coil-stdlib
+      - name: Install system deps
+        run: brew install libffi
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-platforms-macos
+      - name: Build
+        run: |
+          cargo build -p coil -p coil-embed -p coil-test
+          cargo build -p coil-rt
+      - name: What the runtime links
+        run: cargo rustc -p coil-rt -- --print native-static-libs
+      - name: Every way to run
+        run: bash scripts/native_platform_smoke.sh target/debug .deps/coil-stdlib/src
+      - name: Package and JIT tests
+        run: cargo test -p coil --test package_cli --test native_jit_cli
+
+  windows:
+    name: native (windows-gnu)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ardax-corp/coil-stdlib
+          path: .deps/coil-stdlib
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            python
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-pkgconf
+      - name: Configure pkg-config
+        shell: msys2 {0}
+        run: |
+          echo "PKG_CONFIG=$MINGW_PREFIX/bin/pkgconf.exe" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$MINGW_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-platforms-windows-ucrt
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          cargo build -p coil -p coil-embed -p coil-test
+          cargo build -p coil-rt
+      - name: What the runtime links
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          cargo rustc -p coil-rt -- --print native-static-libs
+      - name: Every way to run
+        shell: msys2 {0}
+        run: |
+          export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
+          bash scripts/native_platform_smoke.sh target/debug .deps/coil-stdlib/src
+      - name: Package and JIT tests
+        shell: msys2 {0}
+        run: |
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          cargo test -p coil --test package_cli --test native_jit_cli

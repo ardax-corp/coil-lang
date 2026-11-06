@@ -247,7 +247,12 @@ impl StripSymbols {
     }
 }
 
-/// `libcoil_rt.a`: `COIL_RT_LIB`, else the copy embedded in this binary
+/// What `rustc` names `coil-rt`'s static library for this target: Windows
+/// has two, and the GNU one, which releases build, is named as on Unix.
+#[cfg(not(target_family = "wasm"))]
+const RUNTIME_LIB: &str = if cfg!(target_env = "msvc") { "coil_rt.lib" } else { "libcoil_rt.a" };
+
+/// [`RUNTIME_LIB`]: `COIL_RT_LIB`, else the copy embedded in this binary
 /// (written to the cache on first use), else the file beside it.
 #[cfg(not(target_family = "wasm"))]
 fn runtime_library() -> Result<PathBuf, String> {
@@ -260,7 +265,7 @@ fn runtime_library() -> Result<PathBuf, String> {
     {
         return Ok(lib);
     }
-    let lib = exe.with_file_name(if cfg!(windows) { "coil_rt.lib" } else { "libcoil_rt.a" });
+    let lib = exe.with_file_name(RUNTIME_LIB);
     if lib.is_file() {
         Ok(lib)
     } else {
@@ -301,7 +306,7 @@ pub fn embedded_runtime(exe: &Path, cache: &Path) -> Result<Option<PathBuf>, Str
     let digest = Sha256::digest(&lib);
     let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
     let dir = cache.join(hex);
-    let path = dir.join(if cfg!(windows) { "coil_rt.lib" } else { "libcoil_rt.a" });
+    let path = dir.join(RUNTIME_LIB);
     if fs::metadata(&path).is_ok_and(|m| m.len() == len) {
         return Ok(Some(path));
     }
@@ -320,7 +325,9 @@ pub fn embedded_runtime(exe: &Path, cache: &Path) -> Result<Option<PathBuf>, Str
 #[cfg(not(target_family = "wasm"))]
 fn system_libs() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
-        &["-Wl,-dead_strip", "-lSystem", "-lc", "-lm"]
+        &["-Wl,-dead_strip", "-liconv", "-lSystem", "-lc", "-lm"]
+    } else if cfg!(windows) {
+        &["-Wl,--gc-sections", "-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"]
     } else {
         &["-Wl,--gc-sections", "-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
     }
@@ -343,7 +350,8 @@ fn link_dir() -> Result<PathBuf, String> {
 fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, String> {
     let dir = link_dir()?;
     let obj = dir.join("program.o");
-    let exe = dir.join("program");
+    // Named as the linker names it: gcc on Windows adds `.exe` to any other.
+    let exe = dir.join(format!("program{}", std::env::consts::EXE_SUFFIX));
     let out = (|| {
         fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
         let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());

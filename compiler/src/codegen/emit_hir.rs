@@ -3197,8 +3197,8 @@ impl Compiler {
                     if !self.hir_fn_names.contains_key(&name) {
                         continue;
                     }
-                    let file = self.loc_from_span(SimpleSpan::from(start..end)).file;
-                    self.inlined_bodies.push((file, start..end, name));
+                    let loc = self.loc_from_span(SimpleSpan::from(start..end));
+                    self.inlined_bodies.push((loc.file, loc.start_byte as usize..loc.end_byte as usize, name));
                 }
                 Some((body, emit))
             }
