@@ -1255,7 +1255,8 @@ impl Compiler {
                     id.0,
                     crate::mir::HirCallSite {
                         target,
-                        pair_args: vec![false; args.len()],
+                        // An inherent method's two-word parameters.
+                        pair_args: (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect(),
                         pair_ret: natural.words() == 2,
                         coro,
                         boxed_ret,

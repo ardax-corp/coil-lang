@@ -7035,7 +7035,15 @@ impl Compiler {
         // As `emit_call_args_range_pairs`: a plain free function takes its
         // numeric range parameters as `[start, end]`.
         let ranges = if self_layout.is_some() {
-            Vec::new()
+            // An inherent method's: aligned with the arguments, the
+            // receiver (listed in the scheme or not) one word.
+            let pairs = if self.callee_has_unboxed_range_params(&key) { self.callee_param_pairs(&key) } else { self.callee_param_pairs(&lookup) };
+            match pairs.len() {
+                0 => Vec::new(),
+                n if n == explicit => std::iter::once(None).chain(pairs).collect(),
+                n if n == argc => std::iter::once(None).chain(pairs.into_iter().skip(1)).collect(),
+                _ => return Err("callee-pair"),
+            }
         } else if self.callee_has_unboxed_range_params(&key) {
             self.callee_param_pairs(&key)
         } else {

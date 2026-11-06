@@ -109,12 +109,13 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   returns its pair to direct calls; its `$dict` adapter, which
   dictionaries hold, boxes it. Other instance methods return one word
   unless their definition pins the pair (`Iterator::next`,
-  `IntoIterator::into_iter`). Inherent methods, overloaded and generic
-  functions keep one-word parameters (a numeric range's two words
-  excepted). A free function's arity-2 immediate tuple or two-field
-  readonly class parameter is two words like its result (the stack VM
-  kept them boxed: splitting a box into `[a, b]` needed a temp slot above
-  live operands, which MIR parameters do not).
+  `IntoIterator::into_iter`). Overloaded and generic functions and trait
+  instance methods keep one-word parameters (a numeric range's two words
+  excepted). A free function's or inherent method's two-word parameter,
+  an arity-2 immediate tuple or two-field readonly class included, is two
+  words like its result; a method's receiver stays one word. (The stack
+  VM kept these boxed: splitting a box into `[a, b]` needed a temp slot
+  above live operands, which MIR parameters do not.)
 - A local bound from a two-slot call keeps its two slots, so `match r`,
   `r?`, `return r`, `let (a, b) = r` and `r[0]` do not allocate. `?`
   compares the tag in place and shares one fail epilogue per function

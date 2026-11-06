@@ -114,8 +114,6 @@ pub struct CalleeFacts {
     /// (`CodePtr`): not raw, and no definition site pinned its result's
     /// pair. A raw one's `$dict` adapter boxes the pair instead.
     pub instance_method: bool,
-    /// An inherent method: its parameters stay one word.
-    pub inherent_method: bool,
     /// An overloaded or generic function: its parameters stay one word
     /// (a numeric range's two words excepted).
     pub overloaded_or_generic: bool,
@@ -134,7 +132,7 @@ pub fn convention_ret(checker: &Checker, facts: &CalleeFacts, ret: &Ty) -> Optio
 /// or a pair enum `enum_pair` admits. MIR passes the two words as two
 /// parameters, so the caller boxes nothing.
 pub fn convention_param(checker: &Checker, facts: &CalleeFacts, ty: &Ty, enum_pair: impl Fn(&PairKind) -> bool) -> Option<PairKind> {
-    if facts.escaped || facts.instance_method || facts.inherent_method {
+    if facts.escaped || facts.instance_method {
         return None;
     }
     if let Some(kind) = two_word_range_kind(ty) {

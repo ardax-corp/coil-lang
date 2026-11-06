@@ -886,7 +886,6 @@ impl Compiler {
             (0..params.len()).any(|argc| self.is_fn_value_escaped(&format!("{lookup}#{argc}")));
         let facts = crate::layout::CalleeFacts {
             escaped: self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) || under_applied,
-            inherent_method: self.checker.inherent_method_visibility(lookup).is_some(),
             instance_method: is_instance_method_fqn(&self.checker, lookup) || is_instance_method_fqn(&self.checker, name),
             overloaded_or_generic: self.checker.is_overloaded(lookup) || self.checker.is_generic_fn(lookup),
             coroutine: self.coroutine_fns.contains(name) || self.coroutine_fns.contains(lookup),
@@ -919,7 +918,12 @@ impl Compiler {
     /// The function being compiled's key that answers
     /// [`Self::callee_has_unboxed_range_params`], if any.
     pub(super) fn current_fn_pair_key(&self) -> Option<String> {
-        if self.compiling_method {
+        // A trait instance method's parameters stay one word; an inherent
+        // method's follow its signature, as a free function's.
+        let inherent = |k: &str| self.checker.inherent_method_visibility(strip_overload_key(k)).is_some();
+        if self.compiling_method
+            && !self.current_function_table_key.as_deref().into_iter().chain(self.current_function_qualified.as_deref()).any(inherent)
+        {
             return None;
         }
         self.current_function_table_key
@@ -933,15 +937,16 @@ impl Compiler {
     fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<PairKind> {
         let key = self.current_fn_pair_key()?;
         // By position, from the same signature every caller reads.
+        // A method's scheme may list `self` ahead of the named parameters.
         if let Expression::Argument { name, .. } = arg.1.as_ref()
-            && let Some(i) = self
-                .checker
-                .fn_param_names(&key)
-                .or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
-                .and_then(|names| names.iter().position(|n| n == name))
-            && let Some(kind) = self.callee_param_pairs(&key).get(i)
+            && let Some(names) = self.checker.fn_param_names(&key).or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
+            && let Some(i) = names.iter().position(|n| n == name)
         {
-            return kind.clone();
+            let pairs = self.callee_param_pairs(&key);
+            let skip = pairs.len().saturating_sub(names.len());
+            if let Some(kind) = pairs.get(skip + i) {
+                return kind.clone();
+            }
         }
         if let Some(ty) = self.sidecar_ty_of(arg)
             && let Some(kind) = crate::layout::two_word_range_kind(&ty) {
