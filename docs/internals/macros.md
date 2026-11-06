@@ -506,7 +506,7 @@ while compiling, on the same host (`MacroHost::eval_consts`):
 
 - Its initializer must be pure (the HIR effect summary of its `Static` body):
   a read or write of a `static let`, or any IO, is E0134 naming the cause.
-- After `finalize_bytecode`, `Pipeline::compute_consts` runs every const's
+- After `finalize_bodies`, `Pipeline::compute_consts` runs every const's
   `__static_init$NAME` in setup order on one fresh isolate, each within
   `ComptimeLimits`, storing each value to its slot so later consts can read
   earlier ones. A panic or a limit is E0134 at the const.
