@@ -779,6 +779,13 @@ impl NativeCode {
         self.entries.is_empty()
     }
 
+    /// [`Self::lookup`] without copying the entry.
+    #[inline]
+    pub(crate) fn entry_ref(&self, pc: usize) -> Option<&NativeEntry> {
+        let i = *self.by_pc.get(pc)?;
+        self.entries.get((i as usize).checked_sub(1)?)
+    }
+
     #[inline]
     pub(crate) fn lookup(&self, pc: usize) -> Option<NativeEntry> {
         let i = *self.by_pc.get(pc)?;
@@ -1890,30 +1897,33 @@ pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, 
     // SAFETY: as the caller promises.
     let given = unsafe { std::slice::from_raw_parts(args, n) };
     let words = unsafe { std::slice::from_raw_parts_mut(out, FN_ENTRY_WORDS) };
+    // Word copies by hand: a call passes a few words, below what a
+    // `memcpy` / `memset` call pays for.
     let (pc, len) = if callee < code.code_len() as u64 {
         // A code offset: a function with nothing captured.
         let Some(w) = words.get_mut(..n) else { return 0 };
-        w.copy_from_slice(given);
+        for (w, v) in w.iter_mut().zip(given) {
+            *w = *v;
+        }
         (callee as usize, n)
     } else {
         // SAFETY: the context's heap is the machine's.
-        let Some(crate::memory::Object::Fn(gc)) = unsafe { &*c.heap }.find_object_by_addr(callee) else {
+        let Some(gc) = unsafe { &*c.heap }.fn_at(callee) else {
             return 0;
         };
         let f = gc.as_ref();
         if f.dicts.is_some() || f.filled_mask != 0 || f.is_rest || f.arity as usize != n {
             return 0;
         }
-        let len = f.captures.len() + n;
+        let caps = f.captures.len();
+        let len = caps + n;
         let Some(w) = words.get_mut(..len) else { return 0 };
-        let (caps, rest) = w.split_at_mut(f.captures.len());
-        for (w, v) in caps.iter_mut().zip(&f.captures) {
-            *w = v.bits();
+        for (w, v) in w.iter_mut().zip(f.captures.iter().map(|v| v.bits()).chain(given.iter().copied())) {
+            *w = v;
         }
-        rest.copy_from_slice(given);
         (f.entry as usize, len)
     };
-    let Some(entry) = code.lookup(pc) else { return 0 };
+    let Some(entry) = code.entry_ref(pc) else { return 0 };
     // A generator's body is entered by a resume; a body without machine
     // code by the runtime.
     if entry.generator || entry.data != 0 || len < entry.reads as usize || entry.arity as usize > FN_ENTRY_WORDS {
@@ -1921,8 +1931,8 @@ pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, 
     }
     // The words past `len` up to its arity are `0`, as the runtime passes
     // them; words past its arity it does not read.
-    if let Some(rest) = words.get_mut(len..entry.arity as usize) {
-        rest.fill(0);
+    for w in words.iter_mut().take(entry.arity as usize).skip(len) {
+        *w = 0;
     }
     c.host_calls += 1;
     c.gc_epoch += 1;
