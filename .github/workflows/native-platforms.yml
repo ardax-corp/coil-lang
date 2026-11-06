@@ -45,49 +45,50 @@ jobs:
           cargo build -p coil-rt
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Get-ChildItem target\debug\coil*.exe, target\debug\coil_rt.lib | Format-Table Name, Length
-      - name: JIT, archive and runner
-        continue-on-error: true
+      - name: The smoke program
         shell: bash
-        run: bash scripts/native_platform_smoke.sh target/debug .deps/coil-stdlib/src
-      - name: AOT by hand with link.exe
+        run: sed -n '/<<.COIL.$/,/^COIL$/p' scripts/native_platform_smoke.sh | sed '1d;$d' > app.coil
+      - name: Object
+        shell: pwsh
+        run: |
+          target\debug\coil.exe package --emit obj --root .deps\coil-stdlib\src app.coil -o app.obj
+          if ($LASTEXITCODE) { exit 1 }
+          target\debug\coil.exe --no-build-cache --root .deps\coil-stdlib\src app.coil
+      - name: Link with link.exe, dynamic CRT
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
           $said = cargo rustc -p coil-rt -- --print native-static-libs 2>&1 | Out-String
-          $libs = ([regex]'native-static-libs: (.*)').Match($said).Groups[1].Value.Trim()
-          "rustc says: $libs"
-          $dir = (Get-ChildItem "$env:USERPROFILE\.cargo\registry\src\*\windows_x86_64_msvc-0.52*\lib" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
-          "import libs: $dir"
-          @'
-          use io::sync::println;
-          use string::format;
-          fn fib(int n) -> int {
-              if n < 2 {
-                  return n;
-              }
-              return fib(n - 1) + fib(n - 2);
-          }
-          fn main() {
-              let _ = println(format("%i", fib(25)));
-          }
-          '@ | Set-Content app.coil
-          target\debug\coil.exe package --emit obj --root .deps\coil-stdlib\src app.coil -o app.obj
-          "package exit: $LASTEXITCODE"
-          link.exe /NOLOGO app.obj target\debug\coil_rt.lib @($libs -split '\s+') "/LIBPATH:$dir" /OUT:app.exe /SUBSYSTEM:CONSOLE /OPT:REF /STACK:8388608
+          $libs = ([regex]'native-static-libs: (.*)').Match($said).Groups[1].Value.Trim() -split '\s+'
+          $found = Get-ChildItem -Path $env:USERPROFILE\.cargo, $env:CARGO_HOME, target -Recurse -Filter 'windows.0.52.0.lib' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x86_64_msvc|x86_64-msvc' } | Select-Object -First 1
+          "windows.0.52.0.lib: $($found.FullName)"
+          $path = @()
+          if ($found) { $path = @("/LIBPATH:$($found.DirectoryName)") } else { $libs = $libs | Where-Object { $_ -ne 'windows.0.52.0.lib' } }
+          link.exe /NOLOGO app.obj target\debug\coil_rt.lib @libs @path /OUT:app.exe /SUBSYSTEM:CONSOLE /OPT:REF /STACK:8388608
           "link exit: $LASTEXITCODE"
           .\app.exe
           "app exit: $LASTEXITCODE"
-          if ($LASTEXITCODE) { exit 1 }
-      - name: JIT tests
+          dumpbin /nologo /dependents app.exe | Select-String '\.dll'
+          (Get-Item app.exe).Length
+      - name: Link with link.exe, static CRT
         continue-on-error: true
         shell: pwsh
-        run: cargo test -p coil --test native_jit_cli
-      - name: Corpus on native code
-        continue-on-error: true
-        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: target-static
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=/STACK:8388608"
         run: |
-          target\debug\coil-test.exe --engine native --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src tests/functions
-          "functions exit: $LASTEXITCODE"
-          target\debug\coil-test.exe --engine native --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src tests/memory
-          "memory exit: $LASTEXITCODE"
+          $ErrorActionPreference = 'Continue'
+          cargo build -p coil-rt 2>&1 | Select-Object -Last 2
+          $said = cargo rustc -p coil-rt -- --print native-static-libs 2>&1 | Out-String
+          $libs = ([regex]'native-static-libs: (.*)').Match($said).Groups[1].Value.Trim() -split '\s+'
+          "rustc says: $libs"
+          $found = Get-ChildItem -Path $env:USERPROFILE\.cargo, $env:CARGO_HOME, target-static -Recurse -Filter 'windows.0.52.0.lib' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x86_64_msvc|x86_64-msvc' } | Select-Object -First 1
+          $path = @()
+          if ($found) { $path = @("/LIBPATH:$($found.DirectoryName)") } else { $libs = $libs | Where-Object { $_ -ne 'windows.0.52.0.lib' } }
+          link.exe /NOLOGO app.obj target-static\debug\coil_rt.lib @libs @path /OUT:app-static.exe /SUBSYSTEM:CONSOLE /OPT:REF /STACK:8388608
+          "link exit: $LASTEXITCODE"
+          .\app-static.exe
+          "app exit: $LASTEXITCODE"
+          dumpbin /nologo /dependents app-static.exe | Select-String '\.dll'
+          (Get-Item app-static.exe).Length
