@@ -1249,6 +1249,30 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
     }
 }
 
+/// The bytes of the string `addr` names, for `s[i]` read in place: writes
+/// `(pointer, length)` to `out`, or `(0, 0)` when `addr` is not a string
+/// object itself (a boxed one goes through `string_byte_at`). Strings are
+/// never written after they exist, so the view holds until a collection
+/// may move the object.
+///
+/// # Safety
+/// `addr` is a heap word or 0; `out` has room for two words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_str_view(addr: u64, out: *mut u64) -> u64 {
+    let (ptr, len) = match object(addr) {
+        Some(crate::memory::Object::String(gc)) => {
+            let b = gc.as_ref().data.as_str().as_bytes();
+            (b.as_ptr() as u64, b.len() as u64)
+        }
+        _ => (0, 0),
+    };
+    unsafe {
+        out.write(ptr);
+        out.add(1).write(len);
+    }
+    1
+}
+
 // ---------------------------------------------------------------------------
 // Copy-on-write for native code. These allocate (a unique copy) but never
 // collect; see [`NativeCtx::allocs`].
@@ -2423,6 +2447,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_store_index", coil_native_store_index as *const u8),
         ("coil_native_set_field", coil_native_set_field as *const u8),
         ("coil_native_view", coil_native_view as *const u8),
+        ("coil_native_str_view", coil_native_str_view as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
@@ -2452,4 +2477,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 34;
+const HELPERS: usize = 35;

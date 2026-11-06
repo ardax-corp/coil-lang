@@ -1281,6 +1281,7 @@ struct Ids {
     store_index: FuncId,
     set_field: FuncId,
     view: FuncId,
+    str_view: FuncId,
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
@@ -1429,6 +1430,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let store_index = module.declare_function("coil_native_store_index", Linkage::Import, &s4).map_err(e)?;
     let set_field = module.declare_function("coil_native_set_field", Linkage::Import, &s4).map_err(e)?;
     let view = module.declare_function("coil_native_view", Linkage::Import, &s3).map_err(e)?;
+    let str_view = module.declare_function("coil_native_str_view", Linkage::Import, &s2).map_err(e)?;
     let mut s1v = module.make_signature();
     s1v.params.push(AbiParam::new(types::I64));
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
@@ -1481,6 +1483,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         store_index,
         set_field,
         view,
+        str_view,
         cow,
         cow_field,
         alloc,
@@ -1569,6 +1572,7 @@ struct Lower<'a> {
     store_index: FuncRef,
     set_field: FuncRef,
     view: FuncRef,
+    str_view: FuncRef,
     cow: FuncRef,
     cow_field: FuncRef,
     alloc: FuncRef,
@@ -1644,6 +1648,11 @@ struct Lower<'a> {
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
     views: HashMap<ValueId, (Variable, Variable, Variable)>,
+    /// Strings this body reads `s[i]` of: `(known, pointer, length)` of
+    /// their bytes, filled at the first read after the string value is
+    /// defined or the views were dropped (`machine::native::coil_native_str_view`;
+    /// length 0 when the word is not a string object itself).
+    str_views: HashMap<ValueId, (Variable, Variable, Variable)>,
     /// The MIR values to root at the op being lowered (`None`: all of
     /// them): those live there and the words locals hold ([`held_words`]).
     /// [`Self::push_roots`] records only these, so a dead temporary is
@@ -1697,6 +1706,7 @@ impl<'a> Lower<'a> {
         let store_index = module.declare_func_in_func(ids.store_index, func);
         let set_field = module.declare_func_in_func(ids.set_field, func);
         let view = module.declare_func_in_func(ids.view, func);
+        let str_view = module.declare_func_in_func(ids.str_view, func);
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
@@ -1751,6 +1761,7 @@ impl<'a> Lower<'a> {
             store_index,
             set_field,
             view,
+            str_view,
             cow,
             cow_field,
             alloc,
@@ -1796,6 +1807,7 @@ impl<'a> Lower<'a> {
             cur_loc: None,
             cur_site: None,
             views: HashMap::new(),
+            str_views: HashMap::new(),
             live: None,
             stored: HashSet::new(),
             barriers: HashMap::new(),
@@ -1837,6 +1849,10 @@ impl<'a> Lower<'a> {
         let var = self.var(f, v);
         let x = self.coerce(x, cl_ty(ty_of(f, v)));
         self.b.def_var(var, x);
+        if let Some(&(known, _, _)) = self.str_views.get(&v) {
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.b.def_var(known, zero);
+        }
     }
 
     /// `x` as a `want` word with the same bits. MIR may move a word between
@@ -1960,7 +1976,7 @@ impl<'a> Lower<'a> {
     /// call), when other values may name the same array: every view reads
     /// through the helpers until its value is defined again.
     fn drop_views(&mut self) {
-        let views: Vec<_> = self.views.values().map(|v| v.0).collect();
+        let views: Vec<_> = self.views.values().chain(self.str_views.values()).map(|v| v.0).collect();
         let zero = self.b.ins().iconst(types::I64, 0);
         for ok in views {
             self.b.def_var(ok, zero);
@@ -2359,6 +2375,18 @@ impl<'a> Lower<'a> {
         self.pair_words = pair_words(f, &self.ptr_words);
         for blk in &f.blocks {
             for inst in &blk.insts {
+                if let MirInst::HostInvoke { native_id, args, .. } = inst
+                    && *native_id == common::STRING_BYTE_AT_ID
+                    && args.len() == 2
+                    && !self.str_views.contains_key(&args[0])
+                {
+                    let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64), self.b.declare_var(types::I64));
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    for v in [vars.0, vars.1, vars.2] {
+                        self.b.def_var(v, zero);
+                    }
+                    self.str_views.insert(args[0], vars);
+                }
                 let array = match inst {
                     MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
                     MirInst::StoreIndex { array, .. } => {
@@ -2990,6 +3018,10 @@ impl<'a> Lower<'a> {
                 }
             }
             MirInst::HostInvoke { dest, native_id, layout, args } => {
+                // `s[i]` on a string: the byte in place when `i` is in range,
+                // else the host call (out of range, a boxed string).
+                let byte_read = *native_id == common::STRING_BYTE_AT_ID && args.len() == 2 && self.str_views.contains_key(&args[0]);
+                let join = if byte_read { Some(self.byte_in_place(f, args[0], args[1])) } else { None };
                 let fp = self.b.ins().iconst(types::I64, i64::from(*native_id));
                 let lay = self.b.ins().iconst(types::I64, i64::from(*layout));
                 let p = self.words_slot(f, args);
@@ -3007,9 +3039,18 @@ impl<'a> Lower<'a> {
                 self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
-                self.drop_views();
-                self.set(f, *dest, w);
-                self.view_of(f, *dest);
+                if let Some(join) = join {
+                    // `string_byte_at` neither collects nor moves anything:
+                    // every view holds.
+                    self.b.ins().jump(join, &[w.into()]);
+                    self.b.switch_to_block(join);
+                    let w = self.b.block_params(join)[0];
+                    self.set(f, *dest, w);
+                } else {
+                    self.drop_views();
+                    self.set(f, *dest, w);
+                    self.view_of(f, *dest);
+                }
             }
             MirInst::Panic { dest, msg } => {
                 let v = self.get(f, *msg);
@@ -3407,6 +3448,46 @@ impl<'a> Lower<'a> {
         self.b.def_var(ok, r);
         self.b.def_var(ptr, p);
         self.b.def_var(len, n);
+    }
+
+    /// `s[i]` read in place: fill `s`'s byte view when it is not known,
+    /// then load the byte when `i` is in range and jump to the returned join
+    /// block with it. Out of range (or not a string object) continues in a
+    /// cold block, current on return, where the caller emits the host call
+    /// and jumps to the join with its word.
+    fn byte_in_place(&mut self, f: &MirFunc, s: ValueId, i: ValueId) -> Block {
+        let (known, ptr, len) = self.str_views[&s];
+        let sw = self.get(f, s);
+        let sw = self.coerce(sw, types::I64);
+        let i = self.get(f, i);
+        let i = self.coerce(i, types::I64);
+        let (fetch, have, read, slow, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(join, types::I64);
+        let k = self.b.use_var(known);
+        self.b.ins().brif(k, have, &[], fetch, &[]);
+        self.b.set_cold_block(fetch);
+        self.b.switch_to_block(fetch);
+        let out = self.b.ins().stack_addr(types::I64, self.view_slot, 0);
+        let call = self.b.ins().call(self.str_view, &[sw, out]);
+        let r = self.b.inst_results(call)[0];
+        let p = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 0);
+        let n = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 8);
+        self.b.def_var(known, r);
+        self.b.def_var(ptr, p);
+        self.b.def_var(len, n);
+        self.b.ins().jump(have, &[]);
+        self.b.switch_to_block(have);
+        let n = self.b.use_var(len);
+        let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, n);
+        self.b.ins().brif(inb, read, &[], slow, &[]);
+        self.b.switch_to_block(read);
+        let p = self.b.use_var(ptr);
+        let at = self.b.ins().iadd(p, i);
+        let byte = self.b.ins().uload8(types::I64, MemFlagsData::trusted(), at, 0);
+        self.b.ins().jump(join, &[byte.into()]);
+        self.b.set_cold_block(slow);
+        self.b.switch_to_block(slow);
+        join
     }
 
     /// Branch on whether `array[i]` is in its view: `(in view, otherwise,
