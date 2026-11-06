@@ -140,7 +140,7 @@ records the trap (`TRAP_OVERFLOW`, `TRAP_DIV_ZERO`, `TRAP_NEGATIVE_EXPONENT`,
 (`MirFunc::op_loc`). `Driver::native_panic` turns those into the message, its ` at
 file:line:col` and the backtrace lines (`in f at …`, repeats folded), with locations
 from `ProgramDebug::line_of`. A panic in a body under a host call unwinds as
-`TRAP_VM_PANIC`: the panic is already reported, so the frames above only leave.
+`TRAP_PANICKED`: the panic is already reported, so the frames above only leave.
 
 A host native whose first argument is a `Stream` keeps its unsent-stream check:
 native code makes it and raises the message with `TRAP_MESSAGE`.
@@ -209,7 +209,7 @@ A native with a plain function (`machine::native::direct_host_natives`, resolved
 compile time since ids are frozen) is called straight from `coil_native_host`. One
 without (`write`, `await_writable`, `thread_*`, ...) runs through `NativeHost::invoke`
 on the driver, with its words rooted, and maps the result to a value, a panic
-(`TRAP_MESSAGE`) or an unwind already reported (`TRAP_VM_PANIC`). `gc_epoch` moves so
+(`TRAP_MESSAGE`) or an unwind already reported (`TRAP_PANICKED`). `gc_epoch` moves so
 native code reloads its words.
 
 - Waits (thread park, io retry, pending io) suspend the task the call runs on. With
@@ -458,7 +458,8 @@ natives, FFI, threads, reactor, archive reader): `--gc-sections` cannot drop a n
 the table names, so a smaller executable needs a per-program native table.
 
 Across the 18 cross-language benches, an AOT executable took 0.37x the wall time of the
-`--no-aot` runner (geomean, best of 5) and 2.7x Rust's (Go: 1.4-1.5x).
+`--no-aot` runner as it was then, the bytecode VM's since deleted (geomean, best of 5),
+and 2.7x Rust's (Go: 1.4-1.5x).
 
 ### Static `extern` libraries
 

@@ -21,7 +21,7 @@ A `DebugLoc` records:
 - `start_byte` / `end_byte`: UTF-8 byte range in that source file
 
 MIR carries the locations: `MirFunc::value_locs` and `op_locs` give each op's, and
-`MirFunc::op_loc` reads them. `finalize_bytecode` collects every location the bodies
+`MirFunc::op_loc` reads them. `finalize_bodies` collects every location the bodies
 use into `debug_locs`. `Pipeline::program_debug_full` then resolves lines while the
 sources exist, so archives and packaged binaries never read them back (#580).
 

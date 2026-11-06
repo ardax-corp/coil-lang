@@ -108,7 +108,7 @@ serves everything with no machine code. The bytecode VM is deleted.
 | Step | State |
 |---|---|
 | 1. MIR interpreter | Done: every corpus, every level, CI cells |
-| 2. Glue as MIR | Done: thunks are built as HIR (`hir::synth`), a clean compile panics on a body with no MIR (`require_mir`) |
+| 2. Glue as MIR | Done: thunks are built as HIR (`hir::synth`), a clean compile panics on a body with no MIR (`finalize_bodies`) |
 | 3. Comptime and macros on the interpreter | Done (below) |
 | 4. JIT by default | Done: `coil FILE`, `coil compile`, `coil run` and `coil test` |
 | 5. Packaging | Done in coil: `coil-embed` is the JIT runner. Open: AOT on macOS and Windows is untried |
