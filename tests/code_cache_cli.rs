@@ -183,3 +183,27 @@ fn coil_file_loads_the_code_too() {
     assert!(!hit(&changed));
     assert_eq!(String::from_utf8_lossy(&changed.stdout), "84\n");
 }
+
+/// Functions compile on several threads, and the code does not depend on how
+/// many: the program is big enough to use them, and an entry's bytes are its
+/// code.
+#[test]
+fn the_code_is_the_same_on_any_number_of_threads() {
+    let mut src = HEADER.to_string();
+    for i in 0..200 {
+        src.push_str(&format!("#[inline(never)]\nfn f{i}(int n) -> int {{ if n > {i} {{ return n - {i}; }} return n + {i}; }}\n"));
+    }
+    let calls: Vec<String> = (0..200).map(|i| format!("    t = t + f{i}(t);\n")).collect();
+    src.push_str(&format!("fn main() {{\n    let t = 1;\n{}    let _ = println(format(\"%i\", t));\n}}\n", calls.concat()));
+    let p = Project::new("threads", &src);
+    let image = |threads: &str| {
+        let cache = p.dir.join(format!("cache-{threads}"));
+        let out = coil(&cache).arg("run").arg(&p.archive).env("COIL_NATIVE_THREADS", threads).output().expect("spawn coil run");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let read = std::fs::read_dir(cache.join("coil/code")).expect("an entry").next().expect("an entry").unwrap();
+        (std::fs::read(read.path()).unwrap(), out.stdout)
+    };
+    let one = image("1");
+    assert_eq!(one, image("2"));
+    assert_eq!(one, image("7"));
+}

@@ -201,9 +201,10 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
             .map_err(|e| e.to_string())?
             .finish(settings::Flags::new(flags))
             .map_err(|e| e.to_string())?;
+        let compile_isa = isa.clone();
         let builder = cranelift_object::ObjectBuilder::new(isa, "coil_aot", default_libcall_names()).map_err(|e| e.to_string())?;
         let mut module = cranelift_object::ObjectModule::new(builder);
-        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan, None)? {
+        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan, &*compile_isa, None)? {
             Ok(done) => done,
             Err((i, why)) => {
                 excluded.insert(i, why);
@@ -419,9 +420,10 @@ fn jit_once(
 
     let reserve = jit_reserve(bodies, &plan);
     let mut module = jit_module(reserve)?;
+    let isa = jit_isa()?;
     let mut recorder = keep_image.then(image::Recorder::default);
 
-    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan, recorder.as_mut())? {
+    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan, &*isa, recorder.as_mut())? {
         Ok(done) => done,
         Err((i, why)) => return Ok(Attempt::Without(i, why)),
     };
@@ -516,6 +518,7 @@ fn define_all<M: Module>(
     bodies: &[NativeBody],
     entry_pcs: &HashMap<String, u32>,
     plan: &Plan,
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
     mut recorder: Option<&mut image::Recorder>,
 ) -> Result<Result<Defined, (usize, String)>, String> {
     let ids = declare(module, bodies, plan)?;
@@ -525,70 +528,172 @@ fn define_all<M: Module>(
     let mut ctx = module.make_context();
     let mut defined = Vec::new();
     let mut sites = Vec::new();
-    let mut maps = Vec::new();
-    for &i in &plan.compile {
-        let body = &bodies[i];
-        ctx.func.signature = impl_signature(&*module, &body.mir, plan.tail_conv.contains(&i));
-        let lowered = {
-            let entry_pc = entry_pcs.get(&body.name).copied();
-            let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, entry_pc);
-            lower.body_index = Some(i);
-            let r = lower.body(&body.mir);
-            if r.is_ok() {
-                lower.b.finalize(fcfg);
-            }
-            r
-        };
-        if let Err(why) = lowered {
-            return Ok(Err((i, why)));
-        }
-        if let Err(e) = module.define_function(ids.imp[&i], &mut ctx) {
-            return Ok(Err((i, format!("cranelift: {e:?}"))));
-        }
-        maps.push((ids.imp[&i], stack_maps(&ctx)));
-        if let Some(r) = recorder.as_deref_mut() {
-            r.add(ids.imp[&i], &ctx);
-        }
-        module.clear_context(&mut ctx);
-
-        if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
-            ctx.func.signature = entry_signature(&*module);
+    // Lowering declares what it calls in the module, so it runs in order;
+    // each function compiles on its own as soon as it is lowered.
+    let (lowered, done) = compile_while(isa, compile_threads(plan.compile.len() * 2), |submit| {
+        for &i in &plan.compile {
+            let body = &bodies[i];
+            ctx.func.signature = impl_signature(&*module, &body.mir, plan.tail_conv.contains(&i));
             let lowered = {
-                // Its sites are its body's: a panic in a `defer` names it.
-                let entry_pc = entry_pcs.get(&body.name).copied();
-                let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, entry_pc);
-                lower.is_pad = true;
-                let r = lower.body(pad);
+                let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, &body.mir);
+                lower.entry_pc = entry_pcs.get(&body.name).copied();
+                lower.body_index = Some(i);
+                let r = lower.body(&body.mir);
                 if r.is_ok() {
                     lower.b.finalize(fcfg);
                 }
                 r
             };
             if let Err(why) = lowered {
-                return Ok(Err((i, format!("cleanup pad: {why}"))));
+                return Err((i, why));
             }
-            if let Err(e) = module.define_function(pad_id, &mut ctx) {
-                return Ok(Err((i, format!("cranelift pad: {e:?}"))));
-            }
-            maps.push((pad_id, stack_maps(&ctx)));
-            if let Some(r) = recorder.as_deref_mut() {
-                r.add(pad_id, &ctx);
-            }
+            submit(Job::take(ids.imp[&i], i, "", true, &mut ctx));
             module.clear_context(&mut ctx);
-        }
 
-        ctx.func.signature = entry_signature(&*module);
-        build_entry(module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
-        module
-            .define_function(ids.entry[&i], &mut ctx)
-            .map_err(|e| format!("cranelift entry of `{}`: {e:?}", body.name))?;
-        if let Some(r) = recorder.as_deref_mut() {
-            r.add(ids.entry[&i], &ctx);
+            if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
+                ctx.func.signature = entry_signature(&*module);
+                let lowered = {
+                    // Its sites are its body's: a panic in a `defer` names it.
+                    let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, pad);
+                    lower.entry_pc = entry_pcs.get(&body.name).copied();
+                    lower.is_pad = true;
+                    let r = lower.body(pad);
+                    if r.is_ok() {
+                        lower.b.finalize(fcfg);
+                    }
+                    r
+                };
+                if let Err(why) = lowered {
+                    return Err((i, format!("cleanup pad: {why}")));
+                }
+                submit(Job::take(pad_id, i, " pad", true, &mut ctx));
+                module.clear_context(&mut ctx);
+            }
+
+            ctx.func.signature = entry_signature(&*module);
+            build_entry(module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
+            submit(Job::take(ids.entry[&i], i, " entry", false, &mut ctx));
+            module.clear_context(&mut ctx);
+            defined.push(i);
         }
-        module.clear_context(&mut ctx);
-        defined.push(i);
+        Ok(())
+    });
+    if let Err(failed) = lowered {
+        return Ok(Err(failed));
+    }
+    let mut maps = Vec::new();
+    for done in done {
+        let func = match done {
+            Ok((func, Some(fmaps))) => {
+                maps.push((func.id, fmaps));
+                func
+            }
+            Ok((func, None)) => func,
+            Err(failed) => return Ok(Err(failed)),
+        };
+        module.define_function_bytes(func.id, func.align, &func.bytes, &func.relocs).map_err(|e| format!("cranelift: {e:?}"))?;
+        if let Some(r) = recorder.as_deref_mut() {
+            r.add(func);
+        }
     }
     Ok(Ok((ids, defined, sites, maps)))
+}
+
+/// A function lowered to Cranelift IR, waiting to compile.
+struct Job {
+    id: FuncId,
+    func: cranelift_codegen::ir::Function,
+    /// The body it belongs to.
+    owner: usize,
+    /// What it is of that body, for an error.
+    part: &'static str,
+    /// The collector walks its frames: it has stack maps.
+    walked: bool,
+}
+
+impl Job {
+    /// The function `ctx` holds, leaving it empty.
+    fn take(id: FuncId, owner: usize, part: &'static str, walked: bool, ctx: &mut cranelift_codegen::Context) -> Self {
+        let func = std::mem::replace(&mut ctx.func, cranelift_codegen::ir::Function::new());
+        Self { id, func, owner, part, walked }
+    }
+}
+
+/// A compiled function with its stack maps; or the body that did not compile.
+type Done = Result<(image::Func, Option<FuncMaps>), (usize, String)>;
+
+fn compile_job(isa: &dyn cranelift_codegen::isa::TargetIsa, ctx: &mut cranelift_codegen::Context, job: Job) -> Done {
+    ctx.clear();
+    ctx.func = job.func;
+    let mut plane = cranelift_codegen::control::ControlPlane::default();
+    if let Err(e) = ctx.compile(isa, &mut plane) {
+        return Err((job.owner, format!("cranelift{}: {:?}", job.part, e.inner)));
+    }
+    let func = image::Func::of(job.id, ctx).ok_or((job.owner, "cranelift: no code".to_string()))?;
+    Ok((func, job.walked.then(|| stack_maps(ctx))))
+}
+
+/// Functions a thread should have to itself before another is worth starting.
+const JOBS_PER_THREAD: usize = 16;
+
+/// Past this, lowering is what compiling waits for: more threads only contend.
+const MAX_COMPILE_THREADS: usize = 8;
+
+/// Threads to compile `jobs` functions with. `COIL_NATIVE_THREADS` sets the
+/// most it may use; the output does not depend on it.
+fn compile_threads(jobs: usize) -> usize {
+    let most = std::env::var("COIL_NATIVE_THREADS").ok().and_then(|v| v.parse().ok());
+    let most = most.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from).min(MAX_COMPILE_THREADS));
+    (jobs / JOBS_PER_THREAD).clamp(1, most.max(1))
+}
+
+/// Run `produce`, compiling each job it submits: each is independent of the
+/// rest, so `threads` work beside it. The results are in submission order, so
+/// the code is the same on one thread or many.
+fn compile_while<R>(isa: &dyn cranelift_codegen::isa::TargetIsa, threads: usize, produce: impl FnOnce(&mut dyn FnMut(Job)) -> R) -> (R, Vec<Done>) {
+    use std::sync::{Mutex, PoisonError, mpsc};
+    if threads == 1 {
+        let mut ctx = cranelift_codegen::Context::new();
+        let mut done = Vec::new();
+        let out = produce(&mut |job| done.push(compile_job(isa, &mut ctx, job)));
+        return (out, done);
+    }
+    let (tx, rx) = mpsc::channel::<(usize, Job)>();
+    let rx = Mutex::new(rx);
+    let finished: Mutex<Vec<(usize, Done)>> = Mutex::new(Vec::new());
+    let work = || {
+        let mut ctx = cranelift_codegen::Context::new();
+        loop {
+            // The lock is released before the job runs.
+            let next = rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
+            let Ok((at, job)) = next else { return };
+            let out = compile_job(isa, &mut ctx, job);
+            finished.lock().unwrap_or_else(PoisonError::into_inner).push((at, out));
+        }
+    };
+    let out = std::thread::scope(|scope| {
+        let mut started = 0;
+        for _ in 0..threads {
+            // Deep bodies recurse in the compiler; match the main thread.
+            if std::thread::Builder::new().name("coil-compile".into()).stack_size(8 << 20).spawn_scoped(scope, work).is_ok() {
+                started += 1;
+            }
+        }
+        let mut count = 0;
+        let out = produce(&mut |job| {
+            let _ = tx.send((count, job));
+            count += 1;
+        });
+        drop(tx);
+        // With no thread started, this one does the work.
+        if started == 0 {
+            work();
+        }
+        out
+    });
+    let mut done = finished.into_inner().unwrap_or_else(PoisonError::into_inner);
+    done.sort_unstable_by_key(|(at, _)| *at);
+    (out, done.into_iter().map(|(_, d)| d).collect())
 }
 
 /// A compiled function's code size and stack maps: per call that holds
@@ -1262,8 +1367,8 @@ fn define_trampolines<M: Module>(module: &mut M, tramps: &[(FuncId, FuncId, Sign
         b.seal_all_blocks();
         b.finalize(fcfg);
         module.define_function(*tramp, &mut ctx).map_err(|e| format!("cranelift trampoline: {e:?}"))?;
-        if let Some(r) = recorder.as_deref_mut() {
-            r.add(*tramp, &ctx);
+        if let (Some(r), Some(func)) = (recorder.as_deref_mut(), image::Func::of(*tramp, &ctx)) {
+            r.add(func);
         }
         module.clear_context(&mut ctx);
     }
@@ -1554,12 +1659,19 @@ impl<'a> Lower<'a> {
         ids: &Ids,
         plan: &'a Plan,
         sites: &'a mut Vec<NativeSite>,
-        entry_pc: Option<u32>,
+        body: &MirFunc,
     ) -> Self {
         let by_label = &plan.by_label;
+        // Only what `body` calls: every body declaring every other is
+        // quadratic in the program.
         let mut module_refs = HashMap::new();
-        for (&i, &id) in &ids.imp {
-            module_refs.insert(i, module.declare_func_in_func(id, func));
+        for inst in body.blocks.iter().flat_map(|b| &b.insts) {
+            if let MirInst::Call { target, .. } = inst
+                && let Some(&i) = by_label.get(target)
+                && let Some(&id) = ids.imp.get(&i)
+            {
+                module_refs.entry(i).or_insert_with(|| module.declare_func_in_func(id, func));
+            }
         }
         let fmod = module.declare_func_in_func(ids.fmod, func);
         let powf = module.declare_func_in_func(ids.powf, func);
@@ -1665,7 +1777,7 @@ impl<'a> Lower<'a> {
             pad_fn: None,
             pad_refs,
             sites,
-            entry_pc,
+            entry_pc: None,
             cur_loc: None,
             cur_site: None,
             views: HashMap::new(),
