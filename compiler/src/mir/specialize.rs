@@ -1,37 +1,12 @@
 //! Per-body MIR specialization.
 
-
 use crate::opt::OptimizeOptions;
 
-
-
-/// `(function, "dense" | "lir", MIR text)` captured for `coil dissect --mir`.
-pub type CapturedMir = Vec<(String, &'static str, String)>;
-
-thread_local! {
-    /// `coil dissect --mir`: `(function, form, MIR text)` of each body that
-    /// reached emission. `None` when not capturing.
-    static MIR_CAPTURE: std::cell::RefCell<Option<CapturedMir>> =
-        const { std::cell::RefCell::new(None) };
-    static DENSE_REFUSAL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-    static LIR_REFUSAL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Start recording the final MIR of each specialized body (dissect).
-pub fn start_mir_capture() {
-    MIR_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
-}
-
-/// Stop recording and return `(function, "dense" | "lir", MIR text)`.
-pub fn take_mir_capture() -> CapturedMir {
-    MIR_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
-}
-
-/// The MIR passes the dense tier runs on a body, at `opts`' level: the
-/// folds, loop passes, SROA and the loop rewrites (`copy_until`,
-/// `byte_scan`, `bulk_push`, `vec_loops`). Native code takes the same
-/// MIR (`native_capture`). `promote`: keep loop-written fields in
-/// registers (`promote_fields`, whose `PanicStore`s a backend must honour).
+/// The MIR passes run on a body at `opts`' level: the folds, loop passes,
+/// SROA and the loop rewrites (`copy_until`, `byte_scan`, `bulk_push`,
+/// `vec_loops`). Both engines take this MIR (`native_capture`). `promote`:
+/// keep loop-written fields in registers (`promote_fields`, whose
+/// `PanicStore`s a backend must honour).
 pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions, promote: bool) {
     // `-O0` / `-Og` run none of these; `-O1` only the folds.
     if opts.mir_fold {

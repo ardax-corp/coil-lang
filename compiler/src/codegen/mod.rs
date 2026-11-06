@@ -303,8 +303,8 @@ pub struct Compiler {
     /// `do_compile` to recover the `NodeId` of the node it's currently
     /// emitting. Reset at the start of each `compile`.
     emit_idx: usize,
-    /// Wide immediates referenced from compact 8-byte `Byte`
-    /// operands (floats, `JumpIfMatch` targets, etc.).
+    /// The archive's constant pool: encoded heap snapshots, which a
+    /// `RestoreSnapshot` startup op names by index.
     constants: Vec<u64>,
     /// Program string literals referenced by string-literal ops.
     strings: Vec<String>,

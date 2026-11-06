@@ -19,7 +19,6 @@ pub use hir::effects::{
     EffectsCapture, describe_fns, effect_declaration_errors, start_effects_capture, take_effects_capture,
 };
 pub use hir::{ContractLevel, start_hir_capture, take_hir_capture};
-pub use mir::{start_mir_capture, take_mir_capture};
 /// MIR for a native backend (`coil-native`): the capture and the types it reads.
 pub mod native_mir {
     pub use crate::bodies::Label;
@@ -53,7 +52,7 @@ pub mod verify;
 mod codegen;
 
 #[cfg(any(test, feature = "dissect"))]
-pub use dissect::{DissectArtifacts, FnSym, filter_symbols, format_symbol_index, matches_fn_pat};
+pub use dissect::{DissectArtifacts, FnSym, format_symbol_index, matches_fn_pat};
 pub use host_grants::{ComptimeGrants, ComptimeLimits, HostGrants, Scoped};
 pub use module_roots::{default_module_roots, resolve_use_in_roots};
 pub use pipeline::*;

@@ -1,21 +1,7 @@
 //! Glue to attach a compiled program to a runtime: standard HostInvoke table,
 //! dload/FFI paths, C struct layouts, thread program.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-
-/// Inputs the compiler can supply without depending on `machine`.
-pub struct VmHostSpec<'a> {
-    pub entry_path: Option<&'a Path>,
-    pub project_root: &'a Path,
-    pub ffi_search_paths: &'a [PathBuf],
-    pub native_pins: &'a [(String, String)],
-    pub trusted_stems: &'a [String],
-    pub extra_dload_stems: &'a [String],
-    pub extra_dload_grants: &'a [(String, PathBuf)],
-    pub c_structs: &'a [common::CStructLayout],
-}
 
 /// Index [`common::ClassWordKinds`] rows by `type_id`, at
 /// [`common::type_kinds_index`].

@@ -49,15 +49,7 @@ pub fn matches_fn_pat(name: &str, pat: &str) -> bool {
     false
 }
 
-/// Filter symbols whose names match `pat` (or all when `pat` is `None`).
-pub fn filter_symbols<'a>(syms: &'a [FnSym], pat: Option<&str>) -> Vec<&'a FnSym> {
-    match pat {
-        None => syms.iter().collect(),
-        Some(p) => syms.iter().filter(|s| matches_fn_pat(&s.name, p)).collect(),
-    }
-}
-
-/// Format the symbol index (name → entry PC).
+/// Format the symbol index (name and body identity).
 pub fn format_symbol_index(functions: &[FnSym]) -> String {
     let mut syms = functions.to_vec();
     syms.sort_by(|a, b| a.name.cmp(&b.name));

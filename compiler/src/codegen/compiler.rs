@@ -7070,9 +7070,9 @@ impl Compiler {
         // `use` aliases are per-module; leftovers from a prior
         // `compile_module` would otherwise redirect bare names.
         self.aliases.clear();
-        // Shared constant pool across `compile_module` calls. Clearing between
-        // modules orphans JumpIfMatch/CONST indices (runtime panic). Reset only on
-        // a fresh prologue (CALL/JMP/HALT).
+        // The constant and string pools are shared across `compile_module`
+        // calls: clearing them between modules would orphan the indices the
+        // earlier modules hold. Reset them only for a fresh compile.
         if self.bodies.is_fresh() {
             self.constants.clear();
             self.strings.clear();
