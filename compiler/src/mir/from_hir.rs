@@ -2857,7 +2857,9 @@ impl Lower<'_> {
             // bodies): the same bits read as the node's type.
             HirKind::Builtin { op: Builtin::Retype, args } if let [inner] = args.as_slice() => {
                 let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("retype type")?;
-                let Some(v) = self.word(*inner)? else {
+                // A two-word value read as a type parameter's word: its box.
+                let v = if self.inp.pair_tys.contains_key(&inner.0) { self.boxed_word(*inner)? } else { self.word(*inner)? };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 let word = self.b.ins_word(v).map_err(mir)?;
