@@ -298,6 +298,9 @@ pub struct Heap {
     doomed: Vec<u64>,
     /// What the last [`Self::free_early`] gave back.
     early_freed: Vec<u64>,
+    /// Scratch of a deep [`Heap::free_early`] walk (found, mark work,
+    /// children), kept so a free does not allocate.
+    early_scratch: (Vec<Object>, Vec<Object>, Vec<u64>),
     /// [`Self::free_early`] freed something: a dead frame word or a dead
     /// object may now point at a freed or reused slot, so a typed handle
     /// is looked up before it is marked ([`Self::early_freed_slot`]).
@@ -379,6 +382,7 @@ impl Default for Heap {
             gc_dangling_strings: Vec::new(),
             doomed: Vec::new(),
             early_freed: Vec::new(),
+            early_scratch: (Vec::new(), Vec::new(), Vec::new()),
             freed_early: false,
             nursery: false,
             epoch_born: Vec::new(),
@@ -1309,25 +1313,45 @@ impl Heap {
     /// [`Self::early_freed`] lists the addresses it freed.
     pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool) -> usize {
         self.early_freed.clear();
-        let Some((found, reaches_drop, _)) = self.early_walk(v, deep, keep) else {
+        if !deep {
+            // One object: no walk.
+            let Some(root) = self.early_root(v, keep) else {
+                return 0;
+            };
+            if self.pending_drop(root) {
+                return 0;
+            }
+            if check {
+                self.doomed.push(root.addr());
+                return 0;
+            }
+            self.freed_early = true;
+            self.early_freed.push(root.addr());
+            unsafe { self.dealloc(root) };
+            return 1;
+        }
+        let Some((mut found, reaches_drop, _)) = self.early_walk(v, deep, keep) else {
             return 0;
         };
         // A `drop` that has not run yet keeps its object (and what reaches
         // it: the `drop` may read anything the walk would free) for the
         // collector; [`Self::early_drops`] lets the runtime run it first.
-        if reaches_drop {
-            return 0;
-        }
-        if check {
+        let n = if reaches_drop {
+            0
+        } else if check {
             self.doomed.extend(found.iter().map(Object::addr));
-            return 0;
-        }
-        self.freed_early = true;
-        self.early_freed.extend(found.iter().map(Object::addr));
-        for &obj in &found {
-            unsafe { self.dealloc(obj) };
-        }
-        found.len()
+            0
+        } else {
+            self.freed_early = true;
+            self.early_freed.extend(found.iter().map(Object::addr));
+            for &obj in &found {
+                unsafe { self.dealloc(obj) };
+            }
+            found.len()
+        };
+        found.clear();
+        self.early_scratch.0 = found;
+        n
     }
 
     /// The objects an early free of `v` would give back once their `drop`s
@@ -1364,23 +1388,19 @@ impl Heap {
     /// frees nothing (a collection is under way, the root is kept or not
     /// freeable). A pending `drop` object is walked like any other.
     fn early_walk(&mut self, v: Value, deep: bool, keep: &dyn Fn(u64) -> bool) -> Option<(Vec<Object>, bool, bool)> {
-        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
-            return None;
-        }
-        let root = self.find_object_by_addr(v.heap_addr())?;
-        if !self.early_freeable(root) || keep(root.addr()) {
-            return None;
-        }
+        let root = self.early_root(v, keep)?;
         let mut reaches_drop = self.pending_drop(root);
         if !deep {
             return Some((vec![root], reaches_drop, false));
         }
         let mut blocked = false;
-        let mut found = vec![root];
+        let (mut found, mut work, mut children) = std::mem::take(&mut self.early_scratch);
+        found.clear();
+        found.push(root);
         // Every mark bit is clear while idle: a set bit means visited.
-        let mut work = Vec::new();
+        work.clear();
         root.mark(&mut work);
-        let mut children = Vec::new();
+        children.clear();
         let mut i = 0;
         while i < found.len() {
             // Walk in `found` order (breadth first): a parent comes before
@@ -1394,7 +1414,9 @@ impl Heap {
                 }
             });
             for addr in children.drain(..) {
-                let Some(child) = self.find_object_by_addr(addr) else {
+                // SAFETY: `for_each_reference` visits only the addresses of
+                // live objects (it looked each word up).
+                let Some(child) = (unsafe { Object::from_header(addr) }) else {
                     continue;
                 };
                 if child.is_marked() {
@@ -1415,7 +1437,19 @@ impl Heap {
         for obj in &found {
             obj.unmark();
         }
+        work.clear();
+        self.early_scratch = (Vec::new(), work, children);
         Some((found, reaches_drop, blocked))
+    }
+
+    /// The object an early free of `v` starts at: `None` while a collection
+    /// or a steal epoch is open, or when it is kept or not freeable.
+    fn early_root(&self, v: Value, keep: &dyn Fn(u64) -> bool) -> Option<Object> {
+        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+            return None;
+        }
+        let root = self.find_object_by_addr(v.heap_addr())?;
+        (self.early_freeable(root) && !keep(root.addr())).then_some(root)
     }
 
     /// The addresses the last [`Self::free_early`] gave back.
@@ -2054,6 +2088,7 @@ impl Heap {
     }
 
     /// Find a heap object by its address (mapped slot + header kind).
+    #[inline]
     pub fn find_object_by_addr(&self, addr: u64) -> Option<Object> {
         if addr == 0 || !self.slab.contains_slot(addr) {
             return None;

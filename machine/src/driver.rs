@@ -295,6 +295,7 @@ impl<'a> Driver<'a> {
             fuel: &raw mut self.rt.fuel,
             natives: &raw const self.rt.natives,
             probes: &raw mut self.rt.probes,
+            code: Arc::as_ptr(&self.program.native),
         }
     }
 

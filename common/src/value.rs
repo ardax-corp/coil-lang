@@ -66,6 +66,7 @@ type Word = *mut u8;
 type Word = u64;
 
 #[derive(Default, Copy, Clone, Eq)]
+#[repr(transparent)]
 pub struct Value(Word);
 
 // `self.0 as u64` is a no-op where the word is already a `u64`.
