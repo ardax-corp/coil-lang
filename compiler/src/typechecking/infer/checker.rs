@@ -13562,6 +13562,25 @@ impl Checker {
         Some((params, ty))
     }
 
+    /// `fn_name`'s declared result: [`Self::fn_return_ty`] peels every
+    /// arrow, so a function returning a function value reports that value's
+    /// result; this peels only the declared parameters (one, `unit`, for a
+    /// function of none). Without recorded names, the full peel.
+    pub fn fn_declared_return_ty(&self, fn_name: &str) -> Option<Ty> {
+        let Some(n) = self.fn_param_names(fn_name).map(<[String]>::len) else {
+            return self.fn_return_ty(fn_name);
+        };
+        let scheme = self.lookup_fn_scheme(fn_name)?;
+        let mut ty = apply_ty_prune(&self.subst, &scheme.ty);
+        for _ in 0..n.max(1) {
+            let Ty::Fun(_, next) = ty else {
+                break;
+            };
+            ty = *next;
+        }
+        Some(ty)
+    }
+
     /// Resolved parameter types in declaration order (curried `Fun` peel).
     pub fn fn_param_tys(&self, fn_name: &str) -> Option<Vec<Ty>> {
         let scheme = self.lookup_fn_scheme(fn_name)?;
