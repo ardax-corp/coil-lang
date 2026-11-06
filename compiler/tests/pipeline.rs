@@ -648,6 +648,10 @@ fn examples_print_their_documented_output() {
         if documented.starts_with("(not checked") {
             continue;
         }
+        // It reads `/etc/hosts` and `/etc/passwd`.
+        if cfg!(windows) && name == "task_files.coil" {
+            continue;
+        }
         let expected = parser::test_headers::unescape(documented);
         let got = run_example(&path);
         checked += 1;
