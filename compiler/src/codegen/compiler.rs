@@ -4072,26 +4072,23 @@ impl Compiler {
 
     /// A fresh frame for a function emitted inside another, with the
     /// module's class, method and symbol tables (inlined code in it may
-    /// build an object). The enclosing frame and expression depth, for
-    /// [`Self::par_frame_exit`].
-    pub(super) fn par_frame_enter(&mut self) -> (Context, u32) {
+    /// build an object). The enclosing frame, for [`Self::par_frame_exit`].
+    pub(super) fn par_frame_enter(&mut self) -> Context {
         let mut prev_ctx = std::mem::take(&mut self.context);
         self.context.symbols = std::mem::take(&mut prev_ctx.symbols);
         self.context.classes = std::mem::take(&mut prev_ctx.classes);
         self.context.impementations = std::mem::take(&mut prev_ctx.impementations);
         self.context.methods = std::mem::take(&mut prev_ctx.methods);
-        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
-        (prev_ctx, prev_depth)
+        prev_ctx
     }
 
     /// Back to the frame [`Self::par_frame_enter`] set aside.
-    pub(super) fn par_frame_exit(&mut self, (prev_ctx, prev_depth): (Context, u32)) {
+    pub(super) fn par_frame_exit(&mut self, prev_ctx: Context) {
         let inner = std::mem::replace(&mut self.context, prev_ctx);
         self.context.symbols = inner.symbols;
         self.context.classes = inner.classes;
         self.context.impementations = inner.impementations;
         self.context.methods = inner.methods;
-        self.expr_depth = prev_depth;
     }
 
     /// Mark compiler-provided instance thunk `fqn` raw: its entry takes the
@@ -5481,12 +5478,6 @@ impl Compiler {
 
     fn alloc_temp_slot(&mut self) -> u32 {
         self.temp_counter += 1;
-        // Shared stack/locals: do not StorePop into HostInvoke native-id CONST index (overwrites id).
-        let min_slot = self.context.variables.len() as u32 + self.expr_depth;
-        while (self.context.variables.len() as u32) < min_slot {
-            let pad = format!("__pad{}", self.context.variables.len());
-            let _ = self.context.variables.intern(pad);
-        }
         let name = format!("__tmp{}", self.temp_counter);
         self.context.variables.intern(name) as u32
     }
@@ -5897,7 +5888,6 @@ impl Compiler {
         let prev_result_ok_is_result =
             std::mem::replace(&mut self.compiling_result_ok_is_result, false);
         let prev_two_word_enum = self.compiling_two_word_enum.take();
-        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
 
         // The initializer returns the value; the setup region stores it.
         if !self.try_lower_hir_function(&init.0, init) {
@@ -5908,7 +5898,6 @@ impl Compiler {
         self.attach_hir_mir();
         self.flush_hir_par_tail();
 
-        self.expr_depth = prev_depth;
         self.compiling_two_word_enum = prev_two_word_enum;
         self.compiling_result_ok_is_result = prev_result_ok_is_result;
         self.compiling_result_mode = prev_result_mode;
@@ -6326,7 +6315,6 @@ impl Compiler {
             self.context.stack_array_locals.clear();
             self.context.stack_array_box.clear();
             self.context.unboxed_enum_locals.clear();
-            self.expr_depth = 0;
             let saved_debug_scope = self.debug_scope_enter(body.0.start as u32, body.0.end as u32);
             if self.compiling_method {
                 let slot = self.context.variables.intern("self".to_string()) as u32;
@@ -7055,7 +7043,6 @@ impl Compiler {
 
         self.emit_idx = 0;
         self.temp_counter = 0;
-        self.expr_depth = 0;
         self.codegen_depth = 0;
         self.const_env_stack.clear();
         self.const_env_stack.push(HashMap::new());

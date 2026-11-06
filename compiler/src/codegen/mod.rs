@@ -345,14 +345,6 @@ pub struct Compiler {
     /// (`STRING` materialized once at entry, then `LOAD`).
     field_key_slots: HashMap<String, u32>,
 
-    /// Count of expression values currently live on the operand stack
-    /// *above* interned locals (e.g. a `HostInvoke` native-id `CONST`
-    /// pushed before argument codegen). `alloc_temp_slot` must allocate
-    /// at or above `variables.len() + expr_depth` so `StorePop` does not
-    /// clobber those live values (locals and the operand stack share
-    /// memory).
-    expr_depth: u32,
-
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
     /// the typechecker's `Checker`.
@@ -736,7 +728,6 @@ impl Default for Compiler {
             coroutine_fns: std::collections::HashSet::new(),
             temp_counter: 0,
             field_key_slots: HashMap::new(),
-            expr_depth: 0,
             codegen_depth: 0,
             active_fn_name: None,
             compiling_method: false,
