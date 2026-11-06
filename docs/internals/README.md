@@ -74,11 +74,11 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | `coil-rt` | Runtime library an AOT executable links (`libcoil_rt.a`) |
 | `common` | Values, archive format, host native table, startup ops, debug tables |
 | `coil-simd` | Stable SIMD helpers (`std::arch`) for numeric / byte kernels |
-| `coil-cli` | Shared CLI helpers: archive load, execute, git-style dispatch (`try_run_embedded` for packaged apps) |
+| `coil-cli` | Shared CLI helpers: archive load, execute, git-style dispatch (`run_linked_package`, `try_run_embedded_with` for packaged apps) |
 | `coil-args` | Shared clap flag groups (host grants, module roots, opt level) for `coil` and its helper binaries |
 | `reporting` | Diagnostics rendering (ariadne) |
 | `coil-embed` | JIT runner for packaged apps (`coil package --no-aot`): the runtime and Cranelift, calling `coil_cli::try_run_embedded_with`. Not an embedding library. |
 
-`coil package` links an AOT executable by default and appends the archive to it; `--no-aot` appends it to the `coil-embed` runner. There is no supported embedding library API yet (that needs host-catalog + archive C-layout work, later).
+`coil package` links an AOT executable by default, with the archive in its object; `--emit obj|lib` stops before that link; `--no-aot` appends the archive to the `coil-embed` runner. There is no supported embedding library API yet (that needs host-catalog + archive C-layout work, later).
 
 Contributor invariants: [AGENTS.md](../../AGENTS.md).

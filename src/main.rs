@@ -648,7 +648,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
 }
 
 fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, natives: &[FfiNative], tsv: bool) {
-    use common::{read_embedded_native_lock, read_package_trailer};
+    use common::{find_linked_package, read_embedded_native_lock, read_package_trailer};
 
     let lock = if let Some(path) = exe {
         let data = match std::fs::read(path) {
@@ -659,7 +659,9 @@ fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, natives: &[FfiNa
                 format!("cannot read `{path}`: {e}"),
             ),
         };
-        let trailer = match read_package_trailer(&data) {
+        // A JIT runner ends with its package; an AOT executable has it inside.
+        let package = if read_package_trailer(&data).is_some() { &data[..] } else { find_linked_package(&data).unwrap_or_default() };
+        let trailer = match read_package_trailer(package) {
             Some(t) => t,
             None => fail_and_exit(
                 pipeline,
@@ -667,7 +669,7 @@ fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, natives: &[FfiNa
                 format!("`{path}` is not a packaged Coil executable"),
             ),
         };
-        match read_embedded_native_lock(&data, trailer) {
+        match read_embedded_native_lock(package, trailer) {
             Ok(Some(lock)) => lock,
             Ok(None) => fail_and_exit(
                 pipeline,

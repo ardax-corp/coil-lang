@@ -770,3 +770,169 @@ fn aot_package_links_extern_libraries_statically() {
     assert!(String::from_utf8_lossy(&vm.stderr).contains("--link-static"), "{}", String::from_utf8_lossy(&vm.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(target_os = "linux")]
+mod linked {
+    use super::*;
+
+    /// `coil package` of `src` with `args`, for the tests of what it writes.
+    fn package_to(dir: &Path, out: &Path, src: &str, args: &[&str]) -> std::process::Output {
+        let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+        let rt = build_matching_coil_rt(Path::new(&bin));
+        let entry = dir.join("app.coil");
+        std::fs::write(&entry, src).unwrap();
+        let mut cmd = Command::new(&bin);
+        cmd.arg("package");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        cmd.arg(&entry).arg("-o").arg(out).args(args).env("COIL_RT_LIB", &rt);
+        cmd.output().expect("spawn coil package")
+    }
+
+    /// `cc INPUTS -o OUT` with the libraries the runtime needs, as `coil package`
+    /// says to link.
+    fn link(inputs: &[&Path], out: &Path) {
+        let libs: &[&str] = if cfg!(target_os = "macos") {
+            &["-lSystem", "-lc", "-lm"]
+        } else {
+            &["-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
+        };
+        let o = Command::new("cc").args(inputs).arg("-o").arg(out).args(libs).output().expect("spawn cc");
+        assert!(o.status.success(), "cc: {}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("coil_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const HELLO: &str = "use io::sync::println;\nfn main() { let _ = println(\"hello\"); }\n";
+
+    /// The program is in the image: the executable need not read its own file.
+    #[test]
+    fn an_aot_executable_carries_its_program_in_the_image() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("aot_image");
+        let exe = dir.join("app");
+        let o = package_to(&dir, &exe, HELLO, &[]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert!(common::read_package_trailer(&std::fs::read(&exe).unwrap()).is_none(), "nothing is appended");
+        // Execute only: no reading the file back.
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let run = run_with_timeout(&exe, 60);
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "hello\n", "{}", String::from_utf8_lossy(&run.stderr));
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_package_is_found_inside_an_aot_executable() {
+        let dir = temp_dir("aot_find");
+        let exe = dir.join("app");
+        let o = package_to(&dir, &exe, HELLO, &[]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let data = std::fs::read(&exe).unwrap();
+        let package = common::find_linked_package(&data).expect("a linked package");
+        let trailer = common::read_package_trailer(package).expect("its trailer");
+        assert!(trailer.is_linked());
+        assert!(common::embedded_archive_slice(package, trailer).is_some_and(|a| !a.is_empty()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_object_links_with_the_runtime_into_a_program() {
+        let dir = temp_dir("emit_obj");
+        let obj = dir.join("app.o");
+        let o = package_to(&dir, &obj, HELLO, &["--emit", "obj"]);
+        let said = String::from_utf8_lossy(&o.stderr);
+        assert!(o.status.success(), "{said}");
+        assert!(said.contains("link it with: cc"), "{said}");
+        let bin = std::env::var("CARGO_BIN_EXE_coil").unwrap();
+        let rt = build_matching_coil_rt(Path::new(&bin));
+        let exe = dir.join("app");
+        link(&[&obj, &rt], &exe);
+        let run = run_with_timeout(&exe, 60);
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "hello\n", "{}", String::from_utf8_lossy(&run.stderr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_static_library_links_alone_into_a_program() {
+        let dir = temp_dir("emit_lib");
+        let lib = dir.join("libapp.a");
+        let o = package_to(&dir, &lib, HELLO, &["--emit", "lib"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let exe = dir.join("app");
+        link(&[&lib], &exe);
+        let run = run_with_timeout(&exe, 60);
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "hello\n", "{}", String::from_utf8_lossy(&run.stderr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reason to link an object yourself: code of your own beside it.
+    #[test]
+    fn an_object_links_with_c_code_it_declares() {
+        let dir = temp_dir("emit_obj_c");
+        let c = dir.join("sum.c");
+        std::fs::write(&c, "long sum_add(long a, long b) { return a + b; }\n").unwrap();
+        let c_obj = dir.join("sum.o");
+        let cc = Command::new("cc").arg("-c").arg(&c).arg("-o").arg(&c_obj).output().expect("spawn cc");
+        assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+        let lib = dir.join("libsum.a");
+        let ar = Command::new("ar").arg("rs").arg(&lib).arg(&c_obj).output().expect("spawn ar");
+        assert!(ar.status.success(), "{}", String::from_utf8_lossy(&ar.stderr));
+        let src = "use io::sync::println;\nuse string::format;\nextern \"sum\" {\n    fn sum_add(int a, int b) -> int;\n}\nfn main() { let _ = println(format(\"%i\", sum_add(40, 2))); }\n";
+        let obj = dir.join("app.o");
+        let flag = format!("sum={}", lib.display());
+        let o = package_to(&dir, &obj, src, &["--emit", "obj", "--link-static", &flag, "--allow-dload", "sum", "--dload-trusted", "sum"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let bin = std::env::var("CARGO_BIN_EXE_coil").unwrap();
+        let rt = build_matching_coil_rt(Path::new(&bin));
+        let exe = dir.join("app");
+        link(&[&obj, &lib, &rt], &exe);
+        let run = run_with_timeout(&exe, 60);
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "{}", String::from_utf8_lossy(&run.stderr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tool outside the program finds the lock inside the image.
+    #[test]
+    fn natives_dump_reads_an_aot_executable() {
+        let dir = temp_dir("aot_natives");
+        let c = dir.join("sum.c");
+        std::fs::write(&c, "long sum_add(long a, long b) { return a + b; }\n").unwrap();
+        let so = dir.join("libsum.so");
+        let cc = Command::new("cc").args(["-shared", "-fPIC"]).arg(&c).arg("-o").arg(&so).output().expect("spawn cc");
+        assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+        let src = "extern \"sum\" {\n    fn sum_add(int a, int b) -> int;\n}\nfn main() { let _ = sum_add(1, 2); }\n";
+        let exe = dir.join("app");
+        let row = format!("name=sum,version=1.0.0,path={}", dir.display());
+        let o = package_to(&dir, &exe, src, &["--strip-symbols", "all", "--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-native", &row]);
+        let said = String::from_utf8_lossy(&o.stderr);
+        assert!(o.status.success() && said.contains("native code for"), "not an AOT package: {said}");
+        let bin = std::env::var("CARGO_BIN_EXE_coil").unwrap();
+        let dump = Command::new(&bin).arg("natives").arg("dump").arg(&exe).output().expect("natives dump");
+        assert!(dump.status.success(), "{}", String::from_utf8_lossy(&dump.stderr));
+        assert!(String::from_utf8_lossy(&dump.stdout).contains("\"stem\": \"sum\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn emit_refuses_what_it_cannot_do() {
+        let dir = temp_dir("emit_refuses");
+        let obj = dir.join("app.o");
+        for (args, says) in [
+            (&["--emit", "obj", "--no-aot"][..], "--emit` needs native code"),
+            (&["--emit", "lib", "--link-arg", "-lm"][..], "--link-arg"),
+        ] {
+            let o = package_to(&dir, &obj, HELLO, args);
+            let said = String::from_utf8_lossy(&o.stderr);
+            assert!(!o.status.success(), "{args:?}");
+            assert!(said.contains(says), "{args:?}: {said}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

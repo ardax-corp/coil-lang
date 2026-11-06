@@ -8,7 +8,7 @@ use std::process::exit;
 use coil_cli::resolve_default_runner;
 use common::{
     append_package_payload_with_natives, dload_request_stem,
-    is_packaged_executable, is_system_ffi_stem, ArchivedProgram,
+    is_packaged_executable, is_system_ffi_stem, linked_package, ArchivedProgram,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
 use compiler::Pipeline;
@@ -82,23 +82,12 @@ fn refused_exit(refused: &[(String, String)]) -> ! {
 }
 
 /// Link an AOT executable for the program just compiled: its MIR through
-/// `coil_native::aot`, then `cc` with the runtime library (`libcoil_rt.a`
-/// beside `coil`, or `COIL_RT_LIB`). Returns the image, how many functions
-/// compiled and the runtime used; `None` (with a warning) when this host
-/// cannot link one, and the JIT runner is packaged instead.
+/// The object for the program: native code, its tables and `package`.
+/// `Err` when the backend fails; a body it refuses ends the run.
 #[cfg(not(target_family = "wasm"))]
-fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs) -> Option<(Vec<u8>, usize, PathBuf)> {
+fn aot_object(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8]) -> Result<coil_native::AotObject, String> {
     let debug = pipeline.program_debug_full();
     let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
-    let fallback = |why: String| {
-        // Static libraries link only into an AOT executable.
-        if !link.statics.is_empty() {
-            eprintln!("error: {why}; `--link-static` needs the AOT executable");
-            exit(1);
-        }
-        eprintln!("warning: {why}; packaging the JIT runner instead (pass `--no-aot` to skip linking)");
-        None
-    };
     let linked: Vec<(String, String)> = pipeline
         .extern_symbols()
         .into_iter()
@@ -112,10 +101,7 @@ fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::Nati
             eprintln!("warning: `--link-static {}`: no `extern \"{}\"` block declares a function", s.path.display(), s.stem);
         }
     }
-    let object = match coil_native::aot(bodies, &pcs, &linked) {
-        Ok(o) => o,
-        Err(e) => return fallback(format!("native code for the package failed ({e})")),
-    };
+    let object = coil_native::aot(bodies, &pcs, &linked, package).map_err(|e| format!("native code for the package failed ({e})"))?;
     if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
         for (name, why) in &object.refused {
             eprintln!("  refused: {name}: {why}");
@@ -124,6 +110,28 @@ fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::Nati
     if !object.refused.is_empty() {
         refused_exit(&object.refused);
     }
+    Ok(object)
+}
+
+/// [`aot_object`], then `cc` with the runtime library (`libcoil_rt.a`
+/// beside `coil`, or `COIL_RT_LIB`). Returns the image, how many functions
+/// compiled and the runtime used; `None` (with a warning) when this host
+/// cannot link one, and the JIT runner is packaged instead.
+#[cfg(not(target_family = "wasm"))]
+fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8]) -> Option<(Vec<u8>, usize, PathBuf)> {
+    let fallback = |why: String| {
+        // Static libraries link only into an AOT executable.
+        if !link.statics.is_empty() {
+            eprintln!("error: {why}; `--link-static` needs the AOT executable");
+            exit(1);
+        }
+        eprintln!("warning: {why}; packaging the JIT runner instead (pass `--no-aot` to skip linking)");
+        None
+    };
+    let object = match aot_object(pipeline, bodies, link, package) {
+        Ok(o) => o,
+        Err(e) => return fallback(e),
+    };
     let rt = match runtime_library() {
         Ok(p) => p,
         Err(e) => return fallback(e),
@@ -135,8 +143,52 @@ fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::Nati
 }
 
 #[cfg(target_family = "wasm")]
-fn link_aot_executable(_: &Pipeline, _: &[compiler::native_mir::NativeBody], _: &LinkInputs) -> Option<(Vec<u8>, usize, PathBuf)> {
+fn link_aot_executable(_: &Pipeline, _: &[compiler::native_mir::NativeBody], _: &LinkInputs, _: &[u8]) -> Option<(Vec<u8>, usize, PathBuf)> {
     None
+}
+
+/// `--emit obj` and `--emit lib`: write what the caller's own link takes,
+/// and say how to link it.
+#[cfg(not(target_family = "wasm"))]
+fn write_linkable(pipeline: &mut Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8], output: &str) {
+    let object = match aot_object(pipeline, bodies, link, package) {
+        Ok(o) => o,
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
+    };
+    let rt = match runtime_library() {
+        Ok(p) => p,
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
+    };
+    let bytes = match link.emit {
+        Emit::Lib => match static_library(&object.bytes, &rt) {
+            Ok(b) => b,
+            Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
+        },
+        _ => object.bytes,
+    };
+    if let Err(e) = fs::write(output, &bytes) {
+        fail_and_exit(pipeline, ErrorCode::IoError, format!("cannot write `{output}`: {e}"));
+    }
+    if let Err(e) = pipeline.finish_reporting() {
+        pipeline.emit_spanless_warning(ErrorCode::IoError, format!("failed to flush diagnostics: {e}"));
+        let _ = pipeline.finish_reporting();
+    }
+    eprintln!(
+        "wrote `{output}` for {}-{} ({} bytes; native code for {} functions)",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        bytes.len(),
+        object.compiled.len()
+    );
+    let statics: Vec<String> = link.statics.iter().map(|s| s.path.display().to_string()).collect();
+    let runtime = if link.emit == Emit::Lib { Vec::new() } else { vec![rt.display().to_string()] };
+    let line = [vec!["cc".to_string(), output.to_string()], statics, runtime, vec!["-o".to_string(), "app".to_string()], system_libs().iter().map(|l| (*l).to_string()).collect()].concat();
+    eprintln!("link it with: {}", line.join(" "));
+}
+
+#[cfg(target_family = "wasm")]
+fn write_linkable(pipeline: &mut Pipeline, _: &[compiler::native_mir::NativeBody], _: &LinkInputs, _: &[u8], _: &str) {
+    fail_and_exit(pipeline, ErrorCode::IoError, "`--emit` needs a native host".to_string())
 }
 
 /// How a package's executable is made.
@@ -145,12 +197,26 @@ pub struct LinkInputs {
     /// Link native code for the program (an AOT executable); `false` with
     /// `--no-aot` or `--runner`: the JIT runner runs it.
     pub aot: bool,
+    /// What to write (`--emit`).
+    pub emit: Emit,
     /// Static libraries for `extern` blocks (`--link-static`).
     pub statics: Vec<StaticLink>,
     /// Extra linker arguments, after the libraries (`--link-arg`).
     pub args: Vec<String>,
     /// What the linker strips from the executable (`--strip-symbols`).
     pub strip: StripSymbols,
+}
+
+/// What `coil package` writes (`--emit`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Emit {
+    /// An executable.
+    #[default]
+    Exe,
+    /// A relocatable object holding the program, to link with the runtime.
+    Obj,
+    /// A static library holding the program and the runtime.
+    Lib,
 }
 
 /// What `coil package` strips from an AOT executable (`--strip-symbols`):
@@ -249,27 +315,38 @@ pub fn embedded_runtime(exe: &Path, cache: &Path) -> Result<Option<PathBuf>, Str
     Ok(Some(path))
 }
 
-/// `cc OBJECT STATIC-LIBS RUNTIME -o EXE LINK-ARGS` with the system
-/// libraries the runtime needs.
+/// The system libraries the runtime needs, and dropping what nothing the
+/// program runs references.
 #[cfg(not(target_family = "wasm"))]
-fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, String> {
+fn system_libs() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &["-Wl,-dead_strip", "-lSystem", "-lc", "-lm"]
+    } else {
+        &["-Wl,--gc-sections", "-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
+    }
+}
+
+/// A new directory for one link's files.
+#[cfg(not(target_family = "wasm"))]
+fn link_dir() -> Result<PathBuf, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
     let dir = std::env::temp_dir().join(format!("coil-aot-{}-{nanos}", std::process::id()));
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create `{}`: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// `cc OBJECT STATIC-LIBS RUNTIME -o EXE LINK-ARGS` with the system
+/// libraries the runtime needs.
+#[cfg(not(target_family = "wasm"))]
+fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, String> {
+    let dir = link_dir()?;
     let obj = dir.join("program.o");
     let exe = dir.join("program");
     let out = (|| {
         fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
         let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-        // Dead code goes: what nothing the program runs references (the
-        // interpreter, when the driver runs it all) is not linked in.
-        let libs: &[&str] = if cfg!(target_os = "macos") {
-            &["-Wl,-dead_strip", "-lSystem", "-lc", "-lm"]
-        } else {
-            &["-Wl,--gc-sections", "-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
-        };
         let run = std::process::Command::new(&cc)
             .arg(&obj)
             .args(link.statics.iter().map(|s| &s.path))
@@ -277,7 +354,7 @@ fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, 
             .arg("-o")
             .arg(&exe)
             .args(&link.args)
-            .args(libs)
+            .args(system_libs())
             .args(link.strip.cc_args())
             .output()
             .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))?;
@@ -287,6 +364,33 @@ fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, 
             return Err(format!("linking with `{}` failed: {first}", cc.to_string_lossy()));
         }
         fs::read(&exe).map_err(|e| format!("cannot read `{}`: {e}", exe.display()))
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    out
+}
+
+/// The runtime library `rt` with `object` added (`ar`, or `AR`).
+#[cfg(not(target_family = "wasm"))]
+fn static_library(object: &[u8], rt: &Path) -> Result<Vec<u8>, String> {
+    let dir = link_dir()?;
+    let obj = dir.join("coil_program.o");
+    let lib = dir.join("libprogram.a");
+    let out = (|| {
+        fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
+        fs::copy(rt, &lib).map_err(|e| format!("cannot copy `{}`: {e}", rt.display()))?;
+        let ar = std::env::var_os("AR").unwrap_or_else(|| "ar".into());
+        let run = std::process::Command::new(&ar)
+            .arg("rs")
+            .arg(&lib)
+            .arg(&obj)
+            .output()
+            .map_err(|e| format!("cannot run `{}` ({e})", ar.to_string_lossy()))?;
+        if !run.status.success() {
+            let err = String::from_utf8_lossy(&run.stderr);
+            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output");
+            return Err(format!("`{}` failed: {first}", ar.to_string_lossy()));
+        }
+        fs::read(&lib).map_err(|e| format!("cannot read `{}`: {e}", lib.display()))
     })();
     let _ = fs::remove_dir_all(&dir);
     out
@@ -563,6 +667,12 @@ pub fn cmd_package(
     link: &LinkInputs,
 ) {
     let aot = link.aot;
+    if link.emit != Emit::Exe && !aot {
+        fail_and_exit(pipeline, ErrorCode::IoError, "`--emit` needs native code; it cannot be used with `--no-aot` or `--runner`".to_string());
+    }
+    if link.emit != Emit::Exe && !link.args.is_empty() {
+        fail_and_exit(pipeline, ErrorCode::IoError, "`--link-arg` goes to the link of an executable; `--emit` leaves that link to you".to_string());
+    }
     if !aot && !link.statics.is_empty() {
         fail_and_exit(
             pipeline,
@@ -648,17 +758,17 @@ pub fn cmd_package(
     // The executable the payload goes on: one linked from native code for
     // the program, or the JIT runner (`--no-aot`, `--runner`, or when
     // linking is not possible here).
-    let linked = if aot { link_aot_executable(pipeline, &bodies, link) } else { None };
-    if let Some((exe, compiled, rt)) = linked {
-        let archive_bytes = payload_bytes(pipeline, &program);
-        let lock_json = (!native_lock.entries.is_empty()).then(|| native_lock.to_json());
-        let packaged = append_package_payload_with_natives(
-            &exe,
-            &archive_bytes,
-            lock_json.as_deref().map(|s| s.as_bytes()),
-            flags,
-            ARCHIVE_VERSION,
-        );
+    let package = aot.then(|| {
+        let archive = payload_bytes(pipeline, &program);
+        let lock = (!native_lock.entries.is_empty()).then(|| native_lock.to_json());
+        linked_package(&archive, lock.as_deref().map(str::as_bytes), flags, ARCHIVE_VERSION)
+    });
+    if link.emit != Emit::Exe {
+        write_linkable(pipeline, &bodies, link, package.as_deref().unwrap_or_default(), output);
+        return;
+    }
+    let linked = package.as_deref().and_then(|p| link_aot_executable(pipeline, &bodies, link, p));
+    if let Some((packaged, compiled, rt)) = linked {
         if let Err(e) = fs::write(output, &packaged) {
             fail_and_exit(pipeline, ErrorCode::IoError, format!("cannot write packaged output `{}`: {e}", output));
         }

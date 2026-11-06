@@ -244,6 +244,11 @@ enum RawCommand {
         /// code for it (the default links an AOT executable with `cc`)
         #[arg(long)]
         no_aot: bool,
+        /// What to write: `exe` (default) an executable, `obj` a relocatable
+        /// object holding the program, `lib` a static library holding the
+        /// program and the runtime. For `obj` and `lib` you run the link
+        #[arg(long, value_name = "WHAT", value_enum, default_value_t)]
+        emit: crate::package_app::Emit,
         /// Link a static library into the AOT executable for the `extern`
         /// block that names STEM (repeatable): its functions resolve from
         /// the executable instead of a shared library. Without `STEM=`,
@@ -646,6 +651,7 @@ impl RawCli {
                 ffi_native,
                 check_native,
                 no_aot,
+                emit,
                 link_static,
                 link_arg,
                 strip_symbols,
@@ -657,11 +663,12 @@ impl RawCli {
                     return Err("package requires an entry file".into());
                 }
                 let out = output.unwrap_or_else(|| {
-                    Path::new(&filename)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("a.out")
-                        .to_string()
+                    let stem = Path::new(&filename).file_stem().and_then(|s| s.to_str()).unwrap_or("a.out");
+                    match emit {
+                        crate::package_app::Emit::Exe => stem.to_string(),
+                        crate::package_app::Emit::Obj => format!("{stem}.o"),
+                        crate::package_app::Emit::Lib => format!("lib{stem}.a"),
+                    }
                 });
                 CliArgs {
                     debug_level: debug.level(),
@@ -669,7 +676,7 @@ impl RawCli {
                         Command::Package {
                             filename,
                             output: out,
-                            link: LinkInputs { aot: !no_aot && runner.is_none(), statics: link_static, args: link_arg, strip: strip_symbols },
+                            link: LinkInputs { aot: !no_aot && runner.is_none(), emit, statics: link_static, args: link_arg, strip: strip_symbols },
                             runner,
                             natives: ffi_native,
                             check_native,
