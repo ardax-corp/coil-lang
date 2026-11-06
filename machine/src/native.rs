@@ -119,7 +119,8 @@ pub const NATIVE_CTX_NATIVE_FP: i32 = std::mem::offset_of!(NativeCtx, native_fp)
 /// Native code's stack maps (Cranelift user stack maps): the code ranges
 /// of the compiled bodies, and per call that holds heap words across it,
 /// its return address and the offsets from the stack pointer at that call
-/// of the slots holding them. Code is never unmapped, so both only grow.
+/// of the slots holding them. A program's code leaves with
+/// [`unregister_stack_maps`].
 #[derive(Default)]
 struct StackMaps {
     /// Start → end of each compiled body's code.
@@ -145,6 +146,16 @@ pub fn register_stack_maps(start: u64, size: u32, maps: impl IntoIterator<Item =
     for (ra, offsets) in maps {
         table.maps.insert(start + u64::from(ra), offsets.into_boxed_slice());
     }
+}
+
+/// Forget `bodies` (`(start, size)`, as registered), whose code is about to go.
+/// Its addresses will be some other program's.
+pub fn unregister_stack_maps(bodies: &[(u64, u32)]) {
+    let gone: std::collections::BTreeMap<u64, u64> = bodies.iter().map(|&(start, size)| (start, start + u64::from(size))).collect();
+    let mut table = STACK_MAPS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    table.code.retain(|start, _| !gone.contains_key(start));
+    // A call that does not return can end its body: `ra` is then the end.
+    table.maps.retain(|ra, _| !gone.range(..ra).next_back().is_some_and(|(_, end)| ra <= end));
 }
 
 /// One AOT stack map record, as `coil_native::aot` writes it: a body's

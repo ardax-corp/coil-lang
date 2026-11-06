@@ -506,6 +506,8 @@ fn install_cached_code(key: Option<&str>) -> bool {
                         eprintln!("  native: {name}");
                     }
                 }
+                // Its entries point into it for the rest of the process.
+                std::mem::forget(program.keep);
                 machine::native::install_for_next_run(program.entries, program.sites, true);
                 true
             }
@@ -601,6 +603,8 @@ fn install_native_bodies(
         // A run that cannot keep its code still runs.
         let _ = code_cache::store(&dir, key, &image);
     }
+    // Its entries point into it for the rest of the process.
+    std::mem::forget(program.keep);
     machine::native::install_for_next_run(program.entries, program.sites, true);
     true
 }

@@ -176,7 +176,7 @@ fn jitted_code(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collectio
         }
     }
     let complete = program.refused.is_empty();
-    let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete);
+    let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
     (!code.is_empty()).then(|| Arc::new(code))
 }
 
