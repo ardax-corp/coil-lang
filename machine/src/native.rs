@@ -1657,6 +1657,30 @@ pub unsafe extern "C" fn coil_native_stringify(ctx: *mut NativeCtx, word: u64, t
     s.as_ptr() as *mut u8 as u64
 }
 
+/// The `n` argument words at `args`.
+fn words_slice<'a>(args: *const u64, n: u64) -> &'a [u64] {
+    // SAFETY: native code passes `n` words at `args` (none when `n == 0`).
+    if n == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, n as usize) } }
+}
+
+/// The strings a format of only `%s` (after the head's) appends: `None` when
+/// the format has anything else, the count is off (or over 8), or an operand
+/// is not a string (the general renderer handles those).
+fn concat_tails<'a>(rest: &str, args: &[u64]) -> Option<([&'a str; 8], usize)> {
+    if args.len() > 8 || rest.len() != 2 * args.len() || !rest.as_bytes().chunks(2).all(|c| c == b"%s") {
+        return None;
+    }
+    let mut out = [""; 8];
+    for (slot, &w) in out.iter_mut().zip(args) {
+        let Some(crate::memory::Object::String(g)) = object(w) else {
+            return None;
+        };
+        // SAFETY: a live string object outlives this call.
+        *slot = unsafe { &*std::ptr::from_ref(g.as_ref().data.as_str()) };
+    }
+    Some((out, args.len()))
+}
+
 /// `FORMAT` with the format string `fmt` and the `n` argument words at
 /// `args` (in order), as the runtime's handler: a leading `%s` appends the rest
 /// to the first argument (in place when that string ends at its buffer's
@@ -1689,6 +1713,25 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
             Some(rest) => (words.next(), rest),
             None => (None, format_string),
         };
+        // String `+` and `join` lower to `"%s%s…"` with string operands: append
+        // them straight onto the head, with no format parse or temporary render.
+        if let Some(Some(Object::String(gh))) = head.map(|h| object(h.bits()))
+            && let Some((tails, count)) = concat_tails(rest, &words_slice(args, n)[1..])
+        {
+            let joined = match &tails[..count] {
+                [one] => gh.as_ref().concat(one),
+                many => {
+                    let mut tail = String::with_capacity(many.iter().map(|t| t.len()).sum());
+                    for t in many {
+                        tail.push_str(t);
+                    }
+                    gh.as_ref().concat(&tail)
+                }
+            };
+            let addr = heap.alloc(joined, Object::String).0.addr();
+            unsafe { note_alloc(ctx, heap) };
+            return addr;
+        }
         let message = crate::format::render_format(rest, || words.next().unwrap_or_default());
         match head {
             Some(head) => {
