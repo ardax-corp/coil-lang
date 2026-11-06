@@ -451,14 +451,15 @@ jobs:
             O0) $run -- --engine native -O 0 $FLAGS ;;
             leak-smoke)
               # Each corpus process gets 256 MiB of address space above the
-              # harness's own code, and one job: every extra thread reserves
-              # a glibc malloc arena (64 MiB of address space), which alone
-              # exceeds the room left. A leak grows far past this; a
-              # million-frame fold on the interpreter takes about 128 MiB.
+              # harness's own code, one job and one malloc arena: a thread's
+              # own arena reserves 64 MiB of address space, so whether a deep
+              # test fits would depend on the order of the files. A leak
+              # grows far past this; a million-frame recursion on the
+              # interpreter takes about 128 MiB.
               # Parked frames, because a fiber's reserved stack counts as
               # address space with nothing behind it.
               code_kb=$(( $(size -d harness-bin/coil-test | awk 'NR==2 {print $4}') / 1024 ))
-              COIL_NO_FIBERS=1 $run -j 1 --limit-as-kb $(( code_kb + 262144 )) -- --engine mir $FLAGS ;;
+              MALLOC_ARENA_MAX=1 COIL_NO_FIBERS=1 $run -j 1 --limit-as-kb $(( code_kb + 262144 )) -- --engine mir $FLAGS ;;
             # Collect and evacuate at every allocation (precise-root soundness).
             # The memory corpus also at -O0: without inlining, a call's
             # result reaches its consumer on the operand stack instead of a
