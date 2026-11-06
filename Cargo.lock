@@ -519,6 +519,7 @@ dependencies = [
  "proptest",
  "reporting",
  "rkyv",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",

@@ -9,6 +9,7 @@ dissect = []
 pratt = []
 
 [dependencies]
+rustc-hash = "2"
 common = { path = "../common" }
 parser = { path = "../parser" }
 reporting = { path = "../reporting" }
