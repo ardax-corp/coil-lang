@@ -3419,6 +3419,62 @@ fn main() {
     );
 }
 
+/// A ground trait instance method returns its `Option<int>` as two words
+/// to a direct call; its `$dict` adapter, which a dictionary holds, boxes
+/// the pair.
+#[test]
+fn ground_instance_method_returns_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+trait Halver<T> {
+    fn half(T s, int x) -> Option<int> {}
+}
+class H {
+    pub d: int,
+}
+impl Halver for H {
+    pub fn half(H h, int x) -> Option<int> {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / h.d);
+    }
+}
+fn via<T: Halver>(T h, int x) -> int {
+    return match h.half(x) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+fn main() {
+    let h = new H(2);
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += match h.half(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    let _ = write(stdout(), to_bytes(format("%i %i", s, via(h, 8))));
+}
+"#;
+    assert_eq!(run_example_src(src), "16 4");
+
+    let mut pipeline = test_pipeline();
+    // Keep the calls: inlined, there is no edge to look at.
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("pair-returning instance method");
+    let method = compiled.bodies.iter().find(|b| b.name.ends_with("::half") || b.name.ends_with("__half")).expect("the method body");
+    assert!(method.mir.ret_hi_ty.is_some(), "`half` returns two words");
+    assert!(
+        !compiled.insts("main").any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "`main` reads the pair without a box"
+    );
+}
+
 /// A free function's `(int, int)` / two-field readonly class parameter
 /// takes its two words, as its result does: the caller passes them
 /// without building a tuple or an instance.
