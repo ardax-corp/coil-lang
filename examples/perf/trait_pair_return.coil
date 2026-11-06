@@ -1,0 +1,37 @@
+// A ground trait method returning `Option<int>`: two words to the direct
+// call, no `Option` boxed per call (its `$dict` adapter boxes for
+// dictionary callers).
+use io::sync::print;
+use string::format;
+
+trait Halver<T> {
+    fn half(T s, int x) -> Option<int> {}
+}
+
+class H {
+    pub d: int,
+}
+
+impl Halver for H {
+    #[inline(never)]
+    pub fn half(H h, int x) -> Option<int> {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / h.d);
+    }
+}
+
+fn main() {
+    let h = new H(2);
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        s += match h.half(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    let _ = print(format("%i", s));
+}

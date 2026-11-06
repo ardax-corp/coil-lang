@@ -1229,6 +1229,18 @@ impl Compiler {
                 .any(|t| t.as_ref().and_then(Self::ty_to_value_tag).is_some())
     }
 
+    /// [`Self::instance_method_raw`] of instance method `fqn`, from its
+    /// instance's class, method name and head.
+    fn instance_method_fqn_raw(&self, fqn: &str) -> bool {
+        let Some((class, method, args)) = self.checker.generics().instances.iter().find_map(|inst| {
+            let (method, _) = inst.method_fqns.iter().find(|(_, f)| *f == fqn)?;
+            Some((inst.class.clone(), method.clone(), inst.args.clone()))
+        }) else {
+            return false;
+        };
+        self.instance_method_raw(&class, &method, &args, fqn, self.coroutine_fns.contains(fqn))
+    }
+
     /// Mark instance method `fqn` raw ([`Self::instance_method_raw`]) and
     /// reserve its adapter, so a dictionary built before the method is
     /// emitted already points at the adapter.
@@ -2272,8 +2284,11 @@ impl Compiler {
         }
         let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
         let calls = HashMap::from([(fqn.to_string(), (params, self.value_layout(&ret)))]);
-        let mut value = b.call(fqn, args, pair_ret.unwrap_or(ret));
-        if ret_from.is_some() {
+        let mut value = b.call(fqn, args, pair_ret.clone().unwrap_or(ret));
+        if pair_ret.is_some() && matches!(body_ret, Ty::Var(_)) {
+            // A bare type parameter's result: the pair's box, as its word.
+            value = b.builtin(Builtin::Retype, vec![value], body_ret.clone());
+        } else if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
         } else if ret_box.is_some() {
             value = b.builtin(Builtin::Retype, vec![value], crate::typechecking::ty::int());
@@ -4875,13 +4890,15 @@ impl Compiler {
     fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
         let lookup = strip_overload_key(name);
         // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed
-        // ABI; trait instance methods are dictionary entries (`CodePtr`)
-        // unless a definition site pinned a pair
+        // ABI. A trait instance method is a dictionary entry (`CodePtr`): a
+        // raw one returns its pair to direct calls and its `$dict` adapter
+        // boxes it for dictionary callers; any other keeps one word unless
+        // a definition site pinned a pair
         // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
         let facts = crate::layout::CalleeFacts {
             coroutine: self.coroutine_fns.contains(name),
             escaped: self.is_fn_value_escaped(name),
-            instance_method: is_instance_method_fqn(&self.checker, name),
+            instance_method: is_instance_method_fqn(&self.checker, name) && !self.instance_method_fqn_raw(name),
             host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
             ..crate::layout::CalleeFacts::default()
         };

@@ -104,8 +104,12 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   walk: any function value, partial application, `thread::spawn` or FFI
   callback of that name, in any file of the package use-graph, keeps every
   caller on the one-word ABI.
-- Coroutines, host natives and trait instance methods (dictionary entries)
-  never return two slots. Inherent methods, overloaded and generic
+- Coroutines and host natives never return two slots. A raw trait
+  instance method (a ground instance with no context, not a default body)
+  returns its pair to direct calls; its `$dict` adapter, which
+  dictionaries hold, boxes it. Other instance methods return one word
+  unless their definition pins the pair (`Iterator::next`,
+  `IntoIterator::into_iter`). Inherent methods, overloaded and generic
   functions keep one-word parameters (a numeric range's two words
   excepted). A free function's arity-2 immediate tuple or two-field
   readonly class parameter is two words like its result (the stack VM

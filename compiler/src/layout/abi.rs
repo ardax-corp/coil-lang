@@ -110,8 +110,9 @@ pub struct CalleeFacts {
     pub coroutine: bool,
     /// A host native: one packed `HostInvoke` word.
     pub host_native: bool,
-    /// A trait instance method: a dictionary entry (`CodePtr`), unless a
-    /// definition site pinned its result's pair.
+    /// A trait instance method whose direct calls take its dictionary entry
+    /// (`CodePtr`): not raw, and no definition site pinned its result's
+    /// pair. A raw one's `$dict` adapter boxes the pair instead.
     pub instance_method: bool,
     /// An inherent method: its parameters stay one word.
     pub inherent_method: bool,
