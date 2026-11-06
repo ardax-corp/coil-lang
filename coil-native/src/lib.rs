@@ -16,7 +16,10 @@ pub mod section;
 
 pub use image::load as load_image;
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::mem::ManuallyDrop;
+use std::sync::Arc;
 
 use compiler::native_mir::{
     BlockId, Label, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
@@ -57,11 +60,43 @@ pub struct NativeProgram {
     pub sites: Vec<NativeSite>,
     /// The code as bytes for [`load_image`], when [`jit_keeping_image`] asked.
     pub image: Option<Vec<u8>>,
+    /// What `entries` point into. It goes with the last handle: hold one for
+    /// as long as anything can run them (`NativeCode::with_keep`), or forget
+    /// it to keep the code for the rest of the process.
+    pub keep: Arc<dyn Any + Send + Sync>,
+}
+
+/// A program's code in memory, freed with this. The module is only ever
+/// dropped from here on, which is why it may cross threads.
+struct Code {
+    module: ManuallyDrop<JITModule>,
+    /// `(start, size)` of the bodies with stack maps.
+    bodies: Vec<(u64, u32)>,
+}
+
+// SAFETY: nothing reads the module after it is built; `drop` has it alone.
+unsafe impl Send for Code {}
+// SAFETY: as for `Send`: a shared `Code` gives no access to the module.
+unsafe impl Sync for Code {}
+
+impl Code {
+    fn keep(module: JITModule, bodies: Vec<(u64, u32)>) -> Arc<dyn Any + Send + Sync> {
+        Arc::new(Self { module: ManuallyDrop::new(module), bodies })
+    }
+}
+
+impl Drop for Code {
+    fn drop(&mut self) {
+        machine::native::unregister_stack_maps(&self.bodies);
+        // SAFETY: this was the last handle, so no runtime can enter the code,
+        // and `module` is not used again.
+        unsafe { ManuallyDrop::take(&mut self.module).free_memory() };
+    }
 }
 
 /// Compile every eligible body of `bodies` in memory. `entry_pcs` maps a
-/// body's name to its entry id. The code stays mapped for the
-/// rest of the process.
+/// body's name to its entry id. The code stays mapped for as long as
+/// [`NativeProgram::keep`].
 ///
 /// Under `COIL_CODE_IMAGE_CHECK` the program goes through a code image and
 /// the run uses the copy, as a code cache's next run would.
@@ -379,7 +414,7 @@ fn jit_once(
     let plan = plan_without(bodies, excluded, entry_pcs);
     let refused = plan.refused.clone();
     if plan.compile.is_empty() {
-        return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused, sites: Vec::new(), image: None }));
+        return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused, sites: Vec::new(), image: None, keep: Arc::new(()) }));
     }
 
     let reserve = jit_reserve(bodies, &plan);
@@ -391,8 +426,11 @@ fn jit_once(
         Err((i, why)) => return Ok(Attempt::Without(i, why)),
     };
     module.finalize_definitions().map_err(|e| e.to_string())?;
+    let mut mapped = Vec::with_capacity(maps.len());
     for (id, (size, fmaps)) in &maps {
-        machine::native::register_stack_maps(module.get_finalized_function(*id) as u64, *size, fmaps.clone());
+        let start = module.get_finalized_function(*id) as u64;
+        machine::native::register_stack_maps(start, *size, fmaps.clone());
+        mapped.push((start, *size));
     }
 
     let mut entries = Vec::new();
@@ -419,9 +457,7 @@ fn jit_once(
     let image = recorder.filter(|_| refused.is_empty()).and_then(|recorder| {
         image::encode(image::Parts { module: &module, reserve, recorder, maps: &maps, entries: &entry_funcs, sites: &sites, compiled: &compiled })
     });
-    // The code must outlive every `Runtime` that runs it.
-    std::mem::forget(module);
-    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites, image }))
+    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites, image, keep: Code::keep(module, mapped) }))
 }
 
 /// Address space to reserve for the code and data of `plan`'s bodies: far

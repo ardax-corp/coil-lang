@@ -259,6 +259,7 @@ pub fn load(image: &[u8]) -> Result<NativeProgram, String> {
         module.define_function_bytes(id, align, bytes, &relocs).map_err(|e| e.to_string())?;
     }
     module.finalize_definitions().map_err(|e| e.to_string())?;
+    let mut mapped = Vec::new();
     for _ in 0..r.len()? {
         let id = FuncId::from_u32(r.u32()?);
         let size = r.u32()?;
@@ -268,7 +269,9 @@ pub fn load(image: &[u8]) -> Result<NativeProgram, String> {
             let offsets = (0..r.len()?).map(|_| r.u32()).collect::<Result<Vec<_>, _>>()?;
             maps.push((ra, offsets));
         }
-        machine::native::register_stack_maps(module.get_finalized_function(id) as u64, size, maps);
+        let start = module.get_finalized_function(id) as u64;
+        machine::native::register_stack_maps(start, size, maps);
+        mapped.push((start, size));
     }
     let mut entries = Vec::new();
     for _ in 0..r.len()? {
@@ -285,7 +288,5 @@ pub fn load(image: &[u8]) -> Result<NativeProgram, String> {
         sites.push(NativeSite { entry_pc, loc: common::DebugLoc { file, start_byte, end_byte } });
     }
     let compiled = (0..r.len()?).map(|_| r.text()).collect::<Result<Vec<_>, _>>()?;
-    // The code must outlive every `Runtime` that runs it.
-    std::mem::forget(module);
-    Ok(NativeProgram { entries, compiled, refused: Vec::new(), sites, image: None })
+    Ok(NativeProgram { entries, compiled, refused: Vec::new(), sites, image: None, keep: crate::Code::keep(module, mapped) })
 }

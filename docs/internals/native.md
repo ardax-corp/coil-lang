@@ -29,6 +29,13 @@ A run takes its archive from the build cache as any other does, with the MIR
 section in it. `--mir` skips the cache, since the section holds only what native
 code compiles.
 
+## How long code lives
+
+`NativeProgram::keep` owns a program's code and stack maps, and they go with its
+last handle. `coil test` gives it to `NativeCode`, so each file's code leaves with
+the file: a JIT reserves 64 MiB or more, and Windows charges all of it to the commit
+limit. A run of one program forgets `keep`: the code stays for the process.
+
 ## Program start
 
 A compiled program is its bodies, a list of `common::StartupOp` and `main`. A body's
