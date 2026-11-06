@@ -2,7 +2,7 @@
 
 Coil runs programs as machine code that [Cranelift](https://cranelift.dev) makes
 from their MIR: JIT by default, AOT with `coil package`. Compile-time code, macros,
-`coil debug`, wasm and `--engine mir` run the same MIR on the interpreter
+`coil debug`, wasm and `--mir` (`--engine mir` under `coil test`) run the same MIR on the interpreter
 ([mir-interp.md](mir-interp.md)), which sits on the same ABI.
 
 ## Using it

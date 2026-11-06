@@ -111,7 +111,7 @@ serves everything with no machine code. The bytecode VM is deleted.
 | 2. Glue as MIR | Done: thunks are built as HIR (`hir::synth`), a clean compile panics on a body with no MIR (`finalize_bodies`) |
 | 3. Comptime and macros on the interpreter | Done (below) |
 | 4. JIT by default | Done: `coil FILE`, `coil compile`, `coil run` and `coil test` |
-| 5. Packaging | Done in coil: `coil-embed` is the JIT runner. Open: AOT on macOS and Windows is untried |
+| 5. Packaging | Done in coil: `coil-embed` is the JIT runner. AOT links on Windows and CI smoke-tests JIT and AOT packages on macOS and Windows (#2298) |
 | 6. Debugger and coverage | Done (below) |
 | 7. wasm | Done: the interpreter runs programs, tests and comptime in `coil.wasm`, generators and tasks park on the heap, and comptime runs on an `Isolate` (below) |
 | 8. Delete the VM | Done: bodies by identity, not bytecode PC; archive major 7, MIR and data only ([archive-history.md](archive-history.md)) |
