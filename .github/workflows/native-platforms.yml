@@ -1,13 +1,10 @@
-# Native code on the hosts CI otherwise reaches only through a ready PR into
-# `main`: JIT and AOT on macOS and Windows, for each PR into a feature branch.
-# `scripts/native_platform_smoke.sh` runs every way a program starts, and the
-# AOT tests fail on a fallback to the JIT runner.
+# Probe, not for merging: how far coil gets on the MSVC target. Every stage
+# goes on after a failure, so one run shows them all.
 name: Native platforms
 
 on:
   pull_request:
     branches: ['feature/**']
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -21,87 +18,76 @@ env:
   CI: "true"
 
 jobs:
-  macos:
-    name: native (macos-latest)
-    runs-on: macos-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: ardax-corp/coil-stdlib
-          path: .deps/coil-stdlib
-      - name: Install system deps
-        run: brew install libffi
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: native-platforms-macos
-      - name: Build
-        run: |
-          cargo build -p coil -p coil-embed -p coil-test
-          cargo build -p coil-rt
-      - name: What the runtime links
-        run: cargo rustc -p coil-rt -- --print native-static-libs
-      - name: Every way to run
-        run: bash scripts/native_platform_smoke.sh target/debug .deps/coil-stdlib/src
-      - name: Package and JIT tests
-        run: cargo test -p coil --test package_cli --test native_jit_cli
-
-  windows:
-    name: native (windows-gnu)
+  msvc:
+    name: probe (windows-msvc)
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: ardax-corp/coil-stdlib
           path: .deps/coil-stdlib
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            base-devel
-            python
-            mingw-w64-ucrt-x86_64-toolchain
-            mingw-w64-ucrt-x86_64-libffi
-            mingw-w64-ucrt-x86_64-pkgconf
-      - name: Configure pkg-config
-        shell: msys2 {0}
-        run: |
-          echo "PKG_CONFIG=$MINGW_PREFIX/bin/pkgconf.exe" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$MINGW_PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "$MINGW_PREFIX/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable-x86_64-pc-windows-gnu
+          toolchain: stable-x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: native-platforms-windows-ucrt
+          shared-key: native-platforms-msvc
+      - uses: ilammy/msvc-dev-cmd@v1
       - name: Build
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          # /usr/bin: GNU make + cmp for vendored libffi-sys ./configure.
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
+          rustc -vV
+          Get-Command link.exe, cl.exe | Format-Table Source
           cargo build -p coil -p coil-embed -p coil-test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo build -p coil-rt
-      - name: What the runtime links
-        shell: msys2 {0}
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem target\debug\coil*.exe, target\debug\coil_rt.lib | Format-Table Name, Length
+      - name: JIT, archive and runner
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/native_platform_smoke.sh target/debug .deps/coil-stdlib/src
+      - name: AOT by hand with link.exe
+        continue-on-error: true
+        shell: pwsh
         run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          cargo rustc -p coil-rt -- --print native-static-libs
-      - name: Every way to run
-        shell: msys2 {0}
+          $ErrorActionPreference = 'Continue'
+          $said = cargo rustc -p coil-rt -- --print native-static-libs 2>&1 | Out-String
+          $libs = ([regex]'native-static-libs: (.*)').Match($said).Groups[1].Value.Trim()
+          "rustc says: $libs"
+          $dir = (Get-ChildItem "$env:USERPROFILE\.cargo\registry\src\*\windows_x86_64_msvc-0.52*\lib" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
+          "import libs: $dir"
+          @'
+          use io::sync::println;
+          use string::format;
+          fn fib(int n) -> int {
+              if n < 2 {
+                  return n;
+              }
+              return fib(n - 1) + fib(n - 2);
+          }
+          fn main() {
+              let _ = println(format("%i", fib(25)));
+          }
+          '@ | Set-Content app.coil
+          target\debug\coil.exe package --emit obj --root .deps\coil-stdlib\src app.coil -o app.obj
+          "package exit: $LASTEXITCODE"
+          link.exe /NOLOGO app.obj target\debug\coil_rt.lib @($libs -split '\s+') "/LIBPATH:$dir" /OUT:app.exe /SUBSYSTEM:CONSOLE /OPT:REF /STACK:8388608
+          "link exit: $LASTEXITCODE"
+          .\app.exe
+          "app exit: $LASTEXITCODE"
+          if ($LASTEXITCODE) { exit 1 }
+      - name: JIT tests
+        continue-on-error: true
+        shell: pwsh
+        run: cargo test -p coil --test native_jit_cli
+      - name: Corpus on native code
+        continue-on-error: true
+        shell: pwsh
         run: |
-          export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
-          bash scripts/native_platform_smoke.sh target/debug .deps/coil-stdlib/src
-      - name: Package and JIT tests
-        shell: msys2 {0}
-        run: |
-          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
-          export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          cargo test -p coil --test package_cli --test native_jit_cli
+          target\debug\coil-test.exe --engine native --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src tests/functions
+          "functions exit: $LASTEXITCODE"
+          target\debug\coil-test.exe --engine native --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src tests/memory
+          "memory exit: $LASTEXITCODE"
