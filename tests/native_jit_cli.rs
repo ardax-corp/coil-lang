@@ -1693,3 +1693,19 @@ fn a_refused_body_fails_a_debug_run() {
     assert!(mir.status.success(), "stderr: {}", String::from_utf8_lossy(&mir.stderr));
     assert_eq!(String::from_utf8_lossy(&mir.stdout), "42\n");
 }
+
+/// A body with more than 64 defer homes compiles natively, and its normal
+/// exit and its panic behave as the interpreter's (#2307).
+#[test]
+fn more_than_64_defer_homes_compile() {
+    let mut body = String::new();
+    for i in 0..70 {
+        body.push_str(&format!("  let s{i} = format(\"s%i\", {i});\n  defer use (s{i}) {{ collect(); let _ = println(s{i}); }}\n"));
+    }
+    let src = format!(
+        "{HEADER}use gc::collect;\n#[inline(never)]\nfn many(int n) -> int {{\n{body}  if n > 0 {{ panic(\"boom\"); }}\n  return n;\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", many(0))); let _ = many(1); }}\n"
+    );
+    let stats = same_as_mir("many_homes", &src);
+    assert!(compiled(&stats, "many"), "stats: {stats}");
+}

@@ -3,7 +3,10 @@
 // survives a collection before the defers run (#2307).
 use gc::collect;
 use string::format;
+use task::{scope, Scope, TaskError};
 use tests::assert;
+
+static let LOG: int = 0;
 
 fn many(Vec<string> log) {
     let s0 = format("s%i", 0);
@@ -645,6 +648,369 @@ fn mixed(Vec<int> log) -> int {
     return total;
 }
 
+// Each defer allocates, then counts its home's length: the pads run with
+// every heap home still rooted. (A `collect()` in a pad is coil-lang#2312.)
+fn unwinds() -> int {
+    let u0 = format("u%i", 0);
+    defer use (u0) {
+        let tag = format("%s!", u0);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u1 = format("u%i", 1);
+    defer use (u1) {
+        let tag = format("%s!", u1);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u2 = format("u%i", 2);
+    defer use (u2) {
+        let tag = format("%s!", u2);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u3 = format("u%i", 3);
+    defer use (u3) {
+        let tag = format("%s!", u3);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u4 = format("u%i", 4);
+    defer use (u4) {
+        let tag = format("%s!", u4);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u5 = format("u%i", 5);
+    defer use (u5) {
+        let tag = format("%s!", u5);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u6 = format("u%i", 6);
+    defer use (u6) {
+        let tag = format("%s!", u6);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u7 = format("u%i", 7);
+    defer use (u7) {
+        let tag = format("%s!", u7);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u8 = format("u%i", 8);
+    defer use (u8) {
+        let tag = format("%s!", u8);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u9 = format("u%i", 9);
+    defer use (u9) {
+        let tag = format("%s!", u9);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u10 = format("u%i", 10);
+    defer use (u10) {
+        let tag = format("%s!", u10);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u11 = format("u%i", 11);
+    defer use (u11) {
+        let tag = format("%s!", u11);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u12 = format("u%i", 12);
+    defer use (u12) {
+        let tag = format("%s!", u12);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u13 = format("u%i", 13);
+    defer use (u13) {
+        let tag = format("%s!", u13);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u14 = format("u%i", 14);
+    defer use (u14) {
+        let tag = format("%s!", u14);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u15 = format("u%i", 15);
+    defer use (u15) {
+        let tag = format("%s!", u15);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u16 = format("u%i", 16);
+    defer use (u16) {
+        let tag = format("%s!", u16);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u17 = format("u%i", 17);
+    defer use (u17) {
+        let tag = format("%s!", u17);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u18 = format("u%i", 18);
+    defer use (u18) {
+        let tag = format("%s!", u18);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u19 = format("u%i", 19);
+    defer use (u19) {
+        let tag = format("%s!", u19);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u20 = format("u%i", 20);
+    defer use (u20) {
+        let tag = format("%s!", u20);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u21 = format("u%i", 21);
+    defer use (u21) {
+        let tag = format("%s!", u21);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u22 = format("u%i", 22);
+    defer use (u22) {
+        let tag = format("%s!", u22);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u23 = format("u%i", 23);
+    defer use (u23) {
+        let tag = format("%s!", u23);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u24 = format("u%i", 24);
+    defer use (u24) {
+        let tag = format("%s!", u24);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u25 = format("u%i", 25);
+    defer use (u25) {
+        let tag = format("%s!", u25);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u26 = format("u%i", 26);
+    defer use (u26) {
+        let tag = format("%s!", u26);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u27 = format("u%i", 27);
+    defer use (u27) {
+        let tag = format("%s!", u27);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u28 = format("u%i", 28);
+    defer use (u28) {
+        let tag = format("%s!", u28);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u29 = format("u%i", 29);
+    defer use (u29) {
+        let tag = format("%s!", u29);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u30 = format("u%i", 30);
+    defer use (u30) {
+        let tag = format("%s!", u30);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u31 = format("u%i", 31);
+    defer use (u31) {
+        let tag = format("%s!", u31);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u32 = format("u%i", 32);
+    defer use (u32) {
+        let tag = format("%s!", u32);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u33 = format("u%i", 33);
+    defer use (u33) {
+        let tag = format("%s!", u33);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u34 = format("u%i", 34);
+    defer use (u34) {
+        let tag = format("%s!", u34);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u35 = format("u%i", 35);
+    defer use (u35) {
+        let tag = format("%s!", u35);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u36 = format("u%i", 36);
+    defer use (u36) {
+        let tag = format("%s!", u36);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u37 = format("u%i", 37);
+    defer use (u37) {
+        let tag = format("%s!", u37);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u38 = format("u%i", 38);
+    defer use (u38) {
+        let tag = format("%s!", u38);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u39 = format("u%i", 39);
+    defer use (u39) {
+        let tag = format("%s!", u39);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u40 = format("u%i", 40);
+    defer use (u40) {
+        let tag = format("%s!", u40);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u41 = format("u%i", 41);
+    defer use (u41) {
+        let tag = format("%s!", u41);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u42 = format("u%i", 42);
+    defer use (u42) {
+        let tag = format("%s!", u42);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u43 = format("u%i", 43);
+    defer use (u43) {
+        let tag = format("%s!", u43);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u44 = format("u%i", 44);
+    defer use (u44) {
+        let tag = format("%s!", u44);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u45 = format("u%i", 45);
+    defer use (u45) {
+        let tag = format("%s!", u45);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u46 = format("u%i", 46);
+    defer use (u46) {
+        let tag = format("%s!", u46);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u47 = format("u%i", 47);
+    defer use (u47) {
+        let tag = format("%s!", u47);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u48 = format("u%i", 48);
+    defer use (u48) {
+        let tag = format("%s!", u48);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u49 = format("u%i", 49);
+    defer use (u49) {
+        let tag = format("%s!", u49);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u50 = format("u%i", 50);
+    defer use (u50) {
+        let tag = format("%s!", u50);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u51 = format("u%i", 51);
+    defer use (u51) {
+        let tag = format("%s!", u51);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u52 = format("u%i", 52);
+    defer use (u52) {
+        let tag = format("%s!", u52);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u53 = format("u%i", 53);
+    defer use (u53) {
+        let tag = format("%s!", u53);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u54 = format("u%i", 54);
+    defer use (u54) {
+        let tag = format("%s!", u54);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u55 = format("u%i", 55);
+    defer use (u55) {
+        let tag = format("%s!", u55);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u56 = format("u%i", 56);
+    defer use (u56) {
+        let tag = format("%s!", u56);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u57 = format("u%i", 57);
+    defer use (u57) {
+        let tag = format("%s!", u57);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u58 = format("u%i", 58);
+    defer use (u58) {
+        let tag = format("%s!", u58);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u59 = format("u%i", 59);
+    defer use (u59) {
+        let tag = format("%s!", u59);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u60 = format("u%i", 60);
+    defer use (u60) {
+        let tag = format("%s!", u60);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u61 = format("u%i", 61);
+    defer use (u61) {
+        let tag = format("%s!", u61);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u62 = format("u%i", 62);
+    defer use (u62) {
+        let tag = format("%s!", u62);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u63 = format("u%i", 63);
+    defer use (u63) {
+        let tag = format("%s!", u63);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u64 = format("u%i", 64);
+    defer use (u64) {
+        let tag = format("%s!", u64);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u65 = format("u%i", 65);
+    defer use (u65) {
+        let tag = format("%s!", u65);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u66 = format("u%i", 66);
+    defer use (u66) {
+        let tag = format("%s!", u66);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u67 = format("u%i", 67);
+    defer use (u67) {
+        let tag = format("%s!", u67);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u68 = format("u%i", 68);
+    defer use (u68) {
+        let tag = format("%s!", u68);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u69 = format("u%i", 69);
+    defer use (u69) {
+        let tag = format("%s!", u69);
+        LOG = LOG + tag.len() - 1;
+    }
+    panic "unwinds";
+}
+
+fn failed(Result<int, TaskError> r) -> bool {
+    return match r {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    };
+}
+
 test("seventy string homes run in reverse") {
     let log: Vec<string> = [];
     many(log);
@@ -658,4 +1024,14 @@ test("seventy int homes and a result") {
     assert!(mixed(log) == 4830);
     assert!(log.len() == 70);
     assert!(log[0] == 138);
+}
+
+test("a panic runs seventy defers with their homes") {
+    LOG = 0;
+    let r = scope(fn (Scope s) {
+        let _ = s.spawn(unwinds);
+        0
+    });
+    assert!(failed(r));
+    assert!(LOG == 200);
 }
