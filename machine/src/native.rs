@@ -2196,7 +2196,7 @@ impl Drop for GenFiber {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: u64, args: *const u64, n: u64) -> u64 {
     let ffi = unsafe { (*ctx).host.ffi };
-    unsafe { host_on_machine(ctx, ffi, op, operand, args, n, false) }
+    unsafe { host_on_machine(ctx, ffi, op, operand, args, n) }
 }
 
 /// [`coil_native_host`] of an ordinary native that is no plain function:
@@ -2261,7 +2261,7 @@ unsafe fn host_invoke(
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
-unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, layout: u64, args: *const u64, n: u64, _via_vm: bool) -> u64 {
+unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
     let Some(words) = buf.get_mut(..n as usize) else {

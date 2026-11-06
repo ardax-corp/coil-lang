@@ -566,10 +566,10 @@ fn assert_linked_native_code(package: &std::process::Output) {
 }
 
 /// `coil package` links native code by default (an AOT executable): its
-/// output, panic and exit status match the interpreter runner's package of the same
+/// output, panic and exit status match the JIT runner's (`coil-embed`) package of the same
 /// program, and its calls run natively.
 #[test]
-fn aot_package_matches_the_vm_runner() {
+fn aot_package_matches_the_jit_runner() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     let embed = build_matching_coil_embed(Path::new(&bin));
     let rt = build_matching_coil_rt(Path::new(&bin));
@@ -610,16 +610,16 @@ fn main() {
         assert!(o.status.success(), "package failed: {}", String::from_utf8_lossy(&o.stderr));
         String::from_utf8_lossy(&o.stderr).into_owned()
     };
-    let vm = dir.join("app-vm");
+    let jit = dir.join("app-jit");
     let aot = dir.join("app-aot");
-    let _ = package(&vm, &["--runner", embed.to_str().unwrap()]);
+    let _ = package(&jit, &["--runner", embed.to_str().unwrap()]);
     let said = package(&aot, &[]);
     assert!(said.contains("native code for"), "not an AOT package: {said}");
-    let vm_run = run_with_timeout(&vm, 60);
+    let jit_run = run_with_timeout(&jit, 60);
     let aot_run = run_with_timeout(&aot, 60);
-    assert_eq!(String::from_utf8_lossy(&vm_run.stdout), String::from_utf8_lossy(&aot_run.stdout));
-    assert_eq!(String::from_utf8_lossy(&vm_run.stderr), String::from_utf8_lossy(&aot_run.stderr));
-    assert_eq!(vm_run.status.code(), aot_run.status.code());
+    assert_eq!(String::from_utf8_lossy(&jit_run.stdout), String::from_utf8_lossy(&aot_run.stdout));
+    assert_eq!(String::from_utf8_lossy(&jit_run.stderr), String::from_utf8_lossy(&aot_run.stderr));
+    assert_eq!(jit_run.status.code(), aot_run.status.code());
     assert!(String::from_utf8_lossy(&aot_run.stderr).contains("index out of bounds"));
     let mut stats = Command::new(&aot);
     stats.env("COIL_NATIVE_STATS", "1");
@@ -759,9 +759,9 @@ fn aot_package_links_extern_libraries_statically() {
     let run = run_command_with_timeout(run, 60);
     assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(run.status.code(), Some(0));
-    let vm = package(&dir.join("app-vm"), &["--no-aot", "--link-static", lib.to_str().unwrap()]);
-    assert!(!vm.status.success());
-    assert!(String::from_utf8_lossy(&vm.stderr).contains("--link-static"), "{}", String::from_utf8_lossy(&vm.stderr));
+    let jit = package(&dir.join("app-jit"), &["--no-aot", "--link-static", lib.to_str().unwrap()]);
+    assert!(!jit.status.success());
+    assert!(String::from_utf8_lossy(&jit.stderr).contains("--link-static"), "{}", String::from_utf8_lossy(&jit.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

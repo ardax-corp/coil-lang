@@ -395,10 +395,10 @@ impl Reactor {
         if is_pool_worker() {
             return wait_join_on_worker(self, state);
         }
-        self.wait_join_with_helper_vm(state)
+        self.wait_join_helping(state)
     }
 
-    fn wait_join_with_helper_vm(
+    fn wait_join_helping(
         self: &Arc<Self>,
         state: &JoinState,
     ) -> Result<PortableValue, ThreadErrorTag> {

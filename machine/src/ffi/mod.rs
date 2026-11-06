@@ -21,10 +21,10 @@ pub use call::{
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol,
 };
 #[cfg(not(target_family = "wasm"))]
-pub use closure::{OwnedClosure, VmCallFn, callback_cif, make_int_callback};
+pub use closure::{OwnedClosure, ProgramCallFn, callback_cif, make_int_callback};
 #[cfg(target_family = "wasm")]
 pub use nolib::{
-    InvokeContext, Library, OwnedClosure, PreparedCall, VmCallFn, callback_cif,
+    InvokeContext, Library, OwnedClosure, PreparedCall, ProgramCallFn, callback_cif,
     invoke_via_libffi, make_int_callback, prepare_cif, prepare_cif_for_symbol,
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol,
 };

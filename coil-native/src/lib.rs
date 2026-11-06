@@ -4055,7 +4055,7 @@ mod tests {
     }
 
     #[test]
-    fn a_callee_that_fails_to_lower_keeps_its_callers_on_the_vm() {
+    fn a_callee_that_fails_to_lower_refuses_its_callers() {
         // `g` passes `plan` but has no lowering (`!` of a float); `f` calls it.
         let mut g = MirFunc::new("g");
         g.blocks.clear();
