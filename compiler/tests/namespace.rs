@@ -427,6 +427,31 @@ fn clones_of_another_modules_methods_compile_the_same_every_time() {
     }
 }
 
+/// A method of another module, cloned at `int` and at a class of this
+/// module: the `int` clone compiles under its own module's context, and the
+/// clone of a class that module does not know stays with this one (#2289).
+#[test]
+fn clones_at_a_class_the_methods_module_does_not_know_stay_here() {
+    let lib = "class Box<T> {\n    pub v: T,\n}\n\nimpl Box<T> {\n    pub fn get() -> T {\n        return self.v;\n    }\n}\n";
+    let main = r#"use boxes::Box;
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+class P {
+    pub n: int,
+}
+
+fn main() {
+    let b = new Box(new P(1));
+    let s = new Box(7);
+    let t = b.get().n + s.get();
+    let _ = write(stdout(), to_bytes(format("%i", t)));
+}
+"#;
+    let (root, entry) = build_project("clone_unknown_class", "", &[("src/boxes.coil", lib), ("main.coil", main)], "main.coil");
+    assert_eq!(run_project(&root, &entry), "8");
+}
+
 /// Multi-file programs that use `?` (JumpIfMatch → constant pool) in a
 /// dependency must keep a single shared pool across `compile_module`
 /// calls. Clearing the pool between files left worker threads panicking
