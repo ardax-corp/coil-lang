@@ -474,6 +474,9 @@ pub struct HirMirInput<'a> {
     /// Calls through a function value HIR emission made a plain
     /// `CallIndirect` (not a `PolyFn` call with dictionaries).
     pub value_calls: &'a HashSet<u32>,
+    /// Of those, the calls of a two-word result read as its two words:
+    /// the `unpair` body of each ([`MirInst::CallIndirect`]).
+    pub value_pair_calls: &'a HashMap<u32, crate::bodies::Label>,
     /// Calls through a `PolyFn` local with no dictionaries, by call.
     pub poly_calls: &'a HashMap<u32, HirPolyCall>,
     /// Trait methods and operators on a bound type parameter, called
@@ -2628,7 +2631,8 @@ impl Lower<'_> {
     /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk,
     /// any call through a function value).
     fn boxed_call(&self, id: HirId) -> bool {
-        (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || self.inp.value_calls.contains(&id.0)) && self.inp.pair_tys.contains_key(&id.0)
+        (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || (self.inp.value_calls.contains(&id.0) && !self.inp.value_pair_calls.contains_key(&id.0)))
+            && self.inp.pair_tys.contains_key(&id.0)
     }
 
     /// Lower `id` for its value, packed as a bare-class existential where
@@ -4888,6 +4892,15 @@ impl Lower<'_> {
         };
         if self.b.value_ty(callee) != MirTy::HeapRef {
             return Err("call value callee".into());
+        }
+        // A two-word result read as its two words: the callee's twin
+        // returns them, or `unpair` reads them from its box.
+        if let (Some(&unpair), Some(&tys)) = (self.inp.value_pair_calls.get(&id.0), self.inp.pair_tys.get(&id.0)) {
+            let (lo, hi) = self.at_expr(id, |l| l.b.ins_call_indirect_pair(callee, words, tys, unpair).map_err(mir))?;
+            if self.inp.heap_pairs.contains(&id.0) {
+                self.b.mark_heap_pair_word(lo);
+            }
+            return Ok(Val::Pair(lo, hi));
         }
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
         Ok(if unit { Val::Unit } else { Val::V(dest) })

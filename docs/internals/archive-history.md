@@ -23,6 +23,10 @@ Bodies are named by `label.0 + 1`, not by bytecode entry PC. The bytecode, line 
 span run tables, frame maps, stack maps, `cleanup_ranges` and
 `operand_stack_slots` went, and with them every reader of an older archive.
 
+MIR section `FORMAT` 11 (feature/native) adds `CallIndirect`'s two-word
+form (opcode 44: second word and `unpair` body) and each body's
+`pair_twin`; the code image `FORMAT` 2 adds `NativeEntry::twin`.
+
 Majors 4 to 6 ran on the VM. The notes below are the record of what minors of
 major 4 added; opcodes and frame maps in them no longer exist.
 

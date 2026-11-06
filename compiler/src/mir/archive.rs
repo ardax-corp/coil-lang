@@ -1239,6 +1239,7 @@ mod tests {
         f.debug_keep = true;
         f.opaque_words = true;
         f.tail_targets.insert(Label(9));
+        f.pair_twin = Some(Label(5));
         f.heap_pair_words.extend([ValueId(0), ValueId(2), ValueId(1)]);
         f.pure_calls.insert(ValueId(1));
         f.call_fields.insert(ValueId(1), 7);

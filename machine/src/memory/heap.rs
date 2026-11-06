@@ -2126,7 +2126,7 @@ impl Heap {
     /// which a typed word does not need. `None` for anything else.
     #[inline]
     pub fn fn_at(&self, addr: u64) -> Option<Gc<ObjFn>> {
-        if addr == 0 || addr % 8 != 0 || !self.slab.may_contain(addr) {
+        if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
             return None;
         }
         // SAFETY: the slab's range stays mapped and a function value's

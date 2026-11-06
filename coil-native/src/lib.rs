@@ -1726,7 +1726,7 @@ impl<'a> Lower<'a> {
         // quadratic in the program.
         let mut module_refs = HashMap::new();
         for inst in body.blocks.iter().flat_map(|b| &b.insts) {
-            if let MirInst::Call { target, .. } = inst
+            if let MirInst::Call { target, .. } | MirInst::CallIndirect { pair: Some((_, target)), .. } = inst
                 && let Some(&i) = by_label.get(target)
                 && let Some(&id) = ids.imp.get(&i)
             {
@@ -2765,12 +2765,14 @@ impl<'a> Lower<'a> {
                 // through the runtime.
                 let values = args.len().saturating_sub(*dicts as usize);
                 let nv = self.b.ins().iconst(types::I64, values as i64);
-                let out = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                // A two-word call's helper also writes whether it gave the
+                // twin, past the words.
+                let out_slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
                     cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                    (machine::native::FN_ENTRY_WORDS * 8) as u32,
+                    ((machine::native::FN_ENTRY_WORDS + usize::from(pair.is_some())) * 8) as u32,
                     3,
                 ));
-                let out = self.b.ins().stack_addr(types::I64, out, 0);
+                let out = self.b.ins().stack_addr(types::I64, out_slot, 0);
                 let helper = if pair.is_some() { self.fn_entry_pair } else { self.fn_entry };
                 let ec = self.b.ins().call(helper, &[self.ctx, c, p, nv, out]);
                 let entry = self.b.inst_results(ec)[0];
@@ -2788,11 +2790,10 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(direct);
                 if let Some(both) = both {
                     let (twin, canon) = (self.b.create_block(), self.b.create_block());
-                    let bit = self.b.ins().band_imm_u(entry, 1);
+                    let bit = self.b.ins().stack_load(types::I64, types::I64, out_slot, (machine::native::FN_ENTRY_WORDS * 8) as i32);
                     self.b.ins().brif(bit, twin, &[], canon, &[]);
                     self.b.switch_to_block(twin);
-                    let at = self.b.ins().band_imm_s(entry, !1);
-                    let call = self.b.ins().call_indirect(self.entry_sig, at, &[self.ctx, out]);
+                    let call = self.b.ins().call_indirect(self.entry_sig, entry, &[self.ctx, out]);
                     let lo = self.b.inst_results(call)[0];
                     let hi = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, machine::native::NATIVE_CTX_RET_HI);
                     self.b.ins().jump(both, &[lo.into(), hi.into()]);

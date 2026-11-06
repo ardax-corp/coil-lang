@@ -1898,12 +1898,13 @@ pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, 
 }
 
 /// [`coil_native_fn_entry`] for a call of a two-word result: the entry
-/// of the body's two-word twin ([`NativeEntry::twin`]) with its low bit
-/// set when it has one, which returns its words as a direct `CALL`'s
-/// (`lo`, then [`NativeCtx::ret_hi`]); else the body's own one-word entry.
+/// of the body's two-word twin ([`NativeEntry::twin`]) when it has one,
+/// which returns its words as a direct `CALL`'s (`lo`, then
+/// [`NativeCtx::ret_hi`]), and `1` in `out[FN_ENTRY_WORDS]`; else the
+/// body's own one-word entry and `0` there.
 ///
 /// # Safety
-/// As [`coil_native_fn_entry`].
+/// As [`coil_native_fn_entry`], with room for one more word at `out`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_fn_entry_pair(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64) -> u64 {
     // SAFETY: as the caller promises.
@@ -1921,6 +1922,10 @@ unsafe fn fn_entry(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, o
     let n = n as usize;
     // SAFETY: as the caller promises.
     let given = unsafe { std::slice::from_raw_parts(args, n) };
+    if pair {
+        // SAFETY: as the caller promises.
+        unsafe { *out.add(FN_ENTRY_WORDS) = 0 };
+    }
     let words = unsafe { std::slice::from_raw_parts_mut(out, FN_ENTRY_WORDS) };
     // Word copies by hand: a call passes a few words, below what a
     // `memcpy` / `memset` call pays for.
@@ -1971,9 +1976,11 @@ unsafe fn fn_entry(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, o
     }
     c.host_calls += 1;
     c.gc_epoch += 1;
-    let at = entry.entry as usize as u64;
-    debug_assert!(at & 1 == 0, "an entry's address is aligned");
-    at | tag
+    if pair {
+        // SAFETY: the caller gave room for the flag past the words.
+        unsafe { *out.add(FN_ENTRY_WORDS) = tag };
+    }
+    entry.entry as usize as u64
 }
 
 /// The words [`coil_native_fn_entry`] writes at most.
