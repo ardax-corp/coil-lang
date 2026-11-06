@@ -54,6 +54,42 @@ struct WorkItem {
 /// Predicate over a source path (see [`Pipeline::set_keep_fns_in`]).
 pub type KeepFnFilter = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// One file, parsed and expanded in `module`.
+fn parse_and_expand(source: String, module: &str) -> crate::ast_cache::CachedAst {
+    let mut cached = crate::ast_cache::CachedAst::parse(source);
+    let _ = cached.expand_in(module);
+    cached
+}
+
+/// [`parse_and_expand`] of `jobs` (a file, its source, its module) on several
+/// threads, as deep as the main thread: an AST's depth follows its source.
+fn parse_all(jobs: Vec<(PathBuf, String, String)>) -> Vec<(PathBuf, crate::ast_cache::CachedAst)> {
+    const STACK_BYTES: usize = 8 << 20;
+    const MAX_THREADS: usize = 8;
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    let threads = jobs.len().min(cores).min(MAX_THREADS);
+    let jobs = std::sync::Mutex::new(jobs);
+    let next = || jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop();
+    let work = || {
+        let mut done = Vec::new();
+        while let Some((file, source, module)) = next() {
+            done.push((file, parse_and_expand(source, &module)));
+        }
+        done
+    };
+    std::thread::scope(|scope| {
+        // This thread parses too, so a limit that refuses a thread costs only speed.
+        let workers: Vec<_> = (1..threads)
+            .filter_map(|_| std::thread::Builder::new().stack_size(STACK_BYTES).spawn_scoped(scope, work).ok())
+            .collect();
+        let mut parsed = work();
+        parsed.extend(workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e))));
+        // Threads finish in any order; a compile does not depend on it.
+        parsed.sort_by(|(a, _), (b, _)| a.cmp(b));
+        parsed
+    })
+}
+
 /// Where [`Pipeline::compile_src_from_file`] is (see [`Pipeline::set_progress`]).
 #[derive(Debug, Clone, Copy)]
 pub enum CompileStep<'a> {
@@ -1147,8 +1183,37 @@ impl Pipeline {
             return false;
         };
         let module = self.namespace_for(file);
-        let mut cached = crate::ast_cache::CachedAst::parse(source);
-        let _ = cached.expand_in(&module);
+        self.keep_ast(file, parse_and_expand(source, &module));
+        true
+    }
+
+    /// Parse the files on the worklist no one has reached yet, side by side.
+    /// Each stands alone until it is checked; [`Self::fill_ast_cache`] then
+    /// finds them.
+    fn parse_ahead(&mut self) {
+        if cfg!(target_family = "wasm") {
+            return;
+        }
+        let queued: Vec<PathBuf> = self.worklist.iter().map(|item| item.file.clone()).collect();
+        let mut jobs = Vec::new();
+        for file in queued {
+            if self.ast_cache.get(&file).is_none()
+                && !self.overlays.contains_key(&file)
+                && let Some(source) = self.read_source(&file)
+            {
+                let module = self.namespace_for(&file);
+                jobs.push((file, source, module));
+            }
+        }
+        if jobs.len() > 1 {
+            for (file, cached) in parse_all(jobs) {
+                self.keep_ast(&file, cached);
+            }
+        }
+    }
+
+    /// Keep `cached`, the parsed and expanded `file`.
+    fn keep_ast(&mut self, file: &Path, mut cached: crate::ast_cache::CachedAst) {
         // A provider's macros run only in the expansion program. The entry
         // file keeps them so its macro bodies are still checked.
         if !self.expansion_program
@@ -1162,7 +1227,6 @@ impl Pipeline {
             }
         }
         self.ast_cache.insert(file.to_path_buf(), cached);
-        true
     }
 
     /// Parse → expand → check one file. Used by compile and `typecheck_project`.
@@ -1260,6 +1324,9 @@ impl Pipeline {
                 continue;
             }
             already_scanned.push(file.clone());
+            if self.ast_cache.get(&file).is_none() {
+                self.parse_ahead();
+            }
             if !self.fill_ast_cache(&file) {
                 self.emit_spanless_error(
                     ErrorCode::IoError,
