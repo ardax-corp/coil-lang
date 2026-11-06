@@ -168,7 +168,7 @@ pub struct Pipeline {
     /// Generated-code spans per file, for moving diagnostics to macro sites.
     generated_ranges: Vec<macros::GeneratedRange>,
     /// Items each derived type already received, to splice in derive order.
-    derived_items: HashMap<parser::SimpleSpan, usize>,
+    derived_items: HashMap<(PathBuf, parser::SimpleSpan), usize>,
 }
 
 impl Default for Pipeline {
