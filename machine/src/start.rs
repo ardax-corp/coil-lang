@@ -27,13 +27,12 @@ pub struct NativeStart {
 /// Run `program` on the native driver with the native code installed for
 /// the next run ([`crate::native::install_for_next_run`],
 /// [`crate::native::install_aot`]): `Some(panicked)`. `None` when that code
-/// does not cover every body or the driver is off: the code stays
-/// installed and the caller runs the program on the VM.
+/// does not cover every body: nothing ran.
 pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<bool> {
-    if !crate::driver::enabled() || !crate::native::pending_is_complete() {
+    if !crate::native::pending_is_complete() {
         return None;
     }
-    let native = crate::native::take_pending()?.into_code(0);
+    let native = crate::native::take_pending()?.into_code();
     if !Driver::covers(&program.startup, program.main, &native) {
         crate::native::install_shared_for_next_run(native);
         return None;
@@ -50,7 +49,6 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
         constants: Arc::clone(&program.constants),
         native,
         debug: program.debug.clone(),
-        base_dir: rt.ffi.base_dir.clone(),
         thread_program: Some(Arc::clone(&program)),
         shared_print,
     };

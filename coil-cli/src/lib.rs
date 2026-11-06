@@ -357,7 +357,7 @@ pub fn writer_for_format(pretty_on_stderr: bool) -> Box<dyn Write + Send> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::Instruction;
+    
 
     #[test]
     fn sibling_bin_uses_host_exe_suffix() {

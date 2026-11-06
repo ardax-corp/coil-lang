@@ -12,7 +12,6 @@ default = []
 debugger = []
 # Per-instruction hit counts for `coil-test --coverage`.
 coverage = []
-vm_profile = []
 # Collect at every allocation safepoint (GC soundness testing only).
 gc-stress = []
 # Print GC census numbers after each mark (docs/internals/gc-evacuation.md).

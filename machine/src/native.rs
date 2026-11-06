@@ -70,9 +70,7 @@ pub struct NativeCtx {
     pub machine: *mut std::ffi::c_void,
     pub host: NativeHost,
     /// VM calls the call made: the VM then checks for a collection.
-    pub vm_calls: u64,
-    /// The second result word of the last VM call.
-    pub vm_hi: u64,
+    pub host_calls: u64,
     /// The native frames' heap words while a VM call runs (a collection
     /// may run then): a chain of `[next, n, word × n]` records on the
     /// native stack, newest first, `0`-terminated. The VM pins them.
@@ -364,9 +362,6 @@ impl NativeCtx {
     }
 }
 
-/// Byte offset of [`NativeCtx::vm_hi`].
-pub const NATIVE_CTX_VM_HI: i32 = std::mem::offset_of!(NativeCtx, vm_hi) as i32;
-
 /// What native code asks of the machine that runs it, type-erased over its
 /// stack size. Each takes [`NativeCtx::machine`].
 #[derive(Clone, Copy, Debug)]
@@ -379,12 +374,6 @@ pub struct NativeHost {
     /// What a call of function word `callee` on the words comes to, the last
     /// `usize` of them dictionaries: see [`apply_value`].
     pub apply: unsafe fn(*mut std::ffi::c_void, u64, &[common::Value], usize) -> Applied,
-    /// Run the bytecode function at `pc` on `args` and return its result
-    /// word; sets the `bool` when it panicked (the VM reported it).
-    /// The second result word goes to the last `u64`.
-    /// The context is the calling native code's: its roots stay pinned
-    /// while the VM runs.
-    pub call: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u32, &[common::Value], &mut bool) -> u64,
     /// Call the function value (or code pointer) word on `args`, the last
     /// `u32` of them instance dictionaries, as `CallIndirect` does; same
     /// result and panic rules as `call`.
@@ -405,10 +394,6 @@ pub struct NativeHost {
     /// `FreeEarly` now, running the `drop`s it owes (with the context's
     /// roots pinned); `false` when one panicked (the VM reported it).
     pub free: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, bool) -> bool,
-    /// Run the host native `id` that needs the VM on `args` in `layout`
-    /// through its stub ([`host_stubs`]), as `call` runs a body; `None`
-    /// when the machine has no stub for it (nothing ran).
-    pub host: HostViaVmFn,
     /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
     /// byte) with its operand on `args`, on the runtime.
     pub ffi: HostViaVmFn,
@@ -497,14 +482,12 @@ impl NativeHost {
         print: |_, _| {},
         tasks: |_| (0, Vec::new()),
         apply: |_, _, _, _| Applied::Other,
-        call: |_, _, _, _, _| 0,
         call_value: |_, _, _, _, _, _| 0,
         resume: |_, _, _, _, _| 0,
         claim: |_, _, _| 1,
         collect: |_, _| {},
         gc: |_, _, _| 0,
         free: |_, _, _, _| true,
-        host: |_, _, _, _, _, _| None,
         ffi: |_, _, _, _, _, _| None,
         invoke: |_, _, _, _, _| None,
     };
@@ -601,8 +584,7 @@ impl NativeCtx {
             message: std::ptr::null_mut(),
             machine: std::ptr::null_mut(),
             host: NativeHost::NONE,
-            vm_calls: 0,
-            vm_hi: 0,
+            host_calls: 0,
             roots: 0,
             gc_due: 0,
             gc_epoch: 0,
@@ -765,10 +747,9 @@ pub struct NativeCode {
 }
 
 impl NativeCode {
-    /// `code_len` is the program's bytecode length; entries past it are
-    /// dropped. `sites` are the panic sites the code names.
-    pub fn new(code_len: usize, entries: Vec<NativeEntry>, sites: Vec<NativeSite>) -> Self {
-        let code_len = entries.iter().map(|e| e.pc as usize + 1).max().unwrap_or(0).max(code_len);
+    /// `sites` are the panic sites the code names.
+    pub fn new(entries: Vec<NativeEntry>, sites: Vec<NativeSite>) -> Self {
+        let code_len = entries.iter().map(|e| e.pc as usize + 1).max().unwrap_or(0);
         let mut by_pc = vec![0u32; code_len];
         let mut kept = Vec::with_capacity(entries.len());
         for e in entries {
@@ -830,14 +811,8 @@ impl NativeCode {
 /// counters and bail state.
 pub(crate) struct NativeTable {
     pub(crate) code: std::sync::Arc<NativeCode>,
-    /// Calls that ran natively / bailed to the VM (`COIL_NATIVE_STATS=1`).
+    /// Calls that ran natively (`COIL_NATIVE_STATS=1`).
     pub(crate) hits: u64,
-    pub(crate) bails: u64,
-    /// Bytecode bodies the VM ran (`CALL`s native code did not take).
-    pub(crate) vm_runs: u64,
-    /// Operand stack base of the last call that bailed: calls whose base
-    /// is above it run in the VM (`usize::MAX`: none).
-    pub(crate) quiet_above: usize,
 }
 
 impl NativeTable {
@@ -845,9 +820,6 @@ impl NativeTable {
         Self {
             code,
             hits: 0,
-            bails: 0,
-            vm_runs: 0,
-            quiet_above: usize::MAX,
         }
     }
 
@@ -901,7 +873,6 @@ pub(crate) enum NativeOutcome {
     /// The call never started (no fiber stack): the VM runs it. Native
     /// code commits at entry, so nothing else bails.
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    Bailed,
     Panicked(NativePanic),
     /// It parked ([`parks`]): the word it yielded, if any.
     Parked(ParkedCall, u64),
@@ -1091,7 +1062,7 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
     match ctx.bail {
         0 => {
             let hi = (entry.ret_words == 2).then_some(ctx.ret_hi);
-            NativeOutcome::Done(NativeResult { lo: out, hi, allocated: ctx.allocs != 0 || ctx.vm_calls != 0, frees })
+            NativeOutcome::Done(NativeResult { lo: out, hi, allocated: ctx.allocs != 0 || ctx.host_calls != 0, frees })
         }
         // Its effects stay, as a VM panic's do. A committed call cannot
         // bail, so any other flag is a panic as well.
@@ -1117,9 +1088,6 @@ pub unsafe extern "C" fn coil_native_unwind(ctx: *mut NativeCtx, code: u64, site
             // not model, the native stack) hands the call back to the VM.
             let trap = if code == TRAP_HELPER { ctx.trap } else { code };
             if !panics_natively(trap) {
-                if let Some(n) = BAIL_TRAPS.get(trap as usize) {
-                    n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
                 ctx.bail = 1;
                 return;
             }
@@ -1174,9 +1142,9 @@ pub(crate) enum Pending {
 }
 
 impl Pending {
-    pub(crate) fn into_code(self, code_len: usize) -> std::sync::Arc<NativeCode> {
+    pub(crate) fn into_code(self) -> std::sync::Arc<NativeCode> {
         match self {
-            Self::Entries(entries, sites, complete) => std::sync::Arc::new(NativeCode::new(code_len, entries, sites).with_complete(complete)),
+            Self::Entries(entries, sites, complete) => std::sync::Arc::new(NativeCode::new(entries, sites).with_complete(complete)),
             Self::Shared(code) => code,
         }
     }
@@ -1184,9 +1152,7 @@ impl Pending {
 
 /// `COIL_NATIVE_STATS`'s counts after a run with native code installed.
 pub(crate) fn print_stats(table: &NativeTable) {
-    eprintln!("native: {} calls ran natively, {} bailed to the VM", table.hits, table.bails);
-    let entries = VM_ENTRIES.load(std::sync::atomic::Ordering::Relaxed);
-    eprintln!("native: {} calls ran on the VM, {entries} VM entries from native code", table.vm_runs);
+    eprintln!("native: {} calls ran natively", table.hits);
     let vector = VECTOR_OPS.load(std::sync::atomic::Ordering::Relaxed);
     if vector > 0 {
         eprintln!("native: {vector} vector ops ran natively");
@@ -1835,7 +1801,7 @@ pub unsafe extern "C" fn coil_native_free_early(ctx: *mut NativeCtx, word: u64, 
             return unsafe { bail(ctx) };
         }
         c.committed = 1;
-        c.vm_calls += 1;
+        c.host_calls += 1;
         c.gc_epoch += 1;
         let (machine, free) = (c.machine, c.host.free);
         // SAFETY: `machine` is the live machine `host` was made for.
@@ -1875,49 +1841,10 @@ pub unsafe extern "C" fn coil_native_print(ctx: *mut NativeCtx, word: u64) -> u6
     0
 }
 
-/// A call from native code to a body that runs on the VM: the bytecode
-/// function at `pc` on the `n` words at `args`. What the VM runs cannot be
-/// taken back, so the call commits first. When the VM's run panicked (it
-/// reported the panic), native code unwinds with [`TRAP_VM_PANIC`] and the
-/// VM goes on unwinding its own frames.
-///
-/// # Safety
-/// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn coil_native_call_vm(ctx: *mut NativeCtx, pc: u64, args: *const u64, n: u64) -> u64 {
-    let c = unsafe { &mut *ctx };
-    let mut buf = [common::Value::default(); 16];
-    let Some(words) = buf.get_mut(..n as usize) else {
-        return unsafe { bail(ctx) };
-    };
-    if c.machine.is_null() {
-        return unsafe { bail(ctx) };
-    }
-    for (i, w) in words.iter_mut().enumerate() {
-        // SAFETY: `args` holds `n` words.
-        *w = common::Value::from(unsafe { *args.add(i) });
-    }
-    c.committed = 1;
-    c.vm_calls += 1;
-    c.gc_epoch += 1;
-    let mut panicked = false;
-    // SAFETY: `machine` is the live machine `host` was made for.
-    let (machine, call) = (c.machine, c.host.call);
-    let out = unsafe { call(machine, ctx, pc as u32, words, &mut panicked) };
-    let c = unsafe { &mut *ctx };
-    if panicked {
-        if c.park == 0 {
-            c.trap = TRAP_VM_PANIC;
-        }
-        return unsafe { bail(ctx) };
-    }
-    out
-}
-
 /// `CallIndirect` from native code: call the function value (or code
 /// pointer) `callee` on the `n` words at `args`, the last `dicts` of them
 /// instance dictionaries, on the VM. Commits first, as
-/// [`coil_native_call_vm`] does, with the same panic rule.
+/// the driver does, with its panic rule.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
@@ -1940,7 +1867,7 @@ pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64
         *w = common::Value::from(unsafe { *args.add(i) });
     }
     c.committed = 1;
-    c.vm_calls += 1;
+    c.host_calls += 1;
     c.gc_epoch += 1;
     let mut panicked = false;
     let (machine, call) = (c.machine, c.host.call_value);
@@ -1979,7 +1906,7 @@ pub unsafe extern "C" fn coil_native_resume(ctx: *mut NativeCtx, handle: u64, se
         return unsafe { bail(ctx) };
     }
     c.committed = 1;
-    c.vm_calls += 1;
+    c.host_calls += 1;
     c.gc_epoch += 1;
     let mut panicked = false;
     let (machine, resume) = (c.machine, c.host.resume);
@@ -2070,7 +1997,7 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         }
         // Finalizers it runs cannot be taken back.
         c.committed = 1;
-        c.vm_calls += 1;
+        c.host_calls += 1;
         c.gc_epoch += 1;
         let mut panicked = false;
         // SAFETY: `machine` is the live machine `host` was made for.
@@ -2086,12 +2013,10 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         .get(id as usize)
         .is_some_and(|h| h.via_vm)
     {
-        if let Some(out) = unsafe { host_invoke(ctx, id, layout, args, n) } {
-            return out;
-        }
-        let host = unsafe { (*ctx).host.host };
-        note_host_call(id as usize, HostPath::Stub);
-        return unsafe { host_via_vm(ctx, host, id, layout, args, n) };
+        return match unsafe { host_invoke(ctx, id, layout, args, n) } {
+            Some(out) => out,
+            None => unsafe { bail(ctx) },
+        };
     }
     let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
         return unsafe { bail(ctx) };
@@ -2234,8 +2159,7 @@ impl Drop for GenFiber {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: u64, args: *const u64, n: u64) -> u64 {
     let ffi = unsafe { (*ctx).host.ffi };
-    let kind = [common::Instruction::FfiLoad as u8, common::Instruction::DeclareFFI as u8].iter().position(|o| u64::from(*o) == op).unwrap_or(2);
-    FFI_CALLS[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _kind = [common::Instruction::FfiLoad as u8, common::Instruction::DeclareFFI as u8].iter().position(|o| u64::from(*o) == op).unwrap_or(2);
     unsafe { host_on_machine(ctx, ffi, op, operand, args, n, false) }
 }
 
@@ -2300,22 +2224,12 @@ unsafe fn host_invoke(
     }
 }
 
-/// [`coil_native_host`] of a native that needs the VM: its stub runs in a
-/// nested VM execution ([`NativeHost::host`]), as [`coil_native_call_vm`]
-/// runs a body, with the same commit and panic rules.
+/// Run a host entry on the machine, with the commit and panic rules of a
+/// call.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
-unsafe fn host_via_vm(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
-    unsafe { host_on_machine(ctx, host, id, layout, args, n, true) }
-}
-
-/// [`host_via_vm`], or (`!via_vm`) a host entry that runs in Rust and
-/// enters no VM stub.
-///
-/// # Safety
-/// As [`host_via_vm`].
-unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u64, args: *const u64, n: u64, via_vm: bool) -> u64 {
+unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layout: u64, args: *const u64, n: u64, _via_vm: bool) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
     let Some(words) = buf.get_mut(..n as usize) else {
@@ -2330,10 +2244,7 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layou
     }
     let committed = std::mem::replace(&mut c.committed, 1);
     // It may allocate (the call reports `allocated`).
-    c.vm_calls += 1;
-    if via_vm {
-        HOST_VIA_VM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
+    c.host_calls += 1;
     c.gc_epoch += 1;
     let mut panicked = false;
     let machine = c.machine;
@@ -2341,7 +2252,7 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: HostViaVmFn, id: u64, layou
     let out = unsafe { host(machine, ctx, id, layout, words, &mut panicked) };
     let c = unsafe { &mut *ctx };
     let Some(out) = out else {
-        // No stub: nothing ran.
+        // Nothing ran.
         c.committed = committed;
         return unsafe { bail(ctx) };
     };
@@ -2513,83 +2424,6 @@ pub unsafe extern "C" fn coil_native_ipow(a: i64, b: i64, out: *mut i64) -> i64 
 /// `COIL_NATIVE_STATS`.
 pub static VECTOR_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Bytecode runs native code started so far (a body, a host stub, a
-/// generator, a `drop`): what a native run still needs the VM for.
-pub static VM_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Process-wide counts of what a native run still does on the VM, for the
-/// native inventory (`COIL_NATIVE_INVENTORY`, `scripts/native_inventory.py`):
-/// calls that bailed to a VM re-run, calls the VM ran because their body
-/// has no native code, and host calls that ran in a VM stub.
-pub static BAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// See [`BAILS`].
-pub static VM_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Bails before a commit by trap code ([`TRAP_HELPER`] `0`: an operation
-/// native code does not model; [`TRAP_STACK`]: the stack budget), for the
-/// inventory.
-pub static BAIL_TRAPS: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
-/// See [`BAILS`].
-pub static HOST_VIA_VM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// How a host call from native code ran, for the inventory.
-#[derive(Clone, Copy)]
-pub(crate) enum HostPath {
-    /// On the runtime ([`crate::runtime::invoke_ordinary`]).
-    Runtime,
-    /// On the machine in Rust (task ops, regions): `NativeHost::invoke`.
-    Machine,
-    /// On a one-op VM stub ([`HOST_VIA_VM`]).
-    Stub,
-}
-
-/// Host calls native code made, by host id and [`HostPath`].
-static HOST_CALLS: [[std::sync::atomic::AtomicU64; 3]; 256] = [const { [const { std::sync::atomic::AtomicU64::new(0) }; 3] }; 256];
-
-/// FFI ops native code ran on the machine (`FfiLoad`, `DeclareFFI`, a call).
-static FFI_CALLS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
-
-/// Count a host call `id` that ran on `path`.
-pub(crate) fn note_host_call(id: usize, path: HostPath) {
-    if let Some(n) = HOST_CALLS.get(id) {
-        n[path as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// The [`VM_ENTRIES`], [`BAILS`], [`VM_RUNS`] and [`HOST_VIA_VM`] counts,
-/// then the non-zero [`BAIL_TRAPS`] as `bail_trap_<code>` and the
-/// [`HOST_CALLS`] as `host_runtime:<name>` / `host_machine:<name>` /
-/// `host_stub:<name>`.
-pub fn vm_use_counts() -> Vec<(String, u64)> {
-    use std::sync::atomic::Ordering::Relaxed;
-    let mut out = vec![
-        ("vm_entries".to_string(), VM_ENTRIES.load(Relaxed)),
-        ("bails".to_string(), BAILS.load(Relaxed)),
-        ("vm_runs".to_string(), VM_RUNS.load(Relaxed)),
-        ("host_via_vm".to_string(), HOST_VIA_VM.load(Relaxed)),
-    ];
-    for (code, n) in BAIL_TRAPS.iter().enumerate() {
-        let n = n.load(Relaxed);
-        if n != 0 {
-            out.push((format!("bail_trap_{code}"), n));
-        }
-    }
-    for (op, n) in ["ffi_load", "ffi_declare", "ffi_call"].into_iter().zip(FFI_CALLS.iter().map(|n| n.load(Relaxed))) {
-        if n != 0 {
-            out.push((format!("host_runtime:{op}"), n));
-        }
-    }
-    let hosts = direct_host_natives();
-    for (id, paths) in HOST_CALLS.iter().enumerate() {
-        let name = hosts.get(id).map_or_else(|| id.to_string(), |h| h.name.clone());
-        for (kind, n) in ["runtime", "machine", "stub"].into_iter().zip(paths.iter().map(|n| n.load(Relaxed))) {
-            if n != 0 {
-                out.push((format!("host_{kind}:{name}"), n));
-            }
-        }
-    }
-    out
-}
-
 /// A `ByteScan` or `VecLoop` native code cannot reduce to lane code, run
 /// by the runtime's lane kernels ([`crate::vm::lanes_on_frame`]). `kind` bit 0: a
 /// loop (else a scan); bit 1: the loop writes the heap (it commits the
@@ -2666,7 +2500,6 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_unwind", coil_native_unwind as *const u8),
         ("coil_native_print", coil_native_print as *const u8),
         ("coil_native_host", coil_native_host as *const u8),
-        ("coil_native_call_vm", coil_native_call_vm as *const u8),
         ("coil_native_call_value", coil_native_call_value as *const u8),
         ("coil_native_resume", coil_native_resume as *const u8),
         ("coil_native_coro_done", coil_native_coro_done as *const u8),
@@ -2681,4 +2514,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 35;
+const HELPERS: usize = 34;

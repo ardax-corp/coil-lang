@@ -376,7 +376,7 @@ fn interpreted(program: &CompiledExpansion) -> Arc<NativeCode> {
         let pcs = program.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
         let prepared = coil_mir_interp::prepare(program.mir.to_vec(), &pcs);
         let complete = prepared.refused.is_empty();
-        let code = NativeCode::new(0, prepared.entries, prepared.sites).with_complete(complete).with_keep(prepared.keep);
+        let code = NativeCode::new(prepared.entries, prepared.sites).with_complete(complete).with_keep(prepared.keep);
         Arc::new(code)
     });
     Arc::clone(code).downcast::<NativeCode>().expect("this host made it")

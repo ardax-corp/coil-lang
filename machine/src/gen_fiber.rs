@@ -239,7 +239,6 @@ fn step_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) ->
             finish(gc);
             Some(GenStep::Panicked(p))
         }
-        crate::native::NativeOutcome::Bailed => None,
     }
 }
 
@@ -319,15 +318,6 @@ fn step_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> 
                 }
                 // Fibers switch: nothing parks on one.
                 crate::native::NativeOutcome::Parked(..) => unreachable!("a parked call on a fiber"),
-                // Before its first yield: nothing it did shows, and the
-                // other engine runs the body from the start.
-                crate::native::NativeOutcome::Bailed => {
-                    with_mut(gc, |c| c.started = false);
-                    if let Some(t) = h.rt().native.as_deref_mut() {
-                        t.bails += 1;
-                    }
-                    None
-                }
             }
         }
     }

@@ -84,13 +84,6 @@ impl Drop for TaskFiber {
     }
 }
 
-/// Whether programs native code covers run on the driver
-/// (`COIL_NATIVE_DRIVER=0`: the VM runs them, calling native code per body).
-pub(crate) fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_NATIVE_DRIVER").is_none_or(|v| v != "0"))
-}
-
 /// The program a driver runs: its code (for the prologue and the
 /// snapshot pool), the native code for it and its debug tables.
 pub(crate) struct DriverProgram {
@@ -99,7 +92,6 @@ pub(crate) struct DriverProgram {
     pub(crate) constants: Arc<Vec<u64>>,
     pub(crate) native: Arc<NativeCode>,
     pub(crate) debug: ProgramDebug,
-    pub(crate) base_dir: Option<std::path::PathBuf>,
     /// What a thread it spawns runs (`None`: it spawns none).
     pub(crate) thread_program: Option<Arc<crate::thread::ThreadProgram>>,
     /// Where spawned threads print (the test harness's capture).
@@ -157,14 +149,12 @@ impl<'a> Driver<'a> {
         print: Driver::host_print,
         tasks: Driver::host_tasks,
         apply: Driver::host_apply,
-        call: Driver::host_call,
         call_value: Driver::host_call_value,
         claim: Driver::host_claim,
         resume: Driver::host_resume,
         collect: Driver::host_collect,
         gc: Driver::host_gc,
         free: Driver::host_free,
-        host: |_, _, _, _, _, _| None,
         ffi: Driver::host_ffi,
         invoke: Driver::host_invoke,
     };
@@ -364,10 +354,6 @@ impl<'a> Driver<'a> {
             }
             NativeOutcome::Panicked(p) => {
                 self.native_panic(p);
-                None
-            }
-            NativeOutcome::Bailed => {
-                self.report("native driver: a native call could not start (no stack)", None, Vec::new(), false);
                 None
             }
             // Only a task body or a generator parks, and neither comes here.
@@ -612,7 +598,7 @@ impl<'a> Driver<'a> {
     }
 
     fn locator(&self) -> crate::locate::Locator<'_> {
-        crate::locate::Locator { debug: &self.program.debug, base_dir: self.program.base_dir.as_deref() }
+        crate::locate::Locator { debug: &self.program.debug }
     }
 
     /// `--cow-report`: the copies copy-on-write made, by source line, most
@@ -726,17 +712,6 @@ impl<'a> Driver<'a> {
     unsafe fn host_print(raw: *mut c_void, s: &str) {
         // SAFETY: native code passes back the driver it was given.
         unsafe { Self::from_raw(raw) }.rt.print(s);
-    }
-
-    unsafe fn host_call(raw: *mut c_void, ctx: *mut NativeCtx, pc: u32, args: &[Value], panicked: &mut bool) -> u64 {
-        // SAFETY: native code passes back the driver it was given.
-        let d = unsafe { Self::from_raw(raw) };
-        let out = d.rooted(ctx, |d| d.call(pc as usize, args));
-        *panicked = out.is_none();
-        let (lo, hi) = out.unwrap_or_default();
-        // SAFETY: the calling native code's live context.
-        unsafe { (*ctx).vm_hi = hi.unwrap_or(0) };
-        lo
     }
 
     unsafe fn host_call_value(raw: *mut c_void, ctx: *mut NativeCtx, callee: u64, args: &[Value], dicts: u32, panicked: &mut bool) -> u64 {
@@ -853,7 +828,6 @@ impl<'a> Driver<'a> {
             _ => Some(Invoked::Panic("native driver: unknown host op".into())),
         };
         if out.is_some() {
-            crate::native::note_host_call(fn_id, crate::native::HostPath::Runtime);
         }
         out
     }
@@ -988,7 +962,7 @@ impl Driver<'_> {
 
     fn task_scope_open(&mut self) -> Invoked {
         // Every task switches at one level: the driver runs no code nested.
-        let s = self.rt.sched.get_or_insert_with(|| Box::new(crate::task::Scheduler::new(0)));
+        let s = self.rt.sched.get_or_insert_with(|| Box::new(crate::task::Scheduler::new()));
         Invoked::Value(Value::from(s.open_scope()).bits())
     }
 
@@ -1324,7 +1298,7 @@ impl Driver<'_> {
                 }
             }
             NativeOutcome::Panicked(p) => self.native_panic(p),
-            NativeOutcome::Bailed | NativeOutcome::Parked(..) => self.report("native driver: a task could not start", None, Vec::new(), false),
+            NativeOutcome::Parked(..) => self.report("native driver: a task could not start", None, Vec::new(), false),
         }
     }
 
@@ -1396,31 +1370,25 @@ impl GcHost for Driver<'_> {
     fn host_roots(&self, visit: &mut dyn FnMut(HostRoot)) {
         use crate::memory::RootKind;
         for v in &self.gen_running {
-            visit(HostRoot::Handle(v.heap_addr(), RootKind::Ambiguous));
+            visit(HostRoot(v.heap_addr(), RootKind::Ambiguous));
         }
         // Parked tasks' frames, pinned.
         for t in self.parked_tasks.values() {
-            t.call.for_each_word(|w| visit(HostRoot::Handle(Value::from(w).heap_addr(), RootKind::Ambiguous)));
+            t.call.for_each_word(|w| visit(HostRoot(Value::from(w).heap_addr(), RootKind::Ambiguous)));
         }
         // The task side not running: its native frames' words and argument
         // roots, pinned.
         #[cfg(not(target_family = "wasm"))]
         for f in self.tasks.values() {
             for v in f.arg_roots.iter().chain(&f.gen_running) {
-                visit(HostRoot::Handle(v.heap_addr(), RootKind::Ambiguous));
+                visit(HostRoot(v.heap_addr(), RootKind::Ambiguous));
             }
             for &(ctx, _) in &f.native_roots {
                 // SAFETY: a parked call's frames keep their contexts.
-                unsafe { &*ctx }.for_each_root(|w, _| visit(HostRoot::Handle(Value::from(unsafe { *w }).heap_addr(), RootKind::Ambiguous)));
+                unsafe { &*ctx }.for_each_root(|w, _| visit(HostRoot(Value::from(unsafe { *w }).heap_addr(), RootKind::Ambiguous)));
             }
         }
     }
-
-    fn slot(&self, _idx: usize) -> Value {
-        Value::default()
-    }
-
-    fn set_slot(&mut self, _idx: usize, _v: Value) {}
 
     /// Not while auto-par workers run on the heap.
     fn can_move(&self) -> bool {

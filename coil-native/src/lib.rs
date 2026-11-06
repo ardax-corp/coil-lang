@@ -31,7 +31,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
+    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -382,41 +382,26 @@ struct Plan {
     compile: Vec<usize>,
     by_label: HashMap<Label, usize>,
     refused: Vec<(String, String)>,
-    /// Bodies compiled code calls that stay on the VM, with their entry
-    /// PCs: native code runs them through the machine.
-    vm_calls: HashMap<usize, u32>,
     /// Compiled bodies that may move an array's storage (a push, a host
-    /// call, a VM call, or a call to such a body): their callers re-read
+    /// call, or a call to such a body): their callers re-read
     /// the arrays they view after the call.
     moves: HashSet<usize>,
-    /// Compiled bodies in which a collection may run (they allocate or
-    /// make a VM call, or call such a body): they have safepoints, and
+    /// Compiled bodies in which a collection may run (they allocate,
+    /// or call such a body): they have safepoints, and
     /// their callers root the heap words they hold across the call.
     may_gc: HashSet<usize>,
     /// Entry PCs of the bodies by label, for function values.
     pcs: HashMap<Label, u32>,
-    /// Bodies that may run VM code ([`runs_vm_code`], a VM call, or a
-    /// call of such a body): calls of them link a `NativeCtx::calls` record.
+    /// Bodies that may reach the runtime ([`runs_vm_code`], or a call of
+    /// such a body): calls of them link a `NativeCtx::calls` record.
     vm_reach: HashSet<usize>,
     /// How many leading parameters each compiled body reads
-    /// ([`used_params`]): a call may pass fewer words, as the VM's `CALL`
+    /// ([`used_params`]): a call may pass fewer words, as a call's
     /// arity may differ from the body's MIR parameters.
     used_params: HashMap<usize, usize>,
     /// Bodies that may be a type's `drop` (a call claims its finalizer).
     drops: HashSet<usize>,
 }
-
-fn plan(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Plan {
-    plan_without(bodies, &HashMap::new(), entry_pcs)
-}
-
-/// Whether native code may call body `b` through the VM: it has an entry
-/// PC and returns at most one word.
-fn vm_callable(b: &NativeBody, entry_pcs: &HashMap<String, u32>) -> Option<u32> {
-    let pc = *entry_pcs.get(&b.name)?;
-    (b.mir.params.len() <= 16).then_some(pc)
-}
-
 
 /// What [`define_all`] made: the declared ids, the bodies defined, the
 /// panic sites their code names, and the stack maps of each function.
@@ -530,16 +515,10 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
             Err(why) => refused.push((b.name.clone(), why)),
         }
     }
-    // A call to a body that does not compile goes through the VM; drop
-    // the bodies that call one the VM cannot run for them, to a fixpoint.
+    // A body that calls one that does not compile does not compile either.
     loop {
-        let bad: Vec<usize> = ok
-            .iter()
-            .filter(|(_, callees)| {
-                callees.iter().any(|&c| !ok.contains_key(&c) && vm_callable(&bodies[c], entry_pcs).is_none())
-            })
-            .map(|(&i, _)| i)
-            .collect();
+        let bad: Vec<usize> =
+            ok.iter().filter(|(_, callees)| callees.iter().any(|c| !ok.contains_key(c))).map(|(&i, _)| i).collect();
         if bad.is_empty() {
             break;
         }
@@ -548,21 +527,10 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
             refused.push((bodies[i].name.clone(), "calls a body native code cannot call".to_string()));
         }
     }
-    let mut vm_calls = HashMap::new();
-    for callees in ok.values() {
-        for &c in callees {
-            if !ok.contains_key(&c)
-                && let Some(pc) = vm_callable(&bodies[c], entry_pcs)
-            {
-                vm_calls.insert(c, pc);
-            }
-        }
-    }
     let mut moves: HashSet<usize> = ok
         .iter()
-        .filter(|(i, callees)| {
-            callees.iter().any(|c| vm_calls.contains_key(c))
-                || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
+        .filter(|(i, _)| {
+                bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
                         MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::VecLoop { .. }
@@ -584,10 +552,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
     }
     let mut may_gc: HashSet<usize> = ok
         .iter()
-        .filter(|(i, callees)| {
-            callees.iter().any(|c| vm_calls.contains_key(c))
-                || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(allocates)
-        })
+        .filter(|(i, _)| bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(allocates))
         .map(|(&i, _)| i)
         .collect();
     loop {
@@ -616,9 +581,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
     let has_drops = bodies.iter().any(|b| b.name.ends_with("::drop") && b.mir.params.len() == 1);
     let mut vm_reach: HashSet<usize> = ok
         .iter()
-        .filter(|(i, callees)| {
-            callees.iter().any(|c| vm_calls.contains_key(c)) || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| runs_vm_code(inst, has_drops))
-        })
+        .filter(|(i, _)| bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| runs_vm_code(inst, has_drops)))
         .map(|(&i, _)| i)
         .collect();
     loop {
@@ -635,7 +598,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
     let used_params = compile_used_params(bodies, ok.keys());
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs, drops, vm_reach, used_params }
+    Plan { compile, by_label, refused, moves, may_gc, pcs, drops, vm_reach, used_params }
 }
 
 /// An instruction that may run VM code: a function value's call, a free
@@ -1080,7 +1043,6 @@ struct Ids {
     /// `ByteScan` / `VecLoop` (`coil_native_vector`).
     vector: FuncId,
     /// Calls to bodies on the VM (commit the call).
-    call_vm: FuncId,
     call_value: FuncId,
     resume: FuncId,
     coro_done: FuncId,
@@ -1216,7 +1178,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     s9.params.extend((0..9).map(|_| AbiParam::new(types::I64)));
     s9.returns.push(AbiParam::new(types::I64));
     let vector = module.declare_function("coil_native_vector", Linkage::Import, &s9).map_err(e)?;
-    let call_vm = trampoline(module, "coil_native_call_vm", &s4, &mut tramps)?;
     let call_value = trampoline(module, "coil_native_call_value", &s5, &mut tramps)?;
     let resume = trampoline(module, "coil_native_resume", &s4, &mut tramps)?;
     let coro_done = module.declare_function("coil_native_coro_done", Linkage::Import, &s2).map_err(e)?;
@@ -1262,7 +1223,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
         host,
         ffi,
         vector,
-        call_vm,
         call_value,
         resume,
         coro_done,
@@ -1351,7 +1311,6 @@ struct Lower<'a> {
     host: FuncRef,
     ffi: FuncRef,
     vector: FuncRef,
-    call_vm: FuncRef,
     call_value: FuncRef,
     resume: FuncRef,
     coro_done: FuncRef,
@@ -1473,7 +1432,6 @@ impl<'a> Lower<'a> {
         let host = module.declare_func_in_func(ids.host, func);
         let ffi = module.declare_func_in_func(ids.ffi, func);
         let vector = module.declare_func_in_func(ids.vector, func);
-        let call_vm = module.declare_func_in_func(ids.call_vm, func);
         let call_value = module.declare_func_in_func(ids.call_value, func);
         let resume = module.declare_func_in_func(ids.resume, func);
         let coro_done = module.declare_func_in_func(ids.coro_done, func);
@@ -1528,8 +1486,7 @@ impl<'a> Lower<'a> {
             host,
             ffi,
             vector,
-            call_vm,
-        call_value,
+            call_value,
         resume,
         coro_done,
         gen_yield,
@@ -2941,27 +2898,6 @@ impl<'a> Lower<'a> {
     fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, target: Label, args: &[ValueId]) -> Result<(), String> {
         let (dest, dest_hi, target) = (&dest, &dest_hi, &target);
         let callee = *self.by_label.get(target).ok_or("unknown callee")?;
-        if let Some(&pc) = self.plan.vm_calls.get(&callee) {
-            let pcv = self.b.ins().iconst(types::I64, i64::from(pc));
-            let p = self.words_slot(f, args);
-            let n = self.b.ins().iconst(types::I64, args.len() as i64);
-            let roots = self.push_roots(f);
-            let prev = self.push_call();
-            let call = self.b.ins().call(self.call_vm, &[self.ctx, pcv, p, n]);
-            let w = self.b.inst_results(call)[0];
-            self.pop_call(prev);
-            self.pop_roots(roots);
-            let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-            self.bail_if(flag, TRAP_HELPER);
-            self.drop_views();
-            self.set(f, *dest, w);
-            if let Some(h) = dest_hi {
-                let x = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_VM_HI);
-                self.set(f, *h, x);
-            }
-            self.view_of(f, *dest);
-            return Ok(());
-        }
         let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
         let sig = self.b.func.dfg.ext_funcs[fref].signature;
         let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
@@ -3423,7 +3359,7 @@ impl<'a> Lower<'a> {
 pub fn describe(p: &NativeProgram) -> String {
     let refused: HashSet<&str> = p.refused.iter().map(|(n, _)| n.as_str()).collect();
     format!(
-        "native: {} compiled, {} installed, {} on the VM",
+        "native: {} compiled, {} installed, {} refused",
         p.compiled.len(),
         p.entries.len(),
         refused.len()

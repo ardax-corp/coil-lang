@@ -1,15 +1,12 @@
 //! Source locations and function names for panic reports, from a
 //! program's debug tables: what the VM and the native driver both print.
 
-use std::path::{Path, PathBuf};
 
 use common::ProgramDebug;
 
 /// A program's debug tables, as panic reports read them.
 pub(crate) struct Locator<'a> {
     pub(crate) debug: &'a ProgramDebug,
-    /// Directory of the entry script (relative source paths).
-    pub(crate) base_dir: Option<&'a Path>,
 }
 
 impl Locator<'_> {

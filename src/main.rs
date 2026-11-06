@@ -130,7 +130,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str, cac
             exit(1);
         }
     };
-    // `coil compile --jit`: keep the MIR native code is made from.
+    // `coil compile`: keep the MIR the program runs from.
     let bodies = compiler::native_mir::take_native_capture();
     let bytes = archive_bytes(pipeline, constants, &bodies);
     write_archive(pipeline, output, &bytes);
@@ -171,7 +171,7 @@ fn archive_bytes(pipeline: &mut Pipeline, constants: Vec<u64>, bodies: &[compile
     let full = pipeline.program_debug_full();
     let level = pipeline.debug_level();
     if !bodies.is_empty() {
-        program.native_mir = encode_section(bodies, &entry_pcs(&full));
+        program.native_mir = compiler::native_mir::archive::encode(bodies, &entry_pcs(&full));
     }
     program.set_debug(full, level);
 
@@ -180,7 +180,7 @@ fn archive_bytes(pipeline: &mut Pipeline, constants: Vec<u64>, bodies: &[compile
         Err(e) => fail_and_exit(
             pipeline,
             ErrorCode::IoError,
-            format!("Unable to serialize bytecode archive: {e}"),
+            format!("Unable to serialize archive: {e}"),
         ),
     }
 }
@@ -353,7 +353,7 @@ fn maybe_warn_stale_archive(
         pipeline.emit_spanless_warning(
             ErrorCode::IoError,
             format!(
-                "Bytecode archive `{archive}` may be stale (recorded sources are newer). Recompile with `coil compile … -o {archive}` or run `coil <entry.coil>` directly."
+                "Archive `{archive}` may be stale (recorded sources are newer). Recompile with `coil compile … -o {archive}` or run `coil <entry.coil>` directly."
             ),
         );
     }
@@ -463,29 +463,21 @@ fn interprets() -> bool {
     cfg!(target_family = "wasm") || RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The section of a `.ccoil` for `bodies`, for the engine this host runs.
-fn encode_section(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>) -> Vec<u8> {
-    #[cfg(not(target_family = "wasm"))]
-    return coil_native::section::encode(bodies, pcs);
-    #[cfg(target_family = "wasm")]
-    coil_mir_interp::encode_section(bodies, pcs)
-}
-
 /// Hand the captured MIR to the engine that runs it for the coming run.
 fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common::ProgramDebug) {
     install_bodies(bodies, &entry_pcs(debug));
 }
 
-/// Hand `bodies` to the engine that runs them.
+/// Hand `bodies` to the engine that runs them. The interpreter runs what
+/// native code refuses.
 fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::collections::HashMap<String, u32>) {
-    if !interprets() {
-        #[cfg(not(target_family = "wasm"))]
-        install_native_bodies(&bodies, pcs);
+    #[cfg(not(target_family = "wasm"))]
+    if !interprets() && install_native_bodies(&bodies, pcs) {
         return;
     }
     let program = coil_mir_interp::prepare(bodies, pcs);
     for (name, why) in &program.refused {
-        eprintln!("warning: `{name}` runs on the VM: {why}");
+        eprintln!("error: `{name}` cannot run: {why}");
     }
     let complete = program.refused.is_empty();
     // Its entries point into it for the rest of the process.
@@ -493,8 +485,7 @@ fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::coll
     machine::native::install_for_next_run(program.entries, program.sites, complete);
 }
 
-/// Install an archive's native MIR section for the coming run; a section
-/// that cannot be read leaves the run on the VM. `name` is what the warning
+/// Install an archive's MIR for the coming run. `name` is what the error
 /// says.
 fn install_section(name: &str, section: &[u8]) {
     if section.is_empty() {
@@ -502,39 +493,48 @@ fn install_section(name: &str, section: &[u8]) {
     }
     match compiler::native_mir::archive::decode(section) {
         Ok((bodies, pcs)) => install_bodies(bodies, &pcs),
-        Err(e) => eprintln!("warning: `{name}`: {e}; running on the VM"),
+        Err(e) => {
+            eprintln!("error: `{name}`: {e}");
+            exit(1);
+        }
     }
 }
 
-/// Function name to bytecode entry PC.
+/// Function name to body entry.
 fn entry_pcs(debug: &common::ProgramDebug) -> std::collections::HashMap<String, u32> {
     debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect()
 }
 
-/// JIT `bodies` and install them for the coming run.
+/// JIT `bodies` and install them for the coming run: `false`, with nothing
+/// installed, when native code cannot run the whole program.
 #[cfg(not(target_family = "wasm"))]
 fn install_native_bodies(
     bodies: &[compiler::native_mir::NativeBody],
     pcs: &std::collections::HashMap<String, u32>,
-) {
-    match coil_native::jit(bodies, pcs) {
-        Ok(program) => {
-            if std::env::var_os("COIL_NATIVE_STATS").is_some() {
-                eprintln!("{}", coil_native::describe(&program));
-                if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
-                    for name in &program.compiled {
-                        eprintln!("  native: {name}");
-                    }
-                    for (name, why) in &program.refused {
-                        eprintln!("  vm: {name}: {why}");
-                    }
-                }
-            }
-            let complete = program.refused.is_empty();
-            machine::native::install_for_next_run(program.entries, program.sites, complete);
+) -> bool {
+    let program = match coil_native::jit(bodies, pcs) {
+        Ok(program) => program,
+        Err(e) => {
+            eprintln!("warning: native compile failed ({e}); running on the interpreter");
+            return false;
         }
-        Err(e) => eprintln!("warning: native compile failed ({e}); running on the VM"),
+    };
+    if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+        eprintln!("{}", coil_native::describe(&program));
+        if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+            for name in &program.compiled {
+                eprintln!("  native: {name}");
+            }
+        }
     }
+    if !program.refused.is_empty() {
+        for (name, why) in &program.refused {
+            eprintln!("warning: `{name}` has no native code: {why}; running on the interpreter");
+        }
+        return false;
+    }
+    machine::native::install_for_next_run(program.entries, program.sites, true);
+    true
 }
 
 /// `coil FILE` from a build-cache hit: what [`cmd_build_and_run`] does after
@@ -916,7 +916,6 @@ mod tests {
         archive_is_stale, archive_mtime, archive_source_mtime, same_source_path,
     };
     use super::*;
-    use common::Byte;
     use std::path::PathBuf;
 
     fn unique_tmp(label: &str) -> PathBuf {

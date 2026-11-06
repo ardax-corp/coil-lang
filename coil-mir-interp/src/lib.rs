@@ -260,7 +260,7 @@ fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mu
 /// must be what went in. Running that copy tests the format on a whole
 /// corpus.
 fn through_archive(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> Vec<NativeBody> {
-    let bytes = encode_section(&bodies, entry_pcs);
+    let bytes = compiler::native_mir::archive::encode(&bodies, entry_pcs);
     let (back, pcs) = compiler::native_mir::archive::decode(&bytes).expect("the archive format reads what it wrote");
     assert_eq!(back.len(), bodies.len(), "bodies through the archive format");
     for (a, b) in bodies.iter().zip(&back) {
@@ -270,15 +270,6 @@ fn through_archive(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) ->
         assert_eq!(entry_pcs.get(&a.name), pcs.get(&a.name), "{}", a.name);
     }
     back
-}
-
-/// The MIR section of a `.ccoil` for this engine: every body, as it runs
-/// them all.
-pub fn encode_section(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Vec<u8> {
-    use compiler::native_mir::archive::{self, ArchiveEntry};
-    let entries: Vec<ArchiveEntry<'_>> =
-        bodies.iter().map(|body| ArchiveEntry { body, pc: entry_pcs.get(&body.name).copied(), stub: false }).collect();
-    archive::encode(&entries)
 }
 
 /// Make `bodies` runnable. `entry_pcs` maps a body's name to its bytecode

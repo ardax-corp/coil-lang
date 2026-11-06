@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use common::Value;
 
 use crate::memory::{Heap, Object};
-use crate::thread::{is_immediate_value, ThreadProgram};
+use crate::thread::is_immediate_value;
 
 /// C1 share whitelist: immediates, immortal unit enums, Arc handles already
 /// on this Heap. Arrays / strings / Fn / cycles stay isolate.

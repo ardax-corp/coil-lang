@@ -2287,11 +2287,6 @@ fn program_mir(e: &crate::macros::CompiledExpansion) -> Vec<u8> {
     if e.mir.is_empty() {
         return Vec::new();
     }
-    let pcs: HashMap<&str, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.as_str(), s.entry_pc)).collect();
-    let entries: Vec<_> = e
-        .mir
-        .iter()
-        .map(|body| crate::mir::archive::ArchiveEntry { body, pc: pcs.get(body.name.as_str()).copied(), stub: false })
-        .collect();
-    crate::mir::archive::encode(&entries)
+    let pcs: HashMap<String, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    crate::mir::archive::encode(&e.mir, &pcs)
 }

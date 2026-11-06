@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use common::{Byte, ProgramDebug};
 
 /// Inputs the compiler can supply without depending on `machine`.
 pub struct VmHostSpec<'a> {

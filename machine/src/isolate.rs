@@ -123,7 +123,6 @@ impl Isolate {
             constants: Arc::clone(&self.constants),
             native: Arc::clone(&self.native),
             debug: self.debug.clone(),
-            base_dir: None,
             thread_program: None,
             shared_print: None,
         };

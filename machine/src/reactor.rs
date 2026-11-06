@@ -16,9 +16,8 @@ use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
 use crate::ffi::{DloadGate, Natives};
 use crate::thread::{
-    HostStateGuard, JoinState, LiveThreadRegistry, PortableValue, SharedPrintWriter, SpawnArg,
-    ThreadErrorTag, ThreadProgram, ThreadSpawnContext, WORKER_STACK_SLOTS, spawn_arg_to_value,
-    value_to_portable,
+    JoinState, LiveThreadRegistry, PortableValue, SpawnArg,
+    ThreadErrorTag, ThreadProgram, ThreadSpawnContext,
 };
 
 /// No OS threads on this target (wasm without the atomics feature): the pool
@@ -902,7 +901,7 @@ mod tests {
             entry: returns_data,
             data: imm as usize,
         };
-        Some(Arc::new(crate::native::NativeCode::new(2, vec![entry], Vec::new()).with_complete(true)))
+        Some(Arc::new(crate::native::NativeCode::new(vec![entry], Vec::new()).with_complete(true)))
     }
 
     fn submit_const_job(reactor: &Arc<Reactor>, imm: i32) -> Arc<JoinState> {

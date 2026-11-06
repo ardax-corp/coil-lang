@@ -18,12 +18,12 @@ rkyv = "0.8.12"
 serde = { version = "1", features = ["derive"] }
 stacker = "0.1.25"
 sha2 = "0.10"
-machine = { path = "../machine", optional = true, default-features = false, features = ["vm_profile"] }
+machine = { path = "../machine", optional = true, default-features = false, features = [] }
 
 [dev-dependencies]
 # Lib tests format `Instruction`/`Byte` with Debug, also under `--release` (#1455).
 common = { path = "../common", features = ["debug-fmt"] }
-machine = { path = "../machine", default-features = false, features = ["vm_profile"] }
+machine = { path = "../machine", default-features = false }
 # Integration tests run user and built-in derive macros on the VM.
 comptime = { path = "../comptime" }
 proptest = "1"
@@ -42,6 +42,3 @@ required-features = ["vm-wire"]
 name = "namespace"
 required-features = ["vm-wire"]
 
-[[test]]
-name = "perf_metrics"
-required-features = ["vm-wire"]

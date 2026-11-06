@@ -32,44 +32,24 @@ use crate::mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 9;
+const FORMAT: u8 = 10;
 const NO_PC: u32 = u32::MAX;
 
-/// One body of a section.
-pub struct ArchiveEntry<'a> {
-    pub body: &'a NativeBody,
-    /// Its bytecode entry PC, if it has one.
-    pub pc: Option<u32>,
-    /// Only what a call to it needs (its name, PC, label and shape): the
-    /// body stays on the VM.
-    pub stub: bool,
-}
-
-/// The section of `entries`.
-pub fn encode(entries: &[ArchiveEntry<'_>]) -> Vec<u8> {
+/// The section for `bodies`, each with its entry from `entry_pcs`.
+pub fn encode(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Vec<u8> {
     let mut w = Writer(Vec::new());
     w.0.extend_from_slice(MAGIC);
     w.u8(FORMAT);
-    w.u32(entries.len() as u32);
-    for entry in entries {
-        let body = entry.body;
+    w.u32(bodies.len() as u32);
+    for body in bodies {
         w.str(&body.name);
-        w.u32(entry.pc.unwrap_or(NO_PC));
+        w.u32(entry_pcs.get(&body.name).copied().unwrap_or(NO_PC));
         w.u32(body.entry.map_or(u32::MAX, |l| l.0));
-        if entry.stub {
-            w.u8(BODY_STUB);
-            w.u32(body.mir.params.len() as u32);
-            w.u8(u8::from(body.mir.ret_hi_ty.is_some()));
-        } else {
-            w.u8(BODY_FULL);
-            func(&mut w, &body.mir);
-        }
+        func(&mut w, &body.mir);
     }
     w.0
 }
 
-const BODY_FULL: u8 = 0;
-const BODY_STUB: u8 = 1;
 
 /// The bodies of a section and their entry PCs.
 pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), String> {
@@ -88,20 +68,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
         let name = r.str()?;
         let pc = r.u32()?;
         let label = r.u32()?;
-        let mir = match r.u8()? {
-            BODY_FULL => read_func(&mut r)?,
-            BODY_STUB => {
-                // A body that stays on the VM: native code calls it there.
-                let mut f = MirFunc::new(&name);
-                f.emit_refusal = Some("runs on the VM");
-                f.params = (0..r.u32()?).map(ValueId).collect();
-                if r.u8()? != 0 {
-                    f.ret_hi_ty = Some(MirTy::I64);
-                }
-                f
-            }
-            k => return Err(format!("native MIR: bad body kind {k}")),
-        };
+        let mir = read_func(&mut r)?;
         if pc != NO_PC {
             pcs.insert(name.clone(), pc);
         }
@@ -130,7 +97,7 @@ const TYS: [MirTy; 8] = [
 const LAYOUTS: [MirLayout; 3] = [MirLayout::Word, MirLayout::TwoSlot, MirLayout::HeapNiche];
 const DEOPTS: [MirDeoptKind; 2] = [MirDeoptKind::Stop, MirDeoptKind::Deopt];
 /// Every reason a body refuses emission: the field is a `&'static str`.
-const REFUSALS: [&str; 2] = ["runs on the VM", "existential pack"];
+const REFUSALS: [&str; 2] = ["no native code", "existential pack"];
 const BIN_OPS: [MirBinOp; 11] = [
     MirBinOp::Add,
     MirBinOp::Sub,
@@ -1270,7 +1237,7 @@ mod tests {
     }
 
     fn bytes(b: &NativeBody) -> Vec<u8> {
-        encode(&[ArchiveEntry { body: b, pc: Some(42), stub: false }])
+        encode(std::slice::from_ref(b), &HashMap::from([(b.name.clone(), 42)]))
     }
 
     #[test]
@@ -1290,16 +1257,6 @@ mod tests {
         for _ in 0..16 {
             assert_eq!(bytes(&body()), first);
         }
-    }
-
-    #[test]
-    fn a_stub_keeps_only_what_a_call_needs() {
-        let b = body();
-        let section = encode(&[ArchiveEntry { body: &b, pc: None, stub: true }]);
-        let (back, pcs) = decode(&section).expect("decode");
-        assert!(pcs.is_empty());
-        assert_eq!(back[0].mir.params.len(), 1);
-        assert_eq!(back[0].mir.emit_refusal, Some("runs on the VM"));
     }
 
     #[test]

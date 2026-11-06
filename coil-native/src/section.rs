@@ -1,50 +1,25 @@
-//! The native MIR section of a `.ccoil`: which bodies it stores. The format
-//! is `compiler::native_mir::archive`.
-//!
-//! Only the bodies the backend compiles are stored, and a stub of each body
-//! they call on the VM.
+//! Reading the MIR section of a `.ccoil`. The format is
+//! `compiler::native_mir::archive`.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
-use compiler::native_mir::NativeBody;
-use compiler::native_mir::archive::{self, ArchiveEntry};
-
-pub use compiler::native_mir::archive::decode;
-
-/// The section for the bodies of `bodies` the backend compiles, keyed to
-/// their entry PCs. Empty when none compiles.
-pub fn encode(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Vec<u8> {
-    let plan = crate::plan(bodies, entry_pcs);
-    if plan.compile.is_empty() {
-        return Vec::new();
-    }
-    let mut stubs: Vec<usize> = plan.vm_calls.keys().copied().collect();
-    stubs.sort_unstable();
-    let full = plan.compile.iter().map(|&i| (i, false));
-    let entries: Vec<ArchiveEntry<'_>> = full
-        .chain(stubs.iter().map(|&i| (i, true)))
-        .map(|(i, stub)| {
-            let body = &bodies[i];
-            ArchiveEntry { body, pc: entry_pcs.get(&body.name).copied(), stub }
-        })
-        .collect();
-    archive::encode(&entries)
-}
+pub use compiler::native_mir::archive::{decode, encode};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use compiler::native_mir::{BlockId, Label, MirBinOp, MirBlock, MirConst, MirFunc, MirInst, MirTy, Terminator, ValueId};
+    use compiler::native_mir::{BlockId, Label, NativeBody, MirBinOp, MirBlock, MirConst, MirFunc, MirInst, MirTy, Terminator, ValueId};
     use machine::native::{NATIVE_STACK_BUDGET, NativeCtx};
 
-    /// A runner has no VM: a section with a body native code refuses stops
+    /// A runner has no interpreter: a section with a body native code refuses stops
     /// it, naming the body, and an empty one says what to do.
     #[test]
     fn a_runner_refuses_what_it_cannot_compile() {
         let mut refused = body();
-        refused.mir.emit_refusal = Some("runs on the VM");
-        let entries = [ArchiveEntry { body: &refused, pc: Some(4), stub: false }];
-        let why = crate::install_section(&archive::encode(&entries)).expect_err("a refused body");
+        refused.mir.emit_refusal = Some("no native code");
+        let pcs = HashMap::from([("f".to_string(), 4u32)]);
+        let why = crate::install_section(&encode(&[refused], &pcs)).expect_err("a refused body");
         assert!(why.contains("`f` cannot compile to native code"), "{why}");
         let why = crate::install_section(&[]).expect_err("no section");
         assert!(why.contains("no native MIR"), "{why}");
@@ -87,13 +62,6 @@ mod tests {
         // SAFETY: compiled for two argument words.
         let out = unsafe { (program.entries[0].entry)(&mut ctx, args.as_ptr()) };
         assert_eq!((ctx.bail, out), (0, 25));
-    }
-
-    #[test]
-    fn nothing_to_compile_is_an_empty_section() {
-        let mut b = body();
-        b.mir.types[4] = MirTy::HeapRef;
-        assert!(encode(&[b], &HashMap::new()).is_empty());
     }
 
     #[test]

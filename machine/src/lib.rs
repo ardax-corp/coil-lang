@@ -1,7 +1,6 @@
 //! Stack VM, managed heap, and FFI runtime for coil bytecode.
 
 mod apply;
-mod arith;
 mod collect;
 mod driver;
 mod gen_fiber;
@@ -15,9 +14,7 @@ pub mod key_index;
 pub mod symbol;
 pub mod debug;
 pub mod env;
-mod dense;
 mod simd;
-mod fused;
 mod ffi;
 pub mod fs;
 pub mod gc_handles;
@@ -34,7 +31,6 @@ pub mod packed_la;
 pub mod reactor;
 pub mod runtime_wire;
 mod runtime;
-mod profile;
 mod stacks;
 mod start;
 mod worker;
@@ -72,7 +68,6 @@ pub use packed_la::{
     packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
 };
 pub use runtime_wire::{VmHostSpec, class_kind_table};
-pub use profile::*;
 pub use isolate::{Isolate, IsolateProgram};
 pub use start::{NativeStart, run_natively, spawn_context};
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};

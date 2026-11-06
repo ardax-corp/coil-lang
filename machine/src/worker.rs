@@ -22,7 +22,7 @@ thread_local! {
 /// Whether `job`'s native code covers every body and its entry, so
 /// [`run_native_job`] can run it.
 pub(crate) fn runs_natively(job: &Job) -> bool {
-    let Some(native) = job.native.as_ref().filter(|n| crate::driver::enabled() && n.is_complete()) else {
+    let Some(native) = job.native.as_ref().filter(|n| n.is_complete()) else {
         return false;
     };
     let startup = job.test.is_none() || Driver::covers(&job.program.startup, None, native);
@@ -130,7 +130,6 @@ fn run_on(rt: &mut Runtime, job: Job) {
             constants: Arc::clone(&program.constants),
             native,
             debug: program.debug.clone(),
-            base_dir: rt.ffi.base_dir.clone(),
             thread_program: Some(Arc::clone(&program)),
             shared_print: shared_print.clone(),
         };

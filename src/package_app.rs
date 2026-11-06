@@ -8,7 +8,7 @@ use std::process::exit;
 use coil_cli::resolve_default_runner;
 use common::{
     append_package_payload_with_natives, dload_request_stem,
-    is_packaged_executable, is_system_ffi_stem, ArchivedProgram, Byte,
+    is_packaged_executable, is_system_ffi_stem, ArchivedProgram,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
 use compiler::Pipeline;
@@ -52,7 +52,7 @@ fn compile_program(pipeline: &mut Pipeline, filename: &str) -> Result<ArchivedPr
 fn payload_bytes(pipeline: &mut Pipeline, program: &ArchivedProgram) -> Vec<u8> {
     match rkyv::to_bytes::<Error>(program) {
         Ok(b) => b.as_slice().to_vec(),
-        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("Unable to serialize bytecode archive: {e}")),
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("Unable to serialize archive: {e}")),
     }
 }
 
@@ -71,13 +71,13 @@ fn add_native_mir(pipeline: &mut Pipeline, program: &mut ArchivedProgram, bodies
 #[cfg(target_family = "wasm")]
 fn add_native_mir(_: &mut Pipeline, _: &mut ArchivedProgram, _: &[compiler::native_mir::NativeBody]) {}
 
-/// A package has no bytecode VM: a body native code refuses is an error.
+/// A package has no interpreter: a body native code refuses is an error.
 #[cfg(not(target_family = "wasm"))]
 fn refused_exit(refused: &[(String, String)]) -> ! {
     for (name, why) in refused {
         eprintln!("error: `{name}` cannot compile to native code: {why}");
     }
-    eprintln!("  help: a package has no bytecode VM; `coil FILE` still runs the program");
+    eprintln!("  help: a package has no interpreter; `coil FILE` still runs the program");
     exit(1);
 }
 
@@ -118,7 +118,7 @@ fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::Nati
     };
     if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
         for (name, why) in &object.refused {
-            eprintln!("  vm: {name}: {why}");
+            eprintln!("  refused: {name}: {why}");
         }
     }
     if !object.refused.is_empty() {
@@ -759,8 +759,6 @@ pub fn cmd_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coil_cli::{LoadErr, load_archive_bytes};
-    use common::{ArchivedProgram, Instruction, pack_archive_version};
 
     #[test]
     fn static_link_stem_comes_from_the_file_or_the_flag() {

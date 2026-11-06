@@ -82,4 +82,4 @@ pub(crate) fn fiber_stack_limit() -> Option<usize> {
 }
 
 /// Panic when a frame needs more operand stack than [`crate::MAX_OPERAND_STACK_SLOTS`].
-pub(crate) const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand stack limit";
+pub(crate) const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the stack limit";

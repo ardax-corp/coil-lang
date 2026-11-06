@@ -1,6 +1,5 @@
 //! Self-contained executable packaging (append `.ccoil` archive + trailer).
 
-use crate::opcode::{Byte, Instruction};
 
 /// Magic at the end of a packaged `coil` binary.
 pub const PACKAGE_MAGIC: &[u8; 8] = b"COILAPP\0";
@@ -576,7 +575,7 @@ pub fn default_natives_root() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opcode::Byte;
+    
 
     #[test]
     fn json_bool_roundtrip() {

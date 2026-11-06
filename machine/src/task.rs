@@ -116,8 +116,6 @@ pub(crate) struct TaskRec {
     /// Generators this task was resuming when it suspended:
     /// `(coroutine, base_sp offset, frame_depth offset)` from the task's base.
     pub inner: Vec<(RefCoroutine, usize, usize)>,
-    /// `resume_stack` index of the task's own coroutine while it runs.
-    pub ctx_index: usize,
     pub joiners: Vec<TaskId>,
     pub panic: Option<String>,
     /// It has run at least once (a task that never ran has nothing to unwind).
@@ -127,9 +125,6 @@ pub(crate) struct TaskRec {
     pub shield: u32,
     /// [`TaskState::Ending`]: the state it finishes in.
     pub ending: Option<TaskState>,
-    /// Root only: where it continues (it stays on the operand stack).
-    pub resume_ip: usize,
-    pub resume_sp: usize,
 }
 
 impl TaskRec {
@@ -142,15 +137,12 @@ impl TaskRec {
             wake: None,
             timer_seq: None,
             inner: Vec::new(),
-            ctx_index: 0,
             joiners: Vec::new(),
             panic: None,
             started: false,
             cancel: Cancel::None,
             shield: 0,
             ending: None,
-            resume_ip: 0,
-            resume_sp: 0,
         }
     }
 }
@@ -184,8 +176,6 @@ pub(crate) struct Scheduler {
     /// on pool workers share the VM's, and must not take each other's tokens.
     pub reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
     pub current: TaskId,
-    /// `nested_depth` the scheduler runs at; switches only happen there.
-    pub base_nested: u32,
     /// Child tasks not finished yet.
     pub live: usize,
     next_task: TaskId,
@@ -223,7 +213,7 @@ impl Scheduler {
             .collect()
     }
 
-    pub(crate) fn new(base_nested: u32) -> Self {
+    pub(crate) fn new() -> Self {
         let mut tasks = HashMap::new();
         let mut root = TaskRec::new(None, 0);
         root.state = TaskState::Running;
@@ -240,7 +230,6 @@ impl Scheduler {
             next_thread_key: 1,
             reactor: crate::io_reactor::IoReactor::new(),
             current: ROOT,
-            base_nested,
             live: 0,
             next_task: 1,
             next_scope: 1,
@@ -1093,7 +1082,7 @@ mod tests {
     fn finishing_a_task_does_not_scan_its_finished_siblings() {
         // coil-lang#2135: each finish rescanned every child of the scope, so
         // N spawn + join pairs in one scope cost O(N^2).
-        let mut s = Scheduler::new(0);
+        let mut s = Scheduler::new();
         let scope = s.open_scope();
         let n = 20_000;
         let start = std::time::Instant::now();
@@ -1112,7 +1101,7 @@ mod tests {
 
     #[test]
     fn a_scope_counts_only_its_unfinished_children() {
-        let mut s = Scheduler::new(0);
+        let mut s = Scheduler::new();
         let a = s.open_scope();
         let b = s.open_scope();
         let a1 = add_bare_task(&mut s, a);

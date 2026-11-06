@@ -295,9 +295,9 @@ impl Launch {
         }
     }
 
-    fn with_code(mut self, program: coil_mir_interp::InterpProgram, code_len: usize) -> Self {
+    fn with_code(mut self, program: coil_mir_interp::InterpProgram, _code_len: usize) -> Self {
         let complete = program.refused.is_empty();
-        let code = machine::native::NativeCode::new(code_len, program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+        let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
         self.code = Some(Arc::new(code));
         self
     }

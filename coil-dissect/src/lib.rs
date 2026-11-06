@@ -33,10 +33,10 @@ fn fail_and_exit(pipeline: &mut Pipeline, code: ErrorCode, message: impl Into<St
 #[derive(Parser, Debug)]
 #[command(
     name = "coil-dissect",
-    about = "In-memory compile and dump filtered bytecode / IL / AST",
+    about = "In-memory compile and dump filtered MIR / HIR / AST",
     disable_help_subcommand = true,
     after_help = "Pass the entry as a positional `.coil` or `--entry FILE`. A `.ccoil` archive\n\
-dumps its bytecode instead of compiling."
+dumps its MIR instead of compiling."
 )]
 struct DissectCli {
     #[command(flatten)]

@@ -57,7 +57,6 @@ pub(crate) enum Command {
     Dissect {
         filename: String,
         fn_pat: Option<String>,
-        show_il: bool,
         show_ast: bool,
     },
     Debug {
@@ -122,7 +121,7 @@ Default diagnostics: pretty reports on stderr.\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
 `--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck.\n\
 `coil run out.ccoil` and coil-embed do\n\
-not re-apply allow flags; if the bytecode has the op, it runs. `--ffi-search-path` is\n\
+not re-apply allow flags; if the archive has the call, it runs. `--ffi-search-path` is\n\
 lookup only. `--dload-pin STEM=SHA256` / `--dload-trusted STEM` are the dload integrity.\n\
 `dload(\"c\")` stays denied even if flagged."
 )]
@@ -268,7 +267,7 @@ enum RawCommand {
         #[command(subcommand)]
         action: NativesAction,
     },
-    /// In-memory compile and dump filtered bytecode / IL / AST
+    /// In-memory compile and dump filtered MIR / HIR / AST
     Dissect {
         #[command(flatten)]
         log: LogFlags,
@@ -285,31 +284,25 @@ enum RawCommand {
         /// Filter functions by FQN substring / trailing name
         #[arg(long = "fn", value_name = "PAT")]
         fn_pat: Option<String>,
-        /// Also print pre-opt stack IL
-        #[arg(long)]
-        il: bool,
-        /// Also print the optimized IL (before fuse / lowering)
-        #[arg(long)]
-        il_post: bool,
         /// Also print each body's HIR (typed, desugared tree)
         #[arg(long)]
         hir: bool,
         /// Also print each function's effects and why auto-par left loops sequential
         #[arg(long)]
         effects: bool,
-        /// Also print the MIR of numeric bodies (dense / LIR)
+        /// Print each body's MIR (the default)
         #[arg(long)]
         mir: bool,
-        /// Do not interleave source lines in the bytecode listing
-        #[arg(long)]
-        no_source: bool,
+        /// Include `test` blocks, as `coil test` compiles them
+        #[arg(long = "tests")]
+        tests: bool,
         /// Also print the entry-file AST
         #[arg(long)]
         ast: bool,
-        /// Print the entry file after macro expansion (no bytecode)
+        /// Print the entry file after macro expansion (no MIR)
         #[arg(long)]
         expand: bool,
-        /// Entry `.coil` file, or a compiled `.ccoil` archive (bytecode only)
+        /// Entry `.coil` file, or a compiled `.ccoil` archive (MIR only)
         file: Option<String>,
     },
     /// GDB-style debugger (REPL; --dap for IDE)
@@ -717,12 +710,10 @@ impl RawCli {
                 roots,
                 entry_flag,
                 fn_pat,
-                il,
-                il_post: _,
                 hir: _,
                 effects: _,
                 mir: _,
-                no_source: _,
+                tests: _,
                 ast,
                 expand: _,
                 file,
@@ -736,7 +727,6 @@ impl RawCli {
                     Command::Dissect {
                         filename,
                         fn_pat,
-                        show_il: il,
                         show_ast: ast,
                     },
                     log,
@@ -921,13 +911,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_dissect_with_fn_il_ast() {
+    fn parse_dissect_with_fn_and_ast() {
         let cli = parse_args(&args(&[
             "dissect",
             "examples/fib.coil",
             "--fn",
             "fib",
-            "--il",
             "--ast",
         ]))
         .unwrap();
@@ -936,7 +925,6 @@ mod tests {
             Command::Dissect {
                 filename: "examples/fib.coil".into(),
                 fn_pat: Some("fib".into()),
-                show_il: true,
                 show_ast: true,
             }
         );
@@ -964,7 +952,6 @@ mod tests {
             Command::Dissect {
                 filename: "a.coil".into(),
                 fn_pat: None,
-                show_il: false,
                 show_ast: false,
             }
         );

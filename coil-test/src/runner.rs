@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use coil_host::{
     ExecutePipelineArgs, bind_cli_roots, execute_pipeline,
 };
-use common::{Byte, Instruction, ProgramDebug};
+use common::ProgramDebug;
 use compiler::{HostGrants, OptLevel, Pipeline};
 use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::thread::ThreadSpawnContext;
@@ -122,17 +122,17 @@ impl Engine {
 }
 
 /// Make what this compile captured runnable. `None` when nothing compiles
-/// or the backend fails (the file then runs on the VM, as `coil --jit` does).
-fn native_code(pipeline: &Pipeline, code_len: usize, file: &str, engine: Engine, coverage: bool) -> (Option<Arc<machine::native::NativeCode>>, Option<Probes>) {
+/// or the backend fails (the file then fails to run).
+fn native_code(pipeline: &Pipeline, file: &str, engine: Engine, coverage: bool) -> (Option<Arc<machine::native::NativeCode>>, Option<Probes>) {
     let mut bodies = compiler::native_mir::take_native_capture();
     let probes = coverage.then(|| compiler::native_mir::coverage::instrument(&mut bodies));
-    let code = compiled_code(pipeline, bodies, code_len, file, engine);
+    let code = compiled_code(pipeline, bodies, file, engine);
     let probes = probes.filter(|_| code.is_some());
     (code, probes)
 }
 
 /// Make `bodies` runnable on `engine`; a host with no native code interprets.
-fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBody>, code_len: usize, file: &str, engine: Engine) -> Option<Arc<machine::native::NativeCode>> {
+fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBody>, file: &str, engine: Engine) -> Option<Arc<machine::native::NativeCode>> {
     let debug = pipeline.program_debug_full();
     let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
     if engine == Engine::Mir || cfg!(target_family = "wasm") {
@@ -142,20 +142,20 @@ fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBo
             inventory(&format!("refused\t{file}\t{name}\t{why}"));
         }
         let complete = program.refused.is_empty();
-        let code = machine::native::NativeCode::new(code_len, program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+        let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
         return (!code.is_empty()).then(|| Arc::new(code));
     }
-    jitted_code(&bodies, &pcs, code_len, file)
+    jitted_code(&bodies, &pcs, file)
 }
 
 #[cfg(target_family = "wasm")]
-fn jitted_code(_: &[compiler::native_mir::NativeBody], _: &std::collections::HashMap<String, u32>, _: usize, _: &str) -> Option<Arc<machine::native::NativeCode>> {
+fn jitted_code(_: &[compiler::native_mir::NativeBody], _: &std::collections::HashMap<String, u32>, _: &str) -> Option<Arc<machine::native::NativeCode>> {
     None
 }
 
 /// JIT `bodies`.
 #[cfg(not(target_family = "wasm"))]
-fn jitted_code(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>, code_len: usize, file: &str) -> Option<Arc<machine::native::NativeCode>> {
+fn jitted_code(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>, file: &str) -> Option<Arc<machine::native::NativeCode>> {
     let program = match coil_native::jit(bodies, pcs) {
         Ok(p) => p,
         Err(e) => {
@@ -171,12 +171,12 @@ fn jitted_code(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collectio
         eprintln!("{} ({} bodies)", coil_native::describe(&program), bodies.len());
         if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
             for (name, why) in &program.refused {
-                eprintln!("  vm: {name}: {why}");
+                eprintln!("  refused: {name}: {why}");
             }
         }
     }
     let complete = program.refused.is_empty();
-    let code = machine::native::NativeCode::new(code_len, program.entries, program.sites).with_complete(complete);
+    let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete);
     (!code.is_empty()).then(|| Arc::new(code))
 }
 
@@ -194,12 +194,6 @@ fn inventory(line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(format!("{}\n", line.replace('\n', " ")).as_bytes());
     }
-}
-
-/// The run's VM-use counts as a `counts` inventory line.
-fn inventory_counts(options: &TestOptions) {
-    let counts: Vec<String> = machine::native::vm_use_counts().iter().map(|(k, v)| format!("{k}={v}")).collect();
-    inventory(&format!("counts\t{}\t{}", options.root.display(), counts.join("\t")));
 }
 
 /// Whether a run includes doc-tests (the code examples in `///` comments).
@@ -875,7 +869,7 @@ pub(crate) fn compile_test_file(
         pipeline.compile_src_from_file(&display)
     }));
     let native = match &compiled {
-        Ok(Ok(_)) if native => native_code(&pipeline, 0, &display, options.engine, options.coverage.is_some()),
+        Ok(Ok(_)) if native => native_code(&pipeline, &display, options.engine, options.coverage.is_some()),
         _ => {
             let _ = compiler::native_mir::take_native_capture();
             (None, None)
@@ -1293,7 +1287,7 @@ fn start_doc_case(
         pipeline.compile_src_from_file(&entry.display().to_string())
     }));
     let native = match &compiled {
-        Ok(Ok(_)) => native_code(&pipeline, 0, &entry.display().to_string(), run.options.engine, false).0,
+        Ok(Ok(_)) => native_code(&pipeline, &entry.display().to_string(), run.options.engine, false).0,
         _ => {
             let _ = compiler::native_mir::take_native_capture();
             None
@@ -1606,7 +1600,6 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
             return 1;
         }
     };
-    inventory_counts(&options);
 
     if !json {
         print_failures(&failures);

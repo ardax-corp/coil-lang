@@ -434,15 +434,3 @@ pub fn eval_vbin_wide(kind: u8, lhs: &[u64; WIDE], rhs: &[u64; WIDE], scalar: Va
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod byte_tests {
-    use super::*;
-
-    fn reg(bytes: &[u8]) -> [u64; LANES] {
-        let mut r = [0u64; LANES];
-        as_bytes_mut(&mut r)[..bytes.len()].copy_from_slice(bytes);
-        r
-    }
-
-}

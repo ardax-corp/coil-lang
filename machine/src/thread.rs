@@ -128,7 +128,7 @@ pub fn join_undetached_threads(registry: &LiveThreadRegistry) {
     }
 }
 
-use common::{BUILTIN_RESULT_VARIANTS, Byte, ProgramDebug, Value};
+use common::{BUILTIN_RESULT_VARIANTS, ProgramDebug, Value};
 
 use crate::ffi::Natives;
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
@@ -1632,7 +1632,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     if args.len() > 1 && args.len() - 1 != arity as usize {
         return Err(ThreadErrorTag::Other);
     }
-    let all_immediate = args[1..].iter().all(|v| is_immediate_value(heap, *v));
+    let _all_immediate = args[1..].iter().all(|v| is_immediate_value(heap, *v));
     let mut spawn_args = Vec::with_capacity(args.len().saturating_sub(1));
     for v in &args[1..] {
         if crate::shared_heap::is_c1_shareable(heap, *v) {

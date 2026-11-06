@@ -613,15 +613,6 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                     }
                     return Flow::Next;
                 }
-                if callee.refused {
-                    let w = rt::coil_native_call_vm(ctx, u64::from(callee.pc), words!(args), args.len() as u64);
-                    check!();
-                    set!(*dest, w);
-                    if let Some(h) = dest_hi {
-                        set!(*h, (*ctx).vm_hi);
-                    }
-                    return Flow::Next;
-                }
                 let cf = &callee.mir;
                 let mut buf = [0u64; 16];
                 let many: Vec<u64>;
