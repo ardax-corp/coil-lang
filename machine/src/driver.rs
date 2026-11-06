@@ -16,7 +16,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use common::{Instruction, ProgramDebug, Value};
+use common::{ProgramDebug, Value};
 
 use crate::collect::{GcHost, HostRoot};
 use crate::native::{Invoked, NativeCode, NativeCtx, NativeEnv, NativeHost, NativeOutcome, NativePanic};
@@ -776,8 +776,8 @@ impl<'a> Driver<'a> {
         let d = unsafe { Self::from_raw(raw) };
         let arg = |i: usize| args.get(i).copied().unwrap_or_default();
         let out = match op as u8 {
-            o if o == Instruction::FfiLoad as u8 => d.rt.ffi_load(arg(0)),
-            o if o == Instruction::DeclareFFI as u8 => d.rt.ffi_declare(operand as u32, arg(0), arg(1), arg(2), arg(3)),
+            common::FFI_OP_LOAD => d.rt.ffi_load(arg(0)),
+            common::FFI_OP_DECLARE => d.rt.ffi_declare(operand as u32, arg(0), arg(1), arg(2), arg(3)),
             _ => {
                 let call = crate::runtime_ffi::FfiCall::from_words(&d.rt.heap, args);
                 d.rooted(ctx, |d| {

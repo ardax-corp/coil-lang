@@ -9,8 +9,6 @@ use std::{
 use common::{
     decode_archived_program, ArchivedProgram, ProgramDebug, ARCHIVE_VERSION,
 };
-#[cfg(any(test, feature = "vm-wire"))]
-use machine::{FfiError, FfiSignature, FfiType, Heap, HostClosureFn, NativeFn};
 use parser::{ast::Expression, Pratt, SimpleSpan};
 use reporting::{
     create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
@@ -89,15 +87,6 @@ pub struct Pipeline {
     worklist: VecDeque<WorkItem>,
     /// `use`/`mod` edges for topo-sort compile order (discovery can reorder worklist).
     module_deps: HashMap<PathBuf, Vec<PathBuf>>,
-    /// Native functions registered by the host (tests / extra closures).
-    #[cfg(any(test, feature = "vm-wire"))]
-    natives: Vec<NativeDecl>,
-    /// Extra Host Rust closures from [`Self::register_host_native`].
-    #[cfg(any(test, feature = "vm-wire"))]
-    host_natives: Vec<std::sync::Arc<dyn NativeFn>>,
-    /// Test-native signatures (and host ids), replayed when the compiler is rebuilt.
-    #[cfg(any(test, feature = "vm-wire"))]
-    native_sigs: Vec<(String, Vec<crate::typechecking::ty::Ty>, crate::typechecking::ty::Ty, Option<usize>)>,
     /// The entry file (the file passed to `compile`).
     /// This file is special: it's the program root and
     /// lives in the top-level namespace (no prefix),
@@ -182,15 +171,6 @@ pub struct Pipeline {
     derived_items: HashMap<parser::SimpleSpan, usize>,
 }
 
-/// Native function declaration registered by the host.
-#[cfg(any(test, feature = "vm-wire"))]
-#[derive(Debug, Clone)]
-pub struct NativeDecl {
-    pub name: String,
-    pub namespace: String,
-    pub sig: FfiSignature,
-}
-
 impl Default for Pipeline {
     fn default() -> Self {
         Self::new()
@@ -219,46 +199,6 @@ impl Pipeline {
     pub fn overlay_text(&self, file: &Path) -> Option<&str> {
         self.overlays.get(file).map(String::as_str)
     }
-    /// Register a host native with an explicit [`FfiSignature`]
-    /// and Rust closure. Test-only; production ids come from
-    /// [`common::HOST_NATIVES`].
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn register_host_native<F>(&mut self, sig: FfiSignature, func: F) -> usize
-    where
-        F: Fn(&mut Heap, &[common::Value]) -> Result<Option<common::Value>, FfiError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let params: Vec<crate::typechecking::ty::Ty> =
-            sig.args.iter().copied().map(ffi_type_to_ty).collect();
-        let ret = ffi_type_to_ty(sig.ret);
-        self.compiler_lazy_mut().register(&sig.name, &params, &ret);
-        let id = common::HOST_NATIVES.len() + self.host_natives.len();
-        self.compiler_lazy_mut().register_native_id(&sig.name, id);
-        self.native_sigs.push((sig.name.clone(), params, ret, Some(id)));
-        self.host_natives
-            .push(std::sync::Arc::new(HostClosureFn::new(sig, func)));
-        id
-    }
-
-    /// Register a native function's type signature (metadata
-    /// only, no VM closure). Embedders that supply their own
-    /// closures should prefer [`Self::register_host_native`].
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn register_native_function(&mut self, name: String, namespace: String, sig: FfiSignature) {
-        let params: Vec<crate::typechecking::ty::Ty> =
-            sig.args.iter().copied().map(ffi_type_to_ty).collect();
-        let ret = ffi_type_to_ty(sig.ret);
-        self.compiler_lazy_mut().register(&name, &params, &ret);
-        self.native_sigs.push((name.clone(), params, ret, None));
-        self.natives.push(NativeDecl {
-            name,
-            namespace,
-            sig,
-        });
-    }
-
     /// Record HostInvoke ids from [`common::HOST_NATIVES`] (no VM closures).
     fn register_standard_host_natives(&mut self) {
         self.pending_native_ids = common::host_native_ids()
@@ -269,16 +209,6 @@ impl Pipeline {
     /// Bytecode entry offset for a registered function (for tests).
     pub fn function_offset(&self, name: &str) -> Option<usize> {
         self.compiler_lazy().function_offset(name)
-    }
-
-    /// Borrow the inner `Compiler` mutably. Used by the
-    /// integration tests in `compiler/src/lib.rs::tests`
-    /// and `compiler/tests/namespace.rs` that need to
-    /// inspect the compiler's diagnostic messages
-    /// directly.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn compiler_mut(&mut self) -> &mut Compiler {
-        self.compiler_lazy_mut()
     }
 
     pub fn compiler(&self) -> &Compiler {
@@ -305,13 +235,6 @@ impl Pipeline {
             }
             c.set_include_tests(self.include_tests);
             c.set_keep_fns_in(self.keep_fns_in.clone());
-            #[cfg(any(test, feature = "vm-wire"))]
-            for (name, params, ret, id) in &self.native_sigs {
-                c.register(name, params, ret);
-                if let Some(id) = id {
-                    c.register_native_id(name, *id);
-                }
-            }
             c
         })
     }
@@ -332,9 +255,7 @@ impl Pipeline {
     }
 
     /// Borrow the compiler's accumulated diagnostic
-    /// messages. Public so integration tests can read
-    /// them (the `#[cfg(test)]`-only `compiler_mut` is
-    /// only visible to in-crate tests).
+    /// messages.
     pub fn messages(&self) -> &[Message] {
         self.compiler_lazy().get_messages()
     }
@@ -608,22 +529,6 @@ impl Pipeline {
             .collect()
     }
 
-    /// Fail-closed integrity: lock hash, trusted, and host grants.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn build_dload_gate(&self) -> machine::DloadGate {
-        let mut gate = machine::DloadGate::from_consumer_trusted(
-            &self.host_grants.dload_pins,
-            &self.host_grants.dload_trusted,
-        );
-        for stem in &self.extra_dload_stems {
-            gate.grant_stem(stem);
-        }
-        for (stem, path) in &self.extra_dload_grants {
-            let _ = gate.grant_file(stem, path);
-        }
-        gate
-    }
-
     /// Compute C align/pad once for every `extern struct` (declaration order).
     pub fn archived_struct_layouts(&self) -> Vec<common::CStructLayout> {
         let defs = self.compiler_lazy().c_structs().iter().map(|d| {
@@ -677,12 +582,6 @@ impl Pipeline {
             processed: Vec::new(),
             worklist: VecDeque::new(),
             module_deps: HashMap::new(),
-            #[cfg(any(test, feature = "vm-wire"))]
-            natives: Vec::new(),
-            #[cfg(any(test, feature = "vm-wire"))]
-            host_natives: Vec::new(),
-            #[cfg(any(test, feature = "vm-wire"))]
-            native_sigs: Vec::new(),
             entry_file: None,
             source_interner: common::Interner::default(),
             source_cache: Vec::new(),
@@ -978,13 +877,6 @@ impl Pipeline {
         }
         self.record_module_dep(from, &core);
         self.enqueue_file(core);
-        // Native code calls the Coil twins of some host natives
-        // (`mir::native_twins`): a native compile builds them too.
-        let twins = crate::macros::twins_module_path();
-        if crate::mir::native_capture_active() && from != twins {
-            self.record_module_dep(from, &twins);
-            self.enqueue_file(twins);
-        }
     }
 
     /// Record that `from` `use`s/`mod`s `on` (compile `on` first).
@@ -1099,8 +991,6 @@ impl Pipeline {
         // The embedded core prelude is `core` wherever the roots are.
         let ns = if file == crate::macros::core_module_path() {
             Some(crate::macros::CORE_MODULE.to_string())
-        } else if file == crate::macros::twins_module_path() {
-            Some(crate::macros::TWINS_MODULE.to_string())
         } else {
             namespace_of_in_roots(&self.roots, &self.project_root, &file)
         };
@@ -2258,23 +2148,12 @@ impl Pipeline {
         self.opt_level
     }
 
-    /// Borrow host-registered native function metadata.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn natives(&self) -> &[NativeDecl] {
-        &self.natives
-    }
-
     pub fn constants(&self) -> &[u64] {
         self.compiler_lazy().constants()
     }
 
     pub fn strings(&self) -> &[String] {
         self.compiler_lazy().strings()
-    }
-
-    /// Operand-stack capacity from the last compile's recursion-depth analysis.
-    pub fn operand_stack_slots(&self) -> u32 {
-        self.compiler_lazy().operand_stack_slots()
     }
 
     pub fn static_slot_count(&self) -> u32 {
@@ -2453,29 +2332,6 @@ fn source_file_matches_generated(stored: &str, generated: &std::path::Path) -> b
         || stored.file_name() == generated.file_name()
         || generated.ends_with(stored)
         || stored.ends_with(generated)
-}
-
-#[cfg(any(test, feature = "vm-wire"))]
-fn ffi_type_to_ty(ty: FfiType) -> crate::typechecking::ty::Ty {
-    use crate::typechecking::ty::{array, boolean, float, int, string, unit};
-    match ty {
-        FfiType::Int
-        | FfiType::Int8
-        | FfiType::Int16
-        | FfiType::Int32
-        | FfiType::UInt8
-        | FfiType::UInt16
-        | FfiType::UInt32
-        | FfiType::UInt64 => int(),
-        FfiType::Float => float(),
-        FfiType::String => string(),
-        FfiType::Void => unit(),
-        FfiType::Bool => boolean(),
-        FfiType::Ptr => array(int()),
-        FfiType::Bytes => array(crate::typechecking::ty::Ty::Con("byte".into())),
-        FfiType::ConstBytes => string(),
-        FfiType::Callback(_) | FfiType::Struct(_) => int(),
-    }
 }
 
 /// Counts what reaches `inner`, for [`Pipeline::diagnostics_emitted`].
@@ -2666,50 +2522,6 @@ fn main() { write(stdout(), to_bytes(format("%i", missing))); }"#;
     }
 
     #[test]
-    fn fib32_compile_sets_operand_stack_slots_above_default() {
-        let mut pipeline = Pipeline::new();
-        pipeline
-            .compile_src(
-                r#"
-fn fib(int n) -> int {
-    if n <= 2 { return 1; }
-    return fib(n - 1) + fib(n - 2);
-}
-fn main() {
-    let x = fib(32);
-    return;
-}
-"#,
-            )
-            .expect("fib(32) must compile");
-        assert!(
-            pipeline.operand_stack_slots() > crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
-            "fib(32) should raise the operand stack above the default, got {}",
-            pipeline.operand_stack_slots()
-        );
-    }
-
-    #[test]
-    fn non_recursive_compile_keeps_default_operand_stack_slots() {
-        let mut pipeline = Pipeline::new();
-        pipeline
-            .compile_src(
-                r#"
-fn add(int a, int b) -> int { return a + b; }
-fn main() {
-    let x = add(1, 2);
-    return;
-}
-"#,
-            )
-            .expect("compile");
-        assert_eq!(
-            pipeline.operand_stack_slots(),
-            crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS
-        );
-    }
-
-    #[test]
     fn dynamic_recursion_without_max_depth_compiles() {
         let mut pipeline = Pipeline::new();
         let compiled = pipeline.compile_src(
@@ -2781,11 +2593,11 @@ fn main() {
         );
     }
 
-    /// `register_host_native` forces compiler init; pending standard ids must
-    /// already be present so later HostInvoke codegen stays consistent.
+    /// The compiler's lazy init replays the pending standard ids, so HostInvoke
+    /// codegen sees them.
     #[test]
-    fn register_host_native_preserves_replayed_standard_ids() {
-        let mut pipeline =
+    fn compiler_init_replays_standard_ids() {
+        let pipeline =
             Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
         assert!(pipeline.compiler.get().is_none());
         let stdout_id = pipeline
@@ -2795,17 +2607,8 @@ fn main() {
             .map(|(_, id)| *id)
             .expect("stdout native buffered at construction");
 
-        let custom_id = pipeline.register_host_native(
-            machine::FfiSignature::from_parts("coverage_probe", vec![], machine::FfiType::Int)
-                .expect("sig"),
-            |_heap, _args| Ok(Some(common::Value::from(7))),
-        );
-        assert!(pipeline.compiler.get().is_some());
         assert_eq!(pipeline.compiler().native_id("stdout"), Some(stdout_id));
-        assert!(
-            custom_id >= pipeline.pending_native_ids.len(),
-            "custom host native must append after the standard table"
-        );
+        assert!(pipeline.compiler.get().is_some());
     }
 
     #[test]

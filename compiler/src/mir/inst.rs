@@ -958,11 +958,12 @@ impl MirFfiOp {
         }
     }
 
-    pub fn instruction(self) -> common::Instruction {
+    /// What the runtime's `coil_native_ffi` calls the op.
+    pub fn code(self) -> u8 {
         match self {
-            Self::Load => common::Instruction::FfiLoad,
-            Self::Declare => common::Instruction::DeclareFFI,
-            Self::Invoke => common::Instruction::FfiInvoke,
+            Self::Load => common::FFI_OP_LOAD,
+            Self::Declare => common::FFI_OP_DECLARE,
+            Self::Invoke => common::FFI_OP_INVOKE,
         }
     }
 }

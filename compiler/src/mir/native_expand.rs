@@ -325,12 +325,7 @@ fn remove(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
     ex.jump(join, rest);
 }
 
-/// Expand the Vec natives in every captured body but the twins' own.
-pub fn apply_all<'a>(bodies: impl Iterator<Item = (&'a str, &'a mut MirFunc)>) {
-    let prefix = format!("{}::", crate::macros::TWINS_MODULE);
-    for (name, func) in bodies {
-        if !name.starts_with(&prefix) {
-            apply(func);
-        }
-    }
+/// Expand the Vec natives in every captured body.
+pub fn apply_all<'a>(bodies: impl Iterator<Item = &'a mut MirFunc>) {
+    bodies.for_each(apply);
 }

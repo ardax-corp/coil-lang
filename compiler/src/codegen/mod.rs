@@ -4,7 +4,7 @@ use std::{
 };
 
 use common::{
-    DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, ValueTag,
+    DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Interner, ValueTag,
     encode_tag_operand, tag,
 };
 use reporting::Label as DiagLabel;
@@ -125,17 +125,9 @@ pub enum StringLiteralByteError {
     NotSingleByte,
 }
 
-pub(crate) fn primitive_cast_opcode(from: &str, to: &str) -> Option<Instruction> {
-    match (from, to) {
-        ("int", "float") => Some(Instruction::CastIntToFloat),
-        ("float", "int") => Some(Instruction::CastFloatToInt),
-        ("int", "byte") => Some(Instruction::CastIntToByte),
-        ("byte", "int") => Some(Instruction::CastByteToInt),
-        ("int", "bool") => Some(Instruction::CastIntToBool),
-        ("bool", "int") => Some(Instruction::CastBoolToInt),
-        (a, b) if a == b => None,
-        _ => None,
-    }
+/// Whether `from` casts to `to` as a primitive.
+pub(crate) fn is_primitive_cast(from: &str, to: &str) -> bool {
+    matches!((from, to), ("int", "float") | ("float", "int") | ("int", "byte") | ("byte", "int") | ("int", "bool") | ("bool", "int"))
 }
 
 fn into_primitive_fqn(from: &str, to: &str) -> String {

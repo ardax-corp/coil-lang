@@ -26,7 +26,6 @@ pub mod io_reactor;
 pub mod math_libm;
 mod memory;
 pub mod native;
-mod opcode;
 pub mod packed_la;
 pub mod reactor;
 pub mod runtime_wire;
@@ -62,7 +61,6 @@ pub use host_natives::{
     STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE, build_standard_host_natives,
 };
 pub use memory::*;
-pub use opcode::*;
 pub use packed_la::{
     PACKED_DOT, PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH, packed_dot,
     packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,

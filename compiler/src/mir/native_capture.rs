@@ -27,9 +27,6 @@ struct Capture {
     bodies: Vec<NativeBody>,
     /// Keep each body as lowered, with no MIR pass run on it.
     raw: bool,
-    /// For compile-time evaluation only: the program builds as it would
-    /// with no capture ([`ComptimeCapture`]).
-    comptime: bool,
 }
 
 thread_local! {
@@ -38,7 +35,7 @@ thread_local! {
 
 /// Start capturing for a backend that optimizes (drops an earlier capture).
 pub fn start_native_capture() {
-    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: false, comptime: false }));
+    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: false }));
 }
 
 /// Start capturing bodies as lowered from HIR, with no MIR pass run on them
@@ -46,7 +43,7 @@ pub fn start_native_capture() {
 /// output is the reference the optimized engines are compared against. A
 /// bug in a pass cannot then hide on both sides of the comparison.
 pub fn start_raw_capture() {
-    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true, comptime: false }));
+    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true }));
 }
 
 /// Run `f` with the capture closed: a program compiled inside another
@@ -59,20 +56,12 @@ pub fn without_native_capture<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// A capture for a native backend is open: the compile also builds what
-/// native code needs (the twins), which a [`ComptimeCapture`] does not ask
-/// for.
-pub fn native_capture_active() -> bool {
-    NATIVE_CAPTURE.with(|c| c.borrow().as_ref().is_some_and(|c| !c.comptime))
-}
-
 /// Any capture is open: the compile hands its bodies over.
 pub(crate) fn capture_open() -> bool {
     NATIVE_CAPTURE.with(|c| c.borrow().is_some())
 }
 
-/// End the capture and return its bodies, each call of a twinned host
-/// native now a call of its Coil twin ([`super::native_twins`]).
+/// End the capture and return its bodies.
 pub fn take_native_capture() -> Vec<NativeBody> {
     finished(NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).map(|c| c.bodies).unwrap_or_default())
 }
@@ -86,16 +75,13 @@ pub fn peek_native_capture() -> Vec<NativeBody> {
 
 /// `bodies` as an engine runs them.
 fn finished(mut bodies: Vec<NativeBody>) -> Vec<NativeBody> {
-    let entries = bodies.iter().filter_map(|b| Some((b.name.clone(), b.entry?))).collect();
-    super::native_twins::apply(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)), &entries);
-    super::native_expand::apply_all(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)));
+    super::native_expand::apply_all(bodies.iter_mut().map(|b| &mut b.mir));
     bodies
 }
 
 /// A raw capture for compile-time evaluation, closed when this drops, so a
-/// compile that fails or panics leaves none open. It builds nothing extra:
-/// the interpreter runs a twinned native as the host call it is. With a
-/// capture already open this does nothing, and evaluation reads that one.
+/// compile that fails or panics leaves none open. With a capture already
+/// open this does nothing, and evaluation reads that one.
 pub struct ComptimeCapture {
     owner: bool,
 }
@@ -104,7 +90,7 @@ impl ComptimeCapture {
     pub fn open() -> Self {
         let owner = !capture_open();
         if owner {
-            NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true, comptime: true }));
+            NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true }));
         }
         Self { owner }
     }
@@ -187,7 +173,7 @@ pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
     for (i, v) in inputs.iter().enumerate() {
         regs[v.index()] = (i + 2) as u8;
     }
-    let words = |body: Vec<common::Byte>| body.iter().map(|b| u64::from(*b.bytecode() as u8) | (u64::from(b.operand_u32()) << 32)).collect::<Vec<_>>();
+    let words = |body: Vec<common::LaneWord>| body.iter().map(|b| b.to_bits()).collect();
     match inst {
         super::MirInst::ByteScan { inclusive, backward, streams, scalars, expr, .. } => {
             let body = super::vector_body::byte_scan_body(expr, streams, scalars, &regs)?;

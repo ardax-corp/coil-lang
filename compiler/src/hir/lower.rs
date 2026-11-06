@@ -20,7 +20,7 @@
 
 use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, UnOp};
 use std::collections::HashMap;
-use crate::codegen::primitive_cast_opcode as cast_opcode;
+use crate::codegen::is_primitive_cast;
 use crate::typechecking::infer::{Checker, ForInCounted, ForInKind};
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
@@ -2511,7 +2511,7 @@ impl Walk<'_> {
             HirKind::Cast { value } => {
                 let from = self.ty(*value).and_then(primitive).ok_or("cast")?;
                 let to = self.ty(id).and_then(primitive).ok_or("cast")?;
-                if from != to && cast_opcode(from, to).is_none() {
+                if from != to && !is_primitive_cast(from, to) {
                     return Err("cast");
                 }
                 self.value(*value)

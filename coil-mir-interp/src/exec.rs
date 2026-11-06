@@ -739,7 +739,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 }
             }
             MirInst::Ffi { dest, op, operand, args } => {
-                let w = rt::coil_native_ffi(ctx, u64::from(op.instruction() as u8), u64::from(*operand), words!(args), args.len() as u64);
+                let w = rt::coil_native_ffi(ctx, u64::from(op.code()), u64::from(*operand), words!(args), args.len() as u64);
                 check!();
                 set!(*dest, w);
             }

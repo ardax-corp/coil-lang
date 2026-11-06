@@ -2463,7 +2463,7 @@ impl<'a> Lower<'a> {
                 }
             }
             MirInst::Ffi { dest, op, operand, args } => {
-                let o = self.b.ins().iconst(types::I64, i64::from(op.instruction() as u8));
+                let o = self.b.ins().iconst(types::I64, i64::from(op.code()));
                 let x = self.b.ins().iconst(types::I64, i64::from(*operand));
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);

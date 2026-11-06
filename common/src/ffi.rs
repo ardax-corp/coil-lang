@@ -141,3 +141,8 @@ mod tests {
         );
     }
 }
+
+/// The FFI operations native code asks the runtime for.
+pub const FFI_OP_LOAD: u8 = 0;
+pub const FFI_OP_DECLARE: u8 = 1;
+pub const FFI_OP_INVOKE: u8 = 2;

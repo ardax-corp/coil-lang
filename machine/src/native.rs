@@ -2159,7 +2159,6 @@ impl Drop for GenFiber {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: u64, args: *const u64, n: u64) -> u64 {
     let ffi = unsafe { (*ctx).host.ffi };
-    let _kind = [common::Instruction::FfiLoad as u8, common::Instruction::DeclareFFI as u8].iter().position(|o| u64::from(*o) == op).unwrap_or(2);
     unsafe { host_on_machine(ctx, ffi, op, operand, args, n, false) }
 }
 
@@ -2437,7 +2436,7 @@ pub static VECTOR_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flags: u64, body: *const u64, nbody: u64, slots: *mut u64, nslots: u64, from: u64, bound: u64) -> u64 {
     let c = unsafe { &mut *ctx };
-    let mut words = [common::Byte::default(); 128];
+    let mut words = [common::LaneWord::default(); 128];
     let Some(code) = words.get_mut(..nbody as usize) else {
         return unsafe { bail(ctx) };
     };
@@ -2446,8 +2445,10 @@ pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flag
     }
     for (i, w) in code.iter_mut().enumerate() {
         // SAFETY: `body` holds `nbody` words.
-        let x = unsafe { *body.add(i) };
-        *w = common::Byte::new(common::Instruction::from(x as u8)).with_operand_u32((x >> 32) as u32);
+        let Some(word) = common::LaneWord::from_bits(unsafe { *body.add(i) }) else {
+            return unsafe { bail(ctx) };
+        };
+        *w = word;
     }
     // SAFETY: `slots` holds `nslots` words.
     let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };

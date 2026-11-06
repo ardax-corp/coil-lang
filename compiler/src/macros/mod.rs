@@ -89,14 +89,6 @@ pub fn forward_thread_uses(ast: &mut parser::ast::Output<'_>) {
     }
 }
 
-/// Module path of the Coil twins of host natives native code calls
-/// instead of the native (`mir::native_twins`). Embedded only while a
-/// native capture is open.
-pub const TWINS_MODULE: &str = "native_twins";
-
-/// Source of the embedded `native_twins` module.
-pub const TWINS_SOURCE: &str = include_str!("../prelude/twins.coil");
-
 /// An enum the core prelude marks with `#[lang(..)]`.
 #[derive(Debug)]
 pub struct LangEnum {
@@ -197,11 +189,6 @@ pub fn arbitrary_module_path() -> PathBuf {
     PathBuf::from("<coil>/arbitrary.coil")
 }
 
-/// Pseudo path of the embedded `native_twins` module.
-pub fn twins_module_path() -> PathBuf {
-    PathBuf::from("<coil>/twins.coil")
-}
-
 /// Pseudo path of the embedded `thread_locks` module.
 pub fn thread_locks_module_path() -> PathBuf {
     PathBuf::from("<coil>/thread_locks.coil")
@@ -226,8 +213,6 @@ pub fn embedded_source(path: &Path) -> Option<&'static str> {
         Some(ARBITRARY_SOURCE)
     } else if path == core_module_path() {
         Some(CORE_SOURCE)
-    } else if path == twins_module_path() {
-        Some(TWINS_SOURCE)
     } else if path == thread_locks_module_path() {
         Some(THREAD_LOCKS_SOURCE)
     } else {
@@ -249,8 +234,6 @@ pub fn embedded_module(path: &Path) -> Option<&'static str> {
         Some(ARBITRARY_MODULE)
     } else if path == core_module_path() {
         Some(CORE_MODULE)
-    } else if path == twins_module_path() {
-        Some(TWINS_MODULE)
     } else if path == thread_locks_module_path() {
         Some(THREAD_LOCKS_MODULE)
     } else {

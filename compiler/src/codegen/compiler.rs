@@ -7802,11 +7802,6 @@ impl Compiler {
                 if let Some(keep) = &self.keep_fns_in {
                     roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name)));
                 }
-                // Native code calls the twins in place of their host
-                // natives (`mir::native_twins`).
-                if crate::mir::native_capture_active() {
-                    roots.extend(crate::mir::native_twins::twin_fn_names().filter(|name| self.functions.contains_key(name)));
-                }
                 roots
             } else {
                 self.functions.keys().filter(|name| !no_mir.contains(*name)).cloned().collect()
