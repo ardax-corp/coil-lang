@@ -66,6 +66,15 @@ pub struct NativeProgram {
     pub keep: Arc<dyn Any + Send + Sync>,
 }
 
+impl NativeProgram {
+    /// Install every body for the coming run. Its entries point into the code
+    /// for the rest of the process, so it stays.
+    pub fn install(self) {
+        std::mem::forget(self.keep);
+        machine::native::install_for_next_run(self.entries, self.sites, true);
+    }
+}
+
 /// A program's code in memory, freed with this. The module is only ever
 /// dropped from here on, which is why it may cross threads.
 struct Code {
@@ -147,7 +156,7 @@ pub fn install_section(bytes: &[u8]) -> Result<(), String> {
     if std::env::var_os("COIL_NATIVE_STATS").is_some() {
         eprintln!("{}", describe(&program));
     }
-    machine::native::install_for_next_run(program.entries, program.sites, true);
+    program.install();
     Ok(())
 }
 
