@@ -20,7 +20,7 @@ pub(crate) struct Runtime {
     pub(crate) reactor: std::sync::Arc<crate::reactor::Reactor>,
     /// IO readiness reactor (sync adapters + async waiters).
     pub(crate) io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
-    /// Undetached spawns owned by this runtime (joined at end of `run_with_pool`).
+    /// Undetached spawns owned by this runtime (joined when `main` returns).
     pub(crate) live_threads: crate::thread::LiveThreadRegistry,
     /// Shared concurrent OS-worker budget for this root runtime (and its workers).
     pub(crate) worker_cap: std::sync::Arc<crate::thread::WorkerCap>,
@@ -70,24 +70,24 @@ pub(crate) struct Runtime {
     /// happen), so a charge is one decrement and one never-taken branch
     /// either way.
     pub(crate) fuel: u64,
-    /// Set once the budget ran out ([`crate::Machine::step_budget_exhausted`]).
+    /// Set once the budget ran out ([`crate::Isolate::step_budget_exhausted`]).
     pub(crate) step_budget_hit: bool,
-    /// `fuel` as [`crate::Machine::set_step_budget`] last set it
-    /// ([`crate::Machine::steps_charged`]).
+    /// `fuel` as [`crate::Isolate::set_step_budget`] last set it
+    /// ([`crate::Isolate::steps_charged`]).
     pub(crate) fuel_start: u64,
     /// Runs of each coverage probe ([`crate::native::coil_native_probe`]).
     pub(crate) probes: Vec<u32>,
-    /// Heap cap from [`crate::Machine::set_heap_cap`] (`usize::MAX`: none).
+    /// Heap cap from [`crate::Isolate::set_heap_cap`] (`usize::MAX`: none).
     pub(crate) heap_cap: usize,
     /// Set once the live heap outgrew [`Self::heap_cap`] after a full
-    /// collection ([`crate::Machine::heap_cap_exceeded`]).
+    /// collection ([`crate::Isolate::heap_cap_exceeded`]).
     pub(crate) heap_cap_hit: bool,
 }
 
-/// Panic when [`crate::Machine::set_step_budget`]'s budget runs out.
+/// Panic when [`crate::Isolate::set_step_budget`]'s budget runs out.
 pub(crate) const STEP_BUDGET_EXHAUSTED: &str = "step budget exhausted: execution exceeded its back-edge / call limit";
 
-/// Panic when the heap outgrows [`crate::Machine::set_heap_cap`]'s cap.
+/// Panic when the heap outgrows [`crate::Isolate::set_heap_cap`]'s cap.
 pub(crate) const HEAP_CAP_EXCEEDED: &str = "heap limit exceeded: live objects outgrew the memory cap";
 
 /// What the `ffi::` natives keep between calls.

@@ -516,10 +516,10 @@ pub const TRAP_PANICKED: u64 = 8;
 /// An explicit `panic(msg)`: the message in [`NativeCtx::message`].
 pub const TRAP_EXPLICIT: u64 = 9;
 /// Not a panic: the call's fiber parked (its task suspended inside it);
-/// the task suspends at the `CALL` (`vm_fiber.rs`).
+/// the task suspends at the `CALL` (`driver.rs`).
 pub const TRAP_PARKED: u64 = 10;
 /// Not a panic: a generator's close unwinds its body from the yield it is
-/// suspended at, collecting its armed `defer`s (`vm_gen.rs`).
+/// suspended at, collecting its armed `defer`s (`gen_fiber.rs`).
 pub const TRAP_CLOSE: u64 = 11;
 /// The step budget ran out, or the heap outgrew its cap, which drains it.
 pub const TRAP_BUDGET: u64 = 12;
@@ -618,7 +618,7 @@ pub struct NativeEntry {
     /// It may run interpreted code (a runtime call, a function value, a `drop`), so a
     /// task switch could come while its frames are live: with a scheduler
     /// that can switch, the call runs on the task's own fiber stack
-    /// (`vm_fiber.rs`).
+    /// (`driver.rs`).
     pub suspends: bool,
     /// The leading parameters the body reads: a `CALL` of at least this
     /// many words (and at most `arity`) enters it, the rest passed as `0`.
@@ -627,10 +627,10 @@ pub struct NativeEntry {
     /// in [`NativeCtx::ret_hi`]), in that order.
     pub ret_words: u8,
     /// A generator's body: only a resume enters it, on a fiber of its own
-    /// (`native_gen.rs`), never a `CALL`.
+    /// (`gen_fiber.rs`), never a `CALL`.
     pub generator: bool,
     /// It has `defer`s (a cleanup pad): a generator's close resumes its
-    /// fiber to unwind them (`vm_gen.rs`).
+    /// fiber to unwind them (`gen_fiber.rs`).
     pub cleanup: bool,
     pub entry: NativeEntryFn,
     /// Copied to [`NativeCtx::entry_data`] for the call (`0` for machine
@@ -2024,7 +2024,7 @@ thread_local! {
 pub(crate) type GenCoro = corosensei::Coroutine<u64, (u64, usize), NativeOutcome, corosensei::stack::DefaultStack>;
 
 /// The native side of a generator whose body runs natively: owned by its
-/// `ObjCoroutine` while it is suspended (`vm_gen.rs`).
+/// `ObjCoroutine` while it is suspended (`gen_fiber.rs`).
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub struct GenFiber {
     #[cfg(not(target_family = "wasm"))]

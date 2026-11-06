@@ -387,7 +387,7 @@ pub struct CaseOutcome {
     pub file: PathBuf,
     pub name: String,
     pub passed: bool,
-    /// Step-budget charges (see `Machine::set_step_budget`).
+    /// Step-budget charges (see `Isolate::set_step_budget`).
     pub steps: u64,
     /// Covered project lines per canonical source path (with `--coverage`).
     pub covered: Vec<(PathBuf, Vec<u32>)>,

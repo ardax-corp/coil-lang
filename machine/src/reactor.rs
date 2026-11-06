@@ -66,7 +66,7 @@ pub struct Job {
     pub program: Arc<ThreadProgram>,
     pub natives: Natives,
     pub shared_print: Option<Arc<Mutex<Vec<u8>>>>,
-    /// The stdout part of `shared_print` (see [`Machine::set_shared_stdout`]).
+    /// The stdout part of `shared_print` (see [`crate::io::set_shared_stdout_redirect`]).
     pub shared_stdout: Option<Arc<Mutex<Vec<u8>>>>,
     /// The stderr part of `shared_print`.
     pub shared_stderr: Option<Arc<Mutex<Vec<u8>>>>,
