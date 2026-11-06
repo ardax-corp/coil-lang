@@ -4248,8 +4248,9 @@ impl Lower<'_> {
     /// `f` with the source location of statement `id`.
     fn at_stmt<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
         let outer = self.b.pending_loc;
-        if let Some(file) = self.inp.file {
-            let (start, end) = self.hir.expr(id).span;
+        let (start, end) = self.hir.expr(id).span;
+        // Generated code without a place of its own has the enclosing one.
+        if let Some(file) = self.inp.file.filter(|_| !crate::attrs::is_fresh_span(start)) {
             self.b.pending_loc = DebugLoc {
                 file,
                 start_byte: start as u32,
