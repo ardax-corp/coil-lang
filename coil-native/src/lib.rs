@@ -194,6 +194,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         let refused = plan.refused.clone();
         let mut flags = settings::builder();
         flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
+        flags.set("enable_verifier", VERIFY_CLIF).map_err(|e| e.to_string())?;
         // Executables are position independent on most hosts.
         flags.set("is_pic", "true").map_err(|e| e.to_string())?;
         flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
@@ -377,11 +378,16 @@ enum Attempt {
 fn jit_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
+    flags.set("enable_verifier", VERIFY_CLIF).map_err(|e| e.to_string())?;
     // The collector walks native frames by their frame pointers.
     flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
     isa_builder.finish(settings::Flags::new(flags)).map_err(|e| e.to_string())
 }
+
+/// Cranelift's verifier: debug builds, which CI runs over every corpus. It
+/// costs a release build a tenth of its compile.
+const VERIFY_CLIF: &str = if cfg!(debug_assertions) { "true" } else { "false" };
 
 /// A module for JIT code, with `reserve` bytes of address space.
 fn jit_module(reserve: usize) -> Result<JITModule, String> {
