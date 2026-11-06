@@ -747,9 +747,7 @@ impl Pipeline {
         self.sink.finish()
     }
 
-    /// How many diagnostics (errors, warnings, notes) were reported so
-    /// far. The build cache keeps only compiles that reported none, since
-    /// a cached run would not repeat them.
+    /// How many diagnostics (errors, warnings, notes) were reported so far.
     pub fn diagnostics_emitted(&self) -> usize {
         self.diagnostics.load(std::sync::atomic::Ordering::Relaxed)
     }
