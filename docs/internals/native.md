@@ -81,9 +81,11 @@ limit. The `harness native` cell writes the report to its job summary.
 
 A body holds `int`, `float` and `bool` words (`MirTy::I64` / `F64` / `Bool`) and heap
 words (`HeapRef`, `NicheOpt`, `NicheRes`). Native-to-native calls are direct
-Cranelift calls with the values in registers. Native code does not read
-`MirFunc::tail_targets`, so a tail call keeps its frame here; only the interpreter
-takes the frame. An entry has the shape `extern "C"
+Cranelift calls with the values in registers. A tail call (`is_tail_call_inst`) takes
+the frame with `return_call`, in a body with no `defer`s or `gc::root` handles
+whose callee returns the same words. Those bodies and their callees are on the `tail`
+calling convention; the others stay on the platform's, which keeps callee-saved
+registers. An entry has the shape `extern "C"
 fn(ctx, *const u64) -> u64`: the wrapper unpacks words (a `bool` word is true when
 its low byte is `1`; a `float` word is its bits), calls the body and packs the
 result. A body that returns two words returns two Cranelift values, and the entry

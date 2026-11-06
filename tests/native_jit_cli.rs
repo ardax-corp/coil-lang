@@ -1438,3 +1438,74 @@ fn byte_array_literals_are_packed_natively() {
     let stats = same_as_mir("packed_bytes", &src);
     assert!(compiled(&stats, "row") && compiled(&stats, "grown"), "stats: {stats}");
 }
+
+/// Past any stack the runtime gives a call: a tail call that keeps its frame
+/// overflows long before this (#2277).
+const TAIL_DEPTH: u32 = 30_000_000;
+
+/// `body` as a program whose `main` prints `expr`; its output on native code.
+fn tail_program(name: &str, body: &str, expr: &str) -> String {
+    let src = format!("{HEADER}{body}\nfn main() {{ let _ = println(format(\"%i\", {expr})); }}\n");
+    let out = run(name, &src, true);
+    assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn a_self_tail_call_takes_the_frame() {
+    let body = "#[inline(never)]\nfn count(int n, int acc) -> int { if n == 0 { return acc; } return count(n - 1, acc + 1); }";
+    assert_eq!(tail_program("tail_self", body, &format!("count({TAIL_DEPTH}, 0)")), TAIL_DEPTH.to_string());
+}
+
+#[test]
+fn a_tail_call_of_a_sibling_takes_the_frame() {
+    let body = "#[inline(never)]\nfn even(int n) -> int { if n == 0 { return 1; } return odd(n - 1); }\n\
+                #[inline(never)]\nfn odd(int n) -> int { if n == 0 { return 0; } return even(n - 1); }";
+    assert_eq!(tail_program("tail_sibling", body, &format!("even({TAIL_DEPTH})")), "1");
+}
+
+#[test]
+fn a_tail_call_with_more_words_than_registers_takes_the_frame() {
+    // The sibling takes more stack arguments than its caller.
+    let body = "#[inline(never)]\nfn few(int n, int a) -> int { if n == 0 { return a; } return many(n - 1, a, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12); }\n\
+                #[inline(never)]\nfn many(int n, int a, int b, int c, int d, int e, int f, int g, int h, int i, int j, int k, int l, int m) -> int { if n == 0 { return a + m; } return few(n - 1, a + b + c + d + e + f + g + h + i + j + k + l + m - 77); }";
+    assert_eq!(tail_program("tail_words", body, &format!("few({TAIL_DEPTH}, 0)")), (TAIL_DEPTH / 2).to_string());
+}
+
+#[test]
+fn a_tail_call_returning_two_words_takes_the_frame() {
+    let body = "#[inline(never)]\nfn find(int n, int at) -> Result<int, string> { if n == 0 { return Result::Ok(at); } return find(n - 1, at + 1); }";
+    let expr = format!("match find({TAIL_DEPTH}, 0) {{ Result::Ok(v) => v, Result::Err(_) => -1 }}");
+    assert_eq!(tail_program("tail_pair", body, &expr), TAIL_DEPTH.to_string());
+}
+
+#[test]
+fn heap_words_survive_collections_across_tail_calls() {
+    // Each step allocates, so collections run with the words only in
+    // tail-called frames, among them frames with stack arguments.
+    let body = "class Box {\n    pub n: int,\n}\n\
+                #[inline(never)]\nfn a(int n, Box x, int p, int q, int r, int s, int t, int u, int v, int w, Box y) -> int { if n == 0 { return x.n + y.n; } return b(n - 1, new Box(x.n + 1), y); }\n\
+                #[inline(never)]\nfn b(int n, Box x, Box y) -> int { if n == 0 { return x.n + y.n; } return a(n - 1, new Box(x.n + 1), 1, 2, 3, 4, 5, 6, 7, 8, y); }";
+    assert_eq!(tail_program("tail_heap", body, "a(3000000, new Box(0), 1, 2, 3, 4, 5, 6, 7, 8, new Box(5))"), "3000005");
+}
+
+#[test]
+fn a_panic_through_tail_calls_matches_the_interpreter() {
+    // The frames the calls took are not in the trace, on either engine.
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn down(int n) -> int {{ if n == 0 {{ panic \"bottom\"; }} return up(n - 1); }}\n\
+         #[inline(never)]\nfn up(int n) -> int {{ return down(n); }}\n\
+         #[inline(never)]\nfn top() -> int {{ let r = down(5); return r + 1; }}\n\
+         fn main() {{ let _ = println(format(\"%i\", top())); }}\n"
+    );
+    same_as_mir("tail_panic", &src);
+}
+
+#[test]
+fn a_body_with_a_defer_keeps_its_frame() {
+    let src = format!(
+        "{HEADER}#[inline(never)]\nfn step(int n) -> int {{ defer {{ let _ = println(\"out\"); }} if n == 0 {{ return 0; }} return step(n - 1); }}\n\
+         fn main() {{ let _ = println(format(\"%i\", step(3))); }}\n"
+    );
+    same_as_mir("tail_defer", &src);
+}

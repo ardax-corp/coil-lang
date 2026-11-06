@@ -21,6 +21,7 @@ use compiler::native_mir::{
     ty_of, root_handles, used_params, word_kind,
 };
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::ir::{AbiParam, Block, FuncRef, InstBuilder, MemFlagsData, Signature, Type, types};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -397,6 +398,12 @@ struct Plan {
     used_params: HashMap<usize, usize>,
     /// Bodies that may be a type's `drop` (a call claims its finalizer).
     drops: HashSet<usize>,
+    /// The blocks of each body that end in a tail call ([`tail_sites`]).
+    tail_sites: HashMap<usize, HashSet<BlockId>>,
+    /// Bodies on the `tail` calling convention: the ones with tail sites
+    /// and what they call there. It saves no registers across a call, so
+    /// other bodies stay on the platform's.
+    tail_conv: HashSet<usize>,
 }
 
 /// What [`define_all`] made: the declared ids, the bodies defined, the
@@ -413,7 +420,7 @@ fn define_all<M: Module>(
     entry_pcs: &HashMap<String, u32>,
     plan: &Plan,
 ) -> Result<Result<Defined, (usize, String)>, String> {
-    let ids = declare(module, bodies, &plan.compile)?;
+    let ids = declare(module, bodies, plan)?;
     define_trampolines(module, &ids.tramps)?;
     let fcfg = module.isa().frontend_config();
     let mut fbc = FunctionBuilderContext::new();
@@ -423,7 +430,7 @@ fn define_all<M: Module>(
     let mut maps = Vec::new();
     for &i in &plan.compile {
         let body = &bodies[i];
-        ctx.func.signature = impl_signature(&*module, &body.mir);
+        ctx.func.signature = impl_signature(&*module, &body.mir, plan.tail_conv.contains(&i));
         let lowered = {
             let entry_pc = entry_pcs.get(&body.name).copied();
             let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, entry_pc);
@@ -486,7 +493,10 @@ fn stack_maps(ctx: &cranelift_codegen::Context) -> FuncMaps {
     let Some(code) = ctx.compiled_code() else {
         return (0, Vec::new());
     };
-    let maps = code.buffer.user_stack_maps().iter().map(|(ra, _, map)| (*ra, map.entries().map(|(_, off)| off).collect())).collect();
+    // Each slot by its distance below the frame pointer: a frame's stack
+    // pointer at a call is not always where its callee's frame starts, as a
+    // `tail` body moves its return address to make room for stack arguments.
+    let maps = code.buffer.user_stack_maps().iter().map(|(ra, span, map)| (*ra, map.entries().map(|(_, off)| span - off).collect())).collect();
     (code.code_info().total_size, maps)
 }
 
@@ -592,9 +602,18 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         runtime_reach.extend(more);
     }
     let used_params = compile_used_params(bodies, ok.keys());
+    let tail_sites = tail_sites(bodies, &ok, &by_label, &drops);
+    let mut tail_conv: HashSet<usize> = tail_sites.keys().copied().collect();
+    for (i, blocks) in &tail_sites {
+        let f = &bodies[*i].mir;
+        tail_conv.extend(f.blocks.iter().filter(|b| blocks.contains(&b.id)).filter_map(|b| match b.insts.last() {
+            Some(MirInst::Call { target, .. }) => by_label.get(target).copied(),
+            _ => None,
+        }));
+    }
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused, moves, may_gc, pcs, drops, runtime_reach, used_params }
+    Plan { compile, by_label, refused, moves, may_gc, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv }
 }
 
 /// An instruction that may run interpreted code: a function value's call, a free
@@ -613,6 +632,32 @@ fn reaches_runtime(inst: &MirInst, drops: bool) -> bool {
 /// [`used_params`] of each of `bodies` at `which`.
 fn compile_used_params<'a>(bodies: &[NativeBody], which: impl Iterator<Item = &'a usize>) -> HashMap<usize, usize> {
     which.map(|&i| (i, used_params(&bodies[i].mir))).collect()
+}
+
+/// The blocks of each compiled body whose last op takes the frame, as the
+/// interpreter's does: a planned tail call in a body with no `defer`s. Here
+/// also none that holds a `gc::root` handle until it returns, and only where
+/// both bodies return the same words, which `return_call` needs.
+fn tail_sites(bodies: &[NativeBody], ok: &HashMap<usize, Vec<usize>>, by_label: &HashMap<Label, usize>, drops: &HashSet<usize>) -> HashMap<usize, HashSet<BlockId>> {
+    let returns = |f: &MirFunc| (cl_ty(f.ret_ty.unwrap_or(MirTy::I64)), f.ret_hi_ty.map(cl_ty));
+    let mut sites: HashMap<usize, HashSet<BlockId>> = HashMap::new();
+    for &i in ok.keys() {
+        let f = &bodies[i].mir;
+        if !f.homes.is_empty() || f.cleanup.is_some() || !root_handles(f).is_empty() || is_generator(f) {
+            continue;
+        }
+        for b in &f.blocks {
+            let Some(inst) = b.insts.last().filter(|inst| compiler::native_mir::is_tail_call_inst(f, b, inst)) else {
+                continue;
+            };
+            let MirInst::Call { target, .. } = inst else { continue };
+            let Some(&callee) = by_label.get(target) else { continue };
+            if ok.contains_key(&callee) && !drops.contains(&callee) && returns(f) == returns(&bodies[callee].mir) {
+                sites.entry(i).or_default().insert(b.id);
+            }
+        }
+    }
+    sites
 }
 
 /// Whether any instruction or terminator of `f` reads `v`.
@@ -1053,8 +1098,11 @@ fn cl_ty(t: MirTy) -> Type {
     if t == MirTy::F64 { types::F64 } else { types::I64 }
 }
 
-fn impl_signature(module: &impl Module, f: &MirFunc) -> Signature {
+fn impl_signature(module: &impl Module, f: &MirFunc, tail: bool) -> Signature {
     let mut sig = module.make_signature();
+    if tail {
+        sig.call_conv = CallConv::Tail;
+    }
     sig.params.push(AbiParam::new(types::I64));
     for &p in &f.params {
         sig.params.push(AbiParam::new(cl_ty(ty_of(f, p))));
@@ -1112,14 +1160,15 @@ fn define_trampolines<M: Module>(module: &mut M, tramps: &[(FuncId, FuncId, Sign
     Ok(())
 }
 
-fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -> Result<Ids, String> {
+fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Result<Ids, String> {
+    let compile = &plan.compile;
     let e = |e: cranelift_module::ModuleError| e.to_string();
     let mut tramps = Vec::new();
     let mut imp = HashMap::new();
     let mut entry = HashMap::new();
     let mut pad = HashMap::new();
     for &i in compile {
-        let sig = impl_signature(module, &bodies[i].mir);
+        let sig = impl_signature(module, &bodies[i].mir, plan.tail_conv.contains(&i));
         imp.insert(i, module.declare_function(&format!("coil_impl_{i}"), Linkage::Local, &sig).map_err(e)?);
         let esig = entry_signature(module);
         entry.insert(i, module.declare_function(&format!("coil_entry_{i}"), Linkage::Local, &esig).map_err(e)?);
@@ -2181,10 +2230,16 @@ impl<'a> Lower<'a> {
                 Some(Terminator::JumpIfMatch { payloads, .. }) => payloads,
                 _ => &[],
             };
+            let tail = self.body_index.is_some_and(|i| self.plan.tail_sites.get(&i).is_some_and(|b| b.contains(&blk.id)));
             for (ii, inst) in blk.insts.iter().enumerate() {
                 if let MirInst::MatchPayload { dest, .. } = inst
                     && edge_bound.contains(dest)
                 {
+                    continue;
+                }
+                if tail && ii + 1 == blk.insts.len() {
+                    self.at(Some(f.op_loc(inst.dest())));
+                    self.tail_call(f, inst)?;
                     continue;
                 }
                 let mut live = live_after[bi][ii].clone();
@@ -2204,7 +2259,9 @@ impl<'a> Lower<'a> {
             }
             self.live = None;
             self.at(None);
-            self.term(f, blk.id, blk.term.as_ref().ok_or("no terminator")?)?;
+            if !tail {
+                self.term(f, blk.id, blk.term.as_ref().ok_or("no terminator")?)?;
+            }
         }
 
         // Bail or panic (`coil_native_unwind` decides), return a dummy word.
@@ -2871,10 +2928,9 @@ impl<'a> Lower<'a> {
         self.b.ins().iadd_imm_u(base, i64::from(slot) * 8)
     }
 
-    /// A direct call of the body at `target`.
-    fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, target: Label, args: &[ValueId]) -> Result<(), String> {
-        let (dest, dest_hi, target) = (&dest, &dest_hi, &target);
-        let callee = *self.by_label.get(target).ok_or("unknown callee")?;
+    /// The callee at `target` and the words of a call of it on `args`.
+    fn call_words(&mut self, f: &MirFunc, target: Label, args: &[ValueId]) -> Result<(usize, FuncRef, Vec<cranelift_codegen::ir::Value>), String> {
+        let callee = *self.by_label.get(&target).ok_or("unknown callee")?;
         let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
         let sig = self.b.func.dfg.ext_funcs[fref].signature;
         let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
@@ -2890,6 +2946,24 @@ impl<'a> Lower<'a> {
             };
             vals.push(self.coerce(x, want));
         }
+        Ok((callee, fref, vals))
+    }
+
+    /// A call that takes this frame ([`Plan::tail_sites`]): the callee
+    /// returns to this body's caller, so nothing here runs after it.
+    fn tail_call(&mut self, f: &MirFunc, inst: &MirInst) -> Result<(), String> {
+        let MirInst::Call { target, args, .. } = inst else {
+            return Err("tail site without a call".to_string());
+        };
+        let (_, fref, vals) = self.call_words(f, *target, args)?;
+        self.b.ins().return_call(fref, &vals);
+        Ok(())
+    }
+
+    /// A direct call of the body at `target`.
+    fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, target: Label, args: &[ValueId]) -> Result<(), String> {
+        let (dest, dest_hi) = (&dest, &dest_hi);
+        let (callee, fref, vals) = self.call_words(f, target, args)?;
         let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
         let prev = if self.plan.runtime_reach.contains(&callee) { Some(self.push_call()) } else { None };
         let call = self.b.ins().call(fref, &vals);
