@@ -1292,7 +1292,10 @@ impl Compiler {
         // A compiler-made body's call as it planned it: the dictionaries
         // it passes, and a raw method's own entry.
         let synth = self.hir_synth_calls.is_some().then(|| self.hir_synth_callees.get(&call.key).cloned()).flatten();
-        self.raw_instance_call = synth.as_ref().is_some_and(|s| s.raw);
+        // A ground call of a raw instance method that returns a pair (a
+        // `?` converting through `Into`) passes its own words and takes
+        // the pair: the method's entry, not its `$dict` adapter.
+        self.raw_instance_call = synth.as_ref().is_some_and(|s| s.raw) || (call.pair.is_some() && self.raw_instance_methods.contains(&call.key));
         let target = self.named_entry_target(&call.key, true);
         // A shared generic's call is plain, its dictionaries the ones
         // `plan_call_site_dicts` plans (none forwarded through a slot).
