@@ -1509,3 +1509,35 @@ fn a_body_with_a_defer_keeps_its_frame() {
     );
     same_as_mir("tail_defer", &src);
 }
+
+/// A test run gives each file's code back when the file is done. A JIT
+/// reserves 64 MiB or more, and Windows charges all of it to the commit limit,
+/// so a run that keeps every file's stops partway through a corpus.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_test_run_gives_back_each_files_code() {
+    const FILES: usize = 96;
+    const MOST_KB: u64 = 3 << 20;
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-code-freed", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for i in 0..FILES {
+        let src = format!("// @output {i}\nuse io::{{stdout, write}};\nuse string::{{format, to_bytes}};\n\nfn main() {{\n  let _ = write(stdout(), to_bytes(format(\"%i\", {i})));\n}}\n");
+        std::fs::write(dir.join(format!("f{i}.coil")), src).expect("write source");
+    }
+    let runner = PathBuf::from(coil_bin()).with_file_name("coil-test");
+    let mut child = Command::new(runner).args(["-j", "1"]).arg(&dir).stdout(std::process::Stdio::null()).spawn().expect("spawn coil-test");
+    let status = format!("/proc/{}/status", child.id());
+    let mut peak_kb = 0;
+    let exit = loop {
+        let text = std::fs::read_to_string(&status).unwrap_or_default();
+        let peak = text.lines().find_map(|l| l.strip_prefix("VmPeak:")).and_then(|l| l.trim().trim_end_matches(" kB").parse().ok());
+        peak_kb = peak.unwrap_or(peak_kb).max(peak_kb);
+        if let Some(exit) = child.try_wait().expect("wait for coil-test") {
+            break exit;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(exit.success(), "{exit}");
+    assert!(peak_kb > 0 && peak_kb < MOST_KB, "address space reached {} MiB", peak_kb / 1024);
+}
