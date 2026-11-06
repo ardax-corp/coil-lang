@@ -663,6 +663,7 @@ fn examples_print_their_documented_output() {
     assert!(checked > 100, "only {checked} examples were checked");
 }
 
+#[cfg(unix)]
 /// Soft-skip an FFI-dependent test outside CI. In CI (`CI` env set), skip is a
 /// hard failure so missing `cc` / libffi never silently greens the suite.
 fn ffi_soft_skip(reason: &str) {
@@ -922,6 +923,7 @@ fn main() {
 
 
 
+#[cfg(unix)]
 fn ensure_ffi_libsum_built() -> std::path::PathBuf {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1513,6 +1515,7 @@ fn pipeline_gate_first_party_allow_plus_trusted_skips_hash() {
 
 
 
+#[cfg(unix)]
 fn run_ffi_example_with_lib(path: &str, lib_path: &std::path::Path) -> String {
     ensure_ffi_libsum_built();
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
