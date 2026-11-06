@@ -50,7 +50,7 @@ Codegen / match: `.claude/skills/coil-contributor/reference.md`.
 ## Commands (reference; CI runs these)
 
 - Full suite: `cargo test --workspace --lib --tests --bins` (use `--lib --tests --bins`, not `--all-targets`: Criterion benches abort on test argv). CI runs its two corpus-wide tests, `hir_corpus` and `fmt_round_trip`, in a separate `test corpus` job. Default features are empty and the tooling crates unify `dissect` / `debugger`, so feature variants build the same thing; one run covers them.
-- `.coil` corpus: `./target/debug/coil test` (or a path). `--engine native|mir`; `COIL_NO_FIBERS=1 --engine mir` runs generators and tasks on parked frames, as wasm does.
+- `.coil` corpus: `./target/debug/coil test` (or a path). `--engine native|mir`; `COIL_NO_FIBERS=1 --engine mir` runs generators and tasks on parked frames, as wasm does; `COIL_CODE_IMAGE_CHECK=1 --engine native` runs each program from a code image, as a code cache hit does.
 - Leak smoke and GC stress: the `harness-*` jobs in `.github/workflows/ci.yml` (`scripts/test_corpora.py`; leak smoke is `MALLOC_ARENA_MAX=1`, `-j 1 --limit-as-kb <code size + 256 MiB>`, GC stress is `coil-test` built with `--features gc-stress --target-dir target/gc-stress`, release cells only since #2131).
 - Soft CPU baseline: `./scripts/poop_baseline.sh`.
 - Under cargo the reactor runs one worker (`COIL_MAX_WORKER_THREADS=1` in `.cargo/config.toml`); override it when profiling auto-par.

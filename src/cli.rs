@@ -187,6 +187,9 @@ enum RawCommand {
         grants: HostGrantFlags,
         #[command(flatten)]
         nursery: NurseryFlag,
+        /// Compile the archive's code even when the code cache holds it
+        #[arg(long)]
+        no_build_cache: bool,
         /// Archive path
         archive: String,
     },
@@ -623,11 +626,13 @@ impl RawCli {
                 log,
                 grants,
                 nursery,
+                no_build_cache,
                 archive,
             }) => CliArgs {
                 nursery: nursery.nursery,
                 cow_report: nursery.cow_report,
                 mir: nursery.mir,
+                build_cache: !no_build_cache,
                 ..cli_from(
                     Command::Run { archive },
                     log,

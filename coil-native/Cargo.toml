@@ -12,6 +12,7 @@ machine = { path = "../machine", default-features = false }
 # No native code on wasm (the playground runs the MIR interpreter): the crate
 # is empty there.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+sha2 = "0.10"
 cranelift-codegen = "0.137"
 cranelift-frontend = "0.137"
 cranelift-jit = "0.137"
