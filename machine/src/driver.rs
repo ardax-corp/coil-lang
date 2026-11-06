@@ -334,11 +334,6 @@ impl<'a> Driver<'a> {
         self.depth -= 1;
         match out {
             NativeOutcome::Done(r) => {
-                for (w, deep) in r.frees {
-                    if !self.free_early(Value::from(w), deep) {
-                        return None;
-                    }
-                }
                 if r.allocated {
                     // The result is the caller's word: rooted meanwhile.
                     let n = self.rt.ffi_arg_roots.len();
@@ -1287,13 +1282,7 @@ impl Driver<'_> {
     /// (which fails the task) and the `defer`s it unwound.
     fn task_body_done(&mut self, out: NativeOutcome) {
         match out {
-            NativeOutcome::Done(r) => {
-                for (w, deep) in r.frees {
-                    if !self.free_early(Value::from(w), deep) {
-                        return;
-                    }
-                }
-            }
+            NativeOutcome::Done(_) => {}
             NativeOutcome::Panicked(p) => self.native_panic(p),
             NativeOutcome::Parked(..) => self.report("native driver: a task could not start", None, Vec::new(), false),
         }
@@ -1432,10 +1421,6 @@ impl crate::gen_fiber::GenHost for Driver<'_> {
 
     fn native_env(&mut self) -> NativeEnv {
         self.env()
-    }
-
-    fn free_early(&mut self, v: Value, deep: bool) {
-        let _ = Driver::free_early(self, v, deep);
     }
 
     fn switches_in_fibers(&self) -> bool {

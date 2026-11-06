@@ -27,7 +27,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
+    NATIVE_CTX_BAIL, NATIVE_CTX_RET_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -1031,14 +1031,14 @@ struct Ids {
     free_early: FuncId,
     /// Bails and native panics (`coil_native_unwind`).
     unwind: FuncId,
-    /// `PRINT` (commits the call).
+    /// `PRINT`.
     print: FuncId,
-    /// Direct host natives (commit the call).
+    /// Direct host natives.
     host: FuncId,
     ffi: FuncId,
     /// `ByteScan` / `VecLoop` (`coil_native_vector`).
     vector: FuncId,
-    /// Calls to bodies on the runtime (commit the call).
+    /// Calls to bodies on the runtime.
     call_value: FuncId,
     resume: FuncId,
     coro_done: FuncId,
@@ -2005,10 +2005,7 @@ impl<'a> Lower<'a> {
         }
         let (kind, lo, hi) = match inst {
             MirInst::ByteScan { from, bound, .. } => (0, *from, *bound),
-            MirInst::VecLoop { from, to, kind, .. } => {
-                let writes = !matches!(kind, compiler::native_mir::VecLoopKind::Reduce { stores, .. } if stores.is_empty());
-                (1 | if writes { 2 } else { 0 }, *from, *to)
-            }
+            MirInst::VecLoop { from, to, .. } => (1, *from, *to),
             _ => unreachable!(),
         };
         let lo = self.get(f, lo);
@@ -2127,26 +2124,13 @@ impl<'a> Lower<'a> {
             let cl = self.b.create_block();
             self.blocks.insert(blk.id, cl);
         }
-        // Stack budget: bail before the native stack runs out.
+        // Trap before the stack runs out. No site of its own: the caller's
+        // call names the frame.
         let sp = self.b.ins().get_stack_pointer(types::I64);
         let limit = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_STACK_LIMIT);
         let low = self.b.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
-        let deep = self.b.create_block();
-        let go = self.b.create_block();
-        self.b.ins().brif(low, deep, &[], go, &[]);
-        // Past the budget: trap unless the thread's stack still has room.
-        // No site of its own: the caller's call names the frame.
-        self.b.switch_to_block(deep);
-        let t = MemFlagsData::trusted();
-        let committed = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_COMMITTED);
-        let hard = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_STACK_HARD);
-        let under = self.b.ins().icmp(IntCC::UnsignedLessThan, sp, hard);
-        let open = self.b.ins().icmp_imm_s(IntCC::Equal, committed, 0);
-        let stop = self.b.ins().bor(under, open);
         self.at(None);
-        self.bail_if(stop, TRAP_STACK);
-        self.b.ins().jump(go, &[]);
-        self.b.switch_to_block(go);
+        self.bail_if(low, TRAP_STACK);
         let gc = self.body_index.is_some_and(|i| self.plan.may_gc.contains(&i));
         // Live sets by block position: into the block past its phis, and
         // at each op (what lives after it and what it reads, which the
@@ -2227,7 +2211,7 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(self.bail);
         let p = self.b.block_params(self.bail).to_vec();
         self.b.ins().call(self.unwind, &[self.ctx, p[0], p[1]]);
-        // After a committed panic, this frame's armed `defer`s run once the
+        // After a panic, this frame's armed `defer`s run once the
         // runtime reported it: hand it the pad and the homes.
         if let (Some(pad), Some(slot)) = (self.pad_fn, self.homes_slot) {
             let fp = self.b.ins().func_addr(types::I64, pad);

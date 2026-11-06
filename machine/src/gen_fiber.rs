@@ -22,7 +22,7 @@ pub(crate) enum GenStep {
     Yielded(Value),
     /// Its body returned this word (it is done).
     Returned(Value),
-    /// Its body panicked after it committed (it is done).
+    /// Its body panicked (it is done).
     Panicked(crate::native::NativePanic),
     /// Its task waits inside it: the resume happens again on the wake.
     Waiting,
@@ -43,8 +43,6 @@ pub(crate) trait GenHost {
     /// A fiber runs (`true`) or stopped (`false`): the host's code under
     /// the body runs nested meanwhile.
     fn nest(&mut self, _entered: bool) {}
-    /// An early free the body's return queued.
-    fn free_early(&mut self, v: Value, deep: bool);
     /// The wake (word and `RESUME_*`) on its way down to a parked wait.
     fn pending_wake(&mut self) -> Option<&mut Option<(u64, u64)>> {
         None
@@ -230,9 +228,6 @@ fn step_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) ->
         }
         crate::native::NativeOutcome::Done(r) => {
             finish(gc);
-            for (w, deep) in r.frees {
-                h.free_early(Value::from(w), deep);
-            }
             Some(GenStep::Returned(Value::from(r.lo)))
         }
         crate::native::NativeOutcome::Panicked(p) => {
@@ -307,9 +302,6 @@ fn step_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> 
             match outcome {
                 crate::native::NativeOutcome::Done(r) => {
                     finish(gc);
-                    for (w, deep) in r.frees {
-                        h.free_early(Value::from(w), deep);
-                    }
                     Some(GenStep::Returned(Value::from(r.lo)))
                 }
                 crate::native::NativeOutcome::Panicked(p) => {
