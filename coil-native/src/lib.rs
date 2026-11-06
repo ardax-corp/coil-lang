@@ -587,7 +587,7 @@ fn define_all<M: Module>(
 
             ctx.func.signature = entry_signature(&*module);
             build_entry(module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
-            submit(Job::take(ids.entry[&i], i, " entry", false, &mut ctx));
+            submit(Job::take(ids.entry[&i], i, " entry", true, &mut ctx));
             module.clear_context(&mut ctx);
             defined.push(i);
         }
@@ -1282,6 +1282,7 @@ struct Ids {
     set_field: FuncId,
     view: FuncId,
     str_view: FuncId,
+    fn_entry: FuncId,
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
@@ -1431,6 +1432,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let set_field = module.declare_function("coil_native_set_field", Linkage::Import, &s4).map_err(e)?;
     let view = module.declare_function("coil_native_view", Linkage::Import, &s3).map_err(e)?;
     let str_view = module.declare_function("coil_native_str_view", Linkage::Import, &s2).map_err(e)?;
+    let fn_entry = module.declare_function("coil_native_fn_entry", Linkage::Import, &s5).map_err(e)?;
     let mut s1v = module.make_signature();
     s1v.params.push(AbiParam::new(types::I64));
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
@@ -1484,6 +1486,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         set_field,
         view,
         str_view,
+        fn_entry,
         cow,
         cow_field,
         alloc,
@@ -1573,6 +1576,9 @@ struct Lower<'a> {
     set_field: FuncRef,
     view: FuncRef,
     str_view: FuncRef,
+    fn_entry: FuncRef,
+    /// [`entry_signature`], for a call of a body's entry by address.
+    entry_sig: cranelift_codegen::ir::SigRef,
     cow: FuncRef,
     cow_field: FuncRef,
     alloc: FuncRef,
@@ -1707,6 +1713,8 @@ impl<'a> Lower<'a> {
         let set_field = module.declare_func_in_func(ids.set_field, func);
         let view = module.declare_func_in_func(ids.view, func);
         let str_view = module.declare_func_in_func(ids.str_view, func);
+        let fn_entry = module.declare_func_in_func(ids.fn_entry, func);
+        let entry_sig = func.import_signature(entry_signature(module));
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
@@ -1762,6 +1770,8 @@ impl<'a> Lower<'a> {
             set_field,
             view,
             str_view,
+            fn_entry,
+            entry_sig,
             cow,
             cow_field,
             alloc,
@@ -2704,9 +2714,34 @@ impl<'a> Lower<'a> {
                 let d = self.b.ins().iconst(types::I64, i64::from(*dicts));
                 let roots = self.push_roots(f);
                 let prev = self.push_call();
-                let call = self.b.ins().call(self.call_value, &[self.ctx, c, p, n, d]);
-                self.pop_call(prev);
+                // A plain function value enters its body here, as a direct
+                // call does (`coil_native_fn_entry`); anything else goes
+                // through the runtime.
+                let values = args.len().saturating_sub(*dicts as usize);
+                let nv = self.b.ins().iconst(types::I64, values as i64);
+                let out = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    (machine::native::FN_ENTRY_WORDS * 8) as u32,
+                    3,
+                ));
+                let out = self.b.ins().stack_addr(types::I64, out, 0);
+                let ec = self.b.ins().call(self.fn_entry, &[self.ctx, c, p, nv, out]);
+                let entry = self.b.inst_results(ec)[0];
+                let (direct, slow, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.append_block_param(join, types::I64);
+                self.b.ins().brif(entry, direct, &[], slow, &[]);
+                self.b.switch_to_block(direct);
+                let call = self.b.ins().call_indirect(self.entry_sig, entry, &[self.ctx, out]);
                 let w = self.b.inst_results(call)[0];
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.set_cold_block(slow);
+                self.b.switch_to_block(slow);
+                let call = self.b.ins().call(self.call_value, &[self.ctx, c, p, n, d]);
+                let w = self.b.inst_results(call)[0];
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                let w = self.b.block_params(join)[0];
+                self.pop_call(prev);
                 self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);

@@ -111,6 +111,10 @@ pub struct NativeCtx {
     pub resume: *mut std::ffi::c_void,
     pub resume_word: u64,
     pub resume_how: u64,
+    /// The program's compiled bodies, for [`coil_native_call_value`] to
+    /// enter a plain function value's body on this context (null: through
+    /// the runtime).
+    pub code: *const NativeCode,
 }
 
 /// Byte offset of [`NativeCtx::native_fp`].
@@ -496,6 +500,8 @@ pub(crate) struct NativeEnv {
     pub(crate) fuel: *mut u64,
     pub(crate) natives: *const crate::ffi::Natives,
     pub(crate) probes: *mut Vec<u32>,
+    /// The compiled bodies ([`NativeCtx::code`]).
+    pub(crate) code: *const NativeCode,
 }
 
 
@@ -583,6 +589,7 @@ impl NativeCtx {
             resume: std::ptr::null_mut(),
             resume_word: 0,
             resume_how: 0,
+            code: std::ptr::null(),
         }
     }
 
@@ -992,6 +999,7 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
     ctx.has_finalizers = u64::from(env.has_finalizers);
     ctx.statics = env.statics;
     ctx.statics_len = env.statics_len as u64;
+    ctx.code = env.code;
     let mut trace = Vec::new();
     ctx.trace = &mut trace;
     let mut message = String::new();
@@ -1859,6 +1867,71 @@ pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64
     out
 }
 
+/// `CallIndirect` of a plain function value, entered by native code
+/// itself as a direct `CALL` is: a code offset, or a function object with
+/// no partial arguments, rest parameter or dictionaries, taking exactly the
+/// `n` argument words at `args`. Writes the body's words (the captures,
+/// then the arguments) to `out` and returns its entry, which native code
+/// calls with this context and `out`. `0`: anything else, which native
+/// code passes to [`coil_native_call_value`]. Never collects.
+///
+/// # Safety
+/// `ctx` is the call's live context; `args` holds `n` words; `out` has
+/// room for [`FN_ENTRY_WORDS`] words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    if c.code.is_null() || c.heap.is_null() || c.machine.is_null() || c.entry_data != 0 {
+        return 0;
+    }
+    // SAFETY: the driver keeps the code for the whole run.
+    let code = unsafe { &*c.code };
+    let n = n as usize;
+    // SAFETY: as the caller promises.
+    let given = unsafe { std::slice::from_raw_parts(args, n) };
+    let words = unsafe { std::slice::from_raw_parts_mut(out, FN_ENTRY_WORDS) };
+    let (pc, len) = if callee < code.code_len() as u64 {
+        // A code offset: a function with nothing captured.
+        let Some(w) = words.get_mut(..n) else { return 0 };
+        w.copy_from_slice(given);
+        (callee as usize, n)
+    } else {
+        // SAFETY: the context's heap is the machine's.
+        let Some(crate::memory::Object::Fn(gc)) = unsafe { &*c.heap }.find_object_by_addr(callee) else {
+            return 0;
+        };
+        let f = gc.as_ref();
+        if f.dicts.is_some() || f.filled_mask != 0 || f.is_rest || f.arity as usize != n {
+            return 0;
+        }
+        let len = f.captures.len() + n;
+        let Some(w) = words.get_mut(..len) else { return 0 };
+        let (caps, rest) = w.split_at_mut(f.captures.len());
+        for (w, v) in caps.iter_mut().zip(&f.captures) {
+            *w = v.bits();
+        }
+        rest.copy_from_slice(given);
+        (f.entry as usize, len)
+    };
+    let Some(entry) = code.lookup(pc) else { return 0 };
+    // A generator's body is entered by a resume; a body without machine
+    // code by the runtime.
+    if entry.generator || entry.data != 0 || len < entry.reads as usize || entry.arity as usize > FN_ENTRY_WORDS {
+        return 0;
+    }
+    // The words past `len` up to its arity are `0`, as the runtime passes
+    // them; words past its arity it does not read.
+    if let Some(rest) = words.get_mut(len..entry.arity as usize) {
+        rest.fill(0);
+    }
+    c.host_calls += 1;
+    c.gc_epoch += 1;
+    entry.entry as usize as u64
+}
+
+/// The words [`coil_native_fn_entry`] writes at most.
+pub const FN_ENTRY_WORDS: usize = 16;
+
 /// `ResumeCoro`: resume a generator ([`NativeHost::resume`]).
 ///
 /// # Safety
@@ -2448,6 +2521,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_set_field", coil_native_set_field as *const u8),
         ("coil_native_view", coil_native_view as *const u8),
         ("coil_native_str_view", coil_native_str_view as *const u8),
+        ("coil_native_fn_entry", coil_native_fn_entry as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
@@ -2477,4 +2551,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 35;
+const HELPERS: usize = 36;
