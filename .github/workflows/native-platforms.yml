@@ -60,14 +60,14 @@ jobs:
           path: .deps/coil-stdlib
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
             base-devel
             python
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-pkgconf
       - name: Configure pkg-config
         shell: msys2 {0}
         run: |
@@ -79,7 +79,7 @@ jobs:
           toolchain: stable-x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: native-platforms-windows
+          shared-key: native-platforms-windows-ucrt
       - name: Build
         shell: msys2 {0}
         run: |
