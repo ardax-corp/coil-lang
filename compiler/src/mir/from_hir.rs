@@ -4249,8 +4249,10 @@ impl Lower<'_> {
     fn at_stmt<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
         let outer = self.b.pending_loc;
         let (start, end) = self.hir.expr(id).span;
-        // Generated code without a place of its own has the enclosing one.
-        if let Some(file) = self.inp.file.filter(|_| !crate::attrs::is_fresh_span(start)) {
+        // Generated code without a place of its own has the enclosing one,
+        // but for a host call: the capability check finds it by its own span.
+        let placeless = crate::attrs::is_fresh_span(start) && !self.inp.hosts.contains_key(&id.0);
+        if let Some(file) = self.inp.file.filter(|_| !placeless) {
             self.b.pending_loc = DebugLoc {
                 file,
                 start_byte: start as u32,
