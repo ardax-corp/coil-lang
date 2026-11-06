@@ -1002,13 +1002,6 @@ impl Heap {
         self.alloc(ObjString::new(data), Object::String).1
     }
 
-    /// Allocate `head + tail` without interning, appending in place when
-    /// `head` ends at its buffer's tail (amortized linear `s = s + x`).
-    pub fn alloc_concat(&mut self, head: RefString, tail: &str) -> RefString {
-        let joined = head.as_ref().concat(tail);
-        self.alloc(joined, Object::String).1
-    }
-
     /// Allocate bytes `[from, to)` of `src`, sharing its buffer when that is
     /// cheap ([`super::StrData::slice`]). `None` when an offset is out of
     /// range or splits a UTF-8 sequence.
@@ -2017,10 +2010,6 @@ impl Heap {
         self.class_kinds = table;
     }
 
-    pub fn class_word_kinds_table(&self) -> std::sync::Arc<Vec<Box<[u8]>>> {
-        std::sync::Arc::clone(&self.class_kinds)
-    }
-
     /// Word kinds of `type_id`'s typed fields (empty = all unknown).
     #[inline]
     pub fn class_field_kinds(&self, type_id: u32) -> &[u8] {
@@ -2070,19 +2059,6 @@ impl Heap {
             return None;
         }
         unsafe { Object::from_header(addr) }
-    }
-
-    /// [`Self::find_object_by_addr`] for an enum (`match` / `Unpack`): reads
-    /// the header kind once instead of building an [`Object`] to match on.
-    #[inline]
-    pub fn find_enum_by_addr(&self, addr: u64) -> Option<Gc<ObjEnum>> {
-        if addr == 0 || !self.slab.contains_slot(addr) {
-            return None;
-        }
-        // SAFETY: a mapped slot start holds a header (poisoned when free).
-        let header = unsafe { &*(addr as *const GcHeader) };
-        // Kind 3 is `Object::Enum` (see `Object::from_header`).
-        (header.kind.get() == 3).then(|| unsafe { Gc::from_addr(addr) })
     }
 
     /// Classify a raw payload / field word as an object or an immediate.
@@ -3582,18 +3558,6 @@ impl ObjArray {
         }
     }
 
-    /// Ask the cache for the object the word `dist` elements past `index`
-    /// names ([`common::dense::HEAP_PREFETCH`]). A hint: a word that is no
-    /// address, or one past the end, costs nothing but the check.
-    #[inline(always)]
-    pub fn prefetch_ahead(&self, index: i64, dist: usize) {
-        if let ArrayData::Words(w) = &self.data
-            && let Some(v) = w.get((index as usize).wrapping_add(dist))
-        {
-            prefetch_addr(v.bits());
-        }
-    }
-
     /// `elements[index]` with the runtime's bounds rules: `unchecked` is a proven
     /// index; otherwise out of range returns `None`.
     #[inline(always)]
@@ -3709,30 +3673,6 @@ impl ObjArray {
         }
         self.note();
         self.words_vec().push(v);
-    }
-
-    /// Append `v` when the storage has room for it as it is: no growth,
-    /// no unpack, so nothing to account and no allocation safepoint.
-    /// False (and nothing changed) otherwise (#1864).
-    #[inline(always)]
-    pub fn push_in_place(&mut self, v: Value) -> bool {
-        match &mut self.data {
-            ArrayData::Words(w) if w.len() < w.capacity() => {
-                if !self.may_hold_refs {
-                    self.may_hold_refs = true;
-                }
-                w.push(v);
-                true
-            }
-            ArrayData::Bytes(b) if b.len() < b.capacity() => match byte_of(v) {
-                Some(byte) => {
-                    b.push(byte);
-                    true
-                }
-                None => false,
-            },
-            _ => false,
-        }
     }
 
     /// Overwrite element `i` (caller checks bounds).
@@ -3941,23 +3881,6 @@ impl ObjArray {
             ArrayData::Bytes(_) => None,
         }
     }
-}
-
-/// A read prefetch of `addr` into every cache level; never faults.
-#[inline(always)]
-fn prefetch_addr(addr: u64) {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: a prefetch reads nothing the program sees and never faults.
-    unsafe {
-        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(addr as *const i8)
-    };
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: as above.
-    unsafe {
-        core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) addr, options(nostack, preserves_flags, readonly))
-    };
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    let _ = addr;
 }
 
 /// Shared bounds rule of [`ObjArray::read_indexed`].

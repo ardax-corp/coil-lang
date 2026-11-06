@@ -606,11 +606,6 @@ impl Pipeline {
             emitted: std::sync::Arc::clone(&diagnostics),
         });
 
-        // The prologue is `[CALL, JMP, HALT]`. The pipeline
-        // patches the JMP at offset 1 to point at `main`
-        // (or `program_start_offset` if `extern` blocks ran
-        // first). See `Self::prologue` for the layout.
-
         let mut pipeline = Self {
             failed: false,
             project_root: cwd,

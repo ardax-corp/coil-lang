@@ -123,7 +123,6 @@ impl Checker {
             fn_value_escaped: HashSet::new(),
             in_bounds_index: HashSet::new(),
             nonneg_expr: HashSet::new(),
-            pin_array: HashSet::new(),
             pin_params: HashSet::new(),
             for_in_pin: HashSet::new(),
             for_in_pin_spans: HashSet::new(),
@@ -1916,7 +1915,6 @@ impl Checker {
         self.def_ids_by_node.clear();
         self.in_bounds_index.clear();
         self.nonneg_expr.clear();
-        self.pin_array.clear();
         self.pin_params.clear();
         self.for_in_pin.clear();
         self.for_in_pin_spans.clear();

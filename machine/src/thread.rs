@@ -93,8 +93,8 @@ fn register_live_thread(registry: &LiveThreadRegistry, state: Arc<JoinState>) {
 
 /// Block until every undetached, not-yet-joined spawn in `registry` has finished.
 ///
-/// Called automatically at the end of [`Machine::run_with_pool`] for that
-/// machine's own registry. Explicit `join(t)` still returns the worker's value;
+/// Called when a program's `main` returns (`start.rs`), for that
+/// runtime's own registry. Explicit `join(t)` still returns the worker's value;
 /// this path only keeps the process alive. `detach(t)` opts a thread out.
 ///
 /// Loops until the registry drains: a worker may `spawn` nested threads onto
@@ -137,9 +137,6 @@ use crate::memory::{
     EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
     ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
 };
-
-/// Operand-stack slots for worker runtimes (same default as `execute_archive` in `src/main.rs`).
-pub const WORKER_STACK_SLOTS: usize = 256;
 
 /// Immutable program image shared across OS threads.
 #[derive(Clone)]
@@ -1501,7 +1498,7 @@ pub struct ThreadSpawnContext {
     pub program: Arc<ThreadProgram>,
     pub natives: Natives,
     pub shared_print: Option<Arc<Mutex<Vec<u8>>>>,
-    /// The stdout part of `shared_print` (see [`Machine::set_shared_stdout`]).
+    /// The stdout part of `shared_print` (see [`crate::io::set_shared_stdout_redirect`]).
     pub shared_stdout: Option<Arc<Mutex<Vec<u8>>>>,
     /// The stderr part of `shared_print`: stderr writes and panic messages.
     pub shared_stderr: Option<Arc<Mutex<Vec<u8>>>>,

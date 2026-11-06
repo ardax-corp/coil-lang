@@ -296,30 +296,6 @@ impl MirFunc {
             .any(|b| b.insts.iter().any(MirInst::is_gc_edge))
     }
 
-    /// A GC edge the mapped-allocation gates count: any but a function value
-    /// (`MakeFn` / `MakePolyFn`) or a boxed carrier (`BoxValue`) and the
-    /// barrier right after it, which emit as in any body
-    /// ([`super::gates::refuses_alloc`]).
-    pub fn has_mapped_gc_edge(&self) -> bool {
-        let is_fn = |i: &MirInst| {
-            matches!(
-                i,
-                MirInst::Alloc {
-                    kind: super::inst::MirAllocKind::Fn { .. }
-                        | super::inst::MirAllocKind::PolyFn { .. }
-                        | super::inst::MirAllocKind::PolyFnCapture { .. },
-                    ..
-                }
-            )
-        };
-        self.blocks.iter().any(|b| {
-            b.insts.iter().enumerate().any(|(k, i)| {
-                let after_fn = matches!(i, MirInst::GcBarrier { .. }) && k > 0 && is_fn(&b.insts[k - 1]);
-                i.is_gc_edge() && !is_fn(i) && !after_fn
-            })
-        })
-    }
-
     /// Lay the blocks out in `layout` order, numbered as they come; a
     /// block not listed is dropped, with the φ incomings from it.
     pub fn relayout(&mut self, layout: &[BlockId]) {

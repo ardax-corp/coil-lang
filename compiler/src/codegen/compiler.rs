@@ -344,11 +344,6 @@ impl Compiler {
         self.opt_options.hir_inline = on;
     }
 
-    /// Keep enum locals built in place as two slots (the default) or boxed.
-    pub fn set_hir_pair_locals(&mut self, on: bool) {
-        self.opt_options.hir_pair_locals = on;
-    }
-
     /// Apply an [`crate::OptLevel`] preset to IL opts and inlining budgets.
     /// The switches no level sets keep their values.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
@@ -377,12 +372,6 @@ impl Compiler {
     /// Enable or disable IL opt-stat collection (COI-131).
     pub fn set_collect_opt_stats(&mut self, on: bool) {
         self.opt_options.collect_stats = on;
-    }
-
-    pub fn intern_constant(&mut self, value: u64) -> u32 {
-        let idx = self.constants.len() as u32;
-        self.constants.push(value);
-        idx
     }
 
     pub fn intern_string(&mut self, value: impl AsRef<str>) -> u32 {
@@ -471,9 +460,6 @@ impl Compiler {
 }
 
 impl Compiler {
-    pub fn get_function(&self, name: &str) -> Option<usize> {
-        self.functions.get(name).copied()
-    }
 
     pub fn function_offset(&self, name: &str) -> Option<usize> {
         self.functions.get(name).copied()
@@ -633,26 +619,6 @@ impl Compiler {
                 _ => {}
             }
         }
-    }
-
-    /// Code offset WHERE the prologue (CALL+JMP+HALT)
-    /// ENDS and user-program code BEGINS. Used by the runtime
-    /// pipeline to patch the prologue's JMP operand so that
-    /// any module-level `extern` block bytes (appended to
-    /// `self.code` before `main`) execute before main.
-    /// Without this, the prologue would skip past the extern
-    /// block entirely (because `main_offset` lands past it).
-    pub fn program_start_offset(&self) -> u32 {
-        self.program_start_offset
-    }
-
-    /// True iff at least one `extern` block was emitted in
-    /// the last `compile`. The pipeline uses this to decide
-    /// whether to JMP to `program_start_offset` (which would
-    /// execute `extern` block bytes first) or directly to
-    /// `main` (which is correct when no extern was used).
-    pub fn has_extern_block(&self) -> bool {
-        !self.extern_runtime_functions.is_empty()
     }
 
     /// Each `extern` function's library (as its block names it) and C
@@ -6269,94 +6235,6 @@ impl Compiler {
 
     /// Named `fn` declaration: emit the body, register the entry and debug info.
     #[inline(never)]
-    /// True when no value of this function can be a heap word: every
-    /// parameter and every expression in `args` / `body` has a numeric,
-    /// `unit` or `never` checker type, and it declares no closures or nested
-    /// functions. Such frames get an empty precise map (see finalize).
-    fn fn_is_heap_free(&self, names: &[&str], args: &Output, body: &Output) -> bool {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::strip_readonly;
-
-        let allowed = |ty: &Ty| {
-            let ty = apply_ty_prune(self.checker.subst(), ty);
-            match strip_readonly(&ty) {
-                Ty::Con(n) => matches!(n.as_str(), "int" | "float" | "bool" | "byte" | "unit"),
-                Ty::Tuple(items) => items.is_empty(),
-                Ty::Never => true,
-                _ => false,
-            }
-        };
-        let Some(params) = names.iter().find_map(|n| self.checker.fn_param_tys(n)) else {
-            return false;
-        };
-        if !params.iter().all(allowed) {
-            return false;
-        }
-        let mut ok = true;
-        let mut stack = vec![args, body];
-        while let Some(node) = stack.pop() {
-            if !ok {
-                break;
-            }
-            match node.1.as_ref() {
-                Expression::Lambda { .. }
-                | Expression::Function { .. }
-                | Expression::Yield(..)
-                | Expression::YieldFrom(..)
-                | Expression::Resume { .. }
-                | Expression::Defer { .. } => ok = false,
-                Expression::Block(_)
-                | Expression::Statement(_)
-                | Expression::ExprStatement(_)
-                | Expression::Expr(_)
-                | Expression::Group(_)
-                | Expression::Fragment(_)
-                | Expression::Noop(_)
-                | Expression::Break
-                | Expression::Continue
-                | Expression::Type(_)
-                | Expression::TypeApp { .. }
-                | Expression::Argument { .. }
-                | Expression::Variable(..)
-                | Expression::Constant(..)
-                | Expression::Return(_)
-                | Expression::ImplicitReturn(_)
-                | Expression::If(..)
-                | Expression::Branch(..)
-                | Expression::Loop { .. } => {}
-                // A plain local target is untyped; the stored value is checked.
-                Expression::Assignment(target, value) | Expression::CompoundAssign(target, _, value) => {
-                    if !matches!(target.1.as_ref(), Expression::Identifier(_)) {
-                        stack.push(target);
-                    }
-                    stack.push(value);
-                    continue;
-                }
-                Expression::Adjust { target, .. } => {
-                    if !matches!(target.1.as_ref(), Expression::Identifier(_)) {
-                        stack.push(target);
-                    }
-                    continue;
-                }
-                // A direct call's callee is a code address, not a frame value;
-                // a local of the same name would be a closure.
-                Expression::Call { name, args } => {
-                    ok = self.sidecar_ty_of(node).is_some_and(|ty| allowed(&ty));
-                    let direct = matches!(name.1.as_ref(), Expression::Identifier(n)
-                        if !self.context.variables.contains(&n.to_string()));
-                    if !direct {
-                        stack.push(name);
-                    }
-                    stack.extend(args.iter().flatten());
-                    continue;
-                }
-                _ => ok = self.sidecar_ty_of(node).is_some_and(|ty| allowed(&ty)),
-            }
-            crate::typechecking::id::walk_children(node, &mut |child| stack.push(child));
-        }
-        ok
-    }
-
     fn compile_function_decl_into<'compiler>(
         &mut self,
         span: &SimpleSpan,
@@ -6516,15 +6394,6 @@ impl Compiler {
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
             self.field_key_slots = prev_field_keys;
-            if prev_fn_table_key_was_none
-                && !*is_coro
-                && type_params.is_empty()
-                && dict_arity == 0
-                && !self.compiling_method
-                && self.fn_is_heap_free(&[qualified.as_str(), table_key.as_str()], args, body)
-            {
-                self.precise_frame_fns.insert(table_key.clone());
-            }
             let entry = self.fn_entry_labels.get(&table_key).copied();
             self.bodies.record(table_key.clone(), entry);
             self.attach_hir_mir();
@@ -7404,9 +7273,6 @@ impl Compiler {
         self.emit_builtin_dict_thunks();
         self.emit_vec_method_thunks();
         self.emit_stream_method_thunks();
-        // Dict thunks after prologue; keep program_start_offset at first user byte.
-        self.program_start_offset = self.bodies.position() as u32;
-        self.setup_entry_offset = self.program_start_offset;
         // Label the setup / top-level region: it starts after the
         // prologue HALT / prelude RETURN, so only its entry reaches it.
         self.bodies.bind_fresh_entry();
@@ -7856,7 +7722,6 @@ impl Compiler {
         for offset in self.mono_offsets.values_mut() {
             *offset = by_offset(&self.bodies, *offset);
         }
-        self.program_start_offset = by_offset(&self.bodies, self.program_start_offset as usize) as u32;
         self.startup = self
             .startup_steps
             .iter()

@@ -21,7 +21,7 @@ use super::ty::{Ty, strip_readonly, vec_element_ty};
 
 const MAX_FACT_ARRAY_ARITY: usize = 32;
 
-type ParamSlot = (String, NodeId, bool);
+type ParamSlot = (String, bool);
 type FnParamShape = (String, Vec<ParamSlot>);
 
 #[derive(Clone, Default)]
@@ -135,7 +135,6 @@ struct CallSite {
 pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
     checker.in_bounds_index.clear();
     checker.nonneg_expr.clear();
-    checker.pin_array.clear();
     checker.pin_params.clear();
     checker.for_in_pin.clear();
     checker.for_in_pin_spans.clear();
@@ -159,7 +158,7 @@ pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
     pin_callee_proven_params(checker, &bodies, &shapes);
 }
 
-type FnShape = (String, Vec<(String, NodeId, bool)>);
+type FnShape = (String, Vec<ParamSlot>);
 
 fn collect_fn_shapes(
     checker: &Checker,
@@ -194,7 +193,7 @@ fn collect_fn_shapes(
     }
 }
 
-fn param_list(checker: &Checker, args: &Output<'_>) -> Vec<(String, NodeId, bool)> {
+fn param_list(checker: &Checker, args: &Output<'_>) -> Vec<ParamSlot> {
     let mut out = Vec::new();
     let kids: &[Output<'_>] = match args.1.as_ref() {
         Expression::Fragment(xs) => xs,
@@ -214,7 +213,7 @@ fn param_list(checker: &Checker, args: &Output<'_>) -> Vec<(String, NodeId, bool
     out
 }
 
-fn one_param(checker: &Checker, a: &Output<'_>) -> Option<(String, NodeId, bool)> {
+fn one_param(checker: &Checker, a: &Output<'_>) -> Option<ParamSlot> {
     let Expression::Argument { name, ty, .. } = a.1.as_ref() else {
         return None;
     };
@@ -222,7 +221,7 @@ fn one_param(checker: &Checker, a: &Output<'_>) -> Option<(String, NodeId, bool)
     let arrayish = checker.lookup_at(id).as_ref().is_some_and(is_arrayish)
         || ty.as_ref().is_some_and(ann_is_vec)
         || name_ty(checker, a).is_some_and(|t| is_arrayish(&t));
-    Some(((*name).to_string(), id, arrayish))
+    Some(((*name).to_string(), arrayish))
 }
 
 fn ann_is_vec(ty: &Output<'_>) -> bool {
@@ -922,19 +921,19 @@ fn apply_interproc(
         let Some(sites) = by_callee.get(fname.as_str()) else {
             continue;
         };
-        let arrs: Vec<(usize, String, NodeId)> = params
+        let arrs: Vec<(usize, String)> = params
             .iter()
             .enumerate()
-            .filter_map(|(i, (n, id, is_a))| is_a.then_some((i, n.clone(), *id)))
+            .filter_map(|(i, (n, is_a))| is_a.then_some((i, n.clone())))
             .collect();
         let idxs: Vec<(usize, String)> = params
             .iter()
             .enumerate()
-            .filter(|(_, (_, _, is_a))| !*is_a)
-            .map(|(i, (n, _, _))| (i, n.clone()))
+            .filter(|(_, (_, is_a))| !*is_a)
+            .map(|(i, (n, _))| (i, n.clone()))
             .collect();
 
-        for (ai, aname, aid) in &arrs {
+        for (ai, aname) in &arrs {
             let mut pin = false;
             for (ii, iname) in &idxs {
                 let proven = sites.iter().all(|s| {
@@ -955,7 +954,6 @@ fn apply_interproc(
                 pin = true;
             }
             if pin {
-                checker.pin_array.insert(*aid);
                 checker.pin_params.insert((fname.clone(), aname.clone()));
             }
         }
@@ -975,12 +973,11 @@ fn pin_callee_proven_params(
         if contains_yield(body) {
             continue;
         }
-        for (aname, aid, is_a) in params {
+        for (aname, is_a) in params {
             if !*is_a {
                 continue;
             }
             if body_has_in_bounds_index_of(checker, body, aname) {
-                checker.pin_array.insert(*aid);
                 checker.pin_params.insert((fname.clone(), aname.clone()));
             }
         }

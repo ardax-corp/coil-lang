@@ -110,11 +110,6 @@ pub struct ProgramDebug {
 
 impl ProgramDebug {
 
-    /// The location numbered `pc` (a debugger's op number).
-    pub fn loc_at(&self, pc: usize) -> Option<DebugLoc> {
-        self.debug_locs.get(pc).copied().filter(|l| l.is_known())
-    }
-
     /// Line and column of `loc`, in a table sorted by location (a compiled
     /// program's: each location its bodies use, once). A span that differs
     /// only in its end stands in for it.
@@ -127,18 +122,6 @@ impl ProgramDebug {
         let near = self.debug_locs[at..].iter().take_while(|l| l.file == loc.file && l.start_byte == loc.start_byte);
         let i = near.clone().position(|l| l.end_byte == loc.end_byte).or_else(|| near.clone().next().map(|_| 0))?;
         self.debug_lines.get(at + i).map(|line| (loc.file, *line))
-    }
-
-    /// File index and line/column of the location numbered `pc`.
-    pub fn file_line_at(&self, pc: usize) -> Option<(u32, DebugLine)> {
-        let loc = self.loc_at(pc)?;
-        let line = self.debug_lines.get(pc).copied().filter(|l| l.is_known())?;
-        Some((loc.file, line))
-    }
-
-    /// Whether any location is recorded (dense or runs).
-    pub fn has_locations(&self) -> bool {
-        !self.debug_locs.is_empty()
     }
 
     /// Keep what `level` records: `-g0` nothing, else everything.

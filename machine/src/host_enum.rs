@@ -12,7 +12,7 @@
 use std::cell::Cell;
 
 use common::{
-    host_invoke_enum_layout, Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
+    Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
     HOST_ENUM_LAYOUT_RESULT_NICHE,
 };
 
@@ -36,10 +36,6 @@ pub enum HostEnumLayout {
 }
 
 impl HostEnumLayout {
-    pub fn from_operand(operand: u32) -> Self {
-        Self::from_u32(host_invoke_enum_layout(operand))
-    }
-
     /// Decode operand bits. `0` is Boxed; `1`/`2` are niches.
     ///
     /// Reserved value `3` (and any other code) maps to [`Self::Boxed`] on

@@ -55,11 +55,6 @@ pub fn stringify_tag(operand: u32) -> Option<ValueTag> {
     ValueTag::from_u16(u16::try_from(raw).ok()?)
 }
 
-/// `UnboxValue` operand that unwraps a boxed word whatever its tag: a shared
-/// generic body normalizes a type parameter's value to its raw word without
-/// knowing the instance's type.
-pub const UNBOX_ANY_TAG: u32 = 0xFFFF;
-
 type Storage = u64;
 
 /// The word a [`Value`] lives in. 64-bit targets keep a pointer so heap
@@ -205,28 +200,6 @@ impl Value {
     #[inline]
     pub fn heap_addr(&self) -> u64 {
         self.word_bits() & !1
-    }
-
-    pub fn inc_int(&mut self) -> &Self {
-        self.replace((self.as_int() + 1) as _);
-        self
-    }
-
-    pub fn dec_int(&mut self) -> &Self {
-        self.replace((self.as_int() - 1) as _);
-        self
-    }
-
-    pub fn inc_float(&mut self) -> &Self {
-        let v = self.as_float() + 1.0;
-        self.replace(v.to_bits() as _);
-        self
-    }
-
-    pub fn dec_float(&mut self) -> &Self {
-        let v = self.as_float() - 1.0;
-        self.replace(v.to_bits() as _);
-        self
     }
 }
 
