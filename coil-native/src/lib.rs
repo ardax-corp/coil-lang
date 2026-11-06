@@ -122,6 +122,22 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
     jit_with(bodies, entry_pcs, false)
 }
 
+/// Bodies `COIL_NATIVE_REFUSE` (comma-separated names) leaves out, so a
+/// test can reach what a refusal does.
+fn forced_refusals(bodies: &[NativeBody]) -> HashMap<usize, String> {
+    let Some(names) = std::env::var_os("COIL_NATIVE_REFUSE") else {
+        return HashMap::new();
+    };
+    let names = names.to_string_lossy().into_owned();
+    let names: HashSet<&str> = names.split(',').map(str::trim).collect();
+    bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| names.contains(b.name.as_str()))
+        .map(|(i, _)| (i, "refused by COIL_NATIVE_REFUSE".to_string()))
+        .collect()
+}
+
 /// [`jit`], with [`NativeProgram::image`] for [`load_image`] when every body
 /// compiled and the code fits an image.
 pub fn jit_keeping_image(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<NativeProgram, String> {
@@ -131,7 +147,7 @@ pub fn jit_keeping_image(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>
 fn jit_with(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, keep_image: bool) -> Result<NativeProgram, String> {
     // A body `plan` admits may still fail to lower; its callers already
     // name it, so leave it out and build the module again.
-    let mut excluded = HashMap::new();
+    let mut excluded = forced_refusals(bodies);
     loop {
         match jit_once(bodies, entry_pcs, &excluded, keep_image)? {
             Attempt::Done(program) => return Ok(program),
