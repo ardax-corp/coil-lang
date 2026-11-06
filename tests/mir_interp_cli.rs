@@ -32,7 +32,7 @@ fn program_stderr(out: &Output) -> String {
 fn same_as_raw(name: &str, src: &str) -> Output {
     let raw = run(name, src, &["--mir"]);
     for level in ["0", "1", "2", "3", "s", "g"] {
-        for engine in [&["--mir"][..], &["--no-jit"], &["--jit"]] {
+        for engine in [&["--mir"][..], &[]] {
             let args = [&["-O", level], engine].concat();
             let other = run(name, src, &args);
             assert_eq!(String::from_utf8_lossy(&raw.stdout), String::from_utf8_lossy(&other.stdout), "{name} {args:?}: stdout differs");

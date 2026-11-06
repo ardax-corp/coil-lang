@@ -253,7 +253,7 @@ fn run_on_source_file_explains_itself() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(
-        stderr.contains("is a source file, not a bytecode archive") && !stderr.contains("corrupt"),
+        stderr.contains("is a source file, not an archive") && !stderr.contains("corrupt"),
         "stderr={stderr}"
     );
     cleanup(&cwd);

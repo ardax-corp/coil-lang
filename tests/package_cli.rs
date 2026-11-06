@@ -629,7 +629,7 @@ fn main() {
     let stats = run_command_with_timeout(stats, 60);
     let err = String::from_utf8_lossy(&stats.stderr);
     // Every body compiled: the driver runs the whole program.
-    assert!(err.lines().any(|l| l == "native: the driver ran the program (no interpreter)"), "stats: {err}");
+    assert!(err.lines().any(|l| l == "native: the driver ran the program"), "stats: {err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

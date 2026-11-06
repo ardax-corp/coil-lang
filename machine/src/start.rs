@@ -64,7 +64,7 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
     let panicked = driver.panicked();
     drop(driver);
     if std::env::var_os("COIL_NATIVE_STATS").is_some() {
-        eprintln!("native: the driver ran the program (no interpreter)");
+        eprintln!("native: the driver ran the program");
         if let Some(t) = rt.native.as_deref() {
             crate::native::print_stats(t);
         }

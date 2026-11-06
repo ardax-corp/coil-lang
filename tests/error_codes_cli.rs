@@ -2,8 +2,6 @@
 
 use std::process::{Command, Output};
 
-use common::{ArchivedProgram, Byte, Instruction, pack_archive_version};
-
 fn coil(args: &[&str]) -> Output {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
     Command::new(bin).args(args).output().expect("spawn coil")

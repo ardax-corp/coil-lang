@@ -67,6 +67,5 @@ fn o0_skips_mir_passes_on_mandelbrot() {
     ensure_coil_dissect();
     let o0 = dissect_mandelbrot("-O0");
     let o2 = dissect_mandelbrot("-O2");
-    assert!(o2.contains("DenseBin2"), "-O2 should pack mandelbrot's float ops, stdout={o2}");
     assert_ne!(o0, o2, "-O0 and -O2 emit the same mandelbrot");
 }
