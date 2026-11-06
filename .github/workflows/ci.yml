@@ -59,9 +59,9 @@ jobs:
   # ───────────────────────────── stage 1: Linux ─────────────────────────────
 
   # Every crate's default feature set is empty, and `coil-debug` /
-  # `coil-dissect` / `coil-test` already turn on `compiler/dissect` and
-  # `machine/debugger` for the whole workspace, so one feature set
-  # covers `--no-default-features` / `--features dissect|debugger` too.
+  # `coil-dissect` already turn on `compiler/dissect` for the whole
+  # workspace, so one feature set covers `--no-default-features` /
+  # `--features dissect` too.
   # Criterion benches stay out (`--lib --tests --bins`).
   clippy:
     name: clippy (ubuntu-latest)

@@ -1659,7 +1659,7 @@ impl Heap {
     /// Lower the byte threshold so the next [`Self::should_collect`] check
     /// fires (test helper for GC stress). The nursery then collects at every
     /// safepoint that finds a young object.
-    #[cfg(any(test, feature = "debugger"))]
+    #[cfg(test)]
     pub fn set_gc_threshold_for_test(&mut self, bytes: usize) {
         self.gc_next_threshold = bytes;
         self.nursery_chunks = 1;
