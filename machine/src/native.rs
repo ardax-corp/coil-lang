@@ -324,15 +324,14 @@ impl NativeCtx {
         let maps = STACK_MAPS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         while fp != 0 {
             // SAFETY: native code keeps frame pointers: `[fp]` is the
-            // caller's frame pointer, `[fp + 8]` the return address into
-            // it, and the caller's stack pointer at that call is `fp + 16`.
+            // caller's frame pointer and `[fp + 8]` the return address into
+            // it. Slots are by their distance below that frame pointer.
             let (next, ra) = unsafe { (*(fp as *const u64), *(fp as *const u64).add(1)) };
             if !maps.in_code(ra) {
                 break;
             }
-            let sp = fp + 16;
             for &off in maps.maps.get(&ra).into_iter().flatten() {
-                visit((sp + u64::from(off)) as *mut u64, false);
+                visit((next - u64::from(off)) as *mut u64, false);
             }
             fp = next;
         }

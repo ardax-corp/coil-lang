@@ -1469,7 +1469,7 @@ fn a_tail_call_with_more_words_than_registers_takes_the_frame() {
     // The sibling takes more stack arguments than its caller.
     let body = "#[inline(never)]\nfn few(int n, int a) -> int { if n == 0 { return a; } return many(n - 1, a, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12); }\n\
                 #[inline(never)]\nfn many(int n, int a, int b, int c, int d, int e, int f, int g, int h, int i, int j, int k, int l, int m) -> int { if n == 0 { return a + m; } return few(n - 1, a + b + c + d + e + f + g + h + i + j + k + l + m - 77); }";
-    assert_eq!(tail_program("tail_words", body, &format!("few({TAIL_DEPTH}, 0)")), "1");
+    assert_eq!(tail_program("tail_words", body, &format!("few({TAIL_DEPTH}, 0)")), (TAIL_DEPTH / 2).to_string());
 }
 
 #[test]
