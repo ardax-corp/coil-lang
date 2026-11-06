@@ -60,6 +60,17 @@ fn build_matching_coil_embed(coil_bin: &Path) -> PathBuf {
     embed
 }
 
+/// `cc` `source` into the shared library for stem `stem` in `dir`, by this
+/// host's name and flags (`libsum.so`, `libsum.dylib`, `sum.dll`).
+fn build_shared_library(source: &Path, dir: &Path, stem: &str) -> PathBuf {
+    let lib = dir.join(machine::platform_shared_lib_filename(stem));
+    let flags: &[&str] = if cfg!(target_os = "macos") { &["-dynamiclib"] } else { &["-shared", "-fPIC"] };
+    let cc = Command::new("cc").args(flags).arg("-O2").arg("-o").arg(&lib).arg(source).output().expect("spawn cc");
+    assert!(cc.status.success(), "cc: {}", String::from_utf8_lossy(&cc.stderr));
+    assert!(lib.is_file(), "cc left no {}", lib.display());
+    lib
+}
+
 fn run_command_with_timeout(mut cmd: Command, secs: u64) -> std::process::Output {
     let child = cmd
         .stdout(Stdio::piped())
@@ -261,7 +272,6 @@ fn package_ffi_without_native_inventory_fails() {
     let _ = std::fs::remove_file(&out);
 }
 
-#[cfg(unix)]
 #[test]
 fn package_with_native_lock_finds_library_in_cache_or_beside_exe() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
@@ -274,27 +284,8 @@ fn package_with_native_lock_finds_library_in_cache_or_beside_exe() {
     std::fs::create_dir_all(tmp.join("native")).unwrap();
     std::fs::create_dir_all(tmp.join("src")).unwrap();
 
+    let so = build_shared_library(&manifest_dir.join("examples/sum.c"), &tmp.join("native"), "sum");
     let lib_name = machine::platform_shared_lib_filename("sum");
-    let so = tmp.join("native").join(&lib_name);
-    let mut cc = Command::new("cc");
-    #[cfg(target_os = "macos")]
-    {
-        cc.arg("-dynamiclib");
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        cc.arg("-shared").arg("-fPIC");
-    }
-    let cc = cc
-        .args([
-            "-O2",
-            "-o",
-            so.to_str().unwrap(),
-            manifest_dir.join("examples/sum.c").to_str().unwrap(),
-        ])
-        .status()
-        .expect("cc");
-    assert!(cc.success(), "failed to build {lib_name}");
 
     std::fs::write(
         tmp.join("src/main.coil"),
@@ -554,7 +545,6 @@ fn main() {
 
 /// Build `libcoil_rt.a` in the same private target directory and profile
 /// as [`build_matching_coil_embed`], for AOT packages (`COIL_RT_LIB`).
-#[cfg(target_os = "linux")]
 fn build_matching_coil_rt(coil_bin: &Path) -> PathBuf {
     let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/package-cli-embed");
     let profile_dir = coil_profile_dir(coil_bin);
@@ -567,10 +557,17 @@ fn build_matching_coil_rt(coil_bin: &Path) -> PathBuf {
     lib
 }
 
+/// `coil package` that fell back to the JIT runner still succeeds, so a test
+/// of an AOT executable has to say it wants one.
+fn assert_linked_native_code(package: &std::process::Output) {
+    let said = String::from_utf8_lossy(&package.stderr);
+    assert!(package.status.success(), "package failed: {said}");
+    assert!(!said.contains("packaging the JIT runner"), "fell back to the JIT runner: {said}");
+}
+
 /// `coil package` links native code by default (an AOT executable): its
 /// output, panic and exit status match the interpreter runner's package of the same
 /// program, and its calls run natively.
-#[cfg(target_os = "linux")]
 #[test]
 fn aot_package_matches_the_vm_runner() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
@@ -651,7 +648,6 @@ fn coil_embed_resolves_no_vm() {
 
 /// More parameters than registers need no interpreter: both kinds of executable run
 /// such a body.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_package_runs_a_body_of_many_parameters() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
@@ -690,7 +686,6 @@ fn a_package_runs_a_body_of_many_parameters() {
 /// `--strip-symbols` sets what the AOT executable keeps: `none` is the
 /// largest, the default (`debug`) drops debug info, `all` also the symbol
 /// table. Each runs the same.
-#[cfg(target_os = "linux")]
 #[test]
 fn aot_package_strips_symbols_as_asked() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
@@ -710,7 +705,7 @@ fn aot_package_strips_symbols_as_asked() {
         }
         cmd.arg(&entry).arg("-o").arg(&out).args(extra).env("COIL_RT_LIB", &rt);
         let o = cmd.output().expect("spawn coil package");
-        assert!(o.status.success(), "{extra:?}: {}", String::from_utf8_lossy(&o.stderr));
+        assert_linked_native_code(&o);
         let run = run_with_timeout(&out, 30);
         assert_eq!(String::from_utf8_lossy(&run.stdout), "stripped\n", "{extra:?}");
         sizes.push(std::fs::metadata(&out).unwrap().len());
@@ -723,7 +718,6 @@ fn aot_package_strips_symbols_as_asked() {
 /// `--link-static` links an `extern` block's library into the AOT
 /// executable: it runs with no shared library anywhere, and the interpreter runner
 /// cannot take one.
-#[cfg(target_os = "linux")]
 #[test]
 fn aot_package_links_extern_libraries_statically() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
@@ -758,7 +752,7 @@ fn aot_package_links_extern_libraries_statically() {
     };
     let exe = dir.join("app");
     let out = package(&exe, &["--link-static", lib.to_str().unwrap()]);
-    assert!(out.status.success(), "package failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert_linked_native_code(&out);
     // Run where no `libsum` can be found.
     let mut run = Command::new(&exe);
     run.current_dir(std::env::temp_dir());
@@ -771,7 +765,6 @@ fn aot_package_links_extern_libraries_statically() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[cfg(target_os = "linux")]
 mod linked {
     use super::*;
 
@@ -794,7 +787,9 @@ mod linked {
     /// says to link.
     fn link(inputs: &[&Path], out: &Path) {
         let libs: &[&str] = if cfg!(target_os = "macos") {
-            &["-lSystem", "-lc", "-lm"]
+            &["-liconv", "-lSystem", "-lc", "-lm"]
+        } else if cfg!(windows) {
+            &["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"]
         } else {
             &["-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
         };
@@ -812,6 +807,7 @@ mod linked {
     const HELLO: &str = "use io::sync::println;\nfn main() { let _ = println(\"hello\"); }\n";
 
     /// The program is in the image: the executable need not read its own file.
+    #[cfg(unix)]
     #[test]
     fn an_aot_executable_carries_its_program_in_the_image() {
         use std::os::unix::fs::PermissionsExt;
@@ -833,7 +829,7 @@ mod linked {
         let dir = temp_dir("aot_find");
         let exe = dir.join("app");
         let o = package_to(&dir, &exe, HELLO, &[]);
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert_linked_native_code(&o);
         let data = std::fs::read(&exe).unwrap();
         let package = common::find_linked_package(&data).expect("a linked package");
         let trailer = common::read_package_trailer(package).expect("its trailer");
@@ -899,20 +895,25 @@ mod linked {
     }
 
     /// A tool outside the program finds the lock inside the image.
+    /// An AOT executable loads a shared library at run time: found beside it
+    /// from any directory, called, and listed by `natives dump`.
     #[test]
-    fn natives_dump_reads_an_aot_executable() {
+    fn an_aot_executable_loads_a_shared_library() {
         let dir = temp_dir("aot_natives");
         let c = dir.join("sum.c");
-        std::fs::write(&c, "long sum_add(long a, long b) { return a + b; }\n").unwrap();
-        let so = dir.join("libsum.so");
-        let cc = Command::new("cc").args(["-shared", "-fPIC"]).arg(&c).arg("-o").arg(&so).output().expect("spawn cc");
-        assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
-        let src = "extern \"sum\" {\n    fn sum_add(int a, int b) -> int;\n}\nfn main() { let _ = sum_add(1, 2); }\n";
-        let exe = dir.join("app");
+        // `long long`: `long` is 32 bits on Windows, and `int` is 64 here.
+        std::fs::write(&c, "long long sum_add(long long a, long long b) { return a + b; }\n").unwrap();
+        build_shared_library(&c, &dir, "sum");
+        let src = "use io::sync::println;\nuse string::format;\nextern \"sum\" {\n    fn sum_add(int a, int b) -> int;\n}\nfn main() { let _ = println(format(\"%i\", sum_add(5000000000, 2))); }\n";
+        let exe = dir.join(format!("app{}", std::env::consts::EXE_SUFFIX));
         let row = format!("name=sum,version=1.0.0,path={}", dir.display());
         let o = package_to(&dir, &exe, src, &["--strip-symbols", "all", "--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-native", &row]);
-        let said = String::from_utf8_lossy(&o.stderr);
-        assert!(o.status.success() && said.contains("native code for"), "not an AOT package: {said}");
+        assert_linked_native_code(&o);
+        let mut run = Command::new(&exe);
+        run.current_dir(std::env::temp_dir());
+        let run = run_command_with_timeout(run, 60);
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "5000000002\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(run.status.code(), Some(0));
         let bin = std::env::var("CARGO_BIN_EXE_coil").unwrap();
         let dump = Command::new(&bin).arg("natives").arg("dump").arg(&exe).output().expect("natives dump");
         assert!(dump.status.success(), "{}", String::from_utf8_lossy(&dump.stderr));
