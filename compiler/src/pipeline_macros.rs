@@ -1372,7 +1372,7 @@ impl Pipeline {
                     .expect("target still present");
                 // After this type's earlier derive outputs, so impls keep
                 // the order the derives are listed in.
-                let done = self.derived_items.entry(job.pending.target).or_insert(0);
+                let done = self.derived_items.entry((job.file.clone(), job.pending.target)).or_insert(0);
                 let start = at + 1 + *done;
                 *done += items.len();
                 for (k, item) in items.into_iter().enumerate() {
