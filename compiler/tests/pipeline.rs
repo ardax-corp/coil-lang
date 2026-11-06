@@ -2008,14 +2008,12 @@ enum Tree {
     Leaf,
     Node(Tree, Tree),
 }
-#[max_depth(64)]
 fn build(int n) -> Tree {
     if n <= 1 {
         return Tree::Leaf();
     }
     return Tree::Node(build(n - 1), build(n - 2));
 }
-#[max_depth(64)]
 fn leaves(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,
@@ -2106,7 +2104,6 @@ fn auto_par_self_call_combine_emits_spec() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2137,7 +2134,6 @@ fn auto_par_narrow_tak_stays_sequential() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2165,7 +2161,6 @@ fn auto_par_fair_tak_load_emits_worker() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2235,7 +2230,6 @@ use thread::{mutex, with_lock};
 fn bump(Mutex m) {
     with_lock(m, fn (int x) => (x + 1, 0))?;
 }
-#[max_depth(64)]
 fn rec(Mutex m, int n) -> int {
     if n <= 1 {
         bump(m);
@@ -2286,7 +2280,6 @@ fn dump(int n) -> int {
     write(f, to_bytes(format("%i", n)));
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return dump(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2329,7 +2322,6 @@ fn leaf(int n) -> int {
     write(stderr(), to_bytes(format("%i", n)));
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return leaf(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2380,7 +2372,6 @@ fn poke(int n) -> int {
     };
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return poke(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2481,7 +2472,6 @@ fn auto_par_irrefutable_match_arm_emits_spec() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(64)]
 fn fibm(int n) -> int {
     if n <= 1 { return n; }
     return match n {
@@ -2601,7 +2591,6 @@ fn auto_par_xor_binop_emits_spec_and_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(64)]
 fn mix(int n) -> int {
     if n <= 1 {
         return n;
@@ -2924,14 +2913,12 @@ enum Tree {
     Leaf,
     Node(Tree, Tree),
 }
-#[max_depth(64)]
 fn build(int n) -> Tree {
     if n <= 1 {
         return Tree::Leaf();
     }
     return Tree::Node(build(n - 1), build(n - 2));
 }
-#[max_depth(64)]
 fn leaves(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,

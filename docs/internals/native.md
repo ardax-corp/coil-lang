@@ -156,10 +156,6 @@ the same size and a generator fiber 8 MiB. `NativeCtx::stack_limit` sits
 interpreter's frames do not use the machine stack, and its limit is
 `frame::MAX_WORDS` words of registers per activation.
 
-`#[max_depth(N)]` still parses and is checked for its target, and
-`analyze_stack_bounds` (`compiler/src/typechecking/stack_bound.rs`) still runs after
-typecheck. Neither changes a run: no engine reads the size it computes.
-
 ## Calls and collections
 
 A collection runs at a *safepoint*: the entry and loop headers of a body that may

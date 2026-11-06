@@ -7110,10 +7110,7 @@ impl Compiler {
         crate::hir::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         crate::verify::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         self.build_hir_for_lowering(module, ast);
-        // Recursion depth / `#[max_depth]`, independent of auto-par.
         let bare_cases = self.checker.bare_cases().clone();
-        let stack_bound = crate::typechecking::analyze_stack_bounds(ast, &bare_cases);
-        self.messages.extend(stack_bound.messages);
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
         self.recursive_pure = if self.auto_par && self.opt_options.auto_par {
             crate::typechecking::analyze_recursive_pure(ast, &bare_cases)

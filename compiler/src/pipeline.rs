@@ -2579,7 +2579,7 @@ fn main() { write(stdout(), to_bytes(format("%i", missing))); }"#;
     }
 
     #[test]
-    fn dynamic_recursion_without_max_depth_compiles() {
+    fn dynamic_recursion_compiles() {
         let mut pipeline = Pipeline::new();
         let compiled = pipeline.compile_src(
             r#"

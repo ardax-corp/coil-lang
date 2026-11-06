@@ -18,7 +18,7 @@ use reporting::{ErrorCode, Message};
 
 use crate::macros::{CallPosition, MacroDecl, MacroKind, PendingMacro};
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh", "shared", "view", "inline", "cold", "hot"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "repr", "lang", "noescape", "fresh", "shared", "view", "inline", "cold", "hot"];
 
 /// Optimizer hints: speed only, never behaviour (`docs/internals/opt-hints.md`).
 const OPT_HINTS: &[&str] = &["inline", "cold", "hot"];
@@ -347,7 +347,7 @@ fn validate_attrs<'x, 'a>(
                 span.into_range(),
             ));
         }
-        if matches!(attr.name, "max_depth" | "noescape" | "fresh") && target != "function" {
+        if matches!(attr.name, "noescape" | "fresh") && target != "function" {
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
                 format!("Attribute `{}` is not valid on {}", attr.name, target),
