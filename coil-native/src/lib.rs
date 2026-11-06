@@ -3571,8 +3571,10 @@ impl<'a> Lower<'a> {
         );
         for blk in [head, found] {
             self.b.append_block_param(blk, types::I64);
-            self.b.append_block_param(blk, types::I64);
         }
+        self.b.append_block_param(head, types::I64);
+        // The lane mask `vhigh_bits` gives.
+        self.b.append_block_param(found, types::I32);
         self.b.append_block_param(step, types::I64);
         self.b.append_block_param(kern, types::I64);
         self.b.append_block_param(done, types::I64);
