@@ -91,7 +91,7 @@ pub(crate) struct CliArgs {
     pub nursery: Option<bool>,
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
-    /// `--mir`: `coil FILE` runs on the MIR interpreter.
+    /// `--mir`: `coil FILE` and `coil run` run on the MIR interpreter.
     pub mir: bool,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
@@ -622,6 +622,7 @@ impl RawCli {
             }) => CliArgs {
                 nursery: nursery.nursery,
                 cow_report: nursery.cow_report,
+                mir: nursery.mir,
                 ..cli_from(
                     Command::Run { archive },
                     log,

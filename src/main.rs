@@ -453,7 +453,7 @@ fn cmd_build_and_run(
 
 /// `coil FILE --mir -O 0`: capture MIR with no MIR pass run on it.
 static RAW_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// `coil FILE --mir`: the captured MIR goes to the interpreter, not to
+/// `--mir` or `--cow-report`: the MIR goes to the interpreter, not to
 /// Cranelift.
 static RUN_ON_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -868,6 +868,7 @@ fn main() {
                     );
                 }
                 Command::Run { archive } => {
+                    RUN_ON_MIR.store(cli.mir || cli.cow_report, std::sync::atomic::Ordering::Relaxed);
                     set_program_args(&archive, &cli.program_args);
                     cmd_run(&mut pipeline, &archive);
                 }

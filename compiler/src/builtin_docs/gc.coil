@@ -138,7 +138,7 @@ fn upgrade<T>(Weak<T> handle) -> Option<T> {}
 
 /// Returns the size of the managed heap in bytes.
 ///
-/// This counts only memory the VM's garbage collector manages: not native
+/// This counts only memory the garbage collector manages: not native
 /// libraries, stacks or other process memory.
 ///
 /// # Examples
