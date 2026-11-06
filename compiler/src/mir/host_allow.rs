@@ -120,9 +120,8 @@ pub fn host_variadic(id: u16) -> bool {
         )
 }
 
-/// A native the embedder registered (`Compiler::register`,
-/// `Pipeline::register_host_native`): its id follows the frozen
-/// [`HOST_NATIVES`] table, as the VM registry numbers it.
+/// A native the embedder registered (`Compiler::register`): its id follows
+/// the frozen [`HOST_NATIVES`] table.
 pub fn embedder_native(id: u16) -> bool {
     id as usize >= HOST_NATIVES.len()
 }

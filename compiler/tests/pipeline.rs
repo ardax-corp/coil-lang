@@ -382,7 +382,7 @@ fn example_pool_caps_concurrent_jobs() {
     }
     let peak = max_seen.load(Ordering::SeqCst);
     assert!(
-        peak >= 1 && peak <= EXAMPLE_POOL_SIZE,
+        (1..=EXAMPLE_POOL_SIZE).contains(&peak),
         "peak concurrent example jobs was {peak}, want 1..={EXAMPLE_POOL_SIZE}"
     );
 }
@@ -1986,7 +1986,7 @@ fn main() {
     let (Run { output, .. }, jobs) = run_as_case(compiled, &pipeline, None);
     assert_eq!(output, "17711");
     assert!(
-        jobs >= 1 && jobs < 20,
+        (1..20).contains(&jobs),
         "fib(22) must spawn, but not a cutoff-chain storm: jobs={jobs}"
     );
 }
@@ -2529,7 +2529,7 @@ fn main() {
     // fib(22)+fib(21)+fib(20) with fib(n<=1)=n
     assert_eq!(output, "35422");
     assert!(
-        jobs >= 1 && jobs < 20,
+        (1..20).contains(&jobs),
         "triple_fib(22) must spawn, but not a cutoff-chain storm: jobs={jobs}"
     );
 }

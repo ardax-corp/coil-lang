@@ -809,7 +809,7 @@ impl<'a> Driver<'a> {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
         let fn_id = id as usize;
-        let out = match d.rt.natives.get_by_id(fn_id)?.host_op() {
+        match d.rt.natives.get_by_id(fn_id)?.host_op() {
             crate::HostOp::Ordinary => crate::runtime::invoke_ordinary(d, ctx, fn_id, layout, args),
             crate::HostOp::RegisterFinalizer => {
                 let word = |i: usize| args.get(i).map_or(0, |v| v.as_int() as u32);
@@ -826,10 +826,7 @@ impl<'a> Driver<'a> {
             }
             crate::HostOp::Task => Some(d.task_op(ctx, fn_id, args)),
             _ => Some(Invoked::Panic("native driver: unknown host op".into())),
-        };
-        if out.is_some() {
         }
-        out
     }
 }
 

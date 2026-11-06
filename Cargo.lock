@@ -508,6 +508,8 @@ dependencies = [
 name = "compiler"
 version = "0.1.0"
 dependencies = [
+ "coil-host",
+ "coil-mir-interp",
  "common",
  "comptime",
  "libc",

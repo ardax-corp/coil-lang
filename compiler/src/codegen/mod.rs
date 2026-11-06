@@ -620,8 +620,6 @@ pub struct Compiler {
     /// [`crate::opt::OptimizeOptions::auto_par`] is on.
     auto_par: bool,
 
-    /// Operand-stack capacity for the VM (from recursion-depth analysis).
-    operand_stack_slots: u32,
 
     /// IL optimization preset (COI-127).
     opt_options: crate::opt::OptimizeOptions,
@@ -844,7 +842,6 @@ impl Default for Compiler {
             hir_closure_adapters: HashMap::new(),
             hir_closure_adapter_tail: Vec::new(),
             auto_par: true,
-            operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
             opt_options: crate::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
             hir_refusal: None,
@@ -942,7 +939,6 @@ pub(crate) struct ModuleCtx {
     par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
     par_workers: HashSet<String>,
     loop_par_sites: crate::typechecking::LoopParSites,
-    operand_stack_slots: u32,
     current_source_file: Option<std::path::PathBuf>,
     source_text: String,
     source_base: (usize, usize),

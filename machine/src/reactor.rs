@@ -888,7 +888,7 @@ mod tests {
     fn const_code(imm: i32) -> Option<Arc<crate::native::NativeCode>> {
         unsafe extern "C" fn returns_data(ctx: *mut crate::native::NativeCtx, _: *const u64) -> u64 {
             // SAFETY: the context of this call.
-            unsafe { (*ctx).entry_data as u64 }
+            unsafe { (*ctx).entry_data }
         }
         let entry = crate::native::NativeEntry {
             pc: 0,

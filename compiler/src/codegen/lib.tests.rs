@@ -27,8 +27,6 @@ fn codegen_depth_guard_panics_with_expected_diagnostic_past_limit() {
     );
 }
 
-/// `x ** 0` folds to const 1.
-
 /// The HM checker should record diagnostic messages on type errors;
 /// `compile` should drain them into the compiler's message list.
 #[test]
@@ -53,7 +51,7 @@ fn register_native_visible_to_emitter() {
     let mut ast = Pratt::default()
         .parse("fn main() { native_print(\"hi\"); }")
         .expect("parse failed");
-    let _bc = c.compile("test", &mut ast);
+    c.compile("test", &mut ast);
     let msgs = std::mem::take(&mut c.messages);
     assert!(msgs.is_empty(), "expected no messages, got: {:?}", msgs);
 }
@@ -101,7 +99,7 @@ fn main() {
 "#;
     let mut ast = Pratt::default().parse(src).expect("parse");
     let mut compiler = Compiler::default();
-    let _ = compiler.compile("", &mut ast);
+    compiler.compile("", &mut ast);
     assert!(
         compiler.get_messages().is_empty(),
         "unexpected: {:?}",
@@ -164,7 +162,7 @@ fn cross_module_does_not_inline_private_method() {
              }";
     let mut ast = Pratt::default().parse(util).expect("parse util");
     let mut compiler = Compiler::default();
-    let _ = compiler.compile_module("util", &mut ast);
+    compiler.compile_module("util", &mut ast);
     let secret = compiler
         .checker()
         .inherent_method_visibility("util::Box::secret")

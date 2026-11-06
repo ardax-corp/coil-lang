@@ -29,7 +29,7 @@ shows and ends that header with its exact stdout:
 Escape newlines as `\n` (also `\t`, `\e`, `\\`). An example that cannot run
 in the test harness says why instead:
 ``// @output (not checked: needs `--allow-dload sum`)``. `examples_print_their_documented_output`
-(`cargo test -p compiler --features vm-wire --test pipeline`) runs every example
+(`cargo test -p compiler --test pipeline`) runs every example
 and compares, so a broken or drifting example fails CI.
 
 ## Where to change things

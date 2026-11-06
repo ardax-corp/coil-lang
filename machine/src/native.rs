@@ -1368,7 +1368,10 @@ pub unsafe extern "C" fn coil_native_collect(ctx: *mut NativeCtx) {
 }
 
 /// `--cow-report`: the copies `ctx`'s heap had made, when it counts them.
-pub fn cow_report_mark(ctx: *mut NativeCtx) -> Option<u64> {
+///
+/// # Safety
+/// `ctx` is the running call's context.
+pub unsafe fn cow_report_mark(ctx: *mut NativeCtx) -> Option<u64> {
     // SAFETY: the running call's context.
     let heap = unsafe { heap(ctx) }?;
     heap.cow_report_on().then(|| heap.cow_copies())
@@ -1376,7 +1379,10 @@ pub fn cow_report_mark(ctx: *mut NativeCtx) -> Option<u64> {
 
 /// `--cow-report`: the `Cow` at `site` ran; `mark` is what
 /// [`cow_report_mark`] said before it.
-pub fn cow_report_note(ctx: *mut NativeCtx, mark: u64, site: u32) {
+///
+/// # Safety
+/// `ctx` is the running call's context.
+pub unsafe fn cow_report_note(ctx: *mut NativeCtx, mark: u64, site: u32) {
     // SAFETY: the running call's context.
     if let Some(heap) = unsafe { heap(ctx) } {
         heap.cow_report_note(mark, site);

@@ -186,10 +186,6 @@ impl Compiler {
     }
 
     /// Operand-stack capacity recommended by recursion-depth analysis.
-    pub fn operand_stack_slots(&self) -> u32 {
-        self.operand_stack_slots
-    }
-
     /// Source text of the module about to compile (names in its AST are
     /// slices of it). Used for exact name spans in debug info.
     pub fn set_source_text(&mut self, text: &str) {
@@ -2002,7 +1998,6 @@ impl Compiler {
             par_shapes: self.par_shapes.clone(),
             par_workers: self.par_workers.clone(),
             loop_par_sites: self.loop_par_sites.clone(),
-            operand_stack_slots: self.operand_stack_slots,
             current_source_file: self.current_source_file.clone(),
             source_text: self.source_text.clone(),
             source_base: self.source_base,
@@ -2037,7 +2032,6 @@ impl Compiler {
         std::mem::swap(&mut self.par_shapes, &mut ctx.par_shapes);
         std::mem::swap(&mut self.par_workers, &mut ctx.par_workers);
         std::mem::swap(&mut self.loop_par_sites, &mut ctx.loop_par_sites);
-        std::mem::swap(&mut self.operand_stack_slots, &mut ctx.operand_stack_slots);
         std::mem::swap(&mut self.current_source_file, &mut ctx.current_source_file);
         std::mem::swap(&mut self.source_text, &mut ctx.source_text);
         std::mem::swap(&mut self.source_base, &mut ctx.source_base);
@@ -6265,9 +6259,8 @@ impl Compiler {
             ));
             std::panic::panic_any(super::CodegenRecursionLimitExceeded);
         }
-        let result = self.do_compile_inner(ast);
+        self.do_compile_inner(ast);
         self.codegen_depth -= 1;
-        result
     }
 
     /// Named `fn` declaration: emit the body, register the entry and debug info.
@@ -6817,7 +6810,7 @@ impl Compiler {
                     match method.1.as_ref() {
                         Expression::AssocTypeDecl { .. } => {
                             // Type-level only, do_compile consumes the NodeId.
-                            let _ = self.do_compile(method);
+                            self.do_compile(method);
                         }
                         Expression::Function {
                             docs: _,
@@ -6868,7 +6861,7 @@ impl Compiler {
                     match method.1.as_ref() {
                         Expression::AssocTypeDef { .. } => {
                             // Type-level only, do_compile consumes wrapper + RHS IDs.
-                            let _ = self.do_compile(method);
+                            self.do_compile(method);
                         }
                         Expression::Function {
                             docs: _,
@@ -7262,7 +7255,6 @@ impl Compiler {
         let bare_cases = self.checker.bare_cases().clone();
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast, &bare_cases);
         self.messages.extend(stack_bound.messages);
-        self.operand_stack_slots = stack_bound.operand_slots_needed;
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
         self.recursive_pure = if self.auto_par && self.opt_options.auto_par {
             crate::typechecking::analyze_recursive_pure(ast, &bare_cases)
@@ -7874,9 +7866,6 @@ impl Compiler {
             })
             .collect();
 
-        self.operand_stack_slots = self
-            .operand_stack_slots
-            .min(crate::typechecking::MAX_OPERAND_STACK_SLOTS);
     }
 
     /// Post-lower function symbols sorted by entry PC (for dissect / debug).

@@ -107,11 +107,11 @@ fn bind_ns_pipeline(pipeline: &mut Pipeline, extra: &[PathBuf]) {
     pipeline.grant_all();
 }
 
-fn run_project(project_root: &PathBuf, entry: &PathBuf) -> String {
+fn run_project(project_root: &Path, entry: &Path) -> String {
     run_project_with_extra(project_root, entry, &[])
 }
 
-fn run_project_with_extra(project_root: &PathBuf, entry: &PathBuf, extra: &[PathBuf]) -> String {
+fn run_project_with_extra(project_root: &Path, entry: &Path, extra: &[PathBuf]) -> String {
     with_project_cwd(project_root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, extra);
@@ -155,7 +155,7 @@ fn run_compiled(compiled: Compiled, pipeline: &Pipeline) -> String {
 }
 
 /// Serialize cwd changes, `chdir` into `root`, run `f`, then restore cwd.
-fn with_project_cwd<R>(root: &PathBuf, f: impl FnOnce() -> R) -> R {
+fn with_project_cwd<R>(root: &Path, f: impl FnOnce() -> R) -> R {
     let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(root).expect("chdir");
@@ -170,7 +170,7 @@ fn with_project_cwd<R>(root: &PathBuf, f: impl FnOnce() -> R) -> R {
 }
 
 /// Compile `entry` as a project.
-fn compile_entry(entry: &PathBuf) -> (Compiled, Pipeline) {
+fn compile_entry(entry: &Path) -> (Compiled, Pipeline) {
     let mut pipeline = Pipeline::new();
     bind_ns_pipeline(&mut pipeline, &[]);
     let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {

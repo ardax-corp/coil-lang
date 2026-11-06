@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn an_archive_round_trips() {
-        let p = decode_archived_program(&program(ARCHIVE_VERSION)).ok().expect("decodes");
+        let Ok(p) = decode_archived_program(&program(ARCHIVE_VERSION)) else { panic!("decodes") };
         assert_eq!(p.startup, vec![crate::StartupOp::Init { entry: 3, slot: 1 }]);
         assert_eq!(p.main, Some(4));
         assert_eq!(p.native_mir, vec![1, 2]);
