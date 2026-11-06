@@ -1,0 +1,13 @@
+// @expected E0152 — `v` is declared in the block this `defer` runs at the
+// end of, so it is gone when the defer assigns it (#2308).
+fn one() -> int {
+    let v = 1;
+    defer use (mut v) {
+        v += 1;
+    }
+    return v;
+}
+
+fn main() {
+    let _ = one();
+}
