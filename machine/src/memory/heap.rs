@@ -2099,6 +2099,7 @@ impl Heap {
     }
 
     /// Find a heap object by its address (mapped slot + header kind).
+    #[inline]
     pub fn find_object_by_addr(&self, addr: u64) -> Option<Object> {
         if addr == 0 || !self.slab.contains_slot(addr) {
             return None;

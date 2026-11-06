@@ -2040,7 +2040,10 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         return unsafe { bail(ctx) };
     };
     let c = unsafe { &mut *ctx };
-    if direct_host_natives().get(id as usize).is_some_and(|h| h.collect) {
+    let Some(host) = direct_host_natives().get(id as usize) else {
+        return unsafe { bail(ctx) };
+    };
+    if host.collect {
         if c.machine.is_null() {
             return unsafe { bail(ctx) };
         }
@@ -2056,41 +2059,30 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         }
         return freed;
     }
-    if direct_host_natives()
-        .get(id as usize)
-        .is_some_and(|h| h.on_machine)
-    {
-        return match unsafe { host_invoke(ctx, id, layout, args, n) } {
-            Some(out) => out,
-            None => unsafe { bail(ctx) },
-        };
-    }
-    let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
-        return unsafe { bail(ctx) };
-    };
     // The runtime's table decides what runs: a host may have replaced this
     // native (the compile-time sandbox refuses most of them), and the
     // replacement is no plain function.
     // SAFETY: when set, `natives` is the live runtime's.
-    if !c.natives.is_null() && unsafe { &*c.natives }.direct_by_id(id as usize).is_none() {
-        return match unsafe { host_invoke(ctx, id, layout, args, n) } {
-            Some(out) => out,
-            None => unsafe { bail(ctx) },
-        };
-    }
-    let mut buf = [common::Value::default(); 16];
-    let Some(words) = buf.get_mut(..n as usize) else {
-        return unsafe { bail(ctx) };
+    let replaced = || !c.natives.is_null() && unsafe { &*c.natives }.direct_by_id(id as usize).is_none();
+    let f = match host.func {
+        Some(f) if !host.on_machine && !replaced() => f,
+        _ if host.on_machine || host.func.is_some() => {
+            return match unsafe { host_invoke(ctx, id, layout, args, n) } {
+                Some(out) => out,
+                None => unsafe { bail(ctx) },
+            };
+        }
+        _ => return unsafe { bail(ctx) },
     };
-    for (i, w) in words.iter_mut().enumerate() {
-        // SAFETY: `args` holds `n` words.
-        *w = common::Value::from(unsafe { *args.add(i) });
+    if n > 16 {
+        return unsafe { bail(ctx) };
     }
-    let args = &*words;
-    if *guarded && args.first().is_some_and(|&s| crate::io::is_unsent_stream(heap, s)) {
+    // SAFETY: `args` holds `n` words, and a `Value` is one word.
+    let args = unsafe { std::slice::from_raw_parts(args.cast::<common::Value>(), n as usize) };
+    if host.guarded && args.first().is_some_and(|&s| crate::io::is_unsent_stream(heap, s)) {
         c.trap = TRAP_MESSAGE;
         // SAFETY: `call` set `message` for the call.
-        unsafe { *c.message = format!("{name}: {}", crate::io::UNSENT_STREAM_PANIC) };
+        unsafe { *c.message = format!("{}: {}", host.name, crate::io::UNSENT_STREAM_PANIC) };
         return unsafe { bail(ctx) };
     }
     let live_before = heap.live_object_count();

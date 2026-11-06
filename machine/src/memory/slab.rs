@@ -842,6 +842,7 @@ impl Slab {
 
     /// True when `addr` is a slot origin in a mapped chunk (not necessarily
     /// live — poison is the header kind).
+    #[inline]
     pub fn contains_slot(&self, addr: u64) -> bool {
         self.chunk_for(addr).is_some_and(|(start, meta)| {
             let off = (addr - start) as u32;
