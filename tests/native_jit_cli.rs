@@ -1354,6 +1354,17 @@ fn a_cached_run_repeats_the_compiles_warnings() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A variadic function compiles as a copy per argument shape, its spans
+/// moved out of the source's range: a panic names the line it was written on.
+#[test]
+fn a_panic_in_a_variadic_copy_names_its_line() {
+    let src = format!("{HEADER}fn first(... xs) -> int {{\n    panic \"boom\";\n}}\nfn main() {{\n    let _ = println(format(\"%i\", first(1, \"a\")));\n}}\n");
+    for native in [true, false] {
+        let err = program_stderr(&run("variadic_panic", &src, native));
+        assert!(err.contains("variadic_panic.coil:4:5"), "native={native}: {err}");
+    }
+}
+
 /// `coil compile` of `file` twice over one new cache directory, the first
 /// building the macro programs and the second reading them: both archives.
 fn archives_cold_and_warm(dir: &std::path::Path, file: &std::path::Path, roots: &[PathBuf]) -> (Vec<u8>, Vec<u8>) {
