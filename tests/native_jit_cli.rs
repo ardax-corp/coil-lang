@@ -1661,3 +1661,35 @@ fn derives_at_the_same_offset_of_two_modules_stay_apart() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "3", "{}", String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A body native code refuses: a debug build stops with the reason and
+/// points at `--mir` (a release build warns and interprets); `--mir` runs
+/// the program.
+#[test]
+fn a_refused_body_fails_a_debug_run() {
+    let src = format!("{HEADER}#[inline(never)]\nfn twice(int n) -> int {{ return n * 2; }}\nfn main() {{ let _ = println(format(\"%i\", twice(21))); }}\n");
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-refused", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("refused.coil");
+    std::fs::write(&file, &src).expect("write source");
+    let mut cmd = Command::new(coil_bin());
+    cmd.arg(&file).args(["--no-build-cache", "--fold-calls", "off"]).env("COIL_NATIVE_REFUSE", "twice");
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let out = cmd.output().expect("spawn coil");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if cfg!(debug_assertions) {
+        assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+        assert!(stderr.contains("error: `twice` has no native code: refused by COIL_NATIVE_REFUSE"), "stderr: {stderr}");
+        assert!(stderr.contains("pass `--mir`"), "stderr: {stderr}");
+        assert!(out.stdout.is_empty(), "nothing runs");
+    } else {
+        assert!(out.status.success(), "stderr: {stderr}");
+        assert!(stderr.contains("warning: `twice` has no native code"), "stderr: {stderr}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
+    }
+    let mir = run("refused_mir", &src, false);
+    assert!(mir.status.success(), "stderr: {}", String::from_utf8_lossy(&mir.stderr));
+    assert_eq!(String::from_utf8_lossy(&mir.stdout), "42\n");
+}
