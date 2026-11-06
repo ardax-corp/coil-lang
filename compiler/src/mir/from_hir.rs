@@ -3386,17 +3386,15 @@ impl Lower<'_> {
             } if args.is_empty() && let Some(lit) = (self.inp.scalar_variant)(enum_name, variant) => {
                 Ok(Val::V(self.scalar_lit(lit)?))
             }
-            // `p[0]` / `p[1]` of a two-word tuple local.
+            // `p[0]` / `p[1]` of a two-word tuple local. Any other index
+            // reads the local's box, as a boxed tuple's field below.
             HirKind::Index { base, index, .. }
                 if let HirKind::Local(local) = self.hir.expr(*base).kind
                     && let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local)
-                    && self.expr_ty(*base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_))) =>
+                    && self.expr_ty(*base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_)))
+                    && let HirKind::Lit(Lit::Int(i @ (0 | 1))) = self.hir.expr(*index).kind =>
             {
-                let (slot, ty) = match self.hir.expr(*index).kind {
-                    HirKind::Lit(Lit::Int(0)) => (lo, lo_ty),
-                    HirKind::Lit(Lit::Int(1)) => (hi, hi_ty),
-                    _ => return Err("tuple index".into()),
-                };
+                let (slot, ty) = if i == 0 { (lo, lo_ty) } else { (hi, hi_ty) };
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
             HirKind::Index { base, index, kind: IndexKind::Array } if self.heap_array(*base) => self.heap_index(id, *base, *index),
@@ -5476,7 +5474,8 @@ impl Lower<'_> {
             None => None,
         }
         .ok_or("element type")?;
-        let Some(arr) = self.word(base)? else {
+        // A two-word tuple local read at a runtime index: its box.
+        let Some(arr) = self.word_or_boxed(base)? else {
             return Ok(Val::Never);
         };
         let Some(idx) = self.index_word(index)? else {
