@@ -2970,9 +2970,9 @@ impl Compiler {
                     || self
                         .hir_fn_names
                         .iter()
-                        .find(|(k, _)| last(k) == *n)
-                        .and_then(|(_, i)| *i)
-                        .is_some_and(|i| named(&module.bodies[i]).contains(&me))
+                        .filter(|(k, _)| last(k) == *n)
+                        .filter_map(|(_, i)| *i)
+                        .any(|i| named(&module.bodies[i]).contains(&me))
             };
             if calls.iter().any(reaches_back) {
                 return Err("recursive".to_string());

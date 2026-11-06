@@ -1933,7 +1933,7 @@ impl Compiler {
         self.hir_plan_bodies_for_clones();
         // This module's own methods register as its bodies compile: every
         // clone source known now is an earlier module's.
-        let foreign: Vec<String> = self
+        let mut foreign: Vec<String> = self
             .method_clone_plans
             .borrow()
             .iter()
@@ -1943,6 +1943,8 @@ impl Compiler {
             })
             .map(|(key, _)| key.clone())
             .collect();
+        // The order labels clones, and near the budget picks them.
+        foreign.sort_unstable();
         for key in foreign {
             self.hir_request_method_clone_pub(&key);
         }

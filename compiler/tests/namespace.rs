@@ -390,6 +390,43 @@ fn bind_project_root_sets_explicit_roots_without_toml() {
     assert_eq!(output, "42");
 }
 
+/// A compile does not depend on hash order: clones of another module's
+/// methods take their labels, and near the budget their existence, in the
+/// order they are requested.
+#[test]
+fn clones_of_another_modules_methods_compile_the_same_every_time() {
+    const METHODS: usize = 12;
+    let getters: String = (0..METHODS).map(|i| format!("    pub fn get{i}() -> T {{\n        return self.v;\n    }}\n")).collect();
+    let calls: String = (0..METHODS).map(|i| format!("    t = t + b.get{i}().n;\n")).collect();
+    let lib = format!("class Box<T> {{\n    pub v: T,\n}}\n\nimpl Box<T> {{\n{getters}}}\n");
+    let main = format!("use boxes::Box;\nuse io::{{stdout, write}};\nuse string::{{format, to_bytes}};\n\nclass P {{\n    pub n: int,\n}}\n\nfn main() {{\n    let b = new Box(new P(1));\n    let t = 0;\n{calls}    let _ = write(stdout(), to_bytes(format(\"%i\", t)));\n}}\n");
+    let (root, entry) = build_project("clone_order", "", &[("src/boxes.coil", lib.as_str()), ("main.coil", main.as_str())], "main.coil");
+
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let original_cwd = std::env::current_dir().expect("get cwd");
+    std::env::set_current_dir(&root).expect("chdir");
+    struct CwdGuard(PathBuf);
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+    let _guard = CwdGuard(original_cwd);
+
+    let archive = || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).expect("compiles");
+        let debug = pipeline.program_debug_full();
+        let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+        compiler::native_mir::archive::encode(&compiled.bodies, &pcs)
+    };
+    let first = archive();
+    for _ in 0..4 {
+        assert!(archive() == first, "MIR differs between identical compiles");
+    }
+}
+
 /// Multi-file programs that use `?` (JumpIfMatch → constant pool) in a
 /// dependency must keep a single shared pool across `compile_module`
 /// calls. Clearing the pool between files left worker threads panicking
