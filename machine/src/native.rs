@@ -111,6 +111,10 @@ pub struct NativeCtx {
     pub resume: *mut std::ffi::c_void,
     pub resume_word: u64,
     pub resume_how: u64,
+    /// The program's compiled bodies, for [`coil_native_call_value`] to
+    /// enter a plain function value's body on this context (null: through
+    /// the runtime).
+    pub code: *const NativeCode,
 }
 
 /// Byte offset of [`NativeCtx::native_fp`].
@@ -496,6 +500,8 @@ pub(crate) struct NativeEnv {
     pub(crate) fuel: *mut u64,
     pub(crate) natives: *const crate::ffi::Natives,
     pub(crate) probes: *mut Vec<u32>,
+    /// The compiled bodies ([`NativeCtx::code`]).
+    pub(crate) code: *const NativeCode,
 }
 
 
@@ -583,6 +589,7 @@ impl NativeCtx {
             resume: std::ptr::null_mut(),
             resume_word: 0,
             resume_how: 0,
+            code: std::ptr::null(),
         }
     }
 
@@ -992,6 +999,7 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
     ctx.has_finalizers = u64::from(env.has_finalizers);
     ctx.statics = env.statics;
     ctx.statics_len = env.statics_len as u64;
+    ctx.code = env.code;
     let mut trace = Vec::new();
     ctx.trace = &mut trace;
     let mut message = String::new();
@@ -1247,6 +1255,30 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
         }
         None => 0,
     }
+}
+
+/// The bytes of the string `addr` names, for `s[i]` read in place: writes
+/// `(pointer, length)` to `out`, or `(0, 0)` when `addr` is not a string
+/// object itself (a boxed one goes through `string_byte_at`). Strings are
+/// never written after they exist, so the view holds until a collection
+/// may move the object.
+///
+/// # Safety
+/// `addr` is a heap word or 0; `out` has room for two words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_str_view(addr: u64, out: *mut u64) -> u64 {
+    let (ptr, len) = match object(addr) {
+        Some(crate::memory::Object::String(gc)) => {
+            let b = gc.as_ref().data.as_str().as_bytes();
+            (b.as_ptr() as u64, b.len() as u64)
+        }
+        _ => (0, 0),
+    };
+    unsafe {
+        out.write(ptr);
+        out.add(1).write(len);
+    }
+    1
 }
 
 // ---------------------------------------------------------------------------
@@ -1657,6 +1689,30 @@ pub unsafe extern "C" fn coil_native_stringify(ctx: *mut NativeCtx, word: u64, t
     s.as_ptr() as *mut u8 as u64
 }
 
+/// The `n` argument words at `args`.
+fn words_slice<'a>(args: *const u64, n: u64) -> &'a [u64] {
+    // SAFETY: native code passes `n` words at `args` (none when `n == 0`).
+    if n == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, n as usize) } }
+}
+
+/// The strings a format of only `%s` (after the head's) appends: `None` when
+/// the format has anything else, the count is off (or over 8), or an operand
+/// is not a string (the general renderer handles those).
+fn concat_tails<'a>(rest: &str, args: &[u64]) -> Option<([&'a str; 8], usize)> {
+    if args.len() > 8 || rest.len() != 2 * args.len() || !rest.as_bytes().chunks(2).all(|c| c == b"%s") {
+        return None;
+    }
+    let mut out = [""; 8];
+    for (slot, &w) in out.iter_mut().zip(args) {
+        let Some(crate::memory::Object::String(g)) = object(w) else {
+            return None;
+        };
+        // SAFETY: a live string object outlives this call.
+        *slot = unsafe { &*std::ptr::from_ref(g.as_ref().data.as_str()) };
+    }
+    Some((out, args.len()))
+}
+
 /// `FORMAT` with the format string `fmt` and the `n` argument words at
 /// `args` (in order), as the runtime's handler: a leading `%s` appends the rest
 /// to the first argument (in place when that string ends at its buffer's
@@ -1689,6 +1745,25 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
             Some(rest) => (words.next(), rest),
             None => (None, format_string),
         };
+        // String `+` and `join` lower to `"%s%s…"` with string operands: append
+        // them straight onto the head, with no format parse or temporary render.
+        if let Some(Some(Object::String(gh))) = head.map(|h| object(h.bits()))
+            && let Some((tails, count)) = concat_tails(rest, &words_slice(args, n)[1..])
+        {
+            let joined = match &tails[..count] {
+                [one] => gh.as_ref().concat(one),
+                many => {
+                    let mut tail = String::with_capacity(many.iter().map(|t| t.len()).sum());
+                    for t in many {
+                        tail.push_str(t);
+                    }
+                    gh.as_ref().concat(&tail)
+                }
+            };
+            let addr = heap.alloc(joined, Object::String).0.addr();
+            unsafe { note_alloc(ctx, heap) };
+            return addr;
+        }
         let message = crate::format::render_format(rest, || words.next().unwrap_or_default());
         match head {
             Some(head) => {
@@ -1791,6 +1866,71 @@ pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64
     }
     out
 }
+
+/// `CallIndirect` of a plain function value, entered by native code
+/// itself as a direct `CALL` is: a code offset, or a function object with
+/// no partial arguments, rest parameter or dictionaries, taking exactly the
+/// `n` argument words at `args`. Writes the body's words (the captures,
+/// then the arguments) to `out` and returns its entry, which native code
+/// calls with this context and `out`. `0`: anything else, which native
+/// code passes to [`coil_native_call_value`]. Never collects.
+///
+/// # Safety
+/// `ctx` is the call's live context; `args` holds `n` words; `out` has
+/// room for [`FN_ENTRY_WORDS`] words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64) -> u64 {
+    let c = unsafe { &mut *ctx };
+    if c.code.is_null() || c.heap.is_null() || c.machine.is_null() || c.entry_data != 0 {
+        return 0;
+    }
+    // SAFETY: the driver keeps the code for the whole run.
+    let code = unsafe { &*c.code };
+    let n = n as usize;
+    // SAFETY: as the caller promises.
+    let given = unsafe { std::slice::from_raw_parts(args, n) };
+    let words = unsafe { std::slice::from_raw_parts_mut(out, FN_ENTRY_WORDS) };
+    let (pc, len) = if callee < code.code_len() as u64 {
+        // A code offset: a function with nothing captured.
+        let Some(w) = words.get_mut(..n) else { return 0 };
+        w.copy_from_slice(given);
+        (callee as usize, n)
+    } else {
+        // SAFETY: the context's heap is the machine's.
+        let Some(crate::memory::Object::Fn(gc)) = unsafe { &*c.heap }.find_object_by_addr(callee) else {
+            return 0;
+        };
+        let f = gc.as_ref();
+        if f.dicts.is_some() || f.filled_mask != 0 || f.is_rest || f.arity as usize != n {
+            return 0;
+        }
+        let len = f.captures.len() + n;
+        let Some(w) = words.get_mut(..len) else { return 0 };
+        let (caps, rest) = w.split_at_mut(f.captures.len());
+        for (w, v) in caps.iter_mut().zip(&f.captures) {
+            *w = v.bits();
+        }
+        rest.copy_from_slice(given);
+        (f.entry as usize, len)
+    };
+    let Some(entry) = code.lookup(pc) else { return 0 };
+    // A generator's body is entered by a resume; a body without machine
+    // code by the runtime.
+    if entry.generator || entry.data != 0 || len < entry.reads as usize || entry.arity as usize > FN_ENTRY_WORDS {
+        return 0;
+    }
+    // The words past `len` up to its arity are `0`, as the runtime passes
+    // them; words past its arity it does not read.
+    if let Some(rest) = words.get_mut(len..entry.arity as usize) {
+        rest.fill(0);
+    }
+    c.host_calls += 1;
+    c.gc_epoch += 1;
+    entry.entry as usize as u64
+}
+
+/// The words [`coil_native_fn_entry`] writes at most.
+pub const FN_ENTRY_WORDS: usize = 16;
 
 /// `ResumeCoro`: resume a generator ([`NativeHost::resume`]).
 ///
@@ -1900,7 +2040,10 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         return unsafe { bail(ctx) };
     };
     let c = unsafe { &mut *ctx };
-    if direct_host_natives().get(id as usize).is_some_and(|h| h.collect) {
+    let Some(host) = direct_host_natives().get(id as usize) else {
+        return unsafe { bail(ctx) };
+    };
+    if host.collect {
         if c.machine.is_null() {
             return unsafe { bail(ctx) };
         }
@@ -1916,41 +2059,30 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         }
         return freed;
     }
-    if direct_host_natives()
-        .get(id as usize)
-        .is_some_and(|h| h.on_machine)
-    {
-        return match unsafe { host_invoke(ctx, id, layout, args, n) } {
-            Some(out) => out,
-            None => unsafe { bail(ctx) },
-        };
-    }
-    let Some(DirectHost { name, func: Some(f), guarded, .. }) = direct_host_natives().get(id as usize) else {
-        return unsafe { bail(ctx) };
-    };
     // The runtime's table decides what runs: a host may have replaced this
     // native (the compile-time sandbox refuses most of them), and the
     // replacement is no plain function.
     // SAFETY: when set, `natives` is the live runtime's.
-    if !c.natives.is_null() && unsafe { &*c.natives }.direct_by_id(id as usize).is_none() {
-        return match unsafe { host_invoke(ctx, id, layout, args, n) } {
-            Some(out) => out,
-            None => unsafe { bail(ctx) },
-        };
-    }
-    let mut buf = [common::Value::default(); 16];
-    let Some(words) = buf.get_mut(..n as usize) else {
-        return unsafe { bail(ctx) };
+    let replaced = || !c.natives.is_null() && unsafe { &*c.natives }.direct_by_id(id as usize).is_none();
+    let f = match host.func {
+        Some(f) if !host.on_machine && !replaced() => f,
+        _ if host.on_machine || host.func.is_some() => {
+            return match unsafe { host_invoke(ctx, id, layout, args, n) } {
+                Some(out) => out,
+                None => unsafe { bail(ctx) },
+            };
+        }
+        _ => return unsafe { bail(ctx) },
     };
-    for (i, w) in words.iter_mut().enumerate() {
-        // SAFETY: `args` holds `n` words.
-        *w = common::Value::from(unsafe { *args.add(i) });
+    if n > 16 {
+        return unsafe { bail(ctx) };
     }
-    let args = &*words;
-    if *guarded && args.first().is_some_and(|&s| crate::io::is_unsent_stream(heap, s)) {
+    // SAFETY: `args` holds `n` words, and a `Value` is one word.
+    let args = unsafe { std::slice::from_raw_parts(args.cast::<common::Value>(), n as usize) };
+    if host.guarded && args.first().is_some_and(|&s| crate::io::is_unsent_stream(heap, s)) {
         c.trap = TRAP_MESSAGE;
         // SAFETY: `call` set `message` for the call.
-        unsafe { *c.message = format!("{name}: {}", crate::io::UNSENT_STREAM_PANIC) };
+        unsafe { *c.message = format!("{}: {}", host.name, crate::io::UNSENT_STREAM_PANIC) };
         return unsafe { bail(ctx) };
     }
     let live_before = heap.live_object_count();
@@ -2328,20 +2460,22 @@ pub static VECTOR_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flags: u64, body: *const u64, nbody: u64, slots: *mut u64, nslots: u64, from: u64, bound: u64) -> u64 {
     let c = unsafe { &mut *ctx };
-    let mut words = [common::LaneWord::default(); 128];
-    let Some(code) = words.get_mut(..nbody as usize) else {
-        return unsafe { bail(ctx) };
-    };
-    if c.heap.is_null() {
+    // A hit-dense scan re-enters here once per hit, so decode only the
+    // `nbody` words (no 128-word fill per call).
+    let mut words = [std::mem::MaybeUninit::<common::LaneWord>::uninit(); 128];
+    let n = nbody as usize;
+    if n > words.len() || c.heap.is_null() {
         return unsafe { bail(ctx) };
     }
-    for (i, w) in code.iter_mut().enumerate() {
+    for (i, w) in words[..n].iter_mut().enumerate() {
         // SAFETY: `body` holds `nbody` words.
         let Some(word) = common::LaneWord::from_bits(unsafe { *body.add(i) }) else {
             return unsafe { bail(ctx) };
         };
-        *w = word;
+        w.write(word);
     }
+    // SAFETY: the loop above wrote the first `n` words.
+    let code: &[common::LaneWord] = unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), n) };
     // SAFETY: `slots` holds `nslots` words.
     let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };
     // SAFETY: `call` set `heap` to the machine's live heap.
@@ -2378,6 +2512,8 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_store_index", coil_native_store_index as *const u8),
         ("coil_native_set_field", coil_native_set_field as *const u8),
         ("coil_native_view", coil_native_view as *const u8),
+        ("coil_native_str_view", coil_native_str_view as *const u8),
+        ("coil_native_fn_entry", coil_native_fn_entry as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
@@ -2407,4 +2543,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 34;
+const HELPERS: usize = 36;
