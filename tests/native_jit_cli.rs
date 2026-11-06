@@ -1354,6 +1354,30 @@ fn a_cached_run_repeats_the_compiles_warnings() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A variadic function compiles as a copy per argument shape, its spans
+/// moved out of the source's range: a panic names the line it was written on.
+#[test]
+fn a_panic_in_a_variadic_copy_names_its_line() {
+    let src = format!("{HEADER}fn first(... xs) -> int {{\n    panic \"boom\";\n}}\nfn main() {{\n    let _ = println(format(\"%i\", first(1, \"a\")));\n}}\n");
+    for native in [true, false] {
+        let err = program_stderr(&run("variadic_panic", &src, native));
+        assert!(err.contains("variadic_panic.coil:4:4"), "native={native}: {err}");
+    }
+}
+
+/// The capability check finds a gated call in the MIR by its location: one
+/// in a variadic copy is still found, and shown where it was written.
+#[test]
+fn a_capability_error_in_a_variadic_copy_names_its_line() {
+    let src = "use io::open;\nfn slurp(... xs) -> int {\n    let _ = open(\"/etc/hostname\", \"r\");\n    return 1;\n}\nfn main() {\n    let _ = slurp(1, \"a\");\n}\n";
+    let out = run("variadic_capability", src, true);
+    let err = program_stderr(&out);
+    assert!(!out.status.success(), "ran without the grant: {err}");
+    assert!(err.contains("E0414") && err.contains("--allow-read"), "{err}");
+    assert!(err.contains("variadic_capability.coil:3:13"), "{err}");
+    assert!(!err.contains("__va"), "a copy's name: {err}");
+}
+
 /// `coil compile` of `file` twice over one new cache directory, the first
 /// building the macro programs and the second reading them: both archives.
 fn archives_cold_and_warm(dir: &std::path::Path, file: &std::path::Path, roots: &[PathBuf]) -> (Vec<u8>, Vec<u8>) {

@@ -234,12 +234,11 @@ impl Compiler {
         if file == DEBUG_FILE_UNKNOWN {
             return DebugLoc::unknown();
         }
-        let start = span.start as u32;
-        let end = span.end.max(span.start + 1) as u32;
+        let (start, end) = crate::variadic::written_span(span.start, span.end);
         DebugLoc {
             file,
-            start_byte: start,
-            end_byte: end,
+            start_byte: start as u32,
+            end_byte: end.max(start + 1) as u32,
         }
     }
 
