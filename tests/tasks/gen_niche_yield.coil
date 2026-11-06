@@ -1,0 +1,119 @@
+// A generator whose yield or send type has a niche layout (`Option` or
+// `Result` of heap values, one word each) moves that word as it is:
+// a `for` loop, `resume` and `resume .. with` take it back (#2311).
+use string::format;
+use tests::assert;
+
+gen fn names(int n) -> Option<string> {
+    let i = 0;
+    while i < n {
+        if i % 2 == 0 {
+            yield Some(format("n%i", i));
+        } else {
+            yield None;
+        }
+        i += 1;
+    }
+}
+
+gen fn parsed(Vec<string> xs) -> Result<string, string> {
+    for x in xs {
+        if x.len() > 1 {
+            yield Ok(x);
+        } else {
+            yield Err(x);
+        }
+    }
+}
+
+gen fn echo() -> coroutine<Option<string>, Option<string>> {
+    let got = yield None;
+    while true {
+        got = yield got;
+    }
+}
+
+gen fn relay(int n) -> Option<string> {
+    yield from names(n);
+}
+
+fn count_somes<T>(coroutine<Option<T>> c) -> int {
+    let k = 0;
+    for x in c {
+        match x {
+            Some(_) => {
+                k += 1;
+            },
+            None => {},
+        }
+    }
+    return k;
+}
+
+test("a for loop takes Option<string> words") {
+    let s = "";
+    let nones = 0;
+    for x in names(5) {
+        match x {
+            Some(v) => {
+                s = s + v;
+            },
+            None => {
+                nones += 1;
+            },
+        }
+    }
+    assert!(s == "n0n2n4", s);
+    assert!(nones == 2);
+}
+
+test("a for loop takes Result<string, string> words") {
+    let oks = "";
+    let errs = "";
+    for r in parsed(["ab", "c", "de", "f"]) {
+        match r {
+            Ok(v) => {
+                oks = oks + v;
+            },
+            Err(e) => {
+                errs = errs + e;
+            },
+        }
+    }
+    assert!(oks == "abde", oks);
+    assert!(errs == "cf", errs);
+}
+
+test("resume takes the yielded word") {
+    let h = names(3);
+    assert!((resume h) == Some("n0"));
+    assert!((resume h) == None);
+    assert!((resume h) == Some("n2"));
+}
+
+test("resume with sends a niche word in") {
+    let h = echo();
+    assert!((resume h) == None);
+    assert!((resume h with Some("a")) == Some("a"));
+    assert!((resume h with None) == None);
+    assert!((resume h with Some("b")) == Some("b"));
+}
+
+test("yield from passes the words through") {
+    let s = "";
+    for x in relay(4) {
+        match x {
+            Some(v) => {
+                s = s + v;
+            },
+            None => {
+                s = s + "-";
+            },
+        }
+    }
+    assert!(s == "n0-n2-", s);
+}
+
+test("a generic consumer") {
+    assert!(count_somes(names(6)) == 3);
+}
