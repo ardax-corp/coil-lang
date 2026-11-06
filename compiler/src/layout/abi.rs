@@ -532,7 +532,7 @@ impl DenseAbi {
 
 #[cfg(test)]
 mod dense_tests {
-    use super::*;
-    use crate::mir::{MirBuilder, MirConst};
+    
+    
 
 }

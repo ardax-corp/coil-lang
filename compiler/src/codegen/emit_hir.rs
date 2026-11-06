@@ -688,14 +688,14 @@ impl Compiler {
             let Ok(mut emit) = self.plan_hir_body(&w) else {
                 panic!("internal error: outlined cold arm `{name}` does not plan");
             };
-            let (entry, label) = self.bind_function_entry(name.clone());
+            let (_, label) = self.bind_function_entry(name.clone());
             let arity = w.params.len() as u32;
             self.fn_arities.insert(name.clone(), (arity, false));
             emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached;
-            self.bytecode.push_return();
+            self.bodies.advance();
             self.hir_mir = self.hir_lower_mir(&w, &mut emit, None);
             assert!(self.hir_mir.is_some(), "internal error: outlined cold arm `{name}` without direct MIR");
-            self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
+            self.bodies.record(name.clone(), Some(label));
             self.attach_hir_mir();
             self.par_frame_exit(frame);
             self.queue_outlined(&w);
@@ -1449,7 +1449,7 @@ impl Compiler {
                     && !hir.is_coro =>
             {
                 let body = inlined.as_ref().unwrap_or(hir);
-                let steady = |n: &str| crate::il::pure_call::name_in(&self.steady_fns, n);
+                let steady = |n: &str| crate::pure_call::name_in(&self.steady_fns, n);
                 let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
                 let body_u = unrolled.as_ref().unwrap_or(body);
                 let tabled = self.opt_options.algebraic.then(|| self.hir_fold_tables(body_u)).flatten();
@@ -1543,11 +1543,8 @@ impl Compiler {
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
                     self.hir_plan_par_loops(hir, &mut emit, root);
                 }
-                // Its code is emitted from its direct MIR; the stack IL
-                // only keeps its function record non-empty.
-                self.bytecode.push_return();
+                self.bodies.advance();
                 self.hir_mir_why = None;
-                self.hir_defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
                 // A shared generic body takes its dictionaries as trailing
                 // parameters: direct MIR lowers it when its code reads them
                 // only as it plans (`HirMirTables::reads_dicts`), its open
@@ -1570,11 +1567,11 @@ impl Compiler {
                 }
                 self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
-                crate::il::opt::note_hir_lowered();
+                crate::opt::note_hir_lowered();
                 true
             }
             Err(reason) => {
-                crate::il::opt::note_hir_fallback(reason);
+                crate::opt::note_hir_fallback(reason);
                 self.hir_refusal = Some(reason);
                 false
             }
@@ -1629,16 +1626,10 @@ impl Compiler {
         let lowered = match plan {
             Ok(mut emit) => {
                 start(self);
-                let il_start = self.bytecode.il_mut().raw_len();
                 if let Some(root) = hir.root {
                     self.hir_plan_par_loops(hir, &mut emit, root);
                 }
-                // Its code is emitted from its direct MIR; the stack IL
-                // only keeps its function record non-empty.
-                self.bytecode.push_return();
-                for op in &mut self.bytecode.il_mut().ops_slice_mut()[il_start..] {
-                    op.set_loc(DebugLoc::unknown());
-                }
+                self.bodies.advance();
                 self.hir_mir_why = None;
                 self.hir_mir = self.hir_lower_mir(hir, &mut emit, entry_words);
                 self.expr_depth = 0;
@@ -1658,10 +1649,10 @@ impl Compiler {
     pub(super) fn attach_hir_mir(&mut self) {
         if let Some(mut func) = self.hir_mir.take() {
             func.shrink_to_fit();
-            self.bytecode.set_last_func_hir_mir(func);
+            self.bodies.set_last_mir(func);
         }
         if let Some(why) = self.hir_mir_why.take() {
-            self.bytecode.set_last_func_hir_mir_why(why);
+            self.bodies.set_last_mir_why(why);
         }
     }
 
@@ -1701,12 +1692,12 @@ impl Compiler {
             Ok(mut func) => {
                 let slots: HashSet<u32> = self.frozen_tables.keys().copied().collect();
                 crate::mir::mark_frozen_arrays(&mut func, &slots);
-                crate::il::opt::note_hir_mir(None);
+                crate::opt::note_hir_mir(None);
                 self.hir_mir_debug_vars(hir, emit, &tables.frame);
                 Some(func)
             }
             Err(why) => {
-                crate::il::opt::note_hir_mir(Some(&why));
+                crate::opt::note_hir_mir(Some(&why));
                 self.hir_mir_why = Some(why);
                 None
             }
@@ -2367,8 +2358,8 @@ impl Compiler {
             ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx[..] } else { &[] },
             lens: &emit.plan.lens,
             alloc_steady: self.alloc_steady,
-            pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),
-            steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
+            pure_fn: Box::new(move |n: &str| crate::pure_call::name_in(pure_fns, n)),
+            steady_fn: Box::new(move |n: &str| crate::pure_call::name_in(steady_fns, n)),
             call_fields: Box::new(move |n: &str, def| {
                 let stem = n.split("$mono$").next().unwrap_or(n);
                 finalizers | program_effects.call_fields(checker, &module_path, stem, def)
@@ -3099,7 +3090,7 @@ impl Compiler {
             }
             if shape.looping()
                 && !callee.hints.always
-                && crate::il::pure_call::name_in(&self.pure_fns, &callee.name)
+                && crate::pure_call::name_in(&self.pure_fns, &callee.name)
                 && args.iter().all(|&a| inline::invariant_expr(hir, a, &invariant))
             {
                 return Err("pure loop callee on invariant arguments".to_string());
@@ -3199,7 +3190,7 @@ impl Compiler {
         let sites = spliced.len();
         match replanned {
             Ok(emit) => {
-                crate::il::opt::note_hir_inlined(sites);
+                crate::opt::note_hir_inlined(sites);
                 self.queue_outlined(&body);
                 for (name, (start, end)) in spliced {
                     // Another module's body is scalar code with no host call.
@@ -3212,7 +3203,7 @@ impl Compiler {
                 Some((body, emit))
             }
             Err(reason) => {
-                crate::il::opt::note_hir_inline_refused(reason);
+                crate::opt::note_hir_inline_refused(reason);
                 None
             }
         }
@@ -4421,7 +4412,7 @@ impl Compiler {
                 plan.slots[inner.0 as usize] = Some(slot as u32);
                 plan.plan.params.insert(inner.0, (slot as u32, None));
             }
-            let label = self.bytecode.fresh_label();
+            let label = self.bodies.fresh_label();
             emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts }));
         }
         Ok(())
@@ -5763,7 +5754,7 @@ impl Compiler {
         // the shared body (#2182).
         let adapt = plan.generic.as_ref().map(|g| g.adapt.clone()).unwrap_or_default();
         self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, adapt, ..compiler::SynthCallee::default() });
-        self.emit_synth_fn(name, &hir, calls, true);
+        self.emit_synth_fn(name, &hir, calls);
         self.hir_synth_callees.clear();
         // The adapters its call wraps a function argument in (#2163).
         self.flush_hir_lambdas();
@@ -7772,7 +7763,7 @@ impl Compiler {
         if let Some(&label) = self.hir_fn_adapters.get(&key) {
             return (label, operand);
         }
-        let label = self.bytecode.fresh_label();
+        let label = self.bodies.fresh_label();
         self.hir_fn_adapters.insert(key, label);
         self.hir_adapter_tail.push((label, adapt.clone()));
         (label, operand)
@@ -7787,7 +7778,7 @@ impl Compiler {
         if let Some(&label) = self.hir_closure_adapters.get(adapt) {
             return (label, operand);
         }
-        let label = self.bytecode.fresh_label();
+        let label = self.bodies.fresh_label();
         self.hir_closure_adapters.insert(adapt.clone(), label);
         self.hir_closure_adapter_tail.push((label, adapt.clone()));
         (label, operand)
@@ -7799,16 +7790,15 @@ impl Compiler {
     fn hir_closure_adapter_fn(&mut self, label: IlLabel, adapt: &HirClosureAdapt) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_closure_adapter_{}", self.loop_par_helpers);
-        let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        self.bytecode.push_return();
+        self.bodies.advance();
         let arity = 1 + adapt.args.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
-        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        self.bodies.record(name.clone(), Some(label));
         match Self::closure_adapter_mir(&name, adapt) {
-            Ok(func) => self.bytecode.set_last_func_hir_mir(func),
-            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+            Ok(func) => self.bodies.set_last_mir(func),
+            Err(why) => self.bodies.set_last_mir_why(why),
         }
     }
 
@@ -7941,16 +7931,15 @@ impl Compiler {
     fn hir_fn_adapter_fn(&mut self, label: IlLabel, adapt: &HirFnAdapt) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_fn_adapter_{}", self.loop_par_helpers);
-        let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        self.bytecode.push_return();
+        self.bodies.advance();
         let arity = 1 + adapt.unbox.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
-        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        self.bodies.record(name.clone(), Some(label));
         match Self::fn_adapter_mir(&name, adapt) {
-            Ok(func) => self.bytecode.set_last_func_hir_mir(func),
-            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+            Ok(func) => self.bodies.set_last_mir(func),
+            Err(why) => self.bodies.set_last_mir_why(why),
         }
     }
 
@@ -10443,7 +10432,6 @@ impl Compiler {
         let prev_two_word = self.compiling_two_word_enum.take();
         let prev_keys = std::mem::take(&mut self.field_key_slots);
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
-        let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
         let slots = Self::hir_lambda_frame(&mut self.context.variables, &body, &dicts);
@@ -10457,7 +10445,7 @@ impl Compiler {
         self.hir_plan_par_loops(&body, &mut emit, root);
         // Its code is emitted from its direct MIR; the stack IL only keeps
         // its function record non-empty.
-        self.bytecode.push_return();
+        self.bodies.advance();
         // Direct MIR takes the captures as the first parameters.
         let mut flat = body.clone();
         flat.params = body.captures.iter().map(|&(_, inner)| inner).chain(body.params.iter().copied()).collect();
@@ -10472,16 +10460,10 @@ impl Compiler {
         self.hir_lambda_dicts = prev_dicts;
         // A lambda with a `defer` gets its cleanup pad, as a function does,
         // so a cancelled task's unwinder runs it (#1194).
-        let prev_defers = std::mem::replace(&mut self.hir_defers, flat.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. })));
-        let pinned = self.finish_fn_defers(&name);
-        self.hir_defers = prev_defers;
         let arity = (ncap + dicts.len() + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
-        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
-        if pinned {
-            self.bytecode.set_last_func_pinned();
-        }
         self.hir_mir_ctx = prev_ctx;
         self.field_key_slots = prev_keys;
         self.compiling_two_word_enum = prev_two_word;
@@ -10541,7 +10523,6 @@ impl Compiler {
         let hir = self.hir_par_driver_body(site, driver, worker, (spawn, join), (begin, end));
         let words = hir.params.len() as u32;
         let arity = 3 + site.live_captures.len();
-        let start = self.bytecode.len();
         let frame = self.par_frame_enter();
         self.fn_arities.insert(driver.to_string(), (words, false));
         let calls = HashMap::from([(worker.to_string(), (vec![ValueLayout::Boxed; arity], ValueLayout::Boxed))]);
@@ -10551,7 +10532,7 @@ impl Compiler {
         });
         if lowered {
             let label = self.fn_entry_labels.get(driver).copied();
-            self.bytecode.record_func_with_sp(driver.to_string(), label, start, self.bytecode.len(), words);
+            self.bodies.record(driver.to_string(), label);
             self.attach_hir_mir();
         }
         self.par_frame_exit(frame);
@@ -10856,9 +10837,9 @@ impl Compiler {
         self.hir_plan_par_loops(w, &mut emit, root);
         // Its code is emitted from its direct MIR; the stack IL only keeps
         // its function record non-empty.
-        self.bytecode.push_return();
+        self.bodies.advance();
         self.hir_mir = self.hir_lower_mir(w, &mut emit, None);
-        self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
+        self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
         self.par_frame_exit(frame);
         // A parallel loop inside the worker moved out of it too.
@@ -10907,8 +10888,8 @@ impl Compiler {
         hir: &HirBody,
         emit: &HirEmit,
         id: HirId,
-        worker: crate::il::Label,
-        seq: Option<(crate::il::Label, i64)>,
+        worker: crate::bodies::Label,
+        seq: Option<(crate::bodies::Label, i64)>,
         par_forks: &mut HashMap<u32, crate::mir::HirParFork>,
     ) {
         let natural = Self::hir_call_rep(&emit.plan.calls[&id.0]);
@@ -10943,7 +10924,7 @@ impl Compiler {
     }
 }
 
-/// `limit` (`COIL_HIR_BISECT=N`, [`crate::il::opt::OptimizeOptions::hir_bisect`])
+/// `limit` (`COIL_HIR_BISECT=N`, [`crate::opt::OptimizeOptions::hir_bisect`])
 /// lowers only the first `N` bodies the plan admits (per process) and names
 /// the `N`th on stderr, to bisect a miscompile.
 fn hir_bisect(name: &str, limit: Option<usize>) -> bool {

@@ -95,7 +95,7 @@ pub struct MirFunc {
     pub cleanup: Option<Box<MirFunc>>,
     /// Callees a call of this body may reach as a `TailCall` (planned tail
     /// calls of a `return`): a call to one whose result the block returns.
-    pub tail_targets: HashSet<crate::il::Label>,
+    pub tail_targets: HashSet<crate::bodies::Label>,
     /// Calls of a pure function returning one scalar word: CSE and LICM
     /// may treat them as operators that can trap.
     pub pure_calls: HashSet<ValueId>,
@@ -172,7 +172,7 @@ impl MirFunc {
     /// The function entries this body's code names: the callees of its
     /// calls, its code pointers and function values, its cleanup pad's
     /// included.
-    pub fn code_targets(&self) -> Vec<crate::il::Label> {
+    pub fn code_targets(&self) -> Vec<crate::bodies::Label> {
         use super::MirAllocKind;
         let mut out = Vec::new();
         for inst in self.blocks.iter().flat_map(|b| &b.insts) {

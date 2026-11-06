@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use common::DebugLoc;
 
 use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
-use crate::il::Label;
+use crate::bodies::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::layout::ValueLayout;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};

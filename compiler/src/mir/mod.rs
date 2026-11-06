@@ -81,7 +81,7 @@ pub use prefetch::mark_prefetch_scans;
 pub use interchange::interchange_loops;
 pub use strength::strength_reduce;
 #[cfg(test)]
-pub use text::{ParseError, parse_func};
+pub use text::parse_func;
 pub use ty::MirTy;
 
 /// Build the Mandelbrot inner iteration in typed SSA (acceptance for COI-267).

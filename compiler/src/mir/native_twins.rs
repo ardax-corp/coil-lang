@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use super::{MirFunc, MirInst};
-use crate::il::Label;
+use crate::bodies::Label;
 
 /// `(host native, twin)`: the twin is `native_twins::<twin>`.
 pub const NATIVE_TWINS: &[(&str, &str)] = &[

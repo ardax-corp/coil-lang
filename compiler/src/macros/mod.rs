@@ -19,7 +19,6 @@ pub mod lower;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use common::Byte;
 
 /// Module path of the embedded declaration model (`use macro::{TypeDecl, Code}`).
 pub const MACRO_MODULE: &str = "macro";

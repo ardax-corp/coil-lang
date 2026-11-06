@@ -182,25 +182,3 @@ pub fn host_edge_spec_by_name(name: &str) -> Option<HostSpec> {
         .find(|n| n.name == name)
         .and_then(|n| host_edge_spec(n.id))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Documented W4 set: packed LA **87–91**, frozen math **102–110**,
-    /// M1 math **125–135**, `simd_axpy_reduce` **136**.
-    fn allowlisted_host_ids() -> impl Iterator<Item = u16> {
-        (PACKED_DOT_ID..=PACKED_VEC_ARITH_ID)
-            .chain(MATH_SIN_ID..=MATH_POW_ID)
-            .chain(MATH_ATAN_ID..=MATH_TANH_ID)
-            .chain(std::iter::once(SIMD_AXPY_REDUCE_ID))
-    }
-
-    fn host_spec_by_name(name: &str) -> Option<HostSpec> {
-        HOST_NATIVES
-            .iter()
-            .find(|n| n.name == name)
-            .and_then(|n| host_spec(n.id))
-    }
-
-}

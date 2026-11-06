@@ -2,7 +2,7 @@
 //! else as LIR stack ops.
 
 
-use crate::il::opt::OptimizeOptions;
+use crate::opt::OptimizeOptions;
 
 
 

@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use super::MirFunc;
-use crate::il::Label;
+use crate::bodies::Label;
 
 /// One function body's MIR.
 #[derive(Clone, Debug)]
@@ -131,7 +131,7 @@ impl Drop for ComptimeCapture {
 /// fills, which call the runtime's kernels). A generator, a body with a
 /// cleanup pad, a debugger's or a coverage build's keep their MIR as
 /// lowered.
-pub fn capture_native_bodies<'a>(bodies: impl Iterator<Item = (&'a str, Option<Label>, &'a MirFunc)>, opts: &crate::il::opt::OptimizeOptions) {
+pub fn capture_native_bodies<'a>(bodies: impl Iterator<Item = (&'a str, Option<Label>, &'a MirFunc)>, opts: &crate::opt::OptimizeOptions) {
     NATIVE_CAPTURE.with(|c| {
         if let Some(capture) = c.borrow_mut().as_mut() {
             let raw = capture.raw;

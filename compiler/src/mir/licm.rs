@@ -1155,7 +1155,7 @@ mod tests {
             ret: MirTy::I64,
             ret_hi: Some(MirTy::I64),
         };
-        let (_, tag) = b.ins_call(crate::il::Label(9), vec![n], &abi).unwrap();
+        let (_, tag) = b.ins_call(crate::bodies::Label(9), vec![n], &abi).unwrap();
         let zero = b.ins_const(MirConst::I64(0)).unwrap();
         let some = b.ins_cmp(MirCmpOp::Ne, tag.unwrap(), zero).unwrap();
         b.branch(some, header, exit).unwrap();

@@ -4,14 +4,14 @@ use std::{
 };
 
 use common::{
-    Byte, DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, ValueTag,
+    DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, ValueTag,
     encode_tag_operand, tag,
 };
 use reporting::Label as DiagLabel;
 
 use crate::const_fold::ConstValue;
 use crate::layout::PairKind;
-use crate::il::{CodeBuf, IlOp, Label as IlLabel};
+use crate::bodies::{BodyTable, Label as IlLabel};
 use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
 use parser::{
@@ -229,11 +229,6 @@ struct Context {
     prev: Option<Box<Self>>,
 }
 
-/// Length of the CALL + JMP + HALT prologue every [`Compiler`] starts with.
-/// Multi-file linking treats `bytecode.len() <= PROLOGUE_BYTECODE_LEN` as a
-/// fresh compile (safe to clear the shared constant pool).
-pub const PROLOGUE_BYTECODE_LEN: usize = 3;
-
 /// Target-side layouts at a trait-method call across a generic boundary;
 /// see [`Compiler::trait_method_boundary_sig`].
 pub(super) struct BoundarySig {
@@ -245,8 +240,8 @@ pub(super) struct BoundarySig {
 
 pub struct Compiler {
     namespace: String,
-    /// Stack IL during emit; lowered `Vec<Byte>` after [`Self::finalize_bytecode`].
-    bytecode: CodeBuf,
+    /// The bodies compiled so far.
+    bodies: BodyTable,
 
     aliases: HashMap<String, String>,
     functions: HashMap<String, usize>,
@@ -382,14 +377,10 @@ pub struct Compiler {
 
 
 
-    /// Functions with a `defer` cleanup pad, resolved to pcs at finalize.
-    cleanup_pads: Vec<CleanupPad>,
 
     /// Name of the function currently being codegen'd (for ctor/Instantiate routing).
     active_fn_name: Option<String>,
 
-    /// Global static initializers (spliced at `program_start_offset`). Same sink as `ffi_init`.
-    static_init: CodeBuf,
     /// `const`s and pure `static let`s whose initializer runs at compile
     /// time, in setup order (comptime steps 3-4).
     comptime_consts: Vec<ComptimeConst>,
@@ -569,8 +560,6 @@ pub struct Compiler {
     current_function_qualified: Option<String>,
     /// `functions` map key for the active function (overload-aware).
     current_function_table_key: Option<String>,
-    /// Peel/unroll spans for the module currently being compiled.
-    fn_bytecode_spans: HashMap<String, (usize, usize)>,
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
     /// Debug variables per function (see [`crate::debug_vars`]).
@@ -628,22 +617,22 @@ pub struct Compiler {
     hir_lambda_tail: Vec<compiler::emit_hir::HirLambdaTail>,
     /// Closure adapters ([`Compiler::hir_fn_adapter`]) by unboxed tags,
     /// and those still to emit after the current body.
-    hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<crate::layout::ValueLayout>), crate::il::Label>,
-    hir_adapter_tail: Vec<(crate::il::Label, compiler::emit_hir::HirFnAdapt)>,
+    hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<crate::layout::ValueLayout>), crate::bodies::Label>,
+    hir_adapter_tail: Vec<(crate::bodies::Label, compiler::emit_hir::HirFnAdapt)>,
     /// Adapters of closures shared generic bodies return
     /// ([`Compiler::hir_closure_adapter`]) by shape, and the ones to emit
     /// after the body (#1532).
-    hir_closure_adapters: HashMap<compiler::emit_hir::HirClosureAdapt, crate::il::Label>,
-    hir_closure_adapter_tail: Vec<(crate::il::Label, compiler::emit_hir::HirClosureAdapt)>,
+    hir_closure_adapters: HashMap<compiler::emit_hir::HirClosureAdapt, crate::bodies::Label>,
+    hir_closure_adapter_tail: Vec<(crate::bodies::Label, compiler::emit_hir::HirClosureAdapt)>,
     /// When false, skip auto fork-join even if
-    /// [`crate::il::opt::OptimizeOptions::auto_par`] is on.
+    /// [`crate::opt::OptimizeOptions::auto_par`] is on.
     auto_par: bool,
 
     /// Operand-stack capacity for the VM (from recursion-depth analysis).
     operand_stack_slots: u32,
 
     /// IL optimization preset (COI-127).
-    opt_options: crate::il::opt::OptimizeOptions,
+    opt_options: crate::opt::OptimizeOptions,
 
     /// Cost budgets for typed inlining (COI-124).
     pub inline_cost: inline_cost::InlineCostOptions,
@@ -654,9 +643,6 @@ pub struct Compiler {
     hir_mir: Option<crate::mir::MirFunc>,
     /// Why the body just emitted did not lower straight to MIR.
     hir_mir_why: Option<String>,
-    /// The body HIR just lowered holds a `defer`: its function gets a
-    /// cleanup pad and is pinned ([`Self::finish_fn_defers`]).
-    hir_defers: bool,
     /// Frame words at entry of the function being compiled (its arguments
     /// and dictionaries), when its compile path records them.
     hir_entry_sp: Option<u32>,
@@ -694,7 +680,7 @@ pub struct Compiler {
     /// `#[cold]`, or never returning ([`crate::hir::cold`]), by table key.
     cold_fns: HashSet<String>,
     /// Entry labels of [`Self::cold_fns`] calls resolved to.
-    cold_labels: HashSet<crate::il::Label>,
+    cold_labels: HashSet<crate::bodies::Label>,
     /// `#[inline(always)]` functions already reported as not inlined (E0807).
     inline_refused: HashSet<String>,
     /// Hot functions of the program by table key: `#[hot]`, and those a
@@ -733,18 +719,13 @@ pub struct Compiler {
 
 impl Default for Compiler {
     fn default() -> Self {
-        let mut bytecode = CodeBuf::new();
-        bytecode.push(Byte::new(Instruction::CALL));
-        bytecode.push_prologue_jmp();
-        bytecode.push(Byte::new(Instruction::HALT));
-        debug_assert_eq!(bytecode.len(), PROLOGUE_BYTECODE_LEN);
-        let program_start_offset = bytecode.len() as u32;
-        let debug_locs = vec![DebugLoc::unknown(); bytecode.len()];
+        let bodies = BodyTable::new();
+        let program_start_offset = bodies.position() as u32;
 
         Self {
             namespace: String::default(),
-            bytecode,
-            debug_locs,
+            bodies,
+            debug_locs: Vec::new(),
             aliases: HashMap::default(),
             functions: HashMap::with_capacity(32),
             fn_entry_labels: HashMap::with_capacity(32),
@@ -781,7 +762,6 @@ impl Default for Compiler {
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
             codegen_depth: 0,
-            cleanup_pads: Vec::new(),
             active_fn_name: None,
             compiling_method: false,
             compiling_mono_clone: false,
@@ -827,7 +807,6 @@ impl Default for Compiler {
             planning_for_clones: false,
             hir_ground_splice: Default::default(),
             mono_var_tys: Vec::new(),
-            static_init: CodeBuf::new(),
             comptime_consts: Vec::new(),
             pure_static_inits: HashSet::new(),
             startup_consts: HashSet::new(),
@@ -846,7 +825,6 @@ impl Default for Compiler {
             static_const_values: HashMap::new(),
             current_function_qualified: None,
             current_function_table_key: None,
-            fn_bytecode_spans: HashMap::new(),
             fn_debug_locals: HashMap::new(),
             fn_debug_vars: HashMap::new(),
             debug_scope_ends: Vec::new(),
@@ -875,7 +853,7 @@ impl Default for Compiler {
             hir_closure_adapter_tail: Vec::new(),
             auto_par: true,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
-            opt_options: crate::il::opt::OptimizeOptions::default(),
+            opt_options: crate::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
             hir_refusal: None,
             hir_module: None,
@@ -885,7 +863,6 @@ impl Default for Compiler {
             inlined_bodies: Vec::new(),
             hir_mir: None,
             hir_mir_why: None,
-            hir_defers: false,
             hir_entry_sp: None,
             hir_mir_dict_sp: None,
             hir_lambda_dicts: None,
@@ -962,7 +939,6 @@ pub(crate) struct ModuleCtx {
     hir_module: Option<crate::hir::HirModule>,
     const_env_stack: Vec<HashMap<String, ConstValue>>,
     static_const_values: HashMap<String, ConstValue>,
-    fn_bytecode_spans: HashMap<String, (usize, usize)>,
     mono_plan: MonoPlan,
     mono_offsets: HashMap<MonoKey, usize>,
     mono_names: HashMap<MonoKey, String>,
@@ -1021,16 +997,6 @@ pub(crate) struct InstClone {
     /// The clone sources on its chain of clones, its own last: the clone
     /// whose body asked for it, that clone's, and so on.
     chain: Vec<String>,
-}
-
-/// A function's cleanup pad, before label resolution.
-#[derive(Clone, Debug)]
-pub(crate) struct CleanupPad {
-    /// Function table key (resolves labels through its IL chunk).
-    pub func: String,
-    pub pad: IlLabel,
-    /// Slots the frame uses; the unwinder raises the stack top past them.
-    pub frame_words: u32,
 }
 
 /// A host call that needs a capability.

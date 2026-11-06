@@ -480,7 +480,7 @@ pub enum MirInst {
     Call {
         dest: ValueId,
         dest_hi: Option<ValueId>,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         args: Vec<ValueId>,
     },
     /// `CallIndirect n`: call the function value `callee` (an `ObjFn` /
@@ -677,7 +677,7 @@ pub enum MirInst {
     /// [`MirTy::I64`].
     CodePtr {
         dest: ValueId,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `PRINT` (I4 / Q9 R1). Dest is a `bool` unit token. IO barrier.
     Print {
@@ -989,7 +989,7 @@ pub enum MirAllocKind {
     },
     /// `MakeCoro`: args → coroutine handle (C2b). Target is the async body.
     Coro {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `MakeFn`: a function value of the code at `target`, elems its
     /// captures then its filled parameters (the `Const mask` fill mask and
@@ -997,13 +997,13 @@ pub enum MirAllocKind {
     /// operand; `mask` has a bit per filled parameter (0: none, a closure
     /// or a named function's value; a prefix: a partial application).
     Fn {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         operand: u32,
         mask: u32,
     },
     /// `MakePolyFn`: a generic function's value with no dictionaries.
     PolyFn {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `MakePolyFnCapture`: a generic function's value carrying its
     /// instance dictionaries, the elems (a `0` word for evidence the call
@@ -1011,7 +1011,7 @@ pub enum MirAllocKind {
     /// its declared parameter count (0: unrecorded), so a call given more
     /// hands the rest to its result (#1589).
     PolyFnCapture {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         params: u32,
     },
 }

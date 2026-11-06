@@ -826,7 +826,7 @@ impl Pipeline {
     fn run_expansions(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
         let started = std::time::Instant::now();
         let (results, reused) = self.run_expansions_timed(jobs);
-        crate::il::opt::note_comptime_macros(jobs.len(), reused, started.elapsed().as_micros() as u64);
+        crate::opt::note_comptime_macros(jobs.len(), reused, started.elapsed().as_micros() as u64);
         results
     }
 

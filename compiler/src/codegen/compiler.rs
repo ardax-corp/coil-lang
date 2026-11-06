@@ -56,7 +56,7 @@ pub(super) enum DictStep {
     /// A method's code pointer: an entry already emitted, by offset.
     CodeAt(u32),
     /// A method's code pointer: a reserved entry, by label.
-    CodeLabel(crate::il::Label),
+    CodeLabel(crate::bodies::Label),
     /// A dictionary in a `__dictN` slot of the frame.
     Load(u32),
     /// An unresolved `PolyFn` dictionary (`CONST 0`).
@@ -233,41 +233,6 @@ impl Compiler {
         syms
     }
 
-    fn pad_debug_locs(&mut self) {
-        self.debug_locs
-            .resize(self.bytecode.len(), DebugLoc::unknown());
-    }
-
-    /// Start a function body that may hold `defer`s: whether it does is
-    /// known once its HIR lowers ([`Self::finish_fn_defers`]).
-    fn begin_fn_defers(&mut self) {
-        self.hir_defers = false;
-    }
-
-    /// End a function body: a function with `defer`s gets a cleanup pad
-    /// after its code. The VM unwinder jumps there when a panic (or a
-    /// cancellation) leaves the frame; the pad runs the armed thunks, then
-    /// `unwind_resume` hands the frame back to the unwinder. The body is
-    /// pinned so the pad's slot numbers stay true.
-    fn finish_fn_defers(&mut self, table_key: &str) -> bool {
-        // A body HIR lowered has a pad when it holds a `defer`, whether or
-        // not its stack IL registered the thunk: its MIR runs the defers.
-        if !std::mem::take(&mut self.hir_defers) {
-            return false;
-        }
-        if self.native_id("unwind_resume").is_none() {
-            return false;
-        }
-        let pad = self.bytecode.fresh_label();
-        self.bytecode.bind_label(pad);
-        self.cleanup_pads.push(CleanupPad {
-            func: table_key.to_string(),
-            pad,
-            frame_words: self.context.variables.len() as u32,
-        });
-        true
-    }
-
     fn loc_from_span(&mut self, span: SimpleSpan) -> DebugLoc {
         let file = self.intern_source_file();
         if file == DEBUG_FILE_UNKNOWN {
@@ -389,12 +354,6 @@ impl Compiler {
         self.opt_options.hir_pair_locals = on;
     }
 
-    /// Let MIR bodies take the dense tier (the default), or lower every
-    /// body through LIR.
-    pub fn set_mir_dense(&mut self, on: bool) {
-        self.opt_options.mir_dense = on;
-    }
-
     /// Apply an [`crate::OptLevel`] preset to IL opts and inlining budgets.
     /// The switches no level sets keep their values.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
@@ -406,27 +365,23 @@ impl Compiler {
         self.inline_cost.inline_across_modules = level.inline_across_modules();
         self.inline_cost.hint_factors = level.hint_factors();
         self.inline_cost.max_cross_module_inline_cost = level.cross_module_inline_cost();
-        self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
     /// `--early-free on|off`: emit the early frees whatever the level.
     pub fn set_early_free(&mut self, on: bool) {
         self.early_free = Some(on);
         self.opt_options.early_free = on;
-        self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
     /// I7/B8: session flag. Does not disable MIR specialize; turns typed
     /// inlining off so frames and locals match the source.
     pub fn set_debugger_attached(&mut self, on: bool) {
         self.debugger_attached = on;
-        self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
     /// Enable or disable IL opt-stat collection (COI-131).
     pub fn set_collect_opt_stats(&mut self, on: bool) {
         self.opt_options.collect_stats = on;
-        self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
     pub fn intern_constant(&mut self, value: u64) -> u32 {
@@ -506,10 +461,6 @@ impl Compiler {
         !would_wrap
     }
 
-    fn record_fn_span(&mut self, key: String, start: usize, end: usize) {
-        self.fn_bytecode_spans.insert(key, (start, end));
-    }
-
     /// Free module functions are importable; inherent methods need `pub`.
     /// Uses [`Checker::can_access_member`] with no impl owner (foreign site).
     fn callee_is_visible_for_inline(&self, lookup: &str) -> bool {
@@ -533,20 +484,14 @@ impl Compiler {
         self.functions.get(name).copied()
     }
 
-    /// The end of the function whose entry is `entry`: the next function's
-    /// entry, or the end of the code.
-    pub fn function_end(&self, entry: usize) -> usize {
-        self.functions.values().copied().filter(|&o| o > entry).min().unwrap_or(self.bytecode.len())
-    }
-
     /// Bind a fresh entry label at the current PC and register `name`.
     fn bind_function_entry(&mut self, name: String) -> (usize, IlLabel) {
-        let offset = self.bytecode.len();
+        let offset = self.bodies.position();
         let label = if let Some(existing) = self.fn_entry_labels.get(&name).copied() {
-            self.bytecode.bind_reserved_entry(existing);
+            self.bodies.bind_reserved_entry(existing);
             existing
         } else {
-            self.bytecode.bind_fresh_entry()
+            self.bodies.bind_fresh_entry()
         };
         self.functions.insert(name.clone(), offset);
         if self.keep_fns_in.is_some() {
@@ -563,7 +508,7 @@ impl Compiler {
         if self.fn_entry_labels.contains_key(&name) {
             return;
         }
-        let label = self.bytecode.fresh_label();
+        let label = self.bodies.fresh_label();
         self.fn_entry_labels.insert(name, label);
     }
 
@@ -1644,7 +1589,7 @@ impl Compiler {
         // more per program.
         let want = 2 * (self.checker.host_grants().clone_budget().saturating_sub(self.inst_clones.len()) + HOT_CLONE_ROOM);
         while self.inst_clone_labels.len() < want {
-            let label = self.bytecode.fresh_label();
+            let label = self.bodies.fresh_label();
             self.inst_clone_labels.push(label);
         }
     }
@@ -2046,7 +1991,6 @@ impl Compiler {
             hir_module: self.hir_module.take(),
             const_env_stack: self.const_env_stack.clone(),
             static_const_values: self.static_const_values.clone(),
-            fn_bytecode_spans: self.fn_bytecode_spans.clone(),
             mono_plan: self.mono_plan.clone(),
             mono_offsets: self.mono_offsets.clone(),
             mono_names: self.mono_names.clone(),
@@ -2082,7 +2026,6 @@ impl Compiler {
         std::mem::swap(&mut self.hir_module, &mut ctx.hir_module);
         std::mem::swap(&mut self.const_env_stack, &mut ctx.const_env_stack);
         std::mem::swap(&mut self.static_const_values, &mut ctx.static_const_values);
-        std::mem::swap(&mut self.fn_bytecode_spans, &mut ctx.fn_bytecode_spans);
         std::mem::swap(&mut self.mono_plan, &mut ctx.mono_plan);
         std::mem::swap(&mut self.mono_offsets, &mut ctx.mono_offsets);
         std::mem::swap(&mut self.mono_names, &mut ctx.mono_names);
@@ -2208,7 +2151,7 @@ impl Compiler {
         self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, pair, ..SynthCallee::default() });
         // Its callers pass the instance's dictionary after the arguments;
         // it builds its own.
-        self.emit_synth_fn(&req.name, &hir, calls, true);
+        self.emit_synth_fn(&req.name, &hir, calls);
         self.hir_synth_callees.clear();
     }
 
@@ -2343,7 +2286,7 @@ impl Compiler {
         let pair = self.two_word_return_kind(fqn);
         self.hir_synth_callees.insert(fqn.to_string(), SynthCallee { raw, pair, ..SynthCallee::default() });
         // No `CALL` names it: dictionaries hold it.
-        self.emit_synth_fn(&adapter, &hir, calls, true);
+        self.emit_synth_fn(&adapter, &hir, calls);
         self.hir_synth_callees.clear();
     }
 
@@ -3817,23 +3760,19 @@ impl Compiler {
 
         // The worker's own entry (its `MakeFn` and nested calls) while it
         // plans; bound once it does.
-        self.functions.insert(worker_name.clone(), self.bytecode.len());
+        self.functions.insert(worker_name.clone(), self.bodies.position());
         self.fn_arities.insert(worker_name.clone(), (n as u32 + 1, false));
         let prev_fn_vars = std::mem::take(&mut self.context.variables);
         let prev_fn_table_key = self.current_function_table_key.replace(worker_name.clone());
         let calls = HashMap::from([(worker_name.clone(), (vec![ValueLayout::Boxed; n + 1], ValueLayout::Boxed))]);
-        let body_start = self.bytecode.len();
         let bind = worker_name.clone();
         let lowered = self.lower_synth_hir(&hir, calls, move |c: &mut Self| {
             c.bind_function_entry(bind);
         });
         if lowered {
             self.par_worker_of.insert(worker_name.clone(), table_key.to_string());
-            let body_end = self.bytecode.len();
-            self.record_fn_span(worker_name.clone(), body_start, body_end);
             let entry = self.fn_entry_labels.get(&worker_name).copied();
-            self.bytecode
-                .record_func_with_sp(worker_name, entry, body_start, body_end, 0);
+            self.bodies.record(worker_name, entry);
             self.attach_hir_mir();
             self.flush_hir_par_tail();
         } else {
@@ -4506,7 +4445,7 @@ impl Compiler {
         word_ret: bool,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
-        self.emit_builtin_body(fqn, params, ret, word_ret, true, op);
+        self.emit_builtin_body(fqn, params, ret, word_ret, op);
     }
 
     /// A builtin entry whose dictionary ABI boxes its result (`box_tag`):
@@ -4540,7 +4479,7 @@ impl Compiler {
         ret: Ty,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
-        self.emit_builtin_body(fqn, params, ret, false, false, op);
+        self.emit_builtin_body(fqn, params, ret, false, op);
     }
 
     fn emit_builtin_body(
@@ -4549,14 +4488,13 @@ impl Compiler {
         params: &[(Ty, bool)],
         ret: Ty,
         word_ret: bool,
-        dict_entry: bool,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
         if self.functions.contains_key(fqn) {
             return;
         }
         let hir = crate::hir::synth::builtin_entry(&self.checker, fqn, params, ret, word_ret, op);
-        self.emit_synth_fn(fqn, &hir, HashMap::new(), dict_entry);
+        self.emit_synth_fn(fqn, &hir, HashMap::new());
     }
 
     /// Thunk for `Vec::{name}` stamped with element kind `stamp`
@@ -4726,7 +4664,7 @@ impl Compiler {
             let call = b.call(native, args, ret);
             let root = b.ret(call);
             let hir = b.finish(root);
-            self.emit_synth_fn(&fqn, &hir, HashMap::new(), false);
+            self.emit_synth_fn(&fqn, &hir, HashMap::new());
         }
     }
 
@@ -4735,7 +4673,7 @@ impl Compiler {
             return;
         }
         let hir = crate::hir::synth::range_to_vec(&self.checker, &fqn, inclusive, float);
-        self.emit_synth_fn(&fqn, &hir, HashMap::new(), false);
+        self.emit_synth_fn(&fqn, &hir, HashMap::new());
     }
 
     /// Emit compiler-made body `hir` ([`crate::hir::synth`]) as function
@@ -4747,11 +4685,9 @@ impl Compiler {
         name: &str,
         hir: &crate::hir::HirBody,
         calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>,
-        dict_entry: bool,
     ) {
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_key = self.current_function_table_key.replace(name.to_string());
-        let body_start = self.bytecode.len();
         let bind = name.to_string();
         if !self.lower_synth_hir(hir, calls, move |c: &mut Self| {
             c.bind_function_entry(bind);
@@ -4759,21 +4695,8 @@ impl Compiler {
             self.report_unlowered(&SimpleSpan::from(0..0), name);
             self.bind_function_entry(name.to_string());
         }
-        let body_end = self.bytecode.len();
-        self.record_fn_span(name.to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get(name).copied();
-        // A dictionary entry is called with its parameters and then the
-        // instance dictionary. No `CALL` names it, so its precise frame map
-        // takes the entry height from here; too low a height leaves the top
-        // words unrooted.
-        let entry_sp = match self.synth_plain_dicts {
-            // An open glue body's dictionaries follow its parameters (#1642).
-            Some(n) => (hir.params.len() + n) as u32,
-            None if dict_entry => hir.params.len() as u32 + 1,
-            None => 0,
-        };
-        self.bytecode
-            .record_func_with_sp(name.to_string(), entry, body_start, body_end, entry_sp);
+        self.bodies.record(name.to_string(), entry);
         self.attach_hir_mir();
         self.current_function_table_key = prev_key;
         self.context.variables = prev_vars;
@@ -5074,45 +4997,6 @@ impl Compiler {
         }
     }
 
-    /// Whether the ops since `op_start` end on a label something jumps to: a
-    /// join that falls off the body. A `match` whose arms all return leaves
-    /// an end label nothing reaches. Moving early exits after the body
-    /// jumps back to the label after each one, so any end label counts then.
-    fn ends_on_jumped_label(&self, op_start: usize) -> bool {
-        let ops = &self.bytecode.ops()[op_start..];
-        let trailing: Vec<_> = ops.iter().rev().map_while(|op| match op {
-            IlOp::Label(l) => Some(*l),
-            _ => None,
-        }).collect();
-        !trailing.is_empty()
-            && ops.iter().any(|op| matches!(op, IlOp::Jump { target, .. } if trailing.contains(target)))
-    }
-
-    /// True when IL ops in `[op_start, ops.len())` end with a return terminator
-    /// (labels skipped). `op_start` must be an index into [`CodeBuf::ops`], not
-    /// an emitting-code length from [`CodeBuf::len`].
-    fn region_ends_with_return(&self, op_start: usize) -> bool {
-        let ops = self.bytecode.ops();
-        let mut i = ops.len();
-        while i > op_start {
-            i -= 1;
-            match &ops[i] {
-                IlOp::Label(_) => continue,
-                IlOp::Return { .. }
-                | IlOp::LoadReturnSlot { .. }
-                | IlOp::ConstReturnImm { .. }
-                | IlOp::BinReturn { .. }
-                | IlOp::Halt { .. } => return true,
-                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ReturnPair => {
-                    return true;
-                }
-                op if op.is_plain_return() => return true,
-                _ => return false,
-            }
-        }
-        false
-    }
-
     fn compile_function_output_with_name<'compiler>(
         &mut self,
         method: &Output<'compiler>,
@@ -5131,8 +5015,7 @@ impl Compiler {
             ..
         } = method.1.as_ref()
         else {
-            let mut bc = self.do_compile(method);
-            self.bytecode.append(&mut bc);
+            self.do_compile(method);
             return;
         };
         let Some(body) = body else {
@@ -5140,7 +5023,7 @@ impl Compiler {
             return;
         };
 
-        let (code_start, _) = self.bind_function_entry(qualified.clone());
+        self.bind_function_entry(qualified.clone());
         if *is_coro {
             self.coroutine_fns.insert(qualified.clone());
         }
@@ -5181,8 +5064,7 @@ impl Compiler {
             self.two_word_return_kind(&qualified)
         };
 
-        let mut a = self.do_compile(args);
-        self.bytecode.append(&mut a);
+        self.do_compile(args);
         for dict_idx in 0..dict_arity {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
@@ -5207,8 +5089,6 @@ impl Compiler {
                 self.hir_entry_ctx.push((slot, own, (base + i) as u32));
             }
         }
-        self.begin_fn_defers();
-        let body_op_start = self.bytecode.ops().len();
         let lowered = self.try_lower_hir_function(&method.0, body);
         if !lowered {
             // Every body runs IL from its direct MIR, so one HIR does not
@@ -5216,21 +5096,11 @@ impl Compiler {
             self.report_unlowered(&method.0, &qualified);
         }
 
-        let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
-        if ends_on_label || !self.region_ends_with_return(body_op_start) {
-            self.bytecode.push_return();
-        }
-        let pinned = self.finish_fn_defers(&qualified);
+        self.bodies.advance();
 
-        let body_end = self.bytecode.len();
-        self.record_fn_span(qualified.clone(), code_start, body_end);
         let entry = self.fn_entry_labels.get(&qualified).copied();
-        self.bytecode
-            .record_func_with_sp(qualified.clone(), entry, code_start, body_end, entry_sp);
+        self.bodies.record(qualified.clone(), entry);
         self.attach_hir_mir();
-        if pinned {
-            self.bytecode.set_last_func_pinned();
-        }
         self.flush_hir_par_tail();
 
         self.compiling_result_mode = prev_result_mode;
@@ -5463,13 +5333,9 @@ impl Compiler {
             if let Some(id) = self.checker.id_table().id_of_output(args) {
                 self.emit_idx = id.0 as usize;
             }
-            let mut a = self.do_compile(args);
-            self.bytecode.append(&mut a);
-            let clone_entry_sp = self.context.variables.len() as u32;
-            let body_op_start = self.bytecode.ops().len();
+            self.do_compile(args);
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
-            self.begin_fn_defers();
             // One HIR per instance: the generic body's HIR at this clone's
             // type arguments.
             let lowered = self.try_lower_hir_function(span, body);
@@ -5477,28 +5343,13 @@ impl Compiler {
                 self.report_unlowered(span, &mono_name);
             }
 
-            let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
-            if ends_on_label || !self.region_ends_with_return(body_op_start) {
-                self.bytecode.push_return();
-            }
-            let pinned = self.finish_fn_defers(&mono_name);
+            self.bodies.advance();
             // Its own IL function: a clone left as trailing glue of the source
             // body has no registered entry, so a CALL to it from another
             // function was resolved through another body's private label ids.
-            let clone_end = self.bytecode.len();
-            self.record_fn_span(mono_name.clone(), clone_offset, clone_end);
             let entry = self.fn_entry_labels.get(&mono_name).copied();
-            self.bytecode.record_func_with_sp(
-                mono_name,
-                entry,
-                clone_offset,
-                clone_end,
-                clone_entry_sp,
-            );
+            self.bodies.record(mono_name, entry);
             self.attach_hir_mir();
-            if pinned {
-                self.bytecode.set_last_func_pinned();
-            }
             self.flush_hir_par_tail();
 
             self.mono_codegen_var_types.pop();
@@ -5604,15 +5455,12 @@ impl Compiler {
     fn consume_function_signature_output<'compiler>(&mut self, method: &Output<'compiler>) {
         let _method_id = self.next_emit_id();
         if let Expression::Function { args, body, .. } = method.1.as_ref() {
-            let mut args_bc = self.do_compile(args);
-            self.bytecode.append(&mut args_bc);
+            self.do_compile(args);
             if let Some(body) = body {
-                let mut body_bc = self.do_compile(body);
-                self.bytecode.append(&mut body_bc);
+                self.do_compile(body);
             }
         } else {
-            let mut bc = self.do_compile(method);
-            self.bytecode.append(&mut bc);
+            self.do_compile(method);
         }
     }
 
@@ -6067,13 +5915,9 @@ impl Compiler {
             && self.static_reads_fold(fqn) {
                 self.static_const_values.insert(fqn.to_string(), val);
             }
-        // Compile the initializer as its own zero-arg function in the module
-        // stream; the setup region only calls it. Call lowering (inline /
-        // self-unroll peels, forward-referenced entries) writes straight into
-        // `self.bytecode`, so an initializer compiled into a side buffer
-        // leaked those ops into whatever function came before it.
+        // The initializer is its own zero-arg function; startup calls it.
         let name = format!("{STATIC_INIT_FN_PREFIX}{fqn}");
-        let (offset, _) = self.bind_function_entry(name.clone());
+        self.bind_function_entry(name.clone());
         self.fn_arities.insert(name.clone(), (0, false));
 
         let prev_fn_vars = std::mem::take(&mut self.context.variables);
@@ -6091,17 +5935,12 @@ impl Compiler {
         let prev_two_word_enum = self.compiling_two_word_enum.take();
         let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
 
-        let body_start = self.bytecode.len();
-        self.record_fn_span(name.clone(), body_start, body_start);
         // The initializer returns the value; the setup region stores it.
         if !self.try_lower_hir_function(&init.0, init) {
             self.report_unlowered(&init.0, fqn);
         }
-        let body_end = self.bytecode.len();
-        self.record_fn_span(name.clone(), body_start, body_end);
         let entry = self.fn_entry_labels.get(&name).copied();
-        self.bytecode
-            .record_func_with_sp(name, entry, body_start, body_end, 0);
+        self.bodies.record(name, entry);
         self.attach_hir_mir();
         self.flush_hir_par_tail();
 
@@ -6119,17 +5958,6 @@ impl Compiler {
         self.context.stack_array_locals = prev_stack_arrays;
         self.context.variables = prev_fn_vars;
 
-        // Setup region: `CALL init; StoreStatic`. The packed target is
-        // resolved to the entry label when the region is spliced
-        // (`splice_buf_at`).
-        self.static_init.push(Self::packed_entry_byte_ret(
-            crate::il::EntryKind::Call,
-            0,
-            offset as u32,
-            1,
-        ));
-        self.static_init
-            .push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
         self.setup_steps
             .push(module_setup::SetupStep::Static { init: format!("{STATIC_INIT_FN_PREFIX}{fqn}"), slot, comptime: false });
     }
@@ -6406,7 +6234,6 @@ impl Compiler {
         let root = b.block(stmts, None, coil_ty::never());
         let hir = b.finish(root);
 
-        let body_start = self.bytecode.len();
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_fn_table_key = self.current_function_table_key.replace("main".to_string());
         // A case returns its `Result<(), string>` boxed.
@@ -6417,18 +6244,15 @@ impl Compiler {
             self.report_unlowered(&SimpleSpan::from(0..0), "main");
             self.bind_function_entry("main".to_string());
         }
-        let body_end = self.bytecode.len();
-        self.record_fn_span("main".to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get("main").copied();
-        self.bytecode
-            .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
+        self.bodies.record("main".to_string(), entry);
         self.attach_hir_mir();
         self.flush_hir_par_tail();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
     }
 
-    fn do_compile<'compiler>(&mut self, ast: &(SimpleSpan, Box<Expression<'compiler>>)) -> CodeBuf {
+    fn do_compile<'compiler>(&mut self, ast: &(SimpleSpan, Box<Expression<'compiler>>)) {
         self.codegen_depth += 1;
         if self.codegen_depth > super::CODEGEN_RECURSION_LIMIT {
             self.messages.push(Message::error(
@@ -6646,7 +6470,7 @@ impl Compiler {
                 self.two_word_return_kind(&table_key)
             };
 
-            let mut a = self.do_compile(args);
+            self.do_compile(args);
 
             // Reserve `__dictN` slots for CallIndirect (FQN preferred; bare
             // names are dropped by `fn_dict_arity.retain(|k| k.contains("::"))`).
@@ -6666,18 +6490,13 @@ impl Compiler {
             let entry_sp = self.context.variables.len() as u32;
             self.hir_entry_sp = Some(entry_sp);
 
-            self.bytecode.append(&mut a);
 
-            let body_start = self.bytecode.len();
             // Provisional span so self-recursive peels can see the opening
             // predicate while the body is still streaming into `self.bytecode`.
-            self.record_fn_span(table_key.clone(), body_start, body_start);
-            let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
             let prev_active = self.active_fn_name.take();
             self.active_fn_name = Some(name.to_string());
-            self.begin_fn_defers();
             let lowered = prev_fn_table_key_was_none && self.try_lower_hir_function(span, body);
             if !lowered {
                 if !prev_fn_table_key_was_none {
@@ -6687,15 +6506,7 @@ impl Compiler {
             }
             self.active_fn_name = prev_active;
 
-            // A lowered body can end on a join label that only unreachable
-            // jumps target; a jumped-to label at the very end would bind to
-            // the next function's entry, so it still gets the fallthrough
-            // return.
-            let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
-            if ends_on_label || !self.region_ends_with_return(body_op_start) {
-                self.bytecode.push_return();
-            }
-            let pinned = self.finish_fn_defers(&table_key);
+            self.bodies.advance();
             self.debug_scope_exit(saved_debug_scope);
 
             self.compiling_result_mode = prev_result_mode;
@@ -6708,8 +6519,6 @@ impl Compiler {
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
             self.field_key_slots = prev_field_keys;
-            let body_end = self.bytecode.len();
-            self.record_fn_span(table_key.clone(), body_start, body_end);
             if prev_fn_table_key_was_none
                 && !*is_coro
                 && type_params.is_empty()
@@ -6720,17 +6529,8 @@ impl Compiler {
                 self.precise_frame_fns.insert(table_key.clone());
             }
             let entry = self.fn_entry_labels.get(&table_key).copied();
-            self.bytecode.record_func_with_sp(
-                table_key.clone(),
-                entry,
-                body_start,
-                body_end,
-                entry_sp,
-            );
+            self.bodies.record(table_key.clone(), entry);
             self.attach_hir_mir();
-            if pinned {
-                self.bytecode.set_last_func_pinned();
-            }
             self.flush_hir_par_tail();
             self.context.variables = prev_fn_vars;
             self.context.stack_array_locals = prev_stack_arrays;
@@ -6753,8 +6553,7 @@ impl Compiler {
     fn do_compile_inner<'compiler>(
         &mut self,
         ast: &(SimpleSpan, Box<Expression<'compiler>>),
-    ) -> CodeBuf {
-        let mut bytecode = CodeBuf::new();
+    ) {
         let _ = self.next_emit_id();
         let (span, child) = ast;
 
@@ -6796,12 +6595,12 @@ impl Compiler {
                     };
                     for p in [0u8, 1, 2, 25, 3] {
                         for child in children.iter().filter(|c| phase(c) == p) {
-                            bytecode.append(&mut self.do_compile(child));
+                            self.do_compile(child);
                         }
                     }
                 } else {
                     for child in children {
-                        bytecode.append(&mut self.do_compile(child));
+                        self.do_compile(child);
                     }
                 }
                 self.emit_instance_clones(children);
@@ -6842,21 +6641,21 @@ impl Compiler {
                     self.report_top_level_statement(span);
                 } else {
                     for child in children {
-                        bytecode.append(&mut self.do_compile(child));
+                        self.do_compile(child);
                     }
                 }
             }
             // An empty default-method body.
             Expression::Block(children) => {
                 for child in children {
-                    bytecode.append(&mut self.do_compile(child));
+                    self.do_compile(child);
                 }
             }
             Expression::Function { .. } => {
                 self.compile_function_decl_into(span, ast);
             }
             Expression::Expr(child) | Expression::Statement(child) => {
-                bytecode.append(&mut self.do_compile(child))
+                self.do_compile(child);
             }
             Expression::StaticDecl { name, init, is_const, .. } => {
                 let fqn = self.qualify_static_fqn(name);
@@ -6987,7 +6786,7 @@ impl Compiler {
                     }
                 );
                 self.compiling_method = !is_static;
-                bytecode.append(&mut self.do_compile(body));
+                self.do_compile(body);
                 self.compiling_method = false;
             }
             Expression::Argument { ty, name: n, .. } => {
@@ -7260,7 +7059,7 @@ impl Compiler {
             } => {
                 // Metadata only; IDs consumed by descending into variants.
                 for v in variants {
-                    bytecode.append(&mut self.do_compile(v));
+                    self.do_compile(v);
                 }
             }
             // Resolved by the typechecker; no bytes.
@@ -7305,39 +7104,20 @@ impl Compiler {
                 let prev_two_word_enum = self.compiling_two_word_enum.clone();
                 self.compiling_two_word_enum = self.two_word_return_kind(&fn_name);
 
-                let body_op_start = self.bytecode.ops().len();
                 let prev_field_keys = std::mem::take(&mut self.field_key_slots);
                 self.emit_field_key_prologue(body);
-                self.begin_fn_defers();
                 let lowered = self.try_lower_hir_function(span, body);
                 if !lowered {
                     self.report_unlowered(span, &fn_name);
                 }
 
-                // A lowered body can end on an unreachable join label.
-                let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
-                if ends_on_label || !self.region_ends_with_return(body_op_start) {
-                    // Test cases are typed as unit / Result<(), string>, zero is safe.
-                    self.bytecode.push_return();
-                }
-                let pinned = self.finish_fn_defers(&fn_name);
+                self.bodies.advance();
 
-                let body_end = self.bytecode.len();
                 // Flatten remaps per IlFunc; unrecorded tests share the epilogue
                 // and collide with ArrayPin labels in earlier bodies.
-                self.record_fn_span(fn_name.clone(), offset as usize, body_end);
                 let entry = self.fn_entry_labels.get(&fn_name).copied();
-                self.bytecode.record_func_with_sp(
-                    fn_name.clone(),
-                    entry,
-                    offset as usize,
-                    body_end,
-                    0,
-                );
+                self.bodies.record(fn_name.clone(), entry);
                 self.attach_hir_mir();
-                if pinned {
-                    self.bytecode.set_last_func_pinned();
-                }
                 self.flush_hir_par_tail();
 
                 self.compiling_result_mode = prev_result_mode;
@@ -7366,7 +7146,6 @@ impl Compiler {
             _expr => self.report_top_level_statement(span),
         }
 
-        bytecode
     }
 
     fn report_top_level_statement(&mut self, span: &SimpleSpan) {
@@ -7419,9 +7198,7 @@ impl Compiler {
         self.current_function_qualified = None;
         self.current_function_table_key = None;
         self.compiling_two_word_enum = None;
-        // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
-        self.fn_bytecode_spans.clear();
-        if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {
+        if self.bodies.is_fresh() {
             self.fn_debug_locals.clear();
             self.fn_debug_vars.clear();
         }
@@ -7431,7 +7208,7 @@ impl Compiler {
         // Shared constant pool across `compile_module` calls. Clearing between
         // modules orphans JumpIfMatch/CONST indices (VM panic). Reset only on
         // a fresh prologue (CALL/JMP/HALT).
-        if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {
+        if self.bodies.is_fresh() {
             self.constants.clear();
             self.strings.clear();
             self.string_indices.clear();
@@ -7633,11 +7410,11 @@ impl Compiler {
         self.emit_vec_method_thunks();
         self.emit_stream_method_thunks();
         // Dict thunks after prologue; keep program_start_offset at first user byte.
-        self.program_start_offset = self.bytecode.len() as u32;
+        self.program_start_offset = self.bodies.position() as u32;
         self.setup_entry_offset = self.program_start_offset;
         // Label the setup / top-level region: it starts after the
         // prologue HALT / prelude RETURN, so only its entry reaches it.
-        self.bytecode.bind_fresh_entry();
+        self.bodies.bind_fresh_entry();
         self.mono_plan = crate::monomorphize::run_monomorphize_pass(module, ast, &self.checker);
         for hit in &self.mono_plan.cap_hits {
             let why = match hit.reason {
@@ -7668,7 +7445,7 @@ impl Compiler {
             self.messages.push(msg);
         }
 
-        let mut program = self.do_compile(ast);
+        self.do_compile(ast);
         self.namespace = ns.to_string();
         for (name, text) in std::mem::take(&mut self.fold_bodies) {
             let qualified = self.qualify_static_fqn(&name);
@@ -7679,12 +7456,10 @@ impl Compiler {
 
         self.messages.extend(self.checker.take_messages());
 
-        self.bytecode.append(&mut program);
         // Structural thunks (a `Result<_, IoError>`'s `show`) can mark a
         // builtin enum's `Show` thunk used, so they go first (#1984).
         self.emit_structural_thunks();
         self.emit_used_builtin_show_thunks();
-        self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
         if self.inst_clone_srcs.values().any(|s| s.program == seq && s.emit_idx.is_some()) {
@@ -7721,7 +7496,7 @@ impl Compiler {
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
         for (fqn, enum_name, variants) in due {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
-            self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
+            self.emit_synth_fn(&fqn, &hir, HashMap::new());
         }
     }
 
@@ -7893,7 +7668,7 @@ impl Compiler {
             .map_or(1, |class| class.flattened_methods(self.checker.generics()).len());
         self.synth_entry_dicts = Some((base, arity));
         self.synth_show_dicts = vars.into_iter().enumerate().map(|(i, v)| (v, i + 1)).collect();
-        self.emit_synth_fn(fqn, &hir, HashMap::new(), true);
+        self.emit_synth_fn(fqn, &hir, HashMap::new());
         self.synth_entry_dicts = None;
         self.synth_show_dicts.clear();
     }
@@ -7948,7 +7723,7 @@ impl Compiler {
         let ret = b.ret(shown);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = b.finish(root);
-        self.emit_synth_fn(name, &hir, HashMap::new(), true);
+        self.emit_synth_fn(name, &hir, HashMap::new());
     }
 
     /// The `Hash` thunk `name` of a ground tuple or array `ty` (#1479): its
@@ -7987,7 +7762,7 @@ impl Compiler {
         let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), retype)], int.clone(), false, |b, a| {
             crate::hir::synth::structural_hash(b, a[0], &items, &targets)
         });
-        self.emit_synth_fn(name, &hir, calls, true);
+        self.emit_synth_fn(name, &hir, calls);
     }
 
     /// Lower stack IL to VM bytecode (fusion select + label resolution).
@@ -8013,11 +7788,9 @@ impl Compiler {
         // A body direct MIR does not lower (a shared generic one a clone
         // stands in for, as a derived `Eq for Box<T>`'s `ne`, or one that
         // builds a `T`-dependent payload) is never a root (#1192, #1424).
-        let no_mir: HashSet<String> = self
-            .bytecode
-            .funcs()
+        let no_mir: HashSet<String> = self.bodies.funcs()
             .iter()
-            .filter(|f| f.hir_mir.is_none() && f.hir_mir_why.is_some())
+            .filter(|f| f.mir.is_none() && f.mir_why.is_some())
             .map(|f| f.name.clone())
             .collect();
         let has_main = self.functions.contains_key("main");
@@ -8049,12 +7822,12 @@ impl Compiler {
             let offsets: HashSet<usize> = functions.values().copied().collect();
             self.test_cases.retain(|(_, offset)| offsets.contains(&(*offset as usize)));
             self.mono_offsets.retain(|_, offset| offsets.contains(offset));
-            self.bytecode.retain_funcs(|f| functions.contains_key(&f.name));
+            self.bodies.retain_funcs(|f| functions.contains_key(&f.name));
         }
 
         // A panic site names a location: each one the bodies use, once.
         let mut locs: Vec<DebugLoc> =
-            self.bytecode.funcs().iter().filter_map(|f| f.hir_mir.as_deref()).flat_map(|m| m.value_locs.values().chain(m.op_locs.values()).chain(m.term_locs.values())).copied().filter(|l| l.is_known()).collect();
+            self.bodies.funcs().iter().filter_map(|f| f.mir.as_deref()).flat_map(|m| m.value_locs.values().chain(m.op_locs.values()).chain(m.term_locs.values())).copied().filter(|l| l.is_known()).collect();
         locs.sort_unstable_by_key(|l| (l.file, l.start_byte, l.end_byte));
         locs.dedup();
         self.debug_locs = locs;
@@ -8062,12 +7835,10 @@ impl Compiler {
         // A body without direct MIR is an internal error once codegen is
         // clean; a module with errors never runs.
         let clean = !self.messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR);
-        let missing: Vec<String> = self
-            .bytecode
-            .funcs()
+        let missing: Vec<String> = self.bodies.funcs()
             .iter()
-            .filter(|f| f.hir_mir.is_none() && (clean || f.hir_mir_why.is_some()))
-            .map(|f| format!("`{}` ({})", f.name, f.hir_mir_why.as_deref().unwrap_or("no MIR from HIR")))
+            .filter(|f| f.mir.is_none() && (clean || f.mir_why.is_some()))
+            .map(|f| format!("`{}` ({})", f.name, f.mir_why.as_deref().unwrap_or("no MIR from HIR")))
             .collect();
         if clean && !missing.is_empty() {
             panic!("internal compiler error: {} bod{} without MIR: {}", missing.len(), if missing.len() == 1 { "y" } else { "ies" }, missing.join(", "));
@@ -8075,27 +7846,27 @@ impl Compiler {
         if crate::mir::capture_open() {
             let opts = self.opt_options.clone();
             crate::mir::capture_native_bodies(
-                self.bytecode.funcs().iter().filter_map(|f| Some((f.name.as_str(), f.entry, f.hir_mir.as_deref()?))),
+                self.bodies.funcs().iter().filter_map(|f| Some((f.name.as_str(), f.entry, f.mir.as_deref()?))),
                 &opts,
             );
         }
 
         // A body is named by its entry label; 0 names nothing.
-        let entry_of = |label: crate::il::Label| label.0 as usize + 1;
-        let by_offset = |bytecode: &CodeBuf, offset: usize| bytecode.entry_label_for_offset(offset).map_or(0, entry_of);
+        let entry_of = |label: crate::bodies::Label| label.0 as usize + 1;
+        let by_offset = |bodies: &crate::bodies::BodyTable, offset: usize| bodies.entry_label_for_offset(offset).map_or(0, entry_of);
         for (name, offset) in self.functions.iter_mut() {
             *offset = match self.fn_entry_labels.get(name) {
                 Some(&label) => entry_of(label),
-                None => by_offset(&self.bytecode, *offset),
+                None => by_offset(&self.bodies, *offset),
             };
         }
         for (_, offset) in self.test_cases.iter_mut() {
-            *offset = by_offset(&self.bytecode, *offset as usize) as u32;
+            *offset = by_offset(&self.bodies, *offset as usize) as u32;
         }
         for offset in self.mono_offsets.values_mut() {
-            *offset = by_offset(&self.bytecode, *offset);
+            *offset = by_offset(&self.bodies, *offset);
         }
-        self.program_start_offset = by_offset(&self.bytecode, self.program_start_offset as usize) as u32;
+        self.program_start_offset = by_offset(&self.bodies, self.program_start_offset as usize) as u32;
         self.startup = self
             .startup_steps
             .iter()

@@ -598,7 +598,7 @@ impl Compiler {
         let hir = Self::synth_generic(b.finish(root));
         self.synth_plain_dicts = Some(vars.len());
         self.synth_eq_dicts = vars.iter().enumerate().map(|(i, &(v, method))| (v, (i, method))).collect();
-        self.emit_synth_fn(fqn, &hir, HashMap::new(), false);
+        self.emit_synth_fn(fqn, &hir, HashMap::new());
         self.synth_plain_dicts = None;
         self.synth_eq_dicts.clear();
     }

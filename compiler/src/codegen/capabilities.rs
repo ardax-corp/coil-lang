@@ -184,8 +184,8 @@ impl Compiler {
             });
         };
         // Each body's `HostInvoke`s, by the loc each carries.
-        for f in self.bytecode.funcs() {
-            let Some(mir) = f.hir_mir.as_deref() else { continue };
+        for f in self.bodies.funcs() {
+            let Some(mir) = f.mir.as_deref() else { continue };
             let chain = parent.contains_key(&f.name).then(|| chain_to(&f.name));
             for block in &mir.blocks {
                 for inst in &block.insts {
@@ -204,11 +204,11 @@ impl Compiler {
     /// Each body reachable from `roots` through MIR, with the body it was
     /// first reached from (`None` for a root).
     pub(super) fn reachable_bodies(&self, roots: impl IntoIterator<Item = String>) -> HashMap<String, Option<String>> {
-        let funcs = self.bytecode.funcs();
+        let funcs = self.bodies.funcs();
         let mut by_label: HashMap<u32, &str> = self.fn_entry_labels.iter().map(|(n, l)| (l.0, n.as_str())).collect();
         by_label.extend(funcs.iter().filter_map(|f| Some((f.entry?.0, f.name.as_str()))));
         let bodies: HashMap<&str, &crate::mir::MirFunc> =
-            funcs.iter().filter_map(|f| Some((f.name.as_str(), f.hir_mir.as_deref()?))).collect();
+            funcs.iter().filter_map(|f| Some((f.name.as_str(), f.mir.as_deref()?))).collect();
         let mut parent: HashMap<String, Option<String>> = HashMap::new();
         let mut work = std::collections::VecDeque::new();
         for name in roots {

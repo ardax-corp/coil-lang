@@ -219,37 +219,3 @@ impl DebugVar {
 pub type DebugClassTable = HashMap<String, Vec<(String, DebugTy)>>;
 /// Enum tables: name → variant names in tag order.
 pub type DebugEnumTable = HashMap<String, Vec<String>>;
-
-/// Decoded effect of the instruction at `pc`.
-struct Step {
-    /// `(code word, slots written, copied-from slot)`: each word of a
-    /// multi-word op has its own debug location.
-    writes: Vec<(usize, Vec<u32>, Option<u32>)>,
-    succs: Vec<usize>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use common::Instruction;
-
-    fn var(name: &str, home: u32, site: (u32, u32)) -> DebugVar {
-        DebugVar {
-            name: name.into(),
-            file: 0,
-            scope: (0, 1000),
-            ty: DebugTy::Int,
-            loc: DebugVarLoc::Slot(home),
-            def_sites: vec![site],
-            is_param: false,
-            name_span: Some(site),
-            ranges: Vec::new(),
-            validated: false,
-            comp_ranges: Vec::new(),
-        }
-    }
-
-    const X: (u32, u32) = (10, 11);
-    const Y: (u32, u32) = (20, 21);
-
-}

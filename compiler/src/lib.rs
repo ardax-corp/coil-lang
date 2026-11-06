@@ -8,10 +8,12 @@ mod const_fold;
 pub mod debug_vars;
 #[cfg(any(test, feature = "dissect"))]
 mod dissect;
-pub(crate) mod il;
+pub(crate) mod bodies;
+pub(crate) mod opt;
+pub(crate) mod pure_call;
 pub(crate) mod mir;
-pub use il::opt::{BodyTier, OptStats, last_opt_stats};
-pub use il::{EarlyFree, OptLevel};
+pub use opt::{OptStats, last_opt_stats};
+pub use opt::{EarlyFree, OptLevel};
 pub use common::DebugLevel;
 pub use hir::effects::{
     EffectsCapture, describe_fns, effect_declaration_errors, start_effects_capture, take_effects_capture,
@@ -20,7 +22,7 @@ pub use hir::{ContractLevel, start_hir_capture, take_hir_capture};
 pub use mir::{start_mir_capture, take_mir_capture};
 /// MIR for a native backend (`coil-native`): the capture and the types it reads.
 pub mod native_mir {
-    pub use crate::il::Label;
+    pub use crate::bodies::Label;
     pub use crate::mir::archive;
     pub use crate::mir::coverage;
     pub use crate::mir::{
@@ -65,7 +67,7 @@ pub use typechecking::{
     ForInCounted, ForInInfo, ForInKind, ModuleId, Ty, VirtualModules,
 };
 
-pub use codegen::{Compiler, PROLOGUE_BYTECODE_LEN, unescape_coil_string};
+pub use codegen::{Compiler, unescape_coil_string};
 pub use local_scopes::{binding_at, local_bindings, local_bindings_in, LocalBinding};
 pub use typechecking::bare_cases::BareCases;
 pub use symbols::{PathPart, RefSite, SymbolDef, SymbolIndex, SymbolKind};

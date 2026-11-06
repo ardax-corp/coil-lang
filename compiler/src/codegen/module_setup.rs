@@ -44,9 +44,6 @@ impl Compiler {
     /// what it made, then the initializers computed while compiling, then
     /// `__module_setup`.
     pub(super) fn emit_module_setup(&mut self) {
-        // The setup ops are rebuilt from the steps: `static_init` only
-        // served the capability scan.
-        drop(std::mem::take(&mut self.static_init));
         let finalizers = self.finalizer_registry();
         let steps = std::mem::take(&mut self.setup_steps);
         let mut startup = Vec::new();
@@ -71,18 +68,15 @@ impl Compiler {
         if !setup.is_empty() {
             let name = MODULE_SETUP_FN.to_string();
             let (_, label) = self.bind_function_entry(name.clone());
-            let start = self.bytecode.len();
             // Its code is emitted from the MIR below.
-            self.bytecode.push_return();
-            let end = self.bytecode.len();
-            self.record_fn_span(name.clone(), start, end);
-            self.bytecode.record_func_with_sp(name.clone(), Some(label), start, end, 0);
+            self.bodies.advance();
+            self.bodies.record(name.clone(), Some(label));
             match self.module_setup_mir(&setup) {
                 Ok(mut func) => {
                     func.shrink_to_fit();
-                    self.bytecode.set_last_func_hir_mir(func);
+                    self.bodies.set_last_mir(func);
                 }
-                Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+                Err(why) => self.bodies.set_last_mir_why(why),
             }
             startup.push(StartupStep { body: name, slot: None });
         }
@@ -94,26 +88,23 @@ impl Compiler {
     }
 
     /// Emit `__finalizer_setup`, the registry of `finalizers`.
-    fn emit_finalizer_setup(&mut self, finalizers: &[(usize, u32, crate::il::Label)]) {
+    fn emit_finalizer_setup(&mut self, finalizers: &[(usize, u32, crate::bodies::Label)]) {
         let name = FINALIZER_SETUP_FN.to_string();
         let (_, label) = self.bind_function_entry(name.clone());
-        let start = self.bytecode.len();
         // Its code is emitted from the MIR below.
-        self.bytecode.push_return();
-        let end = self.bytecode.len();
-        self.record_fn_span(name.clone(), start, end);
-        self.bytecode.record_func_with_sp(name, Some(label), start, end, 0);
+        self.bodies.advance();
+        self.bodies.record(name, Some(label));
         match Self::finalizer_setup_mir(finalizers) {
             Ok(mut func) => {
                 func.shrink_to_fit();
-                self.bytecode.set_last_func_hir_mir(func);
+                self.bodies.set_last_mir(func);
             }
-            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+            Err(why) => self.bodies.set_last_mir_why(why),
         }
     }
 
     /// `__finalizer_setup`'s MIR.
-    fn finalizer_setup_mir(finalizers: &[(usize, u32, crate::il::Label)]) -> Result<MirFunc, String> {
+    fn finalizer_setup_mir(finalizers: &[(usize, u32, crate::bodies::Label)]) -> Result<MirFunc, String> {
         let mir = |e: crate::mir::MirError| e.to_string();
         let mut b = MirBuilder::new(FINALIZER_SETUP_FN);
         b.allow_host_edges = true;
@@ -141,7 +132,7 @@ impl Compiler {
     /// The finalizer registry: `(gc_register_finalizer, type id, drop
     /// entry)` for each class with a `drop`, in type-id order (archives
     /// stay reproducible).
-    fn finalizer_registry(&self) -> Vec<(usize, u32, crate::il::Label)> {
+    fn finalizer_registry(&self) -> Vec<(usize, u32, crate::bodies::Label)> {
         let Some(native) = self.native_id("gc_register_finalizer") else {
             return Vec::new();
         };
@@ -172,12 +163,10 @@ impl Compiler {
             match step {
                 SetupStep::Static { init, slot, .. } => {
                     let target = self.fn_entry_labels.get(init).copied().ok_or_else(|| format!("{init}: no entry"))?;
-                    let ret = self
-                        .bytecode
-                        .funcs()
+                    let ret = self.bodies.funcs()
                         .iter()
                         .find(|f| f.name == *init)
-                        .and_then(|f| f.hir_mir.as_ref())
+                        .and_then(|f| f.mir.as_ref())
                         .and_then(|m| m.ret_ty)
                         .filter(|t| t.is_word_lane())
                         .ok_or_else(|| format!("{init}: no one-word MIR return"))?;

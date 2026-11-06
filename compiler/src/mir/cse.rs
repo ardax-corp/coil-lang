@@ -98,7 +98,7 @@ enum ReadKey {
     FixedIndex { array: ValueId, index: ValueId },
     FixedLen { array: ValueId },
     Len { array: ValueId },
-    Call { target: crate::il::Label, args: Vec<ValueId> },
+    Call { target: crate::bodies::Label, args: Vec<ValueId> },
 }
 
 /// What one instruction may change, for [`ReadKey::killed_by`].

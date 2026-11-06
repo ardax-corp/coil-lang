@@ -129,7 +129,7 @@ pub struct Pipeline {
     /// When false (`--auto-par off`), skip auto fork-join.
     auto_par: bool,
     /// Typed inlining of HIR bodies, when set; `None` keeps the compiler's
-    /// [`crate::il::opt::OptimizeOptions::hir_inline`] (on).
+    /// [`crate::opt::OptimizeOptions::hir_inline`] (on).
     hir_inline: Option<bool>,
     /// `--early-free on|off`; `None` follows the opt level.
     early_free: Option<bool>,
@@ -1783,7 +1783,7 @@ impl Pipeline {
             .collect();
         let outcome = host.eval_consts(&program, &evals, &folds, &limits, &io);
         let cached = evals.iter().filter(|e| e.cached.is_some()).count();
-        crate::il::opt::note_comptime_consts(evals.len(), cached, folds.len(), started.elapsed().as_micros() as u64);
+        crate::opt::note_comptime_consts(evals.len(), cached, folds.len(), started.elapsed().as_micros() as u64);
         match outcome {
             Ok(outcome) => {
                 self.store_cached_consts(&consts, &outcome.records, &cache, entry_src);
@@ -2249,7 +2249,7 @@ impl Pipeline {
     fn begin_compile_opt_stats(&mut self) {
         crate::hir::set_contract_level(self.contracts());
         if self.collect_opt_stats {
-            crate::il::opt::begin_opt_stats();
+            crate::opt::begin_opt_stats();
             self.compiler_lazy_mut().set_collect_opt_stats(true);
         }
     }
@@ -2510,7 +2510,7 @@ mod tests {
 
     use reporting::{ErrorCode, Message, MessageKind, ReportConfig, ReportFormat};
 
-    use common::Instruction;
+    
     use super::Pipeline;
 
     /// Coverage compiles keep never-called functions from accepted files;
@@ -2851,7 +2851,7 @@ fn main() { add(1, 2); }
     }
 
     #[test]
-    fn opt_stats_census_counts_every_body_tier() {
+    fn opt_stats_count_every_lowered_body() {
         let src = r#"
 fn sum(int n) -> int {
     let s = 0;
@@ -2868,56 +2868,8 @@ fn main() { sum(10); }
         pipeline.set_collect_opt_stats(true);
         pipeline.compile_src(src).expect("compile");
         let stats = crate::last_opt_stats();
-        let bodies = stats.bodies_dense + stats.bodies_lir + stats.bodies_fuse;
-        assert!(bodies >= 2, "main and sum are both counted; stats={stats:?}");
-        let reasons: usize = stats.fuse_reasons.iter().map(|r| r.applied).sum();
-        assert_eq!(reasons, stats.bodies_fuse, "every fuse-IL body has a reason");
-        assert!(stats.format_text().contains("bodies:"));
-    }
-
-    fn fn_ops<'a>(
-        bytecode: &'a [common::Byte],
-        syms: &[common::FnDebugSym],
-        name: &str,
-    ) -> &'a [common::Byte] {
-        let idx = syms.iter().position(|s| s.name == name).unwrap_or_else(|| {
-            let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
-            panic!("missing fn_symbol `{name}`; have {names:?}");
-        });
-        let start = syms[idx].entry_pc as usize;
-        let end = syms
-            .get(idx + 1)
-            .map(|s| s.entry_pc as usize)
-            .unwrap_or(bytecode.len());
-        &bytecode[start..end]
-    }
-
-    fn is_unchecked_index(op: common::Instruction) -> bool {
-        matches!(
-            op,
-            Instruction::IndexUnchecked | Instruction::IndexPinUnchecked
-        )
-    }
-
-    fn is_pin_op(op: common::Instruction) -> bool {
-        matches!(
-            op,
-            Instruction::ArrayPin
-                | Instruction::IndexPin
-                | Instruction::IndexPinUnchecked
-                | Instruction::StoreIndexPin
-                | Instruction::StoreIndexPinUnchecked
-        )
-    }
-
-    fn is_dense_heap_index(op: common::Instruction) -> bool {
-        matches!(
-            op,
-            Instruction::DenseIndex
-                | Instruction::DenseIndexJmpf
-                | Instruction::DenseStoreIndex
-                | Instruction::DenseArrayPush
-        )
+        assert!(stats.hir_lowered >= 2, "main and sum are both counted; stats={stats:?}");
+        assert!(stats.format_text().contains("hir:"));
     }
 
     fn temp_hy(name: &str, src: &str) -> (std::path::PathBuf, std::path::PathBuf) {

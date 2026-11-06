@@ -9,10 +9,6 @@
 /// Optimization switches, set per [`OptLevel`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OptimizeOptions {
-    /// The message a body bytecode cannot hold panics with on the VM
-    /// ([`super::IlModule::optimize_and_flatten`]): an index in the program's
-    /// strings. `None`: such a body is a compiler error.
-    pub vm_refusal_message: Option<u32>,
     /// Constant folding and algebraic identities in the HIR (`hir::fold`).
     pub algebraic: bool,
     /// HIR counted-loop in-bounds proofs (`hir::bounds`).
@@ -59,10 +55,6 @@ pub struct OptimizeOptions {
     /// An enum local built in place lives in two slots when its type is a
     /// two-word pair. Always on; unit tests turn it off.
     pub hir_pair_locals: bool,
-    /// MIR bodies may take the dense (register) tier; off, every body
-    /// lowers through LIR. Always on; unit tests of LIR lowering turn it
-    /// off.
-    pub mir_dense: bool,
     /// Lower only the first `N` bodies HIR lowering admits (per process)
     /// and name the `N`th on stderr, to bisect a miscompile.
     /// `COIL_HIR_BISECT=N`; `None` (unset) lowers every body.
@@ -74,24 +66,16 @@ pub struct OptimizeOptions {
     /// or after the call they were passed to (`hir::early_free`). On at
     /// `-O1` and above; `--early-free` overrides the level.
     pub early_free: bool,
-    /// Every function must lower through direct MIR: a body left on its
-    /// raw stack IL (the fuse tier) is an internal error. The compiler sets
-    /// this when codegen reported no errors; IL-only modules leave it off.
-    pub require_mir: bool,
 }
 
 // Default is `OptLevel::Standard.options()`.
 
-mod labels;
 mod opt_level;
 mod stats;
 pub use opt_level::{EarlyFree, HintFactors, OptLevel};
 pub(crate) use stats::{note_comptime_consts, note_comptime_macros, note_hir_fallback, note_hir_mir,
     note_hir_inline_refused, note_hir_inlined, note_hir_lowered,
 };
-pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
+pub use stats::{OptStats, begin_opt_stats, last_opt_stats};
 
 
-#[cfg(test)]
-#[path = "mod.tests.rs"]
-mod iterative_opt_tests;

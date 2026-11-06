@@ -173,7 +173,6 @@ impl fmt::Display for OptLevel {
 
 fn all_off() -> OptimizeOptions {
     OptimizeOptions {
-            vm_refusal_message: None,
         algebraic: false,
         loop_bounds: false,
         sink_return: false,
@@ -188,11 +187,9 @@ fn all_off() -> OptimizeOptions {
         hir_inline: false,
         hir_inline_heap: false,
         hir_pair_locals: false,
-        mir_dense: false,
         hir_bisect: None,
         auto_par: false,
         early_free: false,
-        require_mir: false,
     }
 }
 
@@ -203,7 +200,6 @@ fn level_free_knobs(o: &mut OptimizeOptions) {
     o.hir_inline = true;
     o.hir_inline_heap = true;
     o.hir_pair_locals = true;
-    o.mir_dense = true;
     o.hir_bisect = if cfg!(debug_assertions) {
         std::env::var("COIL_HIR_BISECT").ok().and_then(|v| v.parse::<usize>().ok())
     } else {
@@ -219,7 +215,6 @@ impl OptimizeOptions {
         self.hir_inline = from.hir_inline;
         self.hir_inline_heap = from.hir_inline_heap;
         self.hir_pair_locals = from.hir_pair_locals;
-        self.mir_dense = from.mir_dense;
         self.hir_bisect = from.hir_bisect;
         self.auto_par = from.auto_par;
     }

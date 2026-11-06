@@ -12,8 +12,7 @@
 //! string literals included) and casts between scalars; then each mono
 //! clone of a generic function, at its instance's types. Any other node, type
 //! or body shape is refused, and the reason is counted in `--opt-stats`;
-//! with no AST codegen left, a refused body is an internal error
-//! (`OptimizeOptions::require_mir`).
+//! with no AST codegen left, a refused body is an internal error.
 //!
 //! MIR keeps values in registers, so where a node sits among its siblings
 //! does not matter: a binding, assignment, jump, match or build lowers

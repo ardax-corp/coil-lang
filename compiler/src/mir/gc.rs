@@ -271,15 +271,10 @@ pub(super) fn term_uses(term: &Terminator) -> Vec<ValueId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::il::IlOp;
     use crate::mir::builder::MirBuilder;
     use crate::mir::inst::{MirAllocKind, MirCmpOp, MirConst, MirGcKind};
     use crate::mir::MirTy;
-    use common::{Byte, DebugLoc};
-
-    fn loc() -> DebugLoc {
-        DebugLoc::unknown()
-    }
+    
 
     fn alloc_and_barrier(f: &MirFunc) -> (ValueId, ValueId, Vec<ValueId>) {
         let mut obj = None;

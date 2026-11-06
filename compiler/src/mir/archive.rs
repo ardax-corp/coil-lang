@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use common::DebugLoc;
 
-use crate::il::Label;
+use crate::bodies::Label;
 use crate::layout::MirLayout;
 use crate::mir::func::DeoptSite;
 use crate::mir::gc::LiveRootSet;

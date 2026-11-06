@@ -110,7 +110,7 @@ impl MirBuilder {
 
     /// Let a call to `target` whose result the block returns be a
     /// `TailCall` ([`MirFunc::tail_targets`]).
-    pub fn allow_tail_call(&mut self, target: crate::il::Label) {
+    pub fn allow_tail_call(&mut self, target: crate::bodies::Label) {
         self.func.tail_targets.insert(target);
     }
 
@@ -583,7 +583,7 @@ impl MirBuilder {
 
     pub fn ins_call(
         &mut self,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         args: Vec<ValueId>,
         abi: &crate::layout::DenseAbi,
     ) -> Result<(ValueId, Option<ValueId>), MirError> {
@@ -1126,7 +1126,7 @@ impl MirBuilder {
 
     /// Const string-table push (I4 / Q9 R1).
     /// `CodePtr` of the function at `target`: an `int` word.
-    pub fn ins_code_ptr(&mut self, target: crate::il::Label) -> Result<ValueId, MirError> {
+    pub fn ins_code_ptr(&mut self, target: crate::bodies::Label) -> Result<ValueId, MirError> {
         let dest = self.alloc(MirTy::I64);
         self.push(MirInst::CodePtr { dest, target })?;
         Ok(dest)
@@ -1784,7 +1784,7 @@ mod tests {
             ret: MirTy::I64,
             ret_hi: None,
         };
-        assert!(b.ins_call(crate::il::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
-        assert!(b.ins_call(crate::il::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
+        assert!(b.ins_call(crate::bodies::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
+        assert!(b.ins_call(crate::bodies::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
     }
 }
