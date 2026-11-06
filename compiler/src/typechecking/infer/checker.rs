@@ -3551,7 +3551,31 @@ impl Checker {
             Expression::Declare(args) => self.infer_ffi_declare(args, range),
             Expression::Invoke(args) => self.infer_ffi_invoke(args, range),
 
-            Expression::Defer { captures, body, .. } => {
+            Expression::Defer { captures, borrows, body } => {
+                // An assignment must reach a variable that is alive when the
+                // defer runs: a `use (mut x)` of an outer block's local. A
+                // copy, or a local of the block the defer ends, is gone.
+                let mut gone = false;
+                for (span, name) in crate::typechecking::control_flow::defer_body_assigns(body, captures) {
+                    let (msg, help) = if !borrows.contains(&name) {
+                        (
+                            format!("this assigns the defer's copy of `{name}`, which nothing reads after it"),
+                            format!("capture it with `use (mut {name})` to change the variable"),
+                        )
+                    } else if self.env.lookup_frame(name).is_some_and(|f| f + 1 == self.env.depth()) {
+                        (
+                            format!("`{name}` is declared in the block this defer ends: it is gone when the defer runs"),
+                            format!("declare `{name}` in an outer block, or drop the assignment"),
+                        )
+                    } else {
+                        continue;
+                    };
+                    gone = true;
+                    self.error_with_help(ErrorCode::DeferAssignsCapture, msg, span, Some(help));
+                }
+                if gone {
+                    return unit_ty();
+                }
                 // A defer runs while its function is leaving: it cannot
                 // choose another exit.
                 let exits = crate::typechecking::control_flow::defer_body_exits(body);
