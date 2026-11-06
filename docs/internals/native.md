@@ -399,6 +399,17 @@ arguments and live words have no limit in native code, and the corpus reports no
 refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`, Windows) the
 package warns and falls back to the runner.
 
+## Compiling in parallel
+
+`define_all` lowers bodies in order (it declares what they call in the module, and site
+numbers come from that order) and hands each function to `compile_while`, whose threads
+compile it as soon as it is lowered. Functions do not depend on each other, and results
+go back in submission order, so the code is the same on any number of threads:
+`COIL_NATIVE_THREADS` sets the most, and `the_code_is_the_same_on_any_number_of_threads`
+holds it to that. A program of under 32 functions stays on one thread, and more than
+8 threads only contend, as lowering is what compiling then waits for. `coil package`
+compiles the same way.
+
 ## Code cache
 
 Compiling is nearly all of a program's start: for `spool` (574 bodies), 335 ms in

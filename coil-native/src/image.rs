@@ -38,11 +38,21 @@ const TARGET_FUNC: u8 = 0;
 const TARGET_LIBCALL: u8 = 1;
 const TARGET_OFFSET: u8 = 2;
 
-struct Func {
-    id: u32,
-    align: u64,
-    bytes: Vec<u8>,
-    relocs: Vec<ModuleReloc>,
+/// One compiled function, as a module takes it.
+pub(crate) struct Func {
+    pub(crate) id: FuncId,
+    pub(crate) align: u64,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) relocs: Vec<ModuleReloc>,
+}
+
+impl Func {
+    /// Function `id`, which `ctx` just compiled.
+    pub(crate) fn of(id: FuncId, ctx: &cranelift_codegen::Context) -> Option<Self> {
+        let code = ctx.compiled_code()?;
+        let relocs = code.buffer.relocs().iter().map(|r| ModuleReloc::from_mach_reloc(r, &ctx.func, id)).collect();
+        Some(Self { id, align: u64::from(code.buffer.min_alignment), bytes: code.code_buffer().to_vec(), relocs })
+    }
 }
 
 /// The compiled functions of a module, as it defines them.
@@ -52,11 +62,8 @@ pub(crate) struct Recorder {
 }
 
 impl Recorder {
-    /// Keep function `id`, which `ctx` just compiled.
-    pub(crate) fn add(&mut self, id: FuncId, ctx: &cranelift_codegen::Context) {
-        let Some(code) = ctx.compiled_code() else { return };
-        let relocs = code.buffer.relocs().iter().map(|r| ModuleReloc::from_mach_reloc(r, &ctx.func, id)).collect();
-        self.funcs.push(Func { id: id.as_u32(), align: u64::from(code.buffer.min_alignment), bytes: code.code_buffer().to_vec(), relocs });
+    pub(crate) fn add(&mut self, func: Func) {
+        self.funcs.push(func);
     }
 }
 
@@ -186,7 +193,7 @@ pub(crate) fn encode(parts: Parts<'_>) -> Option<Vec<u8>> {
     }
     w.len(parts.recorder.funcs.len());
     for f in &parts.recorder.funcs {
-        w.u32(f.id);
+        w.u32(f.id.as_u32());
         w.u64(f.align);
         w.bytes(&f.bytes);
         w.len(f.relocs.len());
