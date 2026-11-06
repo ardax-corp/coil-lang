@@ -2328,20 +2328,22 @@ pub static VECTOR_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flags: u64, body: *const u64, nbody: u64, slots: *mut u64, nslots: u64, from: u64, bound: u64) -> u64 {
     let c = unsafe { &mut *ctx };
-    let mut words = [common::LaneWord::default(); 128];
-    let Some(code) = words.get_mut(..nbody as usize) else {
-        return unsafe { bail(ctx) };
-    };
-    if c.heap.is_null() {
+    // A hit-dense scan re-enters here once per hit, so decode only the
+    // `nbody` words (no 128-word fill per call).
+    let mut words = [std::mem::MaybeUninit::<common::LaneWord>::uninit(); 128];
+    let n = nbody as usize;
+    if n > words.len() || c.heap.is_null() {
         return unsafe { bail(ctx) };
     }
-    for (i, w) in code.iter_mut().enumerate() {
+    for (i, w) in words[..n].iter_mut().enumerate() {
         // SAFETY: `body` holds `nbody` words.
         let Some(word) = common::LaneWord::from_bits(unsafe { *body.add(i) }) else {
             return unsafe { bail(ctx) };
         };
-        *w = word;
+        w.write(word);
     }
+    // SAFETY: the loop above wrote the first `n` words.
+    let code: &[common::LaneWord] = unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), n) };
     // SAFETY: `slots` holds `nslots` words.
     let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };
     // SAFETY: `call` set `heap` to the machine's live heap.

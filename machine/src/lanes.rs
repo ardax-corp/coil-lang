@@ -127,7 +127,21 @@ pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[Lan
         static VREGS: std::cell::RefCell<[[u64; common::simd::LANES]; common::simd::NREGS]> =
             const { std::cell::RefCell::new([[0; common::simd::LANES]; common::simd::NREGS]) };
     }
-    let mut frame: Vec<Value> = slots.iter().map(|&w| Value::from(w)).collect();
+    // The frame as values: on the stack for the usual small frame, since a
+    // hit-dense scan comes back here once per hit.
+    const SMALL: usize = 64;
+    let mut small = [Value::default(); SMALL];
+    let mut big = Vec::new();
+    let frame: &mut [Value] = if slots.len() <= SMALL {
+        let f = &mut small[..slots.len()];
+        for (v, &w) in f.iter_mut().zip(slots.iter()) {
+            *v = Value::from(w);
+        }
+        f
+    } else {
+        big.extend(slots.iter().map(|&w| Value::from(w)));
+        &mut big[..]
+    };
     let out = VREGS.with(|r| {
         let mut regs = r.borrow_mut();
         if scan {
@@ -139,7 +153,7 @@ pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[Lan
             vloop(heap, &mut frame[..], 0, &mut regs, body, usize::from(pos), from, bound, pos).map(|()| 0)
         }
     });
-    for (w, v) in slots.iter_mut().zip(&frame) {
+    for (w, v) in slots.iter_mut().zip(frame.iter()) {
         *w = v.bits();
     }
     out
