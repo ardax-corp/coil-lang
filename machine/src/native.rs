@@ -643,6 +643,10 @@ pub struct NativeEntry {
     /// Copied to [`NativeCtx::entry_data`] for the call (`0` for machine
     /// code, whose `entry` is the body).
     pub data: usize,
+    /// One past the entry id of the body's two-word twin
+    /// (`MirFunc::pair_twin`), `0` for none: a `CallIndirect` of a
+    /// two-word result enters it ([`coil_native_fn_entry`]).
+    pub twin: u32,
 }
 
 /// A [`NativeEntry`] as an AOT object's `coil_aot_entries` table lays it
@@ -659,7 +663,8 @@ pub struct AotEntry {
     pub generator: u8,
     /// `1` when it has `defer`s ([`NativeEntry::cleanup`]).
     pub cleanup: u8,
-    pub pad: [u8; 4],
+    /// [`NativeEntry::twin`].
+    pub twin: u32,
     pub entry: NativeEntryFn,
 }
 
@@ -693,6 +698,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
             cleanup: e.cleanup != 0,
             entry: e.entry,
             data: 0,
+            twin: e.twin,
         })
         .collect();
     let sites = words
@@ -1887,6 +1893,25 @@ pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64
 /// room for [`FN_ENTRY_WORDS`] words.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64) -> u64 {
+    // SAFETY: as the caller promises.
+    unsafe { fn_entry(ctx, callee, args, n, out, false) }
+}
+
+/// [`coil_native_fn_entry`] for a call of a two-word result: the entry
+/// of the body's two-word twin ([`NativeEntry::twin`]) with its low bit
+/// set when it has one, which returns its words as a direct `CALL`'s
+/// (`lo`, then [`NativeCtx::ret_hi`]); else the body's own one-word entry.
+///
+/// # Safety
+/// As [`coil_native_fn_entry`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_fn_entry_pair(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64) -> u64 {
+    // SAFETY: as the caller promises.
+    unsafe { fn_entry(ctx, callee, args, n, out, true) }
+}
+
+#[inline(always)]
+unsafe fn fn_entry(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64, pair: bool) -> u64 {
     let c = unsafe { &mut *ctx };
     if c.code.is_null() || c.heap.is_null() || c.machine.is_null() || c.entry_data != 0 {
         return 0;
@@ -1923,7 +1948,17 @@ pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, 
         }
         (f.entry as usize, len)
     };
-    let Some(entry) = code.entry_ref(pc) else { return 0 };
+    let Some(mut entry) = code.entry_ref(pc) else { return 0 };
+    // The twin takes the same words.
+    let mut tag = 0;
+    if pair
+        && entry.twin != 0
+        && let Some(twin) = code.entry_ref(entry.twin as usize - 1)
+        && twin.ret_words == 2
+    {
+        entry = twin;
+        tag = 1;
+    }
     // A generator's body is entered by a resume; a body without machine
     // code by the runtime.
     if entry.generator || entry.data != 0 || len < entry.reads as usize || entry.arity as usize > FN_ENTRY_WORDS {
@@ -1936,7 +1971,9 @@ pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, 
     }
     c.host_calls += 1;
     c.gc_epoch += 1;
-    entry.entry as usize as u64
+    let at = entry.entry as usize as u64;
+    debug_assert!(at & 1 == 0, "an entry's address is aligned");
+    at | tag
 }
 
 /// The words [`coil_native_fn_entry`] writes at most.
@@ -2524,6 +2561,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_view", coil_native_view as *const u8),
         ("coil_native_str_view", coil_native_str_view as *const u8),
         ("coil_native_fn_entry", coil_native_fn_entry as *const u8),
+        ("coil_native_fn_entry_pair", coil_native_fn_entry_pair as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
@@ -2553,4 +2591,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 36;
+const HELPERS: usize = 37;

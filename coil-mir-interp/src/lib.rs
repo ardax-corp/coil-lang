@@ -323,6 +323,7 @@ pub(crate) fn prepare_with(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, 
             cleanup: b.pad.is_some(),
             entry: exec::entry,
             data: std::ptr::from_ref(b) as usize,
+            twin: 0,
         })
         .collect();
     InterpProgram { entries, compiled, refused, sites, keep: program }

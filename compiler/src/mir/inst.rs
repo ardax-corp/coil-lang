@@ -495,6 +495,12 @@ pub enum MirInst {
         /// How many of `args` (the last ones) are instance dictionaries a
         /// `PolyFn` callee takes after its arguments.
         dicts: u32,
+        /// A two-word result (`Option<int>`, `(int, int)`): its second
+        /// word, and `unpair`, a body taking the result's one word (its
+        /// box) and returning its two words. An engine enters the
+        /// callee's two-word twin ([`super::MirFunc::pair_twin`]) when it
+        /// has one; otherwise it calls the callee and `unpair` on the word.
+        pair: Option<(ValueId, crate::bodies::Label)>,
     },
     /// Taken-edge / last-arm payload of [`Terminator::JumpIfMatch`] or
     /// `Unpack` (I2 / D3). `index` is the declaration-order payload word.
@@ -1136,6 +1142,7 @@ impl MirInst {
                 dest_hi: Some(h), ..
             } => Some(h),
             Self::VecLoop { pos: Some(p), .. } => Some(p),
+            Self::CallIndirect { pair: Some((h, _)), .. } => Some(h),
             _ => None,
         };
         std::iter::once(self.dest()).chain(hi)

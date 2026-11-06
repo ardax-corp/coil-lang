@@ -4923,3 +4923,53 @@ fn main() {
     );
     assert_eq!(output, "closed");
 }
+
+/// A lambda whose result moves as two words (`Option<int>`) gets a twin
+/// returning the two words, and a call through the function value reads
+/// them with a two-word `CallIndirect`: neither side boxes the result.
+#[test]
+fn function_value_pair_result_takes_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn run(int -> Option<int> f) -> int {
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += match f(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    return s;
+}
+fn main() {
+    let k = 2;
+    let r = run(fn (int x) use (k) {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / k);
+    });
+    let _ = write(stdout(), to_bytes(format("%i", r)));
+}
+"#;
+    assert_eq!(run_example_src(src), "16");
+
+    let mut pipeline = test_pipeline();
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("pair-returning lambda");
+    assert!(
+        compiled.insts("run").any(|i| matches!(i, MirInst::CallIndirect { pair: Some(_), .. })),
+        "`run` reads the result as two words"
+    );
+    let twins: Vec<_> = compiled.bodies.iter().filter_map(|b| b.mir.pair_twin).collect();
+    assert_eq!(twins.len(), 1, "the lambda has a two-word twin");
+    let twin = compiled.bodies.iter().find(|b| b.entry == Some(twins[0])).expect("the twin body");
+    assert!(twin.mir.ret_hi_ty.is_some(), "the twin returns two words");
+    assert!(
+        !twin.mir.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "the twin builds no box"
+    );
+}
