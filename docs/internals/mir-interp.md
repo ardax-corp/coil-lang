@@ -115,7 +115,7 @@ serves everything with no machine code. The bytecode VM is deleted.
 | 6. Debugger and coverage | Done (below) |
 | 7. wasm | Done: the interpreter runs programs, tests and comptime in `coil.wasm`, generators and tasks park on the heap, and comptime runs on an `Isolate` (below) |
 | 8. Delete the VM | Done: bodies by identity, not bytecode PC; archive major 7, MIR and data only ([archive-history.md](archive-history.md)) |
-| 9. Start-up | Next: lazy compile on first call and a code cache |
+| 9. Start-up | Code cache done ([native.md](native.md#code-cache)). Open: the first run of a program still compiles all of it |
 
 **The MIR archive format** (`compiler/src/mir/archive.rs`) builds for wasm and carries
 a body whole. `COIL_MIR_ARCHIVE_CHECK=1` makes `prepare` send every body through it,
@@ -168,8 +168,8 @@ call that opens a driver.
 
 - `.ccoil` is a **MIR archive that JITs on load**, so archives are portable across
   hosts and `coil run x.ccoil` keeps working.
-- **Start-up is accepted for now.** The JIT's overhead on small programs is tuned in
-  step 9.
+- **The first run compiles everything.** A repeat run loads its code from the cache;
+  a new program pays for all its bodies once.
 
 **Parking.** wasm has no stacks to switch, so nothing can leave a frame on one. The
 interpreter's frames are already on the heap: a yield or a task's wait *parks* the

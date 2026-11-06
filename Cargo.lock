@@ -444,6 +444,7 @@ dependencies = [
  "cranelift-native",
  "cranelift-object",
  "machine",
+ "sha2",
 ]
 
 [[package]]

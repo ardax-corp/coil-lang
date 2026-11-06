@@ -11,7 +11,10 @@
 //! interpreter.
 #![cfg(not(target_family = "wasm"))]
 
+mod image;
 pub mod section;
+
+pub use image::load as load_image;
 
 use std::collections::{HashMap, HashSet};
 
@@ -52,17 +55,41 @@ pub struct NativeProgram {
     pub refused: Vec<(String, String)>,
     /// The panic sites the code names (see `machine::native::NativeSite`).
     pub sites: Vec<NativeSite>,
+    /// The code as bytes for [`load_image`], when [`jit_keeping_image`] asked.
+    pub image: Option<Vec<u8>>,
 }
 
 /// Compile every eligible body of `bodies` in memory. `entry_pcs` maps a
 /// body's name to its entry id. The code stays mapped for the
 /// rest of the process.
+///
+/// Under `COIL_CODE_IMAGE_CHECK` the program goes through a code image and
+/// the run uses the copy, as a code cache's next run would.
 pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<NativeProgram, String> {
+    if std::env::var_os("COIL_CODE_IMAGE_CHECK").is_some() {
+        let program = jit_keeping_image(bodies, entry_pcs)?;
+        return match &program.image {
+            Some(image) => image::load(image),
+            // A refused body leaves native code incomplete, so no image.
+            None if !program.refused.is_empty() => Ok(program),
+            None => Err("the code did not fit a code image".to_string()),
+        };
+    }
+    jit_with(bodies, entry_pcs, false)
+}
+
+/// [`jit`], with [`NativeProgram::image`] for [`load_image`] when every body
+/// compiled and the code fits an image.
+pub fn jit_keeping_image(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<NativeProgram, String> {
+    jit_with(bodies, entry_pcs, true)
+}
+
+fn jit_with(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, keep_image: bool) -> Result<NativeProgram, String> {
     // A body `plan` admits may still fail to lower; its callers already
     // name it, so leave it out and build the module again.
     let mut excluded = HashMap::new();
     loop {
-        match jit_once(bodies, entry_pcs, &excluded)? {
+        match jit_once(bodies, entry_pcs, &excluded, keep_image)? {
             Attempt::Done(program) => return Ok(program),
             Attempt::Without(i, why) => {
                 excluded.insert(i, why);
@@ -141,7 +168,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
             .map_err(|e| e.to_string())?;
         let builder = cranelift_object::ObjectBuilder::new(isa, "coil_aot", default_libcall_names()).map_err(|e| e.to_string())?;
         let mut module = cranelift_object::ObjectModule::new(builder);
-        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
+        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan, None)? {
             Ok(done) => done,
             Err((i, why)) => {
                 excluded.insert(i, why);
@@ -309,47 +336,67 @@ enum Attempt {
     Without(usize, String),
 }
 
-fn jit_once(
-    bodies: &[NativeBody],
-    entry_pcs: &HashMap<String, u32>,
-    excluded: &HashMap<usize, String>,
-) -> Result<Attempt, String> {
-    let plan = plan_without(bodies, excluded, entry_pcs);
-    let refused = plan.refused.clone();
-    if plan.compile.is_empty() {
-        return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused, sites: Vec::new() }));
-    }
-
+/// The ISA native code is compiled for here: what a code image is only good
+/// for, along with the build that made it.
+fn jit_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
     // The collector walks native frames by their frame pointers.
     flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
-    let isa = isa_builder
-        .finish(settings::Flags::new(flags))
-        .map_err(|e| e.to_string())?;
-    let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
+    isa_builder.finish(settings::Flags::new(flags)).map_err(|e| e.to_string())
+}
+
+/// A module for JIT code, with `reserve` bytes of address space.
+fn jit_module(reserve: usize) -> Result<JITModule, String> {
+    let mut jb = JITBuilder::with_isa(jit_isa()?, default_libcall_names());
     for &(name, ptr) in machine::native::helper_symbols() {
         jb.symbol(name, ptr);
     }
     // One reservation: code reaches its read-only data by 32-bit offsets, and
     // the default provider maps each section where the system puts it, which
     // beside a process's big fiber stacks may be out of reach.
-    if let Ok(arena) = cranelift_jit::ArenaMemoryProvider::new_with_size(jit_reserve(bodies, &plan)) {
+    if let Ok(arena) = cranelift_jit::ArenaMemoryProvider::new_with_size(reserve) {
         jb.memory_provider(Box::new(arena));
     }
-    let mut module = JITModule::new(jb);
+    Ok(JITModule::new(jb))
+}
 
-    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan)? {
+/// What a code image depends on besides the program and the build: this
+/// host's target and CPU features.
+pub fn image_fingerprint() -> Result<String, String> {
+    let isa = jit_isa()?;
+    let flags: Vec<String> = isa.isa_flags().iter().map(ToString::to_string).collect();
+    Ok(format!("{} {}", isa.triple(), flags.join(" ")))
+}
+
+fn jit_once(
+    bodies: &[NativeBody],
+    entry_pcs: &HashMap<String, u32>,
+    excluded: &HashMap<usize, String>,
+    keep_image: bool,
+) -> Result<Attempt, String> {
+    let plan = plan_without(bodies, excluded, entry_pcs);
+    let refused = plan.refused.clone();
+    if plan.compile.is_empty() {
+        return Ok(Attempt::Done(NativeProgram { entries: Vec::new(), compiled: Vec::new(), refused, sites: Vec::new(), image: None }));
+    }
+
+    let reserve = jit_reserve(bodies, &plan);
+    let mut module = jit_module(reserve)?;
+    let mut recorder = keep_image.then(image::Recorder::default);
+
+    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, entry_pcs, &plan, recorder.as_mut())? {
         Ok(done) => done,
         Err((i, why)) => return Ok(Attempt::Without(i, why)),
     };
     module.finalize_definitions().map_err(|e| e.to_string())?;
-    for (id, (size, fmaps)) in maps {
-        machine::native::register_stack_maps(module.get_finalized_function(id) as u64, size, fmaps);
+    for (id, (size, fmaps)) in &maps {
+        machine::native::register_stack_maps(module.get_finalized_function(*id) as u64, *size, fmaps.clone());
     }
 
     let mut entries = Vec::new();
+    let mut entry_funcs = Vec::new();
     let mut compiled = Vec::new();
     for i in defined {
         let body = &bodies[i];
@@ -364,11 +411,17 @@ fn jit_once(
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
         let generator = is_generator(&body.mir);
         let cleanup = body.mir.cleanup.is_some();
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.runtime_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 });
+        let native = NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.runtime_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 };
+        entries.push(native);
+        entry_funcs.push(image::Entry { func: ids.entry[&i], entry: native });
     }
+    // A program with refused bodies does not run on native code alone.
+    let image = recorder.filter(|_| refused.is_empty()).and_then(|recorder| {
+        image::encode(image::Parts { module: &module, reserve, recorder, maps: &maps, entries: &entry_funcs, sites: &sites, compiled: &compiled })
+    });
     // The code must outlive every `Runtime` that runs it.
     std::mem::forget(module);
-    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites }))
+    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites, image }))
 }
 
 /// Address space to reserve for the code and data of `plan`'s bodies: far
@@ -427,9 +480,10 @@ fn define_all<M: Module>(
     bodies: &[NativeBody],
     entry_pcs: &HashMap<String, u32>,
     plan: &Plan,
+    mut recorder: Option<&mut image::Recorder>,
 ) -> Result<Result<Defined, (usize, String)>, String> {
     let ids = declare(module, bodies, plan)?;
-    define_trampolines(module, &ids.tramps)?;
+    define_trampolines(module, &ids.tramps, recorder.as_deref_mut())?;
     let fcfg = module.isa().frontend_config();
     let mut fbc = FunctionBuilderContext::new();
     let mut ctx = module.make_context();
@@ -456,6 +510,9 @@ fn define_all<M: Module>(
             return Ok(Err((i, format!("cranelift: {e:?}"))));
         }
         maps.push((ids.imp[&i], stack_maps(&ctx)));
+        if let Some(r) = recorder.as_deref_mut() {
+            r.add(ids.imp[&i], &ctx);
+        }
         module.clear_context(&mut ctx);
 
         if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
@@ -478,6 +535,9 @@ fn define_all<M: Module>(
                 return Ok(Err((i, format!("cranelift pad: {e:?}"))));
             }
             maps.push((pad_id, stack_maps(&ctx)));
+            if let Some(r) = recorder.as_deref_mut() {
+                r.add(pad_id, &ctx);
+            }
             module.clear_context(&mut ctx);
         }
 
@@ -486,6 +546,9 @@ fn define_all<M: Module>(
         module
             .define_function(ids.entry[&i], &mut ctx)
             .map_err(|e| format!("cranelift entry of `{}`: {e:?}", body.name))?;
+        if let Some(r) = recorder.as_deref_mut() {
+            r.add(ids.entry[&i], &ctx);
+        }
         module.clear_context(&mut ctx);
         defined.push(i);
     }
@@ -495,7 +558,7 @@ fn define_all<M: Module>(
 /// A compiled function's code size and stack maps: per call that holds
 /// heap words across it, the return address's offset in the function and
 /// the stack-pointer offsets of the slots that hold them.
-type FuncMaps = (u32, Vec<(u32, Vec<u32>)>);
+pub(crate) type FuncMaps = (u32, Vec<(u32, Vec<u32>)>);
 
 fn stack_maps(ctx: &cranelift_codegen::Context) -> FuncMaps {
     let Some(code) = ctx.compiled_code() else {
@@ -1143,7 +1206,7 @@ fn trampoline(module: &mut impl Module, symbol: &str, sig: &Signature, tramps: &
 }
 
 /// Define [`trampoline`]s: `ctx.native_fp = fp; return helper(args...)`.
-fn define_trampolines<M: Module>(module: &mut M, tramps: &[(FuncId, FuncId, Signature)]) -> Result<(), String> {
+fn define_trampolines<M: Module>(module: &mut M, tramps: &[(FuncId, FuncId, Signature)], mut recorder: Option<&mut image::Recorder>) -> Result<(), String> {
     let fcfg = module.isa().frontend_config();
     let mut fbc = FunctionBuilderContext::new();
     let mut ctx = module.make_context();
@@ -1163,6 +1226,9 @@ fn define_trampolines<M: Module>(module: &mut M, tramps: &[(FuncId, FuncId, Sign
         b.seal_all_blocks();
         b.finalize(fcfg);
         module.define_function(*tramp, &mut ctx).map_err(|e| format!("cranelift trampoline: {e:?}"))?;
+        if let Some(r) = recorder.as_deref_mut() {
+            r.add(*tramp, &ctx);
+        }
         module.clear_context(&mut ctx);
     }
     Ok(())

@@ -392,6 +392,30 @@ arguments and live words have no limit in native code, and the corpus reports no
 refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`, Windows) the
 package warns and falls back to the runner.
 
+## Code cache
+
+Compiling is nearly all of a program's start: for `spool` (574 bodies), 335 ms in
+Cranelift and 110 ms lowering, against 5 ms decoding the MIR and 3 ms planning. So `coil
+FILE` and `coil run` keep the code in `~/.cache/coil/code` (`src/code_cache.rs`) and a
+repeat run loads it: 482 ms becomes 9 ms there. `--no-build-cache` skips it. Neither
+`coil test` nor a JIT runner uses it.
+
+- **Key:** sha256 of the MIR section, the build id, the host's target and CPU features
+  (`coil_native::image_fingerprint`) and every `COIL_*` variable. A hit skips decoding.
+- **Entry:** a code image (`coil-native/src/image.rs`): each function's bytes and
+  relocations, the stack maps, entries and sites. `load_image` declares the same
+  functions in the same order, so `FuncId`s match, and hands the bytes to
+  `define_function_bytes`, which relocates them for this process. Code holds no
+  addresses of its own: the AOT object relocates the same lowering.
+- **Damage:** the image carries a sha256 of itself. One that does not load warns, goes,
+  and the run compiles. Machine code is not checked otherwise, so the directory is
+  `0700` and a hit trusts its owner, as running their own binaries does.
+- **Size:** at most 256 entries, least recently used first, as the build cache.
+
+`COIL_CODE_IMAGE_CHECK=1` sends every JIT through an image and runs the copy, and fails
+if the code does not fit one. CI's `native` cell runs the corpus so, and GC stress runs
+`memory` so: any program a cache hit would break fails there.
+
 ### JIT runner
 
 `coil-embed` is the runtime and Cranelift, with no parser or linker. `coil package

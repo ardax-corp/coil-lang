@@ -18,6 +18,8 @@ use rkyv::rancor::Error;
 
 mod build_cache;
 mod cli;
+#[cfg(not(target_family = "wasm"))]
+mod code_cache;
 mod package_app;
 
 use cli::{CliArgs, Command, DEFAULT_OUT, parse_args, print_version};
@@ -456,6 +458,9 @@ static RAW_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// `--mir` or `--cow-report`: the MIR goes to the interpreter, not to
 /// Cranelift.
 static RUN_ON_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Off with `--no-build-cache`: see [`code_cache_on`].
+#[cfg(not(target_family = "wasm"))]
+static CODE_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Whether the interpreter runs this process's MIR: `--mir`, or a host with
 /// no native code.
@@ -465,16 +470,66 @@ fn interprets() -> bool {
 
 /// Hand the captured MIR to the engine that runs it for the coming run.
 fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common::ProgramDebug) {
-    install_bodies(bodies, &entry_pcs(debug));
+    let pcs = entry_pcs(debug);
+    #[cfg(not(target_family = "wasm"))]
+    let key = code_cache_on().then(|| code_cache::key(&compiler::native_mir::archive::encode(&bodies, &pcs))).flatten();
+    #[cfg(target_family = "wasm")]
+    let key: Option<String> = None;
+    if !install_cached_code(key.as_deref()) {
+        install_bodies(bodies, &pcs, key.as_deref());
+    }
 }
 
-/// Hand `bodies` to the engine that runs them. The interpreter runs what
-/// native code refuses.
-fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::collections::HashMap<String, u32>) {
+/// Whether this run uses the code cache: `coil FILE` and `coil run` on native
+/// code, without `--no-build-cache`.
+#[cfg(not(target_family = "wasm"))]
+fn code_cache_on() -> bool {
+    !interprets() && CODE_CACHE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Install the code stored for `key`. `false` when there is none that loads:
+/// a damaged entry goes, and the run compiles.
+fn install_cached_code(key: Option<&str>) -> bool {
     #[cfg(not(target_family = "wasm"))]
-    if !interprets() && install_native_bodies(&bodies, pcs) {
+    if let (Some(key), Some(dir)) = (key, code_cache::dir())
+        && let Some(image) = code_cache::load(&dir, key)
+    {
+        let stats = std::env::var_os("COIL_NATIVE_STATS");
+        return match coil_native::load_image(&image) {
+            Ok(program) => {
+                if stats.is_some() {
+                    eprintln!("{}", coil_native::describe(&program));
+                    eprintln!("native: code from the cache");
+                }
+                if stats.as_ref().is_some_and(|v| v == "2") {
+                    for name in &program.compiled {
+                        eprintln!("  native: {name}");
+                    }
+                }
+                machine::native::install_for_next_run(program.entries, program.sites, true);
+                true
+            }
+            Err(e) => {
+                eprintln!("warning: cached code for this program does not load ({e}); compiling it again");
+                code_cache::remove(&dir, key);
+                false
+            }
+        };
+    }
+    #[cfg(target_family = "wasm")]
+    let _ = key;
+    false
+}
+
+/// Hand `bodies` to the engine that runs them, keeping the code under `key`.
+/// The interpreter runs what native code refuses.
+fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::collections::HashMap<String, u32>, key: Option<&str>) {
+    #[cfg(not(target_family = "wasm"))]
+    if !interprets() && install_native_bodies(&bodies, pcs, key) {
         return;
     }
+    #[cfg(target_family = "wasm")]
+    let _ = key;
     let program = coil_mir_interp::prepare(bodies, pcs);
     for (name, why) in &program.refused {
         eprintln!("error: `{name}` cannot run: {why}");
@@ -491,8 +546,15 @@ fn install_section(name: &str, section: &[u8]) {
     if section.is_empty() {
         return;
     }
+    #[cfg(not(target_family = "wasm"))]
+    let key = code_cache_on().then(|| code_cache::key(section)).flatten();
+    #[cfg(target_family = "wasm")]
+    let key: Option<String> = None;
+    if install_cached_code(key.as_deref()) {
+        return;
+    }
     match compiler::native_mir::archive::decode(section) {
-        Ok((bodies, pcs)) => install_bodies(bodies, &pcs),
+        Ok((bodies, pcs)) => install_bodies(bodies, &pcs, key.as_deref()),
         Err(e) => {
             eprintln!("error: `{name}`: {e}");
             exit(1);
@@ -511,8 +573,10 @@ fn entry_pcs(debug: &common::ProgramDebug) -> std::collections::HashMap<String, 
 fn install_native_bodies(
     bodies: &[compiler::native_mir::NativeBody],
     pcs: &std::collections::HashMap<String, u32>,
+    key: Option<&str>,
 ) -> bool {
-    let program = match coil_native::jit(bodies, pcs) {
+    let compiled = if key.is_some() { coil_native::jit_keeping_image(bodies, pcs) } else { coil_native::jit(bodies, pcs) };
+    let mut program = match compiled {
         Ok(program) => program,
         Err(e) => {
             eprintln!("warning: native compile failed ({e}); running on the interpreter");
@@ -532,6 +596,10 @@ fn install_native_bodies(
             eprintln!("warning: `{name}` has no native code: {why}; running on the interpreter");
         }
         return false;
+    }
+    if let (Some(key), Some(dir), Some(image)) = (key, code_cache::dir(), program.image.take()) {
+        // A run that cannot keep its code still runs.
+        let _ = code_cache::store(&dir, key, &image);
     }
     machine::native::install_for_next_run(program.entries, program.sites, true);
     true
@@ -843,6 +911,8 @@ fn main() {
                     set_program_args(&filename, &cli.program_args);
                     let cache = BuildCache::new(cache_options.as_deref(), &filename);
                     RUN_ON_MIR.store(cli.mir || cli.cow_report, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(not(target_family = "wasm"))]
+                    CODE_CACHE.store(cli.build_cache, std::sync::atomic::Ordering::Relaxed);
                     // Only `-O 0` is raw: above it the interpreter runs what
                     // native code compiles.
                     RAW_MIR.store(cli.mir && cli.opt_level == compiler::OptLevel::None, std::sync::atomic::Ordering::Relaxed);
@@ -871,6 +941,8 @@ fn main() {
                 }
                 Command::Run { archive } => {
                     RUN_ON_MIR.store(cli.mir || cli.cow_report, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(not(target_family = "wasm"))]
+                    CODE_CACHE.store(cli.build_cache, std::sync::atomic::Ordering::Relaxed);
                     set_program_args(&archive, &cli.program_args);
                     cmd_run(&mut pipeline, &archive);
                 }

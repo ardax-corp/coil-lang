@@ -162,6 +162,11 @@ fn prune(dir: &Path) {
             _ => {}
         }
     }
+    keep_newest(entries);
+}
+
+/// Remove all but the newest [`MAX_ENTRIES`] of `entries`.
+pub(crate) fn keep_newest(mut entries: Vec<(std::time::SystemTime, PathBuf)>) {
     if entries.len() <= MAX_ENTRIES {
         return;
     }
@@ -181,7 +186,7 @@ fn absolute(p: &Path) -> PathBuf {
     })
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

@@ -476,13 +476,17 @@ jobs:
               # the interpreter's scan.
               $run --harness harness-bin/gc-stress/coil-test -- --engine native --wall-timeout 1200 $FLAGS
               $run --harness harness-bin/gc-stress/coil-test memory generics -- --engine native -O 0 --wall-timeout 1200 $FLAGS
+              # Stack maps as a code image carries them.
+              COIL_CODE_IMAGE_CHECK=1 $run --harness harness-bin/gc-stress/coil-test memory -- --engine native --wall-timeout 1200 $FLAGS
               $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS
               # And the frames parked on the heap, as on wasm.
               COIL_NO_FIBERS=1 $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS ;;
             # Every corpus on native code (`docs/internals/native.md`). Each
             # run also records the bodies native code refused
-            # (`scripts/native_inventory.py`, next step).
-            native) mkdir -p target && COIL_NATIVE_INVENTORY="$PWD/target/native-inventory.tsv" $run -- --engine native $FLAGS ;;
+            # (`scripts/native_inventory.py`, next step). Every program goes
+            # through a code image and runs from the copy, as a code cache
+            # hit would: the `default` cells run compiled code as it is.
+            native) mkdir -p target && COIL_CODE_IMAGE_CHECK=1 COIL_NATIVE_INVENTORY="$PWD/target/native-inventory.tsv" $run -- --engine native $FLAGS ;;
             # Every corpus on the MIR interpreter: raw MIR at `-O 0`, the
             # reference the optimized engines are compared against
             # (`docs/internals/mir-interp.md`).
