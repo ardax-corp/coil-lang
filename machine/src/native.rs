@@ -211,9 +211,9 @@ pub type RootScanFn = unsafe fn(data: *mut std::ffi::c_void, visit: &mut dyn FnM
 pub type SiteScanFn = unsafe fn(data: *mut std::ffi::c_void, out: &mut Vec<u32>);
 
 /// The pad of one native frame a panic unwound, with a copy of its homes
-/// laid out as a masked root record (`[next, n | ROOTS_MASKED, mask,
-/// words...]`, see [`NativeCtx::roots`]): a collection while pads run
-/// keeps (and may move) the heap words among them.
+/// laid out as a masked root record (`[next, n | ROOTS_MASKED, masks...,
+/// words...]`, see [`NativeCtx::roots`] and [`mask_words`]): a collection
+/// while pads run keeps (and may move) the heap words among them.
 pub struct NativePad {
     pub func: NativePadFn,
     pub homes: Vec<u64>,
@@ -221,9 +221,26 @@ pub struct NativePad {
     pub data: usize,
 }
 
-/// Set in a root record's count: the next word is a mask of which words
-/// are heap words (the rest are scalars to skip).
+/// Set in a root record's count: the next [`mask_words`] words are a mask
+/// of which words are heap words (the rest are scalars to skip), bit `i`
+/// of word `i / 64` for word `i`.
 pub const ROOTS_MASKED: u64 = 1 << 63;
+
+/// How many mask words a masked root record of `n` words carries: one per
+/// 64 words, and at least one.
+pub const fn mask_words(n: usize) -> usize {
+    if n == 0 { 1 } else { n.div_ceil(64) }
+}
+
+/// The masks of a masked root record of `n` words whose heap words are
+/// `heap` ([`ROOTS_MASKED`]).
+pub fn root_masks(n: usize, heap: impl IntoIterator<Item = usize>) -> Vec<u64> {
+    let mut masks = vec![0u64; mask_words(n)];
+    for h in heap {
+        masks[h / 64] |= 1 << (h % 64);
+    }
+    masks
+}
 
 /// Set in a root record's count: its words are ambiguous (an opaque word
 /// of a generic body may be an immediate), so the collector pins what they
@@ -308,10 +325,10 @@ impl NativeCtx {
                     let scan = std::mem::transmute::<usize, RootScanFn>(*at.add(2) as usize);
                     scan(*at.add(3) as *mut std::ffi::c_void, &mut visit);
                 } else if n & ROOTS_MASKED != 0 {
-                    let mask = *at.add(2);
-                    for i in 0..count.min(64) as usize {
-                        if mask & (1 << i) != 0 {
-                            visit(at.add(3 + i), ambiguous);
+                    let words = mask_words(count as usize);
+                    for i in 0..count as usize {
+                        if *at.add(2 + i / 64) & (1 << (i % 64)) != 0 {
+                            visit(at.add(2 + words + i), ambiguous);
                         }
                     }
                 } else {
@@ -2294,20 +2311,25 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, lay
 }
 
 /// A frame with `defer`s on its way out: after a panic, keep its
-/// cleanup pad `func` and a copy of its `n` homes at `homes` (`mask`: the
-/// heap words among them) for the runtime to run ([`NativeCtx::pads`]).
+/// cleanup pad `func` and a copy of its `n` homes at `homes` (`masks`, at
+/// [`mask_words`] words: the heap words among them) for the runtime to run
+/// ([`NativeCtx::pads`]).
 ///
 /// # Safety
-/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
+/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words and
+/// `masks` at the mask words for them.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, mask: u64) {
+pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, masks: *const u64) {
     if func == 0 {
         return;
     }
     // SAFETY: the backend passes a function with the `NativePadFn` ABI.
     let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
+    let words = mask_words((n & !ROOTS_AMBIGUOUS) as usize);
+    // SAFETY: the backend passes that many mask words.
+    let masks = unsafe { std::slice::from_raw_parts(masks, words) };
     // SAFETY: as this function's.
-    unsafe { defer_pad(ctx, func, 0, homes, n, mask) };
+    unsafe { defer_pad(ctx, func, 0, homes, n, masks) };
 }
 
 /// [`coil_native_defer`] of a pad that reads `data` from
@@ -2315,14 +2337,16 @@ pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes
 ///
 /// # Safety
 /// As [`coil_native_defer`].
-pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64, mask: u64) {
+pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64, masks: &[u64]) {
     let c = unsafe { &mut *ctx };
     if c.bail != BAIL_PANIC || c.pads.is_null() {
         return;
     }
     // `n` may carry `ROOTS_AMBIGUOUS` (an opaque body's `int` homes).
-    let (flags, n) = (n & ROOTS_AMBIGUOUS, (n & !ROOTS_AMBIGUOUS).min(64));
-    let mut rec = vec![0, n | ROOTS_MASKED | flags, mask];
+    let (flags, n) = (n & ROOTS_AMBIGUOUS, n & !ROOTS_AMBIGUOUS);
+    debug_assert_eq!(masks.len(), mask_words(n as usize));
+    let mut rec = vec![0, n | ROOTS_MASKED | flags];
+    rec.extend_from_slice(masks);
     // SAFETY: `homes` holds `n` words.
     rec.extend((0..n as usize).map(|i| unsafe { *homes.add(i) }));
     unsafe { (*c.pads).push(NativePad { func, homes: rec, data }) };
@@ -2367,7 +2391,8 @@ pub(crate) fn run_pads(
         let mut inner = Vec::new();
         ctx.pads = &mut inner;
         ctx.entry_data = pads[i].data as u64;
-        let homes = pads[i].homes[3..].as_ptr();
+        let words = mask_words((pads[i].homes[1] & !(ROOTS_MASKED | ROOTS_AMBIGUOUS)) as usize);
+        let homes = pads[i].homes[2 + words..].as_ptr();
         // SAFETY: the backend compiled `func` as this frame's pad.
         let _ = unsafe { (pads[i].func)(&mut ctx, homes) };
         if ctx.bail == BAIL_PANIC {

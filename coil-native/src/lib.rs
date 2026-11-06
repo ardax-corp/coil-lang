@@ -926,9 +926,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
     if let Some(why) = f.emit_refusal {
         return Err(format!("no emission: {why}"));
     }
-    if f.homes.len() > 64 {
-        return Err("more than 64 defer homes".into());
-    }
     if let Some(t) = f.homes.iter().find(|t| !numeric(**t)) {
         return Err(format!("defer home of {t:?}"));
     }
@@ -2582,9 +2579,18 @@ impl<'a> Lower<'a> {
             // roots every home ambiguously.
             let amb = if self.amb_homes.is_empty() { 0 } else { ROOTS_AMBIGUOUS };
             let n = self.b.ins().iconst(types::I64, (f.homes.len() as u64 | amb) as i64);
-            let mask = self.heap_homes.iter().chain(&self.amb_homes).fold(0u64, |m, &h| m | (1 << h));
-            let mask = self.b.ins().iconst(types::I64, mask as i64);
-            self.b.ins().call(self.defer, &[self.ctx, fp, at, n, mask]);
+            let masks = machine::native::root_masks(f.homes.len(), self.heap_homes.iter().chain(&self.amb_homes).map(|&h| usize::from(h)));
+            let mask_slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                (masks.len() * 8) as u32,
+                3,
+            ));
+            for (i, &m) in masks.iter().enumerate() {
+                let m = self.b.ins().iconst(types::I64, m as i64);
+                self.b.ins().stack_store(types::I64, m, mask_slot, (i * 8) as i32);
+            }
+            let masks = self.b.ins().stack_addr(types::I64, mask_slot, 0);
+            self.b.ins().call(self.defer, &[self.ctx, fp, at, n, masks]);
         }
         let mut zeros = Vec::new();
         for t in std::iter::once(self.ret).chain(self.ret_hi) {
