@@ -223,6 +223,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         // Executables are position independent on most hosts.
         flags.set("is_pic", "true").map_err(|e| e.to_string())?;
         flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
+        stack_probes(&mut flags)?;
         let isa = cranelift_native::builder()
             .map_err(|e| e.to_string())?
             .finish(settings::Flags::new(flags))
@@ -406,8 +407,17 @@ fn jit_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     flags.set("enable_verifier", VERIFY_CLIF).map_err(|e| e.to_string())?;
     // The collector walks native frames by their frame pointers.
     flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
+    stack_probes(&mut flags)?;
     let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
     isa_builder.finish(settings::Flags::new(flags)).map_err(|e| e.to_string())
+}
+
+/// Probe each page of a frame larger than one: Windows commits a thread's
+/// stack a guard page at a time, so a frame that steps past the guard page
+/// faults instead of growing the stack.
+fn stack_probes(flags: &mut settings::Builder) -> Result<(), String> {
+    flags.set("enable_probestack", "true").map_err(|e| e.to_string())?;
+    flags.set("probestack_strategy", "inline").map_err(|e| e.to_string())
 }
 
 /// Cranelift's verifier: debug builds, which CI runs over every corpus. It
