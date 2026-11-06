@@ -1903,8 +1903,11 @@ impl Compiler {
                 };
                 let messages = self.messages.len();
                 self.swap_module_ctx(&mut ctx, true);
-                self.inst_clone_queue.extend(reqs);
+                // The clones queued for the module being compiled wait: their
+                // types may be ones `seq` does not know.
+                let waiting = std::mem::replace(&mut self.inst_clone_queue, reqs.into());
                 self.emit_instance_clones(children);
+                self.inst_clone_queue = waiting;
                 self.swap_module_ctx(&mut ctx, false);
                 self.module_ctxs.insert(seq, ctx);
                 // Its module already reported on this code: keep only errors.
