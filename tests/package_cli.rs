@@ -789,7 +789,7 @@ mod linked {
         let libs: &[&str] = if cfg!(target_os = "macos") {
             &["-liconv", "-lSystem", "-lc", "-lm"]
         } else if cfg!(windows) {
-            &["-lws2_32", "-luserenv", "-lbcrypt", "-lntdll", "-ladvapi32"]
+            &["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"]
         } else {
             &["-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
         };

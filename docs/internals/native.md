@@ -396,8 +396,10 @@ functions and a runtime lifecycle, which do not exist yet. `extern` blocks named
 A body native code refuses is an error naming it and why, at package time on both kinds
 of executable. No source program reaches one today: parameters, captures, generator
 arguments and live words have no limit in native code, and the corpus reports no
-refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`, Windows) the
-package warns and falls back to the runner.
+refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`) the package warns
+and falls back to the runner. On Windows `cc` is a mingw toolchain's, so without one a
+package is the runner. `.github/workflows/native-platforms.yml` runs every way a program
+starts on macOS and Windows, and a fallback fails it.
 
 ## Compiling in parallel
 

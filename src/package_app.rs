@@ -327,7 +327,7 @@ fn system_libs() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         &["-Wl,-dead_strip", "-liconv", "-lSystem", "-lc", "-lm"]
     } else if cfg!(windows) {
-        &["-Wl,--gc-sections", "-lws2_32", "-luserenv", "-lbcrypt", "-lntdll", "-ladvapi32"]
+        &["-Wl,--gc-sections", "-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"]
     } else {
         &["-Wl,--gc-sections", "-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
     }
