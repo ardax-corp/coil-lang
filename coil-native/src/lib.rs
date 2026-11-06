@@ -4022,6 +4022,37 @@ mod tests {
     }
 
     #[test]
+    fn a_forward_string_byte_scan_passes_the_verifier() {
+        // `scan(s, from, bound, c)`: the first `s[i] == c` in `from..bound`.
+        // Debug builds verify the CLIF, and a refused body leaves the
+        // program's native code incomplete.
+        use compiler::native_mir::{LaneExpr, LaneVal, MirCmpOp, MirConst};
+        let mut f = MirFunc::new("scan");
+        f.blocks.clear();
+        f.types = vec![MirTy::HeapRef, MirTy::I64, MirTy::I64, MirTy::I64, MirTy::I64, MirTy::I64];
+        f.params = vec![ValueId(0), ValueId(1), ValueId(2), ValueId(3)];
+        f.ret_ty = Some(MirTy::I64);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::Const { dest: ValueId(4), c: MirConst::I64(0) });
+        b.insts.push(MirInst::ByteScan {
+            dest: ValueId(5),
+            from: ValueId(1),
+            bound: ValueId(2),
+            inclusive: false,
+            backward: false,
+            streams: vec![(ValueId(0), ValueId(4))],
+            scalars: vec![ValueId(3)],
+            expr: LaneExpr::Cmp { op: MirCmpOp::Eq, lhs: LaneVal::Stream(0), rhs: LaneVal::Scalar(0) },
+        });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(5)), hi: None });
+        f.blocks.push(b);
+        let bodies = vec![NativeBody { name: "scan".into(), entry: Some(Label(0)), mir: f }];
+        let pcs = HashMap::from([("scan".to_string(), 0u32)]);
+        let p = jit(&bodies, &pcs).expect("jit");
+        assert!(p.refused.is_empty(), "refused: {:?}", p.refused);
+    }
+
+    #[test]
     fn a_callee_that_fails_to_lower_keeps_its_callers_on_the_vm() {
         // `g` passes `plan` but has no lowering (`!` of a float); `f` calls it.
         let mut g = MirFunc::new("g");
