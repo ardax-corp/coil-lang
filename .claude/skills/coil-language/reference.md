@@ -135,4 +135,4 @@ let f = declare(lib, "strlen", (String,), Int)?;
 
 ## What does NOT exist
 
-See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/not-builtins.md) (`/docs/language/not-builtins`): no general `sort`, string slice/trim builtins, HTTP in VM, manual alloc/free.
+See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/not-builtins.md) (`/docs/language/not-builtins`): no general `sort`, string slice/trim builtins, HTTP in the runtime, manual alloc/free.

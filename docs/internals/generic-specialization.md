@@ -14,17 +14,14 @@ Three changes take the dictionary cost away for ground calls.
 A dictionary made only of method pointers (and such dictionaries) is built
 once, on first use, into a synthetic static `__dict$N` (one per distinct
 dictionary) and loaded after that: load, compare with 0, build and store.
-It is built lazily because worker VMs start with zeroed statics.
+It is built lazily because a worker can start with zeroed statics
+(`machine/src/worker.rs`).
 
-- MIR bodies: `intern_dict_ops` (`codegen/emit_hir_mir.rs`) replaces each
-  maximal ground `Tuple` subtree with `HirDictOp::Interned`.
-- IL thunks: `append_dicts_interned` emits the same pattern from the
-  dictionary plan into a fragment `CodeBuf` and `append`s it, so its
-  `CodePtr`s are rewritten to entries; a reserved entry is emitted as a
-  root entry, which `append` keeps.
-- These statics need no setup, so `prologue_jmp_target` does not count them.
+`intern_dict_ops` (`codegen/emit_hir_mir.rs`) replaces each maximal ground
+`Tuple` subtree with `HirDictOp::Interned`, and `interned_dict`
+(`mir/from_hir.rs`) lowers that to the load, compare and store.
 
-Test: `perf_metrics::ground_dictionary_is_built_once`.
+Bench: `examples/perf/dict_once.coil`.
 
 ## Clones call their siblings' clones (#1419)
 
@@ -111,7 +108,8 @@ took 1.7 s and 346 MB to compile (without the counts, forever).
 
 ## Measurements
 
-2026-10-17, one run each, `--auto-par off`, `vm_profile` builds (counting
+2026-10-17, on the bytecode VM (since deleted), one run each,
+`--auto-par off`, `vm_profile` builds (counting
 allocations slows both): `d1688ee` (before #1416) vs the branch with all of
 the above. Managed allocations from `machine::alloc_count`.
 

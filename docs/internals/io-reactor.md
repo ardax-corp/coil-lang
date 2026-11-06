@@ -1,6 +1,6 @@
 # IO reactor
 
-coil keeps two runtime facets on each root [`Machine`](../../machine/src/vm.rs):
+coil keeps two reactors on each root [`Runtime`](../../machine/src/runtime.rs):
 
 | Facet | Module | Role |
 |-------|--------|------|
@@ -16,7 +16,7 @@ Host streams store a [`NativeHandle`](../../machine/src/io_handle.rs) (`File` / 
 | Surface | Behavior |
 |---------|----------|
 | L0 `read` / `write` / `accept` | Always non-blocking; `WouldBlock` when not ready |
-| `wait_readable` / `wait_writable` (old names `await_readable` / `await_writable` still work) | Inside a `task::scope` with other tasks: suspend the **task** and run others ([tasks](tasks.md)). Otherwise: park the VM (`PendingIoWait`) until ready, inside a generator too (a generator never yields because of IO) |
+| `wait_readable` / `wait_writable` (old names `await_readable` / `await_writable` still work) | Inside a `task::scope` with other tasks: suspend the **task** and run others ([tasks](tasks.md)). Otherwise: block the thread until ready, inside a generator too (a generator never yields because of IO) |
 | `drive()` / `wait_ready()` | **Deprecated** (warning `E0129`). Leftovers from manual multiplexing; nothing registers waiters for them any more. Use `task::scope` |
 | **`task::block_on(coro)`** | Library function in `task`: resume until `done`. IO inside parks as above. Prefer tasks |
 | Userland `io::sync::{write_all, …}` | Coil loops over L0 + `wait_readable` / `wait_writable` ([coil-stdlib IO](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md)), so they work unchanged in and out of tasks |
@@ -40,7 +40,7 @@ waiting task's handle at once when none is ready to run.
 
 ## Waiting on readiness
 
-The VM park path and sync adapters call
+The blocking path and sync adapters call
 [`IoReactor::wait_fd`](../../machine/src/io_reactor.rs) (via
 [`reactor_wait_fd`](../../machine/src/io.rs)). A task wait uses
 [`register_wait`](../../machine/src/io_reactor.rs) on the scheduler's own
@@ -64,15 +64,15 @@ scheduler.
 
 `Stream.attach` is a compile-time capability (`--allow-attach` / `HostGrants`,
 default deny). It is not a process-wide switch. Ungranted source fails the compile (`E0408`): the function form
-when `main` or a test reaches it, the method form at the call. Archived bytecode
-with HostInvoke 120 runs attach; there is no VM `allow_attach` re-check.
+when `main` or a test reaches it, the method form at the call. An archive
+with HostInvoke 120 runs attach; there is no runtime `allow_attach` re-check.
 `--allow-dload` does not grant attach. Function pointers must be symbols from a hashed (or trusted/host)
 `dload`, not raw `i64` transmutes.
 
 After `Stream.attach`, IO (`stream_read` / `stream_write` / close) dispatches
-to the registered C vtable. The VM does not have a TLS-named stream kind and
+to the registered C vtable. The runtime does not have a TLS-named stream kind and
 does not call `coil_tls_*`. coil-tls enable is `dload` + attach. `WouldBlock`
-from package IO is the tagged `IoError` and parks on the VM reactor; do not
+from package IO is the tagged `IoError` and parks on the runtime's reactor; do not
 handshake on a blocking `.so` thread. Stream close and GC send shutdown when
 the fd is still usable, then Drop frees. If the fd is already gone, free-only
 is OK (best-effort close_notify).
@@ -96,8 +96,7 @@ is OK (best-effort close_notify).
 
 119/120 are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
 121–123 are process clocks (`use clock::{…}`); Instant is a Coil `int` of
-`mono_nanos`, not a host HashMap. Current archive is **major 4 / minor 5**
-(minor 5 = M1 math append). TLS (`tls_client_enable` … `tls_alpn_protocol`)
+`mono_nanos`, not a host HashMap. TLS (`tls_client_enable` … `tls_alpn_protocol`)
 and virtual crypto slots were dropped before the major-4 reset (historical
 minor 14); holes collapsed. Regex slots dropped earlier. Do not treat
 COI-37 / COI-209 / COI-215 stub reservations as live for these ids.
@@ -109,12 +108,12 @@ but no surface name reaches them: `prelude::math::{pow, rem}` were removed in
 favour of the `**` and `%` operators. Named `PI` / `E` / `TAU` live on coil-stdlib
 [`num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)
 (`const`, not HostInvoke). Package process/WebSocket/collections APIs
-belong in those package READMEs — this page only names host ids the VM owns.
+belong in those package READMEs — this page only names host ids the runtime owns.
 
 Virtual-time names still occupy panic stubs earlier in the table so the time
 block does not slide. Source of truth: `machine/src/host_natives.rs`.
 
 ## Env / knobs
 
-IO waits inherit the same `Machine` as CPU work; pool size is still
+IO waits inherit the same `Runtime` as CPU work; pool size is still
 `COIL_MAX_WORKER_THREADS` (CPU facet only).

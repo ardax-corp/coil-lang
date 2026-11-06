@@ -91,7 +91,7 @@ Callees the analysis cannot see (function values, unresolved methods,
 trait declarations, natives) keep everything and return nothing fresh.
 Pure natives and the IO writers keep nothing; `to_bytes`, `from_bytes`,
 `format`, the string slices and `Vec::with_capacity` return a fresh
-object (checked against the VM for step 2).
+object (checked against the natives for step 2).
 
 `coil dissect --effects` prints one `;; escape NAME: …` line per function:
 `keeps nothing`, `keeps `t``, `returns `self``, `result fresh`. In
@@ -104,7 +104,7 @@ says its result is fresh. A stated fact is checked against the inferred
 one and is E0139 when it does not hold (or names no parameter); it is
 never trusted in place of the analysis.
 
-A string literal reaches nothing: it is interned, immutable, and the VM
+A string literal reaches nothing: it is interned, immutable, and the runtime
 never frees an interned string (step 3; step 1 counted it as shared, so an
 `Err` holding a literal made a whole `Result` shared). Archives are byte-identical to main and
 compile time is unchanged (b_json 0.30 s, b_csv 0.10 s).
@@ -114,7 +114,7 @@ collection (decided 2026-10-26, built in RAII step 6). The compiler flags a
 `drop` type in its finalizer registration (`common::EARLY_DROP_FLAG` on the
 type id) when the `drop`'s escape facts keep nothing of `self`. At a
 `FreeEarly`, `Heap::early_drops` lists the pending `drop` objects the free
-would give back, parent first; the VM runs them as nested calls with the
+would give back, parent first; the driver runs them as nested calls with the
 objects rooted, then frees. A `drop` of an unflagged type, or a pending one
 the walk reaches but cannot free, makes the free give back nothing. A panic
 in such a `drop` unwinds from the `FreeEarly`. Block-end frees stay shallow,
@@ -136,7 +136,7 @@ everything. Two shapes are freed:
 - **Call temporaries.** In `f(…, g(x), …)`, when `g`'s result is fresh and
   `f` neither keeps nor returns that argument, the argument is bound to a
   temporary and freed after the call. When `f` does not change what the
-  argument reaches either, the free is deep: the VM frees every object it
+  argument reaches either, the free is deep: the runtime frees every object it
   reaches through precise pointer words. `item_check(bottom_up(d))` frees
   each tree after its check.
 - **Block-end locals.** A `let` local whose every value is an object this
@@ -149,21 +149,15 @@ everything. Two shapes are freed:
   panics leave it to the collector.
 
 Each free is `Builtin::FreeEarly { deep }` of the local and a `Clear` of
-its frame word. It lowers to MIR `FreeEarly` and to the `FreeEarly`
-instruction (archive 6.1), which pops the word; the VM runs it in its main
-dispatch loop. (Step 2 first used a host call; that left the fast loop on
-every free, and a `join` with a free per part ran 25% slower.) The VM frees nothing while a collection cycle or a
+its frame word. It lowers to MIR `FreeEarly`, which native code runs through
+`coil_native_free_early`. The runtime frees nothing while a collection cycle or a
 steal epoch is open, and skips what it cannot free safely: interned
 strings, the shared unit variants and `()`, objects of a type with a
-`drop` (while any is registered), handles, and arrays an `ArrayPin` holds
-for its frame. A dense index's pin is only a cache of its register's
-object: the free drops it, so a later object in the same slot is never
-read through the stale entry. A freed slot goes back to the slab like a
-swept one, and the dense object cache forgets it.
+`drop` (while any is registered) and handles. A freed slot goes back to the
+slab like a swept one.
 
-A dead frame word (a call's argument copy, a callee's frame left above the
-stack top) may still hold a freed address. Conservative and precise root
-scans already resolve every word through the slab, so such a word marks
+A dead frame word may still hold a freed address. Root scans resolve every
+word through the slab, so such a word marks
 nothing, or the object now in that slot. Once something was freed early,
 typed `Member::Object` handles are resolved the same way before marking,
 and gc-stress builds accept a freed slot in a pointer word.
@@ -182,12 +176,12 @@ Switches: early frees follow the opt level, on at `-O1` and above and off
 at `-O0` and `-Og` (frames should match the source there). `--early-free
 on|off` overrides the level. `--early-free check` compiles them, and a run
 in the same process (`coil FILE`, `coil test`) frees nothing and at the next
-collection marks again from the roots that are certainly live (precise
-frame slots, statics, VM handles; not words a conservative frame scan
-finds), aborting if that reaches an object a free gave up. The test corpus
+collection marks again from the roots that are certainly live (the
+Runtime's roots and those the driver holds; not stale copies a conservative
+scan might find), aborting if that reaches an object a free gave up. The test corpus
 passes in both modes and with frees on.
 
-### Measured (step 2)
+### Measured (step 2, on the bytecode VM, since deleted)
 
 `COIL_EARLY_FREE=0` against `=1` on the same build (`COIL_AUTO_PAR=0`,
 2026-10-27). Allocations, frees and collections come from the local
@@ -231,10 +225,10 @@ A concatenation whose operands include fresh call results (`a + f(x) + b`)
 binds those results to temporaries and frees them once the result is
 built; the chain stays one chain, so `FORMAT` fusion still applies.
 
-Freeing now has its own instruction (`FreeEarly`, archive 6.1) instead of
-a host call: a host call left the VM's fast dispatch loop on every free,
-and a `join` with one free per part ran 25% slower; with the instruction
-`join` and `append` time the same with frees on and off.
+Freeing has its own MIR op (`FreeEarly`) instead of a host call. On the
+bytecode VM, since deleted, a host call left the fast loop on every free,
+and a `join` with one free per part ran 25% slower; with the op `join` and
+`append` timed the same with frees on and off.
 
 Later in step 3:
 
@@ -248,7 +242,7 @@ Later in step 3:
   heap values (`list = rebuild(list)`) frees the old vector deeply when it
   is reassigned, provided no other local still shares its elements.
 - **Literals count as fresh.** String literals are interned and never freed
-  by the VM, so a value that may be a literal is no longer treated as
+  by the runtime, so a value that may be a literal is no longer treated as
   shared.
 - **Zero-copy `to_bytes`.** `let b = to_bytes(s)` whose only reads are
   `b[i]` and `b.len()` reads `s` directly (string indexing yields the same
@@ -319,12 +313,12 @@ Design (copying nursery, decided 2026-10-27):
   old object allocated with references (a coroutine, a pretenured
   closure) is remembered when it is born. A prototype of the barrier measured within
   noise (0 to 3%).
-- **Minor collection.** Trace young objects from the VM roots and the
+- **Minor collection.** Trace young objects from the roots and the
   remembered objects, never into old ones. A young object reached through
-  an ambiguous word (a conservative frame word, an unknown-kind field, a
+  an ambiguous word (an ambiguous frame word, an unknown-kind field, a
   `Root` or `Weak` target, an FFI argument) is *pinned*. Every other live
   young object is copied bitwise into an old slot of its size class, and
-  precise words naming it are rewritten: must-pointer frame slots, pointer
+  precise words naming it are rewritten: native frames' precise words, pointer
   statics, the remembered objects, and the survivors themselves. This is
   the evacuation machinery of [gc-evacuation.md](gc-evacuation.md),
   limited to the nursery.

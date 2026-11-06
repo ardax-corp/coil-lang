@@ -9,7 +9,7 @@ generated matrix under `tests/representation/`.
 
 **`rep(T)` is a function of the static type only.** A value of type `T`
 has the same word wherever it lives: ground code, a shared generic body, a
-per-type clone, a dictionary or closure adapter, a host call, a frame map.
+per-type clone, a dictionary or closure adapter, a host call, a native frame.
 A bare type variable `V` in a shared body holds `rep(ground T)`: the raw
 niche word for `Option<heap>` / `Result<heap, heap>`, the pointer for an
 object, the immediate for a scalar. A shared body never interprets a bare
@@ -38,13 +38,12 @@ two-slot call width).
 
 The niche and two-slot families are disjoint: a niche needs heap payloads,
 a pair an immediate one. Values are not tagged; the static type picks the
-decode (`CONST 0` / `LogNot` for Option, `BITAND` / `BITOR` / `XOR` for
-Result). No pair or niche opcode is emitted (`ReturnPair`, `PairToHeap`,
-`OptionNicheToHeap`, `HostInvokeNiche`, … are tombstones).
+decode (a compare with `0` for Option, bit operations for Result). No
+pair- or niche-specific operation exists.
 
 **GC.** A niche word is a pointer root: root marking strips bit 0 before
 `find_object_by_addr`, and `values_eq` compares the stripped words. A
-two-slot pair is two scalars, which no frame map roots.
+two-slot pair is two scalars, which are no roots.
 
 **No boxes at generic edges.** A word crosses a shared generic body, a
 dictionary entry, a closure or `PolyFn` adapter and a clone thunk as it
@@ -53,11 +52,7 @@ marks it with `Builtin::Retype` (dictionary entries and thunks) or a
 word flag (`HirCallSite::words` / `word_ret`, `HirPolyCall`,
 `HirAdaptConv::Word`, `HirDictOp::Word`), and MIR lowers it to the same
 bits retyped (`MirBuilder::ins_word` / `ins_word_as`: only a `float` or
-`bool` changes MIR type), so the compiler emits no `BoxValue` /
-`UnboxValue`. Those
-ops stay in the VM for older archives only, where they are
-representation-agnostic: boxing keeps an object as itself and unboxing
-passes a word that is no box through. `Show` of a scalar passes its type
+`bool` changes MIR type), so nothing boxes a word at an edge. `Show` of a scalar passes its type
 on `STRINGIFY`'s operand instead of boxing for the tag.
 
 ## Shared generic bodies

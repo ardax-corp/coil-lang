@@ -339,7 +339,7 @@ error is the only one reported.
 `MacroHost` (`compiler::macros`) keeps the compiler free of `machine`; binaries
 call `comptime::install()` at startup and pipelines pick it up. `IsolateMacroHost`
 keeps one `machine::Isolate` per compiled expansion program per thread (#1008):
-a runtime with no VM, whose calls run the program's MIR on the interpreter. The
+a runtime whose calls run the program's MIR on the interpreter. The
 natives, statics and program are loaded once; each call resets the step
 budget and calls the entry, and a call that returns normally ends with
 `Isolate::reset` so the next one starts from a clean heap. A call that panics,
@@ -353,8 +353,8 @@ one. The sandboxed native table is built once per process.
   evaluation (`native_allowed_at_compile_time`).
 - Each call runs within `ComptimeLimits` (`HostGrants::comptime`): a step
   budget (`--comptime-steps`, default 1B loop back-edges + calls, see
-  `Machine::set_step_budget`) and a cap on live heap bytes (`--comptime-mem`,
-  default 1024 MiB, see `Machine::set_heap_cap`). A runaway macro fails with
+  `Isolate::set_step_budget`) and a cap on live heap bytes (`--comptime-mem`,
+  default 1024 MiB, see `Isolate::set_heap_cap`). A runaway macro fails with
   "it ran too long", a hoarding one with "it used too much memory", each
   naming the flag to raise. 1B steps is about 15 s of a tight loop on a
   release build. The cap is checked at GC safepoints after a full collection,
@@ -460,10 +460,9 @@ Module statics of providers are not initialised (the expansion program has no
 
 Perf (#1008, release build, 2026-10-16): compiling one file with N
 `assert!(x == 1);` calls went from 271 ms to 207 ms at N = 100 (median of 7),
-about 0.6 ms saved per call. At N = 400 the build is about 1.25 s either way:
-there the time goes to codegen of the one large `main` (`mir::gc::fill_live_roots`
-and `stackmap::encode_draft_regs`, about 55% of instructions), and macro
-expansion is 17%.
+about 0.6 ms saved per call. At N = 400 the build was about 1.25 s either way:
+there the time went to codegen of the one large `main` (about 55% of
+instructions), and macro expansion was 17%. These are bytecode-VM numbers.
 
 ## Built-in derives
 
@@ -477,7 +476,7 @@ field its type's default (`0`, `0.0`, `false`, `""`, or `Ty::default()`; an
 enum takes its first variant), and scalar-backed enums
 compare / show / order their backing (a `#[repr(string)]` enum by its
 string's bytes, coil-lang#1722). When they replaced the Rust code, every
-derive-using program compiled to identical bytecode except enums with tuple
+derive-using program compiled to identical code except enums with tuple
 variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
 `p.0` field access cannot be written in source.
 `comptime/tests/derive_golden.rs` pins the generated source.
@@ -544,10 +543,9 @@ the consts (so the call can read them):
   generic, a coroutine, a closure or in result mode, returning `int`,
   `float`, `bool`, `byte` or `string` (`Compiler::fold_bodies`, by bind
   name in `fold_fns`).
-- After finalize, `Compiler::fold_sites` finds each one-word-result `CALL`
-  to a candidate whose arguments are the `CONST` / `STRING` words right
-  before it, with no branch landing among them
-  (`common::jump_targets`): on every path those words are its arguments.
+- `Compiler::fold_sites` takes each one-word MIR `Call` of the capture
+  (`mir::capture_const_calls`) to a candidate whose arguments are all `Const`
+  / `String` values.
   A call to an auto-par worker computes the function it runs, without the
   worker's depth argument.
 - Each distinct call runs once on the compile-time host within the silent
@@ -560,9 +558,8 @@ the consts (so the call can read them):
 - Sites inside an explicit (`const` / `comptime`) initializer are dropped
   (`Compiler::function_end` bounds the initializer): the initializer computes
   them within the explicit budget.
-- `apply_call_folds` turns the argument words into `NOOP`s and the `CALL`
-  into a `CONST` (a negative or wide word from the pool) or `STRING`, then
-  builds the precise frame maps again.
+- `apply_call_folds` turns each `Call` into a `Const` or `String` in the
+  captured MIR (`mir::replace_const_calls`).
 - A program with any `fn drop()` folds no call and no silent static let:
   their temporaries would finalize at compile time instead of when the
   program runs.

@@ -1,8 +1,8 @@
-# Collections: VM hoist vs userland
+# Collections: runtime vs userland
 
 Plan for `HashMap`, `HashSet`, `List`, and `TreeMap` in the standard library.
 
-## Already on the VM / compiler (no new opcodes)
+## Already in the runtime / compiler
 
 | Primitive | Role for collections |
 |-----------|----------------------|
@@ -11,10 +11,10 @@ Plan for `HashMap`, `HashSet`, `List`, and `TreeMap` in the standard library.
 | Classes + field mutation | Mutable map / list / set handles |
 | Recursive enums | Persistent trees / functional lists |
 | Bit ops (`&`, `<<`) and `%` | Bucket index from hash |
-| `HostInvoke` (not opcodes) | Prefer this over new opcodes if a native ever lands |
-| Growable operand stack | Recursive tree / list walks of any depth (up to the VM limit) |
+| `HostInvoke` | Where a native lands, if one ever does |
+| Recursion | Recursive tree / list walks, up to the stack limit |
 
-**Do not add** map/set/list opcodes or a heap `Object::HashMap`. That would be benchmark-shaped surface area; AGENTS prefers alloc reduction and `HostInvoke` over new opcodes unless the pattern is universal.
+**Do not add** map/set/list MIR ops or a heap `Object::HashMap`. That would be benchmark-shaped surface area.
 
 The one native piece is the **key index** ([key-index.md](key-index.md), `key_index::*`, HostInvoke 191–199): probing over plain `Vec<int>`s, no new object kind, usable by any collection keyed by a `Hash + Eq` type. Keys and payloads stay in userland `Vec`s.
 
@@ -44,7 +44,7 @@ shape (COI-92) — not a single boxed ABI.
 | Gap | Impact | Recommended hoist |
 |-----|--------|-------------------|
 | `[Option<T>]` / `[Foo<K,V>]` | Nested generics in array element types parse | Done — write `[Option<int>]` directly |
-| Functional `List` recursion past the VM limit panics with `stack overflow` | Prefer mutable class list for very long lists | — |
+| Functional `List` recursion past the stack limit panics with `stack overflow` | Prefer mutable class list for very long lists | — |
 
 ## Future (only if measured)
 

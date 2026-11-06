@@ -6,11 +6,10 @@ Language quirks
 this note is COI-331).
 
 This file is **spec**, not a compiler changelog. Implementation tickets are
-Q1–Q9 themselves. Do not treat leftover I4 / dense refuse rows as
-overriding these decisions. Q1 box-once is implemented (codegen + IL). Q2 box-once is implemented
-(codegen field-SROA + identity cache). Q3 grow on `[T; N]` is a typechecker
+Q1–Q9 themselves. Q1 box-once is implemented. Q2 box-once is implemented.
+Q3 grow on `[T; N]` is a typechecker
 diagnostic (`FixedArrayGrow` / E0412). Q4 indexing `i % N` is Euclidean
-into `0..N` (codegen rem + SROA last-arm as spec). Q5 `panic` vs `raise`
+into `0..N`. Q5 `panic` vs `raise`
 is documented (CLI / embed abort only on `panic`; checksum boards use
 `panic`).
 
@@ -30,10 +29,10 @@ cookbook for Q5 is the section below plus
 | Q3 | COI-325 | `[T; N]` cannot grow | `ArrayPush` / grow on a fixed array is a **type error**. Use `Vec`. |
 | Q4 | COI-326 | Defined `i % N` for indexing | For **indexing**, `i % N` always maps into `0..N` (Euclidean-or-equivalent). Plain `xs[k]` without `%` still OOB outside `0..N`. |
 | Q5 | COI-327 | `panic` vs `raise` | Keep both: `panic` **aborts the process**; `raise` **is catchable**. Document hard. Checksum / CLI boards use `panic`. |
-| Q6 | COI-328 | MIR-friendly `for` / iterator | **Commit** a near-term MIR-friendly iterator protocol — not a permanent fuse-IL ceiling. |
-| Q7 | COI-329 | Dense / LIR recursion | **Commit** near-term dense or LIR recursion / typed recursive `CALL`. Recursive callees are not forever fuse-only. |
-| Q8 | COI-330 | Dense+match niche / two-slot | **Commit** near-term **dense+match** for niche / two-slot (not only MIR→LIR I2). |
-| Q9 | COI-332 | Full format / string on MIR | **Commit** full format / string on MIR. **Reopen I4** as a delivery ladder, not a permanent barrier. |
+| Q6 | COI-328 | MIR-friendly `for` / iterator | **Done.** Every `for` lowers to MIR. |
+| Q7 | COI-329 | Recursion on MIR | **Done.** Recursive callees lower to MIR as any body. |
+| Q8 | COI-330 | Match on niche / two-slot | **Done.** `match` on niche and two-slot values lowers to MIR. |
+| Q9 | COI-332 | Full format / string on MIR | **Done.** Format and string ops are MIR instructions. |
 
 ## Q1 — `[T; N]` is a reference; box once on escape
 
@@ -50,12 +49,7 @@ later escape edge. Later private index of that local goes through the
 boxed object (slots are only a pre-escape rewrite). Value-array semantics
 and always-heap are non-goals.
 
-Compiler (A1 COI-334 + Q1
-COI-323): codegen boxes once (the IL `escape_analysis` pass was
-removed 2026-10). A refused
-inline must not leave a stale box cache (that was a fresh
-`LOAD` of an unwritten slot). S2g's old fresh-`MakeArray`-per-edge policy
-is gone.
+Compiler (A1 COI-334 + Q1 COI-323): boxes once.
 
 ## Q2 — Named `new C` is a reference; invisible field-SROA
 
@@ -66,14 +60,12 @@ host/FFI, identity compare — forces a real heap instance.
 
 On the first identity use, materialize **one** heap object and reuse it
 on every later escape edge. Field uses before that edge stay slots;
-field uses after it go through the boxed instance. Do not emit a fresh
-`InitTyped` per edge. `fn drop()` and arity 0 or > 32 stay heap from
+field uses after it go through the boxed instance. Do not allocate a fresh
+instance per edge. `fn drop()` and arity 0 or > 32 stay heap from
 construction (finalizer / layout).
 
-Compiler (S2j COI-320 + Q2
-COI-324): codegen binds eligible
-`new C` to field slots and `emit_escape_unboxed_class` boxes once.
-HIR lowering decides which locals never escape (the checker's `local_escape` sidecar was removed as unused).
+Compiler (S2j COI-320 + Q2 COI-324): HIR lowering decides which locals
+never escape.
 
 **COI-84 non-goal is superseded
 for this narrow case.** COI-84 closed as “named locals stay allocated”
@@ -106,16 +98,15 @@ valid index. The mapping is Euclidean (or equivalent):
 
 SROA select last-arm is slot `N-1` of that range — **spec**, not a soft
 refuse that dumped every negative remainder on the last slot (that was
-wrong for `(-2) % 3`). Skip the IL fixup only when the dividend is
+wrong for `(-2) % 3`). Skip the fix-up only when the dividend is
 proven `>= 0` (counted-loop `i`); unknown / param / negative dividends
 always fix up.
 
 Plain `xs[k]` **without** `%` still panics OOB when `k` is outside
 `0..N`. Defined mod does not weaken unproven index checks.
 
-Compiler (COI-326):
-`compile_array_index_expr` + sidecar `nonneg_expr`. Heap `Index` and
-SROA select share the same rem.
+Compiler (COI-326): `lower::index_euclid` and `index_word`
+(`mir/from_hir.rs`), with the sidecar's `nonneg_expr`.
 
 ## Q5 — `panic` aborts; `raise` is catchable
 
@@ -124,10 +115,10 @@ opts must not rewrite one into the other.
 
 | Form | Meaning |
 |------|---------|
-| `panic expr` | **Aborts the process.** Emits `Instruction::Panic`. Writes `panic: <msg>` (plus a line-table suffix when known). Sets `Machine::panicked`. Checksum boards, CLI / embed hard failure, and “this must not continue” paths use `panic`. |
+| `panic expr` | **Aborts the process.** Lowers to `MirInst::Panic`. Writes `panic: <msg>` (plus a location suffix when known). Sets the driver's `panicked`. Checksum boards, CLI / embed hard failure, and “this must not continue” paths use `panic`. |
 | `raise expr` | **Catchable.** Early-return `Result.Err(expr)` from a Result-mode function. `try` / `?` / `match` can swallow it. Not a process abort. |
 
-See [debug-info.md](debug-info.md) for panic line-table output.
+See [debug-info.md](debug-info.md) for panic locations.
 
 ### Cookbook
 
@@ -137,11 +128,11 @@ See [debug-info.md](debug-info.md) for panic line-table output.
 | CLI / packaged-app hard failure | `panic` |
 | Recoverable user error, `?` chains, `match Result` | `raise` / `return Result.Err(…)` |
 | `coil test` expected-fail path | `raise` or `assert!(false)` (harness treats `Err` as a failed case) |
-| `coil test` “this must not continue” | `panic` (also a failed case, and aborts that VM) |
+| `coil test` “this must not continue” | `panic` (also a failed case, and aborts that run) |
 
 Uncaught `raise` from `main` is a `Result.Err` **return**. Default `coil`
-run, `coil run`, and `coil-embed` exit **0** unless `Machine::panicked`
-is set. That is why a checksum written as `if bad { raise "…" }` can
+run, `coil run`, and `coil-embed` exit **0** unless a `panic`
+ran. That is why a checksum written as `if bad { raise "…" }` can
 print nothing and still look green.
 
 `coil test` is stricter: a case fails on **either** `panic` or a
@@ -168,36 +159,31 @@ fn parse_pos(int n) {
 Runnable contrast: [`examples/panic.coil`](../../examples/panic.coil) vs
 [`examples/raise_try.coil`](../../examples/raise_try.coil).
 
-## Q6–Q9 — Roadmap commits (not permanent refuse)
+## Q6–Q9 — Delivered
 
-These four are **near-term delivery commitments**. They do not land in
-this docs PR. They **do** change how island / refuse docs may speak:
+These four were delivery commitments. All are met: every body lowers from
+HIR to MIR. The notes below say what each covers.
 
-| Quirk | Today (implementation) | After the commit |
-|-------|------------------------|------------------|
-| Q6 | Counted desugar for array / Vec / `[T; N]` / literal range (`for_in_sum` / `for_in_range`). First-class `let r = 0..n` locals unbox (B5 / `for_in_range_value`). Free-fn param / returned numeric Range unbox (C2 / `for_in_range_param` / `for_in_range_ret`). Heap-field / array-held Range counted (C2b rung 1 / `for_in_range_field` / `for_in_range_array`). User `Iterator::next` on MIR (C2b rung 2 / `for_in_iter`); counted `into_iter` Range (`for_in_iter_range`). Records are not iterable (C2b rung 3, dict for-in, was removed). Coro for-in on MIR (C2b rung 4 / `for_in_coro`; `ResumeCoro` / `DoneCoro`) | Phased ladder. Not a permanent fuse-IL ceiling. See [q6-iterator-protocol.md](q6-iterator-protocol.md). |
-| Q7 | One-word self-`CALL` / `TailCall` may enter dense | Landed as a cost-gated path (not a hard wall). **B2** convoys tight `tak` / `fib` on the operand stack so they can win that gate. **B7** sibling / mutual `TailCall` may dense (stack-arg + reserved callee entries). **C1** self two-slot `CALL` / `RETURN` may dense or LIR. LIR one-word `CALL` still refuse. |
-| Q8 | Landed: niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` stays I2 LIR. **B3** two-slot helper `CALL` / `RETURN` may dense or LIR | Near-term dense+match for niche / two-slot, not only I2 LIR. |
-| Q9 | **R1–R3 landed:** table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` are SSA + MIR→LIR (dense infer still refuses). `from_bytes` / `to_bytes` are I6 dense HostInvoke. `FORMAT` / `STRINGIFY` take I5-style maps. Unicode / regex later (R4) | Phased ladder. Full format / string on MIR. No half-format second lowering. See [q9-format-string.md](q9-format-string.md). |
+| Quirk | Implementation | Notes |
+|-------|----------------|-------|
+| Q6 | Counted desugar for array / Vec / `[T; N]` / literal range (`for_in_sum` / `for_in_range`). First-class `let r = 0..n` locals unbox (B5 / `for_in_range_value`). Free-fn param / returned numeric Range unbox (C2 / `for_in_range_param` / `for_in_range_ret`). Heap-field / array-held Range counted (C2b rung 1 / `for_in_range_field` / `for_in_range_array`). User `Iterator::next` on MIR (C2b rung 2 / `for_in_iter`); counted `into_iter` Range (`for_in_iter_range`). Records are not iterable (C2b rung 3, dict for-in, was removed). Coro for-in on MIR (C2b rung 4 / `for_in_coro`; `ResumeCoro` / `DoneCoro`) | History: [q6-iterator-protocol.md](q6-iterator-protocol.md). |
+| Q7 | Self, sibling and mutual calls are MIR `Call`s, one- or two-word | A planned tail call is marked in `MirFunc::tail_targets`. |
+| Q8 | Niche, two-slot and boxed `match` all lower to MIR branches | Layouts: [AGENTS.md](../../AGENTS.md) language facts. |
+| Q9 | Format and string ops are MIR instructions (`Print`, `Format`, `Stringify`); `from_bytes` / `to_bytes` are `HostInvoke`s | No second format lowering. History: [q9-format-string.md](q9-format-string.md). |
 
-Island inventory: [mir-islands.md](mir-islands.md). Dense refuse rows:
-[specialize-refuse.md](specialize-refuse.md). Post-Q6–Q9 ranked leftover
-board: [opt-generalization.md](opt-generalization.md) B0
-(COI-338).
+Island history: [mir-islands.md](mir-islands.md),
+[opt-generalization.md](opt-generalization.md).
 
 ## Opt implications (do not implement here)
 
 | Area | Implication |
 |------|-------------|
 | S2g | **Box-once** (Q1 / COI-334). Identity across return / call / field / host matches. |
-| Heap ops | A2 (COI-335): dense-native `Index` / `StoreIndex` / `ArrayLen` / `Make*` when maps allow. Box only at CALL / RETURN / HostInvoke (`DensePush`). Residual LOAD/STORE boxing stays fuse-IL via the cost gate. |
 | S2j / I3 | Mirrors Q2. Field-only unbox stays; identity boxes once and reuses. COI-84 non-goal does not block that case. |
 | Grow | Type error on `[T; N]` (Q3). Do not keep grow as an opt refuse for fixed arrays once the checker lands. |
 | Defined mod | S2f / S2k / S2h select and runtime `%` follow Q4. Negative `i % N` is in-range. |
 | `panic` / `raise` | Checksum and CLI boards: `panic` (Q5). Opts must not rewrite `panic` into `raise`. |
-| Q6–Q9 | Update island / refuse copy as those tickets land. Until then, “today path” may still be fuse-IL, but the **target** is the commit, not a forever barrier. |
 
 Related opt notes: [opt-generalization.md](opt-generalization.md) (A0 doctrine),
-[s2d-inloop-make-tax.md](s2d-inloop-make-tax.md) (S2f–S2l),
 [optimization-roadmap.md](optimization-roadmap.md),
 [limitations.md](limitations.md) (COI-84 / S2j).

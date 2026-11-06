@@ -4,7 +4,7 @@ description: >-
   Troubleshoot coil programs with `coil debug` (GDB-style REPL / batch scripts):
   infinite loops, hangs, wrong values, panics, unexpected call stacks. Use when
   a `.coil` program loops forever, hangs, panics, prints wrong output, or when the
-  user asks to debug, step, breakpoint, backtrace, or inspect VM state.
+  user asks to debug, step, breakpoint, backtrace, or inspect program state.
 ---
 
 # coil debug troubleshooting
@@ -13,7 +13,7 @@ Prefer **batch scripts** (`-x` + `--batch`) over interactive REPL when automatin
 `coil debug` compiles in memory — it never writes `out.ccoil`.
 
 Full command reference: [docs/internals/debugger.md](docs/internals/debugger.md).
-For bytecode/IL dumps without running: `coil dissect <file.coil> --fn <pat>`.
+For MIR dumps without running: `coil dissect <file.coil> --fn <pat>`.
 
 ## Quick start
 
@@ -34,7 +34,7 @@ cargo run --quiet -- debug path/to/prog.coil -x /tmp/coil_dbg.txt --batch
 coil debug gated.coil --allow-attach -x /tmp/coil_dbg.txt --batch
 ```
 
-Use `coil dissect` for bytecode/IL/AST dumps; use `--release` for faster runs.
+Use `coil dissect` for MIR/HIR/AST dumps; use `--release` for faster runs.
 
 ## Command cheat sheet
 
@@ -45,9 +45,9 @@ Use `coil dissect` for bytecode/IL/AST dumps; use `--release` for faster runs.
 | Stop at a line | `break file.coil:12` or `break 12` (entry file) |
 | See how you got here | `bt` |
 | See source | `list` |
-| See bytecode | `disas` / `disas fib` |
+| See MIR | `disas` / `disas fib` |
 | Inspect locals | `print n` / `print $0` / `info locals` |
-| Step | `stepi` (insn), `step` (line into), `next` (over), `finish` |
+| Step | `stepi` (one MIR op), `step` (line into), `next` (over), `finish` |
 | Resume | `continue` — clear recursive BPs first with `delete` if needed |
 | Restart | `run` |
 | Exit | `quit` |

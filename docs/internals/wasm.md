@@ -22,7 +22,7 @@ Release builds publish it as `coil-wasm32-wasip1.wasm` (edge and `v*` tags).
 
 | Area | On wasm |
 |------|---------|
-| Engine | The MIR interpreter runs programs, `coil test` and comptime: no native code, and no fibers, so generators and tasks park their frames on the heap ([mir-interp.md](mir-interp.md), step 7). A `.ccoil` holds every body's MIR. `--no-jit` runs the VM until it goes. |
+| Engine | The MIR interpreter runs programs, `coil test` and comptime: no native code, and no fibers, so generators and tasks park their frames on the heap ([mir-interp.md](mir-interp.md), step 7). A `.ccoil` holds every body's MIR. |
 | `Value` | The word is a `u64`, not a pointer: wasm32 pointers are 32 bits, and ints and floats need all 64. `Value::bits()` reads the whole word on every target; build a `Value` from a `u64` with `Value::from(u64)`, never through `as *mut u8`. |
 | FFI | No dynamic libraries: `machine/src/ffi/nolib.rs` stands in for libffi and libloading. `extern` declarations compile; loading a library or calling through FFI fails with `FfiError::Unsupported`. |
 | Threads | No OS threads (no `atomics` target feature). The reactor starts no workers (`reactor::NO_THREADS`): `join`, a `recv` on an empty channel and the end of `main` run queued `thread::spawn` jobs on the current thread. A spawned thread therefore runs when something waits for it, not at once; output interleaving differs from native. A wait nothing can satisfy fails (`JoinFailed`, `Disconnected`) instead of hanging. Auto-par runs sequentially. |
