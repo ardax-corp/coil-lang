@@ -107,7 +107,10 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
 - Coroutines, host natives and trait instance methods (dictionary entries)
   never return two slots. Inherent methods, overloaded and generic
   functions keep one-word parameters (a numeric range's two words
-  excepted). Products and pair classes are never two-slot parameters.
+  excepted). A free function's arity-2 immediate tuple or two-field
+  readonly class parameter is two words like its result (the stack VM
+  kept them boxed: splitting a box into `[a, b]` needed a temp slot above
+  live operands, which MIR parameters do not).
 - A local bound from a two-slot call keeps its two slots, so `match r`,
   `r?`, `return r`, `let (a, b) = r` and `r[0]` do not allocate. `?`
   compares the tag in place and shares one fail epilogue per function
