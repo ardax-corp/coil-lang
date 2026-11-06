@@ -1,15 +1,14 @@
 //! MIR: typed SSA for every function body, lowered from HIR
-//! ([`lower_from_hir`]), and its two emitters: dense 3-address bytecode
-//! ([`emit`]) and LIR stack ops ([`emit_lir`]). Passes: CSE (P2), LICM
+//! ([`lower_from_hir`]). Passes: CSE (P2), LICM
 //! (P6), InstCombine (P7) with float peeps (P11), DestProp (P8), IV
 //! strength reduction (P9), cross-block GVN/PRE (P10), saxpy-reduce
 //! HostInvoke packs (P12), compiler-only `V*` SIMD (COI-310), and SROA.
 //!
-//! Dense and LIR `CALL` use the one-word or two-slot typed ABI ([`abi`];
+//! `CALL` uses the one-word or two-slot typed ABI ([`abi`];
 //! COI-291 / B3 / C1). SSA models dest + `dest_hi`; N>2 return words
 //! refuse. Typed HostInvoke boxes at the host edge. Allocating bodies
 //! carry `Alloc` + `GcBarrier` with live-heap `roots`; their GC frame maps
-//! are the precise maps of their final bytecode ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
+//! are the precise maps of their final code ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
 //! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` builds use
 //! the same tiers; explicit `Deopt` is skipped at emit. History of each
 //! piece: `docs/internals/mir.md`.

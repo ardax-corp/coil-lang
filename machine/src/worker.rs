@@ -1,7 +1,7 @@
 //! A reactor job (a thread, an auto-par body, a harness case) whose native
 //! code covers its whole program runs on the driver over a [`Runtime`] of
 //! the worker's own, with no `Machine`: what `run_job_on_vm` does for the
-//! VM, without an interpreter.
+//! runtime, without an interpreter.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -65,7 +65,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
         native,
     } = job;
     // The print redirects of a job this thread runs while helping a join
-    // are put back after it (as the VM's job run does).
+    // are put back after it (as the runtime's job run does).
     let redirected = shared_print.is_some();
     let prev_output = redirected.then(|| crate::io::set_output_redirect(None)).flatten();
     let prev_shared_print = redirected.then(|| crate::io::set_shared_print_redirect(None)).flatten();
@@ -108,7 +108,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
         rt.program_string_cache.resize(program.strings.len(), Value::default());
         let native = native.expect("runs_natively checked the native code");
         rt.native = Some(Box::new(crate::native::NativeTable::new(Arc::clone(&native))));
-        // A job reads the spawner's statics, as on the VM.
+        // A job reads the spawner's statics, as on the runtime.
         match statics {
             Some(JobStatics::Shared(words)) if shared => rt.statics = words.iter().map(|&w| Value::from(w)).collect(),
             statics => {

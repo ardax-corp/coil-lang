@@ -1,6 +1,6 @@
 //! Type inference for coil (explicit generics, monomorphic `let`).
 //!
-//! Runs after parsing and before bytecode emission. Exposes [`Checker`]
+//! Runs after parsing and before code emission. Exposes [`Checker`]
 //! for inference, native registration, and span-indexed type lookup.
 
 pub mod aggregate_arith;

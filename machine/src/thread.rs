@@ -17,12 +17,12 @@ use parking_lot::lock_api::RawMutexTimed as _;
 use crate::AddrHashBuilder;
 use crate::task::ThreadWaiters;
 
-/// Per-root-VM registry of undetached spawns (shared with nested workers via
+/// Per-root runtime registry of undetached spawns (shared with nested workers via
 /// [`ThreadSpawnContext`]). Process-global storage was wrong: parallel tests /
 /// multiple `Machine`s would steal each other's joins via `mem::take`.
 pub type LiveThreadRegistry = Arc<Mutex<Vec<Arc<JoinState>>>>;
 
-/// Per-root-VM bound on concurrent OS **pool** threads for the work-stealing
+/// Per-root runtime bound on concurrent OS **pool** threads for the work-stealing
 /// reactor (see [`crate::reactor::Reactor`]).
 ///
 /// Caps host threads used for `spawn` / auto-par. Override with
@@ -138,7 +138,7 @@ use crate::memory::{
     ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
 };
 
-/// Operand-stack slots for worker VMs (same default as `execute_archive` in `src/main.rs`).
+/// Operand-stack slots for worker runtimes (same default as `execute_archive` in `src/main.rs`).
 pub const WORKER_STACK_SLOTS: usize = 256;
 
 /// Immutable program image shared across OS threads.
@@ -679,7 +679,7 @@ thread_local! {
     static HELD_MUTEX: RefCell<Option<(u64, Arc<MutexInner>)>> = const { RefCell::new(None) };
 }
 
-/// Per-`execute` host VM binding (any `Machine<const N>` frame depth).
+/// Per-`execute` host runtime binding (any `Machine<const N>` frame depth).
 pub(crate) struct MachineHostState {
     raw: *mut (),
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
@@ -824,7 +824,7 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
     })
 }
 
-/// The running VM's static words as they are now.
+/// The running runtime's static words as they are now.
 fn host_static_words() -> Option<Arc<Vec<u64>>> {
     HOST_STATE.with(|c| c.borrow().as_ref().map(|s| unsafe { (s.static_words)(s.raw) }))
 }
@@ -856,7 +856,7 @@ fn host_end_shared_steal(published: Value) {
     });
 }
 
-/// Block on IO readiness using the bound VM's reactors. Queued CPU jobs run on
+/// Block on IO readiness using the bound runtime's reactors. Queued CPU jobs run on
 /// a spare thread meanwhile, never nested under the wait (#869).
 pub(crate) fn host_io_wait(
     handle: crate::io_handle::WaitHandle,
@@ -1521,7 +1521,7 @@ pub struct ThreadSpawnContext {
     /// startup `const`s (#1561). Its words name the parent's heap, so an
     /// isolate job takes copies ([`copy_statics_out`]) instead.
     pub statics: Arc<Vec<u64>>,
-    /// The parent's native code (`None`: bytecode only).
+    /// The parent's native code (`None`: interpreter only).
     pub native: Option<Arc<crate::native::NativeCode>>,
 }
 

@@ -1,5 +1,5 @@
-//! `coil FILE --jit`: functions the native backend compiles must behave
-//! exactly as the VM runs them (output, panic message and location, exit
+//! `coil FILE`: functions the native backend compiles must behave
+//! exactly as the interpreter runs them (output, panic message and location, exit
 //! status), and they must actually run natively.
 
 use std::path::PathBuf;
@@ -96,7 +96,7 @@ fn int_traps_panic_as_the_interpreter_does() {
 #[test]
 fn deep_recursion_runs_natively() {
     // Native frames live on the machine stack: it holds recursion as deep
-    // as the VM's frame limit allows, with nothing handed back to the VM.
+    // as the interpreter's frame limit allows, with nothing handed back to the interpreter.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn down(int n) -> int {{ if n == 0 {{ return 0; }} return 1 + down(n - 1); }}\n\
          fn main() {{ let _ = println(format(\"%i\", down(900000))); }}\n"
@@ -106,7 +106,7 @@ fn deep_recursion_runs_natively() {
 
 #[test]
 fn unbounded_recursion_overflows_at_the_interpreter_location() {
-    // The VM's frame limit and the native stack end at different depths,
+    // The interpreter's frame limit and the native stack end at different depths,
     // so only the repeat count differs: message, location and frames match.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn f(int n) -> int {{ return 1 + f(n + 1); }}\n\
@@ -123,7 +123,7 @@ fn unbounded_recursion_overflows_at_the_interpreter_location() {
 #[test]
 fn unbounded_recursion_through_a_function_value_panics() {
     // Each call nests a native entry on the thread's stack: past the stack's
-    // end it must panic as the VM does, not run off it.
+    // end it must panic as the interpreter does, not run off it.
     let src = "fn apply(fn(int) -> int f, int n) -> int { return f(n) + 1; }\n\
          fn rec(int n) -> int { return apply(rec, n + 1); }\n\
          fn main() { let _ = rec(0); }\n";
@@ -168,7 +168,7 @@ fn heap_reads_run_natively() {
 #[test]
 fn heap_stores_stay_when_native_code_panics() {
     // `fill` writes a[0..n] and then indexes past the end: it panics
-    // natively, with the stores made, as the VM's run does.
+    // natively, with the stores made, as the interpreter's run does.
     let src = format!(
         "{HEADER}class C {{ pub n: int, pub f: float }}\n\
          #[inline(never)]\nfn fill(Vec<int> a, int n) -> int {{ let i = 0; while i < n {{ a[i] = i * 10; i = i + 1; }} return a[n]; }}\n\
@@ -213,7 +213,7 @@ fn copy_on_write_keeps_value_semantics_natively() {
 #[test]
 fn allocation_runs_natively_and_matches_the_interpreter() {
     // Objects, tuples, enums and arrays made in native code, pushes, and a
-    // panic after pushes that stay made, as in the VM's run (each push
+    // panic after pushes that stay made, as in the interpreter's run (each push
     // reads the length, so the loop stays one push at a time).
     let src = format!(
         "{HEADER}class Pt {{ pub x: int, pub y: int }}\n\
@@ -269,7 +269,7 @@ fn matches_on_option_result_and_enums_run_natively() {
 #[test]
 fn two_word_returns_run_natively() {
     // A two-slot `Option<int>` and a pair, returned to native callers and
-    // to the VM (`main`), through the JIT and through an archive.
+    // to the interpreter (`main`), through the JIT and through an archive.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn half(int n) -> Option<int> {{ if n % 2 == 0 {{ return Some(n / 2); }} return None; }}\n\
          #[inline(never)]\nfn halves(int n) -> int {{ let s = 0; let i = 0; while i < n {{ s = s + match half(i) {{ Some(h) => h, None => 1 }}; i = i + 1; }} return s; }}\n\
@@ -344,7 +344,7 @@ fn question_mark_err_of_a_string_result_matches_the_interpreter() {
 #[test]
 fn statics_are_read_and_written_natively() {
     // `tick` bumps a static, then divides by its argument: with 0 it
-    // panics natively with the bump made, as the VM's run does.
+    // panics natively with the bump made, as the interpreter's run does.
     let src = format!(
         "{HEADER}static let COUNT: int = 0;\nstatic let NAME: string = \"n\";\n\
          #[inline(never)]\nfn tick(int by) -> int {{ COUNT = COUNT + 1; return COUNT * 10 / by; }}\n\
@@ -412,7 +412,7 @@ fn a_trap_after_a_print_panics_natively_as_the_interpreter_does() {
     );
     let stats = same_as_mir("trap_after_print", &src);
     assert!(compiled(&stats, "step") && compiled(&stats, "deep"), "stats: {stats}");
-    // The panic is raised in native code, with the VM's backtrace.
+    // The panic is raised in native code, with the interpreter's backtrace.
     let jit = run("trap_after_print", &src, true);
     let err = program_stderr(&jit);
     assert!(err.contains("panic: integer overflow at"), "stderr: {err}");
@@ -421,7 +421,7 @@ fn a_trap_after_a_print_panics_natively_as_the_interpreter_does() {
 
 #[test]
 fn native_code_calls_bodies_and_collects() {
-    // `println` stays on the VM (its writes may park); `run` calls it and
+    // `println` stays on the interpreter (its writes may park); `run` calls it and
     // allocates in a loop long enough for collections at its safepoints.
     let src = format!(
         "{HEADER}class B {{ pub v: int, pub s: string }}\n\
@@ -512,8 +512,8 @@ fn an_early_freed_drop_object_drops_once() {
 
 #[test]
 fn a_scope_native_code_ran_leaves_no_scheduler_behind() {
-    // `first` compiles and runs a scope on the VM whose child suspends it;
-    // `main` stays on the VM (its `defer`) and opens its own scope after.
+    // `first` compiles and runs a scope on the interpreter whose child suspends it;
+    // `main` stays on the interpreter (its `defer`) and opens its own scope after.
     let src = format!(
         "{HEADER}use task::{{scope, Scope, yield_now}};\n\
          fn ok(Result<int, task::TaskError> r) -> int {{ return match r {{ Result::Ok(v) => v, Result::Err(_) => -1 }}; }}\n\
@@ -530,7 +530,7 @@ fn a_scope_native_code_ran_leaves_no_scheduler_behind() {
 fn defers_run_from_native_frames_on_return_and_panic() {
     // `step` arms defers capturing heap values in a loop that allocates
     // (collections move them); `outer` panics through `inner` after a
-    // print: the VM reports the panic, then the native frames' defers run.
+    // print: the interpreter reports the panic, then the native frames' defers run.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn step(int n) -> int {{\n  let tag = format(\"n%i\", n);\n  defer use (tag) {{ let _ = println(\"step done \" + tag); }}\n\
            let parts: Vec<string> = [];\n  let i = 0;\n  while i < n {{ parts.push(format(\"%i-%i\", n, i)); i = i + 1; }}\n\
@@ -602,7 +602,7 @@ fn gc_collect_runs_from_native_code_with_its_words_rooted() {
     // `churn` holds heap words across `collect()`; the collection must
     // keep (and may move) them, and run the drops it owes. The handles are
     // made in `drop_one`, so no frame holds one at the collection (native
-    // frames free a local at its last use, the VM's frame when rebound).
+    // frames free a local at its last use, the interpreter's frame when rebound).
     let src = format!(
         "{HEADER}use gc::collect;\nstatic let drops: int = 0;\nclass Handle {{ pub fd: int }}\nimpl Handle {{ fn drop() {{ drops = drops + 1; }} }}\n\
          #[inline(never)]\nfn drop_one(int i) {{ let _h = new Handle(i); }}\n\
@@ -618,7 +618,7 @@ fn gc_collect_runs_from_native_code_with_its_words_rooted() {
 #[test]
 fn int_powers_trap_as_on_the_interpreter() {
     // `**` on ints: exact powers, then overflow and a negative exponent
-    // panic with the VM's messages (after a print: committed).
+    // panic with the interpreter's messages (after a print: committed).
     let src = format!(
         "{HEADER}#[inline(never)]\nfn power(int a, int b) -> int {{ return a ** b; }}\n\
          #[inline(never)]\nfn table(int n) -> int {{ let t = 0; let i = 0; while i < n {{ t = t + power(3, i % 20) + power(-1, i) + power(0, i % 2); i = i + 1; }} return t; }}\n\
@@ -632,9 +632,9 @@ fn int_powers_trap_as_on_the_interpreter() {
 
 #[test]
 fn a_panic_under_native_frames_names_them_in_its_backtrace() {
-    // `vmside` runs on the VM (a host call native code leaves there) and
+    // `vmside` runs on the interpreter (a host call native code leaves there) and
     // panics under two native frames, directly and through a closure: the
-    // backtrace lists them as the VM run does.
+    // backtrace lists them as the interpreter run does.
     let src = format!(
         "{HEADER}use clock::sleep_ms;\n\
          #[inline(never)]\nfn vmside(int x) -> int {{ sleep_ms(0); let v: Vec<int> = [1, 2]; return v[x]; }}\n\
@@ -669,7 +669,7 @@ fn ran_on_driver(stats: &str) -> bool {
 
 #[test]
 fn bodies_that_cannot_suspend_run_natively_inside_tasks() {
-    // `work` reaches no VM code, so no suspension point: tasks run it
+    // `work` reaches no interpreted code, so no suspension point: tasks run it
     // natively while the scheduler is live. `put` may suspend (a channel
     // send) and keeps the switch working.
     let src = format!(
@@ -687,7 +687,7 @@ fn bodies_that_cannot_suspend_run_natively_inside_tasks() {
 }
 
 /// Tasks that suspend under native frames, for the fiber tests: `nap`
-/// stays on the VM (a task host call), the `#[inline(never)]` callers
+/// stays on the interpreter (a task host call), the `#[inline(never)]` callers
 /// around it compile.
 const TASK_SUSPENDERS: &str = "use task::{scope, Scope, Task, TaskError, timeout};\n\
      static let LOG: int = 0;\n\
@@ -756,7 +756,7 @@ fn timeouts_panics_and_joins_under_native_frames_match_the_interpreter() {
 #[test]
 fn native_code_resumes_generators_as_the_interpreter_does() {
     // `drain`, `talk`, `nest` and `boom` compile and resume generators whose
-    // bodies run on the VM: yields, sends, `yield from`, completion, a
+    // bodies run on the interpreter: yields, sends, `yield from`, completion, a
     // generator that panics, and a resume after it finished.
     let defs = format!(
         "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i * i; i = i + 1; }} return 1000; }}\n\
@@ -785,8 +785,8 @@ fn native_code_resumes_generators_as_the_interpreter_does() {
 
 #[test]
 fn a_contract_failing_under_a_task_fiber_blames_the_caller() {
-    // `blame` runs on its task's fiber and calls `half` on the VM: the
-    // failed `requires` names the call site, as on the VM.
+    // `blame` runs on its task's fiber and calls `half` on the interpreter: the
+    // failed `requires` names the call site, as on the interpreter.
     let src = format!(
         "{HEADER}use task::{{scope, Scope, TaskError}};\n\
          fn half(int n) -> int\n    requires n >= 0, \"negative\"\n{{\n    return n / 2;\n}}\n\
@@ -801,7 +801,7 @@ fn a_contract_failing_under_a_task_fiber_blames_the_caller() {
 #[test]
 fn host_calls_on_the_machine_run_from_native_code() {
     // `write_all` waits for the stream (`await_writable`) and `write` goes
-    // through the VM's host call: both bodies still compile.
+    // through the interpreter's host call: both bodies still compile.
     let src = "use io::stdout;\nuse io::sync::write_all;\nuse io::sync::println;\nuse string::to_bytes;\nuse string::format;\n\
          #[inline(never)]\nfn emit(int i) -> int { let _ = write_all(stdout(), to_bytes(format(\"line %i\\n\", i))); return i; }\n\
          fn main() { let t = 0; let i = 0; while i < 5 { t = t + emit(i); i = i + 1; } let _ = println(format(\"%i\", t)); }\n";
@@ -826,7 +826,7 @@ fn a_machine_host_call_panics_at_its_native_call_site() {
 #[test]
 fn generator_bodies_run_natively() {
     // The generators' own bodies compile: yields, sends, strings held
-    // across yields while the resumer collects, an early `for` exit, a VM
+    // across yields while the resumer collects, an early `for` exit, an interpreter
     // generator delegating to one, and a panic after a yield.
     let defs = format!(
         "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i * i; i = i + 1; }} return 1000; }}\n\
@@ -856,7 +856,7 @@ fn generator_bodies_run_natively() {
 fn task_ops_and_contracts_run_from_native_code() {
     // `scope` itself (scope open, spawn, join) and `half` (its failed
     // `requires`) compile: tasks still switch and the failure names the
-    // caller, as on the VM.
+    // caller, as on the interpreter.
     let src = format!(
         "{HEADER}use task::{{scope, Scope, TaskError, yield_now}};\n\
          fn half(int n) -> int\n    requires n >= 0, \"negative\"\n{{\n    return n / 2;\n}}\n\
@@ -916,13 +916,13 @@ fn ffi_calls_run_from_native_code() {
     assert!(compiled(&stats, "total"), "stats: {stats}");
     // The library loads and the declarations run in the native setup body.
     assert!(compiled(&stats, "__module_setup"), "stats: {stats}");
-    // The FFI ops run in Rust, no stub bytecode.
+    // The FFI ops run in Rust, no stubs.
 }
 
 #[test]
 fn yield_from_runs_in_native_generator_bodies() {
     // `outer`, `relay` and `talk` delegate natively: values, sends passed
-    // through, a delegate that runs on the VM (`slow` has a `defer`), and
+    // through, a delegate that runs on the interpreter (`slow` has a `defer`), and
     // nesting.
     let src = format!(
         "{HEADER}gen fn count(int n) {{ let i = 0; while i < n {{ yield i; i = i + 1; }} return 99; }}\n\
@@ -953,8 +953,8 @@ fn vector_ops(stats: &str) -> u64 {
 fn vector_loops_and_byte_scans_run_from_native_code() {
     // `sum` and `dot` are counted reduce loops (`VecLoop`), `scale` a map
     // loop storing lanes, `find` an early-exit byte loop (`ByteScan`) and
-    // `copy` a push loop (one bulk copy): the MIR passes the VM's dense
-    // tier runs give native code the same loops.
+    // `copy` a push loop (one bulk copy): the MIR passes give native code
+    // the same loops.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs, int from) -> int {{ let s = 0; let i = from; while i < xs.len() {{ s = s + xs[i]; i = i + 1; }} return s; }}\n\
          #[inline(never)]\nfn dot(Vec<float> a, Vec<float> b) -> float {{ let s = 0.0; let i = 0; while i < a.len() {{ s = s + a[i] * b[i]; i = i + 1; }} return s; }}\n\
@@ -968,7 +968,7 @@ fn vector_loops_and_byte_scans_run_from_native_code() {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
     // `scale` (a store loop) and `find` (a scan, run twice) go through the
-    // VM's lane code; the reduces compile to native loops.
+    // the interpreter's lane code; the reduces compile to native loops.
     assert!(vector_ops(&stats) >= 3, "stats: {stats}");
 }
 
@@ -1019,15 +1019,15 @@ fn region_blocks_run_from_native_code() {
     );
     let stats = same_as_mir("native_region", &src);
     assert!(compiled(&stats, "rounds"), "stats: {stats}");
-    // The region hooks run in Rust: no stub bytecode.
+    // The region hooks run in Rust: no stubs.
 }
 
 #[test]
 fn reduce_loops_compile_to_native_loops() {
     // Counted reduces (a sum over an index expression as spectral_norm's,
     // a float dot, an int max, a xor, a NaN-aware float max) run as native
-    // loops: no vector op goes through the VM's lane code. Results match
-    // the VM's left-to-right folds bit for bit.
+    // loops: no vector op goes through the interpreter's lane code. Results match
+    // the interpreter's left-to-right folds bit for bit.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn row(Vec<float> v, int i) -> float {{ let s = 0.0; let j = 0; while j < v.len() {{ let ij = i + j; s = s + 1.0 / (((ij * (ij + 1)) / 2 + i + 1) as float) * v[j]; j = j + 1; }} return s; }}\n\
          #[inline(never)]\nfn dot(Vec<float> a, Vec<float> b) -> float {{ let s = 0.0; let i = 0; while i < a.len() {{ s = s + a[i] * b[i]; i = i + 1; }} return s; }}\n\
@@ -1046,8 +1046,8 @@ fn reduce_loops_compile_to_native_loops() {
 #[test]
 fn a_trap_in_a_native_reduce_reports_the_lane_trap() {
     // A lane's term divides by zero after an earlier partial sum would
-    // overflow: the VM evaluates a block's terms before it folds, so the
-    // panic is the division's. Native code re-runs the op on the VM's
+    // overflow: the interpreter evaluates a block's terms before it folds, so the
+    // panic is the division's. Native code re-runs the op on the interpreter's
     // lanes when anything traps.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn sum(Vec<int> xs, Vec<int> ds) -> int {{ let s = 0; let i = 0; while i < xs.len() {{ s = s + xs[i] / ds[i]; i = i + 1; }} return s; }}\n\
@@ -1059,7 +1059,7 @@ fn a_trap_in_a_native_reduce_reports_the_lane_trap() {
 
 #[test]
 fn a_reduce_over_bytes_takes_the_lanes_result() {
-    // A byte array has no word view: the native loop leaves for the VM's
+    // A byte array has no word view: the native loop leaves for the interpreter's
     // lanes on its first load, and the reduce's result is theirs.
     let src = format!(
         "{HEADER}#[inline(never)]\nfn byte_sum(Vec<byte> bytes, int n) -> int {{ let total = 0; for i in 0..n {{ total = total + (bytes[i] as int); }} return total; }}\n\
@@ -1109,7 +1109,7 @@ fn a_call_that_allocates_past_the_cap_collects_natively() {
 #[test]
 fn a_scope_opened_by_native_main_runs_natively() {
     // `main` runs on a fiber of its own, so the scope it opens switches
-    // tasks there: its task ops need no bytecode stubs.
+    // tasks there: its task ops need no stubs.
     let src = format!(
         "{HEADER}use task::{{scope, Scope, yield_now}};\n\
          #[inline(never)]\nfn step(int k) -> int {{ yield_now(); return k * 2; }}\n\
@@ -1138,7 +1138,7 @@ fn auto_par_forks_from_native_code_keep_their_trees() {
 #[test]
 fn a_drop_the_collector_runs_enters_native_code() {
     // `collect` from native `main` finalizes the handle: its `drop` has
-    // native code, so no bytecode runs.
+    // native code, so no interpreted code runs.
     let src = format!(
         "{HEADER}use gc::collect;\nstatic let LOG: int = 0;\nclass Handle {{ pub fd: int, }}\n\
          impl Handle {{ fn drop() {{ LOG = LOG + self.fd; }} }}\n\
@@ -1154,7 +1154,7 @@ fn generators_with_defers_run_natively_and_close() {
     // runs natively), one that runs it out runs the defer on return, and
     // the collector closes one nothing reaches. `loud`'s defer panics in
     // the close: the panic goes on to the loop's caller (inside a task, so
-    // the VM's double report of it, #2261, stays out of stderr).
+    // the interpreter's double report of it, #2261, stays out of stderr).
     let src = format!(
         "{HEADER}use gc::collect;\nuse task::{{scope, Scope, TaskError}};\nstatic let LOG: string = \"\";\nfn say(string s) {{ LOG = LOG + s; }}\n\
          gen fn nums(int n) {{ defer {{ say(\"[d]\"); }} let i = 0; while i < n {{ say(format(\"%i\", i)); yield i; i = i + 1; }} return 0; }}\n\
@@ -1182,7 +1182,7 @@ fn native_hits(stats: &str) -> Option<u64> {
 fn main_itself_runs_natively() {
     // The prologue enters `main` by a jump after a `CALL` with no target:
     // native code runs `main`'s own loop (a recurrence, so no auto-par
-    // body is called), not the VM.
+    // body is called), not the interpreter.
     let src = "fn main() { let t = 1; let n = 0; while t < 100000 { t = t * 2 + n; n = n + 1; } if t < 100000 { panic \"wrong\"; } }\n";
     let stats = same_as_mir("native_main", src);
     assert!(compiled(&stats, "main"), "stats: {stats}");
@@ -1192,7 +1192,7 @@ fn main_itself_runs_natively() {
 #[test]
 fn a_scope_inside_a_generator_body_runs_natively() {
     // The generator's body opens and waits for a scope at each step: its
-    // task ops switch tasks on `main`'s fiber, with no bytecode stubs.
+    // task ops switch tasks on `main`'s fiber, with no stubs.
     let src = format!(
         "{HEADER}use task::{{scope, Scope, yield_now}};\n\
          #[inline(never)]\nfn step(int k) -> int {{ yield_now(); return k * 2; }}\n\
@@ -1243,7 +1243,7 @@ fn module_setup_runs_natively() {
 
 /// Past the registers, arguments go on the stack: a body of many parameters
 /// still runs natively, and the objects among them survive a collection, in
-/// the callee and across a tail call. A package has no VM to run it instead.
+/// the callee and across a tail call. A package has no interpreter to run it instead.
 #[test]
 fn many_parameters_run_natively() {
     let params: Vec<String> = (0..20).map(|i| format!("Box a{i}")).collect();
@@ -1267,8 +1267,8 @@ fn many_parameters_run_natively() {
     assert!(compiled(&stats, "ints"), "stats: {stats}");
 }
 
-/// Bytecode holds 127 call arguments and 255 frame words; native code holds
-/// any number. A body past those runs natively, and on the VM it panics
+/// The interpreter holds 127 call arguments and 255 frame words; native code holds
+/// any number. A body past those runs natively, and on the interpreter it panics
 /// saying so, where it used to take the arity mod 128 or stop the compile.
 #[test]
 fn a_body_with_hundreds_of_words_runs_on_both_engines() {
@@ -1426,7 +1426,7 @@ fn native_frames_root_only_what_they_still_hold() {
 #[test]
 fn byte_array_literals_are_packed_natively() {
     // A `Vec<byte>` literal native code builds is packed one byte per
-    // element, and the heap counts it so, as the VM's `MakeArrayK` does.
+    // element, and the heap counts it so, as the interpreter's `MakeArrayK` does.
     let src = format!(
         "{HEADER}use gc::{{collect, heap_bytes}};\n\
          #[inline(never)]\nfn row(int i) -> Vec<byte> {{ return [(i % 256) as byte, 1 as byte, 2 as byte, 3 as byte, 4 as byte, 5 as byte, 6 as byte, 7 as byte, \

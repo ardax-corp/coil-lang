@@ -1,5 +1,5 @@
 // More parameters than a call passes in registers, or the 16 words a host
-// call used to take. A package has no VM to run such a body instead.
+// call used to take. A package has no interpreter to run such a body instead.
 use tests::assert;
 use gc::collect;
 

@@ -9,7 +9,7 @@
 //! Using one (`#[derive(Name)]`, `#[name(...)]`, `name!(…)`) records a
 //! [`PendingMacro`] during attribute expansion. After discovery the pipeline
 //! compiles each providing module into an expansion program, runs it through
-//! a [`MacroHost`] (the VM, with no host access and a step budget), re-parses
+//! a [`MacroHost`] (the runtime, with no host access and a step budget), re-parses
 //! the returned source and splices it next to (derive) or in place of
 //! (attribute, call) the use. See `docs/internals/macros.md`.
 
@@ -427,9 +427,9 @@ pub struct CompiledExpansion {
 }
 
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
-/// top of the VM so the compiler itself does not depend on `machine`.
+/// top of the runtime so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
-    /// Id of the compiler and VM this host was built with, which keys the
+    /// Id of the compiler and runtime this host was built with, which keys the
     /// on-disk cache of compiled expansion programs; empty keeps none.
     fn build_id(&self) -> &'static str {
         ""
@@ -462,7 +462,7 @@ pub trait MacroHost: Send + Sync {
     /// [`crate::ComptimeLimits::SILENT_MODULE_STEPS`] for all of them) and,
     /// when it fails, is left out instead of failing the rest.
     ///
-    /// Then, on the same VM (so a call can read the consts), each of
+    /// Then, on the same runtime (so a call can read the consts), each of
     /// `folds` runs within the silent tier; one that fails is `None`.
     ///
     /// An explicit item may do the IO `io[item.io]` grants; nothing else

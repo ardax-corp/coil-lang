@@ -863,7 +863,7 @@ impl Compiler {
             _ => return None,
         };
         let unwrap = matches!(builtin, HirBuiltin::Ffi { .. });
-        // The VM pushes a boxed `Result`; a niche-shaped one converts.
+        // The runtime pushes a boxed `Result`; a niche-shaped one converts.
         let niche = match Self::hir_call_rep(&emit.plan.calls[&id.0]) {
             _ if unwrap => None,
             Rep::Word(ValueLayout::NicheUnitResult) => Some(crate::mir::MirTy::NicheOpt),

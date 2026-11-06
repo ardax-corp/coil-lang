@@ -1,5 +1,5 @@
 //! Lane code: `VLoop` bodies and `VScan`s over eight or 64 lanes, on a
-//! heap and a slot window alone, for the VM's operand stack and native
+//! heap and a slot window alone, for the runtime's operand stack and native
 //! code's frames (`coil_native_vector`) alike.
 
 use common::{LaneOp, LaneWord, Value};
@@ -145,7 +145,7 @@ pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[Lan
     out
 }
 
-/// The operand words lane code reads and writes, at `sp + slot`: the VM's
+/// The operand words lane code reads and writes, at `sp + slot`: the runtime's
 /// stack, or the frame native code passes (`coil_native_vector`).
 pub(crate) trait LaneSlots: std::ops::Index<usize, Output = Value> + std::ops::IndexMut<usize> {}
 impl<T: std::ops::Index<usize, Output = Value> + std::ops::IndexMut<usize> + ?Sized> LaneSlots for T {}

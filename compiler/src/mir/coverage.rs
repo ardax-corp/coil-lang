@@ -3,7 +3,7 @@
 //! Each distinct source location of a body gets a [`MirInst::Probe`] in every
 //! block that runs it, so line coverage counts on any engine that runs MIR. A
 //! probe's id indexes the table [`instrument`] returns, which stands where a
-//! bytecode program's PC to location table stands for the VM's counts.
+//! code program's PC to location table stands for the runtime's counts.
 
 use std::collections::HashSet;
 use std::ops::Range;

@@ -2416,7 +2416,7 @@ impl Walk<'_> {
             }
             HirKind::Bin { op, lhs, rhs } => {
                 // A user type's operator: a call of its trait instance, or
-                // (`==` / `!=` without one) the VM's structural `EQ` /
+                // (`==` / `!=` without one) structural equality /
                 // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
                 if let BinOp::Overloaded(sym) = op {
                     // `==` / `!=` on arrays compare structurally (`EQ`), as

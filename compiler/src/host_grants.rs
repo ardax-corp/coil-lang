@@ -1,6 +1,6 @@
 //! Host capability grants and `dload` integrity inputs, from CLI flags only.
 //!
-//! Capabilities are checked at typecheck and the VM does not
+//! Capabilities are checked at typecheck and the runtime does not
 //! re-apply them (the compiled artifact is the grant). Native pins and
 //! trusted stems feed the run-time `dload` gate.
 

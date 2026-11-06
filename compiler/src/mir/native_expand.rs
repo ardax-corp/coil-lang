@@ -1,6 +1,6 @@
 //! Vec natives native code runs as MIR.
 //!
-//! The VM keeps `vec_insert` and `vec_remove` in the runtime. In a captured
+//! The runtime keeps `vec_insert` and `vec_remove` in the runtime library. In a captured
 //! native body [`apply`] writes each `HostInvoke` of them out as the loop it
 //! stands for, over the MIR array ops native code already compiles
 //! (`ArrayLen`, `Index`, `StoreIndex`, `ArrayPush`). The element moves are
@@ -18,7 +18,7 @@
 //! primitive (`remove` rotates the element to the end and pops it, which
 //! also packs the `Option` in the call's layout); and `vec_insert` itself
 //! on the out-of-range path only, so its panic is the host native's, as on
-//! the VM (its message alone, no Coil frames). A call whose operand or
+//! the runtime (its message alone, no Coil frames). A call whose operand or
 //! result types the expansion does not cover stays a `HostInvoke`.
 
 use super::inst::{MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst};
@@ -239,7 +239,7 @@ fn insert(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
     let above = ex.cmp(check_hi, MirCmpOp::Gt, i, n);
     ex.br(check_hi, above, oob, grow);
 
-    // Out of range: the native panics, as the VM's call does.
+    // Out of range: the native panics, as the runtime's call does.
     let failed = ex.value(ex.f.ty(dest));
     ex.push(oob, MirInst::HostInvoke { dest: failed, native_id: native, layout, args: args.to_vec() });
     ex.end(oob, Terminator::Unreachable);

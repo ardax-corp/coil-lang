@@ -1,8 +1,6 @@
 //! Lower a planned HIR body straight to MIR (HIR to MIR plan, phase M1).
 //!
-//! MIR used to be rebuilt from the stack IL by a lift that guessed each
-//! slot's type from the opcodes that touch it (retired in M4/M5). Here the
-//! types come from the checker, locals are read and written by name, and control flow is
+//! The types come from the checker, locals are read and written by name, and control flow is
 //! built from `if` / `loop` / `break` directly, so none of the operand-stack
 //! replay applies.
 //!
@@ -688,7 +686,7 @@ struct Lower<'a> {
     /// The block being filled.
     cur: BlockId,
     loops: Vec<Loop>,
-    /// The function returns `()`: a `return` gives the VM's unit word.
+    /// The function returns `()`: a `return` gives the runtime's unit word.
     unit_ret: bool,
     /// The type a `return` gives: a `gen fn`'s yielded type (its final
     /// resume's word), else the declared one.
@@ -3892,7 +3890,7 @@ impl Lower<'_> {
             return Err(format!("operator {op:?}"));
         }
         // `==` / `!=` on two-word values (an enum, tuple or range kept as
-        // a pair): both boxed, then the VM's structural `EQ`, as HIR
+        // a pair): both boxed, then structural equality, as HIR
         // emission compares them.
         if matches!(op, BinOp::Eq | BinOp::Ne) && (self.inp.pair_tys.contains_key(&lhs.0) || self.inp.pair_tys.contains_key(&rhs.0)) {
             let Some(l) = self.boxed_word(lhs)? else {
@@ -3970,7 +3968,7 @@ impl Lower<'_> {
         Ok(Val::V(out.map_err(mir)?))
     }
 
-    /// `==` / `!=` of two heap words: the VM's structural `EQ`, or, when
+    /// `==` / `!=` of two heap words: structural equality, or, when
     /// their type has `float` leaves, `values_eq_shaped` with the shape
     /// emission planned, so those compare by IEEE (#1253).
     fn structural_eq(&mut self, id: HirId, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
@@ -4546,7 +4544,7 @@ impl Lower<'_> {
     }
 
     /// Ground dictionary `ops` held in static `slot`: built and stored on
-    /// the first run in this VM (a worker's statics start zeroed), loaded
+    /// the first run in this runtime (a worker's statics start zeroed), loaded
     /// after that.
     fn interned_dict(&mut self, slot: u32, ops: &[HirDictOp]) -> Result<ValueId, Refusal> {
         let have = self.b.ins_load_static(slot, MirTy::HeapRef).map_err(mir)?;
@@ -5016,7 +5014,7 @@ impl Lower<'_> {
     }
 
     /// `lhs op rhs` on a user type with no instance, as HIR emission's raw
-    /// opcode: `==` / `!=` of two heap words (the VM's structural `EQ`), or
+    /// opcode: `==` / `!=` of two heap words (structural equality), or
     /// a number-backed scalar enum's backing words.
     fn op_prim(&mut self, id: HirId, sym: &str, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
         // A two-word operand compares boxed, as emission pushes it.
@@ -5028,7 +5026,7 @@ impl Lower<'_> {
             return self.structural_eq(id, l, r, sym == "!=");
         }
         // Niche `Option` / `Result` words compare as HIR emission pushes
-        // them: each boxed to its `ObjEnum`, then the VM's structural `EQ`.
+        // them: each boxed to its `ObjEnum`, then structural equality.
         if lt == rt && matches!(lt, MirTy::NicheOpt | MirTy::NicheRes) && matches!(sym, "==" | "!=") {
             let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
             let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
@@ -5110,7 +5108,7 @@ impl Lower<'_> {
         }
     }
 
-    /// `yield v` / `yield from h`: one instruction (the VM saves the frame
+    /// `yield v` / `yield from h`: one instruction (the runtime saves the frame
     /// and resumes after it). The word
     /// moves boxed. A receiving yield's value is the word the next
     /// `resume .. with` sends.
@@ -5575,7 +5573,7 @@ impl Lower<'_> {
     }
 
     /// A local `const` table of literals (#1561): built into static `slot`
-    /// the first time it runs in this VM (an isolate thread's statics start
+    /// the first time it runs in this runtime (an isolate thread's statics start
     /// zeroed; a shared-heap job's copy may not have it yet), loaded after
     /// that. No code writes the array, so sharing it is not seen.
     fn frozen_array(&mut self, id: HirId, args: &[HirId], slot: u32) -> Result<Val, Refusal> {
@@ -6194,7 +6192,7 @@ impl Lower<'_> {
             };
         }
         let (ok, err) = (self.b.create_block(), self.b.create_block());
-        // `Ok` always carries one word, a void call's too (the VM's
+        // `Ok` always carries one word, a void call's too (the runtime's
         // `Ok(0)`): the match takes it, or the taken edge leaves it on the
         // operand stack, one slot per call (#1638).
         let word = self.b.ins_match_payload(obj, 0, ret.unwrap_or(MirTy::I64)).map_err(mir)?;
@@ -7436,7 +7434,7 @@ impl Lower<'_> {
     }
 
     /// Search the sorted `cases` for `v`: split on the
-    /// middle literal with `<` (bytecode `LE`), and test a small leaf case by
+    /// middle literal with `<` (code `LE`), and test a small leaf case by
     /// case.
     fn search_node(&mut self, v: ValueId, cases: &[(i64, usize)], blocks: &[Option<BlockId>], default: BlockId) -> Result<(), Refusal> {
         if cases.len() <= crate::hir::match_tree::SEARCH_LEAF {
@@ -7629,7 +7627,7 @@ impl Lower<'_> {
         let Some(mut c) = self.word(cond)? else {
             return Ok(Val::Never);
         };
-        // An int condition branches as the VM's `JMPF` reads a word: true
+        // An int condition branches as the runtime's `JMPF` reads a word: true
         // when its low byte is `1`.
         if self.b.value_ty(c) == MirTy::I64 {
             let mask = self.b.ins_const(MirConst::I64(0xff)).map_err(mir)?;

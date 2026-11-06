@@ -240,7 +240,7 @@ fn op_lines(debug: &ProgramDebug, base_dir: Option<&Path>) -> Vec<Option<(u32, u
         .collect()
 }
 
-/// Put the debugger's op numbers where `artifacts` holds bytecode PCs.
+/// Put the debugger's op numbers where `artifacts` holds entry ids.
 fn number_ops(artifacts: &mut DissectArtifacts, locs: Vec<common::DebugLoc>, entries: &[(String, u32)]) {
     let starts: HashMap<&str, u32> = entries.iter().map(|(name, pc)| (name.as_str(), *pc)).collect();
     artifacts.functions.retain_mut(|f| {
@@ -511,7 +511,7 @@ impl DebugSession {
         names: &[&str],
     ) -> Result<Vec<BreakpointInfo>, String> {
         self.breakpoints.retain(|b| b.source.is_some());
-        // Empty replacement still must drop cleared fn BPs from the VM.
+        // Empty replacement still must drop cleared fn BPs from the runtime.
         if names.is_empty() {
             self.sync_vm_breakpoints();
             return Ok(Vec::new());
@@ -559,9 +559,9 @@ impl DebugSession {
         self.begin_run(false)
     }
 
-    /// Start and stop before the first bytecode insn (DAP `stopOnEntry`).
+    /// Start and stop before the first MIR step (DAP `stopOnEntry`).
     ///
-    /// Uses a temporary PC-0 breakpoint so the VM actually builds a frame;
+    /// Uses a temporary PC-0 breakpoint so the runtime actually builds a frame;
     /// a fake pause left `stackTrace` / step empty.
     pub fn start_paused_at_entry(&mut self) -> StopReason {
         self.begin_run(true)
@@ -1314,7 +1314,7 @@ mod tests {
         let reason = session.continue_exec().expect("continue");
         assert!(
             matches!(reason, StopReason::Halt),
-            "empty fn replace must sync VM; reason={reason:?}"
+            "empty fn replace must sync the runtime; reason={reason:?}"
         );
     }
 
@@ -1410,7 +1410,7 @@ mod tests {
         assert!(session.started());
         assert!(
             !session.stack_frames().is_empty(),
-            "stopOnEntry must build a VM frame"
+            "stopOnEntry must build a frame"
         );
         let reason = session.continue_exec().expect("continue");
         assert!(

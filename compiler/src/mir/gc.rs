@@ -6,14 +6,10 @@
 //! plus a barrier (B6 grow). `FORMAT` / `STRINGIFY` pair the same way
 //! (Q9 R3). Heap `GetField` / `SetField` / `LoadField` lower on the map
 //! path so InitTyped+field drafts bind (D1); they are not alloc sites.
-//! Dense emit reconstructs those as `DenseFieldLoad` / `DenseFieldStore`
-//! and Object `DenseMakeObject` (D2).
-//! [`fill_live_roots`] records live heap-word SSA values (and IL
-//! slots when the builder snapshotted them). Dense specialize and MIR→LIR
-//! sidecar. S2c may emit dense / LIR across alloc when every allocation
-//! has its barrier (`mir_maps_ok`).
+//! [`fill_live_roots`] records live heap-word SSA values at each barrier
+//! (`mir_maps_ok` holds when every allocation has its barrier).
 //!
-//! Stack-map roadmap: `docs/internals/mir-stack-maps.md`.
+//! Stack maps: `docs/internals/gc-incremental.md`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 

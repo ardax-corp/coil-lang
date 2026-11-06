@@ -58,7 +58,7 @@ fn run_nested(Vec<Op> ops, int n) -> int {
 }
 
 // The closure keeps `run_closure` off the dense numeric path, so this
-// match goes through the general (LIR) emitter.
+// match goes through the general emitter.
 fn run_closure(Vec<Op> ops, int n) -> int {
     let base = 0;
     let f = fn (int x) use (base) => x + base;

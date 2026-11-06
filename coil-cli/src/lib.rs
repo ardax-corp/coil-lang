@@ -1,4 +1,4 @@
-//! Shared CLI helpers for coil binaries (archive load, VM execute, git-style dispatch).
+//! Shared CLI helpers for coil binaries (archive load, runtime execute, git-style dispatch).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

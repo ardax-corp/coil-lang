@@ -79,7 +79,7 @@ impl Program {
 pub(crate) struct Body {
     pub(crate) mir: MirFunc,
     pub(crate) program: *const Program,
-    /// Bytecode entry PC (`u32::MAX`: none).
+    /// Entry id (`u32::MAX`: none).
     pub(crate) pc: u32,
     /// Its cleanup pad, run as a body of its own.
     pub(crate) pad: Option<Box<Body>>,
@@ -121,7 +121,7 @@ pub(crate) struct ExecBlock {
 pub(crate) struct Edge {
     pub(crate) to: u32,
     pub(crate) moves: Vec<(u32, u32)>,
-    /// It goes back in block order: a step, as a taken back-edge is the VM's.
+    /// It goes back in block order: a step.
     pub(crate) back: bool,
 }
 
@@ -272,7 +272,7 @@ fn through_archive(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) ->
     back
 }
 
-/// Make `bodies` runnable. `entry_pcs` maps a body's name to its bytecode
+/// Make `bodies` runnable. `entry_pcs` maps a body's name to its entry
 /// entry PC, as for `coil_native::jit`.
 pub fn prepare(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> InterpProgram {
     prepare_with(bodies, entry_pcs, None)

@@ -987,7 +987,7 @@ impl Pipeline {
             // its own module's.
             let module = jobs[idx[0]].provider_module.clone();
             let io = self.host_grants.comptime_io_for(&module);
-            // A nested compile plus a VM run is deeper than Windows' 1 MiB
+            // A nested compile plus a runtime run is deeper than Windows' 1 MiB
             // main thread stack; continue on a fresh segment when little is left.
             let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
                 let program = match compiled_program(key, ctx) {

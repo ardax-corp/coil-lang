@@ -1,4 +1,4 @@
-//! GDB-style debug stop controller for the VM.
+//! GDB-style debug stop controller for the runtime.
 //!
 //! Checks run only when a controller is attached (`unlikely`), so the normal
 //! dispatch path stays cold when unused.
@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::AddrHashBuilder;
 
-/// Why the VM paused for the debugger.
+/// Why the runtime paused for the debugger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
     Breakpoint { pc: usize },
@@ -302,7 +302,7 @@ pub struct DebugTask {
 /// Where a task's call chain is.
 #[derive(Clone, Debug)]
 pub enum DebugTaskFrames {
-    /// Live frames on the VM stack (machine frame indices, bottom first):
+    /// Live frames on the stack (machine frame indices, bottom first):
     /// the running task, and the root task while a child runs above it.
     Live(std::ops::Range<usize>),
     /// A suspended child task's saved frames: their pcs, bottom first.

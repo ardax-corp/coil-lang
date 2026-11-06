@@ -1,7 +1,7 @@
 //! Loop-invariant code motion on MIR (COI-280).
 //!
-//! Runs after SSA lower, local CSE and copy forwarding, on dense and LIR
-//! bodies alike. An instruction whose operands the loop does not define
+//! Runs after SSA lower, local CSE and copy forwarding, on every
+//! body. An instruction whose operands the loop does not define
 //! moves to a preheader when computing it early changes nothing: consts,
 //! float and bitwise arithmetic, compares, casts, pure host math, a field
 //! of an object nothing in the loop writes, the length of an array
@@ -21,8 +21,8 @@ use super::func::MirFunc;
 use super::inst::{BlockId, MirBinOp, MirInst, Terminator, ValueId};
 
 /// Hoist loop-invariant instructions. Returns how many moved. `dense`: a
-/// literal and a heap value may move too; LIR keeps a literal where it is
-/// an immediate operand, and every heap word in place.
+/// literal and a heap value may move too; with `false` a literal stays where it is
+/// an immediate operand, and every heap word stays in place.
 pub fn licm(func: &mut MirFunc, dense: bool) -> usize {
     let mut total = 0;
     for _ in 0..func.blocks.len().saturating_mul(4).max(4) {
@@ -460,7 +460,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
             invariant.insert(v);
         }
     }
-    // LIR keeps a literal in the loop (an immediate operand there); code
+    // A literal stays in the loop (an immediate operand there); code
     // that moves reads a copy of it.
     let literals: std::collections::HashMap<ValueId, MirInst> = if dense {
         std::collections::HashMap::new()

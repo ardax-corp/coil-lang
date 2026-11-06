@@ -93,7 +93,7 @@ thread_local! {
 
 /// This thread's epoch batch, set aside while it helps with a job that may
 /// allocate in another heap's epoch (a join help-steals unrelated jobs: other
-/// test cases, other VMs' auto-par work). Dropping it puts the batch back.
+/// test cases, other runtimes' auto-par work). Dropping it puts the batch back.
 #[must_use]
 pub struct EpochBatchStash(Option<EpochBatch>);
 
@@ -138,7 +138,7 @@ pub struct EpochWriteScope {
 }
 
 impl EpochWriteScope {
-    /// Enter a job on `heap` (the heap the job's VM is bound to): a
+    /// Enter a job on `heap` (the heap the job's runtime is bound to): a
     /// shared-heap job of `heap`'s open epoch when `shared`, otherwise a job
     /// that may write anything ([`Self::unchecked`]).
     #[cfg(any(debug_assertions, feature = "gc-stress"))]
@@ -148,7 +148,7 @@ impl EpochWriteScope {
     }
 
     /// Lift the guard until dropped: a join that help-steals runs the stolen
-    /// job (and the reset of its helper VM's own heap) on this thread.
+    /// job (and the reset of its helper runtime's own heap) on this thread.
     #[cfg(any(debug_assertions, feature = "gc-stress"))]
     #[inline]
     pub fn unchecked() -> Self {
@@ -236,7 +236,7 @@ pub struct HeapCounts {
 }
 
 /// Managed heap. Objects are linked in an intrusive list for traversal.
-/// `Gc<T>` handles are copyable; the VM controls when objects become unreachable.
+/// `Gc<T>` handles are copyable; the runtime controls when objects become unreachable.
 pub struct Heap {
     counts: Box<HeapCounts>,
     gc_next_threshold: usize,
@@ -259,7 +259,7 @@ pub struct Heap {
     /// instead of the heap (#1870). A superset: entries a sweep freed or a
     /// slot reuse replaced drop out when it next runs.
     weaks: Vec<u64>,
-    /// Class / enum `type_id`s with a `drop` (the VM's finalizer registry),
+    /// Class / enum `type_id`s with a `drop` (the runtime's finalizer registry),
     /// one bit per id: every allocation asks while any is registered.
     finalizer_types: Vec<u64>,
     /// The [`Self::finalizer_types`] whose `drop` keeps nothing of `self`
@@ -799,7 +799,7 @@ impl Heap {
         self.counts.fin_len = self.finalizer_types.len() as u64;
     }
 
-    /// Forget every finalizer type (a VM reset).
+    /// Forget every finalizer type (a runtime reset).
     pub fn clear_finalizer_types(&mut self) {
         self.finalizer_types.clear();
         self.sync_finalizer_words();
@@ -1306,10 +1306,10 @@ impl Heap {
     /// Free the object `v` points at before a collection would, because
     /// the compiler proved nothing else reaches it (`feature/escape-memory`
     /// step 2). `deep` also frees every object it reaches through precise
-    /// pointer words. `keep` names objects the VM still holds itself (frame
+    /// pointer words. `keep` names objects the runtime still holds itself (frame
     /// pins); those and anything this cannot free safely stay for the GC:
     /// interned strings, the shared unit variants and `()`, objects whose
-    /// `drop` has not run (the VM runs it first when [`Self::early_drops`]
+    /// `drop` has not run (the runtime runs it first when [`Self::early_drops`]
     /// lists it), handles, and everything while a cycle or a steal epoch is
     /// open. `check` frees nothing and records the objects instead, which
     /// the next mark must not reach. Returns how many objects it freed.
@@ -1321,7 +1321,7 @@ impl Heap {
         };
         // A `drop` that has not run yet keeps its object (and what reaches
         // it: the `drop` may read anything the walk would free) for the
-        // collector; [`Self::early_drops`] lets the VM run it first.
+        // collector; [`Self::early_drops`] lets the runtime run it first.
         if reaches_drop {
             return 0;
         }
@@ -1341,7 +1341,7 @@ impl Heap {
     /// ran, in walk order (the root first, a parent before what it
     /// reaches): `None` when the free would free nothing, or when one of
     /// them has a `drop` that may not run there. Empty when no `drop` is
-    /// pending. The VM runs these `drop`s, then calls [`Self::free_early`].
+    /// pending. The runtime runs these `drop`s, then calls [`Self::free_early`].
     pub fn early_drops(&mut self, v: Value, deep: bool, keep: &dyn Fn(u64) -> bool) -> Option<Vec<Object>> {
         if self.finalizer_types.is_empty() {
             return Some(Vec::new());
@@ -1503,7 +1503,7 @@ impl Heap {
     }
 
     /// Limit the heap to `cap` bytes (`usize::MAX`: unlimited). The heap
-    /// itself never refuses an allocation; the VM checks
+    /// itself never refuses an allocation; the runtime checks
     /// [`Self::over_byte_cap`] at its GC safepoints.
     pub fn set_byte_cap(&mut self, cap: usize) {
         self.byte_cap = cap;
@@ -1601,7 +1601,7 @@ impl Heap {
     }
 
     /// A `region` block opens. Returns true for the outermost one, which
-    /// the VM starts with an empty nursery.
+    /// the runtime starts with an empty nursery.
     pub fn region_enter(&mut self) -> bool {
         self.region_depth += 1;
         if self.region_depth != 1 {
@@ -1616,7 +1616,7 @@ impl Heap {
     }
 
     /// A `region` block ends. Returns true for the outermost one, after
-    /// which the VM collects the nursery.
+    /// which the runtime collects the nursery.
     pub fn region_exit(&mut self) -> bool {
         if self.region_depth == 0 {
             return false;
@@ -1643,7 +1643,7 @@ impl Heap {
     }
 
     /// Allocate instances, enums, boxes, tuples, arrays and closures in the
-    /// nursery (the VM turns it on; `--nursery off` keeps it off).
+    /// nursery (the runtime turns it on; `--nursery off` keeps it off).
     pub fn set_nursery(&mut self, on: bool) {
         self.nursery = on;
         self.sync_inline_gate();
@@ -1872,7 +1872,7 @@ impl Heap {
         }
         let _epoch_guard = self.epoch_guard();
         let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None };
-        // Old: a root for the VM's lifetime, never worth a nursery copy.
+        // Old: a root for the runtime's lifetime, never worth a nursery copy.
         let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
         self.immortal_fns.insert((entry, arity, is_rest), object);
         object
@@ -2731,7 +2731,7 @@ impl Object {
 /// How a moving collector may treat a root (`docs/internals/gc-evacuation.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RootKind {
-    /// A word the VM knows is a heap reference; could be rewritten.
+    /// A word the runtime knows is a heap reference; could be rewritten.
     Precise,
     /// A word that may be an immediate (conservative frame, static); the
     /// object it hits must not move.
@@ -3594,7 +3594,7 @@ impl ObjArray {
         }
     }
 
-    /// `elements[index]` with the VM's bounds rules: `unchecked` is a proven
+    /// `elements[index]` with the runtime's bounds rules: `unchecked` is a proven
     /// index; otherwise out of range returns `None`.
     #[inline(always)]
     pub fn read_indexed(&self, index: i64, unchecked: bool) -> Option<Value> {
@@ -3654,7 +3654,7 @@ impl ObjArray {
     }
 
     /// The element words in place, for native code (`None` for a byte
-    /// array). `for_store` marks the array as a VM store would.
+    /// array). `for_store` marks the array as a runtime store would.
     /// [`Self::words_view`] for loads only: no write to the object, so a
     /// shared-heap worker may view an array from before its epoch.
     pub(crate) fn words_view_for_load(&self) -> Option<(*mut Value, usize)> {
@@ -3764,7 +3764,7 @@ impl ObjArray {
         unsafe { *self.words_vec().get_unchecked_mut(i) = v };
     }
 
-    /// `elements[index] = value` with the VM's bounds rules: `unchecked` is a
+    /// `elements[index] = value` with the runtime's bounds rules: `unchecked` is a
     /// proven index; otherwise out of range returns `false`.
     #[inline(always)]
     pub fn store_indexed(&mut self, index: i64, value: Value, unchecked: bool) -> bool {
@@ -4032,7 +4032,7 @@ pub struct ObjWeak {
 /// or explicit-capture lambda (`MakeFn`), or a generic function value
 /// (`MakePolyFn*`, which sets [`Self::dicts`]).
 pub struct ObjFn {
-    /// Bytecode entry of the body.
+    /// Entry id of the body.
     pub entry: u32,
     /// Fixed arity, or rest `nfixed` when `is_rest`.
     pub arity: u32,
@@ -4104,7 +4104,7 @@ impl fmt::Display for ObjStream {
     }
 }
 
-/// Join handle for a spawned OS thread (host `JoinState` lives outside the VM heap).
+/// Join handle for a spawned OS thread (host `JoinState` lives outside the heap).
 pub struct ObjThread {
     pub state: std::sync::Arc<crate::thread::JoinState>,
 }
@@ -4203,7 +4203,7 @@ impl GcSized for ObjArray {
 
 impl GcSized for ObjCoroutine {
     fn size(&self) -> usize {
-        // `saved_stack` / `saved_frames` use Rust's allocator, not the VM
+        // `saved_stack` / `saved_frames` use Rust's allocator, not the runtime
         // heap byte counter (same contract as `ObjInstance`).
         mem::size_of::<Self>()
     }
@@ -4687,7 +4687,7 @@ impl<T> AsMut<T> for GcData<T> {
 #[cfg(any(debug_assertions, feature = "gc-stress"))]
 impl<T> GcData<T> {
     /// Inside a shared-heap job, a payload write must target an object
-    /// allocated in that job's epoch ([`EpochWriteScope`]). Every VM
+    /// allocated in that job's epoch ([`EpochWriteScope`]). Every runtime
     /// payload write reaches the object through [`AsMut::as_mut`] (directly
     /// or via [`Gc::payload_mut`]), so this one check covers field stores,
     /// index stores, pushes, `may_hold_refs` and resize bookkeeping.
@@ -4763,8 +4763,8 @@ impl<T> Gc<T> {
         }
     }
 
-    /// Mutable access to the inner payload (single-threaded VM only).
-    #[allow(clippy::mut_from_ref)] // `Gc<T>` is a copyable slot handle; the VM mutates the payload through shared `&self`
+    /// Mutable access to the inner payload (single-threaded runtime only).
+    #[allow(clippy::mut_from_ref)] // `Gc<T>` is a copyable slot handle; the runtime mutates the payload through shared `&self`
     pub fn payload_mut(&self) -> &mut T {
         unsafe {
             let ptr = self.ptr.as_ptr().cast::<GcData<T>>();

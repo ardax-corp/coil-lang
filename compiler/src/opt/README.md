@@ -1,19 +1,9 @@
-# Optimization on the stack IL
+# Optimization switches
 
-No optimization pass runs on the stack IL any more. The last ones were
-removed in 2026-10; their work moved to the HIR passes and to MIR
-lowering, where the types, locals and control flow are still explicit.
-Since M5 (2026-10-15) the stack IL is only the encoding of what MIR emits:
-
-- **tier pick** (`IlModule::optimize_and_flatten`): each body's MIR (lowered
-  from HIR) emits dense when that wins, else LIR; there is no lift from
-  stack IL and no fuse-IL tier;
-- **fuse-select** (`il::lower::fuse_select`, below), once after the bodies
-  are concatenated, then one PC assignment.
-
-This directory keeps the [`OptimizeOptions`] switches, the [`OptLevel`]
-presets that set them, and the `--opt-stats` counters ([`OptStats`]: body
-tiers, HIR lowering and inlining).
+Optimization passes run on HIR and MIR; none run on a stack IL. This
+directory keeps the [`OptimizeOptions`] switches, the [`OptLevel`] presets
+that set them, and the `--opt-stats` counters ([`OptStats`]: HIR lowering
+and inlining).
 
 **Hit-bench prove:** a change that is sound but leaves the flagship `.ccoil`
 unchanged gets focused `examples/perf` benches, and is proved on those; do not
@@ -45,42 +35,4 @@ convoys, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn` and per-body
 `cfg_gvn`. MIR instcombine / strength reduction / GVN are separate.
 
 The HIR passes run in `emit_hir` after inlining: unroll, fold,
-bounds, sink_return. MIR runs its own passes per tier (CSE in `mir/cse.rs`, LICM in `mir/licm.rs`) ([mir.md](../../../../docs/internals/mir.md)).
-
-## Stack height: `sp`
-
-[`crate::il::sp`] gives the per-op eval-stack *height* delta (`stack_delta`),
-used by `coil dissect`'s depth column. `STORE` does **not** floor height. The
-shared-cursor model (`il::tell`) and its VM differential test were removed
-with the IL optimizer they served (#1874).
-
-- **Input:** **Typed** [`IlOp`](../op.rs). `Jump`/`Entry` stay symbolic.
-  Incoming [`Label`] binds and `FuseHint` (D3) are
-  hard barriers — no dummy `NOOP` / `DUP;POP`. Residual [`IlOp::Byte`] is the
-  **cold set** (`FORMAT`, FFI, packed multi-slot LOAD/STORE, unmatched
-  `from_plain_byte`) and is **refused** in any multi-op window.
-- **Output:** Superinstructions (const fold, `BinSlotImm`/`BinSlotSlot`,
-  including the const-left commute `CONST; LOAD; int-bin` (COI-384),
-  `*Jmpf`/`*Jmpt`, `*Store`, packed LOAD/STORE n≤3, `*Return`).
-  `FloatChainStore` / `BinSlotSlotConstJmpf` are tombstones (not selected). Then one PC
-  assignment. `Vec<Byte>` for the archive. Label ids map to PCs; they do not
-  survive as IL.
-- **Refusals:** Window that would pull a **label** or **abs-jump target** onto a
-  non-first op; window that contains residual **`Byte`**; `*Return` fusion when
-  window[0] is an **unconditional join** (stacked arm value must be popped).
-  **`Entry` CALL / TailCall** is never a fuse window member.
-  **`FuseHint`** `nofuse` on the cond-jump refuses
-  `*Jmpf`/`*Jmpt` fusion (pair-`?` / pair-match keep `EQ;JMPF`). Residual abs JMP as `Byte` panics. Per-function fuse-select
-  is not production (measured no win).
-- **Tests:** `il/lower.rs` `lower_fuses_bin_slot_slot`, `lower_fuses_bin_slot_imm`,
-  `lower_fuses_const_return_imm`, `lower_fuses_load_const_add_store_to_bin_slot_imm_store`,
-  `lower_fuses_two_stage_float_chain_store`, `lower_refuses_cmp_jmpf_when_jump_is_nofuse`,
-  `lower_refuses_const_return_fuse_when_uncond_jmp_binds_producer`,
-  `fuse_select_refuses_residual_byte_in_window`. Retired float chain:
-  `cast_float_chain_is_not_fused`.
-
-Run (from repo root):
-
-```bash
-cargo test -p compiler --lib -- il::
-```
+bounds, sink_return. MIR runs its own passes (CSE in `mir/cse.rs`, LICM in `mir/licm.rs`) ([mir.md](../../../../docs/internals/mir.md)).

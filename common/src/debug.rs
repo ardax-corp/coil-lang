@@ -5,7 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// Sentinel `file` index: no source location (synthetic / unknown).
 pub const DEBUG_FILE_UNKNOWN: u32 = u32::MAX;
 
-/// One entry per bytecode slot (same index as VM `ip`).
+/// One entry per code slot (same index as runtime `ip`).
 #[derive(Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, Debug, Default)]
 #[rkyv(compare(PartialEq))]
 pub struct DebugLoc {
@@ -66,9 +66,10 @@ pub enum DebugLevel {
     /// message and bare `in <unknown>` frames.
     None,
     /// Function names and the line table (file, line, column per run): a
-    /// backtrace reads `in inner at x.coil:3:8`. No byte spans.
+    /// backtrace reads `in inner at x.coil:3:8`. Byte spans are kept too.
     Lines,
-    /// Lines plus byte spans, which the debugger and coverage need.
+    /// The default: everything the compiler recorded, including the byte
+    /// spans the debugger and coverage need.
     #[default]
     Full,
 }
@@ -94,7 +95,7 @@ impl DebugLevel {
     }
 }
 
-/// Debug sections loaded with bytecode (not the reporting `SourceMap`).
+/// Debug sections loaded with code (not the reporting `SourceMap`).
 #[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize, Debug, Default)]
 #[rkyv(compare(PartialEq))]
 pub struct ProgramDebug {

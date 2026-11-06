@@ -1,5 +1,5 @@
 //! Generators whose body is native code, over whatever runs the program
-//! (the VM's [`crate::Machine`] or the native driver). The model is in
+//! (the runtime's [`crate::Machine`] or the native driver). The model is in
 //! `docs/internals/native.md` ("Generator bodies").
 //!
 //! A generator whose body compiled (`NativeEntry::generator`) runs that body
@@ -7,7 +7,7 @@
 //! (`coil_native_yield` suspends it) or returns. While it is suspended the
 //! generator object owns the fiber (`ObjCoroutine::native`), and its
 //! `saved_stack` holds the root words of the parked call, which the
-//! collector traces (and forwards) as it does a VM generator's segment; the
+//! collector traces (and forwards) as it does a runtime generator's segment; the
 //! next resume writes them back before the fiber goes on.
 
 use common::Value;
@@ -50,7 +50,7 @@ pub(crate) trait GenHost {
         None
     }
     /// Whether a task may switch from inside a generator's fiber (the
-    /// native driver's tasks can; the VM's cannot).
+    /// native driver's tasks can; the runtime's cannot).
     fn switches_in_fibers(&self) -> bool {
         false
     }
@@ -334,7 +334,7 @@ fn new_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Box<cra
     let rt = h.rt();
     let table = rt.native.as_deref_mut()?;
     let entry = table.lookup(coro.resume_ip).filter(|e| e.generator)?;
-    // Its VM code could not switch tasks from a fiber of its own.
+    // Its runtime code could not switch tasks from a fiber of its own.
     if entry.suspends && switches {
         return None;
     }

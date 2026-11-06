@@ -1,6 +1,6 @@
 //! `==` / `!=` on an aggregate whose elements have a user `Eq` (#1629).
 //!
-//! The VM's structural `EQ` (and `values_eq_shaped`) compares a class
+//! structural equality (and `values_eq_shaped`) compares a class
 //! instance by identity: it cannot call an `Eq` instance. So an array,
 //! `Vec`, tuple, record, `Option`, `Result` or enum payload (of an enum with
 //! no `Eq` of its own) that holds, at any depth, a class or enum with an
@@ -8,7 +8,7 @@
 //! one per such type, comparing part by part with `==` at the part's type.
 //! That `==` dispatches as any other: a part with an `Eq` instance calls
 //! it, a part that needs glue calls its glue, and anything else compares
-//! as the VM does (a class without `Eq` by identity).
+//! as the runtime does (a class without `Eq` by identity).
 //!
 //! A glue function is reserved the first time a call of it is planned (in
 //! a body, a monomorphic clone, a structural `Eq` thunk or another glue)
@@ -36,7 +36,7 @@ const EQ_DICT_GLUE: &str = "EqDictGlue";
 
 /// The pseudo-class of the `Eq` dictionary a shared body passes for a
 /// type variable none of whose bounds has `Eq` (`T: Lt`): `eq` / `ne` as
-/// the VM's structural `EQ` compares the two values (#1694).
+/// structural equality compares the two values (#1694).
 const EQ_ANY: &str = "EqAny";
 
 /// An open glue call: the glue's key type and name, each variable of the
@@ -442,7 +442,7 @@ impl Compiler {
             }
             // Each variable's dictionary as an `Eq` one, [`EQ_ANY`]'s for
             // one with no `Eq` bound, when some other part needs the glue
-            // (`Vec<Box<T>>` at `T: Lt`, #1694); else the VM's `EQ` compares
+            // (`Vec<Box<T>>` at `T: Lt`, #1694); else structural equality compares
             // the value, as it compares the variables' parts.
             _ => {
                 if self.eq_dict_glue_needed(&key, false, &mut Vec::new()) != Some(true) {
@@ -527,7 +527,7 @@ impl Compiler {
         true
     }
 
-    /// Emit [`EQ_ANY`]'s `fqn`: the VM's structural `EQ` of the two words
+    /// Emit [`EQ_ANY`]'s `fqn`: structural equality of the two words
     /// (`ne` its negation), each unboxed first as a shared body holds a
     /// type variable's value; the trailing dictionary is not read.
     pub(super) fn emit_eq_any(&mut self, fqn: &str, ne: bool) {

@@ -328,7 +328,7 @@ impl LaneExpr {
                 Self::Cmp { op, lhs, rhs }
             }
             // De Morgan when it costs no nodes: `!(a | b)` with compares
-            // on both sides is `!a & !b`, the shape the VM's fast scans
+            // on both sides is `!a & !b`, the shape the runtime's fast scans
             // match (a threaded `&&` chain's mask, #1976).
             Self::And(x, y) => {
                 let size = 1 + x.size() + y.size();
@@ -465,7 +465,7 @@ pub enum MirInst {
     },
     /// An FFI opcode (`extern` calls and `dload` / `declare` / `invoke`):
     /// `args` are its stack operands in push order, `operand` the opcode's
-    /// own; `dest` is the boxed `Result` the VM pushes. A call that may run
+    /// own; `dest` is the boxed `Result` the runtime pushes. A call that may run
     /// a callback: an effect barrier, as an impure HostInvoke; dense refuses.
     Ffi {
         dest: ValueId,
@@ -473,7 +473,7 @@ pub enum MirInst {
         operand: u32,
         args: Vec<ValueId>,
     },
-    /// Dense / LIR `CALL` (COI-291 / B3). Args stay on the operand stack
+    /// `CALL` (COI-291 / B3). Args stay on the operand stack
     /// (LOAD / BinSlotImm convoy). One-word `Entry` uses `dest` only;
     /// two-slot `[payload, tag]` sets `dest_hi`. `STORE` only when a dest
     /// is live in a slot. Same bits as the callee's slots `0..n`.
@@ -510,7 +510,7 @@ pub enum MirInst {
         object: ValueId,
         index: u32,
     },
-    /// Heap `SetField` of slot `index`. Dest is the stored value (VM
+    /// Heap `SetField` of slot `index`. Dest is the stored value (runtime
     /// leaves it TOS).
     HeapFieldStore {
         dest: ValueId,
@@ -527,7 +527,7 @@ pub enum MirInst {
         index: ValueId,
         unchecked: bool,
     },
-    /// Heap index store (S3). Dest is the stored value (VM leaves it TOS).
+    /// Heap index store (S3). Dest is the stored value (runtime leaves it TOS).
     StoreIndex {
         dest: ValueId,
         array: ValueId,
@@ -548,7 +548,7 @@ pub enum MirInst {
         send: Option<ValueId>,
     },
     /// `YieldCoro` (or `YieldFromCoro` when `from`): suspend the running
-    /// coroutine with `value` (a sub-coroutine handle for `from`). The VM
+    /// coroutine with `value` (a sub-coroutine handle for `from`). The runtime
     /// saves the frame as it stands and resumes at the next instruction,
     /// so this is one instruction, and a GC safepoint as a call is: every
     /// live heap word stays in the frame. With `receive`, dest is the word
@@ -612,7 +612,7 @@ pub enum MirInst {
     },
     /// Count one more run of coverage probe `id`
     /// ([`super::coverage::instrument`]). Only a capture holds one, so the
-    /// bytecode tiers never see it. Dest is a `bool` unit token.
+    /// code tiers never see it. Dest is a `bool` unit token.
     Probe {
         dest: ValueId,
         id: u32,
@@ -732,10 +732,10 @@ pub enum MirInst {
         unique: bool,
         field: Option<u32>,
     },
-    /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
+    /// String `==` (`!=` when `ne`): structural equality, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
-    /// instance, which the VM compares structurally: that reads mutable
+    /// instance, which the runtime compares structurally: that reads mutable
     /// objects, so it is never CSE'd or hoisted (it is not, as above).
     StrEq {
         dest: ValueId,
@@ -764,7 +764,7 @@ pub enum MirInst {
         expr: LaneExpr,
     },
     /// A counted map or reduce loop over 8 lanes at a time (archive 6.2,
-    /// VM `VLoop`): `kind` for `p = from, from + 8, ..` below `to`
+    /// the vector loop): `kind` for `p = from, from + 8, ..` below `to`
     /// (`to - from` a multiple of 8, every read and write in range). A
     /// reduce's `dest` is the accumulator; a store loop's is unused.
     /// `pos` (a second dest) holds the block position while the body
@@ -783,7 +783,7 @@ pub enum MirInst {
 /// `p`. Kinds are `common::simd` / `dense` codes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecExpr {
-    /// An invariant `i64` / `f64` in every lane (`ty` is `dense::TY_*`).
+    /// An invariant `i64` / `f64` in every lane (`ty` is the lane type code).
     Splat { v: ValueId, ty: u8 },
     /// The loop index `p + k` in lane `k` (an int lane).
     Index,
@@ -866,7 +866,7 @@ impl VecExpr {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecLoopKind {
     /// `dest = init`, then `dest = dest ⊕ term` lane by lane, left to
-    /// right (`fold` is `simd::REDUCE_*`, `ty` `dense::TY_*`). `stores`
+    /// right (`fold` is `simd::REDUCE_*`, `ty` the lane type code). `stores`
     /// (as in [`Self::Store`]) run first in each block: a loop that both
     /// maps and folds.
     Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr, stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
@@ -1055,12 +1055,12 @@ impl MirGcKind {
     }
 }
 
-/// Stop / leave-specialized edge (I7). Not a bytecode opcode.
+/// Stop / leave-specialized edge (I7). Not a code opcode.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirDeoptKind {
     /// Interpreter may pause here (line / `stepi` boundary).
     Stop,
-    /// Leave specialized or native code; resume fuse-IL at this edge.
+    /// Leave specialized or native code; resume at this edge.
     Deopt,
 }
 
@@ -1325,7 +1325,7 @@ pub enum Terminator {
     /// Taken pops the scrutinee and binds `payloads` (declaration order;
     /// last word TOS), including boxed-overlap `JumpIfMatch` arity 0 with
     /// a unary payload. Miss leaves the scrutinee on the stack (same as
-    /// bytecode `JumpIfMatch`).
+    /// code `JumpIfMatch`).
     JumpIfMatch {
         scrutinee: ValueId,
         tag: u32,

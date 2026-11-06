@@ -568,7 +568,7 @@ fn build_matching_coil_rt(coil_bin: &Path) -> PathBuf {
 }
 
 /// `coil package` links native code by default (an AOT executable): its
-/// output, panic and exit status match the VM runner's package of the same
+/// output, panic and exit status match the interpreter runner's package of the same
 /// program, and its calls run natively.
 #[cfg(target_os = "linux")]
 #[test]
@@ -633,7 +633,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `coil-embed` is a runner with no VM, and a stripped binary cannot show it:
+/// `coil-embed` is a runner with no interpreter, and a stripped binary cannot show it:
 /// its own build resolves `machine` without the feature. A workspace build
 /// unifies it back, so releases build it alone.
 #[test]
@@ -649,7 +649,7 @@ fn coil_embed_resolves_no_vm() {
     assert!(!tree.contains("feature \"vm\""), "{tree}");
 }
 
-/// More parameters than registers need no VM: both kinds of executable run
+/// More parameters than registers need no interpreter: both kinds of executable run
 /// such a body.
 #[cfg(target_os = "linux")]
 #[test]
@@ -721,7 +721,7 @@ fn aot_package_strips_symbols_as_asked() {
 }
 
 /// `--link-static` links an `extern` block's library into the AOT
-/// executable: it runs with no shared library anywhere, and the VM runner
+/// executable: it runs with no shared library anywhere, and the interpreter runner
 /// cannot take one.
 #[cfg(target_os = "linux")]
 #[test]

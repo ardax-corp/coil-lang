@@ -1,11 +1,11 @@
 //! Machine stacks native code runs on: task and generator fibers' sizes,
 //! the running fiber's stack limit, and the deep stack native calls made on
-//! a thread's own stack switch to. Shared by the VM and the native driver.
+//! a thread's own stack switch to. Shared by the interpreter and the native driver.
 
-/// A task fiber's machine stack: native frames and the VM's nested
+/// A task fiber's machine stack: native frames and the interpreter's nested
 /// executions under them. Reserved, not committed: pages are touched as
 /// they are used. Native frames live here, so it is sized for recursion as
-/// deep as the VM's frame limit allows.
+/// deep as the runtime's frame limit allows.
 #[cfg(all(not(target_family = "wasm"), target_pointer_width = "64"))]
 pub(crate) const FIBER_STACK_BYTES: usize = 256 << 20;
 #[cfg(all(not(target_family = "wasm"), not(target_pointer_width = "64")))]
@@ -33,7 +33,7 @@ pub(crate) fn fiber_switch_fence<T: ?Sized>(owner: *mut T) {
 }
 
 /// The stack native calls made on a thread's own stack run on (a thread's
-/// few megabytes would end native recursion far sooner than the VM's frame
+/// few megabytes would end native recursion far sooner than the runtime's frame
 /// limit does): the size of a task's.
 #[cfg(not(target_family = "wasm"))]
 const DEEP_STACK_BYTES: usize = FIBER_STACK_BYTES;
@@ -81,5 +81,5 @@ pub(crate) fn fiber_stack_limit() -> Option<usize> {
     (l != 0).then_some(l)
 }
 
-/// Panic when a frame needs more operand stack than [`crate::MAX_OPERAND_STACK_SLOTS`].
+/// Panic when recursion runs out of stack.
 pub(crate) const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the stack limit";

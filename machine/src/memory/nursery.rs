@@ -2,7 +2,7 @@
 //!
 //! Instances, payload enums, boxes, tuples, arrays and closures are
 //! bump-allocated into young slab chunks ([`super::Slab::alloc_young`]). A minor collection
-//! traces young objects from the VM roots and the remembered set (old
+//! traces young objects from the roots and the remembered set (old
 //! objects written since the last one, see the barrier in
 //! [`super::GcData`]'s `as_mut`), copies every survivor only precise words
 //! name into an old slot, rewrites those words, and resets the young chunks.
@@ -219,10 +219,10 @@ impl Heap {
     }
 
     /// Trace the young objects reachable from `pins` (roots that cannot be
-    /// rewritten, which pin their target), `precise` (roots the VM rewrites
+    /// rewritten, which pin their target), `precise` (roots the runtime rewrites
     /// through [`MinorPlan::forward`]) and the remembered set; copy every
     /// survivor that is not pinned and rewrite the heap's precise words to
-    /// it. The VM then rewrites its precise roots and calls
+    /// it. The runtime then rewrites its precise roots and calls
     /// [`Self::minor_finish`].
     pub fn minor_plan(&mut self, pins: &[u64], precise: &[u64]) -> MinorPlan {
         debug_assert_eq!(self.gc_phase, GcPhase::Idle, "minor collections run between cycles");

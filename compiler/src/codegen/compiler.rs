@@ -88,7 +88,7 @@ impl Compiler {
         &self.module_items
     }
 
-    /// Run HM inference for a module without emitting bytecode.
+    /// Run HM inference for a module without emitting code.
     pub fn typecheck_module<'compiler>(
         &mut self,
         module: &str,
@@ -257,7 +257,7 @@ impl Compiler {
         id
     }
 
-    /// Number of global static slots for the VM table.
+    /// Number of global static slots for the runtime table.
     pub fn static_slot_count(&self) -> u32 {
         self.checker.static_slot_count()
     }
@@ -636,11 +636,11 @@ impl Compiler {
         }
     }
 
-    /// Bytecode offset WHERE the prologue (CALL+JMP+HALT)
+    /// Code offset WHERE the prologue (CALL+JMP+HALT)
     /// ENDS and user-program code BEGINS. Used by the runtime
     /// pipeline to patch the prologue's JMP operand so that
     /// any module-level `extern` block bytes (appended to
-    /// `self.bytecode` before `main`) execute before main.
+    /// `self.code` before `main`) execute before main.
     /// Without this, the prologue would skip past the extern
     /// block entirely (because `main_offset` lands past it).
     pub fn program_start_offset(&self) -> u32 {
@@ -2557,7 +2557,7 @@ impl Compiler {
 
     /// Free fns that must emit after `impl`s: those that call user methods,
     /// plus the transitive callers of that set (so phase-1 never forward-calls
-    /// a deferred callee via Entry into `self.bytecode`).
+    /// a deferred callee via Entry into `self.code`).
     fn deferred_post_impl_free_fns(
         children: &[Output<'_>],
         user_impl_methods: &std::collections::HashSet<String>,
@@ -3033,7 +3033,7 @@ impl Compiler {
                     return self.plan_instance_dict(out, class, &tys);
                 }
                 // `Eq<T>` with no `Eq` bound in scope: one built from a
-                // subclass bound's, or the VM's compare (#1694).
+                // subclass bound's, or the runtime's compare (#1694).
                 None if class == "Eq"
                     && let [Ty::Var(v)] = lookup
                     && let Some(dict) = self.var_eq_dict(*v) =>
@@ -5477,7 +5477,7 @@ impl Compiler {
 
     /// Register an embedder native: its HostInvoke id follows the frozen
     /// [`common::HOST_NATIVES`] table and the natives registered before it,
-    /// as the VM's native registry numbers them.
+    /// as the runtime's native registry numbers them.
     pub fn register(&mut self, name: &str, params: &[Ty], returns: &Ty) -> &mut Self {
         let base = common::HOST_NATIVES.len();
         let idx = self.native.values().copied().filter(|&id| id >= base).max().map_or(base, |id| id + 1);
@@ -5487,7 +5487,7 @@ impl Compiler {
         self
     }
 
-    /// Bind a host-native name to a stable id for [`Instruction::HostInvoke`]
+    /// Bind a host-native name to a stable id for `HostInvoke`
     /// without inserting a type into the HM env (virtual `io::*` schemes
     /// are bound via `use` instead).
     pub fn register_native_id(&mut self, name: &str, id: usize) {
@@ -6185,7 +6185,7 @@ impl Compiler {
     }
 
     /// The `main` of a test file with none (standalone `coil tests/foo.coil`):
-    /// runs every test case in one VM, printing `> Test "<name>" failed` for
+    /// runs every test case in one runtime, printing `> Test "<name>" failed` for
     /// each case that returns `Err`, then panics with `"tests failed"` if
     /// any did. Built as HIR ([`crate::hir::synth`]) and lowered like any
     /// other body.
@@ -6485,7 +6485,7 @@ impl Compiler {
 
 
             // Provisional span so self-recursive peels can see the opening
-            // predicate while the body is still streaming into `self.bytecode`.
+            // predicate while the body is still streaming into `self.code`.
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
             let prev_active = self.active_fn_name.take();
@@ -6567,7 +6567,7 @@ impl Compiler {
                 }
             }
             Expression::Noop(_) => (),
-            // `mod foo;`, pipeline loads the file; no bytecode.
+            // `mod foo;`, pipeline loads the file; no code.
             Expression::Module(_, _body) => {}
             Expression::Program(children) => {
                 self.program_seq += 1;
@@ -6798,7 +6798,6 @@ impl Compiler {
                 {
                     self.polyfn_vars.insert(n.to_string());
                 }
-                // bytecode.push(Byte::new(Instruction::LOAD)
             }
             Expression::Type(_)
             | Expression::TypeFn { .. }
@@ -6919,7 +6918,7 @@ impl Compiler {
                 }
             }
             Expression::AssocTypeDecl { .. } | Expression::TypeProjection { .. } => {
-                // Type-level only, no bytecode (NodeId already consumed by do_compile).
+                // Type-level only, no code (NodeId already consumed by do_compile).
             }
             Expression::AssocTypeDef { .. } => {}
             Expression::ExternBlock {
@@ -7073,7 +7072,7 @@ impl Compiler {
                 // A generated contract test calls its function with random
                 // arguments: only when it cannot write, do IO or the like.
                 // Its body is still emitted and listed until
-                // `finalize_bytecode`, which drops it from the runnable cases.
+                // `finalize_bodies`, which drops it from the runnable cases.
                 if !self.contract_case_allowed(&desc) {
                     self.skipped_contract_cases.insert(desc.clone());
                 }
@@ -7154,7 +7153,7 @@ impl Compiler {
         self.messages.push(message);
     }
 
-    /// [`compile`] calls [`finalize_bytecode`] afterwards for unit tests.
+    /// [`compile`] calls [`finalize_bodies`] afterwards for unit tests.
     fn compile_unfused<'compiler>(
         &mut self,
         module: &str,
@@ -7199,7 +7198,7 @@ impl Compiler {
         // `compile_module` would otherwise redirect bare names.
         self.aliases.clear();
         // Shared constant pool across `compile_module` calls. Clearing between
-        // modules orphans JumpIfMatch/CONST indices (VM panic). Reset only on
+        // modules orphans JumpIfMatch/CONST indices (runtime panic). Reset only on
         // a fresh prologue (CALL/JMP/HALT).
         if self.bodies.is_fresh() {
             self.constants.clear();
@@ -7757,20 +7756,20 @@ impl Compiler {
         self.emit_synth_fn(name, &hir, calls);
     }
 
-    /// Lower stack IL to VM bytecode (fusion select + label resolution).
+    /// Resolve labels and link the bodies into program code.
     ///
     /// Called once after multi-file linking by the pipeline, or at the end
     /// of single-file [`compile`] so unit tests observe fused output.
-    pub fn finalize_bytecode(&mut self) {
+    pub fn finalize_bodies(&mut self) {
         self.emit_foreign_clone_thunks();
-        self.finalize_bytecode_inner();
+        self.finalize_bodies_inner();
         if !self.skipped_contract_cases.is_empty() {
             let skipped = std::mem::take(&mut self.skipped_contract_cases);
             self.test_cases.retain(|(desc, _)| !skipped.contains(desc));
         }
     }
 
-    fn finalize_bytecode_inner(&mut self) {
+    fn finalize_bodies_inner(&mut self) {
         self.emit_module_setup();
 
         // Drop unused function bodies (eager builtin thunks, unreferenced user
@@ -7923,13 +7922,13 @@ impl Compiler {
     ){
         self.compile_unfused(module, ast, false);
         self.report_capability_violations();
-        self.finalize_bytecode();
+        self.finalize_bodies();
     }
 
     /// Append this module's IL to the shared buffer (multi-file pipeline).
     ///
     /// Returns an empty vec for API compatibility; the pipeline should call
-    /// [`finalize_bytecode`] once on the linked compiler buffer.
+    /// [`finalize_bodies`] once on the linked compiler buffer.
     pub fn compile_module<'compiler>(
         &mut self,
         module: &str,

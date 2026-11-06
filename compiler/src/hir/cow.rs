@@ -19,7 +19,7 @@
 //! `inout`, from the effects summary's `mutates`): the caller makes the
 //! argument unique and writes it back before the call, so the callee writes
 //! it in place, and stores of the parameter itself copy it eagerly. Class
-//! instances whose type has a `drop` are identities the VM never copies; a
+//! instances whose type has a `drop` are identities the runtime never copies; a
 //! `readonly class` is never written, so it needs neither op.
 //!
 //! The rewrite runs once per module, after the effects fixed point and
@@ -50,10 +50,10 @@ pub(crate) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
     let Some(ty) = ty else { return false };
     let ty = crate::typechecking::subst::apply_ty_prune(checker.subst(), ty);
     let name = match strip_readonly(&ty) {
-        // A type parameter (#2161): its ops reach the VM only where the
+        // A type parameter (#2161): its ops reach the runtime only where the
         // value is an object word. A per-type clone at a scalar type holds
         // the scalar itself, which MIR passes through with no op; a shared
-        // body holds every `T` boxed, and the VM shares or copies only class
+        // body holds every `T` boxed, and the runtime shares or copies only class
         // instances and arrays.
         Ty::Var(_) => return true,
         Ty::Con(n) => n.as_str(),

@@ -1,6 +1,6 @@
 //! `coil FILE --mir`: the interpreter runs MIR as lowered, at `-O 0` unless
 //! told otherwise. That output is the reference: every level, on the
-//! interpreter, the VM and native code, must give the same stdout, panic and
+//! interpreter and native code, must give the same stdout, panic and
 //! exit status.
 
 use std::process::{Command, Output};

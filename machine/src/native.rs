@@ -1,20 +1,13 @@
-//! Native code entry points (feature/native, step 1).
+//! Native code entry points.
 //!
-//! A native backend (the `coil-native` crate) compiles some function
-//! bodies to machine code and installs them here, keyed by the bytecode PC
-//! of the function's entry. A `CALL` to such a PC runs the native code
-//! instead of opening a VM frame.
+//! A backend (`coil-native`, or the interpreter on the same ABI) installs
+//! each body here, keyed by its entry id, and the driver runs them.
 //!
-//! The first tier only compiles *pure* functions: their values are ints,
-//! floats and bools, and they call only other native functions. Such a
-//! function has no effect but its result, so whenever native code cannot
-//! give the VM's exact answer (an int trap, a recursion deeper than the
-//! native stack budget, anything it does not model) it *bails*: it sets
-//! [`NativeCtx::bail`] and returns, and the VM runs the same call from the
-//! start in bytecode. The VM then raises the same panic, at the same
-//! source location, as it always did. See `docs/internals/native.md`.
+//! A trap panics natively: the first frame raises it and every frame on the
+//! way out adds its site to the trace ([`coil_native_unwind`]). See
+//! `docs/internals/native.md`.
 
-/// Shared state between the VM and native code. `#[repr(C)]`: the native
+/// Shared state between the runtime and native code. `#[repr(C)]`: the native
 /// code reads and writes these fields at fixed offsets.
 #[repr(C)]
 #[derive(Debug)]
@@ -26,7 +19,7 @@ pub struct NativeCtx {
     /// The machine's heap, for helpers that allocate (null: they bail).
     pub heap: *mut crate::memory::Heap,
     /// Objects helpers allocated during this call. No collection runs
-    /// while native code holds raw heap words, so the VM collects after
+    /// while native code holds raw heap words, so the runtime collects after
     /// the call returns; past [`NATIVE_ALLOC_CAP`] with a collection due,
     /// the call commits and collects at its next safepoint.
     pub allocs: u64,
@@ -38,20 +31,19 @@ pub struct NativeCtx {
     pub strings: *const String,
     pub string_cache: *mut common::Value,
     pub strings_len: u64,
-    /// Early frees (`FreeEarly`) the VM makes once the call returns:
+    /// Early frees (`FreeEarly`) the runtime makes once the call returns:
     /// `(word, deep)`. A free cannot be undone, so none happens inside a
     /// call that may still bail.
     pub frees: *mut Vec<(u64, bool)>,
     /// Non-zero when the program has `drop` finalizers: an early free may
-    /// then run one, so `FreeEarly` bails and the VM runs it.
+    /// then run one, so `FreeEarly` bails and the runtime runs it.
     pub has_finalizers: u64,
     /// The machine's statics (`LoadStatic` / `StoreStatic`), `statics_len`
     /// words.
     pub statics: *mut common::Value,
     pub statics_len: u64,
-    /// Non-zero once the call made an effect it cannot take back (a
-    /// `print`, a host call). From then on it never bails: a trap panics
-    /// natively, as the VM would at the same op ([`coil_native_unwind`]).
+    /// Non-zero when a trap panics natively ([`coil_native_unwind`]): set
+    /// from a call's first instruction.
     pub committed: u64,
     /// The [`TRAP_OVERFLOW`]-style code of the trap a helper hit (`0`: an
     /// operation native code does not model).
@@ -61,7 +53,7 @@ pub struct NativeCtx {
     pub trace: *mut Vec<u32>,
     /// After a commit native code may recurse past `stack_limit` (it can
     /// no longer bail) down to this address, near the thread's real stack
-    /// end; below it the call panics with the VM's stack overflow.
+    /// end; below it the call panics with the runtime's stack overflow.
     pub stack_hard: u64,
     /// The message of a [`TRAP_MESSAGE`] panic.
     pub message: *mut String,
@@ -69,24 +61,24 @@ pub struct NativeCtx {
     /// that need it bail).
     pub machine: *mut std::ffi::c_void,
     pub host: NativeHost,
-    /// VM calls the call made: the VM then checks for a collection.
+    /// runtime calls the call made: the runtime then checks for a collection.
     pub host_calls: u64,
-    /// The native frames' heap words while a VM call runs (a collection
+    /// The native frames' heap words while a runtime call runs (a collection
     /// may run then): a chain of `[next, n, word × n]` records on the
-    /// native stack, newest first, `0`-terminated. The VM pins them.
+    /// native stack, newest first, `0`-terminated. The runtime pins them.
     pub roots: u64,
     /// Non-zero when a collection is due and the call can no longer bail
-    /// for the VM to run it: native code collects at its next safepoint
+    /// for the runtime to run it: native code collects at its next safepoint
     /// ([`coil_native_collect`]).
     pub gc_due: u64,
     /// Bumped by every point where a collection may have run (a safepoint
-    /// collection, a VM call): native code then reloads its rooted words.
+    /// collection, a runtime call): native code then reloads its rooted words.
     pub gc_epoch: u64,
     /// Cleanup pads of the frames a committed panic unwound, innermost
-    /// first ([`coil_native_defer`]): the VM runs them once it reported
+    /// first ([`coil_native_defer`]): the runtime runs them once it reported
     /// the panic, as it runs its own frames' pads.
     pub pads: *mut Vec<NativePad>,
-    /// While a native frame makes a call that may run VM code (which may
+    /// While a native frame makes a call that may run interpreted code (which may
     /// panic and print a backtrace): a chain of `[next, site]` records on
     /// the native stack, innermost first, `0`-terminated, naming each such
     /// frame's call site ([`NativeCode::sites`]).
@@ -104,7 +96,7 @@ pub struct NativeCtx {
     /// [`NativePad::data`]): an engine with one entry function for every
     /// body reads which body to run here.
     pub entry_data: u64,
-    /// The runtime's step budget ([`crate::Machine::set_step_budget`]), for
+    /// The runtime's step budget (`Runtime::set_step_budget`), for
     /// an engine that counts steps: a charge that reaches zero stops the
     /// call with [`TRAP_BUDGET`].
     pub fuel: *mut u64,
@@ -273,7 +265,7 @@ pub const BUMP_END: i32 = std::mem::offset_of!(crate::memory::Bump, end) as i32;
 pub const BUMP_BYTES: i32 = std::mem::size_of::<crate::memory::Bump>() as i32;
 
 impl NativeCtx {
-    /// Every heap word the call's native frames hold while it is in a VM
+    /// Every heap word the call's native frames hold while it is in a runtime
     /// call: the root chain and the queued early frees.
     /// The words are native code's to reload: a moving collection may
     /// rewrite them.
@@ -379,11 +371,11 @@ pub struct NativeHost {
     /// result and panic rules as `call`.
     pub call_value: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, &[common::Value], u32, &mut bool) -> u64,
     /// Before a call of the body at `pc` on `word`: `1` when `pc` is no
-    /// `drop`; else, as the VM's `CALL` claims a finalizer, `2` when this
+    /// `drop`; else, claiming the finalizer, `2` when this
     /// call claimed it and `0` when it ran already (skip the call).
     pub claim: unsafe fn(*mut std::ffi::c_void, u32, u64) -> u64,
     /// Resume the generator word (with the sent word when the `bool` says
-    /// so), as `ResumeCoro` does: its body runs on the VM until it yields
+    /// so), as `ResumeCoro` does: its body runs on the runtime until it yields
     /// or returns, and that word comes back; same panic rules as `call`.
     pub resume: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, Option<u64>, &mut bool) -> u64,
     /// Collect, with the context's roots pinned.
@@ -392,13 +384,13 @@ pub struct NativeHost {
     /// returns the bytes freed and sets the `bool` when a `drop` panicked.
     pub gc: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, &mut bool) -> u64,
     /// `FreeEarly` now, running the `drop`s it owes (with the context's
-    /// roots pinned); `false` when one panicked (the VM reported it).
+    /// roots pinned); `false` when one panicked (the runtime reported it).
     pub free: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u64, bool) -> bool,
     /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
     /// byte) with its operand on `args`, on the runtime.
     pub ffi: MachineHostFn,
-    /// Run the ordinary host native `id` on `args` in `layout` as the VM's
-    /// `HostInvoke` does, without bytecode: a native that would block the
+    /// Run the ordinary host native `id` on `args` in `layout` as the runtime's
+    /// `HostInvoke` does, without interpreting a body: a native that would block the
     /// task parks the fiber the call runs on. `None`: it is no ordinary
     /// native (nothing ran).
     pub invoke: InvokeFn,
@@ -414,7 +406,7 @@ pub enum Invoked {
     Value(u64),
     /// It panicked with this message (not reported yet).
     Panic(String),
-    /// The task was cancelled while it waited: the VM armed the unwind.
+    /// The task was cancelled while it waited: the runtime armed the unwind.
     Unwound,
 }
 
@@ -494,7 +486,7 @@ impl NativeHost {
 }
 
 /// The machine a native call runs on, as raw pointers: native code and the
-/// VM calls it makes reach the machine while the call runs, so `call`
+/// runtime calls it makes reach the machine while the call runs, so `call`
 /// holds no Rust borrow of it.
 pub(crate) struct NativeEnv {
     pub(crate) heap: *mut crate::memory::Heap,
@@ -528,7 +520,7 @@ pub const TRAP_OUT_OF_BOUNDS: u64 = 5;
 pub const TRAP_STACK: u64 = 6;
 /// A panic with the message in [`NativeCtx::message`].
 pub const TRAP_MESSAGE: u64 = 7;
-/// A VM call native code made panicked; the VM already reported it.
+/// A runtime call native code made panicked; the runtime already reported it.
 pub const TRAP_PANICKED: u64 = 8;
 /// An explicit `panic(msg)`: the message in [`NativeCtx::message`].
 pub const TRAP_EXPLICIT: u64 = 9;
@@ -562,7 +554,7 @@ pub const NATIVE_CTX_BAIL: i32 = 0;
 pub const NATIVE_CTX_STACK_LIMIT: i32 = 8;
 
 impl NativeCtx {
-    /// A context for one call from the VM.
+    /// A context for one call from the runtime.
     pub fn new(stack_limit: u64) -> Self {
         Self {
             bail: 0,
@@ -621,26 +613,26 @@ impl NativeCtx {
     }
 }
 
-/// How much native stack a call from the VM may use before it bails to the
-/// VM (which then runs the call with its own frame limits).
+/// How much native stack a call may use before its check looks at the
+/// thread's real end ([`NativeCtx::stack_hard`]).
 pub const NATIVE_STACK_BUDGET: u64 = 256 * 1024;
 
 /// Stack native code leaves unused at the thread's end after a commit
 /// ([`NativeCtx::stack_hard`]).
 pub const NATIVE_STACK_GUARD: u64 = 128 * 1024;
 
-/// Entry of a native function: `args` holds `arity` VM words, the result
-/// is one VM word. Sets `ctx.bail` instead of returning a result when it
+/// Entry of a native function: `args` holds `arity` words, the result
+/// is one word. Sets `ctx.bail` instead of returning a result when it
 /// gives up.
 pub type NativeEntryFn = unsafe extern "C" fn(ctx: *mut NativeCtx, args: *const u64) -> u64;
 
 /// One compiled function.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeEntry {
-    /// Bytecode PC of the function's entry (its `CALL` target).
+    /// Entry id of the function's entry (its `CALL` target).
     pub pc: u32,
     pub arity: u16,
-    /// It may run VM code (a VM call, a function value, a `drop`), so a
+    /// It may run interpreted code (a runtime call, a function value, a `drop`), so a
     /// task switch could come while its frames are live: with a scheduler
     /// that can switch, the call runs on the task's own fiber stack
     /// (`vm_fiber.rs`).
@@ -649,7 +641,7 @@ pub struct NativeEntry {
     /// many words (and at most `arity`) enters it, the rest passed as `0`.
     pub reads: u16,
     /// Result words: `1`, or `2` for a two-slot return (`lo`, then `hi`
-    /// in [`NativeCtx::ret_hi`]), as the VM's `RETURN` pushes them.
+    /// in [`NativeCtx::ret_hi`]), in that order.
     pub ret_words: u8,
     /// A generator's body: only a resume enters it, on a fiber of its own
     /// (`native_gen.rs`), never a `CALL`.
@@ -671,7 +663,7 @@ pub struct AotEntry {
     pub arity: u16,
     pub reads: u16,
     pub ret_words: u8,
-    /// `1` when it may run VM code ([`NativeEntry::suspends`]).
+    /// `1` when it may run interpreted code ([`NativeEntry::suspends`]).
     pub suspends: u8,
     /// `1` for a generator's body ([`NativeEntry::generator`]).
     pub generator: u8,
@@ -723,16 +715,16 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
     Ok(())
 }
 
-/// An op native code may panic at: the function it is in (by entry PC)
+/// An op native code may panic at: the function it is in (by entry id)
 /// and the op's source location. A native panic's trace names one per
-/// native frame, which the VM prints as it prints its own frames.
+/// native frame, which the runtime prints as it prints its own frames.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeSite {
     pub entry_pc: u32,
     pub loc: common::DebugLoc,
 }
 
-/// The compiled functions of one program, indexed by entry PC. Shared
+/// The compiled functions of one program, indexed by entry id. Shared
 /// (`Arc`) by every machine that runs the program.
 #[derive(Default)]
 pub struct NativeCode {
@@ -830,7 +822,7 @@ impl NativeTable {
 }
 
 /// What a native call gave back: its result words and whether it
-/// allocated (the VM then checks for a collection).
+/// allocated (the runtime then checks for a collection).
 pub(crate) struct NativeResult {
     pub(crate) lo: u64,
     pub(crate) hi: Option<u64>,
@@ -852,7 +844,7 @@ pub(crate) struct NativePanic {
 
 impl NativePanic {
 
-    /// The VM's message for the same trap.
+    /// The runtime's message for the same trap.
     pub(crate) fn message(&self) -> &str {
         match self.code {
             TRAP_MESSAGE | TRAP_EXPLICIT => &self.message,
@@ -870,7 +862,7 @@ impl NativePanic {
 /// How a native call ended.
 pub(crate) enum NativeOutcome {
     Done(NativeResult),
-    /// The call never started (no fiber stack): the VM runs it. Native
+    /// The call never started (no fiber stack): the runtime runs it. Native
     /// code commits at entry, so nothing else bails.
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     Panicked(NativePanic),
@@ -1043,9 +1035,9 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
         ctx.resume_how = how;
     }
     // One mode: the call is committed from its first instruction. A trap
-    // panics natively with the VM's message, the stack runs to the
+    // panics natively with the runtime's message, the stack runs to the
     // thread's real end, and collections run at safepoints; nothing hands
-    // the call back to the VM.
+    // the call back to the runtime.
     ctx.committed = 1;
     ctx.stack_limit = ctx.stack_hard;
     ctx.entry_data = entry.data as u64;
@@ -1064,7 +1056,7 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
             let hi = (entry.ret_words == 2).then_some(ctx.ret_hi);
             NativeOutcome::Done(NativeResult { lo: out, hi, allocated: ctx.allocs != 0 || ctx.host_calls != 0, frees })
         }
-        // Its effects stay, as a VM panic's do. A committed call cannot
+        // Its effects stay, as a runtime panic's do. A committed call cannot
         // bail, so any other flag is a panic as well.
         _ => NativeOutcome::Panicked(NativePanic { code: ctx.trap, trace, message, pads }),
     }
@@ -1072,8 +1064,7 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
 
 /// Where native code stops a call: called by every frame on the way out,
 /// with the frame's `site` ([`NO_SITE`] for none) and the reason `code`.
-/// Before the call committed it bails (the VM runs the call again); after,
-/// the first frame raises a panic and every frame adds its site to the
+/// The first frame raises a panic and every frame adds its site to the
 /// trace.
 ///
 /// # Safety
@@ -1083,9 +1074,7 @@ pub unsafe extern "C" fn coil_native_unwind(ctx: *mut NativeCtx, code: u64, site
     let ctx = unsafe { &mut *ctx };
     if ctx.bail != BAIL_PANIC {
         if ctx.committed == 0 {
-            // A panic the VM's re-run would raise too panics here: native
-            // code reports it as the VM does. Anything else (an op it does
-            // not model, the native stack) hands the call back to the VM.
+            // Calls start committed ([`call`]), so this does not run.
             let trap = if code == TRAP_HELPER { ctx.trap } else { code };
             if !panics_natively(trap) {
                 ctx.bail = 1;
@@ -1124,7 +1113,7 @@ thread_local! {
     static PENDING: std::cell::RefCell<Option<Pending>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Native code for the next [`crate::Machine::run_raw`] on this thread
+/// Native code for the next run on this thread
 /// (the program's main machine); the machines it spawns share it.
 /// `complete`: every body of the program compiled.
 pub fn install_for_next_run(entries: Vec<NativeEntry>, sites: Vec<NativeSite>, complete: bool) {
@@ -1176,13 +1165,13 @@ pub(crate) fn take_pending() -> Option<Pending> {
 // Heap reads for native code (heap tier).
 //
 // Native code calls these with heap words it was handed. It never
-// re-enters the VM and its helpers never collect (the Cow helpers below
-// allocate, but the VM collects only after the call returns), so every
+// re-enters the runtime and its helpers never collect (the Cow helpers below
+// allocate, but the runtime collects only after the call returns), so every
 // address it holds stays a live object at the same place. Each helper does what
-// the matching VM instruction does; where the VM would panic, it sets the
+// the matching runtime instruction does; where the runtime would panic, it sets the
 // bail flag and returns 0.
 
-/// The object at a heap word, as the VM's `trusted_object` reads it.
+/// The object at a heap word, as `trusted_object` reads it.
 fn object(addr: u64) -> Option<crate::memory::Object> {
     if addr == 0 {
         return None;
@@ -1298,7 +1287,7 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
 /// words, `0` for anything else (a byte array, a tuple, not an array),
 /// which native code then reads through the helpers above. With
 /// `for_store` set, marks the array as possibly holding references, as
-/// every VM store does. The pointer stays valid while native code runs:
+/// every runtime store does. The pointer stays valid while native code runs:
 /// it never grows or shrinks an array, and storing into a word array never
 /// moves its storage.
 ///
@@ -1342,15 +1331,14 @@ unsafe fn note_alloc(ctx: *mut NativeCtx, heap: &crate::memory::Heap) {
             ctx.gc_due = 1;
         }
     } else if ctx.allocs >= NATIVE_ALLOC_CAP && heap.should_collect() {
-        // Commit rather than hand the call back to the VM: it collects at
-        // its next safepoint, and a later trap panics natively.
+        // It collects at its next safepoint.
         ctx.committed = 1;
         ctx.gc_due = 1;
     }
 }
 
 /// A safepoint found [`NativeCtx::gc_due`]: native code linked its heap
-/// words into [`NativeCtx::roots`]; the VM collects with them pinned.
+/// words into [`NativeCtx::roots`]; the runtime collects with them pinned.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
@@ -1390,7 +1378,7 @@ pub unsafe fn cow_report_note(ctx: *mut NativeCtx, mark: u64, site: u32) {
 }
 
 /// `Cow` without a field: share `word` (`unique == 0`) or return a unique
-/// copy of it when it is shared (`unique != 0`), as the VM's `Cow` does.
+/// copy of it when it is shared (`unique != 0`).
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `word` is a heap word.
@@ -1437,7 +1425,7 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
 }
 
 // ---------------------------------------------------------------------------
-// Allocation for native code (`Alloc`, `ArrayPush`), as the VM's
+// Allocation for native code (`Alloc`, `ArrayPush`), as the runtime's
 // `DenseMake` / `DenseMakeObject` / `ArrayPush` do. Same rule as the Cow
 // helpers: they allocate and never collect.
 
@@ -1458,16 +1446,16 @@ pub const ALLOC_CORO: u64 = 7;
 /// - [`ALLOC_ENUM`]: `extra` is `tag | kinds << 32`;
 /// - [`ALLOC_OBJECT`]: `extra` is the type id and `n` the field count
 ///   (`words` unused: stores fill the fields);
-/// - [`ALLOC_FN`]: a function value, as `MakeFn`: `extra` is the entry PC
+/// - [`ALLOC_FN`]: a function value, as `MakeFn`: `extra` is the entry id
 ///   `| operand << 32`, the words its captures and filled parameters, then
 ///   the filled mask;
 /// - [`ALLOC_POLY_FN`]: a generic function's value, as `MakePolyFn` /
-///   `MakePolyFnCapture`: `extra` is the entry PC `| params << 32`, the
+///   `MakePolyFnCapture`: `extra` is the entry id `| params << 32`, the
 ///   words its dictionaries (`0`: filled in by the call);
 /// - [`ALLOC_DROP_ENUM`]: [`ALLOC_ENUM`] of an enum with a `drop`, as
 ///   `TagEnumType` stamps it: the last word is its type id;
 /// - [`ALLOC_CORO`]: a generator, as `MakeCoro`: `extra` is its body's
-///   entry PC, the words its arguments.
+///   entry id, the words its arguments.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
@@ -1566,7 +1554,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 return unsafe { bail(ctx) };
             };
             // The words say how many captures: their 8 bits in `op` are the
-            // bytecode's.
+            // the interpreter's.
             let Some(n_captures) = rest.len().checked_sub(n_filled) else {
                 return unsafe { bail(ctx) };
             };
@@ -1614,7 +1602,7 @@ pub unsafe extern "C" fn coil_native_probe(ctx: *mut NativeCtx, id: u64) -> u64 
     0
 }
 
-/// `ArrayPush`: append `value` to the array `addr` and return `addr`. Not an array: bail, where the VM panics.
+/// `ArrayPush`: append `value` to the array `addr` and return `addr`. Not an array: bail, where the runtime panics.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
@@ -1669,7 +1657,7 @@ pub unsafe extern "C" fn coil_native_enum_payload(ctx: *mut NativeCtx, addr: u64
     }
 }
 
-/// `STRING idx`: the program string's interned object, as the VM's
+/// `STRING idx`: the program string's interned object, as the runtime's
 /// `push_program_string` (cached per machine). Bad index: bail.
 ///
 /// # Safety
@@ -1691,13 +1679,13 @@ pub unsafe extern "C" fn coil_native_string(ctx: *mut NativeCtx, idx: u64) -> u6
     let data = unsafe { &*c.strings.add(idx as usize) };
     let handle = common::Value::from(heap.intern_str(data).as_ptr() as *mut u8 as u64);
     // No collection runs during native code, so the cache entry stays
-    // valid until the VM's next sweep clears it, as after `STRING`.
+    // valid until the runtime's next sweep clears it, as after `STRING`.
     unsafe { *c.string_cache.add(idx as usize) = handle };
     unsafe { note_alloc(ctx, heap) };
     handle.bits()
 }
 
-/// `StrEq` (the VM's `EQ`): `1` when `a` and `b` are equal as the VM
+/// `StrEq`: `1` when `a` and `b` are equal as the runtime
 /// compares them (strings by content, other objects structurally).
 ///
 /// # Safety
@@ -1717,7 +1705,7 @@ pub unsafe extern "C" fn coil_native_eq(ctx: *mut NativeCtx, a: u64, b: u64) -> 
     u64::from(crate::value_eq::values_eq(heap, a, b))
 }
 
-/// `STRINGIFY`: a new string of `word`, as the VM writes it. `tag` is the
+/// `STRINGIFY`: a new string of `word`, as the runtime writes it. `tag` is the
 /// instruction's operand (`common::stringify_operand`, `0`: inspect the
 /// word).
 ///
@@ -1739,7 +1727,7 @@ pub unsafe extern "C" fn coil_native_stringify(ctx: *mut NativeCtx, word: u64, t
 }
 
 /// `FORMAT` with the format string `fmt` and the `n` argument words at
-/// `args` (in order), as the VM's handler: a leading `%s` appends the rest
+/// `args` (in order), as the runtime's handler: a leading `%s` appends the rest
 /// to the first argument (in place when that string ends at its buffer's
 /// tail), and with no arguments only `%%` is rewritten.
 ///
@@ -1786,10 +1774,10 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
     addr
 }
 
-/// `FreeEarly`: queue `word` for the VM to free after the call (see
+/// `FreeEarly`: queue `word` for the runtime to free after the call (see
 /// [`NativeCtx::frees`]); once the call committed (it can no longer bail)
-/// the VM frees it now. With finalizers in the program the free may run
-/// `drop`s, which cannot be taken back: the call commits, and the VM frees
+/// the runtime frees it now. With finalizers in the program the free may run
+/// `drop`s, which cannot be taken back: the call commits, and the runtime frees
 /// it now as its `FreeEarly` does (a collection may run: native code roots
 /// its words around this call then). A `drop` that panicked unwinds with
 /// [`TRAP_PANICKED`].
@@ -1849,7 +1837,7 @@ pub unsafe extern "C" fn coil_native_print(ctx: *mut NativeCtx, word: u64) -> u6
 
 /// `CallIndirect` from native code: call the function value (or code
 /// pointer) `callee` on the `n` words at `args`, the last `dicts` of them
-/// instance dictionaries, on the VM. Commits first, as
+/// instance dictionaries, on the runtime. Commits first, as
 /// the driver does, with its panic rule.
 ///
 /// # Safety
@@ -1966,18 +1954,18 @@ pub fn direct_host_natives() -> &'static [DirectHost] {
 /// One entry of [`direct_host_natives`].
 pub struct DirectHost {
     pub name: String,
-    /// The plain function (`None`: the native needs the VM).
+    /// The plain function (`None`: the native needs the runtime).
     pub func: Option<crate::HostValueFn>,
     /// It takes a `Stream` first, which must not be unsent.
     pub guarded: bool,
-    /// `gc_collect`: a full collection on the VM ([`NativeHost::gc`]),
+    /// `gc_collect`: a full collection on the runtime ([`NativeHost::gc`]),
     /// with native code's words rooted around the call.
     pub collect: bool,
-    /// An ordinary native that needs the VM (it may park the task, open
+    /// An ordinary native that needs the runtime (it may park the task, open
     /// descriptors, ...), a task op, a `region` hook (a minor collection)
     /// or the finalizer registry's `gc_register_finalizer`:
     /// native code runs it through a host-call stub
-    /// ([`host_stubs`]) in a nested VM execution, as a VM call.
+    /// ([`host_stubs`]) in a nested interpreter execution, as a runtime call.
     pub on_machine: bool,
 }
 
@@ -1986,7 +1974,7 @@ pub(crate) const HOST_STUB_ARITIES: usize = 16;
 
 /// `HostInvoke` of the direct host native `id` ([`direct_host_natives`])
 /// on the `n` words at `args`, constructing enums in `layout`
-/// (`common::HOST_ENUM_LAYOUT_*`), as the VM's direct path does. The
+/// (`common::HOST_ENUM_LAYOUT_*`), as the runtime's direct path does. The
 /// native's effects cannot be taken back: the call commits first.
 ///
 /// # Safety
@@ -2056,7 +2044,7 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     let live_before = heap.live_object_count();
     let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
     let v = crate::host_enum::in_host_enum_layout(layout, || f(heap, args));
-    // The VM checks for a collection once the call returns.
+    // The runtime checks for a collection once the call returns.
     let made = heap.live_object_count().saturating_sub(live_before) as u64;
     if made != 0 {
         c.allocs += made - 1;
@@ -2169,7 +2157,7 @@ pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: 
 }
 
 /// [`coil_native_host`] of an ordinary native that is no plain function:
-/// the machine runs it in Rust ([`NativeHost::invoke`]), no bytecode. Its
+/// the machine runs it in Rust ([`NativeHost::invoke`]), no interpreted body. Its
 /// effects cannot be taken back: the call commits first. `None`: it is
 /// no ordinary native, and its stub runs it.
 ///
@@ -2270,8 +2258,7 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, lay
 
 /// A frame with `defer`s on its way out: after a committed panic, keep its
 /// cleanup pad `func` and a copy of its `n` homes at `homes` (`mask`: the
-/// heap words among them) for the VM to run ([`NativeCtx::pads`]). A
-/// bail before the commit runs nothing: the VM runs the call again.
+/// heap words among them) for the runtime to run ([`NativeCtx::pads`]).
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
@@ -2362,7 +2349,7 @@ pub(crate) fn run_pads(
 }
 
 /// Before native code calls the body at `pc` on `word`: whether to make
-/// the call (`0`: a `drop` that ran already, as the VM's `CALL` skips it).
+/// the call (`0`: a `drop` that ran already).
 /// A claim before the commit is logged, so a bail gives it back.
 ///
 /// # Safety
@@ -2378,8 +2365,8 @@ pub unsafe extern "C" fn coil_native_claim(ctx: *mut NativeCtx, pc: u64, word: u
     u64::from(got != 0)
 }
 
-/// `Panic` of the string `msg`: before a commit, bail (the VM's run panics);
-/// after, a native panic with that message ([`TRAP_EXPLICIT`]).
+/// `Panic` of the string `msg`: a native panic with that message
+/// ([`TRAP_EXPLICIT`]).
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `msg` is a heap word.
@@ -2430,11 +2417,11 @@ pub unsafe extern "C" fn coil_native_ipow(a: i64, b: i64, out: *mut i64) -> i64 
 pub static VECTOR_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A `ByteScan` or `VecLoop` native code cannot reduce to lane code, run
-/// by the runtime's lane kernels ([`crate::vm::lanes_on_frame`]). `kind` bit 0: a
+/// by the runtime's lane kernels (`lanes_on_frame`). `kind` bit 0: a
 /// loop (else a scan); bit 1: the loop writes the heap (it commits the
 /// call first, so a trap after it panics here). `body` holds `nbody`
 /// words `opcode | operand << 32`, `slots` the frame's `nslots` words.
-/// Returns a scan's stop; a trap panics with the VM's message.
+/// Returns a scan's stop; a trap panics with the runtime's message.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `body` and `slots` point at

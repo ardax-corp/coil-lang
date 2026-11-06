@@ -113,7 +113,7 @@ fn main() {
 
 // sum types and pattern matching codegen
 
-// VM perf: peephole superinstruction fusion
+// Peephole fusion
 
 #[test]
 fn break_and_continue_outside_loop_emit_diagnostics() {
@@ -149,7 +149,7 @@ fn break_and_continue_outside_loop_emit_diagnostics() {
 // field-access codegen tests
 //
 // The spec locked in 2 codegen tests for the new
-// `Expression::Access` arm. Both verify the bytecode SHAPE
+// `Expression::Access` arm. Both verify the code SHAPE
 // (MakeEnum → LoadField) and the operand (field_index) so the
 // runtime extraction reads the right slot.
 

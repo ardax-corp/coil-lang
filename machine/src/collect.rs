@@ -1,4 +1,4 @@
-//! The collector's root walk, apart from the interpreter. A host (the VM's
+//! The collector's root walk, apart from the interpreter. A host (the runtime's
 //! [`crate::Machine`], or a driver that runs native code alone) reports the
 //! roots it holds itself; the [`Runtime`] adds its own (statics, the
 //! scheduler's tasks, FFI handles and arguments, native frames' root
@@ -27,8 +27,8 @@ thread_local! {
 
 /// Install `kinds` as the static word kinds of the program this thread
 /// runs (what a GC root walk reads static slots by) and return the ones
-/// it replaces. A VM that runs on a thread already serving another program
-/// (the compile-time VM) installs its own and puts the old ones back.
+/// it replaces. A runtime that runs on a thread already serving another program
+/// (the compile-time runtime) installs its own and puts the old ones back.
 pub fn swap_static_word_kinds(kinds: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
     STATIC_KINDS.with_borrow_mut(|k| std::mem::replace(k, kinds))
 }
@@ -120,7 +120,7 @@ impl Runtime {
         }
     }
 
-    /// Heap words native frames hold across a VM call or a safepoint, as
+    /// Heap words native frames hold across a runtime call or a safepoint, as
     /// slot pointers: `true` when the record cannot say the word is one.
     pub(crate) fn for_each_native_word(&self, visit: &mut dyn FnMut(*mut u64, bool)) {
         for &(ctx, _) in &self.native_roots {

@@ -1,7 +1,7 @@
 //! MIR on disk: the native MIR section of a `.ccoil`
 //! (`ArchivedProgram::native_mir`).
 //!
-//! `coil compile --jit` stores the typed MIR of the bodies the native
+//! `coil compile` stores the typed MIR of the bodies the native
 //! backend compiles, so `coil run` can JIT an archive without the source.
 //! This module is the format; `coil_native::section` chooses the bodies. It
 //! lives beside MIR, not in the backend, because anything that runs MIR
@@ -13,7 +13,7 @@
 //! so the same MIR gives the same bytes.
 //!
 //! Layout (little-endian): the magic `CNMIR`, a format byte, then the
-//! bodies. Each body is its name, bytecode entry PC (`u32::MAX`: none),
+//! bodies. Each body is its name, entry ids (`u32::MAX`: none),
 //! entry label, then the function. Labels are the compile's own `Label`
 //! numbers; a call names its callee by label.
 
@@ -1192,7 +1192,7 @@ fn read_vec_stores(r: &mut Reader) -> Result<Vec<(ValueId, ValueId, u8, VecExpr)
 mod tests {
     use super::*;
 
-    /// A body with a value in the fields the bytecode tiers and the root
+    /// A body with a value in the fields the code tiers and the root
     /// analyses read, and a cleanup pad of its own name.
     fn body() -> NativeBody {
         let mut pad = MirFunc::new("pad of f");

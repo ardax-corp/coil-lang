@@ -175,7 +175,7 @@ pub fn tty_enable_vt(heap: &mut Heap, stream: Value) -> bool {
     }
 }
 
-/// Restore every terminal still in raw mode (the VM's exit path and tests).
+/// Restore every terminal still in raw mode (the runtime's exit path and tests).
 pub fn restore_all() {
     os::restore_all();
 }

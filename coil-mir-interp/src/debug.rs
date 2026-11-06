@@ -7,7 +7,7 @@
 //! task or generator runs on a fiber.
 //!
 //! Ops are numbered across the program ([`prepare_debug`]). The numbers stand
-//! where bytecode PCs stood: breakpoints, the step modes of
+//! where entry ids stood: breakpoints, the step modes of
 //! [`DebugController`], and a [`common::ProgramDebug`] built over them. A
 //! local's value is the word of the value last bound to it
 //! (`MirFunc::local_binds`), which is exact on raw MIR: registers stay put

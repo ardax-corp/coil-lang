@@ -1,4 +1,4 @@
-//! Thin VM glue for compiler-only `V*` opcodes. Float math goes through
+//! Thin runtime glue for compiler-only `V*` opcodes. Float math goes through
 //! [`coil_simd::lanes`]; int lanes use [`common::int_arith`], which traps
 //! on overflow like the scalar ops.
 

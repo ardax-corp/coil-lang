@@ -1,5 +1,5 @@
 //! Source locations and function names for panic reports, from a
-//! program's debug tables: what the VM and the native driver both print.
+//! program's debug tables: what the interpreter and the native driver both print.
 
 
 use common::ProgramDebug;

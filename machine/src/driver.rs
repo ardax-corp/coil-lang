@@ -551,7 +551,7 @@ impl<'a> Driver<'a> {
         }
     }
 
-    /// Print a panic as the VM does: `panic: message at loc`, then the
+    /// Print a panic as the runtime does: `panic: message at loc`, then the
     /// backtrace (an explicit `panic` only under `COIL_BACKTRACE`).
     fn report(&mut self, message: &str, loc: Option<String>, frames: Vec<String>, explicit: bool) {
         use std::io::Write;

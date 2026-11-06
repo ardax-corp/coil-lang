@@ -1,11 +1,11 @@
-//! Versioned bytecode archive format.
+//! Versioned code archive format.
 //!
 //! `ArchivedProgram::version` is a packed `major.minor` (`u16` each in a `u32`):
 //! - **same major**, archive minor ≤ runtime minor → loadable (older archives on newer minor runtimes)
 //! - **different major** → never loadable either direction
 //! - archive minor **greater** than runtime minor → rejected (needs newer opcodes/layout)
 //!
-//! Early development uses major `0`. Additive append-only bytecode changes bump the
+//! Early development uses major `0`. Additive append-only code changes bump the
 //! minor; incompatible ABI/layout changes bump the major (and reset minor).
 
 use rkyv::{Archive, Deserialize, Serialize};
@@ -186,7 +186,7 @@ pub fn compute_c_struct_layouts(
     Ok(out)
 }
 
-/// Serialized program with constant pool and bytecode.
+/// Serialized program with constant pool and code.
 #[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(compare(PartialEq))]
 pub struct ArchivedProgram {

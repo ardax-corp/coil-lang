@@ -1,6 +1,6 @@
 //! `--fold-calls on|off`: whether a pure call with constant arguments is
 //! computed at compile time (coil-lang#1863). Flagship perf benches build
-//! with it off so the VM runs them.
+//! with it off so the calls run.
 
 use std::path::PathBuf;
 use std::process::Command;

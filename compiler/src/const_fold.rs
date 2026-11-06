@@ -165,7 +165,7 @@ fn eval_int_bit<'a>(
     Some(ConstValue::Int(op(a, b)))
 }
 
-/// Fold `<<` / `>>` with the VM's 64-bit semantics (`int_arith::shl` /
+/// Fold `<<` / `>>` with the runtime's 64-bit semantics (`int_arith::shl` /
 /// `shr`); a count outside `0..=63` traps there, so it is left unfolded.
 fn eval_int_shift<'a>(
     lhs: &Output<'a>,

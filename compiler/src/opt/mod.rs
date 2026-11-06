@@ -1,9 +1,7 @@
 //! Optimization options, levels and stats.
 //!
-//! No optimization pass runs on the stack IL any more (the last ones went
-//! in 2026-10): the HIR and MIR passes do that work, and the stack IL MIR
-//! emits is only fuse-selected in `lower_optimized`. See `README.md` in
-//! this directory.
+//! The HIR and MIR passes do the optimizing; this module holds the switches
+//! that gate them. See `README.md` in this directory.
 
 
 /// Optimization switches, set per [`OptLevel`].
@@ -38,7 +36,7 @@ pub struct OptimizeOptions {
     pub call_fold: bool,
     /// MIR constant propagation and folding before emission
     /// (`mir::specialize`): SCCP, InstCombine and DestProp on dense
-    /// bodies, SCCP and InstCombine's folds on LIR bodies. On at every
+    /// bodies, SCCP and InstCombine's folds on bodies. On at every
     /// level but None and Debug.
     pub mir_fold: bool,
     /// MIR redundancy and loop passes (`mir::specialize`): CSE, LICM, IV

@@ -1,6 +1,6 @@
 //! Fixed-size work-stealing pool for `thread::spawn` / auto-par fork-join.
 //!
-//! OS threads are created once per root VM (see [`crate::thread::WorkerCap`]
+//! OS threads are created once per root runtime (see [`crate::thread::WorkerCap`]
 //! pool size). Jobs are pushed to a shared injector and stolen via
 //! [`crossbeam_deque`]; `join` help-steals so fork-join does not deadlock
 //! when workers sit on joins.
@@ -47,13 +47,13 @@ fn bump(counter: &AtomicUsize) {
     }
 }
 
-/// One unit of work for the reactor (isolated `call_function` on a worker VM).
+/// One unit of work for the reactor (isolated `call_function` on a worker runtime).
 /// A job's starting statics (see [`Job::statics`]).
 pub enum JobStatics {
-    /// The spawning VM's static words, raw: they name objects of the one
+    /// The spawning runtime's static words, raw: they name objects of the one
     /// heap a shared-heap job is bound to (#1561).
     Shared(Arc<Vec<u64>>),
-    /// The spawning VM's statics copied out of its heap for an isolate job,
+    /// The spawning runtime's statics copied out of its heap for an isolate job,
     /// one entry per slot; `None` (a slot that is unset, or holds a value
     /// that cannot cross threads) starts zeroed (#1663).
     Copied(Vec<Option<crate::thread::SpawnArg>>),
@@ -79,16 +79,16 @@ pub struct Job {
     /// C1 shared-heap steal (None = isolate + PortableValue).
     pub epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// C struct layouts for pass-by-value FFI (ids are indices, so the
-    /// worker VM takes the parent's list as is).
+    /// worker runtime takes the parent's list as is).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
-    /// What the job's statics start as: the spawning VM's, so startup
+    /// What the job's statics start as: the spawning runtime's, so startup
     /// `const`s read the same values (#1561, #1663). `None` starts them
     /// zeroed.
     pub statics: Option<JobStatics>,
     /// Harness case (`coil-test`): run static init first, then report
     /// pass / fail instead of a spawn result.
     pub test: Option<TestJob>,
-    /// The spawner's native code (`None`: bytecode only).
+    /// The spawner's native code (`None`: interpreter only).
     pub native: Option<Arc<crate::native::NativeCode>>,
 }
 
@@ -117,7 +117,7 @@ pub struct TestReport {
     pub reason: Option<String>,
     /// Hit count per PC, or per probe with native code (static init + case)
     /// when the job asked for coverage.
-    /// Threads the case spawns run on other VMs and are not counted.
+    /// Threads the case spawns run on other runtimes and are not counted.
     pub hits: Option<Vec<u32>>,
     /// Steps charged (static init + case; see [`Machine::set_step_budget`]).
     pub steps: u64,
@@ -128,7 +128,7 @@ pub struct TestReport {
 /// Most spare threads [`Reactor::help_off_stack`] keeps alive at once.
 const MAX_SPARES: usize = 64;
 
-/// Per-root-VM work-stealing reactor.
+/// Per-root runtime work-stealing reactor.
 pub struct Reactor {
     injector: Injector<Job>,
     /// Harness cases ([`Self::submit_test`]). Only an idle worker takes one
@@ -260,7 +260,7 @@ impl Reactor {
         self.sleep_cvar.notify_all();
     }
 
-    /// Stop worker threads and join them. Call once the owning root VM's run
+    /// Stop worker threads and join them. Call once the owning root runtime's run
     /// has fully drained (its `live_threads` registry is empty) — workers
     /// hold their own `Arc<Reactor>` clone, so without an explicit stop they
     /// park forever and the reactor is never dropped.
@@ -316,7 +316,7 @@ impl Reactor {
         steal_from_injector(self).or_else(|| steal_from_peers(self))
     }
 
-    /// Run at most one stolen job on this thread's TLS helper VM.
+    /// Run at most one stolen job on this thread's TLS helper runtime.
     pub fn help_once(self: &Arc<Self>) {
         if let Some(job) = self.steal_job() {
             run_help_job(self, job);
@@ -563,13 +563,13 @@ fn run_help_job(reactor: &Reactor, job: Job) {
     // not allocate from (or flush into) that batch (#766, #779).
     let _stash = crate::memory::stash_epoch_batch();
     // The waiting job's shared-heap write guard does not cover the helped
-    // job, nor the reset of the helper VM's own heap afterwards.
+    // job, nor the reset of the helper runtime's own heap afterwards.
     let _write_scope = crate::memory::EpochWriteScope::unchecked();
     run_job_here(job);
 }
 
 /// Run `job` on this thread: on the driver when its native code covers
-/// it, else on a helper VM.
+/// it, else on a helper runtime.
 fn run_job_here(job: Job) {
     if crate::worker::runs_natively(&job) {
         return crate::worker::run_native_job(job);
@@ -692,7 +692,7 @@ impl TestHandle {
         TestProbe(Arc::clone(&self.state))
     }
 
-    /// Block until the case finishes. A Rust panic inside the VM (an ICE) is
+    /// Block until the case finishes. A Rust panic inside the runtime (an ICE) is
     /// a failed case, not a harness abort.
     pub fn wait(self) -> TestReport {
         let joined = self.reactor.wait_join(&self.state);
@@ -715,7 +715,7 @@ impl TestHandle {
 }
 
 impl Reactor {
-    /// Queue a harness case built from a root VM's spawn context. `print`
+    /// Queue a harness case built from a root runtime's spawn context. `print`
     /// captures the case's output (prints and panic messages).
     pub fn submit_test(
         self: &Arc<Self>,
@@ -998,7 +998,7 @@ mod tests {
 
     /// A job run on a thread that is waiting on its own job (a join's
     /// help-steal, or a test run here) leaves that thread's static word
-    /// kinds as they were: the waiting VM's next GC reads its statics by
+    /// kinds as they were: the waiting runtime's next GC reads its statics by
     /// them, and a helped job of another program has another layout
     /// (coil-lang#2053).
     #[test]

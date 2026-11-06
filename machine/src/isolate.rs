@@ -1,4 +1,4 @@
-//! A program's runtime with no VM: compile-time code runs on one.
+//! A program's runtime with no interpreter: compile-time code runs on one.
 
 use std::io::Write as IoWrite;
 use std::sync::Arc;

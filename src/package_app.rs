@@ -56,7 +56,7 @@ fn payload_bytes(pipeline: &mut Pipeline, program: &ArchivedProgram) -> Vec<u8> 
     }
 }
 
-/// `program` with its native MIR, for the runner to JIT. The runner has no VM
+/// `program` with its native MIR, for the runner to JIT. The runner has no interpreter
 /// to run what does not compile, so that shows here and not on the target.
 #[cfg(not(target_family = "wasm"))]
 fn add_native_mir(pipeline: &mut Pipeline, program: &mut ArchivedProgram, bodies: &[compiler::native_mir::NativeBody]) {
@@ -488,7 +488,7 @@ pub fn build_native_lock(
         });
     }
 
-    // Constant stems only: `--ffi-native` rows the bytecode never loads are ignored.
+    // Constant stems only: `--ffi-native` rows the program never loads are ignored.
 
     Ok(NativeLock {
         os: std::env::consts::OS.to_string(),

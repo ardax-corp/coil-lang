@@ -1,4 +1,4 @@
-//! Stack VM, managed heap, and FFI runtime for coil bytecode.
+//! Managed heap, and FFI runtime for coil programs.
 
 mod apply;
 mod collect;
@@ -77,10 +77,3 @@ pub use thread::{
 /// Default operand-stack capacity when analysis does not request more.
 pub const DEFAULT_OPERAND_STACK_SLOTS: usize = 256;
 
-/// Hard ceiling on the operand stack: frames grow it on demand up to here,
-/// then the VM panics with a stack overflow.
-pub const MAX_OPERAND_STACK_SLOTS: usize = 1_048_576;
-
-/// Hard ceiling on live call frames, for recursion that never raises the
-/// operand-stack cursor (zero-argument self calls).
-pub const MAX_CALL_FRAMES: usize = 1_048_576;

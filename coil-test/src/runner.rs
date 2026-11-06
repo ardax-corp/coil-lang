@@ -182,7 +182,7 @@ fn jitted_code(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collectio
 
 /// Append one line to the native inventory file, `COIL_NATIVE_INVENTORY`
 /// (`scripts/native_inventory.py` sums them): what a `--engine native` run
-/// left on the VM. Tab-separated: `file`, `refused`, `failed` per compile,
+/// left on the runtime. Tab-separated: `file`, `refused`, `failed` per compile,
 /// `counts` once per run. No variable: nothing is written.
 fn inventory(line: &str) {
     use std::io::Write;
@@ -751,7 +751,7 @@ pub(crate) struct Prepared {
     /// See [`TestCase::expect_ok_result`].
     pub expect_ok_result: bool,
     pub debug: ProgramDebug,
-    /// Native code's coverage probes; `None` counts PCs on the VM.
+    /// Native code's coverage probes; `None` counts PCs on the runtime.
     pub probes: Option<Probes>,
 }
 

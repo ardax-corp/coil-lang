@@ -66,7 +66,7 @@ pub struct MirFunc {
     /// a frame word of its own, never an inline operand.
     pub debug_keep: bool,
     /// A coverage compile counts a line covered when code it emits runs:
-    /// the body takes LIR, and LIR keeps the code of each line instead of
+    /// the body keeps the code of each line instead of
     /// folding it away.
     pub keep_lines: bool,
     /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
@@ -75,7 +75,7 @@ pub struct MirFunc {
     /// objects this body makes carry no word kinds.
     pub opaque_words: bool,
     /// Locals (frame slots, for MIR lowered from HIR) a heap word was
-    /// stored in: the fuse-IL body of the same HIR keeps them there.
+    /// stored in: another body of the same HIR keeps them there.
     pub heap_slots: BTreeSet<LocalId>,
     /// Locals a non-heap word was stored in.
     pub word_slots: BTreeSet<LocalId>,
@@ -107,7 +107,7 @@ pub struct MirFunc {
     /// `byte_scan` reads them as byte lanes.
     pub byte_loads: HashSet<ValueId>,
     /// `Index` reads of a heap word in a forward scan: dense emission
-    /// asks the VM to prefetch the object a few elements ahead
+    /// asks the runtime to prefetch the object a few elements ahead
     /// ([`super::mark_prefetch_scans`]).
     pub prefetch_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write

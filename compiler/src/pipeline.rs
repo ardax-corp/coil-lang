@@ -29,7 +29,7 @@ mod contracts;
 mod contract_tests;
 pub use contract_tests::CASE_PREFIX as CONTRACT_CASE_PREFIX;
 
-/// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
+/// Code, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
 type RunArtifacts = (Vec<u64>, Vec<String>, u32, ProgramDebug);
 
 /// Compile failed. Diagnostics are already on the pipeline; the error carries no extra payload.
@@ -61,7 +61,7 @@ pub enum CompileStep<'a> {
     Modules(usize),
     /// Compiling this module.
     Module(&'a std::path::Path),
-    /// Every module compiled: linking and lowering to bytecode.
+    /// Every module compiled: linking and lowering to code.
     Link,
 }
 
@@ -157,7 +157,7 @@ pub struct Pipeline {
     messages_emitted: usize,
     /// Told what [`Self::compile_src_from_file`] is doing (a CLI progress bar).
     progress: Option<CompileProgress>,
-    /// Runs user macros at compile time (`coil` wires the VM here).
+    /// Runs user macros at compile time (`coil` wires the runtime here).
     macro_host: Option<std::sync::Arc<dyn crate::macros::MacroHost>>,
     /// Files whose macros an enclosing pipeline is expanding (cycle check).
     macro_stack: Vec<PathBuf>,
@@ -199,14 +199,14 @@ impl Pipeline {
     pub fn overlay_text(&self, file: &Path) -> Option<&str> {
         self.overlays.get(file).map(String::as_str)
     }
-    /// Record HostInvoke ids from [`common::HOST_NATIVES`] (no VM closures).
+    /// Record HostInvoke ids from [`common::HOST_NATIVES`] (no runtime closures).
     fn register_standard_host_natives(&mut self) {
         self.pending_native_ids = common::host_native_ids()
             .map(|(name, id)| (name.to_string(), id))
             .collect();
     }
 
-    /// Bytecode entry offset for a registered function (for tests).
+    /// Code entry offset for a registered function (for tests).
     pub fn function_offset(&self, name: &str) -> Option<usize> {
         self.compiler_lazy().function_offset(name)
     }
@@ -261,7 +261,7 @@ impl Pipeline {
     }
 
     /// Typecheck an entry and its discovered modules without generating
-    /// bytecode. Each result is associated with the source file that was
+    /// code. Each result is associated with the source file that was
     /// checked, which makes this suitable for editor diagnostics.
     ///
     /// Bind roots with [`Self::bind_project_root`].
@@ -491,7 +491,7 @@ impl Pipeline {
         }
     }
 
-    /// Host grants applied at typecheck (deny-all until set). The VM does not
+    /// Host grants applied at typecheck (deny-all until set). The runtime does not
     /// re-apply these; the compiled artifact is the grant.
     pub fn host_grants(&self) -> &HostGrants {
         &self.host_grants
@@ -1448,16 +1448,15 @@ impl Pipeline {
             return;
         }
 
-        // Modules emit labeled stack IL. `finalize_bytecode` tree-shakes,
-        // runs IL opts, then a single lower (fuse-select + label → PC).
+        // `finalize_bodies` tree-shakes and links the bodies.
         // No post-lower peephole; production abs JMP is rejected in lower.
-        self.compiler_lazy_mut().finalize_bytecode();
+        self.compiler_lazy_mut().finalize_bodies();
         self.compute_consts(None);
         if self.failed || self.had_errors() {
             return;
         }
 
-        // Wrap the bytecode in the versioned `ArchivedProgram` envelope
+        // Wrap the code in the versioned `ArchivedProgram` envelope
         // so that older `.ccoil` files can be rejected at load time via
         // `version` mismatch (see `Pipeline::run`).
         let debug = self.program_debug_full();
@@ -1490,7 +1489,7 @@ impl Pipeline {
             .expect("Unable to write compiled output to file");
     }
 
-    /// Compile a parsed AST and return the bytecode.
+    /// Compile a parsed AST and return the code.
     ///
     /// Does **not** emit when the checker rejected the program (B2).
     /// Ill-typed examples belong in diagnostics fixtures, not here.
@@ -1580,7 +1579,7 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
-        self.compiler_lazy_mut().finalize_bytecode();
+        self.compiler_lazy_mut().finalize_bodies();
         self.compute_consts(Some((path, src)));
 
         // Warnings are kept for callers to inspect; only hard errors fail.
@@ -1599,11 +1598,11 @@ impl Pipeline {
     }
 
     /// Compute every `const` and pure `static let` initializer on the
-    /// compile-time VM and replace its startup call with the computed value
+    /// compile-time interpreter and replace its startup call with the computed value
     /// (`RestoreSnapshot`). A const's failure is E0134 at the const; a
     /// `static let` that fails keeps its startup initializer. At `-O2` and
     /// above, pure calls with constant arguments are computed too and
-    /// replaced with their values; one that fails stays a call. Without a macro host (no VM linked)
+    /// replaced with their values; one that fails stays a call. Without a macro host (no runtime linked)
     /// consts keep their startup initializers. `entry_src` is the text of an
     /// in-memory entry, which has no file to read.
     fn compute_consts(&mut self, entry_src: Option<(&Path, &str)>) {
@@ -1911,7 +1910,7 @@ impl Pipeline {
     }
 
     /// Compile a single source file in-memory and return the
-    /// resulting bytecode, resolving `use` and `mod`
+    /// resulting code, resolving `use` and `mod`
     /// declarations by reading the referenced files from disk.
     ///
     /// Multi-file entry point: discovers and compiles the module graph from disk.
@@ -1946,7 +1945,7 @@ impl Pipeline {
 
         // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
         self.step(CompileStep::Link);
-        self.compiler_lazy_mut().finalize_bytecode();
+        self.compiler_lazy_mut().finalize_bodies();
         self.compute_consts(None);
 
 
@@ -1959,8 +1958,6 @@ impl Pipeline {
     }
 
     /// Compile a source entry in-memory for `coil dissect` (never writes an archive).
-    ///
-    /// When `capture_il` is true, retains pre-opt stack IL after finalize splices.
     #[cfg(any(test, feature = "dissect"))]
     pub fn compile_dissect(&mut self, file: &str) -> Result<crate::DissectArtifacts, CompileFail> {
         let _capture = self.comptime_capture();
@@ -1982,7 +1979,7 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
-        self.compiler_lazy_mut().finalize_bytecode();
+        self.compiler_lazy_mut().finalize_bodies();
         self.compute_consts(None);
         if self.failed || self.had_errors() {
             return Err(CompileFail);
@@ -2007,7 +2004,7 @@ impl Pipeline {
         })
     }
 
-    /// Harness test cases from the last compile (`description`, bytecode offset).
+    /// Harness test cases from the last compile (`description`, entry id).
     pub fn test_cases(&self) -> &[(String, u32)] {
         self.compiler_lazy().test_cases()
     }
@@ -2099,7 +2096,7 @@ impl Pipeline {
     }
 
     /// Mark a debugger-attached compile (I7). `coil debug` sets this.
-    /// B8: does not disable MIR specialize; stops stay on reconstructed bytecode.
+    /// B8: does not disable MIR specialize; stops stay on reconstructed code.
     pub fn set_debugger_attached(&mut self, on: bool) {
         self.debugger_attached = on;
         if self.compiler.get().is_some() {
@@ -2562,7 +2559,7 @@ fn main() {
     }
 
     /// Buffered standard-native ids must land in the typechecker map when the
-    /// compiler is first built, otherwise HostInvoke fn_ids drift from the VM.
+    /// compiler is first built, otherwise HostInvoke fn_ids drift from the runtime.
     #[test]
     fn first_compiler_access_replays_pending_native_ids() {
         let pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));

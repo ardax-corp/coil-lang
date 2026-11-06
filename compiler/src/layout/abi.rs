@@ -19,7 +19,7 @@
 //!
 //! ## MIR layout
 //!
-//! Result/Option ABI layouts for MIR→LIR (COI-270) and I1 SSA word names.
+//! Result/Option ABI layouts for MIR lowering (COI-270) and I1 SSA word names.
 //!
 //! Matches [`two_word_kind`] and
 //! `docs/internals/layout.md` (COI-92). No new pair opcodes and no
@@ -31,7 +31,7 @@
 //! Typed dense call/return ABI (COI-291 M1).
 //!
 //! Dense bodies keep `i64` / `f64` / `bool` in frame slots.
-//! A dense→dense `CALL` uses the same one-word Value layout the VM already
+//! A dense→dense `CALL` uses the same one-word Value layout the runtime already
 //! uses at CALL/RETURN — bits are typed slots, not boxed heap objects.
 //!
 //! ### Layout
@@ -363,7 +363,7 @@ fn shape() -> Shape {
 /// How a Result/Option (or arity-2 immediate product) crosses a call edge.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum MirLayout {
-    /// One VM `Value` (boxed `ObjEnum`, scalar, or heap niche word).
+    /// One runtime `Value` (boxed `ObjEnum`, scalar, or heap niche word).
     #[default]
     Word,
     /// Direct `CALL`/`RETURN` width 2. Enums are `[payload, tag]`; products
@@ -371,7 +371,7 @@ pub enum MirLayout {
     TwoSlot,
     /// Heap `Option<T>` (`None` = `0`) or heap-heap `Result<T,E>`
     /// (`Ok` = aligned pointer, `Err` = `pointer | 1`). Host packs at the
-    /// HostInvoke edge; LIR uses `CONST 0` / `BITAND` / `BITOR` / `LogNot`.
+    /// HostInvoke edge; native code uses `CONST 0` / `BITAND` / `BITOR` / `LogNot`.
     /// SSA names the word [`crate::mir::MirTy::NicheOpt`] vs
     /// [`crate::mir::MirTy::NicheRes`]; this variant is the shared ABI.
     HeapNiche,

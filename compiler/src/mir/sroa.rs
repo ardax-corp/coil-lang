@@ -1,8 +1,8 @@
 //! S2f / Q1: reuse the StoreIndex array instead of rematerializing `Alloc`.
 //!
 //! HIR lowering already keeps non-escaping `[T; N]` locals in slots. Dense /
-//! LIR emit can still see a second `Alloc` of the same elems
-//! after `StoreIndex` (dest is the stored *value*). VM mutates in place, so
+//! emit can still see a second `Alloc` of the same elems
+//! after `StoreIndex` (dest is the stored *value*). runtime mutates in place, so
 //! later `Index` must read that object — not a fresh `[0, 0, 0]`.
 
 use std::collections::HashMap;

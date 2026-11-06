@@ -1,5 +1,5 @@
 //! The FFI ops on the [`Runtime`]: `FfiLoad`, `DeclareFFI` and
-//! `FfiInvoke` return the `Result` value the op pushes, for the VM and for
+//! `FfiInvoke` return the `Result` value the op pushes, for the runtime and for
 //! native code alike.
 
 use common::Value;

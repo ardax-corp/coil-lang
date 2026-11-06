@@ -1,5 +1,4 @@
-//! Emit a body's MIR (lowered from HIR) as dense bytecode when that wins,
-//! else as LIR stack ops.
+//! Per-body MIR specialization.
 
 
 use crate::opt::OptimizeOptions;

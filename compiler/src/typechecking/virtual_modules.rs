@@ -397,7 +397,7 @@ impl IoBuiltin {
 
 /// String helpers exported from virtual `string`.
 ///
-/// `format` is a compiler intrinsic that lowers to [`common::Instruction::FORMAT`];
+/// `format` is a compiler intrinsic that lowers to the `FORMAT` host call;
 /// byte conversion helpers use the `from_bytes` / `to_bytes` host-native rows.
 /// Byte reads and search are `s[i]` and plain loops (`text::` in coil-stdlib),
 /// which the compiler vectorises (`docs/internals/byte-simd.md`); the

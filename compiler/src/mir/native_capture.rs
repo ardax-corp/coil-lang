@@ -1,9 +1,8 @@
 //! Hand each body's MIR to a native backend (`coil-native`).
 //!
-//! While a capture is open (`coil --jit`), `IlModule::optimize_and_flatten`
-//! copies every body's MIR, as lowered from HIR, before the VM tiers take
-//! it. The backend reads the bodies it can compile and maps them to the
-//! bytecode entry PCs by name.
+//! While a capture is open (`coil`), the pipeline
+//! copies every body's MIR, as lowered from HIR. The backend reads the bodies it can compile and maps them to the
+//! entry ids by name.
 
 use std::cell::RefCell;
 
@@ -139,7 +138,7 @@ fn optimizable(func: &MirFunc) -> bool {
 }
 
 /// A [`super::MirInst::ByteScan`] or [`super::MirInst::VecLoop`] as the
-/// VM's `VScan` / `VLoop` runs it, over a frame of word slots native code
+/// the vector scan / loop runs it, over a frame of word slots native code
 /// fills: slot 0 is the loop's `dest` (a reduce's or push's start value
 /// goes in first), slot 1 its block position (`pos`), and `inputs[i]` is
 /// in slot `2 + i`.
@@ -155,7 +154,7 @@ pub struct VectorOp {
     pub flags: u8,
 }
 
-/// `inst` as a [`VectorOp`]: `None` for another inst or a body the VM's
+/// `inst` as a [`VectorOp`]: `None` for another inst or a body the runtime's
 /// encoding cannot hold.
 pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
     use super::inst::VecLoopKind;

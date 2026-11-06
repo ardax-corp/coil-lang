@@ -223,7 +223,7 @@ fn dissect_help_lists_host_grant_flags() {
     }
 }
 
-/// Source lines interleave with the bytecode; `-O`, `--il-post` and `--mir`
+/// Source lines interleave with the IL; `-O`, `--il-post` and `--mir`
 /// are accepted and print their sections; `--ast` prints real source.
 #[test]
 fn dissect_views_opt_mir_ast() {
@@ -279,7 +279,7 @@ fn dissect_hir_prints_typed_bodies() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A compiled `.ccoil` archive dumps its bytecode without recompiling.
+/// A compiled `.ccoil` archive dumps its IL without recompiling.
 #[test]
 fn dissect_reads_an_archive() {
     ensure_coil_dissect();
@@ -353,7 +353,7 @@ fn dissect_expand_and_opt_stats_show_comptime() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// With stack IL from MIR, `Vec::pop` returns
+/// With the MIR lowering, `Vec::pop` returns
 /// `vec_pop`'s Option word as it is: no unboxing to a pair and building
 /// the enum again (a `MakeEnum` per pop made tak_iter 2x slower).
 #[test]

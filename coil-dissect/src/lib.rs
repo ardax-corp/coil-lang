@@ -1,4 +1,4 @@
-//! `coil-dissect` — in-memory compile + filtered bytecode / IL / AST dump.
+//! `coil-dissect` — in-memory compile + filtered MIR / AST dump.
 //!
 //! A library so that `coil dissect` can run it in process on wasm, where
 //! there is no `coil-dissect` to re-exec.
@@ -131,8 +131,6 @@ pub fn run(raw: &[String]) {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-
-    use compiler::HostGrants;
 
     use super::*;
 

@@ -1,7 +1,7 @@
 //! Generic in-place Stream attach: package IO via a C vtable.
 //!
-//! The VM stores fd, attached kind, session pointer, and hooks. A new package
-//! kind does not require a VM change. Handshake is one native step per call;
+//! The runtime stores fd, attached kind, session pointer, and hooks. A new package
+//! kind does not require a runtime change. Handshake is one native step per call;
 //! WouldBlock parks on [`crate::io::reactor_wait_fd_no_help`].
 
 use std::ffi::{CStr, c_char, c_void};
@@ -117,7 +117,7 @@ impl AttachedIo {
         Ok(n as usize)
     }
 
-    /// One empty write then empty read. Handshake / probe; not a VM loop.
+    /// One empty write then empty read. Handshake / probe; not a runtime loop.
     pub fn handshake_step(&self) -> Result<(), IoErrorTag> {
         match self.write(&[]) {
             Ok(_) => Ok(()),

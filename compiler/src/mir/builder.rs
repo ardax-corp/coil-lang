@@ -1,7 +1,7 @@
 //! Braun-style SSA builder for the numeric subset.
 //!
-//! Locals are IL slots. Sealing a block completes incomplete φs. This is
-//! construction only — fuse-IL stays the production lowering; dense exec is P1.
+//! Locals are frame slots. Sealing a block completes incomplete φs. This is
+//! construction only.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,7 +49,7 @@ pub struct MirBuilder {
     finished: bool,
     /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
     pub allow_effects: bool,
-    /// MIR→LIR: type non-W4 HostInvoke as Value-word edges without the
+    /// MIR lowering: type non-W4 HostInvoke as Value-word edges without the
     /// map-lift shortcuts `allow_effects` enables in lowering.
     pub allow_host_edges: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
@@ -386,7 +386,7 @@ impl MirBuilder {
             if !ok(lt) || !ok(rt) {
                 return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
             }
-            // The dense compare is a word compare, but VM `EQ` is structural
+            // The dense compare is a word compare, but `==` on objects is structural
             // (strings by content, arrays and tuples element-wise). The two
             // agree only against an integer constant such as a niche `0`.
             if !self.is_int_const(lhs) && !self.is_int_const(rhs) {
@@ -453,7 +453,7 @@ impl MirBuilder {
 
     pub fn ins_not(&mut self, src: ValueId) -> Result<ValueId, MirError> {
         let t = self.resolve_ty(src);
-        // VM `LogNot` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
+        // `!` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
         if t != MirTy::Bool && !t.is_int() && !t.is_heap_word() {
             return Err(MirError::msg(format!("lnot on {t}")));
         }
@@ -1197,7 +1197,7 @@ impl MirBuilder {
     }
 
     /// `STRINGIFY` of `src`, an immediate of static scalar type `tag`
-    /// (`ValueTag`) or, with `None`, a word the VM inspects.
+    /// (`ValueTag`) or, with `None`, a word the runtime inspects.
     pub fn ins_stringify(&mut self, src: ValueId, tag: Option<u32>) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() {
             return Err(MirError::msg("Stringify type".to_string()));
@@ -1642,7 +1642,7 @@ mod tests {
         let x = b.add_param(MirTy::HeapRef).unwrap();
         let y = b.add_param(MirTy::HeapRef).unwrap();
         let w = b.add_param(MirTy::I64).unwrap();
-        // Two heap words (or a heap word and an unknown i64) need the VM's
+        // Two heap words (or a heap word and an unknown i64) need the runtime's
         // structural EQ: strings by content, arrays element-wise.
         assert!(b.ins_cmp(MirCmpOp::Eq, x, y).is_err());
         assert!(b.ins_cmp(MirCmpOp::Ne, w, x).is_err());

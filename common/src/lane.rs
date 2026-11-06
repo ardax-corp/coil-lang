@@ -126,11 +126,11 @@ pub mod simd {
     pub const REDUCE_AND: u8 = 2;
     pub const REDUCE_OR: u8 = 3;
     pub const REDUCE_XOR: u8 = 4;
-    /// `REDUCE_TAKE + pred` (archive 6.3, `pred` one of `dense::CMP_LT`
+    /// `REDUCE_TAKE + pred` (archive 6.3, `pred` one of the `CMP_LT` code
     /// ..= `CMP_GE`): lane by lane in order, `acc = x` when `x pred acc`
     /// (a max is `CMP_GT`, a min `CMP_LT`; floats compare as IEEE).
     pub const REDUCE_TAKE: u8 = 8;
-    /// `VBin` `kind = ICMP + pred` (archive 6.3, `dense::CMP_*`): int lanes
+    /// `VBin` `kind = ICMP + pred` (archive 6.3, the `CMP_*` code): int lanes
     /// `a pred b` as `1` / `0` int lanes. `FCMP + pred` compares float
     /// lanes (IEEE: a NaN compares unequal and unordered).
     pub const ICMP: u8 = 64;
@@ -167,7 +167,7 @@ pub mod simd {
     pub const M_OR: u8 = 41;
     pub const M_ANDN: u8 = 42;
     pub const M_NOT: u8 = 43;
-    /// `VBin` `kind = B_CMP + pred` (`dense::CMP_*`): unsigned lane `a pred
+    /// `VBin` `kind = B_CMP + pred` (the `CMP_*` code): unsigned lane `a pred
     /// b`, both vector registers.
     pub const B_CMP: u8 = 48;
     /// `VBin` `kind = BS_CMP + pred`: lane `b` (a vector register) `pred` the

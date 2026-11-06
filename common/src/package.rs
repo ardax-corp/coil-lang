@@ -7,7 +7,7 @@ pub const PACKAGE_MAGIC: &[u8; 8] = b"COILAPP\0";
 /// Trailer size in bytes (little-endian fields).
 pub const PACKAGE_TRAILER_SIZE: usize = 32;
 
-/// [`PackageTrailer::flags`]: program bytecode uses dynamic FFI (`dload` / `extern`).
+/// [`PackageTrailer::flags`]: program code uses dynamic FFI (`dload` / `extern`).
 pub const PACKAGE_FLAG_USES_FFI: u32 = 1;
 
 /// [`PackageTrailer::flags`]: a [`NativeLock`] blob sits between the `.ccoil` archive and the trailer.

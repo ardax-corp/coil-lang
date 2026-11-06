@@ -1,4 +1,4 @@
-//! Glue to attach a compiled program to a VM: standard HostInvoke table,
+//! Glue to attach a compiled program to a runtime: standard HostInvoke table,
 //! dload/FFI paths, C struct layouts, thread program.
 
 use std::path::{Path, PathBuf};

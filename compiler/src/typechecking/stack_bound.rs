@@ -1,10 +1,10 @@
-//! Static recursion-depth analysis that presizes the VM operand stack.
+//! Static recursion-depth analysis that presizes the runtime operand stack.
 //!
 //! Proves call-frame depth when a recursive function has a decreasing int/byte
 //! **measure** parameter (possibly among multiple args), a recognizable base
 //! case, and **known** entry measure values (literals, intra-proc const bindings,
 //! or shallow interprocedural wrappers). `#[max_depth(N)]` is an optional hint
-//! for other recursion. Neither is needed for safety: the VM grows the stack
+//! for other recursion. Neither is needed for safety: the runtime grows the stack
 //! whenever a frame opens without room (`common::frame_reserve`).
 
 use std::collections::{BTreeSet, HashMap, HashSet};

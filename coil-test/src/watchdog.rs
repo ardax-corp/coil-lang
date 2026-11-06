@@ -1,13 +1,13 @@
 //! `--wall-timeout`: a case that runs past the limit ends the run.
 //!
-//! A case the VM never returns from (a loop that depends on a broken
+//! A case the runtime never returns from (a loop that depends on a broken
 //! invariant, a deadlock between the threads it spawned) would hold the
 //! runner, and in CI the whole harness cell, until the job's own limit with
 //! nothing in the log naming it. The watchdog thread wakes every second,
 //! and once a case in flight has run past the limit without finishing it
 //! prints the cases that are stuck (file, case, elapsed time, what the case
 //! printed so far) and the seed that reruns the same order, then exits with
-//! [`WALL_TIMEOUT_EXIT`]. Nothing else can stop a VM that does not come back
+//! [`WALL_TIMEOUT_EXIT`]. Nothing else can stop a runtime that does not come back
 //! to a safepoint, so the process ends, not the case.
 
 use std::collections::BTreeMap;

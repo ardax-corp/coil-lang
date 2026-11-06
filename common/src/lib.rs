@@ -1,4 +1,4 @@
-//! Shared types for the coil compiler and VM.
+//! Shared types for the coil compiler and runtime.
 
 mod archive;
 mod array_vec;

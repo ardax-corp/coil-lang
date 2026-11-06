@@ -1,6 +1,6 @@
 // Shifts never trap: `<<` by 0..=63 may move bits into or past the sign
 // bit without an overflow panic, and `>>` is arithmetic (it copies the
-// sign bit). Counts of 64 and above are a known VM bug (findings).
+// sign bit). Counts of 64 and above are a known bug (findings).
 use tests::assert;
 
 fn shl(int x, int n) -> int {

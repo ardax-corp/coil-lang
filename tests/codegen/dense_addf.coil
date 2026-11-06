@@ -1,4 +1,4 @@
-// COI-287 W1: float +/− loop (no * or /) must run on dense MIR opcodes.
+// COI-287 W1: float +/− loop (no * or /) must run in a dense loop.
 use tests::assert;
 
 fn hot(float a, float b, int n) -> float {

@@ -3,14 +3,14 @@
 //! Bartlett-style. An object moves only when every reference to it is
 //! precise: a pointer-kind field / payload / tuple / array word, a
 //! `Member::Object`, a masked coroutine slot, or a must-pointer frame slot.
-//! Anything an ambiguous word can reach (the VM's non-must roots, unknown
+//! Anything an ambiguous word can reach (the runtime's non-must roots, unknown
 //! kinds, closure captures, `Member::Value`), `Root` / `Weak` targets, and
 //! every kind other than instances / payload enums / boxes / tuples / arrays
 //! stays put. See `docs/internals/gc-evacuation.md`.
 //!
-//! Three steps so the VM can rewrite its own roots in between:
+//! Three steps so the runtime can rewrite its own roots in between:
 //! [`Heap::evacuate_plan`] copies and rewrites the heap,
-//! the VM rewrites its must-pointer slots through [`EvacPlan::forward`], then
+//! the runtime rewrites its must-pointer slots through [`EvacPlan::forward`], then
 //! [`Heap::evacuate_finish`] poisons and frees the old slots and releases
 //! emptied chunks. Runs only between cycles (`GcPhase::Idle`) and outside a
 //! shared-heap epoch.
@@ -208,7 +208,7 @@ impl Object {
 impl Heap {
     /// Copy the movable objects of sparse chunks (or, with `everything`, of
     /// every chunk — the stress mode) and rewrite the heap's precise
-    /// references. `vm_pins` are the VM roots it cannot rewrite; each pins
+    /// references. `vm_pins` are the roots it cannot rewrite; each pins
     /// its target. `None` when nothing is worth moving. The old copies stay
     /// readable until [`Self::evacuate_finish`].
     #[cold]

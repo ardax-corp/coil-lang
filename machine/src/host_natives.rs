@@ -76,7 +76,7 @@ pub fn build_standard_host_natives(
     // Append-only after math_libm: Vec helpers.
     push_wiring(&mut out, &mut register_id, VEC_WIRING, "vec");
     // `stream_attach` / `stream_park` are the package-IO hooks (coil-tls uses
-    // these via `dload`, not VM TLS natives).
+    // these via `dload`, not runtime TLS natives).
     push_stream_attach(&mut out, &mut register_id);
     push_stream_park(&mut out, &mut register_id);
     // Append-only after stream_park: process clocks (no Instant HashMap).
@@ -108,7 +108,7 @@ pub fn build_standard_host_natives(
         &mut register_id,
         common::TASK_COND_NEW_ID..=common::TASK_COND_NOTIFY_ID,
     );
-    // `contract_fail` reads the caller's frame, so the VM runs it too.
+    // `contract_fail` reads the caller's frame, so the runtime runs it too.
     push_task_natives(
         &mut out,
         &mut register_id,
@@ -136,7 +136,7 @@ pub fn build_standard_host_natives(
     push_wiring(&mut out, &mut register_id, crate::symbol::SYMBOL_WIRING, "symbol");
     // Append-only after symbol: the `process` module (major 6 minor 10).
     push_wiring(&mut out, &mut register_id, crate::process::PROCESS_WIRING, "process");
-    // Append-only after process: `coro_close` (major 6 minor 14), run by the VM.
+    // Append-only after process: `coro_close` (major 6 minor 14), run by the runtime.
     push_task_natives(&mut out, &mut register_id, common::CORO_CLOSE_ID..=common::CORO_CLOSE_ID);
     // Append-only after coro_close: `entropy::bytes` (major 6 minor 15).
     push_entropy(&mut out, &mut register_id);
@@ -424,7 +424,7 @@ fn push_from_bytes_take(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl
     })));
 }
 
-/// `gc_region_enter` / `gc_region_exit`: VM hooks ([`HostOp::RegionEnter`]).
+/// `gc_region_enter` / `gc_region_exit`: runtime hooks ([`HostOp::RegionEnter`]).
 fn push_region(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     for (name, op) in [
         (common::GC_REGION_ENTER_NATIVE, HostOp::RegionEnter),
@@ -503,7 +503,7 @@ fn push_ffi_read_ints(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
     })));
 }
 
-/// `task_*` natives and `contract_fail`: VM hooks ([`HostOp::Task`]), like `gc_collect`.
+/// `task_*` natives and `contract_fail`: runtime hooks ([`HostOp::Task`]), like `gc_collect`.
 fn push_task_natives(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
@@ -531,7 +531,7 @@ fn push_task_natives(
     }
 }
 
-/// `unwind_resume` ends a `defer` cleanup pad; the VM runs it (`HostOp::Unwind`).
+/// `unwind_resume` ends a `defer` cleanup pad; the runtime runs it (`HostOp::Unwind`).
 fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let name = common::UNWIND_RESUME_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![], FfiType::Int).expect("unwind_resume signature");
@@ -623,7 +623,7 @@ fn push_wiring(
             continue;
         }
         if common::host_native_id(name) == Some(common::CLOCK_SLEEP_MS_ID as usize) {
-            // Inside a scope the VM suspends the task instead of calling it.
+            // Inside a scope the runtime suspends the task instead of calling it.
             out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| Ok(Some(host(heap, args))))));
             continue;
         }
@@ -632,7 +632,7 @@ fn push_wiring(
 }
 
 /// The lock primitives the Coil `with_lock` family builds on. An acquire
-/// may park the task (no result yet; the VM or the native driver runs it
+/// may park the task (no result yet; the interpreter or the native driver runs it
 /// again after the wake), so it is an ordinary closure; the rest are
 /// direct.
 fn push_lock_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
@@ -1658,7 +1658,7 @@ mod tests {
         }
     }
 
-    /// Instant handles were a VM HashMap leak; drop lives in coil-time, not HostInvoke.
+    /// Instant handles were a runtime HashMap leak; drop lives in coil-time, not HostInvoke.
     #[test]
     fn instant_drop_is_not_a_vm_host() {
         let mut names = Vec::new();
@@ -1667,7 +1667,7 @@ mod tests {
             names
                 .iter()
                 .all(|n| n != "time_instant_drop" && n != "instant_drop"),
-            "Instant drop must not be a VM host: {names:?}"
+            "Instant drop must not be a host: {names:?}"
         );
         let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let src = crate_dir.join("src");
@@ -1681,7 +1681,7 @@ mod tests {
         }
         assert!(
             leftover.is_empty(),
-            "VM Instant registry must stay gone: {leftover:?}"
+            "Instant registry must stay gone: {leftover:?}"
         );
     }
 

@@ -109,7 +109,7 @@ fn runtime_for(program: &ThreadProgram, start: NativeStart) -> Runtime {
 }
 
 /// After `main`: join the threads it left running and stop the reactor's
-/// workers (as the VM's run does).
+/// workers (as the runtime's run does).
 fn finish(rt: &mut Runtime) {
     if crate::reactor::NO_THREADS {
         while rt.reactor.help_local_once() {}

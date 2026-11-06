@@ -7926,8 +7926,7 @@ impl Compiler {
 
     /// The adapter function [`Self::hir_fn_adapter`] reserved `label` for:
     /// its frame the wrapped function (the capture), then the arguments.
-    /// Its direct MIR is built here, as it has no HIR; the stack IL only
-    /// keeps its function record non-empty.
+    /// Its direct MIR is built here, as it has no HIR.
     fn hir_fn_adapter_fn(&mut self, label: IlLabel, adapt: &HirFnAdapt) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_fn_adapter_{}", self.loop_par_helpers);
@@ -10443,8 +10442,7 @@ impl Compiler {
         }
         let root = body.root.expect("planned lambda body");
         self.hir_plan_par_loops(&body, &mut emit, root);
-        // Its code is emitted from its direct MIR; the stack IL only keeps
-        // its function record non-empty.
+        // Its code is emitted from its direct MIR.
         self.bodies.advance();
         // Direct MIR takes the captures as the first parameters.
         let mut flat = body.clone();
@@ -10507,7 +10505,7 @@ impl Compiler {
     /// The fork-join function `driver` of `site` over chunk worker `worker`
     /// built as HIR ([`Self::hir_par_driver_body`]) and lowered like any
     /// other body, so it gets direct MIR. `false`, with nothing emitted,
-    /// when it does not plan: the caller writes its stack IL instead.
+    /// when it does not plan: the caller writes its code by hand instead.
     fn hir_par_driver_fn(
         &mut self,
         site: &crate::typechecking::LoopParSite,
@@ -10835,8 +10833,7 @@ impl Compiler {
         emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached;
         let root = w.root.expect("worker root");
         self.hir_plan_par_loops(w, &mut emit, root);
-        // Its code is emitted from its direct MIR; the stack IL only keeps
-        // its function record non-empty.
+        // Its code is emitted from its direct MIR.
         self.bodies.advance();
         self.hir_mir = self.hir_lower_mir(w, &mut emit, None);
         self.bodies.record(name.clone(), Some(label));

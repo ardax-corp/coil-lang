@@ -143,7 +143,7 @@ fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
     })
 }
 
-/// Bytecode table key for an overload: `name#2.0` or `name#rest1.0`.
+/// Code table key for an overload: `name#2.0` or `name#rest1.0`.
                         ///
 /// `id` distinguishes same-arity typed overloads (`sum#1.0` vs `sum#1.1`).
 fn overload_fn_key(name: &str, fixed_arity: usize, is_rest: bool, id: u32) -> String {
@@ -165,8 +165,8 @@ fn strip_overload_key(name: &str) -> &str {
 /// `MakeFn` operand: `[7:0]=n_cap [15:8]=n_filled [23:16]=arity [24]=is_rest`.
                         ///
 /// `n_cap` and `n_filled` are packed into 8-bit fields (max 255), and the
-/// mask drops the rest: a closure past that runs natively, where the operand
-/// means nothing, and its body on the VM is a `stub_for_vm` panic.
+/// mask drops the rest: engines read a closure's shape from MIR, so the
+/// operand means nothing past that.
 fn make_fn_operand(n_cap: u32, n_filled: u32, arity: u32, is_rest: bool) -> u32 {
     (n_cap & 0xFF) | ((n_filled & 0xFF) << 8) | (arity << 16) | if is_rest { 1 << 24 } else { 0 }
 }
@@ -311,7 +311,7 @@ pub struct Compiler {
     /// Wide immediates referenced from compact 8-byte `Byte`
     /// operands (floats, `JumpIfMatch` targets, etc.).
     constants: Vec<u64>,
-    /// Program string literals referenced by `Instruction::STRING`.
+    /// Program string literals referenced by string-literal ops.
     strings: Vec<String>,
     string_indices: HashMap<String, u32>,
 
@@ -419,7 +419,7 @@ pub struct Compiler {
     /// [`Compiler::two_word_return_kind`].
     compiling_two_word_enum: Option<PairKind>,
 
-    /// Harness metadata: `(description, bytecode offset)` for each
+    /// Harness metadata: `(description, entry id)` for each
     /// top-level `test("…") { … }` case, in source order.
     test_cases: Vec<(String, u32)>,
 
@@ -532,7 +532,7 @@ pub struct Compiler {
     source_file_indices: std::collections::BTreeMap<String, u32>,
     /// `source_files` order for the archive (index → path).
     source_file_list: Vec<String>,
-    /// One [`DebugLoc`] per bytecode slot (grows with [`Self::bytecode`]).
+    /// One [`DebugLoc`] per code slot (grows with [`Self::code`]).
     debug_locs: Vec<DebugLoc>,
     /// Host calls that need a capability (`open`, `env::exit`, …), by the
     /// [`DebugLoc`] on their `HostInvoke` op. Checked against the grants

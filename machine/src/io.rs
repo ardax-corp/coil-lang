@@ -18,7 +18,7 @@ use crate::memory::{EnumPayload, Heap, Member, ObjArray, ObjStream, ObjTuple, Ob
 
 type OutputRedirect = *mut (dyn Write + Send);
 
-/// Request to park the VM until a handle is ready (set by `await_*` natives).
+/// Request to park the runtime until a handle is ready (set by `await_*` natives).
 #[derive(Debug, Clone)]
 pub struct IoParkRequest {
     pub handle: WaitHandle,
@@ -42,7 +42,7 @@ thread_local! {
 }
 
 /// Whether a native failed with `TooManyOpenFiles` since the last call;
-/// clears it. The VM collects (freeing the descriptors of streams nothing
+/// clears it. The runtime collects (freeing the descriptors of streams nothing
 /// reaches) and tries an `open` / `accept` once more.
 pub fn take_fd_exhausted() -> bool {
     FD_EXHAUSTED.with(|f| f.replace(false))
@@ -373,7 +373,7 @@ pub fn stream_set_write_timeout(heap: &mut Heap, stream: Value, ms: i64) -> Resu
     })?
 }
 
-/// Wait for handle readiness via the VM's [`IoReactor`] (help-steals CPU work when available).
+/// Wait for handle readiness via the runtime's [`IoReactor`] (help-steals CPU work when available).
 pub fn reactor_wait_fd(
     handle: WaitHandle,
     interest: Interest,
@@ -823,7 +823,7 @@ fn wait_writable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     poll_ready(handle, false, timeout)
 }
 
-/// Non-blocking readiness probe; parks the VM via [`IoParkRequest`] when not ready.
+/// Non-blocking readiness probe; parks the runtime via [`IoParkRequest`] when not ready.
 ///
 /// Returns `Ok(None)` when a park was requested (caller must not push a value).
 /// Returns `Ok(Some(Result::Ok(())))` when already ready.
@@ -2374,7 +2374,7 @@ mod tests {
         stream_set_read_timeout(&mut heap, stream, 123).unwrap();
         let _ = take_pending_io_park();
         let parked = stream_await_readable(&mut heap, stream).expect("await");
-        assert!(parked.is_none(), "empty socket must park the VM");
+        assert!(parked.is_none(), "empty socket must park the task");
         let req = take_pending_io_park().expect("park request");
         assert_eq!(req.interest, Interest::Readable);
         assert_eq!(req.timeout, Some(Duration::from_millis(123)));

@@ -1,5 +1,5 @@
 // COI-407: trailing `if` end-label must stay with this function when the
-// next body is MIR-dense (HTTP Client::get neighbored numeric helpers).
+// next body is a dense loop (HTTP Client::get neighbored numeric helpers).
 use tests::assert;
 
 fn pred(int x) -> int {
