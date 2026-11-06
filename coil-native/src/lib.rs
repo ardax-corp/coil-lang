@@ -2283,6 +2283,11 @@ impl<'a> Lower<'a> {
     /// interpreter's `VScan` / `VLoop` kernels, which need no machine): the
     /// helper's result word and the frame the slots came back in.
     fn vector_lanes(&mut self, f: &MirFunc, inst: &MirInst) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::StackSlot) {
+        self.vector_lanes_at(f, inst, None)
+    }
+
+    /// [`Self::vector_lanes`] from lane `at` instead of the op's `from`.
+    fn vector_lanes_at(&mut self, f: &MirFunc, inst: &MirInst, at: Option<cranelift_codegen::ir::Value>) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::StackSlot) {
         let op = compiler::native_mir::vector_op(inst).expect("a vector op checked at planning");
         let t = MemFlagsData::trusted();
         let n = op.inputs.len() + 2;
@@ -2320,8 +2325,13 @@ impl<'a> Lower<'a> {
             MirInst::VecLoop { from, to, .. } => (1, *from, *to),
             _ => unreachable!(),
         };
-        let lo = self.get(f, lo);
-        let lo = self.coerce(lo, types::I64);
+        let lo = match at {
+            Some(at) => at,
+            None => {
+                let lo = self.get(f, lo);
+                self.coerce(lo, types::I64)
+            }
+        };
         let hi = self.get(f, hi);
         let hi = self.coerce(hi, types::I64);
         let kind = self.b.ins().iconst(types::I64, kind);
@@ -2385,17 +2395,21 @@ impl<'a> Lower<'a> {
         self.pair_words = pair_words(f, &self.ptr_words);
         for blk in &f.blocks {
             for inst in &blk.insts {
-                if let MirInst::HostInvoke { native_id, args, .. } = inst
-                    && *native_id == common::STRING_BYTE_AT_ID
-                    && args.len() == 2
-                    && !self.str_views.contains_key(&args[0])
-                {
+                let read: Vec<ValueId> = match inst {
+                    MirInst::HostInvoke { native_id, args, .. } if *native_id == common::STRING_BYTE_AT_ID && args.len() == 2 => vec![args[0]],
+                    MirInst::ByteScan { streams, .. } => streams.iter().map(|&(s, _)| s).collect(),
+                    _ => Vec::new(),
+                };
+                for s in read {
+                    if self.str_views.contains_key(&s) {
+                        continue;
+                    }
                     let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64), self.b.declare_var(types::I64));
                     let zero = self.b.ins().iconst(types::I64, 0);
                     for v in [vars.0, vars.1, vars.2] {
                         self.b.def_var(v, zero);
                     }
-                    self.str_views.insert(args[0], vars);
+                    self.str_views.insert(s, vars);
                 }
                 let array = match inst {
                     MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
@@ -2778,6 +2792,10 @@ impl<'a> Lower<'a> {
                 // A pure reduce compiles to a native loop; the rest runs the
                 // runtime's `VScan` / `VLoop` kernels (`coil_native_vector`).
                 if self.native_reduce(f, inst)? {
+                    return Ok(());
+                }
+                if let (MirInst::ByteScan { dest, .. }, Some(w)) = (inst, self.scan_in_place(f, inst)) {
+                    self.set(f, *dest, w);
                     return Ok(());
                 }
                 let (w, frame) = self.vector_lanes(f, inst);
@@ -3485,23 +3503,17 @@ impl<'a> Lower<'a> {
         self.b.def_var(len, n);
     }
 
-    /// `s[i]` read in place: fill `s`'s byte view when it is not known,
-    /// then load the byte when `i` is in range and jump to the returned join
-    /// block with it. Out of range (or not a string object) continues in a
-    /// cold block, current on return, where the caller emits the host call
-    /// and jumps to the join with its word.
-    fn byte_in_place(&mut self, f: &MirFunc, s: ValueId, i: ValueId) -> Block {
+    /// `(pointer, length)` of string `s`'s bytes from its view, filled
+    /// first when it is not known (length 0: not a string object itself).
+    fn str_bytes(&mut self, f: &MirFunc, s: ValueId) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value) {
         let (known, ptr, len) = self.str_views[&s];
-        let sw = self.get(f, s);
-        let sw = self.coerce(sw, types::I64);
-        let i = self.get(f, i);
-        let i = self.coerce(i, types::I64);
-        let (fetch, have, read, slow, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
-        self.b.append_block_param(join, types::I64);
+        let (fetch, have) = (self.b.create_block(), self.b.create_block());
         let k = self.b.use_var(known);
         self.b.ins().brif(k, have, &[], fetch, &[]);
         self.b.set_cold_block(fetch);
         self.b.switch_to_block(fetch);
+        let sw = self.get(f, s);
+        let sw = self.coerce(sw, types::I64);
         let out = self.b.ins().stack_addr(types::I64, self.view_slot, 0);
         let call = self.b.ins().call(self.str_view, &[sw, out]);
         let r = self.b.inst_results(call)[0];
@@ -3512,11 +3524,185 @@ impl<'a> Lower<'a> {
         self.b.def_var(len, n);
         self.b.ins().jump(have, &[]);
         self.b.switch_to_block(have);
-        let n = self.b.use_var(len);
+        (self.b.use_var(ptr), self.b.use_var(len))
+    }
+
+    /// A forward `ByteScan` over strings: test 16 lanes at a time in place
+    /// for up to one kernel's width ([`common::simd::BYTE_LANES`]), so a
+    /// scan whose next hit is near ends without entering the lane kernel.
+    /// Past that, or where 16 lanes would leave the bound or a stream (or a
+    /// scalar is no byte), the kernel goes on from the lane reached.
+    /// Stopping at a lane the kernel would pass is never wrong: the loop
+    /// after the scan runs it. `None`: not such a scan (nothing emitted).
+    fn scan_in_place(&mut self, f: &MirFunc, inst: &MirInst) -> Option<cranelift_codegen::ir::Value> {
+        const WIDE: i64 = 16;
+        let MirInst::ByteScan { from, bound, inclusive, backward: false, streams, scalars, expr, .. } = inst else {
+            return None;
+        };
+        if streams.is_empty() || !streams.iter().all(|(s, _)| self.str_views.contains_key(s)) || !lane_expr_fits(expr, streams.len(), scalars.len()) {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(streams.len());
+        for &(st, off) in streams {
+            let (p, n) = self.str_bytes(f, st);
+            let o = self.get(f, off);
+            let o = self.coerce(o, types::I64);
+            bytes.push((p, n, o));
+        }
+        let scal: Vec<_> = scalars
+            .iter()
+            .map(|&v| {
+                let x = self.get(f, v);
+                self.coerce(x, types::I64)
+            })
+            .collect();
+        let from = self.get(f, *from);
+        let from = self.coerce(from, types::I64);
+        let bound = self.get(f, *bound);
+        let bound = self.coerce(bound, types::I64);
+        let (head, more, test, found, step, kern, done) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        for blk in [head, found] {
+            self.b.append_block_param(blk, types::I64);
+            self.b.append_block_param(blk, types::I64);
+        }
+        self.b.append_block_param(step, types::I64);
+        self.b.append_block_param(kern, types::I64);
+        self.b.append_block_param(done, types::I64);
+        // Lane compares are on bytes: a scalar outside `0..=255` leaves it to the kernel.
+        let mut bytes_ok = self.b.ins().iconst(types::I8, 1);
+        for &x in &scal {
+            let ok = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, x, 255);
+            bytes_ok = self.b.ins().band(bytes_ok, ok);
+        }
+        let budget = self.b.ins().iconst(types::I64, common::simd::BYTE_LANES as i64 / WIDE);
+        self.b.ins().brif(bytes_ok, head, &[from.into(), budget.into()], kern, &[from.into()]);
+        // head(p, left): out of budget, or 16 lanes past the bound, the kernel goes on.
+        self.b.switch_to_block(head);
+        let (p, left) = (self.b.block_params(head)[0], self.b.block_params(head)[1]);
+        self.b.ins().brif(left, more, &[], kern, &[p.into()]);
+        self.b.switch_to_block(more);
+        let last = self.b.ins().iadd_imm_s(p, WIDE - 1);
+        let cc = if *inclusive { IntCC::SignedLessThanOrEqual } else { IntCC::SignedLessThan };
+        let inb = self.b.ins().icmp(cc, last, bound);
+        self.b.ins().brif(inb, test, &[], kern, &[p.into()]);
+        self.b.switch_to_block(test);
+        let mut lanes = Vec::with_capacity(bytes.len());
+        for &(ptr, n, o) in &bytes {
+            let at = self.b.ins().iadd(p, o);
+            let end = self.b.ins().iadd_imm_s(at, WIDE);
+            let lo = self.b.ins().icmp(IntCC::UnsignedLessThan, at, n);
+            let hi = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, end, n);
+            let ok = self.b.ins().band(lo, hi);
+            let read = self.b.create_block();
+            self.b.ins().brif(ok, read, &[], kern, &[p.into()]);
+            self.b.switch_to_block(read);
+            let a = self.b.ins().iadd(ptr, at);
+            lanes.push(self.b.ins().load(types::I8X16, MemFlagsData::new().with_notrap(), a, 0));
+        }
+        let mask = self.lane_test(expr, &lanes, &scal);
+        let bits = self.b.ins().vhigh_bits(types::I32, mask);
+        self.b.ins().brif(bits, found, &[p.into(), bits.into()], step, &[p.into()]);
+        self.b.switch_to_block(found);
+        let (p, bits) = (self.b.block_params(found)[0], self.b.block_params(found)[1]);
+        let k = self.b.ins().ctz(bits);
+        let k = self.b.ins().uextend(types::I64, k);
+        let at = self.b.ins().iadd(p, k);
+        self.b.ins().jump(done, &[at.into()]);
+        self.b.switch_to_block(step);
+        let p = self.b.block_params(step)[0];
+        let next = self.b.ins().iadd_imm_s(p, WIDE);
+        let left = self.b.ins().iadd_imm_s(left, -1);
+        self.b.ins().jump(head, &[next.into(), left.into()]);
+        self.b.set_cold_block(kern);
+        self.b.switch_to_block(kern);
+        let at = self.b.block_params(kern)[0];
+        let (w, _) = self.vector_lanes_at(f, inst, Some(at));
+        self.b.ins().jump(done, &[w.into()]);
+        self.b.switch_to_block(done);
+        Some(self.b.block_params(done)[0])
+    }
+
+    /// A scan predicate on 16 lanes of bytes (`lanes[k]`, stream `k`) and
+    /// the scan's scalars (each in `0..=255`): a lane mask, all ones where
+    /// the lane does something.
+    fn lane_test(&mut self, e: &compiler::native_mir::LaneExpr, lanes: &[cranelift_codegen::ir::Value], scal: &[cranelift_codegen::ir::Value]) -> cranelift_codegen::ir::Value {
+        use compiler::native_mir::{LaneExpr, LaneVal};
+        match e {
+            LaneExpr::Const(b) => {
+                let x = self.b.ins().iconst(types::I8, if *b { -1 } else { 0 });
+                self.b.ins().splat(types::I8X16, x)
+            }
+            LaneExpr::Cmp { op, lhs: LaneVal::Scalar(a), rhs: LaneVal::Scalar(c) } => {
+                // The same in every lane.
+                let cc = match op {
+                    MirCmpOp::Lt => IntCC::SignedLessThan,
+                    MirCmpOp::Le => IntCC::SignedLessThanOrEqual,
+                    MirCmpOp::Gt => IntCC::SignedGreaterThan,
+                    MirCmpOp::Ge => IntCC::SignedGreaterThanOrEqual,
+                    MirCmpOp::Eq => IntCC::Equal,
+                    MirCmpOp::Ne => IntCC::NotEqual,
+                };
+                let t = self.b.ins().icmp(cc, scal[usize::from(*a)], scal[usize::from(*c)]);
+                let m = self.b.ins().ineg(t);
+                self.b.ins().splat(types::I8X16, m)
+            }
+            LaneExpr::Cmp { op, lhs, rhs } => {
+                // Bytes and byte scalars are `0..=255`: their `i64` order is the unsigned byte order.
+                let mut val = |v: &LaneVal| match *v {
+                    LaneVal::Stream(k) => lanes[usize::from(k)],
+                    LaneVal::Scalar(k) => {
+                        let x = self.b.ins().ireduce(types::I8, scal[usize::from(k)]);
+                        self.b.ins().splat(types::I8X16, x)
+                    }
+                };
+                let (a, c) = (val(lhs), val(rhs));
+                let cc = match op {
+                    MirCmpOp::Lt => IntCC::UnsignedLessThan,
+                    MirCmpOp::Le => IntCC::UnsignedLessThanOrEqual,
+                    MirCmpOp::Gt => IntCC::UnsignedGreaterThan,
+                    MirCmpOp::Ge => IntCC::UnsignedGreaterThanOrEqual,
+                    MirCmpOp::Eq => IntCC::Equal,
+                    MirCmpOp::Ne => IntCC::NotEqual,
+                };
+                self.b.ins().icmp(cc, a, c)
+            }
+            LaneExpr::And(a, c) => {
+                let (a, c) = (self.lane_test(a, lanes, scal), self.lane_test(c, lanes, scal));
+                self.b.ins().band(a, c)
+            }
+            LaneExpr::Or(a, c) => {
+                let (a, c) = (self.lane_test(a, lanes, scal), self.lane_test(c, lanes, scal));
+                self.b.ins().bor(a, c)
+            }
+            LaneExpr::Not(a) => {
+                let a = self.lane_test(a, lanes, scal);
+                self.b.ins().bnot(a)
+            }
+        }
+    }
+
+    /// `s[i]` read in place: fill `s`'s byte view when it is not known,
+    /// then load the byte when `i` is in range and jump to the returned join
+    /// block with it. Out of range (or not a string object) continues in a
+    /// cold block, current on return, where the caller emits the host call
+    /// and jumps to the join with its word.
+    fn byte_in_place(&mut self, f: &MirFunc, s: ValueId, i: ValueId) -> Block {
+        let i = self.get(f, i);
+        let i = self.coerce(i, types::I64);
+        let (p, n) = self.str_bytes(f, s);
+        let (read, slow, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(join, types::I64);
         let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, n);
         self.b.ins().brif(inb, read, &[], slow, &[]);
         self.b.switch_to_block(read);
-        let p = self.b.use_var(ptr);
         let at = self.b.ins().iadd(p, i);
         let byte = self.b.ins().uload8(types::I64, MemFlagsData::trusted(), at, 0);
         self.b.ins().jump(join, &[byte.into()]);
@@ -3770,6 +3956,22 @@ pub fn describe(p: &NativeProgram) -> String {
     )
 }
 
+/// Whether every operand of scan predicate `e` names one of `streams`
+/// streams or `scalars` scalars.
+fn lane_expr_fits(e: &compiler::native_mir::LaneExpr, streams: usize, scalars: usize) -> bool {
+    use compiler::native_mir::{LaneExpr, LaneVal};
+    let fits = |v: &LaneVal| match *v {
+        LaneVal::Stream(k) => usize::from(k) < streams,
+        LaneVal::Scalar(k) => usize::from(k) < scalars,
+    };
+    match e {
+        LaneExpr::Const(_) => true,
+        LaneExpr::Cmp { lhs, rhs, .. } => fits(lhs) && fits(rhs),
+        LaneExpr::And(a, b) | LaneExpr::Or(a, b) => lane_expr_fits(a, streams, scalars) && lane_expr_fits(b, streams, scalars),
+        LaneExpr::Not(a) => lane_expr_fits(a, streams, scalars),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3852,3 +4054,4 @@ mod tests {
         assert_eq!(run(&p.entries[0], &[7]), (0, 7));
     }
 }
+
