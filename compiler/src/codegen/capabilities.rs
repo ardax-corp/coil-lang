@@ -62,7 +62,7 @@ fn shown_fn(name: &str) -> String {
         return format!("the initializer of static `{static_name}`");
     }
     let base = name.split('$').next().unwrap_or(name);
-    format!("`{base}`")
+    format!("`{}`", crate::variadic::copied_from(base))
 }
 
 impl Compiler {

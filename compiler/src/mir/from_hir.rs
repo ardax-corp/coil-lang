@@ -4253,6 +4253,7 @@ impl Lower<'_> {
         // but for a host call: the capability check finds it by its own span.
         let placeless = crate::attrs::is_fresh_span(start) && !self.inp.hosts.contains_key(&id.0);
         if let Some(file) = self.inp.file.filter(|_| !placeless) {
+            let (start, end) = crate::variadic::written_span(start, end);
             self.b.pending_loc = DebugLoc {
                 file,
                 start_byte: start as u32,
