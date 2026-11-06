@@ -1,6 +1,6 @@
 //! What a running program needs besides an interpreter: the heap and the
 //! host natives today, the scheduler, reactor and string table as the
-//! VM-free plan moves them (`docs/internals/native.md`). The VM's
+//! runtime-free plan moves them (`docs/internals/native.md`). The runtime's
 //! [`crate::Machine`] owns one; native code reaches it through its
 //! context, so host functions run without the interpreter.
 
@@ -10,7 +10,7 @@ use common::Value;
 
 use crate::AddrHashBuilder;
 
-/// The program's runtime state that native code and the VM share.
+/// The program's runtime state that native code and the interpreter share.
 pub(crate) struct Runtime {
     pub(crate) heap: crate::memory::HeapSlot,
     pub(crate) natives: crate::ffi::Natives,
@@ -20,9 +20,9 @@ pub(crate) struct Runtime {
     pub(crate) reactor: std::sync::Arc<crate::reactor::Reactor>,
     /// IO readiness reactor (sync adapters + async waiters).
     pub(crate) io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
-    /// Undetached spawns owned by this VM (joined at end of `run_with_pool`).
+    /// Undetached spawns owned by this runtime (joined at end of `run_with_pool`).
     pub(crate) live_threads: crate::thread::LiveThreadRegistry,
-    /// Shared concurrent OS-worker budget for this root VM (and its workers).
+    /// Shared concurrent OS-worker budget for this root runtime (and its workers).
     pub(crate) worker_cap: std::sync::Arc<crate::thread::WorkerCap>,
     /// Global static slots (`LoadStatic` / `StoreStatic`).
     pub(crate) statics: Vec<Value>,
@@ -31,11 +31,11 @@ pub(crate) struct Runtime {
     /// zeros the table so unmarked literals can die; STRING still stacks
     /// the handle before `maybe_gc`.
     pub(crate) program_string_cache: Vec<Value>,
-    /// Native calls in a VM call, innermost last: the heap words their
+    /// Native calls in a runtime call, innermost last: the heap words their
     /// frames hold are pinned roots ([`crate::native::NativeCtx::for_each_root`]).
     pub(crate) native_roots: Vec<(*mut crate::native::NativeCtx, usize)>,
     /// Arguments of the native FFI calls in flight (nested when a callback
-    /// re-enters the VM and calls out again). `FfiInvoke` pops them off the
+    /// re-enters the runtime and calls out again). `FfiInvoke` pops them off the
     /// operand stack, so they are rooted here until the call returns:
     /// `ConstBytes` lends a string's bytes to C for the whole call.
     pub(crate) ffi_arg_roots: Vec<Value>,
@@ -52,7 +52,7 @@ pub(crate) struct Runtime {
     pub(crate) shared_stderr: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
     /// Loaded libraries and declared C functions (`ffi::`).
     pub(crate) ffi: FfiState,
-    /// Native code installed by a native backend (`None`: VM only).
+    /// Native code installed by a native backend (`None`: interpreter only).
     pub(crate) native: Option<Box<crate::native::NativeTable>>,
     /// Some generator suspended with a `defer` armed: the collector looks
     /// for ones to close.
@@ -65,7 +65,7 @@ pub(crate) struct Runtime {
     /// meanwhile): nothing moves.
     pub(crate) shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// Step budget fuel: charged once per taken back-edge and per call by
-    /// whatever counts steps (the VM, the MIR interpreter); zero means
+    /// whatever counts steps (the runtime, the MIR interpreter); zero means
     /// exhausted. `u64::MAX` when no budget is set (2^64 charges cannot
     /// happen), so a charge is one decrement and one never-taken branch
     /// either way.
@@ -238,7 +238,7 @@ impl Runtime {
 
 /// What a host call needs from whatever runs the program besides the
 /// [`Runtime`]: whether tasks may switch where it runs, parking the task
-/// it runs in, and a collection with its native frames rooted. The VM's
+/// it runs in, and a collection with its native frames rooted. The runtime's
 /// [`crate::Machine`] is one; host functions reach the runtime through it.
 pub(crate) trait HostEnv {
     fn rt(&mut self) -> &mut Runtime;
@@ -327,8 +327,8 @@ impl Runtime {
 }
 
 /// The ordinary host native `fn_id` from native code, as `HostInvoke` runs
-/// it (`exec_rest.rs`): a wait parks the task's fiber ([`HostEnv::park`])
-/// where the VM would suspend the task, then the native runs again or the
+/// it: a wait parks the task's fiber ([`HostEnv::park`])
+/// where the runtime would suspend the task, then the native runs again or the
 /// wake is its result. `None` (its stub runs it): a wait where tasks
 /// switch but the call is off a fiber.
 pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::NativeCtx, fn_id: usize, layout: u64, args: &[Value]) -> Option<crate::native::Invoked> {
@@ -432,8 +432,3 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
 /// Where a program's output goes when it is captured.
 pub(crate) type OutputSink = Box<dyn std::io::Write + Send>;
 
-/// `COIL_COW_EAGER=1` (measuring only): every copy-on-write share copies.
-pub(crate) fn cow_eager() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_COW_EAGER").is_some())
-}

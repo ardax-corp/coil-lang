@@ -10,7 +10,7 @@ use super::{BlockId, MirCastKind, MirFunc, MirInst, MirTy, Terminator, ValueId};
 /// One past the last parameter `f` reads. A `CALL` passes the words its
 /// arity says, which a body's MIR parameters may outnumber (an unread
 /// trait-method parameter) or fall short of: native code passes zero for
-/// the unread ones and drops the extra words, as the VM's frame ignores
+/// the unread ones and drops the extra words, as the runtime's frame ignores
 /// them.
 pub fn used_params(f: &MirFunc) -> usize {
     let mut used: HashSet<ValueId> = HashSet::new();
@@ -118,7 +118,7 @@ pub fn ty_of(f: &MirFunc, v: ValueId) -> MirTy {
     f.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
 }
 
-/// A word's kind for an object's packed word kinds, as the VM's emission
+/// A word's kind for an object's packed word kinds, as the runtime's emission
 /// records them.
 pub fn word_kind(t: MirTy) -> u8 {
     match t {
@@ -181,7 +181,7 @@ pub fn pair_words(f: &MirFunc, pointers: &HashSet<ValueId>) -> Vec<ValueId> {
 
 /// `held[block][inst]`: the heap words locals hold just before that inst
 /// (one past the last: at the terminator), by block position. As in the
-/// VM's frame, a local holds the word it was bound to
+/// runtime's frame, a local holds the word it was bound to
 /// ([`MirFunc::local_binds`]) from the word's definition until another of
 /// the same local's is defined or a `ClearWord` drops it, even past its
 /// last use; a match binding holds its word only through its scrutinee.
@@ -269,7 +269,7 @@ pub fn held_words(f: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
 }
 
 /// Each `GcBarrier`'s object: the dest of the allocating instruction right
-/// before it in its block, as the VM's emission pairs them. Native code
+/// before it in its block, as the runtime's emission pairs them. Native code
 /// never collects during a call, so the barrier only names that word.
 pub fn barrier_pairs(f: &MirFunc) -> HashMap<ValueId, ValueId> {
     let mut out = HashMap::new();

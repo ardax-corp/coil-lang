@@ -24,7 +24,7 @@ pub fn cse(func: &mut MirFunc) -> usize {
     cse_with(func, true)
 }
 
-/// [`cse`] for a LIR body: a literal is an immediate operand there, cheaper
+/// [`cse`] that leaves literals alone: an immediate operand is cheaper
 /// than a register another use reads.
 pub fn cse_lir(func: &mut MirFunc) -> usize {
     cse_with(func, false)
@@ -98,7 +98,7 @@ enum ReadKey {
     FixedIndex { array: ValueId, index: ValueId },
     FixedLen { array: ValueId },
     Len { array: ValueId },
-    Call { target: crate::il::Label, args: Vec<ValueId> },
+    Call { target: crate::bodies::Label, args: Vec<ValueId> },
 }
 
 /// What one instruction may change, for [`ReadKey::killed_by`].
@@ -153,7 +153,7 @@ fn read_key(
 }
 
 /// Dominator GVN plus fully-anticipated fork PRE (COI-284).
-/// Cheap `Const` stays same-block so MIR→LIR can keep immediates on the stack.
+/// Cheap `Const` stays same-block so codegen can keep immediates as operands.
 pub fn gvn(func: &mut MirFunc) -> usize {
     let mut removed = 0;
     for _ in 0..4 {

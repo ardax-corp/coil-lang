@@ -7,7 +7,7 @@
 //! task or generator runs on a fiber.
 //!
 //! Ops are numbered across the program ([`prepare_debug`]). The numbers stand
-//! where bytecode PCs stood: breakpoints, the step modes of
+//! where entry ids stood: breakpoints, the step modes of
 //! [`DebugController`], and a [`common::ProgramDebug`] built over them. A
 //! local's value is the word of the value last bound to it
 //! (`MirFunc::local_binds`), which is exact on raw MIR: registers stay put
@@ -19,7 +19,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use common::{DebugLoc, Value};
 use compiler::native_mir::{MirFunc, NativeBody, ValueId};
-use machine::native::{self as rt, NativeCtx, TRAP_CLOSE, TRAP_PARKED, TRAP_VM_PANIC};
+use machine::native::{self as rt, NativeCtx, TRAP_CLOSE, TRAP_PARKED, TRAP_PANICKED};
 use machine::{DebugController, DebugObject, DebugTask, DebugTaskFrames, StopReason};
 
 use crate::frame::{AT_BLOCK_START, Activation};
@@ -276,7 +276,7 @@ pub(crate) unsafe fn before(act: *mut Activation, block: usize, ip: usize) {
 /// # Safety
 /// `act` is the running activation.
 pub(crate) unsafe fn panicking(act: *mut Activation, code: u64) {
-    if matches!(code, TRAP_VM_PANIC | TRAP_CLOSE | TRAP_PARKED) {
+    if matches!(code, TRAP_PANICKED | TRAP_CLOSE | TRAP_PARKED) {
         return;
     }
     // SAFETY: as this function's.

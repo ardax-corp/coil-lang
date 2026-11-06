@@ -87,7 +87,7 @@ pub(super) struct HirMirTables {
     /// functions read as values and partial applications), by expression.
     pub(super) fn_values: HashMap<u32, crate::mir::HirFnValue>,
     /// Entry of the user `into_iter` a counted `for` loop calls, by loop.
-    pub(super) into_iters: HashMap<u32, crate::il::Label>,
+    pub(super) into_iters: HashMap<u32, crate::bodies::Label>,
     /// The `into_iter` and `next` entries a `for` loop over a user
     /// iterator calls, by loop.
     pub(super) iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
@@ -564,7 +564,7 @@ impl Compiler {
             // `MakePolyFnCapture` over the dictionaries
             // `plan_polyfn_escape_dicts` plans.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
-                if let Some(target) = self.functions.get(name).and_then(|&entry| self.bytecode.entry_label_for_offset(entry)) {
+                if let Some(target) = self.functions.get(name).and_then(|&entry| self.bodies.entry_label_for_offset(entry)) {
                     // Its declared parameters, so a call through the value
                     // given more hands the rest to its result (#1589): a
                     // curried one's value is `MakePolyFnCapture` of no
@@ -592,7 +592,7 @@ impl Compiler {
                 }
             }
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
-                if let Some(target) = self.bytecode.entry_label_for_offset(entry) {
+                if let Some(target) = self.bodies.entry_label_for_offset(entry) {
                     let operand = make_fn_operand(0, 0, arity, rest);
                     t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), dicts: Vec::new() });
                 }
@@ -769,7 +769,7 @@ impl Compiler {
                 }) = emit.plan.calls.get(&id.0) =>
             {
                 if args.iter().zip(params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
-                    && let Some(target) = self.bytecode.entry_label_for_offset(*entry as usize)
+                    && let Some(target) = self.bodies.entry_label_for_offset(*entry as usize)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
                     t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new(), dicts: Vec::new() });
@@ -844,7 +844,7 @@ impl Compiler {
                         let mut items = Vec::with_capacity(n as usize);
                         for (&a, &p) in values.iter().zip(params).skip(2) {
                             items.push(match self.hir_ffi_callback(hir, builtin, a) {
-                                Some(offset) => O::CodePtr(self.bytecode.entry_label_for_offset(offset? as usize)?),
+                                Some(offset) => O::CodePtr(self.bodies.entry_label_for_offset(offset? as usize)?),
                                 None => value(self, a, p)?,
                             });
                         }
@@ -863,7 +863,7 @@ impl Compiler {
             _ => return None,
         };
         let unwrap = matches!(builtin, HirBuiltin::Ffi { .. });
-        // The VM pushes a boxed `Result`; a niche-shaped one converts.
+        // The runtime pushes a boxed `Result`; a niche-shaped one converts.
         let niche = match Self::hir_call_rep(&emit.plan.calls[&id.0]) {
             _ if unwrap => None,
             Rep::Word(ValueLayout::NicheUnitResult) => Some(crate::mir::MirTy::NicheOpt),
@@ -1277,7 +1277,7 @@ impl Compiler {
                 HirParCall::Spec { worker, .. } => (worker, None),
                 HirParCall::Dynamic { cutoff, orig, worker } => (worker, Some((orig, cutoff))),
             };
-            let label = |offset: usize| self.bytecode.entry_label_for_offset(offset);
+            let label = |offset: usize| self.bodies.entry_label_for_offset(offset);
             let seq = match seq {
                 None => Some(None),
                 Some((orig, cutoff)) => label(orig).map(|l| Some((l, cutoff))),
@@ -1448,7 +1448,7 @@ impl Compiler {
     /// The adapter a shared generic body's returned closure is wrapped in
     /// at the call's ground type (#1532): `MakeFn` of its entry (the
     /// label, then the operand) over the closure.
-    fn hir_mir_ret_adapter(&mut self, call: &HirCall) -> Option<(crate::il::Label, u32)> {
+    fn hir_mir_ret_adapter(&mut self, call: &HirCall) -> Option<(crate::bodies::Label, u32)> {
         let adapt = call.generic.as_ref().filter(|_| !call.mono)?.ret_adapt.as_ref().ok()?.as_ref()?;
         Some(self.hir_closure_adapter(adapt))
     }
@@ -1461,7 +1461,7 @@ impl Compiler {
 
     /// Each argument's closure adapter: a function value the generic
     /// callee calls with boxed arguments. A lambda literal unboxes them itself.
-    fn hir_mir_adapters(&mut self, hir: &HirBody, call: &HirCall, args: &[HirId]) -> Vec<Option<(crate::il::Label, u32)>> {
+    fn hir_mir_adapters(&mut self, hir: &HirBody, call: &HirCall, args: &[HirId]) -> Vec<Option<(crate::bodies::Label, u32)>> {
         // A shared body (not a clone at ground types) reads an open enum
         // result of a function argument as its object (#2163).
         let open = if call.mono || call.builtin.is_some() { vec![None; args.len()] } else { self.hir_open_ret_adapts(hir, &call.key, args) };
@@ -1629,7 +1629,7 @@ impl Compiler {
         steps
             .iter()
             .map(|&step| match step {
-                DictStep::CodeAt(offset) => self.bytecode.entry_label_for_offset(offset as usize).map(HirDictOp::Code),
+                DictStep::CodeAt(offset) => self.bodies.entry_label_for_offset(offset as usize).map(HirDictOp::Code),
                 DictStep::CodeLabel(label) => Some(HirDictOp::Code(label)),
                 DictStep::Load(slot) => self.hir_mir_dict_param(slot).then_some(HirDictOp::Load(slot)),
                 DictStep::Null => Some(HirDictOp::Null),

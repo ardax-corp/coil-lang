@@ -1,4 +1,4 @@
-//! Append-only HostInvoke catalog shared by compiler and VM.
+//! Append-only HostInvoke catalog shared by compiler and runtime.
 //!
 //! Ids are the table index. New natives go at the end. Do not reorder or
 //! reuse slots. Frozen: 119 = `stream_attach`, 120 = `stream_park`.
@@ -1604,12 +1604,12 @@ pub const STRING_BYTE_AT_ID: u16 = 139;
 /// Last byte-offset `string` native (`string_match_at`).
 pub const STRING_MATCH_AT_ID: u16 = 143;
 /// First task-scheduler native (`task_scope_open`); the block runs through
-/// [`TASK_YIELD_ID`] (archive minor 32). The VM handles these itself
+/// [`TASK_YIELD_ID`] (archive minor 32). The runtime handles these itself
 /// (`HostOp::Task`): they can switch tasks.
 pub const TASK_SCOPE_OPEN_ID: u16 = 144;
 /// Last task-scheduler native (`task_yield`).
 pub const TASK_YIELD_ID: u16 = 151;
-/// Ends a `defer` cleanup pad: the VM unwinder takes the frame back
+/// Ends a `defer` cleanup pad: the runtime unwinder takes the frame back
 /// (archive minor 33, `HostOp::Unwind`). Compiler-emitted only.
 pub const UNWIND_RESUME_ID: u16 = 152;
 pub const UNWIND_RESUME_NATIVE: &str = "unwind_resume";
@@ -1699,7 +1699,7 @@ pub const PROCESS_SIGNAL_NATIVE: &str = "process_signal";
 pub const PROCESS_PID_NATIVE: &str = "process_pid";
 pub const PROCESS_RELEASE_ID: u16 = 188;
 pub const PROCESS_RELEASE_NATIVE: &str = "process_release";
-/// `io::open` (frozen row 3): on `TooManyOpenFiles` the VM collects and
+/// `io::open` (frozen row 3): on `TooManyOpenFiles` the runtime collects and
 /// tries once more, as for [`TCP_ACCEPT_ID`].
 pub const IO_OPEN_ID: u16 = 3;
 /// `tcp_accept` (frozen row 15).
@@ -1733,7 +1733,7 @@ pub const KEY_INDEX_FIND_NATIVE: &str = "key_index_find";
 /// answers [`KEY_EQ_COIL`].
 pub const KEY_INDEX_EQ_MODE_ID: u16 = 199;
 pub const KEY_INDEX_EQ_MODE_NATIVE: &str = "key_index_eq_mode";
-/// `eq_mode`: the type's `==` is not one the VM runs; the caller compares
+/// `eq_mode`: the type's `==` is not one the runtime runs; the caller compares
 /// candidates from `probe` itself.
 pub const KEY_EQ_COIL: i64 = 0;
 /// `eq_mode`: `==` compares the words (`int`).
@@ -1743,7 +1743,7 @@ pub const KEY_EQ_STRING: i64 = 2;
 
 /// Set on the `type_id` argument of `gc_register_finalizer` when the
 /// type's `drop` keeps nothing of `self` (the compiler's escape facts):
-/// the VM may run it where an object of the type is freed early, then free
+/// the runtime may run it where an object of the type is freed early, then free
 /// the object. An archive without it leaves every `drop` to the collector.
 /// The argument is a 16-bit `CONST` immediate: a type id at or above the
 /// flag is never flagged.
@@ -1858,9 +1858,9 @@ pub fn host_native_id(name: &str) -> Option<usize> {
         .map(|e| e.id as usize)
 }
 
-/// Natives the compiler may call with [`crate::Instruction::DenseHostCall`]:
+/// Natives the compiler may call with a direct host call:
 /// plain functions of their arguments that always return a value and never
-/// park, open descriptors or switch tasks. The VM registers each of them
+/// park, open descriptors or switch tasks. The runtime registers each of them
 /// with a direct function (`NativeFn::direct`; a machine test checks it).
 pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "ord",

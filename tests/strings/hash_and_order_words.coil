@@ -1,6 +1,6 @@
 // A string's hash is the 32-bit FNV-1a of its bytes and `<` orders strings
 // by their bytes, whichever engine runs the code: native code runs these
-// as Coil twins (`prelude/twins.coil`), the VM as host natives, and both
+// as Coil twins (`prelude/twins.coil`), the interpreter as host natives, and both
 // must agree (a map keyed by strings is shared between them).
 use tests::assert;
 

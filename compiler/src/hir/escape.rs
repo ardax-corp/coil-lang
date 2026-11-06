@@ -361,7 +361,7 @@ impl<'c, 'a> Escape<'c, 'a> {
         }
         match &e.kind {
             // A string literal is interned: immutable, and never freed early
-            // (the VM skips interned strings), so holding one is like
+            // (the runtime skips interned strings), so holding one is like
             // holding nothing.
             HirKind::Lit(_) => Src::EMPTY,
             HirKind::Local(l) => self.local(*l),
@@ -674,7 +674,7 @@ pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLook
 
 /// Host natives that allocate their result and keep nothing they are
 /// passed. Early freeing frees what these return, so each is checked
-/// against the VM: `to_bytes`, `from_bytes` and `vec_with_capacity`
+/// against the runtime: `to_bytes`, `from_bytes` and `vec_with_capacity`
 /// allocate a new object, `string_slice_bytes` a new string (that may
 /// share its bytes, which are reference-counted), and `format` (also how
 /// `a + b` on strings runs) a new string.

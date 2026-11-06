@@ -1,14 +1,10 @@
 //! Native code for Coil: typed MIR to machine code with Cranelift.
 //!
-//! Step 2 of `feature/native` (see `docs/internals/native.md`): the
-//! *numeric tier*. A body compiles when every value it touches is an
-//! `int`, `float` or `bool` and every call it makes goes to another body
-//! that compiles. Such a function is pure, so native code never has to
-//! reproduce a VM panic: on an int trap, an operation it does not model or
-//! a recursion past its stack budget it sets the bail flag and returns, and
-//! the VM runs the call again in bytecode (see `machine::native`).
+//! See `docs/internals/native.md`. A body compiles when every call it makes
+//! goes to another body that compiles. A trap panics natively (see
+//! `machine::native`).
 //!
-//! [`jit`] compiles in memory for `coil --jit`. An object-file driver for
+//! [`jit`] compiles in memory for `coil FILE`. An object-file driver for
 //! `coil package` reuses the same lowering later.
 //!
 //! Empty on wasm: the playground has no native code and runs the MIR
@@ -31,7 +27,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_VM_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
+    NATIVE_CTX_BAIL, NATIVE_CTX_COMMITTED, NATIVE_CTX_RET_HI, NATIVE_CTX_STACK_HARD, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -47,18 +43,18 @@ struct Roots {
 
 /// What [`jit`] produced.
 pub struct NativeProgram {
-    /// Entries to install with `Machine::install_native`.
+    /// Entries to install with `machine::native::install_for_next_run`.
     pub entries: Vec<NativeEntry>,
     /// Bodies compiled to native code.
     pub compiled: Vec<String>,
-    /// Bodies left to the VM, with the reason.
+    /// Bodies left to the runtime, with the reason.
     pub refused: Vec<(String, String)>,
     /// The panic sites the code names (see `machine::native::NativeSite`).
     pub sites: Vec<NativeSite>,
 }
 
 /// Compile every eligible body of `bodies` in memory. `entry_pcs` maps a
-/// body's name to its bytecode entry PC. The code stays mapped for the
+/// body's name to its entry id. The code stays mapped for the
 /// rest of the process.
 pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<NativeProgram, String> {
     // A body `plan` admits may still fail to lower; its callers already
@@ -75,7 +71,7 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
 }
 
 /// JIT an archive's native MIR section for the coming run, for a host with
-/// no VM to run what does not compile: every body must.
+/// no runtime to run what does not compile: every body must.
 pub fn install_section(bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() {
         return Err("the program carries no native MIR; build it again with `coil package`".to_string());
@@ -168,7 +164,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
             let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
             bytes[at + 6..at + 8].copy_from_slice(&reads.to_le_bytes());
             bytes[at + 8] = if body.mir.ret_hi_ty.is_some() { 2 } else { 1 };
-            bytes[at + 9] = u8::from(plan.vm_reach.contains(&i));
+            bytes[at + 9] = u8::from(plan.runtime_reach.contains(&i));
             bytes[at + std::mem::offset_of!(machine::native::AotEntry, generator)] = u8::from(is_generator(&body.mir));
             bytes[at + std::mem::offset_of!(machine::native::AotEntry, cleanup)] = u8::from(body.mir.cleanup.is_some());
             relocs.push((at + std::mem::offset_of!(machine::native::AotEntry, entry), ids.entry[&i]));
@@ -359,9 +355,9 @@ fn jit_once(
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
         let generator = is_generator(&body.mir);
         let cleanup = body.mir.cleanup.is_some();
-        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.vm_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 });
+        entries.push(NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.runtime_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 });
     }
-    // The code must outlive every `Machine` that runs it.
+    // The code must outlive every `Runtime` that runs it.
     std::mem::forget(module);
     Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites }))
 }
@@ -382,48 +378,33 @@ struct Plan {
     compile: Vec<usize>,
     by_label: HashMap<Label, usize>,
     refused: Vec<(String, String)>,
-    /// Bodies compiled code calls that stay on the VM, with their entry
-    /// PCs: native code runs them through the machine.
-    vm_calls: HashMap<usize, u32>,
     /// Compiled bodies that may move an array's storage (a push, a host
-    /// call, a VM call, or a call to such a body): their callers re-read
+    /// call, or a call to such a body): their callers re-read
     /// the arrays they view after the call.
     moves: HashSet<usize>,
-    /// Compiled bodies in which a collection may run (they allocate or
-    /// make a VM call, or call such a body): they have safepoints, and
+    /// Compiled bodies in which a collection may run (they allocate,
+    /// or call such a body): they have safepoints, and
     /// their callers root the heap words they hold across the call.
     may_gc: HashSet<usize>,
     /// Entry PCs of the bodies by label, for function values.
     pcs: HashMap<Label, u32>,
-    /// Bodies that may run VM code ([`runs_vm_code`], a VM call, or a
-    /// call of such a body): calls of them link a `NativeCtx::calls` record.
-    vm_reach: HashSet<usize>,
+    /// Bodies that may reach the runtime ([`reaches_runtime`], or a call of
+    /// such a body): calls of them link a `NativeCtx::calls` record.
+    runtime_reach: HashSet<usize>,
     /// How many leading parameters each compiled body reads
-    /// ([`used_params`]): a call may pass fewer words, as the VM's `CALL`
+    /// ([`used_params`]): a call may pass fewer words, as a call's
     /// arity may differ from the body's MIR parameters.
     used_params: HashMap<usize, usize>,
     /// Bodies that may be a type's `drop` (a call claims its finalizer).
     drops: HashSet<usize>,
 }
 
-fn plan(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Plan {
-    plan_without(bodies, &HashMap::new(), entry_pcs)
-}
-
-/// Whether native code may call body `b` through the VM: it has an entry
-/// PC and returns at most one word.
-fn vm_callable(b: &NativeBody, entry_pcs: &HashMap<String, u32>) -> Option<u32> {
-    let pc = *entry_pcs.get(&b.name)?;
-    (b.mir.params.len() <= 16).then_some(pc)
-}
-
-
 /// What [`define_all`] made: the declared ids, the bodies defined, the
 /// panic sites their code names, and the stack maps of each function.
 type Defined = (Ids, Vec<usize>, Vec<NativeSite>, Vec<(FuncId, FuncMaps)>);
 
 /// Declare and define every body `plan` compiles (its implementation,
-/// cleanup pad and VM entry) in `module`. `Ok(Err((i, why)))` when body
+/// cleanup pad and driver entry) in `module`. `Ok(Err((i, why)))` when body
 /// `i` does not lower: the caller tries again without it.
 #[allow(clippy::type_complexity)]
 fn define_all<M: Module>(
@@ -530,16 +511,10 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
             Err(why) => refused.push((b.name.clone(), why)),
         }
     }
-    // A call to a body that does not compile goes through the VM; drop
-    // the bodies that call one the VM cannot run for them, to a fixpoint.
+    // A body that calls one that does not compile does not compile either.
     loop {
-        let bad: Vec<usize> = ok
-            .iter()
-            .filter(|(_, callees)| {
-                callees.iter().any(|&c| !ok.contains_key(&c) && vm_callable(&bodies[c], entry_pcs).is_none())
-            })
-            .map(|(&i, _)| i)
-            .collect();
+        let bad: Vec<usize> =
+            ok.iter().filter(|(_, callees)| callees.iter().any(|c| !ok.contains_key(c))).map(|(&i, _)| i).collect();
         if bad.is_empty() {
             break;
         }
@@ -548,21 +523,10 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
             refused.push((bodies[i].name.clone(), "calls a body native code cannot call".to_string()));
         }
     }
-    let mut vm_calls = HashMap::new();
-    for callees in ok.values() {
-        for &c in callees {
-            if !ok.contains_key(&c)
-                && let Some(pc) = vm_callable(&bodies[c], entry_pcs)
-            {
-                vm_calls.insert(c, pc);
-            }
-        }
-    }
     let mut moves: HashSet<usize> = ok
         .iter()
-        .filter(|(i, callees)| {
-            callees.iter().any(|c| vm_calls.contains_key(c))
-                || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
+        .filter(|(i, _)| {
+                bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
                         MirInst::ArrayPush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::VecLoop { .. }
@@ -584,10 +548,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
     }
     let mut may_gc: HashSet<usize> = ok
         .iter()
-        .filter(|(i, callees)| {
-            callees.iter().any(|c| vm_calls.contains_key(c))
-                || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(allocates)
-        })
+        .filter(|(i, _)| bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(allocates))
         .map(|(&i, _)| i)
         .collect();
     loop {
@@ -611,41 +572,39 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, entry_
         .filter(|(_, b)| b.name.ends_with("::drop") && b.mir.params.len() == 1)
         .map(|(i, _)| i)
         .collect();
-    // Bodies that may run VM code (which may panic and print a
+    // Bodies that may run interpreted code (which may panic and print a
     // backtrace): their calls name themselves in `NativeCtx::calls`.
     let has_drops = bodies.iter().any(|b| b.name.ends_with("::drop") && b.mir.params.len() == 1);
-    let mut vm_reach: HashSet<usize> = ok
+    let mut runtime_reach: HashSet<usize> = ok
         .iter()
-        .filter(|(i, callees)| {
-            callees.iter().any(|c| vm_calls.contains_key(c)) || bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| runs_vm_code(inst, has_drops))
-        })
+        .filter(|(i, _)| bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| reaches_runtime(inst, has_drops)))
         .map(|(&i, _)| i)
         .collect();
     loop {
         let more: Vec<usize> = ok
             .iter()
-            .filter(|(i, callees)| !vm_reach.contains(i) && callees.iter().any(|c| vm_reach.contains(c)))
+            .filter(|(i, callees)| !runtime_reach.contains(i) && callees.iter().any(|c| runtime_reach.contains(c)))
             .map(|(&i, _)| i)
             .collect();
         if more.is_empty() {
             break;
         }
-        vm_reach.extend(more);
+        runtime_reach.extend(more);
     }
     let used_params = compile_used_params(bodies, ok.keys());
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused, vm_calls, moves, may_gc, pcs, drops, vm_reach, used_params }
+    Plan { compile, by_label, refused, moves, may_gc, pcs, drops, runtime_reach, used_params }
 }
 
-/// An instruction that may run VM code: a function value's call, a free
+/// An instruction that may run interpreted code: a function value's call, a free
 /// (in a program with `drop`s) or collection that may run `drop`s.
-fn runs_vm_code(inst: &MirInst, drops: bool) -> bool {
+fn reaches_runtime(inst: &MirInst, drops: bool) -> bool {
     match inst {
         MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } => true,
         MirInst::FreeEarly { .. } => drops,
         MirInst::HostInvoke { native_id, .. } => {
-            machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.via_vm)
+            machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine)
         }
         _ => false,
     }
@@ -691,7 +650,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
         }
     }
     // One word, two (a two-slot return: `lo`, then `hi`), or none (the
-    // VM returns a `0` word).
+    // runtime returns a `0` word).
     match (f.ret_ty, f.ret_hi_ty) {
         (None, None) => {}
         (Some(t), None) if numeric(t) => {}
@@ -802,7 +761,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             MirAllocKind::DropEnum { .. } => {}
                             MirAllocKind::Object { .. } if elems.is_empty() => {}
                             // A function value: its body must have an entry
-                            // PC, so it counts as a callee.
+                            // id, so it counts as a callee.
                             MirAllocKind::Fn { target, .. }
                             | MirAllocKind::PolyFn { target }
                             | MirAllocKind::PolyFnCapture { target, .. }
@@ -860,7 +819,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         }
                     }
                     MirInst::String { dest, .. } => need(dest)?,
-                    // A code pointer (a dictionary method's entry PC).
+                    // A code pointer (a dictionary method's entry id).
                     MirInst::CodePtr { dest, target } => {
                         need(dest)?;
                         let Some(&callee) = by_label.get(target) else {
@@ -912,7 +871,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need_scalar(dest)?;
                         need(handle)?;
                     }
-                    // Through its stub on the VM (`coil_native_ffi`).
+                    // Through its stub on the runtime (`coil_native_ffi`).
                     MirInst::Ffi { dest, args, .. } => {
                         need(dest)?;
                         for a in args {
@@ -940,7 +899,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(&v)?;
                         }
                         if compiler::native_mir::vector_op(inst).is_none() {
-                            return Err("vector op the VM's encoding cannot hold".into());
+                            return Err("vector op the lane encoding cannot hold".into());
                         }
                     }
                     // A cleanup pad's end (lowered to nothing).
@@ -954,8 +913,8 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         }
                         match machine::native::direct_host_natives().get(usize::from(*native_id)) {
                             Some(h) if (h.func.is_some() || h.collect) && args.len() <= 16 => {}
-                            Some(h) if h.via_vm && args.len() < 16 => {}
-                            Some(h) => return Err(format!("host call `{}` runs in the VM", h.name)),
+                            Some(h) if h.on_machine && args.len() < 16 => {}
+                            Some(h) => return Err(format!("host call `{}` has no native path", h.name)),
                             None => return Err(format!("host call {native_id} outside the standard table")),
                         }
                     }
@@ -1034,7 +993,7 @@ struct Ids {
     tramps: Vec<(FuncId, FuncId, Signature)>,
     /// Native-convention body: `(ctx, params..) -> ret`.
     imp: HashMap<usize, FuncId>,
-    /// VM entry: `(ctx, *const u64) -> u64`.
+    /// driver entry: `(ctx, *const u64) -> u64`.
     entry: HashMap<usize, FuncId>,
     /// Cleanup pad of a body with `defer`s: `(ctx, *const u64 homes) -> u64`.
     pad: HashMap<usize, FuncId>,
@@ -1068,7 +1027,7 @@ struct Ids {
     stringify: FuncId,
     /// `FORMAT`.
     format: FuncId,
-    /// `FreeEarly` (queued for the VM).
+    /// `FreeEarly` (queued for the runtime).
     free_early: FuncId,
     /// Bails and native panics (`coil_native_unwind`).
     unwind: FuncId,
@@ -1079,8 +1038,7 @@ struct Ids {
     ffi: FuncId,
     /// `ByteScan` / `VecLoop` (`coil_native_vector`).
     vector: FuncId,
-    /// Calls to bodies on the VM (commit the call).
-    call_vm: FuncId,
+    /// Calls to bodies on the runtime (commit the call).
     call_value: FuncId,
     resume: FuncId,
     coro_done: FuncId,
@@ -1216,7 +1174,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
     s9.params.extend((0..9).map(|_| AbiParam::new(types::I64)));
     s9.returns.push(AbiParam::new(types::I64));
     let vector = module.declare_function("coil_native_vector", Linkage::Import, &s9).map_err(e)?;
-    let call_vm = trampoline(module, "coil_native_call_vm", &s4, &mut tramps)?;
     let call_value = trampoline(module, "coil_native_call_value", &s5, &mut tramps)?;
     let resume = trampoline(module, "coil_native_resume", &s4, &mut tramps)?;
     let coro_done = module.declare_function("coil_native_coro_done", Linkage::Import, &s2).map_err(e)?;
@@ -1262,7 +1219,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
         host,
         ffi,
         vector,
-        call_vm,
         call_value,
         resume,
         coro_done,
@@ -1273,7 +1229,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], compile: &[usize]) -
 }
 
 // ---------------------------------------------------------------------------
-// The VM entry wrapper
+// The runtime entry wrapper
 
 fn build_entry(
     module: &mut impl Module,
@@ -1294,7 +1250,7 @@ fn build_entry(
         let w = b.ins().load(types::I64, MemFlagsData::trusted(), argp, (i * 8) as i32);
         let v = match ty_of(f, p) {
             MirTy::F64 => b.ins().bitcast(types::F64, MemFlagsData::new(), w),
-            // The VM reads a bool word's low byte: `== 1` is true.
+            // The runtime reads a bool word's low byte: `== 1` is true.
             MirTy::Bool => {
                 let low = b.ins().band_imm_u(w, 0xff);
                 let t = b.ins().icmp_imm_s(IntCC::Equal, low, 1);
@@ -1351,7 +1307,6 @@ struct Lower<'a> {
     host: FuncRef,
     ffi: FuncRef,
     vector: FuncRef,
-    call_vm: FuncRef,
     call_value: FuncRef,
     resume: FuncRef,
     coro_done: FuncRef,
@@ -1400,7 +1355,7 @@ struct Lower<'a> {
     /// Panic sites of every body so far; this body's ops name theirs by
     /// index ([`Self::site`]).
     sites: &'a mut Vec<NativeSite>,
-    /// This body's entry PC, which its sites name (`None`: no sites).
+    /// This body's entry id, which its sites name (`None`: no sites).
     entry_pc: Option<u32>,
     /// The location of the op being lowered, and its site once a bail
     /// path named it.
@@ -1473,7 +1428,6 @@ impl<'a> Lower<'a> {
         let host = module.declare_func_in_func(ids.host, func);
         let ffi = module.declare_func_in_func(ids.ffi, func);
         let vector = module.declare_func_in_func(ids.vector, func);
-        let call_vm = module.declare_func_in_func(ids.call_vm, func);
         let call_value = module.declare_func_in_func(ids.call_value, func);
         let resume = module.declare_func_in_func(ids.resume, func);
         let coro_done = module.declare_func_in_func(ids.coro_done, func);
@@ -1528,8 +1482,7 @@ impl<'a> Lower<'a> {
             host,
             ffi,
             vector,
-            call_vm,
-        call_value,
+            call_value,
         resume,
         coro_done,
         gen_yield,
@@ -1602,7 +1555,7 @@ impl<'a> Lower<'a> {
 
     /// `x` as a `want` word with the same bits. MIR may move a word between
     /// an `f64` and an `i64` value unchanged (a callee's `float` result into
-    /// a caller's `int`-typed value, as the VM's untyped words allow).
+    /// a caller's `int`-typed value, as the runtime's untyped words allow).
     fn coerce(&mut self, x: cranelift_codegen::ir::Value, want: Type) -> cranelift_codegen::ir::Value {
         if self.b.func.dfg.value_type(x) == want {
             x
@@ -1717,7 +1670,7 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(go);
     }
 
-    /// After an op that may move an array's storage (a push, a host or VM
+    /// After an op that may move an array's storage (a push, a host or runtime
     /// call), when other values may name the same array: every view reads
     /// through the helpers until its value is defined again.
     fn drop_views(&mut self) {
@@ -1731,10 +1684,10 @@ impl<'a> Lower<'a> {
     /// Branch to the bail block when `cond` is non-zero, stopping at the
     /// current op for reason `code` (a `TRAP_*`); continue in a new block.
     /// A `VecLoop` reduce with no stores as a native loop over its lanes,
-    /// one lane at a time, folding left to right as the VM does. Anything
-    /// the VM's lanes would trap on, or a load outside its array's view,
+    /// one lane at a time, folding left to right as the runtime does. Anything
+    /// the runtime's lanes would trap on, or a load outside its array's view,
     /// leaves the loop and runs the whole op on the runtime's lane code from the
-    /// start (a pure reduce: nothing it did shows), which gives the VM's
+    /// start (a pure reduce: nothing it did shows), which gives the runtime's
     /// own result or trap. `false`: not such a reduce (nothing emitted).
     fn native_reduce(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
         use compiler::native_mir::VecLoopKind;
@@ -1981,7 +1934,7 @@ impl<'a> Lower<'a> {
     }
 
     /// `a pred b` on lanes (`dense::CMP_*`), signed for ints and IEEE for
-    /// floats (a NaN compares unequal and unordered), as the VM's lanes.
+    /// floats (a NaN compares unequal and unordered), as the runtime's lanes.
     fn lane_cmp(&mut self, pred: u8, float: bool, a: cranelift_codegen::ir::Value, b: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
         use common::dense;
         if float {
@@ -2097,7 +2050,7 @@ impl<'a> Lower<'a> {
         }
         let s = match (self.entry_pc, self.cur_loc) {
             // Without a location the site still names its function, as a
-            // VM frame without one does.
+            // runtime frame without one does.
             (Some(entry_pc), loc) => {
                 let loc = loc.unwrap_or(common::DebugLoc::unknown());
                 self.sites.push(NativeSite { entry_pc, loc });
@@ -2181,9 +2134,8 @@ impl<'a> Lower<'a> {
         let deep = self.b.create_block();
         let go = self.b.create_block();
         self.b.ins().brif(low, deep, &[], go, &[]);
-        // Past the budget: bail, unless the call committed and the thread's
-        // stack still has room. No site of its own: the caller's call
-        // names the frame.
+        // Past the budget: trap unless the thread's stack still has room.
+        // No site of its own: the caller's call names the frame.
         self.b.switch_to_block(deep);
         let t = MemFlagsData::trusted();
         let committed = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_COMMITTED);
@@ -2239,8 +2191,7 @@ impl<'a> Lower<'a> {
                 self.safepoint(f);
             }
             // A `MatchPayload` of a payload the block's `JumpIfMatch` binds
-            // belongs to the taken edge, where the terminator binds it (as
-            // the VM's emission does): run here, it would read the payload
+            // belongs to the taken edge, where the terminator binds it: run here, it would read the payload
             // of whatever variant the word holds.
             let edge_bound: &[ValueId] = match &blk.term {
                 Some(Terminator::JumpIfMatch { payloads, .. }) => payloads,
@@ -2277,7 +2228,7 @@ impl<'a> Lower<'a> {
         let p = self.b.block_params(self.bail).to_vec();
         self.b.ins().call(self.unwind, &[self.ctx, p[0], p[1]]);
         // After a committed panic, this frame's armed `defer`s run once the
-        // VM reported it: hand it the pad and the homes.
+        // runtime reported it: hand it the pad and the homes.
         if let (Some(pad), Some(slot)) = (self.pad_fn, self.homes_slot) {
             let fp = self.b.ins().func_addr(types::I64, pad);
             let at = self.b.ins().stack_addr(types::I64, slot, 0);
@@ -2324,7 +2275,7 @@ impl<'a> Lower<'a> {
                         MirCmpOp::Gt => FloatCC::GreaterThan,
                         MirCmpOp::Ge => FloatCC::GreaterThanOrEqual,
                         MirCmpOp::Eq => FloatCC::Equal,
-                        // The VM's `!=` is Rust's: true when unordered.
+                        // `!=` is true when unordered.
                         MirCmpOp::Ne => FloatCC::NotEqual,
                     };
                     self.b.ins().fcmp(cc, a, c)
@@ -2364,7 +2315,7 @@ impl<'a> Lower<'a> {
                 let from = ty_of(f, *src);
                 let x = match kind {
                     MirCastKind::IntToFloat => self.b.ins().fcvt_from_sint(types::F64, a),
-                    // Rust `as`: saturating, NaN is 0, as the VM.
+                    // Rust `as`: saturating, NaN is 0, as the runtime.
                     MirCastKind::FloatToInt => self.b.ins().fcvt_to_sint_sat(types::I64, a),
                     MirCastKind::Word => {
                         let (ft, tt) = (cl_ty(from), cl_ty(*to));
@@ -2410,8 +2361,7 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, zero);
             }
             MirInst::Call { dest, dest_hi, target, args } => {
-                // A `drop` called as a method: claim its finalizer first, as
-                // the VM's `CALL` does, and skip the call when it ran.
+                // A `drop` called as a method: claim its finalizer first, and skip the call when it ran.
                 let drop_pc = self
                     .by_label
                     .get(target)
@@ -2459,7 +2409,7 @@ impl<'a> Lower<'a> {
                 self.view_of(f, *dest);
             }
             MirInst::ResumeCoro { dest, handle, send } => {
-                // A generator's body runs on the VM, in a nested execution
+                // A generator's body runs on the runtime, in a nested execution
                 // that ends at its next yield or return.
                 let h = self.get(f, *handle);
                 let h = self.coerce(h, types::I64);
@@ -2506,7 +2456,7 @@ impl<'a> Lower<'a> {
                 }
             }
             MirInst::Ffi { dest, op, operand, args } => {
-                let o = self.b.ins().iconst(types::I64, i64::from(op.instruction() as u8));
+                let o = self.b.ins().iconst(types::I64, i64::from(op.code()));
                 let x = self.b.ins().iconst(types::I64, i64::from(*operand));
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
@@ -2677,7 +2627,7 @@ impl<'a> Lower<'a> {
                     words.reverse();
                 }
                 // An opaque body's `int` words may be objects: their kinds
-                // stay unknown, as the VM's emission leaves them.
+                // stay unknown.
                 let packed = || if f.opaque_words { 0 } else { common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w)))) };
                 let (code, n, extra) = match *kind {
                     MirAllocKind::Array => (ALLOC_ARRAY, words.len() as u64, u64::from(*kinds)),
@@ -2754,7 +2704,7 @@ impl<'a> Lower<'a> {
                 self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
             }
-            // A pad's end: the VM goes on unwinding once the pad returns.
+            // A pad's end: the runtime goes on unwinding once the pad returns.
             MirInst::HostInvoke { dest, native_id, .. } if *native_id == common::UNWIND_RESUME_ID => {
                 if numeric(ty_of(f, *dest)) {
                     let zero = self.b.ins().iconst(types::I64, 0);
@@ -2766,9 +2716,9 @@ impl<'a> Lower<'a> {
                 let lay = self.b.ins().iconst(types::I64, i64::from(*layout));
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
-                // `gc_collect` collects, and a host call through the VM may:
+                // `gc_collect` collects, and a host call through the runtime may:
                 // this frame's words are roots.
-                let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.via_vm);
+                let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine);
                 let roots = if collect { self.push_roots(f) } else { None };
                 let prev = if collect { Some(self.push_call()) } else { None };
                 let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
@@ -2805,7 +2755,7 @@ impl<'a> Lower<'a> {
             }
             MirInst::FreeEarly { dest, value, deep } => {
                 // With finalizers in the program the free may run `drop`s
-                // on the VM (and collect): root this frame's words then.
+                // on the runtime (and collect): root this frame's words then.
                 let t = MemFlagsData::trusted();
                 let fin = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HAS_FINALIZERS);
                 let (slow, fast, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
@@ -2849,7 +2799,7 @@ impl<'a> Lower<'a> {
             MirInst::Stringify { dest, src, tag } => {
                 let v = self.get(f, *src);
                 let v = self.coerce(v, types::I64);
-                // The instruction's operand, as the VM's emission packs it.
+                // The instruction's packed operand.
                 let op = tag
                     .and_then(|t| common::ValueTag::from_u16(u16::try_from(t).ok()?))
                     .map_or(0, common::stringify_operand);
@@ -2927,7 +2877,7 @@ impl<'a> Lower<'a> {
     }
 
     /// The address of static `slot`, or bail when the machine has fewer
-    /// statics (the VM reads `0` there and drops the store; never seen).
+    /// statics (the runtime reads `0` there and drops the store; never seen).
     fn static_at(&mut self, slot: u32) -> cranelift_codegen::ir::Value {
         let t = MemFlagsData::trusted();
         let len = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_STATICS_LEN);
@@ -2941,27 +2891,6 @@ impl<'a> Lower<'a> {
     fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, target: Label, args: &[ValueId]) -> Result<(), String> {
         let (dest, dest_hi, target) = (&dest, &dest_hi, &target);
         let callee = *self.by_label.get(target).ok_or("unknown callee")?;
-        if let Some(&pc) = self.plan.vm_calls.get(&callee) {
-            let pcv = self.b.ins().iconst(types::I64, i64::from(pc));
-            let p = self.words_slot(f, args);
-            let n = self.b.ins().iconst(types::I64, args.len() as i64);
-            let roots = self.push_roots(f);
-            let prev = self.push_call();
-            let call = self.b.ins().call(self.call_vm, &[self.ctx, pcv, p, n]);
-            let w = self.b.inst_results(call)[0];
-            self.pop_call(prev);
-            self.pop_roots(roots);
-            let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
-            self.bail_if(flag, TRAP_HELPER);
-            self.drop_views();
-            self.set(f, *dest, w);
-            if let Some(h) = dest_hi {
-                let x = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_VM_HI);
-                self.set(f, *h, x);
-            }
-            self.view_of(f, *dest);
-            return Ok(());
-        }
         let fref = *self.module_refs.get(&callee).ok_or("callee not compiled")?;
         let sig = self.b.func.dfg.ext_funcs[fref].signature;
         let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
@@ -2978,7 +2907,7 @@ impl<'a> Lower<'a> {
             vals.push(self.coerce(x, want));
         }
         let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
-        let prev = if self.plan.vm_reach.contains(&callee) { Some(self.push_call()) } else { None };
+        let prev = if self.plan.runtime_reach.contains(&callee) { Some(self.push_call()) } else { None };
         let call = self.b.ins().call(fref, &vals);
         let results = self.b.inst_results(call).to_vec();
         if let Some(prev) = prev {
@@ -2999,8 +2928,8 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
-    /// Before a call that may run VM code: link this frame's call site
-    /// into `NativeCtx::calls`, so a panic the VM reports meanwhile names
+    /// Before a call that may run interpreted code: link this frame's call site
+    /// into `NativeCtx::calls`, so a panic the runtime reports meanwhile names
     /// this frame in its backtrace. Returns the chain's previous head.
     fn push_call(&mut self) -> cranelift_codegen::ir::Value {
         let slot = match self.calls_slot {
@@ -3153,7 +3082,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Payload word `index` of the matched `scrutinee` (word `s`): a niche
-    /// word is its own payload, as the VM's emission moves it; a boxed
+    /// word is its own payload; a boxed
     /// enum's comes from its object.
     fn payload(&mut self, f: &MirFunc, scrutinee: ValueId, s: cranelift_codegen::ir::Value, index: u32) -> cranelift_codegen::ir::Value {
         let s = self.coerce(s, types::I64);
@@ -3212,7 +3141,7 @@ impl<'a> Lower<'a> {
         self.b.ins().iadd(p, off)
     }
 
-    /// Define `v` from a VM word read out of the heap: a `bool` word is
+    /// Define `v` from a word read out of the heap: a `bool` word is
     /// true when its low byte is `1`, as `Value::as_bool` reads it.
     fn set_word(&mut self, f: &MirFunc, v: ValueId, w: cranelift_codegen::ir::Value) {
         let w = if ty_of(f, v) == MirTy::Bool {
@@ -3384,7 +3313,7 @@ impl<'a> Lower<'a> {
                     _ => {
                         // A boxed enum: `tag | payload length << 32`. A tag
                         // match with another payload width than the arm
-                        // binds is left to the VM.
+                        // binds is left to the runtime.
                         let call = self.b.ins().call(self.enum_tag, &[s]);
                         let tl = self.b.inst_results(call)[0];
                         let not_enum = self.b.ins().icmp_imm_s(IntCC::Equal, tl, -1);
@@ -3423,7 +3352,7 @@ impl<'a> Lower<'a> {
 pub fn describe(p: &NativeProgram) -> String {
     let refused: HashSet<&str> = p.refused.iter().map(|(n, _)| n.as_str()).collect();
     format!(
-        "native: {} compiled, {} installed, {} on the VM",
+        "native: {} compiled, {} installed, {} refused",
         p.compiled.len(),
         p.entries.len(),
         refused.len()

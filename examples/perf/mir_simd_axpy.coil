@@ -1,6 +1,6 @@
 // Hit bench for COI-286 P12: counted f64 saxpy-reduce
-// `s = s + a * x + y; x = x + dx` lowers to HostInvoke `simd_axpy_reduce`
-// (workspace coil-simd). No Coil SIMD syntax. Mandelbrot is unchanged.
+// `s = s + a * x + y; x = x + dx` is a counted loop with a float
+// accumulator and a stepped input. No Coil SIMD syntax. Mandelbrot is unchanged.
 use io::sync::print;
 use string::format;
 

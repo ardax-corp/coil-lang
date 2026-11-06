@@ -9,7 +9,7 @@
 //! Using one (`#[derive(Name)]`, `#[name(...)]`, `name!(…)`) records a
 //! [`PendingMacro`] during attribute expansion. After discovery the pipeline
 //! compiles each providing module into an expansion program, runs it through
-//! a [`MacroHost`] (the VM, with no host access and a step budget), re-parses
+//! a [`MacroHost`] (the runtime, with no host access and a step budget), re-parses
 //! the returned source and splices it next to (derive) or in place of
 //! (attribute, call) the use. See `docs/internals/macros.md`.
 
@@ -19,7 +19,6 @@ pub mod lower;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use common::Byte;
 
 /// Module path of the embedded declaration model (`use macro::{TypeDecl, Code}`).
 pub const MACRO_MODULE: &str = "macro";
@@ -89,14 +88,6 @@ pub fn forward_thread_uses(ast: &mut parser::ast::Output<'_>) {
         children.iter_mut().for_each(|c| visit(&mut c.1));
     }
 }
-
-/// Module path of the Coil twins of host natives native code calls
-/// instead of the native (`mir::native_twins`). Embedded only while a
-/// native capture is open.
-pub const TWINS_MODULE: &str = "native_twins";
-
-/// Source of the embedded `native_twins` module.
-pub const TWINS_SOURCE: &str = include_str!("../prelude/twins.coil");
 
 /// An enum the core prelude marks with `#[lang(..)]`.
 #[derive(Debug)]
@@ -198,11 +189,6 @@ pub fn arbitrary_module_path() -> PathBuf {
     PathBuf::from("<coil>/arbitrary.coil")
 }
 
-/// Pseudo path of the embedded `native_twins` module.
-pub fn twins_module_path() -> PathBuf {
-    PathBuf::from("<coil>/twins.coil")
-}
-
 /// Pseudo path of the embedded `thread_locks` module.
 pub fn thread_locks_module_path() -> PathBuf {
     PathBuf::from("<coil>/thread_locks.coil")
@@ -227,8 +213,6 @@ pub fn embedded_source(path: &Path) -> Option<&'static str> {
         Some(ARBITRARY_SOURCE)
     } else if path == core_module_path() {
         Some(CORE_SOURCE)
-    } else if path == twins_module_path() {
-        Some(TWINS_SOURCE)
     } else if path == thread_locks_module_path() {
         Some(THREAD_LOCKS_SOURCE)
     } else {
@@ -250,8 +234,6 @@ pub fn embedded_module(path: &Path) -> Option<&'static str> {
         Some(ARBITRARY_MODULE)
     } else if path == core_module_path() {
         Some(CORE_MODULE)
-    } else if path == twins_module_path() {
-        Some(TWINS_MODULE)
     } else if path == thread_locks_module_path() {
         Some(THREAD_LOCKS_MODULE)
     } else {
@@ -427,11 +409,9 @@ pub struct PendingMacro {
 /// It depends only on the providing modules, so one is compiled per provider
 /// set and reused for every macro call (see `pipeline_macros`).
 pub struct CompiledExpansion {
-    pub bytecode: std::sync::Arc<Vec<Byte>>,
     pub constants: std::sync::Arc<Vec<u64>>,
     pub strings: std::sync::Arc<Vec<String>>,
     pub static_slot_count: u32,
-    pub operand_stack_slots: u32,
     pub program_debug: common::ProgramDebug,
     /// Per-class field word kinds, so captured instances know which fields
     /// are scalars.
@@ -447,9 +427,9 @@ pub struct CompiledExpansion {
 }
 
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
-/// top of the VM so the compiler itself does not depend on `machine`.
+/// top of the runtime so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
-    /// Id of the compiler and VM this host was built with, which keys the
+    /// Id of the compiler and runtime this host was built with, which keys the
     /// on-disk cache of compiled expansion programs; empty keeps none.
     fn build_id(&self) -> &'static str {
         ""
@@ -482,7 +462,7 @@ pub trait MacroHost: Send + Sync {
     /// [`crate::ComptimeLimits::SILENT_MODULE_STEPS`] for all of them) and,
     /// when it fails, is left out instead of failing the rest.
     ///
-    /// Then, on the same VM (so a call can read the consts), each of
+    /// Then, on the same runtime (so a call can read the consts), each of
     /// `folds` runs within the silent tier; one that fails is `None`.
     ///
     /// An explicit item may do the IO `io[item.io]` grants; nothing else

@@ -12,8 +12,7 @@
 //! string literals included) and casts between scalars; then each mono
 //! clone of a generic function, at its instance's types. Any other node, type
 //! or body shape is refused, and the reason is counted in `--opt-stats`;
-//! with no AST codegen left, a refused body is an internal error
-//! (`OptimizeOptions::require_mir`).
+//! with no AST codegen left, a refused body is an internal error.
 //!
 //! MIR keeps values in registers, so where a node sits among its siblings
 //! does not matter: a binding, assignment, jump, match or build lowers
@@ -21,7 +20,7 @@
 
 use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, UnOp};
 use std::collections::HashMap;
-use crate::codegen::primitive_cast_opcode as cast_opcode;
+use crate::codegen::is_primitive_cast;
 use crate::typechecking::infer::{Checker, ForInCounted, ForInKind};
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
@@ -2417,7 +2416,7 @@ impl Walk<'_> {
             }
             HirKind::Bin { op, lhs, rhs } => {
                 // A user type's operator: a call of its trait instance, or
-                // (`==` / `!=` without one) the VM's structural `EQ` /
+                // (`==` / `!=` without one) structural equality /
                 // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
                 if let BinOp::Overloaded(sym) = op {
                     // `==` / `!=` on arrays compare structurally (`EQ`), as
@@ -2512,7 +2511,7 @@ impl Walk<'_> {
             HirKind::Cast { value } => {
                 let from = self.ty(*value).and_then(primitive).ok_or("cast")?;
                 let to = self.ty(id).and_then(primitive).ok_or("cast")?;
-                if from != to && cast_opcode(from, to).is_none() {
+                if from != to && !is_primitive_cast(from, to) {
                     return Err("cast");
                 }
                 self.value(*value)

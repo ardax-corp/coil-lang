@@ -375,16 +375,17 @@ fn debug_restarts_after_a_panic() {
     assert_eq!(stdout.lines().filter(|l| l.starts_with('#')).count(), 3, "{stdout}");
 }
 
-/// A body bytecode cannot hold debugs like any other.
+/// A body with hundreds of locals debugs like any other.
 #[test]
-fn debug_reads_a_body_too_large_for_bytecode() {
+fn debug_reads_a_body_with_hundreds_of_locals() {
     let lets: String = (0..300).map(|i| format!("    let a{i} = make({i});\n")).collect();
-    let sum: Vec<String> = (0..300).map(|i| format!("a{i}.n")).collect();
+    // Statements: a chain of 300 `+` overflows a debug build's checker.
+    let sum: Vec<String> = (0..300).map(|i| format!("total = total + a{i}.n;")).collect();
     let src = format!(
-        "class Box {{\n    pub n: int,\n}}\n\n#[inline(never)]\nfn make(int n) -> Box {{\n    return new Box(n);\n}}\n\nfn main() {{\n{lets}    let total = {};\n    let done = total + 1;\n}}\n",
-        sum.join(" + ")
+        "class Box {{\n    pub n: int,\n}}\n\n#[inline(never)]\nfn make(int n) -> Box {{\n    return new Box(n);\n}}\n\nfn main() {{\n{lets}    let total = 0;\n    {}\n    let done = total + 1;\n}}\n",
+        sum.join(" ")
     );
-    let (out, stdout) = debug_program(&src, "break 312\nrun\nprint a299.n\nprint total\ncontinue\nquit\n", "large");
+    let (out, stdout) = debug_program(&src, "break 313\nrun\nprint a299.n\nprint total\ncontinue\nquit\n", "large");
     assert!(out.status.success(), "{stdout}");
     assert!(stdout.contains(") = 299"), "{stdout}");
     assert!(stdout.contains(") = 44850"), "{stdout}");

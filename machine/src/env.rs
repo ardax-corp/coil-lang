@@ -219,7 +219,7 @@ fn try_host_set_cwd(heap: &mut Heap, args: &[Value]) -> Result<(), EnvErrorTag> 
 
 /// Terminates the process (`std::process::exit`). Never returns.
 ///
-/// Compile-time `--allow-exit` is the grant; archived bytecode with this op
+/// Compile-time `--allow-exit` is the grant; archived code with this op
 /// runs it. Under [`trap_exit`] the wired native is [`try_host_exit`]
 /// instead, which does return.
 pub fn host_exit(_heap: &mut Heap, args: &[Value]) -> Value {
@@ -236,7 +236,7 @@ thread_local! {
     static EXIT_REQUEST: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
-/// Make `env::exit` a VM panic of the calling job (for every machine in this
+/// Make `env::exit` a runtime panic of the calling job (for every machine in this
 /// process) instead of a process exit. The panic runs the job's `defer`s;
 /// [`take_exit_request`] then tells the job's runner it was an exit.
 pub fn trap_exit(on: bool) {

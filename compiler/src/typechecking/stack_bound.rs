@@ -1,10 +1,10 @@
-//! Static recursion-depth analysis that presizes the VM operand stack.
+//! Static recursion-depth analysis that presizes the runtime operand stack.
 //!
 //! Proves call-frame depth when a recursive function has a decreasing int/byte
 //! **measure** parameter (possibly among multiple args), a recognizable base
 //! case, and **known** entry measure values (literals, intra-proc const bindings,
 //! or shallow interprocedural wrappers). `#[max_depth(N)]` is an optional hint
-//! for other recursion. Neither is needed for safety: the VM grows the stack
+//! for other recursion. Neither is needed for safety: the runtime grows the stack
 //! whenever a frame opens without room (`common::frame_reserve`).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -35,18 +35,6 @@ pub fn operand_slots_for_frame_size(max_frames: u32, frame_slots: u32) -> u32 {
     let frame = frame_slots.max(1);
     let need = max_frames.saturating_mul(frame).saturating_add(frame);
     need.clamp(DEFAULT_OPERAND_STACK_SLOTS, MAX_OPERAND_STACK_SLOTS)
-}
-
-/// Grow a typecheck-time stack bound when dense emit used a fatter frame.
-///
-/// Recovers `max_frames` from `current` (`frames × 16 + 16`) and reapplies
-/// `seek`. No-op when `seek` fits the 16-slot estimate.
-pub fn rescale_operand_slots_for_dense_seek(current: u32, seek: u32) -> u32 {
-    if seek <= DEFAULT_FRAME_SLOTS {
-        return current;
-    }
-    let frames = current.saturating_sub(DEFAULT_FRAME_SLOTS) / DEFAULT_FRAME_SLOTS;
-    operand_slots_for_frame_size(frames.max(1), seek).max(current)
 }
 
 /// Proven or attributed max live frames for one recursive function.
@@ -1534,15 +1522,6 @@ mod tests {
     use super::*;
     use crate::typechecking::bare_cases::BareCases;
     use parser::Pratt;
-
-    #[test]
-    fn rescale_grows_only_when_seek_exceeds_default_frame() {
-        assert_eq!(rescale_operand_slots_for_dense_seek(512, 15), 512);
-        assert_eq!(
-            rescale_operand_slots_for_dense_seek(512, 25),
-            operand_slots_for_frame_size(31, 25)
-        );
-    }
 
     /// Unprovable recursion compiles; it just gets no frame bound.
     fn assert_unbounded(report: &StackBoundReport, name: &str) {

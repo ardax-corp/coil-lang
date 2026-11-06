@@ -16,19 +16,6 @@ pub struct PassHit {
     pub ops_delta: i64,
 }
 
-/// Final tier of one function body, with why MIR tiers refused it.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BodyTier {
-    pub name: String,
-    /// `dense`, `lir`, or `fuse`.
-    pub tier: String,
-    pub dense_reason: Option<String>,
-    pub lir_reason: Option<String>,
-    /// `lowered` when the body lowered straight from HIR to MIR, else why
-    /// not (`None`: not tried).
-    pub hir_reason: Option<String>,
-}
-
 /// Counters from IL opts (and typed inlining when compiling). COI-176.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OptStats {
@@ -41,19 +28,6 @@ pub struct OptStats {
     pub branches_optimized: usize,
     pub blocks_reordered: usize,
     pub iterations: usize,
-    /// Function bodies kept as dense MIR, MIR→LIR reconstruct, or fuse-IL.
-    #[serde(default)]
-    pub bodies_dense: usize,
-    #[serde(default)]
-    pub bodies_lir: usize,
-    #[serde(default)]
-    pub bodies_fuse: usize,
-    /// Why fuse-IL bodies were not taken by MIR→LIR (coarse keys, counted).
-    #[serde(default)]
-    pub fuse_reasons: Vec<PassHit>,
-    /// Per-body tier records (census input for dynamic weighting).
-    #[serde(default)]
-    pub body_tiers: Vec<BodyTier>,
     pub passes: Vec<PassHit>,
     /// Function bodies codegen lowered from HIR (`--hir`).
     #[serde(default)]
@@ -125,13 +99,6 @@ impl OptStats {
         self.branches_optimized += other.branches_optimized;
         self.blocks_reordered += other.blocks_reordered;
         self.iterations += other.iterations;
-        self.bodies_dense += other.bodies_dense;
-        self.bodies_lir += other.bodies_lir;
-        self.bodies_fuse += other.bodies_fuse;
-        for hit in &other.fuse_reasons {
-            note_reason(&mut self.fuse_reasons, &hit.name, hit.applied);
-        }
-        self.body_tiers.extend(other.body_tiers.iter().cloned());
         self.hir_lowered += other.hir_lowered;
         self.hir_fallback += other.hir_fallback;
         for hit in &other.hir_fallback_reasons {
@@ -175,30 +142,6 @@ impl OptStats {
         let _ = writeln!(out, "  stores eliminated: {}", self.stores_eliminated);
         let _ = writeln!(out, "  branches optimized: {}", self.branches_optimized);
         let _ = writeln!(out, "  blocks reordered: {}", self.blocks_reordered);
-        let _ = writeln!(
-            out,
-            "  bodies: {} dense, {} lir, {} fuse-il",
-            self.bodies_dense, self.bodies_lir, self.bodies_fuse
-        );
-        for b in &self.body_tiers {
-            let _ = writeln!(
-                out,
-                "    {}: {} (dense: {}; lir: {}; hir: {})",
-                b.name,
-                b.tier,
-                b.dense_reason.as_deref().unwrap_or("-"),
-                b.lir_reason.as_deref().unwrap_or("-"),
-                b.hir_reason.as_deref().unwrap_or("-")
-            );
-        }
-        if !self.fuse_reasons.is_empty() {
-            let _ = writeln!(out, "  fuse-il reasons:");
-            let mut ranked = self.fuse_reasons.clone();
-            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
-            for hit in ranked {
-                let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
-            }
-        }
         if self.hir_lowered + self.hir_fallback > 0 {
             let _ = writeln!(
                 out,
@@ -273,7 +216,7 @@ impl OptStats {
             );
         }
         format!(
-            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"bodies_dense\":{},\"bodies_lir\":{},\"bodies_fuse\":{},\"hir_lowered\":{},\"hir_fallback\":{},\"comptime_macro_runs\":{},\"comptime_macro_cached\":{},\"comptime_macro_us\":{},\"comptime_consts\":{},\"comptime_consts_cached\":{},\"comptime_folds\":{},\"comptime_const_us\":{},\"passes\":[{}]}}",
+            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"hir_lowered\":{},\"hir_fallback\":{},\"comptime_macro_runs\":{},\"comptime_macro_cached\":{},\"comptime_macro_us\":{},\"comptime_consts\":{},\"comptime_consts_cached\":{},\"comptime_folds\":{},\"comptime_const_us\":{},\"passes\":[{}]}}",
             self.ops_eliminated,
             self.ops_added,
             self.functions_inlined,
@@ -283,9 +226,6 @@ impl OptStats {
             self.branches_optimized,
             self.blocks_reordered,
             self.iterations,
-            self.bodies_dense,
-            self.bodies_lir,
-            self.bodies_fuse,
             self.hir_lowered,
             self.hir_fallback,
             self.comptime_macro_runs,
@@ -328,11 +268,6 @@ fn note_reason(reasons: &mut Vec<PassHit>, name: &str, n: usize) {
     }
 }
 
-/// Count one body that stayed fuse-IL for `reason`.
-pub(crate) fn note_fuse_reason(reason: &str) {
-    with_stats(|s| note_reason(&mut s.fuse_reasons, reason, 1));
-}
-
 /// Count one function body lowered from HIR.
 pub(crate) fn note_hir_lowered() {
     with_stats(|s| s.hir_lowered += 1);
@@ -352,11 +287,6 @@ pub(crate) fn note_hir_mir(refused: Option<&str>) {
         None => s.hir_mir += 1,
         Some(why) => note_reason(&mut s.hir_mir_refused, why, 1),
     });
-}
-
-/// Count one body whose dense tier came from MIR lowered from HIR.
-pub(crate) fn note_hir_mir_kept() {
-    with_stats(|s| s.hir_mir_kept += 1);
 }
 
 /// Count `sites` call sites inlined into one HIR body.
@@ -390,20 +320,6 @@ pub(crate) fn note_comptime_consts(consts: usize, cached: usize, folds: usize, u
         s.comptime_consts_cached += cached;
         s.comptime_folds += folds;
         s.comptime_const_us += us;
-    });
-}
-
-/// Record one body's final tier and refusal reasons.
-pub(crate) fn note_body_tier(record: BodyTier) {
-    with_stats(|s| s.body_tiers.push(record));
-}
-
-/// Record which tier each function body ended in (MIR keep-rate census).
-pub(crate) fn note_body_tiers(dense: usize, lir: usize, fuse: usize) {
-    with_stats(|s| {
-        s.bodies_dense += dense;
-        s.bodies_lir += lir;
-        s.bodies_fuse += fuse;
     });
 }
 

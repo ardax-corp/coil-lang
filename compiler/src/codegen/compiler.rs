@@ -17,26 +17,6 @@ mod eq_glue;
 #[path = "module_setup.rs"]
 pub(super) mod module_setup;
 
-#[cfg(any(test, feature = "dissect"))]
-type FinalizeIlOut = Option<crate::dissect::IlSnapshot>;
-#[cfg(not(any(test, feature = "dissect")))]
-type FinalizeIlOut = ();
-
-fn apply_debug_slot_remaps(
-    locals: &mut HashMap<String, HashMap<String, u32>>,
-    remaps: &HashMap<String, HashMap<u32, u32>>,
-) {
-    for (fn_name, slots) in locals.iter_mut() {
-        let Some(remap) = remaps.get(fn_name) else {
-            continue;
-        };
-        for slot in slots.values_mut() {
-            if let Some(&new) = remap.get(slot) {
-                *slot = new;
-            }
-        }
-    }
-}
 
 /// Where an open dictionary goal comes from (see
 /// `Compiler::resolve_open_dict_goal`).
@@ -76,7 +56,7 @@ pub(super) enum DictStep {
     /// A method's code pointer: an entry already emitted, by offset.
     CodeAt(u32),
     /// A method's code pointer: a reserved entry, by label.
-    CodeLabel(crate::il::Label),
+    CodeLabel(crate::bodies::Label),
     /// A dictionary in a `__dictN` slot of the frame.
     Load(u32),
     /// An unresolved `PolyFn` dictionary (`CONST 0`).
@@ -108,7 +88,7 @@ impl Compiler {
         &self.module_items
     }
 
-    /// Run HM inference for a module without emitting bytecode.
+    /// Run HM inference for a module without emitting code.
     pub fn typecheck_module<'compiler>(
         &mut self,
         module: &str,
@@ -206,10 +186,6 @@ impl Compiler {
     }
 
     /// Operand-stack capacity recommended by recursion-depth analysis.
-    pub fn operand_stack_slots(&self) -> u32 {
-        self.operand_stack_slots
-    }
-
     /// Source text of the module about to compile (names in its AST are
     /// slices of it). Used for exact name spans in debug info.
     pub fn set_source_text(&mut self, text: &str) {
@@ -239,20 +215,6 @@ impl Compiler {
         &self.debug_locs
     }
 
-    /// `defer` cleanup ranges for the VM unwinder.
-    pub fn cleanup_ranges(&self) -> &[common::CleanupRange] {
-        &self.cleanup_ranges
-    }
-
-    pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
-        &self.precise_frames
-    }
-
-    /// I7 / C3 deopt resume drafts (empty when no specialized body).
-    pub fn deopt_map_drafts(&self) -> &[crate::mir::DraftDeoptMap] {
-        &self.deopt_map_drafts
-    }
-
     /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
     pub fn fn_debug_symbols(&self) -> Vec<FnDebugSym> {
         let mut syms: Vec<FnDebugSym> = self
@@ -265,41 +227,6 @@ impl Compiler {
             .collect();
         syms.sort_by_key(|s| s.entry_pc);
         syms
-    }
-
-    fn pad_debug_locs(&mut self) {
-        self.debug_locs
-            .resize(self.bytecode.len(), DebugLoc::unknown());
-    }
-
-    /// Start a function body that may hold `defer`s: whether it does is
-    /// known once its HIR lowers ([`Self::finish_fn_defers`]).
-    fn begin_fn_defers(&mut self) {
-        self.hir_defers = false;
-    }
-
-    /// End a function body: a function with `defer`s gets a cleanup pad
-    /// after its code. The VM unwinder jumps there when a panic (or a
-    /// cancellation) leaves the frame; the pad runs the armed thunks, then
-    /// `unwind_resume` hands the frame back to the unwinder. The body is
-    /// pinned so the pad's slot numbers stay true.
-    fn finish_fn_defers(&mut self, table_key: &str) -> bool {
-        // A body HIR lowered has a pad when it holds a `defer`, whether or
-        // not its stack IL registered the thunk: its MIR runs the defers.
-        if !std::mem::take(&mut self.hir_defers) {
-            return false;
-        }
-        if self.native_id("unwind_resume").is_none() {
-            return false;
-        }
-        let pad = self.bytecode.fresh_label();
-        self.bytecode.bind_label(pad);
-        self.cleanup_pads.push(CleanupPad {
-            func: table_key.to_string(),
-            pad,
-            frame_words: self.context.variables.len() as u32,
-        });
-        true
     }
 
     fn loc_from_span(&mut self, span: SimpleSpan) -> DebugLoc {
@@ -330,31 +257,17 @@ impl Compiler {
         id
     }
 
-    /// Number of global static slots for the VM table.
+    /// Number of global static slots for the runtime table.
     pub fn static_slot_count(&self) -> u32 {
         self.checker.static_slot_count()
     }
 
-    /// Prologue `JMP` target: static initializers and/or `extern` setup
-    /// run at `setup_entry_offset`; otherwise jump straight to `main`, or,
-    /// with no `main`, to the prologue's `HALT` (there is nothing to run).
-    pub fn prologue_jmp_target(&self) -> u32 {
-        // Interned dictionaries and local `const` tables start zeroed and
-        // are built on first use: they need no setup.
-        if self.static_slot_count() > (self.interned_dicts.len() + self.interned_tables.len()) as u32
-            || self.has_extern_block()
-            || self.checker.classes_with_drop().next().is_some()
-        {
-            self.setup_entry_offset
-        } else {
-            self.functions
-                .get("main")
-                .copied()
-                .unwrap_or(PROLOGUE_HALT_OFFSET) as u32
-        }
+    /// What runs before `main`.
+    pub fn startup(&self) -> &[common::StartupOp] {
+        &self.startup
     }
 
-    /// Bytecode offset of `main`, if bound.
+    /// `main`'s body, if bound.
     pub fn main_offset(&self) -> Option<u32> {
         self.functions.get("main").copied().map(|o| o as u32)
     }
@@ -437,12 +350,6 @@ impl Compiler {
         self.opt_options.hir_pair_locals = on;
     }
 
-    /// Let MIR bodies take the dense tier (the default), or lower every
-    /// body through LIR.
-    pub fn set_mir_dense(&mut self, on: bool) {
-        self.opt_options.mir_dense = on;
-    }
-
     /// Apply an [`crate::OptLevel`] preset to IL opts and inlining budgets.
     /// The switches no level sets keep their values.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
@@ -454,27 +361,23 @@ impl Compiler {
         self.inline_cost.inline_across_modules = level.inline_across_modules();
         self.inline_cost.hint_factors = level.hint_factors();
         self.inline_cost.max_cross_module_inline_cost = level.cross_module_inline_cost();
-        self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
     /// `--early-free on|off`: emit the early frees whatever the level.
     pub fn set_early_free(&mut self, on: bool) {
         self.early_free = Some(on);
         self.opt_options.early_free = on;
-        self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
     /// I7/B8: session flag. Does not disable MIR specialize; turns typed
     /// inlining off so frames and locals match the source.
     pub fn set_debugger_attached(&mut self, on: bool) {
         self.debugger_attached = on;
-        self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
     /// Enable or disable IL opt-stat collection (COI-131).
     pub fn set_collect_opt_stats(&mut self, on: bool) {
         self.opt_options.collect_stats = on;
-        self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
     pub fn intern_constant(&mut self, value: u64) -> u32 {
@@ -554,10 +457,6 @@ impl Compiler {
         !would_wrap
     }
 
-    fn record_fn_span(&mut self, key: String, start: usize, end: usize) {
-        self.fn_bytecode_spans.insert(key, (start, end));
-    }
-
     /// Free module functions are importable; inherent methods need `pub`.
     /// Uses [`Checker::can_access_member`] with no impl owner (foreign site).
     fn callee_is_visible_for_inline(&self, lookup: &str) -> bool {
@@ -581,20 +480,14 @@ impl Compiler {
         self.functions.get(name).copied()
     }
 
-    /// The end of the function whose entry is `entry`: the next function's
-    /// entry, or the end of the code.
-    pub fn function_end(&self, entry: usize) -> usize {
-        self.functions.values().copied().filter(|&o| o > entry).min().unwrap_or(self.bytecode.len())
-    }
-
     /// Bind a fresh entry label at the current PC and register `name`.
     fn bind_function_entry(&mut self, name: String) -> (usize, IlLabel) {
-        let offset = self.bytecode.len();
+        let offset = self.bodies.position();
         let label = if let Some(existing) = self.fn_entry_labels.get(&name).copied() {
-            self.bytecode.bind_reserved_entry(existing);
+            self.bodies.bind_reserved_entry(existing);
             existing
         } else {
-            self.bytecode.bind_fresh_entry()
+            self.bodies.bind_fresh_entry()
         };
         self.functions.insert(name.clone(), offset);
         if self.keep_fns_in.is_some() {
@@ -611,7 +504,7 @@ impl Compiler {
         if self.fn_entry_labels.contains_key(&name) {
             return;
         }
-        let label = self.bytecode.fresh_label();
+        let label = self.bodies.fresh_label();
         self.fn_entry_labels.insert(name, label);
     }
 
@@ -743,11 +636,11 @@ impl Compiler {
         }
     }
 
-    /// Bytecode offset WHERE the prologue (CALL+JMP+HALT)
+    /// Code offset WHERE the prologue (CALL+JMP+HALT)
     /// ENDS and user-program code BEGINS. Used by the runtime
     /// pipeline to patch the prologue's JMP operand so that
     /// any module-level `extern` block bytes (appended to
-    /// `self.bytecode` before `main`) execute before main.
+    /// `self.code` before `main`) execute before main.
     /// Without this, the prologue would skip past the extern
     /// block entirely (because `main_offset` lands past it).
     pub fn program_start_offset(&self) -> u32 {
@@ -1692,7 +1585,7 @@ impl Compiler {
         // more per program.
         let want = 2 * (self.checker.host_grants().clone_budget().saturating_sub(self.inst_clones.len()) + HOT_CLONE_ROOM);
         while self.inst_clone_labels.len() < want {
-            let label = self.bytecode.fresh_label();
+            let label = self.bodies.fresh_label();
             self.inst_clone_labels.push(label);
         }
     }
@@ -2094,7 +1987,6 @@ impl Compiler {
             hir_module: self.hir_module.take(),
             const_env_stack: self.const_env_stack.clone(),
             static_const_values: self.static_const_values.clone(),
-            fn_bytecode_spans: self.fn_bytecode_spans.clone(),
             mono_plan: self.mono_plan.clone(),
             mono_offsets: self.mono_offsets.clone(),
             mono_names: self.mono_names.clone(),
@@ -2106,7 +1998,6 @@ impl Compiler {
             par_shapes: self.par_shapes.clone(),
             par_workers: self.par_workers.clone(),
             loop_par_sites: self.loop_par_sites.clone(),
-            operand_stack_slots: self.operand_stack_slots,
             current_source_file: self.current_source_file.clone(),
             source_text: self.source_text.clone(),
             source_base: self.source_base,
@@ -2130,7 +2021,6 @@ impl Compiler {
         std::mem::swap(&mut self.hir_module, &mut ctx.hir_module);
         std::mem::swap(&mut self.const_env_stack, &mut ctx.const_env_stack);
         std::mem::swap(&mut self.static_const_values, &mut ctx.static_const_values);
-        std::mem::swap(&mut self.fn_bytecode_spans, &mut ctx.fn_bytecode_spans);
         std::mem::swap(&mut self.mono_plan, &mut ctx.mono_plan);
         std::mem::swap(&mut self.mono_offsets, &mut ctx.mono_offsets);
         std::mem::swap(&mut self.mono_names, &mut ctx.mono_names);
@@ -2142,7 +2032,6 @@ impl Compiler {
         std::mem::swap(&mut self.par_shapes, &mut ctx.par_shapes);
         std::mem::swap(&mut self.par_workers, &mut ctx.par_workers);
         std::mem::swap(&mut self.loop_par_sites, &mut ctx.loop_par_sites);
-        std::mem::swap(&mut self.operand_stack_slots, &mut ctx.operand_stack_slots);
         std::mem::swap(&mut self.current_source_file, &mut ctx.current_source_file);
         std::mem::swap(&mut self.source_text, &mut ctx.source_text);
         std::mem::swap(&mut self.source_base, &mut ctx.source_base);
@@ -2256,7 +2145,7 @@ impl Compiler {
         self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, pair, ..SynthCallee::default() });
         // Its callers pass the instance's dictionary after the arguments;
         // it builds its own.
-        self.emit_synth_fn(&req.name, &hir, calls, true);
+        self.emit_synth_fn(&req.name, &hir, calls);
         self.hir_synth_callees.clear();
     }
 
@@ -2391,7 +2280,7 @@ impl Compiler {
         let pair = self.two_word_return_kind(fqn);
         self.hir_synth_callees.insert(fqn.to_string(), SynthCallee { raw, pair, ..SynthCallee::default() });
         // No `CALL` names it: dictionaries hold it.
-        self.emit_synth_fn(&adapter, &hir, calls, true);
+        self.emit_synth_fn(&adapter, &hir, calls);
         self.hir_synth_callees.clear();
     }
 
@@ -2668,7 +2557,7 @@ impl Compiler {
 
     /// Free fns that must emit after `impl`s: those that call user methods,
     /// plus the transitive callers of that set (so phase-1 never forward-calls
-    /// a deferred callee via Entry into `self.bytecode`).
+    /// a deferred callee via Entry into `self.code`).
     fn deferred_post_impl_free_fns(
         children: &[Output<'_>],
         user_impl_methods: &std::collections::HashSet<String>,
@@ -3144,7 +3033,7 @@ impl Compiler {
                     return self.plan_instance_dict(out, class, &tys);
                 }
                 // `Eq<T>` with no `Eq` bound in scope: one built from a
-                // subclass bound's, or the VM's compare (#1694).
+                // subclass bound's, or the runtime's compare (#1694).
                 None if class == "Eq"
                     && let [Ty::Var(v)] = lookup
                     && let Some(dict) = self.var_eq_dict(*v) =>
@@ -3865,23 +3754,19 @@ impl Compiler {
 
         // The worker's own entry (its `MakeFn` and nested calls) while it
         // plans; bound once it does.
-        self.functions.insert(worker_name.clone(), self.bytecode.len());
+        self.functions.insert(worker_name.clone(), self.bodies.position());
         self.fn_arities.insert(worker_name.clone(), (n as u32 + 1, false));
         let prev_fn_vars = std::mem::take(&mut self.context.variables);
         let prev_fn_table_key = self.current_function_table_key.replace(worker_name.clone());
         let calls = HashMap::from([(worker_name.clone(), (vec![ValueLayout::Boxed; n + 1], ValueLayout::Boxed))]);
-        let body_start = self.bytecode.len();
         let bind = worker_name.clone();
         let lowered = self.lower_synth_hir(&hir, calls, move |c: &mut Self| {
             c.bind_function_entry(bind);
         });
         if lowered {
             self.par_worker_of.insert(worker_name.clone(), table_key.to_string());
-            let body_end = self.bytecode.len();
-            self.record_fn_span(worker_name.clone(), body_start, body_end);
             let entry = self.fn_entry_labels.get(&worker_name).copied();
-            self.bytecode
-                .record_func_with_sp(worker_name, entry, body_start, body_end, 0);
+            self.bodies.record(worker_name, entry);
             self.attach_hir_mir();
             self.flush_hir_par_tail();
         } else {
@@ -4554,7 +4439,7 @@ impl Compiler {
         word_ret: bool,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
-        self.emit_builtin_body(fqn, params, ret, word_ret, true, op);
+        self.emit_builtin_body(fqn, params, ret, word_ret, op);
     }
 
     /// A builtin entry whose dictionary ABI boxes its result (`box_tag`):
@@ -4588,7 +4473,7 @@ impl Compiler {
         ret: Ty,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
-        self.emit_builtin_body(fqn, params, ret, false, false, op);
+        self.emit_builtin_body(fqn, params, ret, false, op);
     }
 
     fn emit_builtin_body(
@@ -4597,14 +4482,13 @@ impl Compiler {
         params: &[(Ty, bool)],
         ret: Ty,
         word_ret: bool,
-        dict_entry: bool,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
         if self.functions.contains_key(fqn) {
             return;
         }
         let hir = crate::hir::synth::builtin_entry(&self.checker, fqn, params, ret, word_ret, op);
-        self.emit_synth_fn(fqn, &hir, HashMap::new(), dict_entry);
+        self.emit_synth_fn(fqn, &hir, HashMap::new());
     }
 
     /// Thunk for `Vec::{name}` stamped with element kind `stamp`
@@ -4774,7 +4658,7 @@ impl Compiler {
             let call = b.call(native, args, ret);
             let root = b.ret(call);
             let hir = b.finish(root);
-            self.emit_synth_fn(&fqn, &hir, HashMap::new(), false);
+            self.emit_synth_fn(&fqn, &hir, HashMap::new());
         }
     }
 
@@ -4783,7 +4667,7 @@ impl Compiler {
             return;
         }
         let hir = crate::hir::synth::range_to_vec(&self.checker, &fqn, inclusive, float);
-        self.emit_synth_fn(&fqn, &hir, HashMap::new(), false);
+        self.emit_synth_fn(&fqn, &hir, HashMap::new());
     }
 
     /// Emit compiler-made body `hir` ([`crate::hir::synth`]) as function
@@ -4795,11 +4679,9 @@ impl Compiler {
         name: &str,
         hir: &crate::hir::HirBody,
         calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>,
-        dict_entry: bool,
     ) {
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_key = self.current_function_table_key.replace(name.to_string());
-        let body_start = self.bytecode.len();
         let bind = name.to_string();
         if !self.lower_synth_hir(hir, calls, move |c: &mut Self| {
             c.bind_function_entry(bind);
@@ -4807,21 +4689,8 @@ impl Compiler {
             self.report_unlowered(&SimpleSpan::from(0..0), name);
             self.bind_function_entry(name.to_string());
         }
-        let body_end = self.bytecode.len();
-        self.record_fn_span(name.to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get(name).copied();
-        // A dictionary entry is called with its parameters and then the
-        // instance dictionary. No `CALL` names it, so its precise frame map
-        // takes the entry height from here; too low a height leaves the top
-        // words unrooted.
-        let entry_sp = match self.synth_plain_dicts {
-            // An open glue body's dictionaries follow its parameters (#1642).
-            Some(n) => (hir.params.len() + n) as u32,
-            None if dict_entry => hir.params.len() as u32 + 1,
-            None => 0,
-        };
-        self.bytecode
-            .record_func_with_sp(name.to_string(), entry, body_start, body_end, entry_sp);
+        self.bodies.record(name.to_string(), entry);
         self.attach_hir_mir();
         self.current_function_table_key = prev_key;
         self.context.variables = prev_vars;
@@ -5122,45 +4991,6 @@ impl Compiler {
         }
     }
 
-    /// Whether the ops since `op_start` end on a label something jumps to: a
-    /// join that falls off the body. A `match` whose arms all return leaves
-    /// an end label nothing reaches. Moving early exits after the body
-    /// jumps back to the label after each one, so any end label counts then.
-    fn ends_on_jumped_label(&self, op_start: usize) -> bool {
-        let ops = &self.bytecode.ops()[op_start..];
-        let trailing: Vec<_> = ops.iter().rev().map_while(|op| match op {
-            IlOp::Label(l) => Some(*l),
-            _ => None,
-        }).collect();
-        !trailing.is_empty()
-            && ops.iter().any(|op| matches!(op, IlOp::Jump { target, .. } if trailing.contains(target)))
-    }
-
-    /// True when IL ops in `[op_start, ops.len())` end with a return terminator
-    /// (labels skipped). `op_start` must be an index into [`CodeBuf::ops`], not
-    /// an emitting-code length from [`CodeBuf::len`].
-    fn region_ends_with_return(&self, op_start: usize) -> bool {
-        let ops = self.bytecode.ops();
-        let mut i = ops.len();
-        while i > op_start {
-            i -= 1;
-            match &ops[i] {
-                IlOp::Label(_) => continue,
-                IlOp::Return { .. }
-                | IlOp::LoadReturnSlot { .. }
-                | IlOp::ConstReturnImm { .. }
-                | IlOp::BinReturn { .. }
-                | IlOp::Halt { .. } => return true,
-                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ReturnPair => {
-                    return true;
-                }
-                op if op.is_plain_return() => return true,
-                _ => return false,
-            }
-        }
-        false
-    }
-
     fn compile_function_output_with_name<'compiler>(
         &mut self,
         method: &Output<'compiler>,
@@ -5179,8 +5009,7 @@ impl Compiler {
             ..
         } = method.1.as_ref()
         else {
-            let mut bc = self.do_compile(method);
-            self.bytecode.append(&mut bc);
+            self.do_compile(method);
             return;
         };
         let Some(body) = body else {
@@ -5188,7 +5017,7 @@ impl Compiler {
             return;
         };
 
-        let (code_start, _) = self.bind_function_entry(qualified.clone());
+        self.bind_function_entry(qualified.clone());
         if *is_coro {
             self.coroutine_fns.insert(qualified.clone());
         }
@@ -5229,8 +5058,7 @@ impl Compiler {
             self.two_word_return_kind(&qualified)
         };
 
-        let mut a = self.do_compile(args);
-        self.bytecode.append(&mut a);
+        self.do_compile(args);
         for dict_idx in 0..dict_arity {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
@@ -5255,8 +5083,6 @@ impl Compiler {
                 self.hir_entry_ctx.push((slot, own, (base + i) as u32));
             }
         }
-        self.begin_fn_defers();
-        let body_op_start = self.bytecode.ops().len();
         let lowered = self.try_lower_hir_function(&method.0, body);
         if !lowered {
             // Every body runs IL from its direct MIR, so one HIR does not
@@ -5264,21 +5090,11 @@ impl Compiler {
             self.report_unlowered(&method.0, &qualified);
         }
 
-        let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
-        if ends_on_label || !self.region_ends_with_return(body_op_start) {
-            self.bytecode.push_return();
-        }
-        let pinned = self.finish_fn_defers(&qualified);
+        self.bodies.advance();
 
-        let body_end = self.bytecode.len();
-        self.record_fn_span(qualified.clone(), code_start, body_end);
         let entry = self.fn_entry_labels.get(&qualified).copied();
-        self.bytecode
-            .record_func_with_sp(qualified.clone(), entry, code_start, body_end, entry_sp);
+        self.bodies.record(qualified.clone(), entry);
         self.attach_hir_mir();
-        if pinned {
-            self.bytecode.set_last_func_pinned();
-        }
         self.flush_hir_par_tail();
 
         self.compiling_result_mode = prev_result_mode;
@@ -5335,101 +5151,6 @@ impl Compiler {
         }
         let free = crate::typechecking::subst::ftv(result);
         scheme.bounds.iter().any(|bound| free.contains(bound))
-    }
-
-    /// Parameter / return word kinds of every emitted function, from its
-    /// checked scheme. Types are curried (`Fun(param, ret)`), so the walk
-    /// takes exactly the entry height's worth of params (a zero-arity fn has
-    /// one `unit` param); a scheme shorter than the entry (dictionary params)
-    /// is skipped. Generic parameters and returns stay unknown.
-    fn fn_word_kinds(
-        &self,
-        entries: &[(String, u32)],
-        entry_sps: &HashMap<String, u32>,
-    ) -> HashMap<String, super::precise_frames::FnWordKinds> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::layout::word_kind;
-        let mut out = HashMap::new();
-        for (name, _) in entries {
-            if out.contains_key(name) {
-                continue;
-            }
-            let Some(&arity) = entry_sps.get(name) else {
-                continue;
-            };
-            // `Vec` constructor thunks always return an array.
-            let ctor = name
-                .strip_prefix(common::BUILTIN_VEC_TYPE)
-                .and_then(|n| n.strip_prefix("::"))
-                .map(|n| n.strip_suffix("$ptr").or_else(|| n.strip_suffix("$bytes")).unwrap_or(n));
-            if matches!(ctor, Some("new" | "with_capacity" | "from")) {
-                let params = match ctor {
-                    Some("with_capacity") => vec![common::WORD_SCALAR],
-                    Some("from") => vec![common::WORD_POINTER],
-                    _ => Vec::new(),
-                };
-                if params.len() == arity as usize {
-                    out.insert(
-                        name.clone(),
-                        super::precise_frames::FnWordKinds {
-                            params,
-                            ret: common::WORD_POINTER,
-                        },
-                    );
-                }
-                continue;
-            }
-            // A fork worker (`__coil_par_f`) returns what `f` returns and
-            // takes `f`'s params plus an int hop count.
-            let par_base = name
-                .strip_prefix("__coil_par_")
-                .filter(|_| !name.starts_with("__coil_par_loop_"));
-            let base = par_base.unwrap_or(name);
-            let Some(scheme) = self.checker.env().lookup(base) else {
-                continue;
-            };
-            let Some(declared) = (arity as usize).checked_sub(usize::from(par_base.is_some()))
-            else {
-                continue;
-            };
-            let mut params = Vec::with_capacity(declared);
-            let mut current = &scheme.ty;
-            for _ in 0..declared.max(1) {
-                let Ty::Fun(param, ret) = current else {
-                    break;
-                };
-                // A `()` parameter holds the empty tuple object, a pointer,
-                // as a tuple's `()` item does (#1465).
-                params.push(if crate::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
-                    common::WORD_POINTER
-                } else {
-                    word_kind(&self.checker, param)
-                });
-                current = ret;
-            }
-            if params.len() != declared.max(1) {
-                continue;
-            }
-            if declared == 0 {
-                if !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT)) {
-                    continue;
-                }
-                params.clear();
-            }
-            if par_base.is_some() {
-                params.push(common::WORD_SCALAR);
-            }
-            let ret = if self.generic_return_is_boxed(base) {
-                common::WORD_UNKNOWN
-            } else {
-                word_kind(&self.checker, current)
-            };
-            out.insert(
-                name.clone(),
-                super::precise_frames::FnWordKinds { params, ret },
-            );
-        }
-        out
     }
 
     /// Whether a generic call's return value is boxed at the ABI boundary.
@@ -5606,13 +5327,9 @@ impl Compiler {
             if let Some(id) = self.checker.id_table().id_of_output(args) {
                 self.emit_idx = id.0 as usize;
             }
-            let mut a = self.do_compile(args);
-            self.bytecode.append(&mut a);
-            let clone_entry_sp = self.context.variables.len() as u32;
-            let body_op_start = self.bytecode.ops().len();
+            self.do_compile(args);
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
-            self.begin_fn_defers();
             // One HIR per instance: the generic body's HIR at this clone's
             // type arguments.
             let lowered = self.try_lower_hir_function(span, body);
@@ -5620,28 +5337,13 @@ impl Compiler {
                 self.report_unlowered(span, &mono_name);
             }
 
-            let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
-            if ends_on_label || !self.region_ends_with_return(body_op_start) {
-                self.bytecode.push_return();
-            }
-            let pinned = self.finish_fn_defers(&mono_name);
+            self.bodies.advance();
             // Its own IL function: a clone left as trailing glue of the source
             // body has no registered entry, so a CALL to it from another
             // function was resolved through another body's private label ids.
-            let clone_end = self.bytecode.len();
-            self.record_fn_span(mono_name.clone(), clone_offset, clone_end);
             let entry = self.fn_entry_labels.get(&mono_name).copied();
-            self.bytecode.record_func_with_sp(
-                mono_name,
-                entry,
-                clone_offset,
-                clone_end,
-                clone_entry_sp,
-            );
+            self.bodies.record(mono_name, entry);
             self.attach_hir_mir();
-            if pinned {
-                self.bytecode.set_last_func_pinned();
-            }
             self.flush_hir_par_tail();
 
             self.mono_codegen_var_types.pop();
@@ -5747,15 +5449,12 @@ impl Compiler {
     fn consume_function_signature_output<'compiler>(&mut self, method: &Output<'compiler>) {
         let _method_id = self.next_emit_id();
         if let Expression::Function { args, body, .. } = method.1.as_ref() {
-            let mut args_bc = self.do_compile(args);
-            self.bytecode.append(&mut args_bc);
+            self.do_compile(args);
             if let Some(body) = body {
-                let mut body_bc = self.do_compile(body);
-                self.bytecode.append(&mut body_bc);
+                self.do_compile(body);
             }
         } else {
-            let mut bc = self.do_compile(method);
-            self.bytecode.append(&mut bc);
+            self.do_compile(method);
         }
     }
 
@@ -5778,7 +5477,7 @@ impl Compiler {
 
     /// Register an embedder native: its HostInvoke id follows the frozen
     /// [`common::HOST_NATIVES`] table and the natives registered before it,
-    /// as the VM's native registry numbers them.
+    /// as the runtime's native registry numbers them.
     pub fn register(&mut self, name: &str, params: &[Ty], returns: &Ty) -> &mut Self {
         let base = common::HOST_NATIVES.len();
         let idx = self.native.values().copied().filter(|&id| id >= base).max().map_or(base, |id| id + 1);
@@ -5788,7 +5487,7 @@ impl Compiler {
         self
     }
 
-    /// Bind a host-native name to a stable id for [`Instruction::HostInvoke`]
+    /// Bind a host-native name to a stable id for `HostInvoke`
     /// without inserting a type into the HM env (virtual `io::*` schemes
     /// are bound via `use` instead).
     pub fn register_native_id(&mut self, name: &str, id: usize) {
@@ -6210,13 +5909,9 @@ impl Compiler {
             && self.static_reads_fold(fqn) {
                 self.static_const_values.insert(fqn.to_string(), val);
             }
-        // Compile the initializer as its own zero-arg function in the module
-        // stream; the setup region only calls it. Call lowering (inline /
-        // self-unroll peels, forward-referenced entries) writes straight into
-        // `self.bytecode`, so an initializer compiled into a side buffer
-        // leaked those ops into whatever function came before it.
+        // The initializer is its own zero-arg function; startup calls it.
         let name = format!("{STATIC_INIT_FN_PREFIX}{fqn}");
-        let (offset, _) = self.bind_function_entry(name.clone());
+        self.bind_function_entry(name.clone());
         self.fn_arities.insert(name.clone(), (0, false));
 
         let prev_fn_vars = std::mem::take(&mut self.context.variables);
@@ -6234,17 +5929,12 @@ impl Compiler {
         let prev_two_word_enum = self.compiling_two_word_enum.take();
         let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
 
-        let body_start = self.bytecode.len();
-        self.record_fn_span(name.clone(), body_start, body_start);
         // The initializer returns the value; the setup region stores it.
         if !self.try_lower_hir_function(&init.0, init) {
             self.report_unlowered(&init.0, fqn);
         }
-        let body_end = self.bytecode.len();
-        self.record_fn_span(name.clone(), body_start, body_end);
         let entry = self.fn_entry_labels.get(&name).copied();
-        self.bytecode
-            .record_func_with_sp(name, entry, body_start, body_end, 0);
+        self.bodies.record(name, entry);
         self.attach_hir_mir();
         self.flush_hir_par_tail();
 
@@ -6262,17 +5952,6 @@ impl Compiler {
         self.context.stack_array_locals = prev_stack_arrays;
         self.context.variables = prev_fn_vars;
 
-        // Setup region: `CALL init; StoreStatic`. The packed target is
-        // resolved to the entry label when the region is spliced
-        // (`splice_buf_at`).
-        self.static_init.push(Self::packed_entry_byte_ret(
-            crate::il::EntryKind::Call,
-            0,
-            offset as u32,
-            1,
-        ));
-        self.static_init
-            .push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
         self.setup_steps
             .push(module_setup::SetupStep::Static { init: format!("{STATIC_INIT_FN_PREFIX}{fqn}"), slot, comptime: false });
     }
@@ -6506,7 +6185,7 @@ impl Compiler {
     }
 
     /// The `main` of a test file with none (standalone `coil tests/foo.coil`):
-    /// runs every test case in one VM, printing `> Test "<name>" failed` for
+    /// runs every test case in one runtime, printing `> Test "<name>" failed` for
     /// each case that returns `Err`, then panics with `"tests failed"` if
     /// any did. Built as HIR ([`crate::hir::synth`]) and lowered like any
     /// other body.
@@ -6549,7 +6228,6 @@ impl Compiler {
         let root = b.block(stmts, None, coil_ty::never());
         let hir = b.finish(root);
 
-        let body_start = self.bytecode.len();
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_fn_table_key = self.current_function_table_key.replace("main".to_string());
         // A case returns its `Result<(), string>` boxed.
@@ -6560,18 +6238,15 @@ impl Compiler {
             self.report_unlowered(&SimpleSpan::from(0..0), "main");
             self.bind_function_entry("main".to_string());
         }
-        let body_end = self.bytecode.len();
-        self.record_fn_span("main".to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get("main").copied();
-        self.bytecode
-            .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
+        self.bodies.record("main".to_string(), entry);
         self.attach_hir_mir();
         self.flush_hir_par_tail();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
     }
 
-    fn do_compile<'compiler>(&mut self, ast: &(SimpleSpan, Box<Expression<'compiler>>)) -> CodeBuf {
+    fn do_compile<'compiler>(&mut self, ast: &(SimpleSpan, Box<Expression<'compiler>>)) {
         self.codegen_depth += 1;
         if self.codegen_depth > super::CODEGEN_RECURSION_LIMIT {
             self.messages.push(Message::error(
@@ -6584,9 +6259,8 @@ impl Compiler {
             ));
             std::panic::panic_any(super::CodegenRecursionLimitExceeded);
         }
-        let result = self.do_compile_inner(ast);
+        self.do_compile_inner(ast);
         self.codegen_depth -= 1;
-        result
     }
 
     /// Named `fn` declaration: emit the body, register the entry and debug info.
@@ -6789,7 +6463,7 @@ impl Compiler {
                 self.two_word_return_kind(&table_key)
             };
 
-            let mut a = self.do_compile(args);
+            self.do_compile(args);
 
             // Reserve `__dictN` slots for CallIndirect (FQN preferred; bare
             // names are dropped by `fn_dict_arity.retain(|k| k.contains("::"))`).
@@ -6809,18 +6483,13 @@ impl Compiler {
             let entry_sp = self.context.variables.len() as u32;
             self.hir_entry_sp = Some(entry_sp);
 
-            self.bytecode.append(&mut a);
 
-            let body_start = self.bytecode.len();
             // Provisional span so self-recursive peels can see the opening
-            // predicate while the body is still streaming into `self.bytecode`.
-            self.record_fn_span(table_key.clone(), body_start, body_start);
-            let body_op_start = self.bytecode.ops().len();
+            // predicate while the body is still streaming into `self.code`.
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
             let prev_active = self.active_fn_name.take();
             self.active_fn_name = Some(name.to_string());
-            self.begin_fn_defers();
             let lowered = prev_fn_table_key_was_none && self.try_lower_hir_function(span, body);
             if !lowered {
                 if !prev_fn_table_key_was_none {
@@ -6830,15 +6499,7 @@ impl Compiler {
             }
             self.active_fn_name = prev_active;
 
-            // A lowered body can end on a join label that only unreachable
-            // jumps target; a jumped-to label at the very end would bind to
-            // the next function's entry, so it still gets the fallthrough
-            // return.
-            let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
-            if ends_on_label || !self.region_ends_with_return(body_op_start) {
-                self.bytecode.push_return();
-            }
-            let pinned = self.finish_fn_defers(&table_key);
+            self.bodies.advance();
             self.debug_scope_exit(saved_debug_scope);
 
             self.compiling_result_mode = prev_result_mode;
@@ -6851,8 +6512,6 @@ impl Compiler {
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
             self.field_key_slots = prev_field_keys;
-            let body_end = self.bytecode.len();
-            self.record_fn_span(table_key.clone(), body_start, body_end);
             if prev_fn_table_key_was_none
                 && !*is_coro
                 && type_params.is_empty()
@@ -6863,17 +6522,8 @@ impl Compiler {
                 self.precise_frame_fns.insert(table_key.clone());
             }
             let entry = self.fn_entry_labels.get(&table_key).copied();
-            self.bytecode.record_func_with_sp(
-                table_key.clone(),
-                entry,
-                body_start,
-                body_end,
-                entry_sp,
-            );
+            self.bodies.record(table_key.clone(), entry);
             self.attach_hir_mir();
-            if pinned {
-                self.bytecode.set_last_func_pinned();
-            }
             self.flush_hir_par_tail();
             self.context.variables = prev_fn_vars;
             self.context.stack_array_locals = prev_stack_arrays;
@@ -6896,8 +6546,7 @@ impl Compiler {
     fn do_compile_inner<'compiler>(
         &mut self,
         ast: &(SimpleSpan, Box<Expression<'compiler>>),
-    ) -> CodeBuf {
-        let mut bytecode = CodeBuf::new();
+    ) {
         let _ = self.next_emit_id();
         let (span, child) = ast;
 
@@ -6918,7 +6567,7 @@ impl Compiler {
                 }
             }
             Expression::Noop(_) => (),
-            // `mod foo;`, pipeline loads the file; no bytecode.
+            // `mod foo;`, pipeline loads the file; no code.
             Expression::Module(_, _body) => {}
             Expression::Program(children) => {
                 self.program_seq += 1;
@@ -6939,12 +6588,12 @@ impl Compiler {
                     };
                     for p in [0u8, 1, 2, 25, 3] {
                         for child in children.iter().filter(|c| phase(c) == p) {
-                            bytecode.append(&mut self.do_compile(child));
+                            self.do_compile(child);
                         }
                     }
                 } else {
                     for child in children {
-                        bytecode.append(&mut self.do_compile(child));
+                        self.do_compile(child);
                     }
                 }
                 self.emit_instance_clones(children);
@@ -6985,21 +6634,21 @@ impl Compiler {
                     self.report_top_level_statement(span);
                 } else {
                     for child in children {
-                        bytecode.append(&mut self.do_compile(child));
+                        self.do_compile(child);
                     }
                 }
             }
             // An empty default-method body.
             Expression::Block(children) => {
                 for child in children {
-                    bytecode.append(&mut self.do_compile(child));
+                    self.do_compile(child);
                 }
             }
             Expression::Function { .. } => {
                 self.compile_function_decl_into(span, ast);
             }
             Expression::Expr(child) | Expression::Statement(child) => {
-                bytecode.append(&mut self.do_compile(child))
+                self.do_compile(child);
             }
             Expression::StaticDecl { name, init, is_const, .. } => {
                 let fqn = self.qualify_static_fqn(name);
@@ -7130,7 +6779,7 @@ impl Compiler {
                     }
                 );
                 self.compiling_method = !is_static;
-                bytecode.append(&mut self.do_compile(body));
+                self.do_compile(body);
                 self.compiling_method = false;
             }
             Expression::Argument { ty, name: n, .. } => {
@@ -7149,7 +6798,6 @@ impl Compiler {
                 {
                     self.polyfn_vars.insert(n.to_string());
                 }
-                // bytecode.push(Byte::new(Instruction::LOAD)
             }
             Expression::Type(_)
             | Expression::TypeFn { .. }
@@ -7161,7 +6809,7 @@ impl Compiler {
                     match method.1.as_ref() {
                         Expression::AssocTypeDecl { .. } => {
                             // Type-level only, do_compile consumes the NodeId.
-                            let _ = self.do_compile(method);
+                            self.do_compile(method);
                         }
                         Expression::Function {
                             docs: _,
@@ -7212,7 +6860,7 @@ impl Compiler {
                     match method.1.as_ref() {
                         Expression::AssocTypeDef { .. } => {
                             // Type-level only, do_compile consumes wrapper + RHS IDs.
-                            let _ = self.do_compile(method);
+                            self.do_compile(method);
                         }
                         Expression::Function {
                             docs: _,
@@ -7270,7 +6918,7 @@ impl Compiler {
                 }
             }
             Expression::AssocTypeDecl { .. } | Expression::TypeProjection { .. } => {
-                // Type-level only, no bytecode (NodeId already consumed by do_compile).
+                // Type-level only, no code (NodeId already consumed by do_compile).
             }
             Expression::AssocTypeDef { .. } => {}
             Expression::ExternBlock {
@@ -7403,7 +7051,7 @@ impl Compiler {
             } => {
                 // Metadata only; IDs consumed by descending into variants.
                 for v in variants {
-                    bytecode.append(&mut self.do_compile(v));
+                    self.do_compile(v);
                 }
             }
             // Resolved by the typechecker; no bytes.
@@ -7424,7 +7072,7 @@ impl Compiler {
                 // A generated contract test calls its function with random
                 // arguments: only when it cannot write, do IO or the like.
                 // Its body is still emitted and listed until
-                // `finalize_bytecode`, which drops it from the runnable cases.
+                // `finalize_bodies`, which drops it from the runnable cases.
                 if !self.contract_case_allowed(&desc) {
                     self.skipped_contract_cases.insert(desc.clone());
                 }
@@ -7448,39 +7096,20 @@ impl Compiler {
                 let prev_two_word_enum = self.compiling_two_word_enum.clone();
                 self.compiling_two_word_enum = self.two_word_return_kind(&fn_name);
 
-                let body_op_start = self.bytecode.ops().len();
                 let prev_field_keys = std::mem::take(&mut self.field_key_slots);
                 self.emit_field_key_prologue(body);
-                self.begin_fn_defers();
                 let lowered = self.try_lower_hir_function(span, body);
                 if !lowered {
                     self.report_unlowered(span, &fn_name);
                 }
 
-                // A lowered body can end on an unreachable join label.
-                let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
-                if ends_on_label || !self.region_ends_with_return(body_op_start) {
-                    // Test cases are typed as unit / Result<(), string>, zero is safe.
-                    self.bytecode.push_return();
-                }
-                let pinned = self.finish_fn_defers(&fn_name);
+                self.bodies.advance();
 
-                let body_end = self.bytecode.len();
                 // Flatten remaps per IlFunc; unrecorded tests share the epilogue
                 // and collide with ArrayPin labels in earlier bodies.
-                self.record_fn_span(fn_name.clone(), offset as usize, body_end);
                 let entry = self.fn_entry_labels.get(&fn_name).copied();
-                self.bytecode.record_func_with_sp(
-                    fn_name.clone(),
-                    entry,
-                    offset as usize,
-                    body_end,
-                    0,
-                );
+                self.bodies.record(fn_name.clone(), entry);
                 self.attach_hir_mir();
-                if pinned {
-                    self.bytecode.set_last_func_pinned();
-                }
                 self.flush_hir_par_tail();
 
                 self.compiling_result_mode = prev_result_mode;
@@ -7509,7 +7138,6 @@ impl Compiler {
             _expr => self.report_top_level_statement(span),
         }
 
-        bytecode
     }
 
     fn report_top_level_statement(&mut self, span: &SimpleSpan) {
@@ -7525,7 +7153,7 @@ impl Compiler {
         self.messages.push(message);
     }
 
-    /// [`compile`] calls [`finalize_bytecode`] afterwards for unit tests.
+    /// [`compile`] calls [`finalize_bodies`] afterwards for unit tests.
     fn compile_unfused<'compiler>(
         &mut self,
         module: &str,
@@ -7562,9 +7190,7 @@ impl Compiler {
         self.current_function_qualified = None;
         self.current_function_table_key = None;
         self.compiling_two_word_enum = None;
-        // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
-        self.fn_bytecode_spans.clear();
-        if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {
+        if self.bodies.is_fresh() {
             self.fn_debug_locals.clear();
             self.fn_debug_vars.clear();
         }
@@ -7572,9 +7198,9 @@ impl Compiler {
         // `compile_module` would otherwise redirect bare names.
         self.aliases.clear();
         // Shared constant pool across `compile_module` calls. Clearing between
-        // modules orphans JumpIfMatch/CONST indices (VM panic). Reset only on
+        // modules orphans JumpIfMatch/CONST indices (runtime panic). Reset only on
         // a fresh prologue (CALL/JMP/HALT).
-        if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {
+        if self.bodies.is_fresh() {
             self.constants.clear();
             self.strings.clear();
             self.string_indices.clear();
@@ -7628,7 +7254,6 @@ impl Compiler {
         let bare_cases = self.checker.bare_cases().clone();
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast, &bare_cases);
         self.messages.extend(stack_bound.messages);
-        self.operand_stack_slots = stack_bound.operand_slots_needed;
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
         self.recursive_pure = if self.auto_par && self.opt_options.auto_par {
             crate::typechecking::analyze_recursive_pure(ast, &bare_cases)
@@ -7776,11 +7401,11 @@ impl Compiler {
         self.emit_vec_method_thunks();
         self.emit_stream_method_thunks();
         // Dict thunks after prologue; keep program_start_offset at first user byte.
-        self.program_start_offset = self.bytecode.len() as u32;
+        self.program_start_offset = self.bodies.position() as u32;
         self.setup_entry_offset = self.program_start_offset;
         // Label the setup / top-level region: it starts after the
         // prologue HALT / prelude RETURN, so only its entry reaches it.
-        self.bytecode.bind_fresh_entry();
+        self.bodies.bind_fresh_entry();
         self.mono_plan = crate::monomorphize::run_monomorphize_pass(module, ast, &self.checker);
         for hit in &self.mono_plan.cap_hits {
             let why = match hit.reason {
@@ -7811,7 +7436,7 @@ impl Compiler {
             self.messages.push(msg);
         }
 
-        let mut program = self.do_compile(ast);
+        self.do_compile(ast);
         self.namespace = ns.to_string();
         for (name, text) in std::mem::take(&mut self.fold_bodies) {
             let qualified = self.qualify_static_fqn(&name);
@@ -7822,12 +7447,10 @@ impl Compiler {
 
         self.messages.extend(self.checker.take_messages());
 
-        self.bytecode.append(&mut program);
         // Structural thunks (a `Result<_, IoError>`'s `show`) can mark a
         // builtin enum's `Show` thunk used, so they go first (#1984).
         self.emit_structural_thunks();
         self.emit_used_builtin_show_thunks();
-        self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
         if self.inst_clone_srcs.values().any(|s| s.program == seq && s.emit_idx.is_some()) {
@@ -7864,7 +7487,7 @@ impl Compiler {
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
         for (fqn, enum_name, variants) in due {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
-            self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
+            self.emit_synth_fn(&fqn, &hir, HashMap::new());
         }
     }
 
@@ -8036,7 +7659,7 @@ impl Compiler {
             .map_or(1, |class| class.flattened_methods(self.checker.generics()).len());
         self.synth_entry_dicts = Some((base, arity));
         self.synth_show_dicts = vars.into_iter().enumerate().map(|(i, v)| (v, i + 1)).collect();
-        self.emit_synth_fn(fqn, &hir, HashMap::new(), true);
+        self.emit_synth_fn(fqn, &hir, HashMap::new());
         self.synth_entry_dicts = None;
         self.synth_show_dicts.clear();
     }
@@ -8091,7 +7714,7 @@ impl Compiler {
         let ret = b.ret(shown);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = b.finish(root);
-        self.emit_synth_fn(name, &hir, HashMap::new(), true);
+        self.emit_synth_fn(name, &hir, HashMap::new());
     }
 
     /// The `Hash` thunk `name` of a ground tuple or array `ty` (#1479): its
@@ -8130,444 +7753,118 @@ impl Compiler {
         let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), retype)], int.clone(), false, |b, a| {
             crate::hir::synth::structural_hash(b, a[0], &items, &targets)
         });
-        self.emit_synth_fn(name, &hir, calls, true);
+        self.emit_synth_fn(name, &hir, calls);
     }
 
-    /// Lower stack IL to VM bytecode (fusion select + label resolution).
+    /// Resolve labels and link the bodies into program code.
     ///
     /// Called once after multi-file linking by the pipeline, or at the end
     /// of single-file [`compile`] so unit tests observe fused output.
-    pub fn finalize_bytecode(&mut self) {
+    pub fn finalize_bodies(&mut self) {
         self.emit_foreign_clone_thunks();
-        #[cfg(any(test, feature = "dissect"))]
-        let _ = self.finalize_bytecode_inner(false);
-        #[cfg(not(any(test, feature = "dissect")))]
-        self.finalize_bytecode_inner(false);
+        self.finalize_bodies_inner();
         if !self.skipped_contract_cases.is_empty() {
             let skipped = std::mem::take(&mut self.skipped_contract_cases);
             self.test_cases.retain(|(desc, _)| !skipped.contains(desc));
         }
     }
 
-    /// Like [`finalize_bytecode`], but also returns a pre-opt IL snapshot for dissect.
-    #[cfg(any(test, feature = "dissect"))]
-    pub fn finalize_bytecode_capturing_il(&mut self) -> crate::dissect::IlSnapshot {
-        self.finalize_bytecode_inner(true)
-            .expect("capture_il requested")
-    }
-
-    fn finalize_bytecode_inner(&mut self, capture_il: bool) -> FinalizeIlOut {
-        // Splice static initializers + `extern` setup into the IL before lower.
-        // Order: user static inits, then FFI dlopen/declare, then JMP → main.
-        // Right after the prologue `HALT`, ahead of every body, so the
-        // setup is prologue code: its labels keep their ids when the module
-        // flattens. Glue after a body shares that body's relabelling, and
-        // an id the body minted could claim the setup's entry or its jumps.
-        let setup_pos = PROLOGUE_HALT_OFFSET + 1;
-        let mut init_len = 0usize;
-
-        if let Some(n) = self.emit_module_setup(setup_pos) {
-            self.setup_entry_offset = setup_pos as u32;
-            self.bytecode.bump_absolute_entry_targets(setup_pos, n);
-            self.bytecode.bump_func_spans(setup_pos, n);
-            init_len += n;
-        }
-
-        let static_init_region = if init_len > 0 {
-            self.bytecode.entry_label_at(setup_pos);
-            self.program_start_offset += init_len as u32;
-            for offset in self.functions.values_mut() {
-                if *offset >= setup_pos {
-                    *offset += init_len;
-                }
-            }
-            for (_, offset) in self.test_cases.iter_mut() {
-                if (*offset as usize) >= setup_pos {
-                    *offset += init_len as u32;
-                }
-            }
-            for offset in self.mono_offsets.values_mut() {
-                if *offset >= setup_pos {
-                    *offset += init_len;
-                }
-            }
-            Some((setup_pos, init_len))
-        } else {
-            None
-        };
-
-        // After setup region, insert JMP → main (or, with no `main`, → the
-        // prologue HALT rather than falling into the first function).
-        let main_off = self.functions.get("main").copied();
-        if let Some((pos, init_len)) = static_init_region {
-            let jmp_pos = pos + init_len;
-            // `main`'s own entry label, which flattening maps to its body:
-            // the first label at its offset may be a neighbour's, and a
-            // label put there is private to whichever chunk holds it.
-            let target_label = match main_off.and_then(|_| self.fn_entry_labels.get("main").copied()) {
-                Some(label) => label,
-                None => self
-                    .bytecode
-                    .entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET)),
-            };
-            self.bytecode.insert_jump_at(jmp_pos, target_label);
-            self.bytecode.bump_absolute_entry_targets(jmp_pos, 1);
-            self.bytecode.bump_func_spans(jmp_pos, 1);
-            for offset in self.functions.values_mut() {
-                if *offset >= jmp_pos {
-                    *offset += 1;
-                }
-            }
-            for (_, offset) in self.test_cases.iter_mut() {
-                if (*offset as usize) >= jmp_pos {
-                    *offset += 1;
-                }
-            }
-            for offset in self.mono_offsets.values_mut() {
-                if *offset >= jmp_pos {
-                    *offset += 1;
-                }
-            }
-            if (self.program_start_offset as usize) > jmp_pos {
-                self.program_start_offset += 1;
-            }
-        }
+    fn finalize_bodies_inner(&mut self) {
+        self.emit_module_setup();
 
         // Drop unused function bodies (eager builtin thunks, unreferenced user
-        // fns) before IL opts / lower. Without a `main`, snippet / unit-test
-        // compiles keep their bodies, except the ones below.
+        // fns). Without a `main`, snippet / unit-test compiles keep their
+        // bodies, except the ones below.
         //
         // A body direct MIR does not lower (a shared generic one a clone
         // stands in for, as a derived `Eq for Box<T>`'s `ne`, or one that
-        // builds a `T`-dependent payload) is never a root: kept with nothing
-        // calling it, it would be a stack-lowered body (#1192, #1424).
-        let no_mir: HashSet<String> = self
-            .bytecode
-            .funcs()
+        // builds a `T`-dependent payload) is never a root (#1192, #1424).
+        let no_mir: HashSet<String> = self.bodies.funcs()
             .iter()
-            .filter(|f| f.hir_mir.is_none() && f.hir_mir_why.is_some())
+            .filter(|f| f.mir.is_none() && f.mir_why.is_some())
             .map(|f| f.name.clone())
             .collect();
         let has_main = self.functions.contains_key("main");
         if has_main || !no_mir.is_empty() {
-            let roots = if has_main {
+            let mut roots = if has_main {
                 let mut roots = vec!["main".to_string()];
+                // Startup calls these; no body does.
+                roots.extend(self.startup_steps.iter().map(|s| s.body.clone()));
                 if let Some(keep) = &self.keep_fns_in {
                     roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name)));
                 }
-                // Native code calls the twins in place of their host
-                // natives (`mir::native_twins`): no bytecode does.
-                if crate::mir::native_capture_active() {
-                    roots.extend(crate::mir::native_twins::twin_fn_names().filter(|name| self.functions.contains_key(name)));
-                }
                 roots
             } else {
-                let mut roots: Vec<String> =
-                    self.functions.keys().filter(|name| !no_mir.contains(*name)).cloned().collect();
-                roots.sort();
-                roots
+                self.functions.keys().filter(|name| !no_mir.contains(*name)).cloned().collect()
             };
-            let (_dropped, shrinks) = crate::il::prune_unused_functions(
-                &mut self.bytecode,
-                crate::il::TreeshakeInput {
-                    functions: &mut self.functions,
-                    fn_entry_labels: &mut self.fn_entry_labels,
-                    fn_debug_locals: &mut self.fn_debug_locals,
-                    test_cases: &mut self.test_cases,
-                    root_names: &roots,
-                    include_tests: self.include_tests,
-                    preserve_emit_start: Some(self.setup_entry_offset as usize),
-                },
-            );
-            for (threshold, delta) in shrinks {
-                for pc in self.mono_offsets.values_mut() {
-                    if *pc >= threshold {
-                        *pc -= delta;
-                    }
-                }
-                if (self.program_start_offset as usize) >= threshold {
-                    self.program_start_offset -= delta as u32;
-                }
-                if (self.setup_entry_offset as usize) >= threshold {
-                    self.setup_entry_offset -= delta as u32;
-                }
+            if self.include_tests {
+                roots.extend(self.test_body_names());
             }
-            let live_pcs: std::collections::HashSet<usize> =
-                self.functions.values().copied().collect();
-            self.mono_offsets.retain(|_, pc| live_pcs.contains(pc));
+            let live = self.reachable_bodies(roots);
+            self.functions.retain(|name, _| live.contains_key(name));
+            let functions = &self.functions;
+            self.fn_entry_labels.retain(|name, _| functions.contains_key(name));
+            self.fn_debug_locals.retain(|name, _| functions.contains_key(name));
+            let offsets: HashSet<usize> = functions.values().copied().collect();
+            self.test_cases.retain(|(_, offset)| offsets.contains(&(*offset as usize)));
+            self.mono_offsets.retain(|_, offset| offsets.contains(offset));
+            self.bodies.retain_funcs(|f| functions.contains_key(&f.name));
         }
 
-        #[cfg(any(test, feature = "dissect"))]
-        let il_snapshot = if capture_il {
-            Some(crate::dissect::IlSnapshot::new(
-                self.bytecode.ops().to_vec(),
-                self.bytecode.funcs().to_vec(),
-            ))
-        } else {
-            None
-        };
+        // A panic site names a location: each one the bodies use, once.
+        let mut locs: Vec<DebugLoc> =
+            self.bodies.funcs().iter().filter_map(|f| f.mir.as_deref()).flat_map(|m| m.value_locs.values().chain(m.op_locs.values()).chain(m.term_locs.values())).copied().filter(|l| l.is_known()).collect();
+        locs.sort_unstable_by_key(|l| (l.file, l.start_byte, l.end_byte));
+        locs.dedup();
+        self.debug_locs = locs;
 
         // A body without direct MIR is an internal error once codegen is
-        // clean; a module with errors still lowers (its bodies may be
-        // `report_unlowered` stubs) but never runs.
-        let mut opts = self.opt_options.clone();
-        opts.require_mir = !self
-            .messages
+        // clean; a module with errors never runs.
+        let clean = !self.messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR);
+        let missing: Vec<String> = self.bodies.funcs()
             .iter()
-            .any(|m| *m.kind() == reporting::MessageKind::ERROR);
-        opts.vm_refusal_message = Some(self.intern_string("this function does not fit the VM's bytecode: run the program on native code"));
-        self.bytecode.set_opt_options(opts);
-        let entry_sps: HashMap<String, u32> = self
-            .bytecode
-            .funcs()
-            .iter()
-            .map(|f| (f.name.clone(), f.entry_sp))
+            .filter(|f| f.mir.is_none() && (clean || f.mir_why.is_some()))
+            .map(|f| format!("`{}` ({})", f.name, f.mir_why.as_deref().unwrap_or("no MIR from HIR")))
             .collect();
-        #[cfg_attr(not(any(test, feature = "dissect")), allow(unused_mut))]
-        let mut lowered = if capture_il {
-            self.bytecode.lower_in_place_capturing(&mut self.constants)
-        } else {
-            self.bytecode.lower_in_place(&mut self.constants)
-        };
-        #[cfg(any(test, feature = "dissect"))]
-        let cursor_ops = lowered.pre_fuse_ops.take();
-        let map = |t: usize| -> usize {
-            if let Some(&p) = lowered.pre_to_post.get(&t) {
-                return p;
-            }
-            let mut best = lowered.code_len;
-            for (&pre, &post) in &lowered.pre_to_post {
-                if pre >= t && post < best {
-                    best = post;
-                }
-            }
-            best
-        };
-        // Prefer entry labels: MIR specialization and fuse shift emitting
-        // indices, so raw `functions` / `test_cases` PCs are stale.
-        // Per-function chunk remaps avoid collisions in the cumulative map.
-        let func_label_maps = &lowered.func_label_maps;
-        let funcs = self.bytecode.funcs();
-        let flat_label = |func_idx: usize, emit_id: u32| -> u32 {
-            func_label_maps
-                .get(func_idx)
-                .and_then(|m| m.get(&emit_id).copied())
-                .unwrap_or(emit_id)
-        };
-        // `dissect --il-post`: the optimized, pre-fuse IL, split per function
-        // at each function's (flattened) entry label.
-        #[cfg(any(test, feature = "dissect"))]
-        if capture_il && let Some(ops) = cursor_ops.as_ref() {
-            let entries: HashMap<u32, usize> = funcs
-                .iter()
-                .enumerate()
-                .filter_map(|(i, f)| f.entry.map(|l| (flat_label(i, l.0), i)))
-                .collect();
-            let mut post_funcs: Vec<crate::il::IlFunc> = Vec::new();
-            let mut emitting = 0usize;
-            for op in ops {
-                if let IlOp::Label(l) = op
-                    && let Some(&i) = entries.get(&l.0)
-                {
-                    if let Some(prev) = post_funcs.last_mut() {
-                        prev.code_end = emitting;
-                    }
-                    let mut f = funcs[i].clone();
-                    f.code_start = emitting;
-                    post_funcs.push(f);
-                }
-                if op.emits_code() {
-                    emitting += 1;
-                }
-            }
-            if let Some(prev) = post_funcs.last_mut() {
-                prev.code_end = emitting;
-            }
-            self.post_il_snapshot =
-                Some(crate::dissect::IlSnapshot::new(ops.clone(), post_funcs));
+        if clean && !missing.is_empty() {
+            panic!("internal compiler error: {} bod{} without MIR: {}", missing.len(), if missing.len() == 1 { "y" } else { "ies" }, missing.join(", "));
         }
-        let func_idx_for_pre = |pre: usize| -> Option<usize> {
-            funcs
-                .iter()
-                .position(|f| pre >= f.code_start && pre < f.code_end)
-        };
-        let func_idx_for_name =
-            |name: &str| -> Option<usize> { funcs.iter().position(|f| f.name == name) };
-        let resolve_fn_label_pc = |name: &str, emit_id: u32| -> Option<usize> {
-            let idx = func_idx_for_name(name)?;
-            let flat_id = flat_label(idx, emit_id);
-            lowered.label_pcs.get(&flat_id).copied()
-        };
-        let first_body = funcs.iter().map(|f| f.code_start).min().unwrap_or(usize::MAX);
-        let resolve_entry = |pre: usize| -> usize {
-            if let Some(label) = self.bytecode.entry_label_for_offset(pre) {
-                if let Some(idx) = func_idx_for_pre(pre) {
-                    let flat_id = flat_label(idx, label.0);
-                    if let Some(pc) = lowered.label_pcs.get(&flat_id).copied() {
-                        return pc;
-                    }
-                }
-                // The prologue (static / extern setup) keeps its emit-time
-                // ids when flattened; a body's private label space may reuse
-                // one, so `label_remap` would land inside that body.
-                if pre < first_body
-                    && let Some(&pc) = lowered.label_pcs.get(&label.0)
-                {
-                    return pc;
-                }
-                let global_flat = lowered
-                    .label_remap
-                    .get(&label.0)
-                    .copied()
-                    .unwrap_or(label.0);
-                if let Some(pc) = lowered.label_pcs.get(&global_flat).copied() {
-                    return pc;
-                }
-                if let Some(&pc) = lowered.label_pcs.get(&label.0) {
-                    return pc;
-                }
-            }
-            map(pre)
-        };
-        for (name, offset) in self.functions.iter_mut() {
-            if let Some(label) = self.fn_entry_labels.get(name)
-                && let Some(pc) = resolve_fn_label_pc(name, label.0) {
-                    *offset = pc;
-                    continue;
-                }
-            *offset = resolve_entry(*offset);
-        }
-        for (_, offset) in self.test_cases.iter_mut() {
-            *offset = resolve_entry(*offset as usize) as u32;
-        }
-        for offset in self.mono_offsets.values_mut() {
-            *offset = resolve_entry(*offset);
-        }
-        self.program_start_offset = resolve_entry(self.program_start_offset as usize) as u32;
-        self.setup_entry_offset = resolve_entry(self.setup_entry_offset as usize) as u32;
-        let mut cleanup = Vec::new();
-        for pad in &self.cleanup_pads {
-            // A body the LIR tier took emits its own pad from its MIR, with
-            // its `defer`s inline.
-            let lir = lowered.lir_cleanup_pads.get(&pad.func);
-            let (pad_label, frame_words) = match lir {
-                Some(&(label, words)) => (label, words),
-                None => (pad.pad, pad.frame_words),
-            };
-            let ranges = (|| {
-                let start = self
-                    .fn_entry_labels
-                    .get(&pad.func)
-                    .and_then(|l| resolve_fn_label_pc(&pad.func, l.0))
-                    .or_else(|| self.functions.get(&pad.func).copied())?;
-                let pad_pc = resolve_fn_label_pc(&pad.func, pad_label.0)?;
-                Some(cleanup_ranges_for(start, pad_pc, frame_words))
-            })();
-            // A body that is not its own IL function (a generic template:
-            // its instances carry their own pads) resolves to nothing.
-            cleanup.extend(ranges.unwrap_or_default());
-        }
-        // A promoted field's write-backs: a range per stretch of the loop
-        // between two of the source's stores ([`crate::mir::PanicPads`]).
-        for (func, pads) in &lowered.panic_pads {
-            for &(start, end, pad) in &pads.ranges {
-                let pcs = (|| Some((resolve_fn_label_pc(func, start.0)?, resolve_fn_label_pc(func, end.0)?, resolve_fn_label_pc(func, pad.0)?)))();
-                // A range the body's labels do not resolve would leave its
-                // traps without the stores they owe: the build stops.
-                let (start_pc, end_pc, pad_pc) = pcs.unwrap_or_else(|| panic!("panic pad of {func} does not resolve"));
-                if start_pc < end_pc {
-                    cleanup.push(common::CleanupRange {
-                        start_pc: start_pc as u32,
-                        end_pc: end_pc as u32,
-                        pad_pc: pad_pc as u32,
-                        frame_words: pads.frame,
-                    });
-                }
-            }
-        }
-        cleanup.sort_unstable_by_key(|r: &common::CleanupRange| r.start_pc);
-        self.cleanup_ranges = cleanup;
-
-        self.debug_locs = lowered.debug_locs;
-
-        let entries: Vec<(String, u32)> = self
-            .functions
-            .iter()
-            .map(|(n, pc)| (n.clone(), *pc as u32))
-            .collect();
-        self.deopt_map_drafts = lowered.deopt_map_drafts.clone();
-        // A debugger reads a local by the slot MIR's `local_binds` name, not
-        // by the register bytecode gave it.
-        let remaps = if self.debugger_attached { Default::default() } else { lowered.debug_slot_remaps.clone() };
-        apply_debug_slot_remaps(&mut self.fn_debug_locals, &remaps);
-        for (fn_name, vars) in self.fn_debug_vars.iter_mut() {
-            if let Some(remap) = remaps.get(fn_name) {
-                for v in vars.iter_mut() {
-                    // A body emitted from MIR assigns its own registers: a
-                    // local the remap leaves out holds no value there, and
-                    // its old slot may now hold another value.
-                    if let crate::debug_vars::DebugVarLoc::Slot(home) = v.loc
-                        && !remap.contains_key(&home)
-                    {
-                        v.validated = true;
-                        v.ranges.clear();
-                    }
-                    // So does a split local's component: each lives in the
-                    // register the remap names for the whole body, or
-                    // nowhere. Its stores carry no def-site tags there.
-                    let comps = v.component_slots();
-                    if !comps.is_empty() {
-                        v.def_sites.clear();
-                        v.validated = true;
-                        v.comp_ranges = comps
-                            .iter()
-                            .map(|c| remap.get(c).map(|&r| vec![(0, u32::MAX, r)]).unwrap_or_default())
-                            .collect();
-                    }
-                    v.loc.remap(remap);
-                }
-            }
-        }
-        let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
-        self.frame_inputs = Some(Box::new(super::FrameInputs {
-            needs_extent: lowered.needs_frame_extent.clone(),
-            temp_words: lowered.temp_words.clone(),
-            match_arities: lowered.match_arities.clone(),
-            entries,
-            entry_sps,
-            fn_kinds,
-        }));
-        self.bind_precise_frames();
-
-        let dense_seek = self
-            .bytecode
-            .as_slice()
-            .iter()
-            .filter(|b| *b.bytecode() == Instruction::Seek)
-            .map(|b| b.operand_u32())
-            .max()
-            .unwrap_or(0);
-        if !self.recursive_fns.is_empty() && dense_seek > 16 {
-            self.operand_stack_slots = crate::typechecking::rescale_operand_slots_for_dense_seek(
-                self.operand_stack_slots,
-                dense_seek,
+        if crate::mir::capture_open() {
+            let opts = self.opt_options.clone();
+            crate::mir::capture_native_bodies(
+                self.bodies.funcs().iter().filter_map(|f| Some((f.name.as_str(), f.entry, f.mir.as_deref()?))),
+                &opts,
             );
         }
-        self.operand_stack_slots = self
-            .operand_stack_slots
-            .min(crate::typechecking::MAX_OPERAND_STACK_SLOTS);
 
-        debug_assert_eq!(
-            self.debug_locs.len(),
-            self.bytecode.len(),
-            "debug_locs / bytecode length mismatch after finalize"
-        );
+        // A body is named by its entry label; 0 names nothing.
+        let entry_of = |label: crate::bodies::Label| label.0 as usize + 1;
+        let by_offset = |bodies: &crate::bodies::BodyTable, offset: usize| bodies.entry_label_for_offset(offset).map_or(0, entry_of);
+        for (name, offset) in self.functions.iter_mut() {
+            *offset = match self.fn_entry_labels.get(name) {
+                Some(&label) => entry_of(label),
+                None => by_offset(&self.bodies, *offset),
+            };
+        }
+        for (_, offset) in self.test_cases.iter_mut() {
+            *offset = by_offset(&self.bodies, *offset as usize) as u32;
+        }
+        for offset in self.mono_offsets.values_mut() {
+            *offset = by_offset(&self.bodies, *offset);
+        }
+        self.program_start_offset = by_offset(&self.bodies, self.program_start_offset as usize) as u32;
+        self.startup = self
+            .startup_steps
+            .iter()
+            .filter_map(|s| {
+                let entry = *self.functions.get(&s.body)? as u32;
+                Some(match s.slot {
+                    Some(slot) => common::StartupOp::Init { entry, slot },
+                    None => common::StartupOp::Call { entry },
+                })
+            })
+            .collect();
 
-
-        #[cfg(any(test, feature = "dissect"))]
-        return il_snapshot;
-        #[cfg(not(any(test, feature = "dissect")))]
-        debug_assert!(!capture_il);
     }
 
     /// Post-lower function symbols sorted by entry PC (for dissect / debug).
@@ -8592,35 +7889,7 @@ impl Compiler {
             })
             .collect();
         syms.sort_by_key(|s| s.entry_pc);
-        // Location lists over each body's final bytecode.
-        let bytecode = self.bytecode.as_slice();
-        let ends: Vec<u32> = syms
-            .iter()
-            .map(|s| s.entry_pc)
-            .chain(std::iter::once(bytecode.len() as u32))
-            .collect();
-        for sym in syms.iter_mut().filter(|_| !self.debugger_attached) {
-            let end = ends
-                .iter()
-                .copied()
-                .find(|&e| e > sym.entry_pc)
-                .unwrap_or(bytecode.len() as u32);
-            crate::debug_vars::location_lists(
-                bytecode,
-                self.constants(),
-                &self.debug_locs,
-                sym.entry_pc as usize,
-                end as usize,
-                &mut sym.vars,
-            );
-        }
         syms
-    }
-
-    /// Post-opt IL captured by the last [`Self::finalize_bytecode_capturing_il`].
-    #[cfg(any(test, feature = "dissect"))]
-    pub fn take_post_il_snapshot(&mut self) -> Option<crate::dissect::IlSnapshot> {
-        self.post_il_snapshot.take()
     }
 
     /// Class field and enum variant tables for rendering heap values.
@@ -8650,22 +7919,21 @@ impl Compiler {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ){
         self.compile_unfused(module, ast, false);
         self.report_capability_violations();
-        self.finalize_bytecode();
-        self.bytecode.clone_bytes()
+        self.finalize_bodies();
     }
 
     /// Append this module's IL to the shared buffer (multi-file pipeline).
     ///
     /// Returns an empty vec for API compatibility; the pipeline should call
-    /// [`finalize_bytecode`] once on the linked compiler buffer.
+    /// [`finalize_bodies`] once on the linked compiler buffer.
     pub fn compile_module<'compiler>(
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ){
         self.compile_module_inner(module, ast, false)
     }
 
@@ -8676,7 +7944,7 @@ impl Compiler {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ){
         self.compile_module_inner(module, ast, true)
     }
 
@@ -8726,12 +7994,11 @@ impl Compiler {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ){
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.compile_unfused_finish(module, ast);
         }));
         Self::rethrow_unless_recursion_limit(result);
-        Vec::new()
     }
 
     /// Only our own recursion-limit signal is swallowed (its message is
@@ -8749,7 +8016,7 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
         prepared: bool,
-    ) -> Vec<Byte> {
+    ){
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.compile_unfused(module, ast, prepared);
         }));
@@ -8762,16 +8029,6 @@ impl Compiler {
             // recorded in `do_compile`), any other panic is a real bug.
             std::panic::resume_unwind(payload);
         }
-        Vec::new()
-    }
-
-    /// Final lowered bytecode after [`finalize_bytecode`].
-    pub fn bytecode_slice(&self) -> &[Byte] {
-        self.bytecode.as_slice()
-    }
-
-    pub fn bytecode_vec(&self) -> Vec<Byte> {
-        self.bytecode.clone_bytes()
     }
 
     /// `const`s to compute at compile time, in setup order, with their
@@ -8792,205 +8049,84 @@ impl Compiler {
             .collect()
     }
 
-    /// Build [`Self::precise_frames`] from the finalized code: at finalize,
-    /// and again after a compile-time patch changes what a frame holds.
-    fn bind_precise_frames(&mut self) {
-        let Some(inputs) = self.frame_inputs.as_ref() else {
-            return;
-        };
-        self.precise_frames = super::precise_frames::bind_precise_frames(
-            &self.precise_frame_fns,
-            &inputs.needs_extent,
-            self.bytecode.as_slice(),
-            &self.constants,
-            &inputs.match_arities,
-            &inputs.entries,
-            &inputs.entry_sps,
-            self.prologue_jmp_target(),
-            &inputs.fn_kinds,
-            &inputs.temp_words,
-        );
-    }
-
     /// Whether [`Self::fold_sites`] are computed at this level.
     pub fn call_fold_on(&self) -> bool {
         self.opt_options.call_fold && !self.debugger_attached
     }
 
-    /// Pure calls with constant arguments in the finalized code, as
-    /// `(pc of the CALL, the argument words before it, the call)`: a `CALL`
-    /// to a function [`Self::fold_fns`] lists, one word back, whose
-    /// arguments are the `CONST` / `STRING` words right before it, or a
-    /// dense `DensePush` of registers the `DenseConst`s right before it set,
-    /// with no branch landing among them (so they are its arguments on every
-    /// path). Folding clears the argument words; a dense call's registers
-    /// keep their constants. A call to an
-    /// auto-par worker computes the function it runs (its last argument is
-    /// the worker's depth).
-    pub fn fold_sites(&self) -> Vec<(usize, usize, crate::macros::FoldCall)> {
-        use crate::macros::FoldCall;
+    /// Pure calls with constant arguments in the captured bodies: a one-word
+    /// call of a function [`Self::fold_fns`] lists. A call to an auto-par
+    /// worker computes the function it runs (its last argument is the
+    /// worker's depth).
+    pub fn fold_sites(&self) -> Vec<(crate::mir::ConstCall, crate::macros::FoldCall)> {
+        use crate::macros::{FoldCall, FoldValue};
+        use crate::mir::ConstArg;
         // A call computed at compile time drops its values there, so a
         // program with a `fn drop()` would miss those finalizers.
         if self.fold_fns.is_empty() || self.checker.any_drop() {
             return Vec::new();
         }
-        let mut entries: HashMap<usize, (usize, bool, bool)> = HashMap::new();
+        let label_of = |name: &str| self.fn_entry_labels.get(name).map(|l| l.0);
+        let mut targets: HashMap<u32, (u32, bool, bool)> = HashMap::new();
         for (name, &text) in &self.fold_fns {
-            if let Some(entry) = self.function_offset(name) {
-                entries.insert(entry, (entry, text, false));
+            if let (Some(label), Some(entry)) = (label_of(name), self.function_offset(name)) {
+                targets.insert(label, (entry as u32, text, false));
             }
         }
         for (worker, func) in &self.par_worker_of {
-            if let (Some(w), Some(&text)) = (self.function_offset(worker), self.fold_fns.get(func))
-                && let Some(entry) = self.function_offset(func)
-            {
-                entries.insert(w, (entry, text, true));
+            if let (Some(label), Some(&text), Some(entry)) = (label_of(worker), self.fold_fns.get(func), self.function_offset(func)) {
+                targets.insert(label, (entry as u32, text, true));
             }
         }
-        let code = self.bytecode.as_slice();
-        let Some(targets) = common::jump_targets(code, &self.constants) else {
-            return Vec::new();
-        };
         let mut out = Vec::new();
-        for (pc, b) in code.iter().enumerate() {
-            if *b.bytecode() != Instruction::CALL || b.call_ret_words() != 1 {
+        for call in crate::mir::capture_const_calls() {
+            let Some(&(entry, text, worker)) = targets.get(&call.target.0) else { continue };
+            if worker && call.args.is_empty() {
                 continue;
             }
-            let (arity, target) = b.call_parts();
-            let Some(&(entry, text, worker)) = entries.get(&target) else {
-                continue;
-            };
-            if worker && arity == 0 {
-                continue;
-            }
-            let Some((words, mut args)) = self
-                .stack_fold_args(code, &targets, pc, arity)
-                .or_else(|| self.dense_fold_args(code, &targets, pc, arity))
-            else {
-                continue;
-            };
+            let args: Option<Vec<FoldValue>> = call
+                .args
+                .iter()
+                .map(|a| match *a {
+                    ConstArg::Word(w) => Some(FoldValue::Word(w)),
+                    ConstArg::Text(i) => self.strings.get(i as usize).cloned().map(FoldValue::Text),
+                })
+                .collect();
+            let Some(mut args) = args else { continue };
             if worker {
                 args.pop();
             }
-            out.push((pc, words, FoldCall { entry: entry as u32, args, text }));
+            out.push((call, FoldCall { entry, args, text }));
         }
         out
     }
 
-    /// The `CONST` / `STRING` words right before the `CALL` at `pc`.
-    fn stack_fold_args(
-        &self,
-        code: &[Byte],
-        targets: &[bool],
-        pc: usize,
-        arity: usize,
-    ) -> Option<(usize, Vec<crate::macros::FoldValue>)> {
+    /// Replace each folded call with its value, in the bodies the program
+    /// runs.
+    pub fn apply_call_folds(&mut self, folds: Vec<(crate::mir::ConstCall, crate::macros::FoldValue)>) {
         use crate::macros::FoldValue;
-        if arity > pc || targets[pc + 1 - arity..=pc].iter().any(|&t| t) {
-            return None;
-        }
-        let args = code[pc - arity..pc]
-            .iter()
-            .map(|w| match *w.bytecode() {
-                Instruction::CONST => Some(FoldValue::Word(w.constant(&self.constants))),
-                Instruction::STRING => self.strings.get(w.operand_u32() as usize).cloned().map(FoldValue::Text),
-                _ => None,
+        use crate::mir::ConstResult;
+        let results: Vec<_> = folds
+            .into_iter()
+            .map(|(call, value)| {
+                let result = match value {
+                    FoldValue::Word(w) => ConstResult::Word(w),
+                    FoldValue::Text(s) => ConstResult::Text(self.intern_string(&s)),
+                };
+                (call, result)
             })
-            .collect::<Option<Vec<_>>>()?;
-        Some((arity, args))
+            .collect();
+        crate::mir::replace_const_calls(&results);
     }
 
-    /// A dense call's arguments: `DenseConst`s right before the
-    /// `DensePush` that feeds the `CALL` at `pc`, one per pushed register.
-    /// Only the push is an argument word.
-    fn dense_fold_args(
-        &self,
-        code: &[Byte],
-        targets: &[bool],
-        pc: usize,
-        arity: usize,
-    ) -> Option<(usize, Vec<crate::macros::FoldValue>)> {
-        use crate::macros::FoldValue;
-        let push = code.get(pc.checked_sub(1)?)?;
-        if *push.bytecode() != Instruction::DensePush || arity == 0 || arity + 1 > pc {
-            return None;
-        }
-        let (n, base) = push.dense_move_parts();
-        if n != arity || targets[pc - 1 - arity..=pc].iter().any(|&t| t) {
-            return None;
-        }
-        let mut args = vec![None; arity];
-        for w in &code[pc - 1 - arity..pc - 1] {
-            if *w.bytecode() != Instruction::DenseConst {
-                return None;
-            }
-            let (ty, dest, payload, pool) = w.dense_const_parts();
-            let slot = args.get_mut(dest.checked_sub(base)?)?;
-            if slot.is_some() || !matches!(ty, common::dense::TY_I64 | common::dense::TY_F64) {
-                return None;
-            }
-            let raw = if pool {
-                *self.constants.get(payload as usize)?
-            } else {
-                payload as i16 as i64 as u64
-            };
-            *slot = Some(FoldValue::Word(raw));
-        }
-        Some((1, args.into_iter().collect::<Option<Vec<_>>>()?))
-    }
-
-    /// Replace each folded call (`(pc of the CALL, argument words, value)`, from
-    /// [`Self::fold_sites`]) with its value: its argument words become
-    /// `NOOP`s and the `CALL` a `CONST` or `STRING`.
-    pub fn apply_call_folds(&mut self, folds: &[(usize, usize, crate::macros::FoldValue)]) {
-        use crate::macros::FoldValue;
-        let mut words = Vec::with_capacity(folds.len());
-        for (_, _, value) in folds {
-            let word = match value {
-                // An inline operand is non-negative: its top bit is the
-                // pool flag.
-                FoldValue::Word(w) => match i32::try_from(*w as i64) {
-                    Ok(small) if small >= 0 => Byte::new(Instruction::CONST).with_const_inline(small),
-                    _ => {
-                        self.constants.push(*w);
-                        Byte::new(Instruction::CONST).with_const_pool(self.constants.len() as u32 - 1)
-                    }
-                },
-                FoldValue::Text(s) => Byte::new(Instruction::STRING).with_operand_u32(self.intern_string(s)),
-            };
-            words.push(word);
-        }
-        let Some(code) = self.bytecode.lowered_mut() else {
-            return;
-        };
-        for ((pc, n, _), word) in folds.iter().zip(words) {
-            for w in &mut code[pc - n..*pc] {
-                *w = Byte::new(Instruction::NOOP);
-            }
-            code[*pc] = word;
-        }
-        // A folded `CALL` is no longer a safepoint, and its value is no
-        // call result.
-        self.bind_precise_frames();
-    }
-
-    /// Replace the setup region's `CALL init; StoreStatic slot` for each of
-    /// `consts` (`(entry, slot)`) with one `RestoreSnapshot` of `snapshot`
-    /// (appended to the pool), at the first const's place, and `NOOP`s.
-    /// False, changing nothing, when a const's setup pair is not found.
+    /// Replace the startup step of each of `consts` (`(entry, slot)`) with
+    /// one restore of `snapshot` (appended to the pool), at the first const's
+    /// place. False, changing nothing, when a const's step is not found.
     pub fn apply_const_snapshot(&mut self, consts: &[(u32, u32)], snapshot: &[u64]) -> bool {
-        let Some(code) = self.bytecode.lowered_mut() else {
-            return false;
-        };
+        use common::StartupOp as Op;
         let mut sites = Vec::with_capacity(consts.len());
         for &(entry, slot) in consts {
-            let found = code.windows(2).position(|w| {
-                *w[0].bytecode() == Instruction::CALL
-                    && w[0].call_parts().1 == entry as usize
-                    && *w[1].bytecode() == Instruction::StoreStatic
-                    && w[1].operand_u32() == slot
-            });
-            match found {
+            match self.startup.iter().position(|op| *op == Op::Init { entry, slot }) {
                 Some(at) => sites.push(at),
                 None => return false,
             }
@@ -8999,11 +8135,15 @@ impl Compiler {
             return false;
         };
         let at = self.constants.len() as u32;
-        for &site in &sites {
-            code[site] = Byte::new(Instruction::NOOP);
-            code[site + 1] = Byte::new(Instruction::NOOP);
-        }
-        code[first] = Byte::new(Instruction::RestoreSnapshot).with_operand_u32(at);
+        let mut i = 0;
+        self.startup.retain_mut(|op| {
+            let keep = i == first || !sites.contains(&i);
+            if i == first {
+                *op = Op::Restore { at };
+            }
+            i += 1;
+            keep
+        });
         self.constants.extend_from_slice(snapshot);
         true
     }
@@ -9157,16 +8297,3 @@ fn pure_static_inits(checker: &crate::typechecking::infer::Checker, hir: &crate:
 #[cfg(test)]
 #[path = "lib.tests.rs"]
 mod tests;
-
-/// The body `start..pad`, unwinding through `pad`.
-fn cleanup_ranges_for(start: usize, pad: usize, frame_words: u32) -> Vec<common::CleanupRange> {
-    (start < pad)
-        .then_some(common::CleanupRange {
-            start_pc: start as u32,
-            end_pc: pad as u32,
-            pad_pc: pad as u32,
-            frame_words,
-        })
-        .into_iter()
-        .collect()
-}

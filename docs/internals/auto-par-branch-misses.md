@@ -1,5 +1,10 @@
 # Auto-par vs branch misses (investigation)
 
+Past investigation, run on the bytecode VM, since deleted: its dispatch
+(`execute_dense`, `COIL_THREADED_DISPATCH`, peeks, byte sizes) no longer exists,
+and `COIL_SHARED_HEAP` is gone. The reactor findings still describe
+`machine/src/reactor.rs`.
+
 Report-only investigation on main `f35b3ea4` G3 (no ISA / codegen change), plus
 **COI-390** join wait (drop 1 ms poll) and **COI-391** idle park (drop 2 ms
 empty-steal). Symptom: `poop` shows many **branch misses** when `--auto-par`
@@ -156,8 +161,7 @@ The dense streak (`execute_dense`) peeks trailing `JMP` (X2), `DenseCast`+bin (S
 - **Fib IPA workers** stay on CALL/RETURN (kernel ops). They **do not** enter
   `execute_dense`. Table vs match wall on fib IPA is a wash (24.6 vs 24.1 ms).
 - **Mandelbrot** is sequential dense: G3 peeks apply, auto-par does not start
-  the reactor. Match is slightly faster here (17.6 vs 18.6 ms), same as
-  [threaded-dispatch.md](threaded-dispatch.md) G3 notes.
+  the reactor. Match is slightly faster here (17.6 vs 18.6 ms).
 - **loop_ipa_sum** workers run a dense int loop **and** one steal. Extra
   ctx-switches still track the idle pool, not peek density.
 
@@ -187,9 +191,8 @@ source.
 | 1 | ~~Join wait without 1 ms poll~~ **landed (COI-390)** — `join_timeouts=0`, `join_parks≈4` on fib IPA | small reactor | Remaining empty-steals were idle 2 ms |
 | 2 | ~~Idle workers park until `notify`~~ **landed (COI-391)** — `idle_waits≈12`, `steal_empty≈140` on fib IPA (was ~30 / ~200) | small reactor | Cuts timed empty-steal; leftover empties are one walk per notify |
 | 3 | **Read `poop` as miss rate + pin `COIL_MAX_WORKER_THREADS`** when comparing seq vs par | docs / script | Absolute misses scale with threads; `poop_baseline.sh` fib is already sequential |
-| 4 | **Do not revert G3 peeks / DenseBin2 for this symptom** | — | Fib IPA never takes them; mandelbrot auto-par is a no-op |
 | 5 | Optional: start `n = min(cap, inflight)` workers, or keep a 1-worker pool until the second submit | medium | Avoids 3 idle pollers for a 3-job fib |
-| 6 | PMU laptop: `perf record -e branch-misses` on fib IPA vs seq; expect hits in `steal_from_*` / pthread condwait, not `exec_dense` | measurement | Confirms (1) if this cloud’s missing PMU worried anyone |
+| 6 | PMU laptop: `perf record -e branch-misses` on fib IPA vs seq; expect hits in `steal_from_*` / pthread condwait | measurement | Confirms (1) if this cloud’s missing PMU worried anyone |
 | 7 | Shared-heap CAS / F3 | skip for this | No evidence on flagships |
 
 Rank 1–2 landed (COI-390, COI-391). Free leftover: (3). Large design: changing hop/grain so fib spawns more

@@ -1,4 +1,4 @@
-// COI-268: float loop that must run on dense MIR opcodes.
+// COI-268: float loop that must run in a dense loop.
 use tests::assert;
 
 fn escape(float cr, float ci, int max_iter) -> int {

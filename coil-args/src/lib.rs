@@ -77,14 +77,8 @@ pub struct NurseryFlag {
     /// At exit, print how many copy-on-write copies each source line made
     #[arg(long)]
     pub cow_report: bool,
-    /// Compile what it can to native code with Cranelift before running
+    /// Run on the MIR interpreter instead of native code
     #[arg(long)]
-    pub jit: bool,
-    /// Run on the VM alone, even when the archive carries native MIR
-    #[arg(long, conflicts_with = "jit")]
-    pub no_jit: bool,
-    /// Run on the MIR interpreter instead of the VM
-    #[arg(long, conflicts_with_all = ["jit", "no_jit"])]
     pub mir: bool,
 }
 

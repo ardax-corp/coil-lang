@@ -240,7 +240,7 @@ fn op_lines(debug: &ProgramDebug, base_dir: Option<&Path>) -> Vec<Option<(u32, u
         .collect()
 }
 
-/// Put the debugger's op numbers where `artifacts` holds bytecode PCs.
+/// Put the debugger's op numbers where `artifacts` holds entry ids.
 fn number_ops(artifacts: &mut DissectArtifacts, locs: Vec<common::DebugLoc>, entries: &[(String, u32)]) {
     let starts: HashMap<&str, u32> = entries.iter().map(|(name, pc)| (name.as_str(), *pc)).collect();
     artifacts.functions.retain_mut(|f| {
@@ -268,14 +268,12 @@ struct Launch {
 impl Launch {
     fn new(pipeline: &Pipeline, artifacts: &DissectArtifacts, entry: &Path) -> Self {
         let program = Arc::new(machine::ThreadProgram {
-            code: Arc::new(artifacts.bytecode.clone()),
-            constants: Arc::new(artifacts.constants.clone()),
+            startup: Arc::new(pipeline.startup()),
+            main: pipeline.main_offset(),
+            constants: Arc::new(pipeline.constants().to_vec()),
             strings: Arc::new(artifacts.strings.clone()),
             static_slot_count: pipeline.static_slot_count(),
             debug: pipeline.program_debug_full(),
-            operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: Arc::new(pipeline.precise_frames().to_vec()),
             class_word_kinds: machine::class_kind_table(&pipeline.class_word_kinds()),
             static_word_kinds: Arc::new(pipeline.static_word_kinds()),
         });
@@ -297,9 +295,9 @@ impl Launch {
         }
     }
 
-    fn with_code(mut self, program: coil_mir_interp::InterpProgram, code_len: usize) -> Self {
+    fn with_code(mut self, program: coil_mir_interp::InterpProgram, _code_len: usize) -> Self {
         let complete = program.refused.is_empty();
-        let code = machine::native::NativeCode::new(code_len, program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+        let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
         self.code = Some(Arc::new(code));
         self
     }
@@ -376,7 +374,7 @@ impl DebugSession {
         let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         pipeline.bind_project_roots_with_default(dir, extra_roots);
         compiler::native_mir::start_raw_capture();
-        let mut artifacts = match pipeline.compile_dissect(filename, false) {
+        let mut artifacts = match pipeline.compile_dissect(filename) {
             Ok(a) => a,
             Err(_) => {
                 let _ = compiler::native_mir::take_native_capture();
@@ -394,7 +392,7 @@ impl DebugSession {
         let mir_text = bodies.iter().map(|b| (b.name.clone(), b.mir.to_string())).collect();
         let pcs = launch.program.debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
         let debug_program = coil_mir_interp::debug::prepare_debug(bodies, &pcs);
-        let launch = launch.with_code(debug_program.program, artifacts.bytecode.len());
+        let launch = launch.with_code(debug_program.program, 0);
         number_ops(&mut artifacts, debug_program.locs, &debug_program.entries);
         let op_lines = op_lines(&artifacts.debug, Some(&base_dir));
         let line_index = LineIndex::build(&artifacts.debug, Some(&base_dir));
@@ -513,7 +511,7 @@ impl DebugSession {
         names: &[&str],
     ) -> Result<Vec<BreakpointInfo>, String> {
         self.breakpoints.retain(|b| b.source.is_some());
-        // Empty replacement still must drop cleared fn BPs from the VM.
+        // Empty replacement still must drop cleared fn BPs from the runtime.
         if names.is_empty() {
             self.sync_vm_breakpoints();
             return Ok(Vec::new());
@@ -561,9 +559,9 @@ impl DebugSession {
         self.begin_run(false)
     }
 
-    /// Start and stop before the first bytecode insn (DAP `stopOnEntry`).
+    /// Start and stop before the first MIR step (DAP `stopOnEntry`).
     ///
-    /// Uses a temporary PC-0 breakpoint so the VM actually builds a frame;
+    /// Uses a temporary PC-0 breakpoint so the runtime actually builds a frame;
     /// a fake pause left `stackTrace` / step empty.
     pub fn start_paused_at_entry(&mut self) -> StopReason {
         self.begin_run(true)
@@ -1257,59 +1255,6 @@ mod tests {
     }
 
     #[test]
-    fn line_index_maps_known_loc() {
-        let text = "fn main() {\n    return;\n}\n";
-        let tmp = std::env::temp_dir().join(format!("coil_dbg_line_{}", std::process::id()));
-        fs::write(&tmp, text).unwrap();
-        let path = tmp.display().to_string();
-        let mut debug = ProgramDebug {
-            source_files: vec![path.clone()],
-            debug_locs: vec![DebugLoc::unknown(); 5],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        let ret_off = text.find("return").unwrap() as u32;
-        debug.debug_locs[3] = DebugLoc {
-            file: 0,
-            start_byte: ret_off,
-            end_byte: ret_off + 6,
-        };
-        let idx = LineIndex::build(&debug, None);
-        let pcs = idx.pcs_for_line(Some(&path), 2, &path);
-        assert!(pcs.contains(&3), "pcs={pcs:?}");
-        let _ = fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn line_index_resolves_basename_hint() {
-        let text = "fn main() {\n    return;\n}\n";
-        let tmp = std::env::temp_dir().join(format!("coil_dbg_base_{}", std::process::id()));
-        fs::write(&tmp, text).unwrap();
-        let path = tmp.display().to_string();
-        let mut debug = ProgramDebug {
-            source_files: vec![path.clone()],
-            debug_locs: vec![DebugLoc::unknown(); 4],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        let ret_off = text.find("return").unwrap() as u32;
-        debug.debug_locs[2] = DebugLoc {
-            file: 0,
-            start_byte: ret_off,
-            end_byte: ret_off + 6,
-        };
-        let idx = LineIndex::build(&debug, None);
-        let base = Path::new(&path).file_name().unwrap().to_str().unwrap();
-        let pcs = idx.pcs_for_line(Some(base), 2, &path);
-        assert!(pcs.contains(&2), "pcs={pcs:?}");
-        let _ = fs::remove_file(&tmp);
-    }
-
-    #[test]
     fn function_breakpoint_exposes_fib_locals_via_frame_id() {
         let mut session = compile_fib();
         session.set_function_breakpoint("fib").expect("break fib");
@@ -1369,7 +1314,7 @@ mod tests {
         let reason = session.continue_exec().expect("continue");
         assert!(
             matches!(reason, StopReason::Halt),
-            "empty fn replace must sync VM; reason={reason:?}"
+            "empty fn replace must sync the runtime; reason={reason:?}"
         );
     }
 
@@ -1465,7 +1410,7 @@ mod tests {
         assert!(session.started());
         assert!(
             !session.stack_frames().is_empty(),
-            "stopOnEntry must build a VM frame"
+            "stopOnEntry must build a frame"
         );
         let reason = session.continue_exec().expect("continue");
         assert!(
@@ -1523,65 +1468,6 @@ mod tests {
     }
 
     #[test]
-    fn debugger_attached_may_dense_opcodes() {
-        use common::Instruction;
-        let src = r#"
-fn hot(float a, float b, int n) -> float {
-    let i = 0;
-    let s = 0.0;
-    while i < n {
-        let xf = i as float;
-        s = s + xf + a - b;
-        i = i + 1;
-    }
-    return s;
-}
-fn main() {
-    let _ = hot(2.0, 1.0, 8);
-}
-"#;
-        let dir = std::env::temp_dir().join(format!("coil_dbg_i7_{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("hot.coil");
-        fs::write(&path, src).unwrap();
-        let mut session = compile_entry(path.to_str().unwrap(), HostGrants::deny_all())
-            .expect("compile debugger-attached hot");
-        let dense = session.artifacts.bytecode.iter().any(|b| {
-            matches!(
-                *b.bytecode(),
-                Instruction::DenseBin
-                    | Instruction::DenseBin2
-                    | Instruction::DenseBinJmpf
-                    | Instruction::DenseIndexJmpf
-                    | Instruction::DenseCmp
-                    | Instruction::DenseConst
-                    | Instruction::DenseMove
-                    | Instruction::DenseUnary
-                    | Instruction::DenseCast
-                    | Instruction::VLoad
-                    | Instruction::VStore
-                    | Instruction::VBin
-                    | Instruction::VMove
-                    | Instruction::VReduce
-                    | Instruction::VFma
-                    | Instruction::DenseIndex
-                    | Instruction::DenseStoreIndex
-                    | Instruction::DenseArrayLen
-                    | Instruction::DenseMake
-                    | Instruction::DenseMakeK
-                    | Instruction::DensePush
-            )
-        });
-        assert!(dense, "B8: debugger-attached may keep dense reconstruct");
-        let reason = session.start();
-        assert!(
-            matches!(reason, StopReason::Halt),
-            "dense debug session must halt; reason={reason:?}"
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn host_grants_apply_to_debug_compile() {
         let dir = std::env::temp_dir().join(format!("coil_dbg_grant_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
@@ -1617,5 +1503,54 @@ fn main() {
         let text = "/// docs\nmacro twice(Expr e) -> Code { return e; }\nfn main() {}\n";
         assert_eq!(find_fn_decl_line(text, "twice"), Some(2));
         assert_eq!(find_fn_decl_line(text, "main"), Some(3));
+    }
+
+    #[test]
+    fn line_index_resolves_basename_hint() {
+        let text = "fn main() {\n    return;\n}\n";
+        let tmp = std::env::temp_dir().join(format!("coil_dbg_base_{}", std::process::id()));
+        fs::write(&tmp, text).unwrap();
+        let path = tmp.display().to_string();
+        let mut debug = ProgramDebug {
+            source_files: vec![path.clone()],
+            debug_locs: vec![DebugLoc::unknown(); 4],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        let ret_off = text.find("return").unwrap() as u32;
+        debug.debug_locs[2] = DebugLoc {
+            file: 0,
+            start_byte: ret_off,
+            end_byte: ret_off + 6,
+        };
+        let idx = LineIndex::build(&debug, None);
+        let base = Path::new(&path).file_name().unwrap().to_str().unwrap();
+        let pcs = idx.pcs_for_line(Some(base), 2, &path);
+        assert!(pcs.contains(&2), "pcs={pcs:?}");
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn line_index_maps_known_loc() {
+        let text = "fn main() {\n    return;\n}\n";
+        let tmp = std::env::temp_dir().join(format!("coil_dbg_line_{}", std::process::id()));
+        fs::write(&tmp, text).unwrap();
+        let path = tmp.display().to_string();
+        let mut debug = ProgramDebug {
+            source_files: vec![path.clone()],
+            debug_locs: vec![DebugLoc::unknown(); 5],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        let ret_off = text.find("return").unwrap() as u32;
+        debug.debug_locs[3] = DebugLoc {
+            file: 0,
+            start_byte: ret_off,
+            end_byte: ret_off + 6,
+        };
+        let idx = LineIndex::build(&debug, None);
+        let pcs = idx.pcs_for_line(Some(&path), 2, &path);
+        assert!(pcs.contains(&3), "pcs={pcs:?}");
+        let _ = fs::remove_file(&tmp);
     }
 }

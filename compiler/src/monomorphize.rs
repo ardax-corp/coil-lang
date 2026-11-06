@@ -1,7 +1,7 @@
 //! Monomorphization planning for ground generic call sites.
 //!
 //! This module is intentionally analysis-first. It decides which generic calls
-//! are safe and small enough to specialize; `Compiler` owns the bytecode
+//! are safe and small enough to specialize; `Compiler` owns the code
 //! emission for each accepted specialization.
 
 use std::collections::{BTreeSet, HashMap};

@@ -16,7 +16,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use common::{Instruction, ProgramDebug, Value};
+use common::{ProgramDebug, Value};
 
 use crate::collect::{GcHost, HostRoot};
 use crate::native::{Invoked, NativeCode, NativeCtx, NativeEnv, NativeHost, NativeOutcome, NativePanic};
@@ -84,21 +84,14 @@ impl Drop for TaskFiber {
     }
 }
 
-/// Whether programs native code covers run on the driver
-/// (`COIL_NATIVE_DRIVER=0`: the VM runs them, calling native code per body).
-pub(crate) fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_NATIVE_DRIVER").is_none_or(|v| v != "0"))
-}
-
 /// The program a driver runs: its code (for the prologue and the
 /// snapshot pool), the native code for it and its debug tables.
 pub(crate) struct DriverProgram {
-    pub(crate) code: Arc<Vec<common::Byte>>,
+    pub(crate) startup: Arc<Vec<common::StartupOp>>,
+    pub(crate) main: Option<u32>,
     pub(crate) constants: Arc<Vec<u64>>,
     pub(crate) native: Arc<NativeCode>,
     pub(crate) debug: ProgramDebug,
-    pub(crate) base_dir: Option<std::path::PathBuf>,
     /// What a thread it spawns runs (`None`: it spawns none).
     pub(crate) thread_program: Option<Arc<crate::thread::ThreadProgram>>,
     /// Where spawned threads print (the test harness's capture).
@@ -156,14 +149,12 @@ impl<'a> Driver<'a> {
         print: Driver::host_print,
         tasks: Driver::host_tasks,
         apply: Driver::host_apply,
-        call: Driver::host_call,
         call_value: Driver::host_call_value,
         claim: Driver::host_claim,
         resume: Driver::host_resume,
         collect: Driver::host_collect,
         gc: Driver::host_gc,
         free: Driver::host_free,
-        host: |_, _, _, _, _, _| None,
         ffi: Driver::host_ffi,
         invoke: Driver::host_invoke,
     };
@@ -199,7 +190,7 @@ impl<'a> Driver<'a> {
         use crate::native::Applied;
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
-        let code_len = d.program.code.len();
+        let code_len = d.program.native.code_len();
         match crate::apply::apply(&mut d.rt.heap, Value::from(callee), args, dicts, code_len) {
             crate::apply::Apply::Value(v) => Applied::Value(v.bits()),
             crate::apply::Apply::Call { pc, args, extras } if extras.is_empty() => Applied::Call { pc, args },
@@ -228,70 +219,45 @@ impl<'a> Driver<'a> {
         self.rt.thread_spawn_context(self.program.thread_program.clone()?, self.program.shared_print.clone())
     }
 
-    /// Whether the driver can run the program that starts at `ip`: its
-    /// prologue holds only startup ops, and every body it calls compiled.
-    pub(crate) fn can_start(code: &[common::Byte], native: &NativeCode, ip: usize) -> bool {
-        let mut pc = ip;
-        for _ in 0..code.len() {
-            let Some(b) = code.get(pc) else { return false };
-            match *b.bytecode() {
-                Instruction::CALL => {
-                    // `CALL 0`: the prologue's bootstrap frame, no call.
-                    let t = b.call_parts().1;
-                    if t != 0 && native.lookup(t).is_none() {
-                        return false;
-                    }
-                }
-                Instruction::StoreStatic | Instruction::POP | Instruction::NOOP | Instruction::RestoreSnapshot => {}
-                // The prologue's end, or the `CALL main; RETURN` its jump
-                // into `main` leads to with native code.
-                Instruction::HALT | Instruction::RETURN => return true,
-                Instruction::JMP => {
-                    let t = b.operand_u32() as usize;
-                    if native.lookup(t).is_some() {
-                        return true;
-                    }
-                    pc = t;
-                    continue;
-                }
-                _ => return false,
-            }
-            pc += 1;
-        }
-        false
+    /// Whether `native` covers `program`: its startup and its `main`.
+    pub(crate) fn covers(startup: &[common::StartupOp], main: Option<u32>, native: &NativeCode) -> bool {
+        use common::StartupOp as Op;
+        native.is_complete()
+            && main.is_none_or(|m| native.lookup(m as usize).is_some())
+            && startup.iter().all(|op| match *op {
+                Op::Call { entry } | Op::Init { entry, .. } => native.lookup(entry as usize).is_some(),
+                Op::Restore { .. } => true,
+            })
     }
 
-    /// Run the prologue from `ip` (as [`Self::can_start`] checked it):
-    /// the startup ops, until its `HALT` or its jump into `main`, which
-    /// is called. Stops at a panic.
-    pub(crate) fn run_from(&mut self, ip: usize) {
-        let code = Arc::clone(&self.program.code);
-        let mut pc = ip;
-        let mut last = Value::default();
-        while !self.panicked {
-            let Some(b) = code.get(pc) else { return };
-            match *b.bytecode() {
-                Instruction::CALL if b.call_parts().1 == 0 => {}
-                Instruction::CALL => last = self.call(b.call_parts().1, &[]).map_or_else(Value::default, |(lo, _)| Value::from(lo)),
-                Instruction::StoreStatic => {
-                    if let Some(s) = self.rt.statics.get_mut(b.operand_u32() as usize) {
-                        *s = last;
-                    }
-                }
-                Instruction::POP | Instruction::NOOP => {}
-                Instruction::RestoreSnapshot => self.restore_snapshot(b.operand_u32() as usize),
-                Instruction::JMP => {
-                    let t = b.operand_u32() as usize;
-                    if self.program.native.lookup(t).is_some() {
-                        let _ = self.call(t, &[]);
-                        return;
-                    }
-                    pc = t;
-                    continue;
-                }
-                _ => return,
+    /// What runs before `main`. A panic stops it.
+    pub(crate) fn run_startup(&mut self) {
+        use common::StartupOp as Op;
+        let ops = Arc::clone(&self.program.startup);
+        for op in ops.iter() {
+            if self.panicked {
+                return;
             }
-            pc += 1;
+            match *op {
+                Op::Call { entry } => {
+                    let _ = self.call(entry as usize, &[]);
+                }
+                Op::Init { entry, slot } => {
+                    let word = self.call(entry as usize, &[]).map_or_else(Value::default, |(lo, _)| Value::from(lo));
+                    if let Some(s) = self.rt.statics.get_mut(slot as usize) {
+                        *s = word;
+                    }
+                }
+                Op::Restore { at } => self.restore_snapshot(at as usize),
+            }
+        }
+    }
+
+    /// The whole program: its startup, then `main`.
+    pub(crate) fn run_program(&mut self) {
+        self.run_startup();
+        if let Some(main) = self.program.main.filter(|_| !self.panicked) {
+            let _ = self.call(main as usize, &[]);
         }
     }
 
@@ -390,10 +356,6 @@ impl<'a> Driver<'a> {
                 self.native_panic(p);
                 None
             }
-            NativeOutcome::Bailed => {
-                self.report("native driver: a native call could not start (no stack)", None, Vec::new(), false);
-                None
-            }
             // Only a task body or a generator parks, and neither comes here.
             NativeOutcome::Parked(..) => {
                 self.report("native driver: a call parked with native frames under it", None, Vec::new(), false);
@@ -407,7 +369,7 @@ impl<'a> Driver<'a> {
     pub(crate) fn call_value(&mut self, callee: Value, args: &[Value], dicts: usize) -> Option<Value> {
         let (mut callee, mut args, mut dicts) = (callee, args.to_vec(), dicts);
         loop {
-            let code_len = self.program.code.len();
+            let code_len = self.program.native.code_len();
             match crate::apply::apply(&mut self.rt.heap, callee, &args, dicts, code_len) {
                 crate::apply::Apply::Value(v) => return Some(v),
                 crate::apply::Apply::Bad(msg) => {
@@ -508,9 +470,9 @@ impl<'a> Driver<'a> {
     }
 
     /// A native panic, unless it is one a nested call already reported
-    /// ([`crate::native::TRAP_VM_PANIC`]); then its frames' pads run.
+    /// ([`crate::native::TRAP_PANICKED`]); then its frames' pads run.
     fn native_panic(&mut self, p: NativePanic) {
-        if p.code != crate::native::TRAP_VM_PANIC {
+        if p.code != crate::native::TRAP_PANICKED {
             let code = Arc::clone(&self.program.native);
             let locator = self.locator();
             // A stack overflow traps in the prologue of a frame that never
@@ -589,7 +551,7 @@ impl<'a> Driver<'a> {
         }
     }
 
-    /// Print a panic as the VM does: `panic: message at loc`, then the
+    /// Print a panic as the runtime does: `panic: message at loc`, then the
     /// backtrace (an explicit `panic` only under `COIL_BACKTRACE`).
     fn report(&mut self, message: &str, loc: Option<String>, frames: Vec<String>, explicit: bool) {
         use std::io::Write;
@@ -636,7 +598,38 @@ impl<'a> Driver<'a> {
     }
 
     fn locator(&self) -> crate::locate::Locator<'_> {
-        crate::locate::Locator { debug: &self.program.debug, code_len: self.program.code.len(), base_dir: self.program.base_dir.as_deref() }
+        crate::locate::Locator { debug: &self.program.debug }
+    }
+
+    /// `--cow-report`: the copies copy-on-write made, by source line, most
+    /// first, on stderr.
+    pub(crate) fn print_cow_report(&mut self) {
+        let Some(sites) = self.rt.heap.get_mut().take_cow_sites() else { return };
+        let code = Arc::clone(&self.program.native);
+        let locator = self.locator();
+        let mut by_line: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for (s, n) in sites {
+            let at = code.site(s).and_then(|site| locator.native_site_location(site)).unwrap_or_else(|| format!("site {s}"));
+            // The report is by line.
+            let at = at.rsplit_once(':').filter(|(line, _)| line.contains(':')).map_or(at.clone(), |(line, _)| line.to_string());
+            *by_line.entry(at).or_insert(0) += n;
+        }
+        let mut rows: Vec<(String, u64)> = by_line.into_iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let total: u64 = rows.iter().map(|r| r.1).sum();
+        let heap = self.rt.heap.get();
+        eprintln!(
+            "cow-report: {total} copies for {} shares ({} objects copied; each share is a copy a copy-on-assign design makes)",
+            heap.cow_shares(),
+            heap.cow_copies()
+        );
+        // A line that copies over and over (a write in a loop to a value
+        // something else shares) is worth a borrow or a `Ref<T>`.
+        const HOT: u64 = 100;
+        for (at, n) in &rows {
+            let hint = if *n >= HOT { "  <- copied repeatedly: borrow with `let x = mut …` or share through a `Ref<T>`" } else { "" };
+            eprintln!("  {n:>10}  {at}{hint}");
+        }
     }
 
     /// `FreeEarly` of `v`: the `drop`s it owes run first. `false` when one
@@ -721,17 +714,6 @@ impl<'a> Driver<'a> {
         unsafe { Self::from_raw(raw) }.rt.print(s);
     }
 
-    unsafe fn host_call(raw: *mut c_void, ctx: *mut NativeCtx, pc: u32, args: &[Value], panicked: &mut bool) -> u64 {
-        // SAFETY: native code passes back the driver it was given.
-        let d = unsafe { Self::from_raw(raw) };
-        let out = d.rooted(ctx, |d| d.call(pc as usize, args));
-        *panicked = out.is_none();
-        let (lo, hi) = out.unwrap_or_default();
-        // SAFETY: the calling native code's live context.
-        unsafe { (*ctx).vm_hi = hi.unwrap_or(0) };
-        lo
-    }
-
     unsafe fn host_call_value(raw: *mut c_void, ctx: *mut NativeCtx, callee: u64, args: &[Value], dicts: u32, panicked: &mut bool) -> u64 {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
@@ -794,8 +776,8 @@ impl<'a> Driver<'a> {
         let d = unsafe { Self::from_raw(raw) };
         let arg = |i: usize| args.get(i).copied().unwrap_or_default();
         let out = match op as u8 {
-            o if o == Instruction::FfiLoad as u8 => d.rt.ffi_load(arg(0)),
-            o if o == Instruction::DeclareFFI as u8 => d.rt.ffi_declare(operand as u32, arg(0), arg(1), arg(2), arg(3)),
+            common::FFI_OP_LOAD => d.rt.ffi_load(arg(0)),
+            common::FFI_OP_DECLARE => d.rt.ffi_declare(operand as u32, arg(0), arg(1), arg(2), arg(3)),
             _ => {
                 let call = crate::runtime_ffi::FfiCall::from_words(&d.rt.heap, args);
                 d.rooted(ctx, |d| {
@@ -827,7 +809,7 @@ impl<'a> Driver<'a> {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
         let fn_id = id as usize;
-        let out = match d.rt.natives.get_by_id(fn_id)?.host_op() {
+        match d.rt.natives.get_by_id(fn_id)?.host_op() {
             crate::HostOp::Ordinary => crate::runtime::invoke_ordinary(d, ctx, fn_id, layout, args),
             crate::HostOp::RegisterFinalizer => {
                 let word = |i: usize| args.get(i).map_or(0, |v| v.as_int() as u32);
@@ -844,11 +826,7 @@ impl<'a> Driver<'a> {
             }
             crate::HostOp::Task => Some(d.task_op(ctx, fn_id, args)),
             _ => Some(Invoked::Panic("native driver: unknown host op".into())),
-        };
-        if out.is_some() {
-            crate::native::note_host_call(fn_id, crate::native::HostPath::Runtime);
         }
-        out
     }
 }
 
@@ -981,7 +959,7 @@ impl Driver<'_> {
 
     fn task_scope_open(&mut self) -> Invoked {
         // Every task switches at one level: the driver runs no code nested.
-        let s = self.rt.sched.get_or_insert_with(|| Box::new(crate::task::Scheduler::new(0)));
+        let s = self.rt.sched.get_or_insert_with(|| Box::new(crate::task::Scheduler::new()));
         Invoked::Value(Value::from(s.open_scope()).bits())
     }
 
@@ -1317,7 +1295,7 @@ impl Driver<'_> {
                 }
             }
             NativeOutcome::Panicked(p) => self.native_panic(p),
-            NativeOutcome::Bailed | NativeOutcome::Parked(..) => self.report("native driver: a task could not start", None, Vec::new(), false),
+            NativeOutcome::Parked(..) => self.report("native driver: a task could not start", None, Vec::new(), false),
         }
     }
 
@@ -1389,31 +1367,25 @@ impl GcHost for Driver<'_> {
     fn host_roots(&self, visit: &mut dyn FnMut(HostRoot)) {
         use crate::memory::RootKind;
         for v in &self.gen_running {
-            visit(HostRoot::Handle(v.heap_addr(), RootKind::Ambiguous));
+            visit(HostRoot(v.heap_addr(), RootKind::Ambiguous));
         }
         // Parked tasks' frames, pinned.
         for t in self.parked_tasks.values() {
-            t.call.for_each_word(|w| visit(HostRoot::Handle(Value::from(w).heap_addr(), RootKind::Ambiguous)));
+            t.call.for_each_word(|w| visit(HostRoot(Value::from(w).heap_addr(), RootKind::Ambiguous)));
         }
         // The task side not running: its native frames' words and argument
         // roots, pinned.
         #[cfg(not(target_family = "wasm"))]
         for f in self.tasks.values() {
             for v in f.arg_roots.iter().chain(&f.gen_running) {
-                visit(HostRoot::Handle(v.heap_addr(), RootKind::Ambiguous));
+                visit(HostRoot(v.heap_addr(), RootKind::Ambiguous));
             }
             for &(ctx, _) in &f.native_roots {
                 // SAFETY: a parked call's frames keep their contexts.
-                unsafe { &*ctx }.for_each_root(|w, _| visit(HostRoot::Handle(Value::from(unsafe { *w }).heap_addr(), RootKind::Ambiguous)));
+                unsafe { &*ctx }.for_each_root(|w, _| visit(HostRoot(Value::from(unsafe { *w }).heap_addr(), RootKind::Ambiguous)));
             }
         }
     }
-
-    fn slot(&self, _idx: usize) -> Value {
-        Value::default()
-    }
-
-    fn set_slot(&mut self, _idx: usize, _v: Value) {}
 
     /// Not while auto-par workers run on the heap.
     fn can_move(&self) -> bool {

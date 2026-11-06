@@ -1,19 +1,10 @@
 //! Lane code: `VLoop` bodies and `VScan`s over eight or 64 lanes, on a
-//! heap and a slot window alone, for the VM's operand stack and native
+//! heap and a slot window alone, for the runtime's operand stack and native
 //! code's frames (`coil_native_vector`) alike.
 
-use common::{ArchivedByte as Byte, ArchivedInstruction as Instruction, Value};
+use common::{LaneOp, LaneWord, Value};
 
 use crate::{Heap, ObjArray, Object};
-
-/// Eight numeric words of the array at `addr` from `index` into `reg`;
-/// `false` past either end.
-pub(crate) fn vload_words_into(heap: &Heap, reg: &mut [u64; common::simd::LANES], addr: u64, index: i64) -> bool {
-    let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
-        return false;
-    };
-    vload_lanes(gc.as_ref(), reg, index)
-}
 
 /// 8 word lanes of `arr` from `index` into `reg`; `false` past either end.
 pub(crate) fn vload_lanes(arr: &ObjArray, reg: &mut [u64; common::simd::LANES], index: i64) -> bool {
@@ -131,10 +122,7 @@ pub(crate) fn vpush_lanes(arr: &mut ObjArray, src: &[u64; common::simd::LANES]) 
 /// `VScan` (`scan`) / `VLoop` `body` over `slots` (the op's frame, as
 /// native code lays it out), on `heap` alone: native code's lane loops
 /// run here, without a machine.
-pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[common::Byte], slots: &mut [u64], from: i64, bound: i64) -> Result<i64, &'static str> {
-    // SAFETY: the archived word has the plain word's layout, as the
-    // program code's casts rely on.
-    let body: &[Byte] = unsafe { std::slice::from_raw_parts(body.as_ptr().cast(), body.len()) };
+pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[LaneWord], slots: &mut [u64], from: i64, bound: i64) -> Result<i64, &'static str> {
     thread_local! {
         static VREGS: std::cell::RefCell<[[u64; common::simd::LANES]; common::simd::NREGS]> =
             const { std::cell::RefCell::new([[0; common::simd::LANES]; common::simd::NREGS]) };
@@ -157,7 +145,7 @@ pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[com
     out
 }
 
-/// The operand words lane code reads and writes, at `sp + slot`: the VM's
+/// The operand words lane code reads and writes, at `sp + slot`: the runtime's
 /// stack, or the frame native code passes (`coil_native_vector`).
 pub(crate) trait LaneSlots: std::ops::Index<usize, Output = Value> + std::ops::IndexMut<usize> {}
 impl<T: std::ops::Index<usize, Output = Value> + std::ops::IndexMut<usize> + ?Sized> LaneSlots for T {}
@@ -175,7 +163,7 @@ pub(crate) enum VloopOp {
     Reduce { ty: u8, slot: usize, src: usize, fold: u8 },
 }
 
-/// `VLoop` (see [`Instruction::VLoop`]): the body over lanes `p ..= p + 7`
+/// `VLoop` (see [`LaneOp::VLoop`]): the body over lanes `p ..= p + 7`
 /// for `p = from, from + 8, ..` below `to` (the last block stops at `to`),
 /// with `dest = p` first when `pos`. A body of lane-wise words runs up to
 /// 64 lanes at once ([`VloopWide`]). The arrays are resolved once: nothing in the body allocates,
@@ -187,7 +175,7 @@ pub(crate) fn vloop<S: LaneSlots + ?Sized>(
     stack: &mut S,
     sp: usize,
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
-    body: &[Byte],
+    body: &[LaneWord],
     dest: usize,
     from: i64,
     to: i64,
@@ -236,7 +224,7 @@ pub(crate) fn vloop_run<S: LaneSlots + ?Sized>(
     stack: &mut S,
     sp: usize,
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
-    body: &[Byte],
+    body: &[LaneWord],
     dest: usize,
     from: i64,
     to: i64,
@@ -281,30 +269,30 @@ pub(crate) fn vloop_run<S: LaneSlots + ?Sized>(
     let VloopScratch { ops, pushed, pending, saved, wide } = scratch;
     ops.clear();
     for word in body {
-        let (kind, d, a, b) = word.dense_abc_parts();
-        if d >= simd::NREGS && !matches!(*word.bytecode(), Instruction::VReduce) {
+        let (kind, d, a, b) = word.abc();
+        if d >= simd::NREGS && !matches!(word.op(), LaneOp::VReduce) {
             return Err(BAD);
         }
-        ops.push(match *word.bytecode() {
-            Instruction::VLoad if kind != simd::TY_U8 => {
+        ops.push(match word.op() {
+            LaneOp::VLoad if kind != simd::TY_U8 => {
                 let (obj, off) = (source(a)?, stack[sp + b].as_int());
                 span(obj, off)?;
                 Op::Load { reg: d, obj, off }
             }
-            Instruction::VStore if kind & simd::STORE_PUSH != 0 => {
+            LaneOp::VStore if kind & simd::STORE_PUSH != 0 => {
                 let obj = array(a)?;
                 pushed.extend(obj);
                 Op::Push { reg: d, obj }
             }
-            Instruction::VStore => {
+            LaneOp::VStore => {
                 let (obj, off) = (array(a)?, stack[sp + b].as_int());
                 span(obj, off)?;
                 Op::Store { reg: d, obj, off }
             }
-            Instruction::VBin if kind == simd::SELECT && a < simd::NREGS && b < simd::NREGS => Op::Sel { dest: d, a, b },
-            Instruction::VBin if !simd::is_byte_kind(kind) => Op::Bin { kind, dest: d, a, b },
-            Instruction::VFma if a < simd::NREGS && b < simd::NREGS => Op::Fma { ty: kind, dest: d, a, b },
-            Instruction::VReduce if a < simd::NREGS => Op::Reduce { ty: kind, slot: d, src: a, fold: b as u8 },
+            LaneOp::VBin if kind == simd::SELECT && a < simd::NREGS && b < simd::NREGS => Op::Sel { dest: d, a, b },
+            LaneOp::VBin if !simd::is_byte_kind(kind) => Op::Bin { kind, dest: d, a, b },
+            LaneOp::VFma if a < simd::NREGS && b < simd::NREGS => Op::Fma { ty: kind, dest: d, a, b },
+            LaneOp::VReduce if a < simd::NREGS => Op::Reduce { ty: kind, slot: d, src: a, fold: b as u8 },
             _ => return Err(BAD),
         });
     }
@@ -785,7 +773,7 @@ pub(crate) fn fold_identity(ty: u8, fold: u8) -> u64 {
 /// Fewest lanes the forward tail of [`vscan`] runs a padded chunk for.
 pub(crate) const TAIL_MIN_LANES: i64 = 2;
 
-/// `VScan` (see [`Instruction::VScan`]): from `p = from` in steps of 64,
+/// `VScan` (see [`LaneOp::VScan`]): from `p = from` in steps of 64,
 /// while lanes `p ..= p + 63` pass `< bound` (`<= bound` when
 /// `inclusive`) and every load lies inside its array, the first `p`
 /// whose body mask is non-zero plus the mask's first lane; else the `p`
@@ -799,7 +787,7 @@ pub(crate) fn vscan<S: LaneSlots + ?Sized>(
     stack: &S,
     sp: usize,
     regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
-    body: &[Byte],
+    body: &[LaneWord],
     from: i64,
     bound: i64,
     inclusive: bool,
@@ -836,12 +824,12 @@ pub(crate) fn vscan<S: LaneSlots + ?Sized>(
     }
     let mut slots = [const { std::mem::MaybeUninit::<Op>::uninit() }; simd::SCAN_MAX_BODY];
     for (op, word) in slots.iter_mut().zip(body) {
-        let (kind, dest, a, b) = word.dense_abc_parts();
+        let (kind, dest, a, b) = word.abc();
         if dest >= simd::NREGS {
             return Err(BAD);
         }
-        op.write(match *word.bytecode() {
-            Instruction::VLoad if kind == simd::TY_U8 => {
+        op.write(match word.op() {
+            LaneOp::VLoad if kind == simd::TY_U8 => {
                 let addr = stack[sp + a].bits();
                 let mut obj = heap.find_object_by_addr(addr);
                 if let Some(Object::Boxed(_)) = obj {
@@ -860,7 +848,7 @@ pub(crate) fn vscan<S: LaneSlots + ?Sized>(
                 };
                 Op::Load { reg: dest, src, off: stack[sp + b].as_int() }
             }
-            Instruction::VBin if simd::is_byte_kind(kind) => {
+            LaneOp::VBin if simd::is_byte_kind(kind) => {
                 let scalar = if kind >= simd::BS_CMP {
                     stack[sp + a]
                 } else if a < simd::NREGS {

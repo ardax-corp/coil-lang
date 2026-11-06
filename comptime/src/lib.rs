@@ -21,7 +21,7 @@ mod io_gate;
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use common::{Byte, Value};
+use common::Value;
 use compiler::ComptimeLimits;
 use compiler::macros::{
     CompiledExpansion, ComptimeIo, ConstEval, ConstEvalError, ConstEvalOutcome, ConstRecord, FoldCall, FoldValue, MacroHost,
@@ -329,10 +329,10 @@ fn failure_reason(reason: String, captured: &Captured) -> String {
     }
 }
 
-/// A thread's isolate for one expansion program. Holding the bytecode `Arc`
+/// A thread's isolate for one expansion program. Holding the MIR `Arc`
 /// keeps the program alive, so its address never names another one.
 struct WarmIsolate {
-    program: Arc<Vec<Byte>>,
+    program: Arc<Vec<compiler::native_mir::NativeBody>>,
     isolate: Box<Isolate>,
 }
 
@@ -344,7 +344,7 @@ thread_local! {
 fn take_isolate(program: &CompiledExpansion) -> Box<Isolate> {
     let warm = WARM.with(|warm| {
         let mut warm = warm.borrow_mut();
-        let at = warm.iter().position(|w| Arc::ptr_eq(&w.program, &program.bytecode))?;
+        let at = warm.iter().position(|w| Arc::ptr_eq(&w.program, &program.mir))?;
         Some(warm.swap_remove(at).isolate)
     });
     warm.unwrap_or_else(|| new_isolate(program))
@@ -352,13 +352,12 @@ fn take_isolate(program: &CompiledExpansion) -> Box<Isolate> {
 
 fn keep_isolate(program: &CompiledExpansion, isolate: Box<Isolate>) {
     WARM.with(|warm| {
-        warm.borrow_mut().push(WarmIsolate { program: program.bytecode.clone(), isolate });
+        warm.borrow_mut().push(WarmIsolate { program: program.mir.clone(), isolate });
     });
 }
 
 fn new_isolate(program: &CompiledExpansion) -> Box<Isolate> {
     let mut isolate = Box::new(Isolate::new(IsolateProgram {
-        code: program.bytecode.clone(),
         constants: program.constants.clone(),
         strings: program.strings.clone(),
         debug: program.program_debug.clone(),
@@ -377,7 +376,7 @@ fn interpreted(program: &CompiledExpansion) -> Arc<NativeCode> {
         let pcs = program.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
         let prepared = coil_mir_interp::prepare(program.mir.to_vec(), &pcs);
         let complete = prepared.refused.is_empty();
-        let code = NativeCode::new(program.bytecode.len(), prepared.entries, prepared.sites).with_complete(complete).with_keep(prepared.keep);
+        let code = NativeCode::new(prepared.entries, prepared.sites).with_complete(complete).with_keep(prepared.keep);
         Arc::new(code)
     });
     Arc::clone(code).downcast::<NativeCode>().expect("this host made it")

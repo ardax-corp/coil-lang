@@ -241,7 +241,7 @@ fn print_help() {
          \x20 info break | info registers    Status\n\
          \x20 run / r                        Start or restart\n\
          \x20 continue / c                   Resume\n\
-         \x20 stepi / si                     Step one bytecode insn\n\
+         \x20 stepi / si                     Step one MIR instruction\n\
          \x20 step / s                       Step to next source line (into)\n\
          \x20 next / n                       Step over (same/outer depth)\n\
          \x20 finish / fin                   Run until frame returns\n\

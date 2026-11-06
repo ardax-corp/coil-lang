@@ -17,12 +17,12 @@ use parking_lot::lock_api::RawMutexTimed as _;
 use crate::AddrHashBuilder;
 use crate::task::ThreadWaiters;
 
-/// Per-root-VM registry of undetached spawns (shared with nested workers via
+/// Per-root runtime registry of undetached spawns (shared with nested workers via
 /// [`ThreadSpawnContext`]). Process-global storage was wrong: parallel tests /
 /// multiple `Machine`s would steal each other's joins via `mem::take`.
 pub type LiveThreadRegistry = Arc<Mutex<Vec<Arc<JoinState>>>>;
 
-/// Per-root-VM bound on concurrent OS **pool** threads for the work-stealing
+/// Per-root runtime bound on concurrent OS **pool** threads for the work-stealing
 /// reactor (see [`crate::reactor::Reactor`]).
 ///
 /// Caps host threads used for `spawn` / auto-par. Override with
@@ -128,7 +128,7 @@ pub fn join_undetached_threads(registry: &LiveThreadRegistry) {
     }
 }
 
-use common::{BUILTIN_RESULT_VARIANTS, Byte, ProgramDebug, Value};
+use common::{BUILTIN_RESULT_VARIANTS, ProgramDebug, Value};
 
 use crate::ffi::Natives;
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
@@ -137,27 +137,21 @@ use crate::memory::{
     EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
     ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
 };
-#[cfg(any(test, feature = "vm"))]
-use crate::vm::Machine;
 
-/// Operand-stack slots for worker VMs (same default as `execute_archive` in `src/main.rs`).
+/// Operand-stack slots for worker runtimes (same default as `execute_archive` in `src/main.rs`).
 pub const WORKER_STACK_SLOTS: usize = 256;
 
 /// Immutable program image shared across OS threads.
 #[derive(Clone)]
 pub struct ThreadProgram {
-    pub code: Arc<Vec<Byte>>,
+    /// What runs before `main`.
+    pub startup: Arc<Vec<common::StartupOp>>,
+    /// `main`'s body, when the program has one.
+    pub main: Option<u32>,
     pub constants: Arc<Vec<u64>>,
     pub strings: Arc<Vec<String>>,
     pub static_slot_count: u32,
     pub debug: ProgramDebug,
-    /// Operand-stack capacity for worker VMs running this program.
-    pub operand_stack_slots: u32,
-    /// S2b slot / frame maps of an older archive (empty when it had none, and
-    /// for every program compiled now).
-    pub stack_maps: Vec<common::FrameStackMap>,
-    /// Complete frame maps; frames without one keep the conservative scan.
-    pub precise_frames: Arc<Vec<common::PreciseFrameMap>>,
     /// Per class `type_id`: field word kinds (see [`crate::class_kind_table`]).
     pub class_word_kinds: Arc<Vec<Box<[u8]>>>,
     /// Per static slot word kind (`common::WORD_*`); empty = all ambiguous.
@@ -685,7 +679,7 @@ thread_local! {
     static HELD_MUTEX: RefCell<Option<(u64, Arc<MutexInner>)>> = const { RefCell::new(None) };
 }
 
-/// Per-`execute` host VM binding (any `Machine<const N>` frame depth).
+/// Per-`execute` host runtime binding (any `Machine<const N>` frame depth).
 pub(crate) struct MachineHostState {
     raw: *mut (),
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
@@ -711,33 +705,38 @@ pub(crate) struct HostStateGuard {
 }
 
 impl HostStateGuard {
-    #[cfg(any(test, feature = "vm"))]
-    pub fn enter<const N: usize>(vm: &mut Machine<N>) -> Self {
+    /// Bind only `io`, for a test of the IO natives.
+    #[cfg(test)]
+    pub(crate) fn enter_io(io: Arc<crate::io_reactor::IoReactor>) -> Self {
+        unsafe fn no_call(_: *mut (), _: u32, _: &[Value]) -> Value {
+            Value::default()
+        }
+        unsafe fn no_steal(_: *mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
+            Err(ThreadErrorTag::Other)
+        }
+        unsafe fn no_end(_: *mut (), _: Value) {}
+        unsafe fn no_context(_: *mut ()) -> Option<ThreadSpawnContext> {
+            None
+        }
+        unsafe fn no_statics(_: *mut ()) -> Arc<Vec<u64>> {
+            Arc::default()
+        }
+        unsafe fn no_gate(_: *mut ()) -> *const crate::ffi::DloadGate {
+            std::ptr::null()
+        }
         let prev = HOST_STATE.with(|c| c.borrow_mut().take());
-        let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
-        let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
-        let debugger_attached = {
-            #[cfg(any(test, feature = "debugger"))]
-            {
-                vm.debug_is_attached()
-            }
-            #[cfg(not(any(test, feature = "debugger")))]
-            {
-                false
-            }
-        };
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
-                raw: (vm as *mut Machine<N>).cast(),
-                call_function: Self::call::<N>,
-                begin_shared_steal: Self::begin_steal::<N>,
-                end_shared_steal: Self::end_steal::<N>,
-                debugger_attached,
-                spawn_context: Self::spawn_context::<N>,
-                static_words: Self::static_words::<N>,
-                dload_gate: Self::dload_gate::<N>,
-                io_reactor,
-                cpu_reactor,
+                raw: std::ptr::null_mut(),
+                call_function: no_call,
+                begin_shared_steal: no_steal,
+                end_shared_steal: no_end,
+                debugger_attached: false,
+                spawn_context: no_context,
+                static_words: no_statics,
+                dload_gate: no_gate,
+                io_reactor: Some(io),
+                cpu_reactor: None,
             });
         });
         Self { prev }
@@ -797,37 +796,6 @@ impl HostStateGuard {
         crate::collect::end_shared_steal(unsafe { Self::driver(raw) }, published);
     }
 
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn call<const N: usize>(raw: *mut (), offset: u32, args: &[Value]) -> Value {
-        unsafe { (*(raw.cast::<Machine<N>>())).call_function(offset, args) }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn spawn_context<const N: usize>(raw: *mut ()) -> Option<ThreadSpawnContext> {
-        unsafe { (*(raw.cast::<Machine<N>>())).thread_spawn_context() }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn static_words<const N: usize>(raw: *mut ()) -> Arc<Vec<u64>> {
-        unsafe { (*(raw.cast::<Machine<N>>())).static_words() }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn dload_gate<const N: usize>(raw: *mut ()) -> *const crate::ffi::DloadGate {
-        unsafe { (*(raw.cast::<Machine<N>>())).dload_gate() as *const _ }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn begin_steal<const N: usize>(
-        raw: *mut (),
-    ) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
-        unsafe { (*(raw.cast::<Machine<N>>())).begin_shared_steal() }
-    }
-
-    #[cfg(any(test, feature = "vm"))]
-    unsafe fn end_steal<const N: usize>(raw: *mut (), extra: Value) {
-        unsafe { (*(raw.cast::<Machine<N>>())).end_shared_steal(extra) }
-    }
 }
 
 impl Drop for HostStateGuard {
@@ -856,7 +824,7 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
     })
 }
 
-/// The running VM's static words as they are now.
+/// The running runtime's static words as they are now.
 fn host_static_words() -> Option<Arc<Vec<u64>>> {
     HOST_STATE.with(|c| c.borrow().as_ref().map(|s| unsafe { (s.static_words)(s.raw) }))
 }
@@ -888,7 +856,7 @@ fn host_end_shared_steal(published: Value) {
     });
 }
 
-/// Block on IO readiness using the bound VM's reactors. Queued CPU jobs run on
+/// Block on IO readiness using the bound runtime's reactors. Queued CPU jobs run on
 /// a spare thread meanwhile, never nested under the wait (#869).
 pub(crate) fn host_io_wait(
     handle: crate::io_handle::WaitHandle,
@@ -1553,7 +1521,7 @@ pub struct ThreadSpawnContext {
     /// startup `const`s (#1561). Its words name the parent's heap, so an
     /// isolate job takes copies ([`copy_statics_out`]) instead.
     pub statics: Arc<Vec<u64>>,
-    /// The parent's native code (`None`: bytecode only).
+    /// The parent's native code (`None`: interpreter only).
     pub native: Option<Arc<crate::native::NativeCode>>,
 }
 
@@ -1664,10 +1632,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     if args.len() > 1 && args.len() - 1 != arity as usize {
         return Err(ThreadErrorTag::Other);
     }
-    let all_immediate = args[1..].iter().all(|v| is_immediate_value(heap, *v));
-    if !all_immediate && !crate::shared_heap::program_has_real_maps(&ctx.program) {
-        return try_host_spawn(heap, args);
-    }
+    let _all_immediate = args[1..].iter().all(|v| is_immediate_value(heap, *v));
     let mut spawn_args = Vec::with_capacity(args.len().saturating_sub(1));
     for v in &args[1..] {
         if crate::shared_heap::is_c1_shareable(heap, *v) {
@@ -2308,26 +2273,26 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn live_thread_registries_are_per_machine() {
-        let m1 = Machine::<WORKER_STACK_SLOTS>::default();
-        let m2 = Machine::<WORKER_STACK_SLOTS>::default();
+    fn live_thread_registries_are_per_runtime() {
+        let r1 = crate::runtime::Runtime::new();
+        let r2 = crate::runtime::Runtime::new();
         assert!(
-            !std::sync::Arc::ptr_eq(m1.live_threads(), m2.live_threads()),
-            "each Machine must own a distinct live-thread registry"
+            !std::sync::Arc::ptr_eq(&r1.live_threads, &r2.live_threads),
+            "each runtime must own a distinct live-thread registry"
         );
-        // Joining an empty registry must not touch another Machine's list.
+        // Joining an empty registry must not touch another runtime's list.
         let sentinel = Arc::new(JoinState::new());
-        register_live_thread(m2.live_threads(), Arc::clone(&sentinel));
-        join_undetached_threads(m1.live_threads());
+        register_live_thread(&r2.live_threads, Arc::clone(&sentinel));
+        join_undetached_threads(&r1.live_threads);
         assert_eq!(
-            m2.live_threads().lock().unwrap().len(),
+            r2.live_threads.lock().unwrap().len(),
             1,
-            "joining m1 must not drain m2's undetached spawns"
+            "joining r1 must not drain r2's undetached spawns"
         );
         // Avoid leaving a JoinState that never finishes: mark detached so a
         // later join skips waiting.
         sentinel.detached.store(true, Ordering::SeqCst);
-        join_undetached_threads(m2.live_threads());
+        join_undetached_threads(&r2.live_threads);
     }
 
     #[test]

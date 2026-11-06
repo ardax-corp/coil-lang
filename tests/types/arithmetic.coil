@@ -1,4 +1,4 @@
-// Integer / float arithmetic — VM binary ops + peephole fusions.
+// Integer / float arithmetic — binary ops and fused forms.
 use tests::assert;
 
 test("int add sub mul") {
@@ -54,7 +54,7 @@ test("float power") {
 }
 
 // Literal `**` const-folds; variable operands lower to a fused slot-pair op,
-// which is a separate VM path.
+// which is a separate path.
 test("float power on locals") {
     let base = 2.0;
     let exp = 10.0;
@@ -67,7 +67,7 @@ fn fpow(float base, float exp) -> float {
     return base ** exp;
 }
 
-// Return-site fuse (`BinReturn` + PowF) is a third path that used to yield 0.0.
+// Return-site fused form (`BinReturn` + PowF) is a third path that used to yield 0.0.
 test("float power via return") {
     assert!(fpow(2.0, 8.0) == 256.0);
     assert!(fpow(3.0, 4.0) == 81.0);
@@ -100,7 +100,7 @@ test("compound assignment arithmetic") {
 
 // The literal cases above fold at compile time. `opaque` hides a value from
 // the optimizer (it round-trips through a `Vec`), so the cases below run the
-// VM's arithmetic instructions.
+// the arithmetic ops.
 fn opaque(int x) -> int {
     let v: Vec<int> = Vec::new();
     v.push(x);

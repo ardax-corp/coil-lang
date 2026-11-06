@@ -1,7 +1,7 @@
 // ffi_sum.coil — Userland FFI example. Demonstrates the
 // `dload` / `declare` / `invoke` API surface that lets a
 // script load a C library, declare its signatures, and call
-// functions entirely from source — no VM-recompile-time
+// functions entirely from source — no recompile-time
 // definitions required.
 //
 // The corresponding C source is `sum.c` in this directory:

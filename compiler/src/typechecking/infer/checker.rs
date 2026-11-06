@@ -2639,7 +2639,7 @@ impl Checker {
 
     /// Register the compiler-owned signatures for the primitive classes.
     ///
-    /// Their instances are emitted as bytecode thunks, but they participate in
+    /// Their instances are emitted as code thunks, but they participate in
     /// lookup exactly like source-declared classes so method/UFCS and operator
     /// dispatch share one dictionary ABI.
     fn register_builtin_typeclass_method_schemes(&mut self) {
@@ -4767,7 +4767,7 @@ impl Checker {
         };
         let index_ty = self.infer(index_expr);
         let index_ty_pruned = apply_ty_prune(&self.subst, &index_ty);
-        // Constrain the index to be an `int` (the VM only
+        // Constrain the index to be an `int` (the runtime only
         // supports integer indices); a `byte` widens. Any other type is
         // rejected here rather than at lowering (#1172).
         let is_byte = Self::is_byte_ty(&index_ty_pruned);
@@ -7706,7 +7706,7 @@ impl Checker {
 
     /// Ground operands of an arithmetic / bitwise operator must be numeric
     /// (`int` / `float` / `byte`), `string` for `+`, or carry an instance of
-    /// the operator's trait (`impl Sub for Vec2`). The VM would otherwise
+    /// the operator's trait (`impl Sub for Vec2`). The runtime would otherwise
     /// operate on the raw words (a string pointer minus a string pointer),
     /// which is a bogus value that can crash later (#554).
     fn check_ground_arith_operands(&mut self, ty: &Ty, op: &str, range: &Range<usize>) {
@@ -14113,7 +14113,7 @@ impl Checker {
 
     /// `invoke`'s function id is the `int` handle `declare` returned (#1761):
     /// never a Coil `fn` (#1666), and never `declare`'s `Result` itself, whose
-    /// boxed address the VM would read as an out-of-range id.
+    /// boxed address the runtime would read as an out-of-range id.
     fn check_ffi_invoke_fn_id(&mut self, id_ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, id_ty);
         let id_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
@@ -15720,7 +15720,7 @@ impl Checker {
                 || args.len() >= fixed_count
                 || fixed_count == 0);
 
-        // `filled_mask` is a u64 on the VM stack (MakeFn / CallIndirect); cap
+        // `filled_mask` is a u64 on the runtime stack (MakeFn / CallIndirect); cap
         // fixed arity so bit shifts never wrap. Abort early, continuing would
         // emit a truncated mask and mis-bind partials.
         if fixed_count > 64 {
@@ -19451,7 +19451,7 @@ impl Checker {
                     }
                 }
             }
-            // Arguments past the last specifier: the VM drops them. Infer them
+            // Arguments past the last specifier: the runtime drops them. Infer them
             // anyway (codegen needs their types) and reject the call.
             if spec_index < p.len() {
                 for arg in &p[spec_index..] {
@@ -19475,7 +19475,7 @@ impl Checker {
                 self.messages.push(msg);
             }
         } else if let Some(p) = params {
-            // No format specifiers: still type-check args (VM consumes them).
+            // No format specifiers: still type-check args (runtime consumes them).
             for arg in p {
                 let _ = self.infer(arg);
             }
@@ -19914,7 +19914,7 @@ impl Checker {
     /// Look up the declared payload for `(enum_name, variant_name)`
     /// as a list of `(field_name, field_type)` pairs in
     /// DECLARATION order. The codegen uses this to reorder record
-    /// call-site fields to declaration order (the VM's
+    /// call-site fields to declaration order (the runtime's
     /// `MAKE_ENUM` pushes payload args in pop order, the first
     /// popped is `payload[0]`).
     ///
@@ -20458,7 +20458,7 @@ impl Checker {
         if let Some(&id) = self.record_type_ids.get(&key) {
             return id;
         }
-        // Records take ids from their own range, so the VM can tell one
+        // Records take ids from their own range, so the runtime can tell one
         // from a class instance (#1618).
         let id = common::RECORD_TYPE_ID_BASE + self.record_type_ids.len() as u32;
         assert!(id < common::RECORD_TYPE_ID_END, "more distinct record types than record type ids");

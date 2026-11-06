@@ -1,4 +1,4 @@
-//! The collector's root walk, apart from the interpreter. A host (the VM's
+//! The collector's root walk, apart from the interpreter. A host (the runtime's
 //! [`crate::Machine`], or a driver that runs native code alone) reports the
 //! roots it holds itself; the [`Runtime`] adds its own (statics, the
 //! scheduler's tasks, FFI handles and arguments, native frames' root
@@ -27,8 +27,8 @@ thread_local! {
 
 /// Install `kinds` as the static word kinds of the program this thread
 /// runs (what a GC root walk reads static slots by) and return the ones
-/// it replaces. A VM that runs on a thread already serving another program
-/// (the compile-time VM) installs its own and puts the old ones back.
+/// it replaces. A runtime that runs on a thread already serving another program
+/// (the compile-time runtime) installs its own and puts the old ones back.
 pub fn swap_static_word_kinds(kinds: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
     STATIC_KINDS.with_borrow_mut(|k| std::mem::replace(k, kinds))
 }
@@ -38,15 +38,9 @@ pub fn swap_static_word_kinds(kinds: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
 const COMPACT_WINDOW: u32 = 8;
 const COMPACT_WINDOW_MAX: u32 = 256;
 
-/// A root the host holds itself.
+/// A root the host holds itself: a heap address it cannot rewrite.
 #[derive(Clone, Copy)]
-pub(crate) enum HostRoot {
-    /// A word the host can rewrite, by its index ([`GcHost::slot`]): a
-    /// `Precise` one moves, any other is pinned where it points.
-    Slot(usize, RootKind),
-    /// A heap address the host holds where it cannot be rewritten.
-    Handle(u64, RootKind),
-}
+pub(crate) struct HostRoot(pub(crate) u64, pub(crate) RootKind);
 
 /// What the collector needs from the host that runs the program.
 pub(crate) trait GcHost {
@@ -54,15 +48,6 @@ pub(crate) trait GcHost {
     fn rt_mut(&mut self) -> &mut Runtime;
     /// Every root the host holds besides the Runtime's.
     fn host_roots(&self, visit: &mut dyn FnMut(HostRoot));
-    /// The word of root slot `idx`.
-    fn slot(&self, idx: usize) -> Value;
-    fn set_slot(&mut self, idx: usize, v: Value);
-    /// The slot an allocation just wrote, if any: a minor collection moves
-    /// the object it names even where the host can only say it may be a
-    /// reference.
-    fn fresh_slot(&self) -> Option<usize> {
-        None
-    }
     /// Whether objects may move now (no raw heap word outside the roots).
     fn can_move(&self) -> bool;
     /// Drop caches that name objects which may move or die.
@@ -135,7 +120,7 @@ impl Runtime {
         }
     }
 
-    /// Heap words native frames hold across a VM call or a safepoint, as
+    /// Heap words native frames hold across a runtime call or a safepoint, as
     /// slot pointers: `true` when the record cannot say the word is one.
     pub(crate) fn for_each_native_word(&self, visit: &mut dyn FnMut(*mut u64, bool)) {
         for &(ctx, _) in &self.native_roots {
@@ -239,11 +224,7 @@ impl Runtime {
 /// Heap-owned roots are seeded by [`crate::memory::Heap::take_gc_roots`].
 pub(crate) fn for_each_root<H: GcHost + ?Sized>(h: &H, visit: &mut dyn FnMut(u64, RootKind)) {
     let heap = &h.rt().heap;
-    h.host_roots(&mut |r| {
-        let (addr, kind) = match r {
-            HostRoot::Slot(idx, kind) => (h.slot(idx).heap_addr(), kind),
-            HostRoot::Handle(addr, kind) => (addr, kind),
-        };
+    h.host_roots(&mut |HostRoot(addr, kind)| {
         if addr != 0 && heap.find_object_by_addr(addr).is_some() {
             visit(addr, kind);
         }
@@ -272,12 +253,7 @@ pub(crate) fn mark<H: GcHost + ?Sized>(h: &mut H) {
 pub(crate) fn certain_root_addrs<H: GcHost + ?Sized>(h: &mut H) -> Vec<u64> {
     let mut roots = h.rt_mut().heap.take_gc_roots();
     let heap = &h.rt().heap;
-    h.host_roots(&mut |r| {
-        let addr = match r {
-            HostRoot::Slot(idx, RootKind::Precise) => h.slot(idx).heap_addr(),
-            HostRoot::Slot(..) => return,
-            HostRoot::Handle(addr, _) => addr,
-        };
+    h.host_roots(&mut |HostRoot(addr, _)| {
         if addr != 0 && heap.find_object_by_addr(addr).is_some() {
             roots.push(addr);
         }
@@ -286,38 +262,24 @@ pub(crate) fn certain_root_addrs<H: GcHost + ?Sized>(h: &mut H) -> Vec<u64> {
     roots
 }
 
-/// Roots split for a moving collection: slots to rewrite, statics to
-/// rewrite, and the addresses that must stay where they are.
+/// Roots split for a moving collection: statics to rewrite, and the
+/// addresses that must stay where they are.
 struct MoveRoots {
-    must: Vec<usize>,
     must_statics: Vec<usize>,
     pins: Vec<u64>,
 }
 
-/// Split the roots of `h` for a move. `fresh`: the host's fresh slot moves
-/// too (a minor collection).
-fn move_roots<H: GcHost + ?Sized>(h: &mut H, fresh: bool) -> MoveRoots {
+/// Split the roots of `h` for a move.
+fn move_roots<H: GcHost + ?Sized>(h: &mut H) -> MoveRoots {
     let mut pins = h.rt_mut().heap.take_gc_roots();
-    let mut must = Vec::new();
-    let fresh = if fresh { h.fresh_slot() } else { None };
-    let mut fresh_seen = false;
-    h.host_roots(&mut |r| match r {
-        HostRoot::Slot(idx, _) if fresh == Some(idx) => {
-            if !std::mem::replace(&mut fresh_seen, true) {
-                must.push(idx);
-            }
-        }
-        HostRoot::Slot(idx, RootKind::Precise) => must.push(idx),
-        HostRoot::Slot(idx, _) => pins.push(h.slot(idx).heap_addr()),
-        HostRoot::Handle(addr, _) => pins.push(addr),
-    });
+    h.host_roots(&mut |HostRoot(addr, _)| pins.push(addr));
     let mut must_statics = Vec::new();
     h.rt().for_each_static_root(&mut |i, addr, kind| match kind {
         RootKind::Precise => must_statics.push(i),
         _ => pins.push(addr),
     });
     h.rt().for_each_handle_root(&mut |addr, _| pins.push(addr));
-    MoveRoots { must, must_statics, pins }
+    MoveRoots { must_statics, pins }
 }
 
 /// Minor collection: copy the surviving young objects out of the nursery
@@ -336,7 +298,7 @@ pub(crate) fn minor<H: GcHost + ?Sized>(h: &mut H) {
     }
     // A cache may name an object that moves.
     h.clear_caches();
-    let MoveRoots { must, must_statics, mut pins } = move_roots(h, true);
+    let MoveRoots { must_statics, mut pins } = move_roots(h);
     let rt = h.rt();
     let mut must_native: Vec<*mut u64> = Vec::new();
     rt.for_each_native_word(&mut |w, ambiguous| {
@@ -350,10 +312,9 @@ pub(crate) fn minor<H: GcHost + ?Sized>(h: &mut H) {
             must_native.push(w);
         }
     });
-    let precise: Vec<u64> = must
+    let precise: Vec<u64> = must_statics
         .iter()
-        .map(|&idx| h.slot(idx).heap_addr())
-        .chain(must_statics.iter().map(|&i| rt.statics[i].heap_addr()))
+        .map(|&i| rt.statics[i].heap_addr())
         .chain(must_native.iter().filter_map(|&w| {
             // SAFETY: the slot is a live word of a native root record.
             let addr = Value::from(unsafe { *w }).heap_addr();
@@ -374,11 +335,6 @@ pub(crate) fn minor<H: GcHost + ?Sized>(h: &mut H) {
     for i in must_statics {
         if let Some(v) = plan.forward(rt.statics[i]) {
             rt.statics[i] = v;
-        }
-    }
-    for idx in must {
-        if let Some(v) = plan.forward(h.slot(idx)) {
-            h.set_slot(idx, v);
         }
     }
     #[cfg(feature = "gc-stress")]
@@ -411,7 +367,7 @@ pub(crate) fn compact<H: GcHost + ?Sized>(h: &mut H) {
         return;
     }
     COMPACT_PACING.set((0, window));
-    let MoveRoots { must, must_statics, mut pins } = move_roots(h, false);
+    let MoveRoots { must_statics, mut pins } = move_roots(h);
     h.rt().for_each_native_root(&mut |addr, _| pins.push(addr));
     let rt = h.rt_mut();
     let Some(plan) = rt.heap.evacuate_plan(&pins, stress) else {
@@ -423,11 +379,6 @@ pub(crate) fn compact<H: GcHost + ?Sized>(h: &mut H) {
     for i in must_statics {
         if let Some(v) = plan.forward(rt.statics[i]) {
             rt.statics[i] = v;
-        }
-    }
-    for idx in must {
-        if let Some(v) = plan.forward(h.slot(idx)) {
-            h.set_slot(idx, v);
         }
     }
     #[cfg(feature = "gc-stress")]

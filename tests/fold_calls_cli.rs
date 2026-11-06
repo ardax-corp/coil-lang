@@ -1,6 +1,6 @@
 //! `--fold-calls on|off`: whether a pure call with constant arguments is
 //! computed at compile time (coil-lang#1863). Flagship perf benches build
-//! with it off so the VM runs them.
+//! with it off so the calls run.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -59,13 +59,11 @@ fn dissect_mandelbrot_main(extra: &[&str]) -> String {
 fn is_folded(stdout: &str) -> bool {
     stdout
         .lines()
-        .any(|l| l.contains("CONST") && l.contains("imm=625885"))
+        .any(|l| l.contains("iconst.i64 625885"))
 }
 
-fn calls_mandelbrot(stdout: &str) -> bool {
-    stdout
-        .lines()
-        .any(|l| l.contains("CALL") && l.contains("(mandelbrot)"))
+fn calls(stdout: &str) -> usize {
+    stdout.lines().filter(|l| l.contains(" = call.")).count()
 }
 
 #[test]
@@ -77,10 +75,6 @@ fn fold_calls_off_keeps_the_flagship_call() {
         is_folded(&folded),
         "default folds mandelbrot(160, 50) to 625885, stdout={folded}"
     );
-    assert!(
-        !calls_mandelbrot(&folded),
-        "folded main still calls mandelbrot, stdout={folded}"
-    );
 
     let kept = dissect_mandelbrot_main(&["--fold-calls", "off"]);
     assert!(
@@ -88,8 +82,8 @@ fn fold_calls_off_keeps_the_flagship_call() {
         "--fold-calls off still folded, stdout={kept}"
     );
     assert!(
-        calls_mandelbrot(&kept),
-        "--fold-calls off: expected CALL to mandelbrot, stdout={kept}"
+        calls(&kept) > calls(&folded),
+        "--fold-calls off lost the call, stdout={kept}"
     );
 }
 

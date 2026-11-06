@@ -1154,7 +1154,7 @@ fn total<T: Area>(T a, T b) -> int {
 Declares a test case run by `coil test`: `test("name") { … }`.
 
 The body runs in result mode, so `assert!(…)`, `raise` and `?` fail the case.
-Each case runs in its own VM. Cases are left out of ordinary builds; a file
+Each case runs in its own runtime. Cases are left out of ordinary builds; a file
 with test cases has no `fn main`.
 
 ```coil

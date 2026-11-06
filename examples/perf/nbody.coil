@@ -1,7 +1,7 @@
 // Canary: float dense loop (spectral-norm). N-body literals/stability were
 // painful under the float lexer (`0.01` / `1.03` do not parse); this is the
 // same numeric-beyond-numeric canary. A later float-loop cut should drop
-// VM-only time vs this baseline.
+// time vs this baseline.
 use io::sync::print;
 use string::format;
 use math::sqrt;

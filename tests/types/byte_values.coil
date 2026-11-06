@@ -1,6 +1,6 @@
 // Bytes in bodies lowered straight from HIR to MIR: a byte is its value as
 // an int word, one-byte literals are constants, and `as byte` / `as int`
-// keep the low eight bits as the VM's casts do.
+// keep the low eight bits as the interpreter's casts do.
 use tests::assert;
 
 fn upper(Vec<byte> buf) -> Vec<byte> {

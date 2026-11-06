@@ -70,7 +70,7 @@ test("a call's result stays alive while it is bound") {
     assert!(n.v == 5);
 }
 
-// An object lives until its last use: native frames free it there, the VM
+// An object lives until its last use: native frames free it there, the interpreter
 // may keep it longer, so only a local still used after the collect is
 // checked.
 test("a local used after a collect stays alive") {

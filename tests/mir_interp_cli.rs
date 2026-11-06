@@ -1,6 +1,6 @@
 //! `coil FILE --mir`: the interpreter runs MIR as lowered, at `-O 0` unless
 //! told otherwise. That output is the reference: every level, on the
-//! interpreter, the VM and native code, must give the same stdout, panic and
+//! interpreter and native code, must give the same stdout, panic and
 //! exit status.
 
 use std::process::{Command, Output};
@@ -32,7 +32,7 @@ fn program_stderr(out: &Output) -> String {
 fn same_as_raw(name: &str, src: &str) -> Output {
     let raw = run(name, src, &["--mir"]);
     for level in ["0", "1", "2", "3", "s", "g"] {
-        for engine in [&["--mir"][..], &["--no-jit"], &["--jit"]] {
+        for engine in [&["--mir"][..], &[]] {
             let args = [&["-O", level], engine].concat();
             let other = run(name, src, &args);
             assert_eq!(String::from_utf8_lossy(&raw.stdout), String::from_utf8_lossy(&other.stdout), "{name} {args:?}: stdout differs");
@@ -126,4 +126,31 @@ fn an_explicit_level_overrides_the_raw_default() {
     let src = format!("{HEADER}fn main() {{ let _ = println(format(\"%i\", 6 * 7)); }}\n");
     let out = run("level", &src, &["--mir", "-O", "2"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
+}
+
+/// `coil run --mir` runs an archive on the interpreter, as `coil FILE --mir`
+/// runs a source: native code compiles nothing.
+#[test]
+fn run_mir_takes_an_archive_to_the_interpreter() {
+    let dir = std::env::temp_dir().join(format!("coil-run-mir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("seven.coil");
+    std::fs::write(&file, "use io::sync::println;\nfn main() { let _ = println(\"7\"); }\n").expect("write source");
+    let archive = dir.join("seven.ccoil");
+    let mut compile = Command::new(env!("CARGO_BIN_EXE_coil"));
+    compile.args(["compile", "--no-build-cache", "-o"]).arg(&archive).arg(&file);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        compile.arg("--root").arg(root);
+    }
+    let made = compile.output().expect("spawn coil compile");
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_coil")).arg("run").args(args).arg(&archive).env("COIL_NATIVE_STATS", "1").output().expect("spawn coil run");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "7\n", "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    assert!(run(&[]).contains(" compiled, "), "the plain run is native");
+    let mir = run(&["--mir"]);
+    assert!(!mir.contains(" compiled, "), "{mir}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

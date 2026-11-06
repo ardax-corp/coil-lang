@@ -1,4 +1,4 @@
-//! Task scheduler state (T1): one VM, one OS thread, FIFO run queue.
+//! Task scheduler state (T1): one runtime, one OS thread, FIFO run queue.
 //!
 //! A task is a coroutine the scheduler resumes (the embedded `task` module
 //! wraps each spawned closure in a `gen fn`). The root task is the code
@@ -7,7 +7,7 @@
 //! whenever they suspend. Switches happen only at suspension points: IO
 //! parks, `sleep`, `join`, the end of a scope, and `yield_now`.
 //!
-//! The VM side (switching, waking, panics) lives in `vm_task.rs`. See
+//! The runtime side (switching, waking, panics) lives in the drivers. See
 //! `docs/internals/tasks.md`.
 
 use std::cmp::Reverse;
@@ -116,8 +116,6 @@ pub(crate) struct TaskRec {
     /// Generators this task was resuming when it suspended:
     /// `(coroutine, base_sp offset, frame_depth offset)` from the task's base.
     pub inner: Vec<(RefCoroutine, usize, usize)>,
-    /// `resume_stack` index of the task's own coroutine while it runs.
-    pub ctx_index: usize,
     pub joiners: Vec<TaskId>,
     pub panic: Option<String>,
     /// It has run at least once (a task that never ran has nothing to unwind).
@@ -127,9 +125,6 @@ pub(crate) struct TaskRec {
     pub shield: u32,
     /// [`TaskState::Ending`]: the state it finishes in.
     pub ending: Option<TaskState>,
-    /// Root only: where it continues (it stays on the operand stack).
-    pub resume_ip: usize,
-    pub resume_sp: usize,
 }
 
 impl TaskRec {
@@ -142,15 +137,12 @@ impl TaskRec {
             wake: None,
             timer_seq: None,
             inner: Vec::new(),
-            ctx_index: 0,
             joiners: Vec::new(),
             panic: None,
             started: false,
             cancel: Cancel::None,
             shield: 0,
             ending: None,
-            resume_ip: 0,
-            resume_sp: 0,
         }
     }
 }
@@ -181,11 +173,9 @@ pub(crate) struct Scheduler {
     pub waker: std::sync::Arc<TaskWaker>,
     next_thread_key: u64,
     /// Readiness waits of this scheduler's tasks. Its own reactor: test cases
-    /// on pool workers share the VM's, and must not take each other's tokens.
+    /// on pool workers share the runtime's, and must not take each other's tokens.
     pub reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
     pub current: TaskId,
-    /// `nested_depth` the scheduler runs at; switches only happen there.
-    pub base_nested: u32,
     /// Child tasks not finished yet.
     pub live: usize,
     next_task: TaskId,
@@ -223,7 +213,7 @@ impl Scheduler {
             .collect()
     }
 
-    pub(crate) fn new(base_nested: u32) -> Self {
+    pub(crate) fn new() -> Self {
         let mut tasks = HashMap::new();
         let mut root = TaskRec::new(None, 0);
         root.state = TaskState::Running;
@@ -240,7 +230,6 @@ impl Scheduler {
             next_thread_key: 1,
             reactor: crate::io_reactor::IoReactor::new(),
             current: ROOT,
-            base_nested,
             live: 0,
             next_task: 1,
             next_scope: 1,
@@ -248,7 +237,7 @@ impl Scheduler {
         }
     }
 
-    /// True when nothing is left to schedule (the VM can drop it).
+    /// True when nothing is left to schedule (the runtime can drop it).
     pub(crate) fn idle(&self) -> bool {
         self.live == 0 && self.scopes.is_empty() && self.current == ROOT
     }
@@ -550,7 +539,7 @@ pub struct ThreadWaiters(std::sync::Mutex<Vec<(std::sync::Arc<TaskWaker>, u64)>>
 impl ThreadWaiters {
     /// Register the running task, if the native runs under a scheduler that
     /// can switch tasks. True when it did: the native then returns
-    /// `Ok(None)` and the VM suspends the task, running the native again
+    /// `Ok(None)` and the interpreter suspends the task, running the native again
     /// once the key is posted. Call it while holding the lock that the
     /// releasing side takes before [`Self::wake_all`], so no wake is lost.
     pub(crate) fn park_current(&self) -> bool {
@@ -604,7 +593,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Around a native the VM runs where it can switch tasks: `Some` arms
+/// Around a native the runtime runs where it can switch tasks: `Some` arms
 /// [`tasks_active`] and [`ThreadWaiters::park_current`], `None` disarms.
 pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64, TaskId)>) {
     TASKS_ACTIVE.with(|c| c.set(waiter.is_some()));
@@ -615,7 +604,7 @@ pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64, Ta
     TASK_WAITER.with(|w| *w.borrow_mut() = waiter);
 }
 
-/// A TCP connect a task started without blocking the VM thread.
+/// A TCP connect a task started without blocking the thread.
 struct PendingConnect {
     host: String,
     port: i64,
@@ -643,7 +632,7 @@ struct Lookup {
 }
 
 /// Most resolver threads at once. `getaddrinfo` blocks on every platform,
-/// so lookups run on these instead of the VM thread. They start on demand
+/// so lookups run on these instead of the thread. They start on demand
 /// and stay for the process (one malloc arena each, not one per connect).
 const RESOLVER_THREADS: usize = 4;
 
@@ -860,7 +849,7 @@ pub(crate) fn tasks_active() -> bool {
     TASKS_ACTIVE.with(|c| c.get())
 }
 
-/// The scheduler rules every host that runs tasks shares (the VM and the
+/// The scheduler rules every host that runs tasks shares (the runtime and the
 /// native driver): ending and cancelling tasks, waiting for events.
 impl crate::runtime::Runtime {
     /// No task is ready: block until IO readiness, a timer or another OS
@@ -1093,7 +1082,7 @@ mod tests {
     fn finishing_a_task_does_not_scan_its_finished_siblings() {
         // coil-lang#2135: each finish rescanned every child of the scope, so
         // N spawn + join pairs in one scope cost O(N^2).
-        let mut s = Scheduler::new(0);
+        let mut s = Scheduler::new();
         let scope = s.open_scope();
         let n = 20_000;
         let start = std::time::Instant::now();
@@ -1112,7 +1101,7 @@ mod tests {
 
     #[test]
     fn a_scope_counts_only_its_unfinished_children() {
-        let mut s = Scheduler::new(0);
+        let mut s = Scheduler::new();
         let a = s.open_scope();
         let b = s.open_scope();
         let a1 = add_bare_task(&mut s, a);

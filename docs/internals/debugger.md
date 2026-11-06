@@ -2,9 +2,9 @@
 
 `coil debug` is a GDB-style debugger for coil programs. The main `coil` binary
 **re-execs** the sibling `coil-debug` helper (git-style). That helper compiles the
-entry `.coil` (and module graph) **in memory** — never writes `out.ccoil` — and drives
-the VM through a stop engine gated behind an attached `DebugController`
-(`machine` feature `debugger`).
+entry `.coil` (and module graph) **in memory** — never writes `out.ccoil` — and runs
+it on the MIR interpreter, through a stop engine gated behind an attached
+`DebugController`.
 
 ```bash
 cargo build   # coil + coil-debug (+ coil-dissect / coil-embed)
@@ -30,13 +30,11 @@ coil-debug examples/fib.coil -x cmds.txt --batch
 | `--root DIR` | Extra `use`/`mod` search directory |
 
 Host grants are CLI / DAP-launch only. Ungranted
-gated calls fail typecheck (`E0406`–`E0411`). The compiled in-memory bytecode is
+gated calls fail typecheck (`E0406`–`E0411`). The compiled in-memory program is
 the grant at run time, same as other compile-and-run paths.
 
 `coil debug` does **not** take `-Og` / `--opt-level`. The session always sets
-`Pipeline::set_debugger_attached(true)` (I7). **B8:** that flag no longer
-disables MIR specialize. Use `-Og` on `coil compile` / `coil dissect` for
-Basic IL cleanup (still may dense / LIR).
+`Pipeline::set_debugger_attached(true)`, compiles at `-O 0` and runs raw MIR.
 
 ## IDE debugging (DAP)
 
@@ -51,7 +49,7 @@ are not shipped in this repository.
 |-------|---------|
 | `program` | Absolute or workspace-relative path to entry `.coil` |
 | `cwd` | Optional working directory for resolving paths |
-| `stopOnEntry` | Optional; stop **before** the first bytecode insn (real VM frame) |
+| `stopOnEntry` | Optional; stop **before** the program's first op |
 | `allowAttach` / `allowExit` / `allowFfiExec` / `allowRead` / `allowWrite` / `allowNet` / `allowEnv` / `allowAll` | Optional; OR with CLI `--allow-*` |
 | `allowDload` | Optional string array of dload stems |
 | `ffiSearchPath` | Optional string array of FFI lookup dirs |
@@ -68,13 +66,12 @@ lists every unfinished task with its state (`task 2 [running]`,
 task is thread `1` (the one that stops and steps); the others are
 `1000 + task id`. `stackTrace` on a task shows its own call chain: the
 running task's frames end at its task body, the root task's frames sit
-below it on the VM stack, and a suspended child's frames come from its
+below it, and a suspended child's frames come from its
 saved coroutine. Locals are available for the frames on the stack; a
 suspended child's frames have none (`scopes` is empty).
 
-`stopOnEntry` starts the VM and pauses at PC 0 (prologue). `stackTrace` /
-`stepIn` work from that stop. A previous fake pause (no `start`) left those
-empty — that is fixed.
+`stopOnEntry` starts the program and pauses before its first op. `stackTrace` /
+`stepIn` work from that stop.
 
 Every statement carries a debug location (see [debug-info.md](debug-info.md)),
 so any line with code verifies; lines without code (signatures, braces, blank
@@ -90,15 +87,15 @@ source you wrote.
 |---------|--------|
 | `break` / `b` `<fn\|file:line\|line> [if <name\|$N> <op> <value>]` | Set breakpoint (function FQN or source line). With `if`, stop only when the condition holds: `op` is `==` `!=` `<` `<=` `>` `>=`, `value` an integer or `true` / `false`, compared with the local's slot as an integer |
 | `delete` / `d` `[n]` | Clear one / all breakpoints |
-| `info break` / `info registers` / `info locals` | List breakpoints, IP/SP/depth, or named locals |
+| `info break` / `info registers` / `info locals` | List breakpoints, op number and depth, or named locals |
 | `run` / `r` | Start or restart from prologue |
 | `continue` / `c` | Resume until next stop |
 | `stepi` / `si` | One MIR op |
-| `step` / `s` | Until source line changes (into calls); falls back to `stepi` (prints `Step`) if the current PC has no line |
-| `next` / `n` | Until line changes at ≤ current frame depth; same `stepi` fallback when the PC has no line |
+| `step` / `s` | Until source line changes (into calls); falls back to `stepi` (prints `Step`) if the current op has no line |
+| `next` / `n` | Until line changes at ≤ current frame depth; same `stepi` fallback when the op has no line |
 | `finish` / `fin` | Until current frame returns |
 | `print` / `p` `<name\|$N>` | Format local by name or slot index |
-| `bt` | Call stack, gdb order (`#0` is the innermost frame), with symbol + `file:line`. The VM bootstrap frame is hidden |
+| `bt` | Call stack, gdb order (`#0` is the innermost frame), with symbol + `file:line`. |
 | `list` / `l` | Source around the current stop (nearest loc in this function, else `fn` decl) |
 | `disassemble` / `disas` `[fn]` | A function's MIR |
 | `quit` / `q` | Exit |

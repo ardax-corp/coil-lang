@@ -1,4 +1,4 @@
-//! `FORMAT` specifier strings, rendered for the VM and native code alike.
+//! `FORMAT` specifier strings, rendered for the interpreter and native code alike.
 
 use std::fmt::Write as _;
 
@@ -9,7 +9,7 @@ use crate::{GcData, ObjString};
 
 /// The text of a `FORMAT` specifier string (after any leading `%s` the
 /// caller appends to): `next` yields the arguments in order. Shared by the
-/// VM's `FORMAT` and native code's.
+/// runtime's `FORMAT` and native code's.
 pub(crate) fn render_format(format_rest: &str, mut next: impl FnMut() -> Value) -> String {
     let mut message = String::default();
     let mut chars = format_rest.chars().peekable();

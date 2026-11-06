@@ -389,6 +389,55 @@ mod tests {
     }
 
     #[test]
+    fn project_filter_rejects_outside_and_deps() {
+        let cwd = scratch("filter");
+        std::fs::write(cwd.join("in.coil"), "").unwrap();
+        std::fs::create_dir_all(cwd.join(".deps/pkg")).unwrap();
+        std::fs::write(cwd.join(".deps/pkg/x.coil"), "").unwrap();
+        assert!(is_project_source("in.coil", &cwd));
+        assert!(!is_project_source(".deps/pkg/x.coil", &cwd));
+        assert!(!is_project_source("missing.coil", &cwd));
+        assert!(!is_project_source("/etc/hostname", &cwd));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn json_strings_are_escaped() {
+        assert_eq!(json_str("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
+    }
+
+    /// A helper inlined into a test body still counts its hits there.
+    #[test]
+    fn inlined_copies_in_test_bodies_count() {
+        let cwd = scratch("inline");
+        std::fs::write(cwd.join("a.coil"), "helper\ntest\n").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec!["a.coil".into()],
+            // pc0 helper (line1), pc1 test body (line2), pc2 inlined helper (line1)
+            debug_locs: vec![loc(0, 0), loc(0, 7), loc(0, 0)],
+            fn_symbols: vec![
+                FnDebugSym {
+                    name: "helper".into(),
+                    entry_pc: 0,
+                },
+                FnDebugSym {
+                    name: "t".into(),
+                    entry_pc: 1,
+                },
+            ],
+            debug_lines: Vec::new(),
+        };
+        let mut cov = Coverage::new(cwd.clone(), false);
+        let prog = cov.register_program(&debug, &test_fn_ranges(&debug, [1]));
+        cov.record(&prog, &[0, 1, 1], "t.coil", "t");
+        assert_eq!(
+            cov.lcov(),
+            "TN:\nSF:a.coil\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
     fn lines_sum_across_cases_and_exclude_tests_and_deps() {
         let cwd = scratch("sum");
         std::fs::write(cwd.join("a.coil"), "l1\nl2\nl3\nl4\n").unwrap();
@@ -420,8 +469,6 @@ mod tests {
                 },
             ],
             debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
         };
         let mut cov = Coverage::new(cwd.clone(), true);
         let exclude = test_fn_ranges(&debug, [2]);
@@ -440,56 +487,5 @@ mod tests {
             "{\"tests\":[{\"file\":\"t.coil\",\"name\":\"one\",\"lines\":{\"a.coil\":[1]}},{\"file\":\"t.coil\",\"name\":\"two\",\"lines\":{\"a.coil\":[1]}}]}\n"
         );
         let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    /// A helper inlined into a test body still counts its hits there.
-    #[test]
-    fn inlined_copies_in_test_bodies_count() {
-        let cwd = scratch("inline");
-        std::fs::write(cwd.join("a.coil"), "helper\ntest\n").unwrap();
-        let debug = ProgramDebug {
-            source_files: vec!["a.coil".into()],
-            // pc0 helper (line1), pc1 test body (line2), pc2 inlined helper (line1)
-            debug_locs: vec![loc(0, 0), loc(0, 7), loc(0, 0)],
-            fn_symbols: vec![
-                FnDebugSym {
-                    name: "helper".into(),
-                    entry_pc: 0,
-                },
-                FnDebugSym {
-                    name: "t".into(),
-                    entry_pc: 1,
-                },
-            ],
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        let mut cov = Coverage::new(cwd.clone(), false);
-        let prog = cov.register_program(&debug, &test_fn_ranges(&debug, [1]));
-        cov.record(&prog, &[0, 1, 1], "t.coil", "t");
-        assert_eq!(
-            cov.lcov(),
-            "TN:\nSF:a.coil\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
-        );
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    #[test]
-    fn project_filter_rejects_outside_and_deps() {
-        let cwd = scratch("filter");
-        std::fs::write(cwd.join("in.coil"), "").unwrap();
-        std::fs::create_dir_all(cwd.join(".deps/pkg")).unwrap();
-        std::fs::write(cwd.join(".deps/pkg/x.coil"), "").unwrap();
-        assert!(is_project_source("in.coil", &cwd));
-        assert!(!is_project_source(".deps/pkg/x.coil", &cwd));
-        assert!(!is_project_source("missing.coil", &cwd));
-        assert!(!is_project_source("/etc/hostname", &cwd));
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    #[test]
-    fn json_strings_are_escaped() {
-        assert_eq!(json_str("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
     }
 }

@@ -28,13 +28,6 @@ pub fn instcombine(func: &mut MirFunc) -> usize {
     combine(func, true)
 }
 
-/// [`instcombine`] without its strength rewrites, for a LIR body: constant
-/// folds, identities and constant branches only. There `x * 2` is one op
-/// with an immediate, and `x + x` would read `x` from a slot twice.
-pub fn instcombine_lir(func: &mut MirFunc) -> usize {
-    combine(func, false)
-}
-
 fn combine(func: &mut MirFunc, strength: bool) -> usize {
     let mut total = 0;
     for _ in 0..8 {

@@ -24,7 +24,7 @@ impl OwnedClosure {
 /// Type-erased reentrant call into a `Machine<S>` (set per closure).
 pub type VmCallFn = unsafe fn(*mut c_void, u32, *const Value, usize) -> Value;
 
-/// VM state stashed in callback userdata (single-threaded).
+/// runtime state stashed in callback userdata (single-threaded).
 pub struct VmCallbackState {
     pub vm: *mut c_void,
     pub fn_offset: u32,

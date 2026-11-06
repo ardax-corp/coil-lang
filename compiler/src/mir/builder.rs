@@ -1,7 +1,7 @@
 //! Braun-style SSA builder for the numeric subset.
 //!
-//! Locals are IL slots. Sealing a block completes incomplete φs. This is
-//! construction only — fuse-IL stays the production lowering; dense exec is P1.
+//! Locals are frame slots. Sealing a block completes incomplete φs. This is
+//! construction only.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,7 +49,7 @@ pub struct MirBuilder {
     finished: bool,
     /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
     pub allow_effects: bool,
-    /// MIR→LIR: type non-W4 HostInvoke as Value-word edges without the
+    /// MIR lowering: type non-W4 HostInvoke as Value-word edges without the
     /// map-lift shortcuts `allow_effects` enables in lowering.
     pub allow_host_edges: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
@@ -110,7 +110,7 @@ impl MirBuilder {
 
     /// Let a call to `target` whose result the block returns be a
     /// `TailCall` ([`MirFunc::tail_targets`]).
-    pub fn allow_tail_call(&mut self, target: crate::il::Label) {
+    pub fn allow_tail_call(&mut self, target: crate::bodies::Label) {
         self.func.tail_targets.insert(target);
     }
 
@@ -386,7 +386,7 @@ impl MirBuilder {
             if !ok(lt) || !ok(rt) {
                 return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
             }
-            // The dense compare is a word compare, but VM `EQ` is structural
+            // The dense compare is a word compare, but `==` on objects is structural
             // (strings by content, arrays and tuples element-wise). The two
             // agree only against an integer constant such as a niche `0`.
             if !self.is_int_const(lhs) && !self.is_int_const(rhs) {
@@ -453,7 +453,7 @@ impl MirBuilder {
 
     pub fn ins_not(&mut self, src: ValueId) -> Result<ValueId, MirError> {
         let t = self.resolve_ty(src);
-        // VM `LogNot` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
+        // `!` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
         if t != MirTy::Bool && !t.is_int() && !t.is_heap_word() {
             return Err(MirError::msg(format!("lnot on {t}")));
         }
@@ -583,7 +583,7 @@ impl MirBuilder {
 
     pub fn ins_call(
         &mut self,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         args: Vec<ValueId>,
         abi: &crate::layout::DenseAbi,
     ) -> Result<(ValueId, Option<ValueId>), MirError> {
@@ -1126,7 +1126,7 @@ impl MirBuilder {
 
     /// Const string-table push (I4 / Q9 R1).
     /// `CodePtr` of the function at `target`: an `int` word.
-    pub fn ins_code_ptr(&mut self, target: crate::il::Label) -> Result<ValueId, MirError> {
+    pub fn ins_code_ptr(&mut self, target: crate::bodies::Label) -> Result<ValueId, MirError> {
         let dest = self.alloc(MirTy::I64);
         self.push(MirInst::CodePtr { dest, target })?;
         Ok(dest)
@@ -1197,7 +1197,7 @@ impl MirBuilder {
     }
 
     /// `STRINGIFY` of `src`, an immediate of static scalar type `tag`
-    /// (`ValueTag`) or, with `None`, a word the VM inspects.
+    /// (`ValueTag`) or, with `None`, a word the runtime inspects.
     pub fn ins_stringify(&mut self, src: ValueId, tag: Option<u32>) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() {
             return Err(MirError::msg("Stringify type".to_string()));
@@ -1326,7 +1326,6 @@ impl MirBuilder {
         if self.func.has_gc_edge() {
             super::gc::fill_live_roots(&mut self.func);
         }
-        super::deopt::fill_deopt_maps(&mut self.func);
         self.func.verify().map_err(MirError::msg)?;
         Ok(self.func)
     }
@@ -1643,7 +1642,7 @@ mod tests {
         let x = b.add_param(MirTy::HeapRef).unwrap();
         let y = b.add_param(MirTy::HeapRef).unwrap();
         let w = b.add_param(MirTy::I64).unwrap();
-        // Two heap words (or a heap word and an unknown i64) need the VM's
+        // Two heap words (or a heap word and an unknown i64) need the runtime's
         // structural EQ: strings by content, arrays element-wise.
         assert!(b.ins_cmp(MirCmpOp::Eq, x, y).is_err());
         assert!(b.ins_cmp(MirCmpOp::Ne, w, x).is_err());
@@ -1785,7 +1784,7 @@ mod tests {
             ret: MirTy::I64,
             ret_hi: None,
         };
-        assert!(b.ins_call(crate::il::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
-        assert!(b.ins_call(crate::il::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
+        assert!(b.ins_call(crate::bodies::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
+        assert!(b.ins_call(crate::bodies::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
     }
 }

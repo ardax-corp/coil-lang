@@ -32,7 +32,7 @@ static NURSERY: AtomicBool = AtomicBool::new(true);
 static EARLY_FREE: AtomicU8 = AtomicU8::new(0);
 
 /// Allocate young objects in a copying nursery (`--nursery on|off`, on by
-/// default). Read when a VM starts, so set it before running.
+/// default). Read when a runtime starts, so set it before running.
 pub fn set_nursery(on: bool) {
     NURSERY.store(on, Ordering::Relaxed);
 }

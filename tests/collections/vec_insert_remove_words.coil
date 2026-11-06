@@ -1,6 +1,6 @@
 // `Vec::insert` and `Vec::remove` move element words (`Vec::from` copies
 // them). Native code writes the first two out as loops over the array
-// (`mir/native_expand.rs`) where the VM calls its runtime natives; both
+// (`mir/native_expand.rs`) where the interpreter calls its runtime natives; both
 // keep these results, for scalar, byte and heap elements and at every edge.
 use tests::assert;
 use thread::{join, spawn, ThreadError};

@@ -1,11 +1,11 @@
 //! End-to-end tests for `use` / `mod` module resolution.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use compiler::{HostGrants, Pipeline};
-use machine::Machine;
+use compiler::native_mir::{MirAllocKind, MirFunc, MirInst, NativeBody};
+use compiler::{CompileFail, HostGrants, Pipeline};
+use machine::native::NativeCode;
 
 // Tests change cwd; serialize with CWD_LOCK when running in parallel.
 
@@ -37,28 +37,37 @@ fn manifest_src_and_stdlib() -> String {
     )
 }
 
-#[derive(Clone, Default)]
-struct SharedBuf {
-    inner: Arc<Mutex<Vec<u8>>>,
+/// What a compile leaves: the constant pool and the bodies an engine runs.
+struct Compiled {
+    constants: Vec<u64>,
+    bodies: Vec<NativeBody>,
 }
 
-impl SharedBuf {
-    pub fn new() -> Self {
-        Self::default()
+impl Compiled {
+    fn body(&self, name: &str) -> &MirFunc {
+        let body = self.bodies.iter().find(|b| b.name == name);
+        let names = || self.bodies.iter().map(|b| b.name.as_str()).collect::<Vec<_>>();
+        &body.unwrap_or_else(|| panic!("no body `{name}`; have {:?}", names())).mir
+    }
+
+    /// The instructions of `name`.
+    fn insts(&self, name: &str) -> impl Iterator<Item = &MirInst> {
+        self.body(name).blocks.iter().flat_map(|b| &b.insts)
+    }
+
+    /// The instructions of every body.
+    fn all_insts(&self) -> impl Iterator<Item = &MirInst> {
+        self.bodies.iter().flat_map(|b| &b.mir.blocks).flat_map(|b| &b.insts)
     }
 }
 
-impl Write for SharedBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner
-            .lock()
-            .map_err(|_| std::io::ErrorKind::Other)?
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+/// Compile `file` with a capture open, as a run does: without one a compile
+/// leaves no bodies.
+fn compile_file(pipeline: &mut Pipeline, file: &str) -> Result<Compiled, CompileFail> {
+    compiler::native_mir::start_native_capture();
+    let constants = pipeline.compile_src_from_file(file);
+    let bodies = compiler::native_mir::take_native_capture();
+    Ok(Compiled { constants: constants?, bodies })
 }
 
 /// Create a temp project and return `(project_root, entry_path)`.
@@ -98,16 +107,16 @@ fn bind_ns_pipeline(pipeline: &mut Pipeline, extra: &[PathBuf]) {
     pipeline.grant_all();
 }
 
-fn run_project(project_root: &PathBuf, entry: &PathBuf) -> String {
+fn run_project(project_root: &Path, entry: &Path) -> String {
     run_project_with_extra(project_root, entry, &[])
 }
 
-fn run_project_with_extra(project_root: &PathBuf, entry: &PathBuf, extra: &[PathBuf]) -> String {
+fn run_project_with_extra(project_root: &Path, entry: &Path, extra: &[PathBuf]) -> String {
     with_project_cwd(project_root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, extra);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -115,38 +124,39 @@ fn run_project_with_extra(project_root: &PathBuf, entry: &PathBuf, extra: &[Path
                 panic!("compile failed");
             }
         };
-        run_bytecode(bytecode, constants, &pipeline)
+        run_compiled(compiled, &pipeline)
     })
 }
 
-fn run_bytecode(bytecode: Vec<common::Byte>, constants: Vec<u64>, pipeline: &Pipeline) -> String {
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.with_output(shared.clone());
-    // Worker threads print via this buffer (not the parent's Write).
-    machine.set_shared_print(shared.inner.clone());
-    pipeline.wire_vm_ffi(&mut machine, None);
-    pipeline.wire_host_natives(&mut machine);
-    pipeline.wire_thread_program(&mut machine, &bytecode, &constants, pipeline.strings());
-    machine.set_program_debug(pipeline.program_debug());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
+/// Run `compiled` on the MIR interpreter and return what it printed.
+fn run_compiled(compiled: Compiled, pipeline: &Pipeline) -> String {
+    let debug = pipeline.program_debug_full();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    let interp = coil_mir_interp::prepare(compiled.bodies, &pcs);
+    assert!(interp.refused.is_empty(), "the interpreter refused {:?}", interp.refused);
+    let code = NativeCode::new(interp.entries, interp.sites).with_complete(true).with_keep(interp.keep);
+    machine::native::install_shared_for_next_run(Arc::new(code));
+    let program = coil_host::thread_program(
+        pipeline,
+        coil_host::CompiledProgram {
+            constants: &compiled.constants,
+            strings: pipeline.strings(),
+            static_slots: pipeline.static_slot_count(),
+            debug: pipeline.program_debug(),
+        },
     );
-    let _ = machine.restore_output();
-    let bytes = shared
-        .inner
-        .lock()
-        .expect("print buffer mutex poisoned")
-        .clone();
+    let print = Arc::new(Mutex::new(Vec::new()));
+    let mut start = coil_host::native_start(pipeline, &pipeline.archived_struct_layouts(), None);
+    start.shared_print = Some(Arc::clone(&print));
+    machine::run_natively(Arc::new(program), start).expect("the interpreter covers every body");
+    machine::io::set_shared_print_redirect(None);
+    let bytes = print.lock().expect("print buffer mutex poisoned").clone();
     String::from_utf8(bytes).expect("captured output should be valid UTF-8")
 }
 
 /// Serialize cwd changes, `chdir` into `root`, run `f`, then restore cwd.
-fn with_project_cwd<R>(root: &PathBuf, f: impl FnOnce() -> R) -> R {
-    let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+fn with_project_cwd<R>(root: &Path, f: impl FnOnce() -> R) -> R {
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(root).expect("chdir");
     struct CwdGuard(PathBuf);
@@ -159,14 +169,12 @@ fn with_project_cwd<R>(root: &PathBuf, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Compile `entry` and assert every `JumpIfMatch` pool index is in range.
-fn compile_entry_and_assert_jump_if_match_pool_valid(
-    entry: &PathBuf,
-) -> (Vec<common::Byte>, Vec<u64>, Pipeline) {
+/// Compile `entry` as a project.
+fn compile_entry(entry: &Path) -> (Compiled, Pipeline) {
     let mut pipeline = Pipeline::new();
     bind_ns_pipeline(&mut pipeline, &[]);
-    let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-        Ok(pair) => pair,
+    let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+        Ok(compiled) => compiled,
         Err(_) => {
             for msg in pipeline.messages() {
                 eprintln!("MSG: {}", msg.message());
@@ -174,23 +182,7 @@ fn compile_entry_and_assert_jump_if_match_pool_valid(
             panic!("compile failed");
         }
     };
-
-    let mut oob = Vec::new();
-    for (i, b) in bytecode.iter().enumerate() {
-        if matches!(*b.bytecode(), common::Instruction::JumpIfMatch) {
-            let idx = (b.operand_u32() & 0xFFFF) as usize;
-            if idx >= constants.len() {
-                oob.push((i, idx));
-            }
-        }
-    }
-    assert!(
-        oob.is_empty(),
-        "JumpIfMatch pool index out of range after multi-file link: \
-         {oob:?} (constants.len() = {})",
-        constants.len()
-    );
-    (bytecode, constants, pipeline)
+    (compiled, pipeline)
 }
 
 #[test]
@@ -240,12 +232,10 @@ fn no_manifest_uses_default_src_root() {
     assert_eq!(output, "42");
 }
 
-/// Phase 1: multi-module link finalizes peephole fusion once, relocating
-/// `MakePolyFn` while keeping fused fib-style ops in the entry module.
+/// A generic function's value and a recursive function, linked across two
+/// modules.
 #[test]
-fn two_module_polyfn_and_fib_fuse_and_run() {
-    use common::Instruction;
-
+fn two_module_polyfn_and_fib_run() {
     let manifest = manifest_src_and_stdlib();
     // Keep recursive `fib` in the entry namespace (empty prefix) — namespaced
     // modules do not rewrite bare recursive calls to the FQN today.
@@ -270,7 +260,7 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
     ];
     let (root, entry) = build_project("two_module_polyfn_fib", &manifest, files, "src/main.coil");
 
-    let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(&root).expect("chdir");
     struct CwdGuard(std::path::PathBuf);
@@ -283,8 +273,8 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
 
     let mut pipeline = Pipeline::new();
     bind_ns_pipeline(&mut pipeline, &[]);
-    let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-        Ok(pair) => pair,
+    let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+        Ok(compiled) => compiled,
         Err(_) => {
             for msg in pipeline.messages() {
                 eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -294,33 +284,13 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
     };
 
     assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakePolyFn)),
-        "expected MakePolyFn in linked bytecode"
-    );
-    let has_fused = bytecode.iter().any(|b| {
-        matches!(
-            b.bytecode(),
-            Instruction::BinSlotImm
-                | Instruction::BinSlotImmJmpf
-                | Instruction::BinSlotSlot
-                | Instruction::CmpJmpf
-                |             Instruction::BinReturn
-                | Instruction::ConstReturnImm
-                | Instruction::LoadReturnSlot
-                | Instruction::DenseBin
-                | Instruction::DenseBin2
-                | Instruction::DenseBinJmpf
-        )
-    });
-    assert!(
-        has_fused,
-        "final-link fusion should leave fused ops; opcodes: {:?}",
-        bytecode.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        compiled
+            .all_insts()
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::PolyFn { .. }, .. })),
+        "expected a PolyFn value in the linked program"
     );
 
-    let output = run_bytecode(bytecode, constants, &pipeline);
+    let output = run_compiled(compiled, &pipeline);
     // fib(5)=5, inc(5)=6, id(6)=6
     assert_eq!(output, "6");
 }
@@ -354,7 +324,7 @@ fn parse_fail_dependency_emits_single_diagnostic() {
     ];
     let (root, entry) = build_project("parse_fail_dep", &manifest, files, "src/main.coil");
 
-    let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(&root).expect("chdir");
     struct CwdGuard(PathBuf);
@@ -399,7 +369,7 @@ fn bind_project_root_sets_explicit_roots_without_toml() {
     )];
     let (root, entry) = build_project("bind_roots", "", files, "src/main.coil");
 
-    let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+    let _cwd_lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_cwd = std::env::current_dir().expect("get cwd");
     std::env::set_current_dir(&root).expect("chdir");
     struct CwdGuard(PathBuf);
@@ -413,10 +383,8 @@ fn bind_project_root_sets_explicit_roots_without_toml() {
     let mut pipeline = Pipeline::new();
     bind_ns_pipeline(&mut pipeline, &[]);
     assert_eq!(pipeline.project_root(), root.as_path());
-    let (bytecode, constants) = pipeline
-        .compile_src_from_file(entry.to_str().unwrap())
-        .expect("bound roots should compile");
-    let output = run_bytecode(bytecode, constants, &pipeline);
+    let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).expect("bound roots should compile");
+    let output = run_compiled(compiled, &pipeline);
     assert_eq!(output, "42");
 }
 
@@ -489,9 +457,8 @@ fn run_jobs(Receiver rx) -> Result<int, ChannelError> {
     let (root, entry) = build_project("try_pool", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
-        let (bytecode, constants, pipeline) =
-            compile_entry_and_assert_jump_if_match_pool_valid(&entry);
-        run_bytecode(bytecode, constants, &pipeline)
+        let (compiled, pipeline) = compile_entry(&entry);
+        run_compiled(compiled, &pipeline)
     });
     assert_eq!(output, "a,b,");
 }
@@ -540,9 +507,8 @@ fn write_greeting() -> Result<(), IoError> {
     let (root, entry) = build_project("io_host_try", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
-        let (bytecode, constants, pipeline) =
-            compile_entry_and_assert_jump_if_match_pool_valid(&entry);
-        run_bytecode(bytecode, constants, &pipeline)
+        let (compiled, pipeline) = compile_entry(&entry);
+        run_compiled(compiled, &pipeline)
     });
     assert_eq!(output, "ok");
 
@@ -609,9 +575,8 @@ fn write_then_read(string path) -> Result<(), IoError> {
     let (root, entry) = build_project("io_host_nested", &manifest, &files, "src/main.coil");
 
     let output = with_project_cwd(&root, || {
-        let (bytecode, constants, pipeline) =
-            compile_entry_and_assert_jump_if_match_pool_valid(&entry);
-        run_bytecode(bytecode, constants, &pipeline)
+        let (compiled, pipeline) = compile_entry(&entry);
+        run_compiled(compiled, &pipeline)
     });
     assert_eq!(output, "ok");
 
@@ -725,8 +690,8 @@ fn main() {
         grants.grant_dload_allow("tls");
         pipeline.set_host_grants(grants);
         pipeline.grant_dload_file("sum", libsum);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -734,7 +699,7 @@ fn main() {
                 panic!("compile failed");
             }
         };
-        run_bytecode(bytecode, constants, &pipeline)
+        run_compiled(compiled, &pipeline)
     });
     let _ = std::fs::remove_dir_all(&root);
     Some(output)
@@ -822,8 +787,8 @@ fn main() {
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, &[]);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -831,21 +796,15 @@ fn main() {
                 panic!("compile failed");
             }
         };
-        let has_two_word_return = bytecode.iter().any(|b| {
-            *b.bytecode() == common::Instruction::RETURN && b.return_words() == 2
-        });
         assert!(
-            !has_two_word_return,
-            "escaped arith::div must keep boxed RETURN, found RETURN operand 2"
+            !compiled.bodies.iter().any(|b| b.mir.ret_hi_ty.is_some()),
+            "escaped arith::div must keep a boxed return, found a two-word return"
         );
-        let has_call_indirect = bytecode
-            .iter()
-            .any(|b| *b.bytecode() == common::Instruction::CallIndirect);
         assert!(
-            has_call_indirect,
-            "address-of div must lower to CallIndirect"
+            compiled.all_insts().any(|i| matches!(i, MirInst::CallIndirect { .. })),
+            "address-of div must lower to an indirect call"
         );
-        let output = run_bytecode(bytecode, constants, &pipeline);
+        let output = run_compiled(compiled, &pipeline);
         assert_eq!(output, "5,-1");
     });
 }
@@ -893,8 +852,8 @@ fn main() {
         bind_ns_pipeline(&mut pipeline, &[]);
         // Pins the CALL ABI; the tiny `div` leaf would otherwise inline.
         pipeline.set_inline_max_cost(0);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -902,24 +861,16 @@ fn main() {
                 panic!("compile failed");
             }
         };
-        let has_two_word_return = bytecode.iter().any(|b| {
-            *b.bytecode() == common::Instruction::RETURN && b.return_words() == 2
-        });
         assert!(
-            has_two_word_return,
-            "direct-only arith::div should keep two-slot RETURN"
+            compiled.bodies.iter().any(|b| b.mir.ret_hi_ty.is_some()),
+            "direct-only arith::div should keep a two-word return"
         );
-        let output = run_bytecode(bytecode, constants, &pipeline);
+        let output = run_compiled(compiled, &pipeline);
         assert_eq!(output, "5");
     });
 }
 
 static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-struct CwdLockGuard(std::sync::MutexGuard<'static, ()>);
-impl Drop for CwdLockGuard {
-    fn drop(&mut self) {}
-}
 
 /// #605: modules with no `use` edge between them were ordered by a
 /// `HashMap`'s iteration, so the same project linked its functions in a
@@ -1211,8 +1162,8 @@ fn assert_entry_chain_dissolves(name: &str, files: &[(&str, &str)]) {
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, &[]);
-        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-            Ok(pair) => pair,
+        let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+            Ok(compiled) => compiled,
             Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -1220,14 +1171,14 @@ fn assert_entry_chain_dissolves(name: &str, files: &[(&str, &str)]) {
                 panic!("compile failed");
             }
         };
-        let start = pipeline.function_offset("main").expect("main");
-        let end = pipeline.compiler().function_end(start);
-        let main: Vec<_> = bytecode[start..end].iter().map(|b| *b.bytecode()).collect();
-        let makes = main.iter().filter(|o| matches!(o, common::Instruction::DenseMakeObject | common::Instruction::InitTyped)).count();
-        let calls = main.iter().filter(|o| matches!(o, common::Instruction::CALL)).count();
-        assert_eq!(makes, 1, "`main` builds the view: {main:?}");
-        assert!(calls <= 3, "`main` keeps view method calls: {main:?}");
-        let _ = run_bytecode(bytecode, constants, &pipeline);
+        let makes = compiled
+            .insts("main")
+            .filter(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Object { .. }, .. }))
+            .count();
+        let calls = compiled.insts("main").filter(|i| matches!(i, MirInst::Call { .. })).count();
+        assert_eq!(makes, 1, "`main` builds the view");
+        assert!(calls <= 3, "`main` keeps view method calls: {calls}");
+        let _ = run_compiled(compiled, &pipeline);
     });
 }
 
@@ -1268,8 +1219,8 @@ fn main() {
             let mut pipeline = Pipeline::new();
             bind_ns_pipeline(&mut pipeline, &[]);
             pipeline.set_opt_level(level);
-            let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
-                Ok(pair) => pair,
+            let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
+                Ok(compiled) => compiled,
                 Err(_) => {
                     for msg in pipeline.messages() {
                         eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -1277,19 +1228,18 @@ fn main() {
                     panic!("compile failed at {level:?}");
                 }
             };
-            let start = pipeline.function_offset("main").expect("main");
-            let end = pipeline.compiler().function_end(start);
-            let targets: Vec<usize> = bytecode[start..end]
-                .iter()
-                .filter(|b| matches!(*b.bytecode(), common::Instruction::CALL))
-                .map(|b| b.call_parts().1)
+            let called: Vec<&str> = compiled
+                .insts("main")
+                .filter_map(|i| match i {
+                    MirInst::Call { target, .. } => compiled.bodies.iter().find(|b| b.entry == Some(*target)),
+                    _ => None,
+                })
+                .map(|b| b.name.as_str())
                 .collect();
             for name in kept {
-                if let Some(at) = pipeline.function_offset(name) {
-                    assert!(!targets.contains(&at), "{level:?}: `main` keeps a call to `{name}`");
-                }
+                assert!(!called.contains(&name), "{level:?}: `main` keeps a call to `{name}`");
             }
-            let _ = run_bytecode(bytecode, constants, &pipeline);
+            let _ = run_compiled(compiled, &pipeline);
         });
     }
 }

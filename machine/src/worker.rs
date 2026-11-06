@@ -1,7 +1,7 @@
 //! A reactor job (a thread, an auto-par body, a harness case) whose native
 //! code covers its whole program runs on the driver over a [`Runtime`] of
 //! the worker's own, with no `Machine`: what `run_job_on_vm` does for the
-//! VM, without an interpreter.
+//! runtime, without an interpreter.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -22,11 +22,11 @@ thread_local! {
 /// Whether `job`'s native code covers every body and its entry, so
 /// [`run_native_job`] can run it.
 pub(crate) fn runs_natively(job: &Job) -> bool {
-    let Some(native) = job.native.as_ref().filter(|n| crate::driver::enabled() && n.is_complete()) else {
+    let Some(native) = job.native.as_ref().filter(|n| n.is_complete()) else {
         return false;
     };
-    let init = job.test.as_ref().and_then(|t| t.init_ip).map(|ip| ip as usize);
-    native.lookup(job.entry as usize).is_some() && init.is_none_or(|ip| native.lookup(ip).is_some() || Driver::can_start(&job.program.code, native, ip))
+    let startup = job.test.is_none() || Driver::covers(&job.program.startup, None, native);
+    native.lookup(job.entry as usize).is_some() && startup
 }
 
 /// Run `job` (one [`runs_natively`] accepts) on the driver and store its
@@ -65,7 +65,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
         native,
     } = job;
     // The print redirects of a job this thread runs while helping a join
-    // are put back after it (as the VM's job run does).
+    // are put back after it (as the runtime's job run does).
     let redirected = shared_print.is_some();
     let prev_output = redirected.then(|| crate::io::set_output_redirect(None)).flatten();
     let prev_shared_print = redirected.then(|| crate::io::set_shared_print_redirect(None)).flatten();
@@ -108,7 +108,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
         rt.program_string_cache.resize(program.strings.len(), Value::default());
         let native = native.expect("runs_natively checked the native code");
         rt.native = Some(Box::new(crate::native::NativeTable::new(Arc::clone(&native))));
-        // A job reads the spawner's statics, as on the VM.
+        // A job reads the spawner's statics, as on the runtime.
         match statics {
             Some(JobStatics::Shared(words)) if shared => rt.statics = words.iter().map(|&w| Value::from(w)).collect(),
             statics => {
@@ -125,11 +125,11 @@ fn run_on(rt: &mut Runtime, job: Job) {
             }
         }
         let driver_program = DriverProgram {
-            code: Arc::clone(&program.code),
+            startup: Arc::clone(&program.startup),
+            main: program.main,
             constants: Arc::clone(&program.constants),
             native,
             debug: program.debug.clone(),
-            base_dir: rt.ffi.base_dir.clone(),
             thread_program: Some(Arc::clone(&program)),
             shared_print: shared_print.clone(),
         };
@@ -139,9 +139,12 @@ fn run_on(rt: &mut Runtime, job: Job) {
         let out = (|| {
             if let Some(test) = &test {
                 d.rt.begin_probes(test.probes);
+                d.rt.set_step_budget(test.step_budget);
                 let ret = crate::reactor::test_on_driver(&mut d, entry, test);
                 let hits = d.rt.take_probes();
-                return Ok(crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits));
+                let steps = (d.rt.steps_charged(), d.rt.step_budget_hit);
+                d.rt.set_step_budget(None);
+                return Ok(crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits, steps));
             }
             let mut child_args = Vec::with_capacity(args.len());
             for a in args {

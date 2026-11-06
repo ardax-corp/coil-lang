@@ -740,10 +740,7 @@ impl Pipeline {
     /// Feed a result-cache key the sources of `files` and every module they
     /// use, each with the macro output spliced into it.
     pub(crate) fn key_sources(&self, files: &[PathBuf], key: &mut crate::comptime_cache::Key) {
-        let mut closure = self.source_closure(files);
-        // Only a native compile loads the twins, and no result depends on
-        // them: the editor, which has none, must find what a build cached.
-        closure.retain(|f| *f != crate::macros::twins_module_path());
+        let closure = self.source_closure(files);
         key.u64(closure.len() as u64);
         for file in &closure {
             key.path(file);
@@ -826,7 +823,7 @@ impl Pipeline {
     fn run_expansions(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
         let started = std::time::Instant::now();
         let (results, reused) = self.run_expansions_timed(jobs);
-        crate::il::opt::note_comptime_macros(jobs.len(), reused, started.elapsed().as_micros() as u64);
+        crate::opt::note_comptime_macros(jobs.len(), reused, started.elapsed().as_micros() as u64);
         results
     }
 
@@ -990,7 +987,7 @@ impl Pipeline {
             // its own module's.
             let module = jobs[idx[0]].provider_module.clone();
             let io = self.host_grants.comptime_io_for(&module);
-            // A nested compile plus a VM run is deeper than Windows' 1 MiB
+            // A nested compile plus a runtime run is deeper than Windows' 1 MiB
             // main thread stack; continue on a fresh segment when little is left.
             let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
                 let program = match compiled_program(key, ctx) {
@@ -2084,7 +2081,7 @@ impl SubProgram {
         let capture = self.host.runs_mir().then(crate::mir::ComptimeCapture::open);
         let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
         let mir = capture.map(crate::mir::ComptimeCapture::take).unwrap_or_default();
-        let (bytecode, constants) = match compiled {
+        let constants = match compiled {
             Ok(out) => out,
             Err(_) => {
                 let detail = sub
@@ -2118,11 +2115,9 @@ impl SubProgram {
         }
         Ok(CompiledProgram {
             expansion: crate::macros::CompiledExpansion {
-                bytecode: std::sync::Arc::new(bytecode),
                 constants: std::sync::Arc::new(constants),
                 strings: std::sync::Arc::new(sub.strings().to_vec()),
                 static_slot_count: sub.static_slot_count(),
-                operand_stack_slots: sub.operand_stack_slots(),
                 program_debug: sub.program_debug(),
                 class_word_kinds: sub.class_word_kinds(),
                 static_word_kinds: std::sync::Arc::new(sub.static_word_kinds()),
@@ -2215,21 +2210,16 @@ fn encode_program(program: &CompiledProgram) -> Option<Vec<u8>> {
         static_slot_count: e.static_slot_count,
         constants: e.constants.to_vec(),
         strings: e.strings.to_vec(),
-        bytecode: e.bytecode.to_vec(),
         source_files: Vec::new(),
         debug_locs: Vec::new(),
         fn_symbols: Vec::new(),
         struct_layouts: Vec::new(),
-        operand_stack_slots: e.operand_stack_slots,
-        stack_maps: Vec::new(),
-        precise_frames: Vec::new(),
         class_word_kinds: e.class_word_kinds.clone(),
         static_word_kinds: e.static_word_kinds.to_vec(),
         debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
         native_mir: program_mir(e),
+        startup: Vec::new(),
+        main: None,
     };
     archive.set_debug(e.program_debug.clone(), common::DebugLevel::Full);
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&archive).ok()?;
@@ -2268,8 +2258,7 @@ fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
     // rkyv needs the archive aligned.
     let mut aligned = rkyv::util::AlignedVec::<16>::new();
     aligned.extend_from_slice(rest);
-    let decoded = common::decode_archived_program(&aligned).ok()?;
-    let p = decoded.program;
+    let p = common::decode_archived_program(&aligned).ok()?;
     if p.version != common::ARCHIVE_VERSION {
         return None;
     }
@@ -2277,11 +2266,9 @@ fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
     let mir = if p.native_mir.is_empty() { Vec::new() } else { crate::mir::archive::decode(&p.native_mir).ok()?.0 };
     Some(CompiledProgram {
         expansion: crate::macros::CompiledExpansion {
-            bytecode: std::sync::Arc::new(p.bytecode),
             constants: std::sync::Arc::new(p.constants),
             strings: std::sync::Arc::new(p.strings),
             static_slot_count: p.static_slot_count,
-            operand_stack_slots: p.operand_stack_slots,
             program_debug,
             class_word_kinds: p.class_word_kinds,
             static_word_kinds: std::sync::Arc::new(p.static_word_kinds),
@@ -2297,11 +2284,6 @@ fn program_mir(e: &crate::macros::CompiledExpansion) -> Vec<u8> {
     if e.mir.is_empty() {
         return Vec::new();
     }
-    let pcs: HashMap<&str, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.as_str(), s.entry_pc)).collect();
-    let entries: Vec<_> = e
-        .mir
-        .iter()
-        .map(|body| crate::mir::archive::ArchiveEntry { body, pc: pcs.get(body.name.as_str()).copied(), stub: false })
-        .collect();
-    crate::mir::archive::encode(&entries)
+    let pcs: HashMap<String, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    crate::mir::archive::encode(&e.mir, &pcs)
 }

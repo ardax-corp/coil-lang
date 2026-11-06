@@ -6,7 +6,7 @@
 //! [`HostEnumMismatch`] (fail closed).
 //!
 //! The layout for a given invoke is the `HostInvoke` operand bits
-//! (`common::host_invoke_enum_layout`); the VM installs it for the duration
+//! (`common::host_invoke_enum_layout`); the runtime installs it for the duration
 //! of `NativeFn::invoke` via [`with_host_enum_layout`].
 
 use std::cell::Cell;

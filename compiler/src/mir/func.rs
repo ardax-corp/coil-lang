@@ -66,7 +66,7 @@ pub struct MirFunc {
     /// a frame word of its own, never an inline operand.
     pub debug_keep: bool,
     /// A coverage compile counts a line covered when code it emits runs:
-    /// the body takes LIR, and LIR keeps the code of each line instead of
+    /// the body keeps the code of each line instead of
     /// folding it away.
     pub keep_lines: bool,
     /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
@@ -75,7 +75,7 @@ pub struct MirFunc {
     /// objects this body makes carry no word kinds.
     pub opaque_words: bool,
     /// Locals (frame slots, for MIR lowered from HIR) a heap word was
-    /// stored in: the fuse-IL body of the same HIR keeps them there.
+    /// stored in: another body of the same HIR keeps them there.
     pub heap_slots: BTreeSet<LocalId>,
     /// Locals a non-heap word was stored in.
     pub word_slots: BTreeSet<LocalId>,
@@ -95,7 +95,7 @@ pub struct MirFunc {
     pub cleanup: Option<Box<MirFunc>>,
     /// Callees a call of this body may reach as a `TailCall` (planned tail
     /// calls of a `return`): a call to one whose result the block returns.
-    pub tail_targets: HashSet<crate::il::Label>,
+    pub tail_targets: HashSet<crate::bodies::Label>,
     /// Calls of a pure function returning one scalar word: CSE and LICM
     /// may treat them as operators that can trap.
     pub pure_calls: HashSet<ValueId>,
@@ -107,7 +107,7 @@ pub struct MirFunc {
     /// `byte_scan` reads them as byte lanes.
     pub byte_loads: HashSet<ValueId>,
     /// `Index` reads of a heap word in a forward scan: dense emission
-    /// asks the VM to prefetch the object a few elements ahead
+    /// asks the runtime to prefetch the object a few elements ahead
     /// ([`super::mark_prefetch_scans`]).
     pub prefetch_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write
@@ -172,7 +172,7 @@ impl MirFunc {
     /// The function entries this body's code names: the callees of its
     /// calls, its code pointers and function values, its cleanup pad's
     /// included.
-    pub fn code_targets(&self) -> Vec<crate::il::Label> {
+    pub fn code_targets(&self) -> Vec<crate::bodies::Label> {
         use super::MirAllocKind;
         let mut out = Vec::new();
         for inst in self.blocks.iter().flat_map(|b| &b.insts) {
@@ -1036,5 +1036,26 @@ impl MirFunc {
             }
         }
         Ok(())
+    }
+}
+
+/// `inst` is a planned tail call ([`MirFunc::tail_targets`]) whose result
+/// `block` returns. Any other call keeps the caller's frame, which a failed
+/// `requires` in the callee blames and a backtrace names.
+pub fn is_tail_call_inst(func: &MirFunc, block: &MirBlock, inst: &MirInst) -> bool {
+    let MirInst::Call { dest, dest_hi, target, .. } = inst else {
+        return false;
+    };
+    if !func.tail_targets.contains(target) {
+        return false;
+    }
+    match block.term {
+        Some(Terminator::Return { lo: Some(v), hi }) if v == *dest && hi == *dest_hi => {
+            matches!(
+                block.insts.last(),
+                Some(MirInst::Call { dest: d, dest_hi: h, .. }) if d == dest && h == dest_hi
+            )
+        }
+        _ => false,
     }
 }

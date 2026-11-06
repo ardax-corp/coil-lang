@@ -143,7 +143,7 @@ unsafe extern "C" fn pad_entry(ctx: *mut NativeCtx, homes: *const u64) -> u64 {
     }
 }
 
-/// The VM reads a bool word's low byte: `== 1` is true.
+/// The runtime reads a bool word's low byte: `== 1` is true.
 #[inline(always)]
 fn as_bool(w: u64) -> u64 {
     u64::from(w & 0xff == 1)
@@ -247,7 +247,7 @@ fn fcmp(op: MirCmpOp, a: f64, b: f64) -> bool {
         MirCmpOp::Gt => a > b,
         MirCmpOp::Ge => a >= b,
         MirCmpOp::Eq => a == b,
-        // The VM's `!=` is Rust's: true when unordered.
+        // `!=` is true when unordered.
         MirCmpOp::Ne => a != b,
     }
 }
@@ -317,7 +317,7 @@ unsafe fn yield_word(act: *mut Activation, ctx: *mut NativeCtx, word: u64) -> u6
     }
 }
 
-/// Charge one step (a call or a taken back-edge, as the VM counts them):
+/// Charge one step (a call or a taken back-edge):
 /// `false` when the budget ran out.
 #[inline(always)]
 unsafe fn charge(ctx: *mut NativeCtx) -> bool {
@@ -573,7 +573,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 let a = get!(*src);
                 set!(*dest, match kind {
                     MirCastKind::IntToFloat => (a as i64 as f64).to_bits(),
-                    // Rust `as`: saturating, NaN is 0, as the VM.
+                    // Rust `as`: saturating, NaN is 0, as the runtime.
                     MirCastKind::FloatToInt => f64::from_bits(a) as i64 as u64,
                     MirCastKind::Word => a,
                 });
@@ -604,21 +604,12 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 let Some(callee) = program(body).body_at(*target) else {
                     return Flow::Trap(TRAP_HELPER);
                 };
-                // A `drop` called as a method: claim its finalizer first, as
-                // the VM's `CALL` does, and skip the call when it ran.
+                // A `drop` called as a method: claim its finalizer first, and
+                // skip the call when it ran.
                 if callee.is_drop && args.len() == 1 && callee.pc != u32::MAX && rt::coil_native_claim(ctx, u64::from(callee.pc), get!(args[0])) == 0 {
                     set!(*dest, 0);
                     if let Some(h) = dest_hi {
                         set!(*h, 0);
-                    }
-                    return Flow::Next;
-                }
-                if callee.refused {
-                    let w = rt::coil_native_call_vm(ctx, u64::from(callee.pc), words!(args), args.len() as u64);
-                    check!();
-                    set!(*dest, w);
-                    if let Some(h) = dest_hi {
-                        set!(*h, (*ctx).vm_hi);
                     }
                     return Flow::Next;
                 }
@@ -635,7 +626,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                     many = args[..n].iter().map(|a| get!(*a)).collect();
                     &many
                 };
-                // A tail call takes the frame, as the VM's `TailCall`: a deep
+                // A tail call takes the frame: a deep
                 // tail recursion runs in one frame.
                 let top = (&(*act).frames).last().expect("a running frame");
                 let last = top.ip as usize + 1 == f.blocks[block].insts.len();
@@ -748,7 +739,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 }
             }
             MirInst::Ffi { dest, op, operand, args } => {
-                let w = rt::coil_native_ffi(ctx, u64::from(op.instruction() as u8), u64::from(*operand), words!(args), args.len() as u64);
+                let w = rt::coil_native_ffi(ctx, u64::from(op.code()), u64::from(*operand), words!(args), args.len() as u64);
                 check!();
                 set!(*dest, w);
             }
@@ -852,7 +843,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set!(*dest, w);
             }
             MirInst::Stringify { dest, src, tag } => {
-                // The instruction's operand, as the VM's emission packs it.
+                // The instruction's packed operand.
                 let op = tag.and_then(|t| common::ValueTag::from_u16(u16::try_from(t).ok()?)).map_or(0, common::stringify_operand);
                 let w = rt::coil_native_stringify(ctx, get!(*src), u64::from(op));
                 check!();
@@ -879,9 +870,8 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             }
             MirInst::MatchPayload { dest, scrutinee, index } => {
                 // One the block's `JumpIfMatch` binds belongs to the taken
-                // edge, where the terminator binds it (as the VM's emission
-                // does): run here, it would read whatever variant the word
-                // holds.
+                // edge, where the terminator binds it: run here, it would read
+                // whatever variant the word holds.
                 let blk = &f.blocks[block];
                 if matches!(&blk.term, Some(Terminator::JumpIfMatch { payloads, .. }) if payloads.contains(dest)) {
                     return Flow::Next;
@@ -900,11 +890,16 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             }
             MirInst::Cow { dest, src, unique, field } => {
                 let s = get!(*src);
+                let mark = rt::cow_report_mark(ctx);
                 let w = match field {
                     Some(i) => rt::coil_native_cow_field(ctx, s, u64::from(*i)),
                     None => rt::coil_native_cow(ctx, s, u64::from(*unique)),
                 };
                 check!();
+                if let Some(mark) = mark {
+                    let top = (&(*act).frames).last().expect("a running frame");
+                    rt::cow_report_note(ctx, mark, body.site_at(top.block, top.ip));
+                }
                 set_word(f, regs, *dest, w);
             }
             // `promote_fields` does not run on a capture; `refusal` says so.

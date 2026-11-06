@@ -22,7 +22,7 @@
 //!   bindings read it and the match does not hand it back.
 //!
 //! Each free is a `Builtin::FreeEarly` of the local, then a `Clear` of it.
-//! The VM skips what it cannot free safely (interned strings, shared unit
+//! The runtime skips what it cannot free safely (interned strings, shared unit
 //! variants, objects whose `drop` may keep `self`, anything while a
 //! collection is under way), so a free never needs more than the escape
 //! facts. An object whose `drop` keeps nothing of `self` has its `drop` run
@@ -269,7 +269,7 @@ fn take_calls(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, H
     out
 }
 
-/// Whether a value of `ty` may be one heap object the VM can free.
+/// Whether a value of `ty` may be one heap object the runtime can free.
 fn freeable(ty: Option<&Ty>) -> bool {
     let Some(t) = ty else {
         return false;
@@ -347,7 +347,7 @@ fn block_locals(checker: &Checker, body: &HirBody, e: &mut Escape<'_, '_>, kept:
             _ => {}
         }
     }
-    // A linear local's literals are interned (the VM never frees one), so
+    // A linear local's literals are interned (the runtime never frees one), so
     // only what it allocated counts.
     let srcs: Vec<(LocalId, Src)> = (0..body.locals.len())
         .map(|i| {

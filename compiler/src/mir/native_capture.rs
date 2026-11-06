@@ -1,14 +1,15 @@
 //! Hand each body's MIR to a native backend (`coil-native`).
 //!
-//! While a capture is open (`coil --jit`), `IlModule::optimize_and_flatten`
-//! copies every body's MIR, as lowered from HIR, before the VM tiers take
-//! it. The backend reads the bodies it can compile and maps them to the
-//! bytecode entry PCs by name.
+//! While a capture is open (`coil`), the pipeline
+//! copies every body's MIR, as lowered from HIR. The backend reads the bodies it can compile and maps them to the
+//! entry ids by name.
 
 use std::cell::RefCell;
 
+use std::collections::HashMap;
+
 use super::MirFunc;
-use crate::il::Label;
+use crate::bodies::Label;
 
 /// One function body's MIR.
 #[derive(Clone, Debug)]
@@ -25,9 +26,6 @@ struct Capture {
     bodies: Vec<NativeBody>,
     /// Keep each body as lowered, with no MIR pass run on it.
     raw: bool,
-    /// For compile-time evaluation only: the program builds as it would
-    /// with no capture ([`ComptimeCapture`]).
-    comptime: bool,
 }
 
 thread_local! {
@@ -36,7 +34,7 @@ thread_local! {
 
 /// Start capturing for a backend that optimizes (drops an earlier capture).
 pub fn start_native_capture() {
-    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: false, comptime: false }));
+    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: false }));
 }
 
 /// Start capturing bodies as lowered from HIR, with no MIR pass run on them
@@ -44,7 +42,7 @@ pub fn start_native_capture() {
 /// output is the reference the optimized engines are compared against. A
 /// bug in a pass cannot then hide on both sides of the comparison.
 pub fn start_raw_capture() {
-    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true, comptime: false }));
+    NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true }));
 }
 
 /// Run `f` with the capture closed: a program compiled inside another
@@ -57,20 +55,12 @@ pub fn without_native_capture<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// A capture for a native backend is open: the compile also builds what
-/// native code needs (the twins), which a [`ComptimeCapture`] does not ask
-/// for.
-pub fn native_capture_active() -> bool {
-    NATIVE_CAPTURE.with(|c| c.borrow().as_ref().is_some_and(|c| !c.comptime))
-}
-
 /// Any capture is open: the compile hands its bodies over.
 pub(crate) fn capture_open() -> bool {
     NATIVE_CAPTURE.with(|c| c.borrow().is_some())
 }
 
-/// End the capture and return its bodies, each call of a twinned host
-/// native now a call of its Coil twin ([`super::native_twins`]).
+/// End the capture and return its bodies.
 pub fn take_native_capture() -> Vec<NativeBody> {
     finished(NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).map(|c| c.bodies).unwrap_or_default())
 }
@@ -84,16 +74,13 @@ pub fn peek_native_capture() -> Vec<NativeBody> {
 
 /// `bodies` as an engine runs them.
 fn finished(mut bodies: Vec<NativeBody>) -> Vec<NativeBody> {
-    let entries = bodies.iter().filter_map(|b| Some((b.name.clone(), b.entry?))).collect();
-    super::native_twins::apply(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)), &entries);
-    super::native_expand::apply_all(bodies.iter_mut().map(|b| (b.name.as_str(), &mut b.mir)));
+    super::native_expand::apply_all(bodies.iter_mut().map(|b| &mut b.mir));
     bodies
 }
 
 /// A raw capture for compile-time evaluation, closed when this drops, so a
-/// compile that fails or panics leaves none open. It builds nothing extra:
-/// the interpreter runs a twinned native as the host call it is. With a
-/// capture already open this does nothing, and evaluation reads that one.
+/// compile that fails or panics leaves none open. With a capture already
+/// open this does nothing, and evaluation reads that one.
 pub struct ComptimeCapture {
     owner: bool,
 }
@@ -102,7 +89,7 @@ impl ComptimeCapture {
     pub fn open() -> Self {
         let owner = !capture_open();
         if owner {
-            NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true, comptime: true }));
+            NATIVE_CAPTURE.with(|c| *c.borrow_mut() = Some(Capture { bodies: Vec::new(), raw: true }));
         }
         Self { owner }
     }
@@ -129,7 +116,7 @@ impl Drop for ComptimeCapture {
 /// fills, which call the runtime's kernels). A generator, a body with a
 /// cleanup pad, a debugger's or a coverage build's keep their MIR as
 /// lowered.
-pub fn capture_native_bodies<'a>(bodies: impl Iterator<Item = (&'a str, Option<Label>, &'a MirFunc)>, opts: &crate::il::opt::OptimizeOptions) {
+pub fn capture_native_bodies<'a>(bodies: impl Iterator<Item = (&'a str, Option<Label>, &'a MirFunc)>, opts: &crate::opt::OptimizeOptions) {
     NATIVE_CAPTURE.with(|c| {
         if let Some(capture) = c.borrow_mut().as_mut() {
             let raw = capture.raw;
@@ -151,7 +138,7 @@ fn optimizable(func: &MirFunc) -> bool {
 }
 
 /// A [`super::MirInst::ByteScan`] or [`super::MirInst::VecLoop`] as the
-/// VM's `VScan` / `VLoop` runs it, over a frame of word slots native code
+/// the vector scan / loop runs it, over a frame of word slots native code
 /// fills: slot 0 is the loop's `dest` (a reduce's or push's start value
 /// goes in first), slot 1 its block position (`pos`), and `inputs[i]` is
 /// in slot `2 + i`.
@@ -167,7 +154,7 @@ pub struct VectorOp {
     pub flags: u8,
 }
 
-/// `inst` as a [`VectorOp`]: `None` for another inst or a body the VM's
+/// `inst` as a [`VectorOp`]: `None` for another inst or a body the runtime's
 /// encoding cannot hold.
 pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
     use super::inst::VecLoopKind;
@@ -185,10 +172,10 @@ pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
     for (i, v) in inputs.iter().enumerate() {
         regs[v.index()] = (i + 2) as u8;
     }
-    let words = |body: Vec<common::Byte>| body.iter().map(|b| u64::from(*b.bytecode() as u8) | (u64::from(b.operand_u32()) << 32)).collect::<Vec<_>>();
+    let words = |body: Vec<common::LaneWord>| body.iter().map(|b| b.to_bits()).collect();
     match inst {
         super::MirInst::ByteScan { inclusive, backward, streams, scalars, expr, .. } => {
-            let body = super::emit::byte_scan_body(expr, streams, scalars, &regs)?;
+            let body = super::vector_body::byte_scan_body(expr, streams, scalars, &regs)?;
             let mut flags = body.len() as u8;
             if *inclusive {
                 flags |= common::simd::SCAN_INCLUSIVE;
@@ -200,7 +187,7 @@ pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
         }
         super::MirInst::VecLoop { pos, kind, .. } => {
             let p = if pos.is_some() { 1 } else { 0 };
-            let body = super::emit::vec_loop_body(kind, &regs, 0, p)?;
+            let body = super::vector_body::vec_loop_body(kind, &regs, 0, p)?;
             let start = match kind {
                 VecLoopKind::Reduce { init, .. } | VecLoopKind::Push { out: init, .. } => Some(*init),
                 VecLoopKind::Store { .. } => None,
@@ -210,4 +197,124 @@ pub fn vector_op(inst: &super::MirInst) -> Option<VectorOp> {
         }
         _ => None,
     }
+}
+
+/// What `bodies` load through FFI: whether any calls into a shared library,
+/// and the names `dload` is given as literals, in order, once each. `strings`
+/// is the program's string table.
+pub fn ffi_use(bodies: &[NativeBody], strings: &[String]) -> (bool, Vec<String>) {
+    let mut uses = false;
+    let mut names: Vec<String> = Vec::new();
+    for b in bodies {
+        let literals: std::collections::HashMap<super::ValueId, u32> = b
+            .mir
+            .blocks
+            .iter()
+            .flat_map(|blk| &blk.insts)
+            .filter_map(|i| match i {
+                super::MirInst::String { dest, idx } => Some((*dest, *idx)),
+                _ => None,
+            })
+            .collect();
+        for inst in b.mir.blocks.iter().flat_map(|blk| &blk.insts) {
+            let super::MirInst::Ffi { op, args, .. } = inst else { continue };
+            uses = true;
+            if *op != super::MirFfiOp::Load {
+                continue;
+            }
+            let name = args.first().and_then(|a| literals.get(a)).and_then(|&s| strings.get(s as usize));
+            if let Some(name) = name
+                && !names.contains(name)
+            {
+                names.push(name.clone());
+            }
+        }
+    }
+    (uses, names)
+}
+
+/// A `Call` of a captured body whose arguments are all constants.
+#[derive(Clone, Debug)]
+pub struct ConstCall {
+    /// Index of its body in the capture, and its block and op there.
+    at: (usize, usize, usize),
+    /// The body it is in.
+    pub body: String,
+    pub target: Label,
+    pub args: Vec<ConstArg>,
+    pub loc: common::DebugLoc,
+}
+
+/// A constant argument: a word, or an index in the string table.
+#[derive(Clone, Copy, Debug)]
+pub enum ConstArg {
+    Word(u64),
+    Text(u32),
+}
+
+/// What a [`ConstCall`] computed.
+pub enum ConstResult {
+    Word(u64),
+    Text(u32),
+}
+
+/// The one-word `Call`s of the open capture with constant arguments.
+pub fn capture_const_calls() -> Vec<ConstCall> {
+    NATIVE_CAPTURE.with(|c| {
+        let c = c.borrow();
+        let Some(capture) = c.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        for (bi, b) in capture.bodies.iter().enumerate() {
+            let consts: HashMap<super::ValueId, ConstArg> = b
+                .mir
+                .blocks
+                .iter()
+                .flat_map(|blk| &blk.insts)
+                .filter_map(|i| match i {
+                    super::MirInst::Const { dest, c } => Some((*dest, ConstArg::Word(const_word(*c)))),
+                    super::MirInst::String { dest, idx } => Some((*dest, ConstArg::Text(*idx))),
+                    _ => None,
+                })
+                .collect();
+            for (blk_i, blk) in b.mir.blocks.iter().enumerate() {
+                for (i, inst) in blk.insts.iter().enumerate() {
+                    let super::MirInst::Call { dest, dest_hi: None, target, args } = inst else { continue };
+                    let Some(args) = args.iter().map(|a| consts.get(a).copied()).collect::<Option<Vec<_>>>() else { continue };
+                    out.push(ConstCall { at: (bi, blk_i, i), body: b.name.clone(), target: *target, args, loc: b.mir.op_loc(*dest) });
+                }
+            }
+        }
+        out
+    })
+}
+
+fn const_word(c: super::MirConst) -> u64 {
+    match c {
+        super::MirConst::I64(v) => v as u64,
+        super::MirConst::F64(bits) => bits,
+        super::MirConst::Bool(b) => u64::from(b),
+    }
+}
+
+/// Replace each call with what it computed, in the open capture.
+pub fn replace_const_calls(results: &[(ConstCall, ConstResult)]) {
+    NATIVE_CAPTURE.with(|c| {
+        let mut c = c.borrow_mut();
+        let Some(capture) = c.as_mut() else { return };
+        for (call, result) in results {
+            let (bi, blk, i) = call.at;
+            let mir = &mut capture.bodies[bi].mir;
+            let super::MirInst::Call { dest, .. } = mir.blocks[blk].insts[i] else { continue };
+            let by_type = match (result, mir.ty(dest)) {
+                (ConstResult::Text(idx), _) => Some(super::MirInst::String { dest, idx: *idx }),
+                (ConstResult::Word(w), super::MirTy::F64) => Some(super::MirInst::Const { dest, c: super::MirConst::F64(*w) }),
+                (ConstResult::Word(w), super::MirTy::Bool) => Some(super::MirInst::Const { dest, c: super::MirConst::Bool(*w != 0) }),
+                (ConstResult::Word(w), super::MirTy::I64) => Some(super::MirInst::Const { dest, c: super::MirConst::I64(*w as i64) }),
+                _ => None,
+            };
+            if let Some(inst) = by_type {
+                mir.blocks[blk].insts[i] = inst;
+            }
+        }
+    });
 }

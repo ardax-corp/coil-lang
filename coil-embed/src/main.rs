@@ -1,4 +1,4 @@
-//! Packaged-app runner: the runtime and Cranelift, no VM, parser or linker.
+//! Packaged-app runner: the runtime and Cranelift, no interpreter, parser or linker.
 //! `coil package` appends the program with its MIR, which this JITs at start.
 //! It is what `--no-aot` packages, and what a failed link falls back to.
 

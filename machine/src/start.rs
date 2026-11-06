@@ -27,14 +27,13 @@ pub struct NativeStart {
 /// Run `program` on the native driver with the native code installed for
 /// the next run ([`crate::native::install_for_next_run`],
 /// [`crate::native::install_aot`]): `Some(panicked)`. `None` when that code
-/// does not cover every body or the driver is off: the code stays
-/// installed and the caller runs the program on the VM.
+/// does not cover every body: nothing ran.
 pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<bool> {
-    if !crate::driver::enabled() || !crate::native::pending_is_complete() {
+    if !crate::native::pending_is_complete() {
         return None;
     }
-    let native = crate::native::take_pending()?.into_code(program.code.len());
-    if native.lookup(0).is_none() && !Driver::can_start(&program.code, &native, 0) {
+    let native = crate::native::take_pending()?.into_code();
+    if !Driver::covers(&program.startup, program.main, &native) {
         crate::native::install_shared_for_next_run(native);
         return None;
     }
@@ -45,29 +44,47 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
     let mut rt = runtime_for(&program, start);
     rt.native = Some(Box::new(crate::native::NativeTable::new(Arc::clone(&native))));
     let driver_program = DriverProgram {
-        code: Arc::clone(&program.code),
+        startup: Arc::clone(&program.startup),
+        main: program.main,
         constants: Arc::clone(&program.constants),
         native,
         debug: program.debug.clone(),
-        base_dir: rt.ffi.base_dir.clone(),
         thread_program: Some(Arc::clone(&program)),
         shared_print,
     };
+    if std::env::var_os("COIL_COW_REPORT").is_some() {
+        rt.heap.get_mut().report_cow();
+    }
     let mut driver = Driver::new(&mut rt, driver_program);
     let guard = crate::thread::HostStateGuard::enter_driver(&mut driver);
-    driver.run_from(0);
+    driver.run_program();
     driver.run_remaining_finalizers();
+    driver.print_cow_report();
     drop(guard);
     let panicked = driver.panicked();
     drop(driver);
     if std::env::var_os("COIL_NATIVE_STATS").is_some() {
-        eprintln!("native: the driver ran the program (no interpreter)");
+        eprintln!("native: the driver ran the program");
         if let Some(t) = rt.native.as_deref() {
             crate::native::print_stats(t);
         }
     }
     finish(&mut rt);
     Some(panicked)
+}
+
+/// What a job needs to run `program`, for a host that only submits jobs (the
+/// test harness).
+pub fn spawn_context(
+    program: Arc<ThreadProgram>,
+    start: NativeStart,
+    reactor: Arc<crate::reactor::Reactor>,
+    native: Option<Arc<crate::native::NativeCode>>,
+) -> Option<crate::thread::ThreadSpawnContext> {
+    let mut rt = runtime_for(&program, start);
+    rt.reactor = reactor;
+    rt.native = native.map(|n| Box::new(crate::native::NativeTable::new(n)));
+    rt.thread_spawn_context(program, None)
 }
 
 /// The runtime `program` runs over: the standard host natives, its FFI
@@ -92,7 +109,7 @@ fn runtime_for(program: &ThreadProgram, start: NativeStart) -> Runtime {
 }
 
 /// After `main`: join the threads it left running and stop the reactor's
-/// workers (as the VM's run does).
+/// workers (as the runtime's run does).
 fn finish(rt: &mut Runtime) {
     if crate::reactor::NO_THREADS {
         while rt.reactor.help_local_once() {}

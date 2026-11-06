@@ -1,6 +1,6 @@
 //! What a call of a function word does, as `CallIndirect` takes it
-//! (`exec_rest.rs`, `call_indirect`), for code that calls bodies without
-//! the VM's operand stack: which body runs on which words, or the new
+//! (`call_indirect`), for code that calls bodies without
+//! the runtime's operand stack: which body runs on which words, or the new
 //! function value a partial application makes.
 
 use common::Value;

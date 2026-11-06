@@ -1,16 +1,13 @@
 //! Module setup as a function of its own (`__module_setup`): the static
 //! initializers' stores and each `extern` library's load and declarations.
 //! The finalizer registry is one more (`__finalizer_setup`), called first of
-//! all. The prologue calls them before `main`
-//! (`CALL __module_setup; POP; JMP main`), so it is a body like any other:
-//! the register tiers emit it from its MIR and native code compiles it
+//! all. Startup calls them before `main`, so each is a body like any other
 //! (`docs/internals/native.md`, "Module setup").
 //!
 //! The initializers computed while compiling (`const`s and pure `static
-//! let`s, [`ComptimeConst`]) stay in the prologue ahead of that call:
-//! `Pipeline::compute_consts` replaces their calls with the values'
-//! snapshot (`RestoreSnapshot`), and one that cannot be computed keeps its
-//! startup call, which runs natively like any call.
+//! let`s, [`ComptimeConst`]) are startup steps of their own, ahead of that
+//! call: `Pipeline::compute_consts` replaces them with the values' snapshot,
+//! and one that cannot be computed keeps its step.
 
 use super::*;
 use crate::mir::{MirAllocKind, MirBuilder, MirConst, MirFfiOp, MirFunc, MirGcKind, MirTy};
@@ -20,6 +17,12 @@ pub(crate) const MODULE_SETUP_FN: &str = "__module_setup";
 
 /// The finalizer registry's function name.
 const FINALIZER_SETUP_FN: &str = "__finalizer_setup";
+
+/// A body startup calls, and the static its word goes to.
+pub(crate) struct StartupStep {
+    pub(crate) body: String,
+    pub(crate) slot: Option<u32>,
+}
 
 /// One step of module setup, in the order its ops run.
 pub(crate) enum SetupStep {
@@ -35,26 +38,24 @@ pub(crate) enum SetupStep {
 }
 
 impl Compiler {
-    /// Emit `__module_setup` from the setup collected while compiling, and
-    /// the prologue's call to it at `insert_at`; the call's length, `None`
-    /// when the program has nothing to set up.
-    pub(super) fn emit_module_setup(&mut self, insert_at: usize) -> Option<usize> {
-        // The setup ops are rebuilt from the steps: `static_init` only
-        // served the capability scan.
-        drop(std::mem::take(&mut self.static_init));
+    /// Emit `__module_setup` from the setup collected while compiling and
+    /// list what runs before `main`, by name: the finalizer registry first,
+    /// as a collection while an initializer runs must find the `drop` of
+    /// what it made, then the initializers computed while compiling, then
+    /// `__module_setup`.
+    pub(super) fn emit_module_setup(&mut self) {
         let finalizers = self.finalizer_registry();
         let steps = std::mem::take(&mut self.setup_steps);
-        let mut region = CodeBuf::new();
+        let mut startup = Vec::new();
         let mut setup = Vec::new();
         for step in steps {
             match step {
                 SetupStep::Static { ref init, slot, comptime } => {
-                    let Some(&offset) = self.functions.get(init) else { continue };
-                    // A `comptime` value's call stays in the prologue, where
-                    // `compute_consts` replaces it.
+                    if !self.functions.contains_key(init) {
+                        continue;
+                    }
                     if comptime {
-                        region.push(Self::packed_entry_byte_ret(crate::il::EntryKind::Call, 0, offset as u32, 1));
-                        region.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
+                        startup.push(StartupStep { body: init.clone(), slot: Some(slot) });
                     } else {
                         setup.push(step);
                     }
@@ -66,63 +67,44 @@ impl Compiler {
         setup.sort_by_key(|s| !matches!(s, SetupStep::Static { .. }));
         if !setup.is_empty() {
             let name = MODULE_SETUP_FN.to_string();
-            let (offset, label) = self.bind_function_entry(name.clone());
-            let start = self.bytecode.len();
+            let (_, label) = self.bind_function_entry(name.clone());
             // Its code is emitted from the MIR below.
-            self.bytecode.push_return();
-            let end = self.bytecode.len();
-            self.record_fn_span(name.clone(), start, end);
-            self.bytecode.record_func_with_sp(name, Some(label), start, end, 0);
+            self.bodies.advance();
+            self.bodies.record(name.clone(), Some(label));
             match self.module_setup_mir(&setup) {
                 Ok(mut func) => {
                     func.shrink_to_fit();
-                    self.bytecode.set_last_func_hir_mir(func);
+                    self.bodies.set_last_mir(func);
                 }
-                Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+                Err(why) => self.bodies.set_last_mir_why(why),
             }
-            region.push(Self::packed_entry_byte_ret(crate::il::EntryKind::Call, 0, offset as u32, 1));
-            region.push_pop();
+            startup.push(StartupStep { body: name, slot: None });
         }
-        // The registry runs before every initializer, the prologue's included:
-        // a collection while one runs must find the `drop` of what it made.
         if !finalizers.is_empty() {
-            let offset = self.emit_finalizer_setup(&finalizers);
-            let mut first = CodeBuf::new();
-            first.push(Self::packed_entry_byte_ret(crate::il::EntryKind::Call, 0, offset as u32, 1));
-            first.push_pop();
-            first.append(&mut region);
-            region = first;
+            self.emit_finalizer_setup(&finalizers);
+            startup.insert(0, StartupStep { body: FINALIZER_SETUP_FN.to_string(), slot: None });
         }
-        if region.is_empty() {
-            return None;
-        }
-        let n = region.len();
-        self.bytecode.splice_buf_at(insert_at, region);
-        Some(n)
+        self.startup_steps = startup;
     }
 
-    /// Emit `__finalizer_setup`, the registry of `finalizers`; its entry.
-    fn emit_finalizer_setup(&mut self, finalizers: &[(usize, u32, crate::il::Label)]) -> usize {
+    /// Emit `__finalizer_setup`, the registry of `finalizers`.
+    fn emit_finalizer_setup(&mut self, finalizers: &[(usize, u32, crate::bodies::Label)]) {
         let name = FINALIZER_SETUP_FN.to_string();
-        let (offset, label) = self.bind_function_entry(name.clone());
-        let start = self.bytecode.len();
+        let (_, label) = self.bind_function_entry(name.clone());
         // Its code is emitted from the MIR below.
-        self.bytecode.push_return();
-        let end = self.bytecode.len();
-        self.record_fn_span(name.clone(), start, end);
-        self.bytecode.record_func_with_sp(name, Some(label), start, end, 0);
+        self.bodies.advance();
+        self.bodies.record(name, Some(label));
         match Self::finalizer_setup_mir(finalizers) {
             Ok(mut func) => {
                 func.shrink_to_fit();
-                self.bytecode.set_last_func_hir_mir(func);
+                self.bodies.set_last_mir(func);
             }
-            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+            Err(why) => self.bodies.set_last_mir_why(why),
         }
-        offset
     }
 
     /// `__finalizer_setup`'s MIR.
-    fn finalizer_setup_mir(finalizers: &[(usize, u32, crate::il::Label)]) -> Result<MirFunc, String> {
+    fn finalizer_setup_mir(finalizers: &[(usize, u32, crate::bodies::Label)]) -> Result<MirFunc, String> {
         let mir = |e: crate::mir::MirError| e.to_string();
         let mut b = MirBuilder::new(FINALIZER_SETUP_FN);
         b.allow_host_edges = true;
@@ -150,7 +132,7 @@ impl Compiler {
     /// The finalizer registry: `(gc_register_finalizer, type id, drop
     /// entry)` for each class with a `drop`, in type-id order (archives
     /// stay reproducible).
-    fn finalizer_registry(&self) -> Vec<(usize, u32, crate::il::Label)> {
+    fn finalizer_registry(&self) -> Vec<(usize, u32, crate::bodies::Label)> {
         let Some(native) = self.native_id("gc_register_finalizer") else {
             return Vec::new();
         };
@@ -181,12 +163,10 @@ impl Compiler {
             match step {
                 SetupStep::Static { init, slot, .. } => {
                     let target = self.fn_entry_labels.get(init).copied().ok_or_else(|| format!("{init}: no entry"))?;
-                    let ret = self
-                        .bytecode
-                        .funcs()
+                    let ret = self.bodies.funcs()
                         .iter()
                         .find(|f| f.name == *init)
-                        .and_then(|f| f.hir_mir.as_ref())
+                        .and_then(|f| f.mir.as_ref())
                         .and_then(|m| m.ret_ty)
                         .filter(|t| t.is_word_lane())
                         .ok_or_else(|| format!("{init}: no one-word MIR return"))?;

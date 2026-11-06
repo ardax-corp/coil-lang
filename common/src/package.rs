@@ -1,6 +1,5 @@
 //! Self-contained executable packaging (append `.ccoil` archive + trailer).
 
-use crate::opcode::{Byte, Instruction};
 
 /// Magic at the end of a packaged `coil` binary.
 pub const PACKAGE_MAGIC: &[u8; 8] = b"COILAPP\0";
@@ -8,7 +7,7 @@ pub const PACKAGE_MAGIC: &[u8; 8] = b"COILAPP\0";
 /// Trailer size in bytes (little-endian fields).
 pub const PACKAGE_TRAILER_SIZE: usize = 32;
 
-/// [`PackageTrailer::flags`]: program bytecode uses dynamic FFI (`dload` / `extern`).
+/// [`PackageTrailer::flags`]: program code uses dynamic FFI (`dload` / `extern`).
 pub const PACKAGE_FLAG_USES_FFI: u32 = 1;
 
 /// [`PackageTrailer::flags`]: a [`NativeLock`] blob sits between the `.ccoil` archive and the trailer.
@@ -564,57 +563,6 @@ pub fn is_system_ffi_stem(name: &str) -> bool {
     }
 }
 
-fn is_ffi_opcode(op: Instruction) -> bool {
-    matches!(
-        op,
-        Instruction::FfiLoad
-            | Instruction::FfiInvoke
-            | Instruction::DeclareFFI
-            | Instruction::NATIVE
-    )
-}
-
-/// True when bytecode may call into shared libraries at runtime.
-pub fn bytecode_uses_ffi(bytecode: &[Byte]) -> bool {
-    bytecode.iter().any(|b| is_ffi_opcode(*b.bytecode()))
-}
-
-/// Decode a `STRING` table index at `i`. Returns `(text, index_after)`.
-fn decode_string_literal(
-    bytecode: &[Byte],
-    strings: &[String],
-    i: usize,
-) -> Option<(String, usize)> {
-    let b = bytecode.get(i)?;
-    if *b.bytecode() != Instruction::STRING {
-        return None;
-    }
-    let idx = b.operand_u32() as usize;
-    let text = strings.get(idx)?.clone();
-    Some((text, i + 1))
-}
-
-/// Library names passed to `FfiLoad` (`STRING` immediately before each `FfiLoad`).
-pub fn ffi_library_names_from_bytecode(bytecode: &[Byte], strings: &[String]) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut i = 0;
-    while i < bytecode.len() {
-        if let Some((name, end)) = decode_string_literal(bytecode, strings, i) {
-            if bytecode
-                .get(end)
-                .is_some_and(|b| *b.bytecode() == Instruction::FfiLoad)
-                && !names.iter().any(|n| n == &name)
-            {
-                names.push(name);
-            }
-            i = end;
-        } else {
-            i += 1;
-        }
-    }
-    names
-}
-
 /// Default natives cache root (`~/.coil/natives`).
 pub fn default_natives_root() -> std::path::PathBuf {
     let home = std::env::var_os("HOME")
@@ -627,7 +575,7 @@ pub fn default_natives_root() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opcode::Byte;
+    
 
     #[test]
     fn json_bool_roundtrip() {
@@ -732,29 +680,6 @@ mod tests {
         assert_eq!(
             embedded_archive_slice(&out, trailer),
             Some(archive.as_slice())
-        );
-    }
-
-    #[test]
-    fn detects_ffi_opcodes() {
-        let bc = vec![
-            Byte::new(Instruction::HALT),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        assert!(bytecode_uses_ffi(&bc));
-        assert!(!bytecode_uses_ffi(&[Byte::new(Instruction::HALT)]));
-    }
-
-    #[test]
-    fn extracts_dload_library_name_before_ffi_load() {
-        let strings = vec!["sum".to_string()];
-        let bc = vec![
-            Byte::new(Instruction::STRING).with_operand_u32(0),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        assert_eq!(
-            ffi_library_names_from_bytecode(&bc, &strings),
-            vec!["sum".to_string()]
         );
     }
 

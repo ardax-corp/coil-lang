@@ -16,15 +16,13 @@ coil-test --help         # same flags as `coil test --help`
 
 ## Why a separate binary
 
-Test-only VM mechanisms (coverage maps, per-test output capture) are Cargo
-features on `machine`. Only `coil-test` enables them, so
-`coil` and `coil-embed` never compile them: no runtime flags or `Option`
-checks in the plain VM. `coil-test` also forwards `gc-stress` / `gc-stats`.
-The step budget (`Machine::set_step_budget`) is not one of them: the VM has
-it anyway (it also bounds compile-time evaluation); a test job sets it per case
-(`TestCase::step_budget`) and reports `steps` / `timed_out`.
+Test-only code (coverage, mutation testing, the harness itself) lives in `coil-test`,
+so `coil` and `coil-embed` never carry it. `coil-test` also forwards `gc-stress` /
+`gc-stats`. The step budget is the runtime's (`Runtime::set_step_budget`, which also
+bounds compile-time evaluation), and only the interpreter charges it; a test job sets
+it per case (`TestCase::step_budget`) and reports `steps` / `timed_out`.
 
-Host wiring (`Pipeline` → `Machine`: FFI paths, dload gate, thread program)
+Host wiring (`Pipeline` → `Runtime`: FFI paths, dload gate, thread program)
 lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 `coil-embed` runs archives only and does not link it.
 
@@ -44,7 +42,7 @@ Every case runs inside the harness process, so `env::exit` (granted with
 `--allow-exit`) must not exit it: an `exit(0)` would end the run early with
 status 0 and green CI (#1401). `run_test_suite` calls
 `machine::env::trap_exit(true)`; from then on the `env_exit` native records
-its code on the thread and raises a VM panic
+its code on the thread and raises a panic
 (`env::exit(N) ends only this job under the test harness`), so the job's
 `defer`s run and the harness goes on with the next case.
 
@@ -52,12 +50,12 @@ its code on the thread and raises a VM panic
 |----------------------|---------|
 | a `test` case (or its static init) | fails, whatever `N`: the rest of the body never ran |
 | a case-less file's `main` | passes when `N == 0` (a program's clean end), fails otherwise |
-| a `thread::spawn` job the case started | that job panics on its own VM (its join fails); the case sees only the failed join |
+| a `thread::spawn` job the case started | that job panics on its own runtime (its join fails); the case sees only the failed join |
 
 A test that needs a real exit status runs the program as a subprocess.
 
 Outside `coil test` (`coil --include-tests tests/foo.coil`), a test file
-with no `main` gets one that runs every case in one VM, prints
+with no `main` gets one that runs every case in one run, prints
 `> Test "<name>" failed` for each `Err`, and panics with `tests failed` if
 any did. The compiler builds that `main` as HIR
 ([`hir::synth`](../../compiler/src/hir/synth.rs)) and lowers it like any
@@ -194,8 +192,8 @@ carry each shown case's `stdout` and `stderr` next to the combined `output`.
 ## Parallel runs
 
 Each case runs as a job on the CPU reactor (`machine/src/reactor.rs`,
-[IO reactor](io-reactor.md)): `Reactor::submit_test` queues it, a worker VM
-runs the file's static-init prologue (its `JMP main` patched to `HALT`), then
+[IO reactor](io-reactor.md)): `Reactor::submit_test` queues it, a worker
+runs the file's startup (`StartupOp`s, not `main`), then
 calls the case; `TestHandle::wait` returns a `TestReport` (passed, and the
 `Err` text of a failing `assert`). `-j N` (default: available CPUs) sets the
 worker count and the number of compile threads.
@@ -211,8 +209,8 @@ worker count and the number of compile threads.
   the threads a case spawns are captured too) and never reach the terminal
   while the run goes. Passing cases' output and passing files' compiler
   warnings are hidden unless `--show-output` / `--verbose`.
-- **Isolation.** A worker VM is reused across jobs. Statics are reset and
-  re-initialized per case, and the heap, finalizer registry (drop PCs), C
+- **Isolation.** A worker's `Runtime` is reused across jobs. Statics are reset and
+  re-initialized per case, and the heap, finalizer registry, C
   struct layouts and thread program are replaced per job, so a case never sees
   another program's state.
 - **`--fail-fast`** stops at once with `-j 1`; with `-j N` files already
@@ -223,7 +221,7 @@ worker count and the number of compile threads.
   says when a pool case is done; an inline case is on the list while it
   runs) and, once one is past the limit, prints the stuck cases with their
   file, elapsed time and output so far, plus the `--seed` that reruns the
-  order, then exits 124 (an `error` event under `--json`). A VM that never
+  order, then exits 124 (an `error` event under `--json`). A case that never
   comes back to a safepoint cannot be stopped from outside, so the process
   ends, not the case; in CI that fails the harness cell with a named
   culprit instead of holding it until the job limit. Where no thread can be
@@ -297,15 +295,13 @@ test result: ok. 721 passed; 0 failed; 721 total
 coverage: lcov written to target/coverage/lcov.info
 ```
 
-- **VM.** `machine` feature `coverage` (only `coil-test` enables it) adds a
-  hit counter per PC, filled at the main dispatch while a job asks for it;
-  dense streaks are off while counting, as under the debugger. Test jobs
-  (`TestJob::coverage`) return the counts in `TestReport::hits`. Threads a case
-  spawns run on other VMs and are not counted. Off, it costs nothing per
-  instruction: the dispatch loop runs its hook-free instantiation
-  (`execute::<false>`) unless a collector is attached (#558).
-- **Lines.** Each PC's `DebugLoc` start gives its line (a statement's first
-  line). A line is coverable when some instruction carries it; counts are
+- **Probes.** A coverage build's captured bodies get a `Probe` per source location
+  in every block that runs it (`mir::coverage`), on either engine, and `coil_native_probe`
+  counts it. Test jobs (`TestJob::coverage`) return the counts in `TestReport::hits`.
+  Threads a case spawns are not counted. A build without coverage has no probes, so
+  it costs nothing.
+- **Lines.** Each probe's `DebugLoc` start gives its line (a statement's first
+  line). A line is coverable when some op carries it; counts are
   summed over every test program that contains it.
 - **What counts.** Sources under the current directory, outside `.deps/`.
   Test case bodies are left out unless the line also has code elsewhere, so
@@ -315,18 +311,15 @@ coverage: lcov written to target/coverage/lcov.info
   a tree-shake root, so an unused function is emitted and reports as uncovered
   instead of vanishing. Generic functions never instantiated have no code and
   do not appear.
-- **Opt level.** Coverage runs at the tests' `-O` (default Standard). Rewrites (HIR inlining,
-  MIR / dense) can still move a few lines: on the repo suite -O2 reports 8 of
+- **Opt level.** Coverage runs at the tests' `-O` (default Standard). Rewrites (HIR inlining) can still move a few lines: on the repo suite -O2 reports 8 of
   1326 lines uncovered that `-Og` covers.
-- **Release builds** build `coil` / `coil-embed` in their own cargo invocation:
-  a workspace-wide build unifies helper-only `machine` features (`debugger`,
-  `coverage`) into every binary.
 
 ## Mutation testing
 
 `coil mutate` (re-execs `coil-test mutate`) changes project sources one small
 edit at a time and checks that some test notices. It reuses the runner: same
-test root, `-O`, `--root`, grants, `--seed`, `-j`.
+test root, `-O`, `--root`, grants, `--seed`, `-j`. It always runs on the interpreter
+(`Engine::Mir`, whatever the options say): only that engine charges the step budget.
 
 ```text
 $ coil mutate --root src
@@ -385,7 +378,7 @@ clamps low)`, `no coverage …`) as it finishes.
    and the run stops instead of reporting every mutant as survived.
 5. **Isolation.** Each mutant runs in a child `coil-test __mutant-worker`
    (same flags; the job on stdin, the verdict on stdout), `-j` at a time.
-   A mutant can crash the VM (see the arithmetic row in
+   A mutant can crash the process (see the arithmetic row in
    [limitations](limitations.md)) or block outside the step budget (threads,
    host waits): a crash counts as `killed`, and `--wall-timeout` (60 s) kills
    a stuck worker as `timeout`.
@@ -449,8 +442,8 @@ serialized to `.ccoil`, so test-only data never touches the archive format.
 | `parser/src/doc_examples.rs` | doc example rules: fences, hidden lines, the doc-test program, documented items |
 | `coil-test/src/order.rs` | seeded file / case order |
 | `machine/src/reactor.rs` | `TestJob` (incl. `step_budget`), `submit_test` / `run_test_here`, `TestHandle` |
-| `coil-test/src/coverage.rs` | PC → line maps, summing, lcov / summary / per-test JSON |
-| `coil-test/src/runner.rs` | discovery, per-file compile, per-case VM, summary |
+| `coil-test/src/coverage.rs` | Location → line maps, summing, lcov / summary / per-test JSON |
+| `coil-test/src/runner.rs` | discovery, per-file compile, per-case jobs, summary |
 | `coil-test/src/mutate/` | `coil mutate`: sites, baseline / plan / report (`mod.rs`), per-mutant job and worker process (`job.rs`) |
 | `coil-host/src/lib.rs` | `wire_pipeline_vm`, `wire_pipeline_threads`, `execute_pipeline` |
 

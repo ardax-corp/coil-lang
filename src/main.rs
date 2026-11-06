@@ -123,16 +123,16 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str, cac
         return;
     }
     // Multi-file entry: discovers `use` / `mod` via bound `--root` / default `src`.
-    let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
+    let constants = match pipeline.compile_src_from_file(filename) {
         Ok(ok) => ok,
         Err(_) => {
             let _ = pipeline.finish_reporting();
             exit(1);
         }
     };
-    // `coil compile --jit`: keep the MIR native code is made from.
+    // `coil compile`: keep the MIR the program runs from.
     let bodies = compiler::native_mir::take_native_capture();
-    let bytes = archive_bytes(pipeline, bytecode, constants, &bodies);
+    let bytes = archive_bytes(pipeline, constants, &bodies);
     write_archive(pipeline, output, &bytes);
     if let Some(cache) = &cache {
         cache.store(pipeline, filename, &bytes);
@@ -151,32 +151,27 @@ fn write_archive(pipeline: &mut Pipeline, output: &str, bytes: &[u8]) {
 
 /// The `.ccoil` bytes of the program `pipeline` just compiled, with a native
 /// MIR section when it has `bodies`.
-fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants: Vec<u64>, bodies: &[compiler::native_mir::NativeBody]) -> Vec<u8> {
+fn archive_bytes(pipeline: &mut Pipeline, constants: Vec<u64>, bodies: &[compiler::native_mir::NativeBody]) -> Vec<u8> {
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
         constants,
         strings: pipeline.strings().to_vec(),
-        bytecode,
         source_files: Vec::new(),
         debug_locs: Vec::new(),
         fn_symbols: Vec::new(),
         struct_layouts: pipeline.archived_struct_layouts(),
-        operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: Vec::new(),
-        precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
         native_mir: Vec::new(),
+        startup: pipeline.startup(),
+        main: pipeline.main_offset(),
     };
     let full = pipeline.program_debug_full();
     let level = pipeline.debug_level();
     if !bodies.is_empty() {
-        program.native_mir = encode_section(bodies, &entry_pcs(&full));
+        program.native_mir = compiler::native_mir::archive::encode(bodies, &entry_pcs(&full));
     }
     program.set_debug(full, level);
 
@@ -185,7 +180,7 @@ fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants
         Err(e) => fail_and_exit(
             pipeline,
             ErrorCode::IoError,
-            format!("Unable to serialize bytecode archive: {e}"),
+            format!("Unable to serialize archive: {e}"),
         ),
     }
 }
@@ -234,7 +229,6 @@ fn cache_options(cli: &CliArgs) -> Option<String> {
         "{:?}",
         (
             cli.include_tests,
-            cli.jit,
             cli.opt_level,
             cli.debug_level,
             cli.contracts,
@@ -359,7 +353,7 @@ fn maybe_warn_stale_archive(
         pipeline.emit_spanless_warning(
             ErrorCode::IoError,
             format!(
-                "Bytecode archive `{archive}` may be stale (recorded sources are newer). Recompile with `coil compile … -o {archive}` or run `coil <entry.coil>` directly."
+                "Archive `{archive}` may be stale (recorded sources are newer). Recompile with `coil compile … -o {archive}` or run `coil <entry.coil>` directly."
             ),
         );
     }
@@ -394,17 +388,14 @@ fn cmd_build_and_run(
     opt_stats: bool,
     opt_stats_json: bool,
     cache: Option<BuildCache>,
-    jit: bool,
 ) {
     // The interpreter runs every body, and an archive's section holds only
     // what native code compiles.
     let cache = if interprets() { None } else { cache };
-    if jit {
-        pipeline.set_runs_mir();
-    }
+    pipeline.set_runs_mir();
     if RAW_MIR.load(std::sync::atomic::Ordering::Relaxed) {
         compiler::native_mir::start_raw_capture();
-    } else if jit {
+    } else {
         compiler::native_mir::start_native_capture();
     }
     if let Some(cache) = &cache
@@ -416,7 +407,7 @@ fn cmd_build_and_run(
     }
     let compiled = pipeline.compile_src_from_file(filename);
     end_compile_progress();
-    let (bytecode, constants) = match compiled {
+    let constants = match compiled {
         Ok(ok) => ok,
         Err(_) => {
             let _ = pipeline.finish_reporting();
@@ -426,7 +417,7 @@ fn cmd_build_and_run(
     print_opt_stats(opt_stats, opt_stats_json);
     let bodies = compiler::native_mir::take_native_capture();
     if let Some(cache) = &cache {
-        let bytes = archive_bytes(pipeline, bytecode.clone(), constants.clone(), &bodies);
+        let bytes = archive_bytes(pipeline, constants.clone(), &bodies);
         cache.store(pipeline, filename, &bytes);
     }
 
@@ -445,19 +436,15 @@ fn cmd_build_and_run(
     }
 
     maybe_warn_stale_default_out(pipeline, filename, &full);
-    if jit {
-        install_native(bodies, &full);
-    }
+    install_native(bodies, &full);
     let entry = ffi_entry_path(Path::new(filename));
     let panicked = execute_pipeline(ExecutePipelineArgs {
         pipeline,
-        bytecode: &bytecode,
         constants: &constants,
         strings: &strings,
         static_slots,
         debug,
         entry: Some(entry.as_path()),
-        operand_stack_slots: pipeline.operand_stack_slots(),
     });
     if panicked {
         exit(1);
@@ -466,7 +453,7 @@ fn cmd_build_and_run(
 
 /// `coil FILE --mir -O 0`: capture MIR with no MIR pass run on it.
 static RAW_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// `coil FILE --mir`: the captured MIR goes to the interpreter, not to
+/// `--mir` or `--cow-report`: the MIR goes to the interpreter, not to
 /// Cranelift.
 static RUN_ON_MIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -476,29 +463,21 @@ fn interprets() -> bool {
     cfg!(target_family = "wasm") || RUN_ON_MIR.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The section of a `.ccoil` for `bodies`, for the engine this host runs.
-fn encode_section(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>) -> Vec<u8> {
-    #[cfg(not(target_family = "wasm"))]
-    return coil_native::section::encode(bodies, pcs);
-    #[cfg(target_family = "wasm")]
-    coil_mir_interp::encode_section(bodies, pcs)
-}
-
 /// Hand the captured MIR to the engine that runs it for the coming run.
 fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common::ProgramDebug) {
     install_bodies(bodies, &entry_pcs(debug));
 }
 
-/// Hand `bodies` to the engine that runs them.
+/// Hand `bodies` to the engine that runs them. The interpreter runs what
+/// native code refuses.
 fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::collections::HashMap<String, u32>) {
-    if !interprets() {
-        #[cfg(not(target_family = "wasm"))]
-        install_native_bodies(&bodies, pcs);
+    #[cfg(not(target_family = "wasm"))]
+    if !interprets() && install_native_bodies(&bodies, pcs) {
         return;
     }
     let program = coil_mir_interp::prepare(bodies, pcs);
     for (name, why) in &program.refused {
-        eprintln!("warning: `{name}` runs on the VM: {why}");
+        eprintln!("error: `{name}` cannot run: {why}");
     }
     let complete = program.refused.is_empty();
     // Its entries point into it for the rest of the process.
@@ -506,8 +485,7 @@ fn install_bodies(bodies: Vec<compiler::native_mir::NativeBody>, pcs: &std::coll
     machine::native::install_for_next_run(program.entries, program.sites, complete);
 }
 
-/// Install an archive's native MIR section for the coming run; a section
-/// that cannot be read leaves the run on the VM. `name` is what the warning
+/// Install an archive's MIR for the coming run. `name` is what the error
 /// says.
 fn install_section(name: &str, section: &[u8]) {
     if section.is_empty() {
@@ -515,39 +493,48 @@ fn install_section(name: &str, section: &[u8]) {
     }
     match compiler::native_mir::archive::decode(section) {
         Ok((bodies, pcs)) => install_bodies(bodies, &pcs),
-        Err(e) => eprintln!("warning: `{name}`: {e}; running on the VM"),
+        Err(e) => {
+            eprintln!("error: `{name}`: {e}");
+            exit(1);
+        }
     }
 }
 
-/// Function name to bytecode entry PC.
+/// Function name to body entry.
 fn entry_pcs(debug: &common::ProgramDebug) -> std::collections::HashMap<String, u32> {
     debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect()
 }
 
-/// JIT `bodies` and install them for the coming run.
+/// JIT `bodies` and install them for the coming run: `false`, with nothing
+/// installed, when native code cannot run the whole program.
 #[cfg(not(target_family = "wasm"))]
 fn install_native_bodies(
     bodies: &[compiler::native_mir::NativeBody],
     pcs: &std::collections::HashMap<String, u32>,
-) {
-    match coil_native::jit(bodies, pcs) {
-        Ok(program) => {
-            if std::env::var_os("COIL_NATIVE_STATS").is_some() {
-                eprintln!("{}", coil_native::describe(&program));
-                if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
-                    for name in &program.compiled {
-                        eprintln!("  native: {name}");
-                    }
-                    for (name, why) in &program.refused {
-                        eprintln!("  vm: {name}: {why}");
-                    }
-                }
-            }
-            let complete = program.refused.is_empty();
-            machine::native::install_for_next_run(program.entries, program.sites, complete);
+) -> bool {
+    let program = match coil_native::jit(bodies, pcs) {
+        Ok(program) => program,
+        Err(e) => {
+            eprintln!("warning: native compile failed ({e}); running on the interpreter");
+            return false;
         }
-        Err(e) => eprintln!("warning: native compile failed ({e}); running on the VM"),
+    };
+    if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+        eprintln!("{}", coil_native::describe(&program));
+        if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+            for name in &program.compiled {
+                eprintln!("  native: {name}");
+            }
+        }
     }
+    if !program.refused.is_empty() {
+        for (name, why) in &program.refused {
+            eprintln!("warning: `{name}` has no native code: {why}; running on the interpreter");
+        }
+        return false;
+    }
+    machine::native::install_for_next_run(program.entries, program.sites, true);
+    true
 }
 
 /// `coil FILE` from a build-cache hit: what [`cmd_build_and_run`] does after
@@ -563,14 +550,13 @@ fn run_cached(pipeline: &mut Pipeline, filename: &str, loaded: &LoadedArchive) {
     let panicked = execute_cached(
         pipeline,
         CachedProgram {
-            bytecode: &loaded.bytecode,
+            startup: &loaded.startup,
+            main: loaded.main,
             constants: &loaded.constants,
             strings: &loaded.strings,
             static_slots: loaded.static_slots,
             debug: loaded.debug.clone(),
-            operand_stack_slots: loaded.operand_stack_slots.unwrap_or(0),
             struct_layouts: &loaded.struct_layouts,
-            precise_frames: loaded.precise_frames.clone(),
             class_word_kinds: loaded.class_word_kinds.clone(),
             static_word_kinds: loaded.static_word_kinds.clone(),
         },
@@ -588,12 +574,9 @@ fn cmd_compile(
     opt_stats: bool,
     opt_stats_json: bool,
     cache: Option<BuildCache>,
-    jit: bool,
 ) {
-    if jit {
-        pipeline.set_runs_mir();
-        compiler::native_mir::start_native_capture();
-    }
+    pipeline.set_runs_mir();
+    compiler::native_mir::start_native_capture();
     compile_to_archive(pipeline, filename, output, cache);
     end_compile_progress();
     print_opt_stats(opt_stats, opt_stats_json);
@@ -606,13 +589,13 @@ fn cmd_compile(
     }
 }
 
-fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
+fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
     if common::ext::is_source_path(Path::new(archive)) {
         fail_and_exit(
             pipeline,
             ErrorCode::IoError,
             format!(
-                "`{archive}` is a source file, not a bytecode archive: run it with `coil {archive}`, or build one with `coil compile {archive}`"
+                "`{archive}` is a source file, not an archive: run it with `coil {archive}`, or build one with `coil compile {archive}`"
             ),
         );
     }
@@ -621,26 +604,21 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
         Err(LoadErr::Missing) => fail_and_exit(
             pipeline,
             ErrorCode::IoError,
-            format!("Bytecode archive `{archive}` not found"),
+            format!("archive `{archive}` not found"),
         ),
         Err(LoadErr::Corrupt) => fail_and_exit(
             pipeline,
             ErrorCode::IoError,
-            format!("Bytecode archive `{archive}` is corrupt"),
+            format!("archive `{archive}` is corrupt or from an older coil: rebuild it"),
         ),
         Err(LoadErr::Version(v)) => fail_and_exit(
             pipeline,
             ErrorCode::ArchiveVersionMismatch,
             format!(
-                "Bytecode archive version {} is not compatible with runtime {}. Please recompile from source.",
+                "archive version {} is not compatible with runtime {}. Please recompile from source.",
                 format_archive_version(v),
                 format_archive_version(ARCHIVE_VERSION)
             ),
-        ),
-        Err(LoadErr::Invalid(e)) => fail_and_exit(
-            pipeline,
-            ErrorCode::IoError,
-            format!("Bytecode archive `{archive}` is invalid ({e}). Please recompile from source."),
         ),
     };
 
@@ -654,14 +632,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str, jit: bool, no_jit: bool) {
         let _ = pipeline.finish_reporting();
     }
 
-    if !no_jit {
-        install_section(archive, &loaded.native_mir);
-        if loaded.native_mir.is_empty() && jit {
-            eprintln!(
-                "warning: `{archive}` carries no native MIR (build it with `coil compile --jit`); running on the VM"
-            );
-        }
-    }
+    install_section(archive, &loaded.native_mir);
 
     // Weak base_dir: archive parent, for relative FFI dload paths.
     // Allow flags are compile-time only; the artifact is the grant.
@@ -869,7 +840,7 @@ fn main() {
                     };
                     set_program_args(&filename, &cli.program_args);
                     let cache = BuildCache::new(cache_options.as_deref(), &filename);
-                    RUN_ON_MIR.store(cli.mir, std::sync::atomic::Ordering::Relaxed);
+                    RUN_ON_MIR.store(cli.mir || cli.cow_report, std::sync::atomic::Ordering::Relaxed);
                     // Only `-O 0` is raw: above it the interpreter runs what
                     // native code compiles.
                     RAW_MIR.store(cli.mir && cli.opt_level == compiler::OptLevel::None, std::sync::atomic::Ordering::Relaxed);
@@ -879,7 +850,6 @@ fn main() {
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
-                        cli.jit || cli.mir,
                     );
                 }
                 Command::Compile { filename, output } => {
@@ -895,12 +865,12 @@ fn main() {
                         cli.opt_stats,
                         cli.opt_stats_json,
                         cache,
-                        cli.jit,
                     );
                 }
                 Command::Run { archive } => {
+                    RUN_ON_MIR.store(cli.mir || cli.cow_report, std::sync::atomic::Ordering::Relaxed);
                     set_program_args(&archive, &cli.program_args);
-                    cmd_run(&mut pipeline, &archive, cli.jit, cli.no_jit);
+                    cmd_run(&mut pipeline, &archive);
                 }
                 Command::Package {
                     filename,
@@ -947,7 +917,6 @@ mod tests {
         archive_is_stale, archive_mtime, archive_source_mtime, same_source_path,
     };
     use super::*;
-    use common::Byte;
     use std::path::PathBuf;
 
     fn unique_tmp(label: &str) -> PathBuf {
@@ -959,258 +928,6 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
-    }
-
-    #[test]
-    fn try_load_archive_missing_corrupt_version_and_ok() {
-        let missing = unique_tmp("missing");
-        assert!(matches!(
-            try_load_archive(missing.to_str().unwrap()),
-            Err(LoadErr::Missing)
-        ));
-
-        let corrupt = unique_tmp("corrupt");
-        std::fs::write(&corrupt, b"not-an-archive").unwrap();
-        assert!(matches!(
-            try_load_archive(corrupt.to_str().unwrap()),
-            Err(LoadErr::Corrupt)
-        ));
-        let _ = std::fs::remove_file(&corrupt);
-
-        let stale = unique_tmp("stale");
-        // Newer minor than this runtime must be rejected.
-        let stale_version = common::pack_archive_version(0, 1);
-        let bytes = rkyv::to_bytes::<Error>(&ArchivedProgram {
-            version: stale_version,
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(common::Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![common::DebugLoc::unknown()],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        })
-        .unwrap();
-        std::fs::write(&stale, bytes.as_slice()).unwrap();
-        let loaded = try_load_archive(stale.to_str().unwrap());
-        match &loaded {
-            Err(LoadErr::Version(v)) if *v == stale_version => {}
-            Err(e) => panic!("expected Version({stale_version}), got Err({e:?})"),
-            Ok(_) => panic!("expected Version({stale_version}), got Ok(..)"),
-        }
-        let _ = std::fs::remove_file(&stale);
-
-        let ok_path = unique_tmp("ok");
-        let ok_prog = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: 0,
-            constants: vec![42],
-            strings: vec![],
-            bytecode: vec![Byte::new(common::Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![common::DebugLoc::unknown()],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        };
-        let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();
-        std::fs::write(&ok_path, ok_bytes.as_slice()).unwrap();
-        let loaded = try_load_archive(ok_path.to_str().unwrap()).expect("ok archive");
-        assert_eq!(loaded.constants, vec![42]);
-        assert!(loaded.strings.is_empty());
-        assert_eq!(loaded.bytecode.len(), 1);
-        assert!(loaded.struct_layouts.is_empty());
-        assert_eq!(loaded.operand_stack_slots, Some(256));
-        let _ = std::fs::remove_file(&ok_path);
-
-        let bad_path = unique_tmp("bad_jump");
-        let bad_prog = ArchivedProgram {
-            bytecode: vec![Byte::new(common::Instruction::JMP).with_operand_u32(99)],
-            ..ok_prog
-        };
-        let bad_bytes = rkyv::to_bytes::<Error>(&bad_prog).unwrap();
-        std::fs::write(&bad_path, bad_bytes.as_slice()).unwrap();
-        assert!(matches!(
-            try_load_archive(bad_path.to_str().unwrap()),
-            Err(LoadErr::Invalid(e)) if e.pc == 0
-        ));
-        let _ = std::fs::remove_file(&bad_path);
-    }
-
-    #[test]
-    fn archive_is_stale_when_entry_not_in_source_files() {
-        let dir = unique_tmp("stale_entry");
-        std::fs::create_dir_all(&dir).unwrap();
-        let a = dir.join("a.coil");
-        let b = dir.join("b.coil");
-        let arch = dir.join("out.ccoil");
-        std::fs::write(&a, b"fn main() {}").unwrap();
-        std::fs::write(&b, b"fn main() {}").unwrap();
-        std::fs::write(&arch, b"x").unwrap();
-        let debug = ProgramDebug {
-            source_files: vec![a.to_string_lossy().into_owned()],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        // Running b.coil against an archive built from a.coil must rebuild.
-        assert!(archive_is_stale(
-            b.to_str().unwrap(),
-            arch.to_str().unwrap(),
-            &debug
-        ));
-        // Same entry, sources not newer => fresh.
-        assert!(!archive_is_stale(
-            a.to_str().unwrap(),
-            arch.to_str().unwrap(),
-            &debug
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn archive_is_stale_when_dependency_source_newer() {
-        let dir = unique_tmp("stale_dep");
-        std::fs::create_dir_all(&dir).unwrap();
-        let entry = dir.join("main.coil");
-        let dep = dir.join("worker.coil");
-        let arch = dir.join("out.ccoil");
-        std::fs::write(&entry, b"fn main() {}").unwrap();
-        std::fs::write(&dep, b"fn w() {}").unwrap();
-        std::fs::write(&arch, b"x").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        // Touch only the dependency — entry mtime stays older than the archive.
-        std::fs::write(&dep, b"fn w() { /* edited */ }").unwrap();
-        let debug = ProgramDebug {
-            source_files: vec![
-                entry.to_string_lossy().into_owned(),
-                dep.to_string_lossy().into_owned(),
-            ],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        assert!(archive_is_stale(
-            entry.to_str().unwrap(),
-            arch.to_str().unwrap(),
-            &debug
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn archive_is_stale_empty_source_files_uses_entry_mtime() {
-        let dir = unique_tmp("stale_empty_sources");
-        std::fs::create_dir_all(&dir).unwrap();
-        let entry = dir.join("main.coil");
-        let arch = dir.join("out.ccoil");
-        std::fs::write(&entry, b"fn main() {}").unwrap();
-        std::fs::write(&arch, b"x").unwrap();
-        let debug = ProgramDebug {
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        // Entry not newer than archive → fresh via the empty-list branch.
-        assert!(!archive_is_stale(
-            entry.to_str().unwrap(),
-            arch.to_str().unwrap(),
-            &debug
-        ));
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        std::fs::write(&entry, b"fn main() { /* edited */ }").unwrap();
-        assert!(archive_is_stale(
-            entry.to_str().unwrap(),
-            arch.to_str().unwrap(),
-            &debug
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn archive_is_stale_when_recorded_source_missing() {
-        let dir = unique_tmp("stale_missing_dep");
-        std::fs::create_dir_all(&dir).unwrap();
-        let entry = dir.join("main.coil");
-        let arch = dir.join("out.ccoil");
-        std::fs::write(&entry, b"fn main() {}").unwrap();
-        std::fs::write(&arch, b"x").unwrap();
-        let missing = dir.join("gone.coil");
-        let debug = ProgramDebug {
-            source_files: vec![
-                entry.to_string_lossy().into_owned(),
-                missing.to_string_lossy().into_owned(),
-            ],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        assert!(
-            archive_is_stale(entry.to_str().unwrap(), arch.to_str().unwrap(), &debug),
-            "missing recorded dependency must invalidate the archive"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn recorded_sources_newer_only_flags_edited_sources() {
-        use super::archive_staleness::recorded_sources_newer;
-        let dir = unique_tmp("run_archive_sources");
-        std::fs::create_dir_all(dir.join("stdlib/io")).unwrap();
-        let dep = dir.join("stdlib/io/sync.coil");
-        let entry = dir.join("main.coil");
-        let arch = dir.join("out.ccoil");
-        std::fs::write(&dep, b"fn f() {}").unwrap();
-        std::fs::write(&entry, b"fn main() {}").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        std::fs::write(&arch, b"x").unwrap();
-        let debug = ProgramDebug {
-            source_files: vec![
-                dep.to_string_lossy().into_owned(),
-                entry.to_string_lossy().into_owned(),
-                dir.join("gone.coil").to_string_lossy().into_owned(),
-            ],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        let a = arch.to_str().unwrap();
-        assert!(!recorded_sources_newer(a, &debug), "fresh archive");
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        std::fs::write(&entry, b"fn main() { /* edited */ }").unwrap();
-        assert!(recorded_sources_newer(a, &debug), "edited entry");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1243,5 +960,151 @@ mod tests {
             "should resolve src/worker.coil relative to cwd"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recorded_sources_newer_only_flags_edited_sources() {
+        use super::archive_staleness::recorded_sources_newer;
+        let dir = unique_tmp("run_archive_sources");
+        std::fs::create_dir_all(dir.join("stdlib/io")).unwrap();
+        let dep = dir.join("stdlib/io/sync.coil");
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&dep, b"fn f() {}").unwrap();
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&arch, b"x").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![
+                dep.to_string_lossy().into_owned(),
+                entry.to_string_lossy().into_owned(),
+                dir.join("gone.coil").to_string_lossy().into_owned(),
+            ],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        let a = arch.to_str().unwrap();
+        assert!(!recorded_sources_newer(a, &debug), "fresh archive");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&entry, b"fn main() { /* edited */ }").unwrap();
+        assert!(recorded_sources_newer(a, &debug), "edited entry");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_is_stale_when_recorded_source_missing() {
+        let dir = unique_tmp("stale_missing_dep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::fs::write(&arch, b"x").unwrap();
+        let missing = dir.join("gone.coil");
+        let debug = ProgramDebug {
+            source_files: vec![
+                entry.to_string_lossy().into_owned(),
+                missing.to_string_lossy().into_owned(),
+            ],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        assert!(
+            archive_is_stale(entry.to_str().unwrap(), arch.to_str().unwrap(), &debug),
+            "missing recorded dependency must invalidate the archive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_is_stale_empty_source_files_uses_entry_mtime() {
+        let dir = unique_tmp("stale_empty_sources");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::fs::write(&arch, b"x").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        // Entry not newer than archive → fresh via the empty-list branch.
+        assert!(!archive_is_stale(
+            entry.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&entry, b"fn main() { /* edited */ }").unwrap();
+        assert!(archive_is_stale(
+            entry.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_is_stale_when_dependency_source_newer() {
+        let dir = unique_tmp("stale_dep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.coil");
+        let dep = dir.join("worker.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::fs::write(&dep, b"fn w() {}").unwrap();
+        std::fs::write(&arch, b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        // Touch only the dependency — entry mtime stays older than the archive.
+        std::fs::write(&dep, b"fn w() { /* edited */ }").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![
+                entry.to_string_lossy().into_owned(),
+                dep.to_string_lossy().into_owned(),
+            ],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        assert!(archive_is_stale(
+            entry.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_is_stale_when_entry_not_in_source_files() {
+        let dir = unique_tmp("stale_entry");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.coil");
+        let b = dir.join("b.coil");
+        let arch = dir.join("out.ccoil");
+        std::fs::write(&a, b"fn main() {}").unwrap();
+        std::fs::write(&b, b"fn main() {}").unwrap();
+        std::fs::write(&arch, b"x").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![a.to_string_lossy().into_owned()],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+        };
+        // Running b.coil against an archive built from a.coil must rebuild.
+        assert!(archive_is_stale(
+            b.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        // Same entry, sources not newer => fresh.
+        assert!(!archive_is_stale(
+            a.to_str().unwrap(),
+            arch.to_str().unwrap(),
+            &debug
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

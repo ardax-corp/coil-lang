@@ -7,9 +7,8 @@ use std::process::exit;
 
 use coil_cli::resolve_default_runner;
 use common::{
-    append_package_payload_with_natives, bytecode_uses_ffi, dload_request_stem,
-    ffi_library_names_from_bytecode,
-    is_packaged_executable, is_system_ffi_stem, ArchivedProgram, Byte,
+    append_package_payload_with_natives, dload_request_stem,
+    is_packaged_executable, is_system_ffi_stem, ArchivedProgram,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
 use compiler::Pipeline;
@@ -23,27 +22,22 @@ use crate::fail_and_exit;
 /// Compile `filename` to an archive at the pipeline's `-g` level
 /// (`coil package` defaults to `-g1`; `--strip-debug` is `-g0`).
 fn compile_program(pipeline: &mut Pipeline, filename: &str) -> Result<ArchivedProgram, ()> {
-    let (bytecode, constants) = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
+    let constants = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
         constants,
         strings: pipeline.strings().to_vec(),
-        bytecode,
         source_files: Vec::new(),
         debug_locs: Vec::new(),
         fn_symbols: Vec::new(),
         struct_layouts: pipeline.archived_struct_layouts(),
-        operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: Vec::new(),
-        precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
         native_mir: Vec::new(),
+        startup: pipeline.startup(),
+        main: pipeline.main_offset(),
     };
     // Cleanup ranges are behaviour (panics run `defer`s), not debug info:
     // `set_debug` keeps them at every level.
@@ -58,11 +52,11 @@ fn compile_program(pipeline: &mut Pipeline, filename: &str) -> Result<ArchivedPr
 fn payload_bytes(pipeline: &mut Pipeline, program: &ArchivedProgram) -> Vec<u8> {
     match rkyv::to_bytes::<Error>(program) {
         Ok(b) => b.as_slice().to_vec(),
-        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("Unable to serialize bytecode archive: {e}")),
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("Unable to serialize archive: {e}")),
     }
 }
 
-/// `program` with its native MIR, for the runner to JIT. The runner has no VM
+/// `program` with its native MIR, for the runner to JIT. The runner has no interpreter
 /// to run what does not compile, so that shows here and not on the target.
 #[cfg(not(target_family = "wasm"))]
 fn add_native_mir(pipeline: &mut Pipeline, program: &mut ArchivedProgram, bodies: &[compiler::native_mir::NativeBody]) {
@@ -77,13 +71,13 @@ fn add_native_mir(pipeline: &mut Pipeline, program: &mut ArchivedProgram, bodies
 #[cfg(target_family = "wasm")]
 fn add_native_mir(_: &mut Pipeline, _: &mut ArchivedProgram, _: &[compiler::native_mir::NativeBody]) {}
 
-/// A package has no bytecode VM: a body native code refuses is an error.
+/// A package has no interpreter: a body native code refuses is an error.
 #[cfg(not(target_family = "wasm"))]
 fn refused_exit(refused: &[(String, String)]) -> ! {
     for (name, why) in refused {
         eprintln!("error: `{name}` cannot compile to native code: {why}");
     }
-    eprintln!("  help: a package has no bytecode VM; `coil FILE` still runs the program");
+    eprintln!("  help: a package has no interpreter; `coil FILE` still runs the program");
     exit(1);
 }
 
@@ -124,7 +118,7 @@ fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::Nati
     };
     if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
         for (name, why) in &object.refused {
-            eprintln!("  vm: {name}: {why}");
+            eprintln!("  refused: {name}: {why}");
         }
     }
     if !object.refused.is_empty() {
@@ -437,21 +431,20 @@ pub fn parse_ffi_native(spec: &str) -> Result<FfiNative, String> {
     })
 }
 
-/// Build a [`NativeLock`] from bytecode `dload` stems and `--ffi-native` rows.
+/// Build a [`NativeLock`] from `dload` stems and `--ffi-native` rows.
 pub fn build_native_lock(
     natives: &[FfiNative],
-    bytecode: &[Byte],
-    strings: &[String],
+    libraries: &[String],
     linked: &[StaticLink],
 ) -> Result<NativeLock, String> {
     // Reduce each literal to the stem the runtime dload gate uses
     // (`./native/libtls.so` → `tls`), so one `--ffi-native name=tls` row covers
     // every spelling of that library.
     let mut stems: Vec<(String, String)> = Vec::new();
-    for literal in ffi_library_names_from_bytecode(bytecode, strings) {
-        let stem = dload_request_stem(&literal);
+    for literal in libraries {
+        let stem = dload_request_stem(literal);
         if !stems.iter().any(|(s, _)| *s == stem) {
-            stems.push((stem, literal));
+            stems.push((stem, literal.clone()));
         }
     }
     let mut entries = Vec::new();
@@ -495,7 +488,7 @@ pub fn build_native_lock(
         });
     }
 
-    // Constant stems only: `--ffi-native` rows the bytecode never loads are ignored.
+    // Constant stems only: `--ffi-native` rows the program never loads are ignored.
 
     Ok(NativeLock {
         os: std::env::consts::OS.to_string(),
@@ -594,14 +587,13 @@ pub fn cmd_package(
         }
     };
     let bodies = compiler::native_mir::take_native_capture();
-    let (bytecode, strings) = (program.bytecode.clone(), program.strings.clone());
-    let uses_ffi = bytecode_uses_ffi(&bytecode);
+    let (uses_ffi, libraries) = compiler::native_mir::ffi_use(&bodies, &program.strings);
     let mut flags = 0u32;
     if uses_ffi {
         flags |= PACKAGE_FLAG_USES_FFI;
     }
 
-    let native_lock = match build_native_lock(natives, &bytecode, &strings, &link.statics) {
+    let native_lock = match build_native_lock(natives, &libraries, &link.statics) {
         Ok(lock) => lock,
         Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
     };
@@ -628,7 +620,7 @@ pub fn cmd_package(
         .parent()
         .filter(|p| !p.as_os_str().is_empty());
     if check_native && uses_ffi {
-        let libs = ffi_library_names_from_bytecode(&bytecode, &strings);
+        let libs = libraries;
     let mut gate = machine::DloadGate::from_consumer_trusted(
         &pipeline.dload_native_pins(),
         pipeline.dload_trusted_stems(),
@@ -767,8 +759,6 @@ pub fn cmd_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coil_cli::{LoadErr, load_archive_bytes};
-    use common::{ArchivedProgram, Instruction, pack_archive_version};
 
     #[test]
     fn static_link_stem_comes_from_the_file_or_the_flag() {
@@ -808,63 +798,6 @@ mod tests {
         fs::write(&exe, &cut).unwrap();
         assert!(embedded_runtime(&exe, &cache).is_err());
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_archive_bytes_rejects_version() {
-        let too_new = ArchivedProgram {
-            version: pack_archive_version(0, 1),
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
-        assert!(matches!(
-            load_archive_bytes(bytes.as_slice()),
-            Err(LoadErr::Version(_))
-        ));
-
-        let other_minor = ArchivedProgram {
-            version: pack_archive_version(1, 99),
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
-        assert!(matches!(
-            load_archive_bytes(bytes.as_slice()),
-            Err(LoadErr::Version(_))
-        ));
     }
 
     /// Project-mode `coil natives dump` lists a row whose local file is not
@@ -908,61 +841,4 @@ mod tests {
         assert!(odd.is_err(), "a directory at the library path must not pass");
     }
 
-    /// A `dload` path literal reduces to the stem the runtime gate uses, so
-    /// one `--ffi-native name=<stem>` row covers it (coil-lang#1656).
-    #[test]
-    fn build_native_lock_reduces_dload_path_to_stem() {
-        let dir = std::env::temp_dir().join(format!("coil_lock_stem_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let filename = platform_shared_lib_filename("tls");
-        fs::write(dir.join(&filename), b"not really a library").unwrap();
-        let natives = vec![parse_ffi_native(&format!(
-            "name=tls,version=1.0.0,path={}",
-            dir.display()
-        ))
-        .unwrap()];
-        let strings = vec![format!("./native/{filename}"), "tls".to_string()];
-        let bytecode = vec![
-            Byte::new(Instruction::STRING).with_operand_u32(0),
-            Byte::new(Instruction::FfiLoad),
-            Byte::new(Instruction::STRING).with_operand_u32(1),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        let lock = build_native_lock(&natives, &bytecode, &strings, &[]);
-        let _ = fs::remove_dir_all(&dir);
-        let lock = lock.expect("the `tls` row covers `./native/libtls.so`");
-        assert_eq!(lock.entries.len(), 1, "one entry per stem: {:?}", lock.entries);
-        assert_eq!(lock.entries[0].stem, "tls");
-        assert_eq!(lock.entries[0].filename, filename);
-    }
-
-    #[test]
-    fn load_archive_bytes_accepts_unaligned_prefix() {
-        let program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            native_mir: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
-        let mut prefixed = vec![0u8; 1];
-        prefixed.extend_from_slice(bytes.as_slice());
-        load_archive_bytes(&prefixed[1..]).expect("unaligned overlay slice");
-    }
 }

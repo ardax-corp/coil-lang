@@ -20,7 +20,7 @@ use common::Value;
 
 use crate::memory::{Heap, Member, ObjInstance, Object};
 
-/// Deep / structural equality for VM values.
+/// Deep / structural equality for values.
 pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
     if let Some(eq) = flat_eq(heap, a, b) {
         return eq;

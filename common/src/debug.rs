@@ -5,7 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// Sentinel `file` index: no source location (synthetic / unknown).
 pub const DEBUG_FILE_UNKNOWN: u32 = u32::MAX;
 
-/// One entry per bytecode slot (same index as VM `ip`).
+/// One entry per code slot (same index as runtime `ip`).
 #[derive(Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, Debug, Default)]
 #[rkyv(compare(PartialEq))]
 pub struct DebugLoc {
@@ -59,27 +59,43 @@ pub struct FnDebugSym {
     pub entry_pc: u32,
 }
 
-/// A `defer` cleanup range: a frame whose pc is in `start_pc..end_pc` is
-/// left through the cleanup pad at `pad_pc`, which runs the function's armed
-/// `defer` thunks. Sorted by `start_pc`, non-overlapping.
-#[derive(Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, Debug)]
-#[rkyv(compare(PartialEq))]
-pub struct CleanupRange {
-    pub start_pc: u32,
-    pub end_pc: u32,
-    pub pad_pc: u32,
-    /// Slots the frame uses; the pad's calls go above them.
-    pub frame_words: u32,
+/// How much debug info a compiled program keeps (`-g0`, `-g1`, `-g2`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DebugLevel {
+    /// No line table, function names or source paths. A panic prints only its
+    /// message and bare `in <unknown>` frames.
+    None,
+    /// Function names and the line table (file, line, column per run): a
+    /// backtrace reads `in inner at x.coil:3:8`. Byte spans are kept too.
+    Lines,
+    /// The default: everything the compiler recorded, including the byte
+    /// spans the debugger and coverage need.
+    #[default]
+    Full,
 }
 
-/// The cleanup range holding `pc`, if any (`ranges` sorted by `start_pc`).
-pub fn cleanup_range_at(ranges: &[CleanupRange], pc: usize) -> Option<&CleanupRange> {
-    let i = ranges.partition_point(|r| (r.start_pc as usize) <= pc);
-    let r = ranges.get(i.checked_sub(1)?)?;
-    (pc < r.end_pc as usize).then_some(r)
+impl DebugLevel {
+    /// `0`, `1` or `2`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim() {
+            "0" => Ok(Self::None),
+            "1" => Ok(Self::Lines),
+            "2" => Ok(Self::Full),
+            other => Err(format!("invalid debug level `{other}` (expected 0, 1 or 2)")),
+        }
+    }
+
+    /// The level's digit, as `-g` takes it.
+    pub fn digit(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Lines => 1,
+            Self::Full => 2,
+        }
+    }
 }
 
-/// Debug sections loaded with bytecode (not the reporting `SourceMap`).
+/// Debug sections loaded with code (not the reporting `SourceMap`).
 #[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize, Debug, Default)]
 #[rkyv(compare(PartialEq))]
 pub struct ProgramDebug {
@@ -90,79 +106,46 @@ pub struct ProgramDebug {
     /// One per [`Self::debug_locs`] entry, or empty when not recorded
     /// (archives before minor 30): then lines come from the source files.
     pub debug_lines: Vec<DebugLine>,
-    /// `defer` cleanup ranges (minor 33+); empty means panics run no `defer`.
-    pub cleanup: Vec<CleanupRange>,
-    /// Run-length locations (archive minor 40+, or a program compiled below
-    /// `-g2`). Used when [`Self::debug_locs`] is empty.
-    pub table: crate::LineTable,
 }
 
 impl ProgramDebug {
-    pub fn empty_for_bytecode_len(len: usize) -> Self {
-        Self {
-            source_files: Vec::new(),
-            debug_locs: vec![DebugLoc::unknown(); len],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: crate::LineTable::default(),
-        }
-    }
 
-    /// Byte span recorded for `pc`: from the dense table when there is one,
-    /// else from the run table (`-g2` only).
+    /// The location numbered `pc` (a debugger's op number).
     pub fn loc_at(&self, pc: usize) -> Option<DebugLoc> {
-        if !self.debug_locs.is_empty() {
-            return self.debug_locs.get(pc).copied().filter(|l| l.is_known());
-        }
-        self.table.span_at(pc)
+        self.debug_locs.get(pc).copied().filter(|l| l.is_known())
     }
 
-    /// File index and line/column recorded for `pc`, without reading any
-    /// source (archives before minor 30 recorded none: see [`Self::loc_at`]).
-    pub fn file_line_at(&self, pc: usize) -> Option<(u32, DebugLine)> {
-        if !self.debug_locs.is_empty() {
-            let loc = self.loc_at(pc)?;
-            return self.line_at(pc).map(|line| (loc.file, line));
+    /// Line and column of `loc`, in a table sorted by location (a compiled
+    /// program's: each location its bodies use, once). A span that differs
+    /// only in its end stands in for it.
+    pub fn line_of(&self, loc: DebugLoc) -> Option<(u32, DebugLine)> {
+        if !loc.is_known() {
+            return None;
         }
-        self.table.line_at(pc)
+        let key = |l: &DebugLoc| (l.file, l.start_byte, l.end_byte);
+        let at = self.debug_locs.partition_point(|l| key(l) < (loc.file, loc.start_byte, 0));
+        let near = self.debug_locs[at..].iter().take_while(|l| l.file == loc.file && l.start_byte == loc.start_byte);
+        let i = near.clone().position(|l| l.end_byte == loc.end_byte).or_else(|| near.clone().next().map(|_| 0))?;
+        self.debug_lines.get(at + i).map(|line| (loc.file, *line))
+    }
+
+    /// File index and line/column of the location numbered `pc`.
+    pub fn file_line_at(&self, pc: usize) -> Option<(u32, DebugLine)> {
+        let loc = self.loc_at(pc)?;
+        let line = self.debug_lines.get(pc).copied().filter(|l| l.is_known())?;
+        Some((loc.file, line))
     }
 
     /// Whether any location is recorded (dense or runs).
     pub fn has_locations(&self) -> bool {
-        !self.debug_locs.is_empty() || !self.table.is_empty()
+        !self.debug_locs.is_empty()
     }
 
-    /// The run table for these locations, with byte spans when `spans`.
-    pub fn line_table(&self, spans: bool) -> crate::LineTable {
-        if self.debug_locs.is_empty() {
-            let table = self.table.clone();
-            return if spans { table } else { table.without_spans() };
-        }
-        crate::LineTable::from_dense(&self.debug_locs, &self.debug_lines, spans)
-    }
-
-    /// Keep only what `level` records: `-g2` everything, `-g1` function
-    /// names and line runs, `-g0` nothing but the cleanup ranges (they are
-    /// behaviour, not debug info).
+    /// Keep what `level` records: `-g0` nothing, else everything.
     pub fn with_level(self, level: crate::DebugLevel) -> Self {
         match level {
-            crate::DebugLevel::Full => self,
-            crate::DebugLevel::Lines => {
-                let table = self.line_table(false);
-                Self {
-                    source_files: self.source_files,
-                    debug_locs: Vec::new(),
-                    fn_symbols: self.fn_symbols,
-                    debug_lines: Vec::new(),
-                    cleanup: self.cleanup,
-                    table,
-                }
-            }
-            crate::DebugLevel::None => Self {
-                cleanup: self.cleanup,
-                ..Self::default()
-            },
+            crate::DebugLevel::None => Self::default(),
+            _ => self,
         }
     }
 
