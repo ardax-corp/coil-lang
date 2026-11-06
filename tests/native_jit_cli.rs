@@ -1568,3 +1568,26 @@ fn a_test_run_gives_back_each_files_code() {
     assert!(exit.success(), "{exit}");
     assert!(peak_kb > 0 && peak_kb < MOST_KB, "address space reached {} MiB", peak_kb / 1024);
 }
+
+/// Two modules can hold a derived type at the same offset: what one's derives
+/// added does not move where the other's go.
+#[test]
+fn derives_at_the_same_offset_of_two_modules_stay_apart() {
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-derive-offsets", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    for (file, class) in [("a", "Aa"), ("b", "Bb")] {
+        let src = format!("#[derive(Eq, Show)]\nclass {class} {{\n    pub n: int,\n}}\n");
+        std::fs::write(dir.join("src").join(format!("{file}.coil")), src).expect("write module");
+    }
+    let main = format!("{HEADER}use a::Aa;\nuse b::Bb;\nfn main() {{\n    let x = new Aa(1);\n    let y = new Bb(2);\n    let _ = println(format(\"%i\", x.n + y.n));\n}}\n");
+    std::fs::write(dir.join("main.coil"), main).expect("write source");
+    let mut cmd = Command::new(coil_bin());
+    cmd.arg("--no-build-cache").arg("--root").arg("src").current_dir(&dir);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let out = cmd.arg("main.coil").output().expect("spawn coil");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "3", "{}", String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
