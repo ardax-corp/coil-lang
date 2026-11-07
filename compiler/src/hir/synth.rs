@@ -2,7 +2,7 @@
 //! auto-par fork-join workers, the test-runner `main` and the builtin
 //! methods' bodies (`Range::to_vec`, …). They lower like
 //! any other body (HIR lowering, then direct MIR), instead of being written
-//! out as stack IL by hand.
+//! out by hand.
 //!
 //! Every node takes [`SPAN`], which no source node has, so no span-keyed
 //! checker or sidecar fact is found for it; lowering clears the debug

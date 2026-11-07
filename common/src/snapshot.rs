@@ -1,4 +1,4 @@
-//! Heap snapshots: an object graph copied out of the compile-time VM.
+//! Heap snapshots: an object graph copied out of the compile-time interpreter.
 //!
 //! A `const` whose value is computed at compile time keeps that value as a
 //! snapshot: the objects it reaches, in an order-free table, plus the static
@@ -143,7 +143,7 @@ impl HeapSnapshot {
     }
 
     /// Total encoded length read from the header at `words[0..]`, for the
-    /// bytecode verifier (which checks it fits the pool).
+    /// code verifier (which checks it fits the pool).
     pub fn encoded_len(words: &[u64]) -> Option<usize> {
         match words {
             [SNAPSHOT_MAGIC, len, ..] => usize::try_from(*len).ok(),

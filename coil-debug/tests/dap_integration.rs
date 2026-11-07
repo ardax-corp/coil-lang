@@ -676,9 +676,9 @@ fn dap_let_locals_at_line_breakpoint_case() {
     assert!(local(&locals, "label").is_some_and(|v| v.contains('x')), "locals={locals:?}");
 }
 
-/// A body emitted from MIR may reuse a dead local's frame word: the
-/// debugger shows that local as optimized out, never the value now there.
-fn dap_dead_local_is_optimized_out_case() {
+/// A local no longer used keeps its value: raw MIR gives each value its own
+/// register, and the debugger reads it there.
+fn dap_dead_local_keeps_its_value_case() {
     let locals = locals_at_line(
         "coil-dap-dead-local",
         "fn work(int n) -> int {\n    let doubled = n * 2;\n    let label = \"x\";\n    let total = doubled + 1;\n    if label != \"x\" {\n        panic \"label\";\n    }\n    return total;\n}\n\nfn main() {\n    let _ = work(20);\n}\n",
@@ -686,11 +686,11 @@ fn dap_dead_local_is_optimized_out_case() {
     );
     assert_eq!(local(&locals, "n"), Some("20"), "locals={locals:?}");
     assert_eq!(local(&locals, "total"), Some("41"), "locals={locals:?}");
-    // Optimized out, or (on a tier that keeps it) the local's own value.
+    // Raw MIR keeps every value: one no longer used is still its own.
     let doubled = local(&locals, "doubled");
-    assert!(matches!(doubled, Some("<optimized out>" | "40")), "locals={locals:?}");
+    assert_eq!(doubled, Some("40"), "locals={locals:?}");
     let label = local(&locals, "label");
-    assert!(label.is_some_and(|v| v == "<optimized out>" || v.contains('x')), "locals={locals:?}");
+    assert!(label.is_some_and(|v| v.contains('x')), "locals={locals:?}");
 }
 
 /// Tasks show as threads: the running task is thread 1, suspended tasks are
@@ -774,6 +774,6 @@ dap_tests! {
     dap_launch_allow_attach_grant_case => dap_launch_allow_attach_grant;
     dap_panic_stops_for_inspection_case => dap_panic_stops_for_inspection;
     dap_let_locals_at_line_breakpoint_case => dap_let_locals_at_line_breakpoint;
-    dap_dead_local_is_optimized_out_case => dap_dead_local_is_optimized_out;
+    dap_dead_local_keeps_its_value_case => dap_dead_local_is_optimized_out;
     dap_tasks_are_threads_case => dap_tasks_are_threads;
 }

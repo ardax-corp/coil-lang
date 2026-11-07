@@ -123,7 +123,6 @@ impl Checker {
             fn_value_escaped: HashSet::new(),
             in_bounds_index: HashSet::new(),
             nonneg_expr: HashSet::new(),
-            pin_array: HashSet::new(),
             pin_params: HashSet::new(),
             for_in_pin: HashSet::new(),
             for_in_pin_spans: HashSet::new(),
@@ -1387,6 +1386,23 @@ impl Checker {
             "task_cancel" | "task_cond_notify" => fun(&[int()], unit_ty()),
             "task_cond_new" => fun(&[], int()),
             "task_cond_wait" => fun(&[int()], int()),
+            "lock_acquire" | "lock_release" | "lock_load" | "lock_store" | "rw_acquire_read" | "rw_acquire_write"
+            | "rw_try_read" | "rw_try_write" | "rw_release_read" | "rw_release_write" | "rw_load" | "rw_store" => {
+                use crate::typechecking::ty::{mutex_ty, rwlock_ty};
+                // The lock primitives (`prelude::thread`): every one takes the
+                // lock with its value type `T`.
+                let t = self.counter.fresh();
+                let tv = Ty::Var(t);
+                let lock_err = Ty::Con(common::BUILTIN_LOCK_ERROR_ENUM.into());
+                let lock = if registry.starts_with("lock_") { mutex_ty(tv.clone()) } else { rwlock_ty(tv.clone()) };
+                let ty = match registry {
+                    "rw_try_read" | "rw_try_write" => fun(&[lock], boolean()),
+                    "lock_load" | "rw_load" => fun(&[lock], result_app_ty(tv, lock_err)),
+                    "lock_store" | "rw_store" => fun(&[lock, tv], result_app_ty(unit_ty(), lock_err)),
+                    _ => fun(&[lock], unit_ty()),
+                };
+                return Scheme::poly(vec![t], vec![], ty);
+            }
             "task_spawn" => {
                 // (scope, coroutine) -> task id; the coroutine's type is free.
                 let t = self.counter.fresh();
@@ -1899,7 +1915,6 @@ impl Checker {
         self.def_ids_by_node.clear();
         self.in_bounds_index.clear();
         self.nonneg_expr.clear();
-        self.pin_array.clear();
         self.pin_params.clear();
         self.for_in_pin.clear();
         self.for_in_pin_spans.clear();
@@ -2622,7 +2637,7 @@ impl Checker {
 
     /// Register the compiler-owned signatures for the primitive classes.
     ///
-    /// Their instances are emitted as bytecode thunks, but they participate in
+    /// Their instances are emitted as code thunks, but they participate in
     /// lookup exactly like source-declared classes so method/UFCS and operator
     /// dispatch share one dictionary ABI.
     fn register_builtin_typeclass_method_schemes(&mut self) {
@@ -3534,7 +3549,31 @@ impl Checker {
             Expression::Declare(args) => self.infer_ffi_declare(args, range),
             Expression::Invoke(args) => self.infer_ffi_invoke(args, range),
 
-            Expression::Defer { captures, body, .. } => {
+            Expression::Defer { captures, borrows, body } => {
+                // An assignment must reach a variable that is alive when the
+                // defer runs: a `use (mut x)` of an outer block's local. A
+                // copy, or a local of the block the defer ends, is gone.
+                let mut gone = false;
+                for (span, name) in crate::typechecking::control_flow::defer_body_assigns(body, captures) {
+                    let (msg, help) = if !borrows.contains(&name) {
+                        (
+                            format!("this assigns the defer's copy of `{name}`, which nothing reads after it"),
+                            format!("capture it with `use (mut {name})` to change the variable"),
+                        )
+                    } else if self.env.lookup_frame(name).is_some_and(|f| f + 1 == self.env.depth()) {
+                        (
+                            format!("`{name}` is declared in the block this defer ends: it is gone when the defer runs"),
+                            format!("declare `{name}` in an outer block, or drop the assignment"),
+                        )
+                    } else {
+                        continue;
+                    };
+                    gone = true;
+                    self.error_with_help(ErrorCode::DeferAssignsCapture, msg, span, Some(help));
+                }
+                if gone {
+                    return unit_ty();
+                }
                 // A defer runs while its function is leaving: it cannot
                 // choose another exit.
                 let exits = crate::typechecking::control_flow::defer_body_exits(body);
@@ -4750,7 +4789,7 @@ impl Checker {
         };
         let index_ty = self.infer(index_expr);
         let index_ty_pruned = apply_ty_prune(&self.subst, &index_ty);
-        // Constrain the index to be an `int` (the VM only
+        // Constrain the index to be an `int` (the runtime only
         // supports integer indices); a `byte` widens. Any other type is
         // rejected here rather than at lowering (#1172).
         let is_byte = Self::is_byte_ty(&index_ty_pruned);
@@ -5834,6 +5873,20 @@ impl Checker {
                 Some(format!("add `use math::{{{ident}}};`")),
             );
         }
+        // `ord` / `char` left the prelude for coil-stdlib's `text`.
+        if crate::typechecking::virtual_modules::REMOVED_PRELUDE_TEXT_FNS.contains(&ident.as_str())
+            && self.lookup_fn_scheme(&ident).is_none()
+        {
+            for arg in raw_args {
+                let _ = self.infer(arg);
+            }
+            return self.error_with_help(
+                ErrorCode::UnknownFunction,
+                format!("there is no built-in `{ident}`; `ord` and `char` moved from the prelude to coil-stdlib's `text` module"),
+                range,
+                Some(format!("add `use text::{{{ident}}};`, or use `string::to_bytes` / `from_bytes` for UTF-8 bytes")),
+            );
+        }
         // The free `len(x)` was removed: a length is the method `x.len()`.
         if ident == "len" && self.lookup_fn_scheme(&ident).is_none() {
             for arg in raw_args {
@@ -5924,10 +5977,8 @@ impl Checker {
                         self.infer_matrix_cells_call(&reordered, id, range, "intersect")
                     }
                     PreludeFn::Diff => self.infer_matrix_cells_call(&reordered, id, range, "diff"),
-                    PreludeFn::Ord => self.infer_ord(&reordered, range),
                     PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
                     PreludeFn::FnKey => self.infer_fn_key(&reordered, range),
-                    PreludeFn::Char => self.infer_char(&reordered, range),
                 };
             }
             let arg_slice = args.as_deref().unwrap_or(&[]);
@@ -5940,10 +5991,8 @@ impl Checker {
                     self.infer_matrix_cells_call(arg_slice, id, range, "intersect")
                 }
                 PreludeFn::Diff => self.infer_matrix_cells_call(arg_slice, id, range, "diff"),
-                PreludeFn::Ord => self.infer_ord(arg_slice, range),
                 PreludeFn::BlackBox => self.infer_black_box(arg_slice, range),
                 PreludeFn::FnKey => self.infer_fn_key(arg_slice, range),
-                PreludeFn::Char => self.infer_char(arg_slice, range),
             };
         }
         // `dload` / `declare` / `invoke` after `use ffi::{…}`.
@@ -7679,7 +7728,7 @@ impl Checker {
 
     /// Ground operands of an arithmetic / bitwise operator must be numeric
     /// (`int` / `float` / `byte`), `string` for `+`, or carry an instance of
-    /// the operator's trait (`impl Sub for Vec2`). The VM would otherwise
+    /// the operator's trait (`impl Sub for Vec2`). The runtime would otherwise
     /// operate on the raw words (a string pointer minus a string pointer),
     /// which is a bogus value that can crash later (#554).
     fn check_ground_arith_operands(&mut self, ty: &Ty, op: &str, range: &Range<usize>) {
@@ -8605,47 +8654,6 @@ impl Checker {
             );
         }
         int()
-    }
-
-    fn infer_ord(&mut self, args: &[Output], range: Range<usize>) -> Ty {
-        use crate::typechecking::ty::byte;
-        if args.len() != 1 {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("ord expects 1 argument, got {}", args.len()),
-                range,
-                Some("use `ord(s)` with a single-character string".to_string()),
-            );
-        }
-        let s_ty = self.infer(&args[0]);
-        self.unify(&s_ty, &string(), &args[0].0.into_range(), "ord argument");
-        result_app_ty(byte(), string())
-    }
-
-    /// `char(byte) -> Result<string, string>`.
-    fn infer_char(&mut self, args: &[Output], range: Range<usize>) -> Ty {
-        use crate::typechecking::ty::byte;
-        if args.len() != 1 {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("char expects 1 argument, got {}", args.len()),
-                range,
-                Some("use `char(b)` with a `byte` value".to_string()),
-            );
-        }
-        // `byte` is expected, so an int literal coerces as for a user
-        // function's `byte` parameter (#1175).
-        let prev_expected = self.current_expected.replace(byte());
-        let b_ty = self.infer(&args[0]);
-        self.current_expected = prev_expected;
-        self.unify(&b_ty, &byte(), &args[0].0.into_range(), "char argument");
-        result_app_ty(string(), string())
     }
 
     /// `dot(a, b)`, equal-length homogeneous numeric vectors → scalar.
@@ -13576,6 +13584,25 @@ impl Checker {
         Some((params, ty))
     }
 
+    /// `fn_name`'s declared result: [`Self::fn_return_ty`] peels every
+    /// arrow, so a function returning a function value reports that value's
+    /// result; this peels only the declared parameters (one, `unit`, for a
+    /// function of none). Without recorded names, the full peel.
+    pub fn fn_declared_return_ty(&self, fn_name: &str) -> Option<Ty> {
+        let Some(n) = self.fn_param_names(fn_name).map(<[String]>::len) else {
+            return self.fn_return_ty(fn_name);
+        };
+        let scheme = self.lookup_fn_scheme(fn_name)?;
+        let mut ty = apply_ty_prune(&self.subst, &scheme.ty);
+        for _ in 0..n.max(1) {
+            let Ty::Fun(_, next) = ty else {
+                break;
+            };
+            ty = *next;
+        }
+        Some(ty)
+    }
+
     /// Resolved parameter types in declaration order (curried `Fun` peel).
     pub fn fn_param_tys(&self, fn_name: &str) -> Option<Vec<Ty>> {
         let scheme = self.lookup_fn_scheme(fn_name)?;
@@ -14127,7 +14154,7 @@ impl Checker {
 
     /// `invoke`'s function id is the `int` handle `declare` returned (#1761):
     /// never a Coil `fn` (#1666), and never `declare`'s `Result` itself, whose
-    /// boxed address the VM would read as an out-of-range id.
+    /// boxed address the runtime would read as an out-of-range id.
     fn check_ffi_invoke_fn_id(&mut self, id_ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, id_ty);
         let id_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
@@ -15734,7 +15761,7 @@ impl Checker {
                 || args.len() >= fixed_count
                 || fixed_count == 0);
 
-        // `filled_mask` is a u64 on the VM stack (MakeFn / CallIndirect); cap
+        // `filled_mask` is a u64 on the runtime stack (MakeFn / CallIndirect); cap
         // fixed arity so bit shifts never wrap. Abort early, continuing would
         // emit a truncated mask and mis-bind partials.
         if fixed_count > 64 {
@@ -19465,7 +19492,7 @@ impl Checker {
                     }
                 }
             }
-            // Arguments past the last specifier: the VM drops them. Infer them
+            // Arguments past the last specifier: the runtime drops them. Infer them
             // anyway (codegen needs their types) and reject the call.
             if spec_index < p.len() {
                 for arg in &p[spec_index..] {
@@ -19489,7 +19516,7 @@ impl Checker {
                 self.messages.push(msg);
             }
         } else if let Some(p) = params {
-            // No format specifiers: still type-check args (VM consumes them).
+            // No format specifiers: still type-check args (runtime consumes them).
             for arg in p {
                 let _ = self.infer(arg);
             }
@@ -19928,7 +19955,7 @@ impl Checker {
     /// Look up the declared payload for `(enum_name, variant_name)`
     /// as a list of `(field_name, field_type)` pairs in
     /// DECLARATION order. The codegen uses this to reorder record
-    /// call-site fields to declaration order (the VM's
+    /// call-site fields to declaration order (the runtime's
     /// `MAKE_ENUM` pushes payload args in pop order, the first
     /// popped is `payload[0]`).
     ///
@@ -20472,7 +20499,7 @@ impl Checker {
         if let Some(&id) = self.record_type_ids.get(&key) {
             return id;
         }
-        // Records take ids from their own range, so the VM can tell one
+        // Records take ids from their own range, so the runtime can tell one
         // from a class instance (#1618).
         let id = common::RECORD_TYPE_ID_BASE + self.record_type_ids.len() as u32;
         assert!(id < common::RECORD_TYPE_ID_END, "more distinct record types than record type ids");

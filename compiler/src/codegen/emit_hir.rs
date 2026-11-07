@@ -289,6 +289,9 @@ struct HirLambda {
     /// The enclosing shared generic body's dictionaries it captures after
     /// its own captures (#1526): each one's name and the enclosing slot.
     dicts: Vec<(String, u32)>,
+    /// A two-word result: the plan and entry of its twin, the same body
+    /// returning the two words (`MirFunc::pair_twin`).
+    twin: Option<(HirEmit, IlLabel, PairKind)>,
 }
 
 /// An anonymous `fn` whose body is emitted as a function of its own once
@@ -297,6 +300,8 @@ pub(in crate::codegen) struct HirLambdaTail {
     body: HirBody,
     emit: HirEmit,
     label: IlLabel,
+    /// [`HirLambda::twin`].
+    twin: Option<(HirEmit, IlLabel, PairKind)>,
     /// The dictionaries it captures ([`HirLambda::dicts`]).
     dicts: Vec<(String, u32)>,
 }
@@ -688,14 +693,14 @@ impl Compiler {
             let Ok(mut emit) = self.plan_hir_body(&w) else {
                 panic!("internal error: outlined cold arm `{name}` does not plan");
             };
-            let (entry, label) = self.bind_function_entry(name.clone());
+            let (_, label) = self.bind_function_entry(name.clone());
             let arity = w.params.len() as u32;
             self.fn_arities.insert(name.clone(), (arity, false));
             emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached;
-            self.bytecode.push_return();
+            self.bodies.advance();
             self.hir_mir = self.hir_lower_mir(&w, &mut emit, None);
             assert!(self.hir_mir.is_some(), "internal error: outlined cold arm `{name}` without direct MIR");
-            self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
+            self.bodies.record(name.clone(), Some(label));
             self.attach_hir_mir();
             self.par_frame_exit(frame);
             self.queue_outlined(&w);
@@ -1449,7 +1454,7 @@ impl Compiler {
                     && !hir.is_coro =>
             {
                 let body = inlined.as_ref().unwrap_or(hir);
-                let steady = |n: &str| crate::il::pure_call::name_in(&self.steady_fns, n);
+                let steady = |n: &str| crate::pure_call::name_in(&self.steady_fns, n);
                 let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
                 let body_u = unrolled.as_ref().unwrap_or(body);
                 let tabled = self.opt_options.algebraic.then(|| self.hir_fold_tables(body_u)).flatten();
@@ -1543,11 +1548,8 @@ impl Compiler {
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
                     self.hir_plan_par_loops(hir, &mut emit, root);
                 }
-                // Its code is emitted from its direct MIR; the stack IL
-                // only keeps its function record non-empty.
-                self.bytecode.push_return();
+                self.bodies.advance();
                 self.hir_mir_why = None;
-                self.hir_defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
                 // A shared generic body takes its dictionaries as trailing
                 // parameters: direct MIR lowers it when its code reads them
                 // only as it plans (`HirMirTables::reads_dicts`), its open
@@ -1568,13 +1570,12 @@ impl Compiler {
                 if !emit.par_tail.is_empty() {
                     self.hir_par_tail = Some(Box::new(HirParTail { hir: hir.clone(), emit }));
                 }
-                self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
-                crate::il::opt::note_hir_lowered();
+                crate::opt::note_hir_lowered();
                 true
             }
             Err(reason) => {
-                crate::il::opt::note_hir_fallback(reason);
+                crate::opt::note_hir_fallback(reason);
                 self.hir_refusal = Some(reason);
                 false
             }
@@ -1629,19 +1630,12 @@ impl Compiler {
         let lowered = match plan {
             Ok(mut emit) => {
                 start(self);
-                let il_start = self.bytecode.il_mut().raw_len();
                 if let Some(root) = hir.root {
                     self.hir_plan_par_loops(hir, &mut emit, root);
                 }
-                // Its code is emitted from its direct MIR; the stack IL
-                // only keeps its function record non-empty.
-                self.bytecode.push_return();
-                for op in &mut self.bytecode.il_mut().ops_slice_mut()[il_start..] {
-                    op.set_loc(DebugLoc::unknown());
-                }
+                self.bodies.advance();
                 self.hir_mir_why = None;
                 self.hir_mir = self.hir_lower_mir(hir, &mut emit, entry_words);
-                self.expr_depth = 0;
                 true
             }
             Err(reason) => {
@@ -1658,10 +1652,10 @@ impl Compiler {
     pub(super) fn attach_hir_mir(&mut self) {
         if let Some(mut func) = self.hir_mir.take() {
             func.shrink_to_fit();
-            self.bytecode.set_last_func_hir_mir(func);
+            self.bodies.set_last_mir(func);
         }
         if let Some(why) = self.hir_mir_why.take() {
-            self.bytecode.set_last_func_hir_mir_why(why);
+            self.bodies.set_last_mir_why(why);
         }
     }
 
@@ -1701,12 +1695,12 @@ impl Compiler {
             Ok(mut func) => {
                 let slots: HashSet<u32> = self.frozen_tables.keys().copied().collect();
                 crate::mir::mark_frozen_arrays(&mut func, &slots);
-                crate::il::opt::note_hir_mir(None);
+                crate::opt::note_hir_mir(None);
                 self.hir_mir_debug_vars(hir, emit, &tables.frame);
                 Some(func)
             }
             Err(why) => {
-                crate::il::opt::note_hir_mir(Some(&why));
+                crate::opt::note_hir_mir(Some(&why));
                 self.hir_mir_why = Some(why);
                 None
             }
@@ -1726,6 +1720,7 @@ impl Compiler {
                     emit: code,
                     label: lam.label,
                     dicts: lam.dicts.clone(),
+                    twin: lam.twin.take(),
                 };
                 self.hir_lambda_tail.push(tail);
             }
@@ -1843,6 +1838,12 @@ impl Compiler {
             .enumerate()
             .filter(|(i, e)| pair_tys.contains_key(&(*i as u32)) && e.ty.as_ref().is_some_and(|t| self.hir_pair_holds_heap(t)))
             .map(|(i, _)| i as u32)
+            .collect();
+        let heap_pair_params = hir
+            .params
+            .iter()
+            .filter(|p| hir.local(**p).ty.as_ref().is_some_and(|t| self.hir_pair_holds_heap(t)))
+            .map(|p| p.0)
             .collect();
         // The locals of outlined parallel loop bodies live in their chunk
         // worker's frame, not this body's.
@@ -2334,6 +2335,7 @@ impl Compiler {
             pair_locals,
             pair_tys,
             heap_pairs,
+            heap_pair_params,
             ret_pair,
             stacks,
             sroa,
@@ -2354,14 +2356,15 @@ impl Compiler {
             op_prims: &tables.op_prims,
             fn_values: &tables.fn_values,
             value_calls: &tables.value_calls,
+            value_pair_calls: &tables.value_pair_calls,
             poly_calls: &tables.poly_calls,
             bound_calls: &tables.bound_calls,
             existential_calls: &tables.existential_calls,
-            ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx } else { &[] },
+            ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx[..] } else { &[] },
             lens: &emit.plan.lens,
             alloc_steady: self.alloc_steady,
-            pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),
-            steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
+            pure_fn: Box::new(move |n: &str| crate::pure_call::name_in(pure_fns, n)),
+            steady_fn: Box::new(move |n: &str| crate::pure_call::name_in(steady_fns, n)),
             call_fields: Box::new(move |n: &str, def| {
                 let stem = n.split("$mono$").next().unwrap_or(n);
                 finalizers | program_effects.call_fields(checker, &module_path, stem, def)
@@ -2972,9 +2975,9 @@ impl Compiler {
                     || self
                         .hir_fn_names
                         .iter()
-                        .find(|(k, _)| last(k) == *n)
-                        .and_then(|(_, i)| *i)
-                        .is_some_and(|i| named(&module.bodies[i]).contains(&me))
+                        .filter(|(k, _)| last(k) == *n)
+                        .filter_map(|(_, i)| *i)
+                        .any(|i| named(&module.bodies[i]).contains(&me))
             };
             if calls.iter().any(reaches_back) {
                 return Err("recursive".to_string());
@@ -3092,7 +3095,7 @@ impl Compiler {
             }
             if shape.looping()
                 && !callee.hints.always
-                && crate::il::pure_call::name_in(&self.pure_fns, &callee.name)
+                && crate::pure_call::name_in(&self.pure_fns, &callee.name)
                 && args.iter().all(|&a| inline::invariant_expr(hir, a, &invariant))
             {
                 return Err("pure loop callee on invariant arguments".to_string());
@@ -3192,20 +3195,20 @@ impl Compiler {
         let sites = spliced.len();
         match replanned {
             Ok(emit) => {
-                crate::il::opt::note_hir_inlined(sites);
+                crate::opt::note_hir_inlined(sites);
                 self.queue_outlined(&body);
                 for (name, (start, end)) in spliced {
                     // Another module's body is scalar code with no host call.
                     if !self.hir_fn_names.contains_key(&name) {
                         continue;
                     }
-                    let file = self.loc_from_span(SimpleSpan::from(start..end)).file;
-                    self.inlined_bodies.push((file, start..end, name));
+                    let loc = self.loc_from_span(SimpleSpan::from(start..end));
+                    self.inlined_bodies.push((loc.file, loc.start_byte as usize..loc.end_byte as usize, name));
                 }
                 Some((body, emit))
             }
             Err(reason) => {
-                crate::il::opt::note_hir_inline_refused(reason);
+                crate::opt::note_hir_inline_refused(reason);
                 None
             }
         }
@@ -4397,25 +4400,46 @@ impl Compiler {
                     })
                     .collect()
             };
-            let prev_vars = std::mem::take(&mut self.context.variables);
-            let prev_two_word = self.compiling_two_word_enum.take();
-            Self::hir_lambda_frame(&mut self.context.variables, lam, &dicts);
-            let prev_dicts = self.hir_lambda_dicts.replace((lam.captures.len() as u32, dicts.len() as u32));
-            // Lambdas inside it are planned in its frame.
-            let plan = self
-                .plan_hir_body_ret(lam, ret)
-                .and_then(|mut plan| self.plan_hir_lambdas(module, lam, &mut plan).map(|()| plan));
-            self.hir_lambda_dicts = prev_dicts;
-            self.context.variables = prev_vars;
-            self.compiling_two_word_enum = prev_two_word;
-            let mut plan = plan?;
-            // The captures are its function's first parameters.
-            for (slot, &(_, inner)) in lam.captures.iter().enumerate() {
-                plan.slots[inner.0 as usize] = Some(slot as u32);
-                plan.plan.params.insert(inner.0, (slot as u32, None));
+            // A two-word result (`Option<int>`) gets a twin returning the
+            // two words, which a two-word call through the value enters.
+            // A lambda inside it would be planned twice: no twin then.
+            let resolved = apply_ty_prune(self.checker.subst(), ret_ty);
+            let twin_kind = crate::layout::two_word_kind(&self.checker, &resolved)
+                .filter(|k| !matches!(k, PairKind::Range { .. }))
+                .filter(|_| !Self::ty_has_var(&resolved) && self.hir_mir_pair_tys(&resolved).is_some())
+                .filter(|_| !lam.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })));
+            let mut plans = Vec::with_capacity(2);
+            for rep in std::iter::once(ret).chain(twin_kind.clone().map(Rep::Pair)) {
+                let prev_vars = std::mem::take(&mut self.context.variables);
+                let prev_two_word = self.compiling_two_word_enum.take();
+                Self::hir_lambda_frame(&mut self.context.variables, lam, &dicts);
+                let prev_dicts = self.hir_lambda_dicts.replace((lam.captures.len() as u32, dicts.len() as u32));
+                // Lambdas inside it are planned in its frame.
+                let plan = self
+                    .plan_hir_body_ret(lam, rep)
+                    .and_then(|mut plan| self.plan_hir_lambdas(module, lam, &mut plan).map(|()| plan));
+                self.hir_lambda_dicts = prev_dicts;
+                self.context.variables = prev_vars;
+                self.compiling_two_word_enum = prev_two_word;
+                let mut plan = match plan {
+                    Ok(plan) => plan,
+                    // The twin is an optimization: without it the value
+                    // calls read the box.
+                    Err(_) if !plans.is_empty() => break,
+                    Err(why) => return Err(why),
+                };
+                // The captures are its function's first parameters.
+                for (slot, &(_, inner)) in lam.captures.iter().enumerate() {
+                    plan.slots[inner.0 as usize] = Some(slot as u32);
+                    plan.plan.params.insert(inner.0, (slot as u32, None));
+                }
+                plans.push(plan);
             }
-            let label = self.bytecode.fresh_label();
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts }));
+            let mut plans = plans.into_iter();
+            let plan = plans.next().expect("the lambda's plan");
+            let twin = plans.next().zip(twin_kind).map(|(p, k)| (p, self.bodies.fresh_label(), k));
+            let label = self.bodies.fresh_label();
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, twin }));
         }
         Ok(())
     }
@@ -5756,7 +5780,7 @@ impl Compiler {
         // the shared body (#2182).
         let adapt = plan.generic.as_ref().map(|g| g.adapt.clone()).unwrap_or_default();
         self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, adapt, ..compiler::SynthCallee::default() });
-        self.emit_synth_fn(name, &hir, calls, true);
+        self.emit_synth_fn(name, &hir, calls);
         self.hir_synth_callees.clear();
         // The adapters its call wraps a function argument in (#2163).
         self.flush_hir_lambdas();
@@ -6132,7 +6156,7 @@ impl Compiler {
                 PreludeFn::Dot | PreludeFn::MatMul | PreludeFn::Cross | PreludeFn::Intersect | PreludeFn::Diff => {
                     Ok(HirBuiltin::LinAlg)
                 }
-                PreludeFn::Ord | PreludeFn::Char | PreludeFn::BlackBox => host(Some(kind.as_str())),
+                PreludeFn::BlackBox => host(Some(kind.as_str())),
                 // The HIR builder already wrote the key in place of the call.
                 PreludeFn::FnKey => Err("callee-builtin"),
             });
@@ -7037,7 +7061,15 @@ impl Compiler {
         // As `emit_call_args_range_pairs`: a plain free function takes its
         // numeric range parameters as `[start, end]`.
         let ranges = if self_layout.is_some() {
-            Vec::new()
+            // An inherent method's: aligned with the arguments, the
+            // receiver (listed in the scheme or not) one word.
+            let pairs = if self.callee_has_unboxed_range_params(&key) { self.callee_param_pairs(&key) } else { self.callee_param_pairs(&lookup) };
+            match pairs.len() {
+                0 => Vec::new(),
+                n if n == explicit => std::iter::once(None).chain(pairs).collect(),
+                n if n == argc => std::iter::once(None).chain(pairs.into_iter().skip(1)).collect(),
+                _ => return Err("callee-pair"),
+            }
         } else if self.callee_has_unboxed_range_params(&key) {
             self.callee_param_pairs(&key)
         } else {
@@ -7765,7 +7797,7 @@ impl Compiler {
         if let Some(&label) = self.hir_fn_adapters.get(&key) {
             return (label, operand);
         }
-        let label = self.bytecode.fresh_label();
+        let label = self.bodies.fresh_label();
         self.hir_fn_adapters.insert(key, label);
         self.hir_adapter_tail.push((label, adapt.clone()));
         (label, operand)
@@ -7780,7 +7812,7 @@ impl Compiler {
         if let Some(&label) = self.hir_closure_adapters.get(adapt) {
             return (label, operand);
         }
-        let label = self.bytecode.fresh_label();
+        let label = self.bodies.fresh_label();
         self.hir_closure_adapters.insert(adapt.clone(), label);
         self.hir_closure_adapter_tail.push((label, adapt.clone()));
         (label, operand)
@@ -7792,16 +7824,15 @@ impl Compiler {
     fn hir_closure_adapter_fn(&mut self, label: IlLabel, adapt: &HirClosureAdapt) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_closure_adapter_{}", self.loop_par_helpers);
-        let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        self.bytecode.push_return();
+        self.bodies.advance();
         let arity = 1 + adapt.args.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
-        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        self.bodies.record(name.clone(), Some(label));
         match Self::closure_adapter_mir(&name, adapt) {
-            Ok(func) => self.bytecode.set_last_func_hir_mir(func),
-            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+            Ok(func) => self.bodies.set_last_mir(func),
+            Err(why) => self.bodies.set_last_mir_why(why),
         }
     }
 
@@ -7929,21 +7960,60 @@ impl Compiler {
 
     /// The adapter function [`Self::hir_fn_adapter`] reserved `label` for:
     /// its frame the wrapped function (the capture), then the arguments.
-    /// Its direct MIR is built here, as it has no HIR; the stack IL only
-    /// keeps its function record non-empty.
+    /// Its direct MIR is built here, as it has no HIR.
+    /// The `unpair` body of a call through a function value whose result
+    /// `ty` moves as two words: it takes the result's one word (its box)
+    /// and returns the two (`MirInst::CallIndirect`). `None` for a type of
+    /// one word, or a numeric range (a value call keeps its box).
+    pub(super) fn hir_unpair(&mut self, ty: &Ty) -> Option<IlLabel> {
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let kind = crate::layout::two_word_kind(&self.checker, &ty)?;
+        if matches!(kind, crate::layout::PairKind::Range { .. }) || Self::ty_has_var(&ty) || self.hir_mir_pair_tys(&ty).is_none() {
+            return None;
+        }
+        let key = format!("{ty:?}");
+        if let Some(&label) = self.hir_unpairs.get(&key) {
+            return Some(label);
+        }
+        let label = self.bodies.fresh_label();
+        let name = format!("__coil_unpair_{}", self.hir_unpairs.len());
+        self.hir_unpairs.insert(key, label);
+        self.hir_unpair_tail.push((name, ty, label));
+        Some(label)
+    }
+
+    /// Emit [`Self::hir_unpair`]'s body `name` for `ty` at `label`:
+    /// `return x` from a one-word parameter to a two-word result.
+    fn hir_unpair_fn(&mut self, name: String, ty: Ty, label: IlLabel) {
+        use crate::hir::LocalKind;
+        use crate::hir::synth::Synth;
+        self.fn_entry_labels.insert(name.clone(), label);
+        self.pin_two_word_return_kind(&name, crate::layout::two_word_kind(&self.checker, &ty));
+        let mut b = Synth::new(&self.checker, &name, ty.clone());
+        let x = b.local("x", ty.clone(), LocalKind::Param);
+        let v = b.read(x);
+        let ret = b.ret(v);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = b.finish(root);
+        self.fn_arities.insert(name.clone(), (1, false));
+        // Its result is the two words.
+        let prev = std::mem::replace(&mut self.compiling_two_word_enum, crate::layout::two_word_kind(&self.checker, &ty));
+        self.emit_synth_fn(&name, &hir, HashMap::new());
+        self.compiling_two_word_enum = prev;
+    }
+
     fn hir_fn_adapter_fn(&mut self, label: IlLabel, adapt: &HirFnAdapt) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_fn_adapter_{}", self.loop_par_helpers);
-        let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        self.bytecode.push_return();
+        self.bodies.advance();
         let arity = 1 + adapt.unbox.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
-        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        self.bodies.record(name.clone(), Some(label));
         match Self::fn_adapter_mir(&name, adapt) {
-            Ok(func) => self.bytecode.set_last_func_hir_mir(func),
-            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+            Ok(func) => self.bodies.set_last_mir(func),
+            Err(why) => self.bodies.set_last_mir_why(why),
         }
     }
 
@@ -8448,9 +8518,12 @@ impl Compiler {
                     })
                     .map_or(BOXED, |ty| Rep::Word(self.value_layout(ty))),
             ),
-            HirKind::Resume { .. }
-            | HirKind::Yield { .. }
-            | HirKind::Builtin {
+            // What a resume sends and a yield hands back: its type's
+            // layout, as the MIR moves it.
+            HirKind::Resume { .. } | HirKind::Yield { .. } => {
+                Some(Self::hir_ty(hir, id).map_or(BOXED, |ty| Rep::Word(self.value_layout(ty))))
+            }
+            HirKind::Builtin {
                 op: Builtin::Done, ..
             } => Some(BOXED),
             HirKind::Call { .. } => emit.plan.calls.get(&id.0).map(Self::hir_call_rep),
@@ -9467,24 +9540,20 @@ impl Compiler {
                     self.hir_check_value(hir, emit, arg, &BOXED)?;
                 }
             }
-            // The yielded word moves as it is (as `Resume`).
+            // The yielded word moves in its type's layout (a niche word as
+            // it is, a pair boxed), as `Resume` and a `for` take it back.
             HirKind::Yield { value, .. } => {
-                let boxed = |id: HirId| Self::hir_ty(hir, id).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
-                if !boxed(*value) {
-                    return Err("yield-layout");
-                }
-                self.hir_check_value(hir, emit, *value, &BOXED)?;
+                let want = Self::hir_ty(hir, *value).map_or(BOXED, |t| Rep::Word(self.value_layout(t)));
+                self.hir_check_value(hir, emit, *value, &want)?;
             }
-            // As the AST: the yielded and sent words move as they are, so
-            // only a boxed-layout type is taken.
+            // The yielded and sent words move in their types' layouts (a
+            // niche word as it is, a pair boxed).
             HirKind::Resume { handle, value } => {
-                let boxed = |id: HirId| Self::hir_ty(hir, id).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
-                if !boxed(id) || value.is_some_and(|v| !boxed(v)) {
-                    return Err("resume-layout");
+                if let Some(v) = value {
+                    let want = Self::hir_ty(hir, *v).map_or(BOXED, |t| Rep::Word(self.value_layout(t)));
+                    self.hir_check_value(hir, emit, *v, &want)?;
                 }
-                for &v in value.iter().chain([handle]) {
-                    self.hir_check_value(hir, emit, v, &BOXED)?;
-                }
+                self.hir_check_value(hir, emit, *handle, &BOXED)?;
             }
             HirKind::Builtin {
                 op: Builtin::Done,
@@ -9991,12 +10060,8 @@ impl Compiler {
                 if !matches!(pat, HirPat::Bind(_)) && !record_items {
                     self.hir_check_let_pat(hir, pat)?;
                 }
-                // The resumed word is stored as it comes back.
-                if let (Some(ForInKind::Coroutine), HirPat::Bind(local)) = (kind, pat)
-                    && self.hir_local_layout(hir, *local) != ValueLayout::Boxed
-                {
-                    return Err("for-in-coroutine");
-                }
+                // The resumed word is stored as it comes back, in the local's
+                // layout (a niche word as the yield sent it).
                 // `into_iter` is called as the AST calls it: a range comes
                 // back as `[start, end]`, anything else as one word.
                 if let (
@@ -10405,9 +10470,12 @@ impl Compiler {
     /// first slots, then the parameters. Its direct MIR takes the captures
     /// as its first parameters. Lambdas inside one follow it.
     pub(super) fn flush_hir_lambdas(&mut self) {
-        while !self.hir_lambda_tail.is_empty() || !self.hir_adapter_tail.is_empty() || !self.hir_closure_adapter_tail.is_empty() {
+        while !self.hir_lambda_tail.is_empty() || !self.hir_adapter_tail.is_empty() || !self.hir_closure_adapter_tail.is_empty() || !self.hir_unpair_tail.is_empty() {
             for lam in std::mem::take(&mut self.hir_lambda_tail) {
                 self.hir_lambda_fn(lam);
+            }
+            for (name, ty, label) in std::mem::take(&mut self.hir_unpair_tail) {
+                self.hir_unpair_fn(name, ty, label);
             }
             for (label, adapt) in std::mem::take(&mut self.hir_adapter_tail) {
                 self.hir_fn_adapter_fn(label, &adapt);
@@ -10423,7 +10491,24 @@ impl Compiler {
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {
-        let HirLambdaTail { body, mut emit, label, dicts } = lam;
+        let HirLambdaTail { body, emit, label, dicts, twin } = lam;
+        let twin = twin.map(|(emit, twin_label, kind)| {
+            let tail = HirLambdaTail { body: body.clone(), emit, label: twin_label, dicts: dicts.clone(), twin: None };
+            (tail, twin_label, kind)
+        });
+        self.hir_lambda_body(body, emit, label, dicts, None);
+        // Its twin returns the two words: the entry a two-word call through
+        // the value takes.
+        if let Some((tail, twin_label, kind)) = twin {
+            let HirLambdaTail { body, emit, dicts, .. } = tail;
+            self.hir_lambda_body(body, emit, twin_label, dicts, Some(kind));
+            self.bodies.set_pair_twin(label, twin_label);
+        }
+    }
+
+    /// [`Self::hir_lambda_fn`]'s function for one plan of the lambda, at
+    /// `label`; `pair`: the twin's two-word result.
+    fn hir_lambda_body(&mut self, body: HirBody, mut emit: HirEmit, label: IlLabel, dicts: Vec<(String, u32)>, pair: Option<PairKind>) {
         // A lambda spliced into several bodies is a function per copy.
         let mut name = body.name.clone();
         let mut k = 1;
@@ -10431,12 +10516,14 @@ impl Compiler {
             k += 1;
             name = format!("{}#{k}", body.name);
         }
+        if let Some(kind) = pair {
+            self.pin_two_word_return_kind(&name, Some(kind));
+        }
         let frame = self.par_frame_enter();
         let prev_key = self.current_function_table_key.replace(name.clone());
         let prev_two_word = self.compiling_two_word_enum.take();
         let prev_keys = std::mem::take(&mut self.field_key_slots);
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
-        let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
         let slots = Self::hir_lambda_frame(&mut self.context.variables, &body, &dicts);
@@ -10448,9 +10535,8 @@ impl Compiler {
         }
         let root = body.root.expect("planned lambda body");
         self.hir_plan_par_loops(&body, &mut emit, root);
-        // Its code is emitted from its direct MIR; the stack IL only keeps
-        // its function record non-empty.
-        self.bytecode.push_return();
+        // Its code is emitted from its direct MIR.
+        self.bodies.advance();
         // Direct MIR takes the captures as the first parameters.
         let mut flat = body.clone();
         flat.params = body.captures.iter().map(|&(_, inner)| inner).chain(body.params.iter().copied()).collect();
@@ -10465,16 +10551,10 @@ impl Compiler {
         self.hir_lambda_dicts = prev_dicts;
         // A lambda with a `defer` gets its cleanup pad, as a function does,
         // so a cancelled task's unwinder runs it (#1194).
-        let prev_defers = std::mem::replace(&mut self.hir_defers, flat.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. })));
-        let pinned = self.finish_fn_defers(&name);
-        self.hir_defers = prev_defers;
         let arity = (ncap + dicts.len() + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
-        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
-        if pinned {
-            self.bytecode.set_last_func_pinned();
-        }
         self.hir_mir_ctx = prev_ctx;
         self.field_key_slots = prev_keys;
         self.compiling_two_word_enum = prev_two_word;
@@ -10518,7 +10598,7 @@ impl Compiler {
     /// The fork-join function `driver` of `site` over chunk worker `worker`
     /// built as HIR ([`Self::hir_par_driver_body`]) and lowered like any
     /// other body, so it gets direct MIR. `false`, with nothing emitted,
-    /// when it does not plan: the caller writes its stack IL instead.
+    /// when it does not plan: the caller writes its code by hand instead.
     fn hir_par_driver_fn(
         &mut self,
         site: &crate::typechecking::LoopParSite,
@@ -10534,7 +10614,6 @@ impl Compiler {
         let hir = self.hir_par_driver_body(site, driver, worker, (spawn, join), (begin, end));
         let words = hir.params.len() as u32;
         let arity = 3 + site.live_captures.len();
-        let start = self.bytecode.len();
         let frame = self.par_frame_enter();
         self.fn_arities.insert(driver.to_string(), (words, false));
         let calls = HashMap::from([(worker.to_string(), (vec![ValueLayout::Boxed; arity], ValueLayout::Boxed))]);
@@ -10544,7 +10623,7 @@ impl Compiler {
         });
         if lowered {
             let label = self.fn_entry_labels.get(driver).copied();
-            self.bytecode.record_func_with_sp(driver.to_string(), label, start, self.bytecode.len(), words);
+            self.bodies.record(driver.to_string(), label);
             self.attach_hir_mir();
         }
         self.par_frame_exit(frame);
@@ -10847,11 +10926,10 @@ impl Compiler {
         emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached;
         let root = w.root.expect("worker root");
         self.hir_plan_par_loops(w, &mut emit, root);
-        // Its code is emitted from its direct MIR; the stack IL only keeps
-        // its function record non-empty.
-        self.bytecode.push_return();
+        // Its code is emitted from its direct MIR.
+        self.bodies.advance();
         self.hir_mir = self.hir_lower_mir(w, &mut emit, None);
-        self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
+        self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
         self.par_frame_exit(frame);
         // A parallel loop inside the worker moved out of it too.
@@ -10900,8 +10978,8 @@ impl Compiler {
         hir: &HirBody,
         emit: &HirEmit,
         id: HirId,
-        worker: crate::il::Label,
-        seq: Option<(crate::il::Label, i64)>,
+        worker: crate::bodies::Label,
+        seq: Option<(crate::bodies::Label, i64)>,
         par_forks: &mut HashMap<u32, crate::mir::HirParFork>,
     ) {
         let natural = Self::hir_call_rep(&emit.plan.calls[&id.0]);
@@ -10936,7 +11014,7 @@ impl Compiler {
     }
 }
 
-/// `limit` (`COIL_HIR_BISECT=N`, [`crate::il::opt::OptimizeOptions::hir_bisect`])
+/// `limit` (`COIL_HIR_BISECT=N`, [`crate::opt::OptimizeOptions::hir_bisect`])
 /// lowers only the first `N` bodies the plan admits (per process) and names
 /// the `N`th on stderr, to bisect a miscompile.
 fn hir_bisect(name: &str, limit: Option<usize>) -> bool {

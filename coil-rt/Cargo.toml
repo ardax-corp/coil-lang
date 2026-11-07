@@ -1,0 +1,13 @@
+[package]
+name = "coil-rt"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime library AOT `coil package` executables link: the runtime, the native driver and its helpers, no VM"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+coil-cli = { path = "../coil-cli", default-features = false }
+machine = { path = "../machine", default-features = false }

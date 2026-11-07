@@ -13,6 +13,7 @@ mod registry;
 mod resolve;
 mod runtime;
 mod signature;
+mod static_libs;
 
 #[cfg(not(target_family = "wasm"))]
 pub use call::{
@@ -20,10 +21,10 @@ pub use call::{
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol,
 };
 #[cfg(not(target_family = "wasm"))]
-pub use closure::{OwnedClosure, VmCallFn, callback_cif, make_int_callback};
+pub use closure::{OwnedClosure, ProgramCallFn, callback_cif, make_int_callback};
 #[cfg(target_family = "wasm")]
 pub use nolib::{
-    InvokeContext, Library, OwnedClosure, PreparedCall, VmCallFn, callback_cif,
+    InvokeContext, Library, OwnedClosure, PreparedCall, ProgramCallFn, callback_cif,
     invoke_via_libffi, make_int_callback, prepare_cif, prepare_cif_for_symbol,
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol,
 };
@@ -37,6 +38,7 @@ pub use resolve::{
     DLOAD_PRODUCTION_STEMS, dload_request_stem, is_libc_alias, is_production_dload_stem,
     library_candidates, platform_shared_lib_filename, resolve_library,
 };
+pub use static_libs::{StaticLibrary, StaticSymbol, install_static_symbols, static_library};
 pub use runtime::{check_native_libraries, packaged_app_ffi_startup_check, probe_system_libffi};
 pub use signature::{FfiError, FfiSignature, FfiSignatureBuilder};
 
@@ -48,7 +50,17 @@ pub fn register_on_library(
     sig: FfiSignature,
     layouts: &[crate::memory::CStructLayout],
 ) -> Result<usize, FfiError> {
-    let prepared = prepare_cif_for_symbol(&sig, &obj_lib.library, &sig.name, layouts)?;
+    let prepared = match obj_lib.static_symbols {
+        // A library linked into the executable: the address it recorded.
+        #[cfg(not(target_family = "wasm"))]
+        Some(linked) => {
+            let addr = *linked.get(&sig.name).ok_or_else(|| FfiError::SymbolNotFound { name: sig.name.clone() })?;
+            let mut prepared = prepare_cif(&sig, layouts)?;
+            prepared.addr = libffi::middle::CodePtr::from_ptr(addr as *mut std::ffi::c_void);
+            prepared
+        }
+        _ => prepare_cif_for_symbol(&sig, &obj_lib.library, &sig.name, layouts)?,
+    };
     let id = obj_lib.signatures.len();
     let name = sig.name.clone();
     obj_lib.signatures.push(crate::memory::RegisteredFunction {

@@ -46,11 +46,11 @@ impl Compiler {
     /// without emitting it: `None` when the `CALL` would not be an entry
     /// op (no such function, or a body whose offset has no label). Takes
     /// [`Self::raw_instance_call`].
-    pub(super) fn named_entry_target(&mut self, name: &str, on_module: bool) -> Option<crate::il::Label> {
+    pub(super) fn named_entry_target(&mut self, name: &str, on_module: bool) -> Option<crate::bodies::Label> {
         let adapter = self.raw_instance_redirect(name);
         let name = adapter.as_deref().unwrap_or(name);
         let label = if let Some(&offset) = self.functions.get(name) {
-            self.bytecode.entry_label_for_offset(offset)
+            self.bodies.entry_label_for_offset(offset)
         } else {
             let label = self.fn_entry_labels.get(name).copied()?;
             if on_module && self.builtin_show_thunks.iter().any(|(fqn, _, _)| fqn == name) {
@@ -72,30 +72,6 @@ impl Compiler {
     pub(super) fn raw_instance_redirect(&mut self, name: &str) -> Option<String> {
         let raw_call = std::mem::take(&mut self.raw_instance_call);
         (!raw_call && self.raw_instance_methods.contains(name)).then(|| Self::dict_adapter_name(name))
-    }
-
-    pub(super) fn packed_entry_byte_ret(
-        kind: crate::il::EntryKind,
-        arity: u32,
-        offset: u32,
-        ret_words: u32,
-    ) -> Byte {
-        let inst = match kind {
-            crate::il::EntryKind::Call => Instruction::CALL,
-            crate::il::EntryKind::TailCall => Instruction::TailCall,
-            crate::il::EntryKind::MakeCoro => Instruction::MakeCoro,
-            crate::il::EntryKind::CodePtr => Instruction::CodePtr,
-            crate::il::EntryKind::MakePolyFn => Instruction::MakePolyFn,
-        };
-        match kind {
-            crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn => {
-                Byte::new(inst).with_operand_u32(offset)
-            }
-            crate::il::EntryKind::Call => {
-                Byte::new(inst).with_call_packed_ret(arity, offset, ret_words)
-            }
-            _ => Byte::new(inst).with_call_packed(arity, offset),
-        }
     }
 
     pub(super) fn missing_call_target(&mut self, name: &str, range: std::ops::Range<usize>) {

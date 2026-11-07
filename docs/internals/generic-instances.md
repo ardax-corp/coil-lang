@@ -47,9 +47,9 @@ Instance methods keep the explicit receiver parameter every trait method has (`f
 - **Open goals.** A goal that still mentions a type variable is served from scope (`resolve_open_dict_goal`): inside a bounded instance, its own dictionary (`__dict0`, for recursion such as `Tree<T>`) or a context slot; inside a generic function, its bound's `__dictN` (scheme order); in a mono clone, the goal at the clone's concrete types (`mono_var_tys`). A goal like `Describe<Pair<T, int>>` goes through the generic `Pair` instance and resolves its context from scope. An open goal never falls back to a concrete instance.
 - **One plan.** Every dictionary is planned once as a `DictStep` stack
   program (code pointer, frame `__dictN`, null, tuple, box) from the goal's
-  types. Direct MIR runs it as a `HirDictOp` program (`hir_dict_ops`); the
-  IL thunks (instance-clone and method-clone calls of a shared body) emit
-  it (`append_dicts_interned`).
+  types. Direct MIR runs it as a `HirDictOp` program (`hir_dict_ops`). A
+  thunk (an instance-clone or method-clone call of a shared body) is
+  built as HIR, its call carrying the plan (`SynthCallee::dicts`).
 - **Allocation.** A ground dictionary is built once into a static ([generic-specialization.md](generic-specialization.md)); an open goal's dictionary is still built at each use.
 
 ## Derives (#552)

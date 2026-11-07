@@ -72,7 +72,7 @@ The panic message is `contract violated: <keyword> <text> ("<message>") in
 <function>`. An `ensures` panic is reported at its clause. A `requires`
 panic blames the caller. Its `Builtin::Panic` carries a second argument, and
 `emit_hir` turns that into `contract_fail` (HostInvoke **159**,
-`HostOp::Task`, archive minor 35). The VM handler adds `, called from
+`HostOp::Task`, archive minor 35). The driver adds `, called from
 <file:line:col>` from the frame below and prints no location of its own.
 Calls of a function with a `requires` are not tiny-inlined
 (`Compiler::caller_blame_fns`), and the HIR inliner refuses any body with a
@@ -217,7 +217,7 @@ Random arguments must not delete files or open sockets. Codegen asks the
 HIR effect summary of the target (`Compiler::contract_case_allowed`) when it
 emits a generated case: anything visible besides `read` and `mutate` (or a
 call through a function parameter) and the case is dropped from the
-runnable cases in `finalize_bytecode`. Its body is still emitted and listed
+runnable cases in `finalize_bodies`. Its body is still emitted and listed
 until then, so labels and node ids stay in step.
 
 ### Project sources

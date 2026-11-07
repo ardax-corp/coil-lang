@@ -38,7 +38,6 @@ fn walk(int n, int k) -> int {
     return walk(n - 1, k) + walk(n - 1, k + 1);
 }
 
-#[max_depth(64)]
 fn mix(int n) -> int {
     if n <= 1 {
         return n;
@@ -46,7 +45,6 @@ fn mix(int n) -> int {
     return mix(n - 1) ^ mix(n - 2);
 }
 
-#[max_depth(64)]
 fn build(int n) -> Tree {
     if n <= 1 {
         return Tree::Leaf();
@@ -54,7 +52,6 @@ fn build(int n) -> Tree {
     return Tree::Node(build(n - 1), build(n - 2));
 }
 
-#[max_depth(64)]
 fn leaves(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,

@@ -1,5 +1,5 @@
 //! Every body of the files below (the former `mir_direct_*` corpus, now
-//! filed by language domain) lowers HIR -> MIR and takes its stack IL from
+//! filed by language domain) lowers HIR -> MIR and is emitted from
 //! that MIR: none keeps emit_hir's stack lowering. A shape direct MIR
 //! refuses gets a file here (M5p), so the census and the harness see it too.
 

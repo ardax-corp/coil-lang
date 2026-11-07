@@ -18,16 +18,16 @@ pub enum HostOp {
     Ordinary,
     Collect,
     RegisterFinalizer,
-    /// Task scheduler native (`task_*`): the VM runs it, since it can switch
+    /// Task scheduler native (`task_*`): the runtime runs it, since it can switch
     /// tasks. Ids [`common::TASK_SCOPE_OPEN_ID`]..=[`common::TASK_YIELD_ID`]
     /// and [`common::TASK_CANCEL_ID`]..=[`common::TASK_SHIELD_EXIT_ID`]
     /// and [`common::TASK_COND_NEW_ID`]..=[`common::TASK_COND_NOTIFY_ID`],
     /// and [`common::CONTRACT_FAIL_ID`] (it reads the caller's frame).
     Task,
-    /// `unwind_resume`: the end of a `defer` cleanup pad; the VM unwinder
+    /// `unwind_resume`: the end of a `defer` cleanup pad; the runtime unwinder
     /// takes the frame back ([`common::UNWIND_RESUME_ID`]).
     Unwind,
-    /// `gc_region_enter` / `gc_region_exit` around a `region` block: the VM
+    /// `gc_region_enter` / `gc_region_exit` around a `region` block: the runtime
     /// runs a minor collection ([`common::GC_REGION_ENTER_ID`]).
     RegionEnter,
     RegionExit,
@@ -41,9 +41,16 @@ pub trait NativeFn: Send + Sync {
         HostOp::Ordinary
     }
     /// The plain function behind a native that always returns a value and
-    /// never parks, opens descriptors or switches tasks. The VM calls it
+    /// never parks, opens descriptors or switches tasks. The runtime calls it
     /// straight from the dispatch loop instead of through [`Self::invoke`].
     fn direct(&self) -> Option<crate::HostValueFn> {
+        None
+    }
+
+    /// [`Self::direct`] of a native that first checks its `Stream`
+    /// argument is not unsent (`host_natives::stream_first`): the plain
+    /// function behind that check, which native code makes itself.
+    fn guarded_direct(&self) -> Option<crate::HostValueFn> {
         None
     }
 }
@@ -73,7 +80,7 @@ impl HostClosureFn {
 
     /// A native that is a plain [`crate::HostValueFn`]: it always returns a
     /// value, and never parks, opens descriptors or switches tasks, so the
-    /// VM may call it directly ([`NativeFn::direct`]).
+    /// runtime may call it directly ([`NativeFn::direct`]).
     pub fn new_direct(signature: FfiSignature, func: crate::HostValueFn) -> Self {
         let mut native = Self::new(signature, move |heap, args| Ok(Some(func(heap, args))));
         native.direct = Some(func);
@@ -129,7 +136,7 @@ impl NativeFn for HostClosureFn {
     }
 
     fn direct(&self) -> Option<crate::HostValueFn> {
-        // A special host op runs in the VM, never as a plain call.
+        // A special host op runs in the runtime, never as a plain call.
         if self.host_op == HostOp::Ordinary { self.direct } else { None }
     }
 

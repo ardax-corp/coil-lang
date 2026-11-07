@@ -1,5 +1,5 @@
 // Hit bench for COI-269 MIR CSE: two DIVF of the same operands per trip.
-// Stack-IL CSE/GVN refuse DIVF; dense specialize + MIR GVN keep one divide.
+// Dense lowering plus MIR GVN keep one divide.
 use io::sync::print;
 use string::format;
 

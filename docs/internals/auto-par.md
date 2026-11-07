@@ -131,12 +131,12 @@ site's path guards, codegen emits **one** parameterized worker
 2. `MakeFn` the first arm: self-arms with `hop > 1` re-enter this worker with
    `hop - 1` and live `ArgForm` args; otherwise the sequential callee.
 3. `thread_spawn_shared` that arm (HostInvoke **137**; isolate
-   `thread_spawn` when maps are missing for non-immediates, the debugger is
-   attached, or an arg misses the C0 whitelist). No `GT` grain gate.
+   `thread_spawn` when an arg misses the C0 whitelist). No `GT` grain gate.
 4. On `Ok(handle)`: evaluate remaining arms locally (same hop policy), `join`
    (help-steals), apply the site's combine. Shared join publishes raw `Value` bits
    (no graph copy).
 5. On `Err` (spawn or non-sendable join): sequential fallback of all arms + combine.
+   Compile-time code takes this path: its `thread_spawn_shared` always fails.
 
 The worker is a HIR body the compiler builds itself
 ([`hir::synth`](../../compiler/src/hir/synth.rs),
@@ -147,14 +147,14 @@ passes or inlining and no par rewrite of the calls inside it. A site whose
 parameters, arm results or combine are not one boxed word each, or whose
 argument forms are not `int`, gets no worker.
 
-Const call sites rewrite to an ordinary `CALL` of that worker (plus
+Const call sites rewrite to an ordinary call of that worker (plus
 `PAR_SPEC_HOPS`, default **2**). Below-floor constant args stay on the
 original sequential `f`. A **unary** call whose argument is a local
 (`fib(n)`, not `fib(n - 1)`) compares that local with the cutoff — the
 smallest `n` in `0..=48` whose grain clears the floor — and calls the same
 worker when it does. The check is one
 compare at that call. Calls inside the sequential function stay ordinary
-`CALL`s, because the worker is registered after that function is emitted;
+calls, because the worker is registered after that function is emitted;
 calls inside the worker stay ordinary too.
 Hops are depth on
 the same function — not a constellation of frozen `__coil_par_f_a_b_…`
@@ -259,7 +259,7 @@ Codegen emits one private **chunk worker** per site,
 returning the partial. For `for`, the worker emits the unit step after the body.
 The fork-join below is a second private function, `__coil_par_loop_fork_{n}(acc,
 …live captures, begin, end)`, returning the new `acc`; the loop site is a
-plain `CALL` of it. Both are emitted after the enclosing function, so neither
+plain call of it. Both are emitted after the enclosing function, so neither
 sits inside its code: the enclosing body and the worker (planned as its own
 HIR body, `while lo < hi { body }; return acc`) each lower to MIR. A `while`
 site over a dynamic range whose index is read after the loop keeps the
@@ -267,8 +267,8 @@ fork-join inline (only the fork-join knows the final index) and has no MIR.
 In the fork-join:
 
 1. `MakeFn` the worker, then `thread_spawn_shared(worker, lo, hi, identity)` for
-   each chunk (HostInvoke **137**; falls back to isolate `thread_spawn` when maps
-   are missing, the debugger is attached, or an arg misses the C1 whitelist).
+   each chunk (HostInvoke **137**; falls back to isolate `thread_spawn` when an arg
+   misses the C1 whitelist).
    Each chunk starts from the operator's identity (`0` for `+`/`^`, `1` for `*`).
 2. `thread_join` every chunk (help-steals), then fold `acc` and the partials in
    order with `ADD` / `MUL` / `XOR`.
@@ -334,36 +334,28 @@ there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
 | `--auto-par on\|off` | `off` compiles no auto fork-join (default `on`). |
 | `COIL_PAR_STATS` | Unit tests of `machine` only: `1` / `true` / `on` / `yes` prints reactor steal/idle/join counters on shutdown (see [auto-par-branch-misses.md](auto-par-branch-misses.md)). Other builds never count. |
 
-Shared-heap spawn is always on. Debugger-attached runs and programs without stack maps still fall back to isolate `PortableValue` spawn.
-
-`.ccoil` / embed execute sizes each isolate operand stack from the persisted
-compiler bound (archive minor 13). Pre-13 archives still use the Seek+CALL
-heuristic; that is not an IPA policy change. Minor 14 stores S2b maps so
-archive/embed GC relocate matches compile-and-run; older maps stay empty.
-Minor 15 appends HostInvoke `thread_spawn_shared` (**137**) for C1 loop-chunk
-steal. Pre-15 archives never emit that id.
+Shared-heap spawn is always on. An argument outside the whitelist falls back to isolate `PortableValue` spawn.
 
 Pool workers pin a TLS local deque tagged with the owning reactor identity.
 `submit` / join-help only push or pop that deque when it belongs to the same
 reactor; otherwise work goes through the shared injector. That keeps concurrent
-`Machine`s (parallel tests) and nested reactors from cross-feeding jobs.
+runtimes (parallel tests) and nested reactors from cross-feeding jobs.
 
 Isolate-per-job tax (COI-360 E2): workers execute from the `Arc`
-`ThreadProgram` image; join-help checks out a TLS helper `Machine`; after an
-**isolate** job the private heap is reset (unmap when more than one 64KiB slab
-is mapped). User `thread::spawn` stays on this path.
+`ThreadProgram` image; join-help checks out a TLS `Runtime`
+(`machine/src/worker.rs`); after an **isolate** job the private heap is reset
+(`Runtime::reset_isolate`). User `thread::spawn` stays on this path.
 
 C1 shared-heap loop steal (COI-365 E6): counted-loop chunks submit
 `SpawnArg::Shared` `Value` bits onto one Heap (helpers **bind** that Heap;
-they do not `reset_isolate_heap` unmap it). Layer A epoch STW: no collect
+they do not reset it). Layer A epoch STW: no collect
 during the steal; a stolen chunk that outgrows the epoch GC ceiling aborts to sequential /
-isolate fallback; the joiner collects after `end_steal`. Maps are mandatory
-for non-immediate args (empty maps → isolate). See
+isolate fallback; the joiner collects after `end_steal`. See
 [shared-heap-sendability.md](shared-heap-sendability.md).
 
 C2 expression IPA (COI-364 E7 / COI-366 F1): parameterized AlwaysPar
-workers emit the same `thread_spawn_shared`. Fib/tak args are immediates
-(Layer A may steal without maps). EnumCtor/Tuple arms allocate on the shared
+workers emit the same `thread_spawn_shared`. Fib/tak args are immediates.
+EnumCtor/Tuple arms allocate on the shared
 Heap and publish the pointer at join (rooted through Layer A collect). User
 `thread::spawn` stays isolate.
 

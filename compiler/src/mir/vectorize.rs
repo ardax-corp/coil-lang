@@ -759,7 +759,7 @@ pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opt
 }
 
 /// A map-and-fold body runs, lane by lane, each store's value then the
-/// store, then the fold (`emit::vec_loop_body`); the VM replays a block
+/// store, then the fold (`emit::vec_loop_body`); the runtime replays a block
 /// that traps in that order. That matches the scalar loop when every
 /// instruction of `body` that can trap is first computed, in that order,
 /// after as many stores as precede it in `body`, and the fold itself

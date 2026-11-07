@@ -5,17 +5,17 @@
 1. Archive a dedicated **string table**; `STRING` is an index (no inline `DATA` runs).
 2. Virtual **`string`** module: `format`, `from_bytes`, `to_bytes` (text helpers also remain as `io` aliases).
 3. Remove **`print`** / **`format`** keywords; write via `io::write` / `write_all` on `stdout()`.
-4. Keep `FORMAT` opcode for compile-time-checked formatting (`%v` / `Show`).
+4. Keep `FORMAT` (MIR `Format`) for compile-time-checked formatting (`%v` / `Show`).
 
-## Archive (version **35**)
+## Archive
 
-`ArchivedProgram` gains `strings: Vec<String>`.  
-`STRING` operand = index into that table. `DATA` stays as a tombstone discriminant (never emitted).
+`ArchivedProgram` has `strings: Vec<String>`.  
+MIR `String { idx }` is an index into that table.
 
 ## Runtime
 
-- Machine holds `program_strings` next to `program_constants`.
-- `STRING` → `heap.intern(program_strings[idx])`.
+- `Runtime` holds `program_strings`.
+- MIR `String { idx }` interns `program_strings[idx]` (`coil_native_string`, cached per index).
 - Runtime-built strings (`DynAdd` concat, `FORMAT`, `STRINGIFY`, `from_bytes`,
   thread-decoded strings) are **not** interned: `Heap::alloc_string` allocates
   them with a lazily computed, cached hash (`ObjString::hash_code`). String
@@ -36,7 +36,7 @@
   far smaller slice is copied (into an exact-size shared buffer, so slices
   of it are views). Views are charged no buffer bytes: the strings that grew
   the buffer were.
-- Stdout/stderr `write`/`write_all` honor `Machine::with_output` via a thread-local redirect (tests keep capturing).
+- Stdout/stderr `write`/`write_all` honor `Runtime::with_output` via a thread-local redirect (tests keep capturing).
 
 ## Language surface
 
@@ -63,7 +63,3 @@ let s = format("%s-%i", name, n);
   | `find_from(hay, needle, start) -> int` | First offset `>= start`, or `-1` |
   | `rfind(hay, needle) -> int` | Last offset, or `-1` |
   | `match_at(s, needle, at) -> bool` | `needle` occurs at `at` |
-
-## Opcode policy
-
-No middle inserts. Redefine `STRING` under the version bump; leave `DATA` / `PRINT` discriminants unused by the compiler.

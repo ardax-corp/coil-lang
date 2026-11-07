@@ -1,8 +1,10 @@
 # Compiler peak memory
 
 Where the compiler's own peak RSS comes from while it compiles a program, and
-what was done about it (2026-10-27). The VM's heap and GC are a separate
-subject.
+what was done about it (2026-10-27). The runtime's heap and GC are a separate
+subject. The measurements date from the bytecode VM, since deleted: its final
+lowering (tiers, flatten, fuse, LIR drafts, `IlModule`) no longer runs, so the
+peaks below are history and a new measurement starts over.
 
 ## Measuring
 
@@ -85,11 +87,10 @@ levels, all 14 coil-http examples). Only `Vec`s are trimmed: shrinking a
 
 ## What is left at the peak
 
-The peak is now the end of the module loop rather than final lowering:
+At that time the peak was the end of the module loop, not final lowering:
 
 - Per-function MIR (~8 MiB on spool), needed by final lowering. Shrinking it
-  further means a smaller `MirInst` or fewer sidecars (deopt sites 1.3 MiB,
-  value locations 0.7 MiB).
+  further means a smaller `MirInst` or fewer sidecars.
 - `ModuleCtx` checker snapshots while modules still compile: each is a full
   clone, so global tables (env, schemes, overload sets) are copied once per
   kept module. Sharing or pruning them is the next lever.

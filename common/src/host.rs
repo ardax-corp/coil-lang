@@ -1,4 +1,4 @@
-//! Append-only HostInvoke catalog shared by compiler and VM.
+//! Append-only HostInvoke catalog shared by compiler and runtime.
 //!
 //! Ids are the table index. New natives go at the end. Do not reorder or
 //! reuse slots. Frozen: 119 = `stream_attach`, 120 = `stream_park`.
@@ -1467,6 +1467,89 @@ pub const HOST_NATIVES: &[HostNative] = &[
         id: 199,
         effects: PURE,
         caps: NO_CAP,
+    },    HostNative {
+        name: "lock_acquire",
+        arity: 1,
+        id: 200,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "lock_release",
+        arity: 1,
+        id: 201,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "lock_load",
+        arity: 1,
+        id: 202,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "lock_store",
+        arity: 2,
+        id: 203,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_acquire_read",
+        arity: 1,
+        id: 204,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_acquire_write",
+        arity: 1,
+        id: 205,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_try_read",
+        arity: 1,
+        id: 206,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_try_write",
+        arity: 1,
+        id: 207,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_release_read",
+        arity: 1,
+        id: 208,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_release_write",
+        arity: 1,
+        id: 209,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_load",
+        arity: 1,
+        id: 210,
+        effects: THREAD_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "rw_store",
+        arity: 2,
+        id: 211,
+        effects: THREAD_R,
+        caps: NO_CAP,
     },
 ];
 
@@ -1521,12 +1604,12 @@ pub const STRING_BYTE_AT_ID: u16 = 139;
 /// Last byte-offset `string` native (`string_match_at`).
 pub const STRING_MATCH_AT_ID: u16 = 143;
 /// First task-scheduler native (`task_scope_open`); the block runs through
-/// [`TASK_YIELD_ID`] (archive minor 32). The VM handles these itself
+/// [`TASK_YIELD_ID`] (archive minor 32). The runtime handles these itself
 /// (`HostOp::Task`): they can switch tasks.
 pub const TASK_SCOPE_OPEN_ID: u16 = 144;
 /// Last task-scheduler native (`task_yield`).
 pub const TASK_YIELD_ID: u16 = 151;
-/// Ends a `defer` cleanup pad: the VM unwinder takes the frame back
+/// Ends a `defer` cleanup pad: the runtime unwinder takes the frame back
 /// (archive minor 33, `HostOp::Unwind`). Compiler-emitted only.
 pub const UNWIND_RESUME_ID: u16 = 152;
 pub const UNWIND_RESUME_NATIVE: &str = "unwind_resume";
@@ -1587,6 +1670,8 @@ pub const TTY_ENABLE_VT_NATIVE: &str = "tty_enable_vt";
 /// compiler swaps it in for `from_bytes`.
 pub const FROM_BYTES_TAKE_ID: u16 = 176;
 pub const FROM_BYTES_TAKE_NATIVE: &str = "from_bytes_take";
+/// `gc::root` (its id in the table above).
+pub const GC_ROOT_ID: u16 = 94;
 /// HostInvoke ids around a `region { ... }` block (escape step 5, archive
 /// 6.2): enter starts a fresh nursery for the block, exit collects it.
 /// Never named in source; the compiler emits them for `region`.
@@ -1614,7 +1699,7 @@ pub const PROCESS_SIGNAL_NATIVE: &str = "process_signal";
 pub const PROCESS_PID_NATIVE: &str = "process_pid";
 pub const PROCESS_RELEASE_ID: u16 = 188;
 pub const PROCESS_RELEASE_NATIVE: &str = "process_release";
-/// `io::open` (frozen row 3): on `TooManyOpenFiles` the VM collects and
+/// `io::open` (frozen row 3): on `TooManyOpenFiles` the runtime collects and
 /// tries once more, as for [`TCP_ACCEPT_ID`].
 pub const IO_OPEN_ID: u16 = 3;
 /// `tcp_accept` (frozen row 15).
@@ -1648,7 +1733,7 @@ pub const KEY_INDEX_FIND_NATIVE: &str = "key_index_find";
 /// answers [`KEY_EQ_COIL`].
 pub const KEY_INDEX_EQ_MODE_ID: u16 = 199;
 pub const KEY_INDEX_EQ_MODE_NATIVE: &str = "key_index_eq_mode";
-/// `eq_mode`: the type's `==` is not one the VM runs; the caller compares
+/// `eq_mode`: the type's `==` is not one the runtime runs; the caller compares
 /// candidates from `probe` itself.
 pub const KEY_EQ_COIL: i64 = 0;
 /// `eq_mode`: `==` compares the words (`int`).
@@ -1658,7 +1743,7 @@ pub const KEY_EQ_STRING: i64 = 2;
 
 /// Set on the `type_id` argument of `gc_register_finalizer` when the
 /// type's `drop` keeps nothing of `self` (the compiler's escape facts):
-/// the VM may run it where an object of the type is freed early, then free
+/// the runtime may run it where an object of the type is freed early, then free
 /// the object. An archive without it leaves every `drop` to the collector.
 /// The argument is a 16-bit `CONST` immediate: a type id at or above the
 /// flag is never flagged.
@@ -1709,8 +1794,15 @@ pub const PACKED_VEC_ARITH: &str = "packed_vec_arith";
 pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
+/// `prelude::thread::lock_acquire`, the first lock primitive (archive 6.21).
+pub const LOCK_ACQUIRE_ID: u16 = 200;
+/// `prelude::thread::rw_store`, the last lock primitive.
+pub const RW_STORE_ID: u16 = 211;
+
 const _: () = {
-    assert!(HOST_NATIVES.len() == 200);
+    assert!(HOST_NATIVES.len() == 212);
+    assert!(HOST_NATIVES[LOCK_ACQUIRE_ID as usize].id == LOCK_ACQUIRE_ID);
+    assert!(HOST_NATIVES[RW_STORE_ID as usize].id == RW_STORE_ID);
     assert!(HOST_NATIVES[KEY_INDEX_EQ_MODE_ID as usize].id == KEY_INDEX_EQ_MODE_ID);
     assert!(HOST_NATIVES[CORO_CLOSE_ID as usize].id == CORO_CLOSE_ID);
     assert!(HOST_NATIVES[KEY_INDEX_TABLE_ID as usize].id == KEY_INDEX_TABLE_ID);
@@ -1723,6 +1815,7 @@ const _: () = {
     assert!(HOST_NATIVES[SYMBOL_NEXT_ID_ID as usize].id == SYMBOL_NEXT_ID_ID);
     assert!(HOST_NATIVES[VEC_EXTEND_RANGE_ID as usize].id == VEC_EXTEND_RANGE_ID);
     assert!(HOST_NATIVES[VEC_FILL_ID as usize].id == VEC_FILL_ID);
+    assert!(HOST_NATIVES[GC_ROOT_ID as usize].id == GC_ROOT_ID);
     assert!(HOST_NATIVES[GC_REGION_ENTER_ID as usize].id == GC_REGION_ENTER_ID);
     assert!(HOST_NATIVES[GC_REGION_EXIT_ID as usize].id == GC_REGION_EXIT_ID);
     assert!(HOST_NATIVES[FROM_BYTES_TAKE_ID as usize].id == FROM_BYTES_TAKE_ID);
@@ -1765,9 +1858,9 @@ pub fn host_native_id(name: &str) -> Option<usize> {
         .map(|e| e.id as usize)
 }
 
-/// Natives the compiler may call with [`crate::Instruction::DenseHostCall`]:
+/// Natives the compiler may call with a direct host call:
 /// plain functions of their arguments that always return a value and never
-/// park, open descriptors or switch tasks. The VM registers each of them
+/// park, open descriptors or switch tasks. The runtime registers each of them
 /// with a direct function (`NativeFn::direct`; a machine test checks it).
 pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "ord",

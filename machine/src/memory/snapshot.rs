@@ -1,6 +1,6 @@
 //! Capture a heap object graph as a [`HeapSnapshot`] and rebuild it.
 //!
-//! Capture runs on the compile-time VM after a `const` initializer returns;
+//! Capture runs on the compile-time runtime after a `const` initializer returns;
 //! restore runs once at startup (`RestoreSnapshot`). A word is a reference
 //! exactly when the collector would treat it as one: pointer kinds always,
 //! unknown kinds when they name a live object (bit 0 masked, as

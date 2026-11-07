@@ -1,5 +1,5 @@
-// Hit bench for COI-288 W2: dense specialize on counted i64 +/− (no heap/CALL).
-// Pre-W2 infer required float arith or unused has_i32; i64 loops stayed fuse-IL.
+// Hit bench for COI-288 W2: dense lowering of counted i64 +/− (no heap/CALL).
+// Loops of i64 +/- must take the dense path like float ones.
 // Trip count is a parameter so the loop is not a const-unroll candidate.
 use io::sync::print;
 use string::format;

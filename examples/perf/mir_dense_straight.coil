@@ -1,6 +1,6 @@
-// Hit bench: dense specialize on a no-back-edge numeric body when the
-// reconstruct beats fuse-IL cost. The `main` caller loop has I/O + CALL
-// (stays fuse-IL); prove is `hot` itself.
+// Hit bench: dense lowering of a no-back-edge numeric body when the
+// reconstruct beats the generic cost. The `main` caller loop has I/O + CALL
+// (stays generic); prove is `hot` itself.
 use io::sync::print;
 use string::format;
 

@@ -29,10 +29,10 @@ ways.
   loaded after that: `LoadStatic`; if zero, build and `StoreStatic`; the
   join is the table (`mir::from_hir` `frozen_array`, the pattern of the
   ground dictionaries in [generic-specialization](generic-specialization.md)).
-  Tables of the same literals share a slot. The slots start zeroed, so the
-  prologue does not run for them (`prologue_jmp_target`). A table inside a
+  Tables of the same literals share a slot. The slots start zeroed, so no
+  startup op runs for them. A table inside a
   loop (a callee's, spliced into its caller's loop) is left an array per
-  evaluation: dense LICM moves that allocation to the loop's preheader,
+  evaluation: MIR LICM moves that allocation to the loop's preheader,
   which is cheaper than a first-use check per iteration and keeps the loop
   eligible for auto-par.
 
@@ -57,25 +57,22 @@ is program-wide.
 `mir::mark_frozen_arrays` marks, in `MirFunc::invariant_loads`, the
 `LoadStatic` of a module table's slot, the join of a local table, a φ of
 only those, and every `Index` and `ArrayLen` of one of them. LICM moves a
-marked `LoadStatic` and length freely (a dense body only: LIR keeps heap
-words in place) and a marked element read behind the loop test whatever
+marked `LoadStatic` and length freely and a marked element read behind the loop test whatever
 the loop stores or calls; local CSE never kills them. In the CRC loop the
 table's slot is now loaded once ahead of the loop, which reads one element
 per byte.
 
 ## Auto-par workers
 
-A shared-heap job (auto-par loop chunks, `thread_spawn_shared`) used to
-start with no statics at all, so a startup `const` read in a parallel loop
-was a `LoadStatic` past the end of an empty array (a crash: auto-par counts
-those reads as pure, #1558). A shared-heap job now starts with a copy of
-the spawning VM's statics (`ThreadSpawnContext::statics`,
-`Machine::load_shared_statics`); the words name the one shared heap, and
+A shared-heap job (auto-par loop chunks, `thread_spawn_shared`) starts with
+a copy of the spawner's statics, since auto-par counts a `const` read as pure
+(#1558) (`ThreadSpawnContext::statics`, `JobStatics::Shared`, read in
+`worker::run_on`); the words name the one shared heap, and
 nothing collects during the epoch. A local table a worker builds lands in
 its own copy, which the job drops when it ends. An isolate job
 (`thread::spawn`) has its own heap, so it gets copies instead: at spawn each
 slot is copied out of the spawner's heap the way spawn arguments are
-(`copy_statics_out`, `Machine::load_copied_statics`, #1663). A standard
+(`copy_statics_out`, `JobStatics::Copied`, #1663). A standard
 stream anywhere in the value, top level or nested, is reopened in the worker
 (`PortableValue::StdStream`); any other stream becomes a `StreamKind::Unsent`
 placeholder that panics in every stream native (`PortableValue::UnsentStream`,
@@ -90,7 +87,7 @@ cannot cross threads (a cyclic graph) starts zeroed
 `examples/perf/const_table_crc.coil` (CRC-32 over a 4 KiB buffer, 2000
 times, through a 256-entry module table) and
 `examples/perf/const_table_local.coil` (a 16-entry local S-box in a function
-called 4M times). Release build, `--auto-par off`, wall time of
+called 4M times). On the bytecode VM, since deleted: release build, `--auto-par off`, wall time of
 `coil run` on a compiled archive, best of 21 on a shared 4-core machine:
 
 | Bench | Before | After |
@@ -98,11 +95,9 @@ called 4M times). Release build, `--auto-par off`, wall time of
 | `const_table_crc` | 724 ms | 530 ms |
 | `const_table_local` | 1119 ms | 601 ms |
 
-The CRC loop loses its per-byte `LoadStatic; STORE` (7 ops per byte, now
+The CRC loop lost its per-byte `LoadStatic; STORE` (7 ops per byte, then
 5). The S-box function no longer allocates its 16-element array per call:
 a thousand calls allocate it once (`perf_metrics::local_const_table_is_built_once`).
-The flagships (`mandelbrot`, `tak`, `nsieve`, `binary_trees`, `fib`) and
-every other `examples/perf` bench compile to the same bytecode.
 
 Tests: `tests/collections/const_tables.coil`, `tests/modules/const_table_import.coil`,
 `tests/codegen/const_table_auto_par.coil`, `tests/codegen/perf/const_table_*.coil`;

@@ -7,17 +7,18 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use coil_host::{
-    ExecutePipelineArgs, bind_cli_roots, execute_pipeline, wire_pipeline_threads, wire_pipeline_vm,
+    ExecutePipelineArgs, bind_cli_roots, execute_pipeline,
 };
-use common::{Byte, Instruction, ProgramDebug};
+use common::ProgramDebug;
 use compiler::{HostGrants, OptLevel, Pipeline};
-use machine::Machine;
 use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::thread::ThreadSpawnContext;
 use parser::doc_examples::{self, ExampleMode};
 use parser::test_headers;
 use reporting::progress::{Progress, paint};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
+
+use compiler::native_mir::coverage::Probes;
 
 use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
 use crate::events::{self, Event};
@@ -78,6 +79,121 @@ pub struct TestOptions {
     /// `--wall-timeout`: a case that runs this long ends the run
     /// (`crate::watchdog`); `None` never does.
     pub wall_timeout: Option<std::time::Duration>,
+    /// What runs the compiled code (`--engine`).
+    pub engine: Engine,
+}
+
+/// `--engine`: native code (`docs/internals/native.md`) or the MIR
+/// interpreter. A suite that passes on both shows a pass or the backend
+/// changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Engine {
+    #[default]
+    Native,
+    /// The MIR interpreter (`docs/internals/mir-interp.md`).
+    Mir,
+}
+
+impl Engine {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "native" => Ok(Self::Native),
+            "mir" => Ok(Self::Mir),
+            _ => Err(format!("invalid --engine `{text}` (expected native|mir)")),
+        }
+    }
+
+    /// What runs a suite unless asked otherwise: native code where there
+    /// is any.
+    pub fn host_default() -> Self {
+        if cfg!(target_family = "wasm") { Self::Mir } else { Self::Native }
+    }
+
+    /// Open the capture this engine runs from at `level`: at `-O 0` the
+    /// interpreter takes MIR as lowered, the reference the rest is compared
+    /// against; otherwise it takes what native code compiles.
+    fn start_capture(self, level: compiler::OptLevel) {
+        if self == Self::Mir && level == compiler::OptLevel::None {
+            compiler::native_mir::start_raw_capture();
+        } else {
+            compiler::native_mir::start_native_capture();
+        }
+    }
+}
+
+/// Make what this compile captured runnable. `None` when nothing compiles
+/// or the backend fails (the file then fails to run).
+fn native_code(pipeline: &Pipeline, file: &str, engine: Engine, coverage: bool) -> (Option<Arc<machine::native::NativeCode>>, Option<Probes>) {
+    let mut bodies = compiler::native_mir::take_native_capture();
+    let probes = coverage.then(|| compiler::native_mir::coverage::instrument(&mut bodies));
+    let code = compiled_code(pipeline, bodies, file, engine);
+    let probes = probes.filter(|_| code.is_some());
+    (code, probes)
+}
+
+/// Make `bodies` runnable on `engine`; a host with no native code interprets.
+fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBody>, file: &str, engine: Engine) -> Option<Arc<machine::native::NativeCode>> {
+    let debug = pipeline.program_debug_full();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    if engine == Engine::Mir || cfg!(target_family = "wasm") {
+        let program = coil_mir_interp::prepare(bodies, &pcs);
+        inventory(&format!("file\t{file}\t{}\t{}", program.compiled.len(), program.refused.len()));
+        for (name, why) in &program.refused {
+            inventory(&format!("refused\t{file}\t{name}\t{why}"));
+        }
+        let complete = program.refused.is_empty();
+        let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+        return (!code.is_empty()).then(|| Arc::new(code));
+    }
+    jitted_code(&bodies, &pcs, file)
+}
+
+#[cfg(target_family = "wasm")]
+fn jitted_code(_: &[compiler::native_mir::NativeBody], _: &std::collections::HashMap<String, u32>, _: &str) -> Option<Arc<machine::native::NativeCode>> {
+    None
+}
+
+/// JIT `bodies`.
+#[cfg(not(target_family = "wasm"))]
+fn jitted_code(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>, file: &str) -> Option<Arc<machine::native::NativeCode>> {
+    let program = match coil_native::jit(bodies, pcs) {
+        Ok(p) => p,
+        Err(e) => {
+            inventory(&format!("failed\t{file}\t{e}"));
+            return None;
+        }
+    };
+    inventory(&format!("file\t{file}\t{}\t{}", program.compiled.len(), program.refused.len()));
+    for (name, why) in &program.refused {
+        inventory(&format!("refused\t{file}\t{name}\t{why}"));
+    }
+    if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+        eprintln!("{} ({} bodies)", coil_native::describe(&program), bodies.len());
+        if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+            for (name, why) in &program.refused {
+                eprintln!("  refused: {name}: {why}");
+            }
+        }
+    }
+    let complete = program.refused.is_empty();
+    let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+    (!code.is_empty()).then(|| Arc::new(code))
+}
+
+/// Append one line to the native inventory file, `COIL_NATIVE_INVENTORY`
+/// (`scripts/native_inventory.py` sums them): what a `--engine native` run
+/// left on the runtime. Tab-separated: `file`, `refused`, `failed` per compile,
+/// `counts` once per run. No variable: nothing is written.
+fn inventory(line: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("COIL_NATIVE_INVENTORY") else {
+        return;
+    };
+    // One `write` per line on an append-mode file, so the compile threads
+    // and the corpus processes sharing it never interleave a line.
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(format!("{}\n", line.replace('\n', " ")).as_bytes());
+    }
 }
 
 /// Whether a run includes doc-tests (the code examples in `///` comments).
@@ -271,7 +387,7 @@ pub struct CaseOutcome {
     pub file: PathBuf,
     pub name: String,
     pub passed: bool,
-    /// Step-budget charges (see `Machine::set_step_budget`).
+    /// Step-budget charges (see `Isolate::set_step_budget`).
     pub steps: u64,
     /// Covered project lines per canonical source path (with `--coverage`).
     pub covered: Vec<(PathBuf, Vec<u32>)>,
@@ -619,18 +735,6 @@ fn push_stream(block: &mut String, name: &str, bytes: &[u8]) {
     block.push_str(&format!("\n{name}:\n{}", text.trim_end_matches('\n')));
 }
 
-/// Replace the first `JMP target` at or after `from` with `HALT` (the static-init
-/// prologue's jump into `main`), like [`Machine::halt_first_jump_to`] on a copy.
-fn halt_first_jump_in(code: &mut [Byte], from: usize, target: u32) -> bool {
-    for b in code.iter_mut().skip(from) {
-        if matches!(b.bytecode(), Instruction::JMP) && b.operand_u32() == target {
-            *b = Byte::new(Instruction::HALT);
-            return true;
-        }
-    }
-    false
-}
-
 /// Queue cases on the pool, or run them right here (`--jobs 1`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dispatch {
@@ -644,21 +748,39 @@ pub(crate) struct Prepared {
     /// `(name, entry)` in run order. A file without cases runs `main` once
     /// as a single case named after the file.
     pub cases: Vec<(String, u32)>,
-    pub init_ip: Option<u32>,
     /// See [`TestCase::expect_ok_result`].
     pub expect_ok_result: bool,
     pub debug: ProgramDebug,
+    /// Native code's coverage probes; `None` counts PCs on the runtime.
+    pub probes: Option<Probes>,
 }
 
 impl Prepared {
     pub fn case(&self, entry: u32, coverage: bool, step_budget: Option<u64>) -> TestCase {
         TestCase {
             entry,
-            init_ip: self.init_ip,
             expect_ok_result: self.expect_ok_result,
-            coverage,
+            coverage: coverage && self.probes.is_none(),
+            probes: self.probes.as_ref().filter(|_| coverage).map_or(0, |p| p.locs.len() as u32),
             step_budget,
         }
+    }
+
+    /// What this file's coverage counts by: its probes' locations and the
+    /// ranges of them in test bodies, else its PCs'.
+    fn coverage_map(&self) -> (std::borrow::Cow<'_, ProgramDebug>, Vec<std::ops::Range<usize>>) {
+        let entries = self.cases.iter().map(|(_, entry)| *entry);
+        let Some(probes) = &self.probes else {
+            return (std::borrow::Cow::Borrowed(&self.debug), test_fn_ranges(&self.debug, entries));
+        };
+        let names: Vec<&str> = entries
+            .filter_map(|e| self.debug.fn_symbols.iter().find(|s| s.body_id == e).map(|s| s.name.as_str()))
+            .collect();
+        let tests = probes.bodies.iter().filter(|(name, _)| names.contains(&name.as_str())).map(|(_, r)| r.clone()).collect();
+        let mut debug = ProgramDebug::default();
+        debug.source_files = self.debug.source_files.clone();
+        debug.debug_locs = probes.locs.clone();
+        (std::borrow::Cow::Owned(debug), tests)
     }
 }
 
@@ -739,9 +861,21 @@ pub(crate) fn compile_test_file(
     // catch_unwind isolates a compiler ICE from aborting the whole
     // harness under panic=unwind. Release builds use panic=abort, so
     // compile_fail fixtures must reject via Ok(Err(_)), not panic.
+    let native = !expect_compile_fail;
+    if native {
+        options.engine.start_capture(options.opt_level);
+    }
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&display)
     }));
+    let native = match &compiled {
+        Ok(Ok(_)) if native => native_code(&pipeline, &display, options.engine, options.coverage.is_some()),
+        _ => {
+            let _ = compiler::native_mir::take_native_capture();
+            (None, None)
+        }
+    };
+    let (native, probes) = native;
     let mut cases: Vec<(String, u32)> = pipeline.test_cases().to_vec();
     if contract_source {
         cases.retain(|(name, _)| name.starts_with(compiler::CONTRACT_CASE_PREFIX));
@@ -771,7 +905,7 @@ pub(crate) fn compile_test_file(
         let message = why.map(|why| format!("> Test \"{display}\" failed ({why})"));
         return Compiled::Decided(ok, message);
     }
-    let (bytecode, constants) = match compiled {
+    let constants = match compiled {
         Err(_) => {
             let m = format!("> Test \"{display}\" failed (compiler panicked)");
             return Compiled::Decided(false, Some(m));
@@ -790,23 +924,24 @@ pub(crate) fn compile_test_file(
         let strings = pipeline.strings().to_vec();
         // No cases and no `main` entry: run the program from the top, as
         // `coil <file>` would, on this thread.
+        if let Some(code) = &native {
+            machine::native::install_shared_for_next_run(Arc::clone(code));
+        }
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             execute_pipeline(ExecutePipelineArgs {
                 pipeline: &pipeline,
-                bytecode: &bytecode,
                 constants: &constants,
                 strings: &strings,
                 static_slots: pipeline.static_slot_count(),
                 debug: pipeline.program_debug(),
                 entry: Some(path),
-                operand_stack_slots: pipeline.operand_stack_slots(),
-            })
+                })
         }));
         let ok = matches!(result, Ok(false));
         return Compiled::Decided(ok, (!ok).then(|| format!("> Test \"{display}\" failed")));
     }
 
-    let Some((ctx, init_ip, debug)) = wire_program(pipeline, bytecode, constants, path, reactor) else {
+    let Some((ctx, debug)) = wire_program(pipeline, constants, path, reactor, native) else {
         let m = format!("> Test \"{display}\" failed (no thread program)");
         return Compiled::Decided(false, Some(m));
     };
@@ -819,9 +954,9 @@ pub(crate) fn compile_test_file(
         (cases, true)
     };
     Compiled::Ready(Box::new(Prepared {
+        probes,
         ctx,
         cases,
-        init_ip,
         expect_ok_result,
         debug,
     }))
@@ -832,6 +967,7 @@ pub(crate) fn compile_test_file(
 fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn Write + Send>) -> Pipeline {
     let mut pipeline = Pipeline::with_reporter(config.clone(), reporter);
     pipeline.set_opt_level(options.opt_level);
+    pipeline.set_runs_mir();
     if let Some(level) = options.debug_level {
         pipeline.set_debug_level(level);
     } else if options.coverage.is_some() {
@@ -876,33 +1012,28 @@ fn search_roots(options: &TestOptions) -> Vec<PathBuf> {
 /// and the debug info. `None` when the program has no thread context.
 fn wire_program(
     pipeline: Pipeline,
-    bytecode: Vec<Byte>,
     constants: Vec<u64>,
     path: &Path,
     reactor: &Arc<Reactor>,
-) -> Option<(ThreadSpawnContext, Option<u32>, ProgramDebug)> {
+    native: Option<Arc<machine::native::NativeCode>>,
+) -> Option<(ThreadSpawnContext, ProgramDebug)> {
     let strings = pipeline.strings().to_vec();
-    let main = pipeline.main_offset();
-    // Stop the static-init prologue before it jumps into `main`; each job
-    // runs it on a fresh VM, then calls its case.
-    let mut code = bytecode;
-    let init_ip = main.and_then(|main| {
-        let setup = pipeline.prologue_jmp_target();
-        (setup != main && halt_first_jump_in(&mut code, setup as usize, main)).then_some(setup)
-    });
     let debug = pipeline.program_debug();
-    let ctx = {
-        let mut root = Machine::<256>::default();
-        wire_pipeline_vm(&pipeline, &mut root, Some(path));
-        // The same precise frame / class / static word maps as `coil <file>`,
-        // so a case's `collect()` exercises production GC roots (#555).
-        wire_pipeline_threads(&pipeline, &mut root, &code, &constants, &strings);
-        root.set_program_debug(debug.clone());
-        root.set_reactor(Arc::clone(reactor));
-        root.thread_spawn_context()
-    };
+    let start = coil_host::native_start(&pipeline, &pipeline.archived_struct_layouts(), Some(path));
+    // The same word maps as `coil <file>`, so a case's `collect()` exercises
+    // production GC roots (#555).
+    let program = coil_host::thread_program(
+        &pipeline,
+        coil_host::CompiledProgram {
+            constants: &constants,
+            strings: &strings,
+            static_slots: pipeline.static_slot_count(),
+            debug: debug.clone(),
+        },
+    );
+    let ctx = machine::spawn_context(Arc::new(program), start, Arc::clone(reactor), native);
     drop(pipeline);
-    Some((ctx?, init_ip, debug))
+    Some((ctx?, debug))
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -982,13 +1113,10 @@ fn compile_and_start(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingF
         Compiled::Ready(prepared) => prepared,
     };
     let lines = run.coverage.map(|cov| {
-        let tests = test_fn_ranges(
-            &prepared.debug,
-            prepared.cases.iter().map(|(_, entry)| *entry),
-        );
+        let (debug, tests) = prepared.coverage_map();
         cov.lock()
             .unwrap_or_else(|e| e.into_inner())
-            .register_program(&prepared.debug, &tests)
+            .register_program(&debug, &tests)
     });
     let cases = prepared
         .cases
@@ -1154,11 +1282,19 @@ fn start_doc_case(
     let diagnostics = Captured::default();
     let mut pipeline = run_pipeline(run.config, run.options, Box::new(diagnostics.clone()));
     pipeline.set_file_text(entry.clone(), program);
+    run.options.engine.start_capture(run.options.opt_level);
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&entry.display().to_string())
     }));
+    let native = match &compiled {
+        Ok(Ok(_)) => native_code(&pipeline, &entry.display().to_string(), run.options.engine, false).0,
+        _ => {
+            let _ = compiler::native_mir::take_native_capture();
+            None
+        }
+    };
     let _ = pipeline.finish_reporting();
-    let (bytecode, constants) = match compiled {
+    let constants = match compiled {
         Ok(Ok(ok)) => ok,
         Ok(Err(_)) => {
             let why = "example does not compile".to_string();
@@ -1176,7 +1312,7 @@ fn start_doc_case(
         let why = "example has no `main` to run".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };
-    let Some((ctx, init_ip, _debug)) = wire_program(pipeline, bytecode, constants, &entry, run.reactor) else {
+    let Some((ctx, _debug)) = wire_program(pipeline, constants, &entry, run.reactor, native) else {
         let why = "no thread program".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };
@@ -1184,9 +1320,9 @@ fn start_doc_case(
     // `assert!` in the example fails it.
     let case = TestCase {
         entry: main,
-        init_ip,
         expect_ok_result: false,
         coverage: false,
+        probes: 0,
         step_budget: None,
     };
     start_case(run, dispatch, &display, name, ctx, case, kind)

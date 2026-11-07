@@ -4,7 +4,6 @@
 use io::sync::print;
 use string::format;
 
-#[max_depth(16)]
 fn walk(int n) -> Option<int> {
     if n <= 0 {
         return Option::Some(0);

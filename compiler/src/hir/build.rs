@@ -933,7 +933,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     /// `if !(cond) { panic "contract violated: …" }` for one clause. A
-    /// `requires` panic blames the caller (`contract_fail` in the VM); an
+    /// `requires` panic blames the caller (`contract_fail` in the runtime); an
     /// `ensures` panic is reported at its clause.
     fn contract_check(&mut self, b: &mut BodyBuilder, c: &Contract<'_>, fname: &str) -> HirId {
         let span = (c.span.start, c.span.end);
@@ -981,7 +981,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     /// `{ panic text }`; `blame_caller` reports the caller's location
-    /// (`contract_fail` in the VM) instead of the clause's.
+    /// (`contract_fail` in the runtime) instead of the clause's.
     fn contract_panic(&mut self, b: &mut BodyBuilder, span: Span, text: String, blame_caller: bool) -> HirId {
         let msg = self.synth(b, span, HirKind::Lit(Lit::Str(text)), Some(coil_ty::string()));
         let mut args = vec![msg];
@@ -1595,7 +1595,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Yield(value) | E::YieldFrom(value) => {
                 let from = matches!(node.1.as_ref(), E::YieldFrom(_));
                 let value = self.expr(b, value);
-                self.emit(b, node, HirKind::Yield { value, from })
+                // A yield's span is its operand's, so the span lookup would
+                // give the yielded type: its value is what the next resume
+                // sends (#2309).
+                let ty = self
+                    .node_id(node)
+                    .and_then(|id| self.sidecar.ty(id).cloned().or_else(|| self.checker.lookup_at(id)))
+                    .or_else(|| self.ty_of(node));
+                self.emit_ty(b, node, HirKind::Yield { value, from }, ty)
             }
             E::Resume(handle, value) => {
                 let handle = self.expr(b, handle);

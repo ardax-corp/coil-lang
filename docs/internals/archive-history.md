@@ -1,11 +1,34 @@
 # Archive version history
 
 The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
-[`common/src/archive.rs`](../../common/src/archive.rs), which also carries the
-entries from minor 24 on. That file is the ledger: bump the minor there (and
-note what it adds) for an append-only change; an incompatible change bumps
-the major and resets the minor. This page keeps the older notes that used to
-live in AGENTS.md and [pipeline.md](pipeline.md) (#1874).
+[`common/src/archive.rs`](../../common/src/archive.rs). Bump the minor there for an
+additive change; any other change to the format bumps the major and resets the
+minor. A runtime loads an archive of its own major and a minor it knows, and no
+other: there are no legacy decoders. The format of the MIR section has a version of
+its own, `FORMAT` in `compiler/src/mir/archive.rs`.
+
+## Major 7
+
+Major 7 minor 0 came with the deletion of the bytecode VM (step 8 of
+[mir-interp.md](mir-interp.md)). An archive holds MIR and data only:
+
+- `version`, `static_slot_count`, `constants` (the snapshots startup restores) and
+  `strings`.
+- The debug tables: `source_files`, `debug_locs`, `debug_lines`, `fn_symbols`.
+- `struct_layouts`, `class_word_kinds`, `static_word_kinds`.
+- `startup` (a list of `common::StartupOp`) and `main`.
+- `native_mir`, every body's typed MIR.
+
+Bodies are named by `label.0 + 1`, not by bytecode entry PC. The bytecode, line and
+span run tables, frame maps, stack maps, `cleanup_ranges` and
+`operand_stack_slots` went, and with them every reader of an older archive.
+
+MIR section `FORMAT` 11 (feature/native) adds `CallIndirect`'s two-word
+form (opcode 44: second word and `unpair` body) and each body's
+`pair_twin`; the code image `FORMAT` 2 adds `NativeEntry::twin`.
+
+Majors 4 to 6 ran on the VM. The notes below are the record of what minors of
+major 4 added; opcodes and frame maps in them no longer exist.
 
 ## Major 4, minors 5 to 37
 
@@ -19,7 +42,7 @@ live in AGENTS.md and [pipeline.md](pipeline.md) (#1874).
 - Minor 30 persists `debug_lines` (line/column per debug loc, resolved at compile time, so packaged binaries never read their sources; older archives fall back to the source files).
 - Minor 29 persists `static_word_kinds` (per static slot word kind: scalar statics are no roots, pointer statics are precise roots evacuation rewrites).
 - Minor 28 appends `MakeArrayK` (array literal with the pointer element kind).
-- Minor 27 appends `TagArrayKind` (array element word kind stamped on an existing array; no longer emitted — `Vec::{new,with_capacity}$ptr` / `$bytes` thunks make the array with `MakeArrayK`, `Vec::from` keeps its source's kind — but the VM still runs it).
+- Minor 27 appends `TagArrayKind` (array element word kind stamped on an existing array).
 - Minor 26 flags precise frame-map slots that definitely hold a pointer (`PRECISE_SLOT_MUST`, bit 15; strip with `precise_slot_index`).
 - Minor 25 appends `MakeEnumK` / `MakeEnumReturnK` / `MakeTupleK` / `DenseMakeK` (construction-site payload / element word kinds, 2 bits × first four words).
 - Minor 24 persists `ClassWordKinds` (per-class field word kinds: scalar / pointer / unknown; marking skips scalar fields, pointer fields are precise references).

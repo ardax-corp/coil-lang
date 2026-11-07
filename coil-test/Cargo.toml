@@ -3,7 +3,7 @@ name = "coil-test"
 version = "0.1.0"
 edition = "2024"
 
-# `coil test` re-execs this binary. Test-only VM mechanisms (coverage, step
+# `coil test` re-execs this binary. Test-only mechanisms (coverage, step
 # budget, …) are enabled here and never in `coil` / `coil-embed`.
 
 [[bin]]
@@ -18,11 +18,13 @@ coil-build-id = { path = "../coil-build-id" }
 common = { path = "../common" }
 parser = { path = "../parser" }
 compiler = { path = "../compiler", default-features = false }
-machine = { path = "../machine", default-features = false, features = ["coverage"] }
+machine = { path = "../machine", default-features = false }
 reporting = { path = "../reporting" }
 coil-host = { path = "../coil-host" }
 coil-args = { path = "../coil-args" }
 comptime = { path = "../comptime" }
+coil-native = { path = "../coil-native" }
+coil-mir-interp = { path = "../coil-mir-interp" }
 clap = { version = "4.5", features = ["derive"] }
 
 [features]

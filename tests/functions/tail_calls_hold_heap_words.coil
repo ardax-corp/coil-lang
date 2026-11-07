@@ -1,0 +1,56 @@
+// A tail call to a body with more stack arguments moves that body's frame, so
+// it no longer starts at its caller's stack pointer. The caller's heap words
+// must still be found: under GC stress every allocation below moves them.
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+#[inline(never)]
+fn make(int n) -> Box {
+    return new Box(n);
+}
+
+#[inline(never)]
+fn few(int n, Box x) -> int {
+    if n == 0 {
+        return x.n;
+    }
+    return many(n - 1, x, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+}
+
+#[inline(never)]
+fn many(
+    int n,
+    Box x,
+    int a,
+    int b,
+    int c,
+    int d,
+    int e,
+    int f,
+    int g,
+    int h,
+    int i,
+    int j,
+    int k,
+    int l,
+) -> int {
+    let y = make(a + b + c + d + e + f + g + h + i + j + k + l);
+    let z = make(x.n + 1);
+    let w = make(y.n - 78);
+    return few(n - 1, new Box(z.n + w.n));
+}
+
+#[inline(never)]
+fn holder(int n) -> int {
+    let kept = make(n);
+    let other = make(n + 1);
+    let r = few(n, make(0));
+    return kept.n + other.n + r;
+}
+
+test("a caller keeps its heap words across a tail call that moved a frame") {
+    assert!(holder(black_box(2000)) == 5001);
+}

@@ -49,7 +49,7 @@ fn frees(flags: &[&str]) -> usize {
     let out = coil(&args, &[]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "dissect {flags:?} failed: {}", String::from_utf8_lossy(&out.stderr));
-    stdout.lines().filter(|l| l.contains("FreeEarly")).count()
+    stdout.lines().filter(|l| l.contains(" = free")).count()
 }
 
 #[test]

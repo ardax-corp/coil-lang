@@ -14,7 +14,7 @@ fn copies(name: &str, src: &str) -> u64 {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("main.coil");
     std::fs::write(&file, src).unwrap();
-    let out = Command::new(coil_bin()).env("COIL_COW_REPORT", "1").arg(&file).output().expect("spawn coil");
+    let out = Command::new(coil_bin()).arg("--cow-report").arg(&file).output().expect("spawn coil");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{name} failed: {stderr}");
     let line = stderr.lines().find(|l| l.starts_with("cow-report:")).unwrap_or_else(|| panic!("{name}: no cow-report in {stderr}"));

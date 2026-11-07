@@ -6,7 +6,7 @@ for debug and `gc-stress` builds. Release builds are unchanged.
 
 ## Why
 
-Inside a Layer A steal epoch several reactor threads run Coil bytecode
+Inside a Layer A steal epoch several reactor threads run Coil code
 against one [`Heap`](../../machine/src/memory/heap.rs)
 ([`SharedHeapEpoch`](../../machine/src/shared_heap.rs) is `Send + Sync` by
 `unsafe impl`). Object headers are `Cell`s, `ObjArray::may_hold_refs` is a
@@ -43,25 +43,23 @@ the result after the producer has finished.
 
 ## Mutation paths
 
-Every payload write in the VM goes through
+Every payload write in the runtime goes through
 `impl AsMut<T> for GcData<T>` (`Gc::as_mut` through `DerefMut`, and
-`Gc::payload_mut`), so one check there covers all of them. The paths a
-worker can reach (line numbers at the commit that adds this note):
+`Gc::payload_mut`), so one check there covers all of them. Native code's
+in-place element stores are the one shape that does not write through it
+each time: see *What it does not catch*. The interpreter runs the same
+`coil_native_*` helpers. The paths a worker can reach:
 
 | Path | Where |
 |---|---|
-| `StoreIndex` / `StoreIndexUnchecked` | `machine/src/exec_rest.rs:969` → `ObjArray::store_indexed` (`heap.rs`, sets `may_hold_refs` via `note()`) |
-| `StoreIndexPin*` | `exec_rest.rs:991` |
-| `DenseStoreIndex` | `machine/src/dispatch.rs:550` (`dense_store_index`) |
-| `VStore` (SIMD lanes) | `machine/src/vm.rs:1459` (`vstore`, `set_numeric_unchecked`) |
-| `ArrayPush` / `DenseArrayPush` | `exec_rest.rs:1126` / `:1098` → `vm.rs:2308` (`array_push_value`: `push`, then `account_array`) |
-| `SetField` (slot and named) | `exec_rest.rs:933` (`set_slot`, `ObjInstance::set`) |
-| `DenseFieldStore` | `dispatch.rs:662` |
-| `MakeDict` / `INIT` / `InitTyped` / `DenseMakeObject` | `exec_rest.rs:882` / `:349` / `:356` / `:1113` (fresh object) |
-| `TagEnumType` / `TagArrayKind` | `exec_rest.rs:1521` / `:1530` (the enum path skips unit enums before writing) |
+| Element store | `coil_native_store_index` → `ObjArray::store_indexed` (`heap.rs`, sets `may_hold_refs` via `note()`); in place through a view from `coil_native_view` with `for_store` |
+| Vector lanes | `machine/src/lanes.rs` (`vstore_lanes`, `vpush_lanes`) |
+| Array push | `coil_native_array_push` |
+| Field store | `coil_native_set_field` (`set_slot`) |
+| Allocation (fresh object) | `coil_native_alloc` |
 | `Vec` natives (`reserve`, `clear`, `pop`, `insert`, `remove`) | `machine/src/vec_ops.rs` |
-| Finalizer claim (`fn drop`) | `vm.rs:2258` (`claim_finalizer`) |
-| Coroutine state | `vm.rs:2826` (`with_coroutine_mut`) |
+| Finalizer claim (`fn drop`) | `Runtime::claim_finalizer` (`machine/src/collect.rs`) |
+| Coroutine state | `machine/src/gen_fiber.rs` (`with_mut`) |
 | Stream / FFI / library writes | `machine/src/io.rs`, `machine/src/ffi/call.rs` (impure: never in a worker) |
 
 Heap-structure state is not a payload write and is outside the guard; it is
@@ -69,13 +67,13 @@ already serialized or atomic:
 
 | State | How it is kept safe in an epoch |
 |---|---|
-| Intern table (`intern`, `intern_str`, `intern_ref`) | epoch lock (`Heap::epoch_guard`, `heap.rs:591-612`) |
+| Intern table (`intern`, `intern_str`, `intern_ref`) | epoch lock (`Heap::epoch_guard`) |
 | Immortal unit enums / `()` | epoch lock (`immortal_unit_enum`, `immortal_empty_tuple`) |
-| `alloc_bytes` / `live_count` (`account_resize`, batch fold) | epoch lock; batch counts fold under it (`alloc_from_epoch_batch`, `heap.rs:415`) |
+| `alloc_bytes` / `live_count` (`account_resize`, batch fold) | epoch lock; batch counts fold under it (`alloc_from_epoch_batch`) |
 | Slab directory, `find_object_by_addr` | atomics (`slab.rs`) |
 | `ObjString` hash | `AtomicU64`, relaxed |
 | String append in place (`alloc_concat`) | atomic claim of the shared buffer's tail (`strbuf.rs` `try_append_at`) |
-| Header `marked` / `fresh` bits | written only by the collector, and collect is forbidden in an epoch (`vm.rs:1622`, `gc_safepoint` at `vm.rs:1785` aborts it instead) |
+| Header `marked` / `fresh` bits | written only by the collector, and collect is forbidden in an epoch (`collect::collect` and `collect::safepoint` abort it instead) |
 | `ObjWeak` `Cell`s | written only by the collector / `gc::upgrade` paths; weaks are not whitelisted |
 
 ## The guard
@@ -92,10 +90,10 @@ Behind `cfg(any(debug_assertions, feature = "gc-stress"))` only:
    immortal objects, objects from before the epoch) keeps 0 or an older
    generation.
 3. **Job scope.** `EpochWriteScope` sets a thread-local generation for the
-   length of one reactor job: `run_job_on_vm` enters it with the bound
+   length of one reactor job: `worker::run_on` enters it with the bound
    heap's `epoch_gen` for a shared-heap job and 0 for an isolate job;
    `run_help_job` sets 0 around a help-stolen job (it may belong to another
-   heap's epoch, and its helper VM resets its own heap afterwards). Dropping
+   heap's epoch, and the helper's runtime resets its own heap afterwards). Dropping
    the scope restores the outer job's value, so a join that help-steals
    inside a shared job is covered.
 4. **Check.** `GcData::as_mut` compares the thread-local generation with the
@@ -126,6 +124,9 @@ job is to make CI fail when that proof is wrong.
 
 - A write through a raw pointer or a `Cell` that bypasses `as_mut` (the
   collector's mark bits, `ObjWeak`): none of those run in a worker.
+- Each in-place element store of native code on its own. The check runs
+  once, when `coil_native_view` takes the view for a body that stores into
+  that array.
 - Two workers writing the same **in-epoch** object (see *Invariant*).
 - A write to an object stamped exactly 256 epochs earlier on the same heap
   (the `u8` generation wraps). Such an object is a false negative, never a

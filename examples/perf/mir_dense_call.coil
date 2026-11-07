@@ -1,5 +1,5 @@
-// Hit bench for COI-291: dense→dense CALL (leaf-first specialize).
-// Parent (W4) refuses user CALL in `hot` and stays fuse-IL. `kernel` is a
+// Hit bench for COI-291: a call between dense loops.
+// `hot` calls a user function. `kernel` is a
 // counted float loop (dense leaf); `hot` loops a typed one-word CALL to it.
 use io::{stdout, write};
 use string::{format, to_bytes};

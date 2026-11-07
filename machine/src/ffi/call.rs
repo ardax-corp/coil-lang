@@ -43,7 +43,7 @@ impl InvokeContext {
     }
 
     fn heap(&mut self) -> &mut Heap {
-        // SAFETY: VM is single-threaded; reentrant callbacks may borrow the heap
+        // SAFETY: runtime is single-threaded; reentrant callbacks may borrow the heap
         // while libffi is active, so this cannot overlap with `&mut Heap` borrows
         // held across the native call.
         unsafe { &mut *self.heap }
@@ -414,7 +414,7 @@ static EMPTY_CONST_BYTES: [u8; 1] = [0];
 /// goes back into that array after the call.
 ///
 /// A string is lent in place: its bytes never move or change while the
-/// string lives (`memory::strbuf`), and the VM roots the call's arguments
+/// string lives (`memory::strbuf`), and the interpreter roots the call's arguments
 /// until it returns. A packed array is lent in place too when `lend` (no
 /// coil callback can run during the call, so nothing can grow, unpack or
 /// free it) and no other argument names the same array (so C sees no
@@ -1134,7 +1134,7 @@ mod tests {
                 return;
             }
         };
-        resolve_symbol(&lib, "system").expect("hand-written bytecode may resolve system");
+        resolve_symbol(&lib, "system").expect("hand-written code may resolve system");
     }
 
     #[test]
@@ -1152,7 +1152,7 @@ mod tests {
         // POSIX `execve` is not exported by Windows CRT; `_wsystem` is the
         // classified FFI-exec symbol that opens with the same libc handle.
         let name = if cfg!(windows) { "_wsystem" } else { "execve" };
-        resolve_symbol(&lib, name).expect("hand-written bytecode may resolve FFI exec symbols");
+        resolve_symbol(&lib, name).expect("hand-written code may resolve FFI exec symbols");
     }
 
     #[cfg(not(target_os = "windows"))]

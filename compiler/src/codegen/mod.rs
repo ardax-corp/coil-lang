@@ -4,15 +4,14 @@ use std::{
 };
 
 use common::{
-    Byte, DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, ValueTag,
+    DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Interner, ValueTag,
     encode_tag_operand, tag,
 };
 use reporting::Label as DiagLabel;
 
-use crate::block_builder::{BlockBuilder, JumpKind as BbJumpKind, Label as BbLabel};
 use crate::const_fold::ConstValue;
 use crate::layout::PairKind;
-use crate::il::{CodeBuf, EmitBuf, IlOp, Label as IlLabel};
+use crate::bodies::{BodyTable, Label as IlLabel};
 use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
 use parser::{
@@ -126,25 +125,13 @@ pub enum StringLiteralByteError {
     NotSingleByte,
 }
 
-pub(crate) fn primitive_cast_opcode(from: &str, to: &str) -> Option<Instruction> {
-    match (from, to) {
-        ("int", "float") => Some(Instruction::CastIntToFloat),
-        ("float", "int") => Some(Instruction::CastFloatToInt),
-        ("int", "byte") => Some(Instruction::CastIntToByte),
-        ("byte", "int") => Some(Instruction::CastByteToInt),
-        ("int", "bool") => Some(Instruction::CastIntToBool),
-        ("bool", "int") => Some(Instruction::CastBoolToInt),
-        (a, b) if a == b => None,
-        _ => None,
-    }
+/// Whether `from` casts to `to` as a primitive.
+pub(crate) fn is_primitive_cast(from: &str, to: &str) -> bool {
+    matches!((from, to), ("int", "float") | ("float", "int") | ("int", "byte") | ("byte", "int") | ("int", "bool") | ("bool", "int"))
 }
 
 fn into_primitive_fqn(from: &str, to: &str) -> String {
     format!("Into__{}__to_{}__into", from, to)
-}
-
-fn emit_ffi_type_const(bytecode: &mut impl EmitBuf, tag: u32, aux: u32) {
-    bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(encode_tag_operand(tag, aux)));
 }
 
 fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
@@ -156,7 +143,7 @@ fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
     })
 }
 
-/// Bytecode table key for an overload: `name#2.0` or `name#rest1.0`.
+/// Code table key for an overload: `name#2.0` or `name#rest1.0`.
                         ///
 /// `id` distinguishes same-arity typed overloads (`sum#1.0` vs `sum#1.1`).
 fn overload_fn_key(name: &str, fixed_arity: usize, is_rest: bool, id: u32) -> String {
@@ -177,14 +164,10 @@ fn strip_overload_key(name: &str) -> &str {
 
 /// `MakeFn` operand: `[7:0]=n_cap [15:8]=n_filled [23:16]=arity [24]=is_rest`.
                         ///
-/// `n_cap` and `n_filled` are packed into 8-bit fields (max 255). Callers with
-/// larger values must not reach here, partial-application arity is already
-/// capped at 32 for `filled_mask`.
+/// `n_cap` and `n_filled` are packed into 8-bit fields (max 255), and the
+/// mask drops the rest: engines read a closure's shape from MIR, so the
+/// operand means nothing past that.
 fn make_fn_operand(n_cap: u32, n_filled: u32, arity: u32, is_rest: bool) -> u32 {
-    debug_assert!(
-        n_cap <= 0xFF && n_filled <= 0xFF,
-        "MakeFn n_cap/n_filled overflow 8-bit fields: n_cap={n_cap} n_filled={n_filled}"
-    );
     (n_cap & 0xFF) | ((n_filled & 0xFF) << 8) | (arity << 16) | if is_rest { 1 << 24 } else { 0 }
 }
 
@@ -238,15 +221,6 @@ struct Context {
     prev: Option<Box<Self>>,
 }
 
-/// Length of the CALL + JMP + HALT prologue every [`Compiler`] starts with.
-/// Multi-file linking treats `bytecode.len() <= PROLOGUE_BYTECODE_LEN` as a
-/// fresh compile (safe to clear the shared constant pool).
-pub const PROLOGUE_BYTECODE_LEN: usize = 3;
-
-/// The prologue's `HALT`: where a program without `main` goes once its
-/// setup (if any) has run, instead of falling into its first function.
-pub const PROLOGUE_HALT_OFFSET: usize = 2;
-
 /// Target-side layouts at a trait-method call across a generic boundary;
 /// see [`Compiler::trait_method_boundary_sig`].
 pub(super) struct BoundarySig {
@@ -258,8 +232,8 @@ pub(super) struct BoundarySig {
 
 pub struct Compiler {
     namespace: String,
-    /// Stack IL during emit; lowered `Vec<Byte>` after [`Self::finalize_bytecode`].
-    bytecode: CodeBuf,
+    /// The bodies compiled so far.
+    bodies: BodyTable,
 
     aliases: HashMap<String, String>,
     functions: HashMap<String, usize>,
@@ -308,6 +282,9 @@ pub struct Compiler {
     extern_runtime_libs: HashMap<String, u32>,
     /// Source name → (lib_static_slot, fn_id_static_slot) for runtime FFI calls.
     extern_runtime_functions: HashMap<String, (u32, u32)>,
+    /// Each `extern` function's library (as the block names it) and C
+    /// symbol, in declaration order: what a package links statically.
+    extern_symbols: Vec<(String, String)>,
     /// Records which FFI library short names have already
     /// been loaded in the current compilation unit. Cleared
     /// each `compile`.
@@ -326,15 +303,10 @@ pub struct Compiler {
     /// `do_compile` to recover the `NodeId` of the node it's currently
     /// emitting. Reset at the start of each `compile`.
     emit_idx: usize,
-    /// Offset where user code starts (after prologue). Extern blocks precede main.
-    program_start_offset: u32,
-    /// Entry for prologue `JMP` when static initializers are spliced (unchanged
-    /// by the post-splice `program_start_offset` bump).
-    setup_entry_offset: u32,
-    /// Wide immediates referenced from compact 8-byte `Byte`
-    /// operands (floats, `JumpIfMatch` targets, etc.).
+    /// The archive's constant pool: encoded heap snapshots, which a
+    /// `RestoreSnapshot` startup op names by index.
     constants: Vec<u64>,
-    /// Program string literals referenced by `Instruction::STRING`.
+    /// Program string literals referenced by string-literal ops.
     strings: Vec<String>,
     string_indices: HashMap<String, u32>,
 
@@ -373,43 +345,17 @@ pub struct Compiler {
     /// (`STRING` materialized once at entry, then `LOAD`).
     field_key_slots: HashMap<String, u32>,
 
-    /// Count of expression values currently live on the operand stack
-    /// *above* interned locals (e.g. a `HostInvoke` native-id `CONST`
-    /// pushed before argument codegen). `alloc_temp_slot` must allocate
-    /// at or above `variables.len() + expr_depth` so `StorePop` does not
-    /// clobber those live values (locals and the operand stack share
-    /// memory).
-    expr_depth: u32,
-
-    /// Top-level functions whose frames can never hold a heap word
-    /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
-    precise_frame_fns: HashSet<String>,
-    precise_frames: Vec<common::PreciseFrameMap>,
-    /// What finalize built [`Self::precise_frames`] from besides the code,
-    /// to build them again after a compile-time patch of the code.
-    frame_inputs: Option<Box<FrameInputs>>,
-
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
     /// the typechecker's `Checker`.
     codegen_depth: u32,
 
-    /// Active loop labels: `(continue_target, break_target)`.
-    loop_stack: Vec<(BbLabel, BbLabel)>,
 
-    /// Active loop patchers. Break/continue emit through the innermost builder.
-    loop_bbs: Vec<BlockBuilder>,
 
-    /// Functions with a `defer` cleanup pad, resolved to pcs at finalize.
-    cleanup_pads: Vec<CleanupPad>,
-    /// [`Self::cleanup_pads`] resolved at finalize (sorted by `start_pc`).
-    cleanup_ranges: Vec<common::CleanupRange>,
 
     /// Name of the function currently being codegen'd (for ctor/Instantiate routing).
     active_fn_name: Option<String>,
 
-    /// Global static initializers (spliced at `program_start_offset`). Same sink as `ffi_init`.
-    static_init: CodeBuf,
     /// `const`s and pure `static let`s whose initializer runs at compile
     /// time, in setup order (comptime steps 3-4).
     comptime_consts: Vec<ComptimeConst>,
@@ -428,10 +374,13 @@ pub struct Compiler {
     /// `fib`).
     par_worker_of: HashMap<String, String>,
 
-    /// `extern` dlopen/declare setup accumulated across modules, spliced into
-    /// the prologue setup region at finalize (so imported-module `extern`
-    /// still runs before `main`).
-    ffi_init: CodeBuf,
+    /// Module setup's steps (static stores, `extern` loads and
+    /// declarations), from which `__module_setup`'s MIR is built.
+    setup_steps: Vec<compiler::module_setup::SetupStep>,
+    /// The bodies startup calls, by name, until they have entries.
+    startup_steps: Vec<compiler::module_setup::StartupStep>,
+    /// What runs before `main`.
+    startup: Vec<common::StartupOp>,
 
     /// True while compiling an `impl` method. Function resets locals
     /// and reserves slot 0 for `self`.
@@ -453,7 +402,7 @@ pub struct Compiler {
     /// [`Compiler::two_word_return_kind`].
     compiling_two_word_enum: Option<PairKind>,
 
-    /// Harness metadata: `(description, bytecode offset)` for each
+    /// Harness metadata: `(description, entry id)` for each
     /// top-level `test("…") { … }` case, in source order.
     test_cases: Vec<(String, u32)>,
 
@@ -566,7 +515,7 @@ pub struct Compiler {
     source_file_indices: std::collections::BTreeMap<String, u32>,
     /// `source_files` order for the archive (index → path).
     source_file_list: Vec<String>,
-    /// One [`DebugLoc`] per bytecode slot (grows with [`Self::bytecode`]).
+    /// One [`DebugLoc`] per code slot (grows with [`Self::code`]).
     debug_locs: Vec<DebugLoc>,
     /// Host calls that need a capability (`open`, `env::exit`, …), by the
     /// [`DebugLoc`] on their `HostInvoke` op. Checked against the grants
@@ -586,13 +535,8 @@ pub struct Compiler {
     current_function_qualified: Option<String>,
     /// `functions` map key for the active function (overload-aware).
     current_function_table_key: Option<String>,
-    /// Peel/unroll spans for the module currently being compiled.
-    fn_bytecode_spans: HashMap<String, (usize, usize)>,
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
-    /// `dissect --il-post` snapshot from the last capturing finalize.
-    #[cfg(any(test, feature = "dissect"))]
-    post_il_snapshot: Option<crate::dissect::IlSnapshot>,
     /// Debug variables per function (see [`crate::debug_vars`]).
     fn_debug_vars: HashMap<String, Vec<crate::debug_vars::DebugVar>>,
     /// Source end offset of each enclosing scope (block / function body).
@@ -646,29 +590,30 @@ pub struct Compiler {
     hir_par_tail: Option<Box<compiler::emit_hir::HirParTail>>,
     /// A body's anonymous `fn`s, emitted after its function record.
     hir_lambda_tail: Vec<compiler::emit_hir::HirLambdaTail>,
+    /// The bodies a two-word call through a function value reads a
+    /// callee's one word with (`MirInst::CallIndirect`'s `unpair`), by
+    /// type: name and entry, emitted after the body that first needs one.
+    hir_unpairs: HashMap<String, crate::bodies::Label>,
+    hir_unpair_tail: Vec<(String, crate::typechecking::Ty, crate::bodies::Label)>,
     /// Closure adapters ([`Compiler::hir_fn_adapter`]) by unboxed tags,
     /// and those still to emit after the current body.
-    hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<crate::layout::ValueLayout>), crate::il::Label>,
-    hir_adapter_tail: Vec<(crate::il::Label, compiler::emit_hir::HirFnAdapt)>,
+    hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<crate::layout::ValueLayout>), crate::bodies::Label>,
+    hir_adapter_tail: Vec<(crate::bodies::Label, compiler::emit_hir::HirFnAdapt)>,
     /// Adapters of closures shared generic bodies return
     /// ([`Compiler::hir_closure_adapter`]) by shape, and the ones to emit
     /// after the body (#1532).
-    hir_closure_adapters: HashMap<compiler::emit_hir::HirClosureAdapt, crate::il::Label>,
-    hir_closure_adapter_tail: Vec<(crate::il::Label, compiler::emit_hir::HirClosureAdapt)>,
+    hir_closure_adapters: HashMap<compiler::emit_hir::HirClosureAdapt, crate::bodies::Label>,
+    hir_closure_adapter_tail: Vec<(crate::bodies::Label, compiler::emit_hir::HirClosureAdapt)>,
     /// When false, skip auto fork-join even if
-    /// [`crate::il::opt::OptimizeOptions::auto_par`] is on.
+    /// [`crate::opt::OptimizeOptions::auto_par`] is on.
     auto_par: bool,
 
-    /// Operand-stack capacity for the VM (from recursion-depth analysis).
-    operand_stack_slots: u32,
 
     /// IL optimization preset (COI-127).
-    opt_options: crate::il::opt::OptimizeOptions,
+    opt_options: crate::opt::OptimizeOptions,
 
     /// Cost budgets for typed inlining (COI-124).
     pub inline_cost: inline_cost::InlineCostOptions,
-
-    deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
 
     /// Why the last [`Self::try_lower_hir_function`] did not lower its body.
     hir_refusal: Option<&'static str>,
@@ -676,9 +621,6 @@ pub struct Compiler {
     hir_mir: Option<crate::mir::MirFunc>,
     /// Why the body just emitted did not lower straight to MIR.
     hir_mir_why: Option<String>,
-    /// The body HIR just lowered holds a `defer`: its function gets a
-    /// cleanup pad and is pinned ([`Self::finish_fn_defers`]).
-    hir_defers: bool,
     /// Frame words at entry of the function being compiled (its arguments
     /// and dictionaries), when its compile path records them.
     hir_entry_sp: Option<u32>,
@@ -716,7 +658,7 @@ pub struct Compiler {
     /// `#[cold]`, or never returning ([`crate::hir::cold`]), by table key.
     cold_fns: HashSet<String>,
     /// Entry labels of [`Self::cold_fns`] calls resolved to.
-    cold_labels: HashSet<crate::il::Label>,
+    cold_labels: HashSet<crate::bodies::Label>,
     /// `#[inline(always)]` functions already reported as not inlined (E0807).
     inline_refused: HashSet<String>,
     /// Hot functions of the program by table key: `#[hot]`, and those a
@@ -755,18 +697,11 @@ pub struct Compiler {
 
 impl Default for Compiler {
     fn default() -> Self {
-        let mut bytecode = CodeBuf::new();
-        bytecode.push(Byte::new(Instruction::CALL));
-        bytecode.push_prologue_jmp();
-        bytecode.push(Byte::new(Instruction::HALT));
-        debug_assert_eq!(bytecode.len(), PROLOGUE_BYTECODE_LEN);
-        let program_start_offset = bytecode.len() as u32;
-        let debug_locs = vec![DebugLoc::unknown(); bytecode.len()];
-
+        let bodies = BodyTable::new();
         Self {
             namespace: String::default(),
-            bytecode,
-            debug_locs,
+            bodies,
+            debug_locs: Vec::new(),
             aliases: HashMap::default(),
             functions: HashMap::with_capacity(32),
             fn_entry_labels: HashMap::with_capacity(32),
@@ -785,29 +720,20 @@ impl Default for Compiler {
             native: HashMap::default(),
             extern_runtime_libs: HashMap::with_capacity(4),
             extern_runtime_functions: HashMap::with_capacity(16),
+            extern_symbols: Vec::new(),
             extern_runtime_libs_loaded: HashSet::new(),
             messages: Vec::default(),
             context: Context::default(),
             checker: crate::typechecking::Checker::new(),
             typed_sidecar: crate::typechecking::TypedSidecar::default(),
             emit_idx: 0,
-            program_start_offset,
-            setup_entry_offset: program_start_offset,
             constants: Vec::default(),
             strings: Vec::default(),
             string_indices: HashMap::default(),
             coroutine_fns: std::collections::HashSet::new(),
             temp_counter: 0,
             field_key_slots: HashMap::new(),
-            expr_depth: 0,
-            precise_frame_fns: HashSet::new(),
-            precise_frames: Vec::new(),
-            frame_inputs: None,
             codegen_depth: 0,
-            loop_stack: Vec::new(),
-            loop_bbs: Vec::new(),
-            cleanup_pads: Vec::new(),
-            cleanup_ranges: Vec::new(),
             active_fn_name: None,
             compiling_method: false,
             compiling_mono_clone: false,
@@ -853,14 +779,15 @@ impl Default for Compiler {
             planning_for_clones: false,
             hir_ground_splice: Default::default(),
             mono_var_tys: Vec::new(),
-            static_init: CodeBuf::new(),
             comptime_consts: Vec::new(),
             pure_static_inits: HashSet::new(),
             startup_consts: HashSet::new(),
             fold_bodies: HashMap::new(),
             fold_fns: HashMap::new(),
             par_worker_of: HashMap::new(),
-            ffi_init: CodeBuf::new(),
+            setup_steps: Vec::new(),
+            startup_steps: Vec::new(),
+            startup: Vec::new(),
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),
             source_file_list: Vec::new(),
@@ -870,10 +797,7 @@ impl Default for Compiler {
             static_const_values: HashMap::new(),
             current_function_qualified: None,
             current_function_table_key: None,
-            fn_bytecode_spans: HashMap::new(),
             fn_debug_locals: HashMap::new(),
-            #[cfg(any(test, feature = "dissect"))]
-            post_il_snapshot: None,
             fn_debug_vars: HashMap::new(),
             debug_scope_ends: Vec::new(),
             debug_stmt_start: 0,
@@ -895,15 +819,15 @@ impl Default for Compiler {
             loop_par_forks: 0,
             hir_par_tail: None,
             hir_lambda_tail: Vec::new(),
+            hir_unpairs: HashMap::new(),
+            hir_unpair_tail: Vec::new(),
             hir_fn_adapters: HashMap::new(),
             hir_adapter_tail: Vec::new(),
             hir_closure_adapters: HashMap::new(),
             hir_closure_adapter_tail: Vec::new(),
             auto_par: true,
-            operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
-            opt_options: crate::il::opt::OptimizeOptions::default(),
+            opt_options: crate::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
-            deopt_map_drafts: Vec::new(),
             hir_refusal: None,
             hir_module: None,
             hir_fns: HashMap::new(),
@@ -912,7 +836,6 @@ impl Default for Compiler {
             inlined_bodies: Vec::new(),
             hir_mir: None,
             hir_mir_why: None,
-            hir_defers: false,
             hir_entry_sp: None,
             hir_mir_dict_sp: None,
             hir_lambda_dicts: None,
@@ -950,8 +873,6 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 
 mod compiler;
 mod inline_cost;
-mod precise_frames;
-pub(crate) use precise_frames::jump_target as jump_target_of;
 
 /// One `defer` thunk of the function being compiled.
 /// A generic-head instance method that ground call sites clone.
@@ -991,7 +912,6 @@ pub(crate) struct ModuleCtx {
     hir_module: Option<crate::hir::HirModule>,
     const_env_stack: Vec<HashMap<String, ConstValue>>,
     static_const_values: HashMap<String, ConstValue>,
-    fn_bytecode_spans: HashMap<String, (usize, usize)>,
     mono_plan: MonoPlan,
     mono_offsets: HashMap<MonoKey, usize>,
     mono_names: HashMap<MonoKey, String>,
@@ -1003,7 +923,6 @@ pub(crate) struct ModuleCtx {
     par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
     par_workers: HashSet<String>,
     loop_par_sites: crate::typechecking::LoopParSites,
-    operand_stack_slots: u32,
     current_source_file: Option<std::path::PathBuf>,
     source_text: String,
     source_base: (usize, usize),
@@ -1052,33 +971,12 @@ pub(crate) struct InstClone {
     chain: Vec<String>,
 }
 
-/// A function's cleanup pad, before label resolution.
-#[derive(Clone, Debug)]
-pub(crate) struct CleanupPad {
-    /// Function table key (resolves labels through its IL chunk).
-    pub func: String,
-    pub pad: BbLabel,
-    /// Slots the frame uses; the unwinder raises the stack top past them.
-    pub frame_words: u32,
-}
-
 /// A host call that needs a capability.
 #[derive(Debug, Clone)]
 pub(crate) struct GatedHostCall {
     pub caps: common::Caps,
     /// The native's name (`open`, `env_exit`).
     pub native: &'static str,
-}
-
-/// The inputs of [`precise_frames::bind_precise_frames`] other than the
-/// code and the constant pool.
-struct FrameInputs {
-    needs_extent: HashSet<String>,
-    temp_words: HashMap<String, Vec<u16>>,
-    match_arities: HashMap<u32, u32>,
-    entries: Vec<(String, u32)>,
-    entry_sps: HashMap<String, u32>,
-    fn_kinds: HashMap<String, precise_frames::FnWordKinds>,
 }
 
 /// A `const` (or, `silent`, a pure `static let`) computed at compile time:

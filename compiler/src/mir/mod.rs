@@ -1,15 +1,14 @@
 //! MIR: typed SSA for every function body, lowered from HIR
-//! ([`lower_from_hir`]), and its two emitters: dense 3-address bytecode
-//! ([`emit`]) and LIR stack ops ([`emit_lir`]). Passes: CSE (P2), LICM
+//! ([`lower_from_hir`]). Passes: CSE (P2), LICM
 //! (P6), InstCombine (P7) with float peeps (P11), DestProp (P8), IV
 //! strength reduction (P9), cross-block GVN/PRE (P10), saxpy-reduce
 //! HostInvoke packs (P12), compiler-only `V*` SIMD (COI-310), and SROA.
 //!
-//! Dense and LIR `CALL` use the one-word or two-slot typed ABI ([`abi`];
+//! `CALL` uses the one-word or two-slot typed ABI ([`abi`];
 //! COI-291 / B3 / C1). SSA models dest + `dest_hi`; N>2 return words
 //! refuse. Typed HostInvoke boxes at the host edge. Allocating bodies
 //! carry `Alloc` + `GcBarrier` with live-heap `roots`; their GC frame maps
-//! are the precise maps of their final bytecode ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
+//! are the precise maps of their final code ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
 //! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` builds use
 //! the same tiers; explicit `Deopt` is skipped at emit. History of each
 //! piece: `docs/internals/mir.md`.
@@ -19,26 +18,19 @@ mod bulk;
 mod byte_scan;
 mod copy_until;
 mod vec_loop;
-mod call_convoy;
 mod cse;
 mod destprop;
-mod deopt;
-mod entry;
 mod effects;
-mod emit;
-mod emit_common;
+mod vector_body;
 mod error;
 mod gc;
-mod gates;
 mod host_allow;
-mod emit_lir;
 mod func;
 mod inst;
 mod instcombine;
 mod interchange;
 mod licm;
 mod from_hir;
-mod pack;
 mod prefetch;
 mod specialize;
 mod sccp;
@@ -48,37 +40,31 @@ mod bool_thread;
 mod phi_sroa;
 mod promote;
 mod strength;
-mod stackmap;
 mod text;
 mod ty;
 
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;
-pub use emit::PanicPads;
-#[cfg(test)]
-pub use emit_lir::emit_lir;
-#[cfg(test)]
-pub use entry::LirRefuse;
 pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirRetItem, HirRetItems, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
 pub use func::MirFunc;
-#[cfg(test)]
-pub use func::MirBlock;
-pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
-pub use deopt::DraftDeoptMap;
-pub use stackmap::is_alloc_opcode;
+pub use gc::liveness;
+pub use func::{MirBlock, is_tail_call_inst};
 pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
-pub use inst::MirCmpOp;
+pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
+pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]
-pub use inst::{BlockId, LocalId, MirUnaryOp, Terminator};
-pub use instcombine::{instcombine, instcombine_lir};
+pub use inst::LocalId;
+pub mod archive;
+mod frame_words;
+mod native_capture;
+pub mod coverage;
+pub mod native_expand;
+pub use frame_words::{allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pointer_words, root_handles, scalar, ty_of, used_params, word_kind, pair_words};
+pub(crate) use native_capture::capture_open;
+pub use native_capture::{ComptimeCapture, ConstArg, ConstCall, ConstResult, NativeBody, VectorOp, ffi_use, capture_const_calls, replace_const_calls, capture_native_bodies, vector_op, peek_native_capture, start_native_capture, start_raw_capture, take_native_capture, without_native_capture};
+pub use instcombine::{instcombine, };
 pub use licm::{licm, mark_frozen_arrays};
-#[cfg(test)]
-pub use error::LowerError;
-pub use specialize::{
-    fuse_fallback, lower_abi_body_reusing, take_dense_refusal, take_lir_refusal,
-    try_specialize_body_side, BodyLabels, BodySidecar, LirDraft,
-};
 pub use sccp::sccp;
 pub use sroa::sroa;
 pub use bool_thread::thread_bool_phis;
@@ -92,7 +78,7 @@ pub use prefetch::mark_prefetch_scans;
 pub use interchange::interchange_loops;
 pub use strength::strength_reduce;
 #[cfg(test)]
-pub use text::{ParseError, parse_func};
+pub use text::parse_func;
 pub use ty::MirTy;
 
 /// Build the Mandelbrot inner iteration in typed SSA (acceptance for COI-267).

@@ -1,5 +1,5 @@
 // `==` / `!=` on niche `Option` / `Result` words compares the boxed
-// values structurally, as the VM's `EQ`: the variant, then the payload
+// values structurally, as the interpreter's equality: the variant, then the payload
 // (a string by content).
 use tests::assert;
 

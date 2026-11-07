@@ -198,13 +198,19 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::CallIndirect { dest, callee, args, dicts } => {
-            write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?;
+        MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
+            match pair {
+                Some((hi, _)) => write!(f, "{dest}, {hi} = callind.{} {callee}", func.ty(*dest))?,
+                None => write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?,
+            }
             for a in args {
                 write!(f, ", {a}")?;
             }
             if *dicts != 0 {
                 write!(f, " dicts {dicts}")?;
+            }
+            if let Some((_, unpair)) = pair {
+                write!(f, " unpair {}", unpair.0)?;
             }
             Ok(())
         }
@@ -267,6 +273,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::HomeStore { dest, home, value } => write!(f, "{dest} = homestore {home}, {value}"),
         MirInst::ClearWord { dest, value } => write!(f, "{dest} = clearword {value}"),
         MirInst::KeepAlive { dest, value } => write!(f, "{dest} = keepalive {value}"),
+        MirInst::Probe { dest, id } => write!(f, "{dest} = probe {id}"),
         MirInst::PanicStore { dest, object, value, index } => write!(f, "{dest} = panicstore {object}, {value}, {index}"),
         MirInst::ArrayPush {
             dest,
@@ -460,7 +467,7 @@ impl<'a> Parser<'a> {
         };
         self.expect('=')?;
         let op = self.ident_dots()?;
-        if dest_hi.is_some() && !op.starts_with("call.") {
+        if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") {
             return Err(ParseError("pair dest is call-only".into()));
         }
         if let Some(rest) = op.strip_prefix("iconst.") {
@@ -649,6 +656,11 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::DoneCoro { dest, handle });
         }
+        if op == "probe" {
+            let id = self.uint()? as u32;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::Probe { dest, id });
+        }
         if op == "loadstatic" {
             let slot = self.uint()? as u32;
             ensure_ty(types, dest, MirTy::I64);
@@ -813,12 +825,21 @@ impl<'a> Parser<'a> {
                 args.push(self.value()?);
             }
             let dicts = if self.eat_str("dicts") { self.uint()? as u32 } else { 0 };
+            let unpair = if self.eat_str("unpair") { Some(crate::bodies::Label(self.uint()? as u32)) } else { None };
             ensure_ty(types, dest, ty);
-            return Ok(MirInst::CallIndirect { dest, callee, args, dicts });
+            let pair = match (dest_hi, unpair) {
+                (Some(hi), Some(unpair)) => {
+                    ensure_ty(types, hi, MirTy::I64);
+                    Some((hi, unpair))
+                }
+                (None, None) => None,
+                _ => return Err(ParseError("callind pair".into())),
+            };
+            return Ok(MirInst::CallIndirect { dest, callee, args, dicts, pair });
         }
         if let Some(ty_s) = op.strip_prefix("call.") {
             let ty = MirTy::parse(ty_s).ok_or_else(|| ParseError(op.clone()))?;
-            let target = crate::il::Label(self.uint()? as u32);
+            let target = crate::bodies::Label(self.uint()? as u32);
             let mut args = Vec::new();
             if self.peek('v') {
                 args.push(self.value()?);
@@ -864,20 +885,20 @@ impl<'a> Parser<'a> {
                     MirAllocKind::DropEnum { tag, type_id }
                 }
                 "coro" => MirAllocKind::Coro {
-                    target: crate::il::Label(self.uint()? as u32),
+                    target: crate::bodies::Label(self.uint()? as u32),
                 },
                 "fn" => {
-                    let target = crate::il::Label(self.uint()? as u32);
+                    let target = crate::bodies::Label(self.uint()? as u32);
                     self.expect(',')?;
                     let operand = self.uint()? as u32;
                     let mask = if self.eat_str(", mask ") { self.uint()? as u32 } else { 0 };
                     MirAllocKind::Fn { target, operand, mask }
                 }
                 "polyfn" => MirAllocKind::PolyFn {
-                    target: crate::il::Label(self.uint()? as u32),
+                    target: crate::bodies::Label(self.uint()? as u32),
                 },
                 "polyfncap" => {
-                    let target = crate::il::Label(self.uint()? as u32);
+                    let target = crate::bodies::Label(self.uint()? as u32);
                     let params = if self.eat_str(", params ") { self.uint()? as u32 } else { 0 };
                     MirAllocKind::PolyFnCapture { target, params }
                 }
@@ -919,7 +940,7 @@ impl<'a> Parser<'a> {
             });
         }
         if op == "codeptr" {
-            let target = crate::il::Label(self.uint()? as u32);
+            let target = crate::bodies::Label(self.uint()? as u32);
             ensure_ty(types, dest, MirTy::I64);
             return Ok(MirInst::CodePtr { dest, target });
         }
@@ -1323,29 +1344,29 @@ bb3:
         let k = b.add_param(MirTy::I64).unwrap();
         let x = b.add_param(MirTy::I64).unwrap();
         let kind = MirAllocKind::Fn {
-            target: crate::il::Label(7),
+            target: crate::bodies::Label(7),
             operand: 3,
             mask: 0,
         };
         let f = b.ins_alloc(kind, vec![k]).unwrap();
         let f = b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).unwrap();
-        let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::il::Label(9) }, Vec::new()).unwrap();
+        let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::bodies::Label(9) }, Vec::new()).unwrap();
         let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![g]).unwrap();
         // A partial application: its first parameter filled.
         let partial = MirAllocKind::Fn {
-            target: crate::il::Label(8),
+            target: crate::bodies::Label(8),
             operand: 0x0002_0100,
             mask: 1,
         };
         let p = b.ins_alloc(partial, vec![x]).unwrap();
         let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![p]).unwrap();
         // An instance dictionary: a method's code pointer in a tuple.
-        let code = b.ins_code_ptr(crate::il::Label(11)).unwrap();
+        let code = b.ins_code_ptr(crate::bodies::Label(11)).unwrap();
         let dict = b.ins_alloc(MirAllocKind::Tuple, vec![code]).unwrap();
         let dict = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
         // A constrained generic's value over its dictionary, called with
         // the call site's.
-        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::il::Label(12), params: 0 }, vec![dict]).unwrap();
+        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::bodies::Label(12), params: 0 }, vec![dict]).unwrap();
         let poly = b.ins_gc_barrier(MirGcKind::Safepoint, vec![poly]).unwrap();
         let _ = b.ins_call_indirect_dicts(poly, vec![x, dict], 1, MirTy::I64).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();

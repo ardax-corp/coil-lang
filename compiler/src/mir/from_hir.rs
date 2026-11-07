@@ -1,8 +1,6 @@
 //! Lower a planned HIR body straight to MIR (HIR to MIR plan, phase M1).
 //!
-//! MIR used to be rebuilt from the stack IL by a lift that guessed each
-//! slot's type from the opcodes that touch it (retired in M4/M5). Here the
-//! types come from the checker, locals are read and written by name, and control flow is
+//! The types come from the checker, locals are read and written by name, and control flow is
 //! built from `if` / `loop` / `break` directly, so none of the operand-stack
 //! replay applies.
 //!
@@ -25,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use common::DebugLoc;
 
 use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
-use crate::il::Label;
+use crate::bodies::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::layout::ValueLayout;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
@@ -424,8 +422,10 @@ pub struct HirMirInput<'a> {
     /// Word types of each expression of a two-word type.
     pub pair_tys: HashMap<u32, (MirTy, MirTy)>,
     /// Calls returning a two-word enum whose low word may carry a heap
-    /// payload ([`MirFunc::heap_pair_calls`]).
+    /// payload ([`MirFunc::heap_pair_words`]).
     pub heap_pairs: HashSet<u32>,
+    /// Pair parameters (by local) whose low word may carry a heap payload.
+    pub heap_pair_params: HashSet<u32>,
     /// Word types of a two-word result.
     pub ret_pair: Option<(MirTy, MirTy)>,
     /// Stack arrays kept in frame slots: first slot, length and element
@@ -474,6 +474,9 @@ pub struct HirMirInput<'a> {
     /// Calls through a function value HIR emission made a plain
     /// `CallIndirect` (not a `PolyFn` call with dictionaries).
     pub value_calls: &'a HashSet<u32>,
+    /// Of those, the calls of a two-word result read as its two words:
+    /// the `unpair` body of each ([`MirInst::CallIndirect`]).
+    pub value_pair_calls: &'a HashMap<u32, crate::bodies::Label>,
     /// Calls through a `PolyFn` local with no dictionaries, by call.
     pub poly_calls: &'a HashMap<u32, HirPolyCall>,
     /// Trait methods and operators on a bound type parameter, called
@@ -686,7 +689,7 @@ struct Lower<'a> {
     /// The block being filled.
     cur: BlockId,
     loops: Vec<Loop>,
-    /// The function returns `()`: a `return` gives the VM's unit word.
+    /// The function returns `()`: a `return` gives the runtime's unit word.
     unit_ret: bool,
     /// The type a `return` gives: a `gen fn`'s yielded type (its final
     /// resume's word), else the declared one.
@@ -1094,9 +1097,13 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
                 vec![word.ok_or_else(|| format!("param type {}", ty_kind(ty)))?]
             }
         };
-        for ty in words {
+        let heap_pair = inp.heap_pair_params.contains(&param.0);
+        for (i, ty) in words.into_iter().enumerate() {
             let v = b.add_param(ty).map_err(mir)?;
             b.def_local(LocalId(next), v).map_err(mir)?;
+            if heap_pair && i == 0 {
+                b.mark_heap_pair_word(v);
+            }
             next += 1;
         }
     }
@@ -1163,15 +1170,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
         if let HirKind::Defer { captures, body } = &e.kind {
-            // The thunk's frame holds copies of its captures: one that
-            // assigns a local would not write the function's.
-            let mut assigns = false;
-            lower::visit(hir, *body, &mut |x| {
-                assigns |= matches!(x.kind, HirKind::Assign { place, .. } if matches!(hir.expr(place).kind, HirKind::Local(l) if captures.contains(&Some(l))));
-            });
-            if assigns {
-                return Err("defer assigns a capture".into());
-            }
+            let _ = captures;
             // The body's own bindings (`let`, a `for` variable, a pattern)
             // live in the thunk's frame, not the function's (#2134).
             let mut binds = Vec::new();
@@ -1334,7 +1333,8 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         let (run, skip) = (pad.b.create_block(), pad.b.create_block());
         pad.b.branch(armed, run, skip).map_err(mir)?;
         pad.switch(run);
-        for c in captures_of(body).ok_or("pad defer")?.into_iter().flatten() {
+        let captures: Vec<HirLocal> = captures_of(body).ok_or("pad defer")?.into_iter().flatten().collect();
+        for &c in &captures {
             let &(home, slot) = parts.homes.caps.get(&c.0).ok_or("pad capture")?;
             let v = pad.b.ins_home_load(home).map_err(mir)?;
             match slot {
@@ -1344,7 +1344,26 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
                 }
             }
         }
+        // A `use (mut x)` the body assigns writes `x`'s home back, so the
+        // pads of outer blocks read the new value.
+        let mut assigned = Vec::new();
+        lower::visit(hir, body, &mut |x| {
+            if let HirKind::Assign { place, .. } = x.kind
+                && let HirKind::Local(l) = hir.expr(place).kind
+                && captures.contains(&l)
+                && !assigned.contains(&l)
+            {
+                assigned.push(l);
+            }
+        });
         if pad.stmt(body)? {
+            for l in &assigned {
+                let &(home, slot) = parts.homes.caps.get(&l.0).ok_or("pad capture")?;
+                let slot = slot.ok_or("pad assigned capture without a slot")?;
+                let ty = *parts.home_tys.get(usize::from(home)).ok_or("pad home")?;
+                let v = pad.b.use_local(slot, ty).map_err(mir)?;
+                pad.b.ins_home_store(home, v).map_err(mir)?;
+            }
             pad.jump(skip)?;
         }
         pad.switch(skip);
@@ -2624,7 +2643,8 @@ impl Lower<'_> {
     /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk,
     /// any call through a function value).
     fn boxed_call(&self, id: HirId) -> bool {
-        (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || self.inp.value_calls.contains(&id.0)) && self.inp.pair_tys.contains_key(&id.0)
+        (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || (self.inp.value_calls.contains(&id.0) && !self.inp.value_pair_calls.contains_key(&id.0)))
+            && self.inp.pair_tys.contains_key(&id.0)
     }
 
     /// Lower `id` for its value, packed as a bare-class existential where
@@ -2853,7 +2873,9 @@ impl Lower<'_> {
             // bodies): the same bits read as the node's type.
             HirKind::Builtin { op: Builtin::Retype, args } if let [inner] = args.as_slice() => {
                 let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("retype type")?;
-                let Some(v) = self.word(*inner)? else {
+                // A two-word value read as a type parameter's word: its box.
+                let v = if self.inp.pair_tys.contains_key(&inner.0) { self.boxed_word(*inner)? } else { self.word(*inner)? };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 let word = self.b.ins_word(v).map_err(mir)?;
@@ -3382,17 +3404,15 @@ impl Lower<'_> {
             } if args.is_empty() && let Some(lit) = (self.inp.scalar_variant)(enum_name, variant) => {
                 Ok(Val::V(self.scalar_lit(lit)?))
             }
-            // `p[0]` / `p[1]` of a two-word tuple local.
+            // `p[0]` / `p[1]` of a two-word tuple local. Any other index
+            // reads the local's box, as a boxed tuple's field below.
             HirKind::Index { base, index, .. }
                 if let HirKind::Local(local) = self.hir.expr(*base).kind
                     && let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local)
-                    && self.expr_ty(*base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_))) =>
+                    && self.expr_ty(*base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_)))
+                    && let HirKind::Lit(Lit::Int(i @ (0 | 1))) = self.hir.expr(*index).kind =>
             {
-                let (slot, ty) = match self.hir.expr(*index).kind {
-                    HirKind::Lit(Lit::Int(0)) => (lo, lo_ty),
-                    HirKind::Lit(Lit::Int(1)) => (hi, hi_ty),
-                    _ => return Err("tuple index".into()),
-                };
+                let (slot, ty) = if i == 0 { (lo, lo_ty) } else { (hi, hi_ty) };
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
             HirKind::Index { base, index, kind: IndexKind::Array } if self.heap_array(*base) => self.heap_index(id, *base, *index),
@@ -3886,7 +3906,7 @@ impl Lower<'_> {
             return Err(format!("operator {op:?}"));
         }
         // `==` / `!=` on two-word values (an enum, tuple or range kept as
-        // a pair): both boxed, then the VM's structural `EQ`, as HIR
+        // a pair): both boxed, then structural equality, as HIR
         // emission compares them.
         if matches!(op, BinOp::Eq | BinOp::Ne) && (self.inp.pair_tys.contains_key(&lhs.0) || self.inp.pair_tys.contains_key(&rhs.0)) {
             let Some(l) = self.boxed_word(lhs)? else {
@@ -3964,7 +3984,7 @@ impl Lower<'_> {
         Ok(Val::V(out.map_err(mir)?))
     }
 
-    /// `==` / `!=` of two heap words: the VM's structural `EQ`, or, when
+    /// `==` / `!=` of two heap words: structural equality, or, when
     /// their type has `float` leaves, `values_eq_shaped` with the shape
     /// emission planned, so those compare by IEEE (#1253).
     fn structural_eq(&mut self, id: HirId, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
@@ -4244,8 +4264,12 @@ impl Lower<'_> {
     /// `f` with the source location of statement `id`.
     fn at_stmt<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
         let outer = self.b.pending_loc;
-        if let Some(file) = self.inp.file {
-            let (start, end) = self.hir.expr(id).span;
+        let (start, end) = self.hir.expr(id).span;
+        // Generated code without a place of its own has the enclosing one,
+        // but for a host call: the capability check finds it by its own span.
+        let placeless = crate::attrs::is_fresh_span(start) && !self.inp.hosts.contains_key(&id.0);
+        if let Some(file) = self.inp.file.filter(|_| !placeless) {
+            let (start, end) = crate::variadic::written_span(start, end);
             self.b.pending_loc = DebugLoc {
                 file,
                 start_byte: start as u32,
@@ -4451,7 +4475,7 @@ impl Lower<'_> {
             return self.unbox_niche(dest, want);
         }
         if dest_hi.is_some() && self.inp.heap_pairs.contains(&id.0) {
-            self.b.mark_heap_pair_call(dest);
+            self.b.mark_heap_pair_word(dest);
         }
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),
@@ -4540,7 +4564,7 @@ impl Lower<'_> {
     }
 
     /// Ground dictionary `ops` held in static `slot`: built and stored on
-    /// the first run in this VM (a worker's statics start zeroed), loaded
+    /// the first run in this runtime (a worker's statics start zeroed), loaded
     /// after that.
     fn interned_dict(&mut self, slot: u32, ops: &[HirDictOp]) -> Result<ValueId, Refusal> {
         let have = self.b.ins_load_static(slot, MirTy::HeapRef).map_err(mir)?;
@@ -4881,6 +4905,15 @@ impl Lower<'_> {
         if self.b.value_ty(callee) != MirTy::HeapRef {
             return Err("call value callee".into());
         }
+        // A two-word result read as its two words: the callee's twin
+        // returns them, or `unpair` reads them from its box.
+        if let (Some(&unpair), Some(&tys)) = (self.inp.value_pair_calls.get(&id.0), self.inp.pair_tys.get(&id.0)) {
+            let (lo, hi) = self.at_expr(id, |l| l.b.ins_call_indirect_pair(callee, words, tys, unpair).map_err(mir))?;
+            if self.inp.heap_pairs.contains(&id.0) {
+                self.b.mark_heap_pair_word(lo);
+            }
+            return Ok(Val::Pair(lo, hi));
+        }
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
@@ -5010,7 +5043,7 @@ impl Lower<'_> {
     }
 
     /// `lhs op rhs` on a user type with no instance, as HIR emission's raw
-    /// opcode: `==` / `!=` of two heap words (the VM's structural `EQ`), or
+    /// opcode: `==` / `!=` of two heap words (structural equality), or
     /// a number-backed scalar enum's backing words.
     fn op_prim(&mut self, id: HirId, sym: &str, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
         // A two-word operand compares boxed, as emission pushes it.
@@ -5022,7 +5055,7 @@ impl Lower<'_> {
             return self.structural_eq(id, l, r, sym == "!=");
         }
         // Niche `Option` / `Result` words compare as HIR emission pushes
-        // them: each boxed to its `ObjEnum`, then the VM's structural `EQ`.
+        // them: each boxed to its `ObjEnum`, then structural equality.
         if lt == rt && matches!(lt, MirTy::NicheOpt | MirTy::NicheRes) && matches!(sym, "==" | "!=") {
             let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
             let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
@@ -5104,7 +5137,7 @@ impl Lower<'_> {
         }
     }
 
-    /// `yield v` / `yield from h`: one instruction (the VM saves the frame
+    /// `yield v` / `yield from h`: one instruction (the runtime saves the frame
     /// and resumes after it). The word
     /// moves boxed. A receiving yield's value is the word the next
     /// `resume .. with` sends.
@@ -5468,7 +5501,8 @@ impl Lower<'_> {
             None => None,
         }
         .ok_or("element type")?;
-        let Some(arr) = self.word(base)? else {
+        // A two-word tuple local read at a runtime index: its box.
+        let Some(arr) = self.word_or_boxed(base)? else {
             return Ok(Val::Never);
         };
         let Some(idx) = self.index_word(index)? else {
@@ -5569,7 +5603,7 @@ impl Lower<'_> {
     }
 
     /// A local `const` table of literals (#1561): built into static `slot`
-    /// the first time it runs in this VM (an isolate thread's statics start
+    /// the first time it runs in this runtime (an isolate thread's statics start
     /// zeroed; a shared-heap job's copy may not have it yet), loaded after
     /// that. No code writes the array, so sharing it is not seen.
     fn frozen_array(&mut self, id: HirId, args: &[HirId], slot: u32) -> Result<Val, Refusal> {
@@ -6188,7 +6222,7 @@ impl Lower<'_> {
             };
         }
         let (ok, err) = (self.b.create_block(), self.b.create_block());
-        // `Ok` always carries one word, a void call's too (the VM's
+        // `Ok` always carries one word, a void call's too (the runtime's
         // `Ok(0)`): the match takes it, or the taken edge leaves it on the
         // operand stack, one slot per call (#1638).
         let word = self.b.ins_match_payload(obj, 0, ret.unwrap_or(MirTy::I64)).map_err(mir)?;
@@ -7430,7 +7464,7 @@ impl Lower<'_> {
     }
 
     /// Search the sorted `cases` for `v`: split on the
-    /// middle literal with `<` (bytecode `LE`), and test a small leaf case by
+    /// middle literal with `<` (code `LE`), and test a small leaf case by
     /// case.
     fn search_node(&mut self, v: ValueId, cases: &[(i64, usize)], blocks: &[Option<BlockId>], default: BlockId) -> Result<(), Refusal> {
         if cases.len() <= crate::hir::match_tree::SEARCH_LEAF {
@@ -7623,7 +7657,7 @@ impl Lower<'_> {
         let Some(mut c) = self.word(cond)? else {
             return Ok(Val::Never);
         };
-        // An int condition branches as the VM's `JMPF` reads a word: true
+        // An int condition branches as the runtime's `JMPF` reads a word: true
         // when its low byte is `1`.
         if self.b.value_ty(c) == MirTy::I64 {
             let mask = self.b.ins_const(MirConst::I64(0xff)).map_err(mir)?;

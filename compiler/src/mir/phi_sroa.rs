@@ -300,7 +300,7 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
                     if b.id != block || !seen_alloc || *value == alloc {
                         return None;
                     }
-                    // The store's own value (the VM leaves it on the stack)
+                    // The store's own value (the runtime leaves it on the stack)
                     // must be unused: it goes with the object.
                     if !user_blocks(func, *dest).is_empty() {
                         return None;

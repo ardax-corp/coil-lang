@@ -15,7 +15,7 @@ use crate::mutate::MutateOptions;
 use crate::mutate::job::Isolation;
 use crate::mutate::sites::Operator;
 use crate::order::{Order, fresh_seed, parse_seed};
-use crate::runner::{DocTests, Report, TestOptions};
+use crate::runner::{DocTests, Engine, Report, TestOptions};
 
 /// Default test root when no path is given.
 pub const TESTS_DIR: &str = "tests";
@@ -116,6 +116,10 @@ struct TestCli {
     /// (the files are parsed, not compiled)
     #[arg(long)]
     doc_tests_only: bool,
+    /// What runs the compiled code: native (Cranelift, the default) or mir
+    /// (the MIR interpreter)
+    #[arg(long, value_name = "native|mir", value_parser = Engine::parse)]
+    engine: Option<Engine>,
     /// Test root (default: ./tests)
     #[arg(value_name = "PATH")]
     path: Option<String>,
@@ -247,6 +251,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
             DocTests::On
         },
         wall_timeout: cli.wall_timeout,
+        engine: cli.engine.unwrap_or_else(Engine::host_default),
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -285,6 +290,8 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         doc_tests: DocTests::Off,
         // The parent kills a mutant's worker after `--wall-timeout`.
         wall_timeout: 0,
+        // Only the interpreter charges steps, which the budget counts.
+        engine: Engine::Mir,
     })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {
@@ -333,6 +340,7 @@ struct RunParts {
     doc_tests: DocTests,
     /// Seconds per case before the run stops; 0: never.
     wall_timeout: u64,
+    engine: Engine,
 }
 
 fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String> {
@@ -365,7 +373,8 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
                 per_test_out: parts.per_test_out,
                 project_root: std::env::current_dir().unwrap_or_default(),
             }),
-            opt_level: parts.opt.level(),
+            // The interpreter is the raw reference unless `-O` says otherwise.
+            opt_level: if parts.engine == Engine::Mir && parts.opt.opt_level.is_none() { compiler::OptLevel::None } else { parts.opt.level() },
             debug_level: parts.debug,
             contracts: parts.opt.contracts,
             fold_calls: parts.opt.fold_calls,
@@ -383,6 +392,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             doc_tests: parts.doc_tests,
             wall_timeout: (parts.wall_timeout != 0)
                 .then(|| std::time::Duration::from_secs(parts.wall_timeout)),
+            engine: parts.engine,
         }),
     ))
 }

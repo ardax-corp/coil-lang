@@ -46,8 +46,9 @@ impl TyVarCounter {
 pub struct Frame {
     /// Name, scheme, and whether the binding is a `const`.
     bindings: Vec<(String, Scheme, bool)>,
-    /// Name to the index of its latest binding in `bindings`.
-    latest: HashMap<String, usize>,
+    /// Name to the index of its latest binding in `bindings`. A name no scope
+    /// binds probes every frame, one per module: a fast hash is worth having.
+    latest: rustc_hash::FxHashMap<String, usize>,
 }
 
 impl Frame {
@@ -57,7 +58,7 @@ impl Frame {
 
     /// Bind `name` to `scheme` in this frame. Later bindings with the same
     /// name shadow earlier ones within the same frame.
-    pub fn insert(&mut self, name: impl Into<String>, scheme: Scheme) {
+    fn insert(&mut self, name: impl Into<String>, scheme: Scheme) {
         let name = name.into();
         self.latest.insert(name.clone(), self.bindings.len());
         self.bindings.push((name, scheme, false));
@@ -126,6 +127,10 @@ impl Frame {
 #[derive(Debug, Default, Clone)]
 pub struct Env {
     frames: Vec<Frame>,
+    /// Every name ever bound here. Most lookups in lowering are of names no
+    /// scope binds (`int`, an enum's name): one probe answers those, where a
+    /// walk probes a frame per module.
+    ever_bound: rustc_hash::FxHashSet<String>,
 }
 
 impl Env {
@@ -196,12 +201,19 @@ impl Env {
             .frames
             .last_mut()
             .expect("Env::insert_top called with no frames on the stack");
+        let name = name.into();
+        if !self.ever_bound.contains(&name) {
+            self.ever_bound.insert(name.clone());
+        }
         frame.insert(name, scheme);
     }
 
     /// Look up a name, walking from the innermost frame to the outermost.
     /// Returns the scheme of the most-recently-bound matching name.
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
+        if !self.ever_bound.contains(name) {
+            return None;
+        }
         for frame in self.frames.iter().rev() {
             if let Some(s) = frame.lookup(name) {
                 return Some(s);

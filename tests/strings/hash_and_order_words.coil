@@ -1,0 +1,28 @@
+// A string's hash is the 32-bit FNV-1a of its bytes and `<` orders strings
+// by their bytes, whichever engine runs the code: native code runs these
+// as Coil twins (`prelude/twins.coil`), the interpreter as host natives, and both
+// must agree (a map keyed by strings is shared between them).
+use tests::assert;
+
+test("a string's hash is the FNV-1a of its bytes") {
+    assert!(black_box("").hash() == 2166136261);
+    assert!(black_box("abc").hash() == 440920331);
+    assert!(black_box("héllo").hash() == 1252296000);
+    assert!(black_box("abc").hash() == black_box("ab" + "c").hash());
+}
+
+test("strings order by their bytes") {
+    let a = black_box("abc");
+    let b = black_box("abd");
+    let p = black_box("ab");
+    let e = black_box("");
+    assert!(a < b);
+    assert!(b > a);
+    assert!(p < a);
+    assert!(a > p);
+    assert!(e < p);
+    assert!(a <= a);
+    assert!(a >= a);
+    assert!(!(a < a));
+    assert!(black_box("é") > black_box("z"));
+}

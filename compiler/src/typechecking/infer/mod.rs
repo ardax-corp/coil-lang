@@ -261,8 +261,6 @@ pub struct Checker {
     pub(crate) in_bounds_index: HashSet<NodeId>,
     /// Expressions proven `>= 0` at the use site (Q4 skip Euclidean rem).
     pub(crate) nonneg_expr: HashSet<NodeId>,
-    /// Array parameter nodes that may be `ArrayPin`'d for the whole frame.
-    pub(crate) pin_array: HashSet<NodeId>,
     /// `(fn_name, param_name)` for helper pins (survives mono AST clones).
     pub(crate) pin_params: HashSet<(String, String)>,
     /// `for x in arr` loops whose synthetic index is in-bounds (length stable).
@@ -1023,7 +1021,7 @@ fn type_matches_specifier(ty: &Ty, spec: char) -> bool {
         's' => matches!(ty, Ty::Con(n) if n == "string"),
         'z' => matches!(ty, Ty::Con(n) if n == "bool"),
         'v' => true, // Show check happens in `check_format_arg`
-        // Unknown specifier (including `%d`, which the VM does not
+        // Unknown specifier (including `%d`, which the runtime does not
         // implement) — can't be matched; the caller will still
         // record a diagnostic, but we don't want to say it matches
         // every type.

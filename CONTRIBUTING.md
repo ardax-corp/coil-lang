@@ -4,9 +4,15 @@
 
 ```bash
 cargo clippy --workspace --lib --tests --bins -- -D warnings   # lint gate
-cargo test --workspace --lib --tests --bins   # required gate (skip Criterion benches)
-cargo build --bin coil --bin coil-test && (ulimit -v 65536; ./target/debug/coil test -j 1)  # leak smoke (64MB)
+cargo build -p coil-fmt && ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
+cargo test -p <crate> <filter>                 # the tests nearest your change
+./target/debug/coil test path/to/touched.coil   # .coil tests you added or changed
 ```
+
+CI runs the full suites: `cargo test --workspace --lib --tests --bins`, the
+`.coil` corpora on native code and on the MIR interpreter (`--engine native|mir`),
+the leak smoke and GC stress (`harness-*` jobs in `.github/workflows/ci.yml`).
+Push and fix what it reports rather than running them locally as a gate.
 
 Release build and soft CPU baseline:
 
@@ -29,7 +35,7 @@ shows and ends that header with its exact stdout:
 Escape newlines as `\n` (also `\t`, `\e`, `\\`). An example that cannot run
 in the test harness says why instead:
 ``// @output (not checked: needs `--allow-dload sum`)``. `examples_print_their_documented_output`
-(`cargo test -p compiler --features vm-wire --test pipeline`) runs every example
+(`cargo test -p compiler --test pipeline`) runs every example
 and compares, so a broken or drifting example fails CI.
 
 ## Where to change things
@@ -39,9 +45,11 @@ and compares, so a broken or drifting example fails CI.
 | Syntax | `parser/` |
 | Types / diagnostics | `compiler/src/typechecking/` |
 | HIR / optimizations | `compiler/src/hir/` |
-| Codegen / IL | `compiler/src/codegen/`, `compiler/src/il/` |
-| VM / natives | `machine/` |
-| Opcodes / archive | `common/` |
+| Codegen plan / MIR | `compiler/src/codegen/`, `compiler/src/mir/` |
+| Native code (Cranelift JIT / AOT) | `coil-native/` |
+| MIR interpreter | `coil-mir-interp/` |
+| Runtime / host natives | `machine/` |
+| Archive format | `common/src/archive.rs`, `compiler/src/mir/archive.rs` |
 
 Routing detail: [.claude/skills/coil-contributor/SKILL.md](.claude/skills/coil-contributor/SKILL.md).
 
@@ -49,8 +57,9 @@ Routing detail: [.claude/skills/coil-contributor/SKILL.md](.claude/skills/coil-c
 
 See [AGENTS.md](AGENTS.md). Highlights:
 
-- Append-only opcodes: new `Instruction` variants at the end only; bump archive minor, VM `promise!` ceiling, and `instruction_from_u8_covers_last_appended_variant`.
-- Virtual-module natives via `HostInvoke`, not new opcodes for `io` / `thread` / etc.
+- Archive version (`ARCHIVE_MAJOR` / `ARCHIVE_MINOR` in `common/src/archive.rs`): an additive change bumps the minor, any other the major.
+- MIR is what both engines run: a new MIR op needs native code and the MIR interpreter, and both must agree (`coil test`, `coil test --engine mir`).
+- Virtual-module natives via `HostInvoke`, not new MIR ops for `io` / `thread` / etc. Frozen ids in `common/src/host.rs` are never renumbered.
 - Language features need full HM integration, user-doc updates in [coil-website](https://github.com/ardax-corp/coil-website), internals updates here when needed, and a minimal runnable example.
 - Method-based APIs: prefer `impl` methods on classes over free functions for type-tied operations (stdlib, new surface). See [limitations.md](docs/internals/limitations.md) for codegen gaps on free generic enum returns.
 
@@ -64,7 +73,7 @@ Opt prove rule: [optimization-roadmap.md](docs/internals/optimization-roadmap.md
 |------|----------------|
 | [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/manual/` | Tutorials, getting started, examples catalog (`/docs/manual/…`) |
 | [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/language/` | Syntax, types, error codes (`/docs/language/…`). Per-API **builtin** pages are generated from the `///` stubs into `src/content/reference/` (`/docs/reference/…`) |
-| `docs/internals/` | Pipeline, VM, tooling (this repo) |
+| `docs/internals/` | Pipeline, MIR, engines, runtime, tooling (this repo) |
 | [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) | Userland API docs (`docs/` in that repo); `///` on public `.coil` |
 
 User-facing docs live in coil-website until a public domain is set.

@@ -43,11 +43,11 @@ Runnable example: `examples/static_trait_method.coil`. Tests: `tests/traits/stat
 
 ## Codegen
 
-- **Concrete `Owner::m(args)`:** the discharged instance is in `call_site_dicts`; `emit_trait_static_call` emits the arguments (boxed / layout-converted per `trait_method_boundary_sig`, staged when an operand may clobber the operand stack) and a direct `CALL` to the instance FQN, plus the instance dictionary only when the target is the trait's default body.
-- **`T::m(args)` in a shared body:** dictionary slot, `Index`, `CallIndirect` with the trailing dictionary (no receiver).
+- **Concrete `Owner::m(args)`:** the discharged instance is planned by `plan_call_site_dicts`; the call lowers to a direct MIR `Call` of the instance FQN (arguments boxed or converted at the trait boundary as for any trait method), plus the instance dictionary only when the target is the trait's default body.
+- **`T::m(args)` in a shared body:** the method is read out of the dictionary and called with `CallIndirect`, the dictionary trailing (no receiver).
 - **`T::m(args)` in a mono clone:** `mono_type_param_tys` maps `T` to its concrete type, so the clone calls that instance directly. The argument-typed lookup cannot see a return-only `T`.
 - **Generic function returning `T`:** `plan_call_site_dicts` binds scheme variables from the call's result type; `bind_scheme_vars` also matches `Result<T, E>` / `Option<T>` sums structurally.
-- A `Construct`-shaped static call is a call, not a variant: `ctor_unbox_ty`, `expr_is_construct_of`, `expr_may_clobber_operand_stack` check `tag_for` first.
+- A `Construct`-shaped static call is a call, not a variant: the HIR build checks `tag_for` before treating it as a constructor.
 
 ## Library
 
@@ -64,5 +64,5 @@ Runnable example: `examples/static_trait_method.coil`. Tests: `tests/traits/stat
 `Trait::m(args)` is the function-form call `m(args)` with only `Trait`'s `m` as a candidate, for instance and static methods alike. It names the trait, so two traits (or a trait and a free fn) sharing a method name are told apart; `m(args)` and `x.m()` keep working.
 
 - **Typechecking:** `qualified_call_trait` takes the owner as a trait only when it names no type parameter, class, enum or primitive (so `Type::assoc_fn`, `Enum::Variant` and `T::m` keep their meaning); `module::Trait` names a trait that module declares. `infer_qualified_trait_call` then runs the function form's steps restricted to the trait: a trait-object first argument, an active bound's dictionary (`bound_method_candidates` filtered to the trait), else the ground instance the argument and expected types discharge. Errors: an unknown owner is E0202, a method the trait does not declare is E0101, no instance (or more than one with nothing to choose) is E0119, and a type parameter without the trait's bound is E0119 naming the missing bound.
-- **Lowering:** the checker records the callee name in `qualified_trait_call_at`. It is the bare method, so the HIR call is the function form's own and the bytecode is identical (`coil dissect --fn`). When a free fn, local or builtin takes the bare name, it is `Trait::m` instead, which `hir_ground_ufcs` / `hir_ground_bound_call` send to the recorded instance as they do `T::m`.
+- **Lowering:** the checker records the callee name in `qualified_trait_call_at`. It is the bare method, so the HIR call is the function form's own and the MIR is identical (`coil dissect --fn`). When a free fn, local or builtin takes the bare name, it is `Trait::m` instead, which `hir_ground_ufcs` / `hir_ground_bound_call` send to the recorded instance as they do `T::m`.
 - Tests: `tests/traits/qualified_trait_calls.coil`, `tests/traits/compile_fail/qualified_trait_*.coil`.

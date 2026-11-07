@@ -247,7 +247,7 @@ pub const FS_METADATA_TYPE_ID: u32 = 0xFFFC;
 pub const FFI_STRUCT_TYPE_ID: u32 = 0xFFFB;
 
 /// First `InitTyped` id of a structural record type. Records take ids
-/// from their own range, so the VM tells a record (`==` compares its
+/// from their own range, so the runtime tells a record (`==` compares its
 /// slots) from a class instance (`==` is identity) by its id alone.
 pub const RECORD_TYPE_ID_BASE: u32 = 0x8000;
 
@@ -263,7 +263,7 @@ pub fn is_record_type_id(type_id: u32) -> bool {
         || type_id == FFI_STRUCT_TYPE_ID
 }
 
-/// Index of `type_id`'s row in the VM's dense field word kinds table:
+/// Index of `type_id`'s row in the runtime's dense field word kinds table:
 /// class ids on even rows, record ids (from [`RECORD_TYPE_ID_BASE`]) on
 /// odd rows, so neither range leaves a gap.
 pub fn type_kinds_index(type_id: u32) -> usize {

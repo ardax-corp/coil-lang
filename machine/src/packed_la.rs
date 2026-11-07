@@ -1,4 +1,4 @@
-//! Packed linear-algebra kernels invoked via [`Instruction::HostInvoke`].
+//! Packed linear-algebra kernels invoked via `HostInvoke`.
 //!
 //! Kept off the `Instruction` enum so fib/scalar dispatch matches `main`
 //! (Approach A originally appended four opcodes and regressed branch
@@ -9,13 +9,13 @@
 //! aggregates into contiguous `f64` / `i64` buffers.
 //!
 //! Int cells use exact arithmetic: a sum, product or quotient that would
-//! overflow or divide by zero is an [`IntTrap`], which the VM raises as a
+//! overflow or divide by zero is an [`IntTrap`], which the runtime raises as a
 //! panic, like the scalar ops. Dot products and matmul cells sum in index
 //! order, as the scalar loop does.
 //!
 //! **Defensive posture:** malformed handles / shape mismatches do **not**
 //! trap. Missing aggregates yield `0` (dot) or zero-filled cells
-//! (matmul/zip/neg) so the VM stays aligned with other silent-fallback
+//! (matmul/zip/neg) so the runtime stays aligned with other silent-fallback
 //! arms. Correctness for well-typed programs relies on the typechecker
 //! and codegen never emitting these kernels with bad static shapes.
 

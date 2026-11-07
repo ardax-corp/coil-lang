@@ -19,7 +19,7 @@
 //!
 //! ## MIR layout
 //!
-//! Result/Option ABI layouts for MIR→LIR (COI-270) and I1 SSA word names.
+//! Result/Option ABI layouts for MIR lowering (COI-270) and I1 SSA word names.
 //!
 //! Matches [`two_word_kind`] and
 //! `docs/internals/layout.md` (COI-92). No new pair opcodes and no
@@ -31,7 +31,7 @@
 //! Typed dense call/return ABI (COI-291 M1).
 //!
 //! Dense bodies keep `i64` / `f64` / `bool` in frame slots.
-//! A dense→dense `CALL` uses the same one-word Value layout the VM already
+//! A dense→dense `CALL` uses the same one-word Value layout the runtime already
 //! uses at CALL/RETURN — bits are typed slots, not boxed heap objects.
 //!
 //! ### Layout
@@ -54,11 +54,10 @@
 //! SSA models at most dest + `dest_hi`. N>2 is the same `ret_words` field
 //! but needs extra dests + archive encoding — not a self-vs-helper wall.
 
-use std::collections::HashMap;
 
 use super::rep::{Layout, PairKind, is_immediate, of_resolved};
 use crate::typechecking::infer::Checker;
-use crate::mir::{MirFunc, MirTy};
+use crate::mir::MirTy;
 use crate::typechecking::ty::{Ty, range_app};
 
 /// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.
@@ -111,11 +110,10 @@ pub struct CalleeFacts {
     pub coroutine: bool,
     /// A host native: one packed `HostInvoke` word.
     pub host_native: bool,
-    /// A trait instance method: a dictionary entry (`CodePtr`), unless a
-    /// definition site pinned its result's pair.
+    /// A trait instance method whose direct calls take its dictionary entry
+    /// (`CodePtr`): not raw, and no definition site pinned its result's
+    /// pair. A raw one's `$dict` adapter boxes the pair instead.
     pub instance_method: bool,
-    /// An inherent method: its parameters stay one word.
-    pub inherent_method: bool,
     /// An overloaded or generic function: its parameters stay one word
     /// (a numeric range's two words excepted).
     pub overloaded_or_generic: bool,
@@ -130,11 +128,11 @@ pub fn convention_ret(checker: &Checker, facts: &CalleeFacts, ret: &Ty) -> Optio
 }
 
 /// The two-slot form of a callee's parameter of type `ty`, if any: a
-/// numeric range, or a pair enum `enum_pair` admits. Products and
-/// readonly classes stay one boxed word (a boxed tuple would split into
-/// `[a, b]` through a temp slot above live operands).
+/// numeric range, an arity-2 immediate tuple, a two-field readonly class,
+/// or a pair enum `enum_pair` admits. MIR passes the two words as two
+/// parameters, so the caller boxes nothing.
 pub fn convention_param(checker: &Checker, facts: &CalleeFacts, ty: &Ty, enum_pair: impl Fn(&PairKind) -> bool) -> Option<PairKind> {
-    if facts.escaped || facts.instance_method || facts.inherent_method {
+    if facts.escaped || facts.instance_method {
         return None;
     }
     if let Some(kind) = two_word_range_kind(ty) {
@@ -143,7 +141,7 @@ pub fn convention_param(checker: &Checker, facts: &CalleeFacts, ty: &Ty, enum_pa
     if facts.overloaded_or_generic || facts.coroutine {
         return None;
     }
-    two_word_kind(checker, ty).filter(|kind| !matches!(kind, PairKind::Product | PairKind::Class(_)) && (matches!(kind, PairKind::Range { .. }) || enum_pair(kind)))
+    two_word_kind(checker, ty).filter(|kind| matches!(kind, PairKind::Product | PairKind::Class(_)) || enum_pair(kind))
 }
 
 #[cfg(test)]
@@ -364,7 +362,7 @@ fn shape() -> Shape {
 /// How a Result/Option (or arity-2 immediate product) crosses a call edge.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum MirLayout {
-    /// One VM `Value` (boxed `ObjEnum`, scalar, or heap niche word).
+    /// One runtime `Value` (boxed `ObjEnum`, scalar, or heap niche word).
     #[default]
     Word,
     /// Direct `CALL`/`RETURN` width 2. Enums are `[payload, tag]`; products
@@ -372,7 +370,7 @@ pub enum MirLayout {
     TwoSlot,
     /// Heap `Option<T>` (`None` = `0`) or heap-heap `Result<T,E>`
     /// (`Ok` = aligned pointer, `Err` = `pointer | 1`). Host packs at the
-    /// HostInvoke edge; LIR uses `CONST 0` / `BITAND` / `BITOR` / `LogNot`.
+    /// HostInvoke edge; native code uses `CONST 0` / `BITAND` / `BITOR` / `LogNot`.
     /// SSA names the word [`crate::mir::MirTy::NicheOpt`] vs
     /// [`crate::mir::MirTy::NicheRes`]; this variant is the shared ABI.
     HeapNiche,
@@ -518,18 +516,6 @@ mod mir_layout_tests {
     }
 }
 
-/// Extra TOS words besides the first return (`ret_words >= 2`).
-#[inline]
-pub fn is_multi_word_ret(ret_words: u32) -> bool {
-    ret_words >= 2
-}
-
-/// Width from a pair dest (`dest_hi` present → 2).
-#[inline]
-pub fn ret_words_from_hi(dest_hi: Option<impl Sized>) -> u32 {
-    if dest_hi.is_some() { 2 } else { 1 }
-}
-
 /// One-word dense callee signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DenseAbi {
@@ -539,101 +525,13 @@ pub struct DenseAbi {
     pub ret_hi: Option<MirTy>,
 }
 
-/// Entry-label id → dense ABI. Built leaf-first during specialize.
-/// Q7 self-`CALL` uses the open one-word ABI until this map records the body.
-pub type DenseCallMap = HashMap<u32, DenseAbi>;
-
 impl DenseAbi {
-    /// Word-layout params + one- or two-slot specialized return.
-    pub fn from_func(func: &MirFunc) -> Option<Self> {
-        let ret = func.ret_ty?;
-        if !ret.is_word_lane() {
-            return None;
-        }
-        let ret_hi = match func.ret_layout {
-            MirLayout::Word | MirLayout::HeapNiche => None,
-            MirLayout::TwoSlot => {
-                let hi = func.ret_hi_ty?;
-                if !hi.is_word_lane() {
-                    return None;
-                }
-                Some(hi)
-            }
-        };
-        let params: Vec<MirTy> = func.params.iter().map(|p| func.ty(*p)).collect();
-        if params.iter().any(|t| !t.is_word_lane()) {
-            return None;
-        }
-        Some(Self {
-            params,
-            ret,
-            ret_hi,
-        })
-    }
 
 }
 
 #[cfg(test)]
 mod dense_tests {
-    use super::*;
-    use crate::mir::{MirBuilder, MirConst};
+    
+    
 
-    #[test]
-    fn from_func_records_word_abi() {
-        let mut b = MirBuilder::new("leaf");
-        let x = b.add_param(MirTy::F64).unwrap();
-        let y = b.add_param(MirTy::I64).unwrap();
-        let _ = y;
-        b.set_ret_ty(MirTy::F64);
-        b.ret(Some(x)).unwrap();
-        let f = b.finish().unwrap();
-        let abi = DenseAbi::from_func(&f).expect("word abi");
-        assert_eq!(abi.params, vec![MirTy::F64, MirTy::I64]);
-        assert_eq!(abi.ret, MirTy::F64);
-    }
-
-    #[test]
-    fn from_func_accepts_heapref_word() {
-        let mut b = MirBuilder::new("href");
-        let p = b.add_param(MirTy::HeapRef).unwrap();
-        b.set_ret_ty(MirTy::HeapRef);
-        b.ret(Some(p)).unwrap();
-        let f = b.finish().unwrap();
-        let abi = DenseAbi::from_func(&f).expect("S3 HeapRef is a word lane");
-        assert_eq!(abi.params, vec![MirTy::HeapRef]);
-        assert_eq!(abi.ret, MirTy::HeapRef);
-    }
-
-    #[test]
-    fn from_func_accepts_niche_word() {
-        let mut b = MirBuilder::new("opt");
-        let p = b.add_param(MirTy::NicheOpt).unwrap();
-        b.set_ret_ty(MirTy::NicheOpt);
-        b.ret(Some(p)).unwrap();
-        let f = b.finish().unwrap();
-        let abi = DenseAbi::from_func(&f).expect("Q8 niche is a word lane");
-        assert_eq!(abi.params, vec![MirTy::NicheOpt]);
-        assert_eq!(abi.ret, MirTy::NicheOpt);
-    }
-
-    #[test]
-    fn from_func_accepts_two_slot() {
-        let mut b = MirBuilder::new("pair");
-        let lo = b.add_param(MirTy::I64).unwrap();
-        let hi = b.ins_const(MirConst::I64(1)).unwrap();
-        b.ret_pair(lo, hi).unwrap();
-        let f = b.finish().unwrap();
-        let abi = DenseAbi::from_func(&f).expect("B3 two-slot abi");
-        assert_eq!(abi.ret, MirTy::I64);
-        assert_eq!(abi.ret_hi, Some(MirTy::I64));
-    }
-
-    #[test]
-    fn modeled_ret_width_is_one_or_two() {
-        assert!(!is_multi_word_ret(1));
-        assert!(is_multi_word_ret(2));
-        assert!(is_multi_word_ret(3));
-        assert_eq!(ret_words_from_hi(None::<u8>), 1);
-        assert_eq!(ret_words_from_hi(Some(0u8)), 2);
-    }
 }

@@ -35,7 +35,7 @@ cargo build --bin coil && ./target/debug/coil test path/to/file.coil  # the test
 | Run archive | `cargo run -- run out.ccoil` |
 | Project tests | `cargo run -- test [path] [--fail-fast]` |
 
-`coil compile` always recompiles; `coil run` never recompiles. Default mode always recompiles in memory — no stale bytecode cache.
+`coil compile` always recompiles; `coil run` never recompiles. Default mode always recompiles in memory — no stale compiled output.
 
 ## File shape
 
@@ -118,7 +118,7 @@ test("addition") {
 }
 ```
 
-Body is Result mode. `raise` / failed `assert!` (stdlib `tests` macro) is a catchable `Err` (harness fails the case). `panic` aborts that VM; `coil test` also treats it as failure. Default `coil` / `coil run` / `coil-embed` exit 1 **only** on `panic` — an uncaught `raise` from `main` is `Result::Err` and exits 0. `#[test]` on `fn` is a type error.
+Body is Result mode. `raise` / failed `assert!` (stdlib `tests` macro) is a catchable `Err` (harness fails the case). `panic` aborts that run; `coil test` also treats it as failure. Default `coil` / `coil run` / `coil-embed` exit 1 **only** on `panic` — an uncaught `raise` from `main` is `Result::Err` and exits 0. `#[test]` on `fn` is a type error.
 
 ## Multi-file projects
 
@@ -141,12 +141,12 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 ## Common pitfalls
 
 1. **`main` + `test()`** — do not combine in one file.
-2. **Assuming stdlib** — no `sort` or HTTP in the VM; add [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) ([modules](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)) for collections/IO adapters/`num` constants; HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool. IEEE `sqrt`/`atan`/… are prelude math; `PI`/`E`/`TAU` are `num`.
+2. **Assuming stdlib** — no `sort` or HTTP in the runtime; add [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) ([modules](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)) for collections/IO adapters/`num` constants; HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool. IEEE `sqrt`/`atan`/… are prelude math; `PI`/`E`/`TAU` are `num`.
 3. **Missing `use`** — `io`/`string` are not auto-imported.
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `--ffi-search-path` dirs, system; `dload` needs `--allow-dload` plus `--dload-pin` / `--dload-trusted`.
 5. **Stale `out.ccoil`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/error-codes.md) (`/docs/language/error-codes`).
-7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two-slot on direct `CALL`/`RETURN` ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`.
+7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two words on a direct call and return ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`.
 8. **`raise` is not abort** — `raise` returns `Result::Err` and can be swallowed. Default `coil` / `coil run` / `coil-embed` exit 1 only on `panic`. Checksum boards must `panic`.
 
 ## Debugging programs

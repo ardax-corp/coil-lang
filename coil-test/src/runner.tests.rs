@@ -34,6 +34,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         report: Report::Human,
         doc_tests: DocTests::On,
         wall_timeout: None,
+        engine: Default::default(),
     }
 }
 
@@ -165,7 +166,7 @@ fn run_test_suite_fail_fast_stops_after_unexpected_compile_ok() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Fresh VM per case: soft-fail / panic in earlier cases must not skip later ones.
+/// Fresh runtime per case: soft-fail / panic in earlier cases must not skip later ones.
 #[test]
 fn harness_isolates_cases_and_continues_after_failures() {
     let root = unique_tmp("isolates_cases");
@@ -372,9 +373,10 @@ fn coverage_reports_project_lines() {
         "use mathx::{clamp};\n\ntest(\"clamps low\") {\n    if !(clamp(-5, 0, 10) == 0) { raise \"assertion failed\"; }\n}\n\ntest(\"passes through\") {\n    if !(clamp(5, 0, 10) == 5) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
-    for jobs in [1, 2] {
+    for (jobs, engine) in [(1, Engine::Native), (2, Engine::Native), (1, Engine::Mir), (2, Engine::Mir)] {
         let opts = TestOptions {
             jobs,
+            engine,
             extra_roots: vec![root.join("src")],
             coverage: Some(CoverageOptions {
                 lcov_out: root.join("unused.info"),
@@ -389,7 +391,7 @@ fn coverage_reports_project_lines() {
         assert_eq!(
             cov.lcov(),
             "TN:\nSF:src/mathx.coil\nDA:2,2\nDA:3,1\nDA:5,1\nDA:6,0\nDA:8,1\nDA:12,0\nDA:13,0\nLF:7\nLH:4\nend_of_record\n",
-            "jobs={jobs}"
+            "jobs={jobs} engine={engine:?}"
         );
         let json = cov.per_test_json().unwrap();
         assert!(
@@ -402,7 +404,7 @@ fn coverage_reports_project_lines() {
 
 /// A line whose code constant folding would erase (`255 as byte` only
 /// reaches the return as a constant) still counts as covered: a coverage
-/// compile keeps each line's code, in a LIR body (`top`) and in a body
+/// compile keeps each line's code, in a MIR body (`top`) and in a body
 /// with the arithmetic dense pays for (`topd`, #1494).
 #[test]
 fn coverage_keeps_a_line_folding_would_erase() {

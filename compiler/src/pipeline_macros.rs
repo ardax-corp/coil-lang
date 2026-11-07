@@ -823,7 +823,7 @@ impl Pipeline {
     fn run_expansions(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
         let started = std::time::Instant::now();
         let (results, reused) = self.run_expansions_timed(jobs);
-        crate::il::opt::note_comptime_macros(jobs.len(), reused, started.elapsed().as_micros() as u64);
+        crate::opt::note_comptime_macros(jobs.len(), reused, started.elapsed().as_micros() as u64);
         results
     }
 
@@ -987,7 +987,7 @@ impl Pipeline {
             // its own module's.
             let module = jobs[idx[0]].provider_module.clone();
             let io = self.host_grants.comptime_io_for(&module);
-            // A nested compile plus a VM run is deeper than Windows' 1 MiB
+            // A nested compile plus a runtime run is deeper than Windows' 1 MiB
             // main thread stack; continue on a fresh segment when little is left.
             let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
                 let program = match compiled_program(key, ctx) {
@@ -1372,7 +1372,7 @@ impl Pipeline {
                     .expect("target still present");
                 // After this type's earlier derive outputs, so impls keep
                 // the order the derives are listed in.
-                let done = self.derived_items.entry(job.pending.target).or_insert(0);
+                let done = self.derived_items.entry((job.file.clone(), job.pending.target)).or_insert(0);
                 let start = at + 1 + *done;
                 *done += items.len();
                 for (k, item) in items.into_iter().enumerate() {
@@ -1974,6 +1974,11 @@ thread_local! {
 /// The program for `key`, compiled on first use. Parallel pipelines wait
 /// for one compile instead of repeating it; failures are not cached.
 fn compiled_program(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, CompileFailure> {
+    crate::mir::without_native_capture(|| compiled_program_uncaptured(key, ctx))
+}
+
+/// [`compiled_program`] with the native capture closed.
+fn compiled_program_uncaptured(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, CompileFailure> {
     if COMPILING.with(|c| c.borrow().contains(&key)) {
         return ctx.compile().map(std::sync::Arc::new);
     }
@@ -2071,7 +2076,15 @@ impl SubProgram {
         sub.host_grants.comptime = self.comptime;
         sub.host_grants.comptime_io = self.comptime_io;
         sub.host_grants.comptime_cache = self.comptime_cache;
-        let (bytecode, constants) = match sub.compile_src_from_file(entry.to_str().expect("utf-8 path")) {
+        // `compiled_program` closed any outer capture: this one is the
+        // expansion program's own.
+        let capture = self.host.runs_mir().then(crate::mir::ComptimeCapture::open);
+        // The level is per thread, and the parent's compile goes on here.
+        let contracts = crate::hir::contract_level();
+        let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
+        crate::hir::set_contract_level(contracts);
+        let mir = capture.map(crate::mir::ComptimeCapture::take).unwrap_or_default();
+        let constants = match compiled {
             Ok(out) => out,
             Err(_) => {
                 let detail = sub
@@ -2105,14 +2118,14 @@ impl SubProgram {
         }
         Ok(CompiledProgram {
             expansion: crate::macros::CompiledExpansion {
-                bytecode: std::sync::Arc::new(bytecode),
                 constants: std::sync::Arc::new(constants),
                 strings: std::sync::Arc::new(sub.strings().to_vec()),
                 static_slot_count: sub.static_slot_count(),
-                operand_stack_slots: sub.operand_stack_slots(),
                 program_debug: sub.program_debug(),
                 class_word_kinds: sub.class_word_kinds(),
                 static_word_kinds: std::sync::Arc::new(sub.static_word_kinds()),
+                mir: std::sync::Arc::new(mir),
+                runnable: std::sync::OnceLock::new(),
             },
             offsets,
         })
@@ -2200,20 +2213,16 @@ fn encode_program(program: &CompiledProgram) -> Option<Vec<u8>> {
         static_slot_count: e.static_slot_count,
         constants: e.constants.to_vec(),
         strings: e.strings.to_vec(),
-        bytecode: e.bytecode.to_vec(),
         source_files: Vec::new(),
         debug_locs: Vec::new(),
         fn_symbols: Vec::new(),
         struct_layouts: Vec::new(),
-        operand_stack_slots: e.operand_stack_slots,
-        stack_maps: Vec::new(),
-        precise_frames: Vec::new(),
         class_word_kinds: e.class_word_kinds.clone(),
         static_word_kinds: e.static_word_kinds.to_vec(),
         debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
+        native_mir: program_mir(e),
+        startup: Vec::new(),
+        main: None,
     };
     archive.set_debug(e.program_debug.clone(), common::DebugLevel::Full);
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&archive).ok()?;
@@ -2252,23 +2261,32 @@ fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
     // rkyv needs the archive aligned.
     let mut aligned = rkyv::util::AlignedVec::<16>::new();
     aligned.extend_from_slice(rest);
-    let decoded = common::decode_archived_program(&aligned).ok()?;
-    let p = decoded.program;
+    let p = common::decode_archived_program(&aligned).ok()?;
     if p.version != common::ARCHIVE_VERSION {
         return None;
     }
     let program_debug = p.debug_bundle();
+    let mir = if p.native_mir.is_empty() { Vec::new() } else { crate::mir::archive::decode(&p.native_mir).ok()?.0 };
     Some(CompiledProgram {
         expansion: crate::macros::CompiledExpansion {
-            bytecode: std::sync::Arc::new(p.bytecode),
             constants: std::sync::Arc::new(p.constants),
             strings: std::sync::Arc::new(p.strings),
             static_slot_count: p.static_slot_count,
-            operand_stack_slots: p.operand_stack_slots,
             program_debug,
             class_word_kinds: p.class_word_kinds,
             static_word_kinds: std::sync::Arc::new(p.static_word_kinds),
+            mir: std::sync::Arc::new(mir),
+            runnable: std::sync::OnceLock::new(),
         },
         offsets,
     })
+}
+
+/// `e`'s bodies in the MIR archive format (empty for none).
+fn program_mir(e: &crate::macros::CompiledExpansion) -> Vec<u8> {
+    if e.mir.is_empty() {
+        return Vec::new();
+    }
+    let pcs: HashMap<String, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    crate::mir::archive::encode(&e.mir, &pcs)
 }

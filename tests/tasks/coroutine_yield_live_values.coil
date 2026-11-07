@@ -1,4 +1,4 @@
-// Coroutine bodies in direct MIR: each `yield` is one instruction the VM
+// Coroutine bodies in direct MIR: each `yield` is one instruction the engine
 // resumes after, with every live word (ints, floats, heap objects) kept in
 // the frame across it, collections between resumes included.
 use tests::assert;

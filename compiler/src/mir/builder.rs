@@ -1,7 +1,7 @@
 //! Braun-style SSA builder for the numeric subset.
 //!
-//! Locals are IL slots. Sealing a block completes incomplete φs. This is
-//! construction only — fuse-IL stays the production lowering; dense exec is P1.
+//! Locals are frame slots. Sealing a block completes incomplete φs. This is
+//! construction only.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,7 +49,7 @@ pub struct MirBuilder {
     finished: bool,
     /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
     pub allow_effects: bool,
-    /// MIR→LIR: type non-W4 HostInvoke as Value-word edges without the
+    /// MIR lowering: type non-W4 HostInvoke as Value-word edges without the
     /// map-lift shortcuts `allow_effects` enables in lowering.
     pub allow_host_edges: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
@@ -57,8 +57,13 @@ pub struct MirBuilder {
     /// Locals kept in a home ([`MirInst::HomeStore`]): each
     /// [`Self::def_local`] of one also writes its home.
     pub homed: HashMap<LocalId, u16>,
-    /// The heap words [`Self::def_local`] bound ([`MirFunc::bound_words`]).
-    bound: Vec<ValueId>,
+    /// The heap words [`Self::def_local`] bound ([`MirFunc::bound_words`]),
+    /// with their locals.
+    bound: Vec<(LocalId, ValueId)>,
+    /// The other words [`Self::def_local`] bound, with their locals.
+    unbound: Vec<(LocalId, ValueId)>,
+    /// The local each of [`Self::var_phis`] merges.
+    phi_locals: Vec<(LocalId, ValueId)>,
     /// Field names announced for the next heap field access at their slot
     /// ([`Self::note_slot_field`]): `(note, slot, bit)`.
     field_notes: Vec<(u32, u32, u64)>,
@@ -89,6 +94,8 @@ impl MirBuilder {
             pending_loc: DebugLoc::unknown(),
             homed: HashMap::new(),
             bound: Vec::new(),
+            phi_locals: Vec::new(),
+            unbound: Vec::new(),
             field_notes: Vec::new(),
             next_note: 0,
             def_count: 0,
@@ -103,7 +110,7 @@ impl MirBuilder {
 
     /// Let a call to `target` whose result the block returns be a
     /// `TailCall` ([`MirFunc::tail_targets`]).
-    pub fn allow_tail_call(&mut self, target: crate::il::Label) {
+    pub fn allow_tail_call(&mut self, target: crate::bodies::Label) {
         self.func.tail_targets.insert(target);
     }
 
@@ -159,10 +166,10 @@ impl MirBuilder {
         *self.func.slot_fields.entry(slot).or_insert(0) |= bits;
     }
 
-    /// `dest` is the low word of a pair a call returns that may carry a
-    /// heap payload ([`MirFunc::heap_pair_calls`]).
-    pub fn mark_heap_pair_call(&mut self, dest: ValueId) {
-        self.func.heap_pair_calls.insert(dest);
+    /// `dest` is the low word of a pair that may carry a heap payload: a
+    /// call's result or a parameter ([`MirFunc::heap_pair_words`]).
+    pub fn mark_heap_pair_word(&mut self, dest: ValueId) {
+        self.func.heap_pair_words.insert(dest);
     }
 
     pub fn entry(&self) -> BlockId {
@@ -188,9 +195,10 @@ impl MirBuilder {
         let b = self.cur()?;
         if self.func.ty(val).is_heap_word() {
             self.func.heap_slots.insert(local);
-            self.bound.push(val);
+            self.bound.push((local, val));
         } else {
             self.func.word_slots.insert(local);
+            self.unbound.push((local, val));
         }
         self.write_variable(local, b, val);
         self.def_count += 1;
@@ -378,7 +386,7 @@ impl MirBuilder {
             if !ok(lt) || !ok(rt) {
                 return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
             }
-            // The dense compare is a word compare, but VM `EQ` is structural
+            // The dense compare is a word compare, but `==` on objects is structural
             // (strings by content, arrays and tuples element-wise). The two
             // agree only against an integer constant such as a niche `0`.
             if !self.is_int_const(lhs) && !self.is_int_const(rhs) {
@@ -445,7 +453,7 @@ impl MirBuilder {
 
     pub fn ins_not(&mut self, src: ValueId) -> Result<ValueId, MirError> {
         let t = self.resolve_ty(src);
-        // VM `LogNot` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
+        // `!` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
         if t != MirTy::Bool && !t.is_int() && !t.is_heap_word() {
             return Err(MirError::msg(format!("lnot on {t}")));
         }
@@ -575,7 +583,7 @@ impl MirBuilder {
 
     pub fn ins_call(
         &mut self,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         args: Vec<ValueId>,
         abi: &crate::layout::DenseAbi,
     ) -> Result<(ValueId, Option<ValueId>), MirError> {
@@ -633,6 +641,31 @@ impl MirBuilder {
     /// [`Self::ins_call_indirect`] whose last `dicts` arguments are
     /// instance dictionaries a `PolyFn` callee takes.
     pub fn ins_call_indirect_dicts(&mut self, callee: ValueId, args: Vec<ValueId>, dicts: u32, ret: MirTy) -> Result<ValueId, MirError> {
+        self.call_indirect(callee, args, dicts, ret, None).map(|(dest, _)| dest)
+    }
+
+    /// [`Self::ins_call_indirect`] of a two-word result, its words typed
+    /// `lo` / `hi`: the callee's two-word twin, or the callee then
+    /// `unpair` on its one word ([`MirInst::CallIndirect`]).
+    pub fn ins_call_indirect_pair(
+        &mut self,
+        callee: ValueId,
+        args: Vec<ValueId>,
+        (lo, hi): (MirTy, MirTy),
+        unpair: crate::bodies::Label,
+    ) -> Result<(ValueId, ValueId), MirError> {
+        let (dest, h) = self.call_indirect(callee, args, 0, lo, Some((hi, unpair)))?;
+        Ok((dest, h.expect("a pair call's second word")))
+    }
+
+    fn call_indirect(
+        &mut self,
+        callee: ValueId,
+        args: Vec<ValueId>,
+        dicts: u32,
+        ret: MirTy,
+        pair: Option<(MirTy, crate::bodies::Label)>,
+    ) -> Result<(ValueId, Option<ValueId>), MirError> {
         if dicts as usize > args.len() {
             return Err(MirError::msg("CallIndirect dicts exceed args".to_string()));
         }
@@ -649,15 +682,22 @@ impl MirBuilder {
         if !ret.is_word_lane() {
             return Err(MirError::msg(format!("CallIndirect dest is {ret}")));
         }
+        if let Some((hi, _)) = pair
+            && !hi.is_word_lane()
+        {
+            return Err(MirError::msg(format!("CallIndirect second word is {hi}")));
+        }
         let dest = self.alloc(ret);
+        let pair = pair.map(|(hi, unpair)| (self.alloc(hi), unpair));
         self.push(MirInst::CallIndirect {
             dest,
             callee: self.resolve(callee),
             args,
             dicts,
+            pair,
         })?;
         self.snapshot_slots(dest);
-        Ok(dest)
+        Ok((dest, pair.map(|(h, _)| h)))
     }
 
     /// Stack-join φ for values carried across CFG edges (I2 match diamonds).
@@ -1118,7 +1158,7 @@ impl MirBuilder {
 
     /// Const string-table push (I4 / Q9 R1).
     /// `CodePtr` of the function at `target`: an `int` word.
-    pub fn ins_code_ptr(&mut self, target: crate::il::Label) -> Result<ValueId, MirError> {
+    pub fn ins_code_ptr(&mut self, target: crate::bodies::Label) -> Result<ValueId, MirError> {
         let dest = self.alloc(MirTy::I64);
         self.push(MirInst::CodePtr { dest, target })?;
         Ok(dest)
@@ -1189,7 +1229,7 @@ impl MirBuilder {
     }
 
     /// `STRINGIFY` of `src`, an immediate of static scalar type `tag`
-    /// (`ValueTag`) or, with `None`, a word the VM inspects.
+    /// (`ValueTag`) or, with `None`, a word the runtime inspects.
     pub fn ins_stringify(&mut self, src: ValueId, tag: Option<u32>) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() {
             return Err(MirError::msg("Stringify type".to_string()));
@@ -1303,12 +1343,21 @@ impl MirBuilder {
         self.rewrite_subst();
         self.finished = true;
         self.func.debug_slots = self.snapshot_debug_slots();
-        let bound: HashSet<ValueId> = self.bound.iter().chain(&self.var_phis).map(|&v| self.resolve(v)).collect();
+        let bound: HashSet<ValueId> = self.bound.iter().map(|&(_, v)| v).chain(self.var_phis.iter().copied()).map(|v| self.resolve(v)).collect();
         self.func.bound_words = bound;
+        let mut binds: Vec<(LocalId, ValueId)> = self
+            .bound
+            .iter()
+            .chain(&self.unbound)
+            .chain(&self.phi_locals)
+            .map(|&(l, v)| (l, self.resolve(v)))
+            .collect();
+        binds.sort_unstable_by_key(|&(l, v)| (l.0, v.0));
+        binds.dedup();
+        self.func.local_binds = binds;
         if self.func.has_gc_edge() {
             super::gc::fill_live_roots(&mut self.func);
         }
-        super::deopt::fill_deopt_maps(&mut self.func);
         self.func.verify().map_err(MirError::msg)?;
         Ok(self.func)
     }
@@ -1371,7 +1420,8 @@ impl MirBuilder {
         let dest_hi = match inst {
             MirInst::Call {
                 dest_hi: Some(h), ..
-            } => Some(h),
+            }
+            | MirInst::CallIndirect { pair: Some((h, _)), .. } => Some(h),
             _ => None,
         };
         let block = self.func.block_mut(b);
@@ -1426,7 +1476,7 @@ impl MirBuilder {
 
     fn read_variable_recursive(&mut self, local: LocalId, ty: MirTy, block: BlockId) -> ValueId {
         if !self.sealed[block.index()] {
-            let phi = self.make_phi(block, ty);
+            let phi = self.make_phi(local, block, ty);
             self.incomplete_phis[block.index()].push((local, phi));
             self.write_variable(local, block, phi);
             return phi;
@@ -1448,7 +1498,7 @@ impl MirBuilder {
                 v
             }
             _ => {
-                let phi = self.make_phi(block, ty);
+                let phi = self.make_phi(local, block, ty);
                 self.write_variable(local, block, phi);
                 self.add_phi_operands(local, phi, block);
                 self.resolve(phi)
@@ -1456,9 +1506,10 @@ impl MirBuilder {
         }
     }
 
-    fn make_phi(&mut self, block: BlockId, ty: MirTy) -> ValueId {
+    fn make_phi(&mut self, local: LocalId, block: BlockId, ty: MirTy) -> ValueId {
         let dest = self.alloc(ty);
         self.var_phis.insert(dest);
+        self.phi_locals.push((local, dest));
         let inst = MirInst::Phi {
             dest,
             ty,
@@ -1624,7 +1675,7 @@ mod tests {
         let x = b.add_param(MirTy::HeapRef).unwrap();
         let y = b.add_param(MirTy::HeapRef).unwrap();
         let w = b.add_param(MirTy::I64).unwrap();
-        // Two heap words (or a heap word and an unknown i64) need the VM's
+        // Two heap words (or a heap word and an unknown i64) need the runtime's
         // structural EQ: strings by content, arrays element-wise.
         assert!(b.ins_cmp(MirCmpOp::Eq, x, y).is_err());
         assert!(b.ins_cmp(MirCmpOp::Ne, w, x).is_err());
@@ -1766,7 +1817,7 @@ mod tests {
             ret: MirTy::I64,
             ret_hi: None,
         };
-        assert!(b.ins_call(crate::il::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
-        assert!(b.ins_call(crate::il::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
+        assert!(b.ins_call(crate::bodies::Label(9), vec![word], &abi(MirTy::HeapRef)).is_ok());
+        assert!(b.ins_call(crate::bodies::Label(9), vec![heap], &abi(MirTy::I64)).is_err());
     }
 }

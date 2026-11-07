@@ -1,6 +1,6 @@
 # Test health report (2026-07-18)
 
-> **Historical snapshot** — see CI for current test status. For open issues see [limitations.md](limitations.md).
+> **Historical snapshot** — see CI for current test status. For open issues see [limitations.md](limitations.md). The bytecode VM and `vm_bench.sh` it names have since been deleted.
 
 Investigation of `main` after PRs #8–#17. This document records what was
 broken, what looked flaky, incomplete implementations, and fixes applied.

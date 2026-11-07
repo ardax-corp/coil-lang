@@ -9,7 +9,7 @@ generated matrix under `tests/representation/`.
 
 **`rep(T)` is a function of the static type only.** A value of type `T`
 has the same word wherever it lives: ground code, a shared generic body, a
-per-type clone, a dictionary or closure adapter, a host call, a frame map.
+per-type clone, a dictionary or closure adapter, a host call, a native frame.
 A bare type variable `V` in a shared body holds `rep(ground T)`: the raw
 niche word for `Option<heap>` / `Result<heap, heap>`, the pointer for an
 object, the immediate for a scalar. A shared body never interprets a bare
@@ -38,13 +38,12 @@ two-slot call width).
 
 The niche and two-slot families are disjoint: a niche needs heap payloads,
 a pair an immediate one. Values are not tagged; the static type picks the
-decode (`CONST 0` / `LogNot` for Option, `BITAND` / `BITOR` / `XOR` for
-Result). No pair or niche opcode is emitted (`ReturnPair`, `PairToHeap`,
-`OptionNicheToHeap`, `HostInvokeNiche`, … are tombstones).
+decode (a compare with `0` for Option, bit operations for Result). No
+pair- or niche-specific operation exists.
 
 **GC.** A niche word is a pointer root: root marking strips bit 0 before
 `find_object_by_addr`, and `values_eq` compares the stripped words. A
-two-slot pair is two scalars, which no frame map roots.
+two-slot pair is two scalars, which are no roots.
 
 **No boxes at generic edges.** A word crosses a shared generic body, a
 dictionary entry, a closure or `PolyFn` adapter and a clone thunk as it
@@ -53,11 +52,7 @@ marks it with `Builtin::Retype` (dictionary entries and thunks) or a
 word flag (`HirCallSite::words` / `word_ret`, `HirPolyCall`,
 `HirAdaptConv::Word`, `HirDictOp::Word`), and MIR lowers it to the same
 bits retyped (`MirBuilder::ins_word` / `ins_word_as`: only a `float` or
-`bool` changes MIR type), so the compiler emits no `BoxValue` /
-`UnboxValue`. Those
-ops stay in the VM for older archives only, where they are
-representation-agnostic: boxing keeps an object as itself and unboxing
-passes a word that is no box through. `Show` of a scalar passes its type
+`bool` changes MIR type), so nothing boxes a word at an edge. `Show` of a scalar passes its type
 on `STRINGIFY`'s operand instead of boxing for the tag.
 
 ## Shared generic bodies
@@ -100,25 +95,39 @@ representation. `abi::convention_ret` / `abi::convention_param` decide it
 from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
 `instance_method`, `inherent_method`, `overloaded_or_generic`):
 
-- A *direct* `CALL` / `RETURN` of a ground callee whose address never
-  escapes moves `[payload, tag]` (or `[a, b]` for products and pair
-  classes, second word on top). `CALL` bit 31 (`Byte::CALL_RET2_BIT`) and
-  `RETURN` operand `2` mark the width; both are additive, so old archives
-  stay one word.
+- A *direct* call of a ground callee whose address never escapes moves
+  `[payload, tag]` (or `[a, b]` for products and pair classes). In MIR the
+  second word is the `Call`'s `dest_hi` and `Terminator::Return { hi }`;
+  both engines pass it beside the first (`NativeCtx::ret_hi`).
 - "Escapes" is the fail-closed whole-compile `typechecking::fn_value_escape`
   walk: any function value, partial application, `thread::spawn` or FFI
   callback of that name, in any file of the package use-graph, keeps every
   caller on the one-word ABI.
-- Coroutines, host natives and trait instance methods (dictionary entries)
-  never return two slots. Inherent methods, overloaded and generic
-  functions keep one-word parameters (a numeric range's two words
-  excepted). Products and pair classes are never two-slot parameters.
+- Coroutines and host natives never return two slots. A raw trait
+  instance method (a ground instance with no context, not a default body)
+  returns its pair to direct calls; its `$dict` adapter, which
+  dictionaries hold, boxes it. Other instance methods return one word
+  unless their definition pins the pair (`Iterator::next`,
+  `IntoIterator::into_iter`). Overloaded and generic functions and trait
+  instance methods keep one-word parameters (a numeric range's two words
+  excepted). A free function's or inherent method's two-word parameter,
+  an arity-2 immediate tuple or two-field readonly class included, is two
+  words like its result; a method's receiver stays one word. (The stack
+  VM kept these boxed: splitting a box into `[a, b]` needed a temp slot
+  above live operands, which MIR parameters do not.)
 - A local bound from a two-slot call keeps its two slots, so `match r`,
   `r?`, `return r`, `let (a, b) = r` and `r[0]` do not allocate. `?`
   compares the tag in place and shares one fail epilogue per function
   (#297, #307).
+- A call through a function value of a two-word result is a
+  `CallIndirect` with `pair` set: a lambda whose result is a pair is
+  emitted twice, its one-word body (the value's entry) and a two-word
+  twin (`MirFunc::pair_twin`), and the call enters the twin
+  (`coil_native_fn_entry_pair`). A callee without one (a named function,
+  an adapter, a runtime call) returns its box and the call reads the two
+  words through a per-type `unpair` body (`__coil_unpair_N`).
 - Everywhere a value must be one word (a field, a capture, a container
-  element, a shared body, a dictionary or closure call, `==`, `Show`) it
+  element, a shared body, a dictionary call, `==`, `Show`) it
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
   back. One pack/unpack pair serves every consumer.
 

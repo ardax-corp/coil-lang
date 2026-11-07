@@ -66,7 +66,7 @@ pub struct MirFunc {
     /// a frame word of its own, never an inline operand.
     pub debug_keep: bool,
     /// A coverage compile counts a line covered when code it emits runs:
-    /// the body takes LIR, and LIR keeps the code of each line instead of
+    /// the body keeps the code of each line instead of
     /// folding it away.
     pub keep_lines: bool,
     /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
@@ -75,7 +75,7 @@ pub struct MirFunc {
     /// objects this body makes carry no word kinds.
     pub opaque_words: bool,
     /// Locals (frame slots, for MIR lowered from HIR) a heap word was
-    /// stored in: the fuse-IL body of the same HIR keeps them there.
+    /// stored in: another body of the same HIR keeps them there.
     pub heap_slots: BTreeSet<LocalId>,
     /// Locals a non-heap word was stored in.
     pub word_slots: BTreeSet<LocalId>,
@@ -95,7 +95,7 @@ pub struct MirFunc {
     pub cleanup: Option<Box<MirFunc>>,
     /// Callees a call of this body may reach as a `TailCall` (planned tail
     /// calls of a `return`): a call to one whose result the block returns.
-    pub tail_targets: HashSet<crate::il::Label>,
+    pub tail_targets: HashSet<crate::bodies::Label>,
     /// Calls of a pure function returning one scalar word: CSE and LICM
     /// may treat them as operators that can trap.
     pub pure_calls: HashSet<ValueId>,
@@ -107,7 +107,7 @@ pub struct MirFunc {
     /// `byte_scan` reads them as byte lanes.
     pub byte_loads: HashSet<ValueId>,
     /// `Index` reads of a heap word in a forward scan: dense emission
-    /// asks the VM to prefetch the object a few elements ahead
+    /// asks the runtime to prefetch the object a few elements ahead
     /// ([`super::mark_prefetch_scans`]).
     pub prefetch_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write
@@ -129,11 +129,22 @@ pub struct MirFunc {
     /// it is rebound or the function returns, so emission zeroes past
     /// their last use only the registers of temporaries (#1650).
     pub bound_words: HashSet<ValueId>,
-    /// Low words of the pairs calls return whose enum may carry a heap
-    /// payload there (an opaque `i64`): emission zeroes them past their
-    /// last use like the payload words a match reads (#1791). A pair of
-    /// numbers (`Option<int>`) is not listed.
-    pub heap_pair_calls: HashSet<ValueId>,
+    /// The words locals were bound to, by local (each `def_local`, and the
+    /// φs merging a local's definitions). The frame holds one from its
+    /// definition until another of the same local's takes its place.
+    pub local_binds: Vec<(LocalId, ValueId)>,
+    /// `i64` words that may hold an object, which an engine roots
+    /// ambiguously: the low words of the pairs calls return, and of the pair
+    /// parameters, whose enum may carry a heap payload there, and the element
+    /// a `Vec` expansion holds across a loop ([`super::native_expand`]).
+    /// Emission zeroes a call's past their last use like the payload words a
+    /// match reads (#1791). A pair of numbers (`Option<int>`) is not listed.
+    pub heap_pair_words: HashSet<ValueId>,
+    /// This body returns a two-word result as its one word (its box), a
+    /// function value's entry; `pair_twin` is the same function taking
+    /// the same words and returning the two words. A
+    /// [`MirInst::CallIndirect`] of a two-word result enters the twin.
+    pub pair_twin: Option<crate::bodies::Label>,
 }
 
 impl MirFunc {
@@ -166,12 +177,16 @@ impl MirFunc {
     /// The function entries this body's code names: the callees of its
     /// calls, its code pointers and function values, its cleanup pad's
     /// included.
-    pub fn code_targets(&self) -> Vec<crate::il::Label> {
+    pub fn code_targets(&self) -> Vec<crate::bodies::Label> {
         use super::MirAllocKind;
         let mut out = Vec::new();
         for inst in self.blocks.iter().flat_map(|b| &b.insts) {
             match inst {
-                MirInst::Call { target, .. } | MirInst::CodePtr { target, .. } => out.push(*target),
+                MirInst::Call { target, .. }
+                | MirInst::CodePtr { target, .. }
+                | MirInst::CallIndirect {
+                    pair: Some((_, target)), ..
+                } => out.push(*target),
                 MirInst::Alloc {
                     kind:
                         MirAllocKind::Coro { target, .. }
@@ -183,6 +198,7 @@ impl MirFunc {
                 _ => {}
             }
         }
+        out.extend(self.pair_twin);
         if let Some(pad) = &self.cleanup {
             out.extend(pad.code_targets());
         }
@@ -197,6 +213,9 @@ impl MirFunc {
         }
         let renamed: Vec<ValueId> = self.bound_words.iter().map(|&v| map(v)).collect();
         self.bound_words.extend(renamed);
+        for (_, v) in &mut self.local_binds {
+            *v = map(*v);
+        }
     }
 
     pub fn new(name: impl Into<String>) -> Self {
@@ -235,7 +254,9 @@ impl MirFunc {
             slot_fields: HashMap::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
-            heap_pair_calls: HashSet::new(),
+            local_binds: Vec::new(),
+            heap_pair_words: HashSet::new(),
+            pair_twin: None,
         }
     }
 
@@ -284,30 +305,6 @@ impl MirFunc {
         self.blocks
             .iter()
             .any(|b| b.insts.iter().any(MirInst::is_gc_edge))
-    }
-
-    /// A GC edge the mapped-allocation gates count: any but a function value
-    /// (`MakeFn` / `MakePolyFn`) or a boxed carrier (`BoxValue`) and the
-    /// barrier right after it, which emit as in any body
-    /// ([`super::gates::refuses_alloc`]).
-    pub fn has_mapped_gc_edge(&self) -> bool {
-        let is_fn = |i: &MirInst| {
-            matches!(
-                i,
-                MirInst::Alloc {
-                    kind: super::inst::MirAllocKind::Fn { .. }
-                        | super::inst::MirAllocKind::PolyFn { .. }
-                        | super::inst::MirAllocKind::PolyFnCapture { .. },
-                    ..
-                }
-            )
-        };
-        self.blocks.iter().any(|b| {
-            b.insts.iter().enumerate().any(|(k, i)| {
-                let after_fn = matches!(i, MirInst::GcBarrier { .. }) && k > 0 && is_fn(&b.insts[k - 1]);
-                i.is_gc_edge() && !is_fn(i) && !after_fn
-            })
-        })
     }
 
     /// Lay the blocks out in `layout` order, numbered as they come; a
@@ -705,9 +702,17 @@ impl MirFunc {
                     return Err(format!("{dest} ffi arg is not a word lane"));
                 }
             }
-            MirInst::CallIndirect { dest, callee, args, dicts } => {
+            MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
                 if *dicts as usize > args.len() {
                     return Err(format!("{dest} CallIndirect dicts exceed args"));
+                }
+                if let Some((hi, _)) = pair {
+                    if *dicts != 0 {
+                        return Err(format!("{dest} CallIndirect pair with dictionaries"));
+                    }
+                    if !self.ty(*hi).is_word_lane() {
+                        return Err(format!("{dest} CallIndirect second word is not a word lane"));
+                    }
                 }
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} CallIndirect dest is not a word lane"));
@@ -840,6 +845,11 @@ impl MirFunc {
                 }
                 if !self.ty(*value).is_word_lane() {
                     return Err(format!("{dest} PanicStore value type"));
+                }
+            }
+            MirInst::Probe { dest, .. } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} Probe dest is not bool"));
                 }
             }
             MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {
@@ -1021,5 +1031,26 @@ impl MirFunc {
             }
         }
         Ok(())
+    }
+}
+
+/// `inst` is a planned tail call ([`MirFunc::tail_targets`]) whose result
+/// `block` returns. Any other call keeps the caller's frame, which a failed
+/// `requires` in the callee blames and a backtrace names.
+pub fn is_tail_call_inst(func: &MirFunc, block: &MirBlock, inst: &MirInst) -> bool {
+    let MirInst::Call { dest, dest_hi, target, .. } = inst else {
+        return false;
+    };
+    if !func.tail_targets.contains(target) {
+        return false;
+    }
+    match block.term {
+        Some(Terminator::Return { lo: Some(v), hi }) if v == *dest && hi == *dest_hi => {
+            matches!(
+                block.insts.last(),
+                Some(MirInst::Call { dest: d, dest_hi: h, .. }) if d == dest && h == dest_hi
+            )
+        }
+        _ => false,
     }
 }

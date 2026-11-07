@@ -4,7 +4,7 @@ description: >-
   Troubleshoot coil programs with `coil debug` (GDB-style REPL / batch scripts):
   infinite loops, hangs, wrong values, panics, unexpected call stacks. Use when
   a `.coil` program loops forever, hangs, panics, prints wrong output, or when the
-  user asks to debug, step, breakpoint, backtrace, or inspect VM state.
+  user asks to debug, step, breakpoint, backtrace, or inspect program state.
 ---
 
 # coil debug troubleshooting
@@ -13,7 +13,7 @@ Prefer **batch scripts** (`-x` + `--batch`) over interactive REPL when automatin
 `coil debug` compiles in memory — it never writes `out.ccoil`.
 
 Full command reference: [docs/internals/debugger.md](docs/internals/debugger.md).
-For bytecode/IL dumps without running: `coil dissect <file.coil> --fn <pat>`.
+For MIR dumps without running: `coil dissect <file.coil> --fn <pat>`.
 
 ## Quick start
 
@@ -34,7 +34,7 @@ cargo run --quiet -- debug path/to/prog.coil -x /tmp/coil_dbg.txt --batch
 coil debug gated.coil --allow-attach -x /tmp/coil_dbg.txt --batch
 ```
 
-Use `coil dissect` for bytecode/IL/AST dumps; use `--release` for faster runs.
+Use `coil dissect` for MIR/HIR/AST dumps; use `--release` for faster runs.
 
 ## Command cheat sheet
 
@@ -45,9 +45,9 @@ Use `coil dissect` for bytecode/IL/AST dumps; use `--release` for faster runs.
 | Stop at a line | `break file.coil:12` or `break 12` (entry file) |
 | See how you got here | `bt` |
 | See source | `list` |
-| See bytecode | `disas` / `disas fib` |
+| See MIR | `disas` / `disas fib` |
 | Inspect locals | `print n` / `print $0` / `info locals` |
-| Step | `stepi` (insn), `step` (line into), `next` (over), `finish` |
+| Step | `stepi` (one MIR op), `step` (line into), `next` (over), `finish` |
 | Resume | `continue` — clear recursive BPs first with `delete` if needed |
 | Restart | `run` |
 | Exit | `quit` |
@@ -63,7 +63,7 @@ Task:
 - [ ] 1. Identify candidate fn / loop site (source or `dissect --fn`)
 - [ ] 2. Break on entry; `run`; confirm stop
 - [ ] 3. `bt` + `list` + `print $N` — note depth / slots
-- [ ] 4. `next` or `stepi` a few times — does PC/line/slots change?
+- [ ] 4. `next` or `stepi` a few times — does the MIR op / line / locals change?
 - [ ] 5. If recursion: watch `bt` depth grow unboundedly
 - [ ] 6. Fix source; re-run the same `-x` script to confirm exit
 ```
@@ -108,7 +108,7 @@ list
 quit
 ```
 
-Compare named locals / slots to expected intermediates. Use `disas <fn>` if fusion/`BinSlot*` obscures the mapping.
+Compare named locals / slots to expected intermediates. Use `disas <fn>` to see the MIR a line became (the debugger always runs raw MIR at `-O 0`, so no pass has reordered it).
 
 ## Workflow: panic
 
@@ -148,7 +148,7 @@ quit
 4. Prefer `next` for source-level progress; use `stepi` + `disas` when line info is missing.
 5. Prefer **named** locals (`print n`, `info locals`); fall back to `$N` when a name is missing.
 6. Do not rely on `out.ccoil` for debug sessions; delete it only if mixing with normal `coil` runs.
-7. If debug cannot set a line BP, fall back to `coil dissect <file> --fn <pat>` and break on the function entry PC symbol instead.
+7. If debug cannot set a line BP, fall back to `coil dissect <file> --fn <pat>` to find the body's full name and `break` on that function instead.
 
 ## Related docs
 

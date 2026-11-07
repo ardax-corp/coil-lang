@@ -2,7 +2,7 @@
 //!
 //! Instances, payload enums, boxes, tuples, arrays and closures are
 //! bump-allocated into young slab chunks ([`super::Slab::alloc_young`]). A minor collection
-//! traces young objects from the VM roots and the remembered set (old
+//! traces young objects from the roots and the remembered set (old
 //! objects written since the last one, see the barrier in
 //! [`super::GcData`]'s `as_mut`), copies every survivor only precise words
 //! name into an old slot, rewrites those words, and resets the young chunks.
@@ -151,9 +151,9 @@ impl Heap {
                 if header.kind.get() != 0 && !header.marked.get() {
                     let obj = unsafe { Object::from_header(addr) }.expect("live held slot");
                     let bytes = obj.size();
-                    self.alloc_bytes -= bytes;
-                    debug_assert!(self.live_count > 0);
-                    self.live_count -= 1;
+                    self.counts.alloc_bytes -= bytes;
+                    debug_assert!(self.counts.live_count > 0);
+                    self.counts.live_count -= 1;
                     unsafe { obj.recycle_payload() };
                 }
             }
@@ -201,15 +201,28 @@ impl Heap {
             let tail = self.slab.chunk_slots_end(chunk);
             free.extend(slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }));
         }
-        self.young_bytes = 0;
+        self.counts.young_bytes = 0;
         self.slab.finish_young(&promoted, &[], free);
     }
 
+    /// Free the nursery's objects: only the heap's own immortals stay. A
+    /// finished job's heap has no other roots, and [`Self::collect`] does
+    /// not reach young objects. Needs an idle collector.
+    pub fn clear_young(&mut self) {
+        if !self.has_young_in_use() {
+            return;
+        }
+        let pins = self.take_gc_roots();
+        let plan = self.minor_plan(&pins, &[]);
+        self.restore_gc_roots(pins);
+        self.minor_finish(plan);
+    }
+
     /// Trace the young objects reachable from `pins` (roots that cannot be
-    /// rewritten, which pin their target), `precise` (roots the VM rewrites
+    /// rewritten, which pin their target), `precise` (roots the runtime rewrites
     /// through [`MinorPlan::forward`]) and the remembered set; copy every
     /// survivor that is not pinned and rewrite the heap's precise words to
-    /// it. The VM then rewrites its precise roots and calls
+    /// it. The runtime then rewrites its precise roots and calls
     /// [`Self::minor_finish`].
     pub fn minor_plan(&mut self, pins: &[u64], precise: &[u64]) -> MinorPlan {
         debug_assert_eq!(self.gc_phase, GcPhase::Idle, "minor collections run between cycles");
@@ -408,9 +421,9 @@ impl Heap {
                 } else {
                     dead += 1;
                     let bytes = obj.size();
-                    self.alloc_bytes -= bytes;
-                    debug_assert!(self.live_count > 0);
-                    self.live_count -= 1;
+                    self.counts.alloc_bytes -= bytes;
+                    debug_assert!(self.counts.live_count > 0);
+                    self.counts.live_count -= 1;
                     unsafe { obj.recycle_payload() };
                 }
             }
@@ -429,7 +442,7 @@ impl Heap {
             }
         }
         // Held objects count as old: only a major frees them.
-        self.young_bytes = 0;
+        self.counts.young_bytes = 0;
         self.note_survival(fwd.len() + kept, fwd.len() + kept + dead);
         self.slab.finish_young(&[], &held, Vec::new());
         fwd.len()
@@ -482,6 +495,7 @@ mod tests {
         // Tests place objects themselves: no pretenuring after a minor
         // most of the nursery survived (see the test of that below).
         heap.pretenure_bytes = 0;
+        heap.sync_inline_gate();
         moved
     }
 
@@ -590,6 +604,7 @@ mod tests {
         assert_eq!(obj.generation(), GEN_UNLOGGED, "nothing young to name: unlogged, not remembered");
         assert!(heap.find_object_by_addr(head).is_some());
         heap.pretenure_bytes = 0;
+        heap.sync_inline_gate();
         let young = cons_list(&mut heap, 1);
         assert_eq!(heap.find_object_by_addr(young).expect("young").generation(), GEN_YOUNG);
     }

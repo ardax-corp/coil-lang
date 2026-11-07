@@ -86,14 +86,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           # base-devel: GNU make + cmp for vendored libffi-sys ./configure
           install: >-
             base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-pkgconf
 
       - name: Configure pkg-config (Windows)
         if: runner.os == 'Windows'
@@ -130,10 +130,12 @@ jobs:
 
       - name: Build release binaries
         if: runner.os != 'Windows' && matrix.libc != 'musl'
-        # Two invocations: a workspace-wide build unifies helper-only `machine`
-        # features (`debugger`, `coverage`) into `coil` / `coil-embed`.
+        # Separate invocations: a workspace-wide build unifies helper-only
+        # `machine` features (`debugger`) into `coil`.
         run: |
-          cargo build --release -p coil -p coil-embed
+          cargo build --release -p coil
+          cargo build --release -p coil-embed
+          cargo build --release -p coil-rt
           cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
 
       - name: Build release binaries (musl / Alpine)
@@ -159,8 +161,10 @@ jobs:
               esac
               # Do not set +crt-static here: it forbids proc-macro dylibs
               # (bytecheck_derive / rkyv) on this target (COI-100).
-              # Split so helper-only machine features stay out of coil / coil-embed.
-              cargo build --release -p coil -p coil-embed
+              # Split so helper-only features stay out of coil.
+              cargo build --release -p coil
+              cargo build --release -p coil-embed
+              cargo build --release -p coil-rt
               cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
             '
           mkdir -p target/release
@@ -189,8 +193,10 @@ jobs:
           command -v make
           command -v cmp
           make --version | head -n 1
-          # Split so helper-only machine features stay out of coil / coil-embed.
-          cargo build --release -p coil -p coil-embed
+          # Split so helper-only features stay out of coil.
+          cargo build --release -p coil
+          cargo build --release -p coil-embed
+          cargo build --release -p coil-rt
           cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
 
       - name: Stage embed binary and toolkit archive
@@ -209,6 +215,15 @@ jobs:
             test -f "$src"
             cp "$src" "staging/coil-${triple}/${b}${ext}"
           done
+
+          # The runtime `coil package` links AOT executables against,
+          # embedded in `coil` (written to its cache on first use).
+          src="target/release/libcoil_rt.a"
+          if [[ "${{ matrix.libc }}" == "musl" ]]; then
+            src="target-musl/release/libcoil_rt.a"
+          fi
+          python="$(command -v python3 || command -v python)"
+          "$python" scripts/embed_runtime.py "staging/coil-${triple}/coil${ext}" "$src"
 
           # Standalone packaging runner (same download name as before).
           cp "target/release/coil-embed${ext}" "dist/coil-embed-${triple}${ext}"

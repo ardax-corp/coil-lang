@@ -1,6 +1,6 @@
 # Tasks
 
-Structured concurrency on one VM and one OS thread: `task::scope`,
+Structured concurrency on one runtime and one OS thread: `task::scope`,
 `Scope.spawn`, `Task.join`, `task::sleep`, `task::yield_now`. There is no
 `async` / `await`: ordinary functions that do IO (`io::sync::read_line`,
 `accept_wait`, …) work unchanged inside tasks, because an IO wait suspends
@@ -49,11 +49,11 @@ Closures passed to `spawn` share the heap: they capture locals, classes and
 
 `task` is an embedded Coil module
 ([`compiler/src/prelude/task.coil`](../../compiler/src/prelude/task.coil)), like
-`macro`. It wraps VM natives from virtual `prelude::task`
+`macro`. It wraps runtime natives from virtual `prelude::task`
 (HostInvoke **144–151**, archive minor 32, **153–155** `task_cancel` /
 `task_shield_enter` / `task_shield_exit`, archive minor 33, and **156–158**
 `task_cond_new` / `task_cond_wait` / `task_cond_notify`, archive minor 34),
-which the VM runs itself (`HostOp::Task`) because they can switch tasks.
+which the driver runs itself (`HostOp::Task`) because they can switch tasks.
 
 ## Suspension points
 
@@ -84,28 +84,29 @@ runs until it ends.
 
 **An IO wait suspends the task, never a generator it is resuming.** A
 generator yields only where its code says `yield`. Without tasks the IO wait
-parks the whole VM, also inside a generator (before T1 it yielded the
-generator with a placeholder `0`, which a `for` loop took as an element).
+blocks the thread, also inside a generator.
 
 ## Runtime
 
 [`machine/src/task.rs`](../../machine/src/task.rs) holds the scheduler state;
-[`machine/src/vm_task.rs`](../../machine/src/vm_task.rs) the switching.
+[`machine/src/driver.rs`](../../machine/src/driver.rs) the switching.
 
-- A child task is a coroutine: `spawn` wraps the closure in the module's
-  `gen fn __task_body`, which stores the result in the `Task` object. Only the
-  scheduler resumes it.
+- `spawn` wraps the closure in the module's `gen fn __task_body`, which stores
+  the result in the `Task` object. Only the scheduler runs it.
+- A child task runs on a fiber of its own; a wait suspends the fiber back to
+  the scheduler. Where there are no fibers (wasm, or `COIL_NO_FIBERS=1
+  --engine mir`) the interpreter parks the task's frames on the heap
+  ([mir-interp.md](mir-interp.md), step 7).
 - The **root task** is the code that opened the first scope. It never leaves
-  the operand stack: when it suspends, children run above its words. A child
-  that suspends is copied off the stack (its whole call chain and any
-  generators it is resuming), so at most one child is on the stack at a time.
+  its stack: where it waits, the driver runs the scheduler there until the
+  root is ready again.
 - One FIFO run queue, a timer heap, and IO waits on the scheduler's own
-  `IoReactor` (pool workers running test cases share the VM's reactor, so
+  `IoReactor` (pool workers running test cases share the runtime's reactor, so
   tasks must not take each other's tokens). With nothing ready, the scheduler
   blocks in `wait_any` until a handle is ready or the next timer is due.
 - Zero cost when unused: the scheduler exists only while a scope is open, and
-  a suspension point with no other task behaves as before (IO parks the VM,
-  sleep sleeps the thread, a join of a finished task returns at once).
+  a suspension point with no other task blocks in place (IO and sleep block
+  the thread, a join of a finished task returns at once).
 - Switches happen only at the nesting level that opened the scheduler
   (`nested_depth`); a wait inside a native callback (FFI) blocks in place.
 - Task results never sit in Rust: the task body writes them into its `Task`
@@ -115,7 +116,7 @@ generator with a placeholder `0`, which a `for` loop took as an element).
 ## Failure
 
 A panic runs the `defer`s of the frames it leaves, innermost first (the
-unwinder, below). In a child task it then fails that task, not the VM: the
+unwinder, below). In a child task it then fails that task, not the program: the
 scope is marked failed and its other unfinished children are cancelled. The
 scope returns `Err(TaskError::Panicked(msg))` once they have stopped; a
 `join` on the panicking task returns the same error, a `join` on a cancelled
@@ -140,17 +141,14 @@ as `Cancelled`. Code cannot catch it.
 
 ## Unwinding
 
-For each function with a `defer`, the compiler emits a cleanup pad after its
-code, and the archive carries a table of cleanup ranges (pc range of the
-function's own code → pad, `ProgramDebug::cleanup`, archive minor 33). Each
-`defer` statement arms a flag local when it runs, so a pad only calls the
-thunks of `defer`s that were reached. Unwinding walks the frames from the
-top: a frame with a range continues at its pad, which calls the armed thunks
-(LIFO) and ends in `unwind_resume` (HostInvoke **152**, `HostOp::Unwind`);
-that drops the frame and the walk goes on. It stops at the frame the
-execution started from (the program entry, a native callback, or the task's
-own coroutine). Stack overflow and the step budget do not unwind.
-Implementation: [`machine/src/vm_unwind.rs`](../../machine/src/vm_unwind.rs).
+A function with a `defer` has a cleanup pad, a body of its own
+(`MirFunc::cleanup`). Each `defer` statement arms a flag local when it runs,
+so a pad only calls the thunks of `defer`s that were reached. A panic hands
+each unwound frame's pad and a copy of its homes to `coil_native_defer`. Once
+the panic is reported, `Driver::run_pads` runs the pads, innermost first. A
+pad calls the armed thunks (LIFO) and ends in `unwind_resume` (HostInvoke
+**152**), which does nothing there. Code:
+[`machine/src/native.rs`](../../machine/src/native.rs) `run_pads`.
 
 A `defer` belongs to its block (RAII plan, `feature/raii`). MIR lowering
 (`compiler/src/mir/from_hir.rs`) keeps a stack of open cleanups per body:
@@ -164,16 +162,16 @@ A `for` loop over a generator it made itself (not a local, field or index)
 closes it when it leaves early: `coro_close` (HostInvoke **189**,
 `HostOp::Task`, archive 6.14) unwinds the suspended coroutine from its
 `yield`, running its armed defers, and marks it done. The loop's `break`
-and `return` paths call it; a panic that leaves the loop closes it through
-the unwinder (`Unwind.closing`). A suspended generator with an armed defer
+and `return` paths call it; a cleanup pad does not, so a panic that leaves the
+loop leaves the generator to what follows. A suspended generator with an armed defer
 is also put on the heap's finalizable list (`Heap::note_closeable`): the
 collector, and teardown at exit, close the ones nothing reaches
-(`run_coro_close`). As with a `drop`, a panic there aborts the program.
+(`Driver::close_generator`). As with a `drop`, a panic there aborts the program.
 
 Leaked streams: an `open` or `accept` that fails with `TooManyOpenFiles`
-roots its arguments, runs `gc_collect` (which closes the unreachable
-streams) and calls the native once more (`retry_after_fd_collect` in
-`machine/src/vm.rs`). The compiler's `E0148` (`compiler/src/hir/stream_lint.rs`)
+roots its arguments, collects (which closes the unreachable
+streams) and calls the native once more (`machine/src/runtime.rs`). The
+compiler's `E0148` (`compiler/src/hir/stream_lint.rs`)
 warns about a local stream that is never closed or handed on.
 
 When every task waits on another task (a join cycle) and no IO or timer can
@@ -181,7 +179,7 @@ wake one, the waiting `join` / scope end panics with `task deadlock`.
 
 ## Channels and other threads
 
-`task::channel<T>(capacity)` is a bounded FIFO between tasks of one VM. It
+`task::channel<T>(capacity)` is a bounded FIFO between tasks of one runtime. It
 is an ordinary Coil class in the `task` module (a ring of `Option<T>`), so
 values are shared, not copied. Its errors use the builtin `thread`
 `ChannelError { Closed, Empty, Full }`, the same enum `thread` channels
@@ -193,16 +191,15 @@ other task that could notify (outside a scope, or every task blocked) is a
 `task deadlock` panic.
 
 Waits on another OS thread suspend only the waiting task. Under a scheduler
-that can switch, the VM arms a thread-local *waiter* (the scheduler's
+that can switch, the runtime arms a thread-local *waiter* (the scheduler's
 `TaskWaker` and a fresh key) around every native call. A `thread` native
 that would block registers that waiter with the object it waits on (a
 channel's queue, a `JoinState`, a mutex) under the lock the other side
-takes to release it, and returns without a result; the VM then suspends
-the task at the `HostInvoke` itself, its arguments still on the stack
-(`Block::Thread`, `Wake::Retry`). The releasing thread (a `send`, a
+takes to release it, and returns without a result; the driver then suspends
+the task at that host call (`Block::Thread`, `Wake::Retry`). The releasing thread (a `send`, a
 `close`, the end of a spawned thread, an unlock) posts every registered
-key; the scheduler takes posted keys when it looks for work and runs the
-`HostInvoke` again, which now finds its value, or registers again.
+key; the scheduler takes posted keys when it looks for work and the host
+call runs again, which now finds its value, or registers again.
 
 While only threads can wake a task, the scheduler first runs queued jobs of
 the CPU pool itself (`Reactor::help_local_once`): with one worker
@@ -225,8 +222,7 @@ functions); a partial application is not sendable.
   release it.
 - On Windows the connect itself (after the lookup) still runs in place and
   blocks every task until it ends; past a full listen backlog that means the
-  server task cannot accept meanwhile. `tests/task_connect_cli.rs` (Unix
-  only) covers the backlog case. A task cancelled mid-connect leaves its
+  server task cannot accept meanwhile. A task cancelled mid-connect leaves its
   socket in a per-thread table until the same task id connects again.
 - No detached tasks, no preemption.
 - `task::timeout` reads its task through the natives instead of `join`

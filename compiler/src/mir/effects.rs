@@ -95,7 +95,7 @@ impl MirInst {
     }
 
     /// May change a word an [`MirInst::Index`] reads: an element store, or
-    /// code that may store. The VM's element ops (`StoreIndex`, its pin
+    /// code that may store. The runtime's element ops (`StoreIndex`, its pin
     /// and dense forms) write only `Object::Array` slots, and field ops
     /// (`SetField`, `DenseFieldStore`) only `Object::Instance` slots, so
     /// neither kind of store changes what a read of the other sees (#1559).

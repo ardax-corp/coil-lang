@@ -1,0 +1,28 @@
+// A job leaves nothing behind: the next one must not run `drop` on it (#2271).
+use tests::assert;
+use gc::collect;
+
+enum Conn {
+    Open(int),
+    Closed,
+}
+
+static let drops: int = 0;
+
+static let keep: Conn = Conn::Closed;
+
+impl Conn {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+
+test("a leaves one Conn alive") {
+    keep = Conn::Open(1);
+    assert!(drops == 0);
+}
+
+test("b makes no Conn, so none may drop") {
+    collect();
+    assert!(drops == 0);
+}

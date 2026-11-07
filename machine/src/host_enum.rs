@@ -6,13 +6,13 @@
 //! [`HostEnumMismatch`] (fail closed).
 //!
 //! The layout for a given invoke is the `HostInvoke` operand bits
-//! (`common::host_invoke_enum_layout`); the VM installs it for the duration
+//! (`common::host_invoke_enum_layout`); the runtime installs it for the duration
 //! of `NativeFn::invoke` via [`with_host_enum_layout`].
 
 use std::cell::Cell;
 
 use common::{
-    host_invoke_enum_layout, Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
+    Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
     HOST_ENUM_LAYOUT_RESULT_NICHE,
 };
 
@@ -36,10 +36,6 @@ pub enum HostEnumLayout {
 }
 
 impl HostEnumLayout {
-    pub fn from_operand(operand: u32) -> Self {
-        Self::from_u32(host_invoke_enum_layout(operand))
-    }
-
     /// Decode operand bits. `0` is Boxed; `1`/`2` are niches.
     ///
     /// Reserved value `3` (and any other code) maps to [`Self::Boxed`] on

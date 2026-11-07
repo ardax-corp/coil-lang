@@ -1,5 +1,5 @@
 // `int as bool` is `n != 0` and `bool as int` is `0` / `1`, on runtime
-// values in direct MIR as in the VM's casts.
+// values in direct MIR as in the interpreter's casts.
 use tests::assert;
 
 fn truthy(int n) -> bool {

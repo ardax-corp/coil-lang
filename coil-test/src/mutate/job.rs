@@ -1,6 +1,6 @@
 //! One mutant's work: compile the covering test files with the patched
 //! source and run the covering cases. Runs in this process, or in a child
-//! `coil-test` so a mutant that crashes or hangs the VM costs only itself.
+//! `coil-test` so a mutant that crashes or hangs the runtime costs only itself.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -129,7 +129,7 @@ pub fn run_in_child(exe: &Path, args: &[String], wall: Duration, job: &MutantJob
 }
 
 /// A worker that reported a verdict is taken at its word; one that died
-/// without (a VM crash, an abort) failed its cases, which kills the mutant.
+/// without (a runtime crash, an abort) failed its cases, which kills the mutant.
 pub fn classify_exit(status: ExitStatus, out: &str, job: &MutantJob) -> Verdict {
     if let Some(verdict) = parse_verdict(out) {
         return verdict;

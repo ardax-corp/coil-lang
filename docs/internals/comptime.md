@@ -1,8 +1,9 @@
 # Comptime: code that runs while compiling
 
 Coil runs code while it compiles in a few forms. All of them use one
-compile-time VM (`MacroHost`, installed by `comptime::install()`), the same
-limits and the same IO grants. This page maps the forms and the stages and
+compile-time host (`MacroHost`, installed by `comptime::install()`) that runs
+MIR on the interpreter ([MIR interpreter](mir-interp.md)), the same limits and
+the same IO grants. This page maps the forms and the stages and
 links to the details, most of which are in [Macros](macros.md).
 
 Design: the Claude Doc "Coil comptime: compile-time code with IO" (rev 11,
@@ -31,7 +32,7 @@ expansion round ([Pipeline stage](macros.md#pipeline-stage)).
    turns `comptime e` and value blocks into hidden consts.
 2. Expansion rounds (`Pipeline::expand_user_macros`). Macro calls and
    top-level blocks are grouped into expansion programs, which are compiled by
-   a sub-pipeline and run on the VM. Their output is spliced in, and the
+   a sub-pipeline and run on the interpreter. Their output is spliced in, and the
    hoisting runs again on it. A round's output may hold more macro calls
    and macro declarations, so rounds repeat until nothing is pending (at most
    `MAX_ROUNDS`).
@@ -39,7 +40,7 @@ expansion round ([Pipeline stage](macros.md#pipeline-stage)).
    pure, or have IO its module was granted (E0134 otherwise). A const that
    only opens a process handle (`stdout()`, `declare(…)`) is computed at
    startup instead.
-4. `compute_consts`. Every const runs in setup order on one VM. The values
+4. `compute_consts`. Every const runs in setup order on the interpreter. The values
    become one `RestoreSnapshot`, and pure calls are folded at `-O2`+. A
    const whose value exists only at run time (a function value, a handle)
    keeps its startup initializer.
@@ -64,7 +65,7 @@ stopped, a lower bound). A call that panics stays quiet, and calls inside a
 the initializer.
 
 `--fold-calls off` (on `coil`, `coil compile`, `coil dissect` and
-`coil test`) turns call folding off. Benchmarks of the VM build with it, since a
+`coil test`) turns call folding off. Benchmarks build with it, since a
 benchmark's `main` is often one pure call with constant arguments.
 
 Details: [Compile-time host](macros.md#compile-time-host).
