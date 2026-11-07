@@ -20467,13 +20467,31 @@ impl Checker {
                 let fields = self.class_fields(key)?;
                 let tails = self.class_flat_tails(key);
                 let flat = |ty: &Ty| crate::layout::pair_word_kinds(self, ty).unwrap_or([common::WORD_UNKNOWN; 2]);
+                // A flat field's first word whose payload is a pointer only
+                // under some tags is tagged by its tail slot: (slot, mask).
+                let mut tagged = Vec::new();
                 let mut kinds: Vec<u8> = fields
                     .iter()
                     .zip(&tails)
-                    .map(|((_, ty), tail)| if tail.is_some() { flat(ty)[0] } else { crate::layout::word_kind(self, ty) })
+                    .map(|((_, ty), tail)| match tail {
+                        Some(tail) if flat(ty)[0] == common::WORD_UNKNOWN => {
+                            match (u16::try_from(*tail), crate::layout::pair_pointer_tags(self, ty)) {
+                                (Ok(slot), Some(mask)) => {
+                                    tagged.push((slot, mask));
+                                    common::WORD_TAGGED
+                                }
+                                _ => common::WORD_UNKNOWN,
+                            }
+                        }
+                        Some(_) => flat(ty)[0],
+                        None => crate::layout::word_kind(self, ty),
+                    })
                     .collect();
                 // A flat field's second word, in its tail slot.
                 kinds.extend(fields.iter().zip(&tails).filter(|(_, t)| t.is_some()).map(|((_, ty), _)| flat(ty)[1]));
+                for (slot, mask) in tagged {
+                    common::push_tagged_entry(&mut kinds, slot, mask);
+                }
                 Some(common::ClassWordKinds { type_id, kinds })
             })
             .chain(self.record_type_ids.iter().map(|((_, kinds), &type_id)| common::ClassWordKinds { type_id, kinds: kinds.clone() }))
