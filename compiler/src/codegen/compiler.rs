@@ -4784,6 +4784,24 @@ impl Compiler {
     /// True when `name` is used as a function value anywhere we can see.
     /// Whole-program seed wins when present; the per-file sidecar is the
     /// single-module fallback and a fail-closed extra union.
+    /// Whether a value of named function `name` can target a one-word
+    /// adapter (`name$value`, [`Self::fn_value_target`]) so the function
+    /// itself returns two words to its direct calls: a plain free function,
+    /// not overloaded, generic, a coroutine or a method, and never
+    /// partially applied (a partial's closure calls it directly).
+    pub(super) fn fn_value_redirects(&self, name: &str) -> bool {
+        let lookup = strip_overload_key(name);
+        lookup == name
+            && !name.contains("::")
+            && !self.checker.is_overloaded(name)
+            && !self.checker.is_generic_fn(name)
+            && !self.coroutine_fns.contains(name)
+            && !is_instance_method_fqn(&self.checker, name)
+            && !self.ident_is_host_native(name)
+            && self.fn_arities.get(name).is_some_and(|&(_, rest)| !rest)
+            && self.checker.fn_param_tys(name).is_some_and(|p| (0..p.len()).all(|argc| !self.is_fn_value_escaped(&format!("{name}#{argc}"))))
+    }
+
     fn is_fn_value_escaped(&self, name: &str) -> bool {
         let short = name.rsplit("::").next().unwrap_or(name);
         if let Some(set) = &self.fn_value_escaped_program
@@ -4886,7 +4904,8 @@ impl Compiler {
         // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
         let facts = crate::layout::CalleeFacts {
             coroutine: self.coroutine_fns.contains(name),
-            escaped: self.is_fn_value_escaped(name),
+            // A value of it targets its one-word adapter instead.
+            escaped: self.is_fn_value_escaped(name) && !self.fn_value_redirects(name),
             instance_method: is_instance_method_fqn(&self.checker, name) && !self.instance_method_fqn_raw(name),
             host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
             ..crate::layout::CalleeFacts::default()

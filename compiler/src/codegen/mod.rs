@@ -595,6 +595,10 @@ pub struct Compiler {
     /// type: name and entry, emitted after the body that first needs one.
     hir_unpairs: HashMap<String, crate::bodies::Label>,
     hir_unpair_tail: Vec<(String, crate::typechecking::Ty, crate::bodies::Label)>,
+    /// A named function's value entry (`f$value`, its one-word adapter,
+    /// [`Compiler::fn_value_target`]) still to emit: the function's name
+    /// and the adapter's.
+    hir_value_adapter_tail: Vec<(String, String)>,
     /// Closure adapters ([`Compiler::hir_fn_adapter`]) by unboxed tags,
     /// and those still to emit after the current body.
     hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<crate::layout::ValueLayout>), crate::bodies::Label>,
@@ -821,6 +825,7 @@ impl Default for Compiler {
             hir_lambda_tail: Vec::new(),
             hir_unpairs: HashMap::new(),
             hir_unpair_tail: Vec::new(),
+            hir_value_adapter_tail: Vec::new(),
             hir_fn_adapters: HashMap::new(),
             hir_adapter_tail: Vec::new(),
             hir_closure_adapters: HashMap::new(),

@@ -340,7 +340,7 @@ struct HirPlan {
     consts: HashMap<u32, crate::const_fold::ConstValue>,
     /// Each named function read as a value, by node: its entry offset,
     /// arity and rest flag for `MakeFn`.
-    fn_refs: HashMap<u32, (usize, u32, bool)>,
+    fn_refs: HashMap<u32, (usize, u32, bool, String)>,
     /// Each generic function read as a `PolyFn` value, by node: its
     /// resolved name (`MakePolyFn` / `MakePolyFnCapture`).
     polyfns: HashMap<u32, String>,
@@ -8740,7 +8740,7 @@ impl Compiler {
     /// A monomorphic, non-overloaded function already emitted, read as a
     /// value: `compile_identifier_into`'s `MakeFn` (a later function has
     /// no entry offset yet, so it stays AST).
-    fn hir_global_fn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(usize, u32, bool)> {
+    fn hir_global_fn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(usize, u32, bool, String)> {
         if name.contains("::") {
             return None;
         }
@@ -8775,7 +8775,7 @@ impl Compiler {
         }
         let entry = *self.functions.get(&resolved)?;
         let (arity, rest) = self.fn_arities.get(&resolved).copied()?;
-        Some((entry, arity, rest))
+        Some((entry, arity, rest, resolved))
     }
 
     /// E0127: a generic function with a type parameter nested in its
@@ -10534,9 +10534,17 @@ impl Compiler {
     /// first slots, then the parameters. Its direct MIR takes the captures
     /// as its first parameters. Lambdas inside one follow it.
     pub(super) fn flush_hir_lambdas(&mut self) {
-        while !self.hir_lambda_tail.is_empty() || !self.hir_adapter_tail.is_empty() || !self.hir_closure_adapter_tail.is_empty() || !self.hir_unpair_tail.is_empty() {
+        while !self.hir_lambda_tail.is_empty()
+            || !self.hir_adapter_tail.is_empty()
+            || !self.hir_closure_adapter_tail.is_empty()
+            || !self.hir_unpair_tail.is_empty()
+            || !self.hir_value_adapter_tail.is_empty()
+        {
             for lam in std::mem::take(&mut self.hir_lambda_tail) {
                 self.hir_lambda_fn(lam);
+            }
+            for (name, adapter) in std::mem::take(&mut self.hir_value_adapter_tail) {
+                self.fn_value_adapter_fn(&name, &adapter);
             }
             for (name, ty, label) in std::mem::take(&mut self.hir_unpair_tail) {
                 self.hir_unpair_fn(name, ty, label);
@@ -10552,6 +10560,59 @@ impl Compiler {
         // another buffer.
         self.hir_fn_adapters.clear();
         self.hir_closure_adapters.clear();
+    }
+
+    /// The entry a value of named function `name` targets: the function
+    /// itself, or, when it returns two words to its direct calls
+    /// ([`Compiler::fn_value_redirects`]), its one-word adapter `name$value`
+    /// (reserved now, emitted after the body), whose two-word twin is the
+    /// function.
+    pub(super) fn fn_value_target(&mut self, name: &str, label: IlLabel) -> IlLabel {
+        if !self.fn_value_redirects(name) || self.two_word_return_kind(name).is_none() {
+            return label;
+        }
+        let adapter = format!("{name}$value");
+        if !self.fn_entry_labels.contains_key(&adapter) {
+            self.reserve_function_entry(adapter.clone());
+            self.hir_value_adapter_tail.push((name.to_string(), adapter.clone()));
+        }
+        self.fn_entry_labels[&adapter]
+    }
+
+    /// [`Self::fn_value_target`]'s adapter: its parameters passed on to
+    /// `name` as they come, its two-word result boxed to the one word a
+    /// function value returns; `name` is its twin.
+    fn fn_value_adapter_fn(&mut self, name: &str, adapter: &str) {
+        use crate::hir::LocalKind;
+        use crate::hir::synth::Synth;
+        let (Some(params), Some(ret)) = (self.checker.fn_param_tys(name), self.checker.fn_return_ty(name)) else {
+            self.bind_function_entry(adapter.to_string());
+            self.missing_call_target(name, 0..0);
+            return;
+        };
+        let mut b = Synth::new(&self.checker, adapter, ret.clone());
+        let args = params
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| {
+                let local = b.local(&format!("arg{i}"), ty.clone(), LocalKind::Param);
+                b.read(local)
+            })
+            .collect();
+        let value = b.call(name, args, ret);
+        let r = b.ret(value);
+        let root = b.block(vec![r], None, crate::typechecking::ty::never());
+        let hir = b.finish(root);
+        let prev = self.compiling_two_word_enum.take();
+        self.pin_two_word_return_kind(adapter, None);
+        self.emit_synth_fn(adapter, &hir, HashMap::new());
+        self.compiling_two_word_enum = prev;
+        if let (Some(&entry), Some(&twin)) = (self.fn_entry_labels.get(adapter), self.fn_entry_labels.get(name)) {
+            self.bodies.set_pair_twin(entry, twin);
+        }
+        if let Some(&arity) = self.fn_arities.get(name) {
+            self.fn_arities.insert(adapter.to_string(), arity);
+        }
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {

@@ -593,8 +593,9 @@ impl Compiler {
                     }
                 }
             }
-            HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
+            HirKind::Global { .. } if let Some((entry, arity, rest, name)) = emit.plan.fn_refs.get(&id.0).cloned() => {
                 if let Some(target) = self.bodies.entry_label_for_offset(entry) {
+                    let target = self.fn_value_target(&name, target);
                     let operand = make_fn_operand(0, 0, arity, rest);
                     t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), dicts: Vec::new() });
                 }
