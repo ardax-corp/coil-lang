@@ -641,6 +641,31 @@ impl MirBuilder {
     /// [`Self::ins_call_indirect`] whose last `dicts` arguments are
     /// instance dictionaries a `PolyFn` callee takes.
     pub fn ins_call_indirect_dicts(&mut self, callee: ValueId, args: Vec<ValueId>, dicts: u32, ret: MirTy) -> Result<ValueId, MirError> {
+        self.call_indirect(callee, args, dicts, ret, None).map(|(dest, _)| dest)
+    }
+
+    /// [`Self::ins_call_indirect`] of a two-word result, its words typed
+    /// `lo` / `hi`: the callee's two-word twin, or the callee then
+    /// `unpair` on its one word ([`MirInst::CallIndirect`]).
+    pub fn ins_call_indirect_pair(
+        &mut self,
+        callee: ValueId,
+        args: Vec<ValueId>,
+        (lo, hi): (MirTy, MirTy),
+        unpair: crate::bodies::Label,
+    ) -> Result<(ValueId, ValueId), MirError> {
+        let (dest, h) = self.call_indirect(callee, args, 0, lo, Some((hi, unpair)))?;
+        Ok((dest, h.expect("a pair call's second word")))
+    }
+
+    fn call_indirect(
+        &mut self,
+        callee: ValueId,
+        args: Vec<ValueId>,
+        dicts: u32,
+        ret: MirTy,
+        pair: Option<(MirTy, crate::bodies::Label)>,
+    ) -> Result<(ValueId, Option<ValueId>), MirError> {
         if dicts as usize > args.len() {
             return Err(MirError::msg("CallIndirect dicts exceed args".to_string()));
         }
@@ -657,15 +682,22 @@ impl MirBuilder {
         if !ret.is_word_lane() {
             return Err(MirError::msg(format!("CallIndirect dest is {ret}")));
         }
+        if let Some((hi, _)) = pair
+            && !hi.is_word_lane()
+        {
+            return Err(MirError::msg(format!("CallIndirect second word is {hi}")));
+        }
         let dest = self.alloc(ret);
+        let pair = pair.map(|(hi, unpair)| (self.alloc(hi), unpair));
         self.push(MirInst::CallIndirect {
             dest,
             callee: self.resolve(callee),
             args,
             dicts,
+            pair,
         })?;
         self.snapshot_slots(dest);
-        Ok(dest)
+        Ok((dest, pair.map(|(h, _)| h)))
     }
 
     /// Stack-join φ for values carried across CFG edges (I2 match diamonds).
@@ -1388,7 +1420,8 @@ impl MirBuilder {
         let dest_hi = match inst {
             MirInst::Call {
                 dest_hi: Some(h), ..
-            } => Some(h),
+            }
+            | MirInst::CallIndirect { pair: Some((h, _)), .. } => Some(h),
             _ => None,
         };
         let block = self.func.block_mut(b);

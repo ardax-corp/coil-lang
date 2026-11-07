@@ -198,13 +198,19 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::CallIndirect { dest, callee, args, dicts } => {
-            write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?;
+        MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
+            match pair {
+                Some((hi, _)) => write!(f, "{dest}, {hi} = callind.{} {callee}", func.ty(*dest))?,
+                None => write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?,
+            }
             for a in args {
                 write!(f, ", {a}")?;
             }
             if *dicts != 0 {
                 write!(f, " dicts {dicts}")?;
+            }
+            if let Some((_, unpair)) = pair {
+                write!(f, " unpair {}", unpair.0)?;
             }
             Ok(())
         }
@@ -461,7 +467,7 @@ impl<'a> Parser<'a> {
         };
         self.expect('=')?;
         let op = self.ident_dots()?;
-        if dest_hi.is_some() && !op.starts_with("call.") {
+        if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") {
             return Err(ParseError("pair dest is call-only".into()));
         }
         if let Some(rest) = op.strip_prefix("iconst.") {
@@ -819,8 +825,17 @@ impl<'a> Parser<'a> {
                 args.push(self.value()?);
             }
             let dicts = if self.eat_str("dicts") { self.uint()? as u32 } else { 0 };
+            let unpair = if self.eat_str("unpair") { Some(crate::bodies::Label(self.uint()? as u32)) } else { None };
             ensure_ty(types, dest, ty);
-            return Ok(MirInst::CallIndirect { dest, callee, args, dicts });
+            let pair = match (dest_hi, unpair) {
+                (Some(hi), Some(unpair)) => {
+                    ensure_ty(types, hi, MirTy::I64);
+                    Some((hi, unpair))
+                }
+                (None, None) => None,
+                _ => return Err(ParseError("callind pair".into())),
+            };
+            return Ok(MirInst::CallIndirect { dest, callee, args, dicts, pair });
         }
         if let Some(ty_s) = op.strip_prefix("call.") {
             let ty = MirTy::parse(ty_s).ok_or_else(|| ParseError(op.clone()))?;

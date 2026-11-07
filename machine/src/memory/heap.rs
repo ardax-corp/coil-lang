@@ -2096,6 +2096,22 @@ impl Heap {
         unsafe { Object::from_header(addr) }
     }
 
+    /// The function object at `addr`, for a word whose static type is a
+    /// function (a code offset or an `ObjFn`): a range check and the
+    /// header kind, without [`Self::find_object_by_addr`]'s slot search,
+    /// which a typed word does not need. `None` for anything else.
+    #[inline]
+    pub fn fn_at(&self, addr: u64) -> Option<Gc<ObjFn>> {
+        if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
+            return None;
+        }
+        // SAFETY: the slab's range stays mapped and a function value's
+        // word is a slot start; a header kind is read either way.
+        let header = unsafe { &*(addr as *const GcHeader) };
+        // Kind 12 is `Object::Fn` (see `Object::from_header`).
+        (header.kind.get() == 12).then(|| unsafe { Gc::from_addr(addr) })
+    }
+
     /// Classify a raw payload / field word as an object or an immediate.
     #[cfg(test)]
     pub(crate) fn member_of(&self, v: Value) -> Member {

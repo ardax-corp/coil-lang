@@ -259,6 +259,9 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
             bytes[at + 9] = u8::from(plan.runtime_reach.contains(&i));
             bytes[at + std::mem::offset_of!(machine::native::AotEntry, generator)] = u8::from(is_generator(&body.mir));
             bytes[at + std::mem::offset_of!(machine::native::AotEntry, cleanup)] = u8::from(body.mir.cleanup.is_some());
+            let twin = twin_of(bodies, body_ids, &plan, i);
+            let off = std::mem::offset_of!(machine::native::AotEntry, twin);
+            bytes[at + off..at + off + 4].copy_from_slice(&twin.to_le_bytes());
             relocs.push((at + std::mem::offset_of!(machine::native::AotEntry, entry), ids.entry[&i]));
         }
         let count = bytes.len() / ENTRY_BYTES;
@@ -492,7 +495,8 @@ fn jit_once(
         let reads = plan.used_params.get(&i).copied().unwrap_or(body.mir.params.len()) as u16;
         let generator = is_generator(&body.mir);
         let cleanup = body.mir.cleanup.is_some();
-        let native = NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.runtime_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0 };
+        let twin = twin_of(bodies, body_ids, &plan, i);
+        let native = NativeEntry { pc, arity: body.mir.params.len() as u16, suspends: plan.runtime_reach.contains(&i), reads, ret_words, generator, cleanup, entry, data: 0, twin };
         entries.push(native);
         entry_funcs.push(image::Entry { func: ids.entry[&i], entry: native });
     }
@@ -501,6 +505,19 @@ fn jit_once(
         image::encode(image::Parts { module: &module, reserve, recorder, maps: &maps, entries: &entry_funcs, sites: &sites, compiled: &compiled })
     });
     Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites, image, keep: Code::keep(module, mapped) }))
+}
+
+/// [`NativeEntry::twin`] of body `i`: one past its two-word twin's entry
+/// id when the twin compiled and returns two words, else `0`.
+fn twin_of(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, plan: &Plan, i: usize) -> u32 {
+    let Some(t) = bodies[i].mir.pair_twin.and_then(|l| plan.by_label.get(&l).copied()) else {
+        return 0;
+    };
+    let twin = &bodies[t];
+    if !plan.compile.contains(&t) || twin.mir.ret_hi_ty.is_none() || twin.mir.params.len() != bodies[i].mir.params.len() {
+        return 0;
+    }
+    body_ids.get(&twin.name).map_or(0, |&pc| pc + 1)
 }
 
 /// Address space to reserve for the code and data of `plan`'s bodies: far
@@ -1148,11 +1165,20 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(dest)?;
                         need(src)?;
                     }
-                    MirInst::CallIndirect { dest, callee, args, .. } => {
+                    MirInst::CallIndirect { dest, callee, args, pair, .. } => {
                         need(dest)?;
                         need(callee)?;
                         for a in args {
                             need(a)?;
+                        }
+                        // A two-word result reads the callee's one word
+                        // through `unpair` when it has no twin.
+                        if let Some((hi, unpair)) = pair {
+                            need(hi)?;
+                            let Some(&un) = by_label.get(unpair) else {
+                                return Err("call to an unknown body".into());
+                            };
+                            callees.push(un);
                         }
                     }
                     MirInst::ResumeCoro { dest, handle, send } => {
@@ -1306,6 +1332,7 @@ struct Ids {
     view: FuncId,
     str_view: FuncId,
     fn_entry: FuncId,
+    fn_entry_pair: FuncId,
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
@@ -1456,6 +1483,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let view = module.declare_function("coil_native_view", Linkage::Import, &s3).map_err(e)?;
     let str_view = module.declare_function("coil_native_str_view", Linkage::Import, &s2).map_err(e)?;
     let fn_entry = module.declare_function("coil_native_fn_entry", Linkage::Import, &s5).map_err(e)?;
+    let fn_entry_pair = module.declare_function("coil_native_fn_entry_pair", Linkage::Import, &s5).map_err(e)?;
     let mut s1v = module.make_signature();
     s1v.params.push(AbiParam::new(types::I64));
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
@@ -1510,6 +1538,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         view,
         str_view,
         fn_entry,
+        fn_entry_pair,
         cow,
         cow_field,
         alloc,
@@ -1600,6 +1629,7 @@ struct Lower<'a> {
     view: FuncRef,
     str_view: FuncRef,
     fn_entry: FuncRef,
+    fn_entry_pair: FuncRef,
     /// [`entry_signature`], for a call of a body's entry by address.
     entry_sig: cranelift_codegen::ir::SigRef,
     cow: FuncRef,
@@ -1719,7 +1749,7 @@ impl<'a> Lower<'a> {
         // quadratic in the program.
         let mut module_refs = HashMap::new();
         for inst in body.blocks.iter().flat_map(|b| &b.insts) {
-            if let MirInst::Call { target, .. } = inst
+            if let MirInst::Call { target, .. } | MirInst::CallIndirect { pair: Some((_, target)), .. } = inst
                 && let Some(&i) = by_label.get(target)
                 && let Some(&id) = ids.imp.get(&i)
             {
@@ -1737,6 +1767,7 @@ impl<'a> Lower<'a> {
         let view = module.declare_func_in_func(ids.view, func);
         let str_view = module.declare_func_in_func(ids.str_view, func);
         let fn_entry = module.declare_func_in_func(ids.fn_entry, func);
+        let fn_entry_pair = module.declare_func_in_func(ids.fn_entry_pair, func);
         let entry_sig = func.import_signature(entry_signature(module));
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
@@ -1794,6 +1825,7 @@ impl<'a> Lower<'a> {
             view,
             str_view,
             fn_entry,
+            fn_entry_pair,
             entry_sig,
             cow,
             cow_field,
@@ -2752,7 +2784,7 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(join);
                 self.view_of(f, *dest);
             }
-            MirInst::CallIndirect { dest, callee, args, dicts } => {
+            MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
                 let c = self.get(f, *callee);
                 let c = self.coerce(c, types::I64);
                 let p = self.words_slot(f, args);
@@ -2765,18 +2797,40 @@ impl<'a> Lower<'a> {
                 // through the runtime.
                 let values = args.len().saturating_sub(*dicts as usize);
                 let nv = self.b.ins().iconst(types::I64, values as i64);
-                let out = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                // A two-word call's helper also writes whether it gave the
+                // twin, past the words.
+                let out_slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
                     cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                    (machine::native::FN_ENTRY_WORDS * 8) as u32,
+                    ((machine::native::FN_ENTRY_WORDS + usize::from(pair.is_some())) * 8) as u32,
                     3,
                 ));
-                let out = self.b.ins().stack_addr(types::I64, out, 0);
-                let ec = self.b.ins().call(self.fn_entry, &[self.ctx, c, p, nv, out]);
+                let out = self.b.ins().stack_addr(types::I64, out_slot, 0);
+                let helper = if pair.is_some() { self.fn_entry_pair } else { self.fn_entry };
+                let ec = self.b.ins().call(helper, &[self.ctx, c, p, nv, out]);
                 let entry = self.b.inst_results(ec)[0];
                 let (direct, slow, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
                 self.b.append_block_param(join, types::I64);
+                // A two-word result: the twin's words join `both`; a one-word
+                // result reaches `join` and goes through `unpair`.
+                let both = pair.map(|_| {
+                    let both = self.b.create_block();
+                    self.b.append_block_param(both, types::I64);
+                    self.b.append_block_param(both, types::I64);
+                    both
+                });
                 self.b.ins().brif(entry, direct, &[], slow, &[]);
                 self.b.switch_to_block(direct);
+                if let Some(both) = both {
+                    let (twin, canon) = (self.b.create_block(), self.b.create_block());
+                    let bit = self.b.ins().stack_load(types::I64, types::I64, out_slot, (machine::native::FN_ENTRY_WORDS * 8) as i32);
+                    self.b.ins().brif(bit, twin, &[], canon, &[]);
+                    self.b.switch_to_block(twin);
+                    let call = self.b.ins().call_indirect(self.entry_sig, entry, &[self.ctx, out]);
+                    let lo = self.b.inst_results(call)[0];
+                    let hi = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, machine::native::NATIVE_CTX_RET_HI);
+                    self.b.ins().jump(both, &[lo.into(), hi.into()]);
+                    self.b.switch_to_block(canon);
+                }
                 let call = self.b.ins().call_indirect(self.entry_sig, entry, &[self.ctx, out]);
                 let w = self.b.inst_results(call)[0];
                 self.b.ins().jump(join, &[w.into()]);
@@ -2787,12 +2841,43 @@ impl<'a> Lower<'a> {
                 self.b.ins().jump(join, &[w.into()]);
                 self.b.switch_to_block(join);
                 let w = self.b.block_params(join)[0];
+                let words = match (pair, both) {
+                    (Some((_, unpair)), Some(both)) => {
+                        // `unpair` reads the two words from the one.
+                        let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                        self.bail_if(flag, TRAP_HELPER);
+                        let callee = *self.by_label.get(unpair).ok_or("unknown unpair body")?;
+                        let fref = *self.module_refs.get(&callee).ok_or("unpair body not compiled")?;
+                        let sig = self.b.func.dfg.ext_funcs[fref].signature;
+                        let params: Vec<Type> = self.b.func.dfg.signatures[sig].params.iter().map(|p| p.value_type).collect();
+                        let mut vals = vec![self.ctx];
+                        for (i, &want) in params[1..].iter().enumerate() {
+                            let x = if i == 0 { w } else { self.b.ins().iconst(types::I64, 0) };
+                            vals.push(self.coerce(x, want));
+                        }
+                        let call = self.b.ins().call(fref, &vals);
+                        let results = self.b.inst_results(call).to_vec();
+                        let (lo, hi) = (results[0], *results.get(1).ok_or("unpair body returns one word")?);
+                        let (lo, hi) = (self.coerce(lo, types::I64), self.coerce(hi, types::I64));
+                        self.b.ins().jump(both, &[lo.into(), hi.into()]);
+                        self.b.switch_to_block(both);
+                        let ps = self.b.block_params(both);
+                        Some((ps[0], ps[1]))
+                    }
+                    _ => None,
+                };
                 self.pop_call(prev);
                 self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.drop_views();
-                self.set_word(f, *dest, w);
+                match (words, pair) {
+                    (Some((lo, hi)), Some((h, _))) => {
+                        self.set(f, *dest, lo);
+                        self.set(f, *h, hi);
+                    }
+                    _ => self.set_word(f, *dest, w),
+                }
                 self.view_of(f, *dest);
             }
             MirInst::ResumeCoro { dest, handle, send } => {

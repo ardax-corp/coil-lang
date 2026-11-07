@@ -110,11 +110,10 @@ pub struct CalleeFacts {
     pub coroutine: bool,
     /// A host native: one packed `HostInvoke` word.
     pub host_native: bool,
-    /// A trait instance method: a dictionary entry (`CodePtr`), unless a
-    /// definition site pinned its result's pair.
+    /// A trait instance method whose direct calls take its dictionary entry
+    /// (`CodePtr`): not raw, and no definition site pinned its result's
+    /// pair. A raw one's `$dict` adapter boxes the pair instead.
     pub instance_method: bool,
-    /// An inherent method: its parameters stay one word.
-    pub inherent_method: bool,
     /// An overloaded or generic function: its parameters stay one word
     /// (a numeric range's two words excepted).
     pub overloaded_or_generic: bool,
@@ -129,11 +128,11 @@ pub fn convention_ret(checker: &Checker, facts: &CalleeFacts, ret: &Ty) -> Optio
 }
 
 /// The two-slot form of a callee's parameter of type `ty`, if any: a
-/// numeric range, or a pair enum `enum_pair` admits. Products and
-/// readonly classes stay one boxed word (a boxed tuple would split into
-/// `[a, b]` through a temp slot above live operands).
+/// numeric range, an arity-2 immediate tuple, a two-field readonly class,
+/// or a pair enum `enum_pair` admits. MIR passes the two words as two
+/// parameters, so the caller boxes nothing.
 pub fn convention_param(checker: &Checker, facts: &CalleeFacts, ty: &Ty, enum_pair: impl Fn(&PairKind) -> bool) -> Option<PairKind> {
-    if facts.escaped || facts.instance_method || facts.inherent_method {
+    if facts.escaped || facts.instance_method {
         return None;
     }
     if let Some(kind) = two_word_range_kind(ty) {
@@ -142,7 +141,7 @@ pub fn convention_param(checker: &Checker, facts: &CalleeFacts, ty: &Ty, enum_pa
     if facts.overloaded_or_generic || facts.coroutine {
         return None;
     }
-    two_word_kind(checker, ty).filter(|kind| !matches!(kind, PairKind::Product | PairKind::Class(_)) && (matches!(kind, PairKind::Range { .. }) || enum_pair(kind)))
+    two_word_kind(checker, ty).filter(|kind| matches!(kind, PairKind::Product | PairKind::Class(_)) || enum_pair(kind))
 }
 
 #[cfg(test)]

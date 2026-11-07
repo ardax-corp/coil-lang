@@ -140,6 +140,11 @@ pub struct MirFunc {
     /// Emission zeroes a call's past their last use like the payload words a
     /// match reads (#1791). A pair of numbers (`Option<int>`) is not listed.
     pub heap_pair_words: HashSet<ValueId>,
+    /// This body returns a two-word result as its one word (its box), a
+    /// function value's entry; `pair_twin` is the same function taking
+    /// the same words and returning the two words. A
+    /// [`MirInst::CallIndirect`] of a two-word result enters the twin.
+    pub pair_twin: Option<crate::bodies::Label>,
 }
 
 impl MirFunc {
@@ -177,7 +182,11 @@ impl MirFunc {
         let mut out = Vec::new();
         for inst in self.blocks.iter().flat_map(|b| &b.insts) {
             match inst {
-                MirInst::Call { target, .. } | MirInst::CodePtr { target, .. } => out.push(*target),
+                MirInst::Call { target, .. }
+                | MirInst::CodePtr { target, .. }
+                | MirInst::CallIndirect {
+                    pair: Some((_, target)), ..
+                } => out.push(*target),
                 MirInst::Alloc {
                     kind:
                         MirAllocKind::Coro { target, .. }
@@ -189,6 +198,7 @@ impl MirFunc {
                 _ => {}
             }
         }
+        out.extend(self.pair_twin);
         if let Some(pad) = &self.cleanup {
             out.extend(pad.code_targets());
         }
@@ -246,6 +256,7 @@ impl MirFunc {
             bound_words: HashSet::new(),
             local_binds: Vec::new(),
             heap_pair_words: HashSet::new(),
+            pair_twin: None,
         }
     }
 
@@ -691,9 +702,17 @@ impl MirFunc {
                     return Err(format!("{dest} ffi arg is not a word lane"));
                 }
             }
-            MirInst::CallIndirect { dest, callee, args, dicts } => {
+            MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
                 if *dicts as usize > args.len() {
                     return Err(format!("{dest} CallIndirect dicts exceed args"));
+                }
+                if let Some((hi, _)) = pair {
+                    if *dicts != 0 {
+                        return Err(format!("{dest} CallIndirect pair with dictionaries"));
+                    }
+                    if !self.ty(*hi).is_word_lane() {
+                        return Err(format!("{dest} CallIndirect second word is not a word lane"));
+                    }
                 }
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} CallIndirect dest is not a word lane"));

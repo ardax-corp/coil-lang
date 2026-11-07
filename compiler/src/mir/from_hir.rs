@@ -474,6 +474,9 @@ pub struct HirMirInput<'a> {
     /// Calls through a function value HIR emission made a plain
     /// `CallIndirect` (not a `PolyFn` call with dictionaries).
     pub value_calls: &'a HashSet<u32>,
+    /// Of those, the calls of a two-word result read as its two words:
+    /// the `unpair` body of each ([`MirInst::CallIndirect`]).
+    pub value_pair_calls: &'a HashMap<u32, crate::bodies::Label>,
     /// Calls through a `PolyFn` local with no dictionaries, by call.
     pub poly_calls: &'a HashMap<u32, HirPolyCall>,
     /// Trait methods and operators on a bound type parameter, called
@@ -2640,7 +2643,8 @@ impl Lower<'_> {
     /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk,
     /// any call through a function value).
     fn boxed_call(&self, id: HirId) -> bool {
-        (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || self.inp.value_calls.contains(&id.0)) && self.inp.pair_tys.contains_key(&id.0)
+        (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || (self.inp.value_calls.contains(&id.0) && !self.inp.value_pair_calls.contains_key(&id.0)))
+            && self.inp.pair_tys.contains_key(&id.0)
     }
 
     /// Lower `id` for its value, packed as a bare-class existential where
@@ -2869,7 +2873,9 @@ impl Lower<'_> {
             // bodies): the same bits read as the node's type.
             HirKind::Builtin { op: Builtin::Retype, args } if let [inner] = args.as_slice() => {
                 let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("retype type")?;
-                let Some(v) = self.word(*inner)? else {
+                // A two-word value read as a type parameter's word: its box.
+                let v = if self.inp.pair_tys.contains_key(&inner.0) { self.boxed_word(*inner)? } else { self.word(*inner)? };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 let word = self.b.ins_word(v).map_err(mir)?;
@@ -3398,17 +3404,15 @@ impl Lower<'_> {
             } if args.is_empty() && let Some(lit) = (self.inp.scalar_variant)(enum_name, variant) => {
                 Ok(Val::V(self.scalar_lit(lit)?))
             }
-            // `p[0]` / `p[1]` of a two-word tuple local.
+            // `p[0]` / `p[1]` of a two-word tuple local. Any other index
+            // reads the local's box, as a boxed tuple's field below.
             HirKind::Index { base, index, .. }
                 if let HirKind::Local(local) = self.hir.expr(*base).kind
                     && let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local)
-                    && self.expr_ty(*base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_))) =>
+                    && self.expr_ty(*base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_)))
+                    && let HirKind::Lit(Lit::Int(i @ (0 | 1))) = self.hir.expr(*index).kind =>
             {
-                let (slot, ty) = match self.hir.expr(*index).kind {
-                    HirKind::Lit(Lit::Int(0)) => (lo, lo_ty),
-                    HirKind::Lit(Lit::Int(1)) => (hi, hi_ty),
-                    _ => return Err("tuple index".into()),
-                };
+                let (slot, ty) = if i == 0 { (lo, lo_ty) } else { (hi, hi_ty) };
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
             }
             HirKind::Index { base, index, kind: IndexKind::Array } if self.heap_array(*base) => self.heap_index(id, *base, *index),
@@ -4901,6 +4905,15 @@ impl Lower<'_> {
         if self.b.value_ty(callee) != MirTy::HeapRef {
             return Err("call value callee".into());
         }
+        // A two-word result read as its two words: the callee's twin
+        // returns them, or `unpair` reads them from its box.
+        if let (Some(&unpair), Some(&tys)) = (self.inp.value_pair_calls.get(&id.0), self.inp.pair_tys.get(&id.0)) {
+            let (lo, hi) = self.at_expr(id, |l| l.b.ins_call_indirect_pair(callee, words, tys, unpair).map_err(mir))?;
+            if self.inp.heap_pairs.contains(&id.0) {
+                self.b.mark_heap_pair_word(lo);
+            }
+            return Ok(Val::Pair(lo, hi));
+        }
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
@@ -5488,7 +5501,8 @@ impl Lower<'_> {
             None => None,
         }
         .ok_or("element type")?;
-        let Some(arr) = self.word(base)? else {
+        // A two-word tuple local read at a runtime index: its box.
+        let Some(arr) = self.word_or_boxed(base)? else {
             return Ok(Val::Never);
         };
         let Some(idx) = self.index_word(index)? else {

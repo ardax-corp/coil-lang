@@ -852,7 +852,6 @@ impl Compiler {
             (0..params.len()).any(|argc| self.is_fn_value_escaped(&format!("{lookup}#{argc}")));
         let facts = crate::layout::CalleeFacts {
             escaped: self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) || under_applied,
-            inherent_method: self.checker.inherent_method_visibility(lookup).is_some(),
             instance_method: is_instance_method_fqn(&self.checker, lookup) || is_instance_method_fqn(&self.checker, name),
             overloaded_or_generic: self.checker.is_overloaded(lookup) || self.checker.is_generic_fn(lookup),
             coroutine: self.coroutine_fns.contains(name) || self.coroutine_fns.contains(lookup),
@@ -885,7 +884,12 @@ impl Compiler {
     /// The function being compiled's key that answers
     /// [`Self::callee_has_unboxed_range_params`], if any.
     pub(super) fn current_fn_pair_key(&self) -> Option<String> {
-        if self.compiling_method {
+        // A trait instance method's parameters stay one word; an inherent
+        // method's follow its signature, as a free function's.
+        let inherent = |k: &str| self.checker.inherent_method_visibility(strip_overload_key(k)).is_some();
+        if self.compiling_method
+            && !self.current_function_table_key.as_deref().into_iter().chain(self.current_function_qualified.as_deref()).any(inherent)
+        {
             return None;
         }
         self.current_function_table_key
@@ -899,15 +903,16 @@ impl Compiler {
     fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<PairKind> {
         let key = self.current_fn_pair_key()?;
         // By position, from the same signature every caller reads.
+        // A method's scheme may list `self` ahead of the named parameters.
         if let Expression::Argument { name, .. } = arg.1.as_ref()
-            && let Some(i) = self
-                .checker
-                .fn_param_names(&key)
-                .or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
-                .and_then(|names| names.iter().position(|n| n == name))
-            && let Some(kind) = self.callee_param_pairs(&key).get(i)
+            && let Some(names) = self.checker.fn_param_names(&key).or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
+            && let Some(i) = names.iter().position(|n| n == name)
         {
-            return kind.clone();
+            let pairs = self.callee_param_pairs(&key);
+            let skip = pairs.len().saturating_sub(names.len());
+            if let Some(kind) = pairs.get(skip + i) {
+                return kind.clone();
+            }
         }
         if let Some(ty) = self.sidecar_ty_of(arg)
             && let Some(kind) = crate::layout::two_word_range_kind(&ty) {
@@ -1193,6 +1198,18 @@ impl Compiler {
                 .instance_method_unbox_tys(class, method, inst_args)
                 .iter()
                 .any(|t| t.as_ref().and_then(Self::ty_to_value_tag).is_some())
+    }
+
+    /// [`Self::instance_method_raw`] of instance method `fqn`, from its
+    /// instance's class, method name and head.
+    fn instance_method_fqn_raw(&self, fqn: &str) -> bool {
+        let Some((class, method, args)) = self.checker.generics().instances.iter().find_map(|inst| {
+            let (method, _) = inst.method_fqns.iter().find(|(_, f)| *f == fqn)?;
+            Some((inst.class.clone(), method.clone(), inst.args.clone()))
+        }) else {
+            return false;
+        };
+        self.instance_method_raw(&class, &method, &args, fqn, self.coroutine_fns.contains(fqn))
     }
 
     /// Mark instance method `fqn` raw ([`Self::instance_method_raw`]) and
@@ -2238,8 +2255,11 @@ impl Compiler {
         }
         let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
         let calls = HashMap::from([(fqn.to_string(), (params, self.value_layout(&ret)))]);
-        let mut value = b.call(fqn, args, pair_ret.unwrap_or(ret));
-        if ret_from.is_some() {
+        let mut value = b.call(fqn, args, pair_ret.clone().unwrap_or(ret));
+        if pair_ret.is_some() && matches!(body_ret, Ty::Var(_)) {
+            // A bare type parameter's result: the pair's box, as its word.
+            value = b.builtin(Builtin::Retype, vec![value], body_ret.clone());
+        } else if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
         } else if ret_box.is_some() {
             value = b.builtin(Builtin::Retype, vec![value], crate::typechecking::ty::int());
@@ -4838,13 +4858,15 @@ impl Compiler {
     fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
         let lookup = strip_overload_key(name);
         // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed
-        // ABI; trait instance methods are dictionary entries (`CodePtr`)
-        // unless a definition site pinned a pair
+        // ABI. A trait instance method is a dictionary entry (`CodePtr`): a
+        // raw one returns its pair to direct calls and its `$dict` adapter
+        // boxes it for dictionary callers; any other keeps one word unless
+        // a definition site pinned a pair
         // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
         let facts = crate::layout::CalleeFacts {
             coroutine: self.coroutine_fns.contains(name),
             escaped: self.is_fn_value_escaped(name),
-            instance_method: is_instance_method_fqn(&self.checker, name),
+            instance_method: is_instance_method_fqn(&self.checker, name) && !self.instance_method_fqn_raw(name),
             host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
             ..crate::layout::CalleeFacts::default()
         };

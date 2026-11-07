@@ -103,16 +103,31 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   walk: any function value, partial application, `thread::spawn` or FFI
   callback of that name, in any file of the package use-graph, keeps every
   caller on the one-word ABI.
-- Coroutines, host natives and trait instance methods (dictionary entries)
-  never return two slots. Inherent methods, overloaded and generic
-  functions keep one-word parameters (a numeric range's two words
-  excepted). Products and pair classes are never two-slot parameters.
+- Coroutines and host natives never return two slots. A raw trait
+  instance method (a ground instance with no context, not a default body)
+  returns its pair to direct calls; its `$dict` adapter, which
+  dictionaries hold, boxes it. Other instance methods return one word
+  unless their definition pins the pair (`Iterator::next`,
+  `IntoIterator::into_iter`). Overloaded and generic functions and trait
+  instance methods keep one-word parameters (a numeric range's two words
+  excepted). A free function's or inherent method's two-word parameter,
+  an arity-2 immediate tuple or two-field readonly class included, is two
+  words like its result; a method's receiver stays one word. (The stack
+  VM kept these boxed: splitting a box into `[a, b]` needed a temp slot
+  above live operands, which MIR parameters do not.)
 - A local bound from a two-slot call keeps its two slots, so `match r`,
   `r?`, `return r`, `let (a, b) = r` and `r[0]` do not allocate. `?`
   compares the tag in place and shares one fail epilogue per function
   (#297, #307).
+- A call through a function value of a two-word result is a
+  `CallIndirect` with `pair` set: a lambda whose result is a pair is
+  emitted twice, its one-word body (the value's entry) and a two-word
+  twin (`MirFunc::pair_twin`), and the call enters the twin
+  (`coil_native_fn_entry_pair`). A callee without one (a named function,
+  an adapter, a runtime call) returns its box and the call reads the two
+  words through a per-type `unpair` body (`__coil_unpair_N`).
 - Everywhere a value must be one word (a field, a capture, a container
-  element, a shared body, a dictionary or closure call, `==`, `Show`) it
+  element, a shared body, a dictionary call, `==`, `Show`) it
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
   back. One pack/unpack pair serves every consumer.
 

@@ -900,6 +900,7 @@ mod tests {
             cleanup: false,
             entry: returns_data,
             data: imm as usize,
+            twin: 0,
         };
         Some(Arc::new(crate::native::NativeCode::new(vec![entry], Vec::new()).with_complete(true)))
     }
