@@ -20531,15 +20531,18 @@ impl Checker {
     /// that holds the second word of a flat two-word field: a field of a
     /// closed two-word type ([`crate::layout::pair_word_kinds`]) keeps its first word in its own
     /// slot and its second after the declared fields, so no other field's
-    /// slot moves. A generic, `shared` (a two-word store is not atomic) or
-    /// `view` class keeps every field one word.
+    /// slot moves. A `shared` (a two-word store is not atomic) or `view`
+    /// class keeps every field one word. In a generic class only a field
+    /// whose type names none of the class's parameters is flat: its layout
+    /// is the same in every instance, so a shared body reads it as a clone
+    /// does.
     pub fn class_flat_tails(&self, key: &str) -> Vec<Option<u32>> {
         let Some(fields) = self.class_fields(key) else {
             return Vec::new();
         };
         let mut tails = vec![None; fields.len()];
-        if self.generics().generic_type_ctors.contains_key(key)
-            || self.is_shared_class(key)
+        let params = self.generics().generic_type_ctors.get(key).cloned().unwrap_or_default();
+        if self.is_shared_class(key)
             || self.is_view_class(key)
             || crate::layout::readonly_pair_class(self, &Ty::Con(key.to_string())).is_some()
         {
@@ -20547,7 +20550,10 @@ impl Checker {
         }
         let mut next = fields.len() as u32;
         for (i, (name, ty)) in fields.iter().enumerate() {
-            if !self.is_borrow_field(key, name) && crate::layout::pair_word_kinds(self, ty).is_some() {
+            if !self.is_borrow_field(key, name)
+                && !ty_names_param(ty, &params)
+                && crate::layout::pair_word_kinds(self, ty).is_some()
+            {
                 tails[i] = Some(next);
                 next += 1;
             }
@@ -22306,6 +22312,24 @@ fn if_value_without_else(e: &Output) -> bool {
             matches!(else_arm.body.1.as_ref(), Expression::Block(items) if items.is_empty())
                 && else_arm.body.0 == e.0
         }
+        _ => false,
+    }
+}
+
+/// Whether `ty` holds an inference variable or one of `params`, a generic
+/// class's parameter names as its field types spell them.
+fn ty_names_param(ty: &Ty, params: &[String]) -> bool {
+    let named = |t: &Ty| ty_names_param(t, params);
+    match ty {
+        Ty::Var(_) => true,
+        Ty::Con(name) => params.iter().any(|p| p == name),
+        Ty::Fun(a, b) => named(a) || named(b),
+        Ty::App(head, args) => named(head) || args.iter().any(named),
+        Ty::Tuple(items) => items.iter().any(named),
+        Ty::Readonly(inner) => named(inner),
+        Ty::Array { element, .. } => named(element),
+        Ty::Constructor { owner, .. } => named(owner),
+        Ty::Record { fields } => fields.iter().any(|(_, t)| named(t)),
         _ => false,
     }
 }
