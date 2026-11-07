@@ -331,3 +331,53 @@ fn main() {
     assert!(mine.is_empty(), "{mine:?}");
     assert!(boxes.iter().any(|b| b.func == "half$value"), "{boxes:?}");
 }
+
+/// A two-word local rebound by `=`, in a loop or not, keeps its two words:
+/// neither the `let` nor an assignment boxes it.
+#[test]
+fn box_capture_rebound_pair_locals_have_no_boxes() {
+    let src = r#"
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+fn last_half(int n) -> int {
+    let best = half(1);
+    let i = 0;
+    while i < n {
+        let h = half(i);
+        if h != None {
+            best = h;
+        }
+        i = i + 1;
+    }
+    return match best {
+        Some(v) => v,
+        None => -1,
+    };
+}
+fn fib(int n) -> int {
+    let p = (0, 1);
+    let i = 0;
+    while i < n {
+        p = (p[1], p[0] + p[1]);
+        i = i + 1;
+    }
+    return p[0];
+}
+fn main() {
+    let _ = last_half(9) + fib(10);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| b.func == "last_half" || b.func == "fib").collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}
