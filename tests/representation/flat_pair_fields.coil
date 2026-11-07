@@ -155,3 +155,87 @@ test("a thread receives a readonly object's words") {
     };
     assert!(got == 11);
 }
+
+enum Tok {
+    Num(int),
+    Word(string),
+    End,
+}
+
+class P {
+    pub r: Result<int, string>,
+    pub t: Tok,
+}
+
+fn word(int i) -> string {
+    return format("w%i", i);
+}
+
+test("a flat field whose payload is a heap word for some tags survives collections") {
+    let v: Vec<P> = Vec::new();
+    for i in 0..300 {
+        let r: Result<int, string> = if i % 2 == 0 {
+            Ok(i)
+        } else {
+            Err(word(i))
+        };
+        let t = if i % 3 == 0 {
+            Tok::Num(i)
+        } else if i % 3 == 1 {
+            Tok::Word(word(i + 1000))
+        } else {
+            Tok::End
+        };
+        v.push(new P(r, t));
+        if i % 50 == 0 {
+            collect();
+        }
+    }
+    collect();
+    let n = 0;
+    for i in 0..300 {
+        let p = v[i];
+        n += match p.r {
+            Ok(k) => k,
+            Err(s) => if s == word(i) {
+                1
+            } else {
+                -100000
+            },
+        };
+        n += match p.t {
+            Tok::Num(k) => k,
+            Tok::Word(s) => if s == word(i + 1000) {
+                1
+            } else {
+                -100000
+            },
+            Tok::End => 0,
+        };
+    }
+    let want = 0;
+    for i in 0..300 {
+        want += if i % 2 == 0 {
+            i
+        } else {
+            1
+        };
+        want += if i % 3 == 0 {
+            i
+        } else if i % 3 == 1 {
+            1
+        } else {
+            0
+        };
+    }
+    assert!(n == want);
+    let p = v[1];
+    p.r = Ok(7);
+    p.t = Tok::Word("x");
+    collect();
+    assert!(p.r == Ok(7));
+    assert!(match p.t {
+        Tok::Word(s) => s == "x",
+        default => false,
+    });
+}
