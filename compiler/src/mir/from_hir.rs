@@ -413,6 +413,14 @@ pub struct HirFfi {
 /// [`HirMirInput::call_fields`]: by callee name and definition.
 pub type CallFields<'a> = Box<dyn Fn(&str, Option<crate::typechecking::def_id::DefId>) -> u64 + 'a>;
 
+/// How `Lower::pair_eq` compares two two-word values' words.
+enum PairEqWords {
+    /// An enum pair: per variant, its tag and its payload's word type.
+    Variants(Vec<(u32, Option<MirTy>)>),
+    /// A product: its two words' types.
+    Product(MirTy, MirTy),
+}
+
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
     /// Planned local id of each local (the first word of a pair local).
@@ -1940,6 +1948,173 @@ impl Lower<'_> {
             Val::V(v) => Ok(v),
             _ => Err("boxed niche return".into()),
         }
+    }
+
+    /// How `lhs == rhs` on two two-word values compares their words, when
+    /// it can: per variant of an enum pair (`[payload, tag]`), the
+    /// payload's word type (`None` for a variant without one); for a
+    /// product (`[a, b]`), its two words' types. `None` when an operand is
+    /// not two words or a word is of a type compared another way (a heap
+    /// word whose aggregate holds a `float`, which compares by IEEE).
+    fn pair_eq_words(&self, id: HirId, lhs: HirId, rhs: HirId) -> Option<PairEqWords> {
+        let tys = *self.inp.pair_tys.get(&lhs.0)?;
+        if self.inp.pair_tys.get(&rhs.0) != Some(&tys) {
+            return None;
+        }
+        let shaped = self.inp.strings.contains_key(&id.0);
+        let plain = |t: MirTy| matches!(t, MirTy::I64 | MirTy::Bool | MirTy::F64) || (t == MirTy::HeapRef && !shaped);
+        let ty = self.expr_ty(lhs)?;
+        match (self.inp.pair_variants)(ty) {
+            Some((_, variants)) => {
+                if !plain(tys.0) || variants.iter().any(|&(_, p)| p.is_some_and(|p| !plain(p))) {
+                    return None;
+                }
+                Some(PairEqWords::Variants(variants))
+            }
+            None => (plain(tys.0) && plain(tys.1)).then_some(PairEqWords::Product(tys.0, tys.1)),
+        }
+    }
+
+    /// `lhs == rhs` (`!=` when `ne`) on two two-word values as their words
+    /// ([`Self::pair_eq_words`]): an enum pair's tags, then the variant's
+    /// payload; a product's two words. No box made for either side.
+    fn pair_eq(&mut self, id: HirId, lhs: HirId, rhs: HirId, ne: bool) -> Result<Val, Refusal> {
+        let words = self.pair_eq_words(id, lhs, rhs).ok_or("pair eq")?;
+        let ty = self.expr_ty(lhs).ok_or("pair eq type")?.clone();
+        let (l, r) = (self.value(lhs)?, self.value(rhs)?);
+        let ((l0, l1), (r0, r1)) = match (l, r) {
+            (Val::Never, _) | (_, Val::Never) => return Ok(Val::Never),
+            (Val::Pair(a, b), Val::Pair(c, d)) => ((a, b), (c, d)),
+            // A side that came out as its box: both compare boxed.
+            (l, r) => {
+                let boxed = |s: &mut Self, v: Val| -> Result<Option<ValueId>, Refusal> {
+                    Ok(match v {
+                        Val::Pair(a, b) => match s.box_pair_val(&ty, a, b)? {
+                            Val::V(v) => Some(v),
+                            _ => None,
+                        },
+                        Val::V(v) => Some(v),
+                        _ => None,
+                    })
+                };
+                let (Some(l), Some(r)) = (boxed(self, l)?, boxed(self, r)?) else {
+                    return Ok(Val::Never);
+                };
+                return self.structural_eq(id, l, r, ne);
+            }
+        };
+        let eq = match words {
+            PairEqWords::Product(a, b) => {
+                let first = self.word_eq(a, l0, r0)?;
+                let second = self.word_eq(b, l1, r1)?;
+                self.b.ins_bool_logic(MirBinOp::BitAnd, first, second).map_err(mir)?
+            }
+            PairEqWords::Variants(variants) => {
+                let (check, differ) = (self.b.create_block(), self.b.create_block());
+                let (lt, rt) = (self.fit(l1, MirTy::I64)?, self.fit(r1, MirTy::I64)?);
+                let same = self.b.ins_cmp(MirCmpOp::Eq, lt, rt).map_err(mir)?;
+                self.b.branch(same, check, differ).map_err(mir)?;
+                let mut out = Vec::with_capacity(variants.len() + 1);
+                self.switch(differ);
+                let no = self.b.ins_const(MirConst::Bool(false)).map_err(mir)?;
+                out.push((self.cur, Val::V(no)));
+                self.switch(check);
+                let last = variants.len().saturating_sub(1);
+                for (k, &(tag, payload)) in variants.iter().enumerate() {
+                    let next = (k < last).then(|| self.b.create_block());
+                    if let Some(next) = next {
+                        let (hit, t) = (self.b.create_block(), self.b.ins_const(MirConst::I64(i64::from(tag))).map_err(mir)?);
+                        let is = self.b.ins_cmp(MirCmpOp::Eq, lt, t).map_err(mir)?;
+                        self.b.branch(is, hit, next).map_err(mir)?;
+                        self.switch(hit);
+                    }
+                    let eq = match payload {
+                        Some(p) => {
+                            let (a, b) = (self.fit(l0, p)?, self.fit(r0, p)?);
+                            self.word_eq(p, a, b)?
+                        }
+                        None => self.b.ins_const(MirConst::Bool(true)).map_err(mir)?,
+                    };
+                    out.push((self.cur, Val::V(eq)));
+                    if let Some(next) = next {
+                        self.switch(next);
+                    }
+                }
+                match self.join_arms(out)? {
+                    Val::V(v) => v,
+                    _ => return Err("pair eq join".into()),
+                }
+            }
+        };
+        Ok(Val::V(if ne { self.b.ins_not(eq).map_err(mir)? } else { eq }))
+    }
+
+    /// `a == b` on two words of type `ty`: a heap word's structural
+    /// equality, a `float`'s IEEE compare, any other word's bits.
+    fn word_eq(&mut self, ty: MirTy, a: ValueId, b: ValueId) -> Result<ValueId, Refusal> {
+        match ty {
+            MirTy::HeapRef => self.b.ins_str_eq(a, b, false).map_err(mir),
+            MirTy::F64 => self.b.ins_cmp(MirCmpOp::Eq, a, b).map_err(mir),
+            _ => {
+                let a = self.fit(a, MirTy::I64)?;
+                let b = self.fit(b, MirTy::I64)?;
+                self.b.ins_cmp(MirCmpOp::Eq, a, b).map_err(mir)
+            }
+        }
+    }
+
+    /// `l == r` (`!=` when `ne`) on two niche words of `layout`, with no
+    /// enum object made: unequal when their variants differ; for `None` /
+    /// `Ok(())` (the zero word) equal; else their payloads' structural
+    /// equality, as on the boxed objects.
+    fn niche_eq(&mut self, layout: ValueLayout, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
+        let l = self.b.ins_cast(MirCastKind::Word, MirTy::I64, l).map_err(mir)?;
+        let r = self.b.ins_cast(MirCastKind::Word, MirTy::I64, r).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+        let (payloads, words) = (self.b.create_block(), self.b.create_block());
+        let (lp, rp) = match layout {
+            // `Ok(p)` is `p`, `Err(p)` is `p | 1`: the same low bit, then
+            // the payloads with it cleared.
+            ValueLayout::NicheResult => {
+                let lb = self.b.ins_binop(MirBinOp::BitAnd, l, one).map_err(mir)?;
+                let rb = self.b.ins_binop(MirBinOp::BitAnd, r, one).map_err(mir)?;
+                let same = self.b.ins_cmp(MirCmpOp::Eq, lb, rb).map_err(mir)?;
+                self.b.branch(same, payloads, words).map_err(mir)?;
+                self.switch(payloads);
+                let lp = self.b.ins_binop(MirBinOp::Xor, l, lb).map_err(mir)?;
+                let rp = self.b.ins_binop(MirBinOp::Xor, r, rb).map_err(mir)?;
+                (lp, rp)
+            }
+            // `None` / `Ok(())` is `0`: both non-zero compare payloads, else
+            // the words themselves.
+            ValueLayout::NicheOption | ValueLayout::NicheUnitResult => {
+                let lz = self.b.ins_cmp(MirCmpOp::Eq, l, zero).map_err(mir)?;
+                let rz = self.b.ins_cmp(MirCmpOp::Eq, r, zero).map_err(mir)?;
+                let lz = self.b.ins_cast(MirCastKind::Word, MirTy::I64, lz).map_err(mir)?;
+                let rz = self.b.ins_cast(MirCastKind::Word, MirTy::I64, rz).map_err(mir)?;
+                let either = self.b.ins_binop(MirBinOp::BitOr, lz, rz).map_err(mir)?;
+                let some = self.b.ins_cmp(MirCmpOp::Eq, either, zero).map_err(mir)?;
+                self.b.branch(some, payloads, words).map_err(mir)?;
+                self.switch(payloads);
+                (l, r)
+            }
+            ValueLayout::Boxed => return Err("boxed niche layout".into()),
+        };
+        let lp = self.b.ins_cast(MirCastKind::Word, MirTy::HeapRef, lp).map_err(mir)?;
+        let rp = self.b.ins_cast(MirCastKind::Word, MirTy::HeapRef, rp).map_err(mir)?;
+        let eq = self.b.ins_str_eq(lp, rp, ne).map_err(mir)?;
+        let mut out = vec![(self.cur, Val::V(eq))];
+        self.switch(words);
+        // A Result's variants differ here (unequal); an Option's at least
+        // one side is `None`: equal when both are.
+        let cmp = if ne { MirCmpOp::Ne } else { MirCmpOp::Eq };
+        let same = match layout {
+            ValueLayout::NicheResult => self.b.ins_cmp(cmp, one, zero).map_err(mir)?,
+            _ => self.b.ins_cmp(cmp, l, r).map_err(mir)?,
+        };
+        out.push((self.cur, Val::V(same)));
+        self.join_arms(out)
     }
 
     /// Niche-layout value `id` as the boxed enum object a generic class's
@@ -5072,7 +5247,11 @@ impl Lower<'_> {
     /// opcode: `==` / `!=` of two heap words (structural equality), or
     /// a number-backed scalar enum's backing words.
     fn op_prim(&mut self, id: HirId, sym: &str, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
-        // A two-word operand compares boxed, as emission pushes it.
+        // Two two-word operands compare on their words.
+        if matches!(sym, "==" | "!=") && self.pair_eq_words(id, lhs, rhs).is_some() {
+            return self.pair_eq(id, lhs, rhs, sym == "!=");
+        }
+        // Another two-word operand compares boxed, as emission pushes it.
         let (Some(l), Some(r)) = (self.word_or_boxed(lhs)?, self.word_or_boxed(rhs)?) else {
             return Ok(Val::Never);
         };
@@ -5080,12 +5259,11 @@ impl Lower<'_> {
         if lt == MirTy::HeapRef && rt == MirTy::HeapRef && matches!(sym, "==" | "!=") {
             return self.structural_eq(id, l, r, sym == "!=");
         }
-        // Niche `Option` / `Result` words compare as HIR emission pushes
-        // them: each boxed to its `ObjEnum`, then structural equality.
+        // Niche `Option` / `Result` words compare on their words: the
+        // same variant, then structural equality of the payloads.
         if lt == rt && matches!(lt, MirTy::NicheOpt | MirTy::NicheRes) && matches!(sym, "==" | "!=") {
-            let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
-            let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
-            return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
+            let layout = self.niche_layout(lhs, lt)?;
+            return self.niche_eq(layout, l, r, sym == "!=");
         }
         // A string-backed scalar enum's (or a `string`'s) words order by
         // their bytes, as `<` on two strings does (#1722).
