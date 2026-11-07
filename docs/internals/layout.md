@@ -157,6 +157,14 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   instance, so a shared body and a clone read it alike. A `shared` (a
   two-word store is not atomic) or `view` class keeps one word per field,
   and a class with a flat field is never scalar-replaced into frame slots.
+- A `static let` of a closed two-word type keeps its second word in a
+  tail slot after every declared static (`Checker::finalize_static_tails`,
+  `static_tail`): its initializer returns both words and `__module_setup`
+  stores them, a store writes both and a read loads both. Its kinds are
+  the pair's (`static_word_kinds`; a payload that is a heap word only under
+  some tags stays unknown, an ambiguous root). Such a static is never
+  folded to a snapshot at compile time, which would fill one slot. A
+  `const` keeps one slot: it is only read.
 - Everywhere else a value must be one word (another field, a `defer`
   capture, a container element, a shared body, a dictionary call, `Show`) it
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
