@@ -9,8 +9,8 @@ use common::DebugLoc;
 
 use super::func::{MirBlock, MirFunc};
 use super::inst::{
-    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
-    ValueId,
+    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirLaneShape, MirUnaryOp,
+    Terminator, ValueId,
 };
 use super::ty::MirTy;
 
@@ -884,7 +884,7 @@ impl MirBuilder {
     }
 
     /// Store `[lo, hi]` as element `index` of a lane array.
-    pub fn ins_lane_store(&mut self, array: ValueId, index: ValueId, lo: ValueId, hi: ValueId) -> Result<ValueId, MirError> {
+    pub fn ins_lane_store(&mut self, array: ValueId, index: ValueId, lo: ValueId, hi: ValueId, shape: MirLaneShape) -> Result<ValueId, MirError> {
         if self.resolve_ty(array) != MirTy::HeapRef || !self.resolve_ty(index).is_int() {
             return Err(MirError::msg("LaneStore operand type"));
         }
@@ -892,13 +892,13 @@ impl MirBuilder {
             return Err(MirError::msg("LaneStore value type"));
         }
         let dest = self.alloc(MirTy::Bool);
-        self.push(MirInst::LaneStore { dest, array: self.resolve(array), index: self.resolve(index), lo: self.resolve(lo), hi: self.resolve(hi) })?;
+        self.push(MirInst::LaneStore { dest, array: self.resolve(array), index: self.resolve(index), lo: self.resolve(lo), hi: self.resolve(hi), shape })?;
         Ok(dest)
     }
 
     /// Append `[lo, hi]` to a lane array in place (a safepoint, as
     /// [`Self::ins_array_push`]).
-    pub fn ins_lane_push(&mut self, array: ValueId, lo: ValueId, hi: ValueId) -> Result<ValueId, MirError> {
+    pub fn ins_lane_push(&mut self, array: ValueId, lo: ValueId, hi: ValueId, shape: MirLaneShape) -> Result<ValueId, MirError> {
         if self.resolve_ty(array) != MirTy::HeapRef {
             return Err(MirError::msg("LanePush array type"));
         }
@@ -906,7 +906,19 @@ impl MirBuilder {
             return Err(MirError::msg("LanePush value type"));
         }
         let dest = self.alloc(MirTy::HeapRef);
-        self.push(MirInst::LanePush { dest, array: self.resolve(array), lo: self.resolve(lo), hi: self.resolve(hi) })?;
+        self.push(MirInst::LanePush { dest, array: self.resolve(array), lo: self.resolve(lo), hi: self.resolve(hi), shape })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
+    /// A lane array turned into one word per element in place (a
+    /// safepoint, as [`Self::ins_array_push`]).
+    pub fn ins_lanes_to_words(&mut self, array: ValueId, shape: MirLaneShape) -> Result<ValueId, MirError> {
+        if self.resolve_ty(array) != MirTy::HeapRef {
+            return Err(MirError::msg("LanesToWords array type"));
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::LanesToWords { dest, array: self.resolve(array), shape })?;
         self.snapshot_slots(dest);
         Ok(dest)
     }

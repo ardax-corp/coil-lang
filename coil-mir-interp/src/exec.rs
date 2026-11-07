@@ -867,13 +867,18 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set_word(f, regs, *dest, w);
                 set_word(f, regs, *dest_hi, (*ctx).ret_hi);
             }
-            MirInst::LaneStore { dest, array, index, lo, hi } => {
-                rt::coil_native_lane_store(ctx, get!(*array), get!(*index) as i64, get!(*lo), get!(*hi));
+            MirInst::LaneStore { dest, array, index, lo, hi, shape } => {
+                rt::coil_native_lane_store(ctx, get!(*array), get!(*index) as i64, get!(*lo), get!(*hi), shape.tag_mask, shape.payload_mask, shape.unit_mask);
                 check!();
                 set!(*dest, 1);
             }
-            MirInst::LanePush { dest, array, lo, hi } => {
-                let w = rt::coil_native_lane_push(ctx, get!(*array), get!(*lo), get!(*hi));
+            MirInst::LanePush { dest, array, lo, hi, shape } => {
+                let w = rt::coil_native_lane_push(ctx, get!(*array), get!(*lo), get!(*hi), shape.tag_mask, shape.payload_mask, shape.unit_mask);
+                check!();
+                set!(*dest, w);
+            }
+            MirInst::LanesToWords { dest, array, shape } => {
+                let w = rt::coil_native_lanes_to_words(ctx, get!(*array), shape.tag_mask, shape.payload_mask, shape.unit_mask);
                 check!();
                 set!(*dest, w);
             }

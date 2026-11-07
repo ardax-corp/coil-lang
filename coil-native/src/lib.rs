@@ -809,7 +809,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
                 bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
-                        MirInst::ArrayPush { .. } | MirInst::LanePush { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::VecLoop { .. }
+                        MirInst::ArrayPush { .. } | MirInst::LanePush { .. } | MirInst::LanesToWords { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::VecLoop { .. }
                     )
                 })
         })
@@ -1054,18 +1054,22 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need_heap(array)?;
                         need_scalar(index)?;
                     }
-                    MirInst::LaneStore { dest, array, index, lo, hi } => {
+                    MirInst::LaneStore { dest, array, index, lo, hi, .. } => {
                         need(dest)?;
                         need_heap(array)?;
                         need_scalar(index)?;
                         need(lo)?;
                         need(hi)?;
                     }
-                    MirInst::LanePush { dest, array, lo, hi } => {
+                    MirInst::LanePush { dest, array, lo, hi, .. } => {
                         need(dest)?;
                         need_heap(array)?;
                         need(lo)?;
                         need(hi)?;
+                    }
+                    MirInst::LanesToWords { dest, array, .. } => {
+                        need(dest)?;
+                        need_heap(array)?;
                     }
                     MirInst::HeapFieldLoad { dest, object, .. } => {
                         need(dest)?;
@@ -1361,10 +1365,12 @@ struct Ids {
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
     array_push: FuncId,
-    /// Lane array element ops (`LaneIndex` / `LaneStore` / `LanePush`).
+    /// Lane array element ops (`LaneIndex` / `LaneStore` / `LanePush`)
+    /// and the in-place `LanesToWords`.
     lane_index: FuncId,
     lane_store: FuncId,
     lane_push: FuncId,
+    lanes_to_words: FuncId,
     probe: FuncId,
     /// Boxed enum matches.
     enum_tag: FuncId,
@@ -1501,6 +1507,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         sig
     };
     let (s5, s4, s3, s1, s2) = (words(5), words(4), words(3), words(1), words(2));
+    let (s8, s7) = (words(8), words(7));
     let index = module.declare_function("coil_native_index", Linkage::Import, &s3).map_err(e)?;
     let len = module.declare_function("coil_native_len", Linkage::Import, &s1).map_err(e)?;
     let field = module.declare_function("coil_native_field", Linkage::Import, &s2).map_err(e)?;
@@ -1517,8 +1524,9 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
     let lane_index = module.declare_function("coil_native_lane_index", Linkage::Import, &s3).map_err(e)?;
-    let lane_store = module.declare_function("coil_native_lane_store", Linkage::Import, &s5).map_err(e)?;
-    let lane_push = module.declare_function("coil_native_lane_push", Linkage::Import, &s4).map_err(e)?;
+    let lane_store = module.declare_function("coil_native_lane_store", Linkage::Import, &s8).map_err(e)?;
+    let lane_push = module.declare_function("coil_native_lane_push", Linkage::Import, &s7).map_err(e)?;
+    let lanes_to_words = module.declare_function("coil_native_lanes_to_words", Linkage::Import, &s5).map_err(e)?;
     let probe = module.declare_function("coil_native_probe", Linkage::Import, &s2).map_err(e)?;
     let free_early = trampoline(module, "coil_native_free_early", &s3, &mut tramps)?;
     let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
@@ -1575,6 +1583,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         lane_index,
         lane_store,
         lane_push,
+        lanes_to_words,
         probe,
         enum_tag,
         enum_payload,
@@ -1671,6 +1680,7 @@ struct Lower<'a> {
     lane_index: FuncRef,
     lane_store: FuncRef,
     lane_push: FuncRef,
+    lanes_to_words: FuncRef,
     probe: FuncRef,
     enum_tag: FuncRef,
     enum_payload: FuncRef,
@@ -1811,6 +1821,7 @@ impl<'a> Lower<'a> {
         let lane_index = module.declare_func_in_func(ids.lane_index, func);
         let lane_store = module.declare_func_in_func(ids.lane_store, func);
         let lane_push = module.declare_func_in_func(ids.lane_push, func);
+        let lanes_to_words = module.declare_func_in_func(ids.lanes_to_words, func);
         let probe = module.declare_func_in_func(ids.probe, func);
         let enum_tag = module.declare_func_in_func(ids.enum_tag, func);
         let enum_payload = module.declare_func_in_func(ids.enum_payload, func);
@@ -1872,6 +1883,7 @@ impl<'a> Lower<'a> {
             lane_index,
             lane_store,
             lane_push,
+            lanes_to_words,
             probe,
             enum_tag,
             enum_payload,
@@ -1964,6 +1976,11 @@ impl<'a> Lower<'a> {
     /// `x` as a `want` word with the same bits. MIR may move a word between
     /// an `f64` and an `i64` value unchanged (a callee's `float` result into
     /// a caller's `int`-typed value, as the runtime's untyped words allow).
+    /// A lane shape's three masks as constants, for a lane helper.
+    fn lane_shape(&mut self, shape: &compiler::native_mir::MirLaneShape) -> [cranelift_codegen::ir::Value; 3] {
+        [shape.tag_mask, shape.payload_mask, shape.unit_mask].map(|m| self.b.ins().iconst(types::I64, m as i64))
+    }
+
     fn coerce(&mut self, x: cranelift_codegen::ir::Value, want: Type) -> cranelift_codegen::ir::Value {
         if self.b.func.dfg.value_type(x) == want {
             x
@@ -3225,26 +3242,39 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, lo);
                 self.set_word(f, *dest_hi, hi);
             }
-            MirInst::LaneStore { dest, array, index, lo, hi } => {
+            MirInst::LaneStore { dest, array, index, lo, hi, shape } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
                 let lo = self.get(f, *lo);
                 let lo = self.coerce(lo, types::I64);
                 let hi = self.get(f, *hi);
                 let hi = self.coerce(hi, types::I64);
-                let call = self.b.ins().call(self.lane_store, &[self.ctx, a, i, lo, hi]);
+                let [t, p, u] = self.lane_shape(shape);
+                let call = self.b.ins().call(self.lane_store, &[self.ctx, a, i, lo, hi, t, p, u]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 self.set(f, *dest, w);
             }
-            MirInst::LanePush { dest, array, lo, hi } => {
+            MirInst::LanePush { dest, array, lo, hi, shape } => {
                 let a = self.get(f, *array);
                 let lo = self.get(f, *lo);
                 let lo = self.coerce(lo, types::I64);
                 let hi = self.get(f, *hi);
                 let hi = self.coerce(hi, types::I64);
-                let call = self.b.ins().call(self.lane_push, &[self.ctx, a, lo, hi]);
+                let [t, p, u] = self.lane_shape(shape);
+                let call = self.b.ins().call(self.lane_push, &[self.ctx, a, lo, hi, t, p, u]);
+                let w = self.b.inst_results(call)[0];
+                let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
+                self.bail_if(flag, TRAP_HELPER);
+                self.drop_views();
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::LanesToWords { dest, array, shape } => {
+                let a = self.get(f, *array);
+                let [t, p, u] = self.lane_shape(shape);
+                let call = self.b.ins().call(self.lanes_to_words, &[self.ctx, a, t, p, u]);
                 let w = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);

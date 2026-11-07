@@ -599,6 +599,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::LaneIndex { .. }
         | MirInst::LaneStore { .. }
         | MirInst::LanePush { .. }
+        | MirInst::LanesToWords { .. }
         | MirInst::ArrayLen { .. }
         | MirInst::ResumeCoro { .. }
         | MirInst::Yield { .. }

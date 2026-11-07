@@ -3528,6 +3528,18 @@ impl ObjArray {
         }
     }
 
+    /// Turn a lane array into one word per element in place: `boxes` holds
+    /// each element's object, in order. The array stays the same object;
+    /// its element kind is pointer, as a boxed two-word element's
+    /// (`array_elem_stamp`).
+    pub fn lanes_into_words(&mut self, boxes: Vec<Value>) {
+        debug_assert_eq!(boxes.len(), self.len(), "a box per element");
+        self.may_hold_refs = !boxes.is_empty();
+        self.data = ArrayData::Words(boxes);
+        self.elem_kind = common::WORD_POINTER;
+        self.tag_mask = 0;
+    }
+
     /// Words per element: `1` but for a lane array.
     #[inline]
     pub fn lanes(&self) -> usize {
@@ -3628,18 +3640,6 @@ impl ObjArray {
         let at = i * *k;
         out.copy_from_slice(&words[at..at + *k]);
         words.drain(at..at + *k);
-    }
-
-    /// A lane array's words in place, for native code, with the element
-    /// count. `for_store` marks the array as a runtime store would.
-    pub(crate) fn lanes_view(&mut self, for_store: bool) -> Option<(*mut Value, usize, usize)> {
-        if for_store {
-            self.note();
-        }
-        match &mut self.data {
-            ArrayData::Lanes { words, k } => Some((words.as_mut_ptr(), words.len() / *k, *k)),
-            _ => None,
-        }
     }
 
     /// Each stored word with the kind the collector reads it as: an

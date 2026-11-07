@@ -791,7 +791,7 @@ impl MirFunc {
                     return Err(format!("{dest} LaneIndex dest type"));
                 }
             }
-            MirInst::LaneStore { dest, array, index, lo, hi } => {
+            MirInst::LaneStore { dest, array, index, lo, hi, .. } => {
                 if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
                     return Err(format!("{dest} LaneStore operand type"));
                 }
@@ -799,7 +799,12 @@ impl MirFunc {
                     return Err(format!("{dest} LaneStore value type"));
                 }
             }
-            MirInst::LanePush { dest, array, lo, hi } => {
+            MirInst::LanesToWords { dest, array, .. } => {
+                if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} LanesToWords array type"));
+                }
+            }
+            MirInst::LanePush { dest, array, lo, hi, .. } => {
                 if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} LanePush array type"));
                 }

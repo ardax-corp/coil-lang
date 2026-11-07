@@ -27,7 +27,7 @@ use crate::mir::func::DeoptSite;
 use crate::mir::gc::LiveRootSet;
 use crate::mir::inst::{LocalId, MirDeoptKind};
 use crate::mir::{
-    BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
+    BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
 };
 
 const MAGIC: &[u8; 5] = b"CNMIR";
@@ -169,6 +169,7 @@ const I_CALL_INDIRECT_PAIR: u8 = 44;
 const I_LANE_INDEX: u8 = 45;
 const I_LANE_STORE: u8 = 46;
 const I_LANE_PUSH: u8 = 47;
+const I_LANES_TO_WORDS: u8 = 48;
 
 const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -471,20 +472,28 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*array);
             w.v(*index);
         }
-        MirInst::LaneStore { dest, array, index, lo, hi } => {
+        MirInst::LaneStore { dest, array, index, lo, hi, shape } => {
             w.u8(I_LANE_STORE);
             w.v(*dest);
             w.v(*array);
             w.v(*index);
             w.v(*lo);
             w.v(*hi);
+            lane_shape(w, shape);
         }
-        MirInst::LanePush { dest, array, lo, hi } => {
+        MirInst::LanePush { dest, array, lo, hi, shape } => {
             w.u8(I_LANE_PUSH);
             w.v(*dest);
             w.v(*array);
             w.v(*lo);
             w.v(*hi);
+            lane_shape(w, shape);
+        }
+        MirInst::LanesToWords { dest, array, shape } => {
+            w.u8(I_LANES_TO_WORDS);
+            w.v(*dest);
+            w.v(*array);
+            lane_shape(w, shape);
         }
         MirInst::ArrayLen { dest, array } => {
             w.u8(I_LEN);
@@ -767,6 +776,12 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.loc(*loc);
         }
     }
+}
+
+fn lane_shape(w: &mut Writer, s: &MirLaneShape) {
+    w.u64(s.tag_mask);
+    w.u64(s.payload_mask);
+    w.u64(s.unit_mask);
 }
 
 fn lane_val(w: &mut Writer, v: LaneVal) {
@@ -1143,8 +1158,9 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
         I_LANE_INDEX => MirInst::LaneIndex { dest: r.v()?, dest_hi: r.v()?, array: r.v()?, index: r.v()? },
-        I_LANE_STORE => MirInst::LaneStore { dest: r.v()?, array: r.v()?, index: r.v()?, lo: r.v()?, hi: r.v()? },
-        I_LANE_PUSH => MirInst::LanePush { dest: r.v()?, array: r.v()?, lo: r.v()?, hi: r.v()? },
+        I_LANE_STORE => MirInst::LaneStore { dest: r.v()?, array: r.v()?, index: r.v()?, lo: r.v()?, hi: r.v()?, shape: read_lane_shape(r)? },
+        I_LANE_PUSH => MirInst::LanePush { dest: r.v()?, array: r.v()?, lo: r.v()?, hi: r.v()?, shape: read_lane_shape(r)? },
+        I_LANES_TO_WORDS => MirInst::LanesToWords { dest: r.v()?, array: r.v()?, shape: read_lane_shape(r)? },
         I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: r.vs()? },
         I_COW => {
             let (dest, src, unique) = (r.v()?, r.v()?, r.u8()? != 0);
@@ -1187,6 +1203,10 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_DEOPT => MirInst::Deopt { dest: r.v()?, kind: r.pick(&DEOPTS, "deopt kind")?, loc: r.loc()? },
         t => return Err(format!("native MIR: bad instruction {t}")),
     })
+}
+
+fn read_lane_shape(r: &mut Reader) -> Result<MirLaneShape, String> {
+    Ok(MirLaneShape { tag_mask: r.u64()?, payload_mask: r.u64()?, unit_mask: r.u64()? })
 }
 
 fn read_lane_val(r: &mut Reader) -> Result<LaneVal, String> {

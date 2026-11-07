@@ -1,10 +1,15 @@
 //! Print / parse a small CLIF-like text form for round-trip tests.
 
 use super::func::{MirBlock, MirFunc};
-use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator};
+use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirLaneShape, MirUnaryOp, Terminator};
 #[cfg(test)]
 use super::inst::{BlockId, MirBinOp, MirCmpOp, MirDeoptKind, MirGcKind, ValueId};
 use super::ty::MirTy;
+
+/// A [`MirLaneShape`] as the text form writes it.
+fn lane_shape(s: &MirLaneShape) -> String {
+    format!("{}/{}/{}", s.tag_mask, s.payload_mask, s.unit_mask)
+}
 
 impl std::fmt::Display for MirFunc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -259,8 +264,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::LaneIndex { dest, dest_hi, array, index } => {
             write!(f, "{dest}, {dest_hi} = laneindex.{}.{} {array}, {index}", func.ty(*dest), func.ty(*dest_hi))
         }
-        MirInst::LaneStore { dest, array, index, lo, hi } => write!(f, "{dest} = lanestore {array}, {index}, {lo}, {hi}"),
-        MirInst::LanePush { dest, array, lo, hi } => write!(f, "{dest} = lanepush {array}, {lo}, {hi}"),
+        MirInst::LaneStore { dest, array, index, lo, hi, shape } => {
+            write!(f, "{dest} = lanestore {array}, {index}, {lo}, {hi}, {}", lane_shape(shape))
+        }
+        MirInst::LanePush { dest, array, lo, hi, shape } => write!(f, "{dest} = lanepush {array}, {lo}, {hi}, {}", lane_shape(shape)),
+        MirInst::LanesToWords { dest, array, shape } => write!(f, "{dest} = lanestowords {array}, {}", lane_shape(shape)),
         MirInst::ResumeCoro {
             dest,
             handle,
@@ -729,16 +737,25 @@ impl<'a> Parser<'a> {
             let lo = self.value()?;
             self.expect(',')?;
             let hi = self.value()?;
+            self.expect(',')?;
+            let shape = self.lane_shape()?;
             return Ok(match index {
                 Some(index) => {
                     ensure_ty(types, dest, MirTy::Bool);
-                    MirInst::LaneStore { dest, array, index, lo, hi }
+                    MirInst::LaneStore { dest, array, index, lo, hi, shape }
                 }
                 None => {
                     ensure_ty(types, dest, MirTy::HeapRef);
-                    MirInst::LanePush { dest, array, lo, hi }
+                    MirInst::LanePush { dest, array, lo, hi, shape }
                 }
             });
+        }
+        if op == "lanestowords" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let shape = self.lane_shape()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::LanesToWords { dest, array, shape });
         }
         if op == "arraypush" {
             let array = self.value()?;
@@ -1242,6 +1259,16 @@ impl<'a> Parser<'a> {
         let neg = self.eat('-');
         let n = self.uint()? as i64;
         Ok(if neg { -n } else { n })
+    }
+
+    /// A [`MirLaneShape`]: `tag_mask/payload_mask/unit_mask`.
+    fn lane_shape(&mut self) -> Result<MirLaneShape, ParseError> {
+        let tag_mask = self.uint()?;
+        self.expect('/')?;
+        let payload_mask = self.uint()?;
+        self.expect('/')?;
+        let unit_mask = self.uint()?;
+        Ok(MirLaneShape { tag_mask, payload_mask, unit_mask })
     }
 
     fn uint(&mut self) -> Result<u64, ParseError> {

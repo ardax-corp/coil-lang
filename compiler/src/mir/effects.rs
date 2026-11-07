@@ -103,7 +103,7 @@ impl MirInst {
     pub fn writes_elements(&self, calls: &CallFacts) -> bool {
         self.runs_effects(calls)
             || match self {
-                Self::StoreIndex { .. } | Self::LaneStore { .. } | Self::VecLoop { kind: super::inst::VecLoopKind::Store { .. }, .. } => true,
+                Self::StoreIndex { .. } | Self::LaneStore { .. } | Self::LanesToWords { .. } | Self::VecLoop { kind: super::inst::VecLoopKind::Store { .. }, .. } => true,
                 Self::VecLoop { kind: super::inst::VecLoopKind::Reduce { stores, .. }, .. } => !stores.is_empty(),
                 _ => false,
             }
@@ -143,6 +143,7 @@ impl MirInst {
             | Self::StoreIndex { .. }
             | Self::LaneStore { .. }
             | Self::LanePush { .. }
+            | Self::LanesToWords { .. }
             | Self::StoreStatic { .. }
             | Self::HomeStore { .. }
             | Self::ClearWord { .. }
