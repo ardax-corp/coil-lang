@@ -875,6 +875,11 @@ impl Compiler {
     /// What decides `name`'s parameters' calling convention
     /// ([`crate::layout::convention_param`]), and its parameter types.
     fn callee_param_facts(&self, name: &str) -> Option<(crate::layout::CalleeFacts, Vec<Ty>)> {
+        // An inherent method clone (`Acc::add$inst$..`): ground, never a
+        // function value, its types the plan's.
+        if let Some(plan) = self.method_clone_plans.borrow().get(name) {
+            return Some((crate::layout::CalleeFacts::default(), plan.param_tys().to_vec()));
+        }
         let lookup = strip_overload_key(name);
         let params = self
             .checker
@@ -939,7 +944,12 @@ impl Compiler {
         // By position, from the same signature every caller reads.
         // A method's scheme may list `self` ahead of the named parameters.
         if let Expression::Argument { name, .. } = arg.1.as_ref()
-            && let Some(names) = self.checker.fn_param_names(&key).or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
+            && let Some(names) = self
+                .checker
+                .fn_param_names(&key)
+                .or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
+                // A method clone's names are its source method's.
+                .or_else(|| self.current_function_qualified.as_deref().and_then(|q| self.checker.fn_param_names(q)))
             && let Some(i) = names.iter().position(|n| n == name)
         {
             let pairs = self.callee_param_pairs(&key);
@@ -4706,6 +4716,12 @@ impl Compiler {
     ) {
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_key = self.current_function_table_key.replace(name.to_string());
+        let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
+        // An inherent method clone's thunk returns its pair in two words.
+        let prev_two_word_enum = self.compiling_two_word_enum.clone();
+        if self.method_clone_plans.borrow().contains_key(name) {
+            self.compiling_two_word_enum = self.two_word_return_kind(name);
+        }
         let bind = name.to_string();
         if !self.lower_synth_hir(hir, calls, move |c: &mut Self| {
             c.bind_function_entry(bind);
@@ -4716,6 +4732,8 @@ impl Compiler {
         let entry = self.fn_entry_labels.get(name).copied();
         self.bodies.record(name.to_string(), entry);
         self.attach_hir_mir();
+        self.compiling_two_word_enum = prev_two_word_enum;
+        self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.current_function_table_key = prev_key;
         self.context.variables = prev_vars;
     }
@@ -4893,6 +4911,9 @@ impl Compiler {
     }
 
     fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
+        if let Some(plan) = self.method_clone_plans.borrow().get(name) {
+            return crate::layout::convention_ret(&self.checker, &crate::layout::CalleeFacts::default(), plan.ret_ty());
+        }
         let lookup = strip_overload_key(name);
         // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed
         // ABI. A trait instance method is a dictionary entry (`CodePtr`): a
@@ -5078,7 +5099,10 @@ impl Compiler {
         self.compiling_two_word_enum = if *is_coro {
             self.pin_two_word_return_kind(&qualified, None);
             None
-        } else if source.is_some() {
+        } else if source.is_some() && !self.method_clone_plans.borrow().contains_key(&qualified) {
+            // A trait instance's clone returns one word to its `$dict`
+            // adapter; an inherent method clone in the pair its callers
+            // planned ([`Self::hir_method_clone`]).
             None
         } else {
             self.two_word_return_kind(&qualified)

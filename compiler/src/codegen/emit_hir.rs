@@ -136,6 +136,19 @@ pub(crate) struct MethodClonePlan {
     generic: Option<HirGeneric>,
 }
 
+impl MethodClonePlan {
+    /// The clone's parameter types, the receiver first: its calling
+    /// convention is a ground function's ([`Compiler::callee_param_facts`]).
+    pub(super) fn param_tys(&self) -> &[Ty] {
+        &self.param_tys
+    }
+
+    /// The clone's result type.
+    pub(super) fn ret_ty(&self) -> &Ty {
+        &self.ret_ty
+    }
+}
+
 /// A ground trait method call, as `compile_call_expr`'s `recv.method(args)`
 /// over a discharged instance: the receiver boxed for the instance, then a
 /// trailing dictionary when the instance has one.
@@ -1603,8 +1616,23 @@ impl Compiler {
         let prev_calls = self.hir_synth_calls.replace(calls);
         let module = self.hir_module.take();
         // The frame starts with the parameters, as a declared function's.
-        for &param in &hir.params {
-            self.context.variables.intern(hir.local(param).name.clone());
+        // An inherent method clone's thunk takes its two-word parameters
+        // in two slots, as its callers pass them ([`Self::hir_method_clone`]).
+        let pairs = match self.current_function_table_key.as_deref() {
+            Some(key) if self.method_clone_plans.borrow().contains_key(key) => self.callee_param_pairs(key),
+            _ => Vec::new(),
+        };
+        let skip = pairs.len().saturating_sub(hir.params.len());
+        for (i, &param) in hir.params.iter().enumerate() {
+            let name = hir.local(param).name.clone();
+            match pairs.get(skip + i).cloned().flatten() {
+                Some(kind) => {
+                    self.alloc_unboxed_enum_slots(&name, &kind);
+                }
+                None => {
+                    self.context.variables.intern(name);
+                }
+            }
         }
         // A bounded instance method's dictionaries (#1479): its own after
         // the parameters, the context read out of it on entry.
@@ -5527,9 +5555,10 @@ impl Compiler {
     /// `call` of inherent method `key` sent to its clone at the call's
     /// ground type arguments ([`Compiler::instance_clone`]) instead of the
     /// shared body `shared` stands for: each argument in its own layout,
-    /// no boxing and no dictionaries. `None` when a type argument is open
-    /// or two words, a parameter or the result is two words, or the clone
-    /// caps are reached.
+    /// no boxing and no dictionaries. A two-word type argument, parameter
+    /// or result (`Acc<(int, int)>`, `Option<int>`) moves as two words, as
+    /// any ground call's (`abi::convention_*`). `None` when a type argument
+    /// is open, the receiver is two words, or the clone caps are reached.
     fn hir_method_clone(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str, shared: &HirCall) -> Option<HirCall> {
         let src = self.inst_clone_srcs.get(key).filter(|s| s.method_of.is_some())?;
         // A free function's own module calls its mono clones; a clone of
@@ -5585,8 +5614,8 @@ impl Compiler {
         // clone is only a cost decision.
         let word = |ty: &Ty| {
             crate::layout::ty_is_closed(ty)
-                && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
-                && !matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_))
+                && (lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                    || matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_)))
         };
         let lookup_tys = src
             .head
@@ -5601,14 +5630,20 @@ impl Compiler {
         // from the shared one's.
         let one = |ty: &Ty| {
             Self::closed_value_ty(ty)
-                && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
-                && !matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_))
+                && (lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                    || matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_)))
         };
         let mut params = Vec::with_capacity(param_tys.len());
         let mut own_tys = Vec::with_capacity(param_tys.len());
-        for param in &param_tys {
+        let receiver = src.method_of.as_ref().is_some_and(|m| !m.is_static);
+        for (slot, param) in param_tys.iter().enumerate() {
             let ty = at(param);
             if !one(&ty) {
+                return None;
+            }
+            // `self` is one word in a method body: a two-word receiver
+            // (`Opt<int>`) keeps the shared body.
+            if receiver && slot == 0 && matches!(crate::layout::of_resolved(&self.checker, &ty), crate::layout::Layout::Pair(_)) {
                 return None;
             }
             params.push(self.value_layout(&ty));
@@ -5657,9 +5692,13 @@ impl Compiler {
             shared_ret_ty: ret_ty,
             generic: shared.generic.as_deref().cloned(),
         });
+        // A clone is a ground function no function value names: two-word
+        // parameters and result move as two words (`abi::convention_*`).
+        let pair = if boundary { None } else { self.two_word_return_kind(&name) };
+        let ranges = self.callee_param_pairs(&name);
         Some(HirCall {
             key: name,
-            pair: None,
+            pair,
             params,
             ret: ret_layout,
             method: true,
@@ -5667,7 +5706,7 @@ impl Compiler {
             builtin: None,
             generic: None,
             instance: None,
-            ranges: Vec::new(),
+            ranges,
             mono_of: None,
             own_dicts: Vec::new(),
         })
