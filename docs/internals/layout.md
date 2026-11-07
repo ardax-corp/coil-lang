@@ -143,7 +143,10 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   by address, for a payload that is a heap word only under some tags
   (`Result<int, string>`, `enum { Num(int), Word(string) }`;
   `layout::pair_word_kinds`). `new` stores both words, and a read or write
-  is two loads or stores (`pair_fields`). A generic, `shared` (a
+  is two loads or stores (`pair_fields`). In a generic class only a
+  field whose type names no class parameter is flat (`G<T> { v: T, o:
+  Option<int> }` flattens `o`): its layout is the same in every
+  instance, so a shared body and a clone read it alike. A `shared` (a
   two-word store is not atomic) or `view` class keeps one word per field,
   and a class with a flat field is never scalar-replaced into frame slots.
 - Everywhere else a value must be one word (another field, a capture, a
