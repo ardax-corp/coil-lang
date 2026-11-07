@@ -63,6 +63,9 @@ struct DissectCli {
     /// Also print each function's effects and why auto-par left loops sequential
     #[arg(long)]
     effects: bool,
+    /// Also print every place lowering boxes a value, with its type and why
+    #[arg(long)]
+    boxes: bool,
     /// Print the MIR the engines run (the default)
     #[arg(long)]
     mir: bool,
@@ -104,6 +107,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DissectArgs)>, St
             grants: cli.grants.into_grants(),
             show_hir: cli.hir,
             show_effects: cli.effects,
+            show_boxes: cli.boxes,
             opt_level: cli.opt.level(),
             contracts: cli.opt.contracts,
             fold_calls: cli.opt.fold_calls,

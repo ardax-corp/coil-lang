@@ -22,6 +22,8 @@ pub struct DissectArgs {
     /// Print each body's HIR (typed, desugared tree).
     pub show_hir: bool,
     pub show_effects: bool,
+    /// Print every place lowering boxes a value (`--boxes`).
+    pub show_boxes: bool,
     pub opt_level: OptLevel,
     pub contracts: Option<compiler::ContractLevel>,
     /// `--fold-calls on|off`; `None` keeps the pipeline default.
@@ -110,6 +112,9 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     if args.show_effects {
         compiler::start_effects_capture();
     }
+    if args.show_boxes {
+        compiler::start_box_capture();
+    }
     let (artifacts, bodies) = if from_archive {
         match archive_artifacts(&args.filename) {
             Ok(a) => a,
@@ -126,6 +131,7 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     };
     let hir = if args.show_hir { compiler::take_hir_capture() } else { Default::default() };
     let effects = if args.show_effects { compiler::take_effects_capture() } else { Default::default() };
+    let boxes = if args.show_boxes { compiler::take_box_capture() } else { Vec::new() };
     if args.opt_stats || args.opt_stats_json {
         let stats = compiler::last_opt_stats();
         if args.opt_stats {
@@ -196,6 +202,18 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
         }
         for line in &effects.auto_par {
             println!(";; {line}");
+        }
+        println!();
+    }
+
+    if args.show_boxes {
+        println!("=== boxes ===");
+        let shown: Vec<_> = boxes.iter().filter(|b| pat.is_none_or(|p| compiler::matches_fn_pat(&b.func, p))).collect();
+        if shown.is_empty() {
+            println!(";; no boxes");
+        }
+        for b in shown {
+            println!("{}: {} `{}` ({})", b.func, b.kind.as_str(), b.ty, b.site);
         }
         println!();
     }
