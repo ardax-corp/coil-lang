@@ -134,16 +134,18 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   (`coil_native_fn_entry_pair`). A callee without one (a named function,
   an adapter, a runtime call) returns its box and the call reads the two
   words through a per-type `unpair` body (`__coil_unpair_N`).
-- A class field of a two-word type neither of whose words is a pointer
-  (`layout::scalar_pair`: `Option<int>`, `(int, float)`, a numeric
-  range, `Result<int, int>`, an enum of immediate payloads) sits flat:
-  its first word in the field's own slot, its second in a tail slot after
-  the declared fields (`Checker::class_flat_tails`), so no other field's
-  slot moves. `ClassWordKinds` marks both scalar, `new` stores both, and
-  a read or write is two loads or stores (`pair_fields`). A generic,
-  `shared` (a two-word store is not atomic) or `view` class keeps one
-  word per field, and a class with a flat field is never scalar-replaced
-  into frame slots.
+- A class field of a closed two-word type sits flat: its first word in
+  the field's own slot, its second in a tail slot after the declared
+  fields (`Checker::class_flat_tails`), so no other field's slot moves.
+  `ClassWordKinds` marks the second word scalar, and the first scalar
+  for a `layout::scalar_pair` (`Option<int>`, `(int, float)`, a range,
+  `Result<int, int>`, an enum of immediate payloads) or unknown, resolved
+  by address, for a payload that is a heap word only under some tags
+  (`Result<int, string>`, `enum { Num(int), Word(string) }`;
+  `layout::pair_word_kinds`). `new` stores both words, and a read or write
+  is two loads or stores (`pair_fields`). A generic, `shared` (a
+  two-word store is not atomic) or `view` class keeps one word per field,
+  and a class with a flat field is never scalar-replaced into frame slots.
 - Everywhere else a value must be one word (another field, a capture, a
   container element, a shared body, a dictionary call, `Show`) it
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
