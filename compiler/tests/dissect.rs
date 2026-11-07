@@ -425,3 +425,40 @@ fn main() {
     let mine: Vec<_> = boxes.iter().filter(|b| b.func == "run").collect();
     assert!(mine.is_empty(), "{mine:?}");
 }
+
+#[test]
+fn box_capture_generic_class_closed_pair_fields_have_no_boxes() {
+    // `o` names no class parameter, so it is flat in every `G<T>`: the
+    // method clone and the shared generic `reset` both store two words.
+    let src = r#"
+class G<T> {
+    pub v: T,
+    pub o: Option<int>,
+}
+impl G<T> {
+    pub fn step(int i) {
+        self.o = Some(i);
+    }
+}
+fn reset<T>(G<T> g) {
+    g.o = None;
+}
+fn main() {
+    let g = new G("x", None);
+    g.step(3);
+    let f = reset;
+    f(g);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes
+        .iter()
+        .filter(|b| b.func == "main" || b.func.contains("step") || b.func.contains("reset"))
+        .collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}

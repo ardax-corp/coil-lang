@@ -239,3 +239,64 @@ test("a flat field whose payload is a heap word for some tags survives collectio
         default => false,
     });
 }
+
+class G<T> {
+    pub v: T,
+    pub o: Option<int>,
+    pub span: Range<int>,
+}
+
+impl G<T> {
+    pub fn bump() {
+        self.o = match self.o {
+            Some(k) => Some(k + 1),
+            None => Some(0),
+        };
+    }
+}
+
+fn reset<T>(G<T> g) {
+    g.o = None;
+    g.span = 1..3;
+}
+
+fn sum<T>(G<T> g) -> int {
+    let s = match g.o {
+        Some(k) => k,
+        None => 100,
+    };
+    for i in g.span {
+        s += i;
+    }
+    return s;
+}
+
+test("a generic class's closed two-word fields, in clones and shared bodies") {
+    let a = new G("x", None, 0..2);
+    let b = new G(1.5, Some(4), 0..0);
+    a.bump();
+    b.bump();
+    assert!(a.o == Some(0) && b.o == Some(5));
+    assert!(sum(a) == 1 && sum(b) == 5);
+    let f = sum;
+    reset(b);
+    assert!(f(b) == 103 && b.v == 1.5);
+    let gs: Vec<G<string>> = Vec::new();
+    for i in 0..100 {
+        gs.push(new G(word(i), half(i), 0..i));
+    }
+    collect();
+    let n = 0;
+    for g in gs {
+        n += sum(g);
+    }
+    let want = 0;
+    for i in 0..100 {
+        want += (if i % 2 == 0 {
+            i / 2
+        } else {
+            100
+        }) + (i * (i - 1)) / 2;
+    }
+    assert!(n == want && gs[7].v == "w7");
+}
