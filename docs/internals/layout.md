@@ -88,6 +88,28 @@ is the main user. This is the only place a value changes representation at
 a boundary, and it is keyed on the static type of the parameter (open
 enum), not on the caller's context.
 
+### Residue boxes (E0808)
+
+A two-word value has no two-word form where the code that reads it takes
+one word for every type. Those places box it, and the project's own code
+warns there (`ErrorCode::BoxedResidue`, `Compiler::note_box_residue`):
+
+- a class field typed by a class parameter (`v: V` at `Option<int>`),
+  which is one word in every instance because the class's shared bodies
+  read it so; it warns at the `new`, once per field and type;
+- a value packed as a bare-trait existential (`let s: Named = pick`);
+- an argument to a `forall` function value (`PolyFn`), whose shared body
+  takes one word.
+
+A call the clone budget sends to a shared body boxes its two-word
+arguments too; E0804 already warns at that call. Two other boxes stay
+without a warning, because nothing in the source chooses them: a
+generator's yielded value, which shared consumers resume as one word, and
+a two-word payload nested in another two-word value. A dependency's code
+(a path outside the project or under `.deps`), a clone compiled for
+another module and compiler-made code never warn. `coil dissect --boxes`
+lists every box, these included.
+
 ## The two-slot calling convention
 
 The two-slot form of a `Layout::Pair` type is a calling convention, not a
