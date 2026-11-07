@@ -295,3 +295,39 @@ fn main() {
     let mine: Vec<_> = boxes.iter().filter(|b| b.func == "same").collect();
     assert!(mine.is_empty(), "{mine:?}");
 }
+
+/// A named function used as a value returns its two words to direct calls
+/// and through the value: only its one-word adapter (`f$value`) boxes.
+#[test]
+fn box_capture_named_fn_value_boxes_only_in_its_adapter() {
+    let src = r#"
+fn half(int x) -> Option<int> {
+    if x % 2 != 0 {
+        return None;
+    }
+    return Some(x / 2);
+}
+#[inline(never)]
+fn through(int -> Option<int> f, int x) -> int {
+    return match f(x) {
+        Some(v) => v,
+        None => -1,
+    };
+}
+fn main() {
+    let _ = through(half, 4) + match half(2) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| ["half", "through", "main"].contains(&b.func.as_str())).collect();
+    assert!(mine.is_empty(), "{mine:?}");
+    assert!(boxes.iter().any(|b| b.func == "half$value"), "{boxes:?}");
+}
