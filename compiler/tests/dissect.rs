@@ -539,3 +539,37 @@ fn main() {
     let mine: Vec<_> = boxes.iter().filter(|b| b.func.starts_with("make")).collect();
     assert!(mine.is_empty(), "{mine:?}");
 }
+
+#[test]
+fn box_capture_pair_statics_have_no_boxes() {
+    // `best` keeps its two words in its slot and a tail slot: neither the
+    // store, the read nor its initializer boxes.
+    let src = r#"
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+static let best: Option<int> = Option::None;
+fn keep(int i) -> int {
+    best = half(i);
+    return match best {
+        Some(v) => v,
+        None => -1,
+    };
+}
+fn main() {
+    let _ = keep(4);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| b.func == "keep" || b.func.contains("best")).collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}
