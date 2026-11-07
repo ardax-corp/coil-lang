@@ -64,6 +64,7 @@ Tracked in Linear project Known limitations. Long-form notes below stay the in-r
 | Topic | Linear |
 |-------|--------|
 | Loop full unroll — **decided: counted trip ≤ 8** (`hir::unroll`; break/call/closure refuse, inner loops that unroll first let the outer one follow; `LEQ` for **trip count** only, not an index in-bounds proof; COI-85 / COI-98) | COI-98 |
+| Frame roots of two-word locals — **ambiguous by design**: the first word of a local `Result<int, string>` or an enum with a heap payload is rooted ambiguously (`frame_words::pair_words`), so an object it reaches stays put through a collection while that frame is live. A flat class field of the same type is precise by its tag (`WORD_TAGGED`, [layout.md](layout.md)) | — |
 | Optimization levels (`OptLevel`) — **implemented** (`-O0`…`-O3`, `-Os`, `-Og`; `Standard` default) | — |
 | Iterative optimization — **removed** (re-running the pipeline is unsound: LICM is not idempotent) | COI-130 |
 | Optimization statistics — **default off** (`collect_stats` / `--opt-stats`) | COI-131 |
