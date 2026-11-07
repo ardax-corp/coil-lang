@@ -1874,7 +1874,9 @@ impl Lower<'_> {
     }
 
     /// A niche `Option` / `Result` word boxed to its `ObjEnum`.
+    #[track_caller]
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
+        super::box_report::note(&self.b.func().name, super::box_report::BoxKind::Niche, || format!("{layout:?}"));
         if !matches!(self.b.value_ty(w), MirTy::NicheOpt | MirTy::NicheRes) {
             return Err("boxed niche return".into());
         }
@@ -1931,6 +1933,7 @@ impl Lower<'_> {
     /// Niche-layout value `id` as the boxed enum object a generic class's
     /// open field holds: a read of another such field moves its object
     /// as is, any other value boxes.
+    #[track_caller]
     fn boxed_niche_word(&mut self, id: HirId, layout: ValueLayout) -> Result<Option<ValueId>, Refusal> {
         if let HirKind::Field { base, .. } = self.hir.expr(id).kind
             && self.inp.boxed_niches.get(&id.0) == Some(&layout)
@@ -2042,6 +2045,7 @@ impl Lower<'_> {
     }
 
     /// `id`'s word, or its box when it is a two-word value.
+    #[track_caller]
     fn word_or_boxed(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
         if self.inp.pair_tys.contains_key(&id.0) {
             return self.boxed_word(id);
@@ -2063,6 +2067,7 @@ impl Lower<'_> {
 
     /// `id`'s word, a two-word value boxed to one, as HIR emission's
     /// conversion of a pair to a boxed local or return.
+    #[track_caller]
     fn boxed_word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
         // A value packed as an existential is its pack's one word.
         if self.inp.packs.contains_key(&id.0) {
@@ -2074,6 +2079,9 @@ impl Lower<'_> {
             && self.inp.pair_tys.contains_key(&id.0)
             && let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_view)(t, Some(variant)))
         {
+            if let Some(ty) = self.expr_ty(id).cloned() {
+                self.note_box(super::box_report::BoxKind::Variant, &ty);
+            }
             let (enum_name, tag, args) = (enum_name.clone(), *tag, args.clone());
             return match self.make_boxed(&enum_name, tag, &tys, &args)? {
                 Val::V(v) => Ok(Some(v)),
@@ -2474,7 +2482,15 @@ impl Lower<'_> {
     }
 
     /// A pair of type `ty` boxed: a two-field tuple, or an enum value.
+    /// Record a box of a value of type `ty` (`coil dissect --boxes`).
+    #[track_caller]
+    fn note_box(&self, kind: super::box_report::BoxKind, ty: &Ty) {
+        super::box_report::note(&self.b.func().name, kind, || crate::typechecking::pretty::format_ty_for_diag(&Default::default(), ty));
+    }
+
+    #[track_caller]
     fn box_pair_val(&mut self, ty: &Ty, lo: ValueId, hi: ValueId) -> Result<Val, Refusal> {
+        self.note_box(super::box_report::BoxKind::Pair, ty);
         if let Ty::Tuple(items) = strip_readonly(ty) {
             if items.len() != 2 {
                 return Err("box pair type".into());
@@ -2522,6 +2538,7 @@ impl Lower<'_> {
 
     /// `id`'s word; refuses `()` and `Never` is passed up as `None`. A
     /// readonly class kept as a pair is one word as its instance (#1562).
+    #[track_caller]
     fn word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
         match self.value(id)? {
             Val::V(v) => Ok(Some(v)),
@@ -4194,6 +4211,7 @@ impl Lower<'_> {
         matches!(&self.hir.expr(*inner).kind, HirKind::Field { base: b, name: n } if n == name && matches!(self.hir.expr(*b).kind, HirKind::Local(l) if l == *local))
     }
 
+    #[track_caller]
     fn boxed_field(&mut self, field: HirId, slot: u32) -> Result<Option<(ValueId, u32)>, Refusal> {
         let HirKind::Field { base, .. } = self.hir.expr(field).kind else {
             return Ok(None);
@@ -4733,6 +4751,7 @@ impl Lower<'_> {
     }
 
     /// The word a plain one-word local holds, as a `Local` read.
+    #[track_caller]
     fn local_word(&mut self, local: HirLocal) -> Result<ValueId, Refusal> {
         // A two-slot local is one word, its box, wherever a word is
         // required (a capture).
@@ -5292,6 +5311,7 @@ impl Lower<'_> {
     /// A heap local's new word from `value`: [`Self::boxed_word`], or a
     /// fixed array read from another local copied (`vec_from_array`), as
     /// the two never share elements.
+    #[track_caller]
     fn boxed_word_copied(&mut self, value: HirId) -> Result<Option<ValueId>, Refusal> {
         let Some(&native) = self.inp.array_copies.get(&value.0) else {
             return self.boxed_word(value);
@@ -6141,6 +6161,11 @@ impl Lower<'_> {
         // tuple object.
         let tuple = pair.is_none() && !raw && self.expr_ty(id).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(items) if !items.is_empty()));
         let unit = self.expr_ty(id).is_some_and(is_unit);
+        if self.inp.pair_tys.contains_key(&id.0) {
+            let name = common::HOST_NATIVES.iter().find(|h| h.id == native).map_or("?", |h| h.name);
+            let ty = self.expr_ty(id).map(|t| crate::typechecking::pretty::format_ty_for_diag(&Default::default(), t)).unwrap_or_default();
+            super::box_report::note(&self.b.func().name, super::box_report::BoxKind::HostResult, || format!("{name} -> {ty}"));
+        }
         let ret = match self.expr_ty(id) {
             _ if pair.is_some() || tuple || raw => Some(MirTy::HeapRef),
             _ if unit => None,

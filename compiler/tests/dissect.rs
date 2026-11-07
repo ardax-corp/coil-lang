@@ -144,3 +144,41 @@ fn main() {
     assert_eq!(of("item_check"), "keeps nothing");
     assert_eq!(of("keep"), "keeps `t`");
 }
+
+/// `coil dissect --boxes`: each place lowering boxes a value, by function,
+/// kind and type; a direct two-word call boxes nothing.
+#[test]
+fn box_capture_names_function_kind_and_type() {
+    let src = r#"
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+fn direct(int n) -> int {
+    return match half(n) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+fn stored(int n) -> int {
+    let v: Vec<Option<int>> = Vec::new();
+    v.push(half(n));
+    return v.len();
+}
+fn main() {
+    let _ = direct(4) + stored(3);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let of = |name: &str| boxes.iter().filter(|b| b.func == name).map(|b| (b.kind, b.ty.as_str())).collect::<Vec<_>>();
+    assert_eq!(of("direct"), vec![], "{boxes:?}");
+    assert_eq!(of("stored"), vec![(compiler::BoxKind::Pair, "Option<int>")], "{boxes:?}");
+    assert!(boxes.iter().all(|b| b.site.starts_with("from_hir.rs:")), "{boxes:?}");
+}
