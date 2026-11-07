@@ -102,7 +102,11 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
 - "Escapes" is the fail-closed whole-compile `typechecking::fn_value_escape`
   walk: any function value, partial application, `thread::spawn` or FFI
   callback of that name, in any file of the package use-graph, keeps every
-  caller on the one-word ABI.
+  caller on the one-word ABI for its parameters. Its result too, unless
+  the value can target an adapter (`Compiler::fn_value_redirects`: a plain
+  free function never partially applied): then the function returns two
+  words to direct calls, and its value enters `f$value`, a one-word
+  adapter that boxes the result, whose `pair_twin` is the function itself.
 - Coroutines never return two slots; host natives return theirs through
   the context (see "Host calls"). A raw trait
   instance method (a ground instance with no context, not a default body)
