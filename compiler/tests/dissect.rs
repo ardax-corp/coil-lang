@@ -221,3 +221,37 @@ fn main() {
         .collect();
     assert!(mine.is_empty(), "{mine:?}");
 }
+
+/// A host native's two-word result (`Vec::pop` of `Option<int>`) comes
+/// back as its two words: the caller boxes nothing.
+#[test]
+fn box_capture_host_pair_result_has_no_boxes() {
+    let src = r#"
+fn drain(Vec<int> v) -> int {
+    let s = 0;
+    let more = true;
+    while more {
+        match v.pop() {
+            Some(x) => {
+                s += x;
+            },
+            None => {
+                more = false;
+            },
+        }
+    }
+    return s;
+}
+fn main() {
+    let _ = drain(Vec::from([1, 2, 3]));
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| b.func == "drain").collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}
