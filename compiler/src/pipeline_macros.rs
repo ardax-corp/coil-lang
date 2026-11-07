@@ -2287,6 +2287,6 @@ fn program_mir(e: &crate::macros::CompiledExpansion) -> Vec<u8> {
     if e.mir.is_empty() {
         return Vec::new();
     }
-    let pcs: HashMap<String, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    let pcs: HashMap<String, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
     crate::mir::archive::encode(&e.mir, &pcs)
 }

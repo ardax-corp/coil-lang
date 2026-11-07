@@ -160,7 +160,7 @@ impl ComptimeGrants {
 /// ([`Self::SILENT_CALL_STEPS`]) and gives up quietly instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComptimeLimits {
-    /// Loop back-edges + calls (see `Machine::set_step_budget`).
+    /// Loop back-edges + calls (see `machine::Isolate::set_step_budget`).
     pub steps: u64,
     /// Heap bytes of live objects after a full collection.
     pub heap_bytes: u64,

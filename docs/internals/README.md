@@ -49,7 +49,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Tasks](tasks.md) | `task::scope` / `spawn` / `join` / `sleep` / `yield_now` / `cancel` / `timeout` / `shield` / `channel` / `blocking` on one runtime: scheduler, suspension points, child panics, cancellation, the `defer` unwinder, waits on other threads; HostInvoke **144–158** |
 | [IO reactor](io-reactor.md) | Sync adapter waits + `wait_readable` / `wait_writable` (task-aware) / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park`; clocks **121–123**; M1 math **125–135** (archive minor 5: `atan`…`tanh`). `PI`/`E`/`TAU` → coil-stdlib `num` |
 | [Function keys](symbol-keys.md) | `symbol::fn_key()` (compile-time per-function, per-instantiation `int` key: what it hashes, inlining, generic clones, DCE, caches) and `symbol::next_id()` (process-wide counter, HostInvoke **179**) |
-| [Collections split](collections-vm-split.md) | Userland collections vs runtime primitives |
+| [Collections split](collections-runtime-split.md) | Userland collections vs runtime primitives |
 | [Key index](key-index.md) | `key_index::*` natives (HostInvoke 191–199): insertion-ordered hash index over `Vec`s for any `Hash + Eq` key; `find` / `eq_mode` for `int` and `string` keys |
 | [Debug info](debug-info.md) | `source_files` / `debug_locs` / `debug_lines` / `fn_symbols` in `.ccoil`; `-g` levels; panic output |
 | [Dissect](dissect.md) | `coil dissect`: in-memory MIR / HIR / AST dump |

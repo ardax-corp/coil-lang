@@ -1583,7 +1583,6 @@ impl Compiler {
                 if !emit.par_tail.is_empty() {
                     self.hir_par_tail = Some(Box::new(HirParTail { hir: hir.clone(), emit }));
                 }
-                self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
                 crate::opt::note_hir_lowered();
                 true
@@ -1665,7 +1664,6 @@ impl Compiler {
                 self.bodies.advance();
                 self.hir_mir_why = None;
                 self.hir_mir = self.hir_lower_mir(hir, &mut emit, entry_words);
-                self.expr_depth = 0;
                 true
             }
             Err(reason) => {
@@ -8584,9 +8582,12 @@ impl Compiler {
                     })
                     .map_or(BOXED, |ty| Rep::Word(self.value_layout(ty))),
             ),
-            HirKind::Resume { .. }
-            | HirKind::Yield { .. }
-            | HirKind::Builtin {
+            // What a resume sends and a yield hands back: its type's
+            // layout, as the MIR moves it.
+            HirKind::Resume { .. } | HirKind::Yield { .. } => {
+                Some(Self::hir_ty(hir, id).map_or(BOXED, |ty| Rep::Word(self.value_layout(ty))))
+            }
+            HirKind::Builtin {
                 op: Builtin::Done, ..
             } => Some(BOXED),
             HirKind::Call { .. } => emit.plan.calls.get(&id.0).map(Self::hir_call_rep),
@@ -9603,24 +9604,20 @@ impl Compiler {
                     self.hir_check_value(hir, emit, arg, &BOXED)?;
                 }
             }
-            // The yielded word moves as it is (as `Resume`).
+            // The yielded word moves in its type's layout (a niche word as
+            // it is, a pair boxed), as `Resume` and a `for` take it back.
             HirKind::Yield { value, .. } => {
-                let boxed = |id: HirId| Self::hir_ty(hir, id).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
-                if !boxed(*value) {
-                    return Err("yield-layout");
-                }
-                self.hir_check_value(hir, emit, *value, &BOXED)?;
+                let want = Self::hir_ty(hir, *value).map_or(BOXED, |t| Rep::Word(self.value_layout(t)));
+                self.hir_check_value(hir, emit, *value, &want)?;
             }
-            // As the AST: the yielded and sent words move as they are, so
-            // only a boxed-layout type is taken.
+            // The yielded and sent words move in their types' layouts (a
+            // niche word as it is, a pair boxed).
             HirKind::Resume { handle, value } => {
-                let boxed = |id: HirId| Self::hir_ty(hir, id).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
-                if !boxed(id) || value.is_some_and(|v| !boxed(v)) {
-                    return Err("resume-layout");
+                if let Some(v) = value {
+                    let want = Self::hir_ty(hir, *v).map_or(BOXED, |t| Rep::Word(self.value_layout(t)));
+                    self.hir_check_value(hir, emit, *v, &want)?;
                 }
-                for &v in value.iter().chain([handle]) {
-                    self.hir_check_value(hir, emit, v, &BOXED)?;
-                }
+                self.hir_check_value(hir, emit, *handle, &BOXED)?;
             }
             HirKind::Builtin {
                 op: Builtin::Done,
@@ -10127,12 +10124,8 @@ impl Compiler {
                 if !matches!(pat, HirPat::Bind(_)) && !record_items {
                     self.hir_check_let_pat(hir, pat)?;
                 }
-                // The resumed word is stored as it comes back.
-                if let (Some(ForInKind::Coroutine), HirPat::Bind(local)) = (kind, pat)
-                    && self.hir_local_layout(hir, *local) != ValueLayout::Boxed
-                {
-                    return Err("for-in-coroutine");
-                }
+                // The resumed word is stored as it comes back, in the local's
+                // layout (a niche word as the yield sent it).
                 // `into_iter` is called as the AST calls it: a range comes
                 // back as `[start, end]`, anything else as one word.
                 if let (

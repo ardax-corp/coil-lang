@@ -225,7 +225,7 @@ pub(crate) fn encode(parts: Parts<'_>) -> Option<Vec<u8>> {
     }
     w.len(parts.sites.len());
     for s in parts.sites {
-        w.u32(s.entry_pc);
+        w.u32(s.body_id);
         w.u32(s.loc.file);
         w.u32(s.loc.start_byte);
         w.u32(s.loc.end_byte);
@@ -291,9 +291,9 @@ pub fn load(image: &[u8]) -> Result<NativeProgram, String> {
     }
     let mut sites = Vec::new();
     for _ in 0..r.len()? {
-        let entry_pc = r.u32()?;
+        let body_id = r.u32()?;
         let (file, start_byte, end_byte) = (r.u32()?, r.u32()?, r.u32()?);
-        sites.push(NativeSite { entry_pc, loc: common::DebugLoc { file, start_byte, end_byte } });
+        sites.push(NativeSite { body_id, loc: common::DebugLoc { file, start_byte, end_byte } });
     }
     let compiled = (0..r.len()?).map(|_| r.text()).collect::<Result<Vec<_>, _>>()?;
     Ok(NativeProgram { entries, compiled, refused: Vec::new(), sites, image: None, keep: crate::Code::keep(module, mapped) })

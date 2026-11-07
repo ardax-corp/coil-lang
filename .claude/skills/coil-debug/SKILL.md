@@ -63,7 +63,7 @@ Task:
 - [ ] 1. Identify candidate fn / loop site (source or `dissect --fn`)
 - [ ] 2. Break on entry; `run`; confirm stop
 - [ ] 3. `bt` + `list` + `print $N` — note depth / slots
-- [ ] 4. `next` or `stepi` a few times — does PC/line/slots change?
+- [ ] 4. `next` or `stepi` a few times — does the MIR op / line / locals change?
 - [ ] 5. If recursion: watch `bt` depth grow unboundedly
 - [ ] 6. Fix source; re-run the same `-x` script to confirm exit
 ```
@@ -108,7 +108,7 @@ list
 quit
 ```
 
-Compare named locals / slots to expected intermediates. Use `disas <fn>` if fusion/`BinSlot*` obscures the mapping.
+Compare named locals / slots to expected intermediates. Use `disas <fn>` to see the MIR a line became (the debugger always runs raw MIR at `-O 0`, so no pass has reordered it).
 
 ## Workflow: panic
 
@@ -148,7 +148,7 @@ quit
 4. Prefer `next` for source-level progress; use `stepi` + `disas` when line info is missing.
 5. Prefer **named** locals (`print n`, `info locals`); fall back to `$N` when a name is missing.
 6. Do not rely on `out.ccoil` for debug sessions; delete it only if mixing with normal `coil` runs.
-7. If debug cannot set a line BP, fall back to `coil dissect <file> --fn <pat>` and break on the function entry PC symbol instead.
+7. If debug cannot set a line BP, fall back to `coil dissect <file> --fn <pat>` to find the body's full name and `break` on that function instead.
 
 ## Related docs
 

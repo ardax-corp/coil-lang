@@ -245,12 +245,12 @@ fn number_ops(artifacts: &mut DissectArtifacts, locs: Vec<common::DebugLoc>, ent
     let starts: HashMap<&str, u32> = entries.iter().map(|(name, pc)| (name.as_str(), *pc)).collect();
     artifacts.functions.retain_mut(|f| {
         let start = starts.get(f.name.as_str()).copied();
-        f.entry_pc = start.unwrap_or(0);
+        f.body_id = start.unwrap_or(0);
         start.is_some()
     });
-    artifacts.functions.sort_by_key(|f| f.entry_pc);
+    artifacts.functions.sort_by_key(|f| f.body_id);
     artifacts.debug.debug_locs = locs;
-    artifacts.debug.fn_symbols = entries.iter().map(|(name, pc)| common::FnDebugSym { name: name.clone(), entry_pc: *pc }).collect();
+    artifacts.debug.fn_symbols = entries.iter().map(|(name, pc)| common::FnDebugSym { name: name.clone(), body_id: *pc }).collect();
 }
 
 /// A program ready to run on the interpreter.
@@ -390,7 +390,7 @@ impl DebugSession {
             .to_path_buf();
         let launch = Launch::new(&pipeline, &artifacts, &entry_path);
         let mir_text = bodies.iter().map(|b| (b.name.clone(), b.mir.to_string())).collect();
-        let pcs = launch.program.debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+        let pcs = launch.program.debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
         let debug_program = coil_mir_interp::debug::prepare_debug(bodies, &pcs);
         let launch = launch.with_code(debug_program.program, 0);
         number_ops(&mut artifacts, debug_program.locs, &debug_program.entries);
@@ -750,8 +750,8 @@ impl DebugSession {
             .artifacts
             .functions
             .iter()
-            .filter(|f| f.entry_pc as usize <= pc)
-            .map(|f| f.entry_pc as usize)
+            .filter(|f| f.body_id as usize <= pc)
+            .map(|f| f.body_id as usize)
             .max()
             .unwrap_or(0);
         let located = |p: usize| {
@@ -764,7 +764,7 @@ impl DebugSession {
             .artifacts
             .functions
             .iter()
-            .map(|f| f.entry_pc as usize)
+            .map(|f| f.body_id as usize)
             .filter(|&e| e > pc)
             .min()
             .unwrap_or(self.artifacts.debug.debug_locs.len());
@@ -1040,7 +1040,7 @@ impl DebugSession {
             .artifacts
             .functions
             .iter()
-            .map(|s| s.entry_pc as usize)
+            .map(|s| s.body_id as usize)
             .collect();
         starts.sort_unstable();
         starts.dedup();
@@ -1082,7 +1082,7 @@ impl DebugSession {
         if matched.is_empty() {
             return Err(format!("no function matching `{arg}`"));
         }
-        let pcs: Vec<usize> = matched.iter().map(|s| s.entry_pc as usize).collect();
+        let pcs: Vec<usize> = matched.iter().map(|s| s.body_id as usize).collect();
         let name = matched[0].name.clone();
         Ok((pcs, name))
     }
@@ -1141,8 +1141,8 @@ fn split_path(expr: &str) -> Result<(&str, Vec<PathStep>), String> {
 pub fn symbol_at_pc(functions: &[FnSym], pc: usize) -> Option<&str> {
     let mut best: Option<&FnSym> = None;
     for s in functions {
-        let entry = s.entry_pc as usize;
-        if entry <= pc && best.map(|b| entry >= b.entry_pc as usize).unwrap_or(true) {
+        let entry = s.body_id as usize;
+        if entry <= pc && best.map(|b| entry >= b.body_id as usize).unwrap_or(true) {
             best = Some(s);
         }
     }

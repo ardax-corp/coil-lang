@@ -2,7 +2,6 @@
 use io::sync::print;
 use string::format;
 
-#[max_depth(4096)]
 fn tak(int x, int y, int z) -> int {
     if y >= x {
         return z;

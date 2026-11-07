@@ -60,7 +60,7 @@ fn payload_bytes(pipeline: &mut Pipeline, program: &ArchivedProgram) -> Vec<u8> 
 /// to run what does not compile, so that shows here and not on the target.
 #[cfg(not(target_family = "wasm"))]
 fn add_native_mir(pipeline: &mut Pipeline, program: &mut ArchivedProgram, bodies: &[compiler::native_mir::NativeBody]) {
-    let pcs = pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    let pcs = pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
     match coil_native::jit(bodies, &pcs) {
         Ok(jitted) if jitted.refused.is_empty() => program.native_mir = coil_native::section::encode(bodies, &pcs),
         Ok(jitted) => refused_exit(&jitted.refused),
@@ -87,7 +87,7 @@ fn refused_exit(refused: &[(String, String)]) -> ! {
 #[cfg(not(target_family = "wasm"))]
 fn aot_object(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8]) -> Result<coil_native::AotObject, String> {
     let debug = pipeline.program_debug_full();
-    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
     let linked: Vec<(String, String)> = pipeline
         .extern_symbols()
         .into_iter()

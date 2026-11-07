@@ -1170,15 +1170,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
         if let HirKind::Defer { captures, body } = &e.kind {
-            // The thunk's frame holds copies of its captures: one that
-            // assigns a local would not write the function's.
-            let mut assigns = false;
-            lower::visit(hir, *body, &mut |x| {
-                assigns |= matches!(x.kind, HirKind::Assign { place, .. } if matches!(hir.expr(place).kind, HirKind::Local(l) if captures.contains(&Some(l))));
-            });
-            if assigns {
-                return Err("defer assigns a capture".into());
-            }
+            let _ = captures;
             // The body's own bindings (`let`, a `for` variable, a pattern)
             // live in the thunk's frame, not the function's (#2134).
             let mut binds = Vec::new();
@@ -1341,7 +1333,8 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         let (run, skip) = (pad.b.create_block(), pad.b.create_block());
         pad.b.branch(armed, run, skip).map_err(mir)?;
         pad.switch(run);
-        for c in captures_of(body).ok_or("pad defer")?.into_iter().flatten() {
+        let captures: Vec<HirLocal> = captures_of(body).ok_or("pad defer")?.into_iter().flatten().collect();
+        for &c in &captures {
             let &(home, slot) = parts.homes.caps.get(&c.0).ok_or("pad capture")?;
             let v = pad.b.ins_home_load(home).map_err(mir)?;
             match slot {
@@ -1351,7 +1344,26 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
                 }
             }
         }
+        // A `use (mut x)` the body assigns writes `x`'s home back, so the
+        // pads of outer blocks read the new value.
+        let mut assigned = Vec::new();
+        lower::visit(hir, body, &mut |x| {
+            if let HirKind::Assign { place, .. } = x.kind
+                && let HirKind::Local(l) = hir.expr(place).kind
+                && captures.contains(&l)
+                && !assigned.contains(&l)
+            {
+                assigned.push(l);
+            }
+        });
         if pad.stmt(body)? {
+            for l in &assigned {
+                let &(home, slot) = parts.homes.caps.get(&l.0).ok_or("pad capture")?;
+                let slot = slot.ok_or("pad assigned capture without a slot")?;
+                let ty = *parts.home_tys.get(usize::from(home)).ok_or("pad home")?;
+                let v = pad.b.use_local(slot, ty).map_err(mir)?;
+                pad.b.ins_home_store(home, v).map_err(mir)?;
+            }
             pad.jump(skip)?;
         }
         pad.switch(skip);

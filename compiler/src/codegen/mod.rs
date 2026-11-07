@@ -303,13 +303,8 @@ pub struct Compiler {
     /// `do_compile` to recover the `NodeId` of the node it's currently
     /// emitting. Reset at the start of each `compile`.
     emit_idx: usize,
-    /// Offset where user code starts (after prologue). Extern blocks precede main.
-    program_start_offset: u32,
-    /// Entry for prologue `JMP` when static initializers are spliced (unchanged
-    /// by the post-splice `program_start_offset` bump).
-    setup_entry_offset: u32,
-    /// Wide immediates referenced from compact 8-byte `Byte`
-    /// operands (floats, `JumpIfMatch` targets, etc.).
+    /// The archive's constant pool: encoded heap snapshots, which a
+    /// `RestoreSnapshot` startup op names by index.
     constants: Vec<u64>,
     /// Program string literals referenced by string-literal ops.
     strings: Vec<String>,
@@ -349,18 +344,6 @@ pub struct Compiler {
     /// Function-local cache of field-name string keys used ≥2 times
     /// (`STRING` materialized once at entry, then `LOAD`).
     field_key_slots: HashMap<String, u32>,
-
-    /// Count of expression values currently live on the operand stack
-    /// *above* interned locals (e.g. a `HostInvoke` native-id `CONST`
-    /// pushed before argument codegen). `alloc_temp_slot` must allocate
-    /// at or above `variables.len() + expr_depth` so `StorePop` does not
-    /// clobber those live values (locals and the operand stack share
-    /// memory).
-    expr_depth: u32,
-
-    /// Top-level functions whose frames can never hold a heap word
-    /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
-    precise_frame_fns: HashSet<String>,
 
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
@@ -715,8 +698,6 @@ pub struct Compiler {
 impl Default for Compiler {
     fn default() -> Self {
         let bodies = BodyTable::new();
-        let program_start_offset = bodies.position() as u32;
-
         Self {
             namespace: String::default(),
             bodies,
@@ -746,16 +727,12 @@ impl Default for Compiler {
             checker: crate::typechecking::Checker::new(),
             typed_sidecar: crate::typechecking::TypedSidecar::default(),
             emit_idx: 0,
-            program_start_offset,
-            setup_entry_offset: program_start_offset,
             constants: Vec::default(),
             strings: Vec::default(),
             string_indices: HashMap::default(),
             coroutine_fns: std::collections::HashSet::new(),
             temp_counter: 0,
             field_key_slots: HashMap::new(),
-            expr_depth: 0,
-            precise_frame_fns: HashSet::new(),
             codegen_depth: 0,
             active_fn_name: None,
             compiling_method: false,

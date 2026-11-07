@@ -59,9 +59,9 @@ jobs:
   # ───────────────────────────── stage 1: Linux ─────────────────────────────
 
   # Every crate's default feature set is empty, and `coil-debug` /
-  # `coil-dissect` / `coil-test` already turn on `compiler/dissect` and
-  # `machine/debugger` for the whole workspace, so one feature set
-  # covers `--no-default-features` / `--features dissect|debugger` too.
+  # `coil-dissect` already turn on `compiler/dissect` for the whole
+  # workspace, so one feature set covers `--no-default-features` /
+  # `--features dissect` too.
   # Criterion benches stay out (`--lib --tests --bins`).
   clippy:
     name: clippy (ubuntu-latest)
@@ -462,7 +462,7 @@ jobs:
               MALLOC_ARENA_MAX=1 COIL_NO_FIBERS=1 $run -j 1 --limit-as-kb $(( code_kb + 262144 )) -- --engine mir $FLAGS ;;
             # Collect and evacuate at every allocation (precise-root soundness).
             # The memory corpus also at -O0: without inlining, a call's
-            # result reaches its consumer on the operand stack instead of a
+            # result reaches its consumer as a call result instead of a
             # local, so the roots differ from the default level (#1481).
             # Generics too: uninlined calls through `forall` parameters
             # pass dictionaries the default level folds away (#1530).

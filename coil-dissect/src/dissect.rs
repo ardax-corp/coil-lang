@@ -46,7 +46,7 @@ fn archive_artifacts(path: &str) -> Result<(DissectArtifacts, Vec<NativeBody>), 
         .debug
         .fn_symbols
         .iter()
-        .map(|sym| FnSym { name: sym.name.clone(), entry_pc: sym.entry_pc, locals: Vec::new(), vars: Vec::new() })
+        .map(|sym| FnSym { name: sym.name.clone(), body_id: sym.body_id, locals: Vec::new(), vars: Vec::new() })
         .collect();
     let bodies = compiler::native_mir::archive::decode(&loaded.native_mir).map_err(|e| format!("`{path}`: {e}"))?.0;
     let artifacts = DissectArtifacts {

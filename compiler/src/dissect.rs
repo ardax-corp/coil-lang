@@ -11,7 +11,7 @@ use common::ProgramDebug;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnSym {
     pub name: String,
-    pub entry_pc: u32,
+    pub body_id: u32,
     /// User-facing locals/params `(name, slot)`, sorted by slot.
     pub locals: Vec<(String, u32)>,
     /// Scoped, typed debug variables with location lists.
@@ -49,21 +49,13 @@ pub fn matches_fn_pat(name: &str, pat: &str) -> bool {
     false
 }
 
-/// Filter symbols whose names match `pat` (or all when `pat` is `None`).
-pub fn filter_symbols<'a>(syms: &'a [FnSym], pat: Option<&str>) -> Vec<&'a FnSym> {
-    match pat {
-        None => syms.iter().collect(),
-        Some(p) => syms.iter().filter(|s| matches_fn_pat(&s.name, p)).collect(),
-    }
-}
-
-/// Format the symbol index (name → entry PC).
+/// Format the symbol index (name and body identity).
 pub fn format_symbol_index(functions: &[FnSym]) -> String {
     let mut syms = functions.to_vec();
     syms.sort_by(|a, b| a.name.cmp(&b.name));
     let mut out = String::from(";; symbols\n");
     for s in &syms {
-        let _ = writeln!(out, "{:>6}  {}", s.entry_pc, s.name);
+        let _ = writeln!(out, "{:>6}  {}", s.body_id, s.name);
     }
     out
 }

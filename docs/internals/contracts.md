@@ -217,7 +217,7 @@ Random arguments must not delete files or open sockets. Codegen asks the
 HIR effect summary of the target (`Compiler::contract_case_allowed`) when it
 emits a generated case: anything visible besides `read` and `mutate` (or a
 call through a function parameter) and the case is dropped from the
-runnable cases in `finalize_bytecode`. Its body is still emitted and listed
+runnable cases in `finalize_bodies`. Its body is still emitted and listed
 until then, so labels and node ids stay in step.
 
 ### Project sources

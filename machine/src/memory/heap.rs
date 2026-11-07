@@ -345,7 +345,7 @@ pub struct Heap {
     epoch_gen: u8,
 }
 
-/// Machine-owned heap that can borrow the root Heap for a C1 steal job.
+/// A runtime's own heap that can borrow the root Heap for a C1 steal job.
 #[derive(Default)]
 pub struct HeapSlot {
     owned: Heap,
@@ -1004,13 +1004,6 @@ impl Heap {
     /// so values built by concat / format / decoding skip the intern hash.
     pub fn alloc_string(&mut self, data: String) -> RefString {
         self.alloc(ObjString::new(data), Object::String).1
-    }
-
-    /// Allocate `head + tail` without interning, appending in place when
-    /// `head` ends at its buffer's tail (amortized linear `s = s + x`).
-    pub fn alloc_concat(&mut self, head: RefString, tail: &str) -> RefString {
-        let joined = head.as_ref().concat(tail);
-        self.alloc(joined, Object::String).1
     }
 
     /// Allocate bytes `[from, to)` of `src`, sharing its buffer when that is
@@ -1700,7 +1693,7 @@ impl Heap {
     /// Lower the byte threshold so the next [`Self::should_collect`] check
     /// fires (test helper for GC stress). The nursery then collects at every
     /// safepoint that finds a young object.
-    #[cfg(any(test, feature = "debugger"))]
+    #[cfg(test)]
     pub fn set_gc_threshold_for_test(&mut self, bytes: usize) {
         self.gc_next_threshold = bytes;
         self.nursery_chunks = 1;
@@ -1815,7 +1808,7 @@ impl Heap {
         while !self.mark_quantum(usize::MAX) {}
     }
 
-    /// Complete collect without a `Machine`: mark `extra_roots` plus immortal
+    /// Complete collect with no host's roots: mark `extra_roots` plus immortal
     /// enums, clear dead weaks, sweep.
     pub fn collect(&mut self, extra_roots: &[u64]) {
         if self.epoch_stw {
@@ -2051,10 +2044,6 @@ impl Heap {
         self.class_kinds = table;
     }
 
-    pub fn class_word_kinds_table(&self) -> std::sync::Arc<Vec<Box<[u8]>>> {
-        std::sync::Arc::clone(&self.class_kinds)
-    }
-
     /// Word kinds of `type_id`'s typed fields (empty = all unknown).
     #[inline]
     pub fn class_field_kinds(&self, type_id: u32) -> &[u8] {
@@ -2105,19 +2094,6 @@ impl Heap {
             return None;
         }
         unsafe { Object::from_header(addr) }
-    }
-
-    /// [`Self::find_object_by_addr`] for an enum (`match` / `Unpack`): reads
-    /// the header kind once instead of building an [`Object`] to match on.
-    #[inline]
-    pub fn find_enum_by_addr(&self, addr: u64) -> Option<Gc<ObjEnum>> {
-        if addr == 0 || !self.slab.contains_slot(addr) {
-            return None;
-        }
-        // SAFETY: a mapped slot start holds a header (poisoned when free).
-        let header = unsafe { &*(addr as *const GcHeader) };
-        // Kind 3 is `Object::Enum` (see `Object::from_header`).
-        (header.kind.get() == 3).then(|| unsafe { Gc::from_addr(addr) })
     }
 
     /// The function object at `addr`, for a word whose static type is a
@@ -3633,18 +3609,6 @@ impl ObjArray {
         }
     }
 
-    /// Ask the cache for the object the word `dist` elements past `index`
-    /// names ([`common::dense::HEAP_PREFETCH`]). A hint: a word that is no
-    /// address, or one past the end, costs nothing but the check.
-    #[inline(always)]
-    pub fn prefetch_ahead(&self, index: i64, dist: usize) {
-        if let ArrayData::Words(w) = &self.data
-            && let Some(v) = w.get((index as usize).wrapping_add(dist))
-        {
-            prefetch_addr(v.bits());
-        }
-    }
-
     /// `elements[index]` with the runtime's bounds rules: `unchecked` is a proven
     /// index; otherwise out of range returns `None`.
     #[inline(always)]
@@ -3760,30 +3724,6 @@ impl ObjArray {
         }
         self.note();
         self.words_vec().push(v);
-    }
-
-    /// Append `v` when the storage has room for it as it is: no growth,
-    /// no unpack, so nothing to account and no allocation safepoint.
-    /// False (and nothing changed) otherwise (#1864).
-    #[inline(always)]
-    pub fn push_in_place(&mut self, v: Value) -> bool {
-        match &mut self.data {
-            ArrayData::Words(w) if w.len() < w.capacity() => {
-                if !self.may_hold_refs {
-                    self.may_hold_refs = true;
-                }
-                w.push(v);
-                true
-            }
-            ArrayData::Bytes(b) if b.len() < b.capacity() => match byte_of(v) {
-                Some(byte) => {
-                    b.push(byte);
-                    true
-                }
-                None => false,
-            },
-            _ => false,
-        }
     }
 
     /// Overwrite element `i` (caller checks bounds).
@@ -3994,23 +3934,6 @@ impl ObjArray {
     }
 }
 
-/// A read prefetch of `addr` into every cache level; never faults.
-#[inline(always)]
-fn prefetch_addr(addr: u64) {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: a prefetch reads nothing the program sees and never faults.
-    unsafe {
-        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(addr as *const i8)
-    };
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: as above.
-    unsafe {
-        core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) addr, options(nostack, preserves_flags, readonly))
-    };
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    let _ = addr;
-}
-
 /// Shared bounds rule of [`ObjArray::read_indexed`].
 #[inline(always)]
 fn read_indexed_in<T: Copy>(elements: &[T], index: i64, unchecked: bool) -> Option<T> {
@@ -4052,7 +3975,7 @@ pub struct ObjCoroutine {
     /// Listed for a close by the collector: it suspended with a `defer`
     /// armed ([`Heap::note_closeable`]).
     pub closeable: bool,
-    /// Its body is native code, suspended on this fiber (`vm_gen.rs`):
+    /// Its body is native code, suspended on this fiber (`gen_fiber.rs`):
     /// `saved_stack` then holds that frame's root words.
     pub native: Option<Box<crate::native::GenFiber>>,
 }

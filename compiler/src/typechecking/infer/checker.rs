@@ -123,7 +123,6 @@ impl Checker {
             fn_value_escaped: HashSet::new(),
             in_bounds_index: HashSet::new(),
             nonneg_expr: HashSet::new(),
-            pin_array: HashSet::new(),
             pin_params: HashSet::new(),
             for_in_pin: HashSet::new(),
             for_in_pin_spans: HashSet::new(),
@@ -1916,7 +1915,6 @@ impl Checker {
         self.def_ids_by_node.clear();
         self.in_bounds_index.clear();
         self.nonneg_expr.clear();
-        self.pin_array.clear();
         self.pin_params.clear();
         self.for_in_pin.clear();
         self.for_in_pin_spans.clear();
@@ -3551,7 +3549,31 @@ impl Checker {
             Expression::Declare(args) => self.infer_ffi_declare(args, range),
             Expression::Invoke(args) => self.infer_ffi_invoke(args, range),
 
-            Expression::Defer { captures, body, .. } => {
+            Expression::Defer { captures, borrows, body } => {
+                // An assignment must reach a variable that is alive when the
+                // defer runs: a `use (mut x)` of an outer block's local. A
+                // copy, or a local of the block the defer ends, is gone.
+                let mut gone = false;
+                for (span, name) in crate::typechecking::control_flow::defer_body_assigns(body, captures) {
+                    let (msg, help) = if !borrows.contains(&name) {
+                        (
+                            format!("this assigns the defer's copy of `{name}`, which nothing reads after it"),
+                            format!("capture it with `use (mut {name})` to change the variable"),
+                        )
+                    } else if self.env.lookup_frame(name).is_some_and(|f| f + 1 == self.env.depth()) {
+                        (
+                            format!("`{name}` is declared in the block this defer ends: it is gone when the defer runs"),
+                            format!("declare `{name}` in an outer block, or drop the assignment"),
+                        )
+                    } else {
+                        continue;
+                    };
+                    gone = true;
+                    self.error_with_help(ErrorCode::DeferAssignsCapture, msg, span, Some(help));
+                }
+                if gone {
+                    return unit_ty();
+                }
                 // A defer runs while its function is leaving: it cannot
                 // choose another exit.
                 let exits = crate::typechecking::control_flow::defer_body_exits(body);
@@ -13560,6 +13582,25 @@ impl Checker {
             ty = *next;
         }
         Some((params, ty))
+    }
+
+    /// `fn_name`'s declared result: [`Self::fn_return_ty`] peels every
+    /// arrow, so a function returning a function value reports that value's
+    /// result; this peels only the declared parameters (one, `unit`, for a
+    /// function of none). Without recorded names, the full peel.
+    pub fn fn_declared_return_ty(&self, fn_name: &str) -> Option<Ty> {
+        let Some(n) = self.fn_param_names(fn_name).map(<[String]>::len) else {
+            return self.fn_return_ty(fn_name);
+        };
+        let scheme = self.lookup_fn_scheme(fn_name)?;
+        let mut ty = apply_ty_prune(&self.subst, &scheme.ty);
+        for _ in 0..n.max(1) {
+            let Ty::Fun(_, next) = ty else {
+                break;
+            };
+            ty = *next;
+        }
+        Some(ty)
     }
 
     /// Resolved parameter types in declaration order (curried `Fun` peel).

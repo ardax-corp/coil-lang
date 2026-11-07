@@ -27,9 +27,9 @@ coil: statically typed `.coil` → typecheck → HIR (optimizations) → MIR (ev
 - Runtime perf: alloc reduction, hot-loop tuning, bounds-check elimination.
 - **Method-based APIs**: prefer inherent/`impl` methods over free functions for type-tied operations (stdlib, new language surface, codegen fixes). Virtual-module host primitives (`io::read`) stay free functions.
 - Language features: full HM integration; update coil-website user docs (`src/content/docs/`) and `docs/internals/` here when needed; minimal runnable example.
-- Prefer compiler virtual modules over userland for core interpreter machinery; extracted features (regex, TLS, HTTP, collections) live in their own repos (`ardax-corp/coil-regex`, `coil-tls`, `coil-http`, `coil-stdlib`). Their demos, native builds and integration tests stay in those repos, not in coil-lang `compiler/tests` or CI.
+- Prefer compiler virtual modules over userland for core runtime machinery; extracted features (regex, TLS, HTTP, collections) live in their own repos (`ardax-corp/coil-regex`, `coil-tls`, `coil-http`, `coil-stdlib`). Their demos, native builds and integration tests stay in those repos, not in coil-lang `compiler/tests` or CI.
 - Prefer `.coil` language tests (`tests/<domain>/`, `coil test`) over Rust tests when coverage overlaps; remove duplicates.
-- IL inspection: `coil dissect`, not verbose debug-build dumps.
+- MIR / HIR inspection: `coil dissect` (`--fn`, `--hir`), not verbose debug-build dumps.
 - `coil fmt`: preserve `//` and `///`; wrap long lines; trailing commas on multi-line lists.
 
 ## Invariants (do not break)
@@ -37,7 +37,7 @@ coil: statically typed `.coil` → typecheck → HIR (optimizations) → MIR (ev
 - **Archive version**: `common/src/archive.rs` (`ARCHIVE_MAJOR` / `ARCHIVE_MINOR`). An additive change bumps the minor; any other change to the format the major (reset minor). Older minors are in [docs/internals/archive-history.md](docs/internals/archive-history.md).
 - **Virtual-module natives** via `HostInvoke`, wired in `machine/`. Frozen ids are the `*_ID` consts in `common/src/host.rs`: never renumber them. Dropped TLS/crypto/regex slots collapsed; virtual-time names stay as panic stubs so later ids do not move.
 - **No PGO.** Removed (#301). Branch layout is heuristic. Do not revive `--pgo-*`, ingest, heat knobs, or `BranchProfile`.
-- **Feature gates**: debugger `feature = "debugger"`; dissect `feature = "dissect"`, on helper binaries, not default `coil`. Release still builds `coil` / `coil-embed` in their own cargo invocation.
+- **Feature gates**: dissect `feature = "dissect"` (`compiler`), on helper binaries, not default `coil`; `gc-stress` / `gc-stats` (`machine`, through `coil-test`) for GC testing only. Release still builds `coil` / `coil-embed` in their own cargo invocation.
 - **Lint**: `Gc::payload_mut` keeps `&self -> &mut T` and allows `clippy::mut_from_ref` on that method only.
 - **MIR** is what every engine runs. New optimizations go in HIR or MIR passes. See `docs/internals/pipeline.md`.
 
@@ -63,4 +63,4 @@ Userland stdlib is [coil-stdlib](https://github.com/ardax-corp/coil-stdlib). `co
 
 - Trait methods have three call spellings: `x.m()`, `m(x)` and `Trait::m(x)`. The qualified one is the function form limited to that trait and lowers to the same call (`docs/internals/static-trait-methods.md`).
 - No C-style `for (init; cond; step)` (use `while` and `for x in`); length is `x.len()` only (`Length` is the trait a user type implements for it); `readonly` is a prefix on a value (`readonly e`, `readonly new C(...)`) and on a type (`readonly T`); `readonly class C` makes every instance immutable (`readonly C` is `C`, structural `==`).
-- Regularity target: one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. `Option`/`Result` use niche / two-slot / boxed by shape; arity-2 immediate products use two-slot `[a, b]` on direct `CALL`/`RETURN` (#302).
+- Regularity target: one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. `Option`/`Result` use niche / two-slot / boxed by shape; arity-2 immediate products use two words `[a, b]` on direct calls (#302; MIR `Call` `dest_hi`, `Terminator::Return { hi }`).

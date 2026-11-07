@@ -29,8 +29,8 @@ ways.
   loaded after that: `LoadStatic`; if zero, build and `StoreStatic`; the
   join is the table (`mir::from_hir` `frozen_array`, the pattern of the
   ground dictionaries in [generic-specialization](generic-specialization.md)).
-  Tables of the same literals share a slot. The slots start zeroed, so the
-  prologue does not run for them (`prologue_jmp_target`). A table inside a
+  Tables of the same literals share a slot. The slots start zeroed, so no
+  startup op runs for them. A table inside a
   loop (a callee's, spliced into its caller's loop) is left an array per
   evaluation: MIR LICM moves that allocation to the loop's preheader,
   which is cheaper than a first-use check per iteration and keeps the loop

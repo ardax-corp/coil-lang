@@ -303,9 +303,9 @@ unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
                 let homes = frame_homes(frame, regs, f);
                 let heap = (0..f.homes.len()).filter(|&h| heap_word(f.homes[h]));
                 let amb: Vec<usize> = if f.opaque_words { (0..f.homes.len()).filter(|&h| f.homes[h] == MirTy::I64).collect() } else { Vec::new() };
-                let mask = heap.chain(amb.iter().copied()).fold(0u64, |m, h| m | (1 << h));
+                let masks = rt::root_masks(f.homes.len(), heap.chain(amb.iter().copied()));
                 let flags = if amb.is_empty() { 0 } else { ROOTS_AMBIGUOUS };
-                rt::defer_pad(ctx, pad_entry, std::ptr::from_ref::<Body>(pad) as usize, homes, f.homes.len() as u64 | flags, mask);
+                rt::defer_pad(ctx, pad_entry, std::ptr::from_ref::<Body>(pad) as usize, homes, f.homes.len() as u64 | flags, &masks);
             }
             let base = frame.base;
             (*act).frames.pop();

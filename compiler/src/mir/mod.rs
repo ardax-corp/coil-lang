@@ -52,7 +52,6 @@ pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, 
 pub use func::MirFunc;
 pub use gc::liveness;
 pub use func::{MirBlock, is_tail_call_inst};
-pub use specialize::{start_mir_capture, take_mir_capture};
 pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
 pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
 pub use inst::{BlockId, MirUnaryOp, Terminator};

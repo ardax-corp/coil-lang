@@ -56,7 +56,7 @@ impl DebugLine {
 #[rkyv(compare(PartialEq))]
 pub struct FnDebugSym {
     pub name: String,
-    pub entry_pc: u32,
+    pub body_id: u32,
 }
 
 /// How much debug info a compiled program keeps (`-g0`, `-g1`, `-g2`).
@@ -101,7 +101,7 @@ impl DebugLevel {
 pub struct ProgramDebug {
     pub source_files: Vec<String>,
     pub debug_locs: Vec<DebugLoc>,
-    /// Sorted by `entry_pc` for binary search during panic backtraces.
+    /// Sorted by `body_id` for binary search during panic backtraces.
     pub fn_symbols: Vec<FnDebugSym>,
     /// One per [`Self::debug_locs`] entry, or empty when not recorded
     /// (archives before minor 30): then lines come from the source files.
@@ -109,11 +109,6 @@ pub struct ProgramDebug {
 }
 
 impl ProgramDebug {
-
-    /// The location numbered `pc` (a debugger's op number).
-    pub fn loc_at(&self, pc: usize) -> Option<DebugLoc> {
-        self.debug_locs.get(pc).copied().filter(|l| l.is_known())
-    }
 
     /// Line and column of `loc`, in a table sorted by location (a compiled
     /// program's: each location its bodies use, once). A span that differs
@@ -127,18 +122,6 @@ impl ProgramDebug {
         let near = self.debug_locs[at..].iter().take_while(|l| l.file == loc.file && l.start_byte == loc.start_byte);
         let i = near.clone().position(|l| l.end_byte == loc.end_byte).or_else(|| near.clone().next().map(|_| 0))?;
         self.debug_lines.get(at + i).map(|line| (loc.file, *line))
-    }
-
-    /// File index and line/column of the location numbered `pc`.
-    pub fn file_line_at(&self, pc: usize) -> Option<(u32, DebugLine)> {
-        let loc = self.loc_at(pc)?;
-        let line = self.debug_lines.get(pc).copied().filter(|l| l.is_known())?;
-        Some((loc.file, line))
-    }
-
-    /// Whether any location is recorded (dense or runs).
-    pub fn has_locations(&self) -> bool {
-        !self.debug_locs.is_empty()
     }
 
     /// Keep what `level` records: `-g0` nothing, else everything.

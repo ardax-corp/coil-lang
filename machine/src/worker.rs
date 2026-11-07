@@ -1,7 +1,6 @@
 //! A reactor job (a thread, an auto-par body, a harness case) whose native
 //! code covers its whole program runs on the driver over a [`Runtime`] of
-//! the worker's own, with no `Machine`: what `run_job_on_vm` does for the
-//! runtime, without an interpreter.
+//! the worker's own.
 
 use std::cell::RefCell;
 use std::sync::Arc;

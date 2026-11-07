@@ -65,7 +65,7 @@ pub use packed_la::{
     PACKED_DOT, PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH, packed_dot,
     packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
 };
-pub use runtime_wire::{VmHostSpec, class_kind_table};
+pub use runtime_wire::class_kind_table;
 pub use isolate::{Isolate, IsolateProgram};
 pub use start::{NativeStart, run_natively, spawn_context};
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
@@ -74,6 +74,4 @@ pub use thread::{
     new_live_thread_registry,
 };
 
-/// Default operand-stack capacity when analysis does not request more.
-pub const DEFAULT_OPERAND_STACK_SLOTS: usize = 256;
 

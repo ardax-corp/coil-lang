@@ -64,7 +64,7 @@ pub struct DebugProgram {
 }
 
 /// [`crate::prepare`] for a debugger: ops numbered, locals bound.
-pub fn prepare_debug(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) -> DebugProgram {
+pub fn prepare_debug(bodies: Vec<NativeBody>, body_ids: &HashMap<String, u32>) -> DebugProgram {
     let mut locs = Vec::new();
     let mut entries = Vec::with_capacity(bodies.len());
     let mut ops = Vec::with_capacity(bodies.len());
@@ -72,7 +72,7 @@ pub fn prepare_debug(bodies: Vec<NativeBody>, entry_pcs: &HashMap<String, u32>) 
         entries.push((b.name.clone(), locs.len() as u32));
         ops.push(BodyOps::number(&b.mir, &mut locs));
     }
-    DebugProgram { program: crate::prepare_with(bodies, entry_pcs, Some(ops)), locs, entries }
+    DebugProgram { program: crate::prepare_with(bodies, body_ids, Some(ops)), locs, entries }
 }
 
 /// The locals of one frame: local to the value last bound to it.

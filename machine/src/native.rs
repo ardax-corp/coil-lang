@@ -211,9 +211,9 @@ pub type RootScanFn = unsafe fn(data: *mut std::ffi::c_void, visit: &mut dyn FnM
 pub type SiteScanFn = unsafe fn(data: *mut std::ffi::c_void, out: &mut Vec<u32>);
 
 /// The pad of one native frame a panic unwound, with a copy of its homes
-/// laid out as a masked root record (`[next, n | ROOTS_MASKED, mask,
-/// words...]`, see [`NativeCtx::roots`]): a collection while pads run
-/// keeps (and may move) the heap words among them.
+/// laid out as a masked root record (`[next, n | ROOTS_MASKED, masks...,
+/// words...]`, see [`NativeCtx::roots`] and [`mask_words`]): a collection
+/// while pads run keeps (and may move) the heap words among them.
 pub struct NativePad {
     pub func: NativePadFn,
     pub homes: Vec<u64>,
@@ -221,9 +221,26 @@ pub struct NativePad {
     pub data: usize,
 }
 
-/// Set in a root record's count: the next word is a mask of which words
-/// are heap words (the rest are scalars to skip).
+/// Set in a root record's count: the next [`mask_words`] words are a mask
+/// of which words are heap words (the rest are scalars to skip), bit `i`
+/// of word `i / 64` for word `i`.
 pub const ROOTS_MASKED: u64 = 1 << 63;
+
+/// How many mask words a masked root record of `n` words carries: one per
+/// 64 words, and at least one.
+pub const fn mask_words(n: usize) -> usize {
+    if n == 0 { 1 } else { n.div_ceil(64) }
+}
+
+/// The masks of a masked root record of `n` words whose heap words are
+/// `heap` ([`ROOTS_MASKED`]).
+pub fn root_masks(n: usize, heap: impl IntoIterator<Item = usize>) -> Vec<u64> {
+    let mut masks = vec![0u64; mask_words(n)];
+    for h in heap {
+        masks[h / 64] |= 1 << (h % 64);
+    }
+    masks
+}
 
 /// Set in a root record's count: its words are ambiguous (an opaque word
 /// of a generic body may be an immediate), so the collector pins what they
@@ -308,10 +325,10 @@ impl NativeCtx {
                     let scan = std::mem::transmute::<usize, RootScanFn>(*at.add(2) as usize);
                     scan(*at.add(3) as *mut std::ffi::c_void, &mut visit);
                 } else if n & ROOTS_MASKED != 0 {
-                    let mask = *at.add(2);
-                    for i in 0..count.min(64) as usize {
-                        if mask & (1 << i) != 0 {
-                            visit(at.add(3 + i), ambiguous);
+                    let words = mask_words(count as usize);
+                    for i in 0..count as usize {
+                        if *at.add(2 + i / 64) & (1 << (i % 64)) != 0 {
+                            visit(at.add(2 + words + i), ambiguous);
                         }
                     }
                 } else {
@@ -522,10 +539,10 @@ pub const TRAP_PANICKED: u64 = 8;
 /// An explicit `panic(msg)`: the message in [`NativeCtx::message`].
 pub const TRAP_EXPLICIT: u64 = 9;
 /// Not a panic: the call's fiber parked (its task suspended inside it);
-/// the task suspends at the `CALL` (`vm_fiber.rs`).
+/// the task suspends at the `CALL` (`driver.rs`).
 pub const TRAP_PARKED: u64 = 10;
 /// Not a panic: a generator's close unwinds its body from the yield it is
-/// suspended at, collecting its armed `defer`s (`vm_gen.rs`).
+/// suspended at, collecting its armed `defer`s (`gen_fiber.rs`).
 pub const TRAP_CLOSE: u64 = 11;
 /// The step budget ran out, or the heap outgrew its cap, which drains it.
 pub const TRAP_BUDGET: u64 = 12;
@@ -625,7 +642,7 @@ pub struct NativeEntry {
     /// It may run interpreted code (a runtime call, a function value, a `drop`), so a
     /// task switch could come while its frames are live: with a scheduler
     /// that can switch, the call runs on the task's own fiber stack
-    /// (`vm_fiber.rs`).
+    /// (`driver.rs`).
     pub suspends: bool,
     /// The leading parameters the body reads: a `CALL` of at least this
     /// many words (and at most `arity`) enters it, the rest passed as `0`.
@@ -634,10 +651,10 @@ pub struct NativeEntry {
     /// in [`NativeCtx::ret_hi`]), in that order.
     pub ret_words: u8,
     /// A generator's body: only a resume enters it, on a fiber of its own
-    /// (`native_gen.rs`), never a `CALL`.
+    /// (`gen_fiber.rs`), never a `CALL`.
     pub generator: bool,
     /// It has `defer`s (a cleanup pad): a generator's close resumes its
-    /// fiber to unwind them (`vm_gen.rs`).
+    /// fiber to unwind them (`gen_fiber.rs`).
     pub cleanup: bool,
     pub entry: NativeEntryFn,
     /// Copied to [`NativeCtx::entry_data`] for the call (`0` for machine
@@ -670,7 +687,7 @@ pub struct AotEntry {
 
 /// Install the code an AOT object linked into this executable defines,
 /// for the next run: `n` entries and `n_sites` sites, each four words
-/// (`entry_pc`, then the location's file, start and end byte).
+/// (`body_id`, then the location's file, start and end byte).
 /// `complete`: the object compiled every body of the program. `layout`:
 /// the [`layout_fingerprint`] of the compiler that made the object; an
 /// object made against other object layouts is refused (`Err`), since its
@@ -705,7 +722,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|w| NativeSite { entry_pc: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
+        .map(|w| NativeSite { body_id: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
         .collect();
     install_for_next_run(entries, sites, complete);
     Ok(())
@@ -716,7 +733,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
 /// native frame, which the runtime prints as it prints its own frames.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeSite {
-    pub entry_pc: u32,
+    pub body_id: u32,
     pub loc: common::DebugLoc,
 }
 
@@ -2236,7 +2253,7 @@ thread_local! {
 pub(crate) type GenCoro = corosensei::Coroutine<u64, (u64, usize), NativeOutcome, corosensei::stack::DefaultStack>;
 
 /// The native side of a generator whose body runs natively: owned by its
-/// `ObjCoroutine` while it is suspended (`vm_gen.rs`).
+/// `ObjCoroutine` while it is suspended (`gen_fiber.rs`).
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub struct GenFiber {
     #[cfg(not(target_family = "wasm"))]
@@ -2276,7 +2293,7 @@ impl Drop for GenFiber {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: u64, args: *const u64, n: u64) -> u64 {
     let ffi = unsafe { (*ctx).host.ffi };
-    unsafe { host_on_machine(ctx, ffi, op, operand, args, n, false) }
+    unsafe { host_on_machine(ctx, ffi, op, operand, args, n) }
 }
 
 /// [`coil_native_host`] of an ordinary native that is no plain function:
@@ -2341,7 +2358,7 @@ unsafe fn host_invoke(
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
-unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, layout: u64, args: *const u64, n: u64, _via_vm: bool) -> u64 {
+unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
     let Some(words) = buf.get_mut(..n as usize) else {
@@ -2374,20 +2391,25 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, lay
 }
 
 /// A frame with `defer`s on its way out: after a panic, keep its
-/// cleanup pad `func` and a copy of its `n` homes at `homes` (`mask`: the
-/// heap words among them) for the runtime to run ([`NativeCtx::pads`]).
+/// cleanup pad `func` and a copy of its `n` homes at `homes` (`masks`, at
+/// [`mask_words`] words: the heap words among them) for the runtime to run
+/// ([`NativeCtx::pads`]).
 ///
 /// # Safety
-/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
+/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words and
+/// `masks` at the mask words for them.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, mask: u64) {
+pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, masks: *const u64) {
     if func == 0 {
         return;
     }
     // SAFETY: the backend passes a function with the `NativePadFn` ABI.
     let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
+    let words = mask_words((n & !ROOTS_AMBIGUOUS) as usize);
+    // SAFETY: the backend passes that many mask words.
+    let masks = unsafe { std::slice::from_raw_parts(masks, words) };
     // SAFETY: as this function's.
-    unsafe { defer_pad(ctx, func, 0, homes, n, mask) };
+    unsafe { defer_pad(ctx, func, 0, homes, n, masks) };
 }
 
 /// [`coil_native_defer`] of a pad that reads `data` from
@@ -2395,14 +2417,16 @@ pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes
 ///
 /// # Safety
 /// As [`coil_native_defer`].
-pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64, mask: u64) {
+pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64, masks: &[u64]) {
     let c = unsafe { &mut *ctx };
     if c.bail != BAIL_PANIC || c.pads.is_null() {
         return;
     }
     // `n` may carry `ROOTS_AMBIGUOUS` (an opaque body's `int` homes).
-    let (flags, n) = (n & ROOTS_AMBIGUOUS, (n & !ROOTS_AMBIGUOUS).min(64));
-    let mut rec = vec![0, n | ROOTS_MASKED | flags, mask];
+    let (flags, n) = (n & ROOTS_AMBIGUOUS, n & !ROOTS_AMBIGUOUS);
+    debug_assert_eq!(masks.len(), mask_words(n as usize));
+    let mut rec = vec![0, n | ROOTS_MASKED | flags];
+    rec.extend_from_slice(masks);
     // SAFETY: `homes` holds `n` words.
     rec.extend((0..n as usize).map(|i| unsafe { *homes.add(i) }));
     unsafe { (*c.pads).push(NativePad { func, homes: rec, data }) };
@@ -2447,7 +2471,8 @@ pub(crate) fn run_pads(
         let mut inner = Vec::new();
         ctx.pads = &mut inner;
         ctx.entry_data = pads[i].data as u64;
-        let homes = pads[i].homes[3..].as_ptr();
+        let words = mask_words((pads[i].homes[1] & !(ROOTS_MASKED | ROOTS_AMBIGUOUS)) as usize);
+        let homes = pads[i].homes[2 + words..].as_ptr();
         // SAFETY: the backend compiled `func` as this frame's pad.
         let _ = unsafe { (pads[i].func)(&mut ctx, homes) };
         if ctx.bail == BAIL_PANIC {

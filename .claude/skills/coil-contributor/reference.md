@@ -11,7 +11,7 @@
 | `machine/src/native.rs` | `NativeCtx`, the entry table, `coil_native_*` helpers |
 | `coil-native/src/lib.rs` | MIR to Cranelift, JIT and AOT |
 | `coil-mir-interp/src/` | The interpreter: `lib.rs` (`prepare`), `exec.rs` (the loop), `frame.rs` (activations, roots) |
-| `compiler/src/codegen/` | Codegen driver (`Compiler`, `finalize_bytecode`, `do_compile`) |
+| `compiler/src/codegen/` | Codegen driver (`Compiler`, `do_compile`, `finalize_bodies`: tree-shake, the no-MIR check, body identities) |
 | `compiler/src/lib.rs` | Crate root: re-exports, `#[macro_use] mod codegen` |
 | `compiler/src/hir/` | HIR build, typed inliner, optimization passes (fold, bounds, unroll, sroa, sink_return; CSE and LICM live in `compiler/src/mir/`) |
 | `compiler/src/codegen/emit_hir.rs` | Per-body layout / dictionary / call plan handed to MIR lowering |
@@ -32,7 +32,7 @@
 
 - **Method-based APIs** — prefer inherent/`impl` methods over free functions for type-tied ops (stdlib, new language surface). Free generic fns returning enums are codegen-fragile; see `docs/internals/limitations.md`.
 - `hir::fold`: scalar const folding and algebraic identities; `if` on a literal keeps one branch; `hir::unroll`: full unroll of counted loops ≤8 trips.
-- Typed inlining in HIR (`hir::inline`); tail calls for eligible self- and sibling-cycle recursion ([#316](https://github.com/ardax-corp/coil-lang/pull/316); `MirFunc::tail_targets`, `is_tail_call_inst`; only the interpreter takes the frame). Two-slot `?` flatten is codegen ([#307](https://github.com/ardax-corp/coil-lang/pull/307)), not InstCombine.
+- Typed inlining in HIR (`hir::inline`); tail calls for eligible self- and sibling-cycle recursion ([#316](https://github.com/ardax-corp/coil-lang/pull/316); `MirFunc::tail_targets`, `is_tail_call_inst`; both engines take the frame: Cranelift `return_call`, the interpreter reuses its activation). Two-slot `?` flatten is codegen ([#307](https://github.com/ardax-corp/coil-lang/pull/307)), not InstCombine.
 - Match: `hir::match_tree` groups rows by outermost constructor, so a nested match tests the scrutinee's tag once and then only the sub-patterns of that tag's rows. MIR reads a payload with `MatchPayload`. Nested niche `Option`/`Result` words are tested by layout (`0` / bit 0).
 - Records and typed class fields: `HeapFieldLoad` / `HeapFieldStore` with a slot operand (a record's slots are its fields sorted by name; see `docs/internals/mir.md` Records).
 - **Return layout:** `layout::abi::two_word_kind` classifies two-word returns on *direct* calls (`Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums as `[payload, tag]`; arity-2 immediate products as `[a, b]`). In MIR the second word is `Terminator::Return { hi }` and a `Call`'s `dest_hi`. Niches stay one word. See [layout.md](../../../docs/internals/layout.md).

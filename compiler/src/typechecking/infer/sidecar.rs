@@ -37,8 +37,6 @@ pub struct TypedSidecar {
     in_bounds_index: HashSet<NodeId>,
     /// Dividend / index nodes proven `>= 0` (Q4: skip Euclidean rem fixup).
     nonneg_expr: HashSet<NodeId>,
-    /// Array parameter nodes to pin for the frame (`ArrayPin`).
-    pin_array: HashSet<NodeId>,
     pin_params: HashSet<(String, String)>,
     for_in_pin: HashSet<NodeId>,
     for_in_pin_spans: HashSet<(usize, usize)>,
@@ -101,11 +99,6 @@ impl TypedSidecar {
 
     pub fn nonneg_expr_ids(&self) -> &HashSet<NodeId> {
         &self.nonneg_expr
-    }
-
-    /// True when `id` is an array parameter that may be pinned at function entry.
-    pub fn is_pin_array(&self, id: NodeId) -> bool {
-        self.pin_array.contains(&id)
     }
 
     pub fn is_pin_param(&self, fn_name: &str, param: &str) -> bool {
@@ -211,7 +204,6 @@ impl Checker {
             ffi_tags,
             in_bounds_index: self.in_bounds_index.clone(),
             nonneg_expr: self.nonneg_expr.clone(),
-            pin_array: self.pin_array.clone(),
             pin_params: self.pin_params.clone(),
             for_in_pin: self.for_in_pin.clone(),
             for_in_pin_spans: self.for_in_pin_spans.clone(),

@@ -116,9 +116,8 @@ struct TestCli {
     /// (the files are parsed, not compiled)
     #[arg(long)]
     doc_tests_only: bool,
-    /// What runs the compiled code: native (Cranelift where the backend
-    /// compiles a body, the runtime elsewhere; the default), vm, or mir (the
-    /// interpreter)
+    /// What runs the compiled code: native (Cranelift, the default) or mir
+    /// (the MIR interpreter)
     #[arg(long, value_name = "native|mir", value_parser = Engine::parse)]
     engine: Option<Engine>,
     /// Test root (default: ./tests)

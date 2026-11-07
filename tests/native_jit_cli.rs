@@ -431,7 +431,7 @@ fn native_code_calls_bodies_and_collects() {
            let _ = println(first.s);\n  let j = 0;\n  while j < keep.len() {{ total = total + keep[j].v + keep[j].s.len(); j = j + 1; }}\n  return total;\n}}\n\
          fn main() {{ let _ = println(format(\"%i\", run(30000))); }}\n"
     );
-    let stats = same_as_mir("vm_calls_and_gc", &src);
+    let stats = same_as_mir("calls_and_gc", &src);
     assert!(compiled(&stats, "run") && compiled(&stats, "churn"), "stats: {stats}");
     assert!(stats.contains("calls ran natively"), "stats: {stats}");
 }
@@ -642,9 +642,9 @@ fn a_panic_under_native_frames_names_them_in_its_backtrace() {
          #[inline(never)]\nfn outer(int x) -> int {{ let f = fn (int y) => mid(y); return f(x) + mid(0); }}\n\
          fn main() {{ let _ = println(format(\"%i\", outer(1))); let _ = println(format(\"%i\", outer(5))); }}\n"
     );
-    let stats = same_as_mir("vm_panic_trace", &src);
+    let stats = same_as_mir("panic_trace", &src);
     assert!(compiled(&stats, "mid") && compiled(&stats, "outer"), "stats: {stats}");
-    let err = program_stderr(&run("vm_panic_trace", &src, true));
+    let err = program_stderr(&run("panic_trace", &src, true));
     assert!(err.contains("  in mid at") && err.contains("  in outer at"), "stderr: {err}");
 }
 
@@ -805,7 +805,7 @@ fn host_calls_on_the_machine_run_from_native_code() {
     let src = "use io::stdout;\nuse io::sync::write_all;\nuse io::sync::println;\nuse string::to_bytes;\nuse string::format;\n\
          #[inline(never)]\nfn emit(int i) -> int { let _ = write_all(stdout(), to_bytes(format(\"line %i\\n\", i))); return i; }\n\
          fn main() { let t = 0; let i = 0; while i < 5 { t = t + emit(i); i = i + 1; } let _ = println(format(\"%i\", t)); }\n";
-    let stats = same_as_mir("vm_host", src);
+    let stats = same_as_mir("machine_host", src);
     assert!(compiled(&stats, "io::sync::write_all"), "stats: {stats}");
     assert!(compiled(&stats, "emit"), "stats: {stats}");
     // `main` enters natively and calls `emit` natively in turn.
@@ -819,7 +819,7 @@ fn a_machine_host_call_panics_at_its_native_call_site() {
          #[inline(never)]\nfn outer(int i) -> int {{ return insert_at(i) + 1; }}\n\
          fn main() {{ let _ = println(format(\"%i\", outer(1))); let _ = println(format(\"%i\", outer(5))); }}\n"
     );
-    let stats = same_as_mir("vm_host_panic", &src);
+    let stats = same_as_mir("machine_host_panic", &src);
     assert!(compiled(&stats, "insert_at"), "stats: {stats}");
 }
 
@@ -1516,7 +1516,7 @@ fn native_frames_root_only_what_they_still_hold() {
     for f in ["temp_dropped", "local_kept", "rebound_dropped", "boxed_arm_dropped", "payload_kept", "pair_dropped"] {
         assert!(compiled(&stats, f), "{f} not native; stats: {stats}");
     }
-    let mir = run("frame_roots_vm", &src, false);
+    let mir = run("frame_roots_mir", &src, false);
     assert_eq!(String::from_utf8_lossy(&mir.stdout), "true\n".repeat(6));
 }
 
@@ -1660,4 +1660,52 @@ fn derives_at_the_same_offset_of_two_modules_stay_apart() {
     let out = cmd.arg("main.coil").output().expect("spawn coil");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "3", "{}", String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A body native code refuses: a debug build stops with the reason and
+/// points at `--mir` (a release build warns and interprets); `--mir` runs
+/// the program.
+#[test]
+fn a_refused_body_fails_a_debug_run() {
+    let src = format!("{HEADER}#[inline(never)]\nfn twice(int n) -> int {{ return n * 2; }}\nfn main() {{ let _ = println(format(\"%i\", twice(21))); }}\n");
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-refused", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("refused.coil");
+    std::fs::write(&file, &src).expect("write source");
+    let mut cmd = Command::new(coil_bin());
+    cmd.arg(&file).args(["--no-build-cache", "--fold-calls", "off"]).env("COIL_NATIVE_REFUSE", "twice");
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let out = cmd.output().expect("spawn coil");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if cfg!(debug_assertions) {
+        assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+        assert!(stderr.contains("error: `twice` has no native code: refused by COIL_NATIVE_REFUSE"), "stderr: {stderr}");
+        assert!(stderr.contains("pass `--mir`"), "stderr: {stderr}");
+        assert!(out.stdout.is_empty(), "nothing runs");
+    } else {
+        assert!(out.status.success(), "stderr: {stderr}");
+        assert!(stderr.contains("warning: `twice` has no native code"), "stderr: {stderr}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
+    }
+    let mir = run("refused_mir", &src, false);
+    assert!(mir.status.success(), "stderr: {}", String::from_utf8_lossy(&mir.stderr));
+    assert_eq!(String::from_utf8_lossy(&mir.stdout), "42\n");
+}
+
+/// A body with more than 64 defer homes compiles natively, and its normal
+/// exit and its panic behave as the interpreter's (#2307).
+#[test]
+fn more_than_64_defer_homes_compile() {
+    let mut body = String::new();
+    for i in 0..70 {
+        body.push_str(&format!("  let s{i} = format(\"s%i\", {i});\n  defer use (s{i}) {{ collect(); let _ = println(s{i}); }}\n"));
+    }
+    let src = format!(
+        "{HEADER}use gc::collect;\n#[inline(never)]\nfn many(int n) -> int {{\n{body}  if n > 0 {{ panic(\"boom\"); }}\n  return n;\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", many(0))); let _ = many(1); }}\n"
+    );
+    let stats = same_as_mir("many_homes", &src);
+    assert!(compiled(&stats, "many"), "stats: {stats}");
 }

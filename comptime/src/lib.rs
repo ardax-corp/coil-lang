@@ -373,7 +373,7 @@ fn new_isolate(program: &CompiledExpansion) -> Box<Isolate> {
 /// `program`'s MIR made runnable, once for every thread.
 fn interpreted(program: &CompiledExpansion) -> Arc<NativeCode> {
     let code = program.runnable.get_or_init(|| {
-        let pcs = program.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect();
+        let pcs = program.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
         let prepared = coil_mir_interp::prepare(program.mir.to_vec(), &pcs);
         let complete = prepared.refused.is_empty();
         let code = NativeCode::new(prepared.entries, prepared.sites).with_complete(complete).with_keep(prepared.keep);

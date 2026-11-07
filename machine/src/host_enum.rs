@@ -12,8 +12,8 @@
 use std::cell::Cell;
 
 use common::{
-    host_invoke_enum_layout, Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
-    HOST_ENUM_LAYOUT_PAIR, HOST_ENUM_LAYOUT_RESULT_NICHE,
+    Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE, HOST_ENUM_LAYOUT_PAIR,
+    HOST_ENUM_LAYOUT_RESULT_NICHE,
 };
 
 use crate::io::{alloc_option_none, alloc_option_some, alloc_result_err, alloc_result_ok};
@@ -72,10 +72,6 @@ pub enum HostEnumLayout {
 }
 
 impl HostEnumLayout {
-    pub fn from_operand(operand: u32) -> Self {
-        Self::from_u32(host_invoke_enum_layout(operand))
-    }
-
     /// Decode operand bits. `0` is Boxed; `1`/`2` are niches; `3` is the
     /// two-word pair.
     ///
