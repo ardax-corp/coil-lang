@@ -1,0 +1,38 @@
+// #2316: a partial of a function whose result moves as two words
+// (`Option<int>`, `(int, int)`) is a function value: the function keeps the
+// one-word result, so the partial compiles, and its direct calls read the
+// same values.
+use tests::assert;
+
+fn add_opt(int a, int b) -> Option<int> {
+    return Some(a + b);
+}
+
+fn pair(int a, int b) -> (int, int) {
+    return (a, b);
+}
+
+fn sum_opt(int n, int -> Option<int> f) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s += f(i) ?? 0;
+        i += 1;
+    }
+    return s;
+}
+
+test("a named partial of an Option result") {
+    let g = add_opt(a: 10);
+    assert!(g(1) == Some(11));
+    assert!(sum_opt(3, g) == 10 + 11 + 12);
+    assert!(add_opt(2, 3) == Some(5));
+}
+
+test("a partial of a tuple result") {
+    let p = pair(a: 1);
+    let (a, b) = p(2);
+    assert!(a == 1 && b == 2);
+    let (c, d) = pair(3, 4);
+    assert!(c == 3 && d == 4);
+}

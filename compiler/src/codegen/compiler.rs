@@ -838,6 +838,17 @@ impl Compiler {
         self.callee_param_pairs_all(name).iter().any(Option::is_some)
     }
 
+    /// Some call passes `name` fewer arguments than it takes: it may be a
+    /// partial application, whose function value keeps the one-word ABI
+    /// for its parameters and its result (#2316).
+    fn is_under_applied(&self, name: &str) -> bool {
+        let lookup = strip_overload_key(name);
+        let Some(params) = self.checker.fn_param_tys(name).or_else(|| self.checker.fn_param_tys(lookup)) else {
+            return false;
+        };
+        (0..params.len()).any(|argc| self.is_fn_value_escaped(&format!("{lookup}#{argc}")))
+    }
+
     /// What decides `name`'s parameters' calling convention
     /// ([`crate::layout::convention_param`]), and its parameter types.
     fn callee_param_facts(&self, name: &str) -> Option<(crate::layout::CalleeFacts, Vec<Ty>)> {
@@ -846,12 +857,8 @@ impl Compiler {
             .checker
             .fn_param_tys(name)
             .or_else(|| self.checker.fn_param_tys(lookup))?;
-        // A call with fewer arguments may be a partial application, whose
-        // function value keeps the one-word ABI.
-        let under_applied =
-            (0..params.len()).any(|argc| self.is_fn_value_escaped(&format!("{lookup}#{argc}")));
         let facts = crate::layout::CalleeFacts {
-            escaped: self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) || under_applied,
+            escaped: self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) || self.is_under_applied(name),
             instance_method: is_instance_method_fqn(&self.checker, lookup) || is_instance_method_fqn(&self.checker, name),
             overloaded_or_generic: self.checker.is_overloaded(lookup) || self.checker.is_generic_fn(lookup),
             coroutine: self.coroutine_fns.contains(name) || self.coroutine_fns.contains(lookup),
@@ -4865,7 +4872,7 @@ impl Compiler {
         // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
         let facts = crate::layout::CalleeFacts {
             coroutine: self.coroutine_fns.contains(name),
-            escaped: self.is_fn_value_escaped(name),
+            escaped: self.is_fn_value_escaped(name) || self.is_under_applied(name),
             instance_method: is_instance_method_fqn(&self.checker, name) && !self.instance_method_fqn_raw(name),
             host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
             ..crate::layout::CalleeFacts::default()
