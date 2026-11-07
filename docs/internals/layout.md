@@ -120,10 +120,13 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   words like its result; a method's receiver stays one word. (The stack
   VM kept these boxed: splitting a box into `[a, b]` needed a temp slot
   above live operands, which MIR parameters do not.)
-- A local bound from a two-slot call keeps its two slots, so `match r`,
-  `r?`, `return r`, `let (a, b) = r` and `r[0]` do not allocate. `?`
-  compares the tag in place and shares one fail epilogue per function
-  (#297, #307).
+- A local of a closed two-word type keeps two slots
+  (`plan.pair_locals`), so `match r`, `r?`, `return r`, `let (a, b) = r`
+  and `r[0]` do not allocate. A one-word init (an element, a field, a
+  boxed result) unpacks once at the `let`; `x = e` rebinds both slots,
+  loops included. `?` compares the tag in place and shares one fail
+  epilogue per function (#297, #307). Only a local captured by a closure
+  or `defer`, or assigned as a value (`ADJUST`), stays one word.
 - A call through a function value of a two-word result is a
   `CallIndirect` with `pair` set: a lambda whose result is a pair is
   emitted twice, its one-word body (the value's entry) and a two-word
