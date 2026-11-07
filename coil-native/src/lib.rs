@@ -122,6 +122,22 @@ pub fn jit(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<Na
     jit_with(bodies, entry_pcs, false)
 }
 
+/// Bodies `COIL_NATIVE_REFUSE` (comma-separated names) leaves out, so a
+/// test can reach what a refusal does.
+fn forced_refusals(bodies: &[NativeBody]) -> HashMap<usize, String> {
+    let Some(names) = std::env::var_os("COIL_NATIVE_REFUSE") else {
+        return HashMap::new();
+    };
+    let names = names.to_string_lossy().into_owned();
+    let names: HashSet<&str> = names.split(',').map(str::trim).collect();
+    bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| names.contains(b.name.as_str()))
+        .map(|(i, _)| (i, "refused by COIL_NATIVE_REFUSE".to_string()))
+        .collect()
+}
+
 /// [`jit`], with [`NativeProgram::image`] for [`load_image`] when every body
 /// compiled and the code fits an image.
 pub fn jit_keeping_image(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Result<NativeProgram, String> {
@@ -131,7 +147,7 @@ pub fn jit_keeping_image(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>
 fn jit_with(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, keep_image: bool) -> Result<NativeProgram, String> {
     // A body `plan` admits may still fail to lower; its callers already
     // name it, so leave it out and build the module again.
-    let mut excluded = HashMap::new();
+    let mut excluded = forced_refusals(bodies);
     loop {
         match jit_once(bodies, entry_pcs, &excluded, keep_image)? {
             Attempt::Done(program) => return Ok(program),
@@ -207,6 +223,7 @@ pub fn aot(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>, statics: &[(
         // Executables are position independent on most hosts.
         flags.set("is_pic", "true").map_err(|e| e.to_string())?;
         flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
+        stack_probes(&mut flags)?;
         let isa = cranelift_native::builder()
             .map_err(|e| e.to_string())?
             .finish(settings::Flags::new(flags))
@@ -390,8 +407,17 @@ fn jit_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     flags.set("enable_verifier", VERIFY_CLIF).map_err(|e| e.to_string())?;
     // The collector walks native frames by their frame pointers.
     flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
+    stack_probes(&mut flags)?;
     let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
     isa_builder.finish(settings::Flags::new(flags)).map_err(|e| e.to_string())
+}
+
+/// Probe each page of a frame larger than one: Windows commits a thread's
+/// stack a guard page at a time, so a frame that steps past the guard page
+/// faults instead of growing the stack.
+fn stack_probes(flags: &mut settings::Builder) -> Result<(), String> {
+    flags.set("enable_probestack", "true").map_err(|e| e.to_string())?;
+    flags.set("probestack_strategy", "inline").map_err(|e| e.to_string())
 }
 
 /// Cranelift's verifier: debug builds, which CI runs over every corpus. It
@@ -909,9 +935,6 @@ fn eligible(f: &MirFunc, by_label: &HashMap<Label, usize>) -> Result<Vec<usize>,
 fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Result<Vec<usize>, String> {
     if let Some(why) = f.emit_refusal {
         return Err(format!("no emission: {why}"));
-    }
-    if f.homes.len() > 64 {
-        return Err("more than 64 defer homes".into());
     }
     if let Some(t) = f.homes.iter().find(|t| !numeric(**t)) {
         return Err(format!("defer home of {t:?}"));
@@ -2566,9 +2589,18 @@ impl<'a> Lower<'a> {
             // roots every home ambiguously.
             let amb = if self.amb_homes.is_empty() { 0 } else { ROOTS_AMBIGUOUS };
             let n = self.b.ins().iconst(types::I64, (f.homes.len() as u64 | amb) as i64);
-            let mask = self.heap_homes.iter().chain(&self.amb_homes).fold(0u64, |m, &h| m | (1 << h));
-            let mask = self.b.ins().iconst(types::I64, mask as i64);
-            self.b.ins().call(self.defer, &[self.ctx, fp, at, n, mask]);
+            let masks = machine::native::root_masks(f.homes.len(), self.heap_homes.iter().chain(&self.amb_homes).map(|&h| usize::from(h)));
+            let mask_slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                (masks.len() * 8) as u32,
+                3,
+            ));
+            for (i, &m) in masks.iter().enumerate() {
+                let m = self.b.ins().iconst(types::I64, m as i64);
+                self.b.ins().stack_store(types::I64, m, mask_slot, (i * 8) as i32);
+            }
+            let masks = self.b.ins().stack_addr(types::I64, mask_slot, 0);
+            self.b.ins().call(self.defer, &[self.ctx, fp, at, n, masks]);
         }
         let mut zeros = Vec::new();
         for t in std::iter::once(self.ret).chain(self.ret_hi) {

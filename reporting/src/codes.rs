@@ -119,6 +119,9 @@ pub enum ErrorCode {
     /// A view value stored, captured, nested in another type or returned
     /// where it would outlive the borrows it holds.
     ViewEscape,
+    /// A `defer` body assigns a capture that is gone when it runs: a copy
+    /// (`use (x)`), or a local of the block the defer ends.
+    DeferAssignsCapture,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -249,6 +252,7 @@ impl ErrorCode {
             Self::BorrowConflict => "E0149",
             Self::MisplacedMut => "E0150",
             Self::ViewEscape => "E0151",
+            Self::DeferAssignsCapture => "E0152",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -359,6 +363,7 @@ impl ErrorCode {
             Self::BorrowConflict => "borrowed object shared or replaced while the borrow lives",
             Self::MisplacedMut => "`mut` borrows nothing here",
             Self::ViewEscape => "view value outlives its borrows",
+            Self::DeferAssignsCapture => "`defer` assigns a variable that is gone when it runs",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -477,6 +482,7 @@ mod tests {
             | BorrowConflict
             | MisplacedMut
             | ViewEscape
+            | DeferAssignsCapture
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -577,6 +583,7 @@ mod tests {
             BorrowConflict,
             MisplacedMut,
             ViewEscape,
+            DeferAssignsCapture,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

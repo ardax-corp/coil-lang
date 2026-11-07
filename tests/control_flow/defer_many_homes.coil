@@ -1,0 +1,1037 @@
+// A body with more than 64 `defer` homes (each capture of each `defer` is
+// one): native code compiles it, and each home, heap words among them,
+// survives a collection before the defers run (#2307).
+use gc::collect;
+use string::format;
+use task::{scope, Scope, TaskError};
+use tests::assert;
+
+static let LOG: int = 0;
+
+fn many(Vec<string> log) {
+    let s0 = format("s%i", 0);
+    defer use (s0, mut log) {
+        log.push(s0);
+    }
+    let s1 = format("s%i", 1);
+    defer use (s1, mut log) {
+        log.push(s1);
+    }
+    let s2 = format("s%i", 2);
+    defer use (s2, mut log) {
+        log.push(s2);
+    }
+    let s3 = format("s%i", 3);
+    defer use (s3, mut log) {
+        log.push(s3);
+    }
+    let s4 = format("s%i", 4);
+    defer use (s4, mut log) {
+        log.push(s4);
+    }
+    let s5 = format("s%i", 5);
+    defer use (s5, mut log) {
+        log.push(s5);
+    }
+    let s6 = format("s%i", 6);
+    defer use (s6, mut log) {
+        log.push(s6);
+    }
+    let s7 = format("s%i", 7);
+    defer use (s7, mut log) {
+        log.push(s7);
+    }
+    let s8 = format("s%i", 8);
+    defer use (s8, mut log) {
+        log.push(s8);
+    }
+    let s9 = format("s%i", 9);
+    defer use (s9, mut log) {
+        log.push(s9);
+    }
+    let s10 = format("s%i", 10);
+    defer use (s10, mut log) {
+        log.push(s10);
+    }
+    let s11 = format("s%i", 11);
+    defer use (s11, mut log) {
+        log.push(s11);
+    }
+    let s12 = format("s%i", 12);
+    defer use (s12, mut log) {
+        log.push(s12);
+    }
+    let s13 = format("s%i", 13);
+    defer use (s13, mut log) {
+        log.push(s13);
+    }
+    let s14 = format("s%i", 14);
+    defer use (s14, mut log) {
+        log.push(s14);
+    }
+    let s15 = format("s%i", 15);
+    defer use (s15, mut log) {
+        log.push(s15);
+    }
+    let s16 = format("s%i", 16);
+    defer use (s16, mut log) {
+        log.push(s16);
+    }
+    let s17 = format("s%i", 17);
+    defer use (s17, mut log) {
+        log.push(s17);
+    }
+    let s18 = format("s%i", 18);
+    defer use (s18, mut log) {
+        log.push(s18);
+    }
+    let s19 = format("s%i", 19);
+    defer use (s19, mut log) {
+        log.push(s19);
+    }
+    let s20 = format("s%i", 20);
+    defer use (s20, mut log) {
+        log.push(s20);
+    }
+    let s21 = format("s%i", 21);
+    defer use (s21, mut log) {
+        log.push(s21);
+    }
+    let s22 = format("s%i", 22);
+    defer use (s22, mut log) {
+        log.push(s22);
+    }
+    let s23 = format("s%i", 23);
+    defer use (s23, mut log) {
+        log.push(s23);
+    }
+    let s24 = format("s%i", 24);
+    defer use (s24, mut log) {
+        log.push(s24);
+    }
+    let s25 = format("s%i", 25);
+    defer use (s25, mut log) {
+        log.push(s25);
+    }
+    let s26 = format("s%i", 26);
+    defer use (s26, mut log) {
+        log.push(s26);
+    }
+    let s27 = format("s%i", 27);
+    defer use (s27, mut log) {
+        log.push(s27);
+    }
+    let s28 = format("s%i", 28);
+    defer use (s28, mut log) {
+        log.push(s28);
+    }
+    let s29 = format("s%i", 29);
+    defer use (s29, mut log) {
+        log.push(s29);
+    }
+    let s30 = format("s%i", 30);
+    defer use (s30, mut log) {
+        log.push(s30);
+    }
+    let s31 = format("s%i", 31);
+    defer use (s31, mut log) {
+        log.push(s31);
+    }
+    let s32 = format("s%i", 32);
+    defer use (s32, mut log) {
+        log.push(s32);
+    }
+    let s33 = format("s%i", 33);
+    defer use (s33, mut log) {
+        log.push(s33);
+    }
+    let s34 = format("s%i", 34);
+    defer use (s34, mut log) {
+        log.push(s34);
+    }
+    let s35 = format("s%i", 35);
+    defer use (s35, mut log) {
+        log.push(s35);
+    }
+    let s36 = format("s%i", 36);
+    defer use (s36, mut log) {
+        log.push(s36);
+    }
+    let s37 = format("s%i", 37);
+    defer use (s37, mut log) {
+        log.push(s37);
+    }
+    let s38 = format("s%i", 38);
+    defer use (s38, mut log) {
+        log.push(s38);
+    }
+    let s39 = format("s%i", 39);
+    defer use (s39, mut log) {
+        log.push(s39);
+    }
+    let s40 = format("s%i", 40);
+    defer use (s40, mut log) {
+        log.push(s40);
+    }
+    let s41 = format("s%i", 41);
+    defer use (s41, mut log) {
+        log.push(s41);
+    }
+    let s42 = format("s%i", 42);
+    defer use (s42, mut log) {
+        log.push(s42);
+    }
+    let s43 = format("s%i", 43);
+    defer use (s43, mut log) {
+        log.push(s43);
+    }
+    let s44 = format("s%i", 44);
+    defer use (s44, mut log) {
+        log.push(s44);
+    }
+    let s45 = format("s%i", 45);
+    defer use (s45, mut log) {
+        log.push(s45);
+    }
+    let s46 = format("s%i", 46);
+    defer use (s46, mut log) {
+        log.push(s46);
+    }
+    let s47 = format("s%i", 47);
+    defer use (s47, mut log) {
+        log.push(s47);
+    }
+    let s48 = format("s%i", 48);
+    defer use (s48, mut log) {
+        log.push(s48);
+    }
+    let s49 = format("s%i", 49);
+    defer use (s49, mut log) {
+        log.push(s49);
+    }
+    let s50 = format("s%i", 50);
+    defer use (s50, mut log) {
+        log.push(s50);
+    }
+    let s51 = format("s%i", 51);
+    defer use (s51, mut log) {
+        log.push(s51);
+    }
+    let s52 = format("s%i", 52);
+    defer use (s52, mut log) {
+        log.push(s52);
+    }
+    let s53 = format("s%i", 53);
+    defer use (s53, mut log) {
+        log.push(s53);
+    }
+    let s54 = format("s%i", 54);
+    defer use (s54, mut log) {
+        log.push(s54);
+    }
+    let s55 = format("s%i", 55);
+    defer use (s55, mut log) {
+        log.push(s55);
+    }
+    let s56 = format("s%i", 56);
+    defer use (s56, mut log) {
+        log.push(s56);
+    }
+    let s57 = format("s%i", 57);
+    defer use (s57, mut log) {
+        log.push(s57);
+    }
+    let s58 = format("s%i", 58);
+    defer use (s58, mut log) {
+        log.push(s58);
+    }
+    let s59 = format("s%i", 59);
+    defer use (s59, mut log) {
+        log.push(s59);
+    }
+    let s60 = format("s%i", 60);
+    defer use (s60, mut log) {
+        log.push(s60);
+    }
+    let s61 = format("s%i", 61);
+    defer use (s61, mut log) {
+        log.push(s61);
+    }
+    let s62 = format("s%i", 62);
+    defer use (s62, mut log) {
+        log.push(s62);
+    }
+    let s63 = format("s%i", 63);
+    defer use (s63, mut log) {
+        log.push(s63);
+    }
+    let s64 = format("s%i", 64);
+    defer use (s64, mut log) {
+        log.push(s64);
+    }
+    let s65 = format("s%i", 65);
+    defer use (s65, mut log) {
+        log.push(s65);
+    }
+    let s66 = format("s%i", 66);
+    defer use (s66, mut log) {
+        log.push(s66);
+    }
+    let s67 = format("s%i", 67);
+    defer use (s67, mut log) {
+        log.push(s67);
+    }
+    let s68 = format("s%i", 68);
+    defer use (s68, mut log) {
+        log.push(s68);
+    }
+    let s69 = format("s%i", 69);
+    defer use (s69, mut log) {
+        log.push(s69);
+    }
+    collect();
+}
+
+fn mixed(Vec<int> log) -> int {
+    let total = 0;
+    let n0 = 0 * 2;
+    defer use (n0, mut log) {
+        log.push(n0);
+    }
+    total += n0;
+    let n1 = 1 * 2;
+    defer use (n1, mut log) {
+        log.push(n1);
+    }
+    total += n1;
+    let n2 = 2 * 2;
+    defer use (n2, mut log) {
+        log.push(n2);
+    }
+    total += n2;
+    let n3 = 3 * 2;
+    defer use (n3, mut log) {
+        log.push(n3);
+    }
+    total += n3;
+    let n4 = 4 * 2;
+    defer use (n4, mut log) {
+        log.push(n4);
+    }
+    total += n4;
+    let n5 = 5 * 2;
+    defer use (n5, mut log) {
+        log.push(n5);
+    }
+    total += n5;
+    let n6 = 6 * 2;
+    defer use (n6, mut log) {
+        log.push(n6);
+    }
+    total += n6;
+    let n7 = 7 * 2;
+    defer use (n7, mut log) {
+        log.push(n7);
+    }
+    total += n7;
+    let n8 = 8 * 2;
+    defer use (n8, mut log) {
+        log.push(n8);
+    }
+    total += n8;
+    let n9 = 9 * 2;
+    defer use (n9, mut log) {
+        log.push(n9);
+    }
+    total += n9;
+    let n10 = 10 * 2;
+    defer use (n10, mut log) {
+        log.push(n10);
+    }
+    total += n10;
+    let n11 = 11 * 2;
+    defer use (n11, mut log) {
+        log.push(n11);
+    }
+    total += n11;
+    let n12 = 12 * 2;
+    defer use (n12, mut log) {
+        log.push(n12);
+    }
+    total += n12;
+    let n13 = 13 * 2;
+    defer use (n13, mut log) {
+        log.push(n13);
+    }
+    total += n13;
+    let n14 = 14 * 2;
+    defer use (n14, mut log) {
+        log.push(n14);
+    }
+    total += n14;
+    let n15 = 15 * 2;
+    defer use (n15, mut log) {
+        log.push(n15);
+    }
+    total += n15;
+    let n16 = 16 * 2;
+    defer use (n16, mut log) {
+        log.push(n16);
+    }
+    total += n16;
+    let n17 = 17 * 2;
+    defer use (n17, mut log) {
+        log.push(n17);
+    }
+    total += n17;
+    let n18 = 18 * 2;
+    defer use (n18, mut log) {
+        log.push(n18);
+    }
+    total += n18;
+    let n19 = 19 * 2;
+    defer use (n19, mut log) {
+        log.push(n19);
+    }
+    total += n19;
+    let n20 = 20 * 2;
+    defer use (n20, mut log) {
+        log.push(n20);
+    }
+    total += n20;
+    let n21 = 21 * 2;
+    defer use (n21, mut log) {
+        log.push(n21);
+    }
+    total += n21;
+    let n22 = 22 * 2;
+    defer use (n22, mut log) {
+        log.push(n22);
+    }
+    total += n22;
+    let n23 = 23 * 2;
+    defer use (n23, mut log) {
+        log.push(n23);
+    }
+    total += n23;
+    let n24 = 24 * 2;
+    defer use (n24, mut log) {
+        log.push(n24);
+    }
+    total += n24;
+    let n25 = 25 * 2;
+    defer use (n25, mut log) {
+        log.push(n25);
+    }
+    total += n25;
+    let n26 = 26 * 2;
+    defer use (n26, mut log) {
+        log.push(n26);
+    }
+    total += n26;
+    let n27 = 27 * 2;
+    defer use (n27, mut log) {
+        log.push(n27);
+    }
+    total += n27;
+    let n28 = 28 * 2;
+    defer use (n28, mut log) {
+        log.push(n28);
+    }
+    total += n28;
+    let n29 = 29 * 2;
+    defer use (n29, mut log) {
+        log.push(n29);
+    }
+    total += n29;
+    let n30 = 30 * 2;
+    defer use (n30, mut log) {
+        log.push(n30);
+    }
+    total += n30;
+    let n31 = 31 * 2;
+    defer use (n31, mut log) {
+        log.push(n31);
+    }
+    total += n31;
+    let n32 = 32 * 2;
+    defer use (n32, mut log) {
+        log.push(n32);
+    }
+    total += n32;
+    let n33 = 33 * 2;
+    defer use (n33, mut log) {
+        log.push(n33);
+    }
+    total += n33;
+    let n34 = 34 * 2;
+    defer use (n34, mut log) {
+        log.push(n34);
+    }
+    total += n34;
+    let n35 = 35 * 2;
+    defer use (n35, mut log) {
+        log.push(n35);
+    }
+    total += n35;
+    let n36 = 36 * 2;
+    defer use (n36, mut log) {
+        log.push(n36);
+    }
+    total += n36;
+    let n37 = 37 * 2;
+    defer use (n37, mut log) {
+        log.push(n37);
+    }
+    total += n37;
+    let n38 = 38 * 2;
+    defer use (n38, mut log) {
+        log.push(n38);
+    }
+    total += n38;
+    let n39 = 39 * 2;
+    defer use (n39, mut log) {
+        log.push(n39);
+    }
+    total += n39;
+    let n40 = 40 * 2;
+    defer use (n40, mut log) {
+        log.push(n40);
+    }
+    total += n40;
+    let n41 = 41 * 2;
+    defer use (n41, mut log) {
+        log.push(n41);
+    }
+    total += n41;
+    let n42 = 42 * 2;
+    defer use (n42, mut log) {
+        log.push(n42);
+    }
+    total += n42;
+    let n43 = 43 * 2;
+    defer use (n43, mut log) {
+        log.push(n43);
+    }
+    total += n43;
+    let n44 = 44 * 2;
+    defer use (n44, mut log) {
+        log.push(n44);
+    }
+    total += n44;
+    let n45 = 45 * 2;
+    defer use (n45, mut log) {
+        log.push(n45);
+    }
+    total += n45;
+    let n46 = 46 * 2;
+    defer use (n46, mut log) {
+        log.push(n46);
+    }
+    total += n46;
+    let n47 = 47 * 2;
+    defer use (n47, mut log) {
+        log.push(n47);
+    }
+    total += n47;
+    let n48 = 48 * 2;
+    defer use (n48, mut log) {
+        log.push(n48);
+    }
+    total += n48;
+    let n49 = 49 * 2;
+    defer use (n49, mut log) {
+        log.push(n49);
+    }
+    total += n49;
+    let n50 = 50 * 2;
+    defer use (n50, mut log) {
+        log.push(n50);
+    }
+    total += n50;
+    let n51 = 51 * 2;
+    defer use (n51, mut log) {
+        log.push(n51);
+    }
+    total += n51;
+    let n52 = 52 * 2;
+    defer use (n52, mut log) {
+        log.push(n52);
+    }
+    total += n52;
+    let n53 = 53 * 2;
+    defer use (n53, mut log) {
+        log.push(n53);
+    }
+    total += n53;
+    let n54 = 54 * 2;
+    defer use (n54, mut log) {
+        log.push(n54);
+    }
+    total += n54;
+    let n55 = 55 * 2;
+    defer use (n55, mut log) {
+        log.push(n55);
+    }
+    total += n55;
+    let n56 = 56 * 2;
+    defer use (n56, mut log) {
+        log.push(n56);
+    }
+    total += n56;
+    let n57 = 57 * 2;
+    defer use (n57, mut log) {
+        log.push(n57);
+    }
+    total += n57;
+    let n58 = 58 * 2;
+    defer use (n58, mut log) {
+        log.push(n58);
+    }
+    total += n58;
+    let n59 = 59 * 2;
+    defer use (n59, mut log) {
+        log.push(n59);
+    }
+    total += n59;
+    let n60 = 60 * 2;
+    defer use (n60, mut log) {
+        log.push(n60);
+    }
+    total += n60;
+    let n61 = 61 * 2;
+    defer use (n61, mut log) {
+        log.push(n61);
+    }
+    total += n61;
+    let n62 = 62 * 2;
+    defer use (n62, mut log) {
+        log.push(n62);
+    }
+    total += n62;
+    let n63 = 63 * 2;
+    defer use (n63, mut log) {
+        log.push(n63);
+    }
+    total += n63;
+    let n64 = 64 * 2;
+    defer use (n64, mut log) {
+        log.push(n64);
+    }
+    total += n64;
+    let n65 = 65 * 2;
+    defer use (n65, mut log) {
+        log.push(n65);
+    }
+    total += n65;
+    let n66 = 66 * 2;
+    defer use (n66, mut log) {
+        log.push(n66);
+    }
+    total += n66;
+    let n67 = 67 * 2;
+    defer use (n67, mut log) {
+        log.push(n67);
+    }
+    total += n67;
+    let n68 = 68 * 2;
+    defer use (n68, mut log) {
+        log.push(n68);
+    }
+    total += n68;
+    let n69 = 69 * 2;
+    defer use (n69, mut log) {
+        log.push(n69);
+    }
+    total += n69;
+    collect();
+    return total;
+}
+
+// Each defer allocates, then counts its home's length: the pads run with
+// every heap home still rooted. (A `collect()` in a pad is coil-lang#2312.)
+fn unwinds() -> int {
+    let u0 = format("u%i", 0);
+    defer use (u0) {
+        let tag = format("%s!", u0);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u1 = format("u%i", 1);
+    defer use (u1) {
+        let tag = format("%s!", u1);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u2 = format("u%i", 2);
+    defer use (u2) {
+        let tag = format("%s!", u2);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u3 = format("u%i", 3);
+    defer use (u3) {
+        let tag = format("%s!", u3);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u4 = format("u%i", 4);
+    defer use (u4) {
+        let tag = format("%s!", u4);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u5 = format("u%i", 5);
+    defer use (u5) {
+        let tag = format("%s!", u5);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u6 = format("u%i", 6);
+    defer use (u6) {
+        let tag = format("%s!", u6);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u7 = format("u%i", 7);
+    defer use (u7) {
+        let tag = format("%s!", u7);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u8 = format("u%i", 8);
+    defer use (u8) {
+        let tag = format("%s!", u8);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u9 = format("u%i", 9);
+    defer use (u9) {
+        let tag = format("%s!", u9);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u10 = format("u%i", 10);
+    defer use (u10) {
+        let tag = format("%s!", u10);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u11 = format("u%i", 11);
+    defer use (u11) {
+        let tag = format("%s!", u11);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u12 = format("u%i", 12);
+    defer use (u12) {
+        let tag = format("%s!", u12);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u13 = format("u%i", 13);
+    defer use (u13) {
+        let tag = format("%s!", u13);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u14 = format("u%i", 14);
+    defer use (u14) {
+        let tag = format("%s!", u14);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u15 = format("u%i", 15);
+    defer use (u15) {
+        let tag = format("%s!", u15);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u16 = format("u%i", 16);
+    defer use (u16) {
+        let tag = format("%s!", u16);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u17 = format("u%i", 17);
+    defer use (u17) {
+        let tag = format("%s!", u17);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u18 = format("u%i", 18);
+    defer use (u18) {
+        let tag = format("%s!", u18);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u19 = format("u%i", 19);
+    defer use (u19) {
+        let tag = format("%s!", u19);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u20 = format("u%i", 20);
+    defer use (u20) {
+        let tag = format("%s!", u20);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u21 = format("u%i", 21);
+    defer use (u21) {
+        let tag = format("%s!", u21);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u22 = format("u%i", 22);
+    defer use (u22) {
+        let tag = format("%s!", u22);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u23 = format("u%i", 23);
+    defer use (u23) {
+        let tag = format("%s!", u23);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u24 = format("u%i", 24);
+    defer use (u24) {
+        let tag = format("%s!", u24);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u25 = format("u%i", 25);
+    defer use (u25) {
+        let tag = format("%s!", u25);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u26 = format("u%i", 26);
+    defer use (u26) {
+        let tag = format("%s!", u26);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u27 = format("u%i", 27);
+    defer use (u27) {
+        let tag = format("%s!", u27);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u28 = format("u%i", 28);
+    defer use (u28) {
+        let tag = format("%s!", u28);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u29 = format("u%i", 29);
+    defer use (u29) {
+        let tag = format("%s!", u29);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u30 = format("u%i", 30);
+    defer use (u30) {
+        let tag = format("%s!", u30);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u31 = format("u%i", 31);
+    defer use (u31) {
+        let tag = format("%s!", u31);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u32 = format("u%i", 32);
+    defer use (u32) {
+        let tag = format("%s!", u32);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u33 = format("u%i", 33);
+    defer use (u33) {
+        let tag = format("%s!", u33);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u34 = format("u%i", 34);
+    defer use (u34) {
+        let tag = format("%s!", u34);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u35 = format("u%i", 35);
+    defer use (u35) {
+        let tag = format("%s!", u35);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u36 = format("u%i", 36);
+    defer use (u36) {
+        let tag = format("%s!", u36);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u37 = format("u%i", 37);
+    defer use (u37) {
+        let tag = format("%s!", u37);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u38 = format("u%i", 38);
+    defer use (u38) {
+        let tag = format("%s!", u38);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u39 = format("u%i", 39);
+    defer use (u39) {
+        let tag = format("%s!", u39);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u40 = format("u%i", 40);
+    defer use (u40) {
+        let tag = format("%s!", u40);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u41 = format("u%i", 41);
+    defer use (u41) {
+        let tag = format("%s!", u41);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u42 = format("u%i", 42);
+    defer use (u42) {
+        let tag = format("%s!", u42);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u43 = format("u%i", 43);
+    defer use (u43) {
+        let tag = format("%s!", u43);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u44 = format("u%i", 44);
+    defer use (u44) {
+        let tag = format("%s!", u44);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u45 = format("u%i", 45);
+    defer use (u45) {
+        let tag = format("%s!", u45);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u46 = format("u%i", 46);
+    defer use (u46) {
+        let tag = format("%s!", u46);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u47 = format("u%i", 47);
+    defer use (u47) {
+        let tag = format("%s!", u47);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u48 = format("u%i", 48);
+    defer use (u48) {
+        let tag = format("%s!", u48);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u49 = format("u%i", 49);
+    defer use (u49) {
+        let tag = format("%s!", u49);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u50 = format("u%i", 50);
+    defer use (u50) {
+        let tag = format("%s!", u50);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u51 = format("u%i", 51);
+    defer use (u51) {
+        let tag = format("%s!", u51);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u52 = format("u%i", 52);
+    defer use (u52) {
+        let tag = format("%s!", u52);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u53 = format("u%i", 53);
+    defer use (u53) {
+        let tag = format("%s!", u53);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u54 = format("u%i", 54);
+    defer use (u54) {
+        let tag = format("%s!", u54);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u55 = format("u%i", 55);
+    defer use (u55) {
+        let tag = format("%s!", u55);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u56 = format("u%i", 56);
+    defer use (u56) {
+        let tag = format("%s!", u56);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u57 = format("u%i", 57);
+    defer use (u57) {
+        let tag = format("%s!", u57);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u58 = format("u%i", 58);
+    defer use (u58) {
+        let tag = format("%s!", u58);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u59 = format("u%i", 59);
+    defer use (u59) {
+        let tag = format("%s!", u59);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u60 = format("u%i", 60);
+    defer use (u60) {
+        let tag = format("%s!", u60);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u61 = format("u%i", 61);
+    defer use (u61) {
+        let tag = format("%s!", u61);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u62 = format("u%i", 62);
+    defer use (u62) {
+        let tag = format("%s!", u62);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u63 = format("u%i", 63);
+    defer use (u63) {
+        let tag = format("%s!", u63);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u64 = format("u%i", 64);
+    defer use (u64) {
+        let tag = format("%s!", u64);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u65 = format("u%i", 65);
+    defer use (u65) {
+        let tag = format("%s!", u65);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u66 = format("u%i", 66);
+    defer use (u66) {
+        let tag = format("%s!", u66);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u67 = format("u%i", 67);
+    defer use (u67) {
+        let tag = format("%s!", u67);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u68 = format("u%i", 68);
+    defer use (u68) {
+        let tag = format("%s!", u68);
+        LOG = LOG + tag.len() - 1;
+    }
+    let u69 = format("u%i", 69);
+    defer use (u69) {
+        let tag = format("%s!", u69);
+        LOG = LOG + tag.len() - 1;
+    }
+    panic "unwinds";
+}
+
+fn failed(Result<int, TaskError> r) -> bool {
+    return match r {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    };
+}
+
+test("seventy string homes run in reverse") {
+    let log: Vec<string> = [];
+    many(log);
+    assert!(log.len() == 70);
+    assert!(log[0] == format("s%i", 69));
+    assert!(log[69] == "s0");
+}
+
+test("seventy int homes and a result") {
+    let log: Vec<int> = [];
+    assert!(mixed(log) == 4830);
+    assert!(log.len() == 70);
+    assert!(log[0] == 138);
+}
+
+test("a panic runs seventy defers with their homes") {
+    LOG = 0;
+    let r = scope(fn (Scope s) {
+        let _ = s.spawn(unwinds);
+        0
+    });
+    assert!(failed(r));
+    assert!(LOG == 200);
+}
