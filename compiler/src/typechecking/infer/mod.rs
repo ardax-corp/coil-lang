@@ -533,6 +533,9 @@ pub struct Checker {
     /// declared type does not describe the word, so their kind stays unknown.
     synthetic_statics: std::collections::HashSet<String>,
     next_static_slot: u32,
+    /// The tail slot of each `static let` of a closed two-word type, which
+    /// holds its second word ([`Checker::finalize_static_tails`]).
+    static_tails: HashMap<String, u32>,
 
     /// `const` class fields: class name → field names (immutable for everyone).
     const_class_fields: HashMap<String, HashSet<String>>,

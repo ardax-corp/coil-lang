@@ -209,6 +209,7 @@ impl Checker {
             static_slot_types: HashMap::new(),
             synthetic_statics: std::collections::HashSet::new(),
             next_static_slot: 0,
+            static_tails: HashMap::new(),
             const_class_fields: HashMap::new(),
             readonly_classes: HashSet::new(),
             shared_classes: HashSet::new(),
@@ -20538,7 +20539,22 @@ impl Checker {
             if self.synthetic_statics.contains(fqn) {
                 continue;
             }
-            if let (Some(k), Some(ty)) = (kinds.get_mut(id as usize), self.static_slot_types.get(fqn)) {
+            let Some(ty) = self.static_slot_types.get(fqn) else {
+                continue;
+            };
+            // A two-word static's words, the second in its tail slot; a
+            // payload that is a pointer only under some tags stays unknown.
+            if let Some(&tail) = self.static_tails.get(fqn) {
+                let [first, second] = crate::layout::pair_word_kinds(self, ty).unwrap_or([common::WORD_UNKNOWN; 2]);
+                if let Some(k) = kinds.get_mut(id as usize) {
+                    *k = first;
+                }
+                if let Some(k) = kinds.get_mut(tail as usize) {
+                    *k = second;
+                }
+                continue;
+            }
+            if let Some(k) = kinds.get_mut(id as usize) {
                 *k = crate::layout::word_kind(self, ty);
             }
         }
@@ -20663,6 +20679,43 @@ impl Checker {
         std::mem::swap(&mut self.next_static_slot, &mut other.next_static_slot);
         std::mem::swap(&mut self.synthetic_statics, &mut other.synthetic_statics);
         std::mem::swap(&mut self.static_slot_types, &mut other.static_slot_types);
+        std::mem::swap(&mut self.static_tails, &mut other.static_tails);
+    }
+
+    /// Give each `static let` of a closed two-word type a tail slot for
+    /// its second word, after every declared slot: a store writes both
+    /// words and a read loads both, with no box. A `const` keeps one slot
+    /// (it is read, never stored); a synthetic slot is no value. Runs once
+    /// typing is done; a static already given one keeps it.
+    pub fn finalize_static_tails(&mut self) {
+        let mut statics: Vec<(String, u32)> = self
+            .static_slots
+            .iter()
+            .filter(|(fqn, (_, is_const))| !is_const && !self.synthetic_statics.contains(*fqn) && !self.static_tails.contains_key(*fqn))
+            .map(|(fqn, (id, _))| (fqn.clone(), *id))
+            .collect();
+        statics.sort_by_key(|(_, id)| *id);
+        for (fqn, _) in statics {
+            let Some(ty) = self.static_slot_types.get(&fqn).map(|t| apply_ty_prune(&self.subst, t)) else {
+                continue;
+            };
+            if ty_names_param(&ty, &[]) || crate::layout::pair_word_kinds(self, &ty).is_none() {
+                continue;
+            }
+            let tail = self.next_static_slot;
+            self.next_static_slot += 1;
+            self.static_tails.insert(fqn, tail);
+        }
+    }
+
+    /// The tail slot of the static in `slot`, if it has one.
+    pub fn static_tail_of_slot(&self, slot: u32) -> Option<u32> {
+        self.static_slots.iter().find(|(_, (id, _))| *id == slot).and_then(|(fqn, _)| self.static_tail(fqn))
+    }
+
+    /// The tail slot of static `fqn` ([`Self::finalize_static_tails`]).
+    pub fn static_tail(&self, fqn: &str) -> Option<u32> {
+        self.static_tails.get(fqn).copied()
     }
 
     /// Allocate a synthetic static slot (e.g. `extern` library / fn-id handles).

@@ -462,6 +462,9 @@ pub struct HirMirInput<'a> {
     pub strings: &'a HashMap<u32, u32>,
     /// Static slot of each `Global` read or assigned that is a static.
     pub statics: &'a HashMap<u32, u32>,
+    /// The tail slot of each of those that is a two-word static: its
+    /// second word, the first in the static's own slot.
+    pub static_tails: HashMap<u32, u32>,
     /// Folded value of each `Global` that is a `const`.
     pub consts: &'a HashMap<u32, crate::const_fold::ConstValue>,
     /// `format` calls with only word arguments, and string `+` (as
@@ -2298,7 +2301,20 @@ impl Lower<'_> {
                 _ => Err("boxed result".into()),
             };
         }
-        // A two-word static is its box already.
+        // A two-word static is its box already, unless it keeps its two
+        // words: then they are boxed here.
+        if let HirKind::Global { .. } = self.hir.expr(id).kind
+            && self.inp.static_tails.contains_key(&id.0)
+        {
+            let ty = self.expr_ty(id).ok_or("static type")?.clone();
+            let Some((lo, hi)) = self.pair(id)? else {
+                return Ok(None);
+            };
+            return match self.box_pair_val(&ty, lo, hi)? {
+                Val::V(v) => Ok(Some(v)),
+                _ => Err("static pair box".into()),
+            };
+        }
         if let HirKind::Global { .. } = self.hir.expr(id).kind
             && let Some(&slot) = self.inp.statics.get(&id.0)
             && self.inp.pair_tys.contains_key(&id.0)
@@ -5615,6 +5631,12 @@ impl Lower<'_> {
     fn global(&mut self, id: HirId) -> Result<Val, Refusal> {
         use crate::const_fold::ConstValue;
         if let Some(&slot) = self.inp.statics.get(&id.0) {
+            // A two-word static's words, from its slot and its tail.
+            if let (Some(&tail), Some(&(lo_ty, hi_ty))) = (self.inp.static_tails.get(&id.0), self.inp.pair_tys.get(&id.0)) {
+                let lo = self.b.ins_load_static(slot, lo_ty).map_err(mir)?;
+                let hi = self.b.ins_load_static(tail, hi_ty).map_err(mir)?;
+                return Ok(Val::Pair(lo, hi));
+            }
             let ty = self.static_ty(id)?;
             let v = self.b.ins_load_static(slot, ty).map_err(mir)?;
             // A two-word static read as its pair, as HIR emission unboxes it.
@@ -5723,6 +5745,17 @@ impl Lower<'_> {
     /// value is stored as is (no fixed-array copy).
     fn store_static(&mut self, place: HirId, value: HirId) -> Result<Val, Refusal> {
         let slot = *self.inp.statics.get(&place.0).ok_or("assign place")?;
+        if let (Some(&tail), Some(&(lo_ty, hi_ty))) = (self.inp.static_tails.get(&place.0), self.inp.pair_tys.get(&place.0)) {
+            let Some((lo, hi)) = self.pair(value)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
+                return Err("assign pair static type".into());
+            }
+            self.b.ins_store_static(slot, lo).map_err(mir)?;
+            self.b.ins_store_static(tail, hi).map_err(mir)?;
+            return Ok(Val::Unit);
+        }
         let ty = self.static_ty(place)?;
         let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(value)? } else { self.word(value)? }) else {
             return Ok(Val::Never);

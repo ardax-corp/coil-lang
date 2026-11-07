@@ -5961,6 +5961,16 @@ impl Compiler {
         let prev_result_ok_is_result =
             std::mem::replace(&mut self.compiling_result_ok_is_result, false);
         let prev_two_word_enum = self.compiling_two_word_enum.take();
+        // A two-word static's initializer returns the two words, which the
+        // setup region stores in its slot and its tail.
+        let tail = self.checker.static_tail(fqn);
+        if tail.is_some() {
+            self.compiling_two_word_enum = self
+                .checker
+                .static_slot_ty(slot)
+                .map(|ty| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty))
+                .and_then(|ty| crate::layout::two_word_kind(&self.checker, &ty));
+        }
 
         // The initializer returns the value; the setup region stores it.
         if !self.try_lower_hir_function(&init.0, init) {
@@ -5985,7 +5995,7 @@ impl Compiler {
         self.context.variables = prev_fn_vars;
 
         self.setup_steps
-            .push(module_setup::SetupStep::Static { init: format!("{STATIC_INIT_FN_PREFIX}{fqn}"), slot, comptime: false });
+            .push(module_setup::SetupStep::Static { init: format!("{STATIC_INIT_FN_PREFIX}{fqn}"), slot, tail, comptime: false });
     }
 
     /// Receiver type for field access / method calls.
@@ -6587,7 +6597,10 @@ impl Compiler {
             Expression::StaticDecl { name, init, is_const, .. } => {
                 let fqn = self.qualify_static_fqn(name);
                 self.emit_static_initializer(&fqn, init);
+                // A two-word static keeps its words in two slots, which a
+                // snapshot of its value would not fill: it runs at startup.
                 let silent = !*is_const
+                    && self.checker.static_tail(&fqn).is_none()
                     && (self.pure_static_inits.contains(&fqn) || self.pure_static_inits.contains(*name));
                 let startup = *is_const && (self.startup_consts.contains(&fqn) || self.startup_consts.contains(*name));
                 if (*is_const || silent)

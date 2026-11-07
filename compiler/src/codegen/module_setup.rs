@@ -28,7 +28,8 @@ pub(crate) struct StartupStep {
 pub(crate) enum SetupStep {
     /// `static_slot = init()`; `comptime` when the value is computed while
     /// compiling (it stays in the prologue).
-    Static { init: String, slot: u32, comptime: bool },
+    /// A two-word static's second word goes to `tail`.
+    Static { init: String, slot: u32, tail: Option<u32>, comptime: bool },
     /// Load the library named by string `name`; its handle to `slot`.
     Load { name: u32, slot: u32 },
     /// Declare symbol `name` of the library in `lib_slot` with argument
@@ -50,7 +51,7 @@ impl Compiler {
         let mut setup = Vec::new();
         for step in steps {
             match step {
-                SetupStep::Static { ref init, slot, comptime } => {
+                SetupStep::Static { ref init, slot, comptime, .. } => {
                     if !self.functions.contains_key(init) {
                         continue;
                     }
@@ -161,18 +162,24 @@ impl Compiler {
         b.allow_host_edges = true;
         for step in steps {
             match step {
-                SetupStep::Static { init, slot, .. } => {
+                SetupStep::Static { init, slot, tail, .. } => {
                     let target = self.fn_entry_labels.get(init).copied().ok_or_else(|| format!("{init}: no entry"))?;
-                    let ret = self.bodies.funcs()
-                        .iter()
-                        .find(|f| f.name == *init)
-                        .and_then(|f| f.mir.as_ref())
+                    let func = self.bodies.funcs().iter().find(|f| f.name == *init).and_then(|f| f.mir.as_ref());
+                    let ret = func
                         .and_then(|m| m.ret_ty)
                         .filter(|t| t.is_word_lane())
                         .ok_or_else(|| format!("{init}: no one-word MIR return"))?;
-                    let abi = crate::layout::DenseAbi { params: Vec::new(), ret, ret_hi: None };
-                    let (value, _) = b.ins_call(target, Vec::new(), &abi).map_err(mir)?;
+                    // A two-word static's initializer returns both words.
+                    let ret_hi = match tail {
+                        Some(_) => Some(func.and_then(|m| m.ret_hi_ty).ok_or_else(|| format!("{init}: no two-word MIR return"))?),
+                        None => None,
+                    };
+                    let abi = crate::layout::DenseAbi { params: Vec::new(), ret, ret_hi };
+                    let (value, hi) = b.ins_call(target, Vec::new(), &abi).map_err(mir)?;
                     b.ins_store_static(*slot, value).map_err(mir)?;
+                    if let (Some(tail), Some(hi)) = (tail, hi) {
+                        b.ins_store_static(*tail, hi).map_err(mir)?;
+                    }
                 }
                 SetupStep::Load { name, slot } => {
                     let name = b.ins_string(*name).map_err(mir)?;

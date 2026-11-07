@@ -474,6 +474,7 @@ type Check = Result<(), &'static str>;
 impl Compiler {
     /// Build the module's HIR for lowering.
     pub(super) fn build_hir_for_lowering(&mut self, module: &str, ast: &Output<'_>) {
+        self.checker.finalize_static_tails();
         self.hir_fns.clear();
         self.hir_fn_names.clear();
         self.hir_module = None;
@@ -2397,6 +2398,7 @@ impl Compiler {
             iter_loops: &tables.iter_loops,
             strings: &tables.strings,
             statics: &emit.plan.statics,
+            static_tails: emit.plan.statics.iter().filter_map(|(&id, &slot)| Some((id, self.checker.static_tail_of_slot(slot)?))).collect(),
             consts: &emit.plan.consts,
             formats: &tables.formats,
             format_shows: &tables.format_shows,
