@@ -2113,11 +2113,25 @@ impl Compiler {
             _ => false,
         };
         let mut invariant_fields = HashSet::new();
+        let mut pair_fields = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             if let HirKind::Field { base, .. } = &e.kind
                 && Self::hir_ty(hir, *base).is_some_and(readonly_class)
             {
                 invariant_fields.insert(i as u32);
+            }
+            // A flat two-word field: its first slot and its tail slot.
+            if let HirKind::Field { base, name } = &e.kind
+                && !fields.contains_key(&(i as u32))
+                && Self::hir_ty(hir, *base).is_some_and(is_class)
+                && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
+                && let Some(key) = self.hir_class_of(hir, *base)
+                && let Some(&Some(tail)) = checker.class_flat_tails(&key).get(idx as usize)
+                && let Some((lo, hi)) = self.hir_mir_pair_tys(&fty)
+                && e.ty.as_ref().and_then(|t| self.hir_mir_pair_tys(t)) == Some((lo, hi))
+            {
+                pair_fields.insert(i as u32, (idx, tail, lo, hi));
+                continue;
             }
             if let HirKind::Field { base, name } = &e.kind
                 && !fields.contains_key(&(i as u32))
@@ -2243,6 +2257,7 @@ impl Compiler {
         // `new C(..)` of a class whose every field holds the word its type
         // names: the type id and each field's word type.
         let mut news = HashMap::new();
+        let mut new_tails = HashMap::new();
         for i in 0..hir.exprs.len() as u32 {
             if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
                 && let HirKind::Make { args, .. } = &hir.expr(HirId(i)).kind
@@ -2297,6 +2312,10 @@ impl Compiler {
                     })
                     .collect::<Option<Vec<_>>>()
             {
+                let tails = checker.class_flat_tails(&class);
+                if tails.iter().any(Option::is_some) {
+                    new_tails.insert(i, tails);
+                }
                 news.insert(i, (checker.class_type_id(&class), words));
             }
         }
@@ -2460,6 +2479,7 @@ impl Compiler {
                 }
             }),
             heap_fields,
+            pair_fields,
             invariant_fields,
             frozen_arrays: HashMap::new(),
             boxed_niches,
@@ -2486,6 +2506,7 @@ impl Compiler {
                 })
                 .collect(),
             news,
+            new_tails,
             pushes,
             hosts,
             pinned_for,

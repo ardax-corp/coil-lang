@@ -551,6 +551,9 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
+    /// Field reads and writes of a flat two-word class field: its slot
+    /// (the first word), its tail slot (the second) and their word types.
+    pub pair_fields: HashMap<u32, (u32, u32, MirTy, MirTy)>,
     /// Field reads of a `readonly class` instance: no store ever changes
     /// what they read (#1560).
     pub invariant_fields: HashSet<u32>,
@@ -620,6 +623,9 @@ pub struct HirMirInput<'a> {
     /// `new C(..)` on the heap: the class's type id and its fields' word
     /// types.
     pub news: HashMap<u32, (u32, Vec<MirTy>)>,
+    /// `new C(..)` of a class with flat two-word fields: each field's tail
+    /// slot, which holds its second word (`Checker::class_flat_tails`).
+    pub new_tails: HashMap<u32, Vec<Option<u32>>>,
     /// `for x in xs` loops whose array the checker pinned: their reads
     /// need no bounds check.
     pub pinned_for: HashSet<u32>,
@@ -3301,6 +3307,40 @@ impl Lower<'_> {
                     None => Ok(Val::V(w)),
                 }
             }
+            // A flat two-word field: its first slot and its tail slot.
+            HirKind::Field { base, .. } if let Some(&(slot, tail, lo_ty, hi_ty)) = self.inp.pair_fields.get(&id.0) => {
+                let Some(obj) = self.word(*base)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(obj) != MirTy::HeapRef {
+                    return Err("pair field base".into());
+                }
+                let lo = self.b.ins_heap_field_load(obj, slot, lo_ty).map_err(mir)?;
+                let hi = self.b.ins_heap_field_load(obj, tail, hi_ty).map_err(mir)?;
+                if self.inp.invariant_fields.contains(&id.0) {
+                    self.b.mark_invariant_load(lo);
+                    self.b.mark_invariant_load(hi);
+                }
+                Ok(Val::Pair(lo, hi))
+            }
+            HirKind::Assign { place, value }
+                if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
+                    && let Some(&(slot, tail, lo_ty, hi_ty)) = self.inp.pair_fields.get(&place.0) =>
+            {
+                // The value, then the object, as `SetField`: payload, then tag.
+                let Some((lo, hi)) = self.pair(*value)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(lo) != lo_ty || self.b.value_ty(hi) != hi_ty {
+                    return Err("pair field type".into());
+                }
+                let Some(obj) = self.word(base)? else {
+                    return Ok(Val::Never);
+                };
+                self.b.ins_heap_field_store(obj, lo, slot).map_err(mir)?;
+                self.b.ins_heap_field_store(obj, hi, tail).map_err(mir)?;
+                Ok(Val::Unit)
+            }
             // A field of a readonly class kept as its pair (#1562): that
             // word, with no object.
             HirKind::Field { base, .. }
@@ -3613,6 +3653,18 @@ impl Lower<'_> {
             {
                 let (slot, ty) = if i == 0 { (lo, lo_ty) } else { (hi, hi_ty) };
                 Ok(Val::V(self.b.use_local(slot, ty).map_err(mir)?))
+            }
+            // `e[0]` / `e[1]` of any other two-word tuple (a flat field, a
+            // call): that word of its pair.
+            HirKind::Index { base, index, .. }
+                if self.inp.pair_tys.contains_key(&base.0)
+                    && self.expr_ty(*base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_)))
+                    && let HirKind::Lit(Lit::Int(i @ (0 | 1))) = self.hir.expr(*index).kind =>
+            {
+                let Some((lo, hi)) = self.pair(*base)? else {
+                    return Ok(Val::Never);
+                };
+                Ok(Val::V(if i == 0 { lo } else { hi }))
             }
             HirKind::Index { base, index, kind: IndexKind::Array } if self.heap_array(*base) => self.heap_index(id, *base, *index),
             // A boxed tuple's field: the same `Index`.
@@ -5869,8 +5921,20 @@ impl Lower<'_> {
     /// order into the word its slot holds; `None` if one never returns.
     fn object_words(&mut self, id: HirId, args: &[HirId]) -> Result<Option<Vec<ValueId>>, Refusal> {
         let tys = self.inp.news[&id.0].1.clone();
+        let tails = self.inp.new_tails.get(&id.0).cloned().unwrap_or_default();
         let mut words = Vec::with_capacity(args.len());
-        for (&arg, ty) in args.iter().zip(tys) {
+        let mut tail_words = Vec::new();
+        for (i, (&arg, ty)) in args.iter().zip(tys).enumerate() {
+            // A flat two-word field: its first word here, its second in
+            // its tail slot.
+            if let Some(&Some(tail)) = tails.get(i) {
+                let Some((lo, hi)) = self.pair(arg)? else {
+                    return Ok(None);
+                };
+                words.push(lo);
+                tail_words.push((tail, hi));
+                continue;
+            }
             let v = match self.inp.boxed_niches.get(&arg.0) {
                 Some(&layout) => self.boxed_niche_word(arg, layout)?,
                 None if ty == MirTy::HeapRef => self.boxed_word(arg)?,
@@ -5883,6 +5947,13 @@ impl Lower<'_> {
                 return Err("field type".into());
             }
             words.push(v);
+        }
+        tail_words.sort_by_key(|&(tail, _)| tail);
+        for (tail, hi) in tail_words {
+            if tail as usize != words.len() {
+                return Err("tail slot".into());
+            }
+            words.push(hi);
         }
         Ok(Some(words))
     }
