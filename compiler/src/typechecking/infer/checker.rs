@@ -20465,10 +20465,14 @@ impl Checker {
             .filter(|(_, id)| *id != 0)
             .filter_map(|(key, type_id)| {
                 let fields = self.class_fields(key)?;
-                let kinds = fields
+                let tails = self.class_flat_tails(key);
+                let mut kinds: Vec<u8> = fields
                     .iter()
-                    .map(|(_, ty)| crate::layout::word_kind(self, ty))
+                    .zip(&tails)
+                    .map(|((_, ty), tail)| if tail.is_some() { common::WORD_SCALAR } else { crate::layout::word_kind(self, ty) })
                     .collect();
+                // A flat field's second word: scalar too.
+                kinds.extend(tails.iter().flatten().map(|_| common::WORD_SCALAR));
                 Some(common::ClassWordKinds { type_id, kinds })
             })
             .chain(self.record_type_ids.iter().map(|((_, kinds), &type_id)| common::ClassWordKinds { type_id, kinds: kinds.clone() }))
@@ -20520,6 +20524,41 @@ impl Checker {
             }
         }
         kinds
+    }
+
+    /// For each field of class `key`, in declaration order, the tail slot
+    /// that holds the second word of a flat two-word field: a field of a
+    /// [`crate::layout::scalar_pair`] type keeps its first word in its own
+    /// slot and its second after the declared fields, so no other field's
+    /// slot moves. A generic, `shared` (a two-word store is not atomic) or
+    /// `view` class keeps every field one word.
+    pub fn class_flat_tails(&self, key: &str) -> Vec<Option<u32>> {
+        let Some(fields) = self.class_fields(key) else {
+            return Vec::new();
+        };
+        let mut tails = vec![None; fields.len()];
+        if self.generics().generic_type_ctors.contains_key(key)
+            || self.is_shared_class(key)
+            || self.is_view_class(key)
+            || crate::layout::readonly_pair_class(self, &Ty::Con(key.to_string())).is_some()
+        {
+            return tails;
+        }
+        let mut next = fields.len() as u32;
+        for (i, (name, ty)) in fields.iter().enumerate() {
+            if !self.is_borrow_field(key, name) && crate::layout::scalar_pair(self, ty) {
+                tails[i] = Some(next);
+                next += 1;
+            }
+        }
+        tails
+    }
+
+    /// Slots an instance of class `key` holds: its fields, then the tail
+    /// slots of its flat fields ([`Self::class_flat_tails`]).
+    pub fn class_slot_count(&self, key: &str) -> usize {
+        let tails = self.class_flat_tails(key);
+        tails.len() + tails.iter().flatten().count()
     }
 
     /// Compile-time type id for `InitTyped` (`0` if the name is not a class).

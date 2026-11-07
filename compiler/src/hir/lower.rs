@@ -351,7 +351,10 @@ pub fn sroa_class(body: &HirBody, checker: &Checker, init: HirId) -> Option<Stri
     };
     let key = checker.resolve_class_key(name)?;
     let n = checker.class_fields(&key)?.len();
-    (!checker.class_has_drop(&key) && (1..=32).contains(&n)).then_some(key)
+    // A flat two-word field takes two slots in the object (its tail), which
+    // frame slots of one word per field do not model.
+    let flat = checker.class_flat_tails(&key).iter().any(Option::is_some);
+    (!checker.class_has_drop(&key) && !flat && (1..=32).contains(&n)).then_some(key)
 }
 
 /// Whether `local` is only ever the base of a field read or write (so its
