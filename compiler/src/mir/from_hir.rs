@@ -34,6 +34,10 @@ use super::func::MirFunc;
 use super::inst::{BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst, Terminator, ValueId};
 use super::ty::MirTy;
 
+/// [`Lower::unbox_pair`]'s arity of a variant whose payload is `()`: its
+/// box holds one word, which the pair carries as `0`.
+const UNIT_PAYLOAD: u32 = u32::MAX;
+
 /// First local of the values HIR emission keeps in temp slots.
 const TEMP_BASE: u32 = 1 << 30;
 
@@ -546,6 +550,10 @@ pub struct HirMirInput<'a> {
     /// variants' tags and payload word types (none for no payload), in
     /// declaration order.
     pub pair_variants: PairVariantsFn<'a>,
+    /// The tags of a two-word enum type whose payload is `()` (bit `t`
+    /// for tag `t`): the pair form carries `0` there, whatever word its
+    /// box holds.
+    pub unit_tags: Box<dyn Fn(&Ty) -> u64 + 'a>,
     /// A variant's payload field names in declaration order, by enum and
     /// variant name (a record pattern's fields in word order).
     pub payload_names: PayloadNamesFn<'a>,
@@ -1981,7 +1989,9 @@ impl Lower<'_> {
                 if !plain(tys.0) || variants.iter().any(|&(_, p)| p.is_some_and(|p| !plain(p))) {
                     return None;
                 }
-                Some(PairEqWords::Variants(variants))
+                // A `()` payload is equal whatever word carries it.
+                let units = (self.inp.unit_tags)(ty);
+                Some(PairEqWords::Variants(variants.into_iter().map(|(t, p)| (t, p.filter(|_| units >> t & 1 == 0))).collect()))
             }
             None => (plain(tys.0) && plain(tys.1)).then_some(PairEqWords::Product(tys.0, tys.1)),
         }
@@ -1993,7 +2003,21 @@ impl Lower<'_> {
     fn pair_eq(&mut self, id: HirId, lhs: HirId, rhs: HirId, ne: bool) -> Result<Val, Refusal> {
         let words = self.pair_eq_words(id, lhs, rhs).ok_or("pair eq")?;
         let ty = self.expr_ty(lhs).ok_or("pair eq type")?.clone();
-        let (l, r) = (self.value(lhs)?, self.value(rhs)?);
+        let (mut l, mut r) = (self.value(lhs)?, self.value(rhs)?);
+        // A side that came out as its box (an element read) is unboxed, so
+        // both compare as words: boxing the other side would compare a
+        // `()` payload's word.
+        if matches!((l, r), (Val::Pair(..), Val::V(_)) | (Val::V(_), Val::Pair(..))) {
+            let (lo_ty, hi_ty) = self.inp.pair_tys[&lhs.0];
+            for side in [&mut l, &mut r] {
+                if let Val::V(v) = *side
+                    && self.b.value_ty(v) == MirTy::HeapRef
+                    && let Ok(p @ Val::Pair(..)) = self.unbox_word(&ty, v, lo_ty, hi_ty)
+                {
+                    *side = p;
+                }
+            }
+        }
         let ((l0, l1), (r0, r1)) = match (l, r) {
             (Val::Never, _) | (_, Val::Never) => return Ok(Val::Never),
             (Val::Pair(a, b), Val::Pair(c, d)) => ((a, b), (c, d)),
@@ -2358,7 +2382,12 @@ impl Lower<'_> {
             return Err("unbox pair type".into());
         }
         let (_, variants) = (self.inp.pair_variants)(ty).ok_or("unbox pair type")?;
-        let variants: Vec<(u32, u32)> = variants.iter().map(|&(t, w)| (t, u32::from(w.is_some()))).collect();
+        // A `()` payload is `0` in the pair, not its box's word.
+        let units = (self.inp.unit_tags)(ty);
+        let variants: Vec<(u32, u32)> = variants
+            .iter()
+            .map(|&(t, w)| (t, if units >> t & 1 == 1 { UNIT_PAYLOAD } else { u32::from(w.is_some()) }))
+            .collect();
         self.unbox_pair(v, lo_ty, &variants)
     }
 
@@ -6635,22 +6664,22 @@ impl Lower<'_> {
         for &(t, arity) in rest {
             let word = match arity {
                 0 => None,
-                1 => Some(self.b.ins_match_payload(obj, 0, lo_ty).map_err(mir)?),
+                1 | UNIT_PAYLOAD => Some(self.b.ins_match_payload(obj, 0, lo_ty).map_err(mir)?),
                 _ => return Err("host pair arity".into()),
             };
             let (hit, miss) = (self.b.create_block(), self.b.create_block());
             self.b.jump_if_match(obj, t, word.into_iter().collect(), hit, miss).map_err(mir)?;
             self.switch(hit);
             let p = match word {
-                Some(w) => w,
-                None => self.zero(lo_ty)?,
+                Some(w) if arity == 1 => w,
+                _ => self.zero(lo_ty)?,
             };
             let tag = self.b.ins_const(MirConst::I64(i64::from(t))).map_err(mir)?;
             out.push((self.cur, Val::Pair(p, tag)));
             self.switch(miss);
         }
         let p = match last_arity {
-            0 => self.zero(lo_ty)?,
+            0 | UNIT_PAYLOAD => self.zero(lo_ty)?,
             1 => self.b.ins_match_payload(obj, 0, lo_ty).map_err(mir)?,
             _ => return Err("host pair arity".into()),
         };

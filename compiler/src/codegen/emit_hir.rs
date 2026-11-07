@@ -2461,6 +2461,16 @@ impl Compiler {
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
+            unit_tags: Box::new(move |t: &Ty| {
+                let t = apply_ty_prune(checker.subst(), t);
+                let Some(kind) = crate::layout::two_word_kind(checker, &t).and_then(|k| k.enum_name().map(str::to_string)) else {
+                    return 0;
+                };
+                checker.enum_variants(&kind).into_iter().flatten().fold(0, |m, (name, tag, _)| {
+                    let unit = Self::payload_tys_of(checker, &t, &name).is_some_and(|p| matches!(p.as_slice(), [p] if crate::layout::is_unit(p)));
+                    if unit { m | 1u64.checked_shl(tag).unwrap_or(0) } else { m }
+                })
+            }),
             pair_variants: Box::new(move |t: &Ty| {
                 let t = apply_ty_prune(checker.subst(), t);
                 let kind = crate::layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
