@@ -104,7 +104,8 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   walk: any function value, partial application, `thread::spawn` or FFI
   callback of that name, in any file of the package use-graph, keeps every
   caller on the one-word ABI.
-- Coroutines and host natives never return two slots. A raw trait
+- Coroutines never return two slots; host natives return theirs through
+  the context (see "Host calls"). A raw trait
   instance method (a ground instance with no context, not a default body)
   returns its pair to direct calls; its `$dict` adapter, which
   dictionaries hold, boxes it. Other instance methods return one word
@@ -147,10 +148,16 @@ Host natives pack their result into one word at the `HostInvoke` edge
 (`machine::host_enum`, operand bits `[17:16]`), with layout bits derived
 from `value_layout` of the invoke's result type: `1` for
 `NicheOption` / `NicheUnitResult` (`Ok` = `0`), `2` for `NicheResult`,
-`0` (boxed) otherwise and whenever the type is unsure. `Vec::pop` /
-`remove` of a heap element and `gc::get` / `unroot` / `upgrade` pack once;
-`Result<int, _>` and `Result<Option<int>, _>` stay boxed. Host natives are
-never two-slot producers. Cross-module `Result<Path, IoError>` keeps
+`3` (pair) for a two-word `Option` / `Result` with a scalar payload
+(`Option<int>`, `Option<float>`, `Result<int, IoError>`), `0` (boxed)
+otherwise and whenever the type is unsure. `Vec::pop` / `remove` of a heap
+element and `gc::get` / `unroot` / `upgrade` pack once. Under the pair
+layout a native returns the payload word (`0` for a variant without one)
+and the runtime leaves the tag in `NativeCtx::ret_hi`, which native code
+and the MIR interpreter read into `HostInvoke`'s `dest_hi`; no enum object
+is made (`host_enum::pack_option` / `pack_result`; a native that builds its
+object anyway is read off it at the edge). A position that wants the boxed
+word (a generic thunk's result) still asks for layout `0`. Cross-module `Result<Path, IoError>` keeps
 virtual-error tags for layout (COI-404).
 
 ## Representation matrix
