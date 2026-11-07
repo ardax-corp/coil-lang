@@ -2,6 +2,7 @@
 // `(int, float)`) compare their words: an enum's tags, then the variant's
 // payload; a product's two words. No box is made for either side.
 use tests::assert;
+use collections::map::HashMap;
 
 #[inline(never)]
 fn half(int x) -> Option<int> {
@@ -62,4 +63,29 @@ test("option of float compares by IEEE") {
     assert!(ratio(4.0) != Some(0.5));
     let nan = 0.0 / 0.0;
     assert!(Some(nan) != Some(nan));
+}
+
+#[inline(never)]
+fn settled(int x) -> Result<(), int> {
+    if x < 0 {
+        return Err(x);
+    }
+    return Ok(());
+}
+
+// A `()` payload is equal whatever word carries it: a literal's, a call
+// result's, or one read out of its box in an array or a map.
+test("result of unit compares by tag") {
+    let r: Result<(), int> = Ok(());
+    assert!(r == Ok(()));
+    assert!(settled(1) == Ok(()));
+    assert!(settled(-2) == Err(-2));
+    let us: Vec<Result<(), int>> = [Ok(()), Err(3)];
+    assert!(us[0] == Ok(()));
+    let x = us[0];
+    assert!(x == r);
+    assert!(us[1] != Ok(()));
+    let m: HashMap<int, Result<(), int>> = HashMap::new();
+    m.insert(1, settled(5));
+    assert!(m.values()[0] == Ok(()));
 }
