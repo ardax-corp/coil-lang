@@ -861,7 +861,13 @@ fn main() {
             }
         };
         assert!(
-            !compiled.bodies.iter().any(|b| b.mir.ret_hi_ty.is_some()),
+            // The per-type unpair adapter an indirect call site uses
+            // (`__coil_unpair_N`) returns two words by design; `div` itself
+            // must not.
+            !compiled
+                .bodies
+                .iter()
+                .any(|b| b.mir.ret_hi_ty.is_some() && !b.mir.name.starts_with("__coil_unpair_")),
             "escaped arith::div must keep a boxed return, found a two-word return"
         );
         assert!(
