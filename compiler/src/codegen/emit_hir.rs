@@ -4817,6 +4817,18 @@ impl Compiler {
                 _ => None,
             })
             .collect();
+        let adjusted: HashSet<u32> = hir
+            .exprs
+            .iter()
+            .filter(|e| e.flags.contains(HirFlags::ADJUST))
+            .filter_map(|e| match e.kind {
+                HirKind::Assign { place, .. } => match hir.expr(place).kind {
+                    HirKind::Local(local) => Some(local.0),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         // A `defer` thunk's frame copies each capture as one word, so a
         // captured local stays one word.
         let deferred: HashSet<u32> = hir
@@ -4836,7 +4848,18 @@ impl Compiler {
             else {
                 continue;
             };
-            if assigned.contains(&local.0) || hir.local(local).captured || deferred.contains(&local.0) {
+            if hir.local(local).captured || deferred.contains(&local.0) {
+                continue;
+            }
+            // An assigned local takes two slots only by the catch-all below
+            // (each `=` writes both), and never when an assignment is also
+            // a value (`ADJUST`).
+            if assigned.contains(&local.0) {
+                if !adjusted.contains(&local.0)
+                    && let Some(kind) = self.hir_pair_local_kind(hir, local)
+                {
+                    emit.plan.pair_locals.insert(local.0, kind);
+                }
                 continue;
             }
             // A local of a one-word type stays one word even when its init
@@ -4874,6 +4897,13 @@ impl Compiler {
                 _ => None,
             };
             if let Some(kind) = range {
+                emit.plan.pair_locals.insert(local.0, kind);
+                continue;
+            }
+            // Any other local of a two-word type lives in two slots too: a
+            // one-word init (an element, a field, a boxed result) unpacks
+            // once at the `let`, and every read is the two words.
+            if let Some(kind) = self.hir_pair_local_kind(hir, local) {
                 emit.plan.pair_locals.insert(local.0, kind);
             }
         }
@@ -8318,6 +8348,21 @@ impl Compiler {
         (self.hir_pair_enum(&kind) && self.hir_builds_pair(hir, emit, init, &kind)).then_some(kind)
     }
 
+    /// The pair kind a local of a closed two-word type takes whatever its
+    /// init: an open range stays its object (#1230).
+    fn hir_pair_local_kind(&self, hir: &HirBody, local: LocalId) -> Option<PairKind> {
+        if !self.opt_options.hir_pair_locals {
+            return None;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), hir.local(local).ty.as_ref()?);
+        if Self::ty_has_var(&ty) || lower::is_open_range(&ty) {
+            return None;
+        }
+        self.hir_mir_pair_tys(&ty)?;
+        let kind = crate::layout::two_word_kind(&self.checker, &ty)?;
+        (kind.enum_name().is_none() || self.hir_pair_enum(&kind)).then_some(kind)
+    }
+
     /// `e` yields a `kind` pair with no boxing on any path.
     fn hir_builds_pair(&self, hir: &HirBody, emit: &HirEmit, e: HirId, kind: &PairKind) -> bool {
         match &hir.expr(e).kind {
@@ -10062,7 +10107,9 @@ impl Compiler {
                 self.hir_check_value(hir, emit, *init, &BOXED)
             }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
-                HirKind::Local(local) if emit.plan.pair_locals.contains_key(&local.0) => Err("assign-pair"),
+                HirKind::Local(local) if let Some(kind) = emit.plan.pair_locals.get(&local.0) => {
+                    self.hir_check_value(hir, emit, *value, &Rep::Pair(kind.clone()))
+                }
                 HirKind::Local(local) if emit.plan.stacks.contains_key(&local.0) => {
                     self.hir_check_stack_array_init(hir, emit, *local, *value)
                 }

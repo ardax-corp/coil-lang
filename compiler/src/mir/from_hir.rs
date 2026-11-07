@@ -3668,6 +3668,21 @@ impl Lower<'_> {
                 self.b.def_local(slot, v).map_err(mir)?;
                 Ok(Val::Unit)
             }
+            // `x = e` of a two-slot local: both words rebound.
+            HirKind::Assign { place, value }
+                if let HirKind::Local(local) = self.hir.expr(*place).kind
+                    && let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local) =>
+            {
+                let Some((a, b)) = self.pair(*value)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(a) != lo_ty || self.b.value_ty(b) != hi_ty {
+                    return Err("assign pair type".into());
+                }
+                self.b.def_local(lo, a).map_err(mir)?;
+                self.b.def_local(hi, b).map_err(mir)?;
+                Ok(Val::Unit)
+            }
             HirKind::Assign { place, value } => {
                 if let HirKind::Global { .. } = self.hir.expr(*place).kind {
                     return self.store_static(*place, *value);
