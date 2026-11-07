@@ -381,3 +381,47 @@ fn main() {
     let mine: Vec<_> = boxes.iter().filter(|b| b.func == "last_half" || b.func == "fib").collect();
     assert!(mine.is_empty(), "{mine:?}");
 }
+
+/// A class field of a two-word type with no pointer word sits flat in the
+/// object (its slot and a tail slot): `new`, a read and a write box nothing.
+#[test]
+fn box_capture_flat_pair_fields_have_no_boxes() {
+    let src = r#"
+class H {
+    pub o: Option<int>,
+    pub p: (int, float),
+    pub n: int,
+}
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+fn run(int n) -> int {
+    let h = new H(half(n), (n, 0.5), n);
+    let s = 0;
+    for i in 0..n {
+        h.o = half(i);
+        h.p = (h.p[0] + 1, h.p[1]);
+        s += match h.o {
+            Some(v) => v,
+            None => h.p[0],
+        };
+    }
+    return s + h.n;
+}
+fn main() {
+    let _ = run(10);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| b.func == "run").collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}
