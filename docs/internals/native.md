@@ -21,7 +21,12 @@ coil run prog.ccoil                  # JITs the section, then runs
 `--cow-report` runs on the interpreter.
 
 `coil FILE`, `coil compile`, `coil run`, `coil test` and packages all run native
-code. A wasm build has none and interprets. Native code finds a panic's location
+code. When a body gets no native code (a refusal, or the JIT itself fails), a
+release `coil FILE` / `coil run` warns and runs the program on the interpreter; a
+debug build stops with the reason (exit 1) and points at `--mir`, so a backend gap
+fails a test instead of passing slowly. `coil test` and packages never fall back.
+`COIL_NATIVE_REFUSE=a,b` makes the JIT refuse the named bodies, for testing that
+path. A wasm build has none and interprets. Native code finds a panic's location
 by span, so an archive or package that runs it keeps byte spans at `-g1`
 (`Pipeline::set_runs_mir`), and so does a direct run.
 

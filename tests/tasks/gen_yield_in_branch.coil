@@ -1,0 +1,108 @@
+// A `yield` as the last statement of a branch: its value is what the next
+// resume sends (`unit` for a generator a `for` loop drives), not the
+// yielded type. A two-word yield type (`Option<int>`, `Result`) read it
+// as that type and panicked (#2309).
+use tests::assert;
+
+gen fn evens(int n) -> Option<int> {
+    let i = 0;
+    while i < n {
+        if i % 2 == 0 {
+            yield Some(i);
+        }
+        i += 1;
+    }
+}
+
+gen fn some_or_none(int n) -> Option<int> {
+    let i = 0;
+    while i < n {
+        if i % 2 == 0 {
+            yield Some(i);
+        } else {
+            yield None;
+        }
+        i += 1;
+    }
+}
+
+gen fn checked(int n) -> Result<int, string> {
+    let i = 0;
+    while i < n {
+        if i % 3 == 0 {
+            yield Err("third");
+        } else {
+            yield Ok(i);
+        }
+        i += 1;
+    }
+}
+
+gen fn pairs(int n) -> (int, int) {
+    let i = 0;
+    while i < n {
+        if i > 0 {
+            yield (i, i * i);
+        }
+        i += 1;
+    }
+}
+
+test("a yield closing an if") {
+    let s = 0;
+    let count = 0;
+    for v in evens(6) {
+        count += 1;
+        match v {
+            Some(x) => {
+                s += x;
+            },
+            None => {},
+        }
+    }
+    assert!(count == 3);
+    assert!(s == 6);
+}
+
+test("a yield closing each arm") {
+    let somes = 0;
+    let nones = 0;
+    for v in some_or_none(5) {
+        match v {
+            Some(x) => {
+                somes += x;
+            },
+            None => {
+                nones += 1;
+            },
+        }
+    }
+    assert!(somes == 6);
+    assert!(nones == 2);
+}
+
+test("a Result yield closing each arm") {
+    let oks = 0;
+    let errs = 0;
+    for r in checked(6) {
+        match r {
+            Ok(x) => {
+                oks += x;
+            },
+            Err(e) => {
+                errs += e.len();
+            },
+        }
+    }
+    assert!(oks == 1 + 2 + 4 + 5);
+    assert!(errs == 10);
+}
+
+test("a pair yield closing an if") {
+    let s = 0;
+    for p in pairs(4) {
+        let (a, b) = p;
+        s += a + b;
+    }
+    assert!(s == 1 + 1 + 2 + 4 + 3 + 9);
+}

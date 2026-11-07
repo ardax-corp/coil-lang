@@ -4819,7 +4819,7 @@ impl Compiler {
     /// its declared result is closed (`-> Option<int>`), the same at every
     /// instance; one word otherwise.
     pub(super) fn mono_clone_pair(&self, name: &str) -> Option<PairKind> {
-        let ty = self.checker.fn_return_ty(name)?;
+        let ty = self.checker.fn_declared_return_ty(name)?;
         if !crate::layout::ty_is_closed(&ty) {
             return None;
         }
@@ -4851,8 +4851,8 @@ impl Compiler {
         // `fn_return_ty` is not by-name lookup; must not feed this classifier (steals caller return ty).
         let ty = self
             .checker
-            .fn_return_ty(name)
-            .or_else(|| self.checker.fn_return_ty(lookup))?;
+            .fn_declared_return_ty(name)
+            .or_else(|| self.checker.fn_declared_return_ty(lookup))?;
         crate::layout::convention_ret(&self.checker, &facts, &ty)
     }
 

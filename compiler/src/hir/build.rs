@@ -1595,7 +1595,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Yield(value) | E::YieldFrom(value) => {
                 let from = matches!(node.1.as_ref(), E::YieldFrom(_));
                 let value = self.expr(b, value);
-                self.emit(b, node, HirKind::Yield { value, from })
+                // A yield's span is its operand's, so the span lookup would
+                // give the yielded type: its value is what the next resume
+                // sends (#2309).
+                let ty = self
+                    .node_id(node)
+                    .and_then(|id| self.sidecar.ty(id).cloned().or_else(|| self.checker.lookup_at(id)))
+                    .or_else(|| self.ty_of(node));
+                self.emit_ty(b, node, HirKind::Yield { value, from }, ty)
             }
             E::Resume(handle, value) => {
                 let handle = self.expr(b, handle);

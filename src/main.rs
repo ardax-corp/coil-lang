@@ -578,8 +578,26 @@ fn body_ids(debug: &common::ProgramDebug) -> std::collections::HashMap<String, u
     debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect()
 }
 
+/// Native code that cannot run the whole program, for each `why`: a
+/// release build warns and the run goes to the interpreter; a debug build
+/// stops, so a backend gap fails a test instead of passing slowly.
+#[cfg(not(target_family = "wasm"))]
+fn native_fallback(why: &[String]) {
+    if cfg!(debug_assertions) {
+        for why in why {
+            eprintln!("error: {why}");
+        }
+        eprintln!("a debug build does not fall back to the interpreter; pass `--mir` to run on it");
+        exit(1);
+    }
+    for why in why {
+        eprintln!("warning: {why}; running on the interpreter");
+    }
+}
+
 /// JIT `bodies` and install them for the coming run: `false`, with nothing
-/// installed, when native code cannot run the whole program.
+/// installed, when native code cannot run the whole program
+/// ([`native_fallback`]).
 #[cfg(not(target_family = "wasm"))]
 fn install_native_bodies(
     bodies: &[compiler::native_mir::NativeBody],
@@ -590,7 +608,7 @@ fn install_native_bodies(
     let mut program = match compiled {
         Ok(program) => program,
         Err(e) => {
-            eprintln!("warning: native compile failed ({e}); running on the interpreter");
+            native_fallback(&[format!("native compile failed ({e})")]);
             return false;
         }
     };
@@ -603,9 +621,7 @@ fn install_native_bodies(
         }
     }
     if !program.refused.is_empty() {
-        for (name, why) in &program.refused {
-            eprintln!("warning: `{name}` has no native code: {why}; running on the interpreter");
-        }
+        native_fallback(&program.refused.iter().map(|(name, why)| format!("`{name}` has no native code: {why}")).collect::<Vec<_>>());
         return false;
     }
     if let (Some(key), Some(dir), Some(image)) = (key, code_cache::dir(), program.image.take()) {
