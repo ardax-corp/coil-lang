@@ -462,3 +462,43 @@ fn main() {
         .collect();
     assert!(mine.is_empty(), "{mine:?}");
 }
+
+#[test]
+fn flat_pair_field_with_a_pointer_payload_is_tagged() {
+    // `r`'s payload word is a string only under `Err`, `t`'s only under
+    // `Word`: each is kinded by its tail slot's tag, not left unknown.
+    let src = r#"
+enum Tok {
+    Num(int),
+    Word(string),
+    End,
+}
+class P {
+    pub r: Result<int, string>,
+    pub t: Tok,
+    pub n: int,
+}
+fn main() {
+    let p = new P(Ok(1), Tok::End, 2);
+    p.t = Tok::Word("w");
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    pipeline.compile_src(src).expect("compiles");
+    let rows = pipeline.class_word_kinds();
+    let row = rows
+        .iter()
+        .find(|r| r.kinds.len() == 5 + 2 * common::TAGGED_ENTRY_BYTES)
+        .unwrap_or_else(|| panic!("no tagged row for P: {rows:?}"));
+    let k = &row.kinds;
+    assert_eq!(&k[..5], [common::WORD_TAGGED, common::WORD_TAGGED, common::WORD_SCALAR, common::WORD_SCALAR, common::WORD_SCALAR]);
+    let entry = |i: usize| {
+        let e = &k[5 + i * common::TAGGED_ENTRY_BYTES..][..common::TAGGED_ENTRY_BYTES];
+        (u16::from_le_bytes([e[0], e[1]]), u64::from_le_bytes(e[2..10].try_into().unwrap()))
+    };
+    // `Err` is tag 1, `Word` tag 1: their tags sit in tail slots 3 and 4.
+    assert_eq!(entry(0), (3, 0b10));
+    assert_eq!(entry(1), (4, 0b10));
+}
