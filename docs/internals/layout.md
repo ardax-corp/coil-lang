@@ -139,10 +139,13 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   fields (`Checker::class_flat_tails`), so no other field's slot moves.
   `ClassWordKinds` marks the second word scalar, and the first scalar
   for a `layout::scalar_pair` (`Option<int>`, `(int, float)`, a range,
-  `Result<int, int>`, an enum of immediate payloads) or unknown, resolved
-  by address, for a payload that is a heap word only under some tags
-  (`Result<int, string>`, `enum { Num(int), Word(string) }`;
-  `layout::pair_word_kinds`). `new` stores both words, and a read or write
+  `Result<int, int>`, an enum of immediate payloads) or tagged for a
+  payload that is a heap word only under some tags (`Result<int,
+  string>`, `enum { Num(int), Word(string) }`): `WORD_TAGGED`, with the
+  row's trailer naming the tail slot and the pointer tags
+  (`layout::pair_pointer_tags`), so the collector reads the word as a
+  precise pointer or a scalar by its current tag and an object it
+  reaches can move. A payload whose kind is unknown leaves it unknown. `new` stores both words, and a read or write
   is two loads or stores (`pair_fields`). In a generic class only a
   field whose type names no class parameter is flat (`G<T> { v: T, o:
   Option<int> }` flattens `o`): its layout is the same in every
