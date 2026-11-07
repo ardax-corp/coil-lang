@@ -2600,9 +2600,10 @@ impl Lower<'_> {
         if let HirKind::Yield { value, from } = self.hir.expr(id).kind {
             return Ok(!matches!(self.yield_(id, value, from, false)?, Val::Never));
         }
-        // A host's two-word result nobody reads stays the boxed word it
-        // comes back as: no unboxing to a pair just to drop it.
-        self.raw_host = self.host_pair(id) || self.boxed_call(id);
+        // A call's two-word result nobody reads stays the boxed word it
+        // comes back as: no unboxing to a pair just to drop it. A host's
+        // comes back as its two words, no box made.
+        self.raw_host = self.boxed_call(id);
         self.drop_value(id);
         let out = self.value(id);
         self.raw_host = false;
@@ -2625,6 +2626,12 @@ impl Lower<'_> {
         matches!(self.hir.expr(id).kind, HirKind::Call { .. })
             && self.inp.hosts.get(&id.0).is_some_and(|h| h.2.is_some())
             && self.inp.pair_tys.contains_key(&id.0)
+    }
+
+    /// A [`Self::host_pair`] call that comes back as its two words
+    /// (`HOST_ENUM_LAYOUT_PAIR`) when read as a value: a scalar payload.
+    fn host_two_words(&self, id: HirId) -> bool {
+        self.host_pair(id) && self.inp.pair_tys.get(&id.0).is_some_and(|(lo, _)| matches!(lo, MirTy::I64 | MirTy::F64))
     }
 
     /// A host call whose result is a boxed enum kept as its object: no
@@ -6161,7 +6168,11 @@ impl Lower<'_> {
         // tuple object.
         let tuple = pair.is_none() && !raw && self.expr_ty(id).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(items) if !items.is_empty()));
         let unit = self.expr_ty(id).is_some_and(is_unit);
-        if self.inp.pair_tys.contains_key(&id.0) {
+        // A two-word `Option` / `Result` comes back as its two words
+        // (`HOST_ENUM_LAYOUT_PAIR`); a raw read and a tuple stay boxed.
+        // A payload word of another type (`Option<bool>`) comes boxed.
+        let two_words = pair.is_some() && self.host_two_words(id);
+        if self.inp.pair_tys.contains_key(&id.0) && !two_words {
             let name = common::HOST_NATIVES.iter().find(|h| h.id == native).map_or("?", |h| h.name);
             let ty = self.expr_ty(id).map(|t| crate::typechecking::pretty::format_ty_for_diag(&Default::default(), t)).unwrap_or_default();
             super::box_report::note(&self.b.func().name, super::box_report::BoxKind::HostResult, || format!("{name} -> {ty}"));
@@ -6197,6 +6208,15 @@ impl Lower<'_> {
                     }
                 }
             }
+        }
+        if let Some(((lo_ty, _), _)) = pair
+            && two_words
+        {
+            let (lo, hi) = self.at_expr(id, |l| l.b.ins_host_invoke_pair(native, words, lo_ty).map_err(mir))?;
+            if self.inp.heap_pairs.contains(&id.0) {
+                self.b.mark_heap_pair_word(lo);
+            }
+            return Ok(Val::Pair(lo, hi));
         }
         let out = self.at_expr(id, |l| l.b.ins_host_invoke_as(native, words, layout, ret).map_err(mir))?;
         if let Some(((lo_ty, _), variants)) = pair {
@@ -6814,7 +6834,9 @@ impl Lower<'_> {
             }
             _ => false,
         };
-        let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee) || self.host_boxed(scrutinee) || self.ffi_boxed(scrutinee);
+        // A two-word host result is matched on its two words.
+        let host_box = self.host_pair(scrutinee) && !self.host_two_words(scrutinee);
+        let boxed_host = host_box || self.boxed_call(scrutinee) || self.host_boxed(scrutinee) || self.ffi_boxed(scrutinee);
         if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
         }

@@ -6084,8 +6084,33 @@ impl Compiler {
         let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
         let params: Vec<ValueLayout> = args.iter().map(|&a| layout(a)).collect();
         // `pop` / `remove` returning a niche `Option` call the host natives
-        // directly, as `compile_call_expr` does; a boxed `Option` is the
-        // thunk's own result, and any other layout stays AST.
+        // directly, as `compile_call_expr` does, and so does a two-word one
+        // (`Option<int>`), which comes back as its two words
+        // (`HOST_ENUM_LAYOUT_PAIR`); a boxed `Option` is the thunk's own
+        // result, and any other layout stays AST.
+        let two_words = Self::hir_ty(hir, call)
+            .map(|t| apply_ty_prune(self.checker.subst(), t))
+            .is_some_and(|t| crate::layout::two_word_kind(&self.checker, &t).is_some());
+        if let Some(native) = Self::vec_option_host_native(&key)
+            && two_words
+            && layout(call) == ValueLayout::Boxed
+        {
+            let native = self.native_id(native).ok_or("vec-method")?;
+            return Ok(HirCall {
+                key,
+                pair: None,
+                params,
+                ret: ValueLayout::Boxed,
+                method: true,
+                mono: false,
+                builtin: Some(HirBuiltin::Host(native)),
+                generic: None,
+                instance: None,
+                ranges: Vec::new(),
+                mono_of: None,
+                own_dicts: Vec::new(),
+            });
+        }
         if let Some(native) = Self::vec_option_host_native(&key)
             && layout(call) != ValueLayout::Boxed
         {
