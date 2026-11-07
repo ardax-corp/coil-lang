@@ -502,3 +502,40 @@ fn main() {
     assert_eq!(entry(0), (3, 0b10));
     assert_eq!(entry(1), (4, 0b10));
 }
+
+#[test]
+fn box_capture_pair_captures_have_no_boxes() {
+    // `o` and `r` are two-slot locals the lambda takes as their two
+    // words: neither the enclosing body nor the lambda boxes them.
+    let src = r#"
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+fn make(int n) -> fn(int) -> int {
+    let o = half(n);
+    let r: Result<int, string> = if n > 0 { Ok(n) } else { Err("neg") };
+    return fn (int k) use (o, r) => match o {
+        Some(v) => v + k + match r {
+            Ok(m) => m,
+            Err(_) => 0,
+        },
+        None => k,
+    };
+}
+fn main() {
+    let _ = make(4)(1);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| b.func.starts_with("make")).collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}
