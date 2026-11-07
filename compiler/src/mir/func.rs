@@ -699,10 +699,16 @@ impl MirFunc {
             }
             MirInst::HostInvoke {
                 dest,
+                dest_hi,
                 native_id,
                 args,
                 ..
             } => {
+                if let Some(hi) = dest_hi
+                    && self.ty(*hi) != MirTy::I64
+                {
+                    return Err(format!("{hi} host tag is not i64"));
+                }
                 let Some(spec) = super::host_allow::host_edge_spec(*native_id) else {
                     return Err(format!("{dest} host {native_id} not a typed edge"));
                 };
@@ -714,7 +720,8 @@ impl MirFunc {
                         return Err(format!("{dest} host arg {i} type"));
                     }
                 }
-                if !super::host_allow::host_result_ok(*native_id, spec.ret, self.ty(*dest)) {
+                let payload = dest_hi.is_some() && self.ty(*dest).is_word_lane();
+                if !payload && !super::host_allow::host_result_ok(*native_id, spec.ret, self.ty(*dest)) {
                     return Err(format!("{dest} host dest type"));
                 }
             }

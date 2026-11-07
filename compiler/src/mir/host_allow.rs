@@ -164,14 +164,15 @@ pub fn host_result_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
         || (packed_la(id) && matches!(actual, MirTy::I64 | MirTy::F64 | MirTy::HeapRef))
 }
 
-/// One-word host Option/Result layouts the dense edge can reconstruct.
-/// Reserved (3) stays boxed-or-refuse, not a niche word.
+/// Host Option/Result layouts the dense edge can reconstruct: the one-word
+/// ones and the two-word pair.
 pub fn dense_host_layout_ok(layout: u8) -> bool {
     matches!(
         layout as u32,
         common::HOST_ENUM_LAYOUT_BOXED
             | common::HOST_ENUM_LAYOUT_OPTION_NICHE
             | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+            | common::HOST_ENUM_LAYOUT_PAIR
     )
 }
 

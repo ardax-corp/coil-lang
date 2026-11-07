@@ -302,7 +302,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
     // X: the run `i0 .. j` in one copy.
     let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
     let i1 = b.value(MirTy::I64);
-    b.push(sx, MirInst::HostInvoke { dest: i1, native_id: VEC_EXTEND_RANGE_ID, layout, args: vec![out, plan.src, i0, j] });
+    b.push(sx, MirInst::HostInvoke { dest: i1, dest_hi: None, native_id: VEC_EXTEND_RANGE_ID, layout, args: vec![out, plan.src, i0, j] });
     b.func.block_mut(sx).term = Some(Terminator::Jump { dest: join });
     b.func.block_mut(skip).term = Some(Terminator::Jump { dest: join });
 

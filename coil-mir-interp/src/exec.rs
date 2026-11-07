@@ -867,10 +867,14 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             }
             // A pad's end: the unwind goes on once the pad returns.
             MirInst::HostInvoke { dest, native_id, .. } if *native_id == common::UNWIND_RESUME_ID => set!(*dest, 0),
-            MirInst::HostInvoke { dest, native_id, layout, args } => {
+            MirInst::HostInvoke { dest, dest_hi, native_id, layout, args } => {
                 let w = rt::coil_native_host(ctx, u64::from(*native_id), u64::from(*layout), words!(args), args.len() as u64);
                 check!();
                 set!(*dest, w);
+                // A two-word result's tag (`HOST_ENUM_LAYOUT_PAIR`).
+                if let Some(h) = dest_hi {
+                    set!(*h, (*ctx).ret_hi);
+                }
             }
             MirInst::Panic { dest, msg } => {
                 rt::coil_native_panic(ctx, get!(*msg));
