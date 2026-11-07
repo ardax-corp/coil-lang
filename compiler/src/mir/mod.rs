@@ -48,11 +48,11 @@ pub use box_report::{BoxKind, BoxSite, start_box_capture, take_box_capture};
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;
-pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirRetItem, HirRetItems, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
+pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirLaneElem, HirRetItem, HirRetItems, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
 pub use func::MirFunc;
 pub use gc::liveness;
 pub use func::{MirBlock, is_tail_call_inst};
-pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
+pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, MirFfiOp, MirGcKind, MirInst, MirLaneShape, ValueId};
 pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
 pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]

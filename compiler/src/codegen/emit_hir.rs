@@ -1863,6 +1863,13 @@ impl Compiler {
             .enumerate()
             .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
             .collect::<HashMap<u32, _>>();
+        // `Vec`s of a closed two-word type: lane arrays.
+        let lane_arrays = hir
+            .exprs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| Some((i as u32, self.hir_lane_elem(e.ty.as_ref()?)?)))
+            .collect::<HashMap<u32, _>>();
         // Of those, the ones whose low word may carry a heap payload.
         let heap_pairs = hir
             .exprs
@@ -2338,7 +2345,8 @@ impl Compiler {
             }
         }
         let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
-        let pushes = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
+        let pushes: HashSet<u32> = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
+        let lane_escapes = self.hir_lane_escapes(hir, emit, &lane_arrays, &pushes);
         // Host natives taking plain words and returning one (a niche word
         // comes back as the layout asks; no pair conversion at the edge),
         // and `gc::root` / `gc::weak` taking any word.
@@ -2501,6 +2509,8 @@ impl Compiler {
             pair_fields,
             invariant_fields,
             frozen_arrays: HashMap::new(),
+            lane_arrays,
+            lane_escapes,
             boxed_niches,
             niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
@@ -2599,6 +2609,84 @@ impl Compiler {
                 Self::payload_tys_of(checker, t, v)
             }
         }
+    }
+
+    /// The lane arrays of `hir` (`lane_arrays`) whose value goes on to code
+    /// that reads it one word per element, so is turned into that form
+    /// first (`HirMirInput::lane_escapes`). A use keeps the lanes when it
+    /// is an element read or store, a push, a length, a `for` loop, a `let`
+    /// or local assignment, the function's own lane-array result, or an
+    /// argument of a ground function whose parameter is a lane array; a
+    /// block, `if` or `match` passes its value's use through.
+    fn hir_lane_escapes(&self, hir: &HirBody, emit: &HirEmit, lanes: &HashMap<u32, crate::mir::HirLaneElem>, pushes: &HashSet<u32>) -> HashSet<u32> {
+        if lanes.is_empty() {
+            return HashSet::new();
+        }
+        let parent = crate::hir::tuple_sroa::parents(hir);
+        let ret_lanes = hir.ret.as_ref().is_some_and(|t| self.hir_lane_elem(t).is_some());
+        let keeps = |id: HirId| -> bool {
+            let mut cur = id;
+            loop {
+                let Some(p) = parent[cur.0 as usize] else {
+                    return ret_lanes;
+                };
+                match &hir.expr(p).kind {
+                    HirKind::Block { tail: Some(t), .. } if *t == cur => {}
+                    HirKind::If { then, els, .. } if *then == cur || *els == Some(cur) => {}
+                    HirKind::Match { arms, .. } if arms.iter().any(|a| a.body == cur) => {}
+                    HirKind::Index { base, kind: IndexKind::Array, .. } => return *base == cur,
+                    HirKind::Assign { place, value } => {
+                        return *place == cur || *value == cur && matches!(hir.expr(*place).kind, HirKind::Local(_));
+                    }
+                    HirKind::Let { .. } => return true,
+                    HirKind::ForIn { iterable, kind: Some(ForInKind::Array), .. } => return *iterable == cur,
+                    HirKind::Return(Some(_)) => return ret_lanes,
+                    HirKind::Call { args, .. } if pushes.contains(&p.0) || emit.plan.lens.contains_key(&p.0) => {
+                        return args.first() == Some(&cur);
+                    }
+                    HirKind::Call { callee: Callee::Named { .. }, args } => {
+                        let Some(call) = emit.plan.calls.get(&p.0) else {
+                            return false;
+                        };
+                        if call.method || call.mono || call.builtin.is_some() || call.generic.is_some() || call.instance.is_some() {
+                            return false;
+                        }
+                        let Some(at) = args.iter().position(|&a| a == cur) else {
+                            return false;
+                        };
+                        return self
+                            .checker
+                            .fn_param_tys(&call.key)
+                            .and_then(|tys| tys.get(at).cloned())
+                            .is_some_and(|t| self.hir_lane_elem(&t) == lanes.get(&id.0).copied());
+                    }
+                    _ => return false,
+                }
+                cur = p;
+            }
+        };
+        lanes.keys().copied().filter(|&i| !keeps(HirId(i))).collect()
+    }
+
+    /// The element of `ty` when it is a `Vec` or array of a closed two-word type,
+    /// which keeps both words of each element in place (a lane array):
+    /// the words' MIR types and how an element is boxed as one word
+    /// ([`crate::layout::pair_lane_shape`]).
+    pub(super) fn hir_lane_elem(&self, ty: &Ty) -> Option<crate::mir::HirLaneElem> {
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        // A fixed array is the same heap array a `Vec` is (a literal
+        // coerces to either), so it is laid out the same way.
+        let elem = match crate::typechecking::ty::strip_readonly(&ty) {
+            Ty::Array { element, .. } => element.as_ref(),
+            _ => crate::typechecking::ty::vec_element_ty(&ty)?,
+        };
+        if Self::ty_has_var(elem) {
+            return None;
+        }
+        let (lo, hi) = self.hir_mir_pair_tys(elem)?;
+        let (tag_mask, payload_mask, unit_mask) = crate::layout::pair_lane_shape(&self.checker, elem)?;
+        let shape = crate::mir::MirLaneShape { tag_mask, payload_mask, unit_mask };
+        Some(crate::mir::HirLaneElem { lo, hi, shape })
     }
 
     fn hir_mir_pair_tys(&self, ty: &Ty) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
@@ -4851,7 +4939,16 @@ impl Compiler {
     /// (`sroa`), and enum locals kept as `[payload, tag]` pairs. Needs the
     /// planned calls, whose results decide pair locals.
     fn plan_hir_local_layouts(&self, hir: &HirBody, emit: &mut HirEmit) -> Result<(), &'static str> {
-        let stacks = lower::stack_arrays(hir, &self.checker);
+        let mut stacks = lower::stack_arrays(hir, &self.checker);
+        // A lane array (two-word elements) is never a stack array: its
+        // slots would hold each element boxed.
+        stacks.len.retain(|&l, _| {
+            hir.local(LocalId(l)).ty.as_ref().is_none_or(|t| self.hir_lane_elem(t).is_none())
+        });
+        for locals in stacks.box_at.values_mut() {
+            locals.retain(|l| stacks.len.contains_key(l));
+        }
+        stacks.box_at.retain(|_, locals| !locals.is_empty());
         emit.plan.stacks = stacks.len;
         emit.plan.box_at = stacks.box_at;
         // Escaping frame-slot class locals box before their escape too.
@@ -4988,6 +5085,21 @@ impl Compiler {
             // one-word init (an element, a field, a boxed result) unpacks
             // once at the `let`, and every read is the two words.
             if let Some(kind) = self.hir_pair_local_kind(hir, local) {
+                emit.plan.pair_locals.insert(local.0, kind);
+            }
+        }
+        // A `for x in xs` over a lane array binds each element's two words.
+        for expr in &hir.exprs {
+            if let HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                kind: Some(ForInKind::Array),
+                ..
+            } = &expr.kind
+                && !deferred.contains(&local.0)
+                && hir.expr(*iterable).ty.as_ref().is_some_and(|t| self.hir_lane_elem(t).is_some())
+                && let Some(kind) = self.hir_pair_local_kind(hir, *local)
+            {
                 emit.plan.pair_locals.insert(local.0, kind);
             }
         }
