@@ -142,16 +142,14 @@ pub fn set_shared_print_redirect(
     SHARED_PRINT.with(|cell| cell.replace(buf))
 }
 
-/// Install this OS thread's stdout-only capture (see
-/// [`crate::vm::Machine::set_shared_stdout`]).
+/// Install this OS thread's stdout-only capture.
 pub fn set_shared_stdout_redirect(
     buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
     SHARED_STDOUT.with(|cell| cell.replace(buf))
 }
 
-/// Install this OS thread's stderr-only capture (see
-/// [`crate::vm::Machine::set_shared_stderr`]).
+/// Install this OS thread's stderr-only capture.
 pub fn set_shared_stderr_redirect(
     buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {

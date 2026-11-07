@@ -5,8 +5,6 @@ edition = "2024"
 
 [features]
 default = []
-# `debugger` gates the hook state and APIs only.
-debugger = []
 # Collect at every allocation safepoint (GC soundness testing only).
 gc-stress = []
 # Print GC census numbers after each mark (docs/internals/gc-evacuation.md).

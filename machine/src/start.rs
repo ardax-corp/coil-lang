@@ -1,5 +1,5 @@
 //! A program's start with no interpreter: a [`Runtime`] built for the
-//! program and the native driver over it, no `Machine`. An AOT executable
+//! program and the native driver over it. An AOT executable
 //! starts here when its native code covers every body
 //! (`docs/internals/native.md`, "The native driver").
 

@@ -32,7 +32,7 @@ Constrained ops (`insert` / `get_or` / …) are **inherent methods** on
 `impl HashMap<K: Eq + Hash, V>` (and the Ord analogues for `TreeMap`). **Rule:**
 type-tied operations should be methods, not free functions — the compiler
 applies `impl` type-param bounds to method schemes and emits dictionary
-arguments on inherent method `CALL` (same ABI as free generics). Free generic
+arguments on inherent method calls (same ABI as free generics). Free generic
 functions may return `Option<T>` (#884).
 Ground `Option` / `Result` values use niche, two-slot, or boxed `ObjEnum` by
 shape (COI-92) — not a single boxed ABI.

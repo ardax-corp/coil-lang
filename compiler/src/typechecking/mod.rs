@@ -21,7 +21,6 @@ pub mod par_profit;
 pub mod pretty;
 pub mod purity;
 pub mod resolve;
-pub mod stack_bound;
 pub mod subst;
 pub mod ty;
 pub mod unify;
@@ -54,11 +53,6 @@ pub use par_profit::{
 pub use purity::{
     EffectFlags, RecursivePureSet, analyze_fn_effects, analyze_recursive_fns,
     analyze_recursive_pure, classify_host_name,
-};
-#[allow(unused_imports)] // public API re-export
-pub use stack_bound::{
-    BoundSource, DEFAULT_OPERAND_STACK_SLOTS, FnStackBound, MAX_OPERAND_STACK_SLOTS,
-    StackBoundReport, analyze_stack_bounds, operand_slots_for_frames,
 };
 #[allow(unused_imports)] // public API re-export
 pub use ty::{ScalarBacking, Ty};

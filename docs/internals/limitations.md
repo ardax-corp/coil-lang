@@ -167,7 +167,7 @@ lowering path (S2j / Q2 box-once). Deliberately refused here:
 
 **Option/Result representations (COI-92) and two-slot direct calls.** One table and the rules (niches, the two-slot calling convention, shared generic bodies, host packing, the debug check, the representation matrix): [layout.md](layout.md).
 
-**Function tree-shake.** `finalize_bytecode` drops bodies not reachable from `main` (plus harness `test_cases` when `include_tests`) through MIR call targets (`reachable_bodies`). Eager primitive dict thunks (`Hash__*` / `Show__*` / …) that nothing calls go too, and debug symbols shrink with them.
+**Function tree-shake.** `finalize_bodies` drops bodies not reachable from `main` (plus harness `test_cases` when `include_tests`) through MIR call targets (`reachable_bodies`). Eager primitive dict thunks (`Hash__*` / `Show__*` / …) that nothing calls go too, and debug symbols shrink with them.
 
 **Unused-slot dead store.** `hir::fold` drops a `let` or assignment of a literal or local read to a local nothing reads.
 

@@ -1,8 +1,8 @@
-//! What a running program needs besides an interpreter: the heap and the
-//! host natives today, the scheduler, reactor and string table as the
-//! runtime-free plan moves them (`docs/internals/native.md`). The runtime's
-//! [`crate::Machine`] owns one; native code reaches it through its
-//! context, so host functions run without the interpreter.
+//! What a running program needs besides its code: the heap, the host
+//! natives, the scheduler, reactor and string table
+//! (`docs/internals/native.md`). The native driver, the MIR interpreter and
+//! an [`crate::Isolate`] each own one; native code reaches it through its
+//! context.
 
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ pub(crate) struct Runtime {
     pub(crate) reactor: std::sync::Arc<crate::reactor::Reactor>,
     /// IO readiness reactor (sync adapters + async waiters).
     pub(crate) io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
-    /// Undetached spawns owned by this runtime (joined at end of `run_with_pool`).
+    /// Undetached spawns owned by this runtime (joined when `main` returns).
     pub(crate) live_threads: crate::thread::LiveThreadRegistry,
     /// Shared concurrent OS-worker budget for this root runtime (and its workers).
     pub(crate) worker_cap: std::sync::Arc<crate::thread::WorkerCap>,
@@ -39,9 +39,9 @@ pub(crate) struct Runtime {
     /// operand stack, so they are rooted here until the call returns:
     /// `ConstBytes` lends a string's bytes to C for the whole call.
     pub(crate) ffi_arg_roots: Vec<Value>,
-    /// `type_id` → drop method entry PC (empty = no user finalizers).
+    /// `type_id` → drop method body id (empty = no user finalizers).
     pub(crate) finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>,
-    /// Drop entry PCs (for explicit `obj.drop()` once-bit intercept).
+    /// Drop body ids (for explicit `obj.drop()` once-bit intercept).
     pub(crate) finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>,
     /// Where `print` writes instead of the process's stdout.
     pub(crate) output: Option<OutputSink>,
@@ -70,24 +70,24 @@ pub(crate) struct Runtime {
     /// happen), so a charge is one decrement and one never-taken branch
     /// either way.
     pub(crate) fuel: u64,
-    /// Set once the budget ran out ([`crate::Machine::step_budget_exhausted`]).
+    /// Set once the budget ran out ([`crate::Isolate::step_budget_exhausted`]).
     pub(crate) step_budget_hit: bool,
-    /// `fuel` as [`crate::Machine::set_step_budget`] last set it
-    /// ([`crate::Machine::steps_charged`]).
+    /// `fuel` as [`crate::Isolate::set_step_budget`] last set it
+    /// ([`crate::Isolate::steps_charged`]).
     pub(crate) fuel_start: u64,
     /// Runs of each coverage probe ([`crate::native::coil_native_probe`]).
     pub(crate) probes: Vec<u32>,
-    /// Heap cap from [`crate::Machine::set_heap_cap`] (`usize::MAX`: none).
+    /// Heap cap from [`crate::Isolate::set_heap_cap`] (`usize::MAX`: none).
     pub(crate) heap_cap: usize,
     /// Set once the live heap outgrew [`Self::heap_cap`] after a full
-    /// collection ([`crate::Machine::heap_cap_exceeded`]).
+    /// collection ([`crate::Isolate::heap_cap_exceeded`]).
     pub(crate) heap_cap_hit: bool,
 }
 
-/// Panic when [`crate::Machine::set_step_budget`]'s budget runs out.
+/// Panic when [`crate::Isolate::set_step_budget`]'s budget runs out.
 pub(crate) const STEP_BUDGET_EXHAUSTED: &str = "step budget exhausted: execution exceeded its back-edge / call limit";
 
-/// Panic when the heap outgrows [`crate::Machine::set_heap_cap`]'s cap.
+/// Panic when the heap outgrows [`crate::Isolate::set_heap_cap`]'s cap.
 pub(crate) const HEAP_CAP_EXCEEDED: &str = "heap limit exceeded: live objects outgrew the memory cap";
 
 /// What the `ffi::` natives keep between calls.
@@ -238,8 +238,8 @@ impl Runtime {
 
 /// What a host call needs from whatever runs the program besides the
 /// [`Runtime`]: whether tasks may switch where it runs, parking the task
-/// it runs in, and a collection with its native frames rooted. The runtime's
-/// [`crate::Machine`] is one; host functions reach the runtime through it.
+/// it runs in, and a collection with its native frames rooted. The native
+/// driver is one; host functions reach the runtime through it.
 pub(crate) trait HostEnv {
     fn rt(&mut self) -> &mut Runtime;
     /// Calls in progress (what a [`Runtime::native_roots`] entry records).

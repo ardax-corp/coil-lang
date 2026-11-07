@@ -431,7 +431,7 @@ fn native_code_calls_bodies_and_collects() {
            let _ = println(first.s);\n  let j = 0;\n  while j < keep.len() {{ total = total + keep[j].v + keep[j].s.len(); j = j + 1; }}\n  return total;\n}}\n\
          fn main() {{ let _ = println(format(\"%i\", run(30000))); }}\n"
     );
-    let stats = same_as_mir("vm_calls_and_gc", &src);
+    let stats = same_as_mir("calls_and_gc", &src);
     assert!(compiled(&stats, "run") && compiled(&stats, "churn"), "stats: {stats}");
     assert!(stats.contains("calls ran natively"), "stats: {stats}");
 }
@@ -642,9 +642,9 @@ fn a_panic_under_native_frames_names_them_in_its_backtrace() {
          #[inline(never)]\nfn outer(int x) -> int {{ let f = fn (int y) => mid(y); return f(x) + mid(0); }}\n\
          fn main() {{ let _ = println(format(\"%i\", outer(1))); let _ = println(format(\"%i\", outer(5))); }}\n"
     );
-    let stats = same_as_mir("vm_panic_trace", &src);
+    let stats = same_as_mir("panic_trace", &src);
     assert!(compiled(&stats, "mid") && compiled(&stats, "outer"), "stats: {stats}");
-    let err = program_stderr(&run("vm_panic_trace", &src, true));
+    let err = program_stderr(&run("panic_trace", &src, true));
     assert!(err.contains("  in mid at") && err.contains("  in outer at"), "stderr: {err}");
 }
 
@@ -805,7 +805,7 @@ fn host_calls_on_the_machine_run_from_native_code() {
     let src = "use io::stdout;\nuse io::sync::write_all;\nuse io::sync::println;\nuse string::to_bytes;\nuse string::format;\n\
          #[inline(never)]\nfn emit(int i) -> int { let _ = write_all(stdout(), to_bytes(format(\"line %i\\n\", i))); return i; }\n\
          fn main() { let t = 0; let i = 0; while i < 5 { t = t + emit(i); i = i + 1; } let _ = println(format(\"%i\", t)); }\n";
-    let stats = same_as_mir("vm_host", src);
+    let stats = same_as_mir("machine_host", src);
     assert!(compiled(&stats, "io::sync::write_all"), "stats: {stats}");
     assert!(compiled(&stats, "emit"), "stats: {stats}");
     // `main` enters natively and calls `emit` natively in turn.
@@ -819,7 +819,7 @@ fn a_machine_host_call_panics_at_its_native_call_site() {
          #[inline(never)]\nfn outer(int i) -> int {{ return insert_at(i) + 1; }}\n\
          fn main() {{ let _ = println(format(\"%i\", outer(1))); let _ = println(format(\"%i\", outer(5))); }}\n"
     );
-    let stats = same_as_mir("vm_host_panic", &src);
+    let stats = same_as_mir("machine_host_panic", &src);
     assert!(compiled(&stats, "insert_at"), "stats: {stats}");
 }
 
@@ -1516,7 +1516,7 @@ fn native_frames_root_only_what_they_still_hold() {
     for f in ["temp_dropped", "local_kept", "rebound_dropped", "boxed_arm_dropped", "payload_kept", "pair_dropped"] {
         assert!(compiled(&stats, f), "{f} not native; stats: {stats}");
     }
-    let mir = run("frame_roots_vm", &src, false);
+    let mir = run("frame_roots_mir", &src, false);
     assert_eq!(String::from_utf8_lossy(&mir.stdout), "true\n".repeat(6));
 }
 

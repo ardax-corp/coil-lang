@@ -147,14 +147,14 @@ passes or inlining and no par rewrite of the calls inside it. A site whose
 parameters, arm results or combine are not one boxed word each, or whose
 argument forms are not `int`, gets no worker.
 
-Const call sites rewrite to an ordinary `CALL` of that worker (plus
+Const call sites rewrite to an ordinary call of that worker (plus
 `PAR_SPEC_HOPS`, default **2**). Below-floor constant args stay on the
 original sequential `f`. A **unary** call whose argument is a local
 (`fib(n)`, not `fib(n - 1)`) compares that local with the cutoff — the
 smallest `n` in `0..=48` whose grain clears the floor — and calls the same
 worker when it does. The check is one
 compare at that call. Calls inside the sequential function stay ordinary
-`CALL`s, because the worker is registered after that function is emitted;
+calls, because the worker is registered after that function is emitted;
 calls inside the worker stay ordinary too.
 Hops are depth on
 the same function — not a constellation of frozen `__coil_par_f_a_b_…`
@@ -259,7 +259,7 @@ Codegen emits one private **chunk worker** per site,
 returning the partial. For `for`, the worker emits the unit step after the body.
 The fork-join below is a second private function, `__coil_par_loop_fork_{n}(acc,
 …live captures, begin, end)`, returning the new `acc`; the loop site is a
-plain `CALL` of it. Both are emitted after the enclosing function, so neither
+plain call of it. Both are emitted after the enclosing function, so neither
 sits inside its code: the enclosing body and the worker (planned as its own
 HIR body, `while lo < hi { body }; return acc`) each lower to MIR. A `while`
 site over a dynamic range whose index is read after the loop keeps the

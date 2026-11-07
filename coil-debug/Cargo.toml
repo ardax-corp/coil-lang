@@ -12,7 +12,7 @@ coil-build-id = { path = "../coil-build-id" }
 comptime = { path = "../comptime" }
 coil-mir-interp = { path = "../coil-mir-interp" }
 common = { path = "../common" }
-machine = { path = "../machine", default-features = false, features = ["debugger"] }
+machine = { path = "../machine", default-features = false }
 compiler = { path = "../compiler", default-features = false, features = ["dissect"] }
 reporting = { path = "../reporting" }
 coil-cli = { path = "../coil-cli", default-features = false, features = [] }

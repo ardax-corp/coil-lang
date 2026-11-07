@@ -89,8 +89,8 @@ fn interpreted(bodies: Vec<NativeBody>, pcs: &std::collections::HashMap<String, 
 }
 
 /// Function name to body entry.
-fn entry_pcs(pipeline: &Pipeline) -> std::collections::HashMap<String, u32> {
-    pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.entry_pc)).collect()
+fn body_ids(pipeline: &Pipeline) -> std::collections::HashMap<String, u32> {
+    pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect()
 }
 
 fn thread_program(constants: &[u64], pipeline: &Pipeline) -> Arc<ThreadProgram> {
@@ -129,7 +129,7 @@ fn captured_output(print: &Mutex<Vec<u8>>) -> String {
 
 /// Run `compiled` on the MIR interpreter.
 fn run(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) -> Run {
-    let code = interpreted(compiled.bodies, &entry_pcs(pipeline));
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
     let program = thread_program(&compiled.constants, pipeline);
     let entry = entry.map(coil_host::ffi_entry_path);
     let start = coil_host::native_start(pipeline, &pipeline.archived_struct_layouts(), entry.as_deref());
@@ -162,7 +162,7 @@ fn run_through_archive(compiled: Compiled, pipeline: &Pipeline) -> Run {
         static_word_kinds: pipeline.static_word_kinds(),
         startup: pipeline.startup(),
         main: pipeline.main_offset(),
-        native_mir: archive::encode(&compiled.bodies, &entry_pcs(pipeline)),
+        native_mir: archive::encode(&compiled.bodies, &body_ids(pipeline)),
     };
     program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
@@ -209,7 +209,7 @@ fn test_case(entry: u32, expect_ok_result: bool) -> TestCase {
 /// in the output.
 fn run_as_case(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) -> (Run, usize) {
     let main = pipeline.main_offset().expect("main");
-    let code = interpreted(compiled.bodies, &entry_pcs(pipeline));
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
     let program = thread_program(&compiled.constants, pipeline);
     let reactor = Reactor::new(1);
     let print = Arc::new(Mutex::new(Vec::new()));
@@ -221,7 +221,7 @@ fn run_as_case(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) ->
 
 /// Run each of `cases` alone: its name and whether it passed.
 fn run_each_case<'a>(compiled: Compiled, pipeline: &Pipeline, cases: &'a [(String, u32)]) -> Vec<(&'a str, bool)> {
-    let code = interpreted(compiled.bodies, &entry_pcs(pipeline));
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
     let program = thread_program(&compiled.constants, pipeline);
     let reactor = Reactor::new(1);
     let results = cases
@@ -2008,14 +2008,12 @@ enum Tree {
     Leaf,
     Node(Tree, Tree),
 }
-#[max_depth(64)]
 fn build(int n) -> Tree {
     if n <= 1 {
         return Tree::Leaf();
     }
     return Tree::Node(build(n - 1), build(n - 2));
 }
-#[max_depth(64)]
 fn leaves(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,
@@ -2106,7 +2104,6 @@ fn auto_par_self_call_combine_emits_spec() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2137,7 +2134,6 @@ fn auto_par_narrow_tak_stays_sequential() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2165,7 +2161,6 @@ fn auto_par_fair_tak_load_emits_worker() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2235,7 +2230,6 @@ use thread::{mutex, with_lock};
 fn bump(Mutex m) {
     with_lock(m, fn (int x) => (x + 1, 0))?;
 }
-#[max_depth(64)]
 fn rec(Mutex m, int n) -> int {
     if n <= 1 {
         bump(m);
@@ -2286,7 +2280,6 @@ fn dump(int n) -> int {
     write(f, to_bytes(format("%i", n)));
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return dump(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2329,7 +2322,6 @@ fn leaf(int n) -> int {
     write(stderr(), to_bytes(format("%i", n)));
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return leaf(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2380,7 +2372,6 @@ fn poke(int n) -> int {
     };
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return poke(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2481,7 +2472,6 @@ fn auto_par_irrefutable_match_arm_emits_spec() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(64)]
 fn fibm(int n) -> int {
     if n <= 1 { return n; }
     return match n {
@@ -2601,7 +2591,6 @@ fn auto_par_xor_binop_emits_spec_and_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(64)]
 fn mix(int n) -> int {
     if n <= 1 {
         return n;
@@ -2924,14 +2913,12 @@ enum Tree {
     Leaf,
     Node(Tree, Tree),
 }
-#[max_depth(64)]
 fn build(int n) -> Tree {
     if n <= 1 {
         return Tree::Leaf();
     }
     return Tree::Node(build(n - 1), build(n - 2));
 }
-#[max_depth(64)]
 fn leaves(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,
@@ -3854,7 +3841,7 @@ fn main() {
 
 #[test]
 fn nested_spawn_joins_via_shared_root_registry() {
-    // Worker mid spawns leaf on the root Machine's live-thread registry.
+    // Worker mid spawns leaf on the root runtime's live-thread registry.
     // Main returns without join; root auto-join must still wait for leaf.
     let output = run_example_src(
         r#"
@@ -4456,7 +4443,7 @@ fn compile_is_deterministic_for_many_drop_classes() {
     let compile = || {
         let mut pipeline = test_pipeline();
         let compiled = compile(&mut pipeline, &src).expect("drop classes compile");
-        compiler::native_mir::archive::encode(&compiled.bodies, &entry_pcs(&pipeline))
+        compiler::native_mir::archive::encode(&compiled.bodies, &body_ids(&pipeline))
     };
     let first = compile();
     for _ in 0..4 {

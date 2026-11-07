@@ -35,15 +35,15 @@ const MAGIC: &[u8; 5] = b"CNMIR";
 const FORMAT: u8 = 11;
 const NO_PC: u32 = u32::MAX;
 
-/// The section for `bodies`, each with its entry from `entry_pcs`.
-pub fn encode(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Vec<u8> {
+/// The section for `bodies`, each with its entry from `body_ids`.
+pub fn encode(bodies: &[NativeBody], body_ids: &HashMap<String, u32>) -> Vec<u8> {
     let mut w = Writer(Vec::new());
     w.0.extend_from_slice(MAGIC);
     w.u8(FORMAT);
     w.u32(bodies.len() as u32);
     for body in bodies {
         w.str(&body.name);
-        w.u32(entry_pcs.get(&body.name).copied().unwrap_or(NO_PC));
+        w.u32(body_ids.get(&body.name).copied().unwrap_or(NO_PC));
         w.u32(body.entry.map_or(u32::MAX, |l| l.0));
         func(&mut w, &body.mir);
     }
@@ -51,7 +51,7 @@ pub fn encode(bodies: &[NativeBody], entry_pcs: &HashMap<String, u32>) -> Vec<u8
 }
 
 
-/// The bodies of a section and their entry PCs.
+/// The bodies of a section and their body ids.
 pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), String> {
     let mut r = Reader { b: bytes, i: 0 };
     if r.take(MAGIC.len())? != MAGIC {

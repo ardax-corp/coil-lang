@@ -1570,7 +1570,6 @@ impl Compiler {
                 if !emit.par_tail.is_empty() {
                     self.hir_par_tail = Some(Box::new(HirParTail { hir: hir.clone(), emit }));
                 }
-                self.expr_depth = 0;
                 self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
                 crate::opt::note_hir_lowered();
                 true
@@ -1637,7 +1636,6 @@ impl Compiler {
                 self.bodies.advance();
                 self.hir_mir_why = None;
                 self.hir_mir = self.hir_lower_mir(hir, &mut emit, entry_words);
-                self.expr_depth = 0;
                 true
             }
             Err(reason) => {

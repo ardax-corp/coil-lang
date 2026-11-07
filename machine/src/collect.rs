@@ -1,6 +1,5 @@
-//! The collector's root walk, apart from the interpreter. A host (the runtime's
-//! [`crate::Machine`], or a driver that runs native code alone) reports the
-//! roots it holds itself; the [`Runtime`] adds its own (statics, the
+//! The collector's root walk. A host (the native driver, or the MIR
+//! interpreter) reports the roots it holds itself; the [`Runtime`] adds its own (statics, the
 //! scheduler's tasks, FFI handles and arguments, native frames' root
 //! records). Minor collections and evacuation forward the precise ones
 //! and pin the rest (`docs/internals/gc-evacuation.md`).
@@ -15,7 +14,7 @@ use crate::runtime::Runtime;
 thread_local! {
     /// Per static slot word kind of the program installed on this thread
     /// (archive minor 29). Only GC root walks read it; kept out of the
-    /// `Machine` / `Heap` so their hot-loop layout is unchanged.
+    /// `Heap` so its hot-loop layout is unchanged.
     pub(crate) static STATIC_KINDS: std::cell::RefCell<Arc<Vec<u8>>> = std::cell::RefCell::new(Arc::default());
     /// Evacuation pacing for this thread's collector: `(cycles since the
     /// last attempt, collections to wait)`.

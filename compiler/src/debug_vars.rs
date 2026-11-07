@@ -182,13 +182,6 @@ impl DebugVar {
             .map(|(_, _, slot)| *slot)
     }
 
-    /// Def-site tag of component `i`: the name span, widened by `i` bytes at
-    /// the end so each component's defining stores are told apart (the start
-    /// byte, which decides the line, stays the name's).
-    pub fn component_site(name_span: (u32, u32), i: usize) -> (u32, u32) {
-        (name_span.0, name_span.1 + i as u32)
-    }
-
     /// Home slots of the components of a split layout (none for `Slot`).
     pub fn component_slots(&self) -> Vec<u32> {
         match &self.loc {

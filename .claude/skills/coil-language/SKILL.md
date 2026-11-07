@@ -146,7 +146,7 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `--ffi-search-path` dirs, system; `dload` needs `--allow-dload` plus `--dload-pin` / `--dload-trusted`.
 5. **Stale `out.ccoil`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/error-codes.md) (`/docs/language/error-codes`).
-7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two-slot on direct `CALL`/`RETURN` ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`.
+7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two words on a direct call and return ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); arity-2 immediate products use the same width as `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`.
 8. **`raise` is not abort** — `raise` returns `Result::Err` and can be swallowed. Default `coil` / `coil run` / `coil-embed` exit 1 only on `panic`. Checksum boards must `panic`.
 
 ## Debugging programs

@@ -95,11 +95,10 @@ representation. `abi::convention_ret` / `abi::convention_param` decide it
 from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
 `instance_method`, `inherent_method`, `overloaded_or_generic`):
 
-- A *direct* `CALL` / `RETURN` of a ground callee whose address never
-  escapes moves `[payload, tag]` (or `[a, b]` for products and pair
-  classes, second word on top). `CALL` bit 31 (`Byte::CALL_RET2_BIT`) and
-  `RETURN` operand `2` mark the width; both are additive, so old archives
-  stay one word.
+- A *direct* call of a ground callee whose address never escapes moves
+  `[payload, tag]` (or `[a, b]` for products and pair classes). In MIR the
+  second word is the `Call`'s `dest_hi` and `Terminator::Return { hi }`;
+  both engines pass it beside the first (`NativeCtx::ret_hi`).
 - "Escapes" is the fail-closed whole-compile `typechecking::fn_value_escape`
   walk: any function value, partial application, `thread::spawn` or FFI
   callback of that name, in any file of the package use-graph, keeps every

@@ -15,7 +15,6 @@ fn fib(int n) -> int {
     return fib(n - 1) + fib(n - 2);
 }
 
-#[max_depth(64)]
 fn build(int n) -> Tree {
     if n <= 1 {
         return Tree::Leaf();
@@ -23,7 +22,6 @@ fn build(int n) -> Tree {
     return Tree::Node(build(n - 1), build(n - 2));
 }
 
-#[max_depth(64)]
 fn leaves(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,
@@ -38,7 +36,6 @@ fn diff(int n) -> int {
     return diff(n - 1) - diff(n - 2);
 }
 
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -64,7 +61,6 @@ fn pair_sq(int n) -> int {
     return sq(n) + sq(n - 1);
 }
 
-#[max_depth(64)]
 fn fibm(int n) -> int {
     if n <= 1 {
         return n;

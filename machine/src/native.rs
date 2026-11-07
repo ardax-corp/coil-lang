@@ -539,10 +539,10 @@ pub const TRAP_PANICKED: u64 = 8;
 /// An explicit `panic(msg)`: the message in [`NativeCtx::message`].
 pub const TRAP_EXPLICIT: u64 = 9;
 /// Not a panic: the call's fiber parked (its task suspended inside it);
-/// the task suspends at the `CALL` (`vm_fiber.rs`).
+/// the task suspends at the `CALL` (`driver.rs`).
 pub const TRAP_PARKED: u64 = 10;
 /// Not a panic: a generator's close unwinds its body from the yield it is
-/// suspended at, collecting its armed `defer`s (`vm_gen.rs`).
+/// suspended at, collecting its armed `defer`s (`gen_fiber.rs`).
 pub const TRAP_CLOSE: u64 = 11;
 /// The step budget ran out, or the heap outgrew its cap, which drains it.
 pub const TRAP_BUDGET: u64 = 12;
@@ -642,7 +642,7 @@ pub struct NativeEntry {
     /// It may run interpreted code (a runtime call, a function value, a `drop`), so a
     /// task switch could come while its frames are live: with a scheduler
     /// that can switch, the call runs on the task's own fiber stack
-    /// (`vm_fiber.rs`).
+    /// (`driver.rs`).
     pub suspends: bool,
     /// The leading parameters the body reads: a `CALL` of at least this
     /// many words (and at most `arity`) enters it, the rest passed as `0`.
@@ -651,10 +651,10 @@ pub struct NativeEntry {
     /// in [`NativeCtx::ret_hi`]), in that order.
     pub ret_words: u8,
     /// A generator's body: only a resume enters it, on a fiber of its own
-    /// (`native_gen.rs`), never a `CALL`.
+    /// (`gen_fiber.rs`), never a `CALL`.
     pub generator: bool,
     /// It has `defer`s (a cleanup pad): a generator's close resumes its
-    /// fiber to unwind them (`vm_gen.rs`).
+    /// fiber to unwind them (`gen_fiber.rs`).
     pub cleanup: bool,
     pub entry: NativeEntryFn,
     /// Copied to [`NativeCtx::entry_data`] for the call (`0` for machine
@@ -687,7 +687,7 @@ pub struct AotEntry {
 
 /// Install the code an AOT object linked into this executable defines,
 /// for the next run: `n` entries and `n_sites` sites, each four words
-/// (`entry_pc`, then the location's file, start and end byte).
+/// (`body_id`, then the location's file, start and end byte).
 /// `complete`: the object compiled every body of the program. `layout`:
 /// the [`layout_fingerprint`] of the compiler that made the object; an
 /// object made against other object layouts is refused (`Err`), since its
@@ -722,7 +722,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|w| NativeSite { entry_pc: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
+        .map(|w| NativeSite { body_id: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
         .collect();
     install_for_next_run(entries, sites, complete);
     Ok(())
@@ -733,7 +733,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
 /// native frame, which the runtime prints as it prints its own frames.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeSite {
-    pub entry_pc: u32,
+    pub body_id: u32,
     pub loc: common::DebugLoc,
 }
 
@@ -2227,7 +2227,7 @@ thread_local! {
 pub(crate) type GenCoro = corosensei::Coroutine<u64, (u64, usize), NativeOutcome, corosensei::stack::DefaultStack>;
 
 /// The native side of a generator whose body runs natively: owned by its
-/// `ObjCoroutine` while it is suspended (`vm_gen.rs`).
+/// `ObjCoroutine` while it is suspended (`gen_fiber.rs`).
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 pub struct GenFiber {
     #[cfg(not(target_family = "wasm"))]
@@ -2267,7 +2267,7 @@ impl Drop for GenFiber {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: u64, args: *const u64, n: u64) -> u64 {
     let ffi = unsafe { (*ctx).host.ffi };
-    unsafe { host_on_machine(ctx, ffi, op, operand, args, n, false) }
+    unsafe { host_on_machine(ctx, ffi, op, operand, args, n) }
 }
 
 /// [`coil_native_host`] of an ordinary native that is no plain function:
@@ -2332,7 +2332,7 @@ unsafe fn host_invoke(
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `args` points at `n` words.
-unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, layout: u64, args: *const u64, n: u64, _via_vm: bool) -> u64 {
+unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
     let Some(words) = buf.get_mut(..n as usize) else {

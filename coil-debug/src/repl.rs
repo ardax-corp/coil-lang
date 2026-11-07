@@ -326,7 +326,7 @@ fn cmd_disas(session: &DebugSession, pat: Option<&str>) -> Result<(), String> {
         return Err(format!("no function matching `{pat}`"));
     }
     for sym in matched {
-        println!(";; fn {} (op {})", sym.name, sym.entry_pc);
+        println!(";; fn {} (op {})", sym.name, sym.body_id);
         println!("{}", session.mir_of(&sym.name).unwrap_or("<no MIR>"));
     }
     Ok(())

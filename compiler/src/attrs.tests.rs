@@ -59,13 +59,13 @@
     }
 
     #[test]
-    fn max_depth_attr_rejected_on_enum() {
-        let (exp, _decls) = expand_src("#[max_depth(8)] enum E { A } fn main() {}");
+    fn noescape_attr_rejected_on_enum() {
+        let (exp, _decls) = expand_src("#[noescape] enum E { A } fn main() {}");
         assert!(
             exp.messages
                 .iter()
-                .any(|m| m.message().contains("max_depth") && m.message().contains("not valid")),
-            "expected max_depth-on-enum error, got: {:?}",
+                .any(|m| m.message().contains("noescape") && m.message().contains("not valid")),
+            "expected noescape-on-enum error, got: {:?}",
             exp.messages
         );
     }

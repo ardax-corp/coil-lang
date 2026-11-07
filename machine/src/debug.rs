@@ -46,7 +46,7 @@ pub enum StepMode {
     },
 }
 
-/// Attached to a [`crate::Machine`] for interactive / scripted debugging.
+/// Attached to the MIR interpreter for interactive / scripted debugging.
 #[derive(Debug, Clone, Default)]
 pub struct DebugController {
     breakpoints: HashSet<usize, AddrHashBuilder>,
@@ -67,10 +67,6 @@ impl DebugController {
 
     pub fn add_breakpoint(&mut self, pc: usize) -> bool {
         self.breakpoints.insert(pc)
-    }
-
-    pub fn remove_breakpoint(&mut self, pc: usize) -> bool {
-        self.breakpoints.remove(&pc)
     }
 
     pub fn clear_breakpoints(&mut self) {
@@ -108,10 +104,6 @@ impl DebugController {
 
     pub fn clear_step(&mut self) {
         self.step_mode = StepMode::None;
-    }
-
-    pub fn clear_skip_bp(&mut self) {
-        self.skip_bp_pc = None;
     }
 
     pub fn skip_breakpoint_once(&mut self, pc: usize) {

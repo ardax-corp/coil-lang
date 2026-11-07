@@ -215,17 +215,17 @@ impl Compiler {
         &self.debug_locs
     }
 
-    /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
+    /// Function entry symbols for panic backtraces (sorted by `body_id`).
     pub fn fn_debug_symbols(&self) -> Vec<FnDebugSym> {
         let mut syms: Vec<FnDebugSym> = self
             .functions
             .iter()
             .map(|(name, &pc)| FnDebugSym {
                 name: name.clone(),
-                entry_pc: pc as u32,
+                body_id: pc as u32,
             })
             .collect();
-        syms.sort_by_key(|s| s.entry_pc);
+        syms.sort_by_key(|s| s.body_id);
         syms
     }
 
@@ -344,11 +344,6 @@ impl Compiler {
         self.opt_options.hir_inline = on;
     }
 
-    /// Keep enum locals built in place as two slots (the default) or boxed.
-    pub fn set_hir_pair_locals(&mut self, on: bool) {
-        self.opt_options.hir_pair_locals = on;
-    }
-
     /// Apply an [`crate::OptLevel`] preset to IL opts and inlining budgets.
     /// The switches no level sets keep their values.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
@@ -377,12 +372,6 @@ impl Compiler {
     /// Enable or disable IL opt-stat collection (COI-131).
     pub fn set_collect_opt_stats(&mut self, on: bool) {
         self.opt_options.collect_stats = on;
-    }
-
-    pub fn intern_constant(&mut self, value: u64) -> u32 {
-        let idx = self.constants.len() as u32;
-        self.constants.push(value);
-        idx
     }
 
     pub fn intern_string(&mut self, value: impl AsRef<str>) -> u32 {
@@ -471,9 +460,6 @@ impl Compiler {
 }
 
 impl Compiler {
-    pub fn get_function(&self, name: &str) -> Option<usize> {
-        self.functions.get(name).copied()
-    }
 
     pub fn function_offset(&self, name: &str) -> Option<usize> {
         self.functions.get(name).copied()
@@ -633,26 +619,6 @@ impl Compiler {
                 _ => {}
             }
         }
-    }
-
-    /// Code offset WHERE the prologue (CALL+JMP+HALT)
-    /// ENDS and user-program code BEGINS. Used by the runtime
-    /// pipeline to patch the prologue's JMP operand so that
-    /// any module-level `extern` block bytes (appended to
-    /// `self.code` before `main`) execute before main.
-    /// Without this, the prologue would skip past the extern
-    /// block entirely (because `main_offset` lands past it).
-    pub fn program_start_offset(&self) -> u32 {
-        self.program_start_offset
-    }
-
-    /// True iff at least one `extern` block was emitted in
-    /// the last `compile`. The pipeline uses this to decide
-    /// whether to JMP to `program_start_offset` (which would
-    /// execute `extern` block bytes first) or directly to
-    /// `main` (which is correct when no extern was used).
-    pub fn has_extern_block(&self) -> bool {
-        !self.extern_runtime_functions.is_empty()
     }
 
     /// Each `extern` function's library (as its block names it) and C
@@ -4126,26 +4092,23 @@ impl Compiler {
 
     /// A fresh frame for a function emitted inside another, with the
     /// module's class, method and symbol tables (inlined code in it may
-    /// build an object). The enclosing frame and expression depth, for
-    /// [`Self::par_frame_exit`].
-    pub(super) fn par_frame_enter(&mut self) -> (Context, u32) {
+    /// build an object). The enclosing frame, for [`Self::par_frame_exit`].
+    pub(super) fn par_frame_enter(&mut self) -> Context {
         let mut prev_ctx = std::mem::take(&mut self.context);
         self.context.symbols = std::mem::take(&mut prev_ctx.symbols);
         self.context.classes = std::mem::take(&mut prev_ctx.classes);
         self.context.impementations = std::mem::take(&mut prev_ctx.impementations);
         self.context.methods = std::mem::take(&mut prev_ctx.methods);
-        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
-        (prev_ctx, prev_depth)
+        prev_ctx
     }
 
     /// Back to the frame [`Self::par_frame_enter`] set aside.
-    pub(super) fn par_frame_exit(&mut self, (prev_ctx, prev_depth): (Context, u32)) {
+    pub(super) fn par_frame_exit(&mut self, prev_ctx: Context) {
         let inner = std::mem::replace(&mut self.context, prev_ctx);
         self.context.symbols = inner.symbols;
         self.context.classes = inner.classes;
         self.context.impementations = inner.impementations;
         self.context.methods = inner.methods;
-        self.expr_depth = prev_depth;
     }
 
     /// Mark compiler-provided instance thunk `fqn` raw: its entry takes the
@@ -5537,12 +5500,6 @@ impl Compiler {
 
     fn alloc_temp_slot(&mut self) -> u32 {
         self.temp_counter += 1;
-        // Shared stack/locals: do not StorePop into HostInvoke native-id CONST index (overwrites id).
-        let min_slot = self.context.variables.len() as u32 + self.expr_depth;
-        while (self.context.variables.len() as u32) < min_slot {
-            let pad = format!("__pad{}", self.context.variables.len());
-            let _ = self.context.variables.intern(pad);
-        }
         let name = format!("__tmp{}", self.temp_counter);
         self.context.variables.intern(name) as u32
     }
@@ -5953,7 +5910,6 @@ impl Compiler {
         let prev_result_ok_is_result =
             std::mem::replace(&mut self.compiling_result_ok_is_result, false);
         let prev_two_word_enum = self.compiling_two_word_enum.take();
-        let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
 
         // The initializer returns the value; the setup region stores it.
         if !self.try_lower_hir_function(&init.0, init) {
@@ -5964,7 +5920,6 @@ impl Compiler {
         self.attach_hir_mir();
         self.flush_hir_par_tail();
 
-        self.expr_depth = prev_depth;
         self.compiling_two_word_enum = prev_two_word_enum;
         self.compiling_result_ok_is_result = prev_result_ok_is_result;
         self.compiling_result_mode = prev_result_mode;
@@ -6291,94 +6246,6 @@ impl Compiler {
 
     /// Named `fn` declaration: emit the body, register the entry and debug info.
     #[inline(never)]
-    /// True when no value of this function can be a heap word: every
-    /// parameter and every expression in `args` / `body` has a numeric,
-    /// `unit` or `never` checker type, and it declares no closures or nested
-    /// functions. Such frames get an empty precise map (see finalize).
-    fn fn_is_heap_free(&self, names: &[&str], args: &Output, body: &Output) -> bool {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::strip_readonly;
-
-        let allowed = |ty: &Ty| {
-            let ty = apply_ty_prune(self.checker.subst(), ty);
-            match strip_readonly(&ty) {
-                Ty::Con(n) => matches!(n.as_str(), "int" | "float" | "bool" | "byte" | "unit"),
-                Ty::Tuple(items) => items.is_empty(),
-                Ty::Never => true,
-                _ => false,
-            }
-        };
-        let Some(params) = names.iter().find_map(|n| self.checker.fn_param_tys(n)) else {
-            return false;
-        };
-        if !params.iter().all(allowed) {
-            return false;
-        }
-        let mut ok = true;
-        let mut stack = vec![args, body];
-        while let Some(node) = stack.pop() {
-            if !ok {
-                break;
-            }
-            match node.1.as_ref() {
-                Expression::Lambda { .. }
-                | Expression::Function { .. }
-                | Expression::Yield(..)
-                | Expression::YieldFrom(..)
-                | Expression::Resume { .. }
-                | Expression::Defer { .. } => ok = false,
-                Expression::Block(_)
-                | Expression::Statement(_)
-                | Expression::ExprStatement(_)
-                | Expression::Expr(_)
-                | Expression::Group(_)
-                | Expression::Fragment(_)
-                | Expression::Noop(_)
-                | Expression::Break
-                | Expression::Continue
-                | Expression::Type(_)
-                | Expression::TypeApp { .. }
-                | Expression::Argument { .. }
-                | Expression::Variable(..)
-                | Expression::Constant(..)
-                | Expression::Return(_)
-                | Expression::ImplicitReturn(_)
-                | Expression::If(..)
-                | Expression::Branch(..)
-                | Expression::Loop { .. } => {}
-                // A plain local target is untyped; the stored value is checked.
-                Expression::Assignment(target, value) | Expression::CompoundAssign(target, _, value) => {
-                    if !matches!(target.1.as_ref(), Expression::Identifier(_)) {
-                        stack.push(target);
-                    }
-                    stack.push(value);
-                    continue;
-                }
-                Expression::Adjust { target, .. } => {
-                    if !matches!(target.1.as_ref(), Expression::Identifier(_)) {
-                        stack.push(target);
-                    }
-                    continue;
-                }
-                // A direct call's callee is a code address, not a frame value;
-                // a local of the same name would be a closure.
-                Expression::Call { name, args } => {
-                    ok = self.sidecar_ty_of(node).is_some_and(|ty| allowed(&ty));
-                    let direct = matches!(name.1.as_ref(), Expression::Identifier(n)
-                        if !self.context.variables.contains(&n.to_string()));
-                    if !direct {
-                        stack.push(name);
-                    }
-                    stack.extend(args.iter().flatten());
-                    continue;
-                }
-                _ => ok = self.sidecar_ty_of(node).is_some_and(|ty| allowed(&ty)),
-            }
-            crate::typechecking::id::walk_children(node, &mut |child| stack.push(child));
-        }
-        ok
-    }
-
     fn compile_function_decl_into<'compiler>(
         &mut self,
         span: &SimpleSpan,
@@ -6470,7 +6337,6 @@ impl Compiler {
             self.context.stack_array_locals.clear();
             self.context.stack_array_box.clear();
             self.context.unboxed_enum_locals.clear();
-            self.expr_depth = 0;
             let saved_debug_scope = self.debug_scope_enter(body.0.start as u32, body.0.end as u32);
             if self.compiling_method {
                 let slot = self.context.variables.intern("self".to_string()) as u32;
@@ -6538,15 +6404,6 @@ impl Compiler {
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
             self.field_key_slots = prev_field_keys;
-            if prev_fn_table_key_was_none
-                && !*is_coro
-                && type_params.is_empty()
-                && dict_arity == 0
-                && !self.compiling_method
-                && self.fn_is_heap_free(&[qualified.as_str(), table_key.as_str()], args, body)
-            {
-                self.precise_frame_fns.insert(table_key.clone());
-            }
             let entry = self.fn_entry_labels.get(&table_key).copied();
             self.bodies.record(table_key.clone(), entry);
             self.attach_hir_mir();
@@ -7208,7 +7065,6 @@ impl Compiler {
 
         self.emit_idx = 0;
         self.temp_counter = 0;
-        self.expr_depth = 0;
         self.codegen_depth = 0;
         self.const_env_stack.clear();
         self.const_env_stack.push(HashMap::new());
@@ -7223,9 +7079,9 @@ impl Compiler {
         // `use` aliases are per-module; leftovers from a prior
         // `compile_module` would otherwise redirect bare names.
         self.aliases.clear();
-        // Shared constant pool across `compile_module` calls. Clearing between
-        // modules orphans JumpIfMatch/CONST indices (runtime panic). Reset only on
-        // a fresh prologue (CALL/JMP/HALT).
+        // The constant and string pools are shared across `compile_module`
+        // calls: clearing them between modules would orphan the indices the
+        // earlier modules hold. Reset them only for a fresh compile.
         if self.bodies.is_fresh() {
             self.constants.clear();
             self.strings.clear();
@@ -7276,10 +7132,7 @@ impl Compiler {
         crate::hir::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         crate::verify::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         self.build_hir_for_lowering(module, ast);
-        // Recursion depth / `#[max_depth]`, independent of auto-par.
         let bare_cases = self.checker.bare_cases().clone();
-        let stack_bound = crate::typechecking::analyze_stack_bounds(ast, &bare_cases);
-        self.messages.extend(stack_bound.messages);
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
         self.recursive_pure = if self.auto_par && self.opt_options.auto_par {
             crate::typechecking::analyze_recursive_pure(ast, &bare_cases)
@@ -7426,9 +7279,6 @@ impl Compiler {
         self.emit_builtin_dict_thunks();
         self.emit_vec_method_thunks();
         self.emit_stream_method_thunks();
-        // Dict thunks after prologue; keep program_start_offset at first user byte.
-        self.program_start_offset = self.bodies.position() as u32;
-        self.setup_entry_offset = self.program_start_offset;
         // Label the setup / top-level region: it starts after the
         // prologue HALT / prelude RETURN, so only its entry reaches it.
         self.bodies.bind_fresh_entry();
@@ -7878,7 +7728,6 @@ impl Compiler {
         for offset in self.mono_offsets.values_mut() {
             *offset = by_offset(&self.bodies, *offset);
         }
-        self.program_start_offset = by_offset(&self.bodies, self.program_start_offset as usize) as u32;
         self.startup = self
             .startup_steps
             .iter()
@@ -7893,7 +7742,7 @@ impl Compiler {
 
     }
 
-    /// Post-lower function symbols sorted by entry PC (for dissect / debug).
+    /// Post-lower function symbols sorted by body id (for dissect / debug).
     #[cfg(any(test, feature = "dissect"))]
     pub fn function_symbols(&self) -> Vec<crate::dissect::FnSym> {
         let mut syms: Vec<_> = self
@@ -7908,13 +7757,13 @@ impl Compiler {
                 locals.sort_by_key(|(_, s)| *s);
                 crate::dissect::FnSym {
                     name: name.clone(),
-                    entry_pc: pc as u32,
+                    body_id: pc as u32,
                     locals,
                     vars: self.fn_debug_vars.get(name).cloned().unwrap_or_default(),
                 }
             })
             .collect();
-        syms.sort_by_key(|s| s.entry_pc);
+        syms.sort_by_key(|s| s.body_id);
         syms
     }
 

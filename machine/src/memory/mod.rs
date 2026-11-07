@@ -1,17 +1,13 @@
-//! Operand stack, call frames, and mark-and-sweep heap.
+//! The heap: allocation, collection, and the run-time switches for both.
 
 mod addr_hash;
-mod frame;
 mod heap;
 mod slab;
-mod stack;
 mod strbuf;
 
 pub use addr_hash::*;
-pub use frame::*;
 pub use heap::*;
 pub use slab::Bump;
-pub use stack::*;
 pub use strbuf::StrData;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};

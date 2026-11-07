@@ -166,7 +166,7 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 
 1. **Attribute expansion** (`attrs::expand_program_in`, per file, during
    discovery) lowers macro items and records every derive, each item's
-   first attribute that is not built in (`derive`, `repr`, `max_depth`, …),
+   first attribute that is not built in (`derive`, `repr`, `inline`, …),
    and every outermost `name!(…)` call, as a `PendingMacro`. It still adds the type-name `Show`
    default. A field / variant attribute on a type with no derive is an
    error right away.

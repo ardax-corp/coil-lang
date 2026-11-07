@@ -1,5 +1,5 @@
 //! Generators whose body is native code, over whatever runs the program
-//! (the runtime's [`crate::Machine`] or the native driver). The model is in
+//! (the native driver). The model is in
 //! `docs/internals/native.md` ("Generator bodies").
 //!
 //! A generator whose body compiled (`NativeEntry::generator`) runs that body

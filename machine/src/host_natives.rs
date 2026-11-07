@@ -1672,7 +1672,7 @@ mod tests {
         let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let src = crate_dir.join("src");
         let mut leftover = Vec::new();
-        for rel in ["lib.rs", "host_natives.rs", "vm.rs", "memory/heap.rs"] {
+        for rel in ["lib.rs", "host_natives.rs", "runtime.rs", "memory/heap.rs"] {
             let text = std::fs::read_to_string(src.join(rel)).unwrap_or_default();
             let prod = text.split("#[cfg(test)]").next().unwrap_or(&text);
             if prod.contains("NEXT_INSTANT_ID") || prod.contains("static INSTANTS") {

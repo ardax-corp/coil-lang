@@ -148,7 +148,7 @@ The shuffle is two-level: files first, then each file's cases with a seed
 derived from the run seed and the file's path under the test root. A file
 keeps its case order when rerun alone with the same seed. Files are shuffled
 rather than a flat list of all cases so only one compiled file is in memory at
-a time (the leak smoke runs under `ulimit -v 65536`). splitmix64 +
+a time (the leak smoke caps each process's address space). splitmix64 +
 Fisher–Yates live in `coil-test/src/order.rs`; there is no `rand` dependency.
 
 ## Report
@@ -226,11 +226,15 @@ worker count and the number of compile threads.
   ends, not the case; in CI that fails the harness cell with a named
   culprit instead of holding it until the job limit. Where no thread can be
   spawned (wasm32-wasip1) the run goes unwatched, with a warning.
-- **Leak smoke** runs `-j 1`: under `ulimit -v 65536` every extra thread's
-  glibc malloc arena (64 MiB of address space) alone exceeds the cap.
-- **GC mode.** Cases run with the same precise frame / class / static word
-  maps as `coil <file>` (`wire_pipeline_threads`), so a `collect()` in a test
-  exercises production roots.
+- **Leak smoke** (CI's `harness` leak-smoke cell) runs `-j 1` with
+  `MALLOC_ARENA_MAX=1` under `scripts/test_corpora.py --limit-as-kb` (the
+  code size plus 256 MiB), on `--engine mir` with `COIL_NO_FIBERS=1`: one
+  malloc arena, and no fiber stacks reserving address space with nothing
+  behind it.
+- **GC mode.** Cases run with the same class / static word maps and the
+  same root scanning (stack maps on native code) as `coil <file>`
+  (`coil_host::thread_program`), so a `collect()` in a test exercises
+  production roots.
 - Cases that call `thread::spawn` put their jobs on the same reactor.
 - **Cases never nest.** A queued case sits in the reactor's own case queue
   (`Reactor::submit_test`), which only an idle worker drains, after every
@@ -445,7 +449,7 @@ serialized to `.ccoil`, so test-only data never touches the archive format.
 | `coil-test/src/coverage.rs` | Location → line maps, summing, lcov / summary / per-test JSON |
 | `coil-test/src/runner.rs` | discovery, per-file compile, per-case jobs, summary |
 | `coil-test/src/mutate/` | `coil mutate`: sites, baseline / plan / report (`mod.rs`), per-mutant job and worker process (`job.rs`) |
-| `coil-host/src/lib.rs` | `wire_pipeline_vm`, `wire_pipeline_threads`, `execute_pipeline` |
+| `coil-host/src/lib.rs` | `native_start`, `thread_program`, `execute_pipeline` |
 
 Plan for parallel runs, coverage and mutation testing: the *coil-test:
 Coverage, Parallel Runner & Mutation Testing* design doc.
