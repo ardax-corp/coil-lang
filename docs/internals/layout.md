@@ -125,8 +125,13 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   and `r[0]` do not allocate. A one-word init (an element, a field, a
   boxed result) unpacks once at the `let`; `x = e` rebinds both slots,
   loops included. `?` compares the tag in place and shares one fail
-  epilogue per function (#297, #307). Only a local captured by a closure
-  or `defer`, or assigned as a value (`ADJUST`), stays one word.
+  epilogue per function (#297, #307). Only a local captured by a
+  `defer`, or assigned as a value (`ADJUST`), stays one word.
+- A lambda captures a two-slot local by value as its two words
+  (`HirLambda::pair_captures`): the function value's `MakeFn` carries
+  both, and the lambda's frame takes them as a two-slot parameter
+  (`hir_lambda_capture_slots`, a `{name}$hi` slot after the capture's).
+  Its operand counts capture words, not captures.
 - A call through a function value of a two-word result is a
   `CallIndirect` with `pair` set: a lambda whose result is a pair is
   emitted twice, its one-word body (the value's entry) and a two-word
@@ -152,8 +157,8 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   instance, so a shared body and a clone read it alike. A `shared` (a
   two-word store is not atomic) or `view` class keeps one word per field,
   and a class with a flat field is never scalar-replaced into frame slots.
-- Everywhere else a value must be one word (another field, a capture, a
-  container element, a shared body, a dictionary call, `Show`) it
+- Everywhere else a value must be one word (another field, a `defer`
+  capture, a container element, a shared body, a dictionary call, `Show`) it
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
   back. One pack/unpack pair serves every consumer.
 - `==` / `!=` with no instance compares two-word values on their words
