@@ -27,8 +27,12 @@ fn total(Vec<Option<int>> v) -> int {
     let t = 0;
     for x in v {
         match x {
-            Some(n) => { t += n; },
-            None => { t += 100; },
+            Some(n) => {
+                t += n;
+            },
+            None => {
+                t += 100;
+            },
         }
     }
     return t;
