@@ -255,3 +255,43 @@ fn main() {
     let mine: Vec<_> = boxes.iter().filter(|b| b.func == "drain").collect();
     assert!(mine.is_empty(), "{mine:?}");
 }
+
+/// `==` on niche words (`Option<string>`) and two-word values
+/// (`Option<int>`, `(int, float)`) compares their words: no side is boxed.
+#[test]
+fn box_capture_eq_on_words_has_no_boxes() {
+    let src = r#"
+#[inline(never)]
+fn name(int i) -> Option<string> {
+    if i == 0 {
+        return None;
+    }
+    return Some("a");
+}
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+#[inline(never)]
+fn point(int x) -> (int, float) {
+    return (x, 0.5);
+}
+fn same(int i) -> bool {
+    return name(i) == Some("a") && half(i) != None && point(i) == (2, 0.5);
+}
+fn main() {
+    let _ = same(2);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| b.func == "same").collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}
