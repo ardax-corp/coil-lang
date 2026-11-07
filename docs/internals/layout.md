@@ -132,6 +132,10 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
   back. One pack/unpack pair serves every consumer.
 
+`coil dissect --boxes` lists every box a compile makes (function, kind,
+type, lowering site); `compiler/tests/dissect.rs` asserts on the same
+capture (`compiler::start_box_capture`).
+
 `compute_two_word_return_kind`, `callee_param_pairs` and
 `callee_has_unboxed_range_params` (`codegen/compiler.rs`) are the callers;
 they build `CalleeFacts` and ask `abi`, so there is no second copy of the
