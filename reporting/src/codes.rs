@@ -189,6 +189,10 @@ pub enum ErrorCode {
     ConflictingOptHints,
     /// An `#[inline]` function whose direct call cannot be spliced.
     InlineRefused,
+    /// A two-word value boxed where no layout can keep its two words: a
+    /// shared body's parameter, an existential pack, a `forall` function
+    /// value's argument, or a class field typed by a class parameter.
+    BoxedResidue,
 
     IoError,
     ArchiveVersionMismatch,
@@ -295,6 +299,7 @@ impl ErrorCode {
             Self::ParLockHint => "E0805",
             Self::ConflictingOptHints => "E0806",
             Self::InlineRefused => "E0807",
+            Self::BoxedResidue => "E0808",
             Self::IoError => "E0900",
             Self::ArchiveVersionMismatch => "E0901",
             Self::InvalidCliFlags => "E0902",
@@ -406,6 +411,7 @@ impl ErrorCode {
             Self::ParLockHint => "parallelization hint: lock a shared escape",
             Self::ConflictingOptHints => "`#[cold]` cannot be combined with `#[inline]` or `#[hot]`",
             Self::InlineRefused => "an `#[inline]` function is not inlined",
+            Self::BoxedResidue => "a two-word value is boxed where its layout cannot keep two words",
             Self::IoError => "I/O error",
             Self::ArchiveVersionMismatch => "bytecode archive version mismatch",
             Self::InvalidCliFlags => "invalid CLI flags",
@@ -525,6 +531,7 @@ mod tests {
             | ParLockHint
             | ConflictingOptHints
             | InlineRefused
+            | BoxedResidue
             | IoError
             | ArchiveVersionMismatch
             | InvalidCliFlags
@@ -626,6 +633,7 @@ mod tests {
             ParLockHint,
             ConflictingOptHints,
             InlineRefused,
+            BoxedResidue,
             IoError,
             ArchiveVersionMismatch,
             InvalidCliFlags,
