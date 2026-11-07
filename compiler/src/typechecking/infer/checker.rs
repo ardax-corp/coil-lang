@@ -20466,13 +20466,14 @@ impl Checker {
             .filter_map(|(key, type_id)| {
                 let fields = self.class_fields(key)?;
                 let tails = self.class_flat_tails(key);
+                let flat = |ty: &Ty| crate::layout::pair_word_kinds(self, ty).unwrap_or([common::WORD_UNKNOWN; 2]);
                 let mut kinds: Vec<u8> = fields
                     .iter()
                     .zip(&tails)
-                    .map(|((_, ty), tail)| if tail.is_some() { common::WORD_SCALAR } else { crate::layout::word_kind(self, ty) })
+                    .map(|((_, ty), tail)| if tail.is_some() { flat(ty)[0] } else { crate::layout::word_kind(self, ty) })
                     .collect();
-                // A flat field's second word: scalar too.
-                kinds.extend(tails.iter().flatten().map(|_| common::WORD_SCALAR));
+                // A flat field's second word, in its tail slot.
+                kinds.extend(fields.iter().zip(&tails).filter(|(_, t)| t.is_some()).map(|((_, ty), _)| flat(ty)[1]));
                 Some(common::ClassWordKinds { type_id, kinds })
             })
             .chain(self.record_type_ids.iter().map(|((_, kinds), &type_id)| common::ClassWordKinds { type_id, kinds: kinds.clone() }))
@@ -20528,7 +20529,7 @@ impl Checker {
 
     /// For each field of class `key`, in declaration order, the tail slot
     /// that holds the second word of a flat two-word field: a field of a
-    /// [`crate::layout::scalar_pair`] type keeps its first word in its own
+    /// closed two-word type ([`crate::layout::pair_word_kinds`]) keeps its first word in its own
     /// slot and its second after the declared fields, so no other field's
     /// slot moves. A generic, `shared` (a two-word store is not atomic) or
     /// `view` class keeps every field one word.
@@ -20546,7 +20547,7 @@ impl Checker {
         }
         let mut next = fields.len() as u32;
         for (i, (name, ty)) in fields.iter().enumerate() {
-            if !self.is_borrow_field(key, name) && crate::layout::scalar_pair(self, ty) {
+            if !self.is_borrow_field(key, name) && crate::layout::pair_word_kinds(self, ty).is_some() {
                 tails[i] = Some(next);
                 next += 1;
             }

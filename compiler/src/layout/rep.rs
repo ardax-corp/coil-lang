@@ -171,6 +171,20 @@ pub(crate) fn readonly_pair_class(checker: &Checker, ty: &Ty) -> Option<String> 
     (fields.len() == 2 && fields.iter().all(|(_, t)| is_immediate(t))).then_some(key)
 }
 
+/// The word kinds of a closed two-word value's two slots when it sits flat
+/// in an object: the second word (a tag, or a product's second item) is
+/// always scalar; the first is scalar for a [`scalar_pair`] and otherwise
+/// a payload that is a heap pointer only for some tags, which the collector
+/// resolves by address ([`common::WORD_UNKNOWN`]).
+pub fn pair_word_kinds(checker: &Checker, ty: &Ty) -> Option<[u8; 2]> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    if !matches!(of_resolved(checker, &ty), Layout::Pair(_)) {
+        return None;
+    }
+    let first = if scalar_pair(checker, &ty) { common::WORD_SCALAR } else { common::WORD_UNKNOWN };
+    Some([first, common::WORD_SCALAR])
+}
+
 /// A two-word value neither of whose words is ever a heap pointer
 /// (`Option<int>`, `(int, float)`, a numeric range, `Result<int, int>`, a
 /// readonly pair class, an enum of immediate payloads): a field of it can
