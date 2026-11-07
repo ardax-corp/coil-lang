@@ -136,6 +136,19 @@ pub(crate) struct MethodClonePlan {
     generic: Option<HirGeneric>,
 }
 
+impl MethodClonePlan {
+    /// The clone's parameter types, the receiver first: its calling
+    /// convention is a ground function's ([`Compiler::callee_param_facts`]).
+    pub(super) fn param_tys(&self) -> &[Ty] {
+        &self.param_tys
+    }
+
+    /// The clone's result type.
+    pub(super) fn ret_ty(&self) -> &Ty {
+        &self.ret_ty
+    }
+}
+
 /// A ground trait method call, as `compile_call_expr`'s `recv.method(args)`
 /// over a discharged instance: the receiver boxed for the instance, then a
 /// trailing dictionary when the instance has one.
@@ -327,7 +340,7 @@ struct HirPlan {
     consts: HashMap<u32, crate::const_fold::ConstValue>,
     /// Each named function read as a value, by node: its entry offset,
     /// arity and rest flag for `MakeFn`.
-    fn_refs: HashMap<u32, (usize, u32, bool)>,
+    fn_refs: HashMap<u32, (usize, u32, bool, String)>,
     /// Each generic function read as a `PolyFn` value, by node: its
     /// resolved name (`MakePolyFn` / `MakePolyFnCapture`).
     polyfns: HashMap<u32, String>,
@@ -1602,8 +1615,23 @@ impl Compiler {
         let prev_calls = self.hir_synth_calls.replace(calls);
         let module = self.hir_module.take();
         // The frame starts with the parameters, as a declared function's.
-        for &param in &hir.params {
-            self.context.variables.intern(hir.local(param).name.clone());
+        // An inherent method clone's thunk takes its two-word parameters
+        // in two slots, as its callers pass them ([`Self::hir_method_clone`]).
+        let pairs = match self.current_function_table_key.as_deref() {
+            Some(key) if self.method_clone_plans.borrow().contains_key(key) => self.callee_param_pairs(key),
+            _ => Vec::new(),
+        };
+        let skip = pairs.len().saturating_sub(hir.params.len());
+        for (i, &param) in hir.params.iter().enumerate() {
+            let name = hir.local(param).name.clone();
+            match pairs.get(skip + i).cloned().flatten() {
+                Some(kind) => {
+                    self.alloc_unboxed_enum_slots(&name, &kind);
+                }
+                None => {
+                    self.context.variables.intern(name);
+                }
+            }
         }
         // A bounded instance method's dictionaries (#1479): its own after
         // the parameters, the context read out of it on entry.
@@ -2085,11 +2113,25 @@ impl Compiler {
             _ => false,
         };
         let mut invariant_fields = HashSet::new();
+        let mut pair_fields = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             if let HirKind::Field { base, .. } = &e.kind
                 && Self::hir_ty(hir, *base).is_some_and(readonly_class)
             {
                 invariant_fields.insert(i as u32);
+            }
+            // A flat two-word field: its first slot and its tail slot.
+            if let HirKind::Field { base, name } = &e.kind
+                && !fields.contains_key(&(i as u32))
+                && Self::hir_ty(hir, *base).is_some_and(is_class)
+                && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
+                && let Some(key) = self.hir_class_of(hir, *base)
+                && let Some(&Some(tail)) = checker.class_flat_tails(&key).get(idx as usize)
+                && let Some((lo, hi)) = self.hir_mir_pair_tys(&fty)
+                && e.ty.as_ref().and_then(|t| self.hir_mir_pair_tys(t)) == Some((lo, hi))
+            {
+                pair_fields.insert(i as u32, (idx, tail, lo, hi));
+                continue;
             }
             if let HirKind::Field { base, name } = &e.kind
                 && !fields.contains_key(&(i as u32))
@@ -2215,6 +2257,7 @@ impl Compiler {
         // `new C(..)` of a class whose every field holds the word its type
         // names: the type id and each field's word type.
         let mut news = HashMap::new();
+        let mut new_tails = HashMap::new();
         for i in 0..hir.exprs.len() as u32 {
             if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
                 && let HirKind::Make { args, .. } = &hir.expr(HirId(i)).kind
@@ -2269,6 +2312,10 @@ impl Compiler {
                     })
                     .collect::<Option<Vec<_>>>()
             {
+                let tails = checker.class_flat_tails(&class);
+                if tails.iter().any(Option::is_some) {
+                    new_tails.insert(i, tails);
+                }
                 news.insert(i, (checker.class_type_id(&class), words));
             }
         }
@@ -2432,6 +2479,7 @@ impl Compiler {
                 }
             }),
             heap_fields,
+            pair_fields,
             invariant_fields,
             frozen_arrays: HashMap::new(),
             boxed_niches,
@@ -2458,6 +2506,7 @@ impl Compiler {
                 })
                 .collect(),
             news,
+            new_tails,
             pushes,
             hosts,
             pinned_for,
@@ -4789,6 +4838,18 @@ impl Compiler {
                 _ => None,
             })
             .collect();
+        let adjusted: HashSet<u32> = hir
+            .exprs
+            .iter()
+            .filter(|e| e.flags.contains(HirFlags::ADJUST))
+            .filter_map(|e| match e.kind {
+                HirKind::Assign { place, .. } => match hir.expr(place).kind {
+                    HirKind::Local(local) => Some(local.0),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         // A `defer` thunk's frame copies each capture as one word, so a
         // captured local stays one word.
         let deferred: HashSet<u32> = hir
@@ -4808,7 +4869,18 @@ impl Compiler {
             else {
                 continue;
             };
-            if assigned.contains(&local.0) || hir.local(local).captured || deferred.contains(&local.0) {
+            if hir.local(local).captured || deferred.contains(&local.0) {
+                continue;
+            }
+            // An assigned local takes two slots only by the catch-all below
+            // (each `=` writes both), and never when an assignment is also
+            // a value (`ADJUST`).
+            if assigned.contains(&local.0) {
+                if !adjusted.contains(&local.0)
+                    && let Some(kind) = self.hir_pair_local_kind(hir, local)
+                {
+                    emit.plan.pair_locals.insert(local.0, kind);
+                }
                 continue;
             }
             // A local of a one-word type stays one word even when its init
@@ -4846,6 +4918,13 @@ impl Compiler {
                 _ => None,
             };
             if let Some(kind) = range {
+                emit.plan.pair_locals.insert(local.0, kind);
+                continue;
+            }
+            // Any other local of a two-word type lives in two slots too: a
+            // one-word init (an element, a field, a boxed result) unpacks
+            // once at the `let`, and every read is the two words.
+            if let Some(kind) = self.hir_pair_local_kind(hir, local) {
                 emit.plan.pair_locals.insert(local.0, kind);
             }
         }
@@ -5525,9 +5604,10 @@ impl Compiler {
     /// `call` of inherent method `key` sent to its clone at the call's
     /// ground type arguments ([`Compiler::instance_clone`]) instead of the
     /// shared body `shared` stands for: each argument in its own layout,
-    /// no boxing and no dictionaries. `None` when a type argument is open
-    /// or two words, a parameter or the result is two words, or the clone
-    /// caps are reached.
+    /// no boxing and no dictionaries. A two-word type argument, parameter
+    /// or result (`Acc<(int, int)>`, `Option<int>`) moves as two words, as
+    /// any ground call's (`abi::convention_*`). `None` when a type argument
+    /// is open, the receiver is two words, or the clone caps are reached.
     fn hir_method_clone(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str, shared: &HirCall) -> Option<HirCall> {
         let src = self.inst_clone_srcs.get(key).filter(|s| s.method_of.is_some())?;
         // A free function's own module calls its mono clones; a clone of
@@ -5583,8 +5663,8 @@ impl Compiler {
         // clone is only a cost decision.
         let word = |ty: &Ty| {
             crate::layout::ty_is_closed(ty)
-                && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
-                && !matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_))
+                && (lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                    || matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_)))
         };
         let lookup_tys = src
             .head
@@ -5599,14 +5679,20 @@ impl Compiler {
         // from the shared one's.
         let one = |ty: &Ty| {
             Self::closed_value_ty(ty)
-                && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
-                && !matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_))
+                && (lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                    || matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_)))
         };
         let mut params = Vec::with_capacity(param_tys.len());
         let mut own_tys = Vec::with_capacity(param_tys.len());
-        for param in &param_tys {
+        let receiver = src.method_of.as_ref().is_some_and(|m| !m.is_static);
+        for (slot, param) in param_tys.iter().enumerate() {
             let ty = at(param);
             if !one(&ty) {
+                return None;
+            }
+            // `self` is one word in a method body: a two-word receiver
+            // (`Opt<int>`) keeps the shared body.
+            if receiver && slot == 0 && matches!(crate::layout::of_resolved(&self.checker, &ty), crate::layout::Layout::Pair(_)) {
                 return None;
             }
             params.push(self.value_layout(&ty));
@@ -5655,9 +5741,13 @@ impl Compiler {
             shared_ret_ty: ret_ty,
             generic: shared.generic.as_deref().cloned(),
         });
+        // A clone is a ground function no function value names: two-word
+        // parameters and result move as two words (`abi::convention_*`).
+        let pair = if boundary { None } else { self.two_word_return_kind(&name) };
+        let ranges = self.callee_param_pairs(&name);
         Some(HirCall {
             key: name,
-            pair: None,
+            pair,
             params,
             ret: ret_layout,
             method: true,
@@ -5665,7 +5755,7 @@ impl Compiler {
             builtin: None,
             generic: None,
             instance: None,
-            ranges: Vec::new(),
+            ranges,
             mono_of: None,
             own_dicts: Vec::new(),
         })
@@ -6043,8 +6133,33 @@ impl Compiler {
         let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
         let params: Vec<ValueLayout> = args.iter().map(|&a| layout(a)).collect();
         // `pop` / `remove` returning a niche `Option` call the host natives
-        // directly, as `compile_call_expr` does; a boxed `Option` is the
-        // thunk's own result, and any other layout stays AST.
+        // directly, as `compile_call_expr` does, and so does a two-word one
+        // (`Option<int>`), which comes back as its two words
+        // (`HOST_ENUM_LAYOUT_PAIR`); a boxed `Option` is the thunk's own
+        // result, and any other layout stays AST.
+        let two_words = Self::hir_ty(hir, call)
+            .map(|t| apply_ty_prune(self.checker.subst(), t))
+            .is_some_and(|t| crate::layout::two_word_kind(&self.checker, &t).is_some());
+        if let Some(native) = Self::vec_option_host_native(&key)
+            && two_words
+            && layout(call) == ValueLayout::Boxed
+        {
+            let native = self.native_id(native).ok_or("vec-method")?;
+            return Ok(HirCall {
+                key,
+                pair: None,
+                params,
+                ret: ValueLayout::Boxed,
+                method: true,
+                mono: false,
+                builtin: Some(HirBuiltin::Host(native)),
+                generic: None,
+                instance: None,
+                ranges: Vec::new(),
+                mono_of: None,
+                own_dicts: Vec::new(),
+            });
+        }
         if let Some(native) = Self::vec_option_host_native(&key)
             && layout(call) != ValueLayout::Boxed
         {
@@ -8254,6 +8369,21 @@ impl Compiler {
         (self.hir_pair_enum(&kind) && self.hir_builds_pair(hir, emit, init, &kind)).then_some(kind)
     }
 
+    /// The pair kind a local of a closed two-word type takes whatever its
+    /// init: an open range stays its object (#1230).
+    fn hir_pair_local_kind(&self, hir: &HirBody, local: LocalId) -> Option<PairKind> {
+        if !self.opt_options.hir_pair_locals {
+            return None;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), hir.local(local).ty.as_ref()?);
+        if Self::ty_has_var(&ty) || lower::is_open_range(&ty) {
+            return None;
+        }
+        self.hir_mir_pair_tys(&ty)?;
+        let kind = crate::layout::two_word_kind(&self.checker, &ty)?;
+        (kind.enum_name().is_none() || self.hir_pair_enum(&kind)).then_some(kind)
+    }
+
     /// `e` yields a `kind` pair with no boxing on any path.
     fn hir_builds_pair(&self, hir: &HirBody, emit: &HirEmit, e: HirId, kind: &PairKind) -> bool {
         match &hir.expr(e).kind {
@@ -8676,7 +8806,7 @@ impl Compiler {
     /// A monomorphic, non-overloaded function already emitted, read as a
     /// value: `compile_identifier_into`'s `MakeFn` (a later function has
     /// no entry offset yet, so it stays AST).
-    fn hir_global_fn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(usize, u32, bool)> {
+    fn hir_global_fn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(usize, u32, bool, String)> {
         if name.contains("::") {
             return None;
         }
@@ -8711,7 +8841,7 @@ impl Compiler {
         }
         let entry = *self.functions.get(&resolved)?;
         let (arity, rest) = self.fn_arities.get(&resolved).copied()?;
-        Some((entry, arity, rest))
+        Some((entry, arity, rest, resolved))
     }
 
     /// E0127: a generic function with a type parameter nested in its
@@ -9998,7 +10128,9 @@ impl Compiler {
                 self.hir_check_value(hir, emit, *init, &BOXED)
             }
             HirKind::Assign { place, value } => match &hir.expr(*place).kind {
-                HirKind::Local(local) if emit.plan.pair_locals.contains_key(&local.0) => Err("assign-pair"),
+                HirKind::Local(local) if let Some(kind) = emit.plan.pair_locals.get(&local.0) => {
+                    self.hir_check_value(hir, emit, *value, &Rep::Pair(kind.clone()))
+                }
                 HirKind::Local(local) if emit.plan.stacks.contains_key(&local.0) => {
                     self.hir_check_stack_array_init(hir, emit, *local, *value)
                 }
@@ -10470,9 +10602,17 @@ impl Compiler {
     /// first slots, then the parameters. Its direct MIR takes the captures
     /// as its first parameters. Lambdas inside one follow it.
     pub(super) fn flush_hir_lambdas(&mut self) {
-        while !self.hir_lambda_tail.is_empty() || !self.hir_adapter_tail.is_empty() || !self.hir_closure_adapter_tail.is_empty() || !self.hir_unpair_tail.is_empty() {
+        while !self.hir_lambda_tail.is_empty()
+            || !self.hir_adapter_tail.is_empty()
+            || !self.hir_closure_adapter_tail.is_empty()
+            || !self.hir_unpair_tail.is_empty()
+            || !self.hir_value_adapter_tail.is_empty()
+        {
             for lam in std::mem::take(&mut self.hir_lambda_tail) {
                 self.hir_lambda_fn(lam);
+            }
+            for (name, adapter) in std::mem::take(&mut self.hir_value_adapter_tail) {
+                self.fn_value_adapter_fn(&name, &adapter);
             }
             for (name, ty, label) in std::mem::take(&mut self.hir_unpair_tail) {
                 self.hir_unpair_fn(name, ty, label);
@@ -10488,6 +10628,59 @@ impl Compiler {
         // another buffer.
         self.hir_fn_adapters.clear();
         self.hir_closure_adapters.clear();
+    }
+
+    /// The entry a value of named function `name` targets: the function
+    /// itself, or, when it returns two words to its direct calls
+    /// ([`Compiler::fn_value_redirects`]), its one-word adapter `name$value`
+    /// (reserved now, emitted after the body), whose two-word twin is the
+    /// function.
+    pub(super) fn fn_value_target(&mut self, name: &str, label: IlLabel) -> IlLabel {
+        if !self.fn_value_redirects(name) || self.two_word_return_kind(name).is_none() {
+            return label;
+        }
+        let adapter = format!("{name}$value");
+        if !self.fn_entry_labels.contains_key(&adapter) {
+            self.reserve_function_entry(adapter.clone());
+            self.hir_value_adapter_tail.push((name.to_string(), adapter.clone()));
+        }
+        self.fn_entry_labels[&adapter]
+    }
+
+    /// [`Self::fn_value_target`]'s adapter: its parameters passed on to
+    /// `name` as they come, its two-word result boxed to the one word a
+    /// function value returns; `name` is its twin.
+    fn fn_value_adapter_fn(&mut self, name: &str, adapter: &str) {
+        use crate::hir::LocalKind;
+        use crate::hir::synth::Synth;
+        let (Some(params), Some(ret)) = (self.checker.fn_param_tys(name), self.checker.fn_return_ty(name)) else {
+            self.bind_function_entry(adapter.to_string());
+            self.missing_call_target(name, 0..0);
+            return;
+        };
+        let mut b = Synth::new(&self.checker, adapter, ret.clone());
+        let args = params
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| {
+                let local = b.local(&format!("arg{i}"), ty.clone(), LocalKind::Param);
+                b.read(local)
+            })
+            .collect();
+        let value = b.call(name, args, ret);
+        let r = b.ret(value);
+        let root = b.block(vec![r], None, crate::typechecking::ty::never());
+        let hir = b.finish(root);
+        let prev = self.compiling_two_word_enum.take();
+        self.pin_two_word_return_kind(adapter, None);
+        self.emit_synth_fn(adapter, &hir, HashMap::new());
+        self.compiling_two_word_enum = prev;
+        if let (Some(&entry), Some(&twin)) = (self.fn_entry_labels.get(adapter), self.fn_entry_labels.get(name)) {
+            self.bodies.set_pair_twin(entry, twin);
+        }
+        if let Some(&arity) = self.fn_arities.get(name) {
+            self.fn_arities.insert(adapter.to_string(), arity);
+        }
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {

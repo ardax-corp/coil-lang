@@ -1,0 +1,11 @@
+// @expected E0119 — `weak()` is refused for a two-word user enum value.
+use gc::weak;
+
+enum Dir {
+    Up,
+    Down(int),
+}
+
+fn main() {
+    let w = weak(Dir::Down(2));
+}

@@ -548,6 +548,8 @@ impl MirBuilder {
             // A generic edge's boxed result may be a heap reference, as its
             // arguments may.
             Some(t) if super::host_allow::host_result_ok(native_id, spec.ret, t) => t,
+            // A two-word result's payload is any word.
+            Some(t) if u32::from(layout) == common::HOST_ENUM_LAYOUT_PAIR && t.is_word_lane() => t,
             Some(t) => {
                 return Err(MirError::msg(format!("host {} result {t} vs {}", spec.name, spec.ret)));
             }
@@ -555,6 +557,7 @@ impl MirBuilder {
         let dest = self.alloc(ret);
         self.push(MirInst::HostInvoke {
             dest,
+            dest_hi: None,
             native_id,
             layout,
             args,
@@ -563,6 +566,22 @@ impl MirBuilder {
             self.snapshot_slots(dest);
         }
         Ok(dest)
+    }
+
+    /// [`Self::ins_host_invoke_as`] of a two-word result
+    /// (`common::HOST_ENUM_LAYOUT_PAIR`): its payload word, typed `lo`, and
+    /// its tag.
+    pub fn ins_host_invoke_pair(&mut self, native_id: u16, args: Vec<ValueId>, lo: MirTy) -> Result<(ValueId, ValueId), MirError> {
+        let layout = common::HOST_ENUM_LAYOUT_PAIR as u8;
+        let dest = self.ins_host_invoke_as(native_id, args, layout, Some(lo))?;
+        let hi = self.alloc(MirTy::I64);
+        let b = self.cur()?;
+        match self.func.block_mut(b).insts.last_mut() {
+            Some(MirInst::HostInvoke { dest: d, dest_hi, .. }) if *d == dest => *dest_hi = Some(hi),
+            _ => return Err(MirError::msg("host pair call")),
+        }
+        self.func.value_locs.insert(hi, self.pending_loc);
+        Ok((dest, hi))
     }
 
     /// An FFI opcode over `args` (its stack operands in push order): the
@@ -1421,6 +1440,7 @@ impl MirBuilder {
             MirInst::Call {
                 dest_hi: Some(h), ..
             }
+            | MirInst::HostInvoke { dest_hi: Some(h), .. }
             | MirInst::CallIndirect { pair: Some((h, _)), .. } => Some(h),
             _ => None,
         };

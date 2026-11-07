@@ -19,6 +19,7 @@ pub use hir::effects::{
     EffectsCapture, describe_fns, effect_declaration_errors, start_effects_capture, take_effects_capture,
 };
 pub use hir::{ContractLevel, start_hir_capture, take_hir_capture};
+pub use mir::{BoxKind, BoxSite, start_box_capture, take_box_capture};
 /// MIR for a native backend (`coil-native`): the capture and the types it reads.
 pub mod native_mir {
     pub use crate::bodies::Label;

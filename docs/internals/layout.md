@@ -102,8 +102,13 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
 - "Escapes" is the fail-closed whole-compile `typechecking::fn_value_escape`
   walk: any function value, partial application, `thread::spawn` or FFI
   callback of that name, in any file of the package use-graph, keeps every
-  caller on the one-word ABI.
-- Coroutines and host natives never return two slots. A raw trait
+  caller on the one-word ABI for its parameters. Its result too, unless
+  the value can target an adapter (`Compiler::fn_value_redirects`: a plain
+  free function never partially applied): then the function returns two
+  words to direct calls, and its value enters `f$value`, a one-word
+  adapter that boxes the result, whose `pair_twin` is the function itself.
+- Coroutines never return two slots; host natives return theirs through
+  the context (see "Host calls"). A raw trait
   instance method (a ground instance with no context, not a default body)
   returns its pair to direct calls; its `$dict` adapter, which
   dictionaries hold, boxes it. Other instance methods return one word
@@ -115,10 +120,13 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   words like its result; a method's receiver stays one word. (The stack
   VM kept these boxed: splitting a box into `[a, b]` needed a temp slot
   above live operands, which MIR parameters do not.)
-- A local bound from a two-slot call keeps its two slots, so `match r`,
-  `r?`, `return r`, `let (a, b) = r` and `r[0]` do not allocate. `?`
-  compares the tag in place and shares one fail epilogue per function
-  (#297, #307).
+- A local of a closed two-word type keeps two slots
+  (`plan.pair_locals`), so `match r`, `r?`, `return r`, `let (a, b) = r`
+  and `r[0]` do not allocate. A one-word init (an element, a field, a
+  boxed result) unpacks once at the `let`; `x = e` rebinds both slots,
+  loops included. `?` compares the tag in place and shares one fail
+  epilogue per function (#297, #307). Only a local captured by a closure
+  or `defer`, or assigned as a value (`ADJUST`), stays one word.
 - A call through a function value of a two-word result is a
   `CallIndirect` with `pair` set: a lambda whose result is a pair is
   emitted twice, its one-word body (the value's entry) and a two-word
@@ -126,10 +134,32 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   (`coil_native_fn_entry_pair`). A callee without one (a named function,
   an adapter, a runtime call) returns its box and the call reads the two
   words through a per-type `unpair` body (`__coil_unpair_N`).
-- Everywhere a value must be one word (a field, a capture, a container
-  element, a shared body, a dictionary call, `==`, `Show`) it
+- A class field of a closed two-word type sits flat: its first word in
+  the field's own slot, its second in a tail slot after the declared
+  fields (`Checker::class_flat_tails`), so no other field's slot moves.
+  `ClassWordKinds` marks the second word scalar, and the first scalar
+  for a `layout::scalar_pair` (`Option<int>`, `(int, float)`, a range,
+  `Result<int, int>`, an enum of immediate payloads) or unknown, resolved
+  by address, for a payload that is a heap word only under some tags
+  (`Result<int, string>`, `enum { Num(int), Word(string) }`;
+  `layout::pair_word_kinds`). `new` stores both words, and a read or write
+  is two loads or stores (`pair_fields`). A generic, `shared` (a
+  two-word store is not atomic) or `view` class keeps one word per field,
+  and a class with a flat field is never scalar-replaced into frame slots.
+- Everywhere else a value must be one word (another field, a capture, a
+  container element, a shared body, a dictionary call, `Show`) it
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
   back. One pack/unpack pair serves every consumer.
+- `==` / `!=` with no instance compares two-word values on their words
+  (`Lower::pair_eq`: an enum's tags, then the variant's payload; a
+  product's two words; a `float` by IEEE, a heap word structurally) and
+  niche words on theirs (`Lower::niche_eq`: the same variant, then the
+  payloads). Only a heap word whose aggregate holds a `float` (a shaped
+  compare) still boxes.
+
+`coil dissect --boxes` lists every box a compile makes (function, kind,
+type, lowering site); `compiler/tests/dissect.rs` asserts on the same
+capture (`compiler::start_box_capture`).
 
 `compute_two_word_return_kind`, `callee_param_pairs` and
 `callee_has_unboxed_range_params` (`codegen/compiler.rs`) are the callers;
@@ -142,10 +172,16 @@ Host natives pack their result into one word at the `HostInvoke` edge
 (`machine::host_enum`, operand bits `[17:16]`), with layout bits derived
 from `value_layout` of the invoke's result type: `1` for
 `NicheOption` / `NicheUnitResult` (`Ok` = `0`), `2` for `NicheResult`,
-`0` (boxed) otherwise and whenever the type is unsure. `Vec::pop` /
-`remove` of a heap element and `gc::get` / `unroot` / `upgrade` pack once;
-`Result<int, _>` and `Result<Option<int>, _>` stay boxed. Host natives are
-never two-slot producers. Cross-module `Result<Path, IoError>` keeps
+`3` (pair) for a two-word `Option` / `Result` with a scalar payload
+(`Option<int>`, `Option<float>`, `Result<int, IoError>`), `0` (boxed)
+otherwise and whenever the type is unsure. `Vec::pop` / `remove` of a heap
+element and `gc::get` / `unroot` / `upgrade` pack once. Under the pair
+layout a native returns the payload word (`0` for a variant without one)
+and the runtime leaves the tag in `NativeCtx::ret_hi`, which native code
+and the MIR interpreter read into `HostInvoke`'s `dest_hi`; no enum object
+is made (`host_enum::pack_option` / `pack_result`; a native that builds its
+object anyway is read off it at the edge). A position that wants the boxed
+word (a generic thunk's result) still asks for layout `0`. Cross-module `Result<Path, IoError>` keeps
 virtual-error tags for layout (COI-404).
 
 ## Representation matrix

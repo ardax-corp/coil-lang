@@ -32,7 +32,7 @@ use crate::mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 11;
+const FORMAT: u8 = 12;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for `bodies`, each with its entry from `body_ids`.
@@ -562,9 +562,10 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u32(*slot);
             w.v(*value);
         }
-        MirInst::HostInvoke { dest, native_id, layout, args } => {
+        MirInst::HostInvoke { dest, dest_hi, native_id, layout, args } => {
             w.u8(I_HOST);
             w.v(*dest);
+            w.opt_v(*dest_hi);
             w.u32(u32::from(*native_id));
             w.u8(*layout);
             w.vs(args);
@@ -1090,6 +1091,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         }
         I_HOST => MirInst::HostInvoke {
             dest: r.v()?,
+            dest_hi: r.opt_v()?,
             native_id: u16::try_from(r.u32()?).map_err(|_| "native MIR: bad host id")?,
             layout: r.u8()?,
             args: r.vs()?,

@@ -150,6 +150,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         }
         MirInst::HostInvoke {
             dest,
+            dest_hi,
             native_id,
             layout,
             args,
@@ -157,10 +158,15 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             let name = super::host_allow::host_edge_spec(*native_id)
                 .map(|s| s.name)
                 .unwrap_or("unknown");
-            if *layout == 0 {
-                write!(f, "{dest} = host.{name}")?;
+            if let Some(hi) = dest_hi {
+                write!(f, "{dest}, {hi} = ")?;
             } else {
-                write!(f, "{dest} = host.{name}.L{layout}")?;
+                write!(f, "{dest} = ")?;
+            }
+            if *layout == 0 {
+                write!(f, "host.{name}")?;
+            } else {
+                write!(f, "host.{name}.L{layout}")?;
             }
             for (i, a) in args.iter().enumerate() {
                 if i == 0 {
@@ -467,7 +473,7 @@ impl<'a> Parser<'a> {
         };
         self.expect('=')?;
         let op = self.ident_dots()?;
-        if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") {
+        if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") && !op.starts_with("host.") {
             return Err(ParseError("pair dest is call-only".into()));
         }
         if let Some(rest) = op.strip_prefix("iconst.") {
@@ -810,8 +816,12 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, spec.ret);
+            if let Some(hi) = dest_hi {
+                ensure_ty(types, hi, MirTy::I64);
+            }
             return Ok(MirInst::HostInvoke {
                 dest,
+                dest_hi,
                 native_id: spec.id,
                 layout,
                 args,

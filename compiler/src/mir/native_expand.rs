@@ -60,7 +60,7 @@ pub fn apply(func: &mut MirFunc) {
     let mut b = 0;
     while b < func.blocks.len() {
         let found = func.blocks[b].insts.iter().enumerate().find_map(|(k, inst)| match inst {
-            MirInst::HostInvoke { dest, native_id, layout, args } if dest.index() < own => {
+            MirInst::HostInvoke { dest, dest_hi: None, native_id, layout, args } if dest.index() < own => {
                 let which = ids.which(*native_id)?;
                 expandable(func, which, *dest, *layout, args).then_some((k, which))
             }
@@ -241,7 +241,7 @@ fn insert(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
 
     // Out of range: the native panics, as the runtime's call does.
     let failed = ex.value(ex.f.ty(dest));
-    ex.push(oob, MirInst::HostInvoke { dest: failed, native_id: native, layout, args: args.to_vec() });
+    ex.push(oob, MirInst::HostInvoke { dest: failed, dest_hi: None, native_id: native, layout, args: args.to_vec() });
     ex.end(oob, Terminator::Unreachable);
 
     let grown = ex.value(MirTy::HeapRef);
@@ -318,7 +318,7 @@ fn remove(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
 
     ex.store(out, v, last, x);
     let some = ex.value(ty);
-    ex.push(out, MirInst::HostInvoke { dest: some, native_id: pop, layout, args: vec![v] });
+    ex.push(out, MirInst::HostInvoke { dest: some, dest_hi: None, native_id: pop, layout, args: vec![v] });
     ex.jump(out, join);
 
     ex.push(join, MirInst::Phi { dest, ty, args: vec![(none, nothing), (out, some)] });
