@@ -1767,8 +1767,10 @@ pub const HOST_ENUM_LAYOUT_BOXED: u32 = 0;
 pub const HOST_ENUM_LAYOUT_OPTION_NICHE: u32 = 1;
 /// Heap-heap `Result` (`Ok` = aligned pointer, `Err` = `pointer | 1`).
 pub const HOST_ENUM_LAYOUT_RESULT_NICHE: u32 = 2;
-/// Reserved operand code. Decoders treat this as boxed (not a niche).
-pub const HOST_ENUM_LAYOUT_RESERVED: u32 = 3;
+/// Two words: the native returns the variant's payload word (`0` when it
+/// has none) and leaves its tag in the native context's second return
+/// word, with no enum object made (`Option<int>`, `Result<int, E>`).
+pub const HOST_ENUM_LAYOUT_PAIR: u32 = 3;
 
 /// Pack `HostInvoke` arity and host-edge Option/Result layout into one operand.
 pub const fn pack_host_invoke_operand(arity: u32, layout: u32) -> u32 {
