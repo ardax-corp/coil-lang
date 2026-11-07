@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::{FuncMaps, NativeProgram};
 
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 const MAGIC: &[u8; 8] = b"COILCODE";
 const DIGEST: usize = 32;
 
@@ -221,6 +221,7 @@ pub(crate) fn encode(parts: Parts<'_>) -> Option<Vec<u8>> {
         w.u16(n.reads);
         w.u8(n.ret_words);
         w.u8(u8::from(n.suspends) | u8::from(n.generator) << 1 | u8::from(n.cleanup) << 2);
+        w.u32(n.twin);
     }
     w.len(parts.sites.len());
     for s in parts.sites {
@@ -283,10 +284,10 @@ pub fn load(image: &[u8]) -> Result<NativeProgram, String> {
     let mut entries = Vec::new();
     for _ in 0..r.len()? {
         let func = FuncId::from_u32(r.u32()?);
-        let (pc, arity, reads, ret_words, flags) = (r.u32()?, r.u16()?, r.u16()?, r.u8()?, r.u8()?);
+        let (pc, arity, reads, ret_words, flags, twin) = (r.u32()?, r.u16()?, r.u16()?, r.u8()?, r.u8()?, r.u32()?);
         // SAFETY: `build_entry` gave this function the `NativeEntryFn` ABI.
         let entry: NativeEntryFn = unsafe { std::mem::transmute::<*const u8, NativeEntryFn>(module.get_finalized_function(func)) };
-        entries.push(NativeEntry { pc, arity, suspends: flags & 1 != 0, reads, ret_words, generator: flags & 2 != 0, cleanup: flags & 4 != 0, entry, data: 0 });
+        entries.push(NativeEntry { pc, arity, suspends: flags & 1 != 0, reads, ret_words, generator: flags & 2 != 0, cleanup: flags & 4 != 0, entry, data: 0, twin });
     }
     let mut sites = Vec::new();
     for _ in 0..r.len()? {

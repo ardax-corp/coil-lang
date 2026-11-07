@@ -98,6 +98,22 @@ impl BodyTable {
         }
     }
 
+    /// Mark the body entered at `entry` as having the two-word twin at
+    /// `twin` ([`crate::mir::MirFunc::pair_twin`]).
+    /// `false`, changing nothing, when the twin has no MIR returning two
+    /// words.
+    pub fn set_pair_twin(&mut self, entry: Label, twin: Label) -> bool {
+        let two = self.bodies.iter().rev().find(|b| b.entry == Some(twin)).and_then(|b| b.mir.as_ref()).is_some_and(|m| m.ret_hi_ty.is_some());
+        if !two {
+            return false;
+        }
+        if let Some(mir) = self.bodies.iter_mut().rev().find(|b| b.entry == Some(entry)).and_then(|b| b.mir.as_mut()) {
+            mir.pair_twin = Some(twin);
+            return true;
+        }
+        false
+    }
+
     pub fn funcs(&self) -> &[Body] {
         &self.bodies
     }

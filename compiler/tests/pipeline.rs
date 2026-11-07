@@ -3419,6 +3419,153 @@ fn main() {
     );
 }
 
+/// An inherent method's `Option<int>` parameter takes its two words: the
+/// caller passes the pair without boxing an `Option`.
+#[test]
+fn inherent_method_pair_parameter_takes_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+class H {
+    pub d: int,
+}
+impl H {
+    pub fn get(Option<int> o) -> int {
+        return match o {
+            Some(v) => v,
+            None => self.d,
+        };
+    }
+}
+fn main() {
+    let h = new H(1);
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        let o = if i % 3 == 0 { None } else { Some(i) };
+        s += h.get(o);
+        i += 1;
+    }
+    let _ = write(stdout(), to_bytes(format("%i", s)));
+}
+"#;
+    assert_eq!(run_example_src(src), "31");
+
+    let mut pipeline = test_pipeline();
+    // Keep the call: inlined, there is no edge to look at.
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("inherent pair parameter");
+    assert_eq!(compiled.body("H::get").params.len(), 3, "`get` takes `self` and `o` as two words");
+    assert!(
+        !compiled.insts("main").any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "`main` passes the pair without boxing it"
+    );
+}
+
+/// A ground trait instance method returns its `Option<int>` as two words
+/// to a direct call; its `$dict` adapter, which a dictionary holds, boxes
+/// the pair.
+#[test]
+fn ground_instance_method_returns_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+trait Halver<T> {
+    fn half(T s, int x) -> Option<int> {}
+}
+class H {
+    pub d: int,
+}
+impl Halver for H {
+    pub fn half(H h, int x) -> Option<int> {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / h.d);
+    }
+}
+fn via<T: Halver>(T h, int x) -> int {
+    return match h.half(x) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+fn main() {
+    let h = new H(2);
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += match h.half(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    let _ = write(stdout(), to_bytes(format("%i %i", s, via(h, 8))));
+}
+"#;
+    assert_eq!(run_example_src(src), "16 4");
+
+    let mut pipeline = test_pipeline();
+    // Keep the calls: inlined, there is no edge to look at.
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("pair-returning instance method");
+    let method = compiled.bodies.iter().find(|b| b.name.ends_with("::half") || b.name.ends_with("__half")).expect("the method body");
+    assert!(method.mir.ret_hi_ty.is_some(), "`half` returns two words");
+    assert!(
+        !compiled.insts("main").any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "`main` reads the pair without a box"
+    );
+}
+
+/// A free function's `(int, int)` / two-field readonly class parameter
+/// takes its two words, as its result does: the caller passes them
+/// without building a tuple or an instance.
+#[test]
+fn product_and_pair_class_parameters_take_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+readonly class Pt {
+    pub x: int,
+    pub y: int,
+}
+fn mk(int i) -> (int, int) {
+    return (i, i + 1);
+}
+fn add((int, int) p) -> int {
+    let (a, b) = p;
+    return a + b;
+}
+fn norm1(Pt p) -> int {
+    return p.x + p.y;
+}
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += add(mk(i)) + add((i, 1)) + norm1(new Pt(i, 2));
+        i += 1;
+    }
+    let _ = write(stdout(), to_bytes(format("%i", s)));
+}
+"#;
+    assert_eq!(run_example_src(src), "220");
+
+    let mut pipeline = test_pipeline();
+    // Keep the calls: inlined, there is no edge to look at.
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("pair parameters");
+    assert_eq!(compiled.body("add").params.len(), 2, "`add` takes `p` as two words");
+    assert_eq!(compiled.body("norm1").params.len(), 2, "`norm1` takes `p` as two words");
+    assert!(
+        !compiled
+            .insts("main")
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Tuple | MirAllocKind::Object { .. }, .. })),
+        "`main` passes the pairs without boxing them"
+    );
+}
+
 #[test]
 fn named_local_class_field_read_unboxes_when_no_escape() {
     let src = r#"
@@ -4775,4 +4922,54 @@ fn main() {
 "#,
     );
     assert_eq!(output, "closed");
+}
+
+/// A lambda whose result moves as two words (`Option<int>`) gets a twin
+/// returning the two words, and a call through the function value reads
+/// them with a two-word `CallIndirect`: neither side boxes the result.
+#[test]
+fn function_value_pair_result_takes_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn run(int -> Option<int> f) -> int {
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += match f(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    return s;
+}
+fn main() {
+    let k = 2;
+    let r = run(fn (int x) use (k) {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / k);
+    });
+    let _ = write(stdout(), to_bytes(format("%i", r)));
+}
+"#;
+    assert_eq!(run_example_src(src), "16");
+
+    let mut pipeline = test_pipeline();
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("pair-returning lambda");
+    assert!(
+        compiled.insts("run").any(|i| matches!(i, MirInst::CallIndirect { pair: Some(_), .. })),
+        "`run` reads the result as two words"
+    );
+    let twins: Vec<_> = compiled.bodies.iter().filter_map(|b| b.mir.pair_twin).collect();
+    assert_eq!(twins.len(), 1, "the lambda has a two-word twin");
+    let twin = compiled.bodies.iter().find(|b| b.entry == Some(twins[0])).expect("the twin body");
+    assert!(twin.mir.ret_hi_ty.is_some(), "the twin returns two words");
+    assert!(
+        !twin.mir.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "the twin builds no box"
+    );
 }

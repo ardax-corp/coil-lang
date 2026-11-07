@@ -32,7 +32,7 @@ use crate::mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 10;
+const FORMAT: u8 = 11;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for `bodies`, each with its entry from `entry_pcs`.
@@ -165,6 +165,7 @@ const I_VEC_LOOP: u8 = 40;
 const I_PANIC_STORE: u8 = 41;
 const I_DEOPT: u8 = 42;
 const I_PROBE: u8 = 43;
+const I_CALL_INDIRECT_PAIR: u8 = 44;
 
 const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -385,6 +386,7 @@ fn func(w: &mut Writer, f: &MirFunc) {
         }
         None => w.u8(0),
     }
+    w.u32(f.pair_twin.map_or(u32::MAX, |l| l.0));
 }
 
 fn inst(w: &mut Writer, inst: &MirInst) {
@@ -593,8 +595,12 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*dest);
             w.u32(*id);
         }
-        MirInst::CallIndirect { dest, callee, args, dicts } => {
-            w.u8(I_CALL_INDIRECT);
+        MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
+            w.u8(if pair.is_some() { I_CALL_INDIRECT_PAIR } else { I_CALL_INDIRECT });
+            if let Some((hi, unpair)) = pair {
+                w.v(*hi);
+                w.u32(unpair.0);
+            }
             w.v(*dest);
             w.v(*callee);
             w.vs(args);
@@ -994,6 +1000,7 @@ fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
     if r.u8()? == 1 {
         f.cleanup = Some(Box::new(read_func(r)?));
     }
+    f.pair_twin = Some(r.u32()?).filter(|&l| l != u32::MAX).map(Label);
     Ok(f)
 }
 
@@ -1076,7 +1083,11 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_STORE_STATIC => MirInst::StoreStatic { dest: r.v()?, slot: r.u32()?, value: r.v()? },
         I_PRINT => MirInst::Print { dest: r.v()?, src: r.v()? },
         I_PANIC => MirInst::Panic { dest: r.v()?, msg: r.v()? },
-        I_CALL_INDIRECT => MirInst::CallIndirect { dest: r.v()?, callee: r.v()?, args: r.vs()?, dicts: r.u32()? },
+        I_CALL_INDIRECT => MirInst::CallIndirect { dest: r.v()?, callee: r.v()?, args: r.vs()?, dicts: r.u32()?, pair: None },
+        I_CALL_INDIRECT_PAIR => {
+            let pair = Some((r.v()?, Label(r.u32()?)));
+            MirInst::CallIndirect { dest: r.v()?, callee: r.v()?, args: r.vs()?, dicts: r.u32()?, pair }
+        }
         I_HOST => MirInst::HostInvoke {
             dest: r.v()?,
             native_id: u16::try_from(r.u32()?).map_err(|_| "native MIR: bad host id")?,
@@ -1228,6 +1239,7 @@ mod tests {
         f.debug_keep = true;
         f.opaque_words = true;
         f.tail_targets.insert(Label(9));
+        f.pair_twin = Some(Label(5));
         f.heap_pair_words.extend([ValueId(0), ValueId(2), ValueId(1)]);
         f.pure_calls.insert(ValueId(1));
         f.call_fields.insert(ValueId(1), 7);

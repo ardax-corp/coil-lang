@@ -660,6 +660,10 @@ pub struct NativeEntry {
     /// Copied to [`NativeCtx::entry_data`] for the call (`0` for machine
     /// code, whose `entry` is the body).
     pub data: usize,
+    /// One past the entry id of the body's two-word twin
+    /// (`MirFunc::pair_twin`), `0` for none: a `CallIndirect` of a
+    /// two-word result enters it ([`coil_native_fn_entry`]).
+    pub twin: u32,
 }
 
 /// A [`NativeEntry`] as an AOT object's `coil_aot_entries` table lays it
@@ -676,7 +680,8 @@ pub struct AotEntry {
     pub generator: u8,
     /// `1` when it has `defer`s ([`NativeEntry::cleanup`]).
     pub cleanup: u8,
-    pub pad: [u8; 4],
+    /// [`NativeEntry::twin`].
+    pub twin: u32,
     pub entry: NativeEntryFn,
 }
 
@@ -710,6 +715,7 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
             cleanup: e.cleanup != 0,
             entry: e.entry,
             data: 0,
+            twin: e.twin,
         })
         .collect();
     let sites = words
@@ -794,6 +800,13 @@ impl NativeCode {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// [`Self::lookup`] without copying the entry.
+    #[inline]
+    pub(crate) fn entry_ref(&self, pc: usize) -> Option<&NativeEntry> {
+        let i = *self.by_pc.get(pc)?;
+        self.entries.get((i as usize).checked_sub(1)?)
     }
 
     #[inline]
@@ -1897,6 +1910,26 @@ pub unsafe extern "C" fn coil_native_call_value(ctx: *mut NativeCtx, callee: u64
 /// room for [`FN_ENTRY_WORDS`] words.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64) -> u64 {
+    // SAFETY: as the caller promises.
+    unsafe { fn_entry(ctx, callee, args, n, out, false) }
+}
+
+/// [`coil_native_fn_entry`] for a call of a two-word result: the entry
+/// of the body's two-word twin ([`NativeEntry::twin`]) when it has one,
+/// which returns its words as a direct `CALL`'s (`lo`, then
+/// [`NativeCtx::ret_hi`]), and `1` in `out[FN_ENTRY_WORDS]`; else the
+/// body's own one-word entry and `0` there.
+///
+/// # Safety
+/// As [`coil_native_fn_entry`], with room for one more word at `out`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_fn_entry_pair(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64) -> u64 {
+    // SAFETY: as the caller promises.
+    unsafe { fn_entry(ctx, callee, args, n, out, true) }
+}
+
+#[inline(always)]
+unsafe fn fn_entry(ctx: *mut NativeCtx, callee: u64, args: *const u64, n: u64, out: *mut u64, pair: bool) -> u64 {
     let c = unsafe { &mut *ctx };
     if c.code.is_null() || c.heap.is_null() || c.machine.is_null() || c.entry_data != 0 {
         return 0;
@@ -1906,31 +1939,48 @@ pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, 
     let n = n as usize;
     // SAFETY: as the caller promises.
     let given = unsafe { std::slice::from_raw_parts(args, n) };
+    if pair {
+        // SAFETY: as the caller promises.
+        unsafe { *out.add(FN_ENTRY_WORDS) = 0 };
+    }
     let words = unsafe { std::slice::from_raw_parts_mut(out, FN_ENTRY_WORDS) };
+    // Word copies by hand: a call passes a few words, below what a
+    // `memcpy` / `memset` call pays for.
     let (pc, len) = if callee < code.code_len() as u64 {
         // A code offset: a function with nothing captured.
         let Some(w) = words.get_mut(..n) else { return 0 };
-        w.copy_from_slice(given);
+        for (w, v) in w.iter_mut().zip(given) {
+            *w = *v;
+        }
         (callee as usize, n)
     } else {
         // SAFETY: the context's heap is the machine's.
-        let Some(crate::memory::Object::Fn(gc)) = unsafe { &*c.heap }.find_object_by_addr(callee) else {
+        let Some(gc) = unsafe { &*c.heap }.fn_at(callee) else {
             return 0;
         };
         let f = gc.as_ref();
         if f.dicts.is_some() || f.filled_mask != 0 || f.is_rest || f.arity as usize != n {
             return 0;
         }
-        let len = f.captures.len() + n;
+        let caps = f.captures.len();
+        let len = caps + n;
         let Some(w) = words.get_mut(..len) else { return 0 };
-        let (caps, rest) = w.split_at_mut(f.captures.len());
-        for (w, v) in caps.iter_mut().zip(&f.captures) {
-            *w = v.bits();
+        for (w, v) in w.iter_mut().zip(f.captures.iter().map(|v| v.bits()).chain(given.iter().copied())) {
+            *w = v;
         }
-        rest.copy_from_slice(given);
         (f.entry as usize, len)
     };
-    let Some(entry) = code.lookup(pc) else { return 0 };
+    let Some(mut entry) = code.entry_ref(pc) else { return 0 };
+    // The twin takes the same words.
+    let mut tag = 0;
+    if pair
+        && entry.twin != 0
+        && let Some(twin) = code.entry_ref(entry.twin as usize - 1)
+        && twin.ret_words == 2
+    {
+        entry = twin;
+        tag = 1;
+    }
     // A generator's body is entered by a resume; a body without machine
     // code by the runtime.
     if entry.generator || entry.data != 0 || len < entry.reads as usize || entry.arity as usize > FN_ENTRY_WORDS {
@@ -1938,11 +1988,15 @@ pub unsafe extern "C" fn coil_native_fn_entry(ctx: *mut NativeCtx, callee: u64, 
     }
     // The words past `len` up to its arity are `0`, as the runtime passes
     // them; words past its arity it does not read.
-    if let Some(rest) = words.get_mut(len..entry.arity as usize) {
-        rest.fill(0);
+    for w in words.iter_mut().take(entry.arity as usize).skip(len) {
+        *w = 0;
     }
     c.host_calls += 1;
     c.gc_epoch += 1;
+    if pair {
+        // SAFETY: the caller gave room for the flag past the words.
+        unsafe { *out.add(FN_ENTRY_WORDS) = tag };
+    }
     entry.entry as usize as u64
 }
 
@@ -2539,6 +2593,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_view", coil_native_view as *const u8),
         ("coil_native_str_view", coil_native_str_view as *const u8),
         ("coil_native_fn_entry", coil_native_fn_entry as *const u8),
+        ("coil_native_fn_entry_pair", coil_native_fn_entry_pair as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
@@ -2568,4 +2623,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 36;
+const HELPERS: usize = 37;

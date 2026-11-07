@@ -150,6 +150,21 @@ fn as_bool(w: u64) -> u64 {
 }
 
 /// Open a frame of `body` at its entry. `false` when the stack is full.
+/// [`push`] `body` with its parameters `words`.
+fn push_with(act: &mut Activation, body: &Body, words: &[u64]) -> bool {
+    if !push(act, body, std::ptr::null_mut()) {
+        return false;
+    }
+    let f = &body.mir;
+    let base = act.frames.last().expect("the frame just pushed").base;
+    for (&p, &w) in f.params.iter().zip(words) {
+        let w = if ty_of(f, p) == MirTy::Bool { as_bool(w) } else { w };
+        // SAFETY: `push` sized the register file for the frame.
+        unsafe { *act.regs.as_mut_ptr().add(base + reg(p)) = w };
+    }
+    true
+}
+
 fn push(act: &mut Activation, body: &Body, homes: *mut u64) -> bool {
     let f = &body.mir;
     let base = act.regs.len();
@@ -435,7 +450,24 @@ unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
                                     *at.add(reg(*d)) = hi.unwrap_or(0);
                                 }
                             }
-                            MirInst::CallIndirect { dest, .. } => set_word(cf, at, *dest, lo),
+                            // A two-word call's callee gave its one word:
+                            // `unpair` reads the two from it, and returns
+                            // here.
+                            MirInst::CallIndirect { pair: Some((_, unpair)), .. } if hi.is_none() => {
+                                let Some(un) = program(&*caller.body).body_at(*unpair) else {
+                                    return unwind(act, TRAP_HELPER);
+                                };
+                                if !push_with(&mut *act, un, &[lo]) {
+                                    rt::coil_native_unwind(ctx, TRAP_STACK, u64::from(un.entry_site));
+                                    return unwind(act, TRAP_HELPER);
+                                }
+                            }
+                            MirInst::CallIndirect { dest, pair, .. } => {
+                                set_word(cf, at, *dest, lo);
+                                if let Some((h, _)) = pair {
+                                    set_word(cf, at, *h, hi.unwrap_or(0));
+                                }
+                            }
                             _ => {}
                         }
                         continue 'frame;
@@ -647,17 +679,35 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 }
                 return Flow::Entered;
             }
-            MirInst::CallIndirect { dest, callee, args, dicts } => {
+            MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
                 let c = get!(*callee);
+                // A two-word result: `unpair` on the one word a callee
+                // without a two-word twin gives, returning to this call.
+                let unpair = |act: *mut Activation, w: u64, unpair: compiler::native_mir::Label| {
+                    let Some(un) = program(body).body_at(unpair) else {
+                        return Flow::Trap(TRAP_HELPER);
+                    };
+                    if !push_with(&mut *act, un, &[w]) {
+                        rt::coil_native_unwind(ctx, TRAP_STACK, u64::from(un.entry_site));
+                        return Flow::Trap(TRAP_HELPER);
+                    }
+                    Flow::Entered
+                };
                 // A body runs as a frame of this activation: nothing of the
                 // host stands between it and its caller, so it may park.
                 match rt::apply_value(ctx, c, words!(args), args.len() as u64, u64::from(*dicts)) {
                     Applied::Value(w) => {
+                        if let Some((_, un)) = pair {
+                            return unpair(act, w, *un);
+                        }
                         set_word(f, regs_now(act), *dest, w);
                         return Flow::Next;
                     }
                     Applied::Call { pc, args } => {
-                        if let Some(callee) = program(body).body_at_pc(pc) {
+                        let found = program(body).body_at_pc(pc);
+                        // The callee's two-word twin returns both words.
+                        let twin = pair.and(found).and_then(|b| b.mir.pair_twin).and_then(|t| program(body).body_at(t));
+                        if let Some(callee) = twin.or(found) {
                             if !push(&mut *act, callee, std::ptr::null_mut()) {
                                 rt::coil_native_unwind(ctx, TRAP_STACK, u64::from(callee.entry_site));
                                 return Flow::Trap(TRAP_HELPER);
@@ -676,6 +726,9 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 }
                 let w = rt::coil_native_call_value(ctx, c, words!(args), args.len() as u64, u64::from(*dicts));
                 check!();
+                if let Some((_, un)) = pair {
+                    return unpair(act, w, *un);
+                }
                 set_word(f, regs_now(act), *dest, w);
             }
             MirInst::ResumeCoro { dest, handle, send } => {
