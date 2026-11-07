@@ -2320,6 +2320,20 @@ impl Compiler {
                 if tails.iter().any(Option::is_some) {
                     new_tails.insert(i, tails);
                 }
+                for ((name, field_ty), &arg) in checker.class_fields(&class).unwrap_or_default().iter().zip(args) {
+                    if checker.field_names_class_param(&class, field_ty)
+                        && let Some(at) = Self::hir_ty(hir, arg)
+                    {
+                        let shown = crate::typechecking::pretty::format_ty_for_diag(&Default::default(), &apply_ty_prune(checker.subst(), at));
+                        self.note_box_residue(
+                            format!("field {class}.{name} {shown}"),
+                            at,
+                            hir.expr(arg).span,
+                            &format!("field `{name}` of `{class}` has a class parameter's type, one word in every instance"),
+                            "a field of a concrete type keeps both words in the instance",
+                        );
+                    }
+                }
                 news.insert(i, (checker.class_type_id(&class), words));
             }
         }

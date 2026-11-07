@@ -202,7 +202,11 @@ impl Compiler {
     }
 
     pub fn set_source_file(&mut self, path: impl Into<std::path::PathBuf>) {
-        self.current_source_file = Some(path.into());
+        let path = path.into();
+        // A path the pipeline left absolute is outside the project; one
+        // under `.deps` is a dependency's.
+        self.residue_lint.set(path.is_relative() && !path.components().any(|c| c.as_os_str() == ".deps"));
+        self.current_source_file = Some(path);
         // Record every compiled file, not only those that emit a located byte.
         self.intern_source_file();
     }
@@ -1901,6 +1905,7 @@ impl Compiler {
                     continue;
                 };
                 let messages = self.messages.len();
+                let lint = self.residue_lint.replace(false);
                 self.swap_module_ctx(&mut ctx, true);
                 // The clones queued for the module being compiled wait: their
                 // types may be ones `seq` does not know.
@@ -1908,6 +1913,7 @@ impl Compiler {
                 self.emit_instance_clones(children);
                 self.inst_clone_queue = waiting;
                 self.swap_module_ctx(&mut ctx, false);
+                self.residue_lint.set(lint);
                 self.module_ctxs.insert(seq, ctx);
                 // Its module already reported on this code: keep only errors.
                 let mut i = messages;
@@ -7391,12 +7397,36 @@ impl Compiler {
         // builtin enum's `Show` thunk used, so they go first (#1984).
         self.emit_structural_thunks();
         self.emit_used_builtin_show_thunks();
+        let (_, residue) = std::mem::take(&mut *self.residue.borrow_mut());
+        self.messages.extend(residue);
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
         if self.inst_clone_srcs.values().any(|s| s.program == seq && s.emit_idx.is_some()) {
             let ctx = self.take_module_ctx(module);
             self.module_ctxs.insert(seq, ctx);
         }
+    }
+
+    /// Warn (E0808) that the project's own code boxes a two-word value of
+    /// type `ty` at `span`, where `why` says what keeps it from its two
+    /// words; once per `key` in a module. A dependency's code, a clone
+    /// another module asked for and compiler-made code stay quiet.
+    pub(super) fn note_box_residue(&self, key: String, ty: &Ty, span: (usize, usize), why: &str, help: &str) {
+        if !self.residue_lint.get() || crate::attrs::is_fresh_span(span.0) {
+            return;
+        }
+        let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
+        if Self::ty_has_var(&ty) || crate::layout::two_word_kind(&self.checker, &ty).is_none() {
+            return;
+        }
+        let (seen, out) = &mut *self.residue.borrow_mut();
+        if !seen.insert(key) {
+            return;
+        }
+        let shown = crate::typechecking::pretty::format_ty_for_diag(&Default::default(), &ty);
+        let mut msg = Message::warn(ErrorCode::BoxedResidue, format!("`{shown}` is boxed here: {why}"), span.0..span.1);
+        msg.with_help(help.to_string());
+        out.push(msg);
     }
 
     /// Emit the reserved `Show` thunks of the builtin error enums that this

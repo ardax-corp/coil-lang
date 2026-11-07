@@ -466,6 +466,16 @@ impl Compiler {
     fn hir_mir_note(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) -> Kids {
         // A value packed after it is built.
         if let Some(pack) = self.hir_existential_pack(hir, id) {
+            if let Some(ty) = Self::hir_ty(hir, id) {
+                let span = hir.expr(id).span;
+                self.note_box_residue(
+                    format!("pack {}", span.0),
+                    ty,
+                    span,
+                    "a value of a bare trait type is one word",
+                    "take it as a generic `T: Trait` parameter, whose clone keeps the value's two words",
+                );
+            }
             let steps = self.hir_mir_once(|this| {
                 let mut steps = Vec::new();
                 this.plan_existential_pack(&mut steps, &pack);
@@ -1386,6 +1396,16 @@ impl Compiler {
                 return;
             };
             let ty = apply_ty_prune(self.checker.subst(), ty);
+            if bare[i] {
+                let span = hir.expr(arg).span;
+                self.note_box_residue(
+                    format!("polyfn {}", span.0),
+                    &ty,
+                    span,
+                    "a `forall` function value's shared body takes it as one word",
+                    "call a named generic function instead: its clone at this type takes both words",
+                );
+            }
             words.push(bare[i] && Self::ty_to_value_tag(&ty).is_some());
             arg_tys.push(ty);
         }

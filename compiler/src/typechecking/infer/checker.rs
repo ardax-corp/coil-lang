@@ -20595,6 +20595,13 @@ impl Checker {
         tails
     }
 
+    /// Whether field type `ty` of class `key` names one of the class's
+    /// type parameters: such a field holds one word in every instance
+    /// (a shared body reads it so), a two-word value boxed.
+    pub fn field_names_class_param(&self, key: &str, ty: &Ty) -> bool {
+        self.generics().generic_type_ctors.get(key).is_some_and(|params| ty_names_param(ty, params))
+    }
+
     /// Slots an instance of class `key` holds: its fields, then the tail
     /// slots of its flat fields ([`Self::class_flat_tails`]).
     pub fn class_slot_count(&self, key: &str) -> usize {
