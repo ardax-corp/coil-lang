@@ -128,9 +128,15 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   an adapter, a runtime call) returns its box and the call reads the two
   words through a per-type `unpair` body (`__coil_unpair_N`).
 - Everywhere a value must be one word (a field, a capture, a container
-  element, a shared body, a dictionary call, `==`, `Show`) it
+  element, a shared body, a dictionary call, `Show`) it
   is its box: `box_pair_val` in MIR builds it, and two field loads read it
   back. One pack/unpack pair serves every consumer.
+- `==` / `!=` with no instance compares two-word values on their words
+  (`Lower::pair_eq`: an enum's tags, then the variant's payload; a
+  product's two words; a `float` by IEEE, a heap word structurally) and
+  niche words on theirs (`Lower::niche_eq`: the same variant, then the
+  payloads). Only a heap word whose aggregate holds a `float` (a shaped
+  compare) still boxes.
 
 `coil dissect --boxes` lists every box a compile makes (function, kind,
 type, lowering site); `compiler/tests/dissect.rs` asserts on the same
