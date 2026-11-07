@@ -182,3 +182,42 @@ fn main() {
     assert_eq!(of("stored"), vec![(compiler::BoxKind::Pair, "Option<int>")], "{boxes:?}");
     assert!(boxes.iter().all(|b| b.site.starts_with("from_hir.rs:")), "{boxes:?}");
 }
+
+/// A generic class's method at a pair type argument gets its own clone,
+/// which takes and returns the pair in two words: neither the caller nor
+/// the clone boxes it.
+#[test]
+fn box_capture_pair_type_argument_clone_has_no_boxes() {
+    let src = r#"
+class Pass<T> { pub n: int }
+impl Pass<T> {
+    pub fn keep(T x) -> T { return x; }
+}
+fn pairs(int n) -> int {
+    let p: Pass<(int, int)> = new Pass(0);
+    let (a, b) = p.keep((n, n + 1));
+    return a + b;
+}
+fn options(int n) -> int {
+    let p: Pass<Option<int>> = new Pass(0);
+    return match p.keep(Some(n)) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+fn main() {
+    let _ = pairs(1) + options(2);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes
+        .iter()
+        .filter(|b| b.func == "pairs" || b.func == "options" || b.func.starts_with("Pass::"))
+        .collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}
