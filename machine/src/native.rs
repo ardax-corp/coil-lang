@@ -1275,7 +1275,7 @@ fn lane_unbox(word: common::Value) -> Option<(u64, u64)> {
     match object(word.bits())? {
         crate::memory::Object::Enum(gc) => {
             let e = gc.as_ref();
-            Some((e.payload.get(0).map_or(0, |v| v.bits()), u64::from(e.tag)))
+            Some((e.payload.first().map_or(0, |v| v.bits()), u64::from(e.tag)))
         }
         crate::memory::Object::Tuple(gc) => match gc.as_ref().elements() {
             [a, b] => Some((a.bits(), b.bits())),
@@ -1647,7 +1647,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             heap.alloc(arr, Object::Array).0.addr()
         }
         ALLOC_LANES => {
-            if n % 2 != 0 {
+            if !n.is_multiple_of(2) {
                 return unsafe { bail(ctx) };
             }
             heap.alloc(ObjArray::from_lanes(values, 2, extra), Object::Array).0.addr()

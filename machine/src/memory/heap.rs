@@ -3518,7 +3518,7 @@ impl ObjArray {
 
     /// A lane array of the elements laid out in `words` (`k` each).
     pub fn from_lanes(words: Vec<Value>, k: usize, tag_mask: u64) -> Self {
-        assert!(k >= 2 && words.len() % k == 0, "lane words are whole elements");
+        assert!(k >= 2 && words.len().is_multiple_of(k), "lane words are whole elements");
         Self {
             accounted: words.capacity() * mem::size_of::<Value>(),
             may_hold_refs: tag_mask != 0 && !words.is_empty(),

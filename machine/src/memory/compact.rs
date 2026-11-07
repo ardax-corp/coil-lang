@@ -534,7 +534,7 @@ mod tests {
         let Some(Object::Array(a)) = heap.find_object_by_addr(arr.addr()) else {
             panic!("array is a pinned root");
         };
-        for v in 0..32 {
+        for (v, &addr) in addrs.iter().enumerate() {
             let lanes = a.as_ref().get_lanes(v).expect("in bounds");
             if v % 2 == 0 {
                 assert!(!moved.contains_key(&lanes[0].heap_addr()));
@@ -543,7 +543,7 @@ mod tests {
                 };
                 assert_eq!(e.as_ref().payload[0].as_int(), v as i64);
             } else {
-                assert_eq!(lanes[0].bits(), addrs[v], "a scalar lane is never rewritten");
+                assert_eq!(lanes[0].bits(), addr, "a scalar lane is never rewritten");
             }
         }
     }
