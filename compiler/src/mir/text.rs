@@ -256,6 +256,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
         MirInst::ArrayLen { dest, array } => write!(f, "{dest} = arraylen {array}"),
+        MirInst::LaneIndex { dest, dest_hi, array, index } => {
+            write!(f, "{dest}, {dest_hi} = laneindex.{}.{} {array}, {index}", func.ty(*dest), func.ty(*dest_hi))
+        }
+        MirInst::LaneStore { dest, array, index, lo, hi } => write!(f, "{dest} = lanestore {array}, {index}, {lo}, {hi}"),
+        MirInst::LanePush { dest, array, lo, hi } => write!(f, "{dest} = lanepush {array}, {lo}, {hi}"),
         MirInst::ResumeCoro {
             dest,
             handle,
@@ -314,6 +319,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                         write!(f, ", params {params}")?;
                     }
                 }
+                MirAllocKind::Lanes { tag_mask } => write!(f, " {tag_mask}")?,
                 MirAllocKind::Array | MirAllocKind::Tuple => {}
             }
             for (i, e) in elems.iter().enumerate() {
@@ -473,6 +479,18 @@ impl<'a> Parser<'a> {
         };
         self.expect('=')?;
         let op = self.ident_dots()?;
+        if let Some(rest) = op.strip_prefix("laneindex.") {
+            let (lo_s, hi_s) = rest.split_once('.').ok_or_else(|| ParseError(op.clone()))?;
+            let lo = MirTy::parse(lo_s).ok_or_else(|| ParseError(op.clone()))?;
+            let hi_ty = MirTy::parse(hi_s).ok_or_else(|| ParseError(op.clone()))?;
+            let hi = dest_hi.ok_or_else(|| ParseError("laneindex takes two dests".into()))?;
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = self.value()?;
+            ensure_ty(types, dest, lo);
+            ensure_ty(types, hi, hi_ty);
+            return Ok(MirInst::LaneIndex { dest, dest_hi: hi, array, index });
+        }
         if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") && !op.starts_with("host.") {
             return Err(ParseError("pair dest is call-only".into()));
         }
@@ -698,6 +716,30 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::KeepAlive { dest, value });
         }
+        if op == "lanestore" || op == "lanepush" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = if op == "lanestore" {
+                let i = self.value()?;
+                self.expect(',')?;
+                Some(i)
+            } else {
+                None
+            };
+            let lo = self.value()?;
+            self.expect(',')?;
+            let hi = self.value()?;
+            return Ok(match index {
+                Some(index) => {
+                    ensure_ty(types, dest, MirTy::Bool);
+                    MirInst::LaneStore { dest, array, index, lo, hi }
+                }
+                None => {
+                    ensure_ty(types, dest, MirTy::HeapRef);
+                    MirInst::LanePush { dest, array, lo, hi }
+                }
+            });
+        }
         if op == "arraypush" {
             let array = self.value()?;
             self.expect(',')?;
@@ -878,6 +920,7 @@ impl<'a> Parser<'a> {
             };
             let kind = match kind_s {
                 "array" => MirAllocKind::Array,
+                "lanes" => MirAllocKind::Lanes { tag_mask: self.uint()? },
                 "tuple" => MirAllocKind::Tuple,
                 "object" => {
                     let type_id = self.uint()? as u32;

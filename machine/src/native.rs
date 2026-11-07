@@ -1240,6 +1240,73 @@ pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64,
     value
 }
 
+/// `LaneIndex`: element `index` of a lane array, its first word returned
+/// and its second in [`NativeCtx::ret_hi`]. Out of bounds traps; not a
+/// lane array: bail.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_lane_index(ctx: *mut NativeCtx, addr: u64, index: i64) -> u64 {
+    let Some(crate::memory::Object::Array(gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    let lanes = usize::try_from(index).ok().and_then(|i| gc.as_ref().get_lanes(i));
+    match lanes {
+        Some(&[lo, hi]) => {
+            unsafe { (*ctx).ret_hi = hi.bits() };
+            lo.bits()
+        }
+        _ => unsafe {
+            if gc.as_ref().lanes() == 2 {
+                (*ctx).trap = TRAP_OUT_OF_BOUNDS;
+            }
+            bail(ctx)
+        },
+    }
+}
+
+/// `LaneStore`: `[lo, hi]` as element `index` of a lane array.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_lane_store(ctx: *mut NativeCtx, addr: u64, index: i64, lo: u64, hi: u64) -> u64 {
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    if gc.as_ref().lanes() != 2 {
+        return unsafe { bail(ctx) };
+    }
+    let stored = usize::try_from(index).is_ok_and(|i| gc.as_mut().set_lanes(i, &[common::Value::from(lo), common::Value::from(hi)]));
+    if !stored {
+        unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
+        return unsafe { bail(ctx) };
+    }
+    1
+}
+
+/// `LanePush`: append `[lo, hi]` to a lane array; returns the array.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_lane_push(ctx: *mut NativeCtx, addr: u64, lo: u64, hi: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    if gc.as_ref().lanes() != 2 {
+        return unsafe { bail(ctx) };
+    }
+    gc.as_mut().push_lanes(&[common::Value::from(lo), common::Value::from(hi)]);
+    heap.account_array(gc.as_mut());
+    unsafe { note_alloc(ctx, heap) };
+    addr
+}
+
 /// `SetField` of slot `index` on an instance with slots; return `value`.
 /// Anything else: bail.
 ///
@@ -1431,6 +1498,7 @@ pub const ALLOC_FN: u64 = 4;
 pub const ALLOC_POLY_FN: u64 = 5;
 pub const ALLOC_DROP_ENUM: u64 = 6;
 pub const ALLOC_CORO: u64 = 7;
+pub const ALLOC_LANES: u64 = 8;
 
 /// A new object of `kind` from the `n` words at `words`, in declaration
 /// order (an enum's payload order):
@@ -1448,7 +1516,9 @@ pub const ALLOC_CORO: u64 = 7;
 /// - [`ALLOC_DROP_ENUM`]: [`ALLOC_ENUM`] of an enum with a `drop`, as
 ///   `TagEnumType` stamps it: the last word is its type id;
 /// - [`ALLOC_CORO`]: a generator, as `MakeCoro`: `extra` is its body's
-///   entry id, the words its arguments.
+///   entry id, the words its arguments;
+/// - [`ALLOC_LANES`]: a lane array of two-word elements, the words theirs
+///   in order: `extra` is its pointer tag mask.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
@@ -1474,6 +1544,12 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 let _ = arr.take_resize();
             }
             heap.alloc(arr, Object::Array).0.addr()
+        }
+        ALLOC_LANES => {
+            if n % 2 != 0 {
+                return unsafe { bail(ctx) };
+            }
+            heap.alloc(ObjArray::from_lanes(values, 2, extra), Object::Array).0.addr()
         }
         ALLOC_TUPLE if n == 0 => return heap.immortal_empty_tuple().addr(),
         ALLOC_TUPLE => heap.alloc(ObjTuple::from_slice(&values).with_kinds(extra as u8), Object::Tuple).0.addr(),
@@ -2624,6 +2700,9 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
+        ("coil_native_lane_index", coil_native_lane_index as *const u8),
+        ("coil_native_lane_store", coil_native_lane_store as *const u8),
+        ("coil_native_lane_push", coil_native_lane_push as *const u8),
         ("coil_native_probe", coil_native_probe as *const u8),
         ("coil_native_free_early", coil_native_free_early as *const u8),
         ("coil_native_format", coil_native_format as *const u8),
@@ -2649,4 +2728,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 37;
+const HELPERS: usize = 40;

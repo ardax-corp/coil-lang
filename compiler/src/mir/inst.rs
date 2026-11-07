@@ -637,6 +637,32 @@ pub enum MirInst {
         value: ValueId,
         index: u32,
     },
+    /// Element `index` of a lane array (two words per element): its first
+    /// word in `dest`, its second (an enum's tag) in `dest_hi`. Out of
+    /// bounds panics, as [`Self::Index`] does.
+    LaneIndex {
+        dest: ValueId,
+        dest_hi: ValueId,
+        array: ValueId,
+        index: ValueId,
+    },
+    /// Store `lo` and `hi` as element `index` of a lane array. Dest is a
+    /// `bool` unit token.
+    LaneStore {
+        dest: ValueId,
+        array: ValueId,
+        index: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+    },
+    /// Append the element `[lo, hi]` to a lane array in place. Dest is the
+    /// same `HeapRef` identity; a GC safepoint like [`Self::ArrayPush`].
+    LanePush {
+        dest: ValueId,
+        array: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+    },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
     ArrayPush {
@@ -981,6 +1007,12 @@ impl MirFfiOp {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirAllocKind {
     Array,
+    /// A lane array of two-word elements, `elems` their words in order
+    /// (`ObjArray::from_lanes`); lane 0 is a heap reference under the tags
+    /// set in `tag_mask`.
+    Lanes {
+        tag_mask: u64,
+    },
     Tuple,
     /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
     /// dense Object `DenseMakeObject` is D2.
@@ -1030,6 +1062,7 @@ impl MirAllocKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Array => "array",
+            Self::Lanes { .. } => "lanes",
             Self::Tuple => "tuple",
             Self::Object { .. } => "object",
             Self::Enum { .. } => "enum",
@@ -1121,6 +1154,9 @@ impl MirInst {
             | Self::Probe { dest, .. }
             | Self::PanicStore { dest, .. }
             | Self::ArrayPush { dest, .. }
+            | Self::LaneIndex { dest, .. }
+            | Self::LaneStore { dest, .. }
+            | Self::LanePush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
             | Self::Deopt { dest, .. }
@@ -1147,6 +1183,7 @@ impl MirInst {
             Self::VecLoop { pos: Some(p), .. } => Some(p),
             Self::CallIndirect { pair: Some((h, _)), .. } => Some(h),
             Self::HostInvoke { dest_hi: Some(h), .. } => Some(h),
+            Self::LaneIndex { dest_hi, .. } => Some(dest_hi),
             _ => None,
         };
         std::iter::once(self.dest()).chain(hi)
@@ -1158,6 +1195,7 @@ impl MirInst {
             self,
             Self::Alloc { .. }
                 | Self::ArrayPush { .. }
+                | Self::LanePush { .. }
                 | Self::Format { .. }
                 | Self::Stringify { .. }
                 | Self::Cow { .. }
@@ -1205,6 +1243,9 @@ impl MirInst {
             Self::LoadStatic { .. } | Self::HomeLoad { .. } => Vec::new(),
             Self::StoreStatic { value, .. } | Self::HomeStore { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
+            Self::LaneIndex { array, index, .. } => vec![*array, *index],
+            Self::LaneStore { array, index, lo, hi, .. } => vec![*array, *index, *lo, *hi],
+            Self::LanePush { array, lo, hi, .. } => vec![*array, *lo, *hi],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
@@ -1281,6 +1322,21 @@ impl MirInst {
             Self::ArrayPush { array, value, .. } => {
                 *array = map(*array);
                 *value = map(*value);
+            }
+            Self::LaneIndex { array, index, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+            }
+            Self::LaneStore { array, index, lo, hi, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+                *lo = map(*lo);
+                *hi = map(*hi);
+            }
+            Self::LanePush { array, lo, hi, .. } => {
+                *array = map(*array);
+                *lo = map(*lo);
+                *hi = map(*hi);
             }
             Self::Alloc { elems, .. } => {
                 for v in elems.iter_mut() {

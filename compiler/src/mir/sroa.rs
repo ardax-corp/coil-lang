@@ -46,7 +46,7 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     pending_reuse = None;
                     pending_alloc = Some(*dest);
                 }
-                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } | MirInst::LanePush { dest, .. } => {
                     pending_alloc = Some(*dest);
                     pending_reuse = None;
                 }

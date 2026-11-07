@@ -783,6 +783,30 @@ impl MirFunc {
                     return Err(format!("{dest} StoreIndex value type"));
                 }
             }
+            MirInst::LaneIndex { dest, dest_hi, array, index } => {
+                if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
+                    return Err(format!("{dest} LaneIndex operand type"));
+                }
+                if !self.ty(*dest).is_word_lane() || !self.ty(*dest_hi).is_word_lane() {
+                    return Err(format!("{dest} LaneIndex dest type"));
+                }
+            }
+            MirInst::LaneStore { dest, array, index, lo, hi } => {
+                if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
+                    return Err(format!("{dest} LaneStore operand type"));
+                }
+                if !self.ty(*lo).is_word_lane() || !self.ty(*hi).is_word_lane() || self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} LaneStore value type"));
+                }
+            }
+            MirInst::LanePush { dest, array, lo, hi } => {
+                if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} LanePush array type"));
+                }
+                if !self.ty(*lo).is_word_lane() || !self.ty(*hi).is_word_lane() {
+                    return Err(format!("{dest} LanePush value type"));
+                }
+            }
             MirInst::ArrayLen { dest, array } => {
                 if self.ty(*array) != MirTy::HeapRef {
                     return Err(format!("{dest} ArrayLen array is not heapref"));

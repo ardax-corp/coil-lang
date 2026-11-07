@@ -32,7 +32,7 @@ use crate::mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 12;
+const FORMAT: u8 = 13;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for `bodies`, each with its entry from `body_ids`.
@@ -166,6 +166,9 @@ const I_PANIC_STORE: u8 = 41;
 const I_DEOPT: u8 = 42;
 const I_PROBE: u8 = 43;
 const I_CALL_INDIRECT_PAIR: u8 = 44;
+const I_LANE_INDEX: u8 = 45;
+const I_LANE_STORE: u8 = 46;
+const I_LANE_PUSH: u8 = 47;
 
 const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -461,6 +464,28 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*index);
             w.u8(*unchecked as u8);
         }
+        MirInst::LaneIndex { dest, dest_hi, array, index } => {
+            w.u8(I_LANE_INDEX);
+            w.v(*dest);
+            w.v(*dest_hi);
+            w.v(*array);
+            w.v(*index);
+        }
+        MirInst::LaneStore { dest, array, index, lo, hi } => {
+            w.u8(I_LANE_STORE);
+            w.v(*dest);
+            w.v(*array);
+            w.v(*index);
+            w.v(*lo);
+            w.v(*hi);
+        }
+        MirInst::LanePush { dest, array, lo, hi } => {
+            w.u8(I_LANE_PUSH);
+            w.v(*dest);
+            w.v(*array);
+            w.v(*lo);
+            w.v(*hi);
+        }
         MirInst::ArrayLen { dest, array } => {
             w.u8(I_LEN);
             w.v(*dest);
@@ -499,6 +524,10 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*dest);
             match *kind {
                 MirAllocKind::Array => w.u8(0),
+                MirAllocKind::Lanes { tag_mask } => {
+                    w.u8(9);
+                    w.u64(tag_mask);
+                }
                 MirAllocKind::Tuple => w.u8(1),
                 MirAllocKind::Enum { tag } => {
                     w.u8(2);
@@ -1073,6 +1102,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
                 5 => MirAllocKind::PolyFn { target: Label(r.u32()?) },
                 6 => MirAllocKind::PolyFnCapture { target: Label(r.u32()?), params: r.u32()? },
                 8 => MirAllocKind::Coro { target: Label(r.u32()?) },
+                9 => MirAllocKind::Lanes { tag_mask: r.u64()? },
                 k => return Err(format!("native MIR: bad allocation kind {k}")),
             };
             let n = r.len()?;
@@ -1112,6 +1142,9 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         },
         I_MATCH_PAYLOAD => MirInst::MatchPayload { dest: r.v()?, scrutinee: r.v()?, index: r.u32()? },
         I_ARRAY_PUSH => MirInst::ArrayPush { dest: r.v()?, array: r.v()?, value: r.v()? },
+        I_LANE_INDEX => MirInst::LaneIndex { dest: r.v()?, dest_hi: r.v()?, array: r.v()?, index: r.v()? },
+        I_LANE_STORE => MirInst::LaneStore { dest: r.v()?, array: r.v()?, index: r.v()?, lo: r.v()?, hi: r.v()? },
+        I_LANE_PUSH => MirInst::LanePush { dest: r.v()?, array: r.v()?, lo: r.v()?, hi: r.v()? },
         I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: r.vs()? },
         I_COW => {
             let (dest, src, unique) = (r.v()?, r.v()?, r.u8()? != 0);
