@@ -635,6 +635,9 @@ pub struct Compiler {
     /// generic body's dictionaries as captures (#1526): `(first slot,
     /// count)`, after its own captures. It is no shared body itself.
     hir_lambda_dicts: Option<(u32, u32)>,
+    /// The lambda about to be planned takes these captures as two words:
+    /// `(capture local, first slot, kind)`. Its plan takes them.
+    hir_lambda_pairs: std::cell::RefCell<Vec<(u32, u32, PairKind)>>,
     /// A bounded generic instance method's context dictionaries, as its
     /// prologue loads them out of its own dictionary: each one's frame
     /// slot, the own dictionary's slot and the index there. Set by the
@@ -844,6 +847,7 @@ impl Default for Compiler {
             hir_entry_sp: None,
             hir_mir_dict_sp: None,
             hir_lambda_dicts: None,
+            hir_lambda_pairs: std::cell::RefCell::new(Vec::new()),
             hir_entry_ctx: Vec::new(),
             hir_mir_ctx: Vec::new(),
             hir_fn_names: HashMap::new(),

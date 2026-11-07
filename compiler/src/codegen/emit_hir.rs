@@ -305,6 +305,9 @@ struct HirLambda {
     /// A two-word result: the plan and entry of its twin, the same body
     /// returning the two words (`MirFunc::pair_twin`).
     twin: Option<(HirEmit, IlLabel, PairKind)>,
+    /// Each capture's kind when it is taken as two words: the enclosing
+    /// body holds it in two slots and the function value carries both.
+    pair_captures: Vec<Option<PairKind>>,
 }
 
 /// An anonymous `fn` whose body is emitted as a function of its own once
@@ -4409,8 +4412,19 @@ impl Compiler {
             if lam.is_coro {
                 return Err("lambda-body");
             }
-            // Captures are one-word locals of this body; a two-slot one is
-            // captured as its box.
+            // Captures are one-word locals of this body, or two-slot ones
+            // the lambda takes as their two words.
+            let pair_captures: Vec<Option<PairKind>> = lam
+                .captures
+                .iter()
+                .map(|&(outer, inner)| {
+                    let kind = emit.plan.pair_locals.get(&outer.0)?;
+                    let ty = lam.local(inner).ty.as_ref()?;
+                    let same = self.hir_pair_local_kind(lam, inner).as_ref() == Some(kind) && self.hir_mir_pair_tys(ty).is_some();
+                    same.then(|| kind.clone())
+                })
+                .collect();
+            let capture_words = lam.captures.len() as u32 + pair_captures.iter().flatten().count() as u32;
             for &(outer, _) in &lam.captures {
                 let plain = (outer.0 as usize) < hir.locals.len()
                     && !emit.plan.sroa.contains_key(&outer.0)
@@ -4461,8 +4475,11 @@ impl Compiler {
             for rep in std::iter::once(ret).chain(twin_kind.clone().map(Rep::Pair)) {
                 let prev_vars = std::mem::take(&mut self.context.variables);
                 let prev_two_word = self.compiling_two_word_enum.take();
-                Self::hir_lambda_frame(&mut self.context.variables, lam, &dicts);
-                let prev_dicts = self.hir_lambda_dicts.replace((lam.captures.len() as u32, dicts.len() as u32));
+                Self::hir_lambda_frame(&mut self.context.variables, lam, &dicts, &pair_captures);
+                let prev_dicts = self.hir_lambda_dicts.replace((capture_words, dicts.len() as u32));
+                *self.hir_lambda_pairs.borrow_mut() = Self::hir_lambda_capture_slots(lam, &pair_captures)
+                    .filter_map(|(inner, slot, kind)| Some((inner.0, slot, kind?)))
+                    .collect();
                 // Lambdas inside it are planned in its frame.
                 let plan = self
                     .plan_hir_body_ret(lam, rep)
@@ -4477,10 +4494,11 @@ impl Compiler {
                     Err(_) if !plans.is_empty() => break,
                     Err(why) => return Err(why),
                 };
+                self.hir_lambda_pairs.borrow_mut().clear();
                 // The captures are its function's first parameters.
-                for (slot, &(_, inner)) in lam.captures.iter().enumerate() {
-                    plan.slots[inner.0 as usize] = Some(slot as u32);
-                    plan.plan.params.insert(inner.0, (slot as u32, None));
+                for (inner, slot, kind) in Self::hir_lambda_capture_slots(lam, &pair_captures) {
+                    plan.slots[inner.0 as usize] = Some(slot);
+                    plan.plan.params.insert(inner.0, (slot, kind.map(|_| slot + 1)));
                 }
                 plans.push(plan);
             }
@@ -4488,15 +4506,33 @@ impl Compiler {
             let plan = plans.next().expect("the lambda's plan");
             let twin = plans.next().zip(twin_kind).map(|(p, k)| (p, self.bodies.fresh_label(), k));
             let label = self.bodies.fresh_label();
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, twin }));
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, twin, pair_captures }));
         }
         Ok(())
     }
 
-    /// A lambda's frame: each capture's name, each captured dictionary's,
-    /// then each parameter's. The slots of the captures and parameters.
-    fn hir_lambda_frame(vars: &mut Interner<String>, lam: &HirBody, dicts: &[(String, u32)]) -> Vec<u32> {
-        let mut slots: Vec<u32> = lam.captures.iter().map(|&(_, inner)| vars.intern(lam.local(inner).name.clone()) as u32).collect();
+    /// Each capture of `lam`, its first slot and, taken as two words, its
+    /// kind: the captures fill the first slots, a two-word one two.
+    fn hir_lambda_capture_slots<'a>(lam: &'a HirBody, pairs: &'a [Option<PairKind>]) -> impl Iterator<Item = (LocalId, u32, Option<PairKind>)> + 'a {
+        lam.captures.iter().zip(pairs).scan(0u32, |at, (&(_, inner), kind)| {
+            let slot = *at;
+            *at += if kind.is_some() { 2 } else { 1 };
+            Some((inner, slot, kind.clone()))
+        })
+    }
+
+    /// A lambda's frame: each capture's name (and a two-word one's second
+    /// word), each captured dictionary's, then each parameter's. The slots
+    /// of the captures and parameters.
+    fn hir_lambda_frame(vars: &mut Interner<String>, lam: &HirBody, dicts: &[(String, u32)], pairs: &[Option<PairKind>]) -> Vec<u32> {
+        let mut slots = Vec::with_capacity(lam.captures.len() + lam.params.len());
+        for (i, &(_, inner)) in lam.captures.iter().enumerate() {
+            let name = lam.local(inner).name.clone();
+            slots.push(vars.intern(name.clone()) as u32);
+            if pairs.get(i).is_some_and(Option::is_some) {
+                vars.intern(format!("{name}$hi"));
+            }
+        }
         for (name, _) in dicts {
             vars.intern(name.clone());
         }
@@ -4599,6 +4635,14 @@ impl Compiler {
             tag_slots: HashMap::new(),
             par_tail: Vec::new(),
         };
+        // A lambda's two-word captures: two-slot parameters from the start,
+        // so its reads of them plan as pairs.
+        for (local, slot, kind) in std::mem::take(&mut *self.hir_lambda_pairs.borrow_mut()) {
+            emit.slots[local as usize] = Some(slot);
+            emit.tag_slots.insert(local, slot + 1);
+            emit.plan.pair_locals.insert(local, kind);
+            emit.plan.params.insert(local, (slot, Some(slot + 1)));
+        }
         // A `declare` signature's tag names are constants and an `invoke`
         // callback is a `CodePtr`, not values.
         let tags: HashSet<u32> = hir
@@ -4869,7 +4913,10 @@ impl Compiler {
             else {
                 continue;
             };
-            if hir.local(local).captured || deferred.contains(&local.0) {
+            // A lambda captures a two-word local by value, as its two
+            // words ([`HirLambda::pair_captures`]) or, where the lambda
+            // takes one word, its box.
+            if deferred.contains(&local.0) {
                 continue;
             }
             // An assigned local takes two slots only by the catch-all below
@@ -10719,9 +10766,19 @@ impl Compiler {
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        let slots = Self::hir_lambda_frame(&mut self.context.variables, &body, &dicts);
+        // The captures its plan takes as two words.
+        let pairs: Vec<Option<PairKind>> = body
+            .captures
+            .iter()
+            .map(|&(_, inner)| match emit.plan.params.get(&inner.0) {
+                Some((_, Some(_))) => emit.plan.pair_locals.get(&inner.0).cloned(),
+                _ => None,
+            })
+            .collect();
+        let slots = Self::hir_lambda_frame(&mut self.context.variables, &body, &dicts, &pairs);
         let ncap = body.captures.len();
-        let prev_dicts = self.hir_lambda_dicts.replace((ncap as u32, dicts.len() as u32));
+        let capture_words = ncap + pairs.iter().flatten().count();
+        let prev_dicts = self.hir_lambda_dicts.replace((capture_words as u32, dicts.len() as u32));
         for (&param, &slot) in body.params.iter().zip(&slots[ncap..]) {
             let pname = body.local(param).name.clone();
             self.record_debug_param(&pname, slot);
@@ -10744,7 +10801,7 @@ impl Compiler {
         self.hir_lambda_dicts = prev_dicts;
         // A lambda with a `defer` gets its cleanup pad, as a function does,
         // so a cancelled task's unwinder runs it (#1194).
-        let arity = (ncap + dicts.len() + body.params.len()) as u32;
+        let arity = (capture_words + dicts.len() + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();

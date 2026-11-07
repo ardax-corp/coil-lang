@@ -208,6 +208,9 @@ pub struct HirIterLoop {
 pub struct HirFnValue {
     pub kind: MirAllocKind,
     pub captures: Vec<HirLocal>,
+    /// Per capture: whether the lambda takes it as its two words (a
+    /// two-slot local's), not one.
+    pub pairs: Vec<bool>,
     pub dicts: Vec<HirDictOp>,
 }
 
@@ -4986,7 +4989,13 @@ impl Lower<'_> {
             return Err("function value type".into());
         }
         let mut words = Vec::with_capacity(f.captures.len());
-        for &local in &f.captures {
+        for (i, &local) in f.captures.iter().enumerate() {
+            if f.pairs.get(i).copied().unwrap_or(false) {
+                let (lo, hi, lo_ty, hi_ty) = self.pair_local(local).ok_or("pair capture")?;
+                words.push(self.b.use_local(lo, lo_ty).map_err(mir)?);
+                words.push(self.b.use_local(hi, hi_ty).map_err(mir)?);
+                continue;
+            }
             words.push(self.local_word(local)?);
         }
         words.extend(self.dict_values(&f.dicts)?);

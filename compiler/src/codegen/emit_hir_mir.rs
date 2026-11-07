@@ -555,11 +555,16 @@ impl Compiler {
                 if let Some(lam) = emit.plan.lambdas.get(&id.0) {
                     let target = lam.label;
                     // Its captured dictionaries follow its captures (#1526).
-                    let words = (lam.body.captures.len() + lam.dicts.len()) as u32;
+                    // A two-word capture is two of its words.
+                    let pairs: Vec<bool> = lam.pair_captures.iter().map(Option::is_some).collect();
+                    let words = (lam.body.captures.len() + pairs.iter().filter(|&&p| p).count() + lam.dicts.len()) as u32;
                     let operand = make_fn_operand(words, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
                     let dicts = lam.dicts.iter().map(|&(_, slot)| crate::mir::HirDictOp::Load(slot)).collect();
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, dicts });
+                    t.fn_values.insert(
+                        id.0,
+                        crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, pairs, dicts },
+                    );
                 }
             }
             // A generic function's `MakePolyFn`, or with bounds its
@@ -577,7 +582,7 @@ impl Compiler {
                             Some(params) => crate::mir::MirAllocKind::PolyFnCapture { target, params },
                             None => crate::mir::MirAllocKind::PolyFn { target },
                         };
-                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), dicts: Vec::new() })
+                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() })
                     } else {
                         let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
                         let steps = self.hir_mir_once(|this| {
@@ -586,7 +591,7 @@ impl Compiler {
                             steps
                         });
                         self.hir_mir_dict_program(&steps)
-                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), dicts })
+                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), pairs: Vec::new(), dicts })
                     };
                     if let Some(value) = value {
                         t.fn_values.insert(id.0, value);
@@ -597,7 +602,7 @@ impl Compiler {
                 if let Some(target) = self.bodies.entry_label_for_offset(entry) {
                     let target = self.fn_value_target(&name, target);
                     let operand = make_fn_operand(0, 0, arity, rest);
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), dicts: Vec::new() });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
                 }
             }
             HirKind::Global { .. } => {
@@ -778,7 +783,7 @@ impl Compiler {
                     && let Some(target) = self.bodies.entry_label_for_offset(*entry as usize)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new(), dicts: Vec::new() });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
                 }
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
