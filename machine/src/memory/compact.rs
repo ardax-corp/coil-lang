@@ -151,8 +151,11 @@ impl Object {
                     storage => {
                         let kinds = heap.class_field_kinds(inst.type_id);
                         if let Some(words) = storage.as_mut_slice() {
-                            for (i, v) in words.iter_mut().enumerate() {
-                                if kinds.get(i).copied() == Some(common::WORD_POINTER) {
+                            // A tagged word's kind reads its tag slot, which
+                            // no fix changes: resolve them all first.
+                            let resolved: Vec<u8> = common::class_slot_kinds(kinds, words).collect();
+                            for (v, kind) in words.iter_mut().zip(resolved) {
+                                if kind == common::WORD_POINTER {
                                     fix(v);
                                 }
                             }

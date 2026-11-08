@@ -16,7 +16,7 @@ use crate::debug::{DebugLine, DebugLoc, ProgramDebug};
 pub const ARCHIVE_MAJOR: u16 = 7;
 
 /// Archive minor. Bump on an additive change to the format.
-pub const ARCHIVE_MINOR: u16 = 0;
+pub const ARCHIVE_MINOR: u16 = 1;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -60,6 +60,47 @@ pub const WORD_POINTER: u8 = 2;
 /// a `byte` or `bool`, so the runtime may store the array one byte per
 /// element. Runtimes that predate it ignore the stamp (elements stay words).
 pub const WORD_BYTE: u8 = 3;
+
+/// Class slot kind only ([`ClassWordKinds`]): the first word of a flat
+/// two-word field whose payload is a heap pointer under some tags and a
+/// scalar under the rest (`Result<int, string>`). The row's trailer names
+/// the slot holding its tag and the tags that make it a pointer
+/// ([`class_slot_kinds`]). Runtimes that predate it treat the word as
+/// [`WORD_UNKNOWN`] and the trailer as kinds of slots that do not exist.
+pub const WORD_TAGGED: u8 = 4;
+
+/// Bytes of one [`WORD_TAGGED`] trailer entry: the tag slot (`u16` LE),
+/// then the pointer-tag mask (`u64` LE, bit `t` for tag `t`).
+pub const TAGGED_ENTRY_BYTES: usize = 10;
+
+/// Append the trailer entry of a [`WORD_TAGGED`] slot to a class row.
+pub fn push_tagged_entry(kinds: &mut Vec<u8>, tag_slot: u16, pointer_tags: u64) {
+    kinds.extend_from_slice(&tag_slot.to_le_bytes());
+    kinds.extend_from_slice(&pointer_tags.to_le_bytes());
+}
+
+/// The kind of each of an instance's `slots` under its class row `kinds`,
+/// with every [`WORD_TAGGED`] slot resolved by its current tag to
+/// [`WORD_POINTER`] or [`WORD_SCALAR`]. A slot past the row, or a tagged
+/// one whose entry is missing or names a slot out of range, is
+/// [`WORD_UNKNOWN`].
+pub fn class_slot_kinds<'a>(kinds: &'a [u8], slots: &'a [crate::Value]) -> impl Iterator<Item = u8> + 'a {
+    let n = slots.len();
+    let mut entries = kinds.get(n..).unwrap_or_default().chunks_exact(TAGGED_ENTRY_BYTES);
+    (0..n).map(move |i| match kinds.get(i).copied() {
+        Some(WORD_TAGGED) => entries
+            .next()
+            .and_then(|e| {
+                let slot = usize::from(u16::from_le_bytes([e[0], e[1]]));
+                let mask = u64::from_le_bytes(e[2..10].try_into().ok()?);
+                let tag = slots.get(slot)?.bits();
+                Some(if tag < 64 && mask >> tag & 1 == 1 { WORD_POINTER } else { WORD_SCALAR })
+            })
+            .unwrap_or(WORD_UNKNOWN),
+        Some(kind) => kind,
+        None => WORD_UNKNOWN,
+    })
+}
 
 /// Words whose kinds a packed `u8` records (2 bits each). Later words of a
 /// wider payload are unknown.
@@ -265,6 +306,24 @@ pub fn decode_archived_program(buffer: &[u8]) -> Result<ArchivedProgram, Archive
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tagged_slot_resolves_by_its_tag() {
+        // Slots: [name, payload, n, tag]; the payload is a pointer under tag 1.
+        let mut kinds = vec![WORD_POINTER, WORD_TAGGED, WORD_SCALAR, WORD_SCALAR];
+        push_tagged_entry(&mut kinds, 3, 0b10);
+        let at = |tag: i64| {
+            let slots = [crate::Value::from(0i64), crate::Value::from(8i64), crate::Value::from(1i64), crate::Value::from(tag)];
+            class_slot_kinds(&kinds, &slots).collect::<Vec<_>>()
+        };
+        assert_eq!(at(1), [WORD_POINTER, WORD_POINTER, WORD_SCALAR, WORD_SCALAR]);
+        assert_eq!(at(0), [WORD_POINTER, WORD_SCALAR, WORD_SCALAR, WORD_SCALAR]);
+        assert_eq!(at(70), [WORD_POINTER, WORD_SCALAR, WORD_SCALAR, WORD_SCALAR]);
+        // No trailer, or a slot past the row: unknown.
+        let bare = [WORD_TAGGED];
+        let one = [crate::Value::from(1i64), crate::Value::from(1i64)];
+        assert_eq!(class_slot_kinds(&bare, &one).collect::<Vec<_>>(), [WORD_UNKNOWN, WORD_UNKNOWN]);
+    }
 
     fn program(version: u32) -> Vec<u8> {
         let p = ArchivedProgram {

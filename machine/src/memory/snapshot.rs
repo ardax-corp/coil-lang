@@ -243,9 +243,9 @@ impl Capture<'_> {
                 let kinds = self.heap.class_field_kinds(inst.type_id);
                 let words = slots
                     .iter()
+                    .zip(common::class_slot_kinds(kinds, slots))
                     .enumerate()
-                    .map(|(i, v)| {
-                        let kind = kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN);
+                    .map(|(i, (v, kind))| {
                         self.word(*v, kind, parent(SnapStep::Field { type_id: inst.type_id, index: i }))
                     })
                     .collect::<Result<_, _>>()?;

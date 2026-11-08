@@ -1227,8 +1227,11 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                     MirInst::HostInvoke { dest, native_id, .. } if pad && *native_id == common::UNWIND_RESUME_ID => {
                         need(dest)?;
                     }
-                    MirInst::HostInvoke { dest, native_id, args, .. } => {
+                    MirInst::HostInvoke { dest, dest_hi, native_id, args, .. } => {
                         need(dest)?;
+                        if let Some(h) = dest_hi {
+                            need(h)?;
+                        }
                         for a in args {
                             need(a)?;
                         }
@@ -3187,7 +3190,7 @@ impl<'a> Lower<'a> {
                     self.set(f, *dest, zero);
                 }
             }
-            MirInst::HostInvoke { dest, native_id, layout, args } => {
+            MirInst::HostInvoke { dest, dest_hi, native_id, layout, args } => {
                 // `s[i]` on a string: the byte in place when `i` is in range,
                 // else the host call (out of range, a boxed string).
                 let byte_read = *native_id == common::STRING_BYTE_AT_ID && args.len() == 2 && self.str_views.contains_key(&args[0]);
@@ -3209,6 +3212,12 @@ impl<'a> Lower<'a> {
                 self.pop_roots(roots);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
+                // A two-word result's tag, which the runtime left in the
+                // context (`HOST_ENUM_LAYOUT_PAIR`).
+                if let Some(h) = dest_hi {
+                    let tag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_RET_HI);
+                    self.set(f, *h, tag);
+                }
                 if let Some(join) = join {
                     // `string_byte_at` neither collects nor moves anything:
                     // every view holds.

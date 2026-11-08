@@ -13,6 +13,7 @@
 //! the same tiers; explicit `Deopt` is skipped at emit. History of each
 //! piece: `docs/internals/mir.md`.
 
+mod box_report;
 mod builder;
 mod bulk;
 mod byte_scan;
@@ -43,6 +44,7 @@ mod strength;
 mod text;
 mod ty;
 
+pub use box_report::{BoxKind, BoxSite, start_box_capture, take_box_capture};
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;

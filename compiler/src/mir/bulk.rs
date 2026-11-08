@@ -295,13 +295,13 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
                 n
             };
             let dest = b.value(MirTy::I64);
-            b.push(fast, MirInst::HostInvoke { dest, native_id: VEC_EXTEND_RANGE_ID, layout, args: vec![out, src, i0, end] })
+            b.push(fast, MirInst::HostInvoke { dest, dest_hi: None, native_id: VEC_EXTEND_RANGE_ID, layout, args: vec![out, src, i0, end] })
         }
         Kind::Fill { value } => {
             let count = b.value(MirTy::I64);
             b.push(fast, MirInst::Bin { dest: count, op: MirBinOp::Sub, ty: MirTy::I64, lhs: n, rhs: i0 });
             let dest = b.value(MirTy::I64);
-            b.push(fast, MirInst::HostInvoke { dest, native_id: VEC_FILL_ID, layout, args: vec![out, value, count] });
+            b.push(fast, MirInst::HostInvoke { dest, dest_hi: None, native_id: VEC_FILL_ID, layout, args: vec![out, value, count] });
             n
         }
     };

@@ -458,6 +458,9 @@ pub enum MirInst {
     /// edge). I6 types other natives as barriers; impure never hoists.
     HostInvoke {
         dest: ValueId,
+        /// A two-word result (`common::HOST_ENUM_LAYOUT_PAIR`): its tag,
+        /// `dest` its payload word.
+        dest_hi: Option<ValueId>,
         native_id: u16,
         /// `common::HOST_ENUM_LAYOUT_*` packed on reconstruct.
         layout: u8,
@@ -1143,6 +1146,7 @@ impl MirInst {
             } => Some(h),
             Self::VecLoop { pos: Some(p), .. } => Some(p),
             Self::CallIndirect { pair: Some((h, _)), .. } => Some(h),
+            Self::HostInvoke { dest_hi: Some(h), .. } => Some(h),
             _ => None,
         };
         std::iter::once(self.dest()).chain(hi)

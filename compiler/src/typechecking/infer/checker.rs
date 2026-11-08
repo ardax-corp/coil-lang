@@ -209,6 +209,7 @@ impl Checker {
             static_slot_types: HashMap::new(),
             synthetic_statics: std::collections::HashSet::new(),
             next_static_slot: 0,
+            static_tails: HashMap::new(),
             const_class_fields: HashMap::new(),
             readonly_classes: HashSet::new(),
             shared_classes: HashSet::new(),
@@ -20465,10 +20466,33 @@ impl Checker {
             .filter(|(_, id)| *id != 0)
             .filter_map(|(key, type_id)| {
                 let fields = self.class_fields(key)?;
-                let kinds = fields
+                let tails = self.class_flat_tails(key);
+                let flat = |ty: &Ty| crate::layout::pair_word_kinds(self, ty).unwrap_or([common::WORD_UNKNOWN; 2]);
+                // A flat field's first word whose payload is a pointer only
+                // under some tags is tagged by its tail slot: (slot, mask).
+                let mut tagged = Vec::new();
+                let mut kinds: Vec<u8> = fields
                     .iter()
-                    .map(|(_, ty)| crate::layout::word_kind(self, ty))
+                    .zip(&tails)
+                    .map(|((_, ty), tail)| match tail {
+                        Some(tail) if flat(ty)[0] == common::WORD_UNKNOWN => {
+                            match (u16::try_from(*tail), crate::layout::pair_pointer_tags(self, ty)) {
+                                (Ok(slot), Some(mask)) => {
+                                    tagged.push((slot, mask));
+                                    common::WORD_TAGGED
+                                }
+                                _ => common::WORD_UNKNOWN,
+                            }
+                        }
+                        Some(_) => flat(ty)[0],
+                        None => crate::layout::word_kind(self, ty),
+                    })
                     .collect();
+                // A flat field's second word, in its tail slot.
+                kinds.extend(fields.iter().zip(&tails).filter(|(_, t)| t.is_some()).map(|((_, ty), _)| flat(ty)[1]));
+                for (slot, mask) in tagged {
+                    common::push_tagged_entry(&mut kinds, slot, mask);
+                }
                 Some(common::ClassWordKinds { type_id, kinds })
             })
             .chain(self.record_type_ids.iter().map(|((_, kinds), &type_id)| common::ClassWordKinds { type_id, kinds: kinds.clone() }))
@@ -20515,11 +20539,74 @@ impl Checker {
             if self.synthetic_statics.contains(fqn) {
                 continue;
             }
-            if let (Some(k), Some(ty)) = (kinds.get_mut(id as usize), self.static_slot_types.get(fqn)) {
+            let Some(ty) = self.static_slot_types.get(fqn) else {
+                continue;
+            };
+            // A two-word static's words, the second in its tail slot; a
+            // payload that is a pointer only under some tags stays unknown.
+            if let Some(&tail) = self.static_tails.get(fqn) {
+                let [first, second] = crate::layout::pair_word_kinds(self, ty).unwrap_or([common::WORD_UNKNOWN; 2]);
+                if let Some(k) = kinds.get_mut(id as usize) {
+                    *k = first;
+                }
+                if let Some(k) = kinds.get_mut(tail as usize) {
+                    *k = second;
+                }
+                continue;
+            }
+            if let Some(k) = kinds.get_mut(id as usize) {
                 *k = crate::layout::word_kind(self, ty);
             }
         }
         kinds
+    }
+
+    /// For each field of class `key`, in declaration order, the tail slot
+    /// that holds the second word of a flat two-word field: a field of a
+    /// closed two-word type ([`crate::layout::pair_word_kinds`]) keeps its first word in its own
+    /// slot and its second after the declared fields, so no other field's
+    /// slot moves. A `shared` (a two-word store is not atomic) or `view`
+    /// class keeps every field one word. In a generic class only a field
+    /// whose type names none of the class's parameters is flat: its layout
+    /// is the same in every instance, so a shared body reads it as a clone
+    /// does.
+    pub fn class_flat_tails(&self, key: &str) -> Vec<Option<u32>> {
+        let Some(fields) = self.class_fields(key) else {
+            return Vec::new();
+        };
+        let mut tails = vec![None; fields.len()];
+        let params = self.generics().generic_type_ctors.get(key).cloned().unwrap_or_default();
+        if self.is_shared_class(key)
+            || self.is_view_class(key)
+            || crate::layout::readonly_pair_class(self, &Ty::Con(key.to_string())).is_some()
+        {
+            return tails;
+        }
+        let mut next = fields.len() as u32;
+        for (i, (name, ty)) in fields.iter().enumerate() {
+            if !self.is_borrow_field(key, name)
+                && !ty_names_param(ty, &params)
+                && crate::layout::pair_word_kinds(self, ty).is_some()
+            {
+                tails[i] = Some(next);
+                next += 1;
+            }
+        }
+        tails
+    }
+
+    /// Whether field type `ty` of class `key` names one of the class's
+    /// type parameters: such a field holds one word in every instance
+    /// (a shared body reads it so), a two-word value boxed.
+    pub fn field_names_class_param(&self, key: &str, ty: &Ty) -> bool {
+        self.generics().generic_type_ctors.get(key).is_some_and(|params| ty_names_param(ty, params))
+    }
+
+    /// Slots an instance of class `key` holds: its fields, then the tail
+    /// slots of its flat fields ([`Self::class_flat_tails`]).
+    pub fn class_slot_count(&self, key: &str) -> usize {
+        let tails = self.class_flat_tails(key);
+        tails.len() + tails.iter().flatten().count()
     }
 
     /// Compile-time type id for `InitTyped` (`0` if the name is not a class).
@@ -20599,6 +20686,43 @@ impl Checker {
         std::mem::swap(&mut self.next_static_slot, &mut other.next_static_slot);
         std::mem::swap(&mut self.synthetic_statics, &mut other.synthetic_statics);
         std::mem::swap(&mut self.static_slot_types, &mut other.static_slot_types);
+        std::mem::swap(&mut self.static_tails, &mut other.static_tails);
+    }
+
+    /// Give each `static let` of a closed two-word type a tail slot for
+    /// its second word, after every declared slot: a store writes both
+    /// words and a read loads both, with no box. A `const` keeps one slot
+    /// (it is read, never stored); a synthetic slot is no value. Runs once
+    /// typing is done; a static already given one keeps it.
+    pub fn finalize_static_tails(&mut self) {
+        let mut statics: Vec<(String, u32)> = self
+            .static_slots
+            .iter()
+            .filter(|(fqn, (_, is_const))| !is_const && !self.synthetic_statics.contains(*fqn) && !self.static_tails.contains_key(*fqn))
+            .map(|(fqn, (id, _))| (fqn.clone(), *id))
+            .collect();
+        statics.sort_by_key(|(_, id)| *id);
+        for (fqn, _) in statics {
+            let Some(ty) = self.static_slot_types.get(&fqn).map(|t| apply_ty_prune(&self.subst, t)) else {
+                continue;
+            };
+            if ty_names_param(&ty, &[]) || crate::layout::pair_word_kinds(self, &ty).is_none() {
+                continue;
+            }
+            let tail = self.next_static_slot;
+            self.next_static_slot += 1;
+            self.static_tails.insert(fqn, tail);
+        }
+    }
+
+    /// The tail slot of the static in `slot`, if it has one.
+    pub fn static_tail_of_slot(&self, slot: u32) -> Option<u32> {
+        self.static_slots.iter().find(|(_, (id, _))| *id == slot).and_then(|(fqn, _)| self.static_tail(fqn))
+    }
+
+    /// The tail slot of static `fqn` ([`Self::finalize_static_tails`]).
+    pub fn static_tail(&self, fqn: &str) -> Option<u32> {
+        self.static_tails.get(fqn).copied()
     }
 
     /// Allocate a synthetic static slot (e.g. `extern` library / fn-id handles).
@@ -22266,6 +22390,24 @@ fn if_value_without_else(e: &Output) -> bool {
             matches!(else_arm.body.1.as_ref(), Expression::Block(items) if items.is_empty())
                 && else_arm.body.0 == e.0
         }
+        _ => false,
+    }
+}
+
+/// Whether `ty` holds an inference variable or one of `params`, a generic
+/// class's parameter names as its field types spell them.
+fn ty_names_param(ty: &Ty, params: &[String]) -> bool {
+    let named = |t: &Ty| ty_names_param(t, params);
+    match ty {
+        Ty::Var(_) => true,
+        Ty::Con(name) => params.iter().any(|p| p == name),
+        Ty::Fun(a, b) => named(a) || named(b),
+        Ty::App(head, args) => named(head) || args.iter().any(named),
+        Ty::Tuple(items) => items.iter().any(named),
+        Ty::Readonly(inner) => named(inner),
+        Ty::Array { element, .. } => named(element),
+        Ty::Constructor { owner, .. } => named(owner),
+        Ty::Record { fields } => fields.iter().any(|(_, t)| named(t)),
         _ => false,
     }
 }

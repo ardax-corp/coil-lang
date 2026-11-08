@@ -27,6 +27,12 @@ MIR section `FORMAT` 11 (feature/native) adds `CallIndirect`'s two-word
 form (opcode 44: second word and `unpair` body) and each body's
 `pair_twin`; the code image `FORMAT` 2 adds `NativeEntry::twin`.
 
+Minor 1 adds class slot kind `WORD_TAGGED` (4): the first word of a flat
+two-word field whose payload is a pointer only under some tags. A row with
+one has a trailer after its slot kinds, an entry per tagged slot (tag slot
+`u16` LE, pointer-tag mask `u64` LE), and the collector resolves the word
+by its tag (`common::class_slot_kinds`).
+
 Majors 4 to 6 ran on the VM. The notes below are the record of what minors of
 major 4 added; opcodes and frame maps in them no longer exist.
 

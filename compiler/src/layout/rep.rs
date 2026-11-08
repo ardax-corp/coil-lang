@@ -171,6 +171,75 @@ pub(crate) fn readonly_pair_class(checker: &Checker, ty: &Ty) -> Option<String> 
     (fields.len() == 2 && fields.iter().all(|(_, t)| is_immediate(t))).then_some(key)
 }
 
+/// The word kinds of a closed two-word value's two slots when it sits flat
+/// in an object: the second word (a tag, or a product's second item) is
+/// always scalar; the first is scalar for a [`scalar_pair`] and otherwise
+/// a payload that is a heap pointer only for some tags, which the collector
+/// resolves by address ([`common::WORD_UNKNOWN`]).
+pub fn pair_word_kinds(checker: &Checker, ty: &Ty) -> Option<[u8; 2]> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    if !matches!(of_resolved(checker, &ty), Layout::Pair(_)) {
+        return None;
+    }
+    let first = if scalar_pair(checker, &ty) { common::WORD_SCALAR } else { common::WORD_UNKNOWN };
+    Some([first, common::WORD_SCALAR])
+}
+
+/// The tags under which the first word of the closed two-word value `ty`
+/// is a heap pointer, as a mask (bit `t` for tag `t`), for a `Result` or
+/// a user enum whose payload words are each a scalar or a pointer by
+/// their type. `None` when a payload's word kind is unknown, a tag is 64
+/// or more, or `ty` is no tagged pair.
+pub fn pair_pointer_tags(checker: &Checker, ty: &Ty) -> Option<u64> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    let variants: Vec<(u32, Vec<Ty>)> = match of_resolved(checker, &ty) {
+        Layout::Pair(PairKind::Result) => {
+            let (ok, err) = result_ok_err(strip_readonly(&ty))?;
+            checker
+                .enum_variants(common::BUILTIN_RESULT_ENUM)?
+                .into_iter()
+                .map(|(name, tag, _)| (tag, vec![if name == "Ok" { ok.clone() } else { err.clone() }]))
+                .collect()
+        }
+        Layout::Pair(PairKind::Enum(name)) => checker.enum_variants(&name)?.into_iter().map(|(_, tag, payload)| (tag, payload)).collect(),
+        _ => return None,
+    };
+    let mut mask = 0u64;
+    for (tag, payload) in variants {
+        let pointer = match payload.as_slice() {
+            [] => false,
+            [p] if is_unit(p) => false,
+            [p] => match word_kind(checker, p) {
+                common::WORD_SCALAR => false,
+                common::WORD_POINTER => true,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if pointer {
+            mask |= 1u64.checked_shl(tag)?;
+        }
+    }
+    Some(mask)
+}
+
+/// A two-word value neither of whose words is ever a heap pointer
+/// (`Option<int>`, `(int, float)`, a numeric range, `Result<int, int>`, a
+/// readonly pair class, an enum of immediate payloads): a field of it can
+/// sit flat in two scalar slots with no tag-aware word kind.
+pub fn scalar_pair(checker: &Checker, ty: &Ty) -> bool {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    let word = |t: &Ty| is_immediate(t) || is_unit(t);
+    match of_resolved(checker, &ty) {
+        Layout::Pair(PairKind::Range { .. } | PairKind::Product | PairKind::Option | PairKind::Class(_)) => true,
+        Layout::Pair(PairKind::Result) => result_ok_err(strip_readonly(&ty)).is_some_and(|(ok, err)| word(&ok) && word(&err)),
+        Layout::Pair(PairKind::Enum(name)) => checker
+            .enum_variants(&name)
+            .is_some_and(|vs| vs.iter().all(|(_, _, payload)| payload.iter().all(|p| word(p) || is_scalar_enum_ty(checker, p)))),
+        _ => false,
+    }
+}
+
 /// `int`, `float`, `bool` or `byte`.
 pub(crate) fn is_immediate(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == INT || n == FLOAT || n == BOOL || n == BYTE)

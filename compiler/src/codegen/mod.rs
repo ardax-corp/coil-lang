@@ -595,6 +595,10 @@ pub struct Compiler {
     /// type: name and entry, emitted after the body that first needs one.
     hir_unpairs: HashMap<String, crate::bodies::Label>,
     hir_unpair_tail: Vec<(String, crate::typechecking::Ty, crate::bodies::Label)>,
+    /// A named function's value entry (`f$value`, its one-word adapter,
+    /// [`Compiler::fn_value_target`]) still to emit: the function's name
+    /// and the adapter's.
+    hir_value_adapter_tail: Vec<(String, String)>,
     /// Closure adapters ([`Compiler::hir_fn_adapter`]) by unboxed tags,
     /// and those still to emit after the current body.
     hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<crate::layout::ValueLayout>), crate::bodies::Label>,
@@ -631,6 +635,15 @@ pub struct Compiler {
     /// generic body's dictionaries as captures (#1526): `(first slot,
     /// count)`, after its own captures. It is no shared body itself.
     hir_lambda_dicts: Option<(u32, u32)>,
+    /// The lambda about to be planned takes these captures as two words:
+    /// `(capture local, first slot, kind)`. Its plan takes them.
+    hir_lambda_pairs: std::cell::RefCell<Vec<(u32, u32, PairKind)>>,
+    /// Whether the module being compiled is the project's own code (a
+    /// path under the project, not a dependency): only its residue boxes
+    /// warn (E0808, [`Compiler::note_box_residue`]).
+    residue_lint: std::cell::Cell<bool>,
+    /// E0808 warnings waiting for the module's messages, each once by key.
+    residue: std::cell::RefCell<(HashSet<String>, Vec<Message>)>,
     /// A bounded generic instance method's context dictionaries, as its
     /// prologue loads them out of its own dictionary: each one's frame
     /// slot, the own dictionary's slot and the index there. Set by the
@@ -821,6 +834,7 @@ impl Default for Compiler {
             hir_lambda_tail: Vec::new(),
             hir_unpairs: HashMap::new(),
             hir_unpair_tail: Vec::new(),
+            hir_value_adapter_tail: Vec::new(),
             hir_fn_adapters: HashMap::new(),
             hir_adapter_tail: Vec::new(),
             hir_closure_adapters: HashMap::new(),
@@ -839,6 +853,9 @@ impl Default for Compiler {
             hir_entry_sp: None,
             hir_mir_dict_sp: None,
             hir_lambda_dicts: None,
+            hir_lambda_pairs: std::cell::RefCell::new(Vec::new()),
+            residue_lint: std::cell::Cell::new(false),
+            residue: std::cell::RefCell::new((HashSet::new(), Vec::new())),
             hir_entry_ctx: Vec::new(),
             hir_mir_ctx: Vec::new(),
             hir_fn_names: HashMap::new(),

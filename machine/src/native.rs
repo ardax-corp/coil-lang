@@ -2138,7 +2138,9 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     let f = match host.func {
         Some(f) if !host.on_machine && !replaced() => f,
         _ if host.on_machine || host.func.is_some() => {
+            crate::host_enum::take_pair_tag();
             return match unsafe { host_invoke(ctx, id, layout, args, n) } {
+                Some(out) if layout as u32 == common::HOST_ENUM_LAYOUT_PAIR => unsafe { split_pair(ctx, out) },
                 Some(out) => out,
                 None => unsafe { bail(ctx) },
             };
@@ -2158,6 +2160,9 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     }
     let live_before = heap.live_object_count();
     let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
+    if layout == crate::host_enum::HostEnumLayout::Pair {
+        crate::host_enum::take_pair_tag();
+    }
     let v = crate::host_enum::in_host_enum_layout(layout, || f(heap, args));
     // The runtime checks for a collection once the call returns.
     let made = heap.live_object_count().saturating_sub(live_before) as u64;
@@ -2165,7 +2170,28 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         c.allocs += made - 1;
         unsafe { note_alloc(ctx, heap) };
     }
+    if layout == crate::host_enum::HostEnumLayout::Pair {
+        return unsafe { split_pair(ctx, v.bits()) };
+    }
     v.bits()
+}
+
+/// A two-word host result ([`common::HOST_ENUM_LAYOUT_PAIR`]): its payload
+/// word returned, its tag left in [`NativeCtx::ret_hi`].
+///
+/// # Safety
+/// `ctx` is the call's live [`NativeCtx`].
+unsafe fn split_pair(ctx: *mut NativeCtx, word: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    match crate::host_enum::split_pair_result(heap, common::Value::from(word)) {
+        Some((lo, tag)) => {
+            unsafe { (*ctx).ret_hi = tag };
+            lo
+        }
+        None => unsafe { bail(ctx) },
+    }
 }
 
 /// `Yield` in a generator's body: suspend its fiber with `value` (the

@@ -2499,8 +2499,9 @@ impl Object {
                     }
                     InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
                         let kinds = heap.class_field_kinds(inst.type_id);
-                        for (i, v) in inst.storage.as_slice().into_iter().flatten().enumerate() {
-                            match kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN) {
+                        let slots = inst.storage.as_slice().unwrap_or_default();
+                        for (v, kind) in slots.iter().zip(common::class_slot_kinds(kinds, slots)) {
+                            match kind {
                                 common::WORD_SCALAR => {}
                                 kind => word(*v, kind == common::WORD_POINTER, visit),
                             }
@@ -2963,8 +2964,9 @@ impl ObjInstance {
             InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
                 if let Some(slots) = self.storage.as_slice() {
                     let kinds = heap.class_field_kinds(self.type_id);
-                    for (i, v) in slots.iter().enumerate() {
-                        let kind = kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN);
+                    for (i, (v, kind)) in slots.iter().zip(common::class_slot_kinds(kinds, slots)).enumerate() {
+                        #[cfg(not(feature = "gc-stress"))]
+                        let _ = i;
                         #[cfg(feature = "gc-stress")]
                         heap.verify_kinded_word(&format!("class {}", self.type_id), i, kind, *v);
                         if kind != common::WORD_SCALAR {

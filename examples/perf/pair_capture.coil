@@ -1,0 +1,32 @@
+// A lambda made in a hot loop captures an `Option<int>` local: it takes
+// the two words, so making and calling it boxes nothing for the capture.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+#[inline(never)]
+fn call(fn(int) -> int f, int k) -> int {
+    return f(k);
+}
+
+fn main() {
+    let s = 0;
+    for i in 0..5000000 {
+        let o = half(i);
+        s += call(
+            fn (int k) use (o) => match o {
+                Some(v) => v + k,
+                None => k,
+            },
+            1,
+        );
+    }
+    let _ = print(format("%i", s));
+}

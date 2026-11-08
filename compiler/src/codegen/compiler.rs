@@ -202,7 +202,11 @@ impl Compiler {
     }
 
     pub fn set_source_file(&mut self, path: impl Into<std::path::PathBuf>) {
-        self.current_source_file = Some(path.into());
+        let path = path.into();
+        // A path the pipeline left absolute is outside the project; one
+        // under `.deps` is a dependency's.
+        self.residue_lint.set(path.is_relative() && !path.components().any(|c| c.as_os_str() == ".deps"));
+        self.current_source_file = Some(path);
         // Record every compiled file, not only those that emit a located byte.
         self.intern_source_file();
     }
@@ -852,6 +856,11 @@ impl Compiler {
     /// What decides `name`'s parameters' calling convention
     /// ([`crate::layout::convention_param`]), and its parameter types.
     fn callee_param_facts(&self, name: &str) -> Option<(crate::layout::CalleeFacts, Vec<Ty>)> {
+        // An inherent method clone (`Acc::add$inst$..`): ground, never a
+        // function value, its types the plan's.
+        if let Some(plan) = self.method_clone_plans.borrow().get(name) {
+            return Some((crate::layout::CalleeFacts::default(), plan.param_tys().to_vec()));
+        }
         let lookup = strip_overload_key(name);
         let params = self
             .checker
@@ -912,7 +921,12 @@ impl Compiler {
         // By position, from the same signature every caller reads.
         // A method's scheme may list `self` ahead of the named parameters.
         if let Expression::Argument { name, .. } = arg.1.as_ref()
-            && let Some(names) = self.checker.fn_param_names(&key).or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
+            && let Some(names) = self
+                .checker
+                .fn_param_names(&key)
+                .or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
+                // A method clone's names are its source method's.
+                .or_else(|| self.current_function_qualified.as_deref().and_then(|q| self.checker.fn_param_names(q)))
             && let Some(i) = names.iter().position(|n| n == name)
         {
             let pairs = self.callee_param_pairs(&key);
@@ -1891,6 +1905,7 @@ impl Compiler {
                     continue;
                 };
                 let messages = self.messages.len();
+                let lint = self.residue_lint.replace(false);
                 self.swap_module_ctx(&mut ctx, true);
                 // The clones queued for the module being compiled wait: their
                 // types may be ones `seq` does not know.
@@ -1898,6 +1913,7 @@ impl Compiler {
                 self.emit_instance_clones(children);
                 self.inst_clone_queue = waiting;
                 self.swap_module_ctx(&mut ctx, false);
+                self.residue_lint.set(lint);
                 self.module_ctxs.insert(seq, ctx);
                 // Its module already reported on this code: keep only errors.
                 let mut i = messages;
@@ -4676,6 +4692,12 @@ impl Compiler {
     ) {
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_key = self.current_function_table_key.replace(name.to_string());
+        let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
+        // An inherent method clone's thunk returns its pair in two words.
+        let prev_two_word_enum = self.compiling_two_word_enum.clone();
+        if self.method_clone_plans.borrow().contains_key(name) {
+            self.compiling_two_word_enum = self.two_word_return_kind(name);
+        }
         let bind = name.to_string();
         if !self.lower_synth_hir(hir, calls, move |c: &mut Self| {
             c.bind_function_entry(bind);
@@ -4686,6 +4708,8 @@ impl Compiler {
         let entry = self.fn_entry_labels.get(name).copied();
         self.bodies.record(name.to_string(), entry);
         self.attach_hir_mir();
+        self.compiling_two_word_enum = prev_two_word_enum;
+        self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.current_function_table_key = prev_key;
         self.context.variables = prev_vars;
     }
@@ -4773,6 +4797,24 @@ impl Compiler {
     /// True when `name` is used as a function value anywhere we can see.
     /// Whole-program seed wins when present; the per-file sidecar is the
     /// single-module fallback and a fail-closed extra union.
+    /// Whether a value of named function `name` can target a one-word
+    /// adapter (`name$value`, [`Self::fn_value_target`]) so the function
+    /// itself returns two words to its direct calls: a plain free function,
+    /// not overloaded, generic, a coroutine or a method, and never
+    /// partially applied (a partial's closure calls it directly).
+    pub(super) fn fn_value_redirects(&self, name: &str) -> bool {
+        let lookup = strip_overload_key(name);
+        lookup == name
+            && !name.contains("::")
+            && !self.checker.is_overloaded(name)
+            && !self.checker.is_generic_fn(name)
+            && !self.coroutine_fns.contains(name)
+            && !is_instance_method_fqn(&self.checker, name)
+            && !self.ident_is_host_native(name)
+            && self.fn_arities.get(name).is_some_and(|&(_, rest)| !rest)
+            && self.checker.fn_param_tys(name).is_some_and(|p| (0..p.len()).all(|argc| !self.is_fn_value_escaped(&format!("{name}#{argc}"))))
+    }
+
     fn is_fn_value_escaped(&self, name: &str) -> bool {
         let short = name.rsplit("::").next().unwrap_or(name);
         if let Some(set) = &self.fn_value_escaped_program
@@ -4863,6 +4905,9 @@ impl Compiler {
     }
 
     fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
+        if let Some(plan) = self.method_clone_plans.borrow().get(name) {
+            return crate::layout::convention_ret(&self.checker, &crate::layout::CalleeFacts::default(), plan.ret_ty());
+        }
         let lookup = strip_overload_key(name);
         // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed
         // ABI. A trait instance method is a dictionary entry (`CodePtr`): a
@@ -4872,7 +4917,9 @@ impl Compiler {
         // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
         let facts = crate::layout::CalleeFacts {
             coroutine: self.coroutine_fns.contains(name),
-            escaped: self.is_fn_value_escaped(name) || self.is_under_applied(name),
+            // A value of it targets its one-word adapter instead; a
+            // partial application still needs the one-word result.
+            escaped: (self.is_fn_value_escaped(name) && !self.fn_value_redirects(name)) || self.is_under_applied(name),
             instance_method: is_instance_method_fqn(&self.checker, name) && !self.instance_method_fqn_raw(name),
             host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
             ..crate::layout::CalleeFacts::default()
@@ -5048,7 +5095,10 @@ impl Compiler {
         self.compiling_two_word_enum = if *is_coro {
             self.pin_two_word_return_kind(&qualified, None);
             None
-        } else if source.is_some() {
+        } else if source.is_some() && !self.method_clone_plans.borrow().contains_key(&qualified) {
+            // A trait instance's clone returns one word to its `$dict`
+            // adapter; an inherent method clone in the pair its callers
+            // planned ([`Self::hir_method_clone`]).
             None
         } else {
             self.two_word_return_kind(&qualified)
@@ -5917,6 +5967,16 @@ impl Compiler {
         let prev_result_ok_is_result =
             std::mem::replace(&mut self.compiling_result_ok_is_result, false);
         let prev_two_word_enum = self.compiling_two_word_enum.take();
+        // A two-word static's initializer returns the two words, which the
+        // setup region stores in its slot and its tail.
+        let tail = self.checker.static_tail(fqn);
+        if tail.is_some() {
+            self.compiling_two_word_enum = self
+                .checker
+                .static_slot_ty(slot)
+                .map(|ty| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty))
+                .and_then(|ty| crate::layout::two_word_kind(&self.checker, &ty));
+        }
 
         // The initializer returns the value; the setup region stores it.
         if !self.try_lower_hir_function(&init.0, init) {
@@ -5941,7 +6001,7 @@ impl Compiler {
         self.context.variables = prev_fn_vars;
 
         self.setup_steps
-            .push(module_setup::SetupStep::Static { init: format!("{STATIC_INIT_FN_PREFIX}{fqn}"), slot, comptime: false });
+            .push(module_setup::SetupStep::Static { init: format!("{STATIC_INIT_FN_PREFIX}{fqn}"), slot, tail, comptime: false });
     }
 
     /// Receiver type for field access / method calls.
@@ -6543,7 +6603,10 @@ impl Compiler {
             Expression::StaticDecl { name, init, is_const, .. } => {
                 let fqn = self.qualify_static_fqn(name);
                 self.emit_static_initializer(&fqn, init);
+                // A two-word static keeps its words in two slots, which a
+                // snapshot of its value would not fill: it runs at startup.
                 let silent = !*is_const
+                    && self.checker.static_tail(&fqn).is_none()
                     && (self.pure_static_inits.contains(&fqn) || self.pure_static_inits.contains(*name));
                 let startup = *is_const && (self.startup_consts.contains(&fqn) || self.startup_consts.contains(*name));
                 if (*is_const || silent)
@@ -7334,12 +7397,36 @@ impl Compiler {
         // builtin enum's `Show` thunk used, so they go first (#1984).
         self.emit_structural_thunks();
         self.emit_used_builtin_show_thunks();
+        let (_, residue) = std::mem::take(&mut *self.residue.borrow_mut());
+        self.messages.extend(residue);
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
         if self.inst_clone_srcs.values().any(|s| s.program == seq && s.emit_idx.is_some()) {
             let ctx = self.take_module_ctx(module);
             self.module_ctxs.insert(seq, ctx);
         }
+    }
+
+    /// Warn (E0808) that the project's own code boxes a two-word value of
+    /// type `ty` at `span`, where `why` says what keeps it from its two
+    /// words; once per `key` in a module. A dependency's code, a clone
+    /// another module asked for and compiler-made code stay quiet.
+    pub(super) fn note_box_residue(&self, key: String, ty: &Ty, span: (usize, usize), why: &str, help: &str) {
+        if !self.residue_lint.get() || crate::attrs::is_fresh_span(span.0) {
+            return;
+        }
+        let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
+        if Self::ty_has_var(&ty) || crate::layout::two_word_kind(&self.checker, &ty).is_none() {
+            return;
+        }
+        let (seen, out) = &mut *self.residue.borrow_mut();
+        if !seen.insert(key) {
+            return;
+        }
+        let shown = crate::typechecking::pretty::format_ty_for_diag(&Default::default(), &ty);
+        let mut msg = Message::warn(ErrorCode::BoxedResidue, format!("`{shown}` is boxed here: {why}"), span.0..span.1);
+        msg.with_help(help.to_string());
+        out.push(msg);
     }
 
     /// Emit the reserved `Show` thunks of the builtin error enums that this

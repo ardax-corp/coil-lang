@@ -11,7 +11,8 @@ Evacuation runs **between** cycles, once a sweep has finished.
 An object moves only when every reference to it is **precise**, meaning
 one of:
 
-- a pointer-kind word: a class field (`ClassWordKinds`), a payload / tuple
+- a pointer-kind word: a class field (`ClassWordKinds`; a tagged flat
+  field's first word while its tag says pointer), a payload / tuple
   word, or an element of a pointer-kind array (construction kinds, `kinds` on
   MIR `Alloc`);
 - a `Member::Object` (dict tables, boxes, roots, poly-fn dictionaries);
