@@ -182,6 +182,8 @@ fn main() {
     // `Vec::new()` of `Option<int>` is a lane array: the push keeps the
     // value's two words.
     assert_eq!(of("stored"), vec![], "{boxes:?}");
+    // A host result is still boxed where the native returns one word.
+    assert_eq!(of("Vec::pop"), vec![(compiler::BoxKind::HostResult, "vec_pop -> Option<int>")], "{boxes:?}");
     assert!(boxes.iter().all(|b| b.site.starts_with("from_hir.rs:")), "{boxes:?}");
 }
 
