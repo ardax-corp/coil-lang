@@ -318,6 +318,9 @@ pub struct Compiler {
     /// are compiled, so an unmemoized query can answer differently for a
     /// body and for a later caller, see [`Compiler::two_word_return_kind`].
     pair_return_kinds: std::cell::RefCell<HashMap<String, Option<PairKind>>>,
+    /// [`Compiler::fn_value_redirects`] answers, kept for the same reason:
+    /// a body planned before the function is emitted must agree with it.
+    fn_value_redirect_answers: std::cell::RefCell<HashMap<String, bool>>,
     /// The generic function value (name, span) a body's HIR plan refused
     /// with `generic-fn-value`; reported as E0127 instead of E0801 (#916).
     generic_fn_value_refusal: std::cell::RefCell<Option<(String, (usize, usize))>>,
@@ -749,6 +752,7 @@ impl Default for Compiler {
             compiling_result_ok_is_result: false,
             compiling_two_word_enum: None,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
+            fn_value_redirect_answers: std::cell::RefCell::new(HashMap::new()),
             generic_fn_value_refusal: std::cell::RefCell::new(None),
             polyfn_over_application: std::cell::RefCell::new(None),
             fn_value_escaped_program: None,

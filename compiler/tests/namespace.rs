@@ -803,11 +803,13 @@ fn worker_dload_sees_parent_ffi_search_paths() {
     );
 }
 
-/// Cross-file hole: defining a two-slot `Result<int,int>` helper in one
-/// module and taking its address in another must keep the boxed ABI so
-/// `CallIndirect` + `match` cannot stack-smash / mis-decode the tag.
+/// Cross-file: a two-slot `Result<int,int>` helper defined in one module
+/// and used as a value in another returns its two words to direct calls;
+/// the value enters its one-word adapter (`arith::div$value`), so
+/// `CallIndirect` + `match` read the boxed word or, through the adapter's
+/// twin, the two words, and never mis-decode the tag.
 #[test]
-fn two_slot_result_address_taken_in_other_module_stays_boxed() {
+fn two_slot_result_address_taken_in_other_module_enters_its_adapter() {
     let files = [
         (
             "src/arith.coil",
@@ -837,7 +839,11 @@ fn main() {
         Result::Ok(_) => 0,
         Result::Err(e) => e,
     };
-    write(stdout(), to_bytes(format("%i,%i", ok, err)));
+    let direct = match div(9, 3) {
+        Result::Ok(q) => q,
+        Result::Err(_) => 0,
+    };
+    write(stdout(), to_bytes(format("%i,%i,%i", ok, err, direct)));
 }
 "#,
         ),
@@ -851,6 +857,8 @@ fn main() {
     with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, &[]);
+        // Keeps the direct CALL; the tiny `div` leaf would otherwise inline.
+        pipeline.set_inline_max_cost(0);
         let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
             Ok(compiled) => compiled,
             Err(_) => {
@@ -860,22 +868,21 @@ fn main() {
                 panic!("compile failed");
             }
         };
+        let body = |name: &str| compiled.bodies.iter().find(|b| b.mir.name == name);
         assert!(
-            // The per-type unpair adapter an indirect call site uses
-            // (`__coil_unpair_N`) returns two words by design; `div` itself
-            // must not.
-            !compiled
-                .bodies
-                .iter()
-                .any(|b| b.mir.ret_hi_ty.is_some() && !b.mir.name.starts_with("__coil_unpair_")),
-            "escaped arith::div must keep a boxed return, found a two-word return"
+            body("arith::div").is_some_and(|b| b.mir.ret_hi_ty.is_some()),
+            "arith::div used as a value should still return two words to direct calls"
+        );
+        assert!(
+            body("arith::div$value").is_some_and(|b| b.mir.ret_hi_ty.is_none()),
+            "the value of arith::div should enter its one-word adapter"
         );
         assert!(
             compiled.all_insts().any(|i| matches!(i, MirInst::CallIndirect { .. })),
             "address-of div must lower to an indirect call"
         );
         let output = run_compiled(compiled, &pipeline);
-        assert_eq!(output, "5,-1");
+        assert_eq!(output, "5,-1,3");
     });
 }
 
