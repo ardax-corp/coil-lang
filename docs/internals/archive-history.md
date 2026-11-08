@@ -41,6 +41,11 @@ first word, then the words), as a `Vec` of a closed two-word type is
 each store, push and conversion with its three shape masks) and the
 `Lanes` allocation kind (9, with its mask).
 
+Minor 3 appends host natives `vec_drain` (**212**: drop elements
+`from..to`) and `vec_rotate_in` (**213**: move the last element to `i`),
+compiler lowering only, in any array form. Lane code's `pop`, `remove`
+and `insert` move a lane array's elements with them.
+
 Majors 4 to 6 ran on the VM. The notes below are the record of what minors of
 major 4 added; opcodes and frame maps in them no longer exist.
 
