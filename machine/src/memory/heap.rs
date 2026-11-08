@@ -265,10 +265,6 @@ pub struct Heap {
     /// The [`Self::finalizer_types`] whose `drop` keeps nothing of `self`
     /// (the compiler's escape facts): an early free may run it at the free.
     early_drop_types: Vec<u64>,
-    /// Class `type_id`s that are identities, never copied on write
-    /// (`shared class`, `Ref<T>`), one bit per id. Classes with a `drop`
-    /// are identities too.
-    identity_types: Vec<u64>,
     /// Objects [`Self::cow_unique`] copied.
     cow_copies: u64,
     /// Objects `Cow` shared.
@@ -367,7 +363,6 @@ impl Default for Heap {
             weaks: Vec::new(),
             finalizer_types: Vec::new(),
             early_drop_types: Vec::new(),
-            identity_types: Vec::new(),
             cow_copies: 0,
             cow_shares: 0,
             cow_sites: None,
@@ -809,25 +804,11 @@ impl Heap {
         self.sync_finalizer_words();
         self.early_drop_types.clear();
         self.finalizable.clear();
-        self.identity_types.clear();
     }
 
-    /// Note that `type_id` is an identity: [`Self::cow_unique`] never
-    /// copies its objects.
-    pub fn register_identity_type(&mut self, type_id: u32) {
-        let word = type_id as usize / 64;
-        if self.identity_types.len() <= word {
-            self.identity_types.resize(word + 1, 0);
-        }
-        self.identity_types[word] |= 1 << (type_id % 64);
-    }
-
+    /// A class with a `drop` is an identity: [`Self::cow_unique`] never copies it.
     fn is_identity_type(&self, type_id: u32) -> bool {
         self.has_finalizer(type_id)
-            || self
-                .identity_types
-                .get(type_id as usize / 64)
-                .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
     }
 
     /// Copy-on-write: a second place now names `v`'s object, so the next
@@ -1105,11 +1086,6 @@ impl Heap {
     #[inline]
     pub fn gc_is_idle(&self) -> bool {
         self.gc_phase == GcPhase::Idle
-    }
-
-    #[inline]
-    pub fn gc_is_marking(&self) -> bool {
-        self.gc_phase == GcPhase::Marking
     }
 
     #[inline]
@@ -2746,28 +2722,6 @@ impl fmt::Display for Object {
 }
 
 impl Object {
-    /// C string pointer for FFI; non-strings return null.
-    pub fn as_cstr(&self) -> *const std::os::raw::c_char {
-        match self {
-            Self::String(s) => s.data.data.as_str().as_ptr() as *const std::os::raw::c_char,
-            Self::Instance(_)
-            | Self::Enum(_)
-            | Self::Library(_)
-            | Self::Tuple(_)
-            | Self::Array(_)
-            | Self::Coroutine(_)
-            | Self::Boxed(_)
-            | Self::Root(_)
-            | Self::Weak(_)
-            | Self::Fn(_)
-            | Self::Stream(_)
-            | Self::Thread(_)
-            | Self::Sender(_)
-            | Self::Receiver(_)
-            | Self::Mutex(_)
-            | Self::RwLock(_) => std::ptr::null(),
-        }
-    }
 }
 
 /// How a moving collector may treat a root (`docs/internals/gc-evacuation.md`).
@@ -3888,6 +3842,25 @@ impl ObjArray {
         }
     }
 
+    /// A two-word lane array's words in place, for native code, with its
+    /// element count (`None` for any other array). Loads only: no write to
+    /// the object ([`Self::words_view_for_load`]).
+    pub(crate) fn lanes_view_for_load(&self) -> Option<(*mut Value, usize)> {
+        match &self.data {
+            ArrayData::Lanes { words, k: 2 } => Some((words.as_ptr().cast_mut(), words.len() / 2)),
+            _ => None,
+        }
+    }
+
+    /// [`Self::lanes_view_for_load`] for stores: marks the array as
+    /// [`Self::set_lanes`] does when an element may hold a reference.
+    pub(crate) fn lanes_view(&mut self) -> Option<(*mut Value, usize)> {
+        if self.tag_mask != 0 {
+            self.note();
+        }
+        self.lanes_view_for_load()
+    }
+
     /// A write may add a reference: the next mark rescans.
     #[inline(always)]
     fn note(&mut self) {
@@ -4013,6 +3986,31 @@ impl ObjArray {
             ArrayData::Words(w) => w.remove(i),
             ArrayData::Bytes(b) => word_of(b.remove(i)),
             ArrayData::Lanes { .. } => lane_misuse(),
+        }
+    }
+
+    /// Drop elements `from..to`, the ones after them moving down (the
+    /// range cut to the length).
+    pub fn drain_range(&mut self, from: usize, to: usize) {
+        let to = to.min(self.len());
+        let from = from.min(to);
+        match &mut self.data {
+            ArrayData::Words(w) => drop(w.drain(from..to)),
+            ArrayData::Bytes(b) => drop(b.drain(from..to)),
+            ArrayData::Lanes { words, k } => drop(words.drain(from * *k..to * *k)),
+        }
+    }
+
+    /// Move the last element to `i`, elements `i..` moving up one (nothing
+    /// when `i` is not below the length).
+    pub fn rotate_last_to(&mut self, i: usize) {
+        if i >= self.len() {
+            return;
+        }
+        match &mut self.data {
+            ArrayData::Words(w) => w[i..].rotate_right(1),
+            ArrayData::Bytes(b) => b[i..].rotate_right(1),
+            ArrayData::Lanes { words, k } => words[i * *k..].rotate_right(*k),
         }
     }
 

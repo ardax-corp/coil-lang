@@ -146,7 +146,7 @@ fn main() {
 }
 
 /// `coil dissect --boxes`: each place lowering boxes a value, by function,
-/// kind and type; a direct two-word call boxes nothing.
+/// kind and type; a direct two-word call and a `Vec` of pairs box nothing.
 #[test]
 fn box_capture_names_function_kind_and_type() {
     let src = r#"
@@ -179,8 +179,56 @@ fn main() {
     let boxes = compiler::take_box_capture();
     let of = |name: &str| boxes.iter().filter(|b| b.func == name).map(|b| (b.kind, b.ty.as_str())).collect::<Vec<_>>();
     assert_eq!(of("direct"), vec![], "{boxes:?}");
-    assert_eq!(of("stored"), vec![(compiler::BoxKind::Pair, "Option<int>")], "{boxes:?}");
+    // `Vec::new()` of `Option<int>` is a lane array: the push keeps the
+    // value's two words.
+    assert_eq!(of("stored"), vec![], "{boxes:?}");
+    // A host result is still boxed where the native returns one word.
+    assert_eq!(of("Vec::pop"), vec![(compiler::BoxKind::HostResult, "vec_pop -> Option<int>")], "{boxes:?}");
     assert!(boxes.iter().all(|b| b.site.starts_with("from_hir.rs:")), "{boxes:?}");
+}
+
+/// The `Vec` methods on a lane array work on its lanes: no function here
+/// turns the array into boxed elements. Passing it to a generic body
+/// does.
+#[test]
+fn box_capture_lane_vec_methods_keep_the_lanes() {
+    let src = r#"
+fn methods(int n) -> int {
+    let v: Vec<Option<int>> = Vec::with_capacity(4);
+    v.push(Some(n));
+    v.insert(0, None);
+    v.reserve(2);
+    let t = v.capacity();
+    let _ = v.remove(1);
+    let _ = v.pop();
+    v.clear();
+    return t + v.len();
+}
+#[inline(never)]
+fn count<T>(Vec<T> v) -> int {
+    let n = 0;
+    for _ in v {
+        n += 1;
+    }
+    return n;
+}
+fn generic(int n) -> int {
+    let v: Vec<Option<int>> = [Some(n)];
+    return count(v);
+}
+fn main() {
+    let _ = methods(3) + generic(4);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let lanes = |name: &str| boxes.iter().filter(|b| b.func == name && b.kind == compiler::BoxKind::LaneArray).count();
+    assert_eq!(lanes("methods"), 0, "{boxes:?}");
+    assert_eq!(lanes("generic"), 1, "{boxes:?}");
 }
 
 /// A generic class's method at a pair type argument gets its own clone,
@@ -328,6 +376,102 @@ fn main() {
     pipeline.compile_src(src).expect("compiles");
     let boxes = compiler::take_box_capture();
     let mine: Vec<_> = boxes.iter().filter(|b| ["half", "through", "main"].contains(&b.func.as_str())).collect();
+    assert!(mine.is_empty(), "{mine:?}");
+    assert!(boxes.iter().any(|b| b.func == "half$value"), "{boxes:?}");
+}
+
+/// A partial application of a function with a two-word result targets the
+/// function's one-word adapter: the function returns its two words to direct
+/// calls and to calls through the partial, and only the adapter boxes.
+#[test]
+fn box_capture_partial_of_pair_fn_boxes_only_in_its_adapter() {
+    let src = r#"
+fn add_opt(int a, int b) -> Option<int> {
+    if a + b < 0 {
+        return None;
+    }
+    return Some(a + b);
+}
+#[inline(never)]
+fn through(int -> Option<int> f, int x) -> int {
+    return match f(x) {
+        Some(v) => v,
+        None => -1,
+    };
+}
+fn main() {
+    let p = add_opt(10);
+    let _ = through(p, 2) + match add_opt(1, 2) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| ["add_opt", "through", "main"].contains(&b.func.as_str())).collect();
+    assert!(mine.is_empty(), "{mine:?}");
+    assert!(boxes.iter().any(|b| b.func == "add_opt$value"), "{boxes:?}");
+}
+
+/// A named function used as a value keeps its two-word result when bodies
+/// emitted before it (a derived `Show`, a caller) ask how it returns.
+#[test]
+fn box_capture_named_fn_value_after_earlier_bodies_boxes_only_in_its_adapter() {
+    let src = r#"
+enum Sign {
+    Neg(int),
+    Zero,
+    Pos(int),
+}
+fn first(int x) -> int {
+    return match half(x) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+fn half(int x) -> Option<int> {
+    if x % 2 != 0 {
+        return None;
+    }
+    return Some(x / 2);
+}
+fn sign(int x) -> Sign {
+    if x < 0 {
+        return Sign::Neg(-x);
+    }
+    if x == 0 {
+        return Sign::Zero;
+    }
+    return Sign::Pos(x);
+}
+#[inline(never)]
+fn through(int -> Option<int> f, int x) -> int {
+    return match f(x) {
+        Some(v) => v,
+        None => -1,
+    };
+}
+fn main() {
+    let s = sign;
+    let k = match s(2) {
+        Sign::Pos(v) => v,
+        default => 0,
+    };
+    let _ = through(half, 4) + first(6) + k;
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| ["half", "first", "sign", "through", "main"].contains(&b.func.as_str())).collect();
     assert!(mine.is_empty(), "{mine:?}");
     assert!(boxes.iter().any(|b| b.func == "half$value"), "{boxes:?}");
 }

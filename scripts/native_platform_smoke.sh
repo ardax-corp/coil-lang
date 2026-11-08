@@ -12,19 +12,11 @@ ext=""
 [[ -x "$bin/coil.exe" ]] && ext=".exe"
 coil="$bin/coil$ext"
 work="$(mktemp -d)"
-# Windows can hold an executable a moment after its process ends. Wait for it,
-# say how long it took and what still runs, and fail if it stays held.
+# Best-effort cleanup: Windows can keep a just-exited coil.exe locked for a
+# moment, and under `set -e` a failed trap would turn a passing run into exit 1
+# (#2313).
 cleanup() {
-    local i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        if rm -rf "$work" 2>/dev/null; then
-            [[ "$i" == 1 ]] || echo "removed $work after $((i - 1)) s"
-            return 0
-        fi
-        [[ "$i" == 1 && -n "$ext" ]] && tasklist //FO CSV 2>/dev/null | grep -iE 'coil|embedded|aot|runner|python' || true
-        sleep 1
-    done
-    rm -rf "$work"
+    rm -rf "$work" 2>/dev/null || { sleep 2; rm -rf "$work" 2>/dev/null; } || true
 }
 trap cleanup EXIT
 

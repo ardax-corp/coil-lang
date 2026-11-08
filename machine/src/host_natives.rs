@@ -205,8 +205,10 @@ host_groups! {
     64 => |o, r| push_wiring(o, r, crate::key_index::KEY_INDEX_WIRING, "key_index");
     // Append-only after key_index: the lock primitives (major 6 minor 21).
     65 => |o, r| push_lock_natives(o, r);
-    // Append-only after the lock primitives: `startup_restore` (major 7 minor 3).
-    66 => |o, r| push_startup_restore(o, r);
+    // Append-only after the lock primitives: `vec_drain` / `vec_rotate_in` (major 7 minor 3).
+    66 => |o, r| push_wiring(o, r, crate::vec_ops::VEC_MOVE_WIRING, "vec move");
+    // Append-only after vec move: `startup_restore` (major 7 minor 4).
+    67 => |o, r| push_startup_restore(o, r);
 }
 
 /// Each standard group's first id and how many natives it pushes, by
@@ -602,6 +604,8 @@ fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(
 
 /// `values_eq_shaped(a, b, shape) -> bool`: `==` on an aggregate whose
 /// `float` leaves compare by IEEE ([`crate::value_eq::values_eq_shaped`]).
+/// The compiler no longer emits it (that `==` calls compiler-made glue);
+/// it stays for archives that still call it.
 fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let name = common::VALUES_EQ_SHAPED_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 3], FfiType::Int)
@@ -1756,6 +1760,8 @@ mod tests {
         );
         assert_eq!(names.get(200).map(String::as_str), Some("lock_acquire"));
         assert_eq!(names.get(211).map(String::as_str), Some("rw_store"));
+        assert_eq!(names.get(212).map(String::as_str), Some(common::VEC_DRAIN_NATIVE));
+        assert_eq!(names.get(213).map(String::as_str), Some(common::VEC_ROTATE_IN_NATIVE));
         assert_eq!(names.last().map(String::as_str), Some(common::STARTUP_RESTORE_NATIVE));
         assert_eq!(attach, 119);
     }
@@ -2141,9 +2147,17 @@ mod tests {
         );
         assert_eq!(
             registrations.get(end + 76).map(|(n, _)| n.as_str()),
+            Some(common::VEC_DRAIN_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 77).map(|(n, _)| n.as_str()),
+            Some(common::VEC_ROTATE_IN_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 78).map(|(n, _)| n.as_str()),
             Some(common::STARTUP_RESTORE_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 77);
+        assert_eq!(registrations.len(), end + 79);
     }
 
     #[test]

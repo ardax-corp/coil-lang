@@ -1476,6 +1476,32 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
     }
 }
 
+/// The element words of lane array `addr` in place, for native code's
+/// `LaneIndex` / `LaneStore` (two words per element): writes `(pointer,
+/// element count)` to `out` and returns `1`, or `0` when `addr` is not a
+/// lane array (one word per element: the lane helpers box and unbox).
+/// `for_store` marks the array as a store of a heap payload would.
+///
+/// # Safety
+/// `addr` is a heap word or 0; `out` has room for two words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_lane_view(addr: u64, for_store: u64, out: *mut u64) -> u64 {
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return 0;
+    };
+    let view = if for_store != 0 { gc.as_mut().lanes_view() } else { gc.as_ref().lanes_view_for_load() };
+    match view {
+        Some((ptr, n)) => {
+            unsafe {
+                out.write(ptr as u64);
+                out.add(1).write(n as u64);
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
 /// The bytes of the string `addr` names, for `s[i]` read in place: writes
 /// `(pointer, length)` to `out`, or `(0, 0)` when `addr` is not a string
 /// object itself (a boxed one goes through `string_byte_at`). Strings are
@@ -2826,6 +2852,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_lane_store", coil_native_lane_store as *const u8),
         ("coil_native_lane_push", coil_native_lane_push as *const u8),
         ("coil_native_lanes_to_words", coil_native_lanes_to_words as *const u8),
+        ("coil_native_lane_view", coil_native_lane_view as *const u8),
         ("coil_native_probe", coil_native_probe as *const u8),
         ("coil_native_free_early", coil_native_free_early as *const u8),
         ("coil_native_format", coil_native_format as *const u8),
@@ -2851,4 +2878,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 41;
+const HELPERS: usize = 42;

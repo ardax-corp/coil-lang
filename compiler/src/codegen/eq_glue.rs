@@ -1,14 +1,18 @@
-//! `==` / `!=` on an aggregate whose elements have a user `Eq` (#1629).
+//! `==` / `!=` on an aggregate whose elements have a user `Eq` (#1629),
+//! or a `float` leaf (#1253).
 //!
-//! structural equality (and `values_eq_shaped`) compares a class
-//! instance by identity: it cannot call an `Eq` instance. So an array,
-//! `Vec`, tuple, record, `Option`, `Result` or enum payload (of an enum with
-//! no `Eq` of its own) that holds, at any depth, a class or enum with an
-//! `Eq` instance compares through a compiler-made glue function instead:
-//! one per such type, comparing part by part with `==` at the part's type.
-//! That `==` dispatches as any other: a part with an `Eq` instance calls
-//! it, a part that needs glue calls its glue, and anything else compares
-//! as the runtime does (a class without `Eq` by identity).
+//! structural equality compares a class instance by identity: it cannot
+//! call an `Eq` instance. So an array, `Vec`, tuple, record, `Option`,
+//! `Result` or enum payload (of an enum with no `Eq` of its own) that
+//! holds, at any depth, a class or enum with an `Eq` instance compares
+//! through a compiler-made glue function instead: one per such type,
+//! comparing part by part with `==` at the part's type. That `==`
+//! dispatches as any other: a part with an `Eq` instance calls it, a part
+//! that needs glue calls its glue, and anything else compares as the
+//! runtime does (a class without `Eq` by identity). An array, `Vec`, tuple
+//! or record with a `float` leaf compares through glue too, so the leaf
+//! compares by IEEE 754 as scalar `float` `==` does, in plain code and with
+//! no runtime call.
 //!
 //! A glue function is reserved the first time a call of it is planned (in
 //! a body, a monomorphic clone, a structural `Eq` thunk or another glue)
@@ -21,7 +25,7 @@
 //! after the two values and compares a bare variable's part through it.
 
 use super::*;
-use crate::hir::{BinOp, Callee, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, UnOp};
+use crate::hir::{BinOp, Builtin, Callee, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, UnOp};
 use crate::hir::synth::Synth;
 use crate::typechecking::generics::Generics;
 use crate::typechecking::ty::{self as coil_ty, TyVarId, strip_readonly};
@@ -239,7 +243,8 @@ impl Compiler {
     }
 
     /// Whether `ty` (a key) compares through glue: it is taken apart and
-    /// some part, at any depth, has a user `Eq` instance.
+    /// some part, at any depth, has a user `Eq` instance, or it is an
+    /// array, `Vec`, tuple or record with a `float` leaf ([`float_leaf`]).
     fn eq_glue_needed(&self, ty: &Ty, visiting: &mut Vec<Ty>) -> bool {
         if !crate::layout::ty_is_closed(ty) || visiting.contains(ty) {
             return false;
@@ -247,6 +252,9 @@ impl Compiler {
         let Some(shape) = self.eq_glue_shape(ty) else {
             return false;
         };
+        if float_leaf(&shape) {
+            return true;
+        }
         visiting.push(ty.clone());
         let needed = shape.parts().into_iter().any(|p| self.eq_user_instance(p) || self.eq_glue_needed(p, visiting));
         visiting.pop();
@@ -364,7 +372,7 @@ impl Compiler {
             return Some(false);
         };
         visiting.push(ty.clone());
-        let mut needed = false;
+        let mut needed = float_leaf(&shape);
         for part in shape.parts() {
             needed |= match part {
                 Ty::Var(_) => vars,
@@ -528,25 +536,18 @@ impl Compiler {
     }
 
     /// Emit [`EQ_ANY`]'s `fqn`: structural equality of the two words
-    /// (`ne` its negation), each unboxed first as a shared body holds a
-    /// type variable's value; the trailing dictionary is not read.
+    /// (`ne` its negation), each in its own representation as a shared
+    /// body holds a type variable's value; the trailing dictionary is not
+    /// read. The words are retyped to `string`, whose `==` is the runtime's
+    /// structural equality of two words (an immediate equal by its bits).
     pub(super) fn emit_eq_any(&mut self, fqn: &str, ne: bool) {
-        let int = coil_ty::int();
-        let boolean = coil_ty::boolean();
-        let native = common::VALUES_EQ_SHAPED_NATIVE;
-        let params = [(int.clone(), true), (int.clone(), true)];
-        let had = self.hir_synth_callees.insert(native.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
+        let (int, string, boolean) = (coil_ty::int(), coil_ty::string(), coil_ty::boolean());
+        let params = [(int.clone(), true), (int, true)];
         self.emit_builtin_entry(fqn, &params, boolean.clone(), false, |b, a| {
-            // No shape: `values_eq`.
-            let none = b.int(0);
-            let eq = b.call(native, vec![a[0], a[1], none], int.clone());
-            let zero = b.int(0);
-            b.bin(if ne { BinOp::Eq } else { BinOp::Ne }, eq, zero, boolean.clone())
+            let x = b.builtin(Builtin::Retype, vec![a[0]], string.clone());
+            let y = b.builtin(Builtin::Retype, vec![a[1]], string);
+            b.bin(if ne { BinOp::Ne } else { BinOp::Eq }, x, y, boolean)
         });
-        match had {
-            Some(callee) => self.hir_synth_callees.insert(native.to_string(), callee),
-            None => self.hir_synth_callees.remove(native),
-        };
     }
 
     /// Reserve the open glue functions of `glue`'s key, as
@@ -602,6 +603,31 @@ impl Compiler {
         self.synth_plain_dicts = None;
         self.synth_eq_dicts.clear();
     }
+}
+
+/// Whether an array, `Vec`, tuple or record shape has a `float` leaf
+/// through arrays, `Vec`s, tuples and records: its glue compares that
+/// leaf with `float` `==`, by IEEE 754 (`NaN != NaN`, `0.0 == -0.0`),
+/// where structural equality compares the bits (#1253). An enum payload's
+/// `float` is not one: a two-word `Option<float>` already compares its
+/// payload word as a `float`.
+fn float_leaf(shape: &GlueShape) -> bool {
+    fn ty_leaf(ty: &Ty) -> bool {
+        let ty = strip_readonly(ty);
+        if crate::hir::lower::primitive(ty) == Some(coil_ty::FLOAT) {
+            return true;
+        }
+        if let Some(element) = coil_ty::vec_element_ty(ty) {
+            return ty_leaf(element);
+        }
+        match ty {
+            Ty::Array { element, .. } => ty_leaf(element),
+            Ty::Tuple(items) => items.iter().any(ty_leaf),
+            Ty::Record { fields } => fields.iter().any(|(_, t)| ty_leaf(t)),
+            _ => false,
+        }
+    }
+    !matches!(shape, GlueShape::Enum { .. }) && shape.parts().into_iter().any(ty_leaf)
 }
 
 /// `x == y` at `ty`; `()` parts are always equal.

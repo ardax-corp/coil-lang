@@ -212,6 +212,33 @@ pub struct HirLaneElem {
     pub shape: MirLaneShape,
 }
 
+/// A `Vec` method call that works on a lane array's lanes
+/// (`HirMirInput::lane_calls`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirLaneCall {
+    /// `v.pop()`: the last element's words, taken out of the array.
+    Pop,
+    /// `v.remove(i)`: element `i`'s words, the rest moved down one.
+    Remove,
+    /// `v.insert(i, x)`: the elements from `i` moved up one, `x` at `i`.
+    Insert,
+    /// A thunk whose native takes either array form (`clear`, `reserve`,
+    /// `capacity`, `from`): called as it is, the array kept in lanes.
+    Thunk,
+    /// `Vec::new()` of a lane type: an empty lane array.
+    New,
+    /// `Vec::with_capacity(n)` of a lane type: an empty lane array with
+    /// room for `n`.
+    WithCapacity,
+}
+
+impl HirLaneCall {
+    /// Whether the call takes its receiver (argument 0) as a lane array.
+    pub fn takes_lanes(self) -> bool {
+        !matches!(self, Self::New | Self::WithCapacity)
+    }
+}
+
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
 /// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
 /// local), or `MakePolyFn` of a generic function's (`MakePolyFnCapture`
@@ -593,6 +620,8 @@ pub struct HirMirInput<'a> {
     /// word per element (a generic body, a host native, a container): a
     /// `LanesToWords` turns the array into that form first, in place.
     pub lane_escapes: HashSet<u32>,
+    /// `Vec` method calls on a lane array, or making one, by call id.
+    pub lane_calls: HashMap<u32, HirLaneCall>,
     /// Heap fields and `new` arguments whose slot holds a boxed enum
     /// object (a generic class's field open in a parameter) for a value
     /// whose own word is this niche layout: boxed on the way in, unboxed
@@ -2054,7 +2083,7 @@ impl Lower<'_> {
                 let (Some(l), Some(r)) = (boxed(self, l)?, boxed(self, r)?) else {
                     return Ok(Val::Never);
                 };
-                return self.structural_eq(id, l, r, ne);
+                return self.structural_eq(l, r, ne);
             }
         };
         let eq = match words {
@@ -2926,6 +2955,9 @@ impl Lower<'_> {
         if self.inp.lane_escapes.contains(&id.0)
             && let (Val::V(v), Some(lane)) = (val, self.lane(id))
         {
+            if let Some(ty) = self.expr_ty(id).cloned() {
+                self.note_box(super::box_report::BoxKind::LaneArray, &ty);
+            }
             let out = self.b.ins_lanes_to_words(v, lane.shape).map_err(mir)?;
             val = Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?);
         }
@@ -3756,11 +3788,11 @@ impl Lower<'_> {
                 kind: Some(ForInKind::Tuple { arity }),
             } => self.for_array(id, pat, *iterable, *body, None, Items::Tuple(*arity)),
             HirKind::ForIn {
-                pat: HirPat::Bind(local),
+                pat,
                 iterable,
                 body,
                 kind: Some(ForInKind::Coroutine),
-            } => self.for_coroutine(*local, *iterable, *body),
+            } => self.for_coroutine(pat, *iterable, *body),
             HirKind::Match { scrutinee, arms } => {
                 if self.stmt_matches.remove(&id) && !returned {
                     self.discard_arms.extend(arms.iter().map(|a| a.body));
@@ -4038,8 +4070,28 @@ impl Lower<'_> {
     /// matches).
     /// `for x in h` over a coroutine, as HIR emission's: resume into `x`,
     /// stop once the handle is done (its completion value is never bound).
-    fn for_coroutine(&mut self, local: HirLocal, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
-        let ty = self.local_ty(local)?;
+    fn for_coroutine(&mut self, pat: &HirPat, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
+        // A destructuring pattern reads its parts from each yielded tuple's
+        // box (#2317).
+        let (ty, item) = match pat {
+            HirPat::Bind(local) => (self.local_ty(*local)?, None),
+            HirPat::Tuple(_) => {
+                let item = match self.expr_ty(iterable).map(strip_readonly) {
+                    Some(Ty::App(head, args)) if matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") && args.len() == 2 => args[0].clone(),
+                    _ => return Err("for in coroutine pattern".into()),
+                };
+                // A tuple (two-word ones too) comes back as its box.
+                let heap = match self.inp.word(&item) {
+                    Some(w) => w == MirTy::HeapRef,
+                    None => matches!(strip_readonly(&item), Ty::Tuple(items) if !items.is_empty()),
+                };
+                if !heap {
+                    return Err("for in coroutine pattern".into());
+                }
+                (MirTy::HeapRef, Some(item))
+            }
+            _ => return Err("for in coroutine pattern".into()),
+        };
         let Some(h) = self.word(iterable)? else {
             return Ok(Val::Never);
         };
@@ -4049,10 +4101,16 @@ impl Lower<'_> {
         self.jump(head)?;
         self.switch(head);
         let x = self.b.ins_resume_coro(h, None, ty).map_err(mir)?;
-        self.bind(local, x)?;
+        if let HirPat::Bind(local) = pat {
+            self.bind(*local, x)?;
+        }
         let done = self.b.ins_done_coro(h).map_err(mir)?;
         self.b.branch(done, exit, body_b).map_err(mir)?;
         self.switch(body_b);
+        // The parts read only once the generator is known to have yielded.
+        if let Some(item) = &item {
+            self.bind_tuple_item(pat, x, Some(item))?;
+        }
         // A loop over a generator it made (not one a local or field holds,
         // which a later `resume` may go on with) closes it when left
         // early: a `break` before it leaves (the loop's `defers` mark is
@@ -4257,7 +4315,7 @@ impl Lower<'_> {
             if self.b.value_ty(l) != MirTy::HeapRef || self.b.value_ty(r) != MirTy::HeapRef {
                 return Err("operator operand type".into());
             }
-            return self.structural_eq(id, l, r, op == BinOp::Ne);
+            return self.structural_eq(l, r, op == BinOp::Ne);
         }
         if let Some(out) = self.bitop_identity(id, op, lhs, rhs) {
             return out;
@@ -4323,18 +4381,11 @@ impl Lower<'_> {
         Ok(Val::V(out.map_err(mir)?))
     }
 
-    /// `==` / `!=` of two heap words: structural equality, or, when
-    /// their type has `float` leaves, `values_eq_shaped` with the shape
-    /// emission planned, so those compare by IEEE (#1253).
-    fn structural_eq(&mut self, id: HirId, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
-        let Some(&shape) = self.inp.strings.get(&id.0) else {
-            return Ok(Val::V(self.b.ins_str_eq(l, r, ne).map_err(mir)?));
-        };
-        let shape = self.b.ins_string(shape).map_err(mir)?;
-        let eq = self.b.ins_host_invoke(common::VALUES_EQ_SHAPED_ID, vec![l, r, shape]).map_err(mir)?;
-        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-        let cmp = if ne { MirCmpOp::Eq } else { MirCmpOp::Ne };
-        Ok(Val::V(self.b.ins_cmp(cmp, eq, zero).map_err(mir)?))
+    /// `==` / `!=` of two heap words: structural equality. An aggregate
+    /// with a `float` leaf compares through its glue instead, so its
+    /// floats compare by IEEE 754 (`codegen::eq_glue`, #1253).
+    fn structural_eq(&mut self, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
+        Ok(Val::V(self.b.ins_str_eq(l, r, ne).map_err(mir)?))
     }
 
     /// Strength reduction: `x / 2^n` as `x >> n` when
@@ -4631,6 +4682,11 @@ impl Lower<'_> {
     /// A plain call: `CALL` of the entry label HIR emission used, with the
     /// word ABI of the argument and result types (a pair as two words).
     fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        if let Some(&lane_call) = self.inp.lane_calls.get(&id.0)
+            && lane_call != HirLaneCall::Thunk
+        {
+            return self.lane_call(id, args, lane_call);
+        }
         // A boxed two-word result kept as it comes back.
         let raw = std::mem::take(&mut self.raw_host);
         let Some(site) = self.inp.calls.get(&id.0) else {
@@ -5403,7 +5459,7 @@ impl Lower<'_> {
         };
         let (lt, rt) = (self.b.value_ty(l), self.b.value_ty(r));
         if lt == MirTy::HeapRef && rt == MirTy::HeapRef && matches!(sym, "==" | "!=") {
-            return self.structural_eq(id, l, r, sym == "!=");
+            return self.structural_eq(l, r, sym == "!=");
         }
         // Niche `Option` / `Result` words compare on their words: the
         // same variant, then structural equality of the payloads.
@@ -5855,6 +5911,165 @@ impl Lower<'_> {
     /// `id`'s element when it is a lane array (`Vec` of a two-word type).
     fn lane(&self, id: HirId) -> Option<HirLaneElem> {
         self.inp.lane_arrays.get(&id.0).copied()
+    }
+
+    /// A `Vec` method on lane array `args[0]`, or a constructor of one,
+    /// written out over the lane ops ([`HirLaneCall`]).
+    fn lane_call(&mut self, id: HirId, args: &[HirId], call: HirLaneCall) -> Result<Val, Refusal> {
+        match call {
+            HirLaneCall::New | HirLaneCall::WithCapacity => {
+                let lane = self.lane(id).ok_or("lane constructor")?;
+                let n = match (call, args) {
+                    (HirLaneCall::WithCapacity, [n]) => match self.word(*n)? {
+                        Some(n) => Some(n),
+                        None => return Ok(Val::Never),
+                    },
+                    _ => None,
+                };
+                let arr = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Lanes { tag_mask: lane.shape.tag_mask }, Vec::new()).map_err(mir))?;
+                let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+                if let Some(n) = n {
+                    let reserve = common::host_native_id("vec_reserve").ok_or("vec_reserve")? as u16;
+                    self.at_expr(id, |l| l.b.ins_host_invoke(reserve, vec![arr, n]).map_err(mir))?;
+                }
+                Ok(Val::V(arr))
+            }
+            HirLaneCall::Pop | HirLaneCall::Remove => self.lane_take(id, args),
+            HirLaneCall::Insert => self.lane_insert(id, args),
+            HirLaneCall::Thunk => Err("lane thunk call".into()),
+        }
+    }
+
+    /// The element type of lane array `id` (a `Vec` or a fixed array).
+    fn lane_elem_ty(&self, id: HirId) -> Result<Ty, Refusal> {
+        match self.expr_ty(id).map(strip_readonly) {
+            Some(Ty::Array { element, .. }) => Ok(element.as_ref().clone()),
+            Some(t) => vec_element_ty(t).cloned().ok_or_else(|| "lane element type".into()),
+            None => Err("lane element type".into()),
+        }
+    }
+
+    /// `v.pop()` or `v.remove(i)` on lane array `args[0]`: `None` when
+    /// there is no such element; else the element's words are read and
+    /// boxed, `vec_drain` takes it out of the array (the ones after it
+    /// move down), and the result is `Some` of the box in the call's
+    /// layout (a niche word, or the enum object a `Vec` thunk returns).
+    fn lane_take(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let raw = std::mem::take(&mut self.raw_host);
+        let lane = self.lane(args[0]).ok_or("lane receiver")?;
+        let elem = self.lane_elem_ty(args[0])?;
+        let ty = self.expr_ty(id).ok_or("lane call type")?.clone();
+        let niche = !raw && self.inp.word(&ty) == Some(MirTy::NicheOpt);
+        let ret = if niche { MirTy::NicheOpt } else { MirTy::HeapRef };
+        let Some(arr) = self.word(args[0])? else {
+            return Ok(Val::Never);
+        };
+        let at = match args.get(1) {
+            Some(&i) => match self.index_word(i)? {
+                Some(i) => Some(i),
+                None => return Ok(Val::Never),
+            },
+            None => None,
+        };
+        let out = self.temp();
+        let (some_b, none_b, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.at_expr(id, |l| {
+            let n = l.b.ins_array_len(arr).map_err(mir)?;
+            let zero = l.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            let one = l.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            // The element taken: the last one, or `i` when `0 <= i < n`.
+            let i = match at {
+                None => {
+                    let empty = l.b.ins_cmp(MirCmpOp::Le, n, zero).map_err(mir)?;
+                    l.b.branch(empty, none_b, some_b).map_err(mir)?;
+                    l.switch(some_b);
+                    l.b.ins_binop(MirBinOp::Sub, n, one).map_err(mir)?
+                }
+                Some(i) => {
+                    let check_hi = l.b.create_block();
+                    let below = l.b.ins_cmp(MirCmpOp::Lt, i, zero).map_err(mir)?;
+                    l.b.branch(below, none_b, check_hi).map_err(mir)?;
+                    l.switch(check_hi);
+                    let above = l.b.ins_cmp(MirCmpOp::Ge, i, n).map_err(mir)?;
+                    l.b.branch(above, none_b, some_b).map_err(mir)?;
+                    l.switch(some_b);
+                    i
+                }
+            };
+            let (lo, hi) = l.b.ins_lane_index(arr, i, lane.lo, lane.hi).map_err(mir)?;
+            // Boxed before the array drops it: a heap payload is then held
+            // by its box, a reference.
+            let Val::V(boxed) = l.box_pair_val(&elem, lo, hi)? else {
+                return Err("lane element box".into());
+            };
+            let next = l.b.ins_binop(MirBinOp::Add, i, one).map_err(mir)?;
+            l.b.ins_host_invoke(common::VEC_DRAIN_ID, vec![arr, i, next]).map_err(mir)?;
+            let some = if niche {
+                l.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, boxed).map_err(mir)?
+            } else {
+                l.make_enum(1, Some(boxed))?
+            };
+            l.b.def_local(out, some).map_err(mir)?;
+            l.jump(join)?;
+            l.switch(none_b);
+            let none = if niche {
+                l.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, zero).map_err(mir)?
+            } else {
+                l.make_enum(0, None)?
+            };
+            l.b.def_local(out, none).map_err(mir)?;
+            l.jump(join)?;
+            l.switch(join);
+            Ok(())
+        })?;
+        Ok(Val::V(self.b.use_local(out, ret).map_err(mir)?))
+    }
+
+    /// `v.insert(i, x)` on lane array `args[0]`: unless `0 <= i <= len`
+    /// the runtime's `vec_insert` panics, as on any array; else `x`'s
+    /// words are pushed and, unless `i` is the end, `vec_rotate_in` moves
+    /// them to `i` (the elements from `i` up one).
+    fn lane_insert(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let lane = self.lane(args[0]).ok_or("lane receiver")?;
+        let Some(arr) = self.word(args[0])? else {
+            return Ok(Val::Never);
+        };
+        let Some(i) = self.index_word(args[1])? else {
+            return Ok(Val::Never);
+        };
+        let Some((lo, hi)) = self.pair(args[2])? else {
+            return Ok(Val::Never);
+        };
+        let insert = common::host_native_id("vec_insert").ok_or("vec_insert")? as u16;
+        let grown = self.at_expr(id, |l| {
+            let n = l.b.ins_array_len(arr).map_err(mir)?;
+            let zero = l.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            let (check_hi, oob, inside, rotate, done) = (l.b.create_block(), l.b.create_block(), l.b.create_block(), l.b.create_block(), l.b.create_block());
+            let below = l.b.ins_cmp(MirCmpOp::Lt, i, zero).map_err(mir)?;
+            l.b.branch(below, oob, check_hi).map_err(mir)?;
+            l.switch(check_hi);
+            let above = l.b.ins_cmp(MirCmpOp::Gt, i, n).map_err(mir)?;
+            l.b.branch(above, oob, inside).map_err(mir)?;
+            // Out of range: the native panics with its own message.
+            let start = l.order.len();
+            l.switch(oob);
+            l.b.ins_host_invoke(insert, vec![arr, i, zero]).map_err(mir)?;
+            l.keep_pins()?;
+            l.b.unreachable().map_err(mir)?;
+            l.mark_cold(start);
+            l.switch(inside);
+            let out = l.b.ins_lane_push(arr, lo, hi, lane.shape).map_err(mir)?;
+            let out = l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+            let end = l.b.ins_cmp(MirCmpOp::Eq, i, n).map_err(mir)?;
+            l.b.branch(end, done, rotate).map_err(mir)?;
+            l.switch(rotate);
+            l.b.ins_host_invoke(common::VEC_ROTATE_IN_ID, vec![out, i]).map_err(mir)?;
+            l.jump(done)?;
+            l.switch(done);
+            Ok(out)
+        })?;
+        self.pushed(args[0], grown)?;
+        Ok(Val::Unit)
     }
 
     /// `xs[i]` of lane array `base`: the element's two words.
@@ -6579,6 +6794,12 @@ impl Lower<'_> {
     /// A host native: the arguments in order, then `HostInvoke` (the native
     /// id is the instruction's, not a value the lowering has to find).
     fn host(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        // A `Vec` native a thunk inlined, on a lane array.
+        if let Some(&lane_call) = self.inp.lane_calls.get(&id.0)
+            && lane_call != HirLaneCall::Thunk
+        {
+            return self.lane_call(id, args, lane_call);
+        }
         let (native, layout, unbox) = &self.inp.hosts[&id.0];
         let (mut native, layout) = (*native, *layout);
         // A `from_bytes` whose buffer is dead after it takes the bytes.

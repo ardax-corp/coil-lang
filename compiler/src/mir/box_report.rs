@@ -19,6 +19,9 @@ pub enum BoxKind {
     Niche,
     /// A host native's two-word result, which the runtime returns boxed.
     HostResult,
+    /// A lane array turned into one boxed word per element in place
+    /// (`LanesToWords`), for code that reads one word per element.
+    LaneArray,
 }
 
 impl BoxKind {
@@ -28,6 +31,7 @@ impl BoxKind {
             Self::Variant => "variant",
             Self::Niche => "niche",
             Self::HostResult => "host result",
+            Self::LaneArray => "lane array",
         }
     }
 }

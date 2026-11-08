@@ -261,7 +261,9 @@ enum HirBuiltin {
     Bound { dict: u32, method: u32 },
     /// `f(a)` filling a prefix of `f`'s parameters: the filled values, the
     /// fill mask, then `CodePtr` and `MakeFn`, as `compile_call_expr`.
-    Partial { entry: u32, mask: u32, operand: u32 },
+    /// `value`: `f` returns two words, so the closure targets its one-word
+    /// adapter ([`Compiler::partial_value_target`]).
+    Partial { entry: u32, mask: u32, operand: u32, value: bool },
     /// `dot` / `cross` / `matmul` / ...: the packed `HostInvoke` kernel, or
     /// the operands to temps and the scalar unroll, as the AST's
     /// `emit_linear_algebra`.
@@ -2346,7 +2348,8 @@ impl Compiler {
         }
         let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
         let pushes: HashSet<u32> = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
-        let lane_escapes = self.hir_lane_escapes(hir, emit, &lane_arrays, &pushes);
+        let lane_calls = Self::hir_lane_calls(hir, emit, &lane_arrays);
+        let lane_escapes = self.hir_lane_escapes(hir, emit, &lane_arrays, &pushes, &lane_calls);
         // Host natives taking plain words and returning one (a niche word
         // comes back as the layout asks; no pair conversion at the edge),
         // and `gc::root` / `gc::weak` taking any word.
@@ -2521,6 +2524,7 @@ impl Compiler {
             frozen_arrays: HashMap::new(),
             lane_arrays,
             lane_escapes,
+            lane_calls,
             boxed_niches,
             niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
@@ -2628,7 +2632,14 @@ impl Compiler {
     /// or local assignment, the function's own lane-array result, or an
     /// argument of a ground function whose parameter is a lane array; a
     /// block, `if` or `match` passes its value's use through.
-    fn hir_lane_escapes(&self, hir: &HirBody, emit: &HirEmit, lanes: &HashMap<u32, crate::mir::HirLaneElem>, pushes: &HashSet<u32>) -> HashSet<u32> {
+    fn hir_lane_escapes(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        lanes: &HashMap<u32, crate::mir::HirLaneElem>,
+        pushes: &HashSet<u32>,
+        lane_calls: &HashMap<u32, crate::mir::HirLaneCall>,
+    ) -> HashSet<u32> {
         if lanes.is_empty() {
             return HashSet::new();
         }
@@ -2654,6 +2665,15 @@ impl Compiler {
                     HirKind::Call { args, .. } if pushes.contains(&p.0) || emit.plan.lens.contains_key(&p.0) => {
                         return args.first() == Some(&cur);
                     }
+                    // A `Vec` method that works on the lanes (`pop`,
+                    // `insert`, `clear`, ...: `hir_lane_calls`).
+                    HirKind::Call { args, .. } if lane_calls.get(&p.0).is_some_and(|c| c.takes_lanes()) => {
+                        return args.first() == Some(&cur);
+                    }
+                    // Freeing the array frees its lanes with it; a
+                    // copy-on-write copy keeps them, its own use decides.
+                    HirKind::Builtin { op: Builtin::FreeEarly { .. }, .. } => return true,
+                    HirKind::Builtin { op: Builtin::Cow { .. }, args } if args.first() == Some(&cur) => {}
                     HirKind::Call { callee: Callee::Named { .. }, args } => {
                         let Some(call) = emit.plan.calls.get(&p.0) else {
                             return false;
@@ -2676,6 +2696,62 @@ impl Compiler {
             }
         };
         lanes.keys().copied().filter(|&i| !keeps(HirId(i))).collect()
+    }
+
+    /// The calls of `Vec` methods on a lane array (or making one) that work
+    /// on its lanes rather than on one word per element: `pop`, `remove`
+    /// and `insert` lower to lane ops at the call; `clear`, `reserve`,
+    /// `capacity` and `from` call their thunks, whose natives take either
+    /// form; `new` and `with_capacity` of a lane type make a lane array.
+    fn hir_lane_calls(hir: &HirBody, emit: &HirEmit, lanes: &HashMap<u32, crate::mir::HirLaneElem>) -> HashMap<u32, crate::mir::HirLaneCall> {
+        use crate::mir::HirLaneCall;
+        if lanes.is_empty() {
+            return HashMap::new();
+        }
+        let mut out = HashMap::new();
+        // The `Vec` natives a thunk inlined into this body calls.
+        let natives: HashMap<usize, &str> = [
+            ("vec_pop", "pop"),
+            ("vec_remove", "remove"),
+            ("vec_insert", "insert"),
+            ("vec_clear", "clear"),
+            ("vec_capacity", "capacity"),
+            ("vec_reserve", "reserve"),
+            ("vec_from_array", "from"),
+        ]
+        .into_iter()
+        .filter_map(|(native, method)| Some((common::host_native_id(native)?, method)))
+        .collect();
+        for (&id, call) in &emit.plan.calls {
+            let method = match call.builtin {
+                Some(HirBuiltin::Host(n)) => match natives.get(&n) {
+                    Some(&m) => m,
+                    None => continue,
+                },
+                _ => match call.key.strip_prefix(common::BUILTIN_VEC_TYPE).and_then(|k| k.strip_prefix("::")) {
+                    Some(m) => m,
+                    None => continue,
+                },
+            };
+            // A stamped constructor twin (`new$ptr`) is the same method.
+            let method = method.split('$').next().unwrap_or(method);
+            let HirKind::Call { args, .. } = &hir.expr(HirId(id)).kind else {
+                continue;
+            };
+            let recv_lanes = args.first().is_some_and(|a| lanes.contains_key(&a.0));
+            let kind = match (method, args.len()) {
+                ("pop", 1) if recv_lanes => HirLaneCall::Pop,
+                ("remove", 2) if recv_lanes => HirLaneCall::Remove,
+                ("insert", 3) if recv_lanes => HirLaneCall::Insert,
+                ("clear" | "capacity", 1) | ("reserve", 2) if recv_lanes => HirLaneCall::Thunk,
+                ("from", 1) if recv_lanes => HirLaneCall::Thunk,
+                ("new", 0) if lanes.contains_key(&id) => HirLaneCall::New,
+                ("with_capacity", 1) if lanes.contains_key(&id) => HirLaneCall::WithCapacity,
+                _ => continue,
+            };
+            out.insert(id, kind);
+        }
+        out
     }
 
     /// The element of `ty` when it is a `Vec` or array of a closed two-word type,
@@ -5059,6 +5135,13 @@ impl Compiler {
             if hir.local(local).ty.as_ref().is_some_and(|t| self.hir_mir_pair_tys(t).is_none()) {
                 continue;
             }
+            // Nor when its init packs as a bare-trait existential, whose
+            // local may still carry the init's type: `let s: Named =
+            // Pick::Num(3)` holds the pack's one word (#2322).
+            let e = hir.expr(init);
+            if e.node.is_some_and(|n| self.checker.existential_pack_at(n).is_some()) || self.checker.existential_pack_span(e.span.0, e.span.1).is_some() {
+                continue;
+            }
             if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
                 emit.plan.pair_locals.insert(local.0, kind);
                 continue;
@@ -5410,9 +5493,14 @@ impl Compiler {
             || (total < 32 && mask >> total != 0)
             || self.checker.is_generic_fn(lookup)
             || self.coroutine_fns.contains(key)
-            || self.two_word_return_kind(lookup).is_some()
             || self.callee_has_unboxed_range_params(lookup)
         {
+            return Err("callee-partial");
+        }
+        // A two-word result: the closure calls the function's one-word
+        // adapter, whose twin the function is.
+        let value = self.two_word_return_kind(lookup).is_some();
+        if value && (method || key != lookup || !self.fn_value_redirects(key)) {
             return Err("callee-partial");
         }
         let entry = *self.functions.get(key).ok_or("callee-partial")?;
@@ -5453,6 +5541,7 @@ impl Compiler {
                 entry: entry as u32,
                 mask,
                 operand: make_fn_operand(0, mask.count_ones(), total as u32, false),
+                value,
             }),
             generic: None,
             instance: None,
@@ -10832,13 +10921,34 @@ impl Compiler {
         self.fn_entry_labels[&adapter]
     }
 
+    /// The entry a partial application of the function at `entry` targets
+    /// ([`HirBuiltin::Partial`]): the function's own `label`, or with
+    /// `value`, its one-word adapter ([`Self::fn_value_target`]).
+    pub(super) fn partial_value_target(&mut self, entry: usize, label: IlLabel, value: bool) -> Option<IlLabel> {
+        if !value {
+            return Some(label);
+        }
+        // The function's names at that entry (a bare one and its path):
+        // the least, so the adapter's name does not depend on map order.
+        let name = self
+            .functions
+            .iter()
+            .filter(|&(n, &e)| e == entry && self.fn_value_redirects(n) && self.two_word_return_kind(n).is_some())
+            .map(|(n, _)| n)
+            .min()?
+            .clone();
+        Some(self.fn_value_target(&name, label))
+    }
+
     /// [`Self::fn_value_target`]'s adapter: its parameters passed on to
     /// `name` as they come, its two-word result boxed to the one word a
     /// function value returns; `name` is its twin.
     fn fn_value_adapter_fn(&mut self, name: &str, adapter: &str) {
         use crate::hir::LocalKind;
         use crate::hir::synth::Synth;
-        let (Some(params), Some(ret)) = (self.checker.fn_param_tys(name), self.checker.fn_return_ty(name)) else {
+        // A function of no parameters is typed `unit -> R`: called with none.
+        let argc = self.fn_arities.get(name).map_or(0, |&(fixed, _)| fixed as usize);
+        let Some((params, ret)) = self.checker.fn_call_sig(name, argc) else {
             self.bind_function_entry(adapter.to_string());
             self.missing_call_target(name, 0..0);
             return;
@@ -10900,7 +11010,6 @@ impl Compiler {
         let frame = self.par_frame_enter();
         let prev_key = self.current_function_table_key.replace(name.clone());
         let prev_two_word = self.compiling_two_word_enum.take();
-        let prev_keys = std::mem::take(&mut self.field_key_slots);
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
@@ -10944,7 +11053,6 @@ impl Compiler {
         self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
         self.hir_mir_ctx = prev_ctx;
-        self.field_key_slots = prev_keys;
         self.compiling_two_word_enum = prev_two_word;
         self.current_function_table_key = prev_key;
         self.par_frame_exit(frame);

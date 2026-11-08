@@ -746,6 +746,17 @@ impl<'a> Driver<'a> {
         out.unwrap_or_default().bits()
     }
 
+    /// Run `f`, telling whether it panicked itself: a host call from a
+    /// `defer` pad that runs while a panic unwinds starts with `panicked`
+    /// already set, and that panic is not the call's (#2312).
+    fn fresh_panic<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> (R, bool) {
+        let was = std::mem::replace(&mut self.panicked, false);
+        let out = f(self);
+        let fresh = self.panicked;
+        self.panicked |= was;
+        (out, fresh)
+    }
+
     unsafe fn host_collect(raw: *mut c_void, ctx: *mut NativeCtx) {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
@@ -756,21 +767,23 @@ impl<'a> Driver<'a> {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
         let before = d.rt.heap.size();
-        d.rooted(ctx, crate::collect::collect);
-        *panicked = d.panicked;
+        let ((), fresh) = d.fresh_panic(|d| d.rooted(ctx, crate::collect::collect));
+        *panicked = fresh;
         before.saturating_sub(d.rt.heap.size()) as u64
     }
 
     unsafe fn host_free(raw: *mut c_void, ctx: *mut NativeCtx, word: u64, deep: bool) -> bool {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
-        d.rooted(ctx, |d| d.free_early(Value::from(word), deep)) && !d.panicked
+        let (freed, fresh) = d.fresh_panic(|d| d.rooted(ctx, |d| d.free_early(Value::from(word), deep)));
+        freed && !fresh
     }
 
     unsafe fn host_ffi(raw: *mut c_void, ctx: *mut NativeCtx, op: u64, operand: u64, args: &[Value], panicked: &mut bool) -> Option<u64> {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
         let arg = |i: usize| args.get(i).copied().unwrap_or_default();
+        let was = std::mem::replace(&mut d.panicked, false);
         let out = match op as u8 {
             common::FFI_OP_LOAD => d.rt.ffi_load(arg(0)),
             common::FFI_OP_DECLARE => d.rt.ffi_declare(operand as u32, arg(0), arg(1), arg(2), arg(3)),
@@ -789,6 +802,7 @@ impl<'a> Driver<'a> {
             }
         };
         *panicked = d.panicked;
+        d.panicked |= was;
         Some(out.bits())
     }
 
@@ -813,8 +827,8 @@ impl<'a> Driver<'a> {
                 Some(Invoked::Value(0))
             }
             op @ (crate::HostOp::RegionEnter | crate::HostOp::RegionExit) => {
-                d.rooted(ctx, |d| crate::collect::region(d, op == crate::HostOp::RegionEnter));
-                Some(if d.panicked { Invoked::Unwound } else { Invoked::Value(0) })
+                let ((), fresh) = d.fresh_panic(|d| d.rooted(ctx, |d| crate::collect::region(d, op == crate::HostOp::RegionEnter)));
+                Some(if fresh { Invoked::Unwound } else { Invoked::Value(0) })
             }
             crate::HostOp::Task if fn_id == common::TASK_SCOPE_OPEN_ID as usize + GEN_CLOSE_OP => {
                 let handle = args.first().copied().unwrap_or_default();

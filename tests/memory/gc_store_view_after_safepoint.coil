@@ -1,0 +1,74 @@
+// A loop that rewrites a large `Vec<Option<int>>` in place: each element
+// is a young box stored into an old array. A minor collection at the
+// loop's safepoint must not leave native code storing through a view taken
+// before it, past the write barrier (#2323).
+use string::format;
+use tests::assert;
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 3 == 0 {
+        return None;
+    }
+    return Some(x / 2);
+}
+
+test("rewrite with a call per element") {
+    let v: Vec<Option<int>> = [];
+    let i = 0;
+    while i < 100000 {
+        v.push(half(i));
+        i += 1;
+    }
+    let round = 0;
+    let t = 0;
+    while round < 10 {
+        let j = 0;
+        while j < v.len() {
+            match v[j] {
+                Some(x) => {
+                    t += x;
+                    v[j] = half(x + round);
+                },
+                None => {
+                    t += 1;
+                },
+            }
+            j += 1;
+        }
+        round += 1;
+    }
+    assert!(t == 2522832506, format("%i", t));
+}
+
+test("rewrite with no call in the store loop") {
+    let v: Vec<Option<int>> = [];
+    let i = 0;
+    while i < 100000 {
+        v.push(Some(i));
+        i += 1;
+    }
+    let round = 0;
+    let t = 0;
+    while round < 10 {
+        let j = 0;
+        while j < v.len() {
+            v[j] = Some(j + round);
+            j += 1;
+        }
+        let k = 0;
+        while k < v.len() {
+            match v[k] {
+                Some(x) => {
+                    t += x;
+                },
+                None => {
+                    t += 1;
+                },
+            }
+            k += 1;
+        }
+        round += 1;
+    }
+    assert!(t == 50004000000, format("%i", t));
+}

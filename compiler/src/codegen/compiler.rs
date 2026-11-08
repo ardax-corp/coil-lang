@@ -185,7 +185,6 @@ impl Compiler {
         &self.strings
     }
 
-    /// Operand-stack capacity recommended by recursion-depth analysis.
     /// Source text of the module about to compile (names in its AST are
     /// slices of it). Used for exact name spans in debug info.
     pub fn set_source_text(&mut self, text: &str) {
@@ -4794,27 +4793,48 @@ impl Compiler {
         Some(Self::peel_fn_return_ty(&applied))
     }
 
-    /// True when `name` is used as a function value anywhere we can see.
-    /// Whole-program seed wins when present; the per-file sidecar is the
-    /// single-module fallback and a fail-closed extra union.
-    /// Whether a value of named function `name` can target a one-word
-    /// adapter (`name$value`, [`Self::fn_value_target`]) so the function
-    /// itself returns two words to its direct calls: a plain free function,
-    /// not overloaded, generic, a coroutine or a method, and never
-    /// partially applied (a partial's closure calls it directly).
+    /// Whether a value of named function `name` (bare, or another module's
+    /// or a static method's path) can target a one-word adapter
+    /// (`name$value`, [`Self::fn_value_target`]) so the function itself
+    /// returns two words to its direct calls. A partial application's
+    /// closure targets the adapter too ([`Self::partial_value_target`]).
+    /// Not: an overload (the adapter is typed by name, not by candidate),
+    /// a generic (its value is the shared body's `PolyFn`), a coroutine or
+    /// a host native (neither returns two words), a trait instance method
+    /// (dictionaries reach it through its `$dict` adapter, so a value never
+    /// targets it), or a function with a rest parameter (the adapter's
+    /// call would pack the pack again).
+    ///
+    /// The first answer for a name is kept, as [`Self::two_word_return_kind`]'s.
     pub(super) fn fn_value_redirects(&self, name: &str) -> bool {
+        if let Some(&known) = self.fn_value_redirect_answers.borrow().get(name) {
+            return known;
+        }
+        let redirects = self.compute_fn_value_redirects(name);
+        self.fn_value_redirect_answers.borrow_mut().insert(name.to_string(), redirects);
+        redirects
+    }
+
+    fn compute_fn_value_redirects(&self, name: &str) -> bool {
         let lookup = strip_overload_key(name);
+        // A function not emitted yet has no arity here: its signature's
+        // rest parameter, as the checker read it.
+        let rest = self.fn_arities.get(name).is_some_and(|&(_, rest)| rest)
+            || self.checker.fn_has_rest(name)
+            || self.checker.fn_tuple_rest(name);
         lookup == name
-            && !name.contains("::")
+            && !rest
             && !self.checker.is_overloaded(name)
             && !self.checker.is_generic_fn(name)
             && !self.coroutine_fns.contains(name)
             && !is_instance_method_fqn(&self.checker, name)
             && !self.ident_is_host_native(name)
-            && self.fn_arities.get(name).is_some_and(|&(_, rest)| !rest)
-            && self.checker.fn_param_tys(name).is_some_and(|p| (0..p.len()).all(|argc| !self.is_fn_value_escaped(&format!("{name}#{argc}"))))
+            && self.checker.fn_param_tys(name).is_some()
     }
 
+    /// True when `name` is used as a function value anywhere we can see.
+    /// Whole-program seed wins when present; the per-file sidecar is the
+    /// single-module fallback and a fail-closed extra union.
     fn is_fn_value_escaped(&self, name: &str) -> bool {
         let short = name.rsplit("::").next().unwrap_or(name);
         if let Some(set) = &self.fn_value_escaped_program
@@ -4830,6 +4850,7 @@ impl Compiler {
     pub fn set_fn_value_escaped_program(&mut self, names: HashSet<String>) {
         self.fn_value_escaped_program = Some(names);
         self.pair_return_kinds.borrow_mut().clear();
+        self.fn_value_redirect_answers.borrow_mut().clear();
     }
 
     /// Whole-compile answer to "can some `fn drop()` resize an array?"
@@ -4865,6 +4886,7 @@ impl Compiler {
     pub fn clear_fn_value_escaped_program(&mut self) {
         self.fn_value_escaped_program = None;
         self.pair_return_kinds.borrow_mut().clear();
+        self.fn_value_redirect_answers.borrow_mut().clear();
     }
 
     /// `Some(kind)` for a compiled function whose direct CALL/RETURN can
@@ -4917,9 +4939,9 @@ impl Compiler {
         // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
         let facts = crate::layout::CalleeFacts {
             coroutine: self.coroutine_fns.contains(name),
-            // A value of it targets its one-word adapter instead; a
-            // partial application still needs the one-word result.
-            escaped: (self.is_fn_value_escaped(name) && !self.fn_value_redirects(name)) || self.is_under_applied(name),
+            // A value of it, or a partial application, targets its
+            // one-word adapter instead.
+            escaped: (self.is_fn_value_escaped(name) || self.is_under_applied(name)) && !self.fn_value_redirects(name),
             instance_method: is_instance_method_fqn(&self.checker, name) && !self.instance_method_fqn_raw(name),
             host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
             ..crate::layout::CalleeFacts::default()
@@ -5374,8 +5396,6 @@ impl Compiler {
                 self.emit_idx = id.0 as usize;
             }
             self.do_compile(args);
-            let prev_field_keys = std::mem::take(&mut self.field_key_slots);
-            self.emit_field_key_prologue(body);
             // One HIR per instance: the generic body's HIR at this clone's
             // type arguments.
             let lowered = self.try_lower_hir_function(span, body);
@@ -5402,7 +5422,6 @@ impl Compiler {
             self.compiling_two_word_enum = prev_two_word_enum;
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
-            self.field_key_slots = prev_field_keys;
             self.context.variables = prev_fn_vars;
             self.polyfn_vars = prev_fn_polyfn_vars;
             self.polyfn_sources = prev_fn_polyfn_sources;
@@ -5552,179 +5571,6 @@ impl Compiler {
         match variable.1.borrow() {
             Expression::Identifier(n) => n.to_string(),
             _ => String::new(),
-        }
-    }
-
-    fn alloc_temp_slot(&mut self) -> u32 {
-        self.temp_counter += 1;
-        let name = format!("__tmp{}", self.temp_counter);
-        self.context.variables.intern(name) as u32
-    }
-
-    /// Count GetField/SetField string-key uses in `node` (Access / OptionalAccess).
-    fn count_field_key_uses(node: &Output<'_>, counts: &mut HashMap<String, u32>) {
-        use Expression::*;
-        match node.1.as_ref() {
-            Access(recv, field) | OptionalAccess(recv, field) => {
-                *counts.entry((*field).to_string()).or_insert(0) += 1;
-                Self::count_field_key_uses(recv, counts);
-            }
-            CompoundAssign(target, _, rhs) | Assignment(target, rhs) => {
-                Self::count_field_key_uses(target, counts);
-                Self::count_field_key_uses(rhs, counts);
-            }
-            Adjust { target, .. } => Self::count_field_key_uses(target, counts),
-            Negate(e)
-            | Not(e)
-            | LogicalNot(e)
-            | Positive(e)
-            | Return(e)
-            | ImplicitReturn(e)
-            | Raise(e)
-            | Panic(e)
-            | Yield(e)
-            | YieldFrom(e)
-            | Try(e)
-            | Expr(e)
-            | Group(e)
-            | ExprStatement(e)
-            | Statement(e)
-            | Readonly(e)
-            | Noop(e)
-            | Dload(e)
-            | Done(e)
-            | Spread(e)
-            | NamedArg(_, e)
-            | Member(e)
-            | Method(_, e)
-            | Constant(e, ..)
-            | Variable(_, Some(e)) => Self::count_field_key_uses(e, counts),
-            Variable(_, None) => {}
-            Resume(e, Some(v)) | Coalesce(e, v) | Cast(e, v) | Index(e, Some(v)) => {
-                Self::count_field_key_uses(e, counts);
-                Self::count_field_key_uses(v, counts);
-            }
-            Resume(e, None) | Index(e, None) => Self::count_field_key_uses(e, counts),
-            Add(a, b)
-            | Sub(a, b)
-            | Mul(a, b)
-            | Div(a, b)
-            | Mod(a, b)
-            | Pow(a, b)
-            | Shl(a, b)
-            | Shr(a, b)
-            | Xor(a, b)
-            | And(a, b)
-            | BitAnd(a, b)
-            | Or(a, b)
-            | BitOr(a, b)
-            | Eq(a, b)
-            | Neq(a, b)
-            | Leq(a, b)
-            | Geq(a, b)
-            | Le(a, b)
-            | Gt(a, b)
-            | TypeFn { params: a, ret: b, .. } => {
-                Self::count_field_key_uses(a, counts);
-                Self::count_field_key_uses(b, counts);
-            }
-            Range { start, end, .. } => {
-                Self::count_field_key_uses(start, counts);
-                Self::count_field_key_uses(end, counts);
-            }
-            Array(v) | Fragment(v) | Block(v) | Program(v) | Tuple(v) | If(v)
-            | Declare(v) | Invoke(v) => {
-                for c in v {
-                    Self::count_field_key_uses(c, counts);
-                }
-            }
-            Dict(fields) => {
-                for f in fields {
-                    Self::count_field_key_uses(&f.value, counts);
-                }
-            }
-            Branch(cond, body) => {
-                if let Some(c) = cond {
-                    Self::count_field_key_uses(c, counts);
-                }
-                Self::count_field_key_uses(body, counts);
-            }
-            Call { name, args } => {
-                Self::count_field_key_uses(name, counts);
-                if let Some(as_) = args {
-                    for a in as_ {
-                        Self::count_field_key_uses(a, counts);
-                    }
-                }
-            }
-            Loop {
-                contracts: _,
-                identifier,
-                pattern: _,
-                iterable,
-                body,
-            } => {
-                if let Some(id) = identifier {
-                    Self::count_field_key_uses(id, counts);
-                }
-                Self::count_field_key_uses(iterable, counts);
-                Self::count_field_key_uses(body, counts);
-            }
-            LetDestructure { rhs, .. } => Self::count_field_key_uses(rhs, counts),
-            Defer { body, .. } | Lambda { body, .. } | TestCase { body, .. } => {
-                Self::count_field_key_uses(body, counts);
-            }
-            Function { body: Some(b), .. } => Self::count_field_key_uses(b, counts),
-            Function { body: None, .. } => {}
-            Instantiate(recv, args) => {
-                Self::count_field_key_uses(recv, counts);
-                if let Some(as_) = args {
-                    for a in as_ {
-                        Self::count_field_key_uses(a, counts);
-                    }
-                }
-            }
-            Match { scrutinee, arms } => {
-                Self::count_field_key_uses(scrutinee, counts);
-                for arm in arms {
-                    Self::count_field_key_uses(&arm.body, counts);
-                }
-            }
-            Construct { fields, .. } => match fields {
-                parser::ast::EnumConstructPayload::Tuple(parts) => {
-                    for p in parts {
-                        Self::count_field_key_uses(p, counts);
-                    }
-                }
-                parser::ast::EnumConstructPayload::Record(fs) => {
-                    for f in fs {
-                        Self::count_field_key_uses(&f.value, counts);
-                    }
-                }
-                parser::ast::EnumConstructPayload::Unit => {}
-            },
-            StaticDecl { init, .. } => Self::count_field_key_uses(init, counts),
-            Field { init: Some(i), .. } => Self::count_field_key_uses(i, counts),
-            // Type-only / declaration / leaf nodes, no runtime field keys.
-            _ => {}
-        }
-    }
-
-    /// Materialize field-name strings used ≥2 times into temp slots at fn entry.
-    fn emit_field_key_prologue(&mut self, body: &Output<'_>) {
-        let mut counts = HashMap::new();
-        Self::count_field_key_uses(body, &mut counts);
-        let mut keys: Vec<String> = counts
-            .into_iter()
-            .filter(|(_, n)| *n >= 2)
-            .map(|(k, _)| k)
-            .collect();
-        keys.sort();
-        self.field_key_slots.clear();
-        for key in keys {
-            let slot = self.alloc_temp_slot();
-            self.intern_string(&key);
-            self.field_key_slots.insert(key, slot);
         }
     }
 
@@ -5960,7 +5806,6 @@ impl Compiler {
         let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
         let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
-        let prev_field_keys = std::mem::take(&mut self.field_key_slots);
         let prev_fn_qualified = self.current_function_qualified.replace(name.clone());
         let prev_fn_table_key = self.current_function_table_key.replace(name.clone());
         let prev_result_mode = std::mem::replace(&mut self.compiling_result_mode, false);
@@ -5992,7 +5837,6 @@ impl Compiler {
         self.compiling_result_mode = prev_result_mode;
         self.current_function_table_key = prev_fn_table_key;
         self.current_function_qualified = prev_fn_qualified;
-        self.field_key_slots = prev_field_keys;
         self.polyfn_sources = prev_polyfn_sources;
         self.polyfn_vars = prev_polyfn_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
@@ -6445,8 +6289,6 @@ impl Compiler {
 
             // Provisional span so self-recursive peels can see the opening
             // predicate while the body is still streaming into `self.code`.
-            let prev_field_keys = std::mem::take(&mut self.field_key_slots);
-            self.emit_field_key_prologue(body);
             let prev_active = self.active_fn_name.take();
             self.active_fn_name = Some(name.to_string());
             let lowered = prev_fn_table_key_was_none && self.try_lower_hir_function(span, body);
@@ -6470,7 +6312,6 @@ impl Compiler {
             }
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
-            self.field_key_slots = prev_field_keys;
             let entry = self.fn_entry_labels.get(&table_key).copied();
             self.bodies.record(table_key.clone(), entry);
             self.attach_hir_mir();
@@ -7049,8 +6890,6 @@ impl Compiler {
                 let prev_two_word_enum = self.compiling_two_word_enum.clone();
                 self.compiling_two_word_enum = self.two_word_return_kind(&fn_name);
 
-                let prev_field_keys = std::mem::take(&mut self.field_key_slots);
-                self.emit_field_key_prologue(body);
                 let lowered = self.try_lower_hir_function(span, body);
                 if !lowered {
                     self.report_unlowered(span, &fn_name);
@@ -7068,7 +6907,6 @@ impl Compiler {
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
                 self.compiling_two_word_enum = prev_two_word_enum;
-                self.field_key_slots = prev_field_keys;
                 self.context.variables = prev_fn_vars;
                 self.context.stack_array_locals = prev_stack_arrays;
                 self.context.stack_array_box = prev_stack_boxes;

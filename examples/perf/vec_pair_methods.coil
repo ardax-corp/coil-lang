@@ -1,0 +1,53 @@
+// `Vec<Option<int>>` used as a stack and a sorted list: `push`, `pop`,
+// `insert` and `remove` work on the elements' two words in place, so the
+// array never turns into boxed elements.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 3 == 0 {
+        return None;
+    }
+    return Some(x / 2);
+}
+
+fn main() {
+    let t = 0;
+    let round = 0;
+    while round < 40 {
+        let v: Vec<Option<int>> = Vec::with_capacity(4000);
+        let i = 0;
+        while i < 4000 {
+            v.push(half(i + round));
+            i += 1;
+        }
+        // Rotate: take from the front, put at the back half.
+        let k = 0;
+        while k < 200 {
+            match v.remove(0) {
+                Some(Some(x)) => {
+                    t += x;
+                    v.insert(v.len() / 2, Some(x + 1));
+                },
+                Some(None) => {
+                    t += 1;
+                },
+                None => {},
+            }
+            k += 1;
+        }
+        while let Some(x) = v.pop() {
+            match x {
+                Some(n) => {
+                    t += n;
+                },
+                None => {
+                    t += 2;
+                },
+            }
+        }
+        round += 1;
+    }
+    let _ = print(format("%i\n", t));
+}

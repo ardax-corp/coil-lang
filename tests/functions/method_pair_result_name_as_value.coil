@@ -1,0 +1,122 @@
+// Methods whose result moves as two words (`Option<int>`, `(int, int)`)
+// keep their two words when a function value, a field read or a partial
+// elsewhere shares their name: the name being a value somewhere says
+// nothing about the method, whose values go through its adapters.
+use tests::assert;
+
+trait Pick<T> {
+    fn pick(T a, int k) -> Option<int> {}
+}
+
+class Bag {
+    pub base: int,
+}
+
+impl Bag {
+    #[inline(never)]
+    pub fn peek(int k) -> Option<int> {
+        if k < 0 {
+            return None;
+        }
+        return Some(self.base + k);
+    }
+
+    #[inline(never)]
+    pub fn span(int k) -> (int, int) {
+        return (self.base, self.base + k);
+    }
+
+    #[inline(never)]
+    pub static fn make(int k) -> Option<int> {
+        if k == 0 {
+            return None;
+        }
+        return Some(k * 3);
+    }
+
+    #[inline(never)]
+    pub static fn sum(int a, int b) -> Option<int> {
+        if a + b == 0 {
+            return None;
+        }
+        return Some(a + b);
+    }
+}
+
+impl Pick for Bag {
+    #[inline(never)]
+    pub fn pick(Bag b, int k) -> Option<int> {
+        if k > b.base {
+            return None;
+        }
+        return Some(k);
+    }
+}
+
+/// Field names shared with the methods above: a field read is a value.
+class Names {
+    pub peek: int,
+    pub span: int,
+    pub pick: int,
+    pub make: int,
+    pub sum: int,
+}
+
+/// A free function of the same name, used as a value.
+fn peek(int k) -> Option<int> {
+    return Some(k * 100);
+}
+
+fn span(int a, int b) -> (int, int) {
+    return (b, a);
+}
+
+#[inline(never)]
+fn through(int -> Option<int> f, int x) -> int {
+    return f(x) ?? -1;
+}
+
+#[inline(never)]
+fn picked<T: Pick>(T x, int k) -> int {
+    return x.pick(k) ?? -1;
+}
+
+test("inherent and trait methods sharing a value's name") {
+    let n = new Names(1, 2, 3, 4, 5);
+    assert!(n.peek + n.span + n.pick + n.make + n.sum == 15);
+    let b = new Bag(10);
+    assert!(b.peek(2) == Some(12));
+    assert!(b.peek(-1) == None);
+    let (x, y) = b.span(5);
+    assert!(x == 10 && y == 15);
+    assert!(Bag::make(2) == Some(6) && Bag::make(0) == None);
+    assert!(b.pick(3) == Some(3) && b.pick(11) == None);
+    assert!(picked(b, 4) == 4 && picked(b, 40) == -1);
+    let s = 0;
+    let i = 0;
+    while i < 100 {
+        s += b.peek(i) ?? 0;
+        s += b.pick(i) ?? 0;
+        i += 1;
+    }
+    assert!(s == 100 * 10 + 4950 + 55);
+}
+
+test("the free namesakes through values and partials") {
+    assert!(through(peek, 3) == 300);
+    let f = peek;
+    assert!(f(1) == Some(100));
+    let g = span(a: 1);
+    let (p, q) = g(2);
+    assert!(p == 2 && q == 1);
+    let (r, t) = span(5, 6);
+    assert!(r == 6 && t == 5);
+}
+
+test("a partial of a static method") {
+    let m = Bag::sum(1);
+    assert!(m(2) == Some(3));
+    assert!(m(-1) == None);
+    assert!(through(m, 5) == 6);
+    assert!(Bag::sum(2, 2) == Some(4));
+}

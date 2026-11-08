@@ -1,6 +1,6 @@
 //! Shared CLI helpers for coil binaries (archive load, runtime execute, git-style dispatch).
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
@@ -359,15 +359,6 @@ const RUNNER_MARKER_REVERSED: &[u8] = b"1v:rennur-debme-lioc";
 pub fn is_coil_embed_runner(bytes: &[u8]) -> bool {
     let marker: Vec<u8> = RUNNER_MARKER_REVERSED.iter().rev().copied().collect();
     bytes.windows(marker.len()).any(|w| w == marker.as_slice())
-}
-
-/// Stdout/stderr writer selection for SARIF / LSP / pretty reports.
-pub fn writer_for_format(pretty_on_stderr: bool) -> Box<dyn Write + Send> {
-    if pretty_on_stderr {
-        Box::new(std::io::stderr())
-    } else {
-        Box::new(std::io::stdout())
-    }
 }
 
 #[cfg(test)]

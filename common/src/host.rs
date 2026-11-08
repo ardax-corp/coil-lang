@@ -1552,9 +1552,23 @@ pub const HOST_NATIVES: &[HostNative] = &[
         caps: NO_CAP,
     },
     HostNative {
-        name: "startup_restore",
+        name: VEC_DRAIN_NATIVE,
+        arity: 3,
+        id: VEC_DRAIN_ID,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: VEC_ROTATE_IN_NATIVE,
+        arity: 2,
+        id: VEC_ROTATE_IN_ID,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: STARTUP_RESTORE_NATIVE,
         arity: 1,
-        id: 212,
+        id: STARTUP_RESTORE_ID,
         effects: SUSPEND,
         caps: NO_CAP,
     },
@@ -1641,7 +1655,9 @@ pub const CONTRACT_FAIL_NATIVE: &str = "contract_fail";
 pub const FFI_READ_INTS_ID: u16 = 160;
 pub const FFI_READ_INTS_NATIVE: &str = "ffi_read_ints";
 /// `==` on an aggregate with `float` leaves, by its static shape
-/// (coil-lang#1253, archive minor 39).
+/// (coil-lang#1253, archive minor 39). No longer emitted: such an `==`
+/// calls compiler-made glue (`codegen::eq_glue`). Kept for archives that
+/// still call it; a panic stub at the next major.
 pub const VALUES_EQ_SHAPED_ID: u16 = 161;
 pub const VALUES_EQ_SHAPED_NATIVE: &str = "values_eq_shaped";
 /// `<` / `<=` / `>` / `>=` on `string`: `-1` / `0` / `1` by UTF-8 bytes
@@ -1807,14 +1823,30 @@ pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 pub const LOCK_ACQUIRE_ID: u16 = 200;
 /// `prelude::thread::rw_store`, the last lock primitive.
 pub const RW_STORE_ID: u16 = 211;
-/// Restores the snapshot at a constant-pool index (archive 7.3,
+
+/// `vec_drain(v, from, to)` (archive 7 minor 3, compiler lowering only):
+/// drop elements `from..to` of array `v`, the ones after them moving down;
+/// the compiler has checked `0 <= from <= to <= v.len()`. Any array form,
+/// a lane array's included: lane code's `pop` and `remove` take the element
+/// out with it.
+pub const VEC_DRAIN_ID: u16 = 212;
+pub const VEC_DRAIN_NATIVE: &str = "vec_drain";
+/// `vec_rotate_in(v, i)` (archive 7 minor 3, compiler lowering only): move
+/// the last element of array `v` to `i`, elements `i..` moving up one; the
+/// compiler has checked `0 <= i < v.len()`. Any array form: lane code's
+/// `insert` pushes and then rotates the element in.
+pub const VEC_ROTATE_IN_ID: u16 = 213;
+pub const VEC_ROTATE_IN_NATIVE: &str = "vec_rotate_in";
+/// Restores the snapshot at a constant-pool index (archive 7 minor 4,
 /// `HostOp::Restore`): an AOT executable's native `__start` runs it where
 /// the startup restored a snapshot. Compiler-emitted only.
-pub const STARTUP_RESTORE_ID: u16 = 212;
+pub const STARTUP_RESTORE_ID: u16 = 214;
 pub const STARTUP_RESTORE_NATIVE: &str = "startup_restore";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 213);
+    assert!(HOST_NATIVES.len() == 215);
+    assert!(HOST_NATIVES[VEC_DRAIN_ID as usize].id == VEC_DRAIN_ID);
+    assert!(HOST_NATIVES[VEC_ROTATE_IN_ID as usize].id == VEC_ROTATE_IN_ID);
     assert!(HOST_NATIVES[STARTUP_RESTORE_ID as usize].id == STARTUP_RESTORE_ID);
     assert!(HOST_NATIVES[LOCK_ACQUIRE_ID as usize].id == LOCK_ACQUIRE_ID);
     assert!(HOST_NATIVES[RW_STORE_ID as usize].id == RW_STORE_ID);
@@ -1896,6 +1928,8 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "vec_from_array",
     "vec_extend_range",
     "vec_fill",
+    VEC_DRAIN_NATIVE,
+    VEC_ROTATE_IN_NATIVE,
     "symbol_next_id",
     "key_index_table",
     "key_index_probe",

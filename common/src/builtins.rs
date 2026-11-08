@@ -207,10 +207,6 @@ pub fn builtin_primitive_type_spelling(name: &str) -> Option<&'static str> {
 /// matmul via `Mul`, not element-wise zip.
 pub const BUILTIN_MATRIX_TYPE: &str = "Matrix";
 
-pub fn is_builtin_matrix_type(name: &str) -> bool {
-    name == BUILTIN_MATRIX_TYPE
-}
-
 /// Explicit GC keep-alive handle (`Root<T>` from virtual `gc`).
 pub const BUILTIN_ROOT_TYPE: &str = "Root";
 
@@ -219,18 +215,6 @@ pub const BUILTIN_WEAK_TYPE: &str = "Weak";
 
 /// Growable heap vector (`Vec<T>`) — replaces dynamic `[T]` arrays.
 pub const BUILTIN_VEC_TYPE: &str = "Vec";
-
-pub fn is_builtin_root_type(name: &str) -> bool {
-    name == BUILTIN_ROOT_TYPE
-}
-
-pub fn is_builtin_weak_type(name: &str) -> bool {
-    name == BUILTIN_WEAK_TYPE
-}
-
-pub fn is_builtin_vec_type(name: &str) -> bool {
-    name == BUILTIN_VEC_TYPE
-}
 
 /// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.
 pub const RANGE_HEAP_TYPE_ID: u32 = 0xFFFE;

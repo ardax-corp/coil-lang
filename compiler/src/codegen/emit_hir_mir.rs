@@ -541,15 +541,6 @@ impl Compiler {
         {
             t.field_news.insert(id.0);
         }
-        // `==` / `!=` on an aggregate with `float` leaves: the shape
-        // `values_eq_shaped` compares it by (#1253).
-        if let HirKind::Bin { op: BinOp::Eq | BinOp::Ne | BinOp::Overloaded("==" | "!="), lhs, .. } = &e.kind
-            && matches!(emit.plan.ops.get(&id.0), None | Some(HirOp::Prim))
-            && let Some(shape) = Self::hir_ty(hir, *lhs).and_then(|t| self.eq_float_shape(t))
-        {
-            let idx = self.intern_string(&shape);
-            t.strings.insert(id.0, idx);
-        }
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
                 if Self::hir_ty(hir, id).and_then(lower::primitive) != Some(crate::typechecking::ty::BYTE)
@@ -784,13 +775,15 @@ impl Compiler {
             // argument its own word.
             HirKind::Call { args, .. }
                 if let Some(HirCall {
-                    builtin: Some(HirBuiltin::Partial { entry, mask, operand }),
+                    builtin: Some(HirBuiltin::Partial { entry, mask, operand, value }),
                     params,
                     ..
                 }) = emit.plan.calls.get(&id.0) =>
             {
+                let (entry, value) = (*entry as usize, *value);
                 if args.iter().zip(params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
-                    && let Some(target) = self.bodies.entry_label_for_offset(*entry as usize)
+                    && let Some(label) = self.bodies.entry_label_for_offset(entry)
+                    && let Some(target) = self.partial_value_target(entry, label, value)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
                     t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
@@ -1865,49 +1858,6 @@ impl Compiler {
             || self.hir_mir_probe_unplanned(|this, steps| {
                 this.plan_call_site_dicts(steps, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
             })
-    }
-
-    /// The shape `values_eq_shaped` compares a value of `ty` by, when it
-    /// is an array, `Vec`, tuple or record with a `float` leaf (#1253): `f`
-    /// a float, `w` anything else, `a` an array's element shape, `t` a
-    /// tuple's and `r` a record's count digit and part shapes.
-    pub(super) fn eq_float_shape(&self, ty: &Ty) -> Option<String> {
-        fn walk(ty: &Ty, out: &mut String) -> Option<()> {
-            let ty = crate::typechecking::ty::strip_readonly(ty);
-            if lower::primitive(ty) == Some(crate::typechecking::ty::FLOAT) {
-                out.push('f');
-            } else if let Ty::Array { element, .. } = ty {
-                out.push('a');
-                walk(element.as_ref(), out)?;
-            } else if let Some(elem) = crate::typechecking::ty::vec_element_ty(ty) {
-                out.push('a');
-                walk(elem, out)?;
-            } else if let Ty::Tuple(items) = ty {
-                let n = u8::try_from(items.len()).ok().filter(|&n| n <= 9)?;
-                out.push('t');
-                out.push(char::from(b'0' + n));
-                for item in items {
-                    walk(item, out)?;
-                }
-            } else if let Ty::Record { fields } = ty {
-                // Slots are the fields sorted by name.
-                let n = u8::try_from(fields.len()).ok().filter(|&n| n <= 9)?;
-                let mut sorted: Vec<&(String, Ty)> = fields.iter().collect();
-                sorted.sort_by(|a, b| a.0.cmp(&b.0));
-                out.push('r');
-                out.push(char::from(b'0' + n));
-                for (_, field) in sorted {
-                    walk(field, out)?;
-                }
-            } else {
-                out.push('w');
-            }
-            Some(())
-        }
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let mut out = String::new();
-        walk(&ty, &mut out)?;
-        (out.contains('f') && out != "f").then_some(out)
     }
 
     /// Whether a `format` call's `%v` arguments read a frame dictionary

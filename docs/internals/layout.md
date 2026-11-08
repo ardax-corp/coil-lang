@@ -133,9 +133,16 @@ made, or one converted earlier): `LaneIndex` unboxes the element, and
 `LaneStore` / `LanePush` box the new one. A one-word element op on a lane
 array is a compiler bug and panics in the runtime.
 
-Lane arrays are never stack arrays. `pop`, `remove`, `insert` and the
-other `Vec` natives still take one word per element, so a lane array
-converts before them.
+Lane arrays are never stack arrays. The `Vec` methods keep the lanes
+(`hir_lane_calls`): `pop`, `remove` and `insert` lower at the call (or at
+the native a thunk inlined into the caller calls) to `ArrayLen`, the lane
+ops and `vec_drain` / `vec_rotate_in`, which move the words in place; their
+`Option` result boxes the element as any `Option` of a two-word value
+does. `clear`, `reserve`, `capacity` and `Vec::from` call their thunks,
+whose natives take either form, and `Vec::new()` / `Vec::with_capacity(n)`
+of a lane type allocate an empty lane array. An early free or a
+copy-on-write copy of the array keeps it in lanes as well. `coil dissect
+--boxes` lists each place an array still converts (`lane array`).
 
 ## The two-slot calling convention
 
@@ -152,10 +159,20 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   walk: any function value, partial application, `thread::spawn` or FFI
   callback of that name, in any file of the package use-graph, keeps every
   caller on the one-word ABI for its parameters. Its result too, unless
-  the value can target an adapter (`Compiler::fn_value_redirects`: a plain
-  free function never partially applied): then the function returns two
-  words to direct calls, and its value enters `f$value`, a one-word
-  adapter that boxes the result, whose `pair_twin` is the function itself.
+  the value can target an adapter (`Compiler::fn_value_redirects`): then
+  the function returns two words to direct calls, and its value enters
+  `f$value`, a one-word adapter that boxes the result, whose `pair_twin`
+  is the function itself. That covers free functions of any module (the
+  adapter is reserved once per compile, in whichever module first takes
+  the value, so every module's direct calls and values agree) and static
+  methods; a partial application's closure (`f(a)`) targets the adapter
+  as well, so a call through it that reads two words enters the function.
+  Not redirected: overloads (the adapter is typed by name, not by
+  candidate), generic functions (their value is the shared body's
+  `PolyFn`), functions with a rest parameter, coroutines and host
+  natives (neither returns two words to a call), and trait instance
+  methods (a value never targets one; dictionaries hold its `$dict`
+  adapter).
 - Coroutines never return two slots; host natives return theirs through
   the context (see "Host calls"). A raw trait
   instance method (a ground instance with no context, not a default body)

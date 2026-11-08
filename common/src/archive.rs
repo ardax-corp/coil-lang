@@ -16,7 +16,7 @@ use crate::debug::{DebugLine, DebugLoc, ProgramDebug};
 pub const ARCHIVE_MAJOR: u16 = 7;
 
 /// Archive minor. Bump on an additive change to the format.
-pub const ARCHIVE_MINOR: u16 = 3;
+pub const ARCHIVE_MINOR: u16 = 4;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -86,7 +86,7 @@ pub fn push_tagged_entry(kinds: &mut Vec<u8>, tag_slot: u16, pointer_tags: u64) 
 /// [`WORD_UNKNOWN`].
 pub fn class_slot_kinds<'a>(kinds: &'a [u8], slots: &'a [crate::Value]) -> impl Iterator<Item = u8> + 'a {
     let n = slots.len();
-    let mut entries = kinds.get(n..).unwrap_or_default().chunks_exact(TAGGED_ENTRY_BYTES);
+    let mut entries = kinds.get(n..).unwrap_or_default().as_chunks::<TAGGED_ENTRY_BYTES>().0.iter();
     (0..n).map(move |i| match kinds.get(i).copied() {
         Some(WORD_TAGGED) => entries
             .next()
