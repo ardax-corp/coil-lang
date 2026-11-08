@@ -18,7 +18,7 @@ impl Collect for Option<int> {
 }
 
 fn take_head<C: Collect>(C xs) -> C::Elem {
-    return head(xs);
+    return xs.head();
 }
 
 test("trait call on a constructed arg") {

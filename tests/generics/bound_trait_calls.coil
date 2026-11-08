@@ -1,5 +1,5 @@
 // Trait calls on a bound type parameter in a shared generic body go
-// through the hidden dictionary: methods, function-style calls and a
+// through the hidden dictionary: methods, trait-qualified calls and a
 // static `T::m(..)` constructor, with int and string results.
 use tests::assert;
 
@@ -33,7 +33,7 @@ impl Size for Bag {
 }
 
 fn twice<T: Size>(T x) -> int {
-    return x.size() + size(x);
+    return x.size() + Size::size(x);
 }
 
 fn named<T: Size>(T x, int n) -> string {

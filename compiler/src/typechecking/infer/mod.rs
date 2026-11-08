@@ -564,8 +564,8 @@ pub struct Checker {
 
     /// Bare `Some`/`Ok`/`Red` (Call or Identifier) resolved to `Enum::Case`.
     bare_constructs_by_span: HashMap<(usize, usize), (String, String)>,
-    /// `Trait::method(args)` resolved as the free call `method(args)`
-    /// limited to `Trait`: span → the callee name lowering gives it.
+    /// `Trait::method(args)`, resolved as `x.method(rest)` is but limited
+    /// to `Trait`: span → the callee name lowering gives it.
     qualified_trait_calls_by_span: HashMap<(usize, usize), String>,
     /// `m::F(args)` / `C::f(args)` calling the function value of a
     /// `const` or `static` (#1705): span → the callee's type.
@@ -791,8 +791,8 @@ pub struct Checker {
     current_typeclass: Option<String>,
 
     /// Bare name of the trait instance method whose body is being inferred.
-    /// Its recursion binding does not shadow a ground function-style trait
-    /// call: `third(4, w)` in `Pass for Box<T>`'s `third` is `int`'s (#1483).
+    /// Its recursion binding is not a free fn: a bare `third(4, w)` in
+    /// `Pass for Box<T>`'s `third` is the trait's method, so E0153.
     current_instance_method: Option<String>,
 
     /// Set to `true` only when `infer_function` is called for a genuine

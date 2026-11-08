@@ -6,7 +6,7 @@ use io::sync::print;
 use string::format;
 
 fn print_any(Show x) {
-    let _ = print(format("%s", show(x)));
+    let _ = print(format("%s", x.show()));
 }
 
 fn main() {

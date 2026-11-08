@@ -31,10 +31,10 @@ impl Ordered for int {
 }
 
 fn choose<c: * -> Constraint, T: c>(T a, T b) -> int {
-    if lt_val(a, b) {
+    if a.lt_val(b) {
         return 0;
     }
-    if eq_val(a, b) {
+    if a.eq_val(b) {
         return 42;
     }
     return 1;

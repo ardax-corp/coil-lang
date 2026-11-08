@@ -5,7 +5,7 @@
 use tests::assert;
 
 fn second<A: Show, B: Show>(A a, B b) -> string {
-    return show(b);
+    return b.show();
 }
 
 fn second_method<A: Show, B: Show>(A a, B b) -> string {

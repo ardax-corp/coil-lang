@@ -16,12 +16,12 @@ impl Show for Point {
 }
 
 fn shown<T: Show>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 
 test("vec of ints shows like an array") {
     let v: Vec<int> = Vec::from([1, 2, 3]);
-    assert!(show(v) == "[1, 2, 3]");
+    assert!(v.show() == "[1, 2, 3]");
     assert!(v.show() == "[1, 2, 3]");
     assert!(format("%v", v) == "[1, 2, 3]");
     assert!(shown(v) == "[1, 2, 3]");
@@ -29,13 +29,13 @@ test("vec of ints shows like an array") {
 
 test("empty vec and other elements") {
     let none: Vec<int> = Vec::new();
-    assert!(show(none) == "[]");
+    assert!(none.show() == "[]");
     let words: Vec<string> = Vec::from(["a", "b"]);
-    assert!(show(words) == "[a, b]");
+    assert!(words.show() == "[a, b]");
     let points: Vec<Point> = Vec::from([new Point(1, 2)]);
-    assert!(show(points) == "[<1 2>]");
+    assert!(points.show() == "[<1 2>]");
     let maybe: Vec<Option<int>> = Vec::from([Option::Some(1), Option::None]);
     let some: Option<int> = Option::Some(1);
     let empty: Option<int> = Option::None;
-    assert!(show(maybe) == "[" + show(some) + ", " + show(empty) + "]");
+    assert!(maybe.show() == "[" + some.show() + ", " + empty.show() + "]");
 }

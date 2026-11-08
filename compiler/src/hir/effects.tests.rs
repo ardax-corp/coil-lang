@@ -279,10 +279,10 @@ impl Plain for Sq {
     }
 }
 fn total(Area a) -> int {
-    return area(a);
+    return a.area();
 }
 fn other(Plain p) -> int {
-    return plain(p);
+    return p.plain();
 }";
     let (m, out) = summaries(src);
     assert!(of(&m, &out, "total").visible.is_pure());

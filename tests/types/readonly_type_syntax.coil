@@ -146,7 +146,7 @@ test("function types with readonly parameters") {
 test("a readonly value as a readonly trait object") {
     let p = readonly new Point(2, 3, new Inner(0));
     let a: readonly Area = p;
-    assert!(area(a) == 6);
+    assert!(a.area() == 6);
 }
 
 test("typeof shows readonly types") {

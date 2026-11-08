@@ -28,7 +28,7 @@ impl Handler for Hello {
 
 fn serve(Handler handler, int extra) -> int {
     let r = new Req("/abc", 2);
-    let resp = handle(handler, r, extra);
+    let resp = handler.handle(r, extra);
     return resp.code;
 }
 
@@ -42,12 +42,12 @@ test("a trait object method takes further arguments") {
 
 test("a trait object from a call stages through a temp") {
     let q = new Req("/x", 3);
-    let resp = handle(make(100), q, 0);
+    let resp = make(100).handle(q, 0);
     assert!(resp.code == 106);
 }
 
 test("a nested trait object call keeps the operands below it") {
     let q = new Req("ab", 1);
-    let total = 1 + handle(make(10), q, 5).code;
+    let total = 1 + make(10).handle(q, 5).code;
     assert!(total == 18);
 }

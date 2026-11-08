@@ -1,0 +1,11 @@
+// @expected E0153 — a default body calls a sibling method as `s.size()` or
+// `Area::size(s)`, not `size(s)`.
+trait Area<T> {
+    fn size(T s) -> int {}
+
+    fn doubled(T s) -> int {
+        return size(s) * 2;
+    }
+}
+
+fn main() {}

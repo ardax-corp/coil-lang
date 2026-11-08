@@ -37,21 +37,21 @@ impl Area for int {
 pure fn sum_areas<T: Area>(Vec<T> xs) -> int {
     let s = 0;
     for x in xs {
-        s = s + area(x);
+        s = s + Area::area(x);
     }
     return s;
 }
 
 pure fn bigger<T: Area>(T a, T b) -> int {
-    let m = area(a);
-    let n = area(b);
+    let m = Area::area(a);
+    let n = Area::area(b);
     if m > n {
         return m;
     }
     return n;
 }
 
-test("bare calls through the bound") {
+test("qualified calls through the bound") {
     let sqs: Vec<Sq> = Vec::from([new Sq(1), new Sq(2)]);
     assert!(sum_areas(sqs) == 5);
     let rs: Vec<Rect> = Vec::from([new Rect(2, 3)]);

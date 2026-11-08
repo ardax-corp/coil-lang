@@ -22,7 +22,7 @@ fn show<T: Describable>(T x) -> int {
 }
 
 fn show_ufcs<T: Describable>(T x) -> int {
-    return describe_val(x);
+    return x.describe_val();
 }
 
 fn outer<T: Describable>(T x) -> int {

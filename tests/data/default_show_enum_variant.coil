@@ -15,7 +15,7 @@ fn describe(Errr e) -> string {
 
 test("unit variant shows its name") {
     assert!(format("%v", Errr::Fatal) == "Errr::Fatal", format("%v", Errr::Fatal));
-    assert!(show(Errr::Fatal) == "Errr::Fatal");
+    assert!(Errr::Fatal.show() == "Errr::Fatal");
 }
 
 test("payload variants show their name without the payload") {

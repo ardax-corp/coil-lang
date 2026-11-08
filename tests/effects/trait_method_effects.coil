@@ -50,7 +50,7 @@ impl Source for Rect {
 }
 
 pure fn total(Area a, Area b) -> int {
-    return area(a) + area(b);
+    return a.area() + b.area();
 }
 
 pure fn total_methods(Area a, Area b) -> int {
@@ -58,7 +58,7 @@ pure fn total_methods(Area a, Area b) -> int {
 }
 
 fn load_both(Source a, Source b) -> int uses {read, mutate} {
-    return load(a) + load(b);
+    return a.load() + b.load();
 }
 
 test("pure trait methods through existentials") {

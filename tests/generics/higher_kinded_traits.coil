@@ -41,11 +41,11 @@ impl Container for Pair {
 }
 
 fn get<F: Container, A>(F<A> xs, A fallback) -> A {
-    return first(xs, fallback);
+    return xs.first(fallback);
 }
 
 fn count<F: Container, A>(F<A> xs) -> int {
-    return size(xs);
+    return xs.size();
 }
 
 trait Pointer<P: * -> *> {
@@ -62,7 +62,7 @@ impl Pointer for Option {
 }
 
 fn load<P: * -> *, Pointer, A>(P<A> ptr, A fallback) -> P::Ref<A> {
-    return deref(ptr, fallback);
+    return ptr.deref(fallback);
 }
 
 test("an Option instance at several element types") {

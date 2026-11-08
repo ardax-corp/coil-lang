@@ -61,6 +61,6 @@ Userland stdlib is [coil-stdlib](https://github.com/ardax-corp/coil-stdlib). `co
 
 ## Language facts agents get wrong
 
-- Trait methods have three call spellings: `x.m()`, `m(x)` and `Trait::m(x)`. The qualified one is the function form limited to that trait and lowers to the same call (`docs/internals/static-trait-methods.md`).
+- Trait methods have two call spellings: `x.m()` and `Trait::m(x)` (the receiver first). Both resolve and lower the same way; a bare `m(x)` is not a trait call (E0153), also inside impl and trait default bodies (`docs/internals/static-trait-methods.md`).
 - No C-style `for (init; cond; step)` (use `while` and `for x in`); length is `x.len()` only (`Length` is the trait a user type implements for it); `readonly` is a prefix on a value (`readonly e`, `readonly new C(...)`) and on a type (`readonly T`); `readonly class C` makes every instance immutable (`readonly C` is `C`, structural `==`).
 - Regularity target: one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. `Option`/`Result` use niche / two-slot / boxed by shape; arity-2 immediate products use two words `[a, b]` on direct calls (#302; MIR `Call` `dest_hi`, `Terminator::Return { hi }`).

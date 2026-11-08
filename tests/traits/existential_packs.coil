@@ -5,11 +5,11 @@
 use tests::assert;
 
 fn shown(Show x) -> string {
-    return show(x);
+    return x.show();
 }
 
 fn joined(Show a, int n, Show b) -> string {
-    return show(a) + show(n) + show(b);
+    return a.show() + n.show() + b.show();
 }
 
 test("packs of each word kind") {

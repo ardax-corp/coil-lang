@@ -6825,9 +6825,9 @@ impl Compiler {
         })
     }
 
-    /// A ground function-style trait call `m(x, ..)`: the typechecker
-    /// discharged the instance into `sidecar_dicts` (only when no function or
-    /// local has that name), called directly as `compile_call_expr` does.
+    /// A ground trait-qualified call `Trait::m(x, ..)` (lowered under the
+    /// name `qualified_trait_call_at` gives it): the typechecker discharged
+    /// the instance into `sidecar_dicts`, called directly.
     /// The dictionaries a generic body forwards (`forwards`) reach only a
     /// method with bounds of its own (#1471).
     fn hir_ground_ufcs(&self, hir: &HirBody, call: HirId, name: &str, forwards: bool) -> Result<Option<HirCall>, &'static str> {

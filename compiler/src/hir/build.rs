@@ -1423,8 +1423,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             {
                 self.qualified_value_call(b, node, enum_name, variant_name, items)
             }
-            // `Trait::m(args)` is the free call `m(args)` the checker
-            // resolved within `Trait`.
+            // `Trait::m(args)`: the call the checker resolved within
+            // `Trait`, under the name `qualified_trait_call_at` gives it.
             E::Construct {
                 fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Tuple(_)),
                 ..
@@ -2294,8 +2294,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
     }
 
-    /// `Trait::m(args)`: the same call as the free `m(args)` (the checker
-    /// recorded its dictionary or instance at this node).
+    /// `Trait::m(args)`: a named call of the method (the checker recorded
+    /// its dictionary or instance at this node).
     fn qualified_trait_call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &[Output<'_>]) -> HirId {
         let (start, end) = span_of(node);
         let name = self.checker.qualified_trait_call_at(start, end).unwrap_or_default().to_string();

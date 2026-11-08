@@ -2,7 +2,7 @@
 
 /// The addition operator `+`.
 ///
-/// `a + b` on a type with an `Add` instance calls `add(a, b)`. `int` and
+/// `a + b` on a type with an `Add` instance calls `Add::add(a, b)`. `int` and
 /// `float` have builtin instances (compiled to machine adds, not calls).
 /// String concatenation with `+` is a separate rule and does not go through
 /// `Add`. In a generic function, `T: Add` (or `T: Num`) allows `+` on `T`.
@@ -35,7 +35,7 @@ trait Add<T> {
 
 /// The subtraction operator `-`.
 ///
-/// `a - b` on a type with a `Sub` instance calls `sub(a, b)`. `int` and
+/// `a - b` on a type with a `Sub` instance calls `Sub::sub(a, b)`. `int` and
 /// `float` have builtin instances.
 ///
 /// # Examples
@@ -66,7 +66,7 @@ trait Sub<T> {
 
 /// The multiplication operator `*`.
 ///
-/// `a * b` on a type with a `Mul` instance calls `mul(a, b)`. `int` and
+/// `a * b` on a type with a `Mul` instance calls `Mul::mul(a, b)`. `int` and
 /// `float` have builtin instances. On `Matrix` values `*` is matrix
 /// multiplication.
 ///
@@ -98,7 +98,7 @@ trait Mul<T> {
 
 /// The division operator `/`.
 ///
-/// `a / b` on a type with a `Div` instance calls `div(a, b)`. `int` and
+/// `a / b` on a type with a `Div` instance calls `Div::div(a, b)`. `int` and
 /// `float` have builtin instances: `int` division truncates toward zero and
 /// panics with `division by zero` when `b` is `0`; `float` division follows
 /// IEEE-754 (`1.0 / 0.0` is infinity).
@@ -132,7 +132,7 @@ trait Div<T> {
 
 /// The unary negation operator `-x`.
 ///
-/// `-x` on a type with a `Neg` instance calls `neg(x)`. `int` and `float`
+/// `-x` on a type with a `Neg` instance calls `Neg::neg(x)`. `int` and `float`
 /// have builtin instances; negating the smallest `int` panics with
 /// `integer overflow`.
 ///
@@ -164,7 +164,7 @@ trait Neg<T> {
 
 /// The remainder operator `%`.
 ///
-/// `a % b` on a type with a `Rem` instance calls `rem(a, b)`. `int` and
+/// `a % b` on a type with a `Rem` instance calls `Rem::rem(a, b)`. `int` and
 /// `float` have builtin instances. The `int` result has the sign of `a`
 /// (`-7 % 2` is `-1`) and `% 0` panics with `division by zero`.
 ///
@@ -195,7 +195,7 @@ trait Rem<T> {
 
 /// The exponentiation operator `**`.
 ///
-/// `a ** b` on a type with a `Pow` instance calls `pow(a, b)`. `int` and
+/// `a ** b` on a type with a `Pow` instance calls `Pow::pow(a, b)`. `int` and
 /// `float` have builtin instances. `**` is right-associative
 /// (`2 ** 3 ** 2` is `512`). For `int` a negative exponent panics with
 /// `negative exponent` and a result that does not fit panics with
@@ -251,7 +251,7 @@ trait Num<T: Add + Sub + Mul + Div + Neg + Rem + Pow> {
 
 /// The left shift operator `<<`.
 ///
-/// `a << n` on a type with a `Shl` instance calls `shl(a, n)`. The shift
+/// `a << n` on a type with a `Shl` instance calls `Shl::shl(a, n)`. The shift
 /// count is always an `int`, whatever the type of `a`, and the result has
 /// the type of `a`. `int` and `byte` have builtin instances; shifting a
 /// `byte` keeps the low 8 bits.
@@ -282,7 +282,7 @@ trait Shl<T> {
 
 /// The right shift operator `>>`.
 ///
-/// `a >> n` on a type with a `Shr` instance calls `shr(a, n)`. The shift
+/// `a >> n` on a type with a `Shr` instance calls `Shr::shr(a, n)`. The shift
 /// count is always an `int`. `int` and `byte` have builtin instances; the
 /// `int` shift is arithmetic (it keeps the sign, so `-8 >> 1` is `-4`).
 ///
@@ -313,7 +313,7 @@ trait Shr<T> {
 
 /// The bitwise AND operator `&`.
 ///
-/// `a & b` on a type with a `BitAnd` instance calls `bitand(a, b)`. `int`
+/// `a & b` on a type with a `BitAnd` instance calls `BitAnd::bitand(a, b)`. `int`
 /// and `byte` have builtin instances. For booleans use `&&`.
 ///
 /// # Examples
@@ -342,7 +342,7 @@ trait BitAnd<T> {
 
 /// The bitwise OR operator `|`.
 ///
-/// `a | b` on a type with a `BitOr` instance calls `bitor(a, b)`. `int` and
+/// `a | b` on a type with a `BitOr` instance calls `BitOr::bitor(a, b)`. `int` and
 /// `byte` have builtin instances. For booleans use `||`.
 ///
 /// # Examples
@@ -371,7 +371,7 @@ trait BitOr<T> {
 
 /// The bitwise XOR operator `^`.
 ///
-/// `a ^ b` on a type with a `BitXor` instance calls `bitxor(a, b)`. `int`
+/// `a ^ b` on a type with a `BitXor` instance calls `BitXor::bitxor(a, b)`. `int`
 /// and `byte` have builtin instances.
 ///
 /// # Examples
@@ -400,7 +400,7 @@ trait BitXor<T> {
 
 /// The bitwise NOT operator `~x`.
 ///
-/// `~x` on a type with a `BitNot` instance calls `bitnot(x)`. Only `int` has
+/// `~x` on a type with a `BitNot` instance calls `BitNot::bitnot(x)`. Only `int` has
 /// a builtin instance (`~x` is `-x - 1`); `byte` does not.
 ///
 /// # Examples
@@ -450,7 +450,7 @@ trait Integral<T: Num + Shl + Shr + BitAnd + BitOr + BitXor + BitNot> {
 
 /// The equality operators `==` and `!=`.
 ///
-/// `a == b` calls `eq(a, b)` and `a != b` calls `ne(a, b)` on a type with an
+/// `a == b` calls `Eq::eq(a, b)` and `a != b` calls `Eq::ne(a, b)` on a type with an
 /// `Eq` instance. The primitives have builtin instances (strings compare by
 /// content). Arrays, `Vec`s, tuples, records and enums compare structurally,
 /// and an element with an `Eq` instance (a class's too) compares with it.
@@ -524,7 +524,7 @@ trait Ord<T: Lt + Le + Gt + Ge + Eq> {
 
 /// The less-than operator `<`.
 ///
-/// `a < b` on a type with an `Lt` instance calls `lt(a, b)`.
+/// `a < b` on a type with an `Lt` instance calls `Lt::lt(a, b)`.
 ///
 /// # Examples
 ///
@@ -551,7 +551,7 @@ trait Lt<T> {
 
 /// The less-or-equal operator `<=`.
 ///
-/// `a <= b` on a type with an `Le` instance calls `le(a, b)`.
+/// `a <= b` on a type with an `Le` instance calls `Le::le(a, b)`.
 ///
 /// # Examples
 ///
@@ -578,7 +578,7 @@ trait Le<T> {
 
 /// The greater-than operator `>`.
 ///
-/// `a > b` on a type with a `Gt` instance calls `gt(a, b)`.
+/// `a > b` on a type with a `Gt` instance calls `Gt::gt(a, b)`.
 ///
 /// # Examples
 ///
@@ -605,7 +605,7 @@ trait Gt<T> {
 
 /// The greater-or-equal operator `>=`.
 ///
-/// `a >= b` on a type with a `Ge` instance calls `ge(a, b)`.
+/// `a >= b` on a type with a `Ge` instance calls `Ge::ge(a, b)`.
 ///
 /// # Examples
 ///
@@ -657,9 +657,9 @@ trait Ge<T> {
 ///
 /// fn main() {
 ///     let p = new Point(1, 2);
-///     assert!(show(p) == "(1, 2)");
+///     assert!(p.show() == "(1, 2)");
 ///     assert!(format("at %v", p) == "at (1, 2)");
-///     assert!(show(2.5) == "2.5");
+///     assert!(2.5.show() == "2.5");
 /// }
 /// ```
 trait Show<T> {

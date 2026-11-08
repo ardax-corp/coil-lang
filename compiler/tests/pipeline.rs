@@ -805,7 +805,7 @@ use string::{format, to_bytes};
             pub fn describe_val(int x) -> int { return x + 1; }
         }
         fn show<T: Describable>(T x) -> int {
-            return describe_val(x);
+            return x.describe_val();
         }
         fn capture_show<T: Describable>(T _w) {
             return show;
@@ -848,7 +848,7 @@ use string::{format, to_bytes};
             pub fn cast(int x) -> int { return x; }
         }
         fn convert_fn<A, B>(A x) -> B where Convert<A, B> {
-            return cast(x);
+            return x.cast();
         }
         fn capture_convert<A, B>(A _wa, B _wb) where Convert<A, B> {
             return convert_fn;
@@ -4479,7 +4479,7 @@ fn broken_effect_declarations_are_errors() {
                 pipeline.messages().iter().map(|m| m.message().to_string()).collect::<Vec<_>>()
             );
         }
-        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    if !(true) {\n        panic \"assertion failed\";\n    }\n    return area(a) + area(b);\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
+        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    if !(true) {\n        panic \"assertion failed\";\n    }\n    return a.area() + b.area();\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
         let mut pipeline = test_pipeline();
         compile_ok(&mut pipeline, kept);
     }

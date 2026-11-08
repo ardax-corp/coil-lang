@@ -15,7 +15,7 @@ impl Describable for int {
 }
 
 fn show<T: Describable>(T x) -> int {
-    return describe_val(x);
+    return x.describe_val();
 }
 
 fn capture_show<T: Describable>(T _w) {

@@ -128,7 +128,7 @@ class S {
 
 test("derived Show and Eq read every field") {
     let a = new S(Some(1), (2, 0.5), Dir::Down(3));
-    assert!(show(a) == "S { o: Some(1), p: (2, 0.5), d: Dir::Down(3) }");
+    assert!(a.show() == "S { o: Some(1), p: (2, 0.5), d: Dir::Down(3) }");
     assert!(a == new S(Some(1), (2, 0.5), Dir::Down(3)));
     assert!(a != new S(None, (2, 0.5), Dir::Down(3)));
 }

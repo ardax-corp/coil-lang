@@ -5427,96 +5427,16 @@ impl Checker {
             );
         }
 
-        // A `readonly` trait object dispatches like the plain one; only
-        // methods declared `readonly A self` may be called on it, which
-        // `hir::effects` checks (#1558).
-        if let Ty::Existential { class } = strip_readonly(&resolved)
-            && let Some((owner, method_slot, scheme)) =
-                self.existential_method_candidate(class, method)
-        {
-            let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
-            if let Some(a) = args {
-                for arg in a {
-                    arg_tys.push(self.infer(arg));
-                }
-            }
-            let hint = ExistentialMethodCall {
-                method_slot,
-                arity: arg_tys.len(),
-                has_receiver: true,
-            };
-            if let Some(call_id) = id {
-                self.existential_method_calls.insert(call_id, hint.clone());
-            }
-            self.existential_method_calls_by_span
-                .insert((range.start, range.end), hint);
-            let result = self.apply_existential_method(
-                &owner,
-                method,
-                &scheme,
-                &arg_tys,
-                args.as_deref(),
-                (id, range),
-            );
-            let declared = self.trait_readonly_params(&owner, method) & 1 != 0;
-            return self.method_result(&recv_ty, result, declared);
-        }
-        if let Some(receiver_var) = Self::constraint_var_of_ty(&resolved) {
-            let candidates = self.bound_method_candidates(method, Some(receiver_var));
-            if let Some((dict_index, dict_class, class, method_slot, scheme)) =
-                self.select_bound_method(candidates, method, &range)
-            {
-                self.bind_matching_abstract_constraints(Some(receiver_var), &dict_class);
-                let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-                let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
-                if let Some(a) = args {
-                    for arg in a {
-                        arg_tys.push(self.infer(arg));
-                    }
-                }
-                if let Some(call_id) = id {
-                    self.bound_method_calls.insert(
-                        call_id,
-                        BoundMethodCall {
-                            dict_index,
-                            method_slot,
-                            arity: arg_tys.len(),
-                            has_receiver: true,
-                            class: class.clone(),
-                        },
-                    );
-                }
-                self.bound_method_calls_by_span.insert(
-                    (range.start, range.end),
-                    BoundMethodCall {
-                        dict_index,
-                        method_slot,
-                        arity: arg_tys.len(),
-                        has_receiver: true,
-                        class: class.clone(),
-                    },
-                );
-                let result = self.apply_function(
-                    Some(&format!("{}::{}", class, method)),
-                    &fun_ty,
-                    &arg_tys,
-                    None,
-                    id,
-                    range.clone(),
-                );
-                if !constraints.is_empty() {
-                    self.discharge_constraints(id, &constraints, &range);
-                    self.pin_assoc_after_discharge(
-                        &class,
-                        &constraints,
-                        Some(&scheme),
-                        &mapping,
-                        &range,
-                    );
-                }
-                let declared = self.trait_readonly_params(&class, method) & 1 != 0;
-                return self.method_result(&recv_ty, result, declared);
-            }
+        // A trait object's method, or one an active bound on the receiver's
+        // type parameter supplies. A `readonly` trait object dispatches like
+        // the plain one; only methods declared `readonly A self` may be
+        // called on it, which `hir::effects` checks (#1558).
+        let on_object = matches!(strip_readonly(&resolved), Ty::Existential { class }
+            if self.existential_method_candidate(class, method).is_some());
+        let on_bound = Self::constraint_var_of_ty(&resolved)
+            .is_some_and(|var| !self.bound_method_candidates(method, Some(var)).is_empty());
+        if on_object || on_bound {
+            return self.infer_method_trait_call(recv, &recv_ty, method, method_args, id, range);
         }
         // Inherent class methods win over ground trait methods (Rust-style).
         let class_owner = self.class_owner_from_ty(&resolved);
@@ -5643,40 +5563,9 @@ impl Checker {
             return self.method_result(&recv_ty, result, false);
         }
 
-        // Ground trait method via concrete instance; pin return from
-        // `current_expected` when present (`let y: T = x.into()`).
-        if let Some((class, scheme)) = self.ground_trait_method_for_receiver(method, &recv_ty) {
-            let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-            let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
-            if let Some(a) = args {
-                for arg in a {
-                    arg_tys.push(self.infer(arg));
-                }
-            }
-            let result = self.apply_function(
-                Some(&format!("{}::{}", class, method)),
-                &fun_ty,
-                &arg_tys,
-                None,
-                id,
-                range.clone(),
-            );
-            if let Some(expected) = self.expected_here.clone() {
-                self.unify(&result, &expected, &range, "expected type");
-            }
-            if !constraints.is_empty() {
-                self.discharge_constraints(id, &constraints, &range);
-                self.pin_assoc_after_discharge(
-                    &class,
-                    &constraints,
-                    Some(&scheme),
-                    &mapping,
-                    &range,
-                );
-            }
-            let declared = self.trait_readonly_params(&class, method) & 1 != 0;
-            let result = apply_ty_prune(&self.subst, &result);
-            return self.method_result(&recv_ty, result, declared);
+        // A ground trait method on a concrete receiver.
+        if self.ground_trait_method_for_receiver(method, &recv_ty).is_some() {
+            return self.infer_method_trait_call(recv, &recv_ty, method, method_args, id, range);
         }
 
         if let Some(owner) = class_owner {
@@ -6121,7 +6010,7 @@ impl Checker {
             }
         }
 
-        // Named call-site args: skip trait UFCS and resolve an ordinary
+        // Named call-site args: resolve an ordinary
         // function (partial application is allowed, residual Fun is OK).
         if has_named {
             let scheme = self.lookup_fn_scheme(&ident);
@@ -6200,8 +6089,8 @@ impl Checker {
             return result;
         }
 
-        // Rest-parameter calls pack trailing args; skip UFCS trait
-        // resolution so we don't double-infer (NodeId alignment).
+        // Rest-parameter calls pack trailing args; infer them once
+        // (NodeId alignment).
         if self.fn_has_rest(&ident) {
             let scheme = self.lookup_fn_scheme(&ident);
             let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = match scheme {
@@ -6247,90 +6136,26 @@ impl Checker {
             return result;
         }
 
-        // Bare/UFCS trait method call: `method(x)`.
-        // Resolve it before ordinary environment lookup because class
-        // methods are selected by the active bound, not by a global FQN.
+        // A bare `m(args)` is never a trait method call: one that only a
+        // trait method answers is an error naming the spellings to use
+        // (`x.m(rest)`, `Trait::m(args)`). A free fn, local or builtin of
+        // that name is called as usual.
         let flat_args = self.flatten_spread_call_args(args.as_deref().unwrap_or(&[]));
         let arg_tys: Vec<Ty> = flat_args
             .iter()
             .map(|arg| self.infer_call_arg(arg))
             .collect();
-        if let Some(Ty::Existential { class }) =
-            arg_tys.first().map(|ty| strip_readonly(&apply_ty_prune(&self.subst, ty)).clone())
-            && let Some((owner, method_slot, scheme)) =
-                self.existential_method_candidate(&class, &ident)
-        {
-            let hint = ExistentialMethodCall {
-                method_slot,
-                arity: arg_tys.len(),
-                has_receiver: false,
-            };
-            if let Some(call_id) = id {
-                self.existential_method_calls.insert(call_id, hint.clone());
-            }
-            self.existential_method_calls_by_span
-                .insert((range.start, range.end), hint);
-            return self.apply_existential_method(
-                &owner,
-                &ident,
-                &scheme,
-                &arg_tys,
-                args.as_deref(),
-                (id, range),
-            );
-        }
-        // A free fn of the same name wins over a compiler-provided trait's
-        // method: `fn add<T: Num>(T a)` called under a `T: Num` bound is
-        // that function, not `Add::add`.
-        let shadowed = self.lookup_fn_scheme(&ident).is_some();
-        let keep = |candidates: Vec<(usize, String, String, usize, Scheme)>| {
-            candidates
-                .into_iter()
-                .filter(|(_, _, owner, _, _)| !(shadowed && Self::is_builtin_class(owner)))
-                .collect::<Vec<_>>()
-        };
-        // A tuple with an open item is not a bound's receiver: its instance
-        // is the arity-wide tuple one, selected below as a ground call's
-        // (#1479).
-        let open_tuple = arg_tys
-            .first()
-            .map(|ty| apply_ty_prune(&self.subst, ty))
-            .is_some_and(|ty| matches!(&ty, Ty::Tuple(_)) && Self::ty_mentions_var(&ty));
-        let candidates = if open_tuple { Vec::new() } else { keep(self.bound_method_candidates(&ident, None)) };
-        if !candidates.is_empty() {
-            let receiver_var = arg_tys
-                .first()
-                .and_then(|ty| Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty)));
-            // With no variable first argument, a bound is only the callee
-            // when the arguments fit its type: `show(x)` on an `int` inside
-            // `fn f<W: Show>` is `int`'s instance, not `W`'s dictionary
-            // (#1483).
-            let candidates = match receiver_var {
-                Some(v) => keep(self.bound_method_candidates(&ident, Some(v))),
-                None => {
-                    let all = keep(self.bound_method_candidates(&ident, None));
-                    all.into_iter()
-                        .filter(|candidate| self.bound_candidate_fits_args(candidate, &arg_tys))
-                        .collect()
-                }
-            };
-            if let Some(candidate) = self.select_bound_method(candidates, &ident, &range) {
-                return self.apply_bound_method_call(candidate, receiver_var, &ident, &arg_tys, args.as_deref(), id, &range);
-            }
-        }
-
-        // Ground function-style trait call: `method(x, …)` with a concrete
-        // first argument selects its instance like `x.method(…)` (the
-        // discharged instance lands in `call_dicts_at` for codegen). A free fn
-        // or local of the same name wins; the recursion binding of the
-        // instance method being inferred does not (#1483).
-        let own_method = self.current_instance_method.as_deref() == Some(ident.as_str())
-            && !self.local_defs.contains_key(ident.as_str());
+        // Inside an instance method `m` or a trait declaring `m`, the bare
+        // name is bound to the method's own signature, not to a free fn.
+        let own_method = (self.current_instance_method.as_deref() == Some(ident.as_str())
+            && !self.local_defs.contains_key(ident.as_str()))
+            || self.current_typeclass.as_deref().is_some_and(|class| {
+                self.generics.typeclass(class).is_some_and(|c| c.methods.iter().any(|m| m.name == ident))
+            });
         if (own_method || self.lookup_fn_scheme(&ident).is_none())
-            && let Some(first) = arg_tys.first()
-            && let Some((class, scheme)) = self.ground_trait_method_for_receiver(&ident, first)
+            && let Some(ty) = self.reject_bare_trait_call(&ident, &arg_tys, &range)
         {
-            return self.apply_ground_trait_call(&class, &ident, &scheme, &arg_tys, &flat_args, false, id, &range);
+            return ty;
         }
 
         // A bare name only an earlier module's frame binds (that module's
@@ -11896,7 +11721,7 @@ impl Checker {
             .collect()
     }
 
-    /// Whether a function-style call's arguments fit a bound candidate from
+    /// Whether a trait call's arguments fit a bound candidate from
     /// [`Self::bound_method_candidates`]: the method's own class constraint
     /// is pinned to the active bound's arguments and each argument is
     /// trial-unified with its parameter, with the type parameters of the
@@ -13328,9 +13153,9 @@ impl Checker {
     /// generic-fn mark of a method with its own type parameters (#1467) and
     /// the dictionary count of one with bounds (#1471), the
     /// env binding, and (when a free fn of that name exists) that fn's DefId
-    /// scheme. The name belongs to the free fn, or to nobody, so a
-    /// function-style call `method(x)` resolves through the trait instead of
-    /// whichever signature was inferred last. Undo with
+    /// scheme. The name belongs to the free fn, or to nobody, so a bare
+    /// `method(x)` calls that fn (or is E0153) instead of whichever
+    /// signature was inferred last. Undo with
     /// [`Self::unshield_bare_names`].
     pub(super) fn shield_bare_names<'n>(
         &self,
@@ -19725,10 +19550,10 @@ impl Checker {
     }
 
     /// `Trait::method(args)` at this span: the callee name to lower it
-    /// with. That is the bare method, so it compiles exactly as the free
-    /// `method(args)`, unless a function, local or builtin of that name
-    /// would take the bare name; then `Trait::method`, which lowering
-    /// sends to the recorded dictionary or instance as it does `T::m`.
+    /// with. That is the bare method (which no bare call names any more),
+    /// unless a function, local or builtin of that name would take it; then
+    /// `Trait::method`, which lowering sends to the recorded dictionary or
+    /// instance as it does `T::m`.
     pub fn qualified_trait_call_at(&self, start: usize, end: usize) -> Option<&str> {
         self.qualified_trait_calls_by_span.get(&(start, end)).map(String::as_str)
     }
@@ -21768,8 +21593,8 @@ impl Checker {
         Some(result)
     }
 
-    /// `method(args)` through the dictionary of the bound `candidate`
-    /// selected (the free call under `T: Trait`, or `Trait::method(args)`).
+    /// A trait method call through the dictionary of the bound `candidate`
+    /// selected (`x.m()` under `T: Trait`, or `Trait::m(args)`).
     #[allow(clippy::too_many_arguments)]
     fn apply_bound_method_call(
         &mut self,
@@ -21777,7 +21602,8 @@ impl Checker {
         receiver_var: Option<TyVarId>,
         method: &str,
         arg_tys: &[Ty],
-        args: Option<&[Output]>,
+        args: &[Output],
+        has_receiver: bool,
         id: Option<NodeId>,
         range: &Range<usize>,
     ) -> Ty {
@@ -21788,7 +21614,7 @@ impl Checker {
             dict_index,
             method_slot,
             arity: arg_tys.len(),
-            has_receiver: false,
+            has_receiver,
             class: class.clone(),
         };
         if let Some(call_id) = id {
@@ -21799,7 +21625,7 @@ impl Checker {
             Some(&format!("{}::{}", class, method)),
             &fun_ty,
             arg_tys,
-            args,
+            if args.is_empty() { None } else { Some(args) },
             id,
             range.clone(),
         );
@@ -21811,9 +21637,9 @@ impl Checker {
         result
     }
 
-    /// `method(args)` at a ground instance of `class`: its constraint is
-    /// discharged against the argument types (and, with `to_expected`, the
-    /// expected result type), landing in `call_dicts_at` for codegen.
+    /// A trait method call at a ground instance of `class`: its constraint
+    /// is discharged against the argument types and the expected result
+    /// type, landing in `call_dicts_at` for codegen.
     #[allow(clippy::too_many_arguments)]
     fn apply_ground_trait_call(
         &mut self,
@@ -21821,8 +21647,7 @@ impl Checker {
         method: &str,
         scheme: &Scheme,
         arg_tys: &[Ty],
-        flat_args: &[Output],
-        to_expected: bool,
+        args: &[Output],
         id: Option<NodeId>,
         range: &Range<usize>,
     ) -> Ty {
@@ -21831,18 +21656,144 @@ impl Checker {
             Some(&format!("{}::{}", class, method)),
             &fun_ty,
             arg_tys,
-            if flat_args.is_empty() { None } else { Some(flat_args) },
+            if args.is_empty() { None } else { Some(args) },
             id,
             range.clone(),
         );
         if !constraints.is_empty() {
-            if to_expected {
-                self.bind_call_result_to_expected(&result);
-            }
+            self.bind_call_result_to_expected(&result);
             self.discharge_constraints(id, &constraints, range);
             self.pin_assoc_after_discharge(class, &constraints, Some(scheme), &mapping, range);
         }
         apply_ty_prune(&self.subst, &result)
+    }
+
+    /// The one resolution of a trait method call, for `x.m(rest)`
+    /// (`has_receiver`, `x` first in `arg_tys` / `args`) and
+    /// `Trait::m(args)` (`only` names the trait): a trait object's method,
+    /// an active bound's dictionary, else the ground instance the argument
+    /// and expected result types discharge. A type parameter without a
+    /// bound that supplies the method is E0119. `None` when no trait method
+    /// applies; the trait the call went to otherwise, and its result.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_trait_method_call(
+        &mut self,
+        only: Option<&str>,
+        method: &str,
+        arg_tys: &[Ty],
+        args: &[Output],
+        has_receiver: bool,
+        id: Option<NodeId>,
+        range: &Range<usize>,
+    ) -> Option<(String, Ty)> {
+        let first = arg_tys.first().map(|ty| apply_ty_prune(&self.subst, ty));
+        if let Some(Ty::Existential { class: object }) = first.as_ref().map(strip_readonly)
+            && let Some((owner, method_slot, scheme)) = self.existential_method_candidate(object, method)
+            && only.is_none_or(|class| class == owner)
+        {
+            let hint = ExistentialMethodCall {
+                method_slot,
+                arity: arg_tys.len(),
+                has_receiver,
+            };
+            if let Some(call_id) = id {
+                self.existential_method_calls.insert(call_id, hint.clone());
+            }
+            self.existential_method_calls_by_span.insert((range.start, range.end), hint);
+            let exprs = if args.is_empty() { None } else { Some(args) };
+            let result = self.apply_existential_method(&owner, method, &scheme, arg_tys, exprs, (id, range.clone()));
+            return Some((owner, result));
+        }
+        let only_trait = |candidates: Vec<(usize, String, String, usize, Scheme)>| {
+            candidates
+                .into_iter()
+                .filter(|(_, _, owner, _, _)| only.is_none_or(|class| class == owner))
+                .collect::<Vec<_>>()
+        };
+        // A tuple with an open item is not a bound's receiver: its instance
+        // is the arity-wide tuple one, a ground call's (#1479).
+        let open_tuple = first.as_ref().is_some_and(|ty| matches!(ty, Ty::Tuple(_)) && Self::ty_mentions_var(ty));
+        let receiver_var = first.as_ref().and_then(Self::constraint_var_of_ty);
+        if !open_tuple && !only_trait(self.bound_method_candidates(method, None)).is_empty() {
+            // With no variable first argument, a bound is only the callee
+            // when the arguments fit its type: `Show::show(x)` on an `int`
+            // inside `fn f<W: Show>` is `int`'s instance, not `W`'s
+            // dictionary (#1483).
+            let candidates = match receiver_var {
+                Some(v) => only_trait(self.bound_method_candidates(method, Some(v))),
+                None => {
+                    let all = only_trait(self.bound_method_candidates(method, None));
+                    all.into_iter()
+                        .filter(|candidate| self.bound_candidate_fits_args(candidate, arg_tys))
+                        .collect()
+                }
+            };
+            if let Some(candidate) = self.select_bound_method(candidates, method, range) {
+                let class = candidate.2.clone();
+                let result = self.apply_bound_method_call(candidate, receiver_var, method, arg_tys, args, has_receiver, id, range);
+                return Some((class, result));
+            }
+        }
+        let ground = match only {
+            Some(class) => self
+                .typeclass_method_schemes
+                .get(&(class.to_string(), method.to_string()))
+                .cloned()
+                .map(|scheme| (class.to_string(), scheme)),
+            None => first.as_ref().and_then(|first| self.ground_trait_method_for_receiver(method, first)),
+        };
+        // A type parameter whose bounds leave out the trait.
+        if let Some(var) = receiver_var
+            && let Some(param) = self.type_params_in_scope.iter().rev().find_map(|frame| {
+                frame.iter().find(|(_, v)| apply_ty_prune(&self.subst, &Ty::Var(**v)) == Ty::Var(var)).map(|(n, _)| n.clone())
+            })
+        {
+            let class = ground.map(|(class, _)| class).or_else(|| only.map(str::to_string))?;
+            let call = if has_receiver { format!(".{method}()") } else { format!("{class}::{method}") };
+            let ty = self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("`{call}` needs a `{class}` bound on `{param}`"),
+                range.clone(),
+                Some(format!("add the bound (`{param}: {class}`)")),
+            );
+            return Some((class, ty));
+        }
+        let (class, scheme) = ground?;
+        let result = self.apply_ground_trait_call(&class, method, &scheme, arg_tys, args, id, range);
+        Some((class, result))
+    }
+
+    /// `x.m(rest)` that a trait method answers ([`Self::resolve_trait_method_call`]),
+    /// the receiver passed first. Its result is `readonly` when the receiver
+    /// is, unless the method declares `readonly A self`.
+    fn infer_method_trait_call(
+        &mut self,
+        recv: &Output,
+        recv_ty: &Ty,
+        method: &str,
+        args: &[Output],
+        id: Option<NodeId>,
+        range: Range<usize>,
+    ) -> Ty {
+        let rest = self.flatten_spread_call_args(args);
+        let mut arg_tys = vec![self.method_self_arg(recv_ty)];
+        arg_tys.extend(rest.iter().map(|arg| self.infer_call_arg(arg)));
+        let mut exprs = Vec::with_capacity(1 + rest.len());
+        exprs.push(recv.clone());
+        exprs.extend(rest);
+        match self.resolve_trait_method_call(None, method, &arg_tys, &exprs, true, id, &range) {
+            Some((class, result)) => {
+                let declared = self.trait_readonly_params(&class, method) & 1 != 0;
+                let result = apply_ty_prune(&self.subst, &result);
+                self.method_result(recv_ty, result, declared)
+            }
+            None => self.error_with_help(
+                ErrorCode::NotAFunction,
+                format!("Cannot call method `{}` on non-class type", method),
+                range,
+                Some("method calls require a class instance receiver".to_string()),
+            ),
+        }
     }
 
     /// The trait `owner` names in `owner::method(args)`, when it names one
@@ -21870,12 +21821,11 @@ impl Checker {
         self.generics.typeclass(&name).map(|_| name)
     }
 
-    /// `Trait::method(args)`: the free call `method(args)` with only
-    /// `Trait`'s method as a candidate. It resolves through an active
-    /// bound's dictionary, a trait object, or the ground instance the
-    /// argument (or expected result) types select, and lowers to the same
-    /// call as the free form. A free fn of the same name or another trait's
-    /// method of that name is never considered.
+    /// `Trait::method(args)`: the call `x.method(rest)` makes, with only
+    /// `Trait`'s method as a candidate and the receiver (if any) passed as
+    /// the first argument ([`Self::resolve_trait_method_call`]). A free fn
+    /// of the same name or another trait's method of that name is never
+    /// considered.
     fn infer_qualified_trait_call(
         &mut self,
         class: &str,
@@ -21914,70 +21864,125 @@ impl Checker {
         let callee = if shadowed { format!("{class}::{method}") } else { method.to_string() };
         self.qualified_trait_calls_by_span.insert((range.start, range.end), callee);
         let flat_args = self.flatten_spread_call_args(args);
-        let arg_tys: Vec<Ty> = flat_args.iter().map(|arg| self.infer_call_arg(arg)).collect();
-        if let Some(Ty::Existential { class: object }) =
-            arg_tys.first().map(|ty| strip_readonly(&apply_ty_prune(&self.subst, ty)).clone())
-            && let Some((owner, method_slot, scheme)) = self.existential_method_candidate(&object, method)
-            && owner == class
-        {
-            let hint = ExistentialMethodCall {
-                method_slot,
-                arity: arg_tys.len(),
-                has_receiver: false,
-            };
-            if let Some(call_id) = id {
-                self.existential_method_calls.insert(call_id, hint.clone());
-            }
-            self.existential_method_calls_by_span.insert((range.start, range.end), hint);
-            return self.apply_existential_method(&owner, method, &scheme, &arg_tys, Some(args), (id, range));
+        let mut arg_tys: Vec<Ty> = flat_args.iter().map(|arg| self.infer_call_arg(arg)).collect();
+        // The receiver passes as `x.m()` passes it, and a `readonly` one
+        // makes the result `readonly` as there.
+        let receiver = arg_tys.first().cloned().filter(|_| self.trait_method_takes_self(class, method));
+        if let Some(recv_ty) = &receiver {
+            arg_tys[0] = self.method_self_arg(recv_ty);
         }
-        let only = |candidates: Vec<(usize, String, String, usize, Scheme)>| {
-            candidates.into_iter().filter(|(_, _, owner, _, _)| owner == class).collect::<Vec<_>>()
-        };
-        let open_tuple = arg_tys
-            .first()
-            .map(|ty| apply_ty_prune(&self.subst, ty))
-            .is_some_and(|ty| matches!(&ty, Ty::Tuple(_)) && Self::ty_mentions_var(&ty));
-        if !open_tuple && !only(self.bound_method_candidates(method, None)).is_empty() {
-            let receiver_var = arg_tys
-                .first()
-                .and_then(|ty| Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty)));
-            let candidates = match receiver_var {
-                Some(v) => only(self.bound_method_candidates(method, Some(v))),
-                None => {
-                    let all = only(self.bound_method_candidates(method, None));
-                    all.into_iter()
-                        .filter(|candidate| self.bound_candidate_fits_args(candidate, &arg_tys))
-                        .collect()
-                }
-            };
-            if let Some(candidate) = self.select_bound_method(candidates, method, &range) {
-                return self.apply_bound_method_call(candidate, receiver_var, method, &arg_tys, Some(args), id, &range);
-            }
-        }
-        // A type parameter whose bounds leave out `Trait`.
-        if let Some(var) = arg_tys
-            .first()
-            .and_then(|ty| Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty)))
-            && let Some(param) = self.type_params_in_scope.iter().rev().find_map(|frame| {
-                frame.iter().find(|(_, v)| apply_ty_prune(&self.subst, &Ty::Var(**v)) == Ty::Var(var)).map(|(n, _)| n.clone())
-            })
-        {
-            return self.error_with_help(
-                ErrorCode::GenericTypeError,
-                format!("`{}::{}` needs a `{}` bound on `{}`", written, method, written, param),
-                range,
-                Some(format!("add the bound (`{}: {}`)", param, written)),
-            );
-        }
-        let Some(scheme) = self
-            .typeclass_method_schemes
-            .get(&(class.to_string(), method.to_string()))
-            .cloned()
+        let Some((class, result)) = self.resolve_trait_method_call(Some(class), method, &arg_tys, &flat_args, false, id, &range)
         else {
             return Ty::Var(self.counter.fresh());
         };
-        self.apply_ground_trait_call(class, method, &scheme, &arg_tys, &flat_args, true, id, &range)
+        match receiver {
+            Some(recv_ty) => {
+                let declared = self.trait_readonly_params(&class, method) & 1 != 0;
+                let result = apply_ty_prune(&self.subst, &result);
+                self.method_result(&recv_ty, result, declared)
+            }
+            None => result,
+        }
+    }
+
+    /// E0153 for a bare `method(args)` a trait method answers: the trait
+    /// the call means (a trait object's, an active bound's, the ground
+    /// instance's for the first argument, else the one trait declaring
+    /// `method`) and the two spellings that call it. `None` when no trait
+    /// declares `method`.
+    fn reject_bare_trait_call(&mut self, method: &str, arg_tys: &[Ty], range: &Range<usize>) -> Option<Ty> {
+        let mut declaring: Vec<String> = self
+            .typeclass_method_schemes
+            .keys()
+            .filter(|(_, m)| m == method)
+            .map(|(class, _)| class.clone())
+            .collect();
+        if declaring.is_empty() {
+            return None;
+        }
+        declaring.sort();
+        declaring.dedup();
+        let first = arg_tys.first().map(|t| strip_readonly(&apply_ty_prune(&self.subst, t)).clone());
+        let existential = match &first {
+            Some(Ty::Existential { class }) => self.existential_method_candidate(class, method).map(|(owner, _, _)| owner),
+            _ => None,
+        };
+        let bound = || {
+            let mut owners: Vec<String> = self
+                .bound_method_candidates(method, first.as_ref().and_then(Self::constraint_var_of_ty))
+                .into_iter()
+                .map(|(_, _, owner, _, _)| owner)
+                .collect();
+            owners.dedup();
+            (owners.len() == 1).then(|| owners.remove(0))
+        };
+        let class = existential
+            .or_else(bound)
+            .or_else(|| {
+                let first = first.clone()?;
+                self.ground_trait_method_for_receiver(method, &first).map(|(class, _)| class)
+            })
+            .or_else(|| (declaring.len() == 1).then(|| declaring[0].clone()));
+        let names: Vec<String> = (0..arg_tys.len()).map(|i| ((b'a' + (i % 26) as u8) as char).to_string()).collect();
+        let Some(class) = class else {
+            let spellings = declaring
+                .iter()
+                .map(|c| format!("`{}::{}({})`", c, method, names.join(", ")))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            return Some(self.error_with_help(
+                ErrorCode::BareTraitCall,
+                format!("`{method}` is a trait method, not a function"),
+                range.clone(),
+                Some(format!("name the trait: {spellings}")),
+            ));
+        };
+        let qualified = format!("`{}::{}({})`", class, method, names.join(", "));
+        let help = if self.bare_call_has_receiver(&class, method, first.as_ref()) {
+            format!("call it as a method: `{}.{}({})`, or name the trait: {}", names[0], method, names[1..].join(", "), qualified)
+        } else {
+            format!("name the trait: {qualified}")
+        };
+        Some(self.error_with_help(
+            ErrorCode::BareTraitCall,
+            format!("`{method}` is a method of trait `{class}`, not a function"),
+            range.clone(),
+            Some(help),
+        ))
+    }
+
+    /// Whether `class`'s `method` takes the first argument as its receiver,
+    /// so `x.method(rest)` calls it: a method that takes a receiver
+    /// ([`Self::trait_method_takes_self`]) on one whose class has no
+    /// inherent method of that name (which the method form would pick).
+    fn bare_call_has_receiver(&self, class: &str, method: &str, first: Option<&Ty>) -> bool {
+        let Some(first) = first else {
+            return false;
+        };
+        let inherent = self
+            .class_owner_from_ty(first)
+            .is_some_and(|owner| self.methods.get(&owner).is_some_and(|m| m.contains_key(method)));
+        self.trait_method_takes_self(class, method) && !inherent
+    }
+
+    /// Whether `class`'s `method` takes a receiver: an instance method
+    /// whose first parameter is the trait's own type.
+    fn trait_method_takes_self(&self, class: &str, method: &str) -> bool {
+        let is_static = self
+            .generics
+            .typeclass(class)
+            .and_then(|c| c.methods.iter().find(|m| m.name == method))
+            .is_some_and(|m| m.is_static);
+        let Some(scheme) = self.typeclass_method_schemes.get(&(class.to_string(), method.to_string())) else {
+            return false;
+        };
+        let self_param = scheme.bounds.first().copied();
+        let takes_self = match Self::first_fun_param(&scheme.ty).as_ref().map(strip_readonly) {
+            Some(Ty::Var(v)) => Some(*v) == self_param,
+            Some(Ty::App(head, _)) => matches!(head.as_ref(), Ty::Var(v) if Some(*v) == self_param),
+            _ => false,
+        };
+        !is_static && takes_self
     }
 
     fn construct_payload_exprs<'a>(

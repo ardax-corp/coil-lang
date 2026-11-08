@@ -1,5 +1,5 @@
 // Ground trait instance methods take their arguments raw: operator,
-// method-style and function-style calls pass the instance's own words, so
+// method-style and trait-qualified calls pass the instance's own words, so
 // the method lowers to direct MIR. Calls through a dictionary (a shared
 // generic body, a default body) box the arguments and reach the method
 // through its `$dict` adapter, which unboxes them first.
@@ -110,7 +110,7 @@ fn top(Rank a, Rank b) -> int {
 
 fn direct(int k) -> int {
     let c = new Crate(k);
-    return k.weight() + c.weight() + weight(k) + c.heavier(new Crate(1)).kg;
+    return k.weight() + c.weight() + Weigh::weight(k) + c.heavier(new Crate(1)).kg;
 }
 
 fn kept(int k) -> int {
@@ -126,7 +126,7 @@ test("operators on raw instances") {
     assert!(top(Rank::High, Rank::Low) == 0);
 }
 
-test("method and function-style calls pass raw words") {
+test("method and trait-qualified calls pass raw words") {
     assert!(direct(5) == 15 + 6 + 15 + 5);
     assert!(kept(4) == 5 + 4 + 4);
 }

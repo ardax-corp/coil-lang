@@ -32,7 +32,7 @@ fn spans(int n) -> string {
         }
         i = i + 1;
     }
-    return show(total) + " " + show(misses);
+    return total.show() + " " + misses.show();
 }
 
 fn kept(int n) -> string {
@@ -54,7 +54,7 @@ fn kept(int n) -> string {
             miss = miss - 1;
         }
     }
-    return show(hits) + " " + show(sum + miss * 0) + " " + show(miss / 3);
+    return hits.show() + " " + (sum + miss * 0).show() + " " + (miss / 3).show();
 }
 
 fn written(int n) -> string {
@@ -71,7 +71,7 @@ fn written(int n) -> string {
         }
         i = i + 1;
     }
-    return show(total) + " " + show(misses);
+    return total.show() + " " + misses.show();
 }
 
 fn same(int n) -> int {
@@ -96,14 +96,14 @@ fn labels(int n) -> string {
     while i < n {
         let r = locate(i) ?? new Cut(-1, -1);
         // Building a string is a safepoint the joined object is live at.
-        out = out + show(r.lo) + ":" + show(r.hi - r.lo) + ",";
+        out = out + r.lo.show() + ":" + (r.hi - r.lo).show() + ",";
         i = i + 1;
     }
     return out;
 }
 
 fn main() {
-    let text = spans(12) + " | " + kept(9) + " | " + written(12) + " | " + show(same(12)) + " | " +
+    let text = spans(12) + " | " + kept(9) + " | " + written(12) + " | " + same(12).show() + " | " +
                labels(5);
     let _ = write(stdout(), to_bytes(text));
 }

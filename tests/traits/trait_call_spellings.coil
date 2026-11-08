@@ -1,0 +1,84 @@
+// A trait method has two call spellings, `x.m(rest)` and `Trait::m(x, rest)`,
+// and they resolve the same way: at a ground type, through a bound, on a
+// trait object, from a default body, and against the expected type (a
+// result packed into an expected trait object). A bare `m(x)` is not a
+// trait call (`compile_fail/bare_trait_call*.coil`).
+use tests::assert;
+
+trait Area<T> {
+    fn size(T s) -> int {}
+
+    fn doubled(T s) -> int {
+        return s.size() + Area::size(s);
+    }
+}
+
+trait Same<T> {
+    fn same(T x) -> T {}
+}
+
+class Sq {
+    pub w: int,
+}
+
+impl Area for Sq {
+    pub fn size(Sq s) -> int {
+        return s.w * s.w;
+    }
+}
+
+impl Same for Sq {
+    pub fn same(Sq s) -> Sq {
+        return s;
+    }
+}
+
+impl Show for Sq {
+    pub fn show(Sq s) -> string {
+        return "sq " + s.w.show();
+    }
+}
+
+impl Area for int {
+    pub fn size(int n) -> int {
+        return n + 100;
+    }
+}
+
+fn under_bound<T: Area>(T x) -> (int, int) {
+    return (x.size(), Area::size(x));
+}
+
+fn on_object(Area a) -> (int, int) {
+    return (a.size(), Area::size(a));
+}
+
+test("ground type") {
+    let s = new Sq(3);
+    assert!(s.size() == Area::size(s));
+    assert!(5.size() == Area::size(5));
+}
+
+test("through a bound") {
+    let (m, q) = under_bound(new Sq(2));
+    assert!(m == 4 && q == 4);
+    let (m, q) = under_bound(1);
+    assert!(m == 101 && q == 101);
+}
+
+test("on a trait object") {
+    let (m, q) = on_object(new Sq(4));
+    assert!(m == 16 && q == 16);
+}
+
+test("from a default body") {
+    assert!(new Sq(3).doubled() == 18);
+    assert!(Area::doubled(new Sq(3)) == 18);
+}
+
+test("the result packs into an expected trait object") {
+    let a: Show = new Sq(2).same();
+    let b: Show = Same::same(new Sq(2));
+    assert!(a.show() == "sq 2");
+    assert!(b.show() == a.show());
+}

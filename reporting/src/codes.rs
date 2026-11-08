@@ -122,6 +122,9 @@ pub enum ErrorCode {
     /// A `defer` body assigns a capture that is gone when it runs: a copy
     /// (`use (x)`), or a local of the block the defer ends.
     DeferAssignsCapture,
+    /// A bare `m(args)` that names only a trait method: write `x.m(rest)`
+    /// or `Trait::m(args)`.
+    BareTraitCall,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -257,6 +260,7 @@ impl ErrorCode {
             Self::MisplacedMut => "E0150",
             Self::ViewEscape => "E0151",
             Self::DeferAssignsCapture => "E0152",
+            Self::BareTraitCall => "E0153",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -369,6 +373,7 @@ impl ErrorCode {
             Self::MisplacedMut => "`mut` borrows nothing here",
             Self::ViewEscape => "view value outlives its borrows",
             Self::DeferAssignsCapture => "`defer` assigns a variable that is gone when it runs",
+            Self::BareTraitCall => "a trait method called as a free function",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -489,6 +494,7 @@ mod tests {
             | MisplacedMut
             | ViewEscape
             | DeferAssignsCapture
+            | BareTraitCall
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -591,6 +597,7 @@ mod tests {
             MisplacedMut,
             ViewEscape,
             DeferAssignsCapture,
+            BareTraitCall,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

@@ -34,7 +34,7 @@ impl Area for Rect {
 }
 
 pure fn total(Area a, Area b) -> int {
-    return area(a) + area(b);
+    return a.area() + b.area();
 }
 
 pure fn nth([int; 3] v, int i) -> int {
