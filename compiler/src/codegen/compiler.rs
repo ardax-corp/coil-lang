@@ -4794,27 +4794,48 @@ impl Compiler {
         Some(Self::peel_fn_return_ty(&applied))
     }
 
-    /// True when `name` is used as a function value anywhere we can see.
-    /// Whole-program seed wins when present; the per-file sidecar is the
-    /// single-module fallback and a fail-closed extra union.
-    /// Whether a value of named function `name` can target a one-word
-    /// adapter (`name$value`, [`Self::fn_value_target`]) so the function
-    /// itself returns two words to its direct calls: a plain free function,
-    /// not overloaded, generic, a coroutine or a method, and never
-    /// partially applied (a partial's closure calls it directly).
+    /// Whether a value of named function `name` (bare, or another module's
+    /// or a static method's path) can target a one-word adapter
+    /// (`name$value`, [`Self::fn_value_target`]) so the function itself
+    /// returns two words to its direct calls.
+    /// Not: an overload (the adapter is typed by name, not by candidate),
+    /// a generic (its value is the shared body's `PolyFn`), a coroutine or
+    /// a host native (neither returns two words), a trait instance method
+    /// (dictionaries reach it through its `$dict` adapter, so a value never
+    /// targets it), a function with a rest parameter (the adapter's call
+    /// would pack the pack again), or one some call partially applies (a
+    /// partial's closure calls it directly).
+    ///
+    /// The first answer for a name is kept, as [`Self::two_word_return_kind`]'s.
     pub(super) fn fn_value_redirects(&self, name: &str) -> bool {
+        if let Some(&known) = self.fn_value_redirect_answers.borrow().get(name) {
+            return known;
+        }
+        let redirects = self.compute_fn_value_redirects(name);
+        self.fn_value_redirect_answers.borrow_mut().insert(name.to_string(), redirects);
+        redirects
+    }
+
+    fn compute_fn_value_redirects(&self, name: &str) -> bool {
         let lookup = strip_overload_key(name);
+        // A function not emitted yet has no arity here: its signature's
+        // rest parameter, as the checker read it.
+        let rest = self.fn_arities.get(name).is_some_and(|&(_, rest)| rest)
+            || self.checker.fn_has_rest(name)
+            || self.checker.fn_tuple_rest(name);
         lookup == name
-            && !name.contains("::")
+            && !rest
             && !self.checker.is_overloaded(name)
             && !self.checker.is_generic_fn(name)
             && !self.coroutine_fns.contains(name)
             && !is_instance_method_fqn(&self.checker, name)
             && !self.ident_is_host_native(name)
-            && self.fn_arities.get(name).is_some_and(|&(_, rest)| !rest)
             && self.checker.fn_param_tys(name).is_some_and(|p| (0..p.len()).all(|argc| !self.is_fn_value_escaped(&format!("{name}#{argc}"))))
     }
 
+    /// True when `name` is used as a function value anywhere we can see.
+    /// Whole-program seed wins when present; the per-file sidecar is the
+    /// single-module fallback and a fail-closed extra union.
     fn is_fn_value_escaped(&self, name: &str) -> bool {
         let short = name.rsplit("::").next().unwrap_or(name);
         if let Some(set) = &self.fn_value_escaped_program
@@ -4830,6 +4851,7 @@ impl Compiler {
     pub fn set_fn_value_escaped_program(&mut self, names: HashSet<String>) {
         self.fn_value_escaped_program = Some(names);
         self.pair_return_kinds.borrow_mut().clear();
+        self.fn_value_redirect_answers.borrow_mut().clear();
     }
 
     /// Whole-compile answer to "can some `fn drop()` resize an array?"
@@ -4865,6 +4887,7 @@ impl Compiler {
     pub fn clear_fn_value_escaped_program(&mut self) {
         self.fn_value_escaped_program = None;
         self.pair_return_kinds.borrow_mut().clear();
+        self.fn_value_redirect_answers.borrow_mut().clear();
     }
 
     /// `Some(kind)` for a compiled function whose direct CALL/RETURN can
