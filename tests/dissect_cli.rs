@@ -353,9 +353,9 @@ fn dissect_expand_and_opt_stats_show_comptime() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// With the MIR lowering, `Vec::pop` returns
-/// `vec_pop`'s Option word as it is: no unboxing to a pair and building
-/// the enum again (a `MakeEnum` per pop made tak_iter 2x slower).
+/// With the MIR lowering, `Vec::pop` is the `vec_pop` call itself, its
+/// Option in two words: no building the enum again (a `MakeEnum` per pop
+/// made tak_iter 2x slower). The wrapper inlines into its caller.
 #[test]
 fn dissect_vec_pop_returns_the_native_option_on_mir() {
     ensure_coil_dissect();
@@ -370,12 +370,12 @@ fn dissect_vec_pop_returns_the_native_option_on_mir() {
     )
     .unwrap();
     let out = coil_dissect(&bin, Some(&dir), &entry)
-        .args(["--fn", "pop"])
+        .args(["--fn", "main"])
         .output()
         .expect("spawn coil dissect");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let body = stdout.split(";; fn Vec::pop").nth(1).expect("Vec::pop body");
+    let body = stdout.split(";; fn main").nth(1).expect("main body");
     let body = body.split(";; fn ").next().unwrap_or(body);
     assert!(body.contains("host.vec_pop"), "{stdout}");
     assert!(!body.contains("enum"), "Vec::pop rebuilds the Option: {stdout}");
