@@ -46,6 +46,11 @@ Minor 3 appends host natives `vec_drain` (**212**: drop elements
 compiler lowering only, in any array form. Lane code's `pop`, `remove`
 and `insert` move a lane array's elements with them.
 
+Minor 4 adds host native `startup_restore` (**214**, `HostOp::Restore`), which an AOT
+executable's native `__start` calls where its startup restores a snapshot. Its
+payload is data only: `startup` holds no `Init` or `Call`, and `main` names `__start`
+(`docs/internals/native.md`, "Native start").
+
 Majors 4 to 6 ran on the VM. The notes below are the record of what minors of
 major 4 added; opcodes and frame maps in them no longer exist.
 

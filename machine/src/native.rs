@@ -198,6 +198,27 @@ pub unsafe fn install_aot_stack_maps(maps: *const u8, n: usize) {
     }
 }
 
+/// The host-native groups an AOT executable links ([`install_aot_host_groups`]).
+static AOT_HOST_GROUPS: std::sync::OnceLock<Vec<(crate::host_natives::HostPush, u32, u32)>> = std::sync::OnceLock::new();
+
+/// Install the host-native groups an AOT executable's object lists
+/// (`coil_aot_host_groups`): its program calls no native outside them.
+///
+/// # Safety
+/// `groups` points at `n` records whose `push` is a `coil_host_group_K` symbol.
+pub unsafe fn install_aot_host_groups(groups: *const crate::host_natives::AotHostGroup, n: usize) {
+    // SAFETY: the caller's.
+    let groups = unsafe { std::slice::from_raw_parts(groups, n) };
+    let groups = groups.iter().map(|g| (unsafe { *g.push.cast::<crate::host_natives::HostPush>() }, g.first, g.count)).collect();
+    let _ = AOT_HOST_GROUPS.set(groups);
+}
+
+/// The host table of an AOT executable: the natives of the groups its
+/// object links ([`install_aot_host_groups`]), absent slots elsewhere.
+pub fn aot_host_natives() -> Vec<std::sync::Arc<dyn crate::ffi::NativeFn>> {
+    crate::host_natives::host_natives_of_groups(AOT_HOST_GROUPS.get().map_or(&[], Vec::as_slice))
+}
+
 /// A `defer` cleanup pad: called with its frame's homes.
 pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u64) -> u64;
 
@@ -269,7 +290,7 @@ pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
 /// Byte offset of [`NativeCtx::roots`].
 pub const NATIVE_CTX_ROOTS: i32 = std::mem::offset_of!(NativeCtx, roots) as i32;
 
-pub use crate::memory::{InlineObject, InlineShape, inline_object, layout_fingerprint};
+pub use crate::memory::{InlineObject, InlineShape, InstanceSlots, inline_object, instance_slots, layout_fingerprint};
 
 /// Byte offsets of [`NativeCtx::alloc_counts`] and [`NativeCtx::alloc_bumps`].
 pub const NATIVE_CTX_ALLOC_COUNTS: i32 = std::mem::offset_of!(NativeCtx, alloc_counts) as i32;
@@ -2273,17 +2294,15 @@ pub fn direct_host_natives() -> &'static [DirectHost] {
         crate::host_natives::build_standard_host_natives(|_, _| {})
             .iter()
             .map(|n| {
-                let guarded = crate::host_natives::stream_first(n.name());
-                let func = if guarded { n.guarded_direct() } else { n.direct() };
-                let collect = n.name() == crate::gc_handles::GC_COLLECT_NATIVE;
-                let on_machine = func.is_none() && !collect && matches!(n.host_op(), crate::HostOp::Ordinary | crate::HostOp::Task | crate::HostOp::RegionEnter | crate::HostOp::RegionExit | crate::HostOp::RegisterFinalizer);
-                DirectHost { name: n.name().to_string(), func, guarded, collect, on_machine }
+                let call = crate::ffi::HostCall::of(n.as_ref());
+                DirectHost { name: n.name().to_string(), func: call.func, guarded: call.guarded, collect: call.collect, on_machine: call.on_machine }
             })
             .collect()
     })
 }
 
-/// One entry of [`direct_host_natives`].
+/// One entry of [`direct_host_natives`] (what [`crate::ffi::HostCall`]
+/// says of a standard native, with its name).
 pub struct DirectHost {
     pub name: String,
     /// The plain function (`None`: the native needs the runtime).
@@ -2316,7 +2335,14 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         return unsafe { bail(ctx) };
     };
     let c = unsafe { &mut *ctx };
-    let Some(host) = direct_host_natives().get(id as usize) else {
+    // The runtime's table decides what runs: a host may have replaced a
+    // native (the compile-time sandbox refuses most of them), and an AOT
+    // executable links only the natives its program calls.
+    // SAFETY: when set, `natives` is the live runtime's.
+    let Some(natives) = (unsafe { c.natives.as_ref() }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(host) = natives.host_call(id as usize) else {
         return unsafe { bail(ctx) };
     };
     if host.collect {
@@ -2335,13 +2361,8 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         }
         return freed;
     }
-    // The runtime's table decides what runs: a host may have replaced this
-    // native (the compile-time sandbox refuses most of them), and the
-    // replacement is no plain function.
-    // SAFETY: when set, `natives` is the live runtime's.
-    let replaced = || !c.natives.is_null() && unsafe { &*c.natives }.direct_by_id(id as usize).is_none();
     let f = match host.func {
-        Some(f) if !host.on_machine && !replaced() => f,
+        Some(f) if !host.on_machine => f,
         _ if host.on_machine || host.func.is_some() => {
             crate::host_enum::take_pair_tag();
             return match unsafe { host_invoke(ctx, id, layout, args, n) } {
@@ -2360,7 +2381,7 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     if host.guarded && args.first().is_some_and(|&s| crate::io::is_unsent_stream(heap, s)) {
         c.trap = TRAP_MESSAGE;
         // SAFETY: `call` set `message` for the call.
-        unsafe { *c.message = format!("{}: {}", host.name, crate::io::UNSENT_STREAM_PANIC) };
+        unsafe { *c.message = format!("{}: {}", natives.get_by_id(id as usize).map_or("?", |n| n.name()), crate::io::UNSENT_STREAM_PANIC) };
         return unsafe { bail(ctx) };
     }
     let live_before = heap.live_object_count();

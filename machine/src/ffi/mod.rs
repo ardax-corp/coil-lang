@@ -33,7 +33,7 @@ pub use gate::DloadGate;
 pub use read::read_ints;
 #[cfg(not(target_family = "wasm"))]
 pub use libloading::Library;
-pub use registry::{HostClosureFn, HostOp, NativeFn, Natives};
+pub use registry::{HostCall, HostClosureFn, HostOp, NativeFn, Natives};
 pub use resolve::{
     DLOAD_PRODUCTION_STEMS, dload_request_stem, is_libc_alias, is_production_dload_stem,
     library_candidates, platform_shared_lib_filename, resolve_library,

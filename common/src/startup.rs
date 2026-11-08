@@ -13,3 +13,7 @@ pub enum StartupOp {
     /// Restore the snapshot at `at` in the constant pool.
     Restore { at: u32 },
 }
+
+/// The body an AOT executable starts in: its startup, then `main`
+/// (`coil_native::start_body`). A panic's backtrace leaves its frame out.
+pub const NATIVE_START_NAME: &str = "__start";

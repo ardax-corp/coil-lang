@@ -22,6 +22,17 @@ pub struct NativeStart {
     pub struct_layouts: Vec<crate::CStructLayout>,
     /// Where `print` goes instead of stdout (a debugger's client).
     pub shared_print: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// The host natives, by id: [`standard_host_natives`], or an AOT
+    /// executable's own ([`crate::native::aot_host_natives`]). The start
+    /// names no default, so a link that never starts the standard table
+    /// drops the natives its program does not call.
+    pub host_natives: Vec<Arc<dyn crate::ffi::NativeFn>>,
+}
+
+/// Every standard host native, by id (built once per process).
+pub fn standard_host_natives() -> Vec<Arc<dyn crate::ffi::NativeFn>> {
+    static TABLE: std::sync::OnceLock<Vec<Arc<dyn crate::ffi::NativeFn>>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| crate::host_natives::build_standard_host_natives(|_, _| {})).clone()
 }
 
 /// Run `program` on the native driver with the native code installed for
@@ -91,7 +102,7 @@ pub fn spawn_context(
 /// paths and layouts, its statics, strings and word kinds.
 fn runtime_for(program: &ThreadProgram, start: NativeStart) -> Runtime {
     let mut rt = Runtime::new();
-    for native in crate::host_natives::build_standard_host_natives(|_, _| {}) {
+    for native in start.host_natives {
         rt.natives.register(native);
     }
     rt.ffi.base_dir = start.base_dir;

@@ -21,6 +21,8 @@ unsafe extern "C" {
     static coil_aot_stack_map_count: u64;
     static coil_static_syms: machine::StaticSymbol;
     static coil_static_sym_count: u64;
+    static coil_aot_host_groups: machine::AotHostGroup;
+    static coil_aot_host_group_count: u64;
     static coil_aot_package: u8;
     static coil_aot_package_len: u64;
 }
@@ -46,6 +48,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
         machine::native::install_aot_stack_maps(&raw const coil_aot_stack_maps, coil_aot_stack_map_count as usize);
         machine::install_static_symbols(&raw const coil_static_syms, coil_static_sym_count as usize);
+        machine::native::install_aot_host_groups(&raw const coil_aot_host_groups, coil_aot_host_group_count as usize);
     }
     // SAFETY: the linked object defines the package as `aot` wrote it.
     let package = unsafe { std::slice::from_raw_parts(&raw const coil_aot_package, coil_aot_package_len as usize) };

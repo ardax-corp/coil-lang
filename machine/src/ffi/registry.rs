@@ -31,6 +31,9 @@ pub enum HostOp {
     /// runs a minor collection ([`common::GC_REGION_ENTER_ID`]).
     RegionEnter,
     RegionExit,
+    /// `startup_restore`: the driver restores the snapshot at a pool index
+    /// ([`common::STARTUP_RESTORE_ID`]).
+    Restore,
 }
 
 pub trait NativeFn: Send + Sync {
@@ -52,6 +55,47 @@ pub trait NativeFn: Send + Sync {
     /// function behind that check, which native code makes itself.
     fn guarded_direct(&self) -> Option<crate::HostValueFn> {
         None
+    }
+
+    /// A slot of a host table without this native: an AOT executable links
+    /// only the natives its program calls (`host_natives_of_groups`).
+    fn is_absent(&self) -> bool {
+        false
+    }
+}
+
+/// How native code calls host native `id` ([`Natives::host_call`]).
+#[derive(Clone, Copy, Default)]
+pub struct HostCall {
+    /// The plain function (`None`: the native needs the runtime).
+    pub func: Option<crate::HostValueFn>,
+    /// It takes a `Stream` first, which must not be unsent.
+    pub guarded: bool,
+    /// `gc_collect`: a full collection on the runtime, with native code's
+    /// words rooted around the call.
+    pub collect: bool,
+    /// An ordinary native that needs the runtime (it may park the task, open
+    /// descriptors, ...), a task op, a `region` hook (a minor collection) or
+    /// the finalizer registry's `gc_register_finalizer`: native code runs it
+    /// as a runtime call.
+    pub on_machine: bool,
+}
+
+impl HostCall {
+    pub fn of(n: &dyn NativeFn) -> Self {
+        if n.is_absent() {
+            return Self::default();
+        }
+        let guarded = crate::host_natives::stream_first(n.name());
+        let func = if guarded { n.guarded_direct() } else { n.direct() };
+        let collect = n.name() == crate::gc_handles::GC_COLLECT_NATIVE;
+        let on_machine = func.is_none()
+            && !collect
+            && matches!(
+                n.host_op(),
+                HostOp::Ordinary | HostOp::Task | HostOp::RegionEnter | HostOp::RegionExit | HostOp::RegisterFinalizer | HostOp::Restore
+            );
+        Self { func, guarded, collect, on_machine }
     }
 }
 
@@ -165,6 +209,8 @@ pub struct Natives {
     by_id: Arc<Vec<Arc<dyn NativeFn>>>,
     /// [`NativeFn::direct`] of each id, read by the dispatch loop.
     direct: Arc<Vec<Option<crate::HostValueFn>>>,
+    /// How native code calls each id.
+    calls: Arc<Vec<HostCall>>,
 }
 
 impl Natives {
@@ -174,13 +220,16 @@ impl Natives {
 
     pub fn register(&mut self, native: Arc<dyn NativeFn>) -> usize {
         let id = self.by_id.len();
-        let name = native.name().to_string();
-        let by_name = Arc::make_mut(&mut self.by_name);
-        if by_name.is_empty() {
-            // The standard host table is ~140 natives; skip the rehash ladder.
-            by_name.reserve(192);
+        if !native.is_absent() {
+            let name = native.name().to_string();
+            let by_name = Arc::make_mut(&mut self.by_name);
+            if by_name.is_empty() {
+                // The standard host table is ~210 natives; skip the rehash ladder.
+                by_name.reserve(256);
+            }
+            by_name.insert(name, Arc::clone(&native));
         }
-        by_name.insert(name, Arc::clone(&native));
+        Arc::make_mut(&mut self.calls).push(HostCall::of(native.as_ref()));
         Arc::make_mut(&mut self.direct).push(native.direct());
         Arc::make_mut(&mut self.by_id).push(native);
         id
@@ -198,6 +247,12 @@ impl Natives {
     #[inline(always)]
     pub fn direct_by_id(&self, id: usize) -> Option<crate::HostValueFn> {
         self.direct.get(id).copied().flatten()
+    }
+
+    /// How native code calls native `id`.
+    #[inline(always)]
+    pub fn host_call(&self, id: usize) -> Option<HostCall> {
+        self.calls.get(id).copied()
     }
 
     pub fn len(&self) -> usize {

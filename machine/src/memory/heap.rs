@@ -5319,7 +5319,7 @@ mod nursery;
 
 #[path = "inline.rs"]
 mod inline;
-pub use inline::{InlineObject, InlineShape, inline_object, layout_fingerprint};
+pub use inline::{InlineObject, InlineShape, InstanceSlots, inline_object, instance_slots, layout_fingerprint};
 pub use nursery::MinorPlan;
 
 #[path = "snapshot.rs"]

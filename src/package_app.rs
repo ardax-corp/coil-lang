@@ -87,7 +87,10 @@ fn refused_exit(refused: &[(String, String)]) -> ! {
 #[cfg(not(target_family = "wasm"))]
 fn aot_object(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8]) -> Result<coil_native::AotObject, String> {
     let debug = pipeline.program_debug_full();
-    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    let mut pcs: std::collections::HashMap<String, u32> = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    if bodies.iter().any(|b| b.name == coil_native::START_NAME) {
+        pcs.insert(coil_native::START_NAME.to_string(), start_id(bodies));
+    }
     let linked: Vec<(String, String)> = pipeline
         .extern_symbols()
         .into_iter()
@@ -111,6 +114,38 @@ fn aot_object(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], 
         refused_exit(&object.refused);
     }
     Ok(object)
+}
+
+/// The body id of an AOT executable's `__start`: past every body's.
+#[cfg(not(target_family = "wasm"))]
+fn start_id(bodies: &[compiler::native_mir::NativeBody]) -> u32 {
+    bodies.iter().filter_map(|b| b.entry).map(|l| l.0 + 1).max().unwrap_or(0) + 1
+}
+
+/// What an AOT executable is made from: `bodies` with `__start`
+/// (`coil_native::start_body`), and `program` as data only, whose `main`
+/// is `__start` and whose startup is empty.
+#[cfg(not(target_family = "wasm"))]
+fn with_native_start(pipeline: &mut Pipeline, bodies: &[compiler::native_mir::NativeBody], program: &ArchivedProgram) -> (Vec<compiler::native_mir::NativeBody>, ArchivedProgram) {
+    let ids = pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    let start = match coil_native::start_body(bodies, &ids, &program.startup, program.main) {
+        Ok(b) => b,
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("native start for the package failed ({e})")),
+    };
+    let id = start_id(bodies);
+    let mut all = bodies.to_vec();
+    all.push(start);
+    let mut data = program.clone();
+    data.startup = Vec::new();
+    data.main = Some(id);
+    // Past every other body: the symbols stay sorted by id.
+    data.fn_symbols.push(common::FnDebugSym { name: coil_native::START_NAME.to_string(), body_id: id });
+    (all, data)
+}
+
+#[cfg(target_family = "wasm")]
+fn with_native_start(_: &mut Pipeline, bodies: &[compiler::native_mir::NativeBody], program: &ArchivedProgram) -> (Vec<compiler::native_mir::NativeBody>, ArchivedProgram) {
+    (bodies.to_vec(), program.clone())
 }
 
 /// [`aot_object`], then `cc` with the runtime library (`libcoil_rt.a`
@@ -766,16 +801,20 @@ pub fn cmd_package(
     // The executable the payload goes on: one linked from native code for
     // the program, or the JIT runner (`--no-aot`, `--runner`, or when
     // linking is not possible here).
-    let package = aot.then(|| {
-        let archive = payload_bytes(pipeline, &program);
+    // An AOT executable starts in its own code: `__start` runs the startup
+    // and `main`, and the payload is data only.
+    let start = aot.then(|| with_native_start(pipeline, &bodies, &program));
+    let aot_bodies = start.as_ref().map_or(&[][..], |(b, _)| b.as_slice());
+    let package = start.as_ref().map(|(_, data)| {
+        let archive = payload_bytes(pipeline, data);
         let lock = (!native_lock.entries.is_empty()).then(|| native_lock.to_json());
         linked_package(&archive, lock.as_deref().map(str::as_bytes), flags, ARCHIVE_VERSION)
     });
     if link.emit != Emit::Exe {
-        write_linkable(pipeline, &bodies, link, package.as_deref().unwrap_or_default(), output);
+        write_linkable(pipeline, aot_bodies, link, package.as_deref().unwrap_or_default(), output);
         return;
     }
-    let linked = package.as_deref().and_then(|p| link_aot_executable(pipeline, &bodies, link, p));
+    let linked = package.as_deref().and_then(|p| link_aot_executable(pipeline, aot_bodies, link, p));
     if let Some((packaged, compiled, rt)) = linked {
         if let Err(e) = fs::write(output, &packaged) {
             fail_and_exit(pipeline, ErrorCode::IoError, format!("cannot write packaged output `{}`: {e}", output));

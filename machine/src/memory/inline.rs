@@ -176,6 +176,78 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
     })
 }
 
+/// Where native code reads and writes an instance's slots in place
+/// (`docs/internals/native.md`, "Inline field access"): byte offsets from
+/// the object's address, probed from real objects as the images are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct InstanceSlots {
+    /// The header's kind byte, and an instance's kind.
+    pub kind_at: u32,
+    pub kind: u8,
+    /// The header's generation byte, and the bit the write barrier takes
+    /// the slow path on ([`GEN_UNLOGGED`]).
+    pub generation_at: u32,
+    pub unlogged: u8,
+    /// The storage's discriminant byte.
+    pub storage_at: u32,
+    /// Inline slots: the discriminant, the `u8` slot count and the words.
+    pub inline_tag: u8,
+    pub inline_len_at: u32,
+    pub inline_slots_at: u32,
+    /// Spilled slots: the discriminant and the `Vec`'s pointer and length words.
+    pub spill_tag: u8,
+    pub spill_ptr_at: u32,
+    pub spill_len_at: u32,
+    /// Stores may be written in place. A debug or GC-stress runtime checks
+    /// every write ([`GcData::as_mut`]), so its stores take the helper.
+    pub inline_stores: bool,
+}
+
+/// The [`InstanceSlots`] of this build.
+#[must_use]
+pub fn instance_slots() -> InstanceSlots {
+    let data = std::mem::offset_of!(GcData<ObjInstance>, data);
+    let header = GcHeader::new();
+    let inline = ObjInstance::with_type_id_and_fields(1, 2);
+    let storage = data + off(&inline, &inline.storage);
+    // SAFETY: `repr(u8)`: the discriminant is the first byte.
+    let tag = |s: &InstanceStorage| unsafe { *std::ptr::from_ref(s).cast::<u8>() };
+    let InstanceStorage::Inline { len, slots } = &inline.storage else {
+        unreachable!("two fields are inline");
+    };
+    let (inline_tag, inline_len_at, inline_slots_at) = (tag(&inline.storage), storage + off(&inline.storage, len), storage + off(&inline.storage, slots));
+    let mut spill = ObjInstance::with_type_id_and_fields(1, INSTANCE_INLINE_FIELDS + 3);
+    let spill_tag = tag(&spill.storage);
+    if let InstanceStorage::Spill(v) = &mut spill.storage {
+        v.reserve_exact(5);
+    }
+    let InstanceStorage::Spill(v) = &spill.storage else {
+        unreachable!("a wide instance spills");
+    };
+    let vec_at = storage + off(&spill.storage, v);
+    // A `Vec`'s words are its capacity, pointer and length in some order:
+    // find the pointer and the length (the capacity is larger).
+    // SAFETY: a `Vec` is three words.
+    let words: [usize; 3] = unsafe { std::mem::transmute_copy(v) };
+    let ptr = words.iter().position(|&w| w == v.as_ptr() as usize).expect("a Vec holds its pointer");
+    let len_word = words.iter().position(|&w| w == v.len()).expect("a Vec holds its length");
+    assert!(v.capacity() != v.len() && ptr != len_word);
+    InstanceSlots {
+        kind_at: off(&header, &header.kind) as u32,
+        kind: KIND_INSTANCE,
+        generation_at: off(&header, &header.generation) as u32,
+        unlogged: GEN_UNLOGGED,
+        storage_at: storage as u32,
+        inline_tag,
+        inline_len_at: inline_len_at as u32,
+        inline_slots_at: inline_slots_at as u32,
+        spill_tag,
+        spill_ptr_at: (vec_at + ptr * 8) as u32,
+        spill_len_at: (vec_at + len_word * 8) as u32,
+        inline_stores: !cfg!(any(debug_assertions, feature = "gc-stress")),
+    }
+}
+
 /// A digest of everything inline allocation assumes: every shape's image,
 /// the counter and cursor layouts. An AOT object records the compiler's,
 /// and the runtime refuses it when its own differs
@@ -202,6 +274,7 @@ pub fn layout_fingerprint() -> u64 {
         std::mem::size_of::<super::super::slab::Bump>(),
     ];
     counts.hash(&mut h);
+    instance_slots().hash(&mut h);
     h.finish()
 }
 
@@ -265,6 +338,37 @@ mod tests {
         assert!(inline_object(InlineShape::Tuple { kinds: 0, n: 0 }).is_none());
         assert!(inline_object(InlineShape::Instance { type_id: 0, n: 1 }).is_none());
         assert!(inline_object(InlineShape::Instance { type_id: 1, n: 5 }).is_none());
+    }
+
+    /// Slots read and written at [`instance_slots`]' offsets are the
+    /// instance's own, inline and spilled.
+    #[test]
+    fn instance_slots_find_the_fields() {
+        let l = instance_slots();
+        let mut heap = Heap::default();
+        for n in [2usize, INSTANCE_INLINE_FIELDS + 2] {
+            let mut obj = ObjInstance::with_type_id_and_fields(9, n);
+            for i in 0..n {
+                obj.set_slot(i, Value::from(100 + i as i64));
+            }
+            let addr = heap.alloc(obj, Object::Instance).1.as_ptr() as u64;
+            let byte = |at: u32| unsafe { *((addr + u64::from(at)) as *const u8) };
+            let word = |at: u32| unsafe { *((addr + u64::from(at)) as *const u64) };
+            assert_eq!(byte(l.kind_at), l.kind);
+            let (ptr, len) = if byte(l.storage_at) == l.inline_tag {
+                (addr + u64::from(l.inline_slots_at), u64::from(byte(l.inline_len_at)))
+            } else {
+                assert_eq!(byte(l.storage_at), l.spill_tag);
+                (word(l.spill_ptr_at), word(l.spill_len_at))
+            };
+            assert_eq!(len, n as u64);
+            for i in 0..n {
+                assert_eq!(unsafe { *((ptr + 8 * i as u64) as *const i64) }, 100 + i as i64);
+            }
+            unsafe { *((ptr + 8) as *mut i64) = 7 };
+            let Some(Object::Instance(gc)) = heap.find_object_by_addr(addr) else { panic!("not an instance") };
+            assert_eq!(gc.as_ref().slot(1), Some(Value::from(7_i64)));
+        }
     }
 
     #[test]

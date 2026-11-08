@@ -1565,6 +1565,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HEAP_R,
         caps: NO_CAP,
     },
+    HostNative {
+        name: STARTUP_RESTORE_NATIVE,
+        arity: 1,
+        id: STARTUP_RESTORE_ID,
+        effects: SUSPEND,
+        caps: NO_CAP,
+    },
 ];
 
 /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
@@ -1830,11 +1837,17 @@ pub const VEC_DRAIN_NATIVE: &str = "vec_drain";
 /// `insert` pushes and then rotates the element in.
 pub const VEC_ROTATE_IN_ID: u16 = 213;
 pub const VEC_ROTATE_IN_NATIVE: &str = "vec_rotate_in";
+/// Restores the snapshot at a constant-pool index (archive 7 minor 4,
+/// `HostOp::Restore`): an AOT executable's native `__start` runs it where
+/// the startup restored a snapshot. Compiler-emitted only.
+pub const STARTUP_RESTORE_ID: u16 = 214;
+pub const STARTUP_RESTORE_NATIVE: &str = "startup_restore";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 214);
+    assert!(HOST_NATIVES.len() == 215);
     assert!(HOST_NATIVES[VEC_DRAIN_ID as usize].id == VEC_DRAIN_ID);
     assert!(HOST_NATIVES[VEC_ROTATE_IN_ID as usize].id == VEC_ROTATE_IN_ID);
+    assert!(HOST_NATIVES[STARTUP_RESTORE_ID as usize].id == STARTUP_RESTORE_ID);
     assert!(HOST_NATIVES[LOCK_ACQUIRE_ID as usize].id == LOCK_ACQUIRE_ID);
     assert!(HOST_NATIVES[RW_STORE_ID as usize].id == RW_STORE_ID);
     assert!(HOST_NATIVES[KEY_INDEX_EQ_MODE_ID as usize].id == KEY_INDEX_EQ_MODE_ID);

@@ -60,103 +60,255 @@ pub fn build_standard_host_natives(
         );
         register_id(name, id);
     };
-    push_io_natives(&mut out, &mut register_id);
-    push_wiring(&mut out, &mut register_id, FS_WIRING, "fs");
-    push_removed_time_stubs(&mut out, &mut register_id);
-    push_wiring(&mut out, &mut register_id, ENV_WIRING, "env");
-    push_prelude_char_ord(&mut out, &mut register_id);
-    push_thread_natives(&mut out, &mut register_id);
-    push_packed_la(&mut out, &mut register_id);
-    // Append-only: keep prior HostInvoke ids stable across ARCHIVE_MINOR bumps.
-    push_io_wait_ready(&mut out, &mut register_id);
-    push_io_write_from(&mut out, &mut register_id);
-    push_wiring(&mut out, &mut register_id, GC_WIRING, "gc");
-    push_gc_host_ops(&mut out, &mut register_id);
-    push_math_libm(&mut out, &mut register_id);
-    // Append-only after math_libm: Vec helpers.
-    push_wiring(&mut out, &mut register_id, VEC_WIRING, "vec");
-    // `stream_attach` / `stream_park` are the package-IO hooks (coil-tls uses
-    // these via `dload`, not runtime TLS natives).
-    push_stream_attach(&mut out, &mut register_id);
-    push_stream_park(&mut out, &mut register_id);
-    // Append-only after stream_park: process clocks (no Instant HashMap).
-    push_wiring(&mut out, &mut register_id, CLOCK_WIRING, "clock");
-    // Append-only after clocks: `Result<(), IoError>` pack probe (no IO).
-    push_result_unit_probe(&mut out, &mut register_id);
-    // Append-only after result_unit_probe: M1 prelude::math expansion.
-    push_removed_math_stubs(&mut out, &mut register_id, MATH_LIBM_M1_REMOVED);
-    // Append-only after math: MIR saxpy-reduce pack (compiler rewrite only).
-    push_simd_axpy_reduce(&mut out, &mut register_id);
-    push_thread_spawn_shared(&mut out, &mut register_id);
-    push_stream_fd(&mut out, &mut register_id);
-    // Append-only after stream_fd: byte-offset `string` natives (minor 31).
-    push_string_bytes(&mut out, &mut register_id);
-    // Append-only after string bytes: task scheduler natives (minor 32).
-    push_task_natives(
-        &mut out,
-        &mut register_id,
-        common::TASK_SCOPE_OPEN_ID..=common::TASK_YIELD_ID,
-    );
-    push_unwind_resume(&mut out, &mut register_id);
-    push_task_natives(
-        &mut out,
-        &mut register_id,
-        common::TASK_CANCEL_ID..=common::TASK_SHIELD_EXIT_ID,
-    );
-    push_task_natives(
-        &mut out,
-        &mut register_id,
-        common::TASK_COND_NEW_ID..=common::TASK_COND_NOTIFY_ID,
-    );
-    // `contract_fail` reads the caller's frame, so the runtime runs it too.
-    push_task_natives(
-        &mut out,
-        &mut register_id,
-        common::CONTRACT_FAIL_ID..=common::CONTRACT_FAIL_ID,
-    );
-    // Append-only after contract_fail: `ffi::read_ints` (minor 36).
-    push_ffi_read_ints(&mut out, &mut register_id);
-    // Append-only after ffi_read_ints: shaped `==` (minor 39).
-    push_values_eq_shaped(&mut out, &mut register_id);
-    // Append-only after values_eq_shaped: string ordering (minor 41).
-    push_string_compare(&mut out, &mut register_id);
-    // Append-only after string_compare: `black_box` (minor 43).
-    push_black_box(&mut out, &mut register_id);
-    // Append-only after black_box: `io::capture_begin` / `capture_end` (minor 44).
-    push_wiring(&mut out, &mut register_id, crate::io::IO_CAPTURE_WIRING, "io capture");
-    // Append-only after io capture: `io::tty` (minor 47).
-    push_wiring(&mut out, &mut register_id, crate::tty::TTY_WIRING, "io tty");
-    // Append-only after io tty: bulk Vec copy / fill (major 6 minor 1).
-    push_wiring(&mut out, &mut register_id, crate::vec_ops::VEC_BULK_WIRING, "vec bulk");
-    // Append-only after vec bulk: `from_bytes` taking a dead buffer (major 6 minor 4).
-    push_from_bytes_take(&mut out, &mut register_id);
-    // Append-only after from_bytes_take: `region` enter / exit (major 6 minor 5).
-    push_region(&mut out, &mut register_id);
-    // Append-only after region: `symbol::next_id` (major 6 minor 9).
-    push_wiring(&mut out, &mut register_id, crate::symbol::SYMBOL_WIRING, "symbol");
-    // Append-only after symbol: the `process` module (major 6 minor 10).
-    push_wiring(&mut out, &mut register_id, crate::process::PROCESS_WIRING, "process");
-    // Append-only after process: `coro_close` (major 6 minor 14), run by the runtime.
-    push_task_natives(&mut out, &mut register_id, common::CORO_CLOSE_ID..=common::CORO_CLOSE_ID);
-    // Append-only after coro_close: `entropy::bytes` (major 6 minor 15).
-    push_entropy(&mut out, &mut register_id);
-    // Append-only after entropy: `key_index::*` (major 6 minor 18).
-    push_wiring(&mut out, &mut register_id, crate::key_index::KEY_INDEX_WIRING, "key_index");
-    // Append-only after key_index: the lock primitives (major 6 minor 21).
-    push_lock_natives(&mut out, &mut register_id);
-    // Append-only after the lock primitives: `vec_drain` / `vec_rotate_in` (major 7 minor 3).
-    push_wiring(&mut out, &mut register_id, crate::vec_ops::VEC_MOVE_WIRING, "vec move");
+    for push in STANDARD_HOST_GROUPS {
+        push(&mut out, &mut register_id);
+    }
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
         "runtime host table length must match common::HOST_NATIVES"
     );
-    for native in &mut out {
-        if stream_first(native.name()) {
+    guard_streams(&mut out);
+    out
+}
+
+/// Wrap each native that takes a `Stream` first in [`UnsentStreamGuard`].
+fn guard_streams(out: &mut [Arc<dyn NativeFn>]) {
+    for native in out {
+        if !native.is_absent() && stream_first(native.name()) {
             *native = Arc::new(UnsentStreamGuard(Arc::clone(native)));
         }
     }
+}
+
+/// What pushes one group of host natives: consecutive ids, the first at
+/// `out.len()`.
+pub type HostPush = fn(&mut Vec<Arc<dyn NativeFn>>, &mut dyn FnMut(&str, usize));
+
+/// The standard groups, in id order, and one exported symbol per group,
+/// `coil_host_group_K`, holding its [`HostPush`]: an AOT executable's object
+/// lists the groups its program calls by those symbols
+/// ([`AotHostGroup`]), so the link keeps only their natives
+/// (`docs/internals/native.md`, "Per-program host natives").
+macro_rules! host_groups {
+    ($($k:literal => $push:expr;)*) => {
+        /// Every host-native group, in id order.
+        pub const STANDARD_HOST_GROUPS: &[HostPush] = &[$($push),*];
+        // Group `K` is the `K`th entry.
+        const _: () = {
+            let ks: &[usize] = &[$($k),*];
+            let mut i = 0;
+            while i < ks.len() {
+                assert!(ks[i] == i, "host_groups! numbers its groups 0, 1, 2, ...");
+                i += 1;
+            }
+        };
+        $(
+            const _: () = {
+                #[unsafe(export_name = concat!("coil_host_group_", $k))]
+                static GROUP: HostPush = $push;
+            };
+        )*
+    };
+}
+
+host_groups! {
+    0 => push_io_kind::<0>;
+    1 => push_io_kind::<1>;
+    2 => push_io_kind::<2>;
+    3 => push_io_kind::<3>;
+    4 => push_io_kind::<4>;
+    5 => push_io_kind::<5>;
+    6 => push_io_kind::<6>;
+    7 => push_io_kind::<7>;
+    8 => push_io_kind::<8>;
+    9 => push_io_kind::<9>;
+    10 => push_io_kind::<10>;
+    11 => push_io_kind::<11>;
+    12 => push_io_kind::<12>;
+    13 => push_io_kind::<13>;
+    14 => push_io_kind::<14>;
+    15 => push_io_kind::<15>;
+    16 => push_io_kind::<16>;
+    17 => push_io_kind::<17>;
+    18 => push_io_kind::<18>;
+    19 => push_io_kind::<19>;
+    20 => push_io_kind::<20>;
+    21 => push_io_kind::<21>;
+    22 => push_io_kind::<22>;
+    23 => push_io_kind::<23>;
+    24 => push_io_kind::<24>;
+    25 => |o, r| push_wiring(o, r, FS_WIRING, "fs");
+    26 => |o, r| push_removed_time_stubs(o, r);
+    27 => |o, r| push_wiring(o, r, ENV_WIRING, "env");
+    28 => |o, r| push_prelude_char_ord(o, r);
+    29 => |o, r| push_thread_natives(o, r);
+    30 => |o, r| push_packed_la(o, r);
+    // Append-only: keep prior HostInvoke ids stable across ARCHIVE_MINOR bumps.
+    31 => |o, r| push_io_wait_ready(o, r);
+    32 => |o, r| push_io_write_from(o, r);
+    33 => |o, r| push_wiring(o, r, GC_WIRING, "gc");
+    34 => |o, r| push_gc_host_ops(o, r);
+    35 => |o, r| push_math_libm(o, r);
+    // Append-only after math_libm: Vec helpers.
+    36 => |o, r| push_wiring(o, r, VEC_WIRING, "vec");
+    // `stream_attach` / `stream_park` are the package-IO hooks (coil-tls uses
+    // these via `dload`, not runtime TLS natives).
+    37 => |o, r| push_stream_attach(o, r);
+    38 => |o, r| push_stream_park(o, r);
+    // Append-only after stream_park: process clocks (no Instant HashMap).
+    39 => |o, r| push_wiring(o, r, CLOCK_WIRING, "clock");
+    // Append-only after clocks: `Result<(), IoError>` pack probe (no IO).
+    40 => |o, r| push_result_unit_probe(o, r);
+    // Append-only after result_unit_probe: M1 prelude::math expansion.
+    41 => |o, r| push_removed_math_stubs(o, r, MATH_LIBM_M1_REMOVED);
+    // Append-only after math: MIR saxpy-reduce pack (compiler rewrite only).
+    42 => |o, r| push_simd_axpy_reduce(o, r);
+    43 => |o, r| push_thread_spawn_shared(o, r);
+    44 => |o, r| push_stream_fd(o, r);
+    // Append-only after stream_fd: byte-offset `string` natives (minor 31).
+    45 => |o, r| push_string_bytes(o, r);
+    // Append-only after string bytes: task scheduler natives (minor 32).
+    46 => |o, r| push_task_natives(o, r, common::TASK_SCOPE_OPEN_ID..=common::TASK_YIELD_ID);
+    47 => |o, r| push_unwind_resume(o, r);
+    48 => |o, r| push_task_natives(o, r, common::TASK_CANCEL_ID..=common::TASK_SHIELD_EXIT_ID);
+    49 => |o, r| push_task_natives(o, r, common::TASK_COND_NEW_ID..=common::TASK_COND_NOTIFY_ID);
+    // `contract_fail` reads the caller's frame, so the runtime runs it too.
+    50 => |o, r| push_task_natives(o, r, common::CONTRACT_FAIL_ID..=common::CONTRACT_FAIL_ID);
+    // Append-only after contract_fail: `ffi::read_ints` (minor 36).
+    51 => |o, r| push_ffi_read_ints(o, r);
+    // Append-only after ffi_read_ints: shaped `==` (minor 39).
+    52 => |o, r| push_values_eq_shaped(o, r);
+    // Append-only after values_eq_shaped: string ordering (minor 41).
+    53 => |o, r| push_string_compare(o, r);
+    // Append-only after string_compare: `black_box` (minor 43).
+    54 => |o, r| push_black_box(o, r);
+    // Append-only after black_box: `io::capture_begin` / `capture_end` (minor 44).
+    55 => |o, r| push_wiring(o, r, crate::io::IO_CAPTURE_WIRING, "io capture");
+    // Append-only after io capture: `io::tty` (minor 47).
+    56 => |o, r| push_wiring(o, r, crate::tty::TTY_WIRING, "io tty");
+    // Append-only after io tty: bulk Vec copy / fill (major 6 minor 1).
+    57 => |o, r| push_wiring(o, r, crate::vec_ops::VEC_BULK_WIRING, "vec bulk");
+    // Append-only after vec bulk: `from_bytes` taking a dead buffer (major 6 minor 4).
+    58 => |o, r| push_from_bytes_take(o, r);
+    // Append-only after from_bytes_take: `region` enter / exit (major 6 minor 5).
+    59 => |o, r| push_region(o, r);
+    // Append-only after region: `symbol::next_id` (major 6 minor 9).
+    60 => |o, r| push_wiring(o, r, crate::symbol::SYMBOL_WIRING, "symbol");
+    // Append-only after symbol: the `process` module (major 6 minor 10).
+    61 => |o, r| push_wiring(o, r, crate::process::PROCESS_WIRING, "process");
+    // Append-only after process: `coro_close` (major 6 minor 14), run by the runtime.
+    62 => |o, r| push_task_natives(o, r, common::CORO_CLOSE_ID..=common::CORO_CLOSE_ID);
+    // Append-only after coro_close: `entropy::bytes` (major 6 minor 15).
+    63 => |o, r| push_entropy(o, r);
+    // Append-only after entropy: `key_index::*` (major 6 minor 18).
+    64 => |o, r| push_wiring(o, r, crate::key_index::KEY_INDEX_WIRING, "key_index");
+    // Append-only after key_index: the lock primitives (major 6 minor 21).
+    65 => |o, r| push_lock_natives(o, r);
+    // Append-only after the lock primitives: `vec_drain` / `vec_rotate_in` (major 7 minor 3).
+    66 => |o, r| push_wiring(o, r, crate::vec_ops::VEC_MOVE_WIRING, "vec move");
+    // Append-only after vec move: `startup_restore` (major 7 minor 4).
+    67 => |o, r| push_startup_restore(o, r);
+}
+
+/// Each standard group's first id and how many natives it pushes, by
+/// group number.
+pub fn host_group_spans() -> &'static [(u32, u32)] {
+    static SPANS: std::sync::OnceLock<Vec<(u32, u32)>> = std::sync::OnceLock::new();
+    SPANS.get_or_init(|| {
+        let mut out: Vec<Arc<dyn NativeFn>> = Vec::new();
+        STANDARD_HOST_GROUPS
+            .iter()
+            .map(|push| {
+                let first = out.len();
+                push(&mut out, &mut |_, _| {});
+                (first as u32, (out.len() - first) as u32)
+            })
+            .collect()
+    })
+}
+
+/// The group (by number) native `id` belongs to.
+pub fn host_group_of(id: usize) -> Option<usize> {
+    host_group_spans().iter().position(|&(first, count)| (first as usize..(first + count) as usize).contains(&id))
+}
+
+/// Groups every program's runtime may call whether or not its code names
+/// them: the task scheduler, `unwind_resume`, `contract_fail`, `coro_close`,
+/// the collector's and `region`'s hooks, `startup_restore`.
+pub fn core_host_groups() -> Vec<usize> {
+    let ids = [
+        common::TASK_SCOPE_OPEN_ID as usize,
+        common::TASK_CANCEL_ID as usize,
+        common::TASK_COND_NEW_ID as usize,
+        common::UNWIND_RESUME_ID as usize,
+        common::CONTRACT_FAIL_ID as usize,
+        common::CORO_CLOSE_ID as usize,
+        common::GC_REGION_ENTER_ID as usize,
+        common::STARTUP_RESTORE_ID as usize,
+    ];
+    let names = [crate::GC_COLLECT_NATIVE, crate::GC_REGISTER_FINALIZER_NATIVE, GC_WIRING[0].0];
+    let mut groups: Vec<usize> = ids
+        .into_iter()
+        .chain(names.into_iter().filter_map(common::host_native_id))
+        .filter_map(host_group_of)
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+/// One group an AOT executable links: the address of its
+/// `coil_host_group_K` symbol, its first id and how many natives it pushes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AotHostGroup {
+    /// Points at the group's [`HostPush`].
+    pub push: *const std::ffi::c_void,
+    pub first: u32,
+    pub count: u32,
+}
+
+/// A host table of `groups` only: each group's natives at their ids, and an
+/// absent native ([`NativeFn::is_absent`]) at every other id.
+pub fn host_natives_of_groups(groups: &[(HostPush, u32, u32)]) -> Vec<Arc<dyn NativeFn>> {
+    let absent: Arc<dyn NativeFn> = Arc::new(AbsentNative);
+    let mut groups = groups.to_vec();
+    groups.sort_by_key(|g| g.1);
+    let mut out: Vec<Arc<dyn NativeFn>> = Vec::with_capacity(common::HOST_NATIVES.len());
+    for (push, first, count) in groups {
+        if (first as usize) < out.len() {
+            continue;
+        }
+        out.resize(first as usize, Arc::clone(&absent));
+        push(&mut out, &mut |_, _| {});
+        assert_eq!(out.len(), (first + count) as usize, "host group at {first} pushed another count");
+    }
+    out.resize(common::HOST_NATIVES.len(), absent);
+    guard_streams(&mut out);
     out
+}
+
+/// A host native this executable did not link: its program never calls it.
+struct AbsentNative;
+
+impl NativeFn for AbsentNative {
+    fn name(&self) -> &str {
+        "(absent host native)"
+    }
+
+    fn signature(&self) -> &FfiSignature {
+        static SIG: std::sync::OnceLock<FfiSignature> = std::sync::OnceLock::new();
+        SIG.get_or_init(|| FfiSignature::from_parts("(absent host native)".to_string(), Vec::new(), FfiType::Int).expect("absent signature"))
+    }
+
+    fn invoke(&self, _: &mut crate::Heap, _: &[Value]) -> Result<Option<Value>, FfiError> {
+        Err(FfiError::Unsupported("this executable does not link the host native".into()))
+    }
+
+    fn is_absent(&self) -> bool {
+        true
+    }
 }
 
 /// Whether native `name` takes a `Stream` first, which it checks is not
@@ -228,7 +380,7 @@ pub use common::{
     STREAM_FD_NATIVE, STREAM_PARK_NATIVE,
 };
 
-fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     use crate::io::as_result_value;
     let sig = FfiSignature::from_parts(
         STREAM_ATTACH_NATIVE.to_string(),
@@ -255,7 +407,7 @@ fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
 
 fn push_result_unit_probe(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
 ) {
     use crate::io::{as_result_unit, IoErrorTag};
     let sig = FfiSignature::from_parts(
@@ -279,7 +431,7 @@ fn push_result_unit_probe(
 
 fn push_simd_axpy_reduce(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
 ) {
     let sig = FfiSignature::from_parts(
         common::SIMD_AXPY_REDUCE_NATIVE.to_string(),
@@ -336,14 +488,14 @@ pub fn refused_spawn_shared() -> Arc<dyn NativeFn> {
 
 fn push_thread_spawn_shared(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
 ) {
     let id = out.len();
     register_id(common::THREAD_SPAWN_SHARED_NATIVE, id);
     out.push(spawn_shared_native(crate::thread::thread_spawn_shared));
 }
 
-fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     use crate::io::as_result_unit;
     let sig = FfiSignature::from_parts(
         STREAM_PARK_NATIVE.to_string(),
@@ -369,7 +521,7 @@ fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
     })));
 }
 
-fn push_stream_fd(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_stream_fd(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     use crate::io::{as_result_value, IoErrorTag};
     let sig = FfiSignature::from_parts(
         STREAM_FD_NATIVE.to_string(),
@@ -390,7 +542,7 @@ fn push_stream_fd(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
 
 fn push_string_bytes(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
 ) {
     use crate::str_bytes::{
         string_byte_at, string_find_from, string_match_at, string_rfind, string_slice_bytes,
@@ -415,7 +567,7 @@ fn push_string_bytes(
 /// through.
 /// `from_bytes_take(buf) -> Result<string, StringError>`: `from_bytes`
 /// that moves the bytes out of a buffer nothing reads again.
-fn push_from_bytes_take(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_from_bytes_take(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let name = common::FROM_BYTES_TAKE_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("from_bytes_take signature");
     let id = out.len();
@@ -427,7 +579,7 @@ fn push_from_bytes_take(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl
 }
 
 /// `gc_region_enter` / `gc_region_exit`: runtime hooks ([`HostOp::RegionEnter`]).
-fn push_region(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_region(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     for (name, op) in [
         (common::GC_REGION_ENTER_NATIVE, HostOp::RegionEnter),
         (common::GC_REGION_EXIT_NATIVE, HostOp::RegionExit),
@@ -442,7 +594,7 @@ fn push_region(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&s
     }
 }
 
-fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let name = common::BLACK_BOX_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("black_box signature");
     let id = out.len();
@@ -454,7 +606,7 @@ fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
 /// `float` leaves compare by IEEE ([`crate::value_eq::values_eq_shaped`]).
 /// The compiler no longer emits it (that `==` calls compiler-made glue);
 /// it stays for archives that still call it.
-fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let name = common::VALUES_EQ_SHAPED_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 3], FfiType::Int)
         .expect("values_eq_shaped signature");
@@ -474,7 +626,7 @@ fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut imp
 /// `string_compare(a, b) -> int`: `-1`, `0` or `1` as `a` orders before,
 /// equal to or after `b` by UTF-8 bytes (a prefix first), for `<` / `<=` /
 /// `>` / `>=` on `string` (coil-stdlib#48).
-fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let name = common::STRING_COMPARE_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 2], FfiType::Int)
         .expect("string_compare signature");
@@ -496,7 +648,7 @@ fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl 
 }
 
 /// `ffi::read_ints(lib, ptr, count) -> Result<Vec<int>, ffi::Error>`.
-fn push_ffi_read_ints(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_ffi_read_ints(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let name = common::FFI_READ_INTS_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 3], FfiType::Int)
         .expect("ffi_read_ints signature");
@@ -510,7 +662,7 @@ fn push_ffi_read_ints(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
 /// `task_*` natives and `contract_fail`: runtime hooks ([`HostOp::Task`]), like `gc_collect`.
 fn push_task_natives(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
     ids: std::ops::RangeInclusive<u16>,
 ) {
     for id in ids {
@@ -535,8 +687,21 @@ fn push_task_natives(
     }
 }
 
+/// `startup_restore` restores a snapshot of the constant pool; the driver
+/// runs it (`HostOp::Restore`).
+fn push_startup_restore(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
+    let name = common::STARTUP_RESTORE_NATIVE;
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("startup_restore signature");
+    assert_eq!(out.len(), common::STARTUP_RESTORE_ID as usize);
+    register_id(name, out.len());
+    out.push(Arc::new(
+        HostClosureFn::new(sig, |_heap, _args| Err(FfiError::Unsupported("startup_restore is HostOp::Restore (runtime hook only)".into())))
+            .with_host_op(HostOp::Restore),
+    ));
+}
+
 /// `unwind_resume` ends a `defer` cleanup pad; the runtime runs it (`HostOp::Unwind`).
-fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let name = common::UNWIND_RESUME_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![], FfiType::Int).expect("unwind_resume signature");
     assert_eq!(out.len(), common::UNWIND_RESUME_ID as usize);
@@ -551,7 +716,7 @@ fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
 
 fn push_removed_time_stubs(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
 ) {
     for &(name, arity) in TIME_REMOVED {
         let args = vec![FfiType::Int; arity];
@@ -565,7 +730,7 @@ fn push_removed_time_stubs(
     }
 }
 
-fn push_gc_host_ops(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_gc_host_ops(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let collect_sig =
         FfiSignature::from_parts(crate::GC_COLLECT_NATIVE.to_string(), vec![], FfiType::Int)
             .expect("gc_collect signature");
@@ -600,7 +765,7 @@ fn push_gc_host_ops(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
 
 fn push_wiring(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
     table: &[(&str, usize, crate::HostValueFn)],
     label: &str,
 ) {
@@ -639,7 +804,7 @@ fn push_wiring(
 /// may park the task (no result yet; the interpreter or the native driver runs it
 /// again after the wake), so it is an ordinary closure; the rest are
 /// direct.
-fn push_lock_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_lock_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     for &(name, arity, host) in crate::thread::LOCK_WIRING {
         if !matches!(name, "lock_acquire" | "rw_acquire_read" | "rw_acquire_write") {
             push_wiring(out, register_id, &[(name, arity, host)], "lock");
@@ -656,7 +821,7 @@ fn push_lock_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl Fn
 }
 
 /// `entropy_bytes`: a negative count or a failed OS source is a Coil panic.
-fn push_entropy(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_entropy(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let name = common::ENTROPY_BYTES_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int)
         .unwrap_or_else(|_| panic!("entropy native signature"));
@@ -668,7 +833,7 @@ fn push_entropy(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&
     })));
 }
 
-fn push_math_libm(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_math_libm(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     push_removed_math_stubs(out, register_id, MATH_LIBM_REMOVED);
 }
 
@@ -676,7 +841,7 @@ fn push_math_libm(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
 /// every later id stay put.
 fn push_removed_math_stubs(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
     removed: &'static [(&'static str, usize)],
 ) {
     for &(name, arity) in removed {
@@ -695,7 +860,7 @@ fn push_removed_math_stubs(
 
 fn push_prelude_char_ord(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
 ) {
     use crate::char_ord::{prelude_char, prelude_hash_string, prelude_ord};
 
@@ -722,7 +887,7 @@ fn push_prelude_char_ord(
     out.push(Arc::new(HostClosureFn::new_direct(hash_sig, prelude_hash_string)));
 }
 
-fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     type Kernel = fn(&mut crate::Heap, &[Value]) -> Result<Value, common::int_arith::IntTrap>;
     let specs: &[(&str, usize, Kernel)] = &[
         (PACKED_DOT, 3, packed_dot),
@@ -758,7 +923,7 @@ fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
     )));
 }
 
-fn push_io_wait_ready(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_io_wait_ready(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     let sig = FfiSignature::from_parts("wait_ready".to_string(), vec![], FfiType::Int)
         .expect("wait_ready signature");
     let id = out.len();
@@ -769,7 +934,7 @@ fn push_io_wait_ready(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
 }
 
 /// Write `buf[offset..]` without allocating a Coil suffix array.
-fn push_io_write_from(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+fn push_io_write_from(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     use crate::io::{as_result_int, stream_write_from};
     let sig = FfiSignature::from_parts(
         "write_from".to_string(),
@@ -904,7 +1069,24 @@ impl IoKind {
     }
 }
 
-fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+/// The `io` native of `IoKind::all()[K]`: one group per kind, so an AOT
+/// executable links only the kinds its program calls.
+fn push_io_kind<const K: usize>(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
+    push_io_native(out, register_id, IoKind::all()[K]);
+}
+
+fn io_closure<F>(sig: FfiSignature, f: F) -> Arc<dyn NativeFn>
+where
+    F: Fn(&mut crate::Heap, &[Value]) -> Result<Option<Value>, FfiError> + Send + Sync + 'static,
+{
+    Arc::new(HostClosureFn::new(sig, f))
+}
+
+/// The native of `kind`. Inlined into each [`push_io_kind`], where `kind` is
+/// a constant, so each group keeps its own closure only.
+#[inline(always)]
+#[allow(unused_variables)]
+fn push_io_native(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize), kind: IoKind) {
     use crate::io::{
         as_result_int, as_result_option_int, as_result_unit, as_result_value, from_bytes, io_drive,
         stream_await_readable, stream_await_writable, stream_close, stream_open, stream_read,
@@ -914,181 +1096,249 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
         value_as_open_mode, value_as_string,
     };
 
-    for &kind in IoKind::all() {
-        let name = kind.native_name().to_string();
-        let arity = kind.arity();
-        let args = vec![FfiType::Int; arity];
-        let sig = FfiSignature::from_parts(name.clone(), args, FfiType::Int)
-            .expect("io native arity/signature");
-        let id = out.len();
-        register_id(&name, id);
-        // The stdio handles are plain lookups: direct natives.
-        let direct: Option<crate::HostValueFn> = match kind {
-            IoKind::Stdin => Some(|heap, _| stream_stdin(heap).unwrap_or_default()),
-            IoKind::Stdout => Some(|heap, _| stream_stdout(heap).unwrap_or_default()),
-            IoKind::Stderr => Some(|heap, _| stream_stderr(heap).unwrap_or_default()),
-            // Pure conversions: they only allocate.
-            IoKind::ToBytes => Some(|heap, args| to_bytes(heap, args[0])),
-            IoKind::FromBytes => Some(|heap, args| {
-                let r = from_bytes(heap, args[0]);
-                crate::str_bytes::as_string_result_value(heap, r)
-            }),
-            _ => None,
-        };
-        if let Some(f) = direct {
-            out.push(Arc::new(HostClosureFn::new_direct(sig, f)));
-            continue;
-        }
-        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-            let v = match kind {
-                // Stdio handles are `() -> Stream` (not Result).
-                IoKind::Stdin => stream_stdin(heap).unwrap_or_default(),
-                IoKind::Stdout => stream_stdout(heap).unwrap_or_default(),
-                IoKind::Stderr => stream_stderr(heap).unwrap_or_default(),
-                IoKind::Open => {
-                    let path = match value_as_string(heap, args[0]) {
-                        Ok(s) => s,
-                        Err(tag) => {
-                            return Ok(Some(as_result_value(heap, Err(tag))));
-                        }
-                    };
-                    let mode = match value_as_open_mode(heap, args[1]) {
-                        Ok(s) => s,
-                        Err(tag) => {
-                            return Ok(Some(as_result_value(heap, Err(tag))));
-                        }
-                    };
-                    let r = stream_open(heap, &path, &mode);
-                    as_result_value(heap, r)
-                }
-                IoKind::Close => {
-                    let r = stream_close(heap, args[0]);
-                    as_result_unit(heap, r)
-                }
-                IoKind::Read => {
-                    let r = stream_read(heap, args[0], args[1]);
-                    as_result_option_int(heap, r)
-                }
-                IoKind::Write => {
-                    let r = stream_write(heap, args[0], args[1]);
-                    as_result_int(heap, r)
-                }
-                IoKind::AwaitReadable => match stream_await_readable(heap, args[0]) {
-                    Ok(v) => return Ok(v),
-                    Err(tag) => as_result_unit(heap, Err(tag)),
-                },
-                IoKind::AwaitWritable => match stream_await_writable(heap, args[0]) {
-                    Ok(v) => return Ok(v),
-                    Err(tag) => as_result_unit(heap, Err(tag)),
-                },
-                IoKind::Drive => return Ok(Some(io_drive(heap))),
-                IoKind::FromBytes => {
-                    let r = from_bytes(heap, args[0]);
-                    crate::str_bytes::as_string_result_value(heap, r)
-                }
-                IoKind::ToBytes => to_bytes(heap, args[0]),
-                IoKind::TcpConnect => {
-                    let host = match value_as_string(heap, args[0]) {
-                        Ok(s) => s,
-                        Err(tag) => {
-                            return Ok(Some(as_result_value(heap, Err(tag))));
-                        }
-                    };
-                    let (port, ms) = (args[1].as_int(), 0);
-                    let r = match crate::task::connect_in_task(&host, port, ms) {
-                        Some(Some(r)) => r.and_then(|s| crate::io::alloc_tcp_stream(heap, s)),
-                        Some(None) => return Ok(None),
-                        None => tcp_connect(heap, &host, port),
-                    };
-                    as_result_value(heap, r)
-                }
-                IoKind::TcpConnectTimeout => {
-                    let host = match value_as_string(heap, args[0]) {
-                        Ok(s) => s,
-                        Err(tag) => {
-                            return Ok(Some(as_result_value(heap, Err(tag))));
-                        }
-                    };
-                    let (port, ms) = (args[1].as_int(), args[2].as_int());
-                    let r = match crate::task::connect_in_task(&host, port, ms) {
-                        Some(Some(r)) => r.and_then(|s| crate::io::alloc_tcp_stream(heap, s)),
-                        Some(None) => return Ok(None),
-                        None => tcp_connect_timeout(heap, &host, port, ms),
-                    };
-                    as_result_value(heap, r)
-                }
-                IoKind::TcpListen => {
-                    let host = match value_as_string(heap, args[0]) {
-                        Ok(s) => s,
-                        Err(tag) => {
-                            return Ok(Some(as_result_value(heap, Err(tag))));
-                        }
-                    };
-                    let r = tcp_listen(heap, &host, args[1].as_int());
-                    as_result_value(heap, r)
-                }
-                IoKind::TcpAccept => {
-                    let r = tcp_accept(heap, args[0]);
-                    as_result_value(heap, r)
-                }
-                IoKind::TcpPeerAddr => {
-                    let r = tcp_peer_addr(heap, args[0]);
-                    as_result_value(heap, r)
-                }
-                IoKind::TcpLocalAddr => {
-                    let r = tcp_local_addr(heap, args[0]);
-                    as_result_value(heap, r)
-                }
-                IoKind::TcpSetNodelay => {
-                    let r = tcp_set_nodelay(heap, args[0], args[1].as_bool());
-                    as_result_unit(heap, r)
-                }
-                IoKind::TcpShutdown => {
-                    let r = tcp_shutdown(heap, args[0], args[1].as_int());
-                    as_result_unit(heap, r)
-                }
-                IoKind::UdpBind => {
-                    let host = match value_as_string(heap, args[0]) {
-                        Ok(s) => s,
-                        Err(tag) => {
-                            return Ok(Some(as_result_value(heap, Err(tag))));
-                        }
-                    };
-                    let r = udp_bind(heap, &host, args[1].as_int());
-                    as_result_value(heap, r)
-                }
-                IoKind::UdpConnect => {
-                    let host = match value_as_string(heap, args[0]) {
-                        Ok(s) => s,
-                        Err(tag) => {
-                            return Ok(Some(as_result_value(heap, Err(tag))));
-                        }
-                    };
-                    let r = udp_connect(heap, &host, args[1].as_int());
-                    as_result_value(heap, r)
-                }
-                IoKind::UdpSendTo => {
-                    let host = match value_as_string(heap, args[2]) {
-                        Ok(s) => s,
-                        Err(tag) => {
-                            return Ok(Some(as_result_value(heap, Err(tag))));
-                        }
-                    };
-                    let r = udp_send_to(heap, args[0], args[1], &host, args[3].as_int());
-                    as_result_int(heap, r)
-                }
-                IoKind::UdpRecvFrom => {
-                    let r = udp_recv_from(heap, args[0], args[1]);
-                    as_result_value(heap, r)
-                }
-                IoKind::UdpLocalPort => {
-                    let r = udp_local_port(heap, args[0]).map(Value::from);
-                    as_result_value(heap, r)
-                }
+    let name = kind.native_name().to_string();
+    let arity = kind.arity();
+    let args = vec![FfiType::Int; arity];
+    let sig = FfiSignature::from_parts(name.clone(), args, FfiType::Int)
+        .expect("io native arity/signature");
+    let id = out.len();
+    register_id(&name, id);
+    // The stdio handles are plain lookups: direct natives.
+    let direct: Option<crate::HostValueFn> = match kind {
+        IoKind::Stdin => Some(|heap, _| stream_stdin(heap).unwrap_or_default()),
+        IoKind::Stdout => Some(|heap, _| stream_stdout(heap).unwrap_or_default()),
+        IoKind::Stderr => Some(|heap, _| stream_stderr(heap).unwrap_or_default()),
+        // Pure conversions: they only allocate.
+        IoKind::ToBytes => Some(|heap, args| to_bytes(heap, args[0])),
+        IoKind::FromBytes => Some(|heap, args| {
+            let r = from_bytes(heap, args[0]);
+            crate::str_bytes::as_string_result_value(heap, r)
+        }),
+        _ => None,
+    };
+    if let Some(f) = direct {
+        out.push(Arc::new(HostClosureFn::new_direct(sig, f)));
+        return;
+    }
+    let native = match kind {
+        // Stdio handles are `() -> Stream` (not Result).
+        IoKind::Stdin => io_closure(sig, move |heap, args| {
+            let v = stream_stdin(heap).unwrap_or_default();
+            Ok(Some(v))
+        }),
+        IoKind::Stdout => io_closure(sig, move |heap, args| {
+            let v = stream_stdout(heap).unwrap_or_default();
+            Ok(Some(v))
+        }),
+        IoKind::Stderr => io_closure(sig, move |heap, args| {
+            let v = stream_stderr(heap).unwrap_or_default();
+            Ok(Some(v))
+        }),
+        IoKind::Open => io_closure(sig, move |heap, args| {
+            let v = {
+                let path = match value_as_string(heap, args[0]) {
+                    Ok(s) => s,
+                    Err(tag) => {
+                        return Ok(Some(as_result_value(heap, Err(tag))));
+                    }
+                };
+                let mode = match value_as_open_mode(heap, args[1]) {
+                    Ok(s) => s,
+                    Err(tag) => {
+                        return Ok(Some(as_result_value(heap, Err(tag))));
+                    }
+                };
+                let r = stream_open(heap, &path, &mode);
+                as_result_value(heap, r)
             };
             Ok(Some(v))
-        })));
-    }
+        }),
+        IoKind::Close => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = stream_close(heap, args[0]);
+                as_result_unit(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::Read => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = stream_read(heap, args[0], args[1]);
+                as_result_option_int(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::Write => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = stream_write(heap, args[0], args[1]);
+                as_result_int(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::AwaitReadable => io_closure(sig, move |heap, args| {
+            let v = match stream_await_readable(heap, args[0]) {
+                Ok(v) => return Ok(v),
+                Err(tag) => as_result_unit(heap, Err(tag)),
+            };
+            Ok(Some(v))
+        }),
+        IoKind::AwaitWritable => io_closure(sig, move |heap, args| {
+            let v = match stream_await_writable(heap, args[0]) {
+                Ok(v) => return Ok(v),
+                Err(tag) => as_result_unit(heap, Err(tag)),
+            };
+            Ok(Some(v))
+        }),
+        IoKind::Drive => io_closure(sig, move |heap, args| Ok(Some(io_drive(heap)))),
+        IoKind::FromBytes => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = from_bytes(heap, args[0]);
+                crate::str_bytes::as_string_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::ToBytes => io_closure(sig, move |heap, args| {
+            let v = to_bytes(heap, args[0]);
+            Ok(Some(v))
+        }),
+        IoKind::TcpConnect => io_closure(sig, move |heap, args| {
+            let v = {
+                let host = match value_as_string(heap, args[0]) {
+                    Ok(s) => s,
+                    Err(tag) => {
+                        return Ok(Some(as_result_value(heap, Err(tag))));
+                    }
+                };
+                let (port, ms) = (args[1].as_int(), 0);
+                let r = match crate::task::connect_in_task(&host, port, ms) {
+                    Some(Some(r)) => r.and_then(|s| crate::io::alloc_tcp_stream(heap, s)),
+                    Some(None) => return Ok(None),
+                    None => tcp_connect(heap, &host, port),
+                };
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::TcpConnectTimeout => io_closure(sig, move |heap, args| {
+            let v = {
+                let host = match value_as_string(heap, args[0]) {
+                    Ok(s) => s,
+                    Err(tag) => {
+                        return Ok(Some(as_result_value(heap, Err(tag))));
+                    }
+                };
+                let (port, ms) = (args[1].as_int(), args[2].as_int());
+                let r = match crate::task::connect_in_task(&host, port, ms) {
+                    Some(Some(r)) => r.and_then(|s| crate::io::alloc_tcp_stream(heap, s)),
+                    Some(None) => return Ok(None),
+                    None => tcp_connect_timeout(heap, &host, port, ms),
+                };
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::TcpListen => io_closure(sig, move |heap, args| {
+            let v = {
+                let host = match value_as_string(heap, args[0]) {
+                    Ok(s) => s,
+                    Err(tag) => {
+                        return Ok(Some(as_result_value(heap, Err(tag))));
+                    }
+                };
+                let r = tcp_listen(heap, &host, args[1].as_int());
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::TcpAccept => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = tcp_accept(heap, args[0]);
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::TcpPeerAddr => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = tcp_peer_addr(heap, args[0]);
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::TcpLocalAddr => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = tcp_local_addr(heap, args[0]);
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::TcpSetNodelay => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = tcp_set_nodelay(heap, args[0], args[1].as_bool());
+                as_result_unit(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::TcpShutdown => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = tcp_shutdown(heap, args[0], args[1].as_int());
+                as_result_unit(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::UdpBind => io_closure(sig, move |heap, args| {
+            let v = {
+                let host = match value_as_string(heap, args[0]) {
+                    Ok(s) => s,
+                    Err(tag) => {
+                        return Ok(Some(as_result_value(heap, Err(tag))));
+                    }
+                };
+                let r = udp_bind(heap, &host, args[1].as_int());
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::UdpConnect => io_closure(sig, move |heap, args| {
+            let v = {
+                let host = match value_as_string(heap, args[0]) {
+                    Ok(s) => s,
+                    Err(tag) => {
+                        return Ok(Some(as_result_value(heap, Err(tag))));
+                    }
+                };
+                let r = udp_connect(heap, &host, args[1].as_int());
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::UdpSendTo => io_closure(sig, move |heap, args| {
+            let v = {
+                let host = match value_as_string(heap, args[2]) {
+                    Ok(s) => s,
+                    Err(tag) => {
+                        return Ok(Some(as_result_value(heap, Err(tag))));
+                    }
+                };
+                let r = udp_send_to(heap, args[0], args[1], &host, args[3].as_int());
+                as_result_int(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::UdpRecvFrom => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = udp_recv_from(heap, args[0], args[1]);
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+        IoKind::UdpLocalPort => io_closure(sig, move |heap, args| {
+            let v = {
+                let r = udp_local_port(heap, args[0]).map(Value::from);
+                as_result_value(heap, r)
+            };
+            Ok(Some(v))
+        }),
+    };
+    out.push(native);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1190,7 +1440,7 @@ impl ThreadKind {
 
 fn push_thread_natives(
     out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
+    register_id: &mut dyn FnMut(&str, usize),
 ) {
     use crate::thread;
 
@@ -1511,7 +1761,8 @@ mod tests {
         assert_eq!(names.get(200).map(String::as_str), Some("lock_acquire"));
         assert_eq!(names.get(211).map(String::as_str), Some("rw_store"));
         assert_eq!(names.get(212).map(String::as_str), Some(common::VEC_DRAIN_NATIVE));
-        assert_eq!(names.last().map(String::as_str), Some(common::VEC_ROTATE_IN_NATIVE));
+        assert_eq!(names.get(213).map(String::as_str), Some(common::VEC_ROTATE_IN_NATIVE));
+        assert_eq!(names.last().map(String::as_str), Some(common::STARTUP_RESTORE_NATIVE));
         assert_eq!(attach, 119);
     }
 
@@ -1902,6 +2153,61 @@ mod tests {
             registrations.get(end + 77).map(|(n, _)| n.as_str()),
             Some(common::VEC_ROTATE_IN_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 78);
+        assert_eq!(
+            registrations.get(end + 78).map(|(n, _)| n.as_str()),
+            Some(common::STARTUP_RESTORE_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 79);
+    }
+
+    #[test]
+    fn host_groups_cover_every_id_once() {
+        let mut next = 0;
+        for &(first, count) in host_group_spans() {
+            assert_eq!(first, next, "groups follow each other");
+            assert!(count > 0);
+            next = first + count;
+        }
+        assert_eq!(next as usize, common::HOST_NATIVES.len());
+        for id in 0..common::HOST_NATIVES.len() {
+            let g = host_group_of(id).expect("every id has a group");
+            let (first, count) = host_group_spans()[g];
+            assert!((first..first + count).contains(&(id as u32)));
+        }
+    }
+
+    #[test]
+    fn each_io_kind_is_its_own_group() {
+        for kind in IoKind::all() {
+            let id = common::host_native_id(kind.native_name()).expect("io native id");
+            let g = host_group_of(id).expect("io group");
+            assert_eq!(host_group_spans()[g], (id as u32, 1), "{}", kind.native_name());
+        }
+    }
+
+    #[test]
+    fn a_table_of_some_groups_holds_their_natives_and_absent_slots_elsewhere() {
+        let standard = build_standard_host_natives(|_, _| {});
+        let write = common::host_native_id("write").expect("write");
+        let keep = [host_group_of(write).expect("write group"), host_group_of(common::TASK_SCOPE_OPEN_ID as usize).expect("task group")];
+        let groups: Vec<(HostPush, u32, u32)> = keep.iter().map(|&g| (STANDARD_HOST_GROUPS[g], host_group_spans()[g].0, host_group_spans()[g].1)).collect();
+        let table = host_natives_of_groups(&groups);
+        assert_eq!(table.len(), standard.len());
+        for (id, native) in table.iter().enumerate() {
+            let kept = host_group_of(id).is_some_and(|g| keep.contains(&g));
+            assert_eq!(!native.is_absent(), kept, "id {id}");
+            if kept {
+                assert_eq!(native.name(), standard[id].name());
+            }
+        }
+        // The stream guard wraps a kept stream native as in the full table.
+        assert!(crate::ffi::HostCall::of(table[write].as_ref()).guarded);
+        let mut natives = crate::ffi::Natives::new();
+        for n in table {
+            natives.register(n);
+        }
+        assert!(natives.get("write").is_some());
+        assert!(natives.get("tcp_connect").is_none(), "an absent native has no name");
+        assert!(natives.host_call(common::host_native_id("tcp_connect").expect("tcp")).is_some_and(|c| c.func.is_none() && !c.on_machine));
     }
 }

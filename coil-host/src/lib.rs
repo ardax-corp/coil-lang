@@ -34,6 +34,7 @@ pub fn native_start(pipeline: &Pipeline, structs: &[common::CStructLayout], entr
         dload_gate: Some(pipeline_dload_gate(pipeline)),
         struct_layouts: structs.iter().map(CStructLayout::from_archive).collect(),
         shared_print: None,
+        host_natives: machine::standard_host_natives(),
     }
 }
 

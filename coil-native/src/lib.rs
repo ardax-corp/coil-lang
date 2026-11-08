@@ -339,9 +339,114 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_layout", machine::native::layout_fingerprint().to_le_bytes().to_vec())?;
         words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
+        host_group_table(&mut module, bodies)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
     }
+}
+
+/// The name of an AOT executable's native start ([`start_body`]).
+pub const START_NAME: &str = common::NATIVE_START_NAME;
+
+/// An AOT executable's start as a body (`__start`): the program's startup
+/// in order (each `Init`'s word stored in its static, each `Call` made,
+/// each `Restore` a `startup_restore` call), then `main`. Its payload then
+/// is data only: the driver calls this body as the program's `main` and
+/// walks no startup (`docs/internals/native.md`, "Native start").
+/// `body_ids` names each body's id; `Err` names a step no body has.
+pub fn start_body(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, startup: &[common::StartupOp], main: Option<u32>) -> Result<NativeBody, String> {
+    use compiler::native_mir::MirBlock;
+    let by_id: HashMap<u32, &NativeBody> = bodies.iter().filter_map(|b| Some((*body_ids.get(&b.name)?, b))).collect();
+    let mut f = MirFunc::new(START_NAME);
+    f.ret_ty = Some(MirTy::I64);
+    let mut b = MirBlock::new(BlockId(0));
+    let val = |f: &mut MirFunc, ty: MirTy| {
+        f.types.push(ty);
+        ValueId(f.types.len() as u32 - 1)
+    };
+    let call = |f: &mut MirFunc, b: &mut MirBlock, id: u32| -> Result<ValueId, String> {
+        let body = by_id.get(&id).ok_or_else(|| format!("no body {id} for the start"))?;
+        let target = body.entry.ok_or_else(|| format!("`{}` has no entry label", body.name))?;
+        let dest = val(f, body.mir.ret_ty.unwrap_or(MirTy::I64));
+        let dest_hi = body.mir.ret_hi_ty.map(|t| val(f, t));
+        b.insts.push(MirInst::Call { dest, dest_hi, target, args: Vec::new() });
+        Ok(dest)
+    };
+    for op in startup {
+        match *op {
+            common::StartupOp::Init { entry, slot } => {
+                let value = call(&mut f, &mut b, entry)?;
+                let dest = val(&mut f, MirTy::Bool);
+                b.insts.push(MirInst::StoreStatic { dest, slot, value });
+            }
+            common::StartupOp::Call { entry } => {
+                call(&mut f, &mut b, entry)?;
+            }
+            common::StartupOp::Restore { at } => {
+                let c = val(&mut f, MirTy::I64);
+                b.insts.push(MirInst::Const { dest: c, c: MirConst::I64(i64::from(at)) });
+                let dest = val(&mut f, MirTy::I64);
+                b.insts.push(MirInst::HostInvoke { dest, dest_hi: None, native_id: common::STARTUP_RESTORE_ID, layout: 0, args: vec![c] });
+            }
+        }
+    }
+    if let Some(m) = main {
+        call(&mut f, &mut b, m)?;
+    }
+    let zero = val(&mut f, MirTy::I64);
+    b.insts.push(MirInst::Const { dest: zero, c: MirConst::I64(0) });
+    b.term = Some(Terminator::Return { lo: Some(zero), hi: None });
+    f.blocks = vec![b];
+    Ok(NativeBody { name: START_NAME.to_string(), entry: None, mir: f })
+}
+
+/// `coil_aot_host_groups`: a `machine::AotHostGroup` record per host-native
+/// group the program calls (`HostInvoke`) and every program's runtime
+/// may call (`machine::core_host_groups`), its `push` the group's
+/// `coil_host_group_K` symbol, and `coil_aot_host_group_count`. The link
+/// keeps those groups' natives only.
+fn host_group_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody]) -> Result<(), String> {
+    let e = |e: cranelift_module::ModuleError| e.to_string();
+    let groups = used_host_groups(bodies);
+    const RECORD: usize = std::mem::size_of::<machine::AotHostGroup>();
+    let spans = machine::host_group_spans();
+    let mut bytes = vec![0u8; RECORD * groups.len().max(1)];
+    for (i, &g) in groups.iter().enumerate() {
+        let at = i * RECORD;
+        let (first, count) = spans[g];
+        let off = std::mem::offset_of!(machine::AotHostGroup, first);
+        bytes[at + off..at + off + 4].copy_from_slice(&first.to_le_bytes());
+        let off = std::mem::offset_of!(machine::AotHostGroup, count);
+        bytes[at + off..at + off + 4].copy_from_slice(&count.to_le_bytes());
+    }
+    let mut table = cranelift_module::DataDescription::new();
+    table.define(bytes.into_boxed_slice());
+    table.set_align(8);
+    for (i, &g) in groups.iter().enumerate() {
+        let id = module.declare_data(&format!("coil_host_group_{g}"), Linkage::Import, false, false).map_err(e)?;
+        let gv = module.declare_data_in_data(id, &mut table);
+        table.write_data_addr((i * RECORD + std::mem::offset_of!(machine::AotHostGroup, push)) as u32, gv, 0);
+    }
+    let id = module.declare_data("coil_aot_host_groups", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &table).map_err(e)?;
+    let mut d = cranelift_module::DataDescription::new();
+    d.define((groups.len() as u64).to_le_bytes().to_vec().into_boxed_slice());
+    d.set_align(8);
+    let id = module.declare_data("coil_aot_host_group_count", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &d).map_err(e)
+}
+
+/// The host-native groups (by number) `bodies` call, with the core ones, in order.
+pub fn used_host_groups(bodies: &[NativeBody]) -> Vec<usize> {
+    let mut groups: std::collections::BTreeSet<usize> = machine::core_host_groups().into_iter().collect();
+    for inst in bodies.iter().flat_map(|b| b.mir.blocks.iter().flat_map(|b| &b.insts)) {
+        if let MirInst::HostInvoke { native_id, .. } = inst
+            && let Some(g) = machine::host_group_of(usize::from(*native_id))
+        {
+            groups.insert(g);
+        }
+    }
+    groups.into_iter().collect()
 }
 
 /// `coil_static_syms`: a `machine::StaticSymbol` record (library
@@ -3164,9 +3269,23 @@ impl<'a> Lower<'a> {
             }
             MirInst::HeapFieldLoad { dest, object, index } => {
                 let o = self.get(f, *object);
+                let o = self.coerce(o, types::I64);
+                // An instance's slot in place; anything else (an enum's
+                // payload) through the helper.
+                let (fast, slow) = self.instance_slot(o, *index, false);
+                let join = self.b.create_block();
+                self.b.append_block_param(join, types::I64);
+                self.b.switch_to_block(fast);
+                let at = self.b.block_params(fast)[0];
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(slow);
                 let i = self.b.ins().iconst(types::I64, i64::from(*index));
                 let call = self.b.ins().call(self.field, &[o, i]);
                 let w = self.b.inst_results(call)[0];
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                let w = self.b.block_params(join)[0];
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -3192,14 +3311,26 @@ impl<'a> Lower<'a> {
             }
             MirInst::HeapFieldStore { dest, object, value, index } => {
                 let o = self.get(f, *object);
-                let i = self.b.ins().iconst(types::I64, i64::from(*index));
+                let o = self.coerce(o, types::I64);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let call = self.b.ins().call(self.set_field, &[self.ctx, o, i, v]);
-                let w = self.b.inst_results(call)[0];
+                let join = self.b.create_block();
+                if machine::native::instance_slots().inline_stores {
+                    // In place, unless the write barrier must log the object.
+                    let (fast, slow) = self.instance_slot(o, *index, true);
+                    self.b.switch_to_block(fast);
+                    let at = self.b.block_params(fast)[0];
+                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    self.b.ins().jump(join, &[]);
+                    self.b.switch_to_block(slow);
+                }
+                let i = self.b.ins().iconst(types::I64, i64::from(*index));
+                self.b.ins().call(self.set_field, &[self.ctx, o, i, v]);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
-                self.set(f, *dest, w);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(join);
+                self.set(f, *dest, v);
             }
             MirInst::Alloc { dest, kind, elems, kinds } => {
                 use machine::native::{ALLOC_ARRAY, ALLOC_ENUM, ALLOC_OBJECT, ALLOC_TUPLE};
@@ -4101,6 +4232,55 @@ impl<'a> Lower<'a> {
         }
         self.b.ins().brif(c, fast, &[], slow, &[]);
         (fast, slow, join)
+    }
+
+    /// Where slot `index` of `o` is when `o` is an instance that has it
+    /// (`machine::native::instance_slots`): branches to the first block,
+    /// with the slot's address as its parameter, or to the second. With
+    /// `store`, an object the write barrier must log takes the second.
+    fn instance_slot(&mut self, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {
+        let l = machine::native::instance_slots();
+        let flags = MemFlagsData::trusted();
+        let (fast, slow) = (self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(fast, types::I64);
+        let (kind, storage, inline, spill_test, spill, check) =
+            (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(check, types::I64);
+        self.b.append_block_param(check, types::I64);
+        self.b.ins().brif(o, kind, &[], slow, &[]);
+        self.b.switch_to_block(kind);
+        let k = self.b.ins().uload8(types::I64, flags, o, l.kind_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+        if store {
+            let g = self.b.ins().uload8(types::I64, flags, o, l.generation_at as i32);
+            let logged = self.b.ins().band_imm_u(g, i64::from(l.unlogged));
+            let clear = self.b.ins().icmp_imm_s(IntCC::Equal, logged, 0);
+            let both = self.b.ins().band(is, clear);
+            self.b.ins().brif(both, storage, &[], slow, &[]);
+        } else {
+            self.b.ins().brif(is, storage, &[], slow, &[]);
+        }
+        self.b.switch_to_block(storage);
+        let tag = self.b.ins().uload8(types::I64, flags, o, l.storage_at as i32);
+        let is_inline = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.inline_tag));
+        self.b.ins().brif(is_inline, inline, &[], spill_test, &[]);
+        self.b.switch_to_block(inline);
+        let len = self.b.ins().uload8(types::I64, flags, o, l.inline_len_at as i32);
+        let ptr = self.b.ins().iadd_imm_s(o, i64::from(l.inline_slots_at));
+        self.b.ins().jump(check, &[ptr.into(), len.into()]);
+        self.b.switch_to_block(spill_test);
+        let is_spill = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.spill_tag));
+        self.b.ins().brif(is_spill, spill, &[], slow, &[]);
+        self.b.switch_to_block(spill);
+        let ptr = self.b.ins().load(types::I64, flags, o, l.spill_ptr_at as i32);
+        let len = self.b.ins().load(types::I64, flags, o, l.spill_len_at as i32);
+        self.b.ins().jump(check, &[ptr.into(), len.into()]);
+        self.b.switch_to_block(check);
+        let (ptr, len) = (self.b.block_params(check)[0], self.b.block_params(check)[1]);
+        let has = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, len, i64::from(index));
+        let at = self.b.ins().iadd_imm_s(ptr, i64::from(index) * 8);
+        self.b.ins().brif(has, fast, &[at.into()], slow, &[]);
+        (fast, slow)
     }
 
     /// Address of `array[i]` in its view.

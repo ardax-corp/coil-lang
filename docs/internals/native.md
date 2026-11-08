@@ -47,7 +47,8 @@ A compiled program is its bodies, a list of `common::StartupOp` and `main`. A bo
 identity is `label.0 + 1`; `0` names nothing. `StartupOp::Call` calls a body,
 `Init` calls one and stores its word in a static, and `Restore` rebuilds a heap
 snapshot from the constant pool. `Driver::run_startup` walks the list, and
-`Driver::run_program` then calls `main`. `Driver::covers` says whether the installed
+`Driver::run_program` then calls `main` (an AOT executable has no list: its `main` is
+its [native start](#native-start)). `Driver::covers` says whether the installed
 code has every body the startup and `main` name.
 
 Module setup is a function, `__module_setup`
@@ -108,7 +109,8 @@ and the runtime share, read at fixed offsets.
 
 Heap reads and writes (`Index`, `ArrayLen`, `HeapFieldLoad`, `StoreIndex`,
 `HeapFieldStore`) call helpers in `machine::native` (`coil_native_index`, `_len`,
-`_field`, `_store_index`, `_set_field`).
+`_field`, `_store_index`, `_set_field`) when they cannot work in place: see the views
+below and "Inline field access".
 
 An array a body indexes gets a *view* where its value is defined (a parameter, a φ,
 a load): `coil_native_view` hands back the pointer and length of its element words,
@@ -347,6 +349,24 @@ object made against other layouts. `COIL_NATIVE_INLINE_ALLOC=0` at compile time 
 the fast path off, for A/B runs. Arrays, closures, generators and `drop` enums always
 take the helper.
 
+## Inline field access
+
+`HeapFieldLoad` and `HeapFieldStore` on an instance work in place. The offsets come
+from `machine::memory::instance_slots`, probed like the allocation images: where the
+header keeps the kind and generation bytes, where `ObjInstance::storage` sits, its
+`Inline` and `Spill` tags, the inline length byte and slots, and the `Vec` pointer and
+length words of spilled storage. Native code checks, in order, that the object is not
+null, that its kind is an instance, for a store that the generation byte has no
+unlogged bit (the write barrier would have to log the object), that the storage is
+inline or spilled, and that the index is under the length. It then loads or stores the
+slot word. Any failed check calls `_field` / `_set_field`, which handle tables, enum
+payloads, logged objects and panics as before. `layout_fingerprint` covers these
+offsets, so an AOT object made against another layout is refused.
+
+In-place stores are compiled only into release builds without `gc-stress`
+(`InstanceSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
+`GcData::as_mut`, which native code would skip. Loads are in place in every build.
+
 ## Operation semantics
 
 | Operation | Native |
@@ -386,6 +406,17 @@ the [JIT runner](#jit-runner) instead):
 trailer with `PACKAGE_FLAG_LINKED`, whose `archive_offset` counts back from the trailer.
 The symbol is 16-byte aligned and the archive comes first, so rkyv reads it in place.
 `common::find_linked_package` finds it from outside the program, for `coil natives dump`.
+
+### Native start
+
+An AOT executable starts in its own code. `coil package` adds a body, `__start`
+(`coil_native::start_body`, `common::NATIVE_START_NAME`), that runs the program's
+startup in order (each `Init` a call and a `StoreStatic`, each `Call` a call, each
+`Restore` a call of host native `startup_restore`, `HostOp::Restore`, which the driver
+runs) and then calls `main`. Its id is past every body's. The payload is then data only:
+its `startup` is empty and its `main` is `__start`, so the driver calls one body and walks
+nothing. A panic's backtrace leaves `__start`'s frame out (`Locator::native_site_line`).
+The JIT runner and `coil FILE` keep the startup list.
 
 `--emit` stops before the link. `--emit obj` writes the object: `cc app.o libcoil_rt.a`
 makes the program, with your own objects beside it. `--emit lib` adds the object to a copy
@@ -454,9 +485,37 @@ A program pays the JIT at every start (a few ms for a small one).
 
 Measured on feature/native 544b4ba (2026-11-05, x86_64 Linux, release `coil` and
 `coil-rt`). A packaged hello world was 1.58 MB with `--strip-symbols all` (1.85 MB by
-default). What remains is the runtime the host-native table reaches (heap, driver, host
+default). What remained was the runtime the host-native table reached (heap, driver, host
 natives, FFI, threads, reactor, archive reader): `--gc-sections` cannot drop a native
-the table names, so a smaller executable needs a per-program native table.
+the table names. The executable now links a per-program table (below): 1.09 MB stripped
+on feature/native 7e00bc9 (2026-11-08), from 1.53 MB, and its start runs 0.83M
+instructions instead of 2.33M (callgrind), as it builds ~25 natives instead of 213 (twice:
+the runtime's table and native code's).
+
+### Per-program host natives
+
+`machine::host_natives` builds the host table from groups (`STANDARD_HOST_GROUPS`, in id
+order): a group is a `HostPush` that pushes consecutive ids, one per `push_*` of the
+table, and one per `io` native (`push_io_kind::<K>`, a constant kind, so each keeps
+its own closure). `host_groups!` also exports each group as a symbol,
+`coil_host_group_K`, that holds its `HostPush`.
+
+- `coil_native::aot` lists the groups the program's `HostInvoke`s name, with the
+  groups every runtime calls (`core_host_groups`: the task scheduler, `unwind_resume`,
+  `contract_fail`, `coro_close`, the collector's and `region`'s hooks), as
+  `coil_aot_host_groups` (`machine::AotHostGroup`: the symbol's address, first id,
+  count) and `coil_aot_host_group_count`. The link keeps those groups and drops the
+  rest.
+- `coil-rt`'s `main` installs them (`machine::native::install_aot_host_groups`) and
+  `run_linked_package` starts on `aot_host_natives`: their natives at their ids and an
+  absent native (`NativeFn::is_absent`, no name) at every other id.
+- The start names no default table: `NativeStart::host_natives` is the table, and each
+  host passes `machine::standard_host_natives()` (built once per process) or the AOT
+  one. A default would name every group, and the link would keep them all.
+- Native code calls a host native through the runtime's table (`Natives::host_call`,
+  a `HostCall` per id), not a process-wide one, so an absent id bails as an unknown
+  one did. `direct_host_natives` (the standard table, by name) is what `coil-native`
+  plans calls with.
 
 Across the 18 cross-language benches, an AOT executable took 0.37x the wall time of the
 `--no-aot` runner as it was then, the bytecode VM's since deleted (geomean, best of 5),

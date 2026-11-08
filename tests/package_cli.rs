@@ -645,6 +645,78 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An AOT executable starts in its own `__start`: statics, consts restored
+/// from a snapshot and module setup run in order before `main`, as on the
+/// JIT runner, and a panic's backtrace (in `main` or in a static's
+/// initializer) names no frame of its own.
+#[test]
+fn aot_package_starts_as_the_jit_runner_does() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed(Path::new(&bin));
+    let rt = build_matching_coil_rt(Path::new(&bin));
+    let dir = std::env::temp_dir().join(format!("coil_aot_start_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let programs = [
+        ("ok", r#"use io::sync::println;
+use string::format;
+fn forty() -> int { return 40; }
+const VERSION = forty() + 2;
+const NAMES: Vec<string> = ["a", "bc", "def"];
+static let count: int = forty();
+static let greeting: string = format("hi %i", count + 1);
+fn main() {
+  count = count + 1;
+  let _ = println(format("%i %i %s %s", VERSION, count, greeting, NAMES[2]));
+}
+"#),
+        ("main_panics", r#"#[inline(never)]
+fn inner(int x) -> int { if x > 2 { panic("boom"); } return x; }
+static let limit: int = 3;
+fn main() { let _ = inner(limit); }
+"#),
+        ("static_panics", r#"#[inline(never)]
+fn check(int x) -> int { if x > 2 { panic("bad static"); } return x; }
+static let a: int = check(5);
+fn main() { let _ = a; }
+"#),
+    ];
+    for (name, src) in programs {
+        let entry = dir.join(format!("{name}.coil"));
+        std::fs::write(&entry, src).unwrap();
+        let package = |out: &Path, extra: &[&str]| {
+            let mut cmd = Command::new(&bin);
+            cmd.arg("package");
+            for root in compiler::Pipeline::workspace_language_extra_roots() {
+                cmd.arg("--root").arg(root);
+            }
+            cmd.arg(&entry).arg("-o").arg(out).args(extra).env("COIL_RT_LIB", &rt);
+            let o = cmd.output().expect("spawn coil package");
+            assert!(o.status.success(), "{name}: package failed: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stderr).into_owned()
+        };
+        let jit = dir.join(format!("{name}-jit"));
+        let aot = dir.join(format!("{name}-aot"));
+        let _ = package(&jit, &["--runner", embed.to_str().unwrap()]);
+        let said = package(&aot, &[]);
+        assert!(said.contains("native code for"), "{name}: not an AOT package: {said}");
+        let run = |exe: &Path| {
+            let mut cmd = Command::new(exe);
+            cmd.env("COIL_BACKTRACE", "1");
+            run_command_with_timeout(cmd, 60)
+        };
+        let (jit_run, aot_run) = (run(&jit), run(&aot));
+        assert_eq!(String::from_utf8_lossy(&jit_run.stdout), String::from_utf8_lossy(&aot_run.stdout), "{name}");
+        assert_eq!(String::from_utf8_lossy(&jit_run.stderr), String::from_utf8_lossy(&aot_run.stderr), "{name}");
+        assert_eq!(jit_run.status.code(), aot_run.status.code(), "{name}");
+        assert!(!String::from_utf8_lossy(&aot_run.stderr).contains("__start"), "{name}");
+        if name == "ok" {
+            assert_eq!(String::from_utf8_lossy(&aot_run.stdout), "42 41 hi 41 def\n");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `coil-embed` is a runner with no interpreter, and a stripped binary cannot show it:
 /// its own build resolves `machine` without the feature. A workspace build
 /// unifies it back, so releases build it alone.
