@@ -637,6 +637,45 @@ pub enum MirInst {
         value: ValueId,
         index: u32,
     },
+    /// Element `index` of a lane array (two words per element): its first
+    /// word in `dest`, its second (an enum's tag) in `dest_hi`. Out of
+    /// bounds panics, as [`Self::Index`] does.
+    LaneIndex {
+        dest: ValueId,
+        dest_hi: ValueId,
+        array: ValueId,
+        index: ValueId,
+    },
+    /// Store `lo` and `hi` as element `index` of a lane array (or, on an
+    /// array of one word per element, the element boxed as `shape` says).
+    /// Dest is a `bool` unit token.
+    LaneStore {
+        dest: ValueId,
+        array: ValueId,
+        index: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+        shape: MirLaneShape,
+    },
+    /// Append the element `[lo, hi]` to a lane array in place (boxed as
+    /// `shape` says on an array of one word per element). Dest is the same
+    /// `HeapRef` identity; a GC safepoint like [`Self::ArrayPush`].
+    LanePush {
+        dest: ValueId,
+        array: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+        shape: MirLaneShape,
+    },
+    /// Turn a lane array into one word per element in place, each element
+    /// boxed as `shape` says, before code that reads it one word per
+    /// element; an array that already is one does not change. Dest is the
+    /// same `HeapRef` identity; a GC safepoint like [`Self::ArrayPush`].
+    LanesToWords {
+        dest: ValueId,
+        array: ValueId,
+        shape: MirLaneShape,
+    },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
     ArrayPush {
@@ -977,10 +1016,28 @@ impl MirFfiOp {
     }
 }
 
+/// How a two-word element of a lane array is boxed as one word: an enum
+/// variant object (tag `t` carries its payload word when bit `t` of
+/// `payload_mask` is set, the empty tuple when bit `t` of `unit_mask` is),
+/// or a two-item tuple when `payload_mask` is `0`. `tag_mask` is the lane
+/// array's: the tags under which the first word is a heap reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct MirLaneShape {
+    pub tag_mask: u64,
+    pub payload_mask: u64,
+    pub unit_mask: u64,
+}
+
 /// Heap object constructed by [`MirInst::Alloc`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirAllocKind {
     Array,
+    /// A lane array of two-word elements, `elems` their words in order
+    /// (`ObjArray::from_lanes`); lane 0 is a heap reference under the tags
+    /// set in `tag_mask`.
+    Lanes {
+        tag_mask: u64,
+    },
     Tuple,
     /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
     /// dense Object `DenseMakeObject` is D2.
@@ -1030,6 +1087,7 @@ impl MirAllocKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Array => "array",
+            Self::Lanes { .. } => "lanes",
             Self::Tuple => "tuple",
             Self::Object { .. } => "object",
             Self::Enum { .. } => "enum",
@@ -1121,6 +1179,10 @@ impl MirInst {
             | Self::Probe { dest, .. }
             | Self::PanicStore { dest, .. }
             | Self::ArrayPush { dest, .. }
+            | Self::LaneIndex { dest, .. }
+            | Self::LaneStore { dest, .. }
+            | Self::LanePush { dest, .. }
+            | Self::LanesToWords { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
             | Self::Deopt { dest, .. }
@@ -1147,6 +1209,7 @@ impl MirInst {
             Self::VecLoop { pos: Some(p), .. } => Some(p),
             Self::CallIndirect { pair: Some((h, _)), .. } => Some(h),
             Self::HostInvoke { dest_hi: Some(h), .. } => Some(h),
+            Self::LaneIndex { dest_hi, .. } => Some(dest_hi),
             _ => None,
         };
         std::iter::once(self.dest()).chain(hi)
@@ -1158,6 +1221,8 @@ impl MirInst {
             self,
             Self::Alloc { .. }
                 | Self::ArrayPush { .. }
+                | Self::LanePush { .. }
+                | Self::LanesToWords { .. }
                 | Self::Format { .. }
                 | Self::Stringify { .. }
                 | Self::Cow { .. }
@@ -1205,6 +1270,10 @@ impl MirInst {
             Self::LoadStatic { .. } | Self::HomeLoad { .. } => Vec::new(),
             Self::StoreStatic { value, .. } | Self::HomeStore { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
+            Self::LaneIndex { array, index, .. } => vec![*array, *index],
+            Self::LaneStore { array, index, lo, hi, .. } => vec![*array, *index, *lo, *hi],
+            Self::LanePush { array, lo, hi, .. } => vec![*array, *lo, *hi],
+            Self::LanesToWords { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
@@ -1282,6 +1351,22 @@ impl MirInst {
                 *array = map(*array);
                 *value = map(*value);
             }
+            Self::LaneIndex { array, index, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+            }
+            Self::LaneStore { array, index, lo, hi, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+                *lo = map(*lo);
+                *hi = map(*hi);
+            }
+            Self::LanePush { array, lo, hi, .. } => {
+                *array = map(*array);
+                *lo = map(*lo);
+                *hi = map(*hi);
+            }
+            Self::LanesToWords { array, .. } => *array = map(*array),
             Self::Alloc { elems, .. } => {
                 for v in elems.iter_mut() {
                     *v = map(*v);

@@ -33,7 +33,15 @@ one has a trailer after its slot kinds, an entry per tagged slot (tag slot
 `u16` LE, pointer-tag mask `u64` LE), and the collector resolves the word
 by its tag (`common::class_slot_kinds`).
 
-Minor 2 adds host native `startup_restore` (id 212, `HostOp::Restore`), which an AOT
+Minor 2 adds snapshot object kind 7, a lane array (`SnapObject::Lanes`): an
+array of two-word elements kept in place (`k`, the pointer-tag mask of the
+first word, then the words), as a `Vec` of a closed two-word type is
+([layout.md](layout.md), "Lane arrays"). MIR section `FORMAT` 13 adds
+`LaneIndex` / `LaneStore` / `LanePush` / `LanesToWords` (opcodes 45 to 48,
+each store, push and conversion with its three shape masks) and the
+`Lanes` allocation kind (9, with its mask).
+
+Minor 3 adds host native `startup_restore` (id 212, `HostOp::Restore`), which an AOT
 executable's native `__start` calls where its startup restores a snapshot. Its
 payload is data only: `startup` holds no `Init` or `Call`, and `main` names `__start`
 (`docs/internals/native.md`, "Native start").

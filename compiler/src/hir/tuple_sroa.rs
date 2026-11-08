@@ -142,7 +142,7 @@ fn binds(pat: &HirPat, local: LocalId) -> bool {
     }
 }
 
-pub(super) fn parents(body: &HirBody) -> Vec<Option<HirId>> {
+pub(crate) fn parents(body: &HirBody) -> Vec<Option<HirId>> {
     let mut parent = vec![None; body.exprs.len()];
     for i in 0..body.exprs.len() {
         for c in super::lower::children(body, HirId(i as u32)) {

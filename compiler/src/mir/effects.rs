@@ -70,7 +70,7 @@ impl MirInst {
             }
             Self::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
             Self::Index { unchecked, .. } => !unchecked,
-            Self::VecLoop { .. } => true,
+            Self::VecLoop { .. } | Self::LaneIndex { .. } | Self::LaneStore { .. } => true,
             _ => false,
         }
     }
@@ -87,6 +87,7 @@ impl MirInst {
             | Self::Yield { .. }
             | Self::ResumeCoro { .. }
             | Self::ArrayPush { .. }
+            | Self::LanePush { .. }
             | Self::Format { .. }
             | Self::Stringify { .. }
             | Self::Cow { .. } => true,
@@ -102,7 +103,7 @@ impl MirInst {
     pub fn writes_elements(&self, calls: &CallFacts) -> bool {
         self.runs_effects(calls)
             || match self {
-                Self::StoreIndex { .. } | Self::VecLoop { kind: super::inst::VecLoopKind::Store { .. }, .. } => true,
+                Self::StoreIndex { .. } | Self::LaneStore { .. } | Self::LanesToWords { .. } | Self::VecLoop { kind: super::inst::VecLoopKind::Store { .. }, .. } => true,
                 Self::VecLoop { kind: super::inst::VecLoopKind::Reduce { stores, .. }, .. } => !stores.is_empty(),
                 _ => false,
             }
@@ -140,6 +141,9 @@ impl MirInst {
             | Self::Deopt { .. }
             | Self::HeapFieldStore { .. }
             | Self::StoreIndex { .. }
+            | Self::LaneStore { .. }
+            | Self::LanePush { .. }
+            | Self::LanesToWords { .. }
             | Self::StoreStatic { .. }
             | Self::HomeStore { .. }
             | Self::ClearWord { .. }

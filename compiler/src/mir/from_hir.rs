@@ -31,7 +31,7 @@ use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 use crate::layout::DenseAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
-use super::inst::{BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst, MirLaneShape, Terminator, ValueId};
 use super::ty::MirTy;
 
 /// [`Lower::unbox_pair`]'s arity of a variant whose payload is `()`: its
@@ -200,6 +200,16 @@ pub struct HirIterLoop {
     /// The iterator `into_iter` returns.
     pub iter_ty: Ty,
     pub shape: HirIterNext,
+}
+
+/// A lane array's element: its two words' types and how it is boxed as
+/// one word ([`MirLaneShape`], whose `tag_mask` is the tags under which
+/// the first word is a heap reference).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HirLaneElem {
+    pub lo: MirTy,
+    pub hi: MirTy,
+    pub shape: MirLaneShape,
 }
 
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
@@ -575,6 +585,14 @@ pub struct HirMirInput<'a> {
     /// `Make` and the static slot it is built into on first use and loaded
     /// from after that.
     pub frozen_arrays: HashMap<u32, u32>,
+    /// Expressions that are a `Vec` of a closed two-word type, by id: a
+    /// lane array, each element's two words in place (`MirAllocKind::Lanes`,
+    /// `LaneIndex` / `LaneStore` / `LanePush`).
+    pub lane_arrays: HashMap<u32, HirLaneElem>,
+    /// Of those, the ones whose value goes on to code that reads it one
+    /// word per element (a generic body, a host native, a container): a
+    /// `LanesToWords` turns the array into that form first, in place.
+    pub lane_escapes: HashSet<u32>,
     /// Heap fields and `new` arguments whose slot holds a boxed enum
     /// object (a generic class's field open in a parameter) for a value
     /// whose own word is this niche layout: boxed on the way in, unboxed
@@ -2903,7 +2921,14 @@ impl Lower<'_> {
     /// Lower `id` for its value, packed as a bare-class existential where
     /// HIR emission packs it.
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
-        let val = self.value_unpacked(id)?;
+        let mut val = self.value_unpacked(id)?;
+        // A lane array leaving for one-word code: boxed in place.
+        if self.inp.lane_escapes.contains(&id.0)
+            && let (Val::V(v), Some(lane)) = (val, self.lane(id))
+        {
+            let out = self.b.ins_lanes_to_words(v, lane.shape).map_err(mir)?;
+            val = Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?);
+        }
         let Some(ops) = self.inp.packs.get(&id.0) else {
             return Ok(val);
         };
@@ -5824,7 +5849,24 @@ impl Lower<'_> {
     }
 
     fn heap_array(&self, id: HirId) -> bool {
-        self.expr_ty(id).is_some_and(|t| self.inp.word(t) == Some(MirTy::HeapRef) && self.inp.elem_word(t).is_some())
+        self.lane(id).is_some() || self.expr_ty(id).is_some_and(|t| self.inp.word(t) == Some(MirTy::HeapRef) && self.inp.elem_word(t).is_some())
+    }
+
+    /// `id`'s element when it is a lane array (`Vec` of a two-word type).
+    fn lane(&self, id: HirId) -> Option<HirLaneElem> {
+        self.inp.lane_arrays.get(&id.0).copied()
+    }
+
+    /// `xs[i]` of lane array `base`: the element's two words.
+    fn lane_index(&mut self, base: HirId, index: HirId, lane: HirLaneElem) -> Result<Val, Refusal> {
+        let Some(arr) = self.word(base)? else {
+            return Ok(Val::Never);
+        };
+        let Some(idx) = self.index_word(index)? else {
+            return Ok(Val::Never);
+        };
+        let (lo, hi) = self.b.ins_lane_index(arr, idx, lane.lo, lane.hi).map_err(mir)?;
+        Ok(Val::Pair(lo, hi))
     }
 
     /// `xs[i]` on a heap array: the array, then the index, as HIR emission
@@ -5836,6 +5878,9 @@ impl Lower<'_> {
                 return Ok(Val::Never);
             }
             return Ok(Val::Unit);
+        }
+        if let Some(lane) = self.lane(base) {
+            return self.lane_index(base, index, lane);
         }
         let ty = match self.expr_ty(base) {
             // A tuple's field: a scalar.
@@ -5893,6 +5938,19 @@ impl Lower<'_> {
     /// index, as HIR emission stages them. The bounds check stays unless
     /// the checker proved the index and the value cannot change the array.
     fn heap_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
+        if self.lane(base).is_some() {
+            let Some((lo, hi)) = self.pair(value)? else {
+                return Ok(Val::Never);
+            };
+            let Some(arr) = self.word(base)? else {
+                return Ok(Val::Never);
+            };
+            let Some(idx) = self.index_word(index)? else {
+                return Ok(Val::Never);
+            };
+            self.b.ins_lane_store(arr, idx, lo, hi, self.lane(base).ok_or("lane array")?.shape).map_err(mir)?;
+            return Ok(Val::Unit);
+        }
         let ty = self.expr_ty(base).and_then(|t| self.inp.elem_word(t)).ok_or("element type")?;
         let v = if ty == MirTy::HeapRef { self.boxed_word(value)? } else { self.word(value)? };
         let Some(v) = v else {
@@ -5923,6 +5981,17 @@ impl Lower<'_> {
     /// is the safepoint's, as the IL lift reads it. Heap elements are
     /// boxed words; the array carries HIR emission's element stamp.
     fn make_array(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        if let Some(lane) = self.lane(id) {
+            let mut words = Vec::with_capacity(args.len() * 2);
+            for &arg in args {
+                let Some((lo, hi)) = self.pair(arg)? else {
+                    return Ok(Val::Never);
+                };
+                words.extend([lo, hi]);
+            }
+            let arr = self.b.ins_alloc(MirAllocKind::Lanes { tag_mask: lane.shape.tag_mask }, words).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?));
+        }
         let ty = self
             .expr_ty(id)
             .and_then(|t| array_elem(t).and_then(scalar).or_else(|| self.inp.elem_word(t)))
@@ -6128,6 +6197,14 @@ impl Lower<'_> {
         let Some(arr) = self.word(recv)? else {
             return Ok(Val::Never);
         };
+        if let Some(lane) = self.lane(recv) {
+            let Some((lo, hi)) = self.pair(value)? else {
+                return Ok(Val::Never);
+            };
+            let out = self.b.ins_lane_push(arr, lo, hi, lane.shape).map_err(mir)?;
+            let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+            return self.pushed(recv, out);
+        }
         let v = if ty == Some(MirTy::HeapRef) { self.boxed_word(value)? } else { self.word(value)? };
         let Some(v) = v else {
             return Ok(Val::Never);
@@ -6141,9 +6218,13 @@ impl Lower<'_> {
         }
         let out = self.b.ins_array_push(arr, v).map_err(mir)?;
         let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
-        // The pushed array, as the safepoint gives it, is the local's value
-        // from here on: a loop's φ for it then takes this word on the latch
-        // rather than merging only with itself (#1295).
+        self.pushed(recv, out)
+    }
+
+    /// After a push onto `recv`: the pushed array, as the safepoint gives
+    /// it, is the local's value from here on: a loop's φ for it then takes
+    /// this word on the latch rather than merging only with itself (#1295).
+    fn pushed(&mut self, recv: HirId, out: ValueId) -> Result<Val, Refusal> {
         if let HirKind::Local(local) = self.hir.expr(recv).kind
             && self.local_ty(local).ok() == Some(MirTy::HeapRef)
         {
@@ -6748,6 +6829,12 @@ impl Lower<'_> {
     /// `continue`). A tuple loops over an array of its items. A tuple
     /// pattern binds each part from the item.
     fn for_array(&mut self, id: HirId, pat: &HirPat, iterable: HirId, body: HirId, into_iter: Option<Label>, items: Items) -> Result<Val, Refusal> {
+        if into_iter.is_none()
+            && matches!(items, Items::Array)
+            && let Some(lane) = self.lane(iterable)
+        {
+            return self.for_lanes(pat, iterable, body, lane);
+        }
         let it_ty = self.expr_ty(iterable).cloned();
         // A user `into_iter`'s array holds the loop's items.
         let elem = match (into_iter, items, &it_ty) {
@@ -6863,6 +6950,59 @@ impl Lower<'_> {
                 }
             }
             _ => return Err("for in pattern".into()),
+        }
+        self.counted_body(body, head, exit, i, MirTy::I64, MirConst::I64(1), None)
+    }
+
+    /// `for x in xs` over lane array `iterable`: each element's two words
+    /// into pair local `x`.
+    fn for_lanes(&mut self, pat: &HirPat, iterable: HirId, body: HirId, lane: HirLaneElem) -> Result<Val, Refusal> {
+        // Where each word goes: a pair local's two slots, or a tuple
+        // pattern's parts.
+        let mut slots: [Option<(LocalId, MirTy)>; 2] = [None, None];
+        match pat {
+            HirPat::Bind(local) => {
+                let (lo, hi, lo_ty, hi_ty) = self.pair_local(*local).ok_or("for in lane binding")?;
+                slots = [Some((lo, lo_ty)), Some((hi, hi_ty))];
+            }
+            HirPat::Wild => {}
+            HirPat::Tuple(pats) if pats.len() == 2 => {
+                for (slot, p) in slots.iter_mut().zip(pats) {
+                    match p {
+                        HirPat::Wild => {}
+                        HirPat::Bind(l) if self.unit_local(*l) => {}
+                        HirPat::Bind(l) if self.pair_local(*l).is_none() => *slot = Some((self.slot(*l)?, self.local_ty(*l)?)),
+                        _ => return Err("for in pattern".into()),
+                    }
+                }
+            }
+            _ => return Err("for in pattern".into()),
+        }
+        let Some(arr) = self.word(iterable)? else {
+            return Ok(Val::Never);
+        };
+        let len = self.b.ins_array_len(arr).map_err(mir)?;
+        let i = self.temp();
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        self.b.def_local(i, zero).map_err(mir)?;
+        let head = self.b.create_block();
+        let exit = self.b.create_block();
+        let body_b = self.b.create_block();
+        self.jump(head)?;
+        self.switch(head);
+        let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
+        let more = self.b.ins_cmp(MirCmpOp::Lt, cur, len).map_err(mir)?;
+        self.b.branch(more, body_b, exit).map_err(mir)?;
+        self.switch(body_b);
+        if slots.iter().any(Option::is_some) {
+            let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
+            let (a, b) = self.b.ins_lane_index(arr, cur, lane.lo, lane.hi).map_err(mir)?;
+            for (slot, w) in slots.into_iter().zip([a, b]) {
+                if let Some((slot, ty)) = slot {
+                    let w = self.fit(w, ty)?;
+                    self.b.def_local(slot, w).map_err(mir)?;
+                }
+            }
         }
         self.counted_body(body, head, exit, i, MirTy::I64, MirConst::I64(1), None)
     }
@@ -7174,8 +7314,10 @@ impl Lower<'_> {
                     || self.boxed_slot_field(scrutinee)
             }
             // So does an array element.
+            // A lane array's keeps both words in place.
             HirKind::Index { base, kind: IndexKind::Array, .. } => {
-                self.heap_array(base)
+                self.lane(base).is_none()
+                    && self.heap_array(base)
                     && self.expr_ty(base).and_then(|t| self.inp.elem_word(t)) == Some(MirTy::HeapRef)
                     && self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_view)(t, None).is_some())
             }

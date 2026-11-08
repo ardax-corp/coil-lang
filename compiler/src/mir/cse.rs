@@ -596,6 +596,10 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::HeapFieldStore { .. }
         | MirInst::Index { .. }
         | MirInst::StoreIndex { .. }
+        | MirInst::LaneIndex { .. }
+        | MirInst::LaneStore { .. }
+        | MirInst::LanePush { .. }
+        | MirInst::LanesToWords { .. }
         | MirInst::ArrayLen { .. }
         | MirInst::ResumeCoro { .. }
         | MirInst::Yield { .. }

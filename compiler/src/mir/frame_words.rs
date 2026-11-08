@@ -44,6 +44,8 @@ pub fn allocates(inst: &MirInst) -> bool {
         inst,
         MirInst::Alloc { .. }
             | MirInst::ArrayPush { .. }
+            | MirInst::LanePush { .. }
+            | MirInst::LanesToWords { .. }
             | MirInst::String { .. }
             | MirInst::Format { .. }
             | MirInst::Stringify { .. }
@@ -279,6 +281,8 @@ pub fn barrier_pairs(f: &MirFunc) -> HashMap<ValueId, ValueId> {
             match inst {
                 MirInst::Alloc { dest, .. }
                 | MirInst::ArrayPush { dest, .. }
+                | MirInst::LanePush { dest, .. }
+                | MirInst::LanesToWords { dest, .. }
                 | MirInst::Format { dest, .. }
                 | MirInst::Stringify { dest, .. }
                 | MirInst::Cow { dest, .. } => pending = Some(*dest),

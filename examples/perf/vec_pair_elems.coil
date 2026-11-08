@@ -1,0 +1,41 @@
+// A `Vec<Option<int>>` built, rewritten and summed in hot loops: each
+// element keeps its two words in place in the array, so a push, a store
+// and a read box nothing.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 3 == 0 {
+        return None;
+    }
+    return Some(x / 2);
+}
+
+fn main() {
+    let v: Vec<Option<int>> = [];
+    let i = 0;
+    while i < 20000 {
+        v.push(half(i));
+        i += 1;
+    }
+    let round = 0;
+    let t = 0;
+    while round < 200 {
+        let j = 0;
+        while j < v.len() {
+            match v[j] {
+                Some(x) => {
+                    t += x;
+                    v[j] = half(x + round);
+                },
+                None => {
+                    t += 1;
+                },
+            }
+            j += 1;
+        }
+        round += 1;
+    }
+    let _ = print(format("%i\n", t));
+}

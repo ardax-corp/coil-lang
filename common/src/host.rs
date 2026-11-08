@@ -1807,7 +1807,7 @@ pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 pub const LOCK_ACQUIRE_ID: u16 = 200;
 /// `prelude::thread::rw_store`, the last lock primitive.
 pub const RW_STORE_ID: u16 = 211;
-/// Restores the snapshot at a constant-pool index (archive 7.2,
+/// Restores the snapshot at a constant-pool index (archive 7.3,
 /// `HostOp::Restore`): an AOT executable's native `__start` runs it where
 /// the startup restored a snapshot. Compiler-emitted only.
 pub const STARTUP_RESTORE_ID: u16 = 212;

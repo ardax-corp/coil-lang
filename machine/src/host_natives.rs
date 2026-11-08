@@ -205,7 +205,7 @@ host_groups! {
     64 => |o, r| push_wiring(o, r, crate::key_index::KEY_INDEX_WIRING, "key_index");
     // Append-only after key_index: the lock primitives (major 6 minor 21).
     65 => |o, r| push_lock_natives(o, r);
-    // Append-only after the lock primitives: `startup_restore` (major 7 minor 2).
+    // Append-only after the lock primitives: `startup_restore` (major 7 minor 3).
     66 => |o, r| push_startup_restore(o, r);
 }
 
