@@ -454,9 +454,37 @@ A program pays the JIT at every start (a few ms for a small one).
 
 Measured on feature/native 544b4ba (2026-11-05, x86_64 Linux, release `coil` and
 `coil-rt`). A packaged hello world was 1.58 MB with `--strip-symbols all` (1.85 MB by
-default). What remains is the runtime the host-native table reaches (heap, driver, host
+default). What remained was the runtime the host-native table reached (heap, driver, host
 natives, FFI, threads, reactor, archive reader): `--gc-sections` cannot drop a native
-the table names, so a smaller executable needs a per-program native table.
+the table names. The executable now links a per-program table (below): 1.09 MB stripped
+on feature/native 7e00bc9 (2026-11-08), from 1.53 MB, and its start runs 0.83M
+instructions instead of 2.33M (callgrind), as it builds ~25 natives instead of 213 (twice:
+the runtime's table and native code's).
+
+### Per-program host natives
+
+`machine::host_natives` builds the host table from groups (`STANDARD_HOST_GROUPS`, in id
+order): a group is a `HostPush` that pushes consecutive ids, one per `push_*` of the
+table, and one per `io` native (`push_io_kind::<K>`, a constant kind, so each keeps
+its own closure). `host_groups!` also exports each group as a symbol,
+`coil_host_group_K`, that holds its `HostPush`.
+
+- `coil_native::aot` lists the groups the program's `HostInvoke`s name, with the
+  groups every runtime calls (`core_host_groups`: the task scheduler, `unwind_resume`,
+  `contract_fail`, `coro_close`, the collector's and `region`'s hooks), as
+  `coil_aot_host_groups` (`machine::AotHostGroup`: the symbol's address, first id,
+  count) and `coil_aot_host_group_count`. The link keeps those groups and drops the
+  rest.
+- `coil-rt`'s `main` installs them (`machine::native::install_aot_host_groups`) and
+  `run_linked_package` starts on `aot_host_natives`: their natives at their ids and an
+  absent native (`NativeFn::is_absent`, no name) at every other id.
+- The start names no default table: `NativeStart::host_natives` is the table, and each
+  host passes `machine::standard_host_natives()` (built once per process) or the AOT
+  one. A default would name every group, and the link would keep them all.
+- Native code calls a host native through the runtime's table (`Natives::host_call`,
+  a `HostCall` per id), not a process-wide one, so an absent id bails as an unknown
+  one did. `direct_host_natives` (the standard table, by name) is what `coil-native`
+  plans calls with.
 
 Across the 18 cross-language benches, an AOT executable took 0.37x the wall time of the
 `--no-aot` runner as it was then, the bytecode VM's since deleted (geomean, best of 5),
