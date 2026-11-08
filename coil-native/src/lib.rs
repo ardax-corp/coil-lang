@@ -339,9 +339,59 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_layout", machine::native::layout_fingerprint().to_le_bytes().to_vec())?;
         words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
+        host_group_table(&mut module, bodies)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
     }
+}
+
+/// `coil_aot_host_groups`: a `machine::AotHostGroup` record per host-native
+/// group the program calls (`HostInvoke`) and every program's runtime
+/// may call (`machine::core_host_groups`), its `push` the group's
+/// `coil_host_group_K` symbol, and `coil_aot_host_group_count`. The link
+/// keeps those groups' natives only.
+fn host_group_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody]) -> Result<(), String> {
+    let e = |e: cranelift_module::ModuleError| e.to_string();
+    let groups = used_host_groups(bodies);
+    const RECORD: usize = std::mem::size_of::<machine::AotHostGroup>();
+    let spans = machine::host_group_spans();
+    let mut bytes = vec![0u8; RECORD * groups.len().max(1)];
+    for (i, &g) in groups.iter().enumerate() {
+        let at = i * RECORD;
+        let (first, count) = spans[g];
+        let off = std::mem::offset_of!(machine::AotHostGroup, first);
+        bytes[at + off..at + off + 4].copy_from_slice(&first.to_le_bytes());
+        let off = std::mem::offset_of!(machine::AotHostGroup, count);
+        bytes[at + off..at + off + 4].copy_from_slice(&count.to_le_bytes());
+    }
+    let mut table = cranelift_module::DataDescription::new();
+    table.define(bytes.into_boxed_slice());
+    table.set_align(8);
+    for (i, &g) in groups.iter().enumerate() {
+        let id = module.declare_data(&format!("coil_host_group_{g}"), Linkage::Import, false, false).map_err(e)?;
+        let gv = module.declare_data_in_data(id, &mut table);
+        table.write_data_addr((i * RECORD + std::mem::offset_of!(machine::AotHostGroup, push)) as u32, gv, 0);
+    }
+    let id = module.declare_data("coil_aot_host_groups", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &table).map_err(e)?;
+    let mut d = cranelift_module::DataDescription::new();
+    d.define((groups.len() as u64).to_le_bytes().to_vec().into_boxed_slice());
+    d.set_align(8);
+    let id = module.declare_data("coil_aot_host_group_count", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &d).map_err(e)
+}
+
+/// The host-native groups (by number) `bodies` call, with the core ones, in order.
+pub fn used_host_groups(bodies: &[NativeBody]) -> Vec<usize> {
+    let mut groups: std::collections::BTreeSet<usize> = machine::core_host_groups().into_iter().collect();
+    for inst in bodies.iter().flat_map(|b| b.mir.blocks.iter().flat_map(|b| &b.insts)) {
+        if let MirInst::HostInvoke { native_id, .. } = inst
+            && let Some(g) = machine::host_group_of(usize::from(*native_id))
+        {
+            groups.insert(g);
+        }
+    }
+    groups.into_iter().collect()
 }
 
 /// `coil_static_syms`: a `machine::StaticSymbol` record (library

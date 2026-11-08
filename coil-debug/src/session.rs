@@ -313,6 +313,7 @@ impl Launch {
             dload_gate: Some(self.gate),
             struct_layouts: self.struct_layouts,
             shared_print: self.shared_print,
+            host_natives: machine::standard_host_natives(),
         };
         machine::run_natively(self.program, start).unwrap_or(true)
     }
