@@ -10838,7 +10838,9 @@ impl Compiler {
     fn fn_value_adapter_fn(&mut self, name: &str, adapter: &str) {
         use crate::hir::LocalKind;
         use crate::hir::synth::Synth;
-        let (Some(params), Some(ret)) = (self.checker.fn_param_tys(name), self.checker.fn_return_ty(name)) else {
+        // A function of no parameters is typed `unit -> R`: called with none.
+        let argc = self.fn_arities.get(name).map_or(0, |&(fixed, _)| fixed as usize);
+        let Some((params, ret)) = self.checker.fn_call_sig(name, argc) else {
             self.bind_function_entry(adapter.to_string());
             self.missing_call_target(name, 0..0);
             return;
