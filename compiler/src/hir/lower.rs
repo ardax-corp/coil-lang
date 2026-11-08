@@ -3024,11 +3024,13 @@ impl Walk<'_> {
                 body: inner,
                 kind,
             } => {
-                // A destructuring pattern binds from each array element.
+                // A destructuring pattern binds from each array element, or
+                // from each tuple a generator yields (#2317).
                 let array = matches!(
                     kind,
                     Some(
                         ForInKind::Array
+                            | ForInKind::Coroutine
                             | ForInKind::Custom {
                                 counted: Some(ForInCounted::Array),
                                 ..
