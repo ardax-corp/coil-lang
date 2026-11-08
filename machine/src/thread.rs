@@ -128,11 +128,10 @@ pub fn join_undetached_threads(registry: &LiveThreadRegistry) {
     }
 }
 
-use common::{BUILTIN_RESULT_VARIANTS, ProgramDebug, Value};
+use common::{ProgramDebug, Value};
 
 use crate::ffi::Natives;
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
-use crate::io::alloc_result_err;
 use crate::memory::{
     EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
     ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
@@ -1044,12 +1043,6 @@ pub fn alloc_thread_error(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -
         return alloc_enum(heap, tag.tag_in(set), vec![message]);
     }
     alloc_enum(heap, tag.tag_in(set), vec![])
-}
-
-pub fn alloc_result_thread_err(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -> Value {
-    let _ = BUILTIN_RESULT_VARIANTS;
-    let err = alloc_thread_error(heap, set, tag);
-    alloc_result_err(heap, err)
 }
 
 pub fn as_result_value(heap: &mut Heap, set: ErrorSet, r: Result<Value, ThreadErrorTag>) -> Value {

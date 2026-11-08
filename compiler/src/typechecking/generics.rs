@@ -117,12 +117,6 @@ impl TypeClassDef {
         self.kind_at(i).is_constructor_kind()
     }
 
-    /// Constructor arity of parameter `i`, if it is constructor-kinded.
-    pub fn constructor_arity_at(&self, i: usize) -> Option<usize> {
-        let kind = self.kind_at(i);
-        kind.is_constructor_kind().then(|| kind.arity())
-    }
-
     pub fn assoc_type(&self, name: &str) -> Option<&AssocTypeDecl> {
         self.assoc_types.iter().find(|decl| decl.name == name)
     }

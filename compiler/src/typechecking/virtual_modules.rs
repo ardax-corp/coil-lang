@@ -1011,21 +1011,6 @@ impl VirtualModules {
             .flat_map(|(path, exports)| exports.iter().map(move |e| (*path, e)))
     }
 
-    pub fn is_virtual_module(&self, module_path: &str) -> bool {
-        self.modules.contains_key(module_path)
-    }
-
-    /// Join `use` path segments (+ optional final item that is not `*`) into a module path.
-    pub fn module_path_of(path: &[String], name: &str) -> String {
-        if name == "*" {
-            path.join("::")
-        } else if path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{}::{}", path.join("::"), name)
-        }
-    }
-
     /// Resolve a concrete `use path::name` (not glob) against virtual modules.
     ///
     /// `path` is the directory segments; `name` is the last segment (item).
@@ -1084,41 +1069,6 @@ impl VirtualModules {
         out
     }
 
-    /// Look up a typeclass by qualified path (`prelude::ops::Eq` → `"Eq"`).
-    pub fn resolve_typeclass_path(&self, segments: &[&str]) -> Option<&'static str> {
-        if segments.len() < 2 {
-            return None;
-        }
-        let (module_segs, name) = segments.split_at(segments.len() - 1);
-        let module = module_segs.join("::");
-        match self
-            .modules
-            .get(module.as_str())?
-            .iter()
-            .find(|e| matches!(e, BuiltinExport::TypeClass { name: n } if n == &name[0]))?
-        {
-            BuiltinExport::TypeClass { name } => Some(*name),
-            _ => None,
-        }
-    }
-
-    /// Look up an enum by qualified path (`prelude::Option` → `"Option"`).
-    pub fn resolve_enum_path(&self, segments: &[&str]) -> Option<&'static str> {
-        if segments.len() < 2 {
-            return None;
-        }
-        let (module_segs, name) = segments.split_at(segments.len() - 1);
-        let module = module_segs.join("::");
-        match self
-            .modules
-            .get(module.as_str())?
-            .iter()
-            .find(|e| matches!(e, BuiltinExport::Enum { name: n } if n == &name[0]))?
-        {
-            BuiltinExport::Enum { name } => Some(*name),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -168,7 +168,6 @@ impl Checker {
             variadic: Default::default(),
             variadic_exports: Default::default(),
             current_tuple_pack: None,
-            spread_call_arity: HashMap::new(),
             spread_expanded_bases: std::collections::HashSet::new(),
             vec_rest_spread: false,
             vec_rest_spreads: std::collections::HashSet::new(),
@@ -236,7 +235,6 @@ impl Checker {
             mixed_literals: Vec::new(),
             fn_body_depth: 0,
             weak_checks: Default::default(),
-            async_functions: std::collections::HashSet::new(),
             async_depth: 0,
             current_yield_ty: None,
             coro_body: false,
@@ -276,7 +274,6 @@ impl Checker {
             result_mode_fns: HashSet::new(),
             result_mode_ok_is_result: HashSet::new(),
             whole_result_returns: HashSet::new(),
-            option_mode_fns: HashSet::new(),
             test_case_names: Vec::new(),
             main_decl_span: None,
             type_params_in_scope: Vec::new(),
@@ -1771,7 +1768,6 @@ impl Checker {
         self.fn_has_rest.clear();
         self.fn_tuple_rest.clear();
         self.current_tuple_pack = None;
-        self.spread_call_arity.clear();
         self.spread_expanded_bases.clear();
         self.vec_rest_spreads.clear();
         // Keep module-qualified overloads across files; drop bare keys so they do not leak.
@@ -1858,7 +1854,6 @@ impl Checker {
         self.variadic_call_arg_tags.clear();
         self.pending_exhaustive.clear();
         self.weak_checks.clear_module();
-        self.async_functions.clear();
         self.async_depth = 0;
         self.current_yield_ty = None;
         self.coro_body = false;
@@ -1869,7 +1864,6 @@ impl Checker {
         self.result_mode_fns.clear();
         self.result_mode_ok_is_result.clear();
         self.whole_result_returns.clear();
-        self.option_mode_fns.clear();
         self.test_case_names.clear();
         self.main_decl_span = None;
         // Keep FQN class tables / generic ctors so later files can `use`
@@ -9908,11 +9902,6 @@ impl Checker {
         self.extern_variadic.contains(name)
     }
 
-    /// Whether a `declare` binding was marked variadic.
-    pub fn is_ffi_declare_variadic(&self, binding: &str) -> bool {
-        self.ffi_fn_variadic.get(binding).copied().unwrap_or(false)
-    }
-
     /// Whether the fn-id expression passed to `invoke` came from a variadic `declare`.
     pub fn is_ffi_declare_variadic_for_fn_id(&self, expr: &Output) -> bool {
         self.ffi_invoke_fn_id_metadata(expr)
@@ -13457,11 +13446,6 @@ impl Checker {
         format!("__zs_test_{index}")
     }
 
-    /// Whether `fn_name` returns (or was inferred to return) `Option<_>`.
-    pub fn fn_is_option_mode(&self, fn_name: &str) -> bool {
-        self.option_mode_fns.contains(fn_name)
-    }
-
     /// Return the resolved result type of a registered function.
     pub fn fn_return_ty(&self, fn_name: &str) -> Option<Ty> {
         let scheme = self.lookup_fn_scheme(fn_name)?;
@@ -15006,8 +14990,6 @@ impl Checker {
             self.unify(&arg, elem, range, "spread call argument");
             fun = apply_ty_prune(&self.subst, &ret);
         }
-        self.spread_call_arity
-            .insert((range.start, range.end), elems.len());
         if let Some(call_id) = id {
             self.cache.insert(call_id, fun.clone());
         }
@@ -15023,10 +15005,6 @@ impl Checker {
             );
         }
         Some(fun)
-    }
-
-    pub fn spread_call_arity_at(&self, start: usize, end: usize) -> Option<usize> {
-        self.spread_call_arity.get(&(start, end)).copied()
     }
 
     /// Assign NodeIds for a function/lambda parameter list so body infer
@@ -22013,11 +21991,6 @@ impl Checker {
         }
     }
 
-    /// True if `name` was declared as `gen fn`.
-    pub fn is_async_function(&self, name: &str) -> bool {
-        self.async_functions.contains(name)
-    }
-
     /// Whether `name` is a generic function (has type params).
     pub fn is_generic_fn(&self, name: &str) -> bool {
         // Exact keys only: defining modules register bare + FQN; importers get
@@ -22219,17 +22192,6 @@ impl Checker {
     /// Read-only access to the generics registry (for codegen).
     pub fn generics(&self) -> &crate::typechecking::generics::Generics {
         &self.generics
-    }
-
-    /// Infer without updating the NodeId cache (codegen helper).
-    pub fn infer_for_codegen(&mut self, expr: &Output) -> Ty {
-        let saved_idx = self.next_id_idx;
-        let ty = self.infer_inner(expr, None);
-        self.next_id_idx = saved_idx;
-        // Don't insert into cache, the ID we restored might be
-        // wrong for this AST node, and overwriting a correct entry
-        // would be worse than skipping this insertion.
-        ty
     }
 
     /// Field access on enum record payloads (`specific_tag` narrows the variant).

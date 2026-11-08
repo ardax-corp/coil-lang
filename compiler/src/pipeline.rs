@@ -226,11 +226,6 @@ impl Pipeline {
         self.overlays.remove(file);
     }
 
-    /// Install the compile-time host that runs user derive / attribute macros.
-    pub fn set_macro_host(&mut self, host: std::sync::Arc<dyn crate::macros::MacroHost>) {
-        self.macro_host = Some(host);
-    }
-
     /// In-memory override for `file`, if the editor (or a test) set one.
     pub fn overlay_text(&self, file: &Path) -> Option<&str> {
         self.overlays.get(file).map(String::as_str)
@@ -355,15 +350,6 @@ impl Pipeline {
             results.push((item.file, messages));
         }
         results
-    }
-
-    /// Typecheck one source file through the project-aware pipeline.
-    pub fn typecheck_src_from_file(&mut self, file: &str) -> Vec<Message> {
-        self.typecheck_project(Path::new(file))
-            .into_iter()
-            .find(|(path, _)| path == Path::new(file))
-            .map(|(_, messages)| messages)
-            .unwrap_or_default()
     }
 
     /// Project directory (cwd unless [`Self::bind_project_root`] set another).
@@ -555,14 +541,6 @@ impl Pipeline {
 
     pub fn dload_trusted_stems(&self) -> Vec<String> {
         self.host_grants.dload_trusted.clone()
-    }
-
-    pub fn c_struct_encodings(&self) -> Vec<(String, Vec<(String, u32)>)> {
-        self.compiler_lazy()
-            .c_structs()
-            .iter()
-            .map(|def| (def.name.clone(), def.fields.clone()))
-            .collect()
     }
 
     /// Compute C align/pad once for every `extern struct` (declaration order).
