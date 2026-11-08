@@ -450,6 +450,8 @@ fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
 
 /// `values_eq_shaped(a, b, shape) -> bool`: `==` on an aggregate whose
 /// `float` leaves compare by IEEE ([`crate::value_eq::values_eq_shaped`]).
+/// The compiler no longer emits it (that `==` calls compiler-made glue);
+/// it stays for archives that still call it.
 fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let name = common::VALUES_EQ_SHAPED_NATIVE;
     let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 3], FfiType::Int)

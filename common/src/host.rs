@@ -1634,7 +1634,9 @@ pub const CONTRACT_FAIL_NATIVE: &str = "contract_fail";
 pub const FFI_READ_INTS_ID: u16 = 160;
 pub const FFI_READ_INTS_NATIVE: &str = "ffi_read_ints";
 /// `==` on an aggregate with `float` leaves, by its static shape
-/// (coil-lang#1253, archive minor 39).
+/// (coil-lang#1253, archive minor 39). No longer emitted: such an `==`
+/// calls compiler-made glue (`codegen::eq_glue`). Kept for archives that
+/// still call it; a panic stub at the next major.
 pub const VALUES_EQ_SHAPED_ID: u16 = 161;
 pub const VALUES_EQ_SHAPED_NATIVE: &str = "values_eq_shaped";
 /// `<` / `<=` / `>` / `>=` on `string`: `-1` / `0` / `1` by UTF-8 bytes
