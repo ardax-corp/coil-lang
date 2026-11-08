@@ -61,3 +61,14 @@ test("a generic body compares its float leaves by IEEE") {
     w.push(("b", nan()));
     assert!(!same(v, w));
 }
+
+test("a two-word (int, float) compares its float word by IEEE") {
+    let n = nan();
+    let t = (1, n);
+    assert!(!(t == t));
+    let v: Vec<(int, float)> = Vec::new();
+    v.push((1, n));
+    v.push((1, -0.0));
+    assert!(!(v[0] == t));
+    assert!(v[1] == (1, 0.0));
+}
