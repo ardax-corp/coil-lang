@@ -261,7 +261,9 @@ enum HirBuiltin {
     Bound { dict: u32, method: u32 },
     /// `f(a)` filling a prefix of `f`'s parameters: the filled values, the
     /// fill mask, then `CodePtr` and `MakeFn`, as `compile_call_expr`.
-    Partial { entry: u32, mask: u32, operand: u32 },
+    /// `value`: `f` returns two words, so the closure targets its one-word
+    /// adapter ([`Compiler::partial_value_target`]).
+    Partial { entry: u32, mask: u32, operand: u32, value: bool },
     /// `dot` / `cross` / `matmul` / ...: the packed `HostInvoke` kernel, or
     /// the operands to temps and the scalar unroll, as the AST's
     /// `emit_linear_algebra`.
@@ -5133,6 +5135,13 @@ impl Compiler {
             if hir.local(local).ty.as_ref().is_some_and(|t| self.hir_mir_pair_tys(t).is_none()) {
                 continue;
             }
+            // Nor when its init packs as a bare-trait existential, whose
+            // local may still carry the init's type: `let s: Named =
+            // Pick::Num(3)` holds the pack's one word (#2322).
+            let e = hir.expr(init);
+            if e.node.is_some_and(|n| self.checker.existential_pack_at(n).is_some()) || self.checker.existential_pack_span(e.span.0, e.span.1).is_some() {
+                continue;
+            }
             if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
                 emit.plan.pair_locals.insert(local.0, kind);
                 continue;
@@ -5484,9 +5493,14 @@ impl Compiler {
             || (total < 32 && mask >> total != 0)
             || self.checker.is_generic_fn(lookup)
             || self.coroutine_fns.contains(key)
-            || self.two_word_return_kind(lookup).is_some()
             || self.callee_has_unboxed_range_params(lookup)
         {
+            return Err("callee-partial");
+        }
+        // A two-word result: the closure calls the function's one-word
+        // adapter, whose twin the function is.
+        let value = self.two_word_return_kind(lookup).is_some();
+        if value && (method || key != lookup || !self.fn_value_redirects(key)) {
             return Err("callee-partial");
         }
         let entry = *self.functions.get(key).ok_or("callee-partial")?;
@@ -5527,6 +5541,7 @@ impl Compiler {
                 entry: entry as u32,
                 mask,
                 operand: make_fn_operand(0, mask.count_ones(), total as u32, false),
+                value,
             }),
             generic: None,
             instance: None,
@@ -10906,13 +10921,34 @@ impl Compiler {
         self.fn_entry_labels[&adapter]
     }
 
+    /// The entry a partial application of the function at `entry` targets
+    /// ([`HirBuiltin::Partial`]): the function's own `label`, or with
+    /// `value`, its one-word adapter ([`Self::fn_value_target`]).
+    pub(super) fn partial_value_target(&mut self, entry: usize, label: IlLabel, value: bool) -> Option<IlLabel> {
+        if !value {
+            return Some(label);
+        }
+        // The function's names at that entry (a bare one and its path):
+        // the least, so the adapter's name does not depend on map order.
+        let name = self
+            .functions
+            .iter()
+            .filter(|&(n, &e)| e == entry && self.fn_value_redirects(n) && self.two_word_return_kind(n).is_some())
+            .map(|(n, _)| n)
+            .min()?
+            .clone();
+        Some(self.fn_value_target(&name, label))
+    }
+
     /// [`Self::fn_value_target`]'s adapter: its parameters passed on to
     /// `name` as they come, its two-word result boxed to the one word a
     /// function value returns; `name` is its twin.
     fn fn_value_adapter_fn(&mut self, name: &str, adapter: &str) {
         use crate::hir::LocalKind;
         use crate::hir::synth::Synth;
-        let (Some(params), Some(ret)) = (self.checker.fn_param_tys(name), self.checker.fn_return_ty(name)) else {
+        // A function of no parameters is typed `unit -> R`: called with none.
+        let argc = self.fn_arities.get(name).map_or(0, |&(fixed, _)| fixed as usize);
+        let Some((params, ret)) = self.checker.fn_call_sig(name, argc) else {
             self.bind_function_entry(adapter.to_string());
             self.missing_call_target(name, 0..0);
             return;
@@ -10974,7 +11010,6 @@ impl Compiler {
         let frame = self.par_frame_enter();
         let prev_key = self.current_function_table_key.replace(name.clone());
         let prev_two_word = self.compiling_two_word_enum.take();
-        let prev_keys = std::mem::take(&mut self.field_key_slots);
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
@@ -11018,7 +11053,6 @@ impl Compiler {
         self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
         self.hir_mir_ctx = prev_ctx;
-        self.field_key_slots = prev_keys;
         self.compiling_two_word_enum = prev_two_word;
         self.current_function_table_key = prev_key;
         self.par_frame_exit(frame);

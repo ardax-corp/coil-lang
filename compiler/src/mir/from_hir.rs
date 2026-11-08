@@ -2083,7 +2083,7 @@ impl Lower<'_> {
                 let (Some(l), Some(r)) = (boxed(self, l)?, boxed(self, r)?) else {
                     return Ok(Val::Never);
                 };
-                return self.structural_eq(id, l, r, ne);
+                return self.structural_eq(l, r, ne);
             }
         };
         let eq = match words {
@@ -3788,11 +3788,11 @@ impl Lower<'_> {
                 kind: Some(ForInKind::Tuple { arity }),
             } => self.for_array(id, pat, *iterable, *body, None, Items::Tuple(*arity)),
             HirKind::ForIn {
-                pat: HirPat::Bind(local),
+                pat,
                 iterable,
                 body,
                 kind: Some(ForInKind::Coroutine),
-            } => self.for_coroutine(*local, *iterable, *body),
+            } => self.for_coroutine(pat, *iterable, *body),
             HirKind::Match { scrutinee, arms } => {
                 if self.stmt_matches.remove(&id) && !returned {
                     self.discard_arms.extend(arms.iter().map(|a| a.body));
@@ -4070,8 +4070,28 @@ impl Lower<'_> {
     /// matches).
     /// `for x in h` over a coroutine, as HIR emission's: resume into `x`,
     /// stop once the handle is done (its completion value is never bound).
-    fn for_coroutine(&mut self, local: HirLocal, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
-        let ty = self.local_ty(local)?;
+    fn for_coroutine(&mut self, pat: &HirPat, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
+        // A destructuring pattern reads its parts from each yielded tuple's
+        // box (#2317).
+        let (ty, item) = match pat {
+            HirPat::Bind(local) => (self.local_ty(*local)?, None),
+            HirPat::Tuple(_) => {
+                let item = match self.expr_ty(iterable).map(strip_readonly) {
+                    Some(Ty::App(head, args)) if matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") && args.len() == 2 => args[0].clone(),
+                    _ => return Err("for in coroutine pattern".into()),
+                };
+                // A tuple (two-word ones too) comes back as its box.
+                let heap = match self.inp.word(&item) {
+                    Some(w) => w == MirTy::HeapRef,
+                    None => matches!(strip_readonly(&item), Ty::Tuple(items) if !items.is_empty()),
+                };
+                if !heap {
+                    return Err("for in coroutine pattern".into());
+                }
+                (MirTy::HeapRef, Some(item))
+            }
+            _ => return Err("for in coroutine pattern".into()),
+        };
         let Some(h) = self.word(iterable)? else {
             return Ok(Val::Never);
         };
@@ -4081,10 +4101,16 @@ impl Lower<'_> {
         self.jump(head)?;
         self.switch(head);
         let x = self.b.ins_resume_coro(h, None, ty).map_err(mir)?;
-        self.bind(local, x)?;
+        if let HirPat::Bind(local) = pat {
+            self.bind(*local, x)?;
+        }
         let done = self.b.ins_done_coro(h).map_err(mir)?;
         self.b.branch(done, exit, body_b).map_err(mir)?;
         self.switch(body_b);
+        // The parts read only once the generator is known to have yielded.
+        if let Some(item) = &item {
+            self.bind_tuple_item(pat, x, Some(item))?;
+        }
         // A loop over a generator it made (not one a local or field holds,
         // which a later `resume` may go on with) closes it when left
         // early: a `break` before it leaves (the loop's `defers` mark is
@@ -4289,7 +4315,7 @@ impl Lower<'_> {
             if self.b.value_ty(l) != MirTy::HeapRef || self.b.value_ty(r) != MirTy::HeapRef {
                 return Err("operator operand type".into());
             }
-            return self.structural_eq(id, l, r, op == BinOp::Ne);
+            return self.structural_eq(l, r, op == BinOp::Ne);
         }
         if let Some(out) = self.bitop_identity(id, op, lhs, rhs) {
             return out;
@@ -4355,18 +4381,11 @@ impl Lower<'_> {
         Ok(Val::V(out.map_err(mir)?))
     }
 
-    /// `==` / `!=` of two heap words: structural equality, or, when
-    /// their type has `float` leaves, `values_eq_shaped` with the shape
-    /// emission planned, so those compare by IEEE (#1253).
-    fn structural_eq(&mut self, id: HirId, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
-        let Some(&shape) = self.inp.strings.get(&id.0) else {
-            return Ok(Val::V(self.b.ins_str_eq(l, r, ne).map_err(mir)?));
-        };
-        let shape = self.b.ins_string(shape).map_err(mir)?;
-        let eq = self.b.ins_host_invoke(common::VALUES_EQ_SHAPED_ID, vec![l, r, shape]).map_err(mir)?;
-        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-        let cmp = if ne { MirCmpOp::Eq } else { MirCmpOp::Ne };
-        Ok(Val::V(self.b.ins_cmp(cmp, eq, zero).map_err(mir)?))
+    /// `==` / `!=` of two heap words: structural equality. An aggregate
+    /// with a `float` leaf compares through its glue instead, so its
+    /// floats compare by IEEE 754 (`codegen::eq_glue`, #1253).
+    fn structural_eq(&mut self, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
+        Ok(Val::V(self.b.ins_str_eq(l, r, ne).map_err(mir)?))
     }
 
     /// Strength reduction: `x / 2^n` as `x >> n` when
@@ -5440,7 +5459,7 @@ impl Lower<'_> {
         };
         let (lt, rt) = (self.b.value_ty(l), self.b.value_ty(r));
         if lt == MirTy::HeapRef && rt == MirTy::HeapRef && matches!(sym, "==" | "!=") {
-            return self.structural_eq(id, l, r, sym == "!=");
+            return self.structural_eq(l, r, sym == "!=");
         }
         // Niche `Option` / `Result` words compare on their words: the
         // same variant, then structural equality of the payloads.

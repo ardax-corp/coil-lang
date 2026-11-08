@@ -1,0 +1,46 @@
+// A `gc::collect()` in a `defer` that runs while a panic unwinds the task
+// runs like any other call: the rest of that defer, and the defers after
+// it, still run (#2312).
+use gc::collect;
+use string::format;
+use task::{scope, Scope, TaskError};
+use tests::assert;
+
+static let LOG: int = 0;
+
+fn add(int n) {
+    LOG = LOG + n;
+}
+
+fn unwinds() -> int {
+    let u0 = format("u%i", 0);
+    defer use (u0) {
+        let k = u0.len();
+        collect();
+        add(k);
+    }
+    defer {
+        add(100);
+    }
+    panic "unwinds";
+}
+
+fn failed(Result<int, TaskError> r) -> bool {
+    return match r {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    };
+}
+
+fn run(unit -> int body) -> bool {
+    return failed(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+test("collect in an unwinding defer") {
+    LOG = 0;
+    assert!(run(unwinds));
+    assert!(LOG == 102, format("%i", LOG));
+}

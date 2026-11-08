@@ -1,0 +1,20 @@
+// Direct calls in a hot loop to another module's function whose result is
+// an `Option<int>`, which is also used as a function value: the direct
+// calls take the two words, while the value goes through its one-word
+// adapter. Needs `--root examples/src` (fn_value_pair_mod).
+use fn_value_pair_mod::step;
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn through(int -> Option<int> f, int x) -> int {
+    return f(x) ?? 0;
+}
+
+fn main() {
+    let s = through(step, 1);
+    for i in 0..20000000 {
+        s += step(i) ?? 0;
+    }
+    let _ = print(format("%i", s));
+}

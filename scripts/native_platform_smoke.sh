@@ -12,7 +12,13 @@ ext=""
 [[ -x "$bin/coil.exe" ]] && ext=".exe"
 coil="$bin/coil$ext"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# Best-effort cleanup: Windows can keep a just-exited coil.exe locked for a
+# moment, and under `set -e` a failed trap would turn a passing run into exit 1
+# (#2313).
+cleanup() {
+    rm -rf "$work" 2>/dev/null || { sleep 2; rm -rf "$work" 2>/dev/null; } || true
+}
+trap cleanup EXIT
 
 cat > "$work/app.coil" <<'COIL'
 use io::sync::println;

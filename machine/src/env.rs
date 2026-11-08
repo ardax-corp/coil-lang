@@ -5,10 +5,9 @@ use std::cell::Cell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
+use common::{BUILTIN_ENV_ERROR_VARIANTS, Value};
 
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
-use crate::io::alloc_result_err;
 use crate::memory::{Heap, ObjArray, Object};
 
 pub use common::is_ffi_exec_symbol;
@@ -30,12 +29,6 @@ fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<crate::EnumPayload>)
 pub fn alloc_env_error(heap: &mut Heap, tag: EnvErrorTag) -> Value {
     let _ = BUILTIN_ENV_ERROR_VARIANTS;
     alloc_enum(heap, tag as u32, vec![])
-}
-
-pub fn alloc_result_env_err(heap: &mut Heap, tag: EnvErrorTag) -> Value {
-    let _ = BUILTIN_RESULT_VARIANTS;
-    let err = alloc_env_error(heap, tag);
-    alloc_result_err(heap, err)
 }
 
 pub fn as_result_value(heap: &mut Heap, r: Result<Value, EnvErrorTag>) -> Value {
