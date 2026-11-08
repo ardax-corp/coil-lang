@@ -1,0 +1,25 @@
+// `Vec::insert` / `Vec::remove` written out as MIR loops in native code
+// (`mir::native_expand`), once runtime natives. Front inserts and removes
+// on a short Vec, so the element shifting dominates.
+// ITERS=1000000. Checksum 4000000.
+use io::sync::print;
+use string::format;
+
+fn main() {
+    let iters = 1000000;
+    let v: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 32 {
+        v.push(k);
+        k = k + 1;
+    }
+    let acc = 0;
+    let i = 0;
+    while i < iters {
+        v.insert(0, 1);
+        v.insert(16, 2);
+        acc = acc + (v.remove(16) ?? 0) + (v.remove(0) ?? 0) + v.len() - 31;
+        i = i + 1;
+    }
+    let _ = print(format("%i", acc));
+}
