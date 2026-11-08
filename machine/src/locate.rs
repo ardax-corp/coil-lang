@@ -25,10 +25,14 @@ impl Locator<'_> {
         Some(format!("{path}:{}:{}", line.line, line.column))
     }
 
-    /// The backtrace line of native site `s`: `  in name at loc`.
+    /// The backtrace line of native site `s`: `  in name at loc`. An AOT
+    /// executable's `__start` has none: it is no function of the program.
     pub(crate) fn native_site_line(&self, code: &crate::native::NativeCode, s: u32) -> Option<String> {
         let site = code.site(s)?;
         let name = self.fn_symbol_at(site.body_id as usize).unwrap_or("<unknown>");
+        if name == common::NATIVE_START_NAME {
+            return None;
+        }
         Some(match self.native_site_location(site) {
             Some(loc) => format!("  in {name} at {loc}"),
             None => format!("  in {name}"),

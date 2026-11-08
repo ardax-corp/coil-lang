@@ -205,6 +205,8 @@ host_groups! {
     64 => |o, r| push_wiring(o, r, crate::key_index::KEY_INDEX_WIRING, "key_index");
     // Append-only after key_index: the lock primitives (major 6 minor 21).
     65 => |o, r| push_lock_natives(o, r);
+    // Append-only after the lock primitives: `startup_restore` (major 7 minor 2).
+    66 => |o, r| push_startup_restore(o, r);
 }
 
 /// Each standard group's first id and how many natives it pushes, by
@@ -231,7 +233,7 @@ pub fn host_group_of(id: usize) -> Option<usize> {
 
 /// Groups every program's runtime may call whether or not its code names
 /// them: the task scheduler, `unwind_resume`, `contract_fail`, `coro_close`,
-/// the collector's and `region`'s hooks.
+/// the collector's and `region`'s hooks, `startup_restore`.
 pub fn core_host_groups() -> Vec<usize> {
     let ids = [
         common::TASK_SCOPE_OPEN_ID as usize,
@@ -241,6 +243,7 @@ pub fn core_host_groups() -> Vec<usize> {
         common::CONTRACT_FAIL_ID as usize,
         common::CORO_CLOSE_ID as usize,
         common::GC_REGION_ENTER_ID as usize,
+        common::STARTUP_RESTORE_ID as usize,
     ];
     let names = [crate::GC_COLLECT_NATIVE, crate::GC_REGISTER_FINALIZER_NATIVE, GC_WIRING[0].0];
     let mut groups: Vec<usize> = ids
@@ -678,6 +681,19 @@ fn push_task_natives(
             .with_host_op(HostOp::Task),
         ));
     }
+}
+
+/// `startup_restore` restores a snapshot of the constant pool; the driver
+/// runs it (`HostOp::Restore`).
+fn push_startup_restore(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
+    let name = common::STARTUP_RESTORE_NATIVE;
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("startup_restore signature");
+    assert_eq!(out.len(), common::STARTUP_RESTORE_ID as usize);
+    register_id(name, out.len());
+    out.push(Arc::new(
+        HostClosureFn::new(sig, |_heap, _args| Err(FfiError::Unsupported("startup_restore is HostOp::Restore (runtime hook only)".into())))
+            .with_host_op(HostOp::Restore),
+    ));
 }
 
 /// `unwind_resume` ends a `defer` cleanup pad; the runtime runs it (`HostOp::Unwind`).
@@ -1739,7 +1755,8 @@ mod tests {
             Some(common::KEY_INDEX_EQ_MODE_NATIVE)
         );
         assert_eq!(names.get(200).map(String::as_str), Some("lock_acquire"));
-        assert_eq!(names.last().map(String::as_str), Some("rw_store"));
+        assert_eq!(names.get(211).map(String::as_str), Some("rw_store"));
+        assert_eq!(names.last().map(String::as_str), Some(common::STARTUP_RESTORE_NATIVE));
         assert_eq!(attach, 119);
     }
 
@@ -2122,7 +2139,11 @@ mod tests {
             registrations.get(end + 75).map(|(n, _)| n.as_str()),
             Some("rw_store")
         );
-        assert_eq!(registrations.len(), end + 76);
+        assert_eq!(
+            registrations.get(end + 76).map(|(n, _)| n.as_str()),
+            Some(common::STARTUP_RESTORE_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 77);
     }
 
     #[test]

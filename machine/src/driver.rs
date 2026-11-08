@@ -821,6 +821,11 @@ impl<'a> Driver<'a> {
                 Some(if d.rooted(ctx, |d| d.close_now(handle)) { Invoked::Value(0) } else { Invoked::Unwound })
             }
             crate::HostOp::Task => Some(d.task_op(ctx, fn_id, args)),
+            crate::HostOp::Restore => {
+                let at = args.first().map_or(0, |v| v.as_int() as usize);
+                d.rooted(ctx, |d| d.restore_snapshot(at));
+                Some(if d.panicked { Invoked::Unwound } else { Invoked::Value(0) })
+            }
             _ => Some(Invoked::Panic("native driver: unknown host op".into())),
         }
     }

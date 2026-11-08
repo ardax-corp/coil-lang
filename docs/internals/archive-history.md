@@ -33,6 +33,11 @@ one has a trailer after its slot kinds, an entry per tagged slot (tag slot
 `u16` LE, pointer-tag mask `u64` LE), and the collector resolves the word
 by its tag (`common::class_slot_kinds`).
 
+Minor 2 adds host native `startup_restore` (id 212, `HostOp::Restore`), which an AOT
+executable's native `__start` calls where its startup restores a snapshot. Its
+payload is data only: `startup` holds no `Init` or `Call`, and `main` names `__start`
+(`docs/internals/native.md`, "Native start").
+
 Majors 4 to 6 ran on the VM. The notes below are the record of what minors of
 major 4 added; opcodes and frame maps in them no longer exist.
 

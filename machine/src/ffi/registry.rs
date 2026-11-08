@@ -31,6 +31,9 @@ pub enum HostOp {
     /// runs a minor collection ([`common::GC_REGION_ENTER_ID`]).
     RegionEnter,
     RegionExit,
+    /// `startup_restore`: the driver restores the snapshot at a pool index
+    /// ([`common::STARTUP_RESTORE_ID`]).
+    Restore,
 }
 
 pub trait NativeFn: Send + Sync {
@@ -90,7 +93,7 @@ impl HostCall {
             && !collect
             && matches!(
                 n.host_op(),
-                HostOp::Ordinary | HostOp::Task | HostOp::RegionEnter | HostOp::RegionExit | HostOp::RegisterFinalizer
+                HostOp::Ordinary | HostOp::Task | HostOp::RegionEnter | HostOp::RegionExit | HostOp::RegisterFinalizer | HostOp::Restore
             );
         Self { func, guarded, collect, on_machine }
     }

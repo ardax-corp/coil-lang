@@ -24,7 +24,7 @@ pub use array_vec::*;
 pub use builtins::*;
 pub use caps::{Caps, open_mode_caps};
 pub use debug::*;
-pub use startup::StartupOp;
+pub use startup::{NATIVE_START_NAME, StartupOp};
 pub use effects::EffectFlags;
 pub use ffi::tag;
 pub use ffi::*;
