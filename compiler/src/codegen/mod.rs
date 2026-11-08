@@ -341,10 +341,6 @@ pub struct Compiler {
     /// Counter for compiler-generated temporary slots.
     temp_counter: u32,
 
-    /// Function-local cache of field-name string keys used ≥2 times
-    /// (`STRING` materialized once at entry, then `LOAD`).
-    field_key_slots: HashMap<String, u32>,
-
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
     /// the typechecker's `Checker`.
@@ -745,7 +741,6 @@ impl Default for Compiler {
             string_indices: HashMap::default(),
             coroutine_fns: std::collections::HashSet::new(),
             temp_counter: 0,
-            field_key_slots: HashMap::new(),
             codegen_depth: 0,
             active_fn_name: None,
             compiling_method: false,

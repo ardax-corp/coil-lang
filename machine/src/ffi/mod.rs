@@ -42,6 +42,7 @@ pub use static_libs::{StaticLibrary, StaticSymbol, install_static_symbols, stati
 pub use runtime::{check_native_libraries, packaged_app_ffi_startup_check, probe_system_libffi};
 pub use signature::{FfiError, FfiSignature, FfiSignatureBuilder};
 
+#[cfg(all(test, not(target_os = "windows")))]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -75,16 +76,6 @@ pub fn register_on_library(
 /// Load a shared library by path (legacy — prefer [`resolve_library`]).
 pub fn load_library(name: &str) -> Result<Arc<Library>, FfiError> {
     resolve_library(name, None, &[], &DloadGate::deny_all())
-}
-
-/// Load with search path resolution.
-pub fn load_library_resolved(
-    name: &str,
-    base_dir: Option<&Path>,
-    search_paths: &[PathBuf],
-    gate: &DloadGate,
-) -> Result<Arc<Library>, FfiError> {
-    resolve_library(name, base_dir, search_paths, gate)
 }
 
 /// Build `examples/sum.c` into the platform `libsum` filename if missing or stale.

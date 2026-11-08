@@ -10902,7 +10902,6 @@ impl Compiler {
         let frame = self.par_frame_enter();
         let prev_key = self.current_function_table_key.replace(name.clone());
         let prev_two_word = self.compiling_two_word_enum.take();
-        let prev_keys = std::mem::take(&mut self.field_key_slots);
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
@@ -10946,7 +10945,6 @@ impl Compiler {
         self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
         self.hir_mir_ctx = prev_ctx;
-        self.field_key_slots = prev_keys;
         self.compiling_two_word_enum = prev_two_word;
         self.current_function_table_key = prev_key;
         self.par_frame_exit(frame);

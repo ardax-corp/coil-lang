@@ -409,8 +409,6 @@ pub struct Checker {
     /// and any `fn(...args) -> R` parameter types in its signature.
     current_tuple_pack: Option<Ty>,
 
-    /// `callee(...pack)` spread calls keyed by call span → unpacked arity.
-    spread_call_arity: HashMap<(usize, usize), usize>,
 
     /// Tuple bases expanded by [`flatten_spread_call_args`] (by span).
     spread_expanded_bases: std::collections::HashSet<(usize, usize)>,
@@ -628,8 +626,6 @@ pub struct Checker {
     /// weakened, directly (#1644) or through a type parameter (#1670).
     weak_checks: checker::weak_check::WeakChecks,
 
-    /// Names of `gen fn` declarations (for codegen).
-    async_functions: std::collections::HashSet<String>,
 
     /// Nesting depth inside `gen fn` bodies (for `yield` validation).
     async_depth: usize,
@@ -760,8 +756,6 @@ pub struct Checker {
     /// `Result` type (`return r;` with `r: Result<T, E>`): returned as is,
     /// not Ok-wrapped (#786).
     whole_result_returns: HashSet<(usize, usize)>,
-    /// Function names whose return type is (or was inferred as) `Option<_>`.
-    option_mode_fns: HashSet<String>,
 
     /// Literal descriptions from top-level `test("…") { … }` declarations
     /// (source order). Used by codegen / the test harness.

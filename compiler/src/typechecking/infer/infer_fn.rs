@@ -616,7 +616,6 @@ impl Checker {
         }
         let prev_async = self.async_depth;
         if is_coro {
-            self.async_functions.insert(name.to_string());
             self.async_depth += 1;
         }
 
@@ -804,7 +803,6 @@ impl Checker {
                     fun_ty = Ty::Fun(Box::new(self_ty.clone()), Box::new(fun_ty));
                 }
             }
-            self.option_mode_fns.insert(name.to_string());
         }
         self.current_yield_ty = prev_yield;
         self.current_send_ty = prev_send;
