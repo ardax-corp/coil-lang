@@ -47,7 +47,8 @@ A compiled program is its bodies, a list of `common::StartupOp` and `main`. A bo
 identity is `label.0 + 1`; `0` names nothing. `StartupOp::Call` calls a body,
 `Init` calls one and stores its word in a static, and `Restore` rebuilds a heap
 snapshot from the constant pool. `Driver::run_startup` walks the list, and
-`Driver::run_program` then calls `main`. `Driver::covers` says whether the installed
+`Driver::run_program` then calls `main` (an AOT executable has no list: its `main` is
+its [native start](#native-start)). `Driver::covers` says whether the installed
 code has every body the startup and `main` name.
 
 Module setup is a function, `__module_setup`
@@ -386,6 +387,17 @@ the [JIT runner](#jit-runner) instead):
 trailer with `PACKAGE_FLAG_LINKED`, whose `archive_offset` counts back from the trailer.
 The symbol is 16-byte aligned and the archive comes first, so rkyv reads it in place.
 `common::find_linked_package` finds it from outside the program, for `coil natives dump`.
+
+### Native start
+
+An AOT executable starts in its own code. `coil package` adds a body, `__start`
+(`coil_native::start_body`, `common::NATIVE_START_NAME`), that runs the program's
+startup in order (each `Init` a call and a `StoreStatic`, each `Call` a call, each
+`Restore` a call of host native `startup_restore`, `HostOp::Restore`, which the driver
+runs) and then calls `main`. Its id is past every body's. The payload is then data only:
+its `startup` is empty and its `main` is `__start`, so the driver calls one body and walks
+nothing. A panic's backtrace leaves `__start`'s frame out (`Locator::native_site_line`).
+The JIT runner and `coil FILE` keep the startup list.
 
 `--emit` stops before the link. `--emit obj` writes the object: `cc app.o libcoil_rt.a`
 makes the program, with your own objects beside it. `--emit lib` adds the object to a copy

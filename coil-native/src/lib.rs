@@ -345,6 +345,61 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
     }
 }
 
+/// The name of an AOT executable's native start ([`start_body`]).
+pub const START_NAME: &str = common::NATIVE_START_NAME;
+
+/// An AOT executable's start as a body (`__start`): the program's startup
+/// in order (each `Init`'s word stored in its static, each `Call` made,
+/// each `Restore` a `startup_restore` call), then `main`. Its payload then
+/// is data only: the driver calls this body as the program's `main` and
+/// walks no startup (`docs/internals/native.md`, "Native start").
+/// `body_ids` names each body's id; `Err` names a step no body has.
+pub fn start_body(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, startup: &[common::StartupOp], main: Option<u32>) -> Result<NativeBody, String> {
+    use compiler::native_mir::MirBlock;
+    let by_id: HashMap<u32, &NativeBody> = bodies.iter().filter_map(|b| Some((*body_ids.get(&b.name)?, b))).collect();
+    let mut f = MirFunc::new(START_NAME);
+    f.ret_ty = Some(MirTy::I64);
+    let mut b = MirBlock::new(BlockId(0));
+    let val = |f: &mut MirFunc, ty: MirTy| {
+        f.types.push(ty);
+        ValueId(f.types.len() as u32 - 1)
+    };
+    let call = |f: &mut MirFunc, b: &mut MirBlock, id: u32| -> Result<ValueId, String> {
+        let body = by_id.get(&id).ok_or_else(|| format!("no body {id} for the start"))?;
+        let target = body.entry.ok_or_else(|| format!("`{}` has no entry label", body.name))?;
+        let dest = val(f, body.mir.ret_ty.unwrap_or(MirTy::I64));
+        let dest_hi = body.mir.ret_hi_ty.map(|t| val(f, t));
+        b.insts.push(MirInst::Call { dest, dest_hi, target, args: Vec::new() });
+        Ok(dest)
+    };
+    for op in startup {
+        match *op {
+            common::StartupOp::Init { entry, slot } => {
+                let value = call(&mut f, &mut b, entry)?;
+                let dest = val(&mut f, MirTy::Bool);
+                b.insts.push(MirInst::StoreStatic { dest, slot, value });
+            }
+            common::StartupOp::Call { entry } => {
+                call(&mut f, &mut b, entry)?;
+            }
+            common::StartupOp::Restore { at } => {
+                let c = val(&mut f, MirTy::I64);
+                b.insts.push(MirInst::Const { dest: c, c: MirConst::I64(i64::from(at)) });
+                let dest = val(&mut f, MirTy::I64);
+                b.insts.push(MirInst::HostInvoke { dest, dest_hi: None, native_id: common::STARTUP_RESTORE_ID, layout: 0, args: vec![c] });
+            }
+        }
+    }
+    if let Some(m) = main {
+        call(&mut f, &mut b, m)?;
+    }
+    let zero = val(&mut f, MirTy::I64);
+    b.insts.push(MirInst::Const { dest: zero, c: MirConst::I64(0) });
+    b.term = Some(Terminator::Return { lo: Some(zero), hi: None });
+    f.blocks = vec![b];
+    Ok(NativeBody { name: START_NAME.to_string(), entry: None, mir: f })
+}
+
 /// `coil_aot_host_groups`: a `machine::AotHostGroup` record per host-native
 /// group the program calls (`HostInvoke`) and every program's runtime
 /// may call (`machine::core_host_groups`), its `push` the group's
