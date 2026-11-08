@@ -3756,11 +3756,11 @@ impl Lower<'_> {
                 kind: Some(ForInKind::Tuple { arity }),
             } => self.for_array(id, pat, *iterable, *body, None, Items::Tuple(*arity)),
             HirKind::ForIn {
-                pat: HirPat::Bind(local),
+                pat,
                 iterable,
                 body,
                 kind: Some(ForInKind::Coroutine),
-            } => self.for_coroutine(*local, *iterable, *body),
+            } => self.for_coroutine(pat, *iterable, *body),
             HirKind::Match { scrutinee, arms } => {
                 if self.stmt_matches.remove(&id) && !returned {
                     self.discard_arms.extend(arms.iter().map(|a| a.body));
@@ -4038,8 +4038,28 @@ impl Lower<'_> {
     /// matches).
     /// `for x in h` over a coroutine, as HIR emission's: resume into `x`,
     /// stop once the handle is done (its completion value is never bound).
-    fn for_coroutine(&mut self, local: HirLocal, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
-        let ty = self.local_ty(local)?;
+    fn for_coroutine(&mut self, pat: &HirPat, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
+        // A destructuring pattern reads its parts from each yielded tuple's
+        // box (#2317).
+        let (ty, item) = match pat {
+            HirPat::Bind(local) => (self.local_ty(*local)?, None),
+            HirPat::Tuple(_) => {
+                let item = match self.expr_ty(iterable).map(strip_readonly) {
+                    Some(Ty::App(head, args)) if matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") && args.len() == 2 => args[0].clone(),
+                    _ => return Err("for in coroutine pattern".into()),
+                };
+                // A tuple (two-word ones too) comes back as its box.
+                let heap = match self.inp.word(&item) {
+                    Some(w) => w == MirTy::HeapRef,
+                    None => matches!(strip_readonly(&item), Ty::Tuple(items) if !items.is_empty()),
+                };
+                if !heap {
+                    return Err("for in coroutine pattern".into());
+                }
+                (MirTy::HeapRef, Some(item))
+            }
+            _ => return Err("for in coroutine pattern".into()),
+        };
         let Some(h) = self.word(iterable)? else {
             return Ok(Val::Never);
         };
@@ -4049,10 +4069,16 @@ impl Lower<'_> {
         self.jump(head)?;
         self.switch(head);
         let x = self.b.ins_resume_coro(h, None, ty).map_err(mir)?;
-        self.bind(local, x)?;
+        if let HirPat::Bind(local) = pat {
+            self.bind(*local, x)?;
+        }
         let done = self.b.ins_done_coro(h).map_err(mir)?;
         self.b.branch(done, exit, body_b).map_err(mir)?;
         self.switch(body_b);
+        // The parts read only once the generator is known to have yielded.
+        if let Some(item) = &item {
+            self.bind_tuple_item(pat, x, Some(item))?;
+        }
         // A loop over a generator it made (not one a local or field holds,
         // which a later `resume` may go on with) closes it when left
         // early: a `break` before it leaves (the loop's `defers` mark is
