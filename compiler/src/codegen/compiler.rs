@@ -4797,14 +4797,14 @@ impl Compiler {
     /// Whether a value of named function `name` (bare, or another module's
     /// or a static method's path) can target a one-word adapter
     /// (`name$value`, [`Self::fn_value_target`]) so the function itself
-    /// returns two words to its direct calls.
+    /// returns two words to its direct calls. A partial application's
+    /// closure targets the adapter too ([`Self::partial_value_target`]).
     /// Not: an overload (the adapter is typed by name, not by candidate),
     /// a generic (its value is the shared body's `PolyFn`), a coroutine or
     /// a host native (neither returns two words), a trait instance method
     /// (dictionaries reach it through its `$dict` adapter, so a value never
-    /// targets it), a function with a rest parameter (the adapter's call
-    /// would pack the pack again), or one some call partially applies (a
-    /// partial's closure calls it directly).
+    /// targets it), or a function with a rest parameter (the adapter's
+    /// call would pack the pack again).
     ///
     /// The first answer for a name is kept, as [`Self::two_word_return_kind`]'s.
     pub(super) fn fn_value_redirects(&self, name: &str) -> bool {
@@ -4830,7 +4830,7 @@ impl Compiler {
             && !self.coroutine_fns.contains(name)
             && !is_instance_method_fqn(&self.checker, name)
             && !self.ident_is_host_native(name)
-            && self.checker.fn_param_tys(name).is_some_and(|p| (0..p.len()).all(|argc| !self.is_fn_value_escaped(&format!("{name}#{argc}"))))
+            && self.checker.fn_param_tys(name).is_some()
     }
 
     /// True when `name` is used as a function value anywhere we can see.
@@ -4940,9 +4940,9 @@ impl Compiler {
         // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
         let facts = crate::layout::CalleeFacts {
             coroutine: self.coroutine_fns.contains(name),
-            // A value of it targets its one-word adapter instead; a
-            // partial application still needs the one-word result.
-            escaped: (self.is_fn_value_escaped(name) && !self.fn_value_redirects(name)) || self.is_under_applied(name),
+            // A value of it, or a partial application, targets its
+            // one-word adapter instead.
+            escaped: (self.is_fn_value_escaped(name) || self.is_under_applied(name)) && !self.fn_value_redirects(name),
             instance_method: is_instance_method_fqn(&self.checker, name) && !self.instance_method_fqn_raw(name),
             host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
             ..crate::layout::CalleeFacts::default()

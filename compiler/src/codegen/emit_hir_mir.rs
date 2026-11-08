@@ -784,13 +784,15 @@ impl Compiler {
             // argument its own word.
             HirKind::Call { args, .. }
                 if let Some(HirCall {
-                    builtin: Some(HirBuiltin::Partial { entry, mask, operand }),
+                    builtin: Some(HirBuiltin::Partial { entry, mask, operand, value }),
                     params,
                     ..
                 }) = emit.plan.calls.get(&id.0) =>
             {
+                let (entry, value) = (*entry as usize, *value);
                 if args.iter().zip(params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
-                    && let Some(target) = self.bodies.entry_label_for_offset(*entry as usize)
+                    && let Some(label) = self.bodies.entry_label_for_offset(entry)
+                    && let Some(target) = self.partial_value_target(entry, label, value)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
                     t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });

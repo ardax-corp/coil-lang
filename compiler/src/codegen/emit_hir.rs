@@ -261,7 +261,9 @@ enum HirBuiltin {
     Bound { dict: u32, method: u32 },
     /// `f(a)` filling a prefix of `f`'s parameters: the filled values, the
     /// fill mask, then `CodePtr` and `MakeFn`, as `compile_call_expr`.
-    Partial { entry: u32, mask: u32, operand: u32 },
+    /// `value`: `f` returns two words, so the closure targets its one-word
+    /// adapter ([`Compiler::partial_value_target`]).
+    Partial { entry: u32, mask: u32, operand: u32, value: bool },
     /// `dot` / `cross` / `matmul` / ...: the packed `HostInvoke` kernel, or
     /// the operands to temps and the scalar unroll, as the AST's
     /// `emit_linear_algebra`.
@@ -5298,9 +5300,14 @@ impl Compiler {
             || (total < 32 && mask >> total != 0)
             || self.checker.is_generic_fn(lookup)
             || self.coroutine_fns.contains(key)
-            || self.two_word_return_kind(lookup).is_some()
             || self.callee_has_unboxed_range_params(lookup)
         {
+            return Err("callee-partial");
+        }
+        // A two-word result: the closure calls the function's one-word
+        // adapter, whose twin the function is.
+        let value = self.two_word_return_kind(lookup).is_some();
+        if value && (method || key != lookup || !self.fn_value_redirects(key)) {
             return Err("callee-partial");
         }
         let entry = *self.functions.get(key).ok_or("callee-partial")?;
@@ -5341,6 +5348,7 @@ impl Compiler {
                 entry: entry as u32,
                 mask,
                 operand: make_fn_operand(0, mask.count_ones(), total as u32, false),
+                value,
             }),
             generic: None,
             instance: None,
@@ -10718,6 +10726,25 @@ impl Compiler {
             self.hir_value_adapter_tail.push((name.to_string(), adapter.clone()));
         }
         self.fn_entry_labels[&adapter]
+    }
+
+    /// The entry a partial application of the function at `entry` targets
+    /// ([`HirBuiltin::Partial`]): the function's own `label`, or with
+    /// `value`, its one-word adapter ([`Self::fn_value_target`]).
+    pub(super) fn partial_value_target(&mut self, entry: usize, label: IlLabel, value: bool) -> Option<IlLabel> {
+        if !value {
+            return Some(label);
+        }
+        // The function's names at that entry (a bare one and its path):
+        // the least, so the adapter's name does not depend on map order.
+        let name = self
+            .functions
+            .iter()
+            .filter(|&(n, &e)| e == entry && self.fn_value_redirects(n) && self.two_word_return_kind(n).is_some())
+            .map(|(n, _)| n)
+            .min()?
+            .clone();
+        Some(self.fn_value_target(&name, label))
     }
 
     /// [`Self::fn_value_target`]'s adapter: its parameters passed on to
