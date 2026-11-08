@@ -3165,9 +3165,23 @@ impl<'a> Lower<'a> {
             }
             MirInst::HeapFieldLoad { dest, object, index } => {
                 let o = self.get(f, *object);
+                let o = self.coerce(o, types::I64);
+                // An instance's slot in place; anything else (an enum's
+                // payload) through the helper.
+                let (fast, slow) = self.instance_slot(o, *index, false);
+                let join = self.b.create_block();
+                self.b.append_block_param(join, types::I64);
+                self.b.switch_to_block(fast);
+                let at = self.b.block_params(fast)[0];
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(slow);
                 let i = self.b.ins().iconst(types::I64, i64::from(*index));
                 let call = self.b.ins().call(self.field, &[o, i]);
                 let w = self.b.inst_results(call)[0];
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                let w = self.b.block_params(join)[0];
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -3193,14 +3207,26 @@ impl<'a> Lower<'a> {
             }
             MirInst::HeapFieldStore { dest, object, value, index } => {
                 let o = self.get(f, *object);
-                let i = self.b.ins().iconst(types::I64, i64::from(*index));
+                let o = self.coerce(o, types::I64);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let call = self.b.ins().call(self.set_field, &[self.ctx, o, i, v]);
-                let w = self.b.inst_results(call)[0];
+                let join = self.b.create_block();
+                if machine::native::instance_slots().inline_stores {
+                    // In place, unless the write barrier must log the object.
+                    let (fast, slow) = self.instance_slot(o, *index, true);
+                    self.b.switch_to_block(fast);
+                    let at = self.b.block_params(fast)[0];
+                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    self.b.ins().jump(join, &[]);
+                    self.b.switch_to_block(slow);
+                }
+                let i = self.b.ins().iconst(types::I64, i64::from(*index));
+                self.b.ins().call(self.set_field, &[self.ctx, o, i, v]);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
-                self.set(f, *dest, w);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(join);
+                self.set(f, *dest, v);
             }
             MirInst::Alloc { dest, kind, elems, kinds } => {
                 use machine::native::{ALLOC_ARRAY, ALLOC_ENUM, ALLOC_OBJECT, ALLOC_TUPLE};
@@ -3961,6 +3987,55 @@ impl<'a> Lower<'a> {
         }
         self.b.ins().brif(c, fast, &[], slow, &[]);
         (fast, slow, join)
+    }
+
+    /// Where slot `index` of `o` is when `o` is an instance that has it
+    /// (`machine::native::instance_slots`): branches to the first block,
+    /// with the slot's address as its parameter, or to the second. With
+    /// `store`, an object the write barrier must log takes the second.
+    fn instance_slot(&mut self, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {
+        let l = machine::native::instance_slots();
+        let flags = MemFlagsData::trusted();
+        let (fast, slow) = (self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(fast, types::I64);
+        let (kind, storage, inline, spill_test, spill, check) =
+            (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(check, types::I64);
+        self.b.append_block_param(check, types::I64);
+        self.b.ins().brif(o, kind, &[], slow, &[]);
+        self.b.switch_to_block(kind);
+        let k = self.b.ins().uload8(types::I64, flags, o, l.kind_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+        if store {
+            let g = self.b.ins().uload8(types::I64, flags, o, l.generation_at as i32);
+            let logged = self.b.ins().band_imm_u(g, i64::from(l.unlogged));
+            let clear = self.b.ins().icmp_imm_s(IntCC::Equal, logged, 0);
+            let both = self.b.ins().band(is, clear);
+            self.b.ins().brif(both, storage, &[], slow, &[]);
+        } else {
+            self.b.ins().brif(is, storage, &[], slow, &[]);
+        }
+        self.b.switch_to_block(storage);
+        let tag = self.b.ins().uload8(types::I64, flags, o, l.storage_at as i32);
+        let is_inline = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.inline_tag));
+        self.b.ins().brif(is_inline, inline, &[], spill_test, &[]);
+        self.b.switch_to_block(inline);
+        let len = self.b.ins().uload8(types::I64, flags, o, l.inline_len_at as i32);
+        let ptr = self.b.ins().iadd_imm_s(o, i64::from(l.inline_slots_at));
+        self.b.ins().jump(check, &[ptr.into(), len.into()]);
+        self.b.switch_to_block(spill_test);
+        let is_spill = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.spill_tag));
+        self.b.ins().brif(is_spill, spill, &[], slow, &[]);
+        self.b.switch_to_block(spill);
+        let ptr = self.b.ins().load(types::I64, flags, o, l.spill_ptr_at as i32);
+        let len = self.b.ins().load(types::I64, flags, o, l.spill_len_at as i32);
+        self.b.ins().jump(check, &[ptr.into(), len.into()]);
+        self.b.switch_to_block(check);
+        let (ptr, len) = (self.b.block_params(check)[0], self.b.block_params(check)[1]);
+        let has = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, len, i64::from(index));
+        let at = self.b.ins().iadd_imm_s(ptr, i64::from(index) * 8);
+        self.b.ins().brif(has, fast, &[at.into()], slow, &[]);
+        (fast, slow)
     }
 
     /// Address of `array[i]` in its view.
