@@ -216,7 +216,7 @@ pub struct HirLaneElem {
 /// (`HirMirInput::lane_calls`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HirLaneCall {
-    /// `v.pop()`: the last element's words, the array truncated.
+    /// `v.pop()`: the last element's words, taken out of the array.
     Pop,
     /// `v.remove(i)`: element `i`'s words, the rest moved down one.
     Remove,
@@ -5930,12 +5930,11 @@ impl Lower<'_> {
         }
     }
 
-    /// `v.pop()` (`pop`) or `v.remove(i)` on lane array `args[0]`:
-    /// `None` when there is no such element; else the element's words are
-    /// read, the elements after it move down one, the array is truncated
-    /// by one (`vec_truncate`), and the result is `Some` of the element
-    /// boxed, in the call's layout (a niche word, or the enum object a
-    /// `Vec` thunk returns).
+    /// `v.pop()` or `v.remove(i)` on lane array `args[0]`: `None` when
+    /// there is no such element; else the element's words are read and
+    /// boxed, `vec_drain` takes it out of the array (the ones after it
+    /// move down), and the result is `Some` of the box in the call's
+    /// layout (a niche word, or the enum object a `Vec` thunk returns).
     fn lane_take(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         let raw = std::mem::take(&mut self.raw_host);
         let lane = self.lane(args[0]).ok_or("lane receiver")?;
@@ -5953,20 +5952,19 @@ impl Lower<'_> {
             },
             None => None,
         };
-        let truncate = common::VEC_TRUNCATE_ID;
         let out = self.temp();
         let (some_b, none_b, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
         self.at_expr(id, |l| {
             let n = l.b.ins_array_len(arr).map_err(mir)?;
             let zero = l.b.ins_const(MirConst::I64(0)).map_err(mir)?;
             let one = l.b.ins_const(MirConst::I64(1)).map_err(mir)?;
-            let last = l.b.ins_binop(MirBinOp::Sub, n, one).map_err(mir)?;
             // The element taken: the last one, or `i` when `0 <= i < n`.
             let i = match at {
                 None => {
                     let empty = l.b.ins_cmp(MirCmpOp::Le, n, zero).map_err(mir)?;
                     l.b.branch(empty, none_b, some_b).map_err(mir)?;
-                    last
+                    l.switch(some_b);
+                    l.b.ins_binop(MirBinOp::Sub, n, one).map_err(mir)?
                 }
                 Some(i) => {
                     let check_hi = l.b.create_block();
@@ -5975,36 +5973,18 @@ impl Lower<'_> {
                     l.switch(check_hi);
                     let above = l.b.ins_cmp(MirCmpOp::Ge, i, n).map_err(mir)?;
                     l.b.branch(above, none_b, some_b).map_err(mir)?;
+                    l.switch(some_b);
                     i
                 }
             };
-            l.switch(some_b);
             let (lo, hi) = l.b.ins_lane_index(arr, i, lane.lo, lane.hi).map_err(mir)?;
-            // Boxed before the move loop, whose header is a safepoint: a
-            // heap payload is then held by its box, a reference.
+            // Boxed before the array drops it: a heap payload is then held
+            // by its box, a reference.
             let Val::V(boxed) = l.box_pair_val(&elem, lo, hi)? else {
                 return Err("lane element box".into());
             };
-            if at.is_some() {
-                // for j = i; j < n - 1; j += 1 { v[j] = v[j + 1] }
-                let j = l.temp();
-                l.b.def_local(j, i).map_err(mir)?;
-                let (head, body, done) = (l.b.create_block(), l.b.create_block(), l.b.create_block());
-                l.jump(head)?;
-                l.switch(head);
-                let cur = l.b.use_local(j, MirTy::I64).map_err(mir)?;
-                let more = l.b.ins_cmp(MirCmpOp::Lt, cur, last).map_err(mir)?;
-                l.b.branch(more, body, done).map_err(mir)?;
-                l.switch(body);
-                let cur = l.b.use_local(j, MirTy::I64).map_err(mir)?;
-                let next = l.b.ins_binop(MirBinOp::Add, cur, one).map_err(mir)?;
-                let (a, b) = l.b.ins_lane_index(arr, next, lane.lo, lane.hi).map_err(mir)?;
-                l.b.ins_lane_store(arr, cur, a, b, lane.shape).map_err(mir)?;
-                l.b.def_local(j, next).map_err(mir)?;
-                l.jump(head)?;
-                l.switch(done);
-            }
-            l.b.ins_host_invoke(truncate, vec![arr, last]).map_err(mir)?;
+            let next = l.b.ins_binop(MirBinOp::Add, i, one).map_err(mir)?;
+            l.b.ins_host_invoke(common::VEC_DRAIN_ID, vec![arr, i, next]).map_err(mir)?;
             let some = if niche {
                 l.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, boxed).map_err(mir)?
             } else {
@@ -6027,9 +6007,9 @@ impl Lower<'_> {
     }
 
     /// `v.insert(i, x)` on lane array `args[0]`: unless `0 <= i <= len`
-    /// the runtime's `vec_insert` panics, as on any array; else the last
-    /// element is pushed again, the elements from `i` move up one and `x`'s
-    /// words go to `i`.
+    /// the runtime's `vec_insert` panics, as on any array; else `x`'s
+    /// words are pushed and, unless `i` is the end, `vec_rotate_in` moves
+    /// them to `i` (the elements from `i` up one).
     fn lane_insert(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         let lane = self.lane(args[0]).ok_or("lane receiver")?;
         let Some(arr) = self.word(args[0])? else {
@@ -6041,21 +6021,16 @@ impl Lower<'_> {
         let Some((lo, hi)) = self.pair(args[2])? else {
             return Ok(Val::Never);
         };
-        // `x`'s first word stays in a value across the move loop.
-        if lane.shape.tag_mask != 0 {
-            self.b.mark_heap_pair_word(lo);
-        }
         let insert = common::host_native_id("vec_insert").ok_or("vec_insert")? as u16;
         let grown = self.at_expr(id, |l| {
             let n = l.b.ins_array_len(arr).map_err(mir)?;
             let zero = l.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-            let one = l.b.ins_const(MirConst::I64(1)).map_err(mir)?;
-            let (check_hi, oob, at_end, inner, done) = (l.b.create_block(), l.b.create_block(), l.b.create_block(), l.b.create_block(), l.b.create_block());
+            let (check_hi, oob, inside, rotate, done) = (l.b.create_block(), l.b.create_block(), l.b.create_block(), l.b.create_block(), l.b.create_block());
             let below = l.b.ins_cmp(MirCmpOp::Lt, i, zero).map_err(mir)?;
             l.b.branch(below, oob, check_hi).map_err(mir)?;
             l.switch(check_hi);
             let above = l.b.ins_cmp(MirCmpOp::Gt, i, n).map_err(mir)?;
-            l.b.branch(above, oob, at_end).map_err(mir)?;
+            l.b.branch(above, oob, inside).map_err(mir)?;
             // Out of range: the native panics with its own message.
             let start = l.order.len();
             l.switch(oob);
@@ -6063,47 +6038,16 @@ impl Lower<'_> {
             l.keep_pins()?;
             l.b.unreachable().map_err(mir)?;
             l.mark_cold(start);
-            // At the end: a push.
-            let grown = l.temp();
-            l.switch(at_end);
-            let end = l.b.ins_cmp(MirCmpOp::Eq, i, n).map_err(mir)?;
-            let push_b = l.b.create_block();
-            l.b.branch(end, push_b, inner).map_err(mir)?;
-            l.switch(push_b);
+            l.switch(inside);
             let out = l.b.ins_lane_push(arr, lo, hi, lane.shape).map_err(mir)?;
             let out = l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
-            l.b.def_local(grown, out).map_err(mir)?;
-            l.jump(done)?;
-            // Inside: push the last element again, then for j = n - 1;
-            // j > i; j -= 1 { v[j] = v[j - 1] }; v[i] = x.
-            l.switch(inner);
-            let last = l.b.ins_binop(MirBinOp::Sub, n, one).map_err(mir)?;
-            let (a, b) = l.b.ins_lane_index(arr, last, lane.lo, lane.hi).map_err(mir)?;
-            let out = l.b.ins_lane_push(arr, a, b, lane.shape).map_err(mir)?;
-            let out = l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
-            l.b.def_local(grown, out).map_err(mir)?;
-            let j = l.temp();
-            l.b.def_local(j, last).map_err(mir)?;
-            let (head, body, put) = (l.b.create_block(), l.b.create_block(), l.b.create_block());
-            l.jump(head)?;
-            l.switch(head);
-            let cur = l.b.use_local(j, MirTy::I64).map_err(mir)?;
-            let more = l.b.ins_cmp(MirCmpOp::Gt, cur, i).map_err(mir)?;
-            l.b.branch(more, body, put).map_err(mir)?;
-            l.switch(body);
-            let a_ = l.b.use_local(grown, MirTy::HeapRef).map_err(mir)?;
-            let cur = l.b.use_local(j, MirTy::I64).map_err(mir)?;
-            let prev = l.b.ins_binop(MirBinOp::Sub, cur, one).map_err(mir)?;
-            let (a, b) = l.b.ins_lane_index(a_, prev, lane.lo, lane.hi).map_err(mir)?;
-            l.b.ins_lane_store(a_, cur, a, b, lane.shape).map_err(mir)?;
-            l.b.def_local(j, prev).map_err(mir)?;
-            l.jump(head)?;
-            l.switch(put);
-            let a_ = l.b.use_local(grown, MirTy::HeapRef).map_err(mir)?;
-            l.b.ins_lane_store(a_, i, lo, hi, lane.shape).map_err(mir)?;
+            let end = l.b.ins_cmp(MirCmpOp::Eq, i, n).map_err(mir)?;
+            l.b.branch(end, done, rotate).map_err(mir)?;
+            l.switch(rotate);
+            l.b.ins_host_invoke(common::VEC_ROTATE_IN_ID, vec![out, i]).map_err(mir)?;
             l.jump(done)?;
             l.switch(done);
-            l.b.use_local(grown, MirTy::HeapRef).map_err(mir)
+            Ok(out)
         })?;
         self.pushed(args[0], grown)?;
         Ok(Val::Unit)

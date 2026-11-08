@@ -3888,6 +3888,25 @@ impl ObjArray {
         }
     }
 
+    /// A two-word lane array's words in place, for native code, with its
+    /// element count (`None` for any other array). Loads only: no write to
+    /// the object ([`Self::words_view_for_load`]).
+    pub(crate) fn lanes_view_for_load(&self) -> Option<(*mut Value, usize)> {
+        match &self.data {
+            ArrayData::Lanes { words, k: 2 } => Some((words.as_ptr().cast_mut(), words.len() / 2)),
+            _ => None,
+        }
+    }
+
+    /// [`Self::lanes_view_for_load`] for stores: marks the array as
+    /// [`Self::set_lanes`] does when an element may hold a reference.
+    pub(crate) fn lanes_view(&mut self) -> Option<(*mut Value, usize)> {
+        if self.tag_mask != 0 {
+            self.note();
+        }
+        self.lanes_view_for_load()
+    }
+
     /// A write may add a reference: the next mark rescans.
     #[inline(always)]
     fn note(&mut self) {
@@ -4016,12 +4035,28 @@ impl ObjArray {
         }
     }
 
-    /// Keep the first `n` elements (all of them when `n` is past the end).
-    pub fn truncate(&mut self, n: usize) {
+    /// Drop elements `from..to`, the ones after them moving down (the
+    /// range cut to the length).
+    pub fn drain_range(&mut self, from: usize, to: usize) {
+        let to = to.min(self.len());
+        let from = from.min(to);
         match &mut self.data {
-            ArrayData::Words(w) => w.truncate(n),
-            ArrayData::Bytes(b) => b.truncate(n),
-            ArrayData::Lanes { words, k } => words.truncate(n.saturating_mul(*k)),
+            ArrayData::Words(w) => drop(w.drain(from..to)),
+            ArrayData::Bytes(b) => drop(b.drain(from..to)),
+            ArrayData::Lanes { words, k } => drop(words.drain(from * *k..to * *k)),
+        }
+    }
+
+    /// Move the last element to `i`, elements `i..` moving up one (nothing
+    /// when `i` is not below the length).
+    pub fn rotate_last_to(&mut self, i: usize) {
+        if i >= self.len() {
+            return;
+        }
+        match &mut self.data {
+            ArrayData::Words(w) => w[i..].rotate_right(1),
+            ArrayData::Bytes(b) => b[i..].rotate_right(1),
+            ArrayData::Lanes { words, k } => words[i * *k..].rotate_right(*k),
         }
     }
 

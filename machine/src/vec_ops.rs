@@ -100,20 +100,35 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
     }
 }
 
-/// `vec_truncate(v, n) -> ()`: drop the elements from `n` on, in any
-/// array form (a lane array's whole elements). Lane code's `pop` and
-/// `remove` shrink the array with it; `n` past the length keeps all.
-pub fn host_vec_truncate(heap: &mut Heap, args: &[Value]) -> Value {
+/// `vec_drain(v, from, to) -> ()`: drop elements `from..to`, in any array
+/// form (a lane array's whole elements). Lane code's `pop` and `remove`
+/// take the element out with it; a range past the end is cut to it.
+pub fn host_vec_drain(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let n = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
+    let from = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
+    let to = args.get(2).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
     if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
-        gc.as_mut().truncate(n);
+        gc.as_mut().drain_range(from, to);
     }
     Value::from(0i64)
 }
 
-/// `vec_truncate` (major 7 minor 3), after the lock primitives.
-pub const VEC_TRUNCATE_WIRING: &[(&str, usize, crate::HostValueFn)] = &[(common::VEC_TRUNCATE_NATIVE, 2, host_vec_truncate)];
+/// `vec_rotate_in(v, i) -> ()`: move the last element to `i`, the
+/// elements from `i` up one, in any array form. Lane code's `insert`
+/// pushes the element and then rotates it in; `i` past the end moves
+/// nothing.
+pub fn host_vec_rotate_in(heap: &mut Heap, args: &[Value]) -> Value {
+    let handle = args.first().copied().unwrap_or(Value::from(0i64));
+    let i = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
+    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
+        gc.as_mut().rotate_last_to(i);
+    }
+    Value::from(0i64)
+}
+
+/// `vec_drain` / `vec_rotate_in` (major 7 minor 3), after the lock primitives.
+pub const VEC_MOVE_WIRING: &[(&str, usize, crate::HostValueFn)] =
+    &[(common::VEC_DRAIN_NATIVE, 3, host_vec_drain), (common::VEC_ROTATE_IN_NATIVE, 2, host_vec_rotate_in)];
 
 /// Copy a fixed array into a fresh growable vec (`Vec::from`).
 pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {

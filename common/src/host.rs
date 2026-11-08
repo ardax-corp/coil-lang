@@ -1552,9 +1552,16 @@ pub const HOST_NATIVES: &[HostNative] = &[
         caps: NO_CAP,
     },
     HostNative {
-        name: VEC_TRUNCATE_NATIVE,
+        name: VEC_DRAIN_NATIVE,
+        arity: 3,
+        id: VEC_DRAIN_ID,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: VEC_ROTATE_IN_NATIVE,
         arity: 2,
-        id: VEC_TRUNCATE_ID,
+        id: VEC_ROTATE_IN_ID,
         effects: HEAP_R,
         caps: NO_CAP,
     },
@@ -1808,16 +1815,24 @@ pub const LOCK_ACQUIRE_ID: u16 = 200;
 /// `prelude::thread::rw_store`, the last lock primitive.
 pub const RW_STORE_ID: u16 = 211;
 
-/// `vec_truncate(v, n)` (archive 7 minor 3, compiler lowering only): drop
-/// the elements of array `v` from `n` on; the compiler has checked
-/// `0 <= n <= v.len()`. Any array form, a lane array's included: lane code
-/// pops and removes with it.
-pub const VEC_TRUNCATE_ID: u16 = 212;
-pub const VEC_TRUNCATE_NATIVE: &str = "vec_truncate";
+/// `vec_drain(v, from, to)` (archive 7 minor 3, compiler lowering only):
+/// drop elements `from..to` of array `v`, the ones after them moving down;
+/// the compiler has checked `0 <= from <= to <= v.len()`. Any array form,
+/// a lane array's included: lane code's `pop` and `remove` take the element
+/// out with it.
+pub const VEC_DRAIN_ID: u16 = 212;
+pub const VEC_DRAIN_NATIVE: &str = "vec_drain";
+/// `vec_rotate_in(v, i)` (archive 7 minor 3, compiler lowering only): move
+/// the last element of array `v` to `i`, elements `i..` moving up one; the
+/// compiler has checked `0 <= i < v.len()`. Any array form: lane code's
+/// `insert` pushes and then rotates the element in.
+pub const VEC_ROTATE_IN_ID: u16 = 213;
+pub const VEC_ROTATE_IN_NATIVE: &str = "vec_rotate_in";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 213);
-    assert!(HOST_NATIVES[VEC_TRUNCATE_ID as usize].id == VEC_TRUNCATE_ID);
+    assert!(HOST_NATIVES.len() == 214);
+    assert!(HOST_NATIVES[VEC_DRAIN_ID as usize].id == VEC_DRAIN_ID);
+    assert!(HOST_NATIVES[VEC_ROTATE_IN_ID as usize].id == VEC_ROTATE_IN_ID);
     assert!(HOST_NATIVES[LOCK_ACQUIRE_ID as usize].id == LOCK_ACQUIRE_ID);
     assert!(HOST_NATIVES[RW_STORE_ID as usize].id == RW_STORE_ID);
     assert!(HOST_NATIVES[KEY_INDEX_EQ_MODE_ID as usize].id == KEY_INDEX_EQ_MODE_ID);
@@ -1898,7 +1913,8 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "vec_from_array",
     "vec_extend_range",
     "vec_fill",
-    VEC_TRUNCATE_NATIVE,
+    VEC_DRAIN_NATIVE,
+    VEC_ROTATE_IN_NATIVE,
     "symbol_next_id",
     "key_index_table",
     "key_index_probe",
