@@ -2036,7 +2036,7 @@ impl Lower<'_> {
                 let (Some(l), Some(r)) = (boxed(self, l)?, boxed(self, r)?) else {
                     return Ok(Val::Never);
                 };
-                return self.structural_eq(id, l, r, ne);
+                return self.structural_eq(l, r, ne);
             }
         };
         let eq = match words {
@@ -4232,7 +4232,7 @@ impl Lower<'_> {
             if self.b.value_ty(l) != MirTy::HeapRef || self.b.value_ty(r) != MirTy::HeapRef {
                 return Err("operator operand type".into());
             }
-            return self.structural_eq(id, l, r, op == BinOp::Ne);
+            return self.structural_eq(l, r, op == BinOp::Ne);
         }
         if let Some(out) = self.bitop_identity(id, op, lhs, rhs) {
             return out;
@@ -4298,18 +4298,11 @@ impl Lower<'_> {
         Ok(Val::V(out.map_err(mir)?))
     }
 
-    /// `==` / `!=` of two heap words: structural equality, or, when
-    /// their type has `float` leaves, `values_eq_shaped` with the shape
-    /// emission planned, so those compare by IEEE (#1253).
-    fn structural_eq(&mut self, id: HirId, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
-        let Some(&shape) = self.inp.strings.get(&id.0) else {
-            return Ok(Val::V(self.b.ins_str_eq(l, r, ne).map_err(mir)?));
-        };
-        let shape = self.b.ins_string(shape).map_err(mir)?;
-        let eq = self.b.ins_host_invoke(common::VALUES_EQ_SHAPED_ID, vec![l, r, shape]).map_err(mir)?;
-        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-        let cmp = if ne { MirCmpOp::Eq } else { MirCmpOp::Ne };
-        Ok(Val::V(self.b.ins_cmp(cmp, eq, zero).map_err(mir)?))
+    /// `==` / `!=` of two heap words: structural equality. An aggregate
+    /// with a `float` leaf compares through its glue instead, so its
+    /// floats compare by IEEE 754 (`codegen::eq_glue`, #1253).
+    fn structural_eq(&mut self, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
+        Ok(Val::V(self.b.ins_str_eq(l, r, ne).map_err(mir)?))
     }
 
     /// Strength reduction: `x / 2^n` as `x >> n` when
@@ -5378,7 +5371,7 @@ impl Lower<'_> {
         };
         let (lt, rt) = (self.b.value_ty(l), self.b.value_ty(r));
         if lt == MirTy::HeapRef && rt == MirTy::HeapRef && matches!(sym, "==" | "!=") {
-            return self.structural_eq(id, l, r, sym == "!=");
+            return self.structural_eq(l, r, sym == "!=");
         }
         // Niche `Option` / `Result` words compare on their words: the
         // same variant, then structural equality of the payloads.
