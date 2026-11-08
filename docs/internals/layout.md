@@ -110,6 +110,33 @@ a two-word payload nested in another two-word value. A dependency's code
 another module and compiler-made code never warn. `coil dissect --boxes`
 lists every box, these included.
 
+### Lane arrays
+
+A `Vec` or array of a closed two-word type (`Option<int>`, `Result<int,
+string>`, a user enum without `drop` whose payloads are each one word, an
+arity-2 tuple of immediates; not ranges or readonly pair classes) keeps
+both words of each element in place: `ArrayData::Lanes { words, k: 2 }`,
+the element's second word its tag, and the first a heap reference only
+under the tags of the array's `tag_mask` (`layout::pair_lane_shape`). The
+collector and compaction read each first word by its tag.
+
+Ground code reads, stores and pushes the two words (`LaneIndex`,
+`LaneStore`, `LanePush`); a literal is an `Alloc` of kind `Lanes`, and a
+`for` loop binds the element's words. Code that takes one word per element
+(a shared generic body, a collection's internals, a host native, `==`,
+`Show`) never sees a lane array: where a lane array's value goes to such a
+use (`hir_lane_escapes`), `LanesToWords` turns it into boxed elements in
+place, as the op's `MirLaneShape` says to box them. The array stays the
+same object, so every alias sees the change, and it never turns back. The
+lane ops in turn accept an array of boxed elements (one a generic body
+made, or one converted earlier): `LaneIndex` unboxes the element, and
+`LaneStore` / `LanePush` box the new one. A one-word element op on a lane
+array is a compiler bug and panics in the runtime.
+
+Lane arrays are never stack arrays. `pop`, `remove`, `insert` and the
+other `Vec` natives still take one word per element, so a lane array
+converts before them.
+
 ## The two-slot calling convention
 
 The two-slot form of a `Layout::Pair` type is a calling convention, not a

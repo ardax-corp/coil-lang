@@ -177,6 +177,15 @@ impl Object {
                 let a = a.payload_mut();
                 if a.may_hold_refs() && a.elem_kind() == common::WORD_POINTER {
                     a.gc_words_mut().unwrap_or_default().iter_mut().for_each(fix);
+                } else if a.may_hold_refs() && a.lanes() > 1 {
+                    // A pointer lane's kind reads its element's tag, which
+                    // no fix changes: resolve them all first.
+                    let kinds: Vec<u8> = a.kinded_words().map(|(_, kind)| kind).collect();
+                    for (v, kind) in a.gc_words_mut().unwrap_or_default().iter_mut().zip(kinds) {
+                        if kind == common::WORD_POINTER {
+                            fix(v);
+                        }
+                    }
                 }
             }
             Self::Coroutine(c) => {
@@ -503,6 +512,40 @@ mod tests {
             heap.evacuate_finish(plan);
         }
         assert!(matches!(heap.find_object_by_addr(target.addr()), Some(Object::Enum(_))));
+    }
+
+    /// A lane array's lane 0 moves and is rewritten where its element's
+    /// tag names a heap variant; under the other tag it is a scalar that
+    /// happens to look like an address and stays as written.
+    #[test]
+    fn lane_array_pointer_lanes_are_rewritten_by_tag() {
+        let mut heap = Heap::default();
+        let mut words = Vec::new();
+        let mut addrs = Vec::new();
+        for v in 0..32 {
+            let (e, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(v)).with_kinds(1)), Object::Enum);
+            addrs.push(e.addr());
+            // Tag 1 (a heap payload) on even elements, tag 0 (a scalar) on odd.
+            words.extend([Value::from(e.addr()), Value::from(i64::from(v % 2 == 0))]);
+        }
+        let (arr, _) = heap.alloc(ObjArray::from_lanes(words, 2, 0b10), Object::Array);
+        full_collect(&mut heap, &[arr.addr()]);
+        let (_, moved) = evacuate(&mut heap, &[arr.addr()]);
+        let Some(Object::Array(a)) = heap.find_object_by_addr(arr.addr()) else {
+            panic!("array is a pinned root");
+        };
+        for (v, &addr) in addrs.iter().enumerate() {
+            let lanes = a.as_ref().get_lanes(v).expect("in bounds");
+            if v % 2 == 0 {
+                assert!(!moved.contains_key(&lanes[0].heap_addr()));
+                let Some(Object::Enum(e)) = heap.find_object_by_addr(lanes[0].heap_addr()) else {
+                    panic!("element {v} is not an enum");
+                };
+                assert_eq!(e.as_ref().payload[0].as_int(), v as i64);
+            } else {
+                assert_eq!(lanes[0].bits(), addr, "a scalar lane is never rewritten");
+            }
+        }
     }
 
     /// Pointer-kind array elements move and are rewritten, keeping the

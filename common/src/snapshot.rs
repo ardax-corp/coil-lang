@@ -33,6 +33,7 @@ const OBJ_TUPLE: u64 = 3;
 const OBJ_ENUM: u64 = 4;
 const OBJ_INSTANCE: u64 = 5;
 const OBJ_BOXED: u64 = 6;
+const OBJ_LANES: u64 = 7;
 
 const TAG_RAW: u64 = 0;
 const TAG_REF: u64 = 1;
@@ -60,6 +61,9 @@ pub enum SnapObject {
     /// A packed byte array (`Vec<byte>` / `Vec<bool>`).
     Bytes(Vec<u8>),
     Array { elem_kind: u8, words: Vec<SnapWord> },
+    /// An array of `k`-word elements, `k` words each in order; `tag_mask`
+    /// as `ObjArray::with_lanes` takes it.
+    Lanes { k: u8, tag_mask: u64, words: Vec<SnapWord> },
     Tuple { kinds: u8, words: Vec<SnapWord> },
     Enum { tag: u32, type_id: u32, kinds: u8, words: Vec<SnapWord> },
     /// A typed class instance's field slots.
@@ -202,6 +206,7 @@ impl HeapSnapshot {
             match object {
                 SnapObject::String(_) | SnapObject::Bytes(_) => {}
                 SnapObject::Array { words, .. }
+                | SnapObject::Lanes { words, .. }
                 | SnapObject::Tuple { words, .. }
                 | SnapObject::Enum { words, .. }
                 | SnapObject::Instance { words, .. } => words.iter().try_for_each(check)?,
@@ -225,6 +230,11 @@ fn encode_object(out: &mut Vec<u64>, object: &SnapObject) {
         }
         SnapObject::Array { elem_kind, words } => {
             out.push(header(OBJ_ARRAY, u64::from(*elem_kind), 0));
+            encode_words(out, words);
+        }
+        SnapObject::Lanes { k, tag_mask, words } => {
+            out.push(header(OBJ_LANES, u64::from(*k), 0));
+            out.push(*tag_mask);
             encode_words(out, words);
         }
         SnapObject::Tuple { kinds, words } => {
@@ -344,6 +354,14 @@ impl<'a> Reader<'a> {
             ),
             OBJ_BYTES => SnapObject::Bytes(self.bytes()?),
             OBJ_ARRAY => SnapObject::Array { elem_kind: aux, words: self.words()? },
+            OBJ_LANES => {
+                let tag_mask = self.next()?;
+                let words = self.words()?;
+                if aux < 2 || words.len() % usize::from(aux) != 0 {
+                    return Err(SnapshotDecodeError::Length);
+                }
+                SnapObject::Lanes { k: aux, tag_mask, words }
+            }
             OBJ_TUPLE => SnapObject::Tuple { kinds: aux, words: self.words()? },
             OBJ_ENUM => {
                 let type_id = self.next()? as u32;
@@ -376,6 +394,7 @@ mod tests {
                     words: (0..40).map(|i| if i % 2 == 0 { SnapWord::Raw(i) } else { SnapWord::Ref { index: 0, err_bit: false } }).collect(),
                 },
                 SnapObject::Tuple { kinds: 0b1001, words: vec![SnapWord::Raw(u64::MAX), SnapWord::Ref { index: 3, err_bit: false }] },
+                SnapObject::Lanes { k: 2, tag_mask: 0b10, words: vec![SnapWord::Ref { index: 0, err_bit: false }, SnapWord::Raw(1), SnapWord::Raw(0), SnapWord::Raw(0)] },
                 SnapObject::Enum { tag: 7, type_id: 42, kinds: 2, words: vec![SnapWord::Ref { index: 0, err_bit: true }] },
                 SnapObject::Instance { type_id: 9, words: vec![SnapWord::UnitEnum { tag: 3, err_bit: true }, SnapWord::EmptyTuple { err_bit: false }, SnapWord::Ref { index: 5, err_bit: false }] },
                 SnapObject::Boxed { tag: 4, word: SnapWord::Raw(f64::NAN.to_bits()) },

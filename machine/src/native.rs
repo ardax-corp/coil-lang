@@ -1240,6 +1240,174 @@ pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64,
     value
 }
 
+/// The object a two-word element `[lo, hi]` of a lane array is as one
+/// word, as the compiler boxes it (`MirLaneShape`): a two-item tuple when
+/// `payload_mask` is `0`, otherwise the enum variant of tag `hi`, whose
+/// payload is `lo` (or the empty tuple, under `unit_mask`) when it has one.
+fn lane_box(heap: &mut crate::memory::Heap, lo: u64, hi: u64, shape: [u64; 3]) -> u64 {
+    use crate::memory::{EnumPayload, ObjEnum, ObjTuple, Object};
+    let [tag_mask, payload_mask, unit_mask] = shape;
+    if payload_mask == 0 {
+        let kinds = common::pack_word_kinds([common::WORD_SCALAR, common::WORD_SCALAR]);
+        let items = [common::Value::from(lo), common::Value::from(hi)];
+        return heap.alloc(ObjTuple::from_slice(&items).with_kinds(kinds), Object::Tuple).0.addr();
+    }
+    let tag = hi as u32;
+    let bit = 1u64.checked_shl(tag).unwrap_or(0);
+    if payload_mask & bit == 0 {
+        return heap.immortal_unit_enum(tag).addr();
+    }
+    let (payload, kind) = if unit_mask & bit != 0 {
+        (heap.immortal_empty_tuple().addr(), common::WORD_POINTER)
+    } else if tag_mask & bit != 0 {
+        (lo, common::WORD_POINTER)
+    } else {
+        (lo, common::WORD_SCALAR)
+    };
+    let payload = EnumPayload::one(common::Value::from(payload)).with_kinds(common::pack_word_kinds([kind]));
+    heap.alloc(ObjEnum::new(tag, payload), Object::Enum).0.addr()
+}
+
+/// The two words of a boxed two-word element (an array of one word per
+/// element holds them so): a tuple's items, an enum's payload (`0` for
+/// none) and tag.
+fn lane_unbox(word: common::Value) -> Option<(u64, u64)> {
+    match object(word.bits())? {
+        crate::memory::Object::Enum(gc) => {
+            let e = gc.as_ref();
+            Some((e.payload.first().map_or(0, |v| v.bits()), u64::from(e.tag)))
+        }
+        crate::memory::Object::Tuple(gc) => match gc.as_ref().elements() {
+            [a, b] => Some((a.bits(), b.bits())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `LaneIndex`: element `index` of a lane array (or of an array of one
+/// word per element, unboxed), its first word returned and its second in
+/// [`NativeCtx::ret_hi`]. Out of bounds traps; anything else: bail.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_lane_index(ctx: *mut NativeCtx, addr: u64, index: i64) -> u64 {
+    let Some(crate::memory::Object::Array(gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    let arr = gc.as_ref();
+    let read = if arr.lanes() == 2 {
+        usize::try_from(index).ok().and_then(|i| arr.get_lanes(i)).map(|w| Some((w[0].bits(), w[1].bits())))
+    } else {
+        arr.read_indexed(index, false).map(lane_unbox)
+    };
+    match read {
+        Some(Some((lo, hi))) => {
+            unsafe { (*ctx).ret_hi = hi };
+            lo
+        }
+        Some(None) => unsafe { bail(ctx) },
+        None => unsafe {
+            (*ctx).trap = TRAP_OUT_OF_BOUNDS;
+            bail(ctx)
+        },
+    }
+}
+
+/// `LaneStore`: `[lo, hi]` as element `index` of a lane array, or boxed
+/// as `shape` says into an array of one word per element.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn coil_native_lane_store(
+    ctx: *mut NativeCtx,
+    addr: u64,
+    index: i64,
+    lo: u64,
+    hi: u64,
+    tag_mask: u64,
+    payload_mask: u64,
+    unit_mask: u64,
+) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    let stored = if gc.as_ref().lanes() == 2 {
+        usize::try_from(index).is_ok_and(|i| gc.as_mut().set_lanes(i, &[common::Value::from(lo), common::Value::from(hi)]))
+    } else if gc.as_ref().read_indexed(index, false).is_some() {
+        let boxed = lane_box(heap, lo, hi, [tag_mask, payload_mask, unit_mask]);
+        gc.as_mut().store_indexed(index, common::Value::from(boxed), false);
+        unsafe { note_alloc(ctx, heap) };
+        true
+    } else {
+        false
+    };
+    if !stored {
+        unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
+        return unsafe { bail(ctx) };
+    }
+    1
+}
+
+/// `LanePush`: append `[lo, hi]` to a lane array, or boxed as `shape`
+/// says to an array of one word per element; returns the array.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_lane_push(ctx: *mut NativeCtx, addr: u64, lo: u64, hi: u64, tag_mask: u64, payload_mask: u64, unit_mask: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    if gc.as_ref().lanes() == 2 {
+        gc.as_mut().push_lanes(&[common::Value::from(lo), common::Value::from(hi)]);
+    } else {
+        let boxed = lane_box(heap, lo, hi, [tag_mask, payload_mask, unit_mask]);
+        gc.as_mut().push(common::Value::from(boxed));
+    }
+    heap.account_array(gc.as_mut());
+    unsafe { note_alloc(ctx, heap) };
+    addr
+}
+
+/// `LanesToWords`: a lane array turned into one word per element in
+/// place, each element boxed as `shape` says; an array of one word per
+/// element is left as it is. Returns the array.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_lanes_to_words(ctx: *mut NativeCtx, addr: u64, tag_mask: u64, payload_mask: u64, unit_mask: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(words) = gc.as_ref().lane_words().filter(|_| gc.as_ref().lanes() == 2).map(<[common::Value]>::to_vec) else {
+        return addr;
+    };
+    // No collection runs inside an allocation, so the boxes made so far
+    // stay alive until the array holds them.
+    let boxes = words
+        .chunks_exact(2)
+        .map(|w| common::Value::from(lane_box(heap, w[0].bits(), w[1].bits(), [tag_mask, payload_mask, unit_mask])))
+        .collect();
+    gc.as_mut().lanes_into_words(boxes);
+    heap.account_array(gc.as_mut());
+    unsafe { note_alloc(ctx, heap) };
+    addr
+}
+
 /// `SetField` of slot `index` on an instance with slots; return `value`.
 /// Anything else: bail.
 ///
@@ -1431,6 +1599,7 @@ pub const ALLOC_FN: u64 = 4;
 pub const ALLOC_POLY_FN: u64 = 5;
 pub const ALLOC_DROP_ENUM: u64 = 6;
 pub const ALLOC_CORO: u64 = 7;
+pub const ALLOC_LANES: u64 = 8;
 
 /// A new object of `kind` from the `n` words at `words`, in declaration
 /// order (an enum's payload order):
@@ -1448,7 +1617,9 @@ pub const ALLOC_CORO: u64 = 7;
 /// - [`ALLOC_DROP_ENUM`]: [`ALLOC_ENUM`] of an enum with a `drop`, as
 ///   `TagEnumType` stamps it: the last word is its type id;
 /// - [`ALLOC_CORO`]: a generator, as `MakeCoro`: `extra` is its body's
-///   entry id, the words its arguments.
+///   entry id, the words its arguments;
+/// - [`ALLOC_LANES`]: a lane array of two-word elements, the words theirs
+///   in order: `extra` is its pointer tag mask.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
@@ -1474,6 +1645,12 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 let _ = arr.take_resize();
             }
             heap.alloc(arr, Object::Array).0.addr()
+        }
+        ALLOC_LANES => {
+            if !n.is_multiple_of(2) {
+                return unsafe { bail(ctx) };
+            }
+            heap.alloc(ObjArray::from_lanes(values, 2, extra), Object::Array).0.addr()
         }
         ALLOC_TUPLE if n == 0 => return heap.immortal_empty_tuple().addr(),
         ALLOC_TUPLE => heap.alloc(ObjTuple::from_slice(&values).with_kinds(extra as u8), Object::Tuple).0.addr(),
@@ -2624,6 +2801,10 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
+        ("coil_native_lane_index", coil_native_lane_index as *const u8),
+        ("coil_native_lane_store", coil_native_lane_store as *const u8),
+        ("coil_native_lane_push", coil_native_lane_push as *const u8),
+        ("coil_native_lanes_to_words", coil_native_lanes_to_words as *const u8),
         ("coil_native_probe", coil_native_probe as *const u8),
         ("coil_native_free_early", coil_native_free_early as *const u8),
         ("coil_native_format", coil_native_format as *const u8),
@@ -2649,4 +2830,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 37;
+const HELPERS: usize = 41;

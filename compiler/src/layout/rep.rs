@@ -223,6 +223,62 @@ pub fn pair_pointer_tags(checker: &Checker, ty: &Ty) -> Option<u64> {
     Some(mask)
 }
 
+/// How a closed two-word value `ty` sits in a lane array and is boxed out
+/// of one: `(tag_mask, payload_mask, unit_mask)` as
+/// `crate::mir::MirLaneShape` holds them (the tags whose first word is a
+/// heap pointer, the tags that carry a payload word, the tags whose
+/// payload is `()`), all `0` for an arity-2 tuple. `None` for a range, a
+/// readonly pair class, an enum with `drop`, or a payload whose word kind
+/// or `()`-ness is open.
+pub fn pair_lane_shape(checker: &Checker, ty: &Ty) -> Option<(u64, u64, u64)> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    let variants: Vec<(u32, Vec<Ty>)> = match of_resolved(checker, &ty) {
+        Layout::Pair(PairKind::Product) => return Some((0, 0, 0)),
+        Layout::Pair(PairKind::Option) => {
+            let inner = option_inner(strip_readonly(&ty))?;
+            checker
+                .enum_variants(common::BUILTIN_OPTION_ENUM)?
+                .into_iter()
+                .map(|(name, tag, _)| (tag, if name == "Some" { vec![inner.clone()] } else { Vec::new() }))
+                .collect()
+        }
+        Layout::Pair(PairKind::Result) => {
+            let (ok, err) = result_ok_err(strip_readonly(&ty))?;
+            checker
+                .enum_variants(common::BUILTIN_RESULT_ENUM)?
+                .into_iter()
+                .map(|(name, tag, _)| (tag, vec![if name == "Ok" { ok.clone() } else { err.clone() }]))
+                .collect()
+        }
+        Layout::Pair(PairKind::Enum(name)) if !checker.enum_has_drop(&name) => {
+            checker.enum_variants(&name)?.into_iter().map(|(_, tag, payload)| (tag, payload)).collect()
+        }
+        _ => return None,
+    };
+    let (mut tags, mut payloads, mut units) = (0u64, 0u64, 0u64);
+    for (tag, payload) in variants {
+        let bit = 1u64.checked_shl(tag)?;
+        match payload.as_slice() {
+            [] => {}
+            [p] if is_unit(p) => {
+                payloads |= bit;
+                units |= bit;
+            }
+            [p] => {
+                payloads |= bit;
+                match word_kind(checker, p) {
+                    common::WORD_SCALAR => {}
+                    common::WORD_POINTER => tags |= bit,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    // An enum with no payload is one word, never a pair.
+    (payloads != 0).then_some((tags, payloads, units))
+}
+
 /// A two-word value neither of whose words is ever a heap pointer
 /// (`Option<int>`, `(int, float)`, a numeric range, `Result<int, int>`, a
 /// readonly pair class, an enum of immediate payloads): a field of it can

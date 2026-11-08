@@ -33,6 +33,14 @@ one has a trailer after its slot kinds, an entry per tagged slot (tag slot
 `u16` LE, pointer-tag mask `u64` LE), and the collector resolves the word
 by its tag (`common::class_slot_kinds`).
 
+Minor 2 adds snapshot object kind 7, a lane array (`SnapObject::Lanes`): an
+array of two-word elements kept in place (`k`, the pointer-tag mask of the
+first word, then the words), as a `Vec` of a closed two-word type is
+([layout.md](layout.md), "Lane arrays"). MIR section `FORMAT` 13 adds
+`LaneIndex` / `LaneStore` / `LanePush` / `LanesToWords` (opcodes 45 to 48,
+each store, push and conversion with its three shape masks) and the
+`Lanes` allocation kind (9, with its mask).
+
 Majors 4 to 6 ran on the VM. The notes below are the record of what minors of
 major 4 added; opcodes and frame maps in them no longer exist.
 

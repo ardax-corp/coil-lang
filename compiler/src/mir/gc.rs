@@ -48,6 +48,8 @@ pub fn fill_live_roots(func: &mut MirFunc) {
             match inst {
                 MirInst::Alloc { dest, .. }
                 | MirInst::ArrayPush { dest, .. }
+                | MirInst::LanePush { dest, .. }
+                | MirInst::LanesToWords { dest, .. }
                 | MirInst::Format { dest, .. }
                 | MirInst::Stringify { dest, .. }
                 | MirInst::Cow { dest, .. } => {

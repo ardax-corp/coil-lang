@@ -77,6 +77,13 @@ impl Heap {
             .collect();
         for (object, snap) in objects.iter().zip(&snapshot.objects) {
             match (object, snap) {
+                (Object::Array(gc), SnapObject::Lanes { words, k, .. }) => {
+                    let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
+                    let a = gc.payload_mut();
+                    for (i, lanes) in values.chunks(usize::from(*k)).enumerate() {
+                        a.set_lanes(i, lanes);
+                    }
+                }
                 (Object::Array(gc), SnapObject::Array { words, .. }) => {
                     let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
                     gc.payload_mut().words_mut().copy_from_slice(&values);
@@ -123,6 +130,9 @@ impl Heap {
                     array.set_elem_kind(common::WORD_POINTER);
                 }
                 self.alloc(array, Object::Array).0
+            }
+            SnapObject::Lanes { k, tag_mask, words } => {
+                self.alloc(ObjArray::from_lanes(zeros(words.len()), usize::from(*k), *tag_mask), Object::Array).0
             }
             SnapObject::Tuple { kinds, words } => {
                 self.alloc(ObjTuple::new(zeros(words.len())).with_kinds(*kinds), Object::Tuple).0
@@ -203,6 +213,19 @@ impl Capture<'_> {
         Ok(match object {
             Object::String(gc) => SnapObject::String(gc.as_ref().data.to_string()),
             Object::Array(gc) if gc.as_ref().is_packed() => SnapObject::Bytes(gc.as_ref().to_byte_vec()),
+            Object::Array(gc) if gc.as_ref().lanes() > 1 => {
+                let a = gc.as_ref();
+                let words = a
+                    .kinded_words()
+                    .enumerate()
+                    .map(|(i, (v, kind))| self.word(v, kind, parent(SnapStep::Element(i / a.lanes()))))
+                    .collect::<Result<_, _>>()?;
+                SnapObject::Lanes {
+                    k: a.lanes() as u8,
+                    tag_mask: a.tag_mask(),
+                    words,
+                }
+            }
             Object::Array(gc) => {
                 let a = gc.as_ref();
                 let kind = a.elem_kind();
