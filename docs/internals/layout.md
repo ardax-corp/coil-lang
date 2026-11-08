@@ -133,9 +133,16 @@ made, or one converted earlier): `LaneIndex` unboxes the element, and
 `LaneStore` / `LanePush` box the new one. A one-word element op on a lane
 array is a compiler bug and panics in the runtime.
 
-Lane arrays are never stack arrays. `pop`, `remove`, `insert` and the
-other `Vec` natives still take one word per element, so a lane array
-converts before them.
+Lane arrays are never stack arrays. The `Vec` methods keep the lanes
+(`hir_lane_calls`): `pop`, `remove` and `insert` lower at the call (or at
+the native a thunk inlined into the caller calls) to `ArrayLen`, the lane
+ops and `vec_drain` / `vec_rotate_in`, which move the words in place; their
+`Option` result boxes the element as any `Option` of a two-word value
+does. `clear`, `reserve`, `capacity` and `Vec::from` call their thunks,
+whose natives take either form, and `Vec::new()` / `Vec::with_capacity(n)`
+of a lane type allocate an empty lane array. An early free or a
+copy-on-write copy of the array keeps it in lanes as well. `coil dissect
+--boxes` lists each place an array still converts (`lane array`).
 
 ## The two-slot calling convention
 

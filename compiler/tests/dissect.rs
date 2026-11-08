@@ -179,11 +179,56 @@ fn main() {
     let boxes = compiler::take_box_capture();
     let of = |name: &str| boxes.iter().filter(|b| b.func == name).map(|b| (b.kind, b.ty.as_str())).collect::<Vec<_>>();
     assert_eq!(of("direct"), vec![], "{boxes:?}");
-    // A `Vec` of a two-word type keeps both words of each element in place.
+    // `Vec::new()` of `Option<int>` is a lane array: the push keeps the
+    // value's two words.
     assert_eq!(of("stored"), vec![], "{boxes:?}");
     // A host result is still boxed where the native returns one word.
     assert_eq!(of("Vec::pop"), vec![(compiler::BoxKind::HostResult, "vec_pop -> Option<int>")], "{boxes:?}");
     assert!(boxes.iter().all(|b| b.site.starts_with("from_hir.rs:")), "{boxes:?}");
+}
+
+/// The `Vec` methods on a lane array work on its lanes: no function here
+/// turns the array into boxed elements. Passing it to a generic body
+/// does.
+#[test]
+fn box_capture_lane_vec_methods_keep_the_lanes() {
+    let src = r#"
+fn methods(int n) -> int {
+    let v: Vec<Option<int>> = Vec::with_capacity(4);
+    v.push(Some(n));
+    v.insert(0, None);
+    v.reserve(2);
+    let t = v.capacity();
+    let _ = v.remove(1);
+    let _ = v.pop();
+    v.clear();
+    return t + v.len();
+}
+#[inline(never)]
+fn count<T>(Vec<T> v) -> int {
+    let n = 0;
+    for _ in v {
+        n += 1;
+    }
+    return n;
+}
+fn generic(int n) -> int {
+    let v: Vec<Option<int>> = [Some(n)];
+    return count(v);
+}
+fn main() {
+    let _ = methods(3) + generic(4);
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let lanes = |name: &str| boxes.iter().filter(|b| b.func == name && b.kind == compiler::BoxKind::LaneArray).count();
+    assert_eq!(lanes("methods"), 0, "{boxes:?}");
+    assert_eq!(lanes("generic"), 1, "{boxes:?}");
 }
 
 /// A generic class's method at a pair type argument gets its own clone,

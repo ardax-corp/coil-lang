@@ -1356,6 +1356,7 @@ struct Ids {
     store_index: FuncId,
     set_field: FuncId,
     view: FuncId,
+    lane_view: FuncId,
     str_view: FuncId,
     fn_entry: FuncId,
     fn_entry_pair: FuncId,
@@ -1514,6 +1515,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let store_index = module.declare_function("coil_native_store_index", Linkage::Import, &s4).map_err(e)?;
     let set_field = module.declare_function("coil_native_set_field", Linkage::Import, &s4).map_err(e)?;
     let view = module.declare_function("coil_native_view", Linkage::Import, &s3).map_err(e)?;
+    let lane_view = module.declare_function("coil_native_lane_view", Linkage::Import, &s3).map_err(e)?;
     let str_view = module.declare_function("coil_native_str_view", Linkage::Import, &s2).map_err(e)?;
     let fn_entry = module.declare_function("coil_native_fn_entry", Linkage::Import, &s5).map_err(e)?;
     let fn_entry_pair = module.declare_function("coil_native_fn_entry_pair", Linkage::Import, &s5).map_err(e)?;
@@ -1573,6 +1575,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         store_index,
         set_field,
         view,
+        lane_view,
         str_view,
         fn_entry,
         fn_entry_pair,
@@ -1668,6 +1671,7 @@ struct Lower<'a> {
     store_index: FuncRef,
     set_field: FuncRef,
     view: FuncRef,
+    lane_view: FuncRef,
     str_view: FuncRef,
     fn_entry: FuncRef,
     fn_entry_pair: FuncRef,
@@ -1757,6 +1761,13 @@ struct Lower<'a> {
     /// defined or the views were dropped (`machine::native::coil_native_str_view`;
     /// length 0 when the word is not a string object itself).
     str_views: HashMap<ValueId, (Variable, Variable, Variable)>,
+    /// Lane arrays this body reads or writes elements of in place:
+    /// `(state, pointer, element count)` of their element words
+    /// (`machine::native::coil_native_lane_view`). `state` is 1 for a view
+    /// in lanes, 2 for an array of one word per element (the lane helpers
+    /// box and unbox), 0 not known: filled where the array value is
+    /// defined, or at the next element op after the views were dropped.
+    lane_views: HashMap<ValueId, (Variable, Variable, Variable)>,
     /// The MIR values to root at the op being lowered (`None`: all of
     /// them): those live there and the words locals hold ([`held_words`]).
     /// [`Self::push_roots`] records only these, so a dead temporary is
@@ -1810,6 +1821,7 @@ impl<'a> Lower<'a> {
         let store_index = module.declare_func_in_func(ids.store_index, func);
         let set_field = module.declare_func_in_func(ids.set_field, func);
         let view = module.declare_func_in_func(ids.view, func);
+        let lane_view = module.declare_func_in_func(ids.lane_view, func);
         let str_view = module.declare_func_in_func(ids.str_view, func);
         let fn_entry = module.declare_func_in_func(ids.fn_entry, func);
         let fn_entry_pair = module.declare_func_in_func(ids.fn_entry_pair, func);
@@ -1872,6 +1884,7 @@ impl<'a> Lower<'a> {
             store_index,
             set_field,
             view,
+            lane_view,
             str_view,
             fn_entry,
             fn_entry_pair,
@@ -1926,6 +1939,7 @@ impl<'a> Lower<'a> {
             cur_site: None,
             views: HashMap::new(),
             str_views: HashMap::new(),
+            lane_views: HashMap::new(),
             live: None,
             stored: HashSet::new(),
             barriers: HashMap::new(),
@@ -2107,7 +2121,7 @@ impl<'a> Lower<'a> {
     /// call), when other values may name the same array: every view reads
     /// through the helpers until its value is defined again.
     fn drop_views(&mut self) {
-        let views: Vec<_> = self.views.values().chain(self.str_views.values()).map(|v| v.0).collect();
+        let views: Vec<_> = self.views.values().chain(self.str_views.values()).chain(self.lane_views.values()).map(|v| v.0).collect();
         let zero = self.b.ins().iconst(types::I64, 0);
         for ok in views {
             self.b.def_var(ok, zero);
@@ -2531,6 +2545,24 @@ impl<'a> Lower<'a> {
                         self.b.def_var(v, zero);
                     }
                     self.str_views.insert(s, vars);
+                }
+                let lane = match inst {
+                    MirInst::LaneIndex { array, .. } => Some(*array),
+                    MirInst::LaneStore { array, .. } => {
+                        self.stored.insert(*array);
+                        Some(*array)
+                    }
+                    _ => None,
+                };
+                if let Some(array) = lane
+                    && !self.lane_views.contains_key(&array)
+                {
+                    let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64), self.b.declare_var(types::I64));
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    for v in [vars.0, vars.1, vars.2] {
+                        self.b.def_var(v, zero);
+                    }
+                    self.lane_views.insert(array, vars);
                 }
                 let array = match inst {
                     MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
@@ -3104,14 +3136,23 @@ impl<'a> Lower<'a> {
             MirInst::ArrayLen { dest, array } => {
                 let a = self.get(f, *array);
                 let (ok, _, len) = self.views[array];
-                let ok = self.b.use_var(ok);
+                let mut ok = self.b.use_var(ok);
+                let mut n = self.b.use_var(len);
+                // A lane array's element count, from its lane view.
+                if let Some(&(lane_ok, _, lane_len)) = self.lane_views.get(array) {
+                    let lane_ok = self.b.use_var(lane_ok);
+                    let lane_ok = self.b.ins().icmp_imm_s(IntCC::Equal, lane_ok, 1);
+                    let lane_ok = self.b.ins().uextend(types::I64, lane_ok);
+                    let lane_len = self.b.use_var(lane_len);
+                    n = self.b.ins().select(ok, n, lane_len);
+                    ok = self.b.ins().bor(ok, lane_ok);
+                }
                 let fast = self.b.create_block();
                 let slow = self.b.create_block();
                 let join = self.b.create_block();
                 self.b.append_block_param(join, types::I64);
                 self.b.ins().brif(ok, fast, &[], slow, &[]);
                 self.b.switch_to_block(fast);
-                let n = self.b.use_var(len);
                 self.b.ins().jump(join, &[n.into()]);
                 self.b.switch_to_block(slow);
                 let call = self.b.ins().call(self.len, &[a]);
@@ -3242,11 +3283,27 @@ impl<'a> Lower<'a> {
             MirInst::LaneIndex { dest, dest_hi, array, index } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
+                let i = self.coerce(i, types::I64);
+                // In place when the array is in lanes and `i` in bounds;
+                // otherwise the helper (a boxed element, a trap).
+                let (fast, slow) = self.in_lane_view(f, *array, i);
+                let join = self.b.create_block();
+                self.b.append_block_param(join, types::I64);
+                self.b.append_block_param(join, types::I64);
+                self.b.switch_to_block(fast);
+                let at = self.lane_element(*array, i);
+                let lo = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                let hi = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 8);
+                self.b.ins().jump(join, &[lo.into(), hi.into()]);
+                self.b.switch_to_block(slow);
                 let call = self.b.ins().call(self.lane_index, &[self.ctx, a, i]);
                 let lo = self.b.inst_results(call)[0];
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
                 let hi = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, machine::native::NATIVE_CTX_RET_HI);
+                self.b.ins().jump(join, &[lo.into(), hi.into()]);
+                self.b.switch_to_block(join);
+                let (lo, hi) = (self.b.block_params(join)[0], self.b.block_params(join)[1]);
                 self.set_word(f, *dest, lo);
                 self.set_word(f, *dest_hi, hi);
             }
@@ -3257,12 +3314,23 @@ impl<'a> Lower<'a> {
                 let lo = self.coerce(lo, types::I64);
                 let hi = self.get(f, *hi);
                 let hi = self.coerce(hi, types::I64);
+                let i = self.coerce(i, types::I64);
+                let (fast, slow) = self.in_lane_view(f, *array, i);
+                let join = self.b.create_block();
+                self.b.switch_to_block(fast);
+                let at = self.lane_element(*array, i);
+                self.b.ins().store(MemFlagsData::trusted(), lo, at, 0);
+                self.b.ins().store(MemFlagsData::trusted(), hi, at, 8);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(slow);
                 let [t, p, u] = self.lane_shape(shape);
-                let call = self.b.ins().call(self.lane_store, &[self.ctx, a, i, lo, hi, t, p, u]);
-                let w = self.b.inst_results(call)[0];
+                self.b.ins().call(self.lane_store, &[self.ctx, a, i, lo, hi, t, p, u]);
                 let flag = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_BAIL);
                 self.bail_if(flag, TRAP_HELPER);
-                self.set(f, *dest, w);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(join);
+                let one = self.b.ins().iconst(types::I64, 1);
+                self.set(f, *dest, one);
             }
             MirInst::LanePush { dest, array, lo, hi, shape } => {
                 let a = self.get(f, *array);
@@ -3729,6 +3797,7 @@ impl<'a> Lower<'a> {
 
     /// Fill `v`'s view right after `v` is defined, when the body indexes it.
     fn view_of(&mut self, f: &MirFunc, v: ValueId) {
+        self.lane_view_of(f, v);
         let Some(&(ok, ptr, len)) = self.views.get(&v) else {
             return;
         };
@@ -3742,6 +3811,67 @@ impl<'a> Lower<'a> {
         self.b.def_var(ok, r);
         self.b.def_var(ptr, p);
         self.b.def_var(len, n);
+    }
+
+    /// Fill `v`'s lane view right after `v` is defined, when the body
+    /// reads or writes its elements in place ([`Self::view_of`]).
+    fn lane_view_of(&mut self, f: &MirFunc, v: ValueId) {
+        let Some(&(ok, ptr, len)) = self.lane_views.get(&v) else {
+            return;
+        };
+        let a = self.get(f, v);
+        let a = self.coerce(a, types::I64);
+        let store = self.b.ins().iconst(types::I64, i64::from(self.stored.contains(&v)));
+        let out = self.b.ins().stack_addr(types::I64, self.view_slot, 0);
+        let call = self.b.ins().call(self.lane_view, &[a, store, out]);
+        let r = self.b.inst_results(call)[0];
+        let p = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 0);
+        let n = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 8);
+        // 1: in lanes; 2: one word per element.
+        let two = self.b.ins().iconst(types::I64, 2);
+        let state = self.b.ins().isub(two, r);
+        self.b.def_var(ok, state);
+        self.b.def_var(ptr, p);
+        self.b.def_var(len, n);
+    }
+
+    /// Branch on whether element `i` of lane array `array` is in its lane
+    /// view: `(in view, otherwise)`; with no lane view, always otherwise.
+    /// A view not known (dropped after a call or a push) is filled first.
+    fn in_lane_view(&mut self, f: &MirFunc, array: ValueId, i: cranelift_codegen::ir::Value) -> (Block, Block) {
+        let fast = self.b.create_block();
+        let slow = self.b.create_block();
+        match self.lane_views.get(&array).copied() {
+            Some((ok, _, len)) => {
+                let (fill, have) = (self.b.create_block(), self.b.create_block());
+                let state = self.b.use_var(ok);
+                self.b.ins().brif(state, have, &[], fill, &[]);
+                self.b.set_cold_block(fill);
+                self.b.switch_to_block(fill);
+                self.lane_view_of(f, array);
+                self.b.ins().jump(have, &[]);
+                self.b.switch_to_block(have);
+                let ok = self.b.use_var(ok);
+                let len = self.b.use_var(len);
+                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+                let has = self.b.ins().icmp_imm_s(IntCC::Equal, ok, 1);
+                let c = self.b.ins().band(inb, has);
+                self.b.ins().brif(c, fast, &[], slow, &[]);
+            }
+            None => {
+                self.b.ins().jump(slow, &[]);
+            }
+        }
+        (fast, slow)
+    }
+
+    /// Address of element `i`'s first word in `array`'s lane view (two
+    /// words per element).
+    fn lane_element(&mut self, array: ValueId, i: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        let (_, ptr, _) = self.lane_views[&array];
+        let p = self.b.use_var(ptr);
+        let off = self.b.ins().ishl_imm_u(i, 4);
+        self.b.ins().iadd(p, off)
     }
 
     /// `(pointer, length)` of string `s`'s bytes from its view, filled

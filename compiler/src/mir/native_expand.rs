@@ -60,6 +60,9 @@ pub fn apply(func: &mut MirFunc) {
     let mut b = 0;
     while b < func.blocks.len() {
         let found = func.blocks[b].insts.iter().enumerate().find_map(|(k, inst)| match inst {
+            // A call the block ends `unreachable` after only panics (lane
+            // code's out-of-range `insert`): it stays a call.
+            MirInst::HostInvoke { .. } if k + 1 == func.blocks[b].insts.len() && matches!(func.blocks[b].term, Some(Terminator::Unreachable)) => None,
             MirInst::HostInvoke { dest, dest_hi: None, native_id, layout, args } if dest.index() < own => {
                 let which = ids.which(*native_id)?;
                 expandable(func, which, *dest, *layout, args).then_some((k, which))
