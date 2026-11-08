@@ -2035,6 +2035,14 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(cold);
         let roots = self.push_roots(f);
         self.b.ins().call(self.collect, &[self.ctx]);
+        // A body with no heap homes pushes no roots, so `pop_roots` drops
+        // no views: drop them here. A minor collection leaves an old array
+        // unlogged again, and an in-place store through a view taken
+        // before it would skip the write barrier, so a young element it
+        // stores is never traced (#2323).
+        if roots.is_none() {
+            self.drop_views();
+        }
         self.pop_roots(roots);
         self.b.ins().jump(go, &[]);
         self.b.switch_to_block(go);
