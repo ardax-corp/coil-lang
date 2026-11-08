@@ -40,7 +40,16 @@ fn coil_embed_build_args(target_dir: &Path, profile_dir: &str) -> Vec<String> {
 ///
 /// Uses a private `--target-dir` so a nested `cargo build` cannot deadlock on the
 /// parent `cargo test` target lock.
+///
+/// Built once per test process: cargo re-links a fresh binary into the profile
+/// directory on every build, so a second build racing another test's read of the
+/// runner could leave it briefly missing (#2303).
 fn build_matching_coil_embed(coil_bin: &Path) -> PathBuf {
+    static EMBED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    EMBED.get_or_init(|| build_coil_embed_once(coil_bin)).clone()
+}
+
+fn build_coil_embed_once(coil_bin: &Path) -> PathBuf {
     let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/package-cli-embed");
     let profile_dir = coil_profile_dir(coil_bin);
     let args = coil_embed_build_args(&target_dir, &profile_dir);
@@ -544,8 +553,14 @@ fn main() {
 }
 
 /// Build `libcoil_rt.a` in the same private target directory and profile
-/// as [`build_matching_coil_embed`], for AOT packages (`COIL_RT_LIB`).
+/// as [`build_matching_coil_embed`], for AOT packages (`COIL_RT_LIB`). Built
+/// once per test process, like the runner (#2303).
 fn build_matching_coil_rt(coil_bin: &Path) -> PathBuf {
+    static RT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RT.get_or_init(|| build_coil_rt_once(coil_bin)).clone()
+}
+
+fn build_coil_rt_once(coil_bin: &Path) -> PathBuf {
     let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/package-cli-embed");
     let profile_dir = coil_profile_dir(coil_bin);
     let mut args = coil_embed_build_args(&target_dir, &profile_dir);
