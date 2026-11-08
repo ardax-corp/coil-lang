@@ -4962,6 +4962,13 @@ impl Compiler {
             if hir.local(local).ty.as_ref().is_some_and(|t| self.hir_mir_pair_tys(t).is_none()) {
                 continue;
             }
+            // Nor when its init packs as a bare-trait existential, whose
+            // local may still carry the init's type: `let s: Named =
+            // Pick::Num(3)` holds the pack's one word (#2322).
+            let e = hir.expr(init);
+            if e.node.is_some_and(|n| self.checker.existential_pack_at(n).is_some()) || self.checker.existential_pack_span(e.span.0, e.span.1).is_some() {
+                continue;
+            }
             if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
                 emit.plan.pair_locals.insert(local.0, kind);
                 continue;
