@@ -12,7 +12,21 @@ ext=""
 [[ -x "$bin/coil.exe" ]] && ext=".exe"
 coil="$bin/coil$ext"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# Windows can hold an executable a moment after its process ends. Wait for it,
+# say how long it took and what still runs, and fail if it stays held.
+cleanup() {
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if rm -rf "$work" 2>/dev/null; then
+            [[ "$i" == 1 ]] || echo "removed $work after $((i - 1)) s"
+            return 0
+        fi
+        [[ "$i" == 1 && -n "$ext" ]] && tasklist //FO CSV 2>/dev/null | grep -iE 'coil|embedded|aot|runner|python' || true
+        sleep 1
+    done
+    rm -rf "$work"
+}
+trap cleanup EXIT
 
 cat > "$work/app.coil" <<'COIL'
 use io::sync::println;
