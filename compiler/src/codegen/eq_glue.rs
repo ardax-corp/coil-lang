@@ -252,7 +252,10 @@ impl Compiler {
         let Some(shape) = self.eq_glue_shape(ty) else {
             return false;
         };
-        if float_leaf(&shape) {
+        // A two-word tuple of immediates (`(int, float)`) needs none: its
+        // `==` compares the two words, a `float` one as a `float`, with no
+        // box made (`from_hir::pair_eq`).
+        if float_leaf(&shape) && !matches!(crate::layout::two_word_kind(&self.checker, ty), Some(crate::layout::PairKind::Product)) {
             return true;
         }
         visiting.push(ty.clone());
