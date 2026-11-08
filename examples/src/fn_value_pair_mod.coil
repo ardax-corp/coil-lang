@@ -1,6 +1,6 @@
-// Helper module for tests/modules/module_fn_value_pair_adapter.coil:
-// functions with two-word results, used as values both here and in the
-// test, and called directly in both.
+// Helper module for tests/modules/module_fn_value_pair_adapter.coil and
+// examples/perf/module_fn_value_pair.coil: functions with two-word
+// results, used as values both here and there, and called directly in both.
 
 enum Sign {
     Neg(int),
@@ -62,4 +62,13 @@ fn direct_sum(int x) -> int {
         Err(_) => 0,
     };
     return (half(x) ?? 0) + a + b + q;
+}
+
+/// The bench's callee: never inlined, so each direct call is a call.
+#[inline(never)]
+fn step(int x) -> Option<int> {
+    if x % 3 == 0 {
+        return None;
+    }
+    return Some(x + 1);
 }
