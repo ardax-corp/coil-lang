@@ -1399,7 +1399,9 @@ pub unsafe extern "C" fn coil_native_lanes_to_words(ctx: *mut NativeCtx, addr: u
     // No collection runs inside an allocation, so the boxes made so far
     // stay alive until the array holds them.
     let boxes = words
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|w| common::Value::from(lane_box(heap, w[0].bits(), w[1].bits(), [tag_mask, payload_mask, unit_mask])))
         .collect();
     gc.as_mut().lanes_into_words(boxes);
