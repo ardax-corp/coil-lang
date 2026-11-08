@@ -144,6 +144,8 @@ pub fn build_standard_host_natives(
     push_wiring(&mut out, &mut register_id, crate::key_index::KEY_INDEX_WIRING, "key_index");
     // Append-only after key_index: the lock primitives (major 6 minor 21).
     push_lock_natives(&mut out, &mut register_id);
+    // Append-only after the lock primitives: `vec_truncate` (major 7 minor 3).
+    push_wiring(&mut out, &mut register_id, crate::vec_ops::VEC_TRUNCATE_WIRING, "vec truncate");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -1505,7 +1507,8 @@ mod tests {
             Some(common::KEY_INDEX_EQ_MODE_NATIVE)
         );
         assert_eq!(names.get(200).map(String::as_str), Some("lock_acquire"));
-        assert_eq!(names.last().map(String::as_str), Some("rw_store"));
+        assert_eq!(names.get(211).map(String::as_str), Some("rw_store"));
+        assert_eq!(names.last().map(String::as_str), Some(common::VEC_TRUNCATE_NATIVE));
         assert_eq!(attach, 119);
     }
 
@@ -1888,6 +1891,10 @@ mod tests {
             registrations.get(end + 75).map(|(n, _)| n.as_str()),
             Some("rw_store")
         );
-        assert_eq!(registrations.len(), end + 76);
+        assert_eq!(
+            registrations.get(end + 76).map(|(n, _)| n.as_str()),
+            Some(common::VEC_TRUNCATE_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 77);
     }
 }

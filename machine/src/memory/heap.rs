@@ -4016,6 +4016,15 @@ impl ObjArray {
         }
     }
 
+    /// Keep the first `n` elements (all of them when `n` is past the end).
+    pub fn truncate(&mut self, n: usize) {
+        match &mut self.data {
+            ArrayData::Words(w) => w.truncate(n),
+            ArrayData::Bytes(b) => b.truncate(n),
+            ArrayData::Lanes { words, k } => words.truncate(n.saturating_mul(*k)),
+        }
+    }
+
     pub fn clear(&mut self) {
         match &mut self.data {
             ArrayData::Words(w) | ArrayData::Lanes { words: w, .. } => w.clear(),

@@ -100,6 +100,21 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
     }
 }
 
+/// `vec_truncate(v, n) -> ()`: drop the elements from `n` on, in any
+/// array form (a lane array's whole elements). Lane code's `pop` and
+/// `remove` shrink the array with it; `n` past the length keeps all.
+pub fn host_vec_truncate(heap: &mut Heap, args: &[Value]) -> Value {
+    let handle = args.first().copied().unwrap_or(Value::from(0i64));
+    let n = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
+    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
+        gc.as_mut().truncate(n);
+    }
+    Value::from(0i64)
+}
+
+/// `vec_truncate` (major 7 minor 3), after the lock primitives.
+pub const VEC_TRUNCATE_WIRING: &[(&str, usize, crate::HostValueFn)] = &[(common::VEC_TRUNCATE_NATIVE, 2, host_vec_truncate)];
+
 /// Copy a fixed array into a fresh growable vec (`Vec::from`).
 pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));

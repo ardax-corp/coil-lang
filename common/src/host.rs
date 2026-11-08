@@ -1551,6 +1551,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: THREAD_R,
         caps: NO_CAP,
     },
+    HostNative {
+        name: VEC_TRUNCATE_NATIVE,
+        arity: 2,
+        id: VEC_TRUNCATE_ID,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
 ];
 
 /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
@@ -1801,8 +1808,16 @@ pub const LOCK_ACQUIRE_ID: u16 = 200;
 /// `prelude::thread::rw_store`, the last lock primitive.
 pub const RW_STORE_ID: u16 = 211;
 
+/// `vec_truncate(v, n)` (archive 7 minor 3, compiler lowering only): drop
+/// the elements of array `v` from `n` on; the compiler has checked
+/// `0 <= n <= v.len()`. Any array form, a lane array's included: lane code
+/// pops and removes with it.
+pub const VEC_TRUNCATE_ID: u16 = 212;
+pub const VEC_TRUNCATE_NATIVE: &str = "vec_truncate";
+
 const _: () = {
-    assert!(HOST_NATIVES.len() == 212);
+    assert!(HOST_NATIVES.len() == 213);
+    assert!(HOST_NATIVES[VEC_TRUNCATE_ID as usize].id == VEC_TRUNCATE_ID);
     assert!(HOST_NATIVES[LOCK_ACQUIRE_ID as usize].id == LOCK_ACQUIRE_ID);
     assert!(HOST_NATIVES[RW_STORE_ID as usize].id == RW_STORE_ID);
     assert!(HOST_NATIVES[KEY_INDEX_EQ_MODE_ID as usize].id == KEY_INDEX_EQ_MODE_ID);
@@ -1883,6 +1898,7 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "vec_from_array",
     "vec_extend_range",
     "vec_fill",
+    VEC_TRUNCATE_NATIVE,
     "symbol_next_id",
     "key_index_table",
     "key_index_probe",
