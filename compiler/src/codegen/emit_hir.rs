@@ -2346,7 +2346,8 @@ impl Compiler {
         }
         let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
         let pushes: HashSet<u32> = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
-        let lane_escapes = self.hir_lane_escapes(hir, emit, &lane_arrays, &pushes);
+        let lane_calls = Self::hir_lane_calls(hir, emit, &lane_arrays);
+        let lane_escapes = self.hir_lane_escapes(hir, emit, &lane_arrays, &pushes, &lane_calls);
         // Host natives taking plain words and returning one (a niche word
         // comes back as the layout asks; no pair conversion at the edge),
         // and `gc::root` / `gc::weak` taking any word.
@@ -2521,6 +2522,7 @@ impl Compiler {
             frozen_arrays: HashMap::new(),
             lane_arrays,
             lane_escapes,
+            lane_calls,
             boxed_niches,
             niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
@@ -2628,7 +2630,14 @@ impl Compiler {
     /// or local assignment, the function's own lane-array result, or an
     /// argument of a ground function whose parameter is a lane array; a
     /// block, `if` or `match` passes its value's use through.
-    fn hir_lane_escapes(&self, hir: &HirBody, emit: &HirEmit, lanes: &HashMap<u32, crate::mir::HirLaneElem>, pushes: &HashSet<u32>) -> HashSet<u32> {
+    fn hir_lane_escapes(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        lanes: &HashMap<u32, crate::mir::HirLaneElem>,
+        pushes: &HashSet<u32>,
+        lane_calls: &HashMap<u32, crate::mir::HirLaneCall>,
+    ) -> HashSet<u32> {
         if lanes.is_empty() {
             return HashSet::new();
         }
@@ -2654,6 +2663,15 @@ impl Compiler {
                     HirKind::Call { args, .. } if pushes.contains(&p.0) || emit.plan.lens.contains_key(&p.0) => {
                         return args.first() == Some(&cur);
                     }
+                    // A `Vec` method that works on the lanes (`pop`,
+                    // `insert`, `clear`, ...: `hir_lane_calls`).
+                    HirKind::Call { args, .. } if lane_calls.get(&p.0).is_some_and(|c| c.takes_lanes()) => {
+                        return args.first() == Some(&cur);
+                    }
+                    // Freeing the array frees its lanes with it; a
+                    // copy-on-write copy keeps them, its own use decides.
+                    HirKind::Builtin { op: Builtin::FreeEarly { .. }, .. } => return true,
+                    HirKind::Builtin { op: Builtin::Cow { .. }, args } if args.first() == Some(&cur) => {}
                     HirKind::Call { callee: Callee::Named { .. }, args } => {
                         let Some(call) = emit.plan.calls.get(&p.0) else {
                             return false;
@@ -2676,6 +2694,62 @@ impl Compiler {
             }
         };
         lanes.keys().copied().filter(|&i| !keeps(HirId(i))).collect()
+    }
+
+    /// The calls of `Vec` methods on a lane array (or making one) that work
+    /// on its lanes rather than on one word per element: `pop`, `remove`
+    /// and `insert` lower to lane ops at the call; `clear`, `reserve`,
+    /// `capacity` and `from` call their thunks, whose natives take either
+    /// form; `new` and `with_capacity` of a lane type make a lane array.
+    fn hir_lane_calls(hir: &HirBody, emit: &HirEmit, lanes: &HashMap<u32, crate::mir::HirLaneElem>) -> HashMap<u32, crate::mir::HirLaneCall> {
+        use crate::mir::HirLaneCall;
+        if lanes.is_empty() {
+            return HashMap::new();
+        }
+        let mut out = HashMap::new();
+        // The `Vec` natives a thunk inlined into this body calls.
+        let natives: HashMap<usize, &str> = [
+            ("vec_pop", "pop"),
+            ("vec_remove", "remove"),
+            ("vec_insert", "insert"),
+            ("vec_clear", "clear"),
+            ("vec_capacity", "capacity"),
+            ("vec_reserve", "reserve"),
+            ("vec_from_array", "from"),
+        ]
+        .into_iter()
+        .filter_map(|(native, method)| Some((common::host_native_id(native)?, method)))
+        .collect();
+        for (&id, call) in &emit.plan.calls {
+            let method = match call.builtin {
+                Some(HirBuiltin::Host(n)) => match natives.get(&n) {
+                    Some(&m) => m,
+                    None => continue,
+                },
+                _ => match call.key.strip_prefix(common::BUILTIN_VEC_TYPE).and_then(|k| k.strip_prefix("::")) {
+                    Some(m) => m,
+                    None => continue,
+                },
+            };
+            // A stamped constructor twin (`new$ptr`) is the same method.
+            let method = method.split('$').next().unwrap_or(method);
+            let HirKind::Call { args, .. } = &hir.expr(HirId(id)).kind else {
+                continue;
+            };
+            let recv_lanes = args.first().is_some_and(|a| lanes.contains_key(&a.0));
+            let kind = match (method, args.len()) {
+                ("pop", 1) if recv_lanes => HirLaneCall::Pop,
+                ("remove", 2) if recv_lanes => HirLaneCall::Remove,
+                ("insert", 3) if recv_lanes => HirLaneCall::Insert,
+                ("clear" | "capacity", 1) | ("reserve", 2) if recv_lanes => HirLaneCall::Thunk,
+                ("from", 1) if recv_lanes => HirLaneCall::Thunk,
+                ("new", 0) if lanes.contains_key(&id) => HirLaneCall::New,
+                ("with_capacity", 1) if lanes.contains_key(&id) => HirLaneCall::WithCapacity,
+                _ => continue,
+            };
+            out.insert(id, kind);
+        }
+        out
     }
 
     /// The element of `ty` when it is a `Vec` or array of a closed two-word type,

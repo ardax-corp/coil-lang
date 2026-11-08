@@ -212,6 +212,33 @@ pub struct HirLaneElem {
     pub shape: MirLaneShape,
 }
 
+/// A `Vec` method call that works on a lane array's lanes
+/// (`HirMirInput::lane_calls`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirLaneCall {
+    /// `v.pop()`: the last element's words, the array truncated.
+    Pop,
+    /// `v.remove(i)`: element `i`'s words, the rest moved down one.
+    Remove,
+    /// `v.insert(i, x)`: the elements from `i` moved up one, `x` at `i`.
+    Insert,
+    /// A thunk whose native takes either array form (`clear`, `reserve`,
+    /// `capacity`, `from`): called as it is, the array kept in lanes.
+    Thunk,
+    /// `Vec::new()` of a lane type: an empty lane array.
+    New,
+    /// `Vec::with_capacity(n)` of a lane type: an empty lane array with
+    /// room for `n`.
+    WithCapacity,
+}
+
+impl HirLaneCall {
+    /// Whether the call takes its receiver (argument 0) as a lane array.
+    pub fn takes_lanes(self) -> bool {
+        !matches!(self, Self::New | Self::WithCapacity)
+    }
+}
+
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
 /// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
 /// local), or `MakePolyFn` of a generic function's (`MakePolyFnCapture`
@@ -593,6 +620,8 @@ pub struct HirMirInput<'a> {
     /// word per element (a generic body, a host native, a container): a
     /// `LanesToWords` turns the array into that form first, in place.
     pub lane_escapes: HashSet<u32>,
+    /// `Vec` method calls on a lane array, or making one, by call id.
+    pub lane_calls: HashMap<u32, HirLaneCall>,
     /// Heap fields and `new` arguments whose slot holds a boxed enum
     /// object (a generic class's field open in a parameter) for a value
     /// whose own word is this niche layout: boxed on the way in, unboxed
@@ -2926,6 +2955,9 @@ impl Lower<'_> {
         if self.inp.lane_escapes.contains(&id.0)
             && let (Val::V(v), Some(lane)) = (val, self.lane(id))
         {
+            if let Some(ty) = self.expr_ty(id).cloned() {
+                self.note_box(super::box_report::BoxKind::LaneArray, &ty);
+            }
             let out = self.b.ins_lanes_to_words(v, lane.shape).map_err(mir)?;
             val = Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?);
         }
@@ -4631,6 +4663,11 @@ impl Lower<'_> {
     /// A plain call: `CALL` of the entry label HIR emission used, with the
     /// word ABI of the argument and result types (a pair as two words).
     fn call(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        if let Some(&lane_call) = self.inp.lane_calls.get(&id.0)
+            && lane_call != HirLaneCall::Thunk
+        {
+            return self.lane_call(id, args, lane_call);
+        }
         // A boxed two-word result kept as it comes back.
         let raw = std::mem::take(&mut self.raw_host);
         let Some(site) = self.inp.calls.get(&id.0) else {
@@ -5857,6 +5894,221 @@ impl Lower<'_> {
         self.inp.lane_arrays.get(&id.0).copied()
     }
 
+    /// A `Vec` method on lane array `args[0]`, or a constructor of one,
+    /// written out over the lane ops ([`HirLaneCall`]).
+    fn lane_call(&mut self, id: HirId, args: &[HirId], call: HirLaneCall) -> Result<Val, Refusal> {
+        match call {
+            HirLaneCall::New | HirLaneCall::WithCapacity => {
+                let lane = self.lane(id).ok_or("lane constructor")?;
+                let n = match (call, args) {
+                    (HirLaneCall::WithCapacity, [n]) => match self.word(*n)? {
+                        Some(n) => Some(n),
+                        None => return Ok(Val::Never),
+                    },
+                    _ => None,
+                };
+                let arr = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Lanes { tag_mask: lane.shape.tag_mask }, Vec::new()).map_err(mir))?;
+                let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+                if let Some(n) = n {
+                    let reserve = common::host_native_id("vec_reserve").ok_or("vec_reserve")? as u16;
+                    self.at_expr(id, |l| l.b.ins_host_invoke(reserve, vec![arr, n]).map_err(mir))?;
+                }
+                Ok(Val::V(arr))
+            }
+            HirLaneCall::Pop | HirLaneCall::Remove => self.lane_take(id, args),
+            HirLaneCall::Insert => self.lane_insert(id, args),
+            HirLaneCall::Thunk => Err("lane thunk call".into()),
+        }
+    }
+
+    /// The element type of lane array `id` (a `Vec` or a fixed array).
+    fn lane_elem_ty(&self, id: HirId) -> Result<Ty, Refusal> {
+        match self.expr_ty(id).map(strip_readonly) {
+            Some(Ty::Array { element, .. }) => Ok(element.as_ref().clone()),
+            Some(t) => vec_element_ty(t).cloned().ok_or_else(|| "lane element type".into()),
+            None => Err("lane element type".into()),
+        }
+    }
+
+    /// `v.pop()` (`pop`) or `v.remove(i)` on lane array `args[0]`:
+    /// `None` when there is no such element; else the element's words are
+    /// read, the elements after it move down one, the array is truncated
+    /// by one (`vec_truncate`), and the result is `Some` of the element
+    /// boxed, in the call's layout (a niche word, or the enum object a
+    /// `Vec` thunk returns).
+    fn lane_take(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let raw = std::mem::take(&mut self.raw_host);
+        let lane = self.lane(args[0]).ok_or("lane receiver")?;
+        let elem = self.lane_elem_ty(args[0])?;
+        let ty = self.expr_ty(id).ok_or("lane call type")?.clone();
+        let niche = !raw && self.inp.word(&ty) == Some(MirTy::NicheOpt);
+        let ret = if niche { MirTy::NicheOpt } else { MirTy::HeapRef };
+        let Some(arr) = self.word(args[0])? else {
+            return Ok(Val::Never);
+        };
+        let at = match args.get(1) {
+            Some(&i) => match self.index_word(i)? {
+                Some(i) => Some(i),
+                None => return Ok(Val::Never),
+            },
+            None => None,
+        };
+        let truncate = common::VEC_TRUNCATE_ID;
+        let out = self.temp();
+        let (some_b, none_b, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.at_expr(id, |l| {
+            let n = l.b.ins_array_len(arr).map_err(mir)?;
+            let zero = l.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            let one = l.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            let last = l.b.ins_binop(MirBinOp::Sub, n, one).map_err(mir)?;
+            // The element taken: the last one, or `i` when `0 <= i < n`.
+            let i = match at {
+                None => {
+                    let empty = l.b.ins_cmp(MirCmpOp::Le, n, zero).map_err(mir)?;
+                    l.b.branch(empty, none_b, some_b).map_err(mir)?;
+                    last
+                }
+                Some(i) => {
+                    let check_hi = l.b.create_block();
+                    let below = l.b.ins_cmp(MirCmpOp::Lt, i, zero).map_err(mir)?;
+                    l.b.branch(below, none_b, check_hi).map_err(mir)?;
+                    l.switch(check_hi);
+                    let above = l.b.ins_cmp(MirCmpOp::Ge, i, n).map_err(mir)?;
+                    l.b.branch(above, none_b, some_b).map_err(mir)?;
+                    i
+                }
+            };
+            l.switch(some_b);
+            let (lo, hi) = l.b.ins_lane_index(arr, i, lane.lo, lane.hi).map_err(mir)?;
+            // Boxed before the move loop, whose header is a safepoint: a
+            // heap payload is then held by its box, a reference.
+            let Val::V(boxed) = l.box_pair_val(&elem, lo, hi)? else {
+                return Err("lane element box".into());
+            };
+            if at.is_some() {
+                // for j = i; j < n - 1; j += 1 { v[j] = v[j + 1] }
+                let j = l.temp();
+                l.b.def_local(j, i).map_err(mir)?;
+                let (head, body, done) = (l.b.create_block(), l.b.create_block(), l.b.create_block());
+                l.jump(head)?;
+                l.switch(head);
+                let cur = l.b.use_local(j, MirTy::I64).map_err(mir)?;
+                let more = l.b.ins_cmp(MirCmpOp::Lt, cur, last).map_err(mir)?;
+                l.b.branch(more, body, done).map_err(mir)?;
+                l.switch(body);
+                let cur = l.b.use_local(j, MirTy::I64).map_err(mir)?;
+                let next = l.b.ins_binop(MirBinOp::Add, cur, one).map_err(mir)?;
+                let (a, b) = l.b.ins_lane_index(arr, next, lane.lo, lane.hi).map_err(mir)?;
+                l.b.ins_lane_store(arr, cur, a, b, lane.shape).map_err(mir)?;
+                l.b.def_local(j, next).map_err(mir)?;
+                l.jump(head)?;
+                l.switch(done);
+            }
+            l.b.ins_host_invoke(truncate, vec![arr, last]).map_err(mir)?;
+            let some = if niche {
+                l.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, boxed).map_err(mir)?
+            } else {
+                l.make_enum(1, Some(boxed))?
+            };
+            l.b.def_local(out, some).map_err(mir)?;
+            l.jump(join)?;
+            l.switch(none_b);
+            let none = if niche {
+                l.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, zero).map_err(mir)?
+            } else {
+                l.make_enum(0, None)?
+            };
+            l.b.def_local(out, none).map_err(mir)?;
+            l.jump(join)?;
+            l.switch(join);
+            Ok(())
+        })?;
+        Ok(Val::V(self.b.use_local(out, ret).map_err(mir)?))
+    }
+
+    /// `v.insert(i, x)` on lane array `args[0]`: unless `0 <= i <= len`
+    /// the runtime's `vec_insert` panics, as on any array; else the last
+    /// element is pushed again, the elements from `i` move up one and `x`'s
+    /// words go to `i`.
+    fn lane_insert(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        let lane = self.lane(args[0]).ok_or("lane receiver")?;
+        let Some(arr) = self.word(args[0])? else {
+            return Ok(Val::Never);
+        };
+        let Some(i) = self.index_word(args[1])? else {
+            return Ok(Val::Never);
+        };
+        let Some((lo, hi)) = self.pair(args[2])? else {
+            return Ok(Val::Never);
+        };
+        // `x`'s first word stays in a value across the move loop.
+        if lane.shape.tag_mask != 0 {
+            self.b.mark_heap_pair_word(lo);
+        }
+        let insert = common::host_native_id("vec_insert").ok_or("vec_insert")? as u16;
+        let grown = self.at_expr(id, |l| {
+            let n = l.b.ins_array_len(arr).map_err(mir)?;
+            let zero = l.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            let one = l.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            let (check_hi, oob, at_end, inner, done) = (l.b.create_block(), l.b.create_block(), l.b.create_block(), l.b.create_block(), l.b.create_block());
+            let below = l.b.ins_cmp(MirCmpOp::Lt, i, zero).map_err(mir)?;
+            l.b.branch(below, oob, check_hi).map_err(mir)?;
+            l.switch(check_hi);
+            let above = l.b.ins_cmp(MirCmpOp::Gt, i, n).map_err(mir)?;
+            l.b.branch(above, oob, at_end).map_err(mir)?;
+            // Out of range: the native panics with its own message.
+            let start = l.order.len();
+            l.switch(oob);
+            l.b.ins_host_invoke(insert, vec![arr, i, zero]).map_err(mir)?;
+            l.keep_pins()?;
+            l.b.unreachable().map_err(mir)?;
+            l.mark_cold(start);
+            // At the end: a push.
+            let grown = l.temp();
+            l.switch(at_end);
+            let end = l.b.ins_cmp(MirCmpOp::Eq, i, n).map_err(mir)?;
+            let push_b = l.b.create_block();
+            l.b.branch(end, push_b, inner).map_err(mir)?;
+            l.switch(push_b);
+            let out = l.b.ins_lane_push(arr, lo, hi, lane.shape).map_err(mir)?;
+            let out = l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+            l.b.def_local(grown, out).map_err(mir)?;
+            l.jump(done)?;
+            // Inside: push the last element again, then for j = n - 1;
+            // j > i; j -= 1 { v[j] = v[j - 1] }; v[i] = x.
+            l.switch(inner);
+            let last = l.b.ins_binop(MirBinOp::Sub, n, one).map_err(mir)?;
+            let (a, b) = l.b.ins_lane_index(arr, last, lane.lo, lane.hi).map_err(mir)?;
+            let out = l.b.ins_lane_push(arr, a, b, lane.shape).map_err(mir)?;
+            let out = l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+            l.b.def_local(grown, out).map_err(mir)?;
+            let j = l.temp();
+            l.b.def_local(j, last).map_err(mir)?;
+            let (head, body, put) = (l.b.create_block(), l.b.create_block(), l.b.create_block());
+            l.jump(head)?;
+            l.switch(head);
+            let cur = l.b.use_local(j, MirTy::I64).map_err(mir)?;
+            let more = l.b.ins_cmp(MirCmpOp::Gt, cur, i).map_err(mir)?;
+            l.b.branch(more, body, put).map_err(mir)?;
+            l.switch(body);
+            let a_ = l.b.use_local(grown, MirTy::HeapRef).map_err(mir)?;
+            let cur = l.b.use_local(j, MirTy::I64).map_err(mir)?;
+            let prev = l.b.ins_binop(MirBinOp::Sub, cur, one).map_err(mir)?;
+            let (a, b) = l.b.ins_lane_index(a_, prev, lane.lo, lane.hi).map_err(mir)?;
+            l.b.ins_lane_store(a_, cur, a, b, lane.shape).map_err(mir)?;
+            l.b.def_local(j, prev).map_err(mir)?;
+            l.jump(head)?;
+            l.switch(put);
+            let a_ = l.b.use_local(grown, MirTy::HeapRef).map_err(mir)?;
+            l.b.ins_lane_store(a_, i, lo, hi, lane.shape).map_err(mir)?;
+            l.jump(done)?;
+            l.switch(done);
+            l.b.use_local(grown, MirTy::HeapRef).map_err(mir)
+        })?;
+        self.pushed(args[0], grown)?;
+        Ok(Val::Unit)
+    }
+
     /// `xs[i]` of lane array `base`: the element's two words.
     fn lane_index(&mut self, base: HirId, index: HirId, lane: HirLaneElem) -> Result<Val, Refusal> {
         let Some(arr) = self.word(base)? else {
@@ -6579,6 +6831,12 @@ impl Lower<'_> {
     /// A host native: the arguments in order, then `HostInvoke` (the native
     /// id is the instruction's, not a value the lowering has to find).
     fn host(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        // A `Vec` native a thunk inlined, on a lane array.
+        if let Some(&lane_call) = self.inp.lane_calls.get(&id.0)
+            && lane_call != HirLaneCall::Thunk
+        {
+            return self.lane_call(id, args, lane_call);
+        }
         let (native, layout, unbox) = &self.inp.hosts[&id.0];
         let (mut native, layout) = (*native, *layout);
         // A `from_bytes` whose buffer is dead after it takes the bytes.
