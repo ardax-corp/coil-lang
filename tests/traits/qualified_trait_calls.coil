@@ -1,4 +1,4 @@
-// `Trait::method(args)` is the free call `method(args)` with only that
+// `Trait::method(args)` is the call `x.method(rest)` makes with only that
 // trait's method as a candidate: it picks between traits (or a free fn)
 // sharing a method name, at a ground type, under a bound, in a default
 // body, on a trait object, for receiverless methods and for a trait
