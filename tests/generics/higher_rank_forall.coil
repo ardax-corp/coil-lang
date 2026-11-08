@@ -12,7 +12,7 @@ fn app(forall T. T -> T f, int x) -> int {
 }
 
 fn both(forall T. T -> T f, int n, string s) -> string {
-    return show(f(n)) + f(s);
+    return f(n).show() + f(s);
 }
 
 test("a generic function for a forall parameter") {

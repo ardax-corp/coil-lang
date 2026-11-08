@@ -1,5 +1,5 @@
 // A trait imported from another module can be implemented for a local
-// class and called as a method, function-style, and via its default (#522).
+// class and called as a method, trait-qualified, and via its default (#522).
 
 use tests::assert;
 use trait_import_codec::{Node, DecodeError, FromNode};
@@ -31,8 +31,8 @@ test("method call on an imported trait") {
     assert!(port_of(new Config(0, "").from_node(new Node(-1, "abc"))) == -1);
 }
 
-test("function-style call on an imported trait") {
-    assert!(port_of(from_node(new Config(0, ""), new Node(4, "abc"))) == 4);
+test("trait-qualified call on an imported trait") {
+    assert!(port_of(FromNode::from_node(new Config(0, ""), new Node(4, "abc"))) == 4);
 }
 
 test("default method from an imported trait") {

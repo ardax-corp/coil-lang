@@ -1597,7 +1597,7 @@ fn implied_superclass_bound_allows_superclass_method() {
                 pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
             fn cmp_eq<T: Ordered>(T a, T b) -> bool {
-                return eq_val(a, b);
+                return a.eq_val(b);
             }
             fn main() {
                 let x = cmp_eq(1, 1);
@@ -1634,8 +1634,8 @@ fn abstract_constraint_kind_uses_superclass_method_after_binding() {
                 pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
             fn choose<c: * -> Constraint, T: c>(T a, T b) -> int {
-                if lt_val(a, b) { return 0; }
-                if eq_val(a, b) { return 42; }
+                if a.lt_val(b) { return 0; }
+                if a.eq_val(b) { return 42; }
                 return 1;
             }
             fn main() {
@@ -2117,7 +2117,7 @@ fn multiparam_where_clause_discharges_at_call_site() {
     let src = r#"
 trait Convert<A, B> { fn cast(A x) -> B; }
 impl Convert<int> for int { pub fn cast(int x) -> int { return x; } }
-fn apply_cast<A, B>(A x) -> B where Convert<A, B> { return cast(x); }
+fn apply_cast<A, B>(A x) -> B where Convert<A, B> { return x.cast(); }
 fn main() { let y = apply_cast(42); }
 "#;
     let (mut c, _) = check(src);

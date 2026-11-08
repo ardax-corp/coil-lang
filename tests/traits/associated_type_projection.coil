@@ -24,14 +24,14 @@ impl Collect for Option<int> {
 }
 
 fn take_head<C: Collect>(C xs) -> C::Elem {
-    return head(xs);
+    return xs.head();
 }
 
 fn head_if_any<C: Collect>(C xs, C::Elem fallback) -> C::Elem {
-    if count(xs) == 0 {
+    if xs.count() == 0 {
         return fallback;
     }
-    return head(xs);
+    return xs.head();
 }
 
 test("a projection is pinned at the call site") {

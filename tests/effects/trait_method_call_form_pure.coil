@@ -27,7 +27,7 @@ pure fn via_concrete(Sq a) -> int {
 }
 
 pure fn via_call(Sq a) -> int {
-    return area(a);
+    return a.area();
 }
 
 fn main() {

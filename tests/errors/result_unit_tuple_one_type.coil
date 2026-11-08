@@ -83,10 +83,10 @@ fn equality() -> string {
 
 fn shows() -> string {
     let shown = match tup(false) {
-        Result::Ok(u) => show(u),
+        Result::Ok(u) => u.show(),
         Result::Err(m) => m,
     };
-    return format("%s %s %s", show(()), show(unit_fn()), shown);
+    return format("%s %s %s", ().show(), unit_fn().show(), shown);
 }
 
 fn stored() -> string {

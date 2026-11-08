@@ -11,12 +11,12 @@ class Q {
 }
 
 fn make<T: Default>() -> T {
-    return default();
+    return Default::default();
 }
 
 fn make_n<T: Default>(int k) -> T {
     let _ = k;
-    return default();
+    return Default::default();
 }
 
 fn forwarded<T: Default>() -> T {

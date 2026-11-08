@@ -10,8 +10,8 @@ fn dist<A: Num + Ord>(A lo, A hi) -> A {
 }
 
 fn spread<A: Num + Ord + Show, B: Show>(A lo, A hi, B tag) -> string {
-    let shown = show(dist(lo, hi));
-    return show(tag) + ":" + shown;
+    let shown = dist(lo, hi).show();
+    return tag.show() + ":" + shown;
 }
 
 fn pair_max<A: Ord, B: Ord>(A a1, A a2, B b1, B b2) -> (A, B) {

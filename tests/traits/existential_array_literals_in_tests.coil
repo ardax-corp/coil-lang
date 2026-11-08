@@ -28,7 +28,7 @@ impl Shape for Square {
 fn total(Vec<Shape> shapes) -> int {
     let n = 0;
     for s in shapes {
-        n += area(s);
+        n += s.area();
     }
     return n;
 }

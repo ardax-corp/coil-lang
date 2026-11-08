@@ -31,17 +31,17 @@ impl D for Dir {
     fn d(Dir x) -> string {
         return match x {
             Dir::Up => "d up",
-            Dir::Down(n) => "d down " + show(n),
+            Dir::Down(n) => "d down " + n.show(),
         };
     }
 }
 
 fn wrap(Show x) -> string {
-    return show(x);
+    return x.show();
 }
 
 fn via(D x) -> string {
-    return d(x);
+    return x.d();
 }
 
 fn main() {

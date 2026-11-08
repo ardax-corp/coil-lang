@@ -30,7 +30,7 @@ fn counted<T: Eq>(T a, T b) -> int {
 }
 
 fn shown<T: Show>(T a) -> string {
-    return show(a);
+    return a.show();
 }
 
 fn hashed<T: Hash>(T a) -> int {

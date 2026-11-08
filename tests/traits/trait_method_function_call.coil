@@ -1,4 +1,4 @@
-// Function-style trait calls `method(x, …)` at a ground type select the
+// Trait-qualified calls `Trait::method(x, …)` at a ground type select the
 // instance like `x.method(…)`; a free fn of the same name still wins (#522).
 use tests::assert;
 
@@ -36,16 +36,16 @@ impl Two for Config {
     }
 }
 
-test("ground ufcs, int, one param") {
-    assert!(one(41) == 42);
+test("ground qualified, int, one param") {
+    assert!(One::one(41) == 42);
 }
 
-test("ground ufcs, class, one param") {
-    assert!(one(new Config(41)) == 42);
+test("ground qualified, class, one param") {
+    assert!(One::one(new Config(41)) == 42);
 }
 
-test("ground ufcs, class, two params") {
-    assert!(two(new Config(1), new Node(4)) == 5);
+test("ground qualified, class, two params") {
+    assert!(Two::two(new Config(1), new Node(4)) == 5);
 }
 
 // Free fn declared before the trait and impl that reuse its name.
@@ -94,12 +94,12 @@ impl Mk for Config {
 }
 
 fn mk_if_let() -> int {
-    if let Result::Ok(c) = mk(new Config(0), new Node(7)) {
+    if let Result::Ok(c) = Mk::mk(new Config(0), new Node(7)) {
         return 1000 + c.port;
     }
     return -1;
 }
 
-test("function-style call with new operands in if let") {
+test("trait-qualified call with new operands in if let") {
     assert!(mk_if_let() == 1007);
 }

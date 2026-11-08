@@ -13,7 +13,7 @@ impl Collect for Option<int> {
 }
 
 fn bad<C: Collect, D: Collect>(C a, D b) -> C::Elem {
-    return head(b);
+    return b.head();
 }
 
 fn main() {

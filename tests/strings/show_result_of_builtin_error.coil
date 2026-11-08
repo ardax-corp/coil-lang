@@ -11,7 +11,7 @@ test("Result and Option of IoError") {
     let some: Option<IoError> = Option::Some(IoError::AlreadyClosed);
     assert!(format("%v", ok) == "Ok(())");
     assert!(format("%v", bad) == "Err(AlreadyClosed)");
-    assert!(show(some) == "Some(AlreadyClosed)");
+    assert!(some.show() == "Some(AlreadyClosed)");
 }
 
 test("Result and Option of ThreadError") {
@@ -20,7 +20,7 @@ test("Result and Option of ThreadError") {
     let closed: Result<unit, ChannelError> = Result::Err(ChannelError::Closed);
     let held: Option<LockError> = Option::Some(LockError::WouldBlock);
     assert!(format("%v", bad) == "Err(NotSendable)");
-    assert!(show(some) == "Some(JoinFailed)");
+    assert!(some.show() == "Some(JoinFailed)");
     assert!(format("%v", closed) == "Err(Closed)");
-    assert!(show(held) == "Some(WouldBlock)");
+    assert!(held.show() == "Some(WouldBlock)");
 }

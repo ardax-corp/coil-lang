@@ -16,7 +16,7 @@ impl Tagged for int {
 }
 
 fn tagged<T: Tagged>(T x) -> int {
-    return tag_of(x);
+    return x.tag_of();
 }
 
 fn konst<T>(T x) -> string {

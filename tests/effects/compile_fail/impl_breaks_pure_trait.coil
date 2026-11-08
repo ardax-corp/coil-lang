@@ -17,5 +17,5 @@ impl Area for Sq {
 }
 
 fn main() {
-    area(new Sq(2));
+    (new Sq(2)).area();
 }

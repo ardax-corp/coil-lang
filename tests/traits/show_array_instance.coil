@@ -18,7 +18,7 @@ impl Show for Point {
 }
 
 fn shown<T: Show>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 
 fn shown_method<T: Show>(T x) -> string {
@@ -30,19 +30,19 @@ fn three(int n) -> [int; 3] {
 }
 
 test("show of arrays") {
-    assert!(show([1, 2, 3]) == "[1, 2, 3]", show([1, 2, 3]));
-    assert!(show([1]) == "[1]", show([1]));
+    assert!([1, 2, 3].show() == "[1, 2, 3]", [1, 2, 3].show());
+    assert!([1].show() == "[1]", [1].show());
     assert!(["a", "b"].show() == "[a, b]", ["a", "b"].show());
-    assert!(show([1.5, 2.0]) == format("[%v, %v]", 1.5, 2.0), show([1.5, 2.0]));
-    assert!(show([true]) == "[true]");
-    assert!(show(three(4)) == "[4, 5, 6]", show(three(4)));
+    assert!([1.5, 2.0].show() == format("[%v, %v]", 1.5, 2.0), [1.5, 2.0].show());
+    assert!([true].show() == "[true]");
+    assert!(three(4).show() == "[4, 5, 6]", three(4).show());
 }
 
 test("show of arrays of tuples, arrays and user types") {
-    assert!(show([(1, ()), (2, ())]) == "[(1, ()), (2, ())]", show([(1, ()), (2, ())]));
-    assert!(show([[1], [2]]) == "[[1], [2]]", show([[1], [2]]));
-    assert!(show([new Point(1, 2)]) == "[<1 2>]", show([new Point(1, 2)]));
-    assert!(show([{ a: 1 }]) == "[{ a: 1 }]", show([{ a: 1 }]));
+    assert!([(1, ()), (2, ())].show() == "[(1, ()), (2, ())]", [(1, ()), (2, ())].show());
+    assert!([[1], [2]].show() == "[[1], [2]]", [[1], [2]].show());
+    assert!([new Point(1, 2)].show() == "[<1 2>]", [new Point(1, 2)].show());
+    assert!([{ a: 1 }].show() == "[{ a: 1 }]", [{ a: 1 }].show());
 }
 
 test("format %v of arrays") {

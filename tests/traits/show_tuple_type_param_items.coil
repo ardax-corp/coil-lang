@@ -19,7 +19,7 @@ impl Show for Point {
 }
 
 fn with_unit<T: Show>(T x) -> string {
-    return show((x, ()));
+    return (x, ()).show();
 }
 
 fn pair_method<A: Show, B: Show>(A a, B b) -> string {
@@ -27,11 +27,11 @@ fn pair_method<A: Show, B: Show>(A a, B b) -> string {
 }
 
 fn nested<T: Show>(T x) -> string {
-    return show(((x, 1), x));
+    return ((x, 1), x).show();
 }
 
 fn shown<T: Show>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 
 // The tuple goes on to another bound: its dictionary is built here from

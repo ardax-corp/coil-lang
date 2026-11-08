@@ -19,13 +19,13 @@ class Name {
 
 impl Describe for int {
     fn describe(int n) -> string {
-        return "int " + show(n);
+        return "int " + Show::show(n);
     }
 }
 
 impl Describe for Pt {
     fn describe(Pt p) -> string {
-        return "pt " + show(p.x) + "," + show(p.y);
+        return "pt " + Show::show(p.x) + "," + Show::show(p.y);
     }
 }
 
@@ -46,7 +46,7 @@ fn pick(int k) -> Describe {
 }
 
 fn both(Describe a, Describe b) -> string {
-    return describe(a) + "/" + b.describe();
+    return Describe::describe(a) + "/" + b.describe();
 }
 
 fn relay(Describe d) -> Describe {
@@ -55,15 +55,15 @@ fn relay(Describe d) -> Describe {
 
 test("a let annotation packs a class value") {
     let p: Describe = new Pt(3, 4);
-    assert!(describe(p) == "pt 3,4");
+    assert!(Describe::describe(p) == "pt 3,4");
     let s: Show = new Pt(3, 4);
-    assert!(show(s) == "Pt { x: 3, y: 4 }", show(s));
+    assert!(Show::show(s) == "Pt { x: 3, y: 4 }", Show::show(s));
 }
 
 test("a return type packs each branch's value") {
-    assert!(describe(pick(0)) == "int 7");
-    assert!(describe(pick(1)) == "pt 1,2");
-    assert!(describe(pick(2)) == "name z");
+    assert!(Describe::describe(pick(0)) == "int 7");
+    assert!(Describe::describe(pick(1)) == "pt 1,2");
+    assert!(Describe::describe(pick(2)) == "name z");
 }
 
 test("parameters of the same trait hold different types") {
@@ -72,6 +72,6 @@ test("parameters of the same trait hold different types") {
 }
 
 test("an existential passes through unchanged") {
-    assert!(describe(relay(pick(1))) == "pt 1,2");
+    assert!(Describe::describe(relay(pick(1))) == "pt 1,2");
     assert!(relay(4).describe() == "int 4");
 }
