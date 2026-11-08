@@ -63,7 +63,11 @@ test("pop takes the last element and leaves the rest") {
 test("a pop loop drains the array in reverse") {
     let v: Vec<Option<int>> = [];
     for i in 0..10 {
-        v.push(if i % 3 == 0 { None } else { Some(i) });
+        v.push(if i % 3 == 0 {
+            None
+        } else {
+            Some(i)
+        });
     }
     let t = 0;
     let nones = 0;
