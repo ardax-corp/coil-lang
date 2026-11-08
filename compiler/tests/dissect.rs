@@ -146,7 +146,7 @@ fn main() {
 }
 
 /// `coil dissect --boxes`: each place lowering boxes a value, by function,
-/// kind and type; a direct two-word call boxes nothing.
+/// kind and type; a direct two-word call and a `Vec` of pairs box nothing.
 #[test]
 fn box_capture_names_function_kind_and_type() {
     let src = r#"
@@ -179,7 +179,10 @@ fn main() {
     let boxes = compiler::take_box_capture();
     let of = |name: &str| boxes.iter().filter(|b| b.func == name).map(|b| (b.kind, b.ty.as_str())).collect::<Vec<_>>();
     assert_eq!(of("direct"), vec![], "{boxes:?}");
-    assert_eq!(of("stored"), vec![(compiler::BoxKind::Pair, "Option<int>")], "{boxes:?}");
+    // A `Vec` of a two-word type keeps both words of each element in place.
+    assert_eq!(of("stored"), vec![], "{boxes:?}");
+    // A host result is still boxed where the native returns one word.
+    assert_eq!(of("Vec::pop"), vec![(compiler::BoxKind::HostResult, "vec_pop -> Option<int>")], "{boxes:?}");
     assert!(boxes.iter().all(|b| b.site.starts_with("from_hir.rs:")), "{boxes:?}");
 }
 
