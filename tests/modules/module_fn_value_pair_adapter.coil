@@ -2,8 +2,9 @@
 // (`Option<int>`, `(int, int)`, `Result<int, E>`, a small payload enum),
 // used as values here and in their own module, return their two words to
 // direct calls in both modules; their values enter one one-word adapter.
-// Needs `--root examples/src` (fn_value_pair_mod).
+// Needs `--root examples/src` (fn_value_pair_mod) and the stdlib.
 use tests::assert;
+use ascii::{digit_val, hex_val};
 use fn_value_pair_mod::{Sign, add_opt, checked_div, direct_sum, half, halves, sign, split};
 
 #[inline(never)]
@@ -93,4 +94,17 @@ test("direct calls in a hot loop") {
         i += 1;
     }
     assert!(s == 249500 / 2);
+}
+
+test("a stdlib function used as a value and called in its module") {
+    let f = digit_val;
+    assert!(f("7" as byte) == Some(7));
+    assert!(f("x" as byte) == None);
+    assert!(through(fn (int c) => digit_val(c as byte), 51) == 3);
+    assert!(digit_val("4" as byte) == Some(4));
+    assert!(hex_val("9" as byte) == Some(9) && hex_val("b" as byte) == Some(11));
+    let vs: Vec<byte -> Option<int>> = Vec::new();
+    vs.push(digit_val);
+    vs.push(hex_val);
+    assert!(vs[0]("2" as byte) == Some(2) && vs[1]("F" as byte) == Some(15));
 }
