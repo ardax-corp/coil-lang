@@ -42,7 +42,7 @@ The order is chosen for low risk and the most deletion first. D3 only deletes. D
 
 ### Phase D3: drop the emit cursor and phased emit
 
-Verified when: the corpus passes on both engines, the three ordering tests pass, and the spool archive is byte-identical to the base (no ids move).
+Verified when: the corpus passes on both engines, the three ordering tests pass, and archives are byte-identical to the base. D3a is the exception: where phased emit fired, bodies move to source order, so those archives only need to be canonically equivalent (see the decision log).
 
 #### Step D3a: delete phased emit (Size: S)
 
@@ -229,6 +229,7 @@ One PR at a time per lane, merged on green into `feature/native`, rebased before
 | Order | D3 → D2 → D1 → D4, with D1a/D1b in parallel | D3 only deletes; D2 is a prerequisite for D1c; D4 changes which rewrites are kept, so it goes last |
 | Execution (user, 2026-11-09) | Two lanes (A: D3+D2, B: D1a+D1b), then D1c onward serially | Faster, and the lanes touch mostly separate code |
 | D1d archive bytes (user, 2026-11-09) | Deterministic is enough; byte identity with the base is not required from D1d on | The format is unchanged; replaying in today's order would add code for no behaviour gain |
+| Archive check when emission order changes (2026-11-09, at D3a) | Byte-identical, or canonically equivalent: same bodies, same string-pool multiset, same metadata, deterministic. Every differing archive is listed in the PR | Deleting phased emit puts bodies in source order in the 7 programs where it fired, spool included, so string indices move. Applies the user's D1d rule (deterministic is enough) to the one step whose premise "no ids move" was wrong |
 | D4 scope (user, 2026-11-09) | All of D4a–D4d, gated by the hit-bench rule (±1%) | early_free's 693 fallbacks are real lost rewrites |
 
 ## Not yet specified
