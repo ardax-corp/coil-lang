@@ -44,7 +44,6 @@ pub use signature::{FfiError, FfiSignature, FfiSignatureBuilder};
 
 #[cfg(all(test, not(target_os = "windows")))]
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 pub fn register_on_library(
     obj_lib: &mut crate::memory::ObjLibrary,
@@ -65,17 +64,11 @@ pub fn register_on_library(
     let id = obj_lib.signatures.len();
     let name = sig.name.clone();
     obj_lib.signatures.push(crate::memory::RegisteredFunction {
-        sig: crate::memory::FunctionSig::from_ffi_signature(&sig),
         ffi_sig: sig,
         prepared,
     });
     obj_lib.by_name.insert(name, id);
     Ok(id)
-}
-
-/// Load a shared library by path (legacy — prefer [`resolve_library`]).
-pub fn load_library(name: &str) -> Result<Arc<Library>, FfiError> {
-    resolve_library(name, None, &[], &DloadGate::deny_all())
 }
 
 /// Build `examples/sum.c` into the platform `libsum` filename if missing or stale.

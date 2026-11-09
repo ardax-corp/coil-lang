@@ -4390,33 +4390,8 @@ pub struct ObjLibrary {
     pub static_symbols: Option<&'static crate::ffi::StaticLibrary>,
 }
 
-/// C signature metadata for an FFI function.
-#[derive(Clone, Debug)]
-pub struct FunctionSig {
-    pub name: String,
-    /// Fixed-prefix arity (`nfixed` when [`Self::variadic`]).
-    pub arity: usize,
-    pub arg_types: Vec<FfiType>,
-    pub ret_type: FfiType,
-    /// C-style varargs, CIF rebuilt per invoke with `Cif::new_variadic`.
-    pub variadic: bool,
-}
-
-impl FunctionSig {
-    pub fn from_ffi_signature(sig: &crate::ffi::FfiSignature) -> Self {
-        Self {
-            name: sig.name.clone(),
-            arity: sig.arity(),
-            arg_types: sig.args.clone(),
-            ret_type: sig.ret,
-            variadic: sig.variadic,
-        }
-    }
-}
-
 /// A declared FFI function with a prepared libffi call interface.
 pub struct RegisteredFunction {
-    pub sig: FunctionSig,
     /// The signature the call path marshals against, kept so an invoke
     /// does not rebuild (and allocate) it.
     pub ffi_sig: crate::ffi::FfiSignature,

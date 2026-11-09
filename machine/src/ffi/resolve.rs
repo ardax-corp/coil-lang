@@ -477,11 +477,11 @@ mod tests {
             }
             other => panic!("expected resolve deny for {name:?}, got {other:?}"),
         }
-        match super::super::load_library(name) {
+        match resolve_library(name, None, &[], &DloadGate::deny_all()) {
             Err(FfiError::LibraryDenied { stem, .. }) => {
                 assert_eq!(stem, expected_stem);
             }
-            other => panic!("expected load_library deny for {name:?}, got {other:?}"),
+            other => panic!("expected deny_all deny for {name:?}, got {other:?}"),
         }
     }
 
@@ -663,9 +663,9 @@ mod tests {
                 other => panic!("expected LibraryNotFound for trusted {stem}, got {other:?}"),
             }
         }
-        match super::super::load_library(&missing_abs_lib("crypto")) {
+        match resolve_library(&missing_abs_lib("crypto"), None, &[], &DloadGate::deny_all()) {
             Err(FfiError::LibraryDenied { .. }) => {}
-            other => panic!("load_library uses deny_all; expected LibraryDenied, got {other:?}"),
+            other => panic!("deny_all: expected LibraryDenied, got {other:?}"),
         }
     }
 
