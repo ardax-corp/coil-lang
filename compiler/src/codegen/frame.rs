@@ -50,6 +50,9 @@ pub(crate) struct BodyFrame {
     pub(crate) entry_sp: u32,
     /// The first slot past the entry words and the context dictionaries.
     pub(crate) frame_base: u32,
+    /// The context dictionaries read on entry: each one's slot, then the
+    /// slot of the dictionary it is read out of and its index there.
+    pub(crate) context: Vec<(u32, u32, u32)>,
 }
 
 impl BodyFrame {
@@ -72,11 +75,13 @@ impl BodyFrame {
         }
         frame.entry_sp = frame.frame_base;
         // Read out of the instance's own dictionary.
-        if let Some((_, n)) = dicts.context
-            && frame.dicts.contains_key(&0)
+        if let Some((base, n)) = dicts.context
+            && let Some(own) = frame.dict_slot(0)
         {
             for i in 0..n {
                 frame.dict(i + 1);
+                let slot = frame.dict_slot(i + 1).expect("context dictionary slot");
+                frame.context.push((slot, own, (base + i) as u32));
             }
         }
         frame
@@ -110,6 +115,12 @@ impl BodyFrame {
     /// `__dict{n}`'s slot.
     pub(crate) fn dict_slot(&self, n: usize) -> Option<u32> {
         self.dicts.get(&(n as u32)).copied()
+    }
+
+    /// The body's entry locals in slot order per kind: a lambda's captures,
+    /// then the parameters. A lambda lowers with both as its parameters.
+    pub(crate) fn entry_locals(&self) -> impl Iterator<Item = &FrameLocal> {
+        self.captures.iter().chain(&self.params)
     }
 
     /// Whether `name` is a parameter or capture of the body.

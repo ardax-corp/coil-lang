@@ -94,8 +94,6 @@ pub(super) struct HirMirTables {
     /// The `into_iter` and `next` entries a `for` loop over a user
     /// iterator calls, by loop.
     pub(super) iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
-    /// Direct MIR's frame: the local id of each local's first word.
-    pub(super) frame: HirMirFrame,
     /// Some code emission writes for this body reads one of the frame's
     /// dictionaries (`__dictN`) ([`Compiler::hir_mir_dict_reads`]).
     pub(super) reads_dicts: bool,
@@ -110,20 +108,6 @@ pub(super) struct HirMirTables {
     /// ([`Compiler::hir_field_of_new`]): each argument runs in order and
     /// `f`'s is the value, by field read.
     pub(super) field_news: HashSet<u32>,
-}
-
-/// The frame direct MIR keeps a body's locals in, planned over the HIR:
-/// each parameter where the entry put it, then each local the body binds,
-/// in local order, one id per word (a stack array's elements, a frame-slot
-/// class local's fields, a pair local's two words).
-#[derive(Default)]
-pub(super) struct HirMirFrame {
-    /// First id of each local that has words (`None`: never bound here).
-    pub(super) slots: Vec<Option<u32>>,
-    /// Second id of each two-word (pair) local.
-    pub(super) tags: HashMap<u32, u32>,
-    /// Words of each bound local.
-    pub(super) widths: HashMap<u32, u32>,
 }
 
 /// Which children of an expression emission evaluates.
@@ -142,7 +126,6 @@ impl Compiler {
         if let Some(root) = hir.root {
             self.hir_mir_walk(hir, emit, root, &mut tables);
         }
-        tables.frame = self.hir_mir_frame(hir, emit);
         tables
     }
 
@@ -183,57 +166,16 @@ impl Compiler {
         }
     }
 
-    /// The frame of `hir` ([`HirMirFrame`]): the locals emission binds in
-    /// this body's frame, from the HIR and the plan alone.
-    fn hir_mir_frame(&self, hir: &HirBody, emit: &HirEmit) -> HirMirFrame {
+    /// The locals emission binds in `hir`'s frame, from the HIR and the
+    /// plan alone: direct MIR numbers them after the entry words.
+    pub(super) fn hir_bound_locals(&self, hir: &HirBody, emit: &HirEmit) -> HashSet<u32> {
         let mut bound = HashSet::new();
         // A lambda's body is emitted for its value ([`Self::hir_lambda_fn`]).
         if let Some(root) = hir.root {
             let value = hir.kind == crate::hir::BodyKind::Lambda;
             self.hir_mir_bound(hir, emit, root, value, false, &mut bound);
         }
-        let mut frame = HirMirFrame {
-            slots: vec![None; hir.locals.len()],
-            ..HirMirFrame::default()
-        };
-        for (&local, &(slot, tag)) in &emit.plan.params {
-            frame.slots[local as usize] = Some(slot);
-            frame.widths.insert(local, 1);
-            if let Some(tag) = tag {
-                frame.tags.insert(local, tag);
-            }
-        }
-        let inits: HashMap<u32, HirId> = hir
-            .exprs
-            .iter()
-            .filter_map(|e| match e.kind {
-                HirKind::Let { local, init: Some(init) } => Some((local.0, init)),
-                _ => None,
-            })
-            .collect();
-        let mut next = emit.plan.frame_base;
-        for local in 0..hir.locals.len() as u32 {
-            if emit.plan.params.contains_key(&local) || !bound.contains(&local) {
-                continue;
-            }
-            let width = if let Some(&n) = emit.plan.stacks.get(&local) {
-                n as u32
-            } else if emit.plan.sroa.contains_key(&local) {
-                inits
-                    .get(&local)
-                    .and_then(|&init| self.hir_new_layout(hir, init))
-                    .map_or(1, |(_, tys)| tys.len() as u32)
-            } else if emit.plan.pair_locals.contains_key(&local) {
-                frame.tags.insert(local, next + 1);
-                2
-            } else {
-                1
-            };
-            frame.slots[local as usize] = Some(next);
-            frame.widths.insert(local, width);
-            next += width;
-        }
-        frame
+        bound
     }
 
     /// Collect the locals `id` binds in this body's frame, as emission
@@ -1619,7 +1561,7 @@ impl Compiler {
             return false;
         };
         (slot < sp && (0..).map_while(|i| self.frame_dict(i)).any(|s| s == slot))
-            || self.hir_mir_ctx.iter().any(|&(s, own, _)| s == slot && own < sp)
+            || self.hir_body_frame.as_ref().is_some_and(|f| f.context.iter().any(|&(s, own, _)| s == slot && own < sp))
     }
 
     /// [`Self::hir_dict_ops`], with every ground dictionary built once

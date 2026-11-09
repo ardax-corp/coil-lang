@@ -370,9 +370,6 @@ struct HirPlan {
     /// A parallel loop runs its chunked fork-join inline, which the direct
     /// MIR lowering does not model.
     par_inline: bool,
-    /// Frame words the function's entry set up (parameters, dictionaries)
-    /// when the body was planned: direct MIR's planned locals come after.
-    frame_base: u32,
     /// Each parameter's frame slot, and a two-word parameter's second.
     params: HashMap<u32, (u32, Option<u32>)>,
 }
@@ -1305,7 +1302,6 @@ impl Compiler {
         *self.polyfn_over_application.borrow_mut() = None;
         // Clones an earlier body planned but never called give back their room.
         self.planned_method_clones.borrow_mut().clear();
-        self.hir_mir_ctx.clear();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
             self.hir_refusal = Some("no-hir-body");
             return false;
@@ -1328,15 +1324,6 @@ impl Compiler {
         let moded = self.hir_fold_key_eq_modes(hir);
         let hir = moded.as_ref().unwrap_or(hir);
         let frame = self.hir_function_frame(hir, dicts.unwrap_or_default());
-        // Direct MIR loads the context dictionaries on entry.
-        if let Some((base, n)) = dicts.and_then(|d| d.context)
-            && let Some(own) = frame.dict_slot(0)
-        {
-            for i in 0..n {
-                let slot = frame.dict_slot(i + 1).expect("context dictionary slot");
-                self.hir_mir_ctx.push((slot, own, (base + i) as u32));
-            }
-        }
         let spans = std::mem::take(&mut self.param_name_spans);
         for param in &frame.params {
             self.record_debug_param_at(&param.name, param.slot, spans.get(&param.name).copied());
@@ -1617,7 +1604,6 @@ impl Compiler {
         start: impl FnOnce(&mut Self),
     ) -> bool {
         self.hir_refusal = None;
-        self.hir_mir_ctx.clear();
         let prev_calls = self.hir_synth_calls.replace(calls);
         let module = self.hir_module.take();
         // The frame starts with the parameters, as a declared function's.
@@ -1637,13 +1623,6 @@ impl Compiler {
             (None, None) => frame::FrameDicts::default(),
         };
         let frame = frame::BodyFrame::function(hir, |i| pairs.get(skip + i).cloned().flatten(), dicts);
-        if let Some((base, n)) = self.synth_entry_dicts {
-            let own = frame.dict_slot(0).expect("own dictionary");
-            for i in 0..n {
-                let slot = frame.dict_slot(i + 1).expect("context dictionary");
-                self.hir_mir_ctx.push((slot, own, (base + i) as u32));
-            }
-        }
         let entry_words = (self.synth_entry_dicts.is_some() || self.synth_plain_dicts.is_some()).then_some(frame.entry_sp);
         let outer = self.hir_body_frame.replace(frame);
         let plan = refusal::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
@@ -1707,18 +1686,19 @@ impl Compiler {
             Err("parallel loop".to_string())
         } else {
             let frozen = self.hir_frozen_arrays(hir);
-            let cx = HirLowerCx::new(self, hir, emit, &tables);
-            self.hir_mir_input(hir, emit, &tables, &cx, file, entry_words).and_then(|mut inp| {
-                inp.frozen_arrays = frozen;
-                crate::mir::lower_from_hir(hir, &inp, &cx)
-            })
+            // A lambda's captured dictionaries are parameters too.
+            let dict_params = entry_words.is_some() || self.hir_lambda_dicts.is_some_and(|(_, n)| n > 0);
+            let cx = HirLowerCx::new(self, hir, emit, &tables, dict_params);
+            let mut inp = self.hir_mir_input(emit, &tables, file);
+            inp.frozen_arrays = frozen;
+            crate::mir::lower_from_hir(hir, &inp, &cx)
         };
         match why {
-            Ok(mut func) => {
+            Ok((mut func, frame)) => {
                 let slots: HashSet<u32> = self.frozen_tables.keys().copied().collect();
                 crate::mir::mark_frozen_arrays(&mut func, &slots);
                 crate::opt::note_hir_mir(None);
-                self.hir_mir_debug_vars(hir, emit, &tables.frame);
+                self.hir_mir_debug_vars(hir, emit, &frame);
                 Some(func)
             }
             Err(why) => {
@@ -1762,7 +1742,7 @@ impl Compiler {
     /// the function's prologue records) for `coil debug`, from the frame
     /// direct MIR plans: a scalar-replaced class local as its fields, a
     /// stack array as its elements, each in its own slot.
-    fn hir_mir_debug_vars(&mut self, hir: &HirBody, emit: &HirEmit, frame: &emit_hir_mir::HirMirFrame) {
+    fn hir_mir_debug_vars(&mut self, hir: &HirBody, emit: &HirEmit, frame: &crate::mir::LocalFrame) {
         use crate::debug_vars::{DebugTy, DebugVarLoc};
         let params: HashSet<u32> = hir.params.iter().map(|l| l.0).collect();
         // The name's span: its first whole-word occurrence in its `let`.
@@ -1824,58 +1804,16 @@ impl Compiler {
         }
     }
 
-    /// What direct MIR lowering needs from emission: slots, the side
-    /// tables planned over the HIR ([`Self::hir_mir_tables`]), call sites,
-    /// and the word types of each two-word pair.
-    fn hir_mir_input<'a>(
-        &'a self,
-        hir: &HirBody,
-        emit: &'a HirEmit,
-        tables: &'a emit_hir_mir::HirMirTables,
-        cx: &HirLowerCx,
-        file: Option<u32>,
-        entry_words: Option<u32>,
-    ) -> Result<crate::mir::HirMirInput<'a>, String> {
-        let frame = &tables.frame;
-        // Each planned pair local has its two word types
-        // ([`HirLowerCx::pair_local`]).
-        for &local in emit.plan.pair_locals.keys() {
-            let ty = hir.local(LocalId(local)).ty.as_ref().ok_or("pair local type")?;
-            self.hir_mir_pair_tys(ty).ok_or("pair local type")?;
-        }
-        // Each stack array, scalar-replaced local and field of one has its
-        // slots and word types ([`HirLowerCx::stack`], `sroa`,
-        // `frame_field`).
-        for &local in emit.plan.stacks.keys() {
-            cx.try_stack(local)?;
-        }
-        for e in &hir.exprs {
-            if let HirKind::Let { local, init: Some(init) } = e.kind
-                && emit.plan.sroa.contains_key(&local.0)
-                && !cx.outlined.contains(&local.0)
-            {
-                cx.try_sroa_words(init)?;
-            }
-        }
-        for i in 0..hir.exprs.len() as u32 {
-            cx.try_frame_field(HirId(i))?;
-        }
-        if self.residue_lint.get() {
-            for i in 0..hir.exprs.len() as u32 {
-                cx.note_new_residue(HirId(i));
-            }
-        }
-        if matches!(emit.plan.ret, Rep::Pair(_)) {
-            hir.ret.as_ref().and_then(|t| self.hir_mir_pair_tys(t)).ok_or("return type")?;
-        }
+    /// What direct MIR lowering needs from emission: the side tables
+    /// planned over the HIR ([`Self::hir_mir_tables`]) and the call sites.
+    fn hir_mir_input<'a>(&'a self, emit: &'a HirEmit, tables: &'a emit_hir_mir::HirMirTables, file: Option<u32>) -> crate::mir::HirMirInput<'a> {
         // A `defer`'s cleanup pad ends in `unwind_resume`.
         let unwind_native = self.native_id("unwind_resume").and_then(|n| u16::try_from(n).ok());
         // A `for` loop left early closes the generator it runs over.
         let coro_close_native = self.native_id(common::CORO_CLOSE_NATIVE).and_then(|n| u16::try_from(n).ok());
-        Ok(crate::mir::HirMirInput {
+        crate::mir::HirMirInput {
             unwind_native,
             coro_close_native,
-            slots: &frame.slots,
             calls: &tables.calls,
             into_iters: &tables.into_iters,
             iter_loops: &tables.iter_loops,
@@ -1892,7 +1830,6 @@ impl Compiler {
             poly_calls: &tables.poly_calls,
             bound_calls: &tables.bound_calls,
             existential_calls: &tables.existential_calls,
-            ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx[..] } else { &[] },
             alloc_steady: self.alloc_steady,
             frozen_arrays: HashMap::new(),
             niche_args: &tables.niche_args,
@@ -1911,11 +1848,9 @@ impl Compiler {
                 HashSet::new()
             },
             file,
-            entry_words,
-            lambda_dicts: self.hir_lambda_dicts.filter(|&(_, n)| n > 0),
             debugger: self.debugger_attached,
             coverage: self.keep_fns_in.is_some(),
-        })
+        }
     }
 
     /// A type whose value can hold an object with a `drop` (a class or
@@ -4114,7 +4049,6 @@ impl Compiler {
     }
 
     fn plan_hir_body_ret(&self, hir: &HirBody, ret: Rep) -> Result<HirEmit, &'static str> {
-        let frame = self.hir_body_frame.as_ref();
         let mut emit = HirEmit {
             plan: HirPlan {
                 calls: HashMap::new(),
@@ -4134,7 +4068,6 @@ impl Compiler {
                 cold_ok: false,
                 par_loops: HashMap::new(),
                 par_inline: false,
-                frame_base: frame.map_or(0, |f| f.frame_base),
                 params: HashMap::new(),
             },
             slots: vec![None; hir.locals.len()],
@@ -10309,7 +10242,6 @@ impl Compiler {
         }
         let prev_key = self.current_function_table_key.replace(name.clone());
         let prev_two_word = self.compiling_two_word_enum.take();
-        let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
         // The captures its plan takes as two words.
@@ -10352,7 +10284,6 @@ impl Compiler {
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
-        self.hir_mir_ctx = prev_ctx;
         self.compiling_two_word_enum = prev_two_word;
         self.current_function_table_key = prev_key;
         // A parallel loop inside the lambda moved out of it too.
@@ -10906,41 +10837,43 @@ struct HirLowerCx<'a> {
     hir: &'a HirBody,
     emit: &'a HirEmit,
     tables: &'a emit_hir_mir::HirMirTables,
+    /// The body's entry frame.
+    frame: &'a frame::BodyFrame,
+    /// The frame's dictionaries are parameters of the body's MIR.
+    dict_params: bool,
     /// A generic body's type variable values are opaque words it only
     /// moves; a generic class's shared method sees its class's
     /// parameters as type variables too.
     opaque_vars: bool,
     /// The locals of outlined parallel loop bodies: they live in their
-    /// chunk worker's frame, not this body's.
-    outlined: HashSet<u32>,
+    /// chunk worker's frame, not this body's. Known once lowering has
+    /// numbered the frame ([`crate::mir::LowerCx::check_frame`]).
+    outlined: std::cell::OnceCell<HashSet<u32>>,
 }
 
 impl<'a> HirLowerCx<'a> {
-    fn new(c: &'a Compiler, hir: &'a HirBody, emit: &'a HirEmit, tables: &'a emit_hir_mir::HirMirTables) -> Self {
+    fn new(c: &'a Compiler, hir: &'a HirBody, emit: &'a HirEmit, tables: &'a emit_hir_mir::HirMirTables, dict_params: bool) -> Self {
         // A `Vec<T>` of them too (`len(self.keys)` in a `HashMap<K, V>`
         // invariant reads no `K`).
         let holds_var = |t: &Ty| is_var_ty(t) || crate::typechecking::ty::vec_element_ty(t).is_some_and(is_var_ty);
         let opaque_vars = hir.is_generic
             || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(holds_var))
             || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(holds_var));
-        let mut outlined = HashSet::new();
-        for par in emit.plan.par_loops.values() {
-            hir.visit(par.tail.body, &mut |x| match x.kind {
-                HirKind::Local(l) | HirKind::Let { local: l, .. } if tables.frame.slots[l.0 as usize].is_none() => {
-                    outlined.insert(l.0);
-                }
-                _ => {}
-            });
-        }
-        HirLowerCx { c, hir, emit, tables, opaque_vars, outlined }
+        let frame = c.hir_body_frame.as_ref().expect("the frame of the body being lowered");
+        HirLowerCx { c, hir, emit, tables, frame, dict_params, opaque_vars, outlined: std::cell::OnceCell::new() }
     }
 
-    /// A stack array local's first slot, length and element word type:
-    /// one frame slot per element, each one word. An error when the plan
-    /// keeps one in slots that direct MIR cannot type.
-    fn try_stack(&self, local: u32) -> Result<Option<(u32, usize, crate::mir::MirTy)>, String> {
+    /// A local of an outlined parallel loop's body.
+    fn outlined(&self, local: u32) -> bool {
+        self.outlined.get().is_some_and(|o| o.contains(&local))
+    }
+
+    /// A stack array local's length and element word type: one frame slot
+    /// per element, each one word. An error when the plan keeps one in
+    /// slots that direct MIR cannot type.
+    fn try_stack(&self, local: u32) -> Result<Option<(usize, crate::mir::MirTy)>, String> {
         let c = self.c;
-        let Some(&n) = self.emit.plan.stacks.get(&local).filter(|_| !self.outlined.contains(&local)) else {
+        let Some(&n) = self.emit.plan.stacks.get(&local).filter(|_| !self.outlined(local)) else {
             return Ok(None);
         };
         let ty = self.hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(c.checker.subst(), t));
@@ -10969,8 +10902,7 @@ impl<'a> HirLowerCx<'a> {
                 }),
             _ => None,
         };
-        let base = self.tables.frame.slots[local as usize].ok_or("stack array slot")?;
-        Ok(Some((base, n, elem.ok_or("stack array type")?)))
+        Ok(Some((n, elem.ok_or("stack array type")?)))
     }
 
     /// The word type of each field slot of a scalar-replaced class local
@@ -11021,11 +10953,11 @@ impl<'a> HirLowerCx<'a> {
         Ok(tys.ok_or("scalar-replaced field type")?)
     }
 
-    /// The frame slot of field read or write `id` on a scalar-replaced
-    /// class local, whether or not the local is boxed by the end: direct
-    /// MIR goes through the box only after it. An error when the field has
-    /// no slot.
-    fn try_frame_field(&self, id: HirId) -> Result<Option<u32>, String> {
+    /// The local and field slot of field read or write `id` on a
+    /// scalar-replaced class local, whether or not the local is boxed by
+    /// the end: direct MIR goes through the box only after it. An error
+    /// when the field has no slot.
+    fn try_frame_field(&self, id: HirId) -> Result<Option<(u32, u32)>, String> {
         let hir = self.hir;
         let HirKind::Field { base, name } = &hir.expr(id).kind else {
             return Ok(None);
@@ -11033,13 +10965,13 @@ impl<'a> HirLowerCx<'a> {
         let HirKind::Local(local) = hir.expr(*base).kind else {
             return Ok(None);
         };
-        if !self.emit.plan.sroa.contains_key(&local.0) || self.outlined.contains(&local.0) {
+        if !self.emit.plan.sroa.contains_key(&local.0) || self.outlined(local.0) {
             return Ok(None);
         }
         let Some((FieldAt::Slot(idx), _)) = self.c.hir_field(hir, *base, name) else {
             return Err("scalar-replaced field".into());
         };
-        Ok(Some(self.tables.frame.slots[local.0 as usize].ok_or("scalar-replaced field")? + idx))
+        Ok(Some((local.0, idx)))
     }
 
     /// The boxed-residue lint for `new` `id`: each field of a class
@@ -11340,15 +11272,92 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         self.c.hir_lane_elem(t)
     }
 
-    fn pair_local(&self, local: u32) -> Option<(u32, crate::mir::MirTy, crate::mir::MirTy)> {
+    fn frame(&self) -> &frame::BodyFrame {
+        self.frame
+    }
+
+    fn dict_params(&self) -> bool {
+        self.dict_params
+    }
+
+    fn bound_locals(&self) -> HashSet<u32> {
+        self.c.hir_bound_locals(self.hir, self.emit)
+    }
+
+    fn local_words(&self, local: u32) -> crate::mir::LocalWords {
+        use crate::mir::LocalWords;
+        let plan = &self.emit.plan;
+        if let Some(&n) = plan.stacks.get(&local) {
+            LocalWords::Slots(n as u32)
+        } else if plan.sroa.contains_key(&local) {
+            // The local's last `let` with a value.
+            let init = self.hir.exprs.iter().rev().find_map(|e| match e.kind {
+                HirKind::Let { local: l, init: Some(init) } if l.0 == local => Some(init),
+                _ => None,
+            });
+            LocalWords::Slots(init.and_then(|init| self.c.hir_new_layout(self.hir, init)).map_or(1, |(_, tys)| tys.len() as u32))
+        } else if plan.pair_locals.contains_key(&local) {
+            LocalWords::Pair
+        } else {
+            LocalWords::Slots(1)
+        }
+    }
+
+    fn check_frame(&self, slots: &[Option<u32>]) -> Result<(), String> {
+        let (c, hir, emit) = (self.c, self.hir, self.emit);
+        let slot = |local: u32| slots.get(local as usize).copied().flatten();
+        let mut outlined = HashSet::new();
+        for par in emit.plan.par_loops.values() {
+            hir.visit(par.tail.body, &mut |x| match x.kind {
+                HirKind::Local(l) | HirKind::Let { local: l, .. } if slot(l.0).is_none() => {
+                    outlined.insert(l.0);
+                }
+                _ => {}
+            });
+        }
+        let _ = self.outlined.set(outlined);
+        // Each planned pair local has its two word types.
+        for &local in emit.plan.pair_locals.keys() {
+            let ty = hir.local(LocalId(local)).ty.as_ref().ok_or("pair local type")?;
+            c.hir_mir_pair_tys(ty).ok_or("pair local type")?;
+        }
+        // Each stack array, scalar-replaced local and field of one has its
+        // slots and word types.
+        for &local in emit.plan.stacks.keys() {
+            if !self.outlined(local) {
+                slot(local).ok_or("stack array slot")?;
+            }
+            self.try_stack(local)?;
+        }
+        for e in &hir.exprs {
+            if let HirKind::Let { local, init: Some(init) } = e.kind
+                && emit.plan.sroa.contains_key(&local.0)
+                && !self.outlined(local.0)
+            {
+                self.try_sroa_words(init)?;
+            }
+        }
+        for i in 0..hir.exprs.len() as u32 {
+            if let Some((local, _)) = self.try_frame_field(HirId(i))? {
+                slot(local).ok_or("scalar-replaced field")?;
+            }
+        }
+        if c.residue_lint.get() {
+            for i in 0..hir.exprs.len() as u32 {
+                self.note_new_residue(HirId(i));
+            }
+        }
+        if matches!(emit.plan.ret, Rep::Pair(_)) {
+            hir.ret.as_ref().and_then(|t| c.hir_mir_pair_tys(t)).ok_or("return type")?;
+        }
+        Ok(())
+    }
+
+    fn pair_local(&self, local: u32) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
         if !self.emit.plan.pair_locals.contains_key(&local) {
             return None;
         }
-        let (lo, hi) = self.c.hir_mir_pair_tys(self.hir.local(LocalId(local)).ty.as_ref()?)?;
-        // A pair local the body never binds (its `let` folded away by
-        // inlining) has no second word: nothing reads it.
-        let &tag = self.tables.frame.tags.get(&local)?;
-        Some((tag, lo, hi))
+        self.c.hir_mir_pair_tys(self.hir.local(LocalId(local)).ty.as_ref()?)
     }
 
     fn ret_pair(&self) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
@@ -11387,12 +11396,12 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         self.opaque_vars
     }
 
-    fn stack(&self, local: u32) -> Option<(u32, usize, crate::mir::MirTy)> {
+    fn stack(&self, local: u32) -> Option<(usize, crate::mir::MirTy)> {
         self.try_stack(local).ok().flatten()
     }
 
     fn sroa(&self, local: u32) -> Option<Vec<crate::mir::MirTy>> {
-        if !self.emit.plan.sroa.contains_key(&local) || self.outlined.contains(&local) {
+        if !self.emit.plan.sroa.contains_key(&local) || self.outlined(local) {
             return None;
         }
         // The local's last `let` with a value.
@@ -11410,7 +11419,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         Some((checker.class_type_id(class), n as u32))
     }
 
-    fn frame_field(&self, id: HirId) -> Option<u32> {
+    fn frame_field(&self, id: HirId) -> Option<(u32, u32)> {
         self.try_frame_field(id).ok().flatten()
     }
 

@@ -47,7 +47,7 @@ pub use box_report::{BoxKind, BoxSite, start_box_capture, take_box_capture};
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;
-pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirLaneCall, HirLaneElem, HirRetItem, HirRetItems, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, LowerCx, PairVariants, ScalarLit, HirFieldFact, HirFieldWord, HirHost, HirLaneUses, HirNew};
+pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirLaneCall, HirLaneElem, HirRetItem, HirRetItems, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, LowerCx, PairVariants, ScalarLit, HirFieldFact, HirFieldWord, HirHost, HirLaneUses, HirNew, LocalFrame, LocalWords};
 pub use func::MirFunc;
 pub use gc::liveness;
 pub use func::{MirBlock, is_tail_call_inst};
