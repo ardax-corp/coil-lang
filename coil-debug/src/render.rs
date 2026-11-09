@@ -179,7 +179,6 @@ impl Renderer<'_> {
             Some(DebugObject::Instance { fields, .. }) => {
                 self.list("{ ", " }", &fields, |w| self.untyped(w, depth + 1), depth)
             }
-            Some(DebugObject::Boxed(inner)) => inner.as_int().to_string(),
             Some(DebugObject::Other(kind)) => format!("<{kind}>"),
             None => word.as_int().to_string(),
         }

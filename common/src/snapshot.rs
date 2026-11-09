@@ -32,7 +32,7 @@ const OBJ_ARRAY: u64 = 2;
 const OBJ_TUPLE: u64 = 3;
 const OBJ_ENUM: u64 = 4;
 const OBJ_INSTANCE: u64 = 5;
-const OBJ_BOXED: u64 = 6;
+// 6 was a generic-runtime box (`SnapObject::Boxed`, gone with archive major 8).
 const OBJ_LANES: u64 = 7;
 
 const TAG_RAW: u64 = 0;
@@ -68,8 +68,6 @@ pub enum SnapObject {
     Enum { tag: u32, type_id: u32, kinds: u8, words: Vec<SnapWord> },
     /// A typed class instance's field slots.
     Instance { type_id: u32, words: Vec<SnapWord> },
-    /// A generic-runtime box: its tag and payload.
-    Boxed { tag: u16, word: SnapWord },
 }
 
 /// Objects plus the static slots that hold the roots.
@@ -91,8 +89,6 @@ pub enum SnapStep {
     Payload(usize),
     /// Field slot `index` of an instance of class or record `type_id`.
     Field { type_id: u32, index: usize },
-    /// The value inside a generic-runtime box.
-    Boxed,
 }
 
 /// A value reachable from a root that has no snapshot form.
@@ -209,7 +205,6 @@ impl HeapSnapshot {
                 | SnapObject::Tuple { words, .. }
                 | SnapObject::Enum { words, .. }
                 | SnapObject::Instance { words, .. } => words.iter().try_for_each(check)?,
-                SnapObject::Boxed { word, .. } => check(word)?,
             }
         }
         Ok(())
@@ -248,10 +243,6 @@ fn encode_object(out: &mut Vec<u64>, object: &SnapObject) {
         SnapObject::Instance { type_id, words } => {
             out.push(header(OBJ_INSTANCE, 0, u64::from(*type_id)));
             encode_words(out, words);
-        }
-        SnapObject::Boxed { tag, word } => {
-            out.push(header(OBJ_BOXED, 0, u64::from(*tag)));
-            encode_words(out, std::slice::from_ref(word));
         }
     }
 }
@@ -367,13 +358,6 @@ impl<'a> Reader<'a> {
                 SnapObject::Enum { tag: extra, type_id, kinds: aux, words: self.words()? }
             }
             OBJ_INSTANCE => SnapObject::Instance { type_id: extra, words: self.words()? },
-            OBJ_BOXED => {
-                let words = self.words()?;
-                let [word] = words[..] else {
-                    return Err(SnapshotDecodeError::Length);
-                };
-                SnapObject::Boxed { tag: extra as u16, word }
-            }
             kind => return Err(SnapshotDecodeError::BadObjectKind(kind)),
         })
     }
@@ -396,7 +380,6 @@ mod tests {
                 SnapObject::Lanes { k: 2, tag_mask: 0b10, words: vec![SnapWord::Ref { index: 0, err_bit: false }, SnapWord::Raw(1), SnapWord::Raw(0), SnapWord::Raw(0)] },
                 SnapObject::Enum { tag: 7, type_id: 42, kinds: 2, words: vec![SnapWord::Ref { index: 0, err_bit: true }] },
                 SnapObject::Instance { type_id: 9, words: vec![SnapWord::UnitEnum { tag: 3, err_bit: true }, SnapWord::EmptyTuple { err_bit: false }, SnapWord::Ref { index: 5, err_bit: false }] },
-                SnapObject::Boxed { tag: 4, word: SnapWord::Raw(f64::NAN.to_bits()) },
             ],
             statics: vec![(0, SnapWord::Ref { index: 5, err_bit: false }), (3, SnapWord::Raw(17))],
         }

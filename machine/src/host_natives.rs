@@ -570,21 +570,12 @@ fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(
     });
 }
 
-/// `values_eq_shaped(a, b, shape) -> bool`: `==` on an aggregate whose
-/// `float` leaves compare by IEEE ([`crate::value_eq::values_eq_shaped`]).
-/// The compiler no longer emits it (that `==` calls compiler-made glue);
-/// it stays for archives that still call it.
+/// `values_eq_shaped` (161): a panic stub that keeps the id. The compiler
+/// stopped emitting it in #2330 (that `==` calls compiler-made glue), and
+/// no archive of major 8 calls it.
 fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     register(out, register_id, common::VALUES_EQ_SHAPED_NATIVE, FfiType::Int, |sig| {
-        HostClosureFn::new_direct(sig, |heap, args| {
-            let eq = match heap.find_object_by_addr(args[2].bits()) {
-                Some(crate::memory::Object::String(gc)) => {
-                    crate::value_eq::values_eq_shaped(heap, args[0], args[1], gc.as_ref().data.as_bytes())
-                }
-                _ => crate::value_eq::values_eq(heap, args[0], args[1]),
-            };
-            Value::from(i64::from(eq))
-        })
+        HostClosureFn::new(sig, |_heap, _args| panic!("removed HostInvoke `values_eq_shaped` (`==` calls compiler-made glue)"))
     });
 }
 
@@ -596,7 +587,7 @@ fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn F
     // strings; anything else orders before every string.
     register(out, register_id, common::STRING_COMPARE_NATIVE, FfiType::Int, |sig| {
         HostClosureFn::new_direct(sig, |heap, args| {
-            let text = |v: Value| match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, v).bits()) {
+            let text = |v: Value| match heap.find_object_by_addr(v.bits()) {
                 Some(crate::memory::Object::String(gc)) => Some(gc),
                 _ => None,
             };

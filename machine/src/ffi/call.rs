@@ -575,9 +575,8 @@ pub fn invoke_via_libffi(
     let mut slots: Vec<ArgSlot> = Vec::with_capacity(effective_types.len());
 
     fn value_is_stream(heap: &Heap, value: &Value) -> bool {
-        let v = crate::io::peel_one_boxed(heap, *value);
         matches!(
-            heap.find_object_by_addr(v.bits()),
+            heap.find_object_by_addr(value.bits()),
             Some(Object::Stream(_))
         )
     }

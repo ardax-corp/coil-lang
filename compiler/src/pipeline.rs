@@ -130,8 +130,6 @@ pub struct Pipeline {
     overlays: HashMap<PathBuf, String>,
     /// Parsed + expanded AST per file (discover / compile / typecheck).
     ast_cache: crate::ast_cache::AstCache,
-    /// Files that declare a `fn drop()` ([`Self::seed_fn_value_escapes`]).
-    finalizer_files: HashSet<PathBuf>,
     /// The file each compiled program came from, by its program number
     /// (foreign clones compile from its AST).
     program_files: HashMap<usize, PathBuf>,
@@ -588,7 +586,6 @@ impl Pipeline {
             source_cache: Vec::new(),
             overlays: HashMap::new(),
             ast_cache: crate::ast_cache::AstCache::default(),
-            finalizer_files: HashSet::new(),
             program_files: HashMap::new(),
             include_tests: false,
             contract_runs: 0,
@@ -1050,7 +1047,6 @@ impl Pipeline {
         if let Some(c) = self.compiler.get_mut() {
             c.clear_fn_value_escaped_program();
             c.set_program_finalizers_resize(None);
-            c.set_pending_finalizers(true);
             c.set_written_names_program(None);
         }
     }
@@ -1062,17 +1058,12 @@ impl Pipeline {
         let mut names = HashSet::new();
         // A finalizer in any file runs at every file's allocation safepoints.
         let mut finalizers_resize = false;
-        self.finalizer_files.clear();
         let mut written = HashSet::new();
-        for (file, cached) in self.ast_cache.iter() {
+        for (_, cached) in self.ast_cache.iter() {
             if let Some(ast) = cached.ast() {
                 crate::static_writes::collect_written_names(ast, &mut written);
                 crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
-                let (declared, resize) = crate::typechecking::purity::finalizer_facts(ast);
-                if declared {
-                    self.finalizer_files.insert(file.clone());
-                }
-                finalizers_resize |= resize;
+                finalizers_resize |= crate::typechecking::purity::finalizer_facts(ast).1;
             }
         }
         let compiler = self.compiler_lazy_mut();
@@ -1086,15 +1077,7 @@ impl Pipeline {
         self.seed_fn_value_escapes();
         let order = self.worklist_in_dependency_order();
         self.step(CompileStep::Modules(order.len()));
-        // Whether a module compiled after each one declares a `fn drop()`.
-        let mut later = false;
-        let mut pending = vec![false; order.len()];
-        for (k, item) in order.iter().enumerate().rev() {
-            pending[k] = later;
-            later |= self.finalizer_files.contains(&item.file);
-        }
-        for (item, pending) in order.into_iter().zip(pending) {
-            self.compiler_lazy_mut().set_pending_finalizers(pending);
+        for item in order {
             let is_entry = self
                 .entry_file
                 .as_ref()
@@ -1696,7 +1679,6 @@ impl Pipeline {
                         None => out.push_str(&format!(" (field {index})")),
                     }
                 }
-                common::SnapStep::Boxed => {}
             }
         }
         out

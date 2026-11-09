@@ -14,7 +14,7 @@ use common::{BUILTIN_IO_ERROR_VARIANTS, BUILTIN_OPTION_VARIANTS, BUILTIN_RESULT_
 
 use crate::io_handle::{NativeHandle, WaitHandle};
 use crate::io_reactor::Interest;
-use crate::memory::{EnumPayload, Heap, Member, ObjArray, ObjStream, ObjTuple, Object, StreamKind};
+use crate::memory::{EnumPayload, Heap, ObjArray, ObjStream, ObjTuple, Object, StreamKind};
 
 type OutputRedirect = *mut (dyn Write + Send);
 
@@ -489,7 +489,6 @@ pub(crate) fn alloc_unsent_stream(heap: &mut Heap) -> Value {
 
 /// Whether `v` is an [`alloc_unsent_stream`] placeholder.
 pub(crate) fn is_unsent_stream(heap: &Heap, v: Value) -> bool {
-    let v = peel_one_boxed(heap, v);
     matches!(
         heap.find_object_by_addr(v.bits()),
         Some(Object::Stream(gc)) if gc.as_ref().kind == StreamKind::Unsent
@@ -509,24 +508,12 @@ pub fn stream_open(heap: &mut Heap, path: &str, mode: &str) -> Result<Value, IoE
     alloc_stream(heap, handle, StreamKind::File).map_err(|e| IoErrorTag::from_error(&e))
 }
 
-pub(crate) fn peel_one_boxed(heap: &Heap, v: Value) -> Value {
-    match heap.find_object_by_addr(v.bits()) {
-        Some(Object::Boxed(gc)) => match &gc.as_ref().payload {
-            Member::Value(inner) => *inner,
-            Member::Object(o) => Value::from(o.addr()),
-        },
-        _ => v,
-    }
-}
-
 pub(crate) fn with_stream_mut<R>(
     heap: &mut Heap,
     stream: Value,
     f: impl FnOnce(&mut ObjStream) -> R,
 ) -> Result<R, IoErrorTag> {
-    let stream = peel_one_boxed(heap, stream);
-    let addr = stream.bits();
-    let Some(Object::Stream(mut gc)) = heap.find_object_by_addr(addr) else {
+    let Some(Object::Stream(mut gc)) = heap.find_object_by_addr(stream.bits()) else {
         return Err(IoErrorTag::InvalidInput);
     };
     Ok(f(gc.as_mut()))
@@ -1570,7 +1557,7 @@ pub fn udp_recv_from_wait(heap: &mut Heap, stream: Value, buf: Value) -> Result<
 
 /// The text of heap string `v`, if it is one.
 pub fn heap_string(heap: &Heap, v: Value) -> Option<String> {
-    match heap.find_object_by_addr(peel_one_boxed(heap, v).bits()) {
+    match heap.find_object_by_addr(v.bits()) {
         Some(Object::String(gc)) => Some(gc.as_ref().data.to_string()),
         _ => None,
     }
@@ -1586,7 +1573,7 @@ pub fn value_as_open_mode(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
     match value_as_string(heap, v) {
         Ok(s) => Ok(s),
         Err(_) => {
-            let n = peel_one_boxed(heap, v).as_int();
+            let n = v.as_int();
             if (0..=255).contains(&n) && (n as u8).is_ascii_lowercase() {
                 Ok(String::from_utf8_lossy(&[n as u8]).into_owned())
             } else {
@@ -1596,9 +1583,8 @@ pub fn value_as_open_mode(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
     }
 }
 
-/// Marshal a Stream (or one Boxed Stream) to its fd. `None` if `v` is not a stream.
+/// Marshal a Stream to its fd. `None` if `v` is not a stream.
 pub fn stream_fd_i64(heap: &Heap, v: Value) -> Option<i64> {
-    let v = peel_one_boxed(heap, v);
     match heap.find_object_by_addr(v.bits()) {
         Some(Object::Stream(gc)) => gc.as_ref().handle.as_ref().map(|h| h.fd_i64()),
         _ => None,
@@ -1655,7 +1641,7 @@ pub fn from_bytes_take(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_
 /// rejects this case).
 pub fn to_bytes(heap: &mut Heap, s: Value) -> Value {
     // One pass over the string's bytes (no intermediate `String` copy).
-    let bytes: Vec<u8> = match heap.find_object_by_addr(peel_one_boxed(heap, s).bits()) {
+    let bytes: Vec<u8> = match heap.find_object_by_addr(s.bits()) {
         Some(Object::String(gc)) => gc.as_ref().data.as_bytes().to_vec(),
         _ => Vec::new(),
     };

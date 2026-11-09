@@ -10,7 +10,7 @@
 use common::{HeapSnapshot, SnapObject, SnapStep, SnapWord, SnapshotError, Value};
 
 use super::super::AddrHashBuilder;
-use super::{EnumPayload, Heap, Member, ObjArray, ObjBoxed, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
+use super::{EnumPayload, Heap, ObjArray, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
 
 /// A root to capture: the static slot it is stored to, its value, and the
 /// slot's word kind (`common::WORD_*`).
@@ -102,12 +102,6 @@ impl Heap {
                         gc.payload_mut().set_slot(i, v);
                     }
                 }
-                (Object::Boxed(gc), SnapObject::Boxed { word, .. }) => {
-                    gc.payload_mut().payload = match *word {
-                        SnapWord::Ref { index, err_bit: false } => Member::Object(objects[index as usize]),
-                        w => Member::Value(self.snapshot_value(&objects, w)),
-                    };
-                }
                 _ => {}
             }
         }
@@ -144,13 +138,6 @@ impl Heap {
             }
             SnapObject::Instance { type_id, words } => {
                 self.alloc(ObjInstance::with_slots(*type_id, zeros(words.len())), Object::Instance).0
-            }
-            SnapObject::Boxed { tag, .. } => {
-                let boxed = ObjBoxed {
-                    tag: *tag,
-                    payload: Member::Value(Value::from(0u64)),
-                };
-                self.alloc(boxed, Object::Boxed).0
             }
         }
     }
@@ -275,14 +262,6 @@ impl Capture<'_> {
                     words,
                 }
             }
-            Object::Boxed(gc) => {
-                let b = gc.as_ref();
-                let word = match b.payload {
-                    Member::Object(o) => self.object_word(o, false, parent(SnapStep::Boxed))?,
-                    Member::Value(v) => self.word(v, common::WORD_UNKNOWN, parent(SnapStep::Boxed))?,
-                };
-                SnapObject::Boxed { tag: b.tag, word }
-            }
             _ => unreachable!("unsupported objects are refused before they are recorded"),
         })
     }
@@ -325,8 +304,7 @@ fn unsupported(object: &Object) -> Option<&'static str> {
         | Object::Array(_)
         | Object::Tuple(_)
         | Object::Enum(_)
-        | Object::Instance(_)
-        | Object::Boxed(_) => return None,
+        | Object::Instance(_) => return None,
         Object::Fn(_) => "a function value",
         Object::Coroutine(_) => "a coroutine",
         Object::Stream(_) => "a stream",

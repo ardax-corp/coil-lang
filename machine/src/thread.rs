@@ -133,7 +133,7 @@ use common::{ProgramDebug, Value};
 use crate::ffi::Natives;
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
 use crate::memory::{
-    EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
+    EnumPayload, Heap, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
     ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
 };
 
@@ -272,8 +272,6 @@ pub enum PortableValue {
         type_id: u32,
         fields: Vec<PortableValue>,
     },
-    /// A `BoxValue` cell: its tag (what `UnboxValue` checks) and payload.
-    Boxed(u16, Box<PortableValue>),
     Sender(Arc<ChannelInner>),
     Receiver(Arc<ChannelInner>),
     MutexHandle(Arc<MutexInner>),
@@ -310,7 +308,6 @@ impl std::fmt::Debug for PortableValue {
                 .field("type_id", type_id)
                 .field("fields", fields)
                 .finish(),
-            Self::Boxed(tag, inner) => f.debug_tuple("Boxed").field(tag).field(inner).finish(),
             Self::Sender(_) => write!(f, "Sender(..)"),
             Self::Receiver(_) => write!(f, "Receiver(..)"),
             Self::MutexHandle(_) => write!(f, "MutexHandle(..)"),
@@ -344,7 +341,6 @@ impl PartialEq for PortableValue {
             (Self::Instance { type_id: t1, fields: f1 }, Self::Instance { type_id: t2, fields: f2 }) => {
                 t1 == t2 && f1 == f2
             }
-            (Self::Boxed(t1, a), Self::Boxed(t2, b)) => t1 == t2 && a == b,
             (Self::Sender(a), Self::Sender(b)) => Arc::ptr_eq(a, b),
             (Self::Receiver(a), Self::Receiver(b)) => Arc::ptr_eq(a, b),
             (Self::MutexHandle(a), Self::MutexHandle(b)) => Arc::ptr_eq(a, b),
@@ -1066,16 +1062,6 @@ pub fn as_result_unit(heap: &mut Heap, set: ErrorSet, r: Result<(), ThreadErrorT
     }
 }
 
-fn member_from_value(heap: &Heap, value: Value) -> Member {
-    if !value.is_zero()
-        && let Some(obj) = heap.find_object_by_addr(value.bits())
-    {
-        Member::Object(obj)
-    } else {
-        Member::Value(value)
-    }
-}
-
 fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<EnumPayload>) -> Value {
     heap.alloc_enum_value(tag, payload)
 }
@@ -1192,13 +1178,6 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
                 fields,
             })
         }
-        Object::Boxed(gc) => {
-            let inner = match &gc.as_ref().payload {
-                Member::Value(iv) => encode_value(heap, *iv, cx)?,
-                Member::Object(o) => encode_object(heap, *o, cx)?,
-            };
-            Ok(PortableValue::Boxed(gc.as_ref().tag, Box::new(inner)))
-        }
         Object::Stream(_)
         | Object::Thread(_)
         | Object::Coroutine(_)
@@ -1211,10 +1190,6 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
             unreachable!("host handles returned before deep encode")
         }
     }
-}
-
-fn encode_object(heap: &Heap, obj: Object, cx: &mut Encode) -> Result<PortableValue, ThreadErrorTag> {
-    encode_value(heap, Value::from(obj.addr()), cx)
 }
 
 /// A stream inside one of the spawner's statics, as an isolate worker
@@ -1287,16 +1262,6 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
                 slots.push(decode_portable(heap, pv)?);
             }
             let (obj, _) = heap.alloc(ObjInstance::with_slots(type_id, slots), Object::Instance);
-            Ok(Value::from(obj.addr()))
-        }
-        PortableValue::Boxed(tag, inner) => {
-            let v = decode_portable(heap, *inner)?;
-            // Keep the tag: `UnboxValue` yields null on a tag mismatch.
-            let payload = member_from_value(heap, v);
-            let (obj, _) = heap.alloc(
-                crate::memory::ObjBoxed { tag, payload },
-                Object::Boxed,
-            );
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Sender(inner) => {
@@ -2233,7 +2198,7 @@ pub use host_with_write as thread_with_write;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::ObjFn;
+    use crate::memory::{Member, ObjFn};
     use std::time::Duration;
 
     #[test]
@@ -2574,26 +2539,6 @@ mod tests {
         assert_eq!(elems.len(), 2);
         assert!(matches!(elems[0], PortableValue::Sender(_)));
         assert!(matches!(elems[1], PortableValue::Receiver(_)));
-    }
-
-    #[test]
-    fn boxed_value_keeps_its_tag_across_threads() {
-        // `UnboxValue tag=3` on the worker must find tag 3 again (#1195).
-        let mut heap = Heap::default();
-        let s = heap.alloc_string("ada".to_string());
-        let payload = Member::Object(Object::String(s));
-        let (boxed, _) = heap.alloc(crate::memory::ObjBoxed { tag: 3, payload }, Object::Boxed);
-        let pv = value_to_portable(&heap, Value::from(boxed.addr())).unwrap();
-        let mut other = Heap::default();
-        let v = portable_to_value(&mut other, pv).unwrap();
-        let Some(Object::Boxed(gc)) = other.find_object_by_addr(v.bits()) else {
-            panic!("expected a box");
-        };
-        assert_eq!(gc.as_ref().tag, 3);
-        let Member::Object(Object::String(inner)) = &gc.as_ref().payload else {
-            panic!("expected a string payload");
-        };
-        assert_eq!(inner.as_ref().data.to_string(), "ada");
     }
 
     #[test]

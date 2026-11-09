@@ -2210,7 +2210,6 @@ impl fmt::Display for Error {
     }
 }
 
-pub type RefBoxed = Gc<ObjBoxed>;
 pub type RefRoot = Gc<ObjRoot>;
 pub type RefWeak = Gc<ObjWeak>;
 pub type RefFn = Gc<ObjFn>;
@@ -2249,7 +2248,6 @@ pub enum Object {
     Tuple(crate::memory::Gc<ObjTuple>),
     Array(crate::memory::Gc<ObjArray>),
     Coroutine(RefCoroutine),
-    Boxed(RefBoxed),
     /// Strong GC pin: marks `payload` while this handle is reachable.
     Root(RefRoot),
     /// Non-rooting handle; cleared when the referent is unmarked.
@@ -2274,7 +2272,6 @@ macro_rules! each_kind {
             Object::Tuple($r) => $body,
             Object::Array($r) => $body,
             Object::Coroutine($r) => $body,
-            Object::Boxed($r) => $body,
             Object::Root($r) => $body,
             Object::Weak($r) => $body,
             Object::Fn($r) => $body,
@@ -2313,7 +2310,7 @@ pub(crate) trait SlotVisitorMut {
 ///   with its element kind, a lane array's pointer lanes only;
 /// - coroutine words: [`common::WORD_POINTER`] where `saved_live_mask`
 ///   names them, [`common::WORD_UNKNOWN`] where there is no mask;
-/// - closure captures: [`common::WORD_UNKNOWN`]; `Boxed` / `Root` payloads
+/// - closure captures: [`common::WORD_UNKNOWN`]; `Root` payloads
 ///   and closure dicts: members.
 ///
 /// The two expansions differ only in how they borrow the payloads.
@@ -2374,7 +2371,6 @@ macro_rules! walk_slots {
                     f.word(v, if masked { common::WORD_POINTER } else { common::WORD_UNKNOWN });
                 }
             }
-            Object::Boxed(b) => f.member(& $($m)? b.$get().payload),
             Object::Root(r) => {
                 if let Some(m) = & $($m)? r.$get().payload {
                     f.member(m);
@@ -2599,6 +2595,9 @@ impl Object {
         each_kind!(self, r => r.as_ptr() as u64)
     }
 
+    /// The header kind byte. 8 (a boxed scalar, gone with archive major 8)
+    /// and 11 are free; no kind takes them, so a stale number never reads as
+    /// another kind.
     fn kind(self) -> u8 {
         match self {
             Self::String(_) => 1,
@@ -2608,7 +2607,6 @@ impl Object {
             Self::Tuple(_) => KIND_TUPLE,
             Self::Array(_) => 6,
             Self::Coroutine(_) => 7,
-            Self::Boxed(_) => 8,
             Self::Root(_) => 9,
             Self::Weak(_) => 10,
             Self::Fn(_) => 12,
@@ -2638,7 +2636,6 @@ impl Object {
             5 => Self::Tuple(unsafe { Gc::from_addr(addr) }),
             6 => Self::Array(unsafe { Gc::from_addr(addr) }),
             7 => Self::Coroutine(unsafe { Gc::from_addr(addr) }),
-            8 => Self::Boxed(unsafe { Gc::from_addr(addr) }),
             9 => Self::Root(unsafe { Gc::from_addr(addr) }),
             10 => Self::Weak(unsafe { Gc::from_addr(addr) }),
             12 => Self::Fn(unsafe { Gc::from_addr(addr) }),
@@ -2669,7 +2666,6 @@ impl fmt::Display for Object {
             Self::Tuple(t) => write!(f, "{}", t.as_ref()),
             Self::Array(a) => write!(f, "{}", a.as_ref()),
             Self::Coroutine(c) => write!(f, "{}", c.as_ref()),
-            Self::Boxed(_) => write!(f, "<boxed 0x{:08x}>", self.addr()),
             Self::Root(_) => write!(f, "<root 0x{:08x}>", self.addr()),
             Self::Weak(_) => write!(f, "<weak 0x{:08x}>", self.addr()),
             Self::Fn(_) => write!(f, "<fn 0x{:08x}>", self.addr()),
@@ -4082,14 +4078,6 @@ pub struct ObjCoroutine {
     pub native: Option<Box<crate::native::GenFiber>>,
 }
 
-/// Heap-allocated boxed value for the generics runtime.
-pub struct ObjBoxed {
-    /// `ValueTag` discriminant stored as a raw `u16`.
-    pub tag: u16,
-    /// The wrapped payload.
-    pub payload: Member,
-}
-
 /// Explicit strong GC pin: keeps `payload` alive while this object is reachable.
 pub struct ObjRoot {
     /// Rooted value; `None` after [`crate::gc_handles`] unroot.
@@ -4281,14 +4269,6 @@ impl GcSized for ObjCoroutine {
     fn size(&self) -> usize {
         // `saved_stack` uses Rust's allocator, not the runtime
         // heap byte counter (same contract as `ObjInstance`).
-        mem::size_of::<Self>()
-    }
-}
-
-impl GcSized for ObjBoxed {
-    const NURSERY: bool = true;
-
-    fn size(&self) -> usize {
         mem::size_of::<Self>()
     }
 }

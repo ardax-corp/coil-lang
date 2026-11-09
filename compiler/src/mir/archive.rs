@@ -23,16 +23,15 @@ use common::DebugLoc;
 
 use crate::bodies::Label;
 use crate::layout::MirLayout;
-use crate::mir::func::DeoptSite;
 use crate::mir::gc::LiveRootSet;
-use crate::mir::inst::{LocalId, MirDeoptKind};
+use crate::mir::inst::LocalId;
 use crate::mir::{
     BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
 };
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 13;
+const FORMAT: u8 = 14;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for `bodies`, each with its entry from `body_ids`.
@@ -95,7 +94,6 @@ const TYS: [MirTy; 8] = [
     MirTy::Value,
 ];
 const LAYOUTS: [MirLayout; 3] = [MirLayout::Word, MirLayout::TwoSlot, MirLayout::HeapNiche];
-const DEOPTS: [MirDeoptKind; 2] = [MirDeoptKind::Stop, MirDeoptKind::Deopt];
 /// Every reason a body refuses emission: the field is a `&'static str`.
 const REFUSALS: [&str; 2] = ["no native code", "existential pack"];
 const BIN_OPS: [MirBinOp; 11] = [
@@ -217,15 +215,6 @@ impl Writer {
             self.loc(l);
         }
     }
-    fn words(&mut self, words: impl Iterator<Item = (u32, u64)>) {
-        let mut words: Vec<_> = words.collect();
-        words.sort_unstable_by_key(|&(k, _)| k);
-        self.u32(words.len() as u32);
-        for (k, x) in words {
-            self.u32(k);
-            self.u64(x);
-        }
-    }
     fn locals(&mut self, locals: impl ExactSizeIterator<Item = LocalId>) {
         self.u32(locals.len() as u32);
         for l in locals {
@@ -342,13 +331,6 @@ fn func(w: &mut Writer, f: &MirFunc) {
     let mut debug_slots: Vec<_> = f.debug_slots.iter().map(|(&l, &v)| (l, v)).collect();
     debug_slots.sort_unstable_by_key(|(l, _)| l.0);
     w.binds(&debug_slots);
-    w.u32(f.deopt_sites.len() as u32);
-    for site in &f.deopt_sites {
-        w.u8(idx(&DEOPTS, &site.kind));
-        w.opt_v(site.at);
-        w.loc(site.loc);
-        w.binds(&site.slots);
-    }
     w.locals(f.heap_slots.iter().copied());
     w.locals(f.word_slots.iter().copied());
     w.binds(&f.local_binds);
@@ -375,8 +357,6 @@ fn func(w: &mut Writer, f: &MirFunc) {
     ] {
         w.value_set(set);
     }
-    w.words(f.call_fields.iter().map(|(v, x)| (v.0, *x)));
-    w.words(f.slot_fields.iter().map(|(k, x)| (*k, *x)));
     // `defer` homes, and the cleanup pad that reads them.
     w.u32(f.homes.len() as u32);
     for &t in &f.homes {
@@ -905,10 +885,6 @@ impl<'a> Reader<'a> {
         let n = self.len()?;
         (0..n).map(|_| Ok((self.u32()?, self.loc()?))).collect()
     }
-    fn words(&mut self) -> Result<Vec<(u32, u64)>, String> {
-        let n = self.len()?;
-        (0..n).map(|_| Ok((self.u32()?, self.u64()?))).collect()
-    }
     fn locals(&mut self) -> Result<Vec<LocalId>, String> {
         let n = self.len()?;
         (0..n).map(|_| self.u32().map(LocalId)).collect()
@@ -997,11 +973,6 @@ fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
         f.gc_roots.push(LiveRootSet { at: r.v()?, values: r.vs()?, slots: r.locals()? });
     }
     f.debug_slots = r.binds()?.into_iter().collect();
-    let n = r.len()?;
-    for _ in 0..n {
-        let kind = r.pick(&DEOPTS, "deopt kind")?;
-        f.deopt_sites.push(DeoptSite { kind, at: r.opt_v()?, loc: r.loc()?, slots: r.binds()? });
-    }
     f.heap_slots = r.locals()?.into_iter().collect::<BTreeSet<_>>();
     f.word_slots = r.locals()?.into_iter().collect::<BTreeSet<_>>();
     f.local_binds = r.binds()?;
@@ -1023,8 +994,6 @@ fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
     f.prefetch_loads = r.value_set()?;
     f.steady_calls = r.value_set()?;
     f.bound_words = r.value_set()?;
-    f.call_fields = r.words()?.into_iter().map(|(k, x)| (ValueId(k), x)).collect();
-    f.slot_fields = r.words()?.into_iter().collect();
     let nh = r.len()?;
     f.homes = (0..nh).map(|_| r.ty()).collect::<Result<_, _>>()?;
     let has_base = r.u8()? != 0;
@@ -1270,7 +1239,6 @@ mod tests {
         f.slot_env.insert(ValueId(1), vec![(LocalId(3), ValueId(0))]);
         f.gc_roots.push(LiveRootSet { at: ValueId(1), values: vec![ValueId(0)], slots: vec![LocalId(3)] });
         f.debug_slots.insert(LocalId(3), ValueId(0));
-        f.deopt_sites.push(DeoptSite { kind: MirDeoptKind::Deopt, at: None, loc, slots: vec![(LocalId(3), ValueId(0))] });
         f.heap_slots.insert(LocalId(3));
         f.word_slots.insert(LocalId(4));
         f.local_binds.push((LocalId(3), ValueId(0)));
@@ -1281,8 +1249,6 @@ mod tests {
         f.pair_twin = Some(Label(5));
         f.heap_pair_words.extend([ValueId(0), ValueId(2), ValueId(1)]);
         f.pure_calls.insert(ValueId(1));
-        f.call_fields.insert(ValueId(1), 7);
-        f.slot_fields.insert(3, 8);
         f.cleanup = Some(Box::new(pad));
         NativeBody { name: "f".into(), entry: Some(Label(7)), mir: f }
     }

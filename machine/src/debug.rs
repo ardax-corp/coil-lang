@@ -274,8 +274,6 @@ pub enum DebugObject {
     Array(Vec<common::Value>),
     Tuple(Vec<common::Value>),
     Enum { tag: u32, payload: Vec<common::Value> },
-    /// Boxed scalar (`int` / `float` / `bool` payload word).
-    Boxed(common::Value),
     /// Some other object kind (stream, thread, …).
     Other(&'static str),
 }
@@ -320,10 +318,6 @@ pub fn object_view(heap: &crate::memory::Heap, v: common::Value) -> Option<Debug
             let e = gc.as_ref();
             DebugObject::Enum { tag: e.tag, payload: e.payload.to_vec() }
         }
-        Object::Boxed(gc) => match &gc.as_ref().payload {
-            crate::memory::Member::Value(inner) => DebugObject::Boxed(*inner),
-            _ => DebugObject::Other("boxed"),
-        },
         Object::Coroutine(_) => DebugObject::Other("coroutine"),
         Object::Fn(_) => DebugObject::Other("fn"),
         _ => DebugObject::Other("object"),

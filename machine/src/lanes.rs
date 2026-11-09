@@ -51,23 +51,12 @@ pub(crate) fn vloop_source_len(obj: Option<Object>) -> Option<usize> {
     }
 }
 
-/// 64 byte lanes of the `string` or byte array `obj` (at `addr`) from
-/// `index` into `reg`; `false` past either end (the compiler guards the
-/// range first). A boxed string is read through its box.
-pub(crate) fn vload_bytes_into(
-    heap: &Heap,
-    obj: Option<Object>,
-    reg: &mut [u64; common::simd::LANES],
-    addr: u64,
-    index: i64,
-) -> bool {
+/// 64 byte lanes of the `string` or byte array `obj` from `index` into
+/// `reg`; `false` past either end (the compiler guards the range first).
+pub(crate) fn vload_bytes_into(obj: Option<Object>, reg: &mut [u64; common::simd::LANES], index: i64) -> bool {
     let n = common::simd::BYTE_LANES;
     let Ok(base) = usize::try_from(index) else {
         return false;
-    };
-    let obj = match obj {
-        Some(Object::Boxed(_)) => heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits()),
-        o => o,
     };
     let lanes = crate::simd::as_bytes_mut(reg);
     match obj {
@@ -260,17 +249,10 @@ pub(crate) fn vloop_run<S: LaneSlots + ?Sized>(
         o @ Some(Object::Array(_)) => Ok(o),
         _ => Err(BAD),
     };
-    // A load also reads a `string`'s bytes (through its box, if boxed).
-    let source = |slot: usize| {
-        let addr = stack[sp + slot].bits();
-        match heap.find_object_by_addr(addr) {
-            o @ Some(Object::Array(_) | Object::String(_)) => Ok(o),
-            Some(Object::Boxed(_)) => match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits()) {
-                o @ Some(Object::String(_)) => Ok(o),
-                _ => Err(BAD),
-            },
-            _ => Err(BAD),
-        }
+    // A load also reads a `string`'s bytes.
+    let source = |slot: usize| match heap.find_object_by_addr(stack[sp + slot].bits()) {
+        o @ Some(Object::Array(_) | Object::String(_)) => Ok(o),
+        _ => Err(BAD),
     };
     // Every lane of every block in range, checked once.
     let span = |obj: Option<Object>, off: i64| {
@@ -813,7 +795,7 @@ pub(crate) fn vscan<S: LaneSlots + ?Sized>(
     enum Src {
         /// Bytes in place; nothing allocates while the scan runs.
         Bytes(*const u8, usize),
-        Other(Option<Object>, u64),
+        Other(Option<Object>),
     }
     #[derive(Clone, Copy)]
     enum Op {
@@ -844,12 +826,7 @@ pub(crate) fn vscan<S: LaneSlots + ?Sized>(
         }
         op.write(match word.op() {
             LaneOp::VLoad if kind == simd::TY_U8 => {
-                let addr = stack[sp + a].bits();
-                let mut obj = heap.find_object_by_addr(addr);
-                if let Some(Object::Boxed(_)) = obj {
-                    obj = heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits());
-                }
-                let src = match obj {
+                let src = match heap.find_object_by_addr(stack[sp + a].bits()) {
                     Some(Object::String(gc)) => {
                         let s = gc.as_ref().data.as_str().as_bytes();
                         Src::Bytes(s.as_ptr(), s.len())
@@ -858,7 +835,7 @@ pub(crate) fn vscan<S: LaneSlots + ?Sized>(
                         let s = gc.as_ref().bytes().unwrap_or_default();
                         Src::Bytes(s.as_ptr(), s.len())
                     }
-                    o => Src::Other(o, addr),
+                    o => Src::Other(o),
                 };
                 Op::Load { reg: dest, src, off: stack[sp + b].as_int() }
             }
@@ -907,8 +884,8 @@ pub(crate) fn vscan<S: LaneSlots + ?Sized>(
                                 let lanes = unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
                                 *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
                             }
-                            Src::Other(obj, addr) => {
-                                if !vload_bytes_into(heap, obj, &mut regs[reg], addr, idx) {
+                            Src::Other(obj) => {
+                                if !vload_bytes_into(obj, &mut regs[reg], idx) {
                                     return Ok(p);
                                 }
                             }
@@ -1062,8 +1039,8 @@ pub(crate) fn vscan<S: LaneSlots + ?Sized>(
                                 let lanes = unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
                                 *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
                             }
-                            Src::Other(obj, addr) => {
-                                if !vload_bytes_into(heap, obj, &mut regs[reg], addr, idx) {
+                            Src::Other(obj) => {
+                                if !vload_bytes_into(obj, &mut regs[reg], idx) {
                                     return Ok(p);
                                 }
                             }

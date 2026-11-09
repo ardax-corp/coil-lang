@@ -5,20 +5,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use common::DebugLoc;
 
 use super::gc::LiveRootSet;
-use super::inst::{BlockId, LocalId, MirConst, MirDeoptKind, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, LocalId, MirConst, MirInst, Terminator, ValueId};
 use crate::layout::MirLayout;
 use super::ty::MirTy;
-
-/// One leave / stop edge with live IL locals (I7 / C3). Sidecar only.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeoptSite {
-    pub kind: MirDeoptKind,
-    /// Dest of the leave inst; `None` for a terminator-only Stop.
-    pub at: Option<ValueId>,
-    pub loc: DebugLoc,
-    /// Live IL slot → SSA value at the edge (over-approx is safe).
-    pub slots: Vec<(LocalId, ValueId)>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MirBlock {
@@ -69,10 +58,6 @@ pub struct MirFunc {
     /// the body keeps the code of each line instead of
     /// folding it away.
     pub keep_lines: bool,
-    /// Leave / stop sites (I7 / C3). Always empty: no pass records one.
-    /// The archive still writes the (empty) list; dropping it is a format
-    /// change.
-    pub deopt_sites: Vec<DeoptSite>,
     /// An `i64` may be a type variable's word, a raw scalar or a box: the
     /// objects this body makes carry no word kinds.
     pub opaque_words: bool,
@@ -115,14 +100,6 @@ pub struct MirFunc {
     /// Calls of a function that never resizes an array (it may write
     /// elements and fields).
     pub steady_calls: HashSet<ValueId>,
-    /// Per call, the fields it may read or write, as
-    /// [`crate::hir::effects::field_bit`]s of their names; a call not
-    /// listed may touch any.
-    pub call_fields: HashMap<ValueId, u64>,
-    /// Per heap slot, the [`crate::hir::effects::field_bit`]s of the field
-    /// names this body reads or writes there by name. A call whose
-    /// [`Self::call_fields`] miss them leaves the slot's word alone.
-    pub slot_fields: HashMap<u32, u64>,
     /// No code that runs at an allocation (a finalizer) resizes an array:
     /// an allocation leaves every length as it was.
     pub lengths_steady: bool,
@@ -206,10 +183,6 @@ impl MirFunc {
         for g in &mut self.gc_roots {
             g.values.shrink_to_fit();
             g.slots.shrink_to_fit();
-        }
-        self.deopt_sites.shrink_to_fit();
-        for d in &mut self.deopt_sites {
-            d.slots.shrink_to_fit();
         }
         self.homes.shrink_to_fit();
         if let Some(c) = &mut self.cleanup {
@@ -334,7 +307,6 @@ impl MirFunc {
             debug_slots: HashMap::new(),
             debug_keep: false,
             keep_lines: false,
-            deopt_sites: Vec::new(),
             heap_slots: BTreeSet::new(),
             word_slots: BTreeSet::new(),
             opaque_words: false,
@@ -348,8 +320,6 @@ impl MirFunc {
             byte_loads: HashSet::new(),
             prefetch_loads: HashSet::new(),
             steady_calls: HashSet::new(),
-            call_fields: HashMap::new(),
-            slot_fields: HashMap::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
             local_binds: Vec::new(),

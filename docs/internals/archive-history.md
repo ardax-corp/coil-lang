@@ -7,6 +7,26 @@ minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
 its own, `FORMAT` in `compiler/src/mir/archive.rs`.
 
+## Major 8
+
+Major 8 minor 0 drops what no engine reads or makes any more. It is the one
+format break of the 2026-11 cleanup: feature/native is not merged to `main`
+(#2265), so no 8.x archive has shipped, and later PRs of the same wave that
+change the format again stay on major 8 minor 0 and list their change here.
+A runtime refuses a major 7 archive with its version error, as any other
+major.
+
+- MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
+  empty since `Deopt` went, #2343) or `call_fields` / `slot_fields`
+  (unread since `promote_fields` went). Instruction tags 41 / 42
+  (`PanicStore` / `Deopt`) stay reserved.
+- Heap object kind 8 (a boxed scalar, `ObjBoxed`) and snapshot object
+  kind 6 (`SnapObject::Boxed`) are gone; no engine allocated one. Both
+  numbers stay free, as heap kind 11 is.
+- Host native `values_eq_shaped` (**161**) is a panic stub: the compiler
+  stopped emitting it in #2330 (`==` on such a type calls compiler-made
+  glue). Its id is kept.
+
 ## Major 7
 
 Major 7 minor 0 came with the deletion of the bytecode VM (step 8 of
