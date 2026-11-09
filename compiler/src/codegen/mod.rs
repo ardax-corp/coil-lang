@@ -4,7 +4,7 @@ use std::{
 };
 
 use common::{
-    DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Interner, ValueTag,
+    DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, ValueTag,
     encode_tag_operand, tag,
 };
 use reporting::Label as DiagLabel;
@@ -194,12 +194,8 @@ fn fn_arity_from_args(args: &Output<'_>) -> (usize, bool) {
 
 #[derive(Default, Clone)]
 struct Context {
-    variables: Interner<String>,
     classes: HashMap<String, Vec<(String, usize)>>,
     methods: HashMap<String, HashMap<String, String>>,
-
-    /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, kind).
-    unboxed_enum_locals: HashMap<String, (u32, u32, PairKind)>,
 }
 
 /// The function state a body compiles under ([`Compiler::with_body_frame`]).
@@ -593,12 +589,13 @@ pub struct Compiler {
     hir_mir: Option<crate::mir::MirFunc>,
     /// Why the body just emitted did not lower straight to MIR.
     hir_mir_why: Option<String>,
-    /// Frame words at entry of the function being compiled (its arguments
-    /// and dictionaries), when its compile path records them.
-    hir_entry_sp: Option<u32>,
     /// The dictionaries of the function whose body
-    /// [`Compiler::try_lower_hir_function`] lowers next.
-    hir_frame_dicts: compiler::frame::FrameDicts,
+    /// [`Compiler::try_lower_hir_function`] lowers next, when its compile
+    /// path records its entry words (arguments and dictionaries).
+    hir_frame_dicts: Option<compiler::frame::FrameDicts>,
+    /// The source span of each parameter name of the function being
+    /// compiled, for its debug parameters.
+    param_name_spans: HashMap<String, (u32, u32)>,
     /// The frame of the body being planned, numbered from its HIR.
     hir_body_frame: Option<compiler::frame::BodyFrame>,
     /// Frame words at entry of the body the direct MIR plan walk is
@@ -617,13 +614,9 @@ pub struct Compiler {
     residue_lint: std::cell::Cell<bool>,
     /// E0808 warnings waiting for the module's messages, each once by key.
     residue: std::cell::RefCell<(HashSet<String>, Vec<Message>)>,
-    /// A bounded generic instance method's context dictionaries, as its
-    /// prologue loads them out of its own dictionary: each one's frame
-    /// slot, the own dictionary's slot and the index there. Set by the
-    /// prologue for the next body ([`Compiler::try_lower_hir_function`]
-    /// takes it into `hir_mir_ctx`).
-    hir_entry_ctx: Vec<(u32, u32, u32)>,
-    /// The context dictionaries of the body being lowered.
+    /// The context dictionaries of the body being lowered, as its prologue
+    /// loads them out of its own dictionary: each one's frame slot, the own
+    /// dictionary's slot and the index there.
     hir_mir_ctx: Vec<(u32, u32, u32)>,
     /// HIR of the module being compiled.
     hir_module: Option<crate::hir::HirModule>,
@@ -816,15 +809,14 @@ impl Default for Compiler {
             inlined_bodies: Vec::new(),
             hir_mir: None,
             hir_mir_why: None,
-            hir_entry_sp: None,
-            hir_frame_dicts: compiler::frame::FrameDicts::default(),
+            hir_frame_dicts: None,
+            param_name_spans: HashMap::new(),
             hir_body_frame: None,
             hir_mir_dict_sp: None,
             hir_lambda_dicts: None,
             hir_lambda_pairs: std::cell::RefCell::new(Vec::new()),
             residue_lint: std::cell::Cell::new(false),
             residue: std::cell::RefCell::new((HashSet::new(), Vec::new())),
-            hir_entry_ctx: Vec::new(),
             hir_mir_ctx: Vec::new(),
             hir_fn_names: HashMap::new(),
             cold_fns: HashSet::new(),

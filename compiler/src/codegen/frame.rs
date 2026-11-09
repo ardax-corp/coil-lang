@@ -23,8 +23,9 @@ pub(crate) struct FrameDicts {
     /// from `__dict{base}`.
     pub(crate) own: Option<(usize, usize)>,
     /// A bounded generic instance method's context dictionaries,
-    /// `__dict1..=n`, read out of `__dict0` after entry.
-    pub(crate) context: usize,
+    /// `__dict1..=n`, read out of `__dict0` after entry from its index
+    /// `base` on: `(base, n)`.
+    pub(crate) context: Option<(usize, usize)>,
 }
 
 /// A parameter's or capture's place in the frame.
@@ -71,8 +72,10 @@ impl BodyFrame {
         }
         frame.entry_sp = frame.frame_base;
         // Read out of the instance's own dictionary.
-        if frame.dicts.contains_key(&0) {
-            for i in 0..dicts.context {
+        if let Some((_, n)) = dicts.context
+            && frame.dicts.contains_key(&0)
+        {
+            for i in 0..n {
                 frame.dict(i + 1);
             }
         }
@@ -139,7 +142,7 @@ impl Compiler {
             |i| {
                 let local = hir.local(hir.params[i]);
                 // `self` is one word; the rest follow the signature every
-                // caller reads ([`Self::argument_unboxed_range_kind`]).
+                // caller reads ([`Self::param_pair_kind`]).
                 if self.compiling_method && i == 0 && local.name == "self" {
                     return None;
                 }
@@ -151,65 +154,12 @@ impl Compiler {
 
     /// `__dict{n}`'s slot in the frame of the body being planned or lowered.
     pub(crate) fn frame_dict(&self, n: usize) -> Option<u32> {
-        let slot = self.hir_body_frame.as_ref().and_then(|f| f.dict_slot(n));
-        debug_assert_eq!(slot, self.lookup_slot(&format!("__dict{n}")), "`__dict{n}`'s slot");
-        slot
+        self.hir_body_frame.as_ref().and_then(|f| f.dict_slot(n))
     }
 
     /// Whether `name` is a parameter or capture of the body being planned
     /// or lowered.
     pub(crate) fn frame_binds(&self, name: &str) -> bool {
-        let binds = self.hir_body_frame.as_ref().is_some_and(|f| f.binds(name));
-        debug_assert_eq!(binds, self.lookup_slot(name).is_some(), "whether the frame binds `{name}`");
-        binds
-    }
-
-    /// Debug builds: `frame` numbers `hir`'s entry frame as the interned
-    /// names in `context.variables` do.
-    pub(crate) fn debug_check_body_frame(&self, hir: &HirBody, frame: &BodyFrame) {
-        if !cfg!(debug_assertions) {
-            return;
-        }
-        let interned = self.interned_body_frame(hir, frame);
-        debug_assert!(
-            interned == *frame,
-            "frame of `{}` numbered from HIR differs from the interned one:\n  hir:      {frame:?}\n  interned: {interned:?}",
-            hir.name
-        );
-    }
-
-    /// The frame `context.variables` holds for `hir` (`frame` gives the
-    /// captures' pair kinds and the entry words, which names do not record).
-    fn interned_body_frame(&self, hir: &HirBody, frame: &BodyFrame) -> BodyFrame {
-        let vars = &self.context.variables;
-        let slot = |name: &str| vars.key(&name.to_string()).map_or(u32::MAX, |s| s as u32);
-        let kinds = frame.captures.iter().map(|c| c.pair.as_ref().map(|(_, kind)| kind)).chain(std::iter::repeat(None));
-        let captures = hir
-            .captures
-            .iter()
-            .zip(kinds)
-            .map(|(&(_, inner), kind)| {
-                let name = hir.local(inner).name.clone();
-                let pair = kind.map(|kind| (slot(&format!("{name}$hi")), kind.clone()));
-                FrameLocal { slot: slot(&name), name, pair }
-            })
-            .collect();
-        let params = hir
-            .params
-            .iter()
-            .map(|&p| {
-                let name = hir.local(p).name.clone();
-                match self.unboxed_enum_kind(&name).cloned().zip(self.unboxed_enum_info(&name)) {
-                    Some((kind, (start, tag))) => FrameLocal { name, slot: start, pair: Some((tag, kind)) },
-                    None => FrameLocal { slot: slot(&name), name, pair: None },
-                }
-            })
-            .collect();
-        let dicts = vars
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, name)| Some((name.strip_prefix("__dict")?.parse().ok()?, slot as u32)))
-            .collect();
-        BodyFrame { captures, params, dicts, entry_sp: frame.entry_sp, frame_base: vars.len() as u32 }
+        self.hir_body_frame.as_ref().is_some_and(|f| f.binds(name))
     }
 }

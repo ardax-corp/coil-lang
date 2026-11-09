@@ -676,6 +676,17 @@ impl Compiler {
         }
     }
 
+    /// A parameter of the function being compiled, named at `span` in the
+    /// source when the parameter list there names it.
+    pub(super) fn record_debug_param_at(&mut self, name: &str, slot: u32, span: Option<(u32, u32)>) {
+        self.record_debug_param(name, slot);
+        if let Some(span) = span
+            && let Some(var) = self.last_debug_var_mut(name)
+        {
+            var.name_span = Some(span);
+        }
+    }
+
     fn last_debug_var_mut(&mut self, name: &str) -> Option<&mut crate::debug_vars::DebugVar> {
         let key = self.current_function_table_key.clone()?;
         self.fn_debug_vars
@@ -696,21 +707,6 @@ impl Compiler {
         self.debug_stmt_start = saved_stmt_start;
     }
 
-    /// The frame slot of `name` in the body being compiled, if it has one.
-    fn lookup_slot(&self, name: &str) -> Option<u32> {
-        self.context
-            .variables
-            .key(&name.to_string())
-            .map(|s| s as u32)
-    }
-
-    /// Allocate a locals slot for a `let` / destructure binder.
-    fn alloc_binding_slot(&mut self, name: &str) -> u32 {
-        let slot = self.context.variables.intern(name.to_string()) as u32;
-        self.record_debug_local(name, slot);
-        slot
-    }
-
     fn node_id_of(&self, node: &Output<'_>) -> Option<crate::typechecking::id::NodeId> {
         self.checker.id_table().id_of_output(node)
     }
@@ -728,30 +724,6 @@ impl Compiler {
             .ty_at_span(node.0.start, node.0.end)
             .cloned()
             .or_else(|| self.node_id_of(node).and_then(|id| self.sidecar_ty(id)))
-    }
-
-    fn unboxed_enum_info(&self, name: &str) -> Option<(u32, u32)> {
-        self.context
-            .unboxed_enum_locals
-            .get(name)
-            .map(|(payload, tag, _)| (*payload, *tag))
-    }
-
-    fn unboxed_enum_kind(&self, name: &str) -> Option<&PairKind> {
-        self.context
-            .unboxed_enum_locals
-            .get(name)
-            .map(|(_, _, kind)| kind)
-    }
-
-    fn alloc_unboxed_enum_slots(&mut self, name: &str, kind: &PairKind) -> (u32, u32) {
-        let payload = self.alloc_binding_slot(name);
-        let tag_name = format!("__unbox_tag_{name}");
-        let tag = self.context.variables.intern(tag_name) as u32;
-        self.context
-            .unboxed_enum_locals
-            .insert(name.to_string(), (payload, tag, kind.clone()));
-        (payload, tag)
     }
 
     /// A free function's parameter of a two-word type (a numeric range,
@@ -862,39 +834,6 @@ impl Compiler {
         }
     }
 
-    fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<PairKind> {
-        let key = self.current_fn_pair_key()?;
-        if let Expression::Argument { name, .. } = arg.1.as_ref()
-            && let Some(kind) = self.signature_param_pair(&key, name)
-        {
-            return kind;
-        }
-        if let Some(ty) = self.sidecar_ty_of(arg)
-            && let Some(kind) = crate::layout::two_word_range_kind(&ty) {
-                return Some(kind);
-            }
-        let Expression::Argument { ty: Some(ty), .. } = arg.1.as_ref() else {
-            return None;
-        };
-        match ty.1.as_ref() {
-            Expression::TypeApp { name, args } => {
-                let inclusive = match *name {
-                    "RangeInclusive" => true,
-                    "Range" => false,
-                    _ => return None,
-                };
-                let numeric = args.first().is_some_and(|a| {
-                    matches!(
-                        a.1.as_ref(),
-                        Expression::Type("int" | "byte" | "float")
-                            | Expression::Identifier("int" | "byte" | "float")
-                    )
-                });
-                numeric.then_some(PairKind::Range { inclusive })
-            }
-            _ => None,
-        }
-    }
 
     /// Extern setup is keyed by the declaration's short name (and, after
     /// B3, sometimes the module FQN). Call meaning is FQN via DefId.
@@ -3314,7 +3253,6 @@ impl Compiler {
         // plans; bound once it does.
         self.functions.insert(worker_name.clone(), self.bodies.position());
         self.fn_arities.insert(worker_name.clone(), (n as u32 + 1, false));
-        let prev_fn_vars = std::mem::take(&mut self.context.variables);
         let prev_fn_table_key = self.current_function_table_key.replace(worker_name.clone());
         let calls = HashMap::from([(worker_name.clone(), (vec![ValueLayout::Boxed; n + 1], ValueLayout::Boxed))]);
         let bind = worker_name.clone();
@@ -3332,7 +3270,6 @@ impl Compiler {
             self.fn_arities.remove(&worker_name);
         }
         self.current_function_table_key = prev_fn_table_key;
-        self.context.variables = prev_fn_vars;
     }
 
     /// The worker body of `site` as HIR, when every value it moves is one
@@ -3658,32 +3595,14 @@ impl Compiler {
         Some((spawn, self.native_id("thread_join")?))
     }
 
-    /// A fresh frame for a function emitted inside another, with the
-    /// module's class, method and symbol tables (inlined code in it may
-    /// build an object). The enclosing frame, for [`Self::par_frame_exit`].
-    pub(super) fn par_frame_enter(&mut self) -> Context {
-        let mut prev_ctx = std::mem::take(&mut self.context);
-        self.context.classes = std::mem::take(&mut prev_ctx.classes);
-        self.context.methods = std::mem::take(&mut prev_ctx.methods);
-        prev_ctx
-    }
-
-    /// Back to the frame [`Self::par_frame_enter`] set aside.
-    pub(super) fn par_frame_exit(&mut self, prev_ctx: Context) {
-        let inner = std::mem::replace(&mut self.context, prev_ctx);
-        self.context.classes = inner.classes;
-        self.context.methods = inner.methods;
-    }
-
-    /// Compile one function body named `record` under `frame`: a fresh
-    /// frame of locals and the function's own key, result mode and return
-    /// ABI while `body` runs (its parameters, then
-    /// [`Self::try_lower_hir_function`]); then record the body with its
+    /// Compile one function body named `record` under `frame`: the
+    /// function's own key, result mode and return ABI while `body` runs
+    /// (its parameters, then [`Self::try_lower_hir_function`]); then record
+    /// the body with its
     /// MIR and emit the lambdas and parallel workers its plan queued, and
     /// put the enclosing body's state back.
     pub(super) fn with_body_frame<R>(&mut self, record: &str, frame: BodyState, body: impl FnOnce(&mut Self) -> R) -> R {
-        let vars = std::mem::take(&mut self.context.variables);
-        let unboxed = std::mem::take(&mut self.context.unboxed_enum_locals);
+        self.param_name_spans.clear();
         let qualified = std::mem::replace(&mut self.current_function_qualified, frame.qualified);
         let table_key = std::mem::replace(&mut self.current_function_table_key, frame.table_key);
         let result_mode = std::mem::replace(&mut self.compiling_result_mode, frame.result_mode);
@@ -3699,8 +3618,6 @@ impl Compiler {
         self.compiling_result_mode = result_mode;
         self.current_function_table_key = table_key;
         self.current_function_qualified = qualified;
-        self.context.unboxed_enum_locals = unboxed;
-        self.context.variables = vars;
         r
     }
 
@@ -4272,9 +4189,7 @@ impl Compiler {
         hir: &crate::hir::HirBody,
         calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>,
     ) {
-        let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_key = self.current_function_table_key.replace(name.to_string());
-        let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
         // An inherent method clone's thunk returns its pair in two words.
         let prev_two_word_enum = self.compiling_two_word_enum.clone();
         if self.method_clone_plans.borrow().contains_key(name) {
@@ -4291,9 +4206,7 @@ impl Compiler {
         self.bodies.record(name.to_string(), entry);
         self.attach_hir_mir();
         self.compiling_two_word_enum = prev_two_word_enum;
-        self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.current_function_table_key = prev_key;
-        self.context.variables = prev_vars;
     }
 
     /// Map a fully-resolved `Ty` to a `ValueTag` for box/unbox
@@ -4694,41 +4607,15 @@ impl Compiler {
             ..self.current_body_frame()
         };
         self.with_body_frame(&qualified, frame, |c| {
-            if c.compiling_method {
-                let slot = c.context.variables.intern("self".to_string()) as u32;
-                c.record_debug_local("self", slot);
-            }
             c.do_compile(args);
-            for dict_idx in 0..dict_arity {
-                c.context.variables.intern(format!("__dict{}", dict_idx));
-            }
-            // A trait method's own bounds: dictionary parameters after the
-            // instance's (#1471).
-            if let Some((base, n)) = own_dicts {
-                c.context.variables.intern("__dict0".to_string());
-                for i in 0..n {
-                    c.context.variables.intern(format!("__dict{}", base + i));
-                }
-            }
-            let entry_sp = c.context.variables.len() as u32;
-            // Direct MIR loads the context dictionaries (`hir_entry_ctx`).
-            c.hir_entry_sp = Some(entry_sp);
-            let instance_ctx = c.pending_instance_ctx.take();
-            c.hir_frame_dicts = frame::FrameDicts {
+            // A trait method's own bounds are dictionary parameters after
+            // the instance's (#1471); a bounded generic instance method reads
+            // its context dictionaries out of its own (`__dict0`).
+            c.hir_frame_dicts = Some(frame::FrameDicts {
                 arity: dict_arity,
                 own: own_dicts,
-                context: instance_ctx.map_or(0, |(_, n)| n),
-            };
-            // Bounded generic instance method: `__dict0` is the instance's own
-            // dictionary, whose tail holds the context dictionaries.
-            if let Some((base, n)) = instance_ctx
-                && let Some(own) = c.lookup_slot("__dict0")
-            {
-                for i in 0..n {
-                    let slot = c.context.variables.intern(format!("__dict{}", i + 1)) as u32;
-                    c.hir_entry_ctx.push((slot, own, (base + i) as u32));
-                }
-            }
+                context: c.pending_instance_ctx.take(),
+            });
             if !c.try_lower_hir_function(&method.0) {
                 // Every body runs from its direct MIR, so one whose HIR does
                 // not lower (an instance clone included) is a compile error.
@@ -5731,11 +5618,6 @@ impl Compiler {
                 };
                 c.push_const_env();
                 let saved_debug_scope = c.debug_scope_enter(body.0.start as u32, body.0.end as u32);
-                if c.compiling_method {
-                    let slot = c.context.variables.intern("self".to_string()) as u32;
-                    c.record_debug_param("self", slot);
-                }
-
                 c.do_compile(args);
 
                 // Reserve `__dictN` slots for CallIndirect (FQN preferred; bare
@@ -5748,14 +5630,8 @@ impl Compiler {
                         c.checker.dict_arity_for(name)
                     }
                 };
-                for dict_idx in 0..dict_arity {
-                    c.context.variables.intern(format!("__dict{}", dict_idx));
-                }
-
                 // Args + self + dicts occupy the shared stack at body entry.
-                let entry_sp = c.context.variables.len() as u32;
-                c.hir_entry_sp = Some(entry_sp);
-                c.hir_frame_dicts = frame::FrameDicts { arity: dict_arity, ..frame::FrameDicts::default() };
+                c.hir_frame_dicts = Some(frame::FrameDicts { arity: dict_arity, ..frame::FrameDicts::default() });
 
                 let lowered = prev_fn_table_key_was_none && c.try_lower_hir_function(span);
                 if !lowered {
@@ -5995,13 +5871,10 @@ impl Compiler {
             }
             Expression::Argument { name: n, .. } => {
                 // A parameter shadows a module `const` of the same name.
+                // Its slots are its body's frame's ([`frame::BodyFrame`]).
                 self.const_env_mut().remove(*n);
-                if let Some(kind) = self.argument_unboxed_range_kind(ast) {
-                    let (start, _) = self.alloc_unboxed_enum_slots(n, &kind);
-                    self.record_debug_param(n, start);
-                } else {
-                    let slot = self.context.variables.intern(n.to_string()) as u32;
-                    self.record_debug_param(n, slot);
+                if let Some(span) = self.span_of_source_str(n) {
+                    self.param_name_spans.insert(n.to_string(), span);
                 }
             }
             Expression::Type(_)
