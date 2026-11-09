@@ -6277,8 +6277,7 @@ impl Lower<'_> {
         Ok(Some(words))
     }
 
-    /// A boxed user enum variant: `MakeEnum` of the payload words, pushed
-    /// last field first (it pops field 0 first).
+    /// A boxed user enum variant: `MakeEnum` of the payload words.
     fn make_boxed(&mut self, enum_name: &str, tag: u32, tys: &[Ty], args: &[HirId]) -> Result<Val, Refusal> {
         // A unit variant is a shared immortal: only payload variants drop.
         let drop_type = if args.is_empty() { None } else { (self.inp.enum_drop)(enum_name) };
@@ -6309,7 +6308,6 @@ impl Lower<'_> {
             }
             words.push(v);
         }
-        words.reverse();
         // Declaration-order payload kinds, as HIR emission's `MakeEnumK`; a
         // `()` payload is the empty tuple object, a pointer.
         let kinds = common::pack_word_kinds(args.iter().zip(tys).map(|(&a, t)| {

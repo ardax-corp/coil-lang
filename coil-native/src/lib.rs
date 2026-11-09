@@ -3323,12 +3323,7 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, v);
             }
             MirInst::Alloc { dest, kind, elems, kinds } => {
-                // Declaration order: an enum's elems are in push order and
-                // its payload starts with the last push, as `DenseMake`.
-                let mut words = elems.clone();
-                if matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::DropEnum { .. }) {
-                    words.reverse();
-                }
+                let words = elems;
                 // An opaque body's `int` words may be objects: their kinds
                 // stay unknown.
                 let packed = || if f.opaque_words { 0 } else { common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w)))) };

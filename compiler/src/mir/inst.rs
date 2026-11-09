@@ -679,6 +679,9 @@ pub enum MirInst {
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,
+        /// The object's words in declaration order: an array's elements,
+        /// a tuple's items, a variant's payload, a function value's
+        /// captures then filled parameters.
         elems: Vec<ValueId>,
         /// Construction word kinds from the source types, as HIR emission
         /// stamps them: an array's element kind (`MakeArrayK`), or a tuple's
