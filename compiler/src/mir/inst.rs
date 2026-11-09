@@ -183,7 +183,7 @@ impl MirCmpOp {
             (Self::Gt, true) => "fcmp.ogt",
             (Self::Ge, true) => "fcmp.oge",
             (Self::Eq, true) => "fcmp.oeq",
-            (Self::Ne, true) => "fcmp.one",
+            (Self::Ne, true) => "fcmp.une",
         }
     }
 
@@ -201,7 +201,7 @@ impl MirCmpOp {
             "fcmp.ogt" => (Self::Gt, true),
             "fcmp.oge" => (Self::Ge, true),
             "fcmp.oeq" => (Self::Eq, true),
-            "fcmp.one" => (Self::Ne, true),
+            "fcmp.une" => (Self::Ne, true),
             _ => return None,
         })
     }
