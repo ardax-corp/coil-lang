@@ -269,7 +269,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
         let mut insts = b.func.block(m).insts.clone();
         for inst in &mut insts {
             let old = inst.dest();
-            set_dest(inst, map(old));
+            *inst.dest_mut() = map(old);
             inst.rewrite_values(map);
             if let MirInst::Phi { args, .. } = inst {
                 for (from, _) in args.iter_mut() {
@@ -322,15 +322,3 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
     run
 }
 
-/// Give a cloned test instruction the dest `d`.
-fn set_dest(inst: &mut MirInst, d: ValueId) {
-    match inst {
-        MirInst::Const { dest, .. }
-        | MirInst::Bin { dest, .. }
-        | MirInst::Cmp { dest, .. }
-        | MirInst::Phi { dest, .. }
-        | MirInst::Index { dest, .. }
-        | MirInst::HostInvoke { dest, .. } => *dest = d,
-        _ => unreachable!("a test holds no {inst:?}"),
-    }
-}

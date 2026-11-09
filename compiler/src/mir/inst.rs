@@ -1162,6 +1162,56 @@ impl MirInst {
         }
     }
 
+    /// [`Self::dest`], to rename it (a cloned instruction's).
+    pub fn dest_mut(&mut self) -> &mut ValueId {
+        match self {
+            Self::Const { dest, .. }
+            | Self::Bin { dest, .. }
+            | Self::Cmp { dest, .. }
+            | Self::Unary { dest, .. }
+            | Self::Cast { dest, .. }
+            | Self::Phi { dest, .. }
+            | Self::HostInvoke { dest, .. }
+            | Self::Ffi { dest, .. }
+            | Self::Call { dest, .. }
+            | Self::CallIndirect { dest, .. }
+            | Self::MatchPayload { dest, .. }
+            | Self::HeapFieldLoad { dest, .. }
+            | Self::HeapFieldStore { dest, .. }
+            | Self::Index { dest, .. }
+            | Self::StoreIndex { dest, .. }
+            | Self::ArrayLen { dest, .. }
+            | Self::ResumeCoro { dest, .. }
+            | Self::Yield { dest, .. }
+            | Self::DoneCoro { dest, .. }
+            | Self::LoadStatic { dest, .. }
+            | Self::StoreStatic { dest, .. }
+            | Self::HomeLoad { dest, .. }
+            | Self::HomeStore { dest, .. }
+            | Self::ClearWord { dest, .. }
+            | Self::KeepAlive { dest, .. }
+            | Self::Probe { dest, .. }
+            | Self::ArrayPush { dest, .. }
+            | Self::LaneIndex { dest, .. }
+            | Self::LaneStore { dest, .. }
+            | Self::LanePush { dest, .. }
+            | Self::LanesToWords { dest, .. }
+            | Self::Alloc { dest, .. }
+            | Self::GcBarrier { dest, .. }
+            | Self::String { dest, .. }
+            | Self::CodePtr { dest, .. }
+            | Self::Print { dest, .. }
+            | Self::FreeEarly { dest, .. }
+            | Self::Panic { dest, .. }
+            | Self::Format { dest, .. }
+            | Self::Stringify { dest, .. }
+            | Self::Cow { dest, .. }
+            | Self::StrEq { dest, .. }
+            | Self::ByteScan { dest, .. }
+            | Self::VecLoop { dest, .. } => dest,
+        }
+    }
+
     /// `dest` plus a two-slot CALL tag / second word when present.
     pub fn dests(&self) -> impl Iterator<Item = ValueId> {
         let hi = match *self {

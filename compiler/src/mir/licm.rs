@@ -579,7 +579,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
                 let fresh = ValueId(func.types.len() as u32);
                 func.types.push(func.types[v.index()]);
                 let mut lit = lit.clone();
-                set_test_dest(&mut lit, fresh);
+                *lit.dest_mut() = fresh;
                 lits.push(lit);
                 fresh
             })
@@ -635,7 +635,7 @@ fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guar
                 let fresh = ValueId(func.types.len() as u32);
                 func.types.push(func.ty(old));
                 map.insert(old, fresh);
-                set_test_dest(&mut copy, fresh);
+                *copy.dest_mut() = fresh;
                 copies.push(copy);
             }
         }
@@ -727,19 +727,6 @@ fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guar
         for (_, v) in env.iter_mut() {
             *v = rename.get(v).copied().unwrap_or(*v);
         }
-    }
-}
-
-/// Rename the value a [`cheap_test`] instruction defines.
-fn set_test_dest(inst: &mut MirInst, fresh: ValueId) {
-    match inst {
-        MirInst::Const { dest, .. }
-        | MirInst::Cmp { dest, .. }
-        | MirInst::Cast { dest, .. }
-        | MirInst::ArrayLen { dest, .. }
-        | MirInst::Bin { dest, .. }
-        | MirInst::Unary { dest, .. } => *dest = fresh,
-        _ => unreachable!("not a cheap test"),
     }
 }
 

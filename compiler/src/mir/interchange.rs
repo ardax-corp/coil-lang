@@ -285,7 +285,7 @@ fn clone_blocks(func: &mut MirFunc, blocks: &[BlockId]) -> HashMap<BlockId, Bloc
     for &b in blocks {
         let mut insts = func.block(b).insts.clone();
         for inst in &mut insts {
-            set_dest(inst, map(inst.dest()));
+            *inst.dest_mut() = map(inst.dest());
             inst.rewrite_values(&map);
             if let MirInst::Phi { args, .. } = inst {
                 for (from, _) in args.iter_mut() {
@@ -310,21 +310,6 @@ fn clone_blocks(func: &mut MirFunc, blocks: &[BlockId]) -> HashMap<BlockId, Bloc
         }
     }
     bmap
-}
-
-/// Give `inst` (a kind a nest may hold) the dest `d`.
-fn set_dest(inst: &mut MirInst, d: ValueId) {
-    match inst {
-        MirInst::Const { dest, .. }
-        | MirInst::Bin { dest, .. }
-        | MirInst::Cmp { dest, .. }
-        | MirInst::Unary { dest, .. }
-        | MirInst::Cast { dest, .. }
-        | MirInst::Phi { dest, .. }
-        | MirInst::Index { dest, .. }
-        | MirInst::StoreIndex { dest, .. } => *dest = d,
-        _ => unreachable!("a nest holds no {inst:?}"),
-    }
 }
 
 /// Guard, clone the original nest for when the guard fails, and swap the

@@ -284,7 +284,7 @@ impl Place<'_, '_> {
         let mapped: HashMap<ValueId, ValueId> = ops.iter().map(|&o| (o, self.value(o))).collect();
         inst.rewrite_values(|x| mapped.get(&x).copied().unwrap_or(x));
         let dest = self.b.value(self.b.func.ty(v));
-        set_dest(&mut inst, dest);
+        *inst.dest_mut() = dest;
         self.b.push(self.at, inst);
         self.done.insert(v, dest);
         dest
@@ -355,16 +355,6 @@ impl Place<'_, '_> {
                 c: Box::new(self.expr(c)),
             },
         }
-    }
-}
-
-fn set_dest(inst: &mut MirInst, to: ValueId) {
-    match inst {
-        MirInst::Const { dest, .. }
-        | MirInst::ArrayLen { dest, .. }
-        | MirInst::Bin { dest, .. }
-        | MirInst::Unary { dest, .. } => *dest = to,
-        _ => unreachable!("placeable values only"),
     }
 }
 
