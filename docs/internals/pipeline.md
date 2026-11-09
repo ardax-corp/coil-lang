@@ -63,7 +63,7 @@ builds do not read it.
 
 Iterative optimization (COI-130) was removed: re-running the pipeline miscompiled loop tests (LICM is not idempotent) and no opt level enabled it. The pipeline runs once.
 
-Optimization statistics (COI-131) are **off** by default (`collect_stats` / CLI `--opt-stats` and `--opt-stats-json`). When enabled, it records HIR lowering and inlining counters (typed-inlining call sites increment `functions_inlined`). Human text or a single JSON object is printed to stderr after a source compile.
+Optimization statistics (COI-131) are **off** by default (CLI `--opt-stats` and `--opt-stats-json`). When enabled, it records HIR lowering counters (bodies planned and refused, bodies lowered to MIR), typed-inlining call sites (`hir_inlined`) and compile-time work. Human text or a single JSON object is printed to stderr after a source compile.
 
 The archive version is recorded only in `common/src/archive.rs` ([older minors](archive-history.md)). If an optimization is sound but flagship `.ccoil` do not change, prove it on focused `examples/perf` hit benches ([roadmap](optimization-roadmap.md#hit-bench-prove-rule)).
 

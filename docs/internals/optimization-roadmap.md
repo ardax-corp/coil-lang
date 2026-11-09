@@ -73,7 +73,7 @@ default). This is what ships, not a textbook pass list.
 | **`loop_bounds`** | Proven sites lower to an unchecked `Index` / `StoreIndex`. The checker's `index_facts` sidecar proves them on source; `hir::bounds` proves the shapes inlining and unrolling leave; `mir/licm.rs` hoists `a.len()` | **`<=` / `>=` headers are not length proofs** (COI-85 / COI-98). Unproven, yield, growing-array and resizing-call loops stay checked. |
 | **`loop_unroll`** (`hir/unroll.rs`) | Full unroll of counted loops, trip ≤ 8, after inlining; each copy reads the counter as a literal, then `hir::fold` folds the copies (merging `x = x + a; x = x + b`) | Calls, exits, closures and inner loops that do not unroll themselves refuse; nests flatten over up to 3 rounds; ≤ 512 added nodes per loop. `<=` accepted for **trip count** only, separate from bounds proofs (COI-98). |
 | **`escape_analysis`** | The option gates HIR enum, tuple and readonly-class scalar replacement | Off at `-O0`, `-O1`, `-Og`, and in a debugger build. |
-| **`collect_stats`** | HIR lowering and inlining counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
+| **`--opt-stats`** | HIR lowering, inlining and compile-time counters to stderr / JSON | **Default off** (COI-131). |
 | **Branch layout** | Heuristic: MIR block layout puts early exits after the body (`HirPlan::cold_ok`) | Default **on** from `-O2` (COI-128 / COI-129). |
 
 **PGO is gone** ([#301](https://github.com/ardax-corp/coil-lang/pull/301)): no

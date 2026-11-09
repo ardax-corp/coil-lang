@@ -603,9 +603,10 @@ impl Inliner<'_> {
     /// (an operand the hoisting in [`Inliner::site_in`] cannot move ahead
     /// of: past an effect, under `&&` / `||`, ...), whose callee then runs
     /// in place as a block value: its parameters' `let`s and statements,
-    /// then its result. Those `let`s need the empty operand stack, so above
-    /// live operands (`zero` false) only an [`Inliner::expression_only`]
-    /// callee splices, as its result expression.
+    /// then its result. Above live operands (`zero` false) only an
+    /// [`Inliner::expression_only`] callee splices, as its result
+    /// expression (a rule from the stack IL, whose `let`s needed an empty
+    /// operand stack; MIR lowering takes a binding inside any operand).
     fn in_place_site<'a>(
         &self,
         s: HirId,

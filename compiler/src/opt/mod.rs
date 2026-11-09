@@ -26,22 +26,19 @@ pub struct OptimizeOptions {
     /// Lay out early exits after the function body in HIR lowering
     /// (`emit_hir`, COI-128).
     pub branch_optimization: bool,
-    /// Record body tiers and HIR counters into [`stats::OptStats`] (COI-131).
-    /// Default **off**.
-    pub collect_stats: bool,
     /// Compute pure calls with constant arguments at compile time
     /// (`Pipeline::compute_consts`, comptime step 4). On at Standard and
     /// above (and Size); `--fold-calls off` turns it off
     /// (`Pipeline::set_call_fold`).
     pub call_fold: bool,
-    /// MIR constant propagation and folding before emission
-    /// (`mir::specialize`): SCCP, InstCombine and DestProp on dense
-    /// bodies, SCCP and InstCombine's folds on bodies. On at every
-    /// level but None and Debug.
+    /// MIR constant propagation and folding (`mir::specialize`): SCCP,
+    /// InstCombine, DestProp and `bool` φ threading. On at every level but
+    /// None and Debug.
     pub mir_fold: bool,
-    /// MIR redundancy and loop passes (`mir::specialize`): CSE, LICM, IV
-    /// strength reduction and GVN/PRE, and the dense saxpy-reduce pack and
-    /// vectorizer. On at Standard and above (and Size).
+    /// MIR redundancy and loop passes (`mir::specialize`): CSE, LICM, loop
+    /// interchange, IV strength reduction, GVN, and the loop rewrites
+    /// (`copy_until`, `byte_scan`, `bulk_push`, `vec_loops`). On at
+    /// Standard and above (and Size).
     pub mir_loop: bool,
     /// Typed inlining of HIR bodies (`hir::inline`). Every level; the
     /// inline budget is what turns it off at `-O0` / `-Og`. Always on;
@@ -71,7 +68,7 @@ pub struct OptimizeOptions {
 mod opt_level;
 mod stats;
 pub use opt_level::{EarlyFree, HintFactors, OptLevel};
-pub(crate) use stats::{note_comptime_consts, note_comptime_macros, note_hir_fallback, note_hir_mir,
+pub(crate) use stats::{note_comptime_consts, note_comptime_macros, note_hir_mir, note_hir_refused,
     note_hir_inline_refused, note_hir_inlined, note_hir_lowered,
 };
 pub use stats::{OptStats, begin_opt_stats, last_opt_stats};

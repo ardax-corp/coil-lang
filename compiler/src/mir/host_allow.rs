@@ -1,9 +1,8 @@
 //! Precise HostInvoke types (math / packed LA / axpy) plus I6 edges.
 //!
 //! LICM hoist uses purity bits ([`super::effects::host_may_hoist`]), not
-//! these id ranges. S3 dense emit reconstructs I6-typed HostInvoke edges
-//! (box → call → unbox), including Q9 R2 `from_bytes` / `to_bytes`. User `CALL`
-//! is one-word (dense map or open callee).
+//! these id ranges. MIR lowering types these HostInvoke edges by them
+//! (box → call → unbox), including Q9 R2 `from_bytes` / `to_bytes`.
 
 use common::{
     HOST_NATIVES, MATH_ATAN_ID, MATH_POW_ID, MATH_SIN_ID, MATH_TANH_ID, PACKED_DOT_ID,

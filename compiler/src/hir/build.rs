@@ -820,7 +820,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
         b.body.ret = ret;
         // Inherent methods take their result mode from the bare method name,
-        // as the AST's `compile_function_decl_into` reads it.
+        // as `Compiler::compile_function_decl_into` reads it.
         let bare = full.rsplit("::").next().unwrap_or(full).to_string();
         let mode_keys = if owner.is_some() { std::slice::from_ref(&bare) } else { keys };
         b.body.result_mode = mode_keys.iter().any(|k| self.checker.fn_is_result_mode(k));
@@ -1257,7 +1257,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::String(s) => {
                 let ty = self.ty_of(node).or(Some(coil_ty::string()));
                 // A literal typed `[byte; N]` is its bytes, an array literal
-                // (the AST keeps it in frame slots, as `let a = [..]`).
+                // (kept in frame slots, as `let a = [..]`).
                 if let Some(Ty::Array {
                     element,
                     length: coil_ty::ArrayLength::Static(n),
@@ -2363,8 +2363,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         !(bare && self.checker.static_slot_index(&format!("{key}::{member}")).is_some())
     }
 
-    /// `E::V { f: a, .. }`: the payload is in declaration order, as the
-    /// AST's construct emits it, whatever order the call site names the
+    /// `E::V { f: a, .. }`: the payload is in declaration order, whatever
+    /// order the call site names the
     /// fields in. Shuffled arguments with effects still run in source order,
     /// through temps.
     fn record_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, src: Vec<HirId>, names: Vec<String>) -> HirId {
@@ -2601,8 +2601,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             && !self.checker.returns_whole_result(value.0.start, value.0.end)
             && miss_ret(b).as_ref().and_then(result_ok_err).is_some();
         // `return e?` (re-wrapped in Ok by result mode) and `return Ok(e?)` /
-        // `return Some(e?)` of the function's own type return `e` as is, as
-        // the AST's `expr_try_return_src` forwards the pair.
+        // `return Some(e?)` of the function's own type return `e` as is,
+        // forwarding the pair.
         if let Some(src) = self.try_forward_src(b, value, wrap) {
             let v = self.expr(b, src);
             return self.emit_ty(b, node, HirKind::Return(Some(v)), Some(coil_ty::never()));
@@ -2711,8 +2711,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let x = b.temp("ok", ok_ty.clone());
         let hit_pat = self.variant_pat(enum_name, hit, HirPatFields::Tuple(vec![HirPat::Bind(x)]));
         let hit_body = self.synth(b, span, HirKind::Local(x), ok_ty);
-        // In a test body the miss arm fails the case with a message, as
-        // the AST's `emit_test_try` (#628).
+        // In a test body the miss arm fails the case with a message (#628).
         let test_try = self.checker.test_try_at(span.0, span.1).cloned();
         // The miss arm re-wraps the error in the function's own return type.
         let (miss_pat, miss_val) = if let Some(kind) = test_try {

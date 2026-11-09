@@ -12,7 +12,7 @@
 //! string literals included) and casts between scalars; then each mono
 //! clone of a generic function, at its instance's types. Any other node, type
 //! or body shape is refused, and the reason is counted in `--opt-stats`;
-//! with no AST codegen left, a refused body is an internal error.
+//! a refused body is an internal error.
 //!
 //! MIR keeps values in registers, so where a node sits among its siblings
 //! does not matter: a binding, assignment, jump, match or build lowers
@@ -230,7 +230,7 @@ fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: b
 
 /// Closed but for type parameters (a generic class's shared method body):
 /// each parameter is one boxed word, and [`crate::layout::of`] gives a type
-/// open in one the same layout the AST codegen uses.
+/// open in one its shared layout.
 fn params_closed(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Var(_) => true,
@@ -340,7 +340,7 @@ fn is_existential(ty: &Ty) -> bool {
 }
 
 /// The class `let x = new C(..)` keeps in frame slots instead of a heap
-/// object (as the AST codegen does): no `fn drop()` and 1 to 32 fields.
+/// object: no `fn drop()` and 1 to 32 fields.
 pub fn sroa_class(body: &HirBody, checker: &Checker, init: HirId) -> Option<String> {
     let HirKind::Make {
         kind: MakeKind::Class(name),
@@ -380,8 +380,8 @@ pub fn only_field_base(body: &HirBody, local: LocalId) -> bool {
             .all(|(i, e)| e.kind != HirKind::Local(local) || bases.contains(&(i as u32)))
 }
 
-/// `let a = [e1, .., en]` locals kept in `n` frame slots (the AST's
-/// multi-slot stack array).
+/// `let a = [e1, .., en]` locals kept in `n` frame slots (a multi-slot
+/// stack array).
 #[derive(Default)]
 pub struct StackArrays {
     /// Local to its length.
@@ -389,7 +389,7 @@ pub struct StackArrays {
     /// A block statement to the locals whose slots are boxed into one
     /// array object just before it: the first statement after the `let`
     /// that uses the local other than through an index (its escape). From
-    /// there on the local is that object, as the AST's hoisted Q1 box.
+    /// there on the local is that object (the hoisted Q1 box).
     pub box_at: HashMap<u32, Vec<u32>>,
 }
 
@@ -458,8 +458,8 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
             _ => None,
         })
         .collect();
-    // An element-wise operand reads the slots (the AST's
-    // `prepare_aggregate_src`) unless the op takes the packed path, which
+    // An element-wise operand reads the slots unless the op takes the
+    // packed path, which
     // needs the array object: a static length of at least 8, for `+ - * /`
     // and negation. The value is that minimum length, or 0 for any.
     let mut slot_reads: HashMap<u32, usize> = HashMap::new();
@@ -698,8 +698,8 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
 /// Frame-slot class locals that escape: each `let x = new C(..)` (a
 /// [`sroa_class`], never reassigned) whose fields are written and that is
 /// also used whole, first by a later statement of the block that binds it.
-/// It is boxed into one object just before that statement (the AST's
-/// hoisted Q2 box) and is that object from there on. Maps the statement to
+/// It is boxed into one object just before that statement (the hoisted Q2
+/// box) and is that object from there on. Maps the statement to
 /// the locals boxed before it.
 pub fn class_boxes(body: &HirBody, checker: &Checker) -> HashMap<u32, Vec<u32>> {
     let mut out: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -788,9 +788,9 @@ impl Walk<'_> {
             .is_some_and(|t| crate::typechecking::infer::Checker::is_structural_len_ty_for_codegen(&apply_ty_prune(self.checker.subst(), t)));
         match self.body.expr(arg).kind {
             HirKind::Local(local) if structural && self.body.local(local).kind != super::LocalKind::Const => Ok(()),
-            // Not const-foldable (the AST folds only literals and const
-            // names): the value is pushed, then measured or popped.
-            // Folded to its byte length, as the AST's `eval_len_operand`.
+            // Not const-foldable (only literals and const names fold): the
+            // value is computed, then measured or dropped.
+            // Folded to its byte length.
             HirKind::Lit(Lit::Str(_)) if structural => Ok(()),
             // An array, tuple or record literal folds to its item count
             // unevaluated, as `eval_len_operand`.
@@ -828,9 +828,8 @@ pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
         .is_some_and(|t| Checker::is_structural_len_ty_for_codegen(&apply_ty_prune(checker.subst(), t)))
 }
 
-/// Whether evaluating `id` may store into frame slots (the AST's
-/// `expr_may_clobber_operand_stack`): a call, `match`, `new` or string
-/// index anywhere inside it.
+/// Whether evaluating `id` may store into frame slots: a call, `match`,
+/// `new` or string index anywhere inside it.
 pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool {
     let mut found = false;
     visit(body, id, &mut |e| {
@@ -843,7 +842,7 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
                 | HirKind::Resume { .. }
                 | HirKind::Yield { .. }
         ) || matches!(
-            // Boxing ops of compiler-made bodies keep the stack as it is.
+            // Boxing ops of compiler-made bodies store into no frame slot.
             &e.kind,
             HirKind::Builtin { op, .. } if !matches!(op, Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. })
         );
@@ -851,9 +850,6 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
     found
 }
 
-/// The checker's element-wise plan for an aggregate `a op b` / `-a` at `id`
-/// (the AST's `try_emit_aggregate_arith`); `None` for a matrix op, which the
-/// AST emits first and HIR leaves to it.
 /// Whether the checker recorded `id` as a linear-algebra op (a matrix or
 /// vector operator, or `dot` / `matmul` / ..).
 pub fn linear_algebra(checker: &Checker, body: &HirBody, id: HirId) -> bool {
@@ -862,6 +858,8 @@ pub fn linear_algebra(checker: &Checker, body: &HirBody, id: HirId) -> bool {
     e.node.is_some_and(|n| checker.linear_algebra_at(n).is_some()) || checker.linear_algebra_span(start, end).is_some()
 }
 
+/// The checker's element-wise plan for an aggregate `a op b` / `-a` at `id`;
+/// `None` for a linear-algebra op ([`linear_algebra`]).
 pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<AggregateArithInfo> {
     let e = body.expr(id);
     let (start, end) = e.span;
@@ -876,9 +874,8 @@ pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ag
 }
 
 /// The element-wise shape from the operand types where the checker kept
-/// none (a mono clone of a generic body), as the AST's
-/// `recover_aggregate_arith`: only for operands it types itself, locals and
-/// literals.
+/// none (a mono clone of a generic body): only for operands it types
+/// itself, locals and literals.
 fn recover_aggregate(checker: &Checker, body: &HirBody, id: HirId) -> Option<AggregateArithInfo> {
     use crate::typechecking::{AggregateOp, aggregate_arith::recover};
     fn typed(body: &HirBody, id: HirId) -> bool {
@@ -912,8 +909,8 @@ fn recover_aggregate(checker: &Checker, body: &HirBody, id: HirId) -> Option<Agg
     }
 }
 
-/// How an element-wise operand's elements are read, as the AST's
-/// `aggregate_src_is_direct_elems`: a non-empty array or tuple literal's
+/// How an element-wise operand's elements are read: a non-empty array or
+/// tuple literal's
 /// items, a frame-slot stack array's slots, else (`None`) a heap value
 /// in a temp read with `Index`.
 pub enum AggregateSrc {
@@ -932,7 +929,7 @@ pub fn aggregate_src(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> 
     }
 }
 
-/// The packed `HostInvoke` path (`try_emit_packed_aggregate_arith`): a static
+/// The packed `HostInvoke` path: a static
 /// shape of at least 8 elements, for `+ - * /` and negation.
 pub fn aggregate_packed(info: &AggregateArithInfo) -> Option<usize> {
     use crate::typechecking::{AggregateArithKind as K, AggregateOp};
@@ -949,8 +946,8 @@ pub fn aggregate_packed(info: &AggregateArithInfo) -> Option<usize> {
 }
 
 /// Whether an argument after the first holds a clobbering index read
-/// ([`staged_read`]), which a live argument would sit under (the AST
-/// stages every argument when one may clobber).
+/// ([`staged_read`]): every argument is then staged into a temp first, so
+/// an earlier one is not read after the clobber.
 pub fn index_stages(body: &HirBody, stack: &HashMap<u32, usize>, args: &[HirId]) -> bool {
     args.iter().skip(1).any(|&arg| {
         let mut found = false;
@@ -1246,8 +1243,8 @@ pub(crate) fn pure_base(body: &HirBody, id: HirId) -> bool {
 }
 
 /// A field store's base that only reads: `x`, a static `G`, `x.f`, or
-/// `x[i]` of such a base with a [`pure_index`] (`xs[0].b`). The AST pushes
-/// it above the value, and a compound store builds it twice.
+/// `x[i]` of such a base with a [`pure_index`] (`xs[0].b`): a compound
+/// store reads it twice.
 pub(crate) fn read_base(body: &HirBody, id: HirId) -> bool {
     match &body.expr(id).kind {
         // A static's load reads its slot, as a local's does (#1557).
@@ -1303,8 +1300,7 @@ pub fn generic_enum_payload(checker: &Checker, enum_name: &str, variant: &str, a
 }
 
 /// An instance of a generic user enum (`Tree<int>`, or `Tree<T>` in a
-/// shared body): laid out as a closed enum with its parameters bound, as
-/// the AST's instance is.
+/// shared body): laid out as a closed enum with its parameters bound.
 fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<String>) -> Option<ValueClass> {
     if checker.is_class(name) && checker.enum_variants(name).is_none() {
         return None;
@@ -1355,8 +1351,8 @@ pub fn let_pat_shape(pat: &HirPat) -> bool {
     }
 }
 
-/// `x % m` with a literal `m` and a dividend not proven non-negative:
-/// the AST adds a Euclidean fix-up after an array index.
+/// `x % m` with a literal `m` and a dividend not proven non-negative: an
+/// array index by it gets a Euclidean fix-up.
 pub fn index_euclid(hir: &HirBody, index: HirId) -> Option<i32> {
     let HirKind::Bin {
         op: BinOp::IntRem,
@@ -1379,8 +1375,8 @@ pub fn index_euclid(hir: &HirBody, index: HirId) -> Option<i32> {
     (!nonneg).then_some(m as i32)
 }
 
-/// Whether a stack-array index needs no bounds check, as the AST's
-/// `stack_array_index_proven`: the checker proved it, or it is
+/// Whether a stack-array index needs no bounds check: the checker proved
+/// it, or it is
 /// `i % m` with `0 < m <= n`.
 pub fn stack_index_proven(hir: &HirBody, node: HirId, index: HirId, n: usize) -> bool {
     if hir.expr(node).flags.contains(HirFlags::IN_BOUNDS) {
@@ -1410,8 +1406,7 @@ pub fn range_bounds(body: &HirBody, iterable: HirId) -> Option<[HirId; 2]> {
 
 /// `for x in a..b` over int literals with at most eight trips, no
 /// `break` or `continue` of its own and no lambda: the first value and the
-/// trip count, for the body emitted once per value as the AST's
-/// `emit_for_in_range` does.
+/// trip count, for the body emitted once per value.
 pub fn unrolled_range(hir: &HirBody, iterable: HirId, body: HirId, inclusive: bool) -> Option<(i64, u32)> {
     let [lo, hi] = range_bounds(hir, iterable)?;
     let (HirKind::Lit(Lit::Int(s)), HirKind::Lit(Lit::Int(e))) = (&hir.expr(lo).kind, &hir.expr(hi).kind) else {
@@ -1491,8 +1486,7 @@ pub fn ffi_fn_variadic(body: &HirBody, checker: &Checker, f: HirId) -> bool {
 }
 
 /// A variadic `invoke`'s per-argument FFI type tags: the checker's for the
-/// call, else each argument's literal kind (the AST's
-/// `resolve_variadic_ffi_tags`).
+/// call, else each argument's literal kind.
 pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: &[HirId]) -> Option<Vec<(u32, u32)>> {
     use common::tag;
     if let Some(tags) = checker.variadic_arg_tags_at(body.expr(call).span) {
@@ -1648,7 +1642,7 @@ pub fn primitive(ty: &Ty) -> Option<&'static str> {
     }
 }
 
-/// A one-byte string literal typed `byte`: pushed as its code.
+/// A one-byte string literal typed `byte`: the byte's code.
 pub fn byte_literal(raw: &str) -> Option<u8> {
     match crate::codegen::unescape_coil_string(raw).as_bytes() {
         [b] => Some(*b),
@@ -1722,11 +1716,6 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
     }
 }
 
-/// A callee the AST calls with a plain `CallIndirect`: a parameter of a
-/// monomorphic function type (a rank-n one is a `Forall`), or a `let` of
-/// one from another indirect call, never reassigned. A `let` naming a
-/// generic function, or a call returning a captured `PolyFn`, boxes its
-/// arguments in the AST and stays there.
 /// A never-reassigned parameter or `let` local holding a `PolyFn`: its
 /// calls box each argument and may pass dictionaries.
 pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
@@ -1735,7 +1724,7 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     };
     let info = body.local(local);
     // A parameter is one only when declared `forall` (an open `T -> U`
-    // parameter of a shared generic body is the AST's plain closure).
+    // parameter of a shared generic body is a plain closure).
     let ty = info.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
     ty.as_ref().is_some_and(|t| match info.kind {
         LocalKind::Param => matches!(strip_readonly(t), Ty::Forall { .. }),
@@ -1969,7 +1958,7 @@ fn generic_passes_closure(body: &HirBody, checker: &Checker, name: &str, args: &
 
 /// A match of an `int` on integer literals, or of a scalar-backed enum on
 /// its unit variants, closed by `default` or a binding: compare-and-branch
-/// arms on the backing word like the AST's scalar match.
+/// arms on the backing word.
 pub fn is_scalar_match(checker: &Checker, body: &HirBody, scrutinee: HirId, arms: &[HirArm]) -> bool {
     let Some(ty) = body.expr(scrutinee).ty.as_ref() else {
         return false;
@@ -2024,7 +2013,7 @@ pub fn is_identity_arm(body: &HirBody, arm: &HirArm) -> bool {
 
 /// Whether some arm tests a sub-pattern of its payload (a literal or an
 /// inner variant): outer-tag dispatch cannot tell such arms apart, so the
-/// match tests arm by arm, as the AST's `compile_match_sequential`.
+/// match tests arm by arm.
 pub fn has_nested_test(arms: &[HirArm]) -> bool {
     let tests = |p: &HirPat| matches!(p, HirPat::Int(_) | HirPat::Variant { .. });
     arms.iter().any(|arm| match &arm.pat {
@@ -2075,9 +2064,9 @@ pub fn staged_read(body: &HirBody, stack: &HashMap<u32, usize>, e: &super::HirEx
     matches!(e.kind, HirKind::Index { index, kind, .. } if !matches!(kind, IndexKind::String) && clobbers(body, stack, index))
 }
 
-/// A stack-array read the AST lowers as a select over the slots (any index
-/// but an in-range literal): it stores temps, so it counts as a call for
-/// staging (`expr_may_clobber_operand_stack`).
+/// A stack-array read lowered as a select over the slots (any index but an
+/// in-range literal): it stores temps, so it counts as a call for staging
+/// ([`clobbers`]).
 pub fn stack_select(body: &HirBody, stack: &HashMap<u32, usize>, e: &super::HirExpr) -> bool {
     let HirKind::Index { base, index, .. } = e.kind else {
         return false;
@@ -2137,11 +2126,9 @@ impl Walk<'_> {
         ) || self.class(id) == Some(ValueClass::Aggregate)
     }
 
-    /// An element-wise `lhs op rhs` / `-lhs`, as the AST's
-    /// `try_emit_aggregate_arith` emits it at the top of the stack: heap
-    /// operands to temps, then each element (literal items and stack-array
-    /// slots read directly) with the results so far below it, then
-    /// `MakeTuple` / `MakeArray`; or the packed `HostInvoke`.
+    /// An element-wise `lhs op rhs` / `-lhs`: heap operands to temps, then
+    /// each element (literal items and stack-array slots read directly),
+    /// then `MakeTuple` / `MakeArray`; or the packed `HostInvoke`.
     fn aggregate_arith(&mut self, id: HirId, lhs: HirId, rhs: Option<HirId>) -> Check {
         use crate::typechecking::{AggregateArithKind as K, ScalarSide};
         let info = aggregate_info(self.checker, self.body, id).ok_or("operator-elementwise")?;
@@ -2220,7 +2207,7 @@ impl Walk<'_> {
     }
 
     /// Element `i` of `src`: a literal item must not store into frame
-    /// slots (the AST compiles it in place).
+    /// slots (it is computed in place).
     fn aggregate_elem(&mut self, src: HirId, i: usize) -> Check {
         match aggregate_src(self.body, &self.stack, src) {
             Some(AggregateSrc::Items(items)) => {
@@ -2300,8 +2287,7 @@ impl Walk<'_> {
     }
 
     /// `dload(path)`, `declare(lib, name, (T, ..), R)` or
-    /// `invoke(lib, f, (a, ..))`, as the AST's `emit_ffi_declare` /
-    /// `emit_ffi_invoke`: the value operands in order, a signature's tags
+    /// `invoke(lib, f, (a, ..))`: the value operands in order, a signature's tags
     /// as constants, the argument tuple packed. A variadic `declare` takes
     /// a `bool` literal fifth; a variadic `invoke` passes its arguments' tags.
     fn ffi_call(&mut self, id: HirId, kind: crate::typechecking::FfiBuiltin, args: &[HirId]) -> Check {
@@ -2422,8 +2408,8 @@ impl Walk<'_> {
                 // (`==` / `!=` without one) structural equality /
                 // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
                 if let BinOp::Overloaded(sym) = op {
-                    // `==` / `!=` on arrays compare structurally (`EQ`), as
-                    // the AST; other operators on them are element-wise,
+                    // `==` / `!=` on arrays compare structurally (`EQ`);
+                    // other operators on them are element-wise,
                     // but for a tuple's lexicographic order: a call of its
                     // `Lt` / .. instance (#1721).
                     let ordering = matches!(*sym, "<" | ">" | "<=" | ">=") && aggregate_info(self.checker, body, id).is_none();
@@ -2531,8 +2517,8 @@ impl Walk<'_> {
                 if self.class(id).is_none() {
                     return Err("call-type");
                 }
-                // An existential or linear-algebra call keeps its operands
-                // on the stack, so a clobbering index read stays refused.
+                // An existential or linear-algebra call does not stage its
+                // operands, so a clobbering index read stays refused.
                 if index_stages(body, &self.stack, args) && (linear_algebra(self.checker, body, id) || existential_hint(body, self.checker, id)) {
                     return Err("staged-index");
                 }
@@ -2567,7 +2553,7 @@ impl Walk<'_> {
                 self.args(args)
             }
             // `f(args)` through a function-value local: the args, the
-            // function word, then `CallIndirect`, as the AST does.
+            // function word, then `CallIndirect`.
             HirKind::Call {
                 callee: Callee::Value(f),
                 args,
@@ -2794,7 +2780,7 @@ impl Walk<'_> {
                 op: Builtin::Panic, ..
             } => self.effect(id),
             // `x++` / `--x` on an int or float local: one `INC` / `DEC`,
-            // which leaves the old or new value, as the AST.
+            // which leaves the old or new value.
             HirKind::Assign { place, .. } if body.expr(id).flags.contains(HirFlags::ADJUST) => {
                 // Any other place splits into statements ahead of this one.
                 if !matches!(body.expr(*place).kind, HirKind::Local(_)) || self.stack_base(*place) {
@@ -2877,8 +2863,8 @@ impl Walk<'_> {
                 if is_unit_local(body, self.checker, *local) {
                     return self.effect(*init);
                 }
-                // `let a = [..]` keeps the elements in frame slots in the AST;
-                // only one that is never more than indexed lowers.
+                // `let a = [..]` keeps the elements in frame slots; only one
+                // that is never more than indexed lowers.
                 if self.stack.contains_key(&local.0) {
                     // A copy loads the source's slots.
                     let HirKind::Make { args, .. } = &body.expr(*init).kind else {
@@ -2890,10 +2876,10 @@ impl Walk<'_> {
                     }
                     return Ok(());
                 }
-                // With no escape the fields live in frame slots (as the AST's
-                // unboxed class local); an escaping one is an object from the
-                // start, unless its fields are written first: the AST stores
-                // those into slots and builds the object once, at the escape
+                // With no escape the fields live in frame slots (an unboxed
+                // class local); an escaping one is an object from the start,
+                // unless its fields are written first: those are stored into
+                // slots and builds the object once, at the escape
                 // ([`class_boxes`]). A reassigned one is an object from the
                 // start: after `q = p` its field writes must reach `p`'s
                 // object (#1556). A captured one is never split either.

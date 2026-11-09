@@ -1,14 +1,11 @@
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet, VecDeque},
-    fs::File,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
-use common::{
-    decode_archived_program, ArchivedProgram, ProgramDebug, ARCHIVE_VERSION,
-};
+use common::ProgramDebug;
 use parser::{ast::Expression, Pratt, SimpleSpan};
 use reporting::{
     create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
@@ -28,9 +25,6 @@ mod contracts;
 #[path = "pipeline_contract_tests.rs"]
 mod contract_tests;
 pub use contract_tests::CASE_PREFIX as CONTRACT_CASE_PREFIX;
-
-/// Code, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
-type RunArtifacts = (Vec<u64>, Vec<String>, u32, ProgramDebug);
 
 /// Compile failed. Diagnostics are already on the pipeline; the error carries no extra payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +158,8 @@ pub struct Pipeline {
     extra_dload_stems: Vec<String>,
     /// CLI / Pipeline API grants and dload pins.
     host_grants: HostGrants,
-    /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
+    /// Optimization preset ([`crate::OptLevel`], COI-127 / COI-173): which HIR
+    /// and MIR passes run, and the inline budget. Default Standard.
     opt_level: crate::OptLevel,
     /// `--contracts`; `None` derives it from the opt level.
     contracts: Option<crate::ContractLevel>,
@@ -174,7 +169,7 @@ pub struct Pipeline {
     runs_mir: bool,
     /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
-    /// Collect IL opt counters for `--opt-stats` (COI-131).
+    /// Collect HIR and compile-time counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
     /// Off: no call is computed at compile time, whatever the level.
     /// `--fold-calls` sets it.
@@ -255,7 +250,6 @@ impl Pipeline {
                 c.register_native_id(name, *id);
             }
             c.set_opt_level(self.opt_level);
-            c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
             if let Some(on) = self.hir_inline {
@@ -1456,77 +1450,6 @@ impl Pipeline {
         compiler.emit_foreign_clones(&asts);
     }
 
-    pub fn compile(mut self, filename: String, output: String) {
-        let _capture = self.comptime_capture();
-        // Seed the worklist with the entry file. The
-        // entry is treated specially (top-level
-        // namespace), see `compile_file`.
-        let entry = PathBuf::from(&filename);
-        self.entry_file = Some(entry.clone());
-        self.begin_compile_opt_stats();
-        self.enqueue_file(entry);
-
-        // Discovery pass: walk the dependency graph
-        // transitively, enqueueing every referenced
-        // file. We re-process the worklist, parsing
-        // each file's AST to find its `use`/`mod`
-        // declarations, but NOT compiling yet. This
-        // builds the complete worklist so that the
-        // compilation pass can run in dependency
-        // order (dependencies first).
-        self.discover_all();
-        self.expand_user_macros();
-
-        // Compilation pass: topo-sort on `use`/`mod` edges
-        // (see `worklist_in_dependency_order`). Discovery's
-        // scan rotation invalidates plain LIFO `pop_back`.
-        self.compile_discovered_modules();
-
-        if self.failed || !self.check_capabilities() {
-            return;
-        }
-
-        // `finalize_bodies` tree-shakes and links the bodies.
-        // No post-lower peephole; production abs JMP is rejected in lower.
-        self.compiler_lazy_mut().finalize_bodies();
-        self.compute_consts(None);
-        if self.failed || self.had_errors() {
-            return;
-        }
-
-        // Wrap the code in the versioned `ArchivedProgram` envelope
-        // so that older `.ccoil` files can be rejected at load time via
-        // `version` mismatch (see `Pipeline::run`).
-        let debug = self.program_debug_full();
-        let level = self.debug_level();
-        let mut program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: self.compiler_lazy().static_slot_count(),
-            constants: self.compiler_lazy().constants().to_vec(),
-            strings: self.compiler_lazy().strings().to_vec(),
-            source_files: Vec::new(),
-            debug_locs: Vec::new(),
-            fn_symbols: Vec::new(),
-            struct_layouts: self.archived_struct_layouts(),
-            class_word_kinds: self.class_word_kinds(),
-            static_word_kinds: self.static_word_kinds(),
-            debug_lines: Vec::new(),
-            native_mir: Vec::new(),
-            startup: self.startup(),
-            main: self.main_offset(),
-        };
-        program.set_debug(debug, level);
-
-        let mut out = File::create(output).expect("Unable to open output file");
-        let _ = out
-            .write(
-                rkyv::to_bytes::<rkyv::rancor::Error>(&program)
-                    .unwrap()
-                    .as_slice(),
-            )
-            .expect("Unable to write compiled output to file");
-    }
-
     /// Compile a parsed AST and return the code.
     ///
     /// Does **not** emit when the checker rejected the program (B2).
@@ -1981,7 +1904,7 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
-        // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
+        // Link every module's bodies once: tree-shake and resolve labels.
         self.step(CompileStep::Link);
         self.compiler_lazy_mut().finalize_bodies();
         self.compute_consts(None);
@@ -2097,7 +2020,6 @@ impl Pipeline {
         }
     }
 
-    /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
     /// Turn computing pure calls with constant arguments at compile time
     /// off (or back on, at `-O2` and above). Tests of what such a call
     /// compiles to turn it off. `--fold-calls on|off` calls this.
@@ -2117,10 +2039,8 @@ impl Pipeline {
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_level = level;
         if self.compiler.get().is_some() {
-            let collect = self.collect_opt_stats;
             let dbg = self.debugger_attached;
             self.compiler_lazy_mut().set_opt_level(level);
-            self.compiler_lazy_mut().set_collect_opt_stats(collect);
             self.compiler_lazy_mut().set_debugger_attached(dbg);
         }
     }
@@ -2138,10 +2058,8 @@ impl Pipeline {
     pub fn set_debugger_attached(&mut self, on: bool) {
         self.debugger_attached = on;
         if self.compiler.get().is_some() {
-            let collect = self.collect_opt_stats;
             let level = self.opt_level;
             self.compiler_lazy_mut().set_opt_level(level);
-            self.compiler_lazy_mut().set_collect_opt_stats(collect);
             self.compiler_lazy_mut().set_debugger_attached(on);
         }
     }
@@ -2150,12 +2068,10 @@ impl Pipeline {
         self.debugger_attached
     }
 
-    /// Collect IL optimization counters (COI-131). Off by default.
+    /// Start a fresh `--opt-stats` window at each compile (COI-131). Off
+    /// by default.
     pub fn set_collect_opt_stats(&mut self, on: bool) {
         self.collect_opt_stats = on;
-        if self.compiler.get().is_some() {
-            self.compiler_lazy_mut().set_collect_opt_stats(on);
-        }
     }
 
     /// Which contract clauses become runtime checks. Unset, `-O0` / `-O1` /
@@ -2175,7 +2091,6 @@ impl Pipeline {
         crate::hir::set_contract_level(self.contracts());
         if self.collect_opt_stats {
             crate::opt::begin_opt_stats();
-            self.compiler_lazy_mut().set_collect_opt_stats(true);
         }
     }
 
@@ -2319,31 +2234,6 @@ impl Pipeline {
     }
 
 
-    pub fn run(
-        self,
-        filename: String,
-    ) -> Result<RunArtifacts, CompileFail> {
-        let mut f = File::open(filename).expect("Unable to find file");
-        let mut buffer = Vec::with_capacity(1024);
-        f.read_to_end(&mut buffer).expect("Unable to read file");
-
-        let program = decode_archived_program(&buffer).map_err(|_| CompileFail)?;
-
-        if self.failed {
-            return Err(CompileFail);
-        }
-
-        let debug = ProgramDebug {
-            fn_symbols: self.compiler_lazy().fn_debug_symbols(),
-            ..program.debug_bundle()
-        };
-        Ok((
-            program.constants,
-            program.strings,
-            program.static_slot_count,
-            debug,
-        ))
-    }
 }
 
 /// Hand the allocator's free pages back to the OS. glibc keeps a phase's
@@ -2680,12 +2570,9 @@ fn main() { add(1, 2); }
         pipeline.set_collect_opt_stats(true);
         pipeline.compile_src(src).expect("compile");
         let stats = crate::last_opt_stats();
-        assert!(
-            stats.functions_inlined >= 1,
-            "tiny add should inline; stats={stats:?}"
-        );
+        assert!(stats.hir_inlined >= 1, "tiny add should inline; stats={stats:?}");
         let json = stats.format_json();
-        assert!(json.contains("\"functions_inlined\""));
+        assert!(json.contains("\"hir_inlined\""));
     }
 
     #[test]

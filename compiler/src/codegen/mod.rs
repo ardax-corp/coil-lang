@@ -195,30 +195,11 @@ fn fn_arity_from_args(args: &Output<'_>) -> (usize, bool) {
 #[derive(Default, Clone)]
 struct Context {
     variables: Interner<String>,
-    symbols: Interner<String>,
     classes: HashMap<String, Vec<(String, usize)>>,
-    impementations: HashMap<String, String>,
     methods: HashMap<String, HashMap<String, String>>,
-
-    /// Nested match arm bindings (payload slots). Inner maps merge over outer
-    /// ones so nested `match` can still load the enclosing arm's names.
-    match_bindings: Option<HashMap<String, u32>>,
-
-    /// Block-local binding overlays. When `Some`, shadowed names allocate a
-    /// fresh slot instead of reusing the outer Interner id (so exiting the
-    /// block leaves the outer binding's stack value intact).
-    block_bindings: Option<HashMap<String, u32>>,
-
-    /// Fixed `[T; N]` locals laid out as `N` consecutive frame slots:
-    /// name → (base_slot, N). Escaping uses → `MakeArray`.
-    stack_array_locals: HashMap<String, (u32, usize)>,
-    /// First whole-object escape of a stack array in this frame → box slot (Q1).
-    stack_array_box: HashMap<String, u32>,
 
     /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, kind).
     unboxed_enum_locals: HashMap<String, (u32, u32, PairKind)>,
-
-    prev: Option<Box<Self>>,
 }
 
 /// Target-side layouts at a trait-method call across a generic boundary;
@@ -235,7 +216,6 @@ pub struct Compiler {
     /// The bodies compiled so far.
     bodies: BodyTable,
 
-    aliases: HashMap<String, String>,
     functions: HashMap<String, usize>,
     /// Entry labels for names in [`Self::functions`] (step-3 binds).
     fn_entry_labels: HashMap<String, IlLabel>,
@@ -275,8 +255,6 @@ pub struct Compiler {
     /// imported names (e.g. `spawn(run_jobs, …)` after `use pool::worker::run_jobs`)
     /// still packs the real arity.
     fn_arities: HashMap<String, (u32, bool)>,
-    /// Top-level items per namespace (legacy; disk `::*` no longer expands).
-    module_items: std::collections::HashMap<String, Vec<String>>,
     native: HashMap<String, usize>,
     /// Let-slot holding each extern library handle (now a static slot index).
     extern_runtime_libs: HashMap<String, u32>,
@@ -341,9 +319,6 @@ pub struct Compiler {
     /// `None`: no fold.
     written_names_program: Option<HashSet<String>>,
 
-    /// Counter for compiler-generated temporary slots.
-    temp_counter: u32,
-
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
     /// the typechecker's `Checker`.
@@ -351,9 +326,6 @@ pub struct Compiler {
 
 
 
-
-    /// Name of the function currently being codegen'd (for ctor/Instantiate routing).
-    active_fn_name: Option<String>,
 
     /// `const`s and pure `static let`s whose initializer runs at compile
     /// time, in setup order (comptime steps 3-4).
@@ -424,14 +396,6 @@ pub struct Compiler {
     /// Function name → index into `source_file_list` of the file it was
     /// compiled from (tracked only while `keep_fns_in` is set).
     fn_source_files: HashMap<String, u32>,
-
-    /// Local variable names that hold an generic `ObjFn` heap pointer
-    /// (i.e. `let f = some_generic_fn;`). When these are invoked via
-    /// `Expression::Call`, the codegen emits `CallIndirect` instead
-    /// of a direct `CALL` opcode.
-    polyfn_vars: HashSet<String>,
-    /// Local PolyFn variable → source generic function name.
-    polyfn_sources: HashMap<String, String>,
 
     /// Monomorphization plan for this compile unit plus emitted clone offsets.
     mono_plan: MonoPlan,
@@ -612,7 +576,7 @@ pub struct Compiler {
     auto_par: bool,
 
 
-    /// IL optimization preset (COI-127).
+    /// HIR and MIR pass switches of the optimization level (COI-127).
     opt_options: crate::opt::OptimizeOptions,
 
     /// Cost budgets for typed inlining (COI-124).
@@ -696,7 +660,8 @@ pub struct Compiler {
     /// typed inlining may splice ([`Compiler::hir_resolved_clone_body`]).
     hir_resolved_clones: HashMap<String, crate::hir::HirBody>,
     /// The namespace to restore once the module being compiled ends,
-    /// between the halves of `compile_unfused`.
+    /// between [`Compiler::check_module_hir`] and
+    /// [`Compiler::lower_module_bodies`].
     module_outer_namespace: Option<String>,
     /// The plans of [`crate::hir::Callee::Resolved`] calls, by their
     /// `plan` index, shared by every module's context.
@@ -714,7 +679,6 @@ impl Default for Compiler {
             namespace: String::default(),
             bodies,
             debug_locs: Vec::new(),
-            aliases: HashMap::default(),
             functions: HashMap::with_capacity(32),
             fn_entry_labels: HashMap::with_capacity(32),
             builtin_show_thunks: Vec::new(),
@@ -728,7 +692,6 @@ impl Default for Compiler {
             synth_eq_dicts: HashMap::new(),
             eq_dict_glue: HashMap::new(),
             fn_arities: HashMap::with_capacity(32),
-            module_items: std::collections::HashMap::default(),
             native: HashMap::default(),
             extern_runtime_libs: HashMap::with_capacity(4),
             extern_runtime_functions: HashMap::with_capacity(16),
@@ -743,9 +706,7 @@ impl Default for Compiler {
             strings: Vec::default(),
             string_indices: HashMap::default(),
             coroutine_fns: std::collections::HashSet::new(),
-            temp_counter: 0,
             codegen_depth: 0,
-            active_fn_name: None,
             compiling_method: false,
             compiling_mono_clone: false,
             compiling_result_mode: false,
@@ -764,8 +725,6 @@ impl Default for Compiler {
             skipped_contract_cases: HashSet::new(),
             keep_fns_in: None,
             fn_source_files: HashMap::new(),
-            polyfn_vars: HashSet::new(),
-            polyfn_sources: HashMap::new(),
             mono_plan: MonoPlan::default(),
             mono_offsets: HashMap::new(),
             mono_names: HashMap::new(),
@@ -921,7 +880,6 @@ pub(crate) struct ModuleCtx {
     checker: Box<Checker>,
     program_seq: usize,
     namespace: String,
-    aliases: HashMap<String, String>,
     typed_sidecar: crate::typechecking::TypedSidecar,
     hir_fns: HashMap<(usize, usize), usize>,
     hir_fn_names: HashMap<String, Option<usize>>,

@@ -1,22 +1,17 @@
-//! Lower a planned HIR body straight to MIR (HIR to MIR plan, phase M1).
+//! Lower a planned HIR body straight to MIR: every body every engine runs
+//! comes from here.
 //!
-//! The types come from the checker, locals are read and written by name, and control flow is
-//! built from `if` / `loop` / `break` directly, so none of the operand-stack
-//! replay applies.
-//!
-//! It covers scalar bodies (`int` / `float` / `bool` values, arithmetic,
-//! compares, casts, `let` / assignment, `if`, loops and `return`), plain
-//! calls, two-word pairs (enums of at most one payload word, ranges and
-//! two-element tuples), frame-slot aggregates (stack arrays and class
-//! locals one slot per field), each as HIR emission keeps them, and heap
-//! arrays and `Vec`s of `int` / `float` that the body reads and writes but
-//! does not allocate.
-//! Anything else refuses with the construct's name and the body keeps the
-//! IL lift.
+//! The types come from the checker, locals are read and written by name,
+//! and control flow is built from `if` / `loop` / `break` directly. The
+//! plan (`codegen/emit_hir.rs`) and its side tables
+//! ([`HirMirInput`], `codegen/emit_hir_mir.rs`) decide each value's layout,
+//! each call's target and ABI, and which locals live in frame slots
+//! (two-word pairs, stack arrays, class locals one slot per field).
+//! A construct this does not take refuses with its name; the body then
+//! has no MIR, which is a compile error if anything reaches it.
 //!
 //! Each local's [`LocalId`] is the frame slot HIR lowering gave it, so the
-//! sidecars keyed by IL slot (debug-slot remap, deopt maps) read the same
-//! numbers as for a lifted body.
+//! sidecars keyed by slot (debug locals) read the same numbers.
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,7 +23,7 @@ use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::layout::ValueLayout;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 
-use crate::layout::DenseAbi;
+use crate::layout::CallAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
 use super::inst::{BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst, MirLaneShape, Terminator, ValueId};
@@ -1138,7 +1133,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         None => inp.word(ret).ok_or_else(|| format!("return type {}", ty_kind(ret)))?,
     };
     let mut b = MirBuilder::new(hir.name.clone());
-    // Host natives are word edges, as the dense lift types them.
+    // Host natives are word edges.
     b.allow_host_edges = true;
     b.set_ret_ty(ret_ty);
     let mut next = 0;
@@ -1350,8 +1345,7 @@ struct PadParts<'p> {
     native: u16,
 }
 
-/// The unwind cleanup pad of a body with `defer`s, as HIR emission's
-/// `finish_fn_defers`: each armed `defer`, last first, with its captures
+/// The unwind cleanup pad of a body with `defer`s: each armed `defer`, last first, with its captures
 /// read from their homes as they stood at the panic, then `unwind_resume`.
 /// It runs in the body's frame and reads the homes there.
 fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<MirFunc, Refusal> {
@@ -1797,7 +1791,7 @@ impl Lower<'_> {
     /// slot, which ends the old value's lifetime; here the new value gets a
     /// register of its own, and the old one would stay in its register (a
     /// root to the end of the frame) unless zeroed. Emission skips the zero
-    /// while another live value shares that register (`cleared_words`).
+    /// while another live value shares that register.
     fn rebound_word(&mut self, slot: LocalId, ty: MirTy) -> Result<Option<ValueId>, Refusal> {
         if !ty.is_heap_word() || !self.b.local_defined(slot) {
             return Ok(None);
@@ -4014,7 +4008,7 @@ impl Lower<'_> {
                 let Some(obj) = self.word(iterable)? else {
                     return Ok(Val::Never);
                 };
-                let abi = DenseAbi {
+                let abi = CallAbi {
                     params: vec![self.b.value_ty(obj)],
                     ret: ty,
                     ret_hi: Some(ty),
@@ -4156,7 +4150,7 @@ impl Lower<'_> {
         };
         let it = match plan.into_iter {
             Some(into_iter) => {
-                let abi = DenseAbi {
+                let abi = CallAbi {
                     params: vec![self.b.value_ty(src)],
                     ret: it_ty,
                     ret_hi: None,
@@ -4186,7 +4180,7 @@ impl Lower<'_> {
         let exit = self.b.create_block();
         self.jump(head)?;
         self.switch(head);
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: vec![it_ty],
             ret,
             ret_hi,
@@ -4503,8 +4497,7 @@ impl Lower<'_> {
     }
 
     /// `id` as a block statement: what it lowers carries the statement's
-    /// source location, as HIR emission gives its IL ops (line breakpoints,
-    /// source views). Nested statements keep their own.
+    /// source location (line breakpoints, source views). Nested statements keep their own.
     fn stmt(&mut self, id: HirId) -> Result<bool, Refusal> {
         self.at_stmt(id, |l| {
             l.box_before(id)?;
@@ -4810,7 +4803,7 @@ impl Lower<'_> {
             let h = self.b.ins_alloc(MirAllocKind::Coro { target: site.target }, words).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?));
         }
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret: if site.word_ret { MirTy::HeapRef } else { ret },
             ret_hi,
@@ -5001,7 +4994,7 @@ impl Lower<'_> {
         }
         let worker = |l: &mut Self, mut words: Vec<ValueId>| -> Result<ValueId, Refusal> {
             words.push(l.b.ins_const(MirConst::I64(fork.hops)).map_err(mir)?);
-            let abi = DenseAbi {
+            let abi = CallAbi {
                 params: vec![MirTy::I64; words.len()],
                 ret,
                 ret_hi: None,
@@ -5021,7 +5014,7 @@ impl Lower<'_> {
         let join = self.b.create_block();
         self.b.branch(small, seq_block, par_block).map_err(mir)?;
         self.switch(seq_block);
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: vec![MirTy::I64],
             ret,
             ret_hi: None,
@@ -5049,7 +5042,7 @@ impl Lower<'_> {
             let slot = self.slot(local)?;
             words.push(self.b.use_local(slot, MirTy::I64).map_err(mir)?);
         }
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: vec![MirTy::I64; words.len()],
             ret: MirTy::I64,
             ret_hi: None,
@@ -5436,7 +5429,7 @@ impl Lower<'_> {
             let dicts = site.dicts.clone();
             words.extend(self.dict_values(&dicts)?);
         }
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret,
             ret_hi: None,
@@ -6193,8 +6186,8 @@ impl Lower<'_> {
     }
 
     /// `[a, b, ..]` on the heap: each item, then the array. The array word
-    /// is the safepoint's, as the IL lift reads it. Heap elements are
-    /// boxed words; the array carries HIR emission's element stamp.
+    /// is the safepoint's. Heap elements are boxed words; the array carries
+    /// its element stamp.
     fn make_array(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         if let Some(lane) = self.lane(id) {
             let mut words = Vec::with_capacity(args.len() * 2);
@@ -6486,7 +6479,7 @@ impl Lower<'_> {
                     true if self.b.value_ty(v) != MirTy::HeapRef => return Err("show word".into()),
                     true => self.b.ins_word(v).map_err(mir)?,
                 };
-                let abi = DenseAbi {
+                let abi = CallAbi {
                     params: vec![self.b.value_ty(v)],
                     ret: MirTy::HeapRef,
                     ret_hi: None,
@@ -6879,8 +6872,8 @@ impl Lower<'_> {
     }
 
     /// An FFI opcode over its operands, then its boxed `Result`: an
-    /// `extern`'s `Ok` payload (an `Err` panics with the error's message,
-    /// as `emit_result_unwrap_or_panic`), the niche word it converts to, or
+    /// `extern`'s `Ok` payload (an `Err` panics with the error's message),
+    /// the niche word it converts to, or
     /// the object as it comes back.
     fn ffi(&mut self, id: HirId, site: &HirFfi) -> Result<Val, Refusal> {
         let ret = match self.expr_ty(id) {
@@ -6905,8 +6898,8 @@ impl Lower<'_> {
         }
         let (ok, err) = (self.b.create_block(), self.b.create_block());
         // `Ok` always carries one word, a void call's too (the runtime's
-        // `Ok(0)`): the match takes it, or the taken edge leaves it on the
-        // operand stack, one slot per call (#1638).
+        // `Ok(0)`): the match takes it, and the taken edge passes it as a
+        // block argument (#1638).
         let word = self.b.ins_match_payload(obj, 0, ret.unwrap_or(MirTy::I64)).map_err(mir)?;
         let payload = ret.map(|_| word);
         self.b.jump_if_match(obj, 0, vec![word], ok, err).map_err(mir)?;
@@ -7113,7 +7106,7 @@ impl Lower<'_> {
         };
         let arr = match (into_iter, items) {
             (Some(target), _) => {
-                let abi = DenseAbi {
+                let abi = CallAbi {
                     params: vec![self.b.value_ty(src)],
                     ret: MirTy::HeapRef,
                     ret_hi: None,

@@ -174,7 +174,7 @@ impl Compiler {
                         Some(_) => Some(func.and_then(|m| m.ret_hi_ty).ok_or_else(|| format!("{init}: no two-word MIR return"))?),
                         None => None,
                     };
-                    let abi = crate::layout::DenseAbi { params: Vec::new(), ret, ret_hi };
+                    let abi = crate::layout::CallAbi { params: Vec::new(), ret, ret_hi };
                     let (value, hi) = b.ins_call(target, Vec::new(), &abi).map_err(mir)?;
                     b.ins_store_static(*slot, value).map_err(mir)?;
                     if let (Some(tail), Some(hi)) = (tail, hi) {
@@ -208,7 +208,7 @@ impl Compiler {
     }
 
     /// An FFI op whose `Result` is unwrapped: the `Ok` word, or a panic
-    /// with the `ffi::Error`'s message (`emit_result_unwrap_or_panic`).
+    /// with the `ffi::Error`'s message.
     fn setup_ffi(b: &mut MirBuilder, op: MirFfiOp, operand: u32, args: Vec<crate::mir::ValueId>) -> Result<crate::mir::ValueId, String> {
         let mir = |e: crate::mir::MirError| e.to_string();
         let obj = b.ins_ffi(op, operand, args).map_err(mir)?;

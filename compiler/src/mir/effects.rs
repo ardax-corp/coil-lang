@@ -1,7 +1,7 @@
 //! I6 — HostInvoke / CALL effect edges from the typechecker purity sidecar.
 //!
-//! Dense emit reconstructs I6-typed HostInvoke edges, including Q9 R2
-//! `from_bytes` / `to_bytes`. Impure edges are LICM/CSE barriers and never hoist. LICM hoist
+//! MIR lowering types each HostInvoke edge by its I6 effects, including Q9
+//! R2 `from_bytes` / `to_bytes`. Impure edges are LICM/CSE barriers and never hoist. LICM hoist
 //! is purity bits (plus heap-read), not a HostInvoke id allowlist.
 
 use crate::typechecking::purity::EffectFlags;

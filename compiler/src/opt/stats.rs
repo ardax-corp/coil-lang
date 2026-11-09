@@ -1,5 +1,6 @@
-//! Optimization statistics (COI-131). Collection is off unless
-//! [`super::OptimizeOptions::collect_stats`] is set.
+//! Optimization statistics (COI-131): HIR lowering, typed inlining and
+//! compile-time work, printed by `--opt-stats` / `--opt-stats-json`. A
+//! window opens per compile ([`begin_opt_stats`]).
 
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
@@ -8,166 +9,72 @@ thread_local! {
     static LAST_STATS: RefCell<Option<OptStats>> = const { RefCell::new(None) };
 }
 
-/// One named pass that mutated the buffer (aggregated by name).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PassHit {
+/// How many times one reason was given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReasonCount {
     pub name: String,
-    pub applied: usize,
-    pub ops_delta: i64,
+    pub count: usize,
 }
 
-/// Counters from IL opts (and typed inlining when compiling). COI-176.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Counters from HIR lowering, typed inlining and compile-time code.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OptStats {
-    pub ops_eliminated: usize,
-    pub ops_added: usize,
-    pub functions_inlined: usize,
-    pub loops_unrolled: usize,
-    pub loads_eliminated: usize,
-    pub stores_eliminated: usize,
-    pub branches_optimized: usize,
-    pub blocks_reordered: usize,
-    pub iterations: usize,
-    pub passes: Vec<PassHit>,
-    /// Function bodies codegen lowered from HIR (`--hir`).
-    #[serde(default)]
+    /// Function bodies HIR lowering planned.
     pub hir_lowered: usize,
-    /// Function bodies `--hir` left to the AST codegen.
-    #[serde(default)]
-    pub hir_fallback: usize,
-    /// Why each fallback body was refused (coarse keys, counted).
-    #[serde(default)]
-    pub hir_fallback_reasons: Vec<PassHit>,
+    /// Function bodies HIR lowering refused (a compile error unless an
+    /// earlier error caused it).
+    pub hir_refused: usize,
+    /// Why each refused body was refused (coarse keys, counted).
+    pub hir_refused_reasons: Vec<ReasonCount>,
     /// Bodies lowered straight from HIR to MIR.
-    #[serde(default)]
     pub hir_mir: usize,
-    /// Bodies whose dense tier came from that MIR rather than the IL lift.
-    #[serde(default)]
-    pub hir_mir_kept: usize,
-    /// Why the other HIR bodies did not lower to MIR (counted).
-    #[serde(default)]
-    pub hir_mir_refused: Vec<PassHit>,
+    /// Why the other planned bodies got no MIR (counted).
+    pub hir_mir_refused: Vec<ReasonCount>,
     /// Call sites typed inlining spliced into HIR bodies.
-    #[serde(default)]
     pub hir_inlined: usize,
     /// Bodies whose inlined HIR did not plan, by reason (kept un-inlined).
-    #[serde(default)]
-    pub hir_inline_refused: Vec<PassHit>,
+    pub hir_inline_refused: Vec<ReasonCount>,
     /// Compile-time code (comptime step 12): macro calls and `comptime`
     /// blocks run (compiling their programs included), and how many of them
     /// reused an earlier result; wall time in microseconds.
-    #[serde(default)]
     pub comptime_macro_runs: usize,
-    #[serde(default)]
     pub comptime_macro_cached: usize,
-    #[serde(default)]
     pub comptime_macro_us: u64,
     /// `const`s and `comptime` expressions computed, how many came from the
     /// result cache, pure calls tried for folding, and the wall time.
-    #[serde(default)]
     pub comptime_consts: usize,
-    #[serde(default)]
     pub comptime_consts_cached: usize,
-    #[serde(default)]
     pub comptime_folds: usize,
-    #[serde(default)]
     pub comptime_const_us: u64,
 }
 
+/// `reasons`, most frequent first.
+fn ranked(reasons: &[ReasonCount]) -> Vec<ReasonCount> {
+    let mut ranked = reasons.to_vec();
+    ranked.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
+    ranked
+}
+
 impl OptStats {
-    fn merge_pass(&mut self, name: &str, applied: usize, ops_delta: i64) {
-        if let Some(hit) = self.passes.iter_mut().find(|p| p.name == name) {
-            hit.applied += applied;
-            hit.ops_delta += ops_delta;
-            return;
-        }
-        self.passes.push(PassHit {
-            name: name.to_string(),
-            applied,
-            ops_delta,
-        });
-    }
-
-    /// Fold `other` into `self` (COI-176).
-    pub fn accumulate(&mut self, other: &Self) {
-        self.ops_eliminated += other.ops_eliminated;
-        self.ops_added += other.ops_added;
-        self.functions_inlined += other.functions_inlined;
-        self.loops_unrolled += other.loops_unrolled;
-        self.loads_eliminated += other.loads_eliminated;
-        self.stores_eliminated += other.stores_eliminated;
-        self.branches_optimized += other.branches_optimized;
-        self.blocks_reordered += other.blocks_reordered;
-        self.iterations += other.iterations;
-        self.hir_lowered += other.hir_lowered;
-        self.hir_fallback += other.hir_fallback;
-        for hit in &other.hir_fallback_reasons {
-            note_reason(&mut self.hir_fallback_reasons, &hit.name, hit.applied);
-        }
-        self.hir_mir += other.hir_mir;
-        self.hir_mir_kept += other.hir_mir_kept;
-        for hit in &other.hir_mir_refused {
-            note_reason(&mut self.hir_mir_refused, &hit.name, hit.applied);
-        }
-        self.hir_inlined += other.hir_inlined;
-        for hit in &other.hir_inline_refused {
-            note_reason(&mut self.hir_inline_refused, &hit.name, hit.applied);
-        }
-        self.comptime_macro_runs += other.comptime_macro_runs;
-        self.comptime_macro_cached += other.comptime_macro_cached;
-        self.comptime_macro_us += other.comptime_macro_us;
-        self.comptime_consts += other.comptime_consts;
-        self.comptime_consts_cached += other.comptime_consts_cached;
-        self.comptime_folds += other.comptime_folds;
-        self.comptime_const_us += other.comptime_const_us;
-        for hit in &other.passes {
-            self.merge_pass(&hit.name, hit.applied, hit.ops_delta);
-        }
-    }
-
-    /// Alias for [`Self::accumulate`].
-    pub fn add(&mut self, other: &Self) {
-        self.accumulate(other);
-    }
-
     /// Human-readable report for `--opt-stats`.
     pub fn format_text(&self) -> String {
         let mut out = String::from("optimization stats:\n");
-        let _ = writeln!(out, "  iterations: {}", self.iterations);
-        let _ = writeln!(out, "  ops eliminated: {}", self.ops_eliminated);
-        let _ = writeln!(out, "  ops added: {}", self.ops_added);
-        let _ = writeln!(out, "  functions inlined: {}", self.functions_inlined);
-        let _ = writeln!(out, "  loops unrolled: {}", self.loops_unrolled);
-        let _ = writeln!(out, "  loads eliminated: {}", self.loads_eliminated);
-        let _ = writeln!(out, "  stores eliminated: {}", self.stores_eliminated);
-        let _ = writeln!(out, "  branches optimized: {}", self.branches_optimized);
-        let _ = writeln!(out, "  blocks reordered: {}", self.blocks_reordered);
-        if self.hir_lowered + self.hir_fallback > 0 {
-            let _ = writeln!(
-                out,
-                "  hir: {} lowered, {} fallback",
-                self.hir_lowered, self.hir_fallback
-            );
-            let mut ranked = self.hir_fallback_reasons.clone();
-            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
-            for hit in ranked {
-                let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
+        if self.hir_lowered + self.hir_refused > 0 {
+            let _ = writeln!(out, "  hir: {} lowered, {} refused", self.hir_lowered, self.hir_refused);
+            for hit in ranked(&self.hir_refused_reasons) {
+                let _ = writeln!(out, "    {}: {}", hit.name, hit.count);
             }
         }
         if self.hir_mir + self.hir_mir_refused.len() > 0 {
-            let _ = writeln!(out, "  hir mir: {} lowered, {} kept dense", self.hir_mir, self.hir_mir_kept);
-            let mut ranked = self.hir_mir_refused.clone();
-            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
-            for hit in ranked {
-                let _ = writeln!(out, "    {}: {}", hit.name, hit.applied);
+            let _ = writeln!(out, "  hir mir: {} lowered", self.hir_mir);
+            for hit in ranked(&self.hir_mir_refused) {
+                let _ = writeln!(out, "    {}: {}", hit.name, hit.count);
             }
         }
         if self.hir_inlined + self.hir_inline_refused.len() > 0 {
             let _ = writeln!(out, "  hir inline: {} sites", self.hir_inlined);
-            let mut ranked = self.hir_inline_refused.clone();
-            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
-            for hit in ranked {
-                let _ = writeln!(out, "    refused {}: {}", hit.name, hit.applied);
+            for hit in ranked(&self.hir_inline_refused) {
+                let _ = writeln!(out, "    refused {}: {}", hit.name, hit.count);
             }
         }
         if self.comptime_macro_runs + self.comptime_consts + self.comptime_folds > 0 {
@@ -185,49 +92,17 @@ impl OptStats {
                 ms(self.comptime_const_us)
             );
         }
-        if self.passes.is_empty() {
-            let _ = writeln!(out, "  passes: (none applied)");
-        } else {
-            let _ = writeln!(out, "  passes:");
-            let mut ranked = self.passes.clone();
-            ranked.sort_by(|a, b| b.applied.cmp(&a.applied).then(a.name.cmp(&b.name)));
-            for hit in ranked {
-                let _ = writeln!(
-                    out,
-                    "    {}: {} change(s), Δops {}",
-                    hit.name, hit.applied, hit.ops_delta
-                );
-            }
-        }
         out
     }
 
     /// Machine-readable report for `--opt-stats-json`.
     pub fn format_json(&self) -> String {
-        let mut passes = String::new();
-        for (i, hit) in self.passes.iter().enumerate() {
-            if i > 0 {
-                passes.push(',');
-            }
-            let _ = write!(
-                passes,
-                "{{\"name\":\"{}\",\"applied\":{},\"ops_delta\":{}}}",
-                hit.name, hit.applied, hit.ops_delta
-            );
-        }
         format!(
-            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"hir_lowered\":{},\"hir_fallback\":{},\"comptime_macro_runs\":{},\"comptime_macro_cached\":{},\"comptime_macro_us\":{},\"comptime_consts\":{},\"comptime_consts_cached\":{},\"comptime_folds\":{},\"comptime_const_us\":{},\"passes\":[{}]}}",
-            self.ops_eliminated,
-            self.ops_added,
-            self.functions_inlined,
-            self.loops_unrolled,
-            self.loads_eliminated,
-            self.stores_eliminated,
-            self.branches_optimized,
-            self.blocks_reordered,
-            self.iterations,
+            "{{\"hir_lowered\":{},\"hir_refused\":{},\"hir_mir\":{},\"hir_inlined\":{},\"comptime_macro_runs\":{},\"comptime_macro_cached\":{},\"comptime_macro_us\":{},\"comptime_consts\":{},\"comptime_consts_cached\":{},\"comptime_folds\":{},\"comptime_const_us\":{}}}",
             self.hir_lowered,
-            self.hir_fallback,
+            self.hir_refused,
+            self.hir_mir,
+            self.hir_inlined,
             self.comptime_macro_runs,
             self.comptime_macro_cached,
             self.comptime_macro_us,
@@ -235,7 +110,6 @@ impl OptStats {
             self.comptime_consts_cached,
             self.comptime_folds,
             self.comptime_const_us,
-            passes
         )
     }
 }
@@ -256,15 +130,11 @@ pub fn last_opt_stats() -> OptStats {
     LAST_STATS.with(|c| c.borrow().clone().unwrap_or_default())
 }
 
-fn note_reason(reasons: &mut Vec<PassHit>, name: &str, n: usize) {
+fn note_reason(reasons: &mut Vec<ReasonCount>, name: &str) {
     if let Some(hit) = reasons.iter_mut().find(|h| h.name == name) {
-        hit.applied += n;
+        hit.count += 1;
     } else {
-        reasons.push(PassHit {
-            name: name.to_string(),
-            applied: n,
-            ops_delta: 0,
-        });
+        reasons.push(ReasonCount { name: name.to_string(), count: 1 });
     }
 }
 
@@ -273,11 +143,11 @@ pub(crate) fn note_hir_lowered() {
     with_stats(|s| s.hir_lowered += 1);
 }
 
-/// Count one function body `--hir` left to the AST codegen, and why.
-pub(crate) fn note_hir_fallback(reason: &str) {
+/// Count one function body HIR lowering refused, and why.
+pub(crate) fn note_hir_refused(reason: &str) {
     with_stats(|s| {
-        s.hir_fallback += 1;
-        note_reason(&mut s.hir_fallback_reasons, reason, 1);
+        s.hir_refused += 1;
+        note_reason(&mut s.hir_refused_reasons, reason);
     });
 }
 
@@ -285,21 +155,18 @@ pub(crate) fn note_hir_fallback(reason: &str) {
 pub(crate) fn note_hir_mir(refused: Option<&str>) {
     with_stats(|s| match refused {
         None => s.hir_mir += 1,
-        Some(why) => note_reason(&mut s.hir_mir_refused, why, 1),
+        Some(why) => note_reason(&mut s.hir_mir_refused, why),
     });
 }
 
 /// Count `sites` call sites inlined into one HIR body.
 pub(crate) fn note_hir_inlined(sites: usize) {
-    with_stats(|s| {
-        s.hir_inlined += sites;
-        s.functions_inlined += sites;
-    });
+    with_stats(|s| s.hir_inlined += sites);
 }
 
 /// Count one body whose inlined HIR was refused, and why.
 pub(crate) fn note_hir_inline_refused(reason: &str) {
-    with_stats(|s| note_reason(&mut s.hir_inline_refused, reason, 1));
+    with_stats(|s| note_reason(&mut s.hir_inline_refused, reason));
 }
 
 /// Count one round of macro and `comptime` block runs (`reused` of
@@ -334,52 +201,3 @@ fn with_stats(f: impl FnOnce(&mut OptStats)) {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accumulate_sums_counters_and_merges_passes() {
-        let mut a = OptStats {
-            ops_eliminated: 2,
-            functions_inlined: 1,
-            iterations: 1,
-            passes: vec![PassHit {
-                name: "dce".into(),
-                applied: 1,
-                ops_delta: -2,
-            }],
-            ..OptStats::default()
-        };
-        let b = OptStats {
-            ops_eliminated: 3,
-            loops_unrolled: 1,
-            iterations: 2,
-            passes: vec![
-                PassHit {
-                    name: "dce".into(),
-                    applied: 1,
-                    ops_delta: -1,
-                },
-                PassHit {
-                    name: "unroll".into(),
-                    applied: 1,
-                    ops_delta: 8,
-                },
-            ],
-            ..OptStats::default()
-        };
-        a.add(&b);
-        assert_eq!(a.ops_eliminated, 5);
-        assert_eq!(a.functions_inlined, 1);
-        assert_eq!(a.loops_unrolled, 1);
-        assert_eq!(a.iterations, 3);
-        assert_eq!(a.passes.len(), 2);
-        assert_eq!(a.passes[0].applied, 2);
-        assert_eq!(a.passes[0].ops_delta, -3);
-        let json = serde_json::to_string(&a).unwrap();
-        assert!(json.contains("\"ops_eliminated\":5"));
-        let round: OptStats = serde_json::from_str(&json).unwrap();
-        assert_eq!(round, a);
-    }
-}

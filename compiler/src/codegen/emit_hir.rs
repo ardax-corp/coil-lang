@@ -2,8 +2,7 @@
 //!
 //! Every function body inside [`crate::hir::lower`]'s subset is planned
 //! here and lowered to MIR by `mir::lower_from_hir`; a refused body is an
-//! internal error (there is no AST codegen or stack lowering to fall back
-//! to). [`Compiler::compile_function_decl_into`] keeps the prologue, slots
+//! internal error. [`Compiler::compile_function_decl_into`] keeps the prologue, slots
 //! for parameters and function records; the body itself is a placeholder
 //! that binds the labels MIR emission replaces.
 //!
@@ -24,7 +23,7 @@ use crate::layout::ValueLayout;
 #[path = "emit_hir_mir.rs"]
 mod emit_hir_mir;
 
-/// How a value sits on the operand stack.
+/// How a value is passed: the words a call takes or returns it in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Rep {
     /// One word in its type's one-word layout.
@@ -82,7 +81,7 @@ pub(in crate::codegen) struct HirCall {
     /// One-word layout of the result (when not a pair).
     ret: ValueLayout,
     /// `recv.m(args)`: the receiver is argument 0; never inlined or a
-    /// tail call (as in the AST codegen).
+    /// tail call.
     method: bool,
     /// A mono clone of a generic function (typed inlining takes it only
     /// as its generic body at the call's types).
@@ -149,8 +148,8 @@ impl MethodClonePlan {
     }
 }
 
-/// A ground trait method call, as `compile_call_expr`'s `recv.method(args)`
-/// over a discharged instance: the receiver boxed for the instance, then a
+/// A ground trait method call, `recv.method(args)` over a discharged
+/// instance: the receiver boxed for the instance, then a
 /// trailing dictionary when the instance has one.
 #[derive(Clone)]
 struct HirInstanceCall {
@@ -163,7 +162,7 @@ struct HirInstanceCall {
     ground: Option<HirGround>,
 }
 
-/// The arguments of a ground instance call, as the AST pushes them.
+/// The arguments of a ground instance call, in the order the call passes them.
 #[derive(Clone)]
 struct HirGround {
     method: String,
@@ -184,7 +183,7 @@ pub(crate) struct HirFnAdapt {
     pub(crate) ret: Option<ValueLayout>,
 }
 
-/// The shared-body ABI of a call to a bounded generic, as `compile_call_expr`.
+/// The shared-body ABI of a call to a bounded generic.
 #[derive(Clone)]
 struct HirGeneric {
     /// The scheme the dictionaries are resolved from.
@@ -247,7 +246,7 @@ enum HirAdaptConv {
     Word,
 }
 
-/// Builtin calls the lowering emits inline, as `compile_call_expr` does.
+/// Builtin calls the lowering emits inline.
 #[derive(Clone, Copy)]
 enum HirBuiltin {
     /// `HostInvoke` of a registered native.
@@ -260,23 +259,22 @@ enum HirBuiltin {
     /// pointer through `CallIndirect`.
     Bound { dict: u32, method: u32 },
     /// `f(a)` filling a prefix of `f`'s parameters: the filled values, the
-    /// fill mask, then `CodePtr` and `MakeFn`, as `compile_call_expr`.
+    /// fill mask, then `CodePtr` and `MakeFn`.
     /// `value`: `f` returns two words, so the closure targets its one-word
     /// adapter ([`Compiler::partial_value_target`]).
     Partial { entry: u32, mask: u32, operand: u32, value: bool },
     /// `dot` / `cross` / `matmul` / ...: the packed `HostInvoke` kernel, or
-    /// the operands to temps and the scalar unroll, as the AST's
-    /// `emit_linear_algebra`.
+    /// the operands to temps and the scalar unroll.
     LinAlg,
     /// `matrix(data)`: the data itself, a zero-cost wrap.
     Matrix,
     /// A trait method on a bare-class existential (`show(x)`): the pack to
     /// a temp, its value, its dictionary, the method's code pointer from
-    /// the dictionary, then `CallIndirect`, as `emit_existential_method_call`.
+    /// the dictionary, then `CallIndirect`.
     Existential { slot: u32 },
     /// An `extern` function: its library and function-id statics under
     /// the arguments, the arguments packed in a tuple, `FfiInvoke`, then
-    /// the `Result` unwrapped or panicked, as `compile_call_expr`. A C
+    /// the `Result` unwrapped or panicked. A C
     /// variadic (`variadic`, the extern's def for its sidecar tags) adds
     /// each argument's type tag in a second tuple.
     Ffi {
@@ -287,7 +285,7 @@ enum HirBuiltin {
     /// `dload` / `declare` / `invoke` after `use ffi::{…}`: the value
     /// operands ([`Compiler::hir_ffi_operands`]), a `declare` signature's
     /// tags as constants, `invoke`'s arguments packed in a tuple, then the
-    /// opcode, as `emit_ffi_declare` / `emit_ffi_invoke`.
+    /// opcode.
     FfiDyn(crate::typechecking::FfiBuiltin),
 }
 
@@ -335,13 +333,13 @@ struct HirPlan {
     /// How this function returns its value.
     ret: Rep,
     /// `let x = f(..)` of a two-word call that is never reassigned keeps
-    /// `[payload, tag]` in two frame slots (the AST's unboxed enum local):
-    /// local to its pair kind.
+    /// `[payload, tag]` in two frame slots (an unboxed enum local): local
+    /// to its pair kind.
     pair_locals: HashMap<u32, PairKind>,
-    /// `let p = new C(..)` kept in frame slots (the AST's unboxed class
-    /// local): local to its resolved class; field `i` is slot `slot + i`.
+    /// `let p = new C(..)` kept in frame slots (an unboxed class local):
+    /// local to its resolved class; field `i` is slot `slot + i`.
     sroa: HashMap<u32, String>,
-    /// Each `const` read, by node, with the value the AST folds it to.
+    /// Each `const` read, by node, with the value it folds to.
     consts: HashMap<u32, crate::const_fold::ConstValue>,
     /// Each named function read as a value, by node: its entry offset,
     /// arity and rest flag for `MakeFn`.
@@ -358,8 +356,8 @@ struct HirPlan {
     lens: HashMap<u32, Option<u32>>,
     /// Each user-type operator, by node.
     ops: HashMap<u32, HirOp>,
-    /// `let a = [..]` kept in frame slots (the AST's multi-slot stack
-    /// array): local to its length; element `i` is slot `slot + i`.
+    /// `let a = [..]` kept in frame slots (a multi-slot stack array):
+    /// local to its length; element `i` is slot `slot + i`.
     stacks: HashMap<u32, usize>,
     /// Block statements that box escaping stack arrays before they run.
     box_at: HashMap<u32, Vec<u32>>,
@@ -446,9 +444,9 @@ struct HirEmit {
     par_tail: Vec<HirParSite>,
 }
 
-/// How a [`BinOp::Overloaded`] lowers, as the AST codegen picks it.
+/// How a [`BinOp::Overloaded`] lowers.
 enum HirOp {
-    /// `CALL` of the operand type's trait instance method (`emit_concrete_operator_call`).
+    /// `CALL` of the operand type's trait instance method.
     Call {
         lookup: Ty,
         fqn: String,
@@ -460,7 +458,7 @@ enum HirOp {
     Prim,
     /// A bound type parameter's operator in a shared generic body: the
     /// instance method in dictionary slot `dict` at `method`, through
-    /// `CallIndirect` (`emit_bound_operator_call`).
+    /// `CallIndirect`.
     Bound { dict: u32, method: u32 },
     /// `==` / `!=` on an aggregate of type parameters in a shared generic
     /// body: a call of its open glue with their `Eq` dictionaries (#1642).
@@ -1594,7 +1592,7 @@ impl Compiler {
                 true
             }
             Err(reason) => {
-                crate::opt::note_hir_fallback(reason);
+                crate::opt::note_hir_refused(reason);
                 self.hir_refusal = Some(reason);
                 false
             }
@@ -1705,13 +1703,13 @@ impl Compiler {
         self.hir_mir_dict_sp = None;
         // A shared generic body's dictionaries are trailing parameters
         // direct MIR reads only through dictionary programs: a body whose
-        // code reads one any other way stays on the stack lowering.
+        // code reads one any other way gets no MIR, and is never a
+        // tree-shake root (a mono clone stands in for it).
         if (entry_words.is_some() || self.hir_lambda_dicts.is_some_and(|(_, n)| n > 0)) && tables.reads_dicts {
             self.hir_mir_why = Some("converted or shared generic entry".into());
             return None;
         }
-        // A compiler-made body has no source: its ops carry no location,
-        // as its stack lowering clears them.
+        // A compiler-made body has no source: its ops carry no location.
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
             .filter(|loc| loc.is_known() && self.hir_synth_calls.is_none())
             .map(|loc| loc.file);
@@ -3174,7 +3172,7 @@ impl Compiler {
                             return Err(format!("callee `{}`", callee.name));
                         }
                         // The stricter cross-module budget weighs every node
-                        // (a read too) and a call as 25, as the IL's op count.
+                        // (a read too) and a call as 25.
                         let (callee, shape) = fit(id, callee, true, true)?;
                         return Ok((callee, shape.with_foreign(true)));
                     }
@@ -3860,8 +3858,8 @@ impl Compiler {
         }
     }
 
-    /// `body` with named, spread and rest call arguments made positional,
-    /// as `split_call_args_for_rest` orders them: fixed arguments in
+    /// `body` with named, spread and rest call arguments made positional:
+    /// fixed arguments in
     /// parameter order, then the rest packed into one array argument. `None` when no call needs it.
     fn hir_call_shapes(&self, body: &HirBody) -> Result<Option<HirBody>, &'static str> {
         let mut out: Option<HirBody> = None;
@@ -4235,8 +4233,8 @@ impl Compiler {
     }
 
     /// `args` with each spread flattened: a literal's items in place (when
-    /// reading them again, as the AST's `Index` per item does, is the
-    /// same), a tuple local's fields by index.
+    /// reading them again, one `Index` per item, is the same), a tuple
+    /// local's fields by index.
     fn hir_flatten_spreads(&self, b: &mut HirBody, args: &[HirId]) -> Result<Vec<HirId>, &'static str> {
         let mut flat = Vec::with_capacity(args.len());
         for &arg in args {
@@ -4747,7 +4745,7 @@ impl Compiler {
             None => {
                 let layout = self.return_layout();
                 let declared = hir.ret.as_ref().map(|ty| self.value_layout(ty));
-                // Tests return their `Result<(), string>` boxed, as the AST does.
+                // Tests return their `Result<(), string>` boxed.
                 let boxed_test = matches!(hir.kind, crate::hir::BodyKind::Test) && layout == ValueLayout::Boxed;
                 // A mono clone returns a generic `Option` / `Result` in the
                 // open type's layout; each `return` converts to it. A bare
@@ -4760,7 +4758,7 @@ impl Compiler {
                         .and_then(|ty| self.generic_enum_layout(&ty))
                         == Some(layout);
                 // A bare `T` result passes through in its concrete layout,
-                // whatever the AST names its open type's layout.
+                // whatever its open type's layout.
                 let bare = self.compiling_mono_clone
                     && hir.ret.as_ref().and_then(|ty| lower::classify(&self.checker, ty)) == Some(ValueClass::Enum)
                     && self
@@ -4994,8 +4992,7 @@ impl Compiler {
             match &hir.expr(value).kind {
                 _ if tail(value) => tails.push(value),
                 // `return match s { p => f(..), .. }` with every arm a tail
-                // call: each arm's call is a `TailCall`, as the AST's
-                // `return_is_tail_match`.
+                // call: each arm's call is a `TailCall`.
                 HirKind::Match { arms, .. } if !arms.is_empty() && arms.iter().all(|a| tail(a.body)) => {
                     tails.extend(arms.iter().map(|a| a.body));
                 }
@@ -5150,8 +5147,7 @@ impl Compiler {
                 emit.plan.pair_locals.insert(local.0, kind);
                 continue;
             }
-            // `let r = a..b` or a copy of an unboxed range local, as
-            // `expr_unboxed_range_kind`.
+            // `let r = a..b` or a copy of an unboxed range local.
             let range = match &hir.expr(init).kind {
                 // A range over an open `T` is one word, its object (#1230).
                 HirKind::Make {
@@ -5292,9 +5288,8 @@ impl Compiler {
     }
 
     /// The table key and ABI of a direct call to `name`, or why it is not a
-    /// plain `CALL` to a user function. The special forms are checked in
-    /// `compile_call_expr`'s order, so a name those claim is never lowered
-    /// as a user call.
+    /// plain `CALL` to a user function. The special forms are checked
+    /// first, so a name those claim is never lowered as a user call.
     fn resolve_hir_callee(
         &self,
         hir: &HirBody,
@@ -5370,7 +5365,8 @@ impl Compiler {
             return Ok(call);
         }
         // Ground dictionaries (`sidecar_dicts`) are re-derived from the
-        // argument types; trait-object dispatch stays on the AST.
+        // argument types; a trait-object call dispatches through its
+        // existential's dictionary.
         if let Some(hint) = self.existential_method_hint(node.node, start, end) {
             return self.hir_existential_abi(hir, call, &hint);
         }
@@ -5379,7 +5375,7 @@ impl Compiler {
         }
         // Dictionaries a generic body forwards reach a generic callee's
         // shared body ([`Self::hir_generic_abi`]); a mono clone or a plain
-        // function takes none, as on the AST.
+        // function takes none.
         let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty() && !self.hir_clone_drops_forwarded(&d));
         if let Some(call) = self.hir_ground_ufcs(hir, call, name, forwards)? {
             return Ok(call);
@@ -5394,7 +5390,7 @@ impl Compiler {
             return self.resolve_hir_overload(hir, call, name, (fixed, rest), id);
         }
         let mut key = match name.rsplit_once("::") {
-            // `C::f(..)`: the static method, keyed like `compile_construct_expr`.
+            // `C::f(..)`: the static method.
             Some((owner, member)) if self.checker.has_impl(owner) => self.class_member_fqn(owner, member),
             _ => self.resolve_free_fn(name),
         };
@@ -5412,7 +5408,7 @@ impl Compiler {
             return self.hir_builtin_abi(hir, call, HirBuiltin::Ffi { lib, func, variadic });
         }
         // A native the embedder registered by name (`Compiler::register`):
-        // `HostInvoke` by its id, as `compile_call_expr`.
+        // `HostInvoke` by its id.
         if !known(&key)
             && let Some(id) = self.native_id(&key).or_else(|| self.native_id(name))
         {
@@ -5431,8 +5427,8 @@ impl Compiler {
         if let Some(call) = self.hir_partial(hir, call, &key, &lookup, partial, false)? {
             return Ok(call);
         }
-        // The AST sends a call to an emitted mono clone, else to the shared
-        // body with boxed arguments and dictionaries.
+        // A call goes to an emitted mono clone, else to the shared body
+        // with boxed arguments and dictionaries.
         if self.checker.is_generic_fn(&lookup) && self.hir_has_mono_clone(hir, call, &key, &lookup) {
             return self.resolve_hir_mono(hir, call, key, &lookup);
         }
@@ -5551,9 +5547,8 @@ impl Compiler {
         }))
     }
 
-    /// A call the checker resolved to one arity overload, keyed as
-    /// `compile_call_expr` keys it (`name#arity.id`, namespace-qualified
-    /// when bare). Its layouts are read off the call's own argument and
+    /// A call the checker resolved to one arity overload, keyed
+    /// `name#arity.id` (namespace-qualified when bare). Its layouts are read off the call's own argument and
     /// result types, so only plain words (no enum, no range) qualify.
     fn resolve_hir_overload(
         &self,
@@ -5635,8 +5630,7 @@ impl Compiler {
     }
 
     /// `recv.m(args)` the checker resolved to one arity overload of an
-    /// inherent method, keyed `Owner::m#arity.id` as `compile_call_expr`
-    /// keys it; layouts are read off the call's own types, as
+    /// inherent method, keyed `Owner::m#arity.id`; layouts are read off the call's own types, as
     /// [`Self::resolve_hir_overload`].
     fn resolve_hir_method_overload(
         &self,
@@ -5701,8 +5695,8 @@ impl Compiler {
     /// The planned clone of generic `key` for `call`: at the type arguments
     /// its signature binds against the ground argument and call types (a
     /// type parameter only inside `Vec<T>` or only in the result included;
-    /// none while one is open), else (a rest formal), as `mono_call_offset`,
-    /// by the ground argument types.
+    /// none while one is open), else (a rest formal) by the ground argument
+    /// types.
     fn hir_mono_spec(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str) -> Option<&crate::monomorphize::MonoSpecialization> {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return None;
@@ -5745,7 +5739,7 @@ impl Compiler {
         Some(if none { Vec::new() } else { params })
     }
 
-    /// The types a mono clone is keyed by (`Compiler::mono_call_offset`):
+    /// The types a mono clone is keyed by:
     /// one per formal, a rest pack ([`Self::hir_call_shapes`]) by its element.
     fn hir_mono_key_tys(&self, lookup: &str, mut arg_tys: Vec<Ty>) -> Vec<Ty> {
         if self.checker.fn_has_rest(lookup)
@@ -5758,9 +5752,9 @@ impl Compiler {
         arg_tys
     }
 
-    /// A call to generic `key` that the AST sends to an already emitted
-    /// mono clone (keyed by the ground argument types, as
-    /// `mono_call_offset`), with the clone's ABI at those types. A call
+    /// A call to generic `key` that goes to an already emitted mono clone
+    /// (keyed by the ground argument types), with the clone's ABI at those
+    /// types. A call
     /// left on the shared body (boxed `T`, dictionaries) is refused.
     fn resolve_hir_mono(&self, hir: &HirBody, call: HirId, key: String, lookup: &str) -> Result<HirCall, &'static str> {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
@@ -6152,7 +6146,7 @@ impl Compiler {
 
     /// The table key and ABI of `recv.method(args)` (`args[0]` is the
     /// receiver), when it is a plain `CALL` to an inherent method of a user
-    /// class; checked in `compile_call_expr`'s order.
+    /// class.
     fn resolve_hir_method(
         &self,
         hir: &HirBody,
@@ -6166,7 +6160,8 @@ impl Compiler {
             return Ok(call);
         }
         // Ground dictionaries (`sidecar_dicts`) are re-derived from the
-        // argument types; trait-object dispatch stays on the AST.
+        // argument types; a trait-object call dispatches through its
+        // existential's dictionary.
         if let Some(hint) = self.existential_method_hint(node.node, start, end) {
             return self.hir_existential_abi(hir, call, &hint);
         }
@@ -6203,8 +6198,8 @@ impl Compiler {
         // A constructor receiver (`E::A.tag()`) is typed as its variant.
         let recv_ty = crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(self.checker.subst(), recv_ty));
         let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
-        // A numeric range's `to_vec` thunk takes the boxed range (as
-        // `compile_call_expr`, the float thunk for a float range).
+        // A numeric range's `to_vec` thunk takes the boxed range (the float
+        // thunk for a float range).
         if matches!(owner, "Range" | "RangeInclusive") && method == "to_vec" && args.len() == 1 {
             let key = if self.range_to_vec_elem_is_float(Some(&recv_ty)) {
                 format!("{owner}::__float_to_vec")
@@ -6262,7 +6257,7 @@ impl Compiler {
             return self.resolve_hir_method_overload(hir, call, &key, fixed, id, shared);
         }
         // A forward call inside an impl that later gained more overloads has
-        // no recorded selection: pick by argument types, as the AST does.
+        // no recorded selection: pick by argument types.
         if self.checker.is_overloaded(&key) {
             use crate::typechecking::infer::OverloadSelect;
             let tys = args[1..]
@@ -6316,8 +6311,7 @@ impl Compiler {
     }
 
     /// `recv.method(args)` the typechecker discharged to a ground trait
-    /// instance (`call_dicts_at`), checked before inherent methods as in
-    /// `compile_call_expr`.
+    /// instance (`call_dicts_at`), checked before inherent methods.
     /// The dictionaries a generic body forwards (`forwards`) reach only a
     /// method with bounds of its own (#1471).
     fn resolve_hir_instance_method(
@@ -6407,10 +6401,9 @@ impl Compiler {
         let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
         let params: Vec<ValueLayout> = args.iter().map(|&a| layout(a)).collect();
         // `pop` / `remove` returning a niche `Option` call the host natives
-        // directly, as `compile_call_expr` does, and so does a two-word one
-        // (`Option<int>`), which comes back as its two words
-        // (`HOST_ENUM_LAYOUT_PAIR`); a boxed `Option` is the thunk's own
-        // result, and any other layout stays AST.
+        // directly, and so does a two-word one (`Option<int>`), which comes
+        // back as its two words (`HOST_ENUM_LAYOUT_PAIR`); a boxed `Option`
+        // is the thunk's own result, and any other layout is refused.
         let two_words = Self::hir_ty(hir, call)
             .map(|t| apply_ty_prune(self.checker.subst(), t))
             .is_some_and(|t| crate::layout::two_word_kind(&self.checker, &t).is_some());
@@ -6519,8 +6512,7 @@ impl Compiler {
 
     /// The ABI of a call to `key` with `argc` arguments, of which the first
     /// is `self` (in `self_layout`) for a method call.
-    /// The builtin `name` resolves to, checked in `compile_call_expr`'s
-    /// order: `None` for a user function, `Err` for a builtin the lowering
+    /// The builtin `name` resolves to: `None` for a user function, `Err` for a builtin the lowering
     /// does not emit.
     fn hir_builtin(&self, name: &str) -> Option<Result<HirBuiltin, &'static str>> {
         use crate::typechecking::{PreludeFn, StringBuiltin};
@@ -6566,8 +6558,8 @@ impl Compiler {
     }
 
     /// A call the typechecker dispatches through a bound's dictionary in a
-    /// shared generic body, as `compile_call_expr`. `None` when it is not
-    /// one; a mono clone (no dictionary slot) stays on the AST.
+    /// shared generic body. `None` when it is not one, as in a mono clone
+    /// (no dictionary slot).
     fn hir_bound_call(
         &self,
         hir: &HirBody,
@@ -6597,7 +6589,7 @@ impl Compiler {
             .typeclass_method_scheme(&hint.class, member)
             .map(|scheme| Self::fun_param_and_ret_tys(&scheme.ty))
             .filter(|(params, _)| params.len() == args.len());
-        // Words pass as the AST compiles them; an open enum is the shared
+        // Words pass in their own layouts; an open enum is the shared
         // layout the dictionary's adapter speaks.
         let word = |id: HirId, declared: Option<&Ty>| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
@@ -6918,8 +6910,8 @@ impl Compiler {
     }
 
     /// How a ground instance call passes its arguments and takes its result:
-    /// the boundary signature's layout where it has one, else words as the
-    /// AST compiles them. An enum passes boxed as the instance entry takes
+    /// the boundary signature's layout where it has one, else each word in
+    /// its own layout. An enum passes boxed as the instance entry takes
     /// it; a niche layout may differ.
     fn hir_ground_words(
         &self,
@@ -6994,9 +6986,9 @@ impl Compiler {
         Ok((params, ret))
     }
 
-    /// A direct call to instance method `fqn`, as the AST's function-style
-    /// and static trait calls: arguments in order, the positions the entry
-    /// unboxes boxed, staged only when one may clobber the operand stack.
+    /// A direct call to instance method `fqn`, as function-style and
+    /// static trait calls make it: arguments in order, boxed at the
+    /// positions the entry unboxes.
     fn hir_ground_direct(
         &self,
         hir: &HirBody,
@@ -7108,8 +7100,8 @@ impl Compiler {
         if hint.arity != args.len() || args.is_empty() {
             return Err("callee-trait");
         }
-        // Further arguments pass as the AST compiles them: one word each
-        // (an enum's layout may differ at the instance).
+        // Further arguments pass one word each in their own layouts (an
+        // enum's may differ at the instance, so it is refused).
         let mut params = vec![ValueLayout::Boxed];
         for &arg in &args[1..] {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).ok_or("callee-signature")?);
@@ -7251,8 +7243,7 @@ impl Compiler {
                 }
                 _ => return Err("callee-signature"),
             }
-            // A `%v` argument stays in its own layout: `Show` boxes it as
-            // the AST did.
+            // A `%v` argument stays in its own layout: `Show` boxes it.
             let show = !params.is_empty() && shows.get(params.len() - 1) == Some(&'v');
             params.push(match self.value_layout(ty) {
                 ValueLayout::NicheUnitResult | ValueLayout::NicheResult if !show => ValueLayout::Boxed,
@@ -7332,8 +7323,8 @@ impl Compiler {
             // #1734).
             Some(&(fixed, true)) if fixed as usize + 1 == explicit && (self_layout.is_some() || !open) => {}
             // Declared later in the file: its entry is reserved but its
-            // arity not yet recorded, so read it from the signature as the
-            // AST call does. Its two-word return kind comes from the
+            // arity not yet recorded, so read it from the signature. Its
+            // two-word return kind comes from the
             // signature too, so it agrees with the definition.
             // A rest pack is one more argument, as above.
             None if key == lookup
@@ -7447,8 +7438,8 @@ impl Compiler {
         if !coro && lower::classify(&self.checker, &ret_ty).is_none() && !open_ty(&ret_ty) {
             return Err("callee-signature");
         }
-        // As `emit_call_args_range_pairs`: a plain free function takes its
-        // numeric range parameters as `[start, end]`.
+        // A plain free function takes its numeric range parameters as
+        // `[start, end]`.
         let ranges = if self_layout.is_some() {
             // An inherent method's: aligned with the arguments, the
             // receiver (listed in the scheme or not) one word.
@@ -7637,8 +7628,8 @@ impl Compiler {
             }
             boxed.push(Some(ty.clone()));
         }
-        // Every constraint needs a ground instance (the AST would emit fewer
-        // dictionaries than the body unpacks otherwise).
+        // Every constraint needs a ground instance (else the call passes
+        // fewer dictionaries than the body unpacks).
         let mut vars = HashMap::new();
         for (param, ty) in params.iter().zip(&arg_tys) {
             Self::bind_scheme_vars(param, ty, &mut vars);
@@ -8479,7 +8470,7 @@ impl Compiler {
     }
 
     /// The frame's dictionary slot and `show` method slot for a `%v` of a
-    /// bound type parameter (`emit_show_for_format_arg`).
+    /// bound type parameter.
     fn hir_bound_show(&self, hir: &HirBody, arg: HirId) -> Option<(u32, u32)> {
         let e = hir.expr(arg);
         let hint = self.bound_display_hint(e.node, e.span.0, e.span.1)?;
@@ -8496,7 +8487,7 @@ impl Compiler {
 
     /// An open type whose `Show` is a bounded generic instance
     /// (`Show for Tree<T: Show>` inside its own body): the instance's
-    /// shared `show` with the frame's dictionaries, as the AST.
+    /// shared `show` with the frame's dictionaries.
     fn hir_generic_show(&self, ty: &Ty) -> bool {
         if matches!(ty, Ty::Var(_) | Ty::Tuple(_) | Ty::Record { .. }) {
             return false;
@@ -8563,8 +8554,8 @@ impl Compiler {
         }
     }
 
-    /// `return f(..)` may jump instead of call, under the rules
-    /// [`Self::resolve_tail_callee_key`] applies to the AST.
+    /// `return f(..)` may jump instead of call: `key` is the function
+    /// being compiled or one in its recursion cycle, with a matching ABI.
     fn hir_tail_call_ok(&self, key: &str) -> bool {
         let Some(cur) = self.current_function_table_key.as_deref() else {
             return false;
@@ -8979,7 +8970,7 @@ impl Compiler {
         (Self::ty_has_var(&fty) && stored != own && !bare_niche).then_some(Rep::Word(stored))
     }
 
-    /// `typeof e`'s text: `e`'s ground type, as `compile_expr`'s `TypeOf`.
+    /// `typeof e`'s text: `e`'s ground type.
     fn hir_typeof(&self, hir: &HirBody, arg: HirId) -> Option<String> {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
         crate::typechecking::pretty::format_ty_fqn(&ty, &self.checker.generics().nominal_type_modules)
@@ -9047,11 +9038,10 @@ impl Compiler {
         self.checker.resolve_class_key(name)
     }
 
-    /// The slot of a `static let` identifier, looked up as
-    /// `compile_identifier_into` does: only when no `const` claims the
-    /// name first and no local shadows it.
+    /// The slot of a `static let` identifier: only when no `const` claims
+    /// the name first and no local shadows it.
     fn hir_global_static(&self, hir: &HirBody, id: HirId, name: &str) -> Option<u32> {
-        // `Owner::member`: a class static, as the AST's qualified read.
+        // `Owner::member`: a class static.
         if let Some((owner, member)) = name.rsplit_once("::") {
             return self.checker.static_slot_index(&self.class_member_fqn(owner, member));
         }
@@ -9075,11 +9065,11 @@ impl Compiler {
             .or_else(|| self.checker.static_slot_for_module_name(name))
     }
 
-    /// The value a `const` identifier folds to, looked up as
-    /// `compile_identifier_into` does, when its kind matches the read's type.
+    /// The value a `const` identifier folds to, when its kind matches the
+    /// read's type.
     /// A monomorphic, non-overloaded function already emitted, read as a
-    /// value: `compile_identifier_into`'s `MakeFn` (a later function has
-    /// no entry offset yet, so it stays AST).
+    /// value, for `MakeFn` (`None` for a later function: it has no entry
+    /// offset yet).
     fn hir_global_fn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(usize, u32, bool, String)> {
         if name.contains("::") {
             return None;
@@ -9135,7 +9125,7 @@ impl Compiler {
     }
 
     /// A generic function already emitted, read where a `PolyFn` is
-    /// expected: `compile_identifier_into`'s `MakePolyFn` path.
+    /// expected (`MakePolyFn`).
     fn hir_global_polyfn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<String> {
         if name.contains("::") {
             return None;
@@ -9144,7 +9134,7 @@ impl Compiler {
         let resolved = self.resolve_free_fn(name);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
         // Any generic function escapes as a `PolyFn`, whatever type the
-        // read is instantiated at (the AST's `MakePolyFn` path).
+        // read is instantiated at.
         if !matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Fun(..) | Ty::Forall { .. })
             || !self.checker.is_generic_fn(&resolved)
             || self.checker.is_overloaded(&resolved)
@@ -9264,7 +9254,7 @@ impl Compiler {
     }
 
     /// Whether a `PolyFn` local's own type returns a bare type parameter
-    /// (boxed at run time), as `local_polyfn_call_needs_unbox`.
+    /// (boxed at run time).
     fn hir_polyfn_returns_var(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> bool {
         let HirKind::Local(local) = hir.expr(f).kind else {
             return false;
@@ -9286,7 +9276,7 @@ impl Compiler {
     /// `readonly` (#1561), by its array's `Make`: the static slot it is
     /// built into once. Tables of the same literals share one. A table
     /// inside a loop (a callee's, spliced into the caller's loop) keeps
-    /// its array, which LICM moves to the preheader of a dense loop.
+    /// its array, which LICM moves to the loop's preheader.
     fn hir_frozen_arrays(&mut self, hir: &HirBody) -> HashMap<u32, u32> {
         let mut out = HashMap::new();
         let sealed = crate::hir::tables::sealed_locals(hir, &|t| self.hir_ty_is_readonly(t));
@@ -9408,7 +9398,7 @@ impl Compiler {
     }
 
     /// `e.f` of a boxed user enum whose record variant names `f`: its
-    /// payload slot, as the AST's `field_index_for` `LoadField`.
+    /// payload slot, for `LoadField`.
     fn hir_variant_field(&self, ty: &Ty, name: &str) -> Option<(FieldAt, Ty)> {
         // Inside an arm the scrutinee is narrowed to its variant.
         let (enum_name, tag) = match crate::typechecking::ty::strip_readonly(ty) {
@@ -9433,9 +9423,8 @@ impl Compiler {
     }
 
     /// The operator at `id`: element-wise matrix and aggregate forms, a
-    /// bound's dictionary call in a shared generic body
-    /// (`emit_bound_operator_call`), the operand type's instance or the raw
-    /// opcode.
+    /// bound's dictionary call in a shared generic body, the operand type's
+    /// instance or the raw opcode.
     fn hir_operator_at(
         &self,
         hir: &HirBody,
@@ -9522,8 +9511,8 @@ impl Compiler {
         Some(meta)
     }
 
-    /// A C variadic call's per-argument FFI type tags, as the AST's
-    /// `resolve_call_ffi_tags`: the extern's sidecar tags when they cover
+    /// A C variadic call's per-argument FFI type tags: the extern's sidecar
+    /// tags when they cover
     /// every argument, else the checker's tags for the call at `span`.
     fn hir_variadic_tags(&self, def: Option<crate::typechecking::DefId>, span: (usize, usize), argc: usize) -> Option<Vec<(u32, u32)>> {
         if let Some(tags) = def.and_then(|d| self.typed_sidecar.ffi_tags(d))
@@ -9536,7 +9525,7 @@ impl Compiler {
 
     /// How `lhs sym rhs` over a user type lowers: its trait instance's
     /// method when there is one (a one-word result; a generic instance gets
-    /// its dictionary as the AST passes it), else `EQ` / `NEQ` for `==` /
+    /// its dictionary), else `EQ` / `NEQ` for `==` /
     /// `!=`.
     fn hir_operator(&self, hir: &HirBody, sym: &'static str, lhs: HirId, rhs: HirId) -> Option<HirOp> {
         let (class, method) = match sym {
@@ -9655,7 +9644,7 @@ impl Compiler {
 
     /// `class`'s fields with their declared types. A generic class's type
     /// parameters are open there: its one shared body holds them boxed, and
-    /// the AST codegen lays a field out by its open type (`Option<Node<T>>`
+    /// a field is laid out by its open type (`Option<Node<T>>`
     /// is a boxed enum, never the niche a closed `Node<int>` would get).
     fn hir_class_fields(&self, class: &str) -> Option<Vec<(String, Ty)>> {
         let fields = self.checker.class_fields(class)?;
@@ -9792,7 +9781,7 @@ impl Compiler {
     }
 
     /// `E::V { .. }.f` on a one-variant enum: the variant's arguments and
-    /// the position of `f`'s. As the AST, the variant is never built: its
+    /// the position of `f`'s. The variant is never built: its
     /// arguments run in order and only `f`'s is kept.
     fn hir_field_of_variant(&self, hir: &HirBody, base: HirId, field: &str) -> Option<(Vec<HirId>, usize)> {
         let HirKind::Make {
@@ -9831,7 +9820,7 @@ impl Compiler {
     }
 
     /// Box a stack array's slots into one array object at a statement
-    /// start, as the AST's `emit_hoisted_escape_box`.
+    /// start.
     fn hir_check_stack_array_init(&self, hir: &HirBody, emit: &HirEmit, local: LocalId, init: HirId) -> Check {
         let HirKind::Make { args, .. } = &hir.expr(init).kind else {
             // A copy of another stack array's slots.
@@ -10142,14 +10131,14 @@ impl Compiler {
         let unit_arg = |i: usize| lower::is_unit_make(hir, args[i]);
         let unit_value = |i: usize| !unit_arg(i) && lower::is_unit_value(hir, &self.checker, args[i]);
         let word_arg = |i: usize| -> Check {
-            // A boxed `()` payload is the empty tuple object, as in the AST
-            // (`Ok(())`, `Some(())`, #1449).
+            // A boxed `()` payload is the empty tuple object (`Ok(())`,
+            // `Some(())`, #1449).
             let boxed = *want == Rep::Word(ValueLayout::Boxed);
             if unit_arg(i) && !boxed {
                 return Err("unit-payload");
             }
             // The implicit `Ok(())` closing a boxed result-mode body: a zero
-            // word, as the AST's `emit_fallthrough_return`.
+            // word.
             if matches!(hir.expr(args[i]).kind, HirKind::Lit(Lit::Unit)) && result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed) {
                 return Ok(());
             }
@@ -10171,7 +10160,7 @@ impl Compiler {
                 "Err" => (0..args.len()).try_for_each(word_arg),
                 _ => Err("make-niche"),
             },
-            // `Ok(())` carries the empty tuple, as in the AST.
+            // `Ok(())` carries the empty tuple.
             Rep::Word(L::NicheResult) if result && variant == "Ok" && args.len() == 1 && unit_arg(0) => Ok(()),
             Rep::Word(L::NicheResult) if result && variant == "Ok" && args.len() == 1 && unit_value(0) => {
                 self.hir_check_effect(hir, emit, args[0])
@@ -10468,7 +10457,7 @@ impl Compiler {
                 }
                 // The resumed word is stored as it comes back, in the local's
                 // layout (a niche word as the yield sent it).
-                // `into_iter` is called as the AST calls it: a range comes
+                // `into_iter` is a plain method call: a range comes
                 // back as `[start, end]`, anything else as one word.
                 if let (
                     Some(ForInKind::Custom {
