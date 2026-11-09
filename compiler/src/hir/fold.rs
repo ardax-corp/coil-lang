@@ -482,7 +482,7 @@ fn step(body: &HirBody, s: HirId) -> Option<(super::LocalId, i64, HirId)> {
 }
 
 /// `c op x` is `x op' c` for an `int` literal `c` and a commutative op (or a
-/// flipped compare), so lowering fuses the slot-immediate form.
+/// flipped compare), so the literal is always the right operand.
 fn literal_right(body: &HirBody, op: BinOp, lhs: HirId, rhs: HirId) -> Option<HirKind> {
     if !matches!(body.expr(lhs).kind, HirKind::Lit(Lit::Int(_))) || matches!(body.expr(rhs).kind, HirKind::Lit(_)) {
         return None;

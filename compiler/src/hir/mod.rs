@@ -1,8 +1,8 @@
 //! High-level IR (HIR): a typed, desugared tree built after `check_program`.
 //!
 //! The port is phased (see the HIR plan doc). Phase 0 is [`layout`]: the one
-//! query that decides how a value of a given type is represented, so the
-//! AST codegen, MIR and the future HIR lowering cannot disagree. Phase 1 is
+//! query that decides how a value of a given type is represented, so HIR
+//! planning and MIR cannot disagree. Phase 1 is
 //! [`build`] (AST + checker facts to HIR) and [`print`] (`coil dissect
 //! --hir`). Phase 2 is [`lower`]: codegen lowers every function body from
 //! HIR (the AST walk is gone since phase 8). Phase 3 widens that subset to enums, `Option` /
