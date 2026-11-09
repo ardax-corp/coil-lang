@@ -104,6 +104,16 @@ impl BodyFrame {
         frame
     }
 
+    /// `__dict{n}`'s slot.
+    pub(crate) fn dict_slot(&self, n: usize) -> Option<u32> {
+        self.dicts.get(&(n as u32)).copied()
+    }
+
+    /// Whether `name` is a parameter or capture of the body.
+    pub(crate) fn binds(&self, name: &str) -> bool {
+        self.params.iter().chain(&self.captures).any(|l| l.name == name)
+    }
+
     fn local(&mut self, name: String, pair: Option<PairKind>) -> FrameLocal {
         let slot = self.frame_base;
         self.frame_base += 1 + u32::from(pair.is_some());
@@ -137,6 +147,21 @@ impl Compiler {
             },
             dicts,
         )
+    }
+
+    /// `__dict{n}`'s slot in the frame of the body being planned or lowered.
+    pub(crate) fn frame_dict(&self, n: usize) -> Option<u32> {
+        let slot = self.hir_body_frame.as_ref().and_then(|f| f.dict_slot(n));
+        debug_assert_eq!(slot, self.lookup_slot(&format!("__dict{n}")), "`__dict{n}`'s slot");
+        slot
+    }
+
+    /// Whether `name` is a parameter or capture of the body being planned
+    /// or lowered.
+    pub(crate) fn frame_binds(&self, name: &str) -> bool {
+        let binds = self.hir_body_frame.as_ref().is_some_and(|f| f.binds(name));
+        debug_assert_eq!(binds, self.lookup_slot(name).is_some(), "whether the frame binds `{name}`");
+        binds
     }
 
     /// Debug builds: `frame` numbers `hir`'s entry frame as the interned

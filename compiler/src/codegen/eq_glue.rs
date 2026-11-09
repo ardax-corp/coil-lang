@@ -276,7 +276,7 @@ impl Compiler {
     /// this shared body's bounds (`T: Eq`, or a subclass's as `T: Ord`).
     fn eq_var_dict(&self, v: TyVarId) -> Option<(u32, u32)> {
         if let Some(&(n, method)) = self.synth_eq_dicts.get(&v) {
-            return Some((self.lookup_slot(&format!("__dict{n}"))?, method));
+            return Some((self.frame_dict(n)?, method));
         }
         if self.compiling_mono_clone {
             return None;
@@ -299,7 +299,7 @@ impl Compiler {
                 let on_var = matches!(c.args.as_slice(), [a] if crate::typechecking::subst::apply_ty_prune(subst, a) == var);
                 if on_var
                     && let Some(method) = eq_slot(&c.class)
-                    && let Some(slot) = self.lookup_slot(&format!("__dict{i}"))
+                    && let Some(slot) = self.frame_dict(i)
                 {
                     return Some((slot, method));
                 }
@@ -381,7 +381,7 @@ impl Compiler {
     /// (#1661).
     pub(super) fn eq_glue_body_var_dict(&self, v: TyVarId) -> Option<u32> {
         match self.synth_eq_dicts.get(&v) {
-            Some(&(n, 0)) => self.lookup_slot(&format!("__dict{n}")),
+            Some(&(n, 0)) => self.frame_dict(n),
             _ => None,
         }
     }
@@ -438,7 +438,7 @@ impl Compiler {
     pub(super) fn var_eq_dict(&self, v: TyVarId) -> Option<VarEqDict> {
         if let Some(&(n, method)) = self.synth_eq_dicts.get(&v) {
             // An open glue body's own; a subclass's holds no `ne` it knows.
-            return (method == 0).then(|| self.lookup_slot(&format!("__dict{n}"))).flatten().map(VarEqDict::Frame);
+            return (method == 0).then(|| self.frame_dict(n)).flatten().map(VarEqDict::Frame);
         }
         if self.compiling_mono_clone {
             return None;
@@ -461,7 +461,7 @@ impl Compiler {
                 let flat = class.flattened_methods(generics);
                 let at = |method: &str| flat.iter().position(|(owner, m)| *owner == "Eq" && m.name == method).map(|i| i as u32);
                 if let (Some(eq), Some(ne)) = (at("eq"), at("ne"))
-                    && let Some(slot) = self.lookup_slot(&format!("__dict{i}"))
+                    && let Some(slot) = self.frame_dict(i)
                 {
                     return Some(VarEqDict::Project { slot, eq, ne });
                 }
