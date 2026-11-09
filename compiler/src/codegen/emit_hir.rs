@@ -2641,7 +2641,7 @@ impl Compiler {
         if lanes.is_empty() {
             return HashSet::new();
         }
-        let parent = crate::hir::tuple_sroa::parents(hir);
+        let parent = hir.parents();
         let ret_lanes = hir.ret.as_ref().is_some_and(|t| self.hir_lane_elem(t).is_some());
         let keeps = |id: HirId| -> bool {
             let mut cur = id;

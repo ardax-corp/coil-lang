@@ -300,10 +300,15 @@ impl HirBody {
     }
 
     /// A fresh compiler temp named `name`.
-    pub fn temp(&mut self, name: String, ty: Option<Ty>) -> LocalId {
+    pub fn temp_named(&mut self, name: String, ty: Option<Ty>) -> LocalId {
         let id = LocalId(self.locals.len() as u32);
         self.locals.push(HirLocal { name, ty, kind: LocalKind::Temp, captured: false, borrow: false });
         id
+    }
+
+    /// A fresh compiler temp named `prefix` and its id (`$free3`).
+    pub fn temp(&mut self, prefix: &str, ty: Option<Ty>) -> LocalId {
+        self.temp_named(format!("{prefix}{}", self.locals.len()), ty)
     }
 }
 

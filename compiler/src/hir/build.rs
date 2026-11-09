@@ -300,15 +300,7 @@ impl BodyBuilder {
     }
 
     fn temp(&mut self, name: &str, ty: Option<Ty>) -> LocalId {
-        let id = LocalId(self.body.locals.len() as u32);
-        self.body.locals.push(HirLocal {
-            name: name.to_string(),
-            ty,
-            kind: LocalKind::Temp,
-            captured: false,
-            borrow: false,
-        });
-        id
+        self.body.temp_named(name.to_string(), ty)
     }
 
     fn lookup(&mut self, name: &str) -> Option<LocalId> {

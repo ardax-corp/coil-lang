@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 
-use super::tuple_sroa::{fresh, mentions, parents, push, set, set_block, staged};
+use super::tuple_sroa::{fresh, mentions, set, set_block, staged};
 use super::{HirBody, HirFlags, HirId, HirKind, HirPat, LocalId, LocalKind, MakeKind};
 use crate::typechecking::ty::Ty;
 
@@ -48,7 +48,7 @@ pub fn scalarize(body: &HirBody, fields: impl Fn(&str) -> Option<Vec<(String, Ty
     if made.is_empty() {
         return None;
     }
-    let parent = parents(body);
+    let parent = body.parents();
     let mut out: Option<HirBody> = None;
     for (k, l) in body.locals.iter().enumerate() {
         let local = LocalId(k as u32);
@@ -211,7 +211,7 @@ fn binds(pat: &HirPat, local: LocalId) -> bool {
 /// Replace `local`'s `let`, reassignments, field reads and whole uses
 /// with its field locals.
 fn rewrite(body: &mut HirBody, local: LocalId, class: &str, names: &[String], fields: &[LocalId]) {
-    let parent = parents(body);
+    let parent = body.parents();
     // Values stored to `local` that read it compute every field first.
     let stage: Vec<HirId> = body
         .exprs
@@ -248,7 +248,7 @@ fn rewrite(body: &mut HirBody, local: LocalId, class: &str, names: &[String], fi
                         .iter()
                         .map(|&f| {
                             let ty = body.local(f).ty.clone();
-                            push(body, HirKind::Local(f), ty, span)
+                            body.push_new(HirKind::Local(f), ty, span)
                         })
                         .collect();
                     let e = &mut body.exprs[i];
