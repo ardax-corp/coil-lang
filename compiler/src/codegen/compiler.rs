@@ -80,14 +80,6 @@ impl Compiler {
         &mut self.checker
     }
 
-    pub fn aliases(&self) -> &HashMap<String, String> {
-        &self.aliases
-    }
-
-    pub fn module_items(&self) -> &HashMap<String, Vec<String>> {
-        &self.module_items
-    }
-
     /// Run HM inference for a module without emitting code.
     pub fn typecheck_module<'compiler>(
         &mut self,
@@ -386,7 +378,7 @@ impl Compiler {
     fn const_env(&self) -> &HashMap<String, ConstValue> {
         self.const_env_stack
             .last()
-            .expect("const_env_stack initialized in compile_unfused")
+            .expect("const_env_stack initialized in check_and_lower_module")
     }
 
     fn const_env_mut(&mut self) -> &mut HashMap<String, ConstValue> {
@@ -699,28 +691,8 @@ impl Compiler {
         self.debug_stmt_start = saved_stmt_start;
     }
 
-    /// Look up the slot for a name used in an arm body. First
-    /// checks the nested `match_bindings` map (inner names shadow
-    /// outer ones). Falls back to block overlays, then `variables`.
-    ///
-    /// Returns the slot ID (u32) if the name is found, `None`
-    /// otherwise.
+    /// The frame slot of `name` in the body being compiled, if it has one.
     fn lookup_slot(&self, name: &str) -> Option<u32> {
-        if let Some(map) = &self.context.match_bindings
-            && let Some(&slot) = map.get(name)
-        {
-            return Some(slot);
-        }
-        // Innermost block overlay first (walk `prev` for nested blocks).
-        let mut ctx = Some(&self.context);
-        while let Some(c) = ctx {
-            if let Some(map) = &c.block_bindings
-                && let Some(&slot) = map.get(name)
-            {
-                return Some(slot);
-            }
-            ctx = c.prev.as_deref();
-        }
         self.context
             .variables
             .key(&name.to_string())
@@ -728,53 +700,10 @@ impl Compiler {
     }
 
     /// Allocate a locals slot for a `let` / destructure binder.
-    ///
-    /// Inside a block (`block_bindings = Some`), re-binding a name that is
-    /// already visible in an outer scope gets a **fresh** slot so the outer
-    /// value is not overwritten.
     fn alloc_binding_slot(&mut self, name: &str) -> u32 {
-        if let Some(map) = &self.context.block_bindings
-            && let Some(&slot) = map.get(name)
-        {
-            self.record_debug_local(name, slot);
-            return slot;
-        }
-        if self.context.block_bindings.is_none() {
-            let slot = self.context.variables.intern(name.to_string()) as u32;
-            self.record_debug_local(name, slot);
-            return slot;
-        }
-        let shadows_outer = {
-            let in_vars = self.context.variables.key(&name.to_string()).is_some();
-            let mut in_ancestor = false;
-            let mut ctx = self.context.prev.as_deref();
-            while let Some(c) = ctx {
-                if let Some(map) = &c.block_bindings
-                    && map.contains_key(name)
-                {
-                    in_ancestor = true;
-                    break;
-                }
-                ctx = c.prev.as_deref();
-            }
-            in_vars || in_ancestor
-        };
-        if shadows_outer {
-            self.temp_counter += 1;
-            let synthetic = format!("__shadow_{}_{}", name, self.temp_counter);
-            let slot = self.context.variables.intern(synthetic) as u32;
-            self.context
-                .block_bindings
-                .as_mut()
-                .expect("block_bindings checked above")
-                .insert(name.to_string(), slot);
-            self.record_debug_local(name, slot);
-            slot
-        } else {
-            let slot = self.context.variables.intern(name.to_string()) as u32;
-            self.record_debug_local(name, slot);
-            slot
-        }
+        let slot = self.context.variables.intern(name.to_string()) as u32;
+        self.record_debug_local(name, slot);
+        slot
     }
 
     fn next_emit_id(&mut self) -> Option<crate::typechecking::id::NodeId> {
@@ -976,7 +905,7 @@ impl Compiler {
         }
     }
 
-    /// Free-fn FQN from interned [`DefId`], not `Compiler.aliases`.
+    /// Free-fn FQN from interned [`DefId`].
     fn resolve_free_fn(&self, name: &str) -> String {
         if let Some(def) = self.checker.def_id_of(name) {
             return self.fqn_of_def(def);
@@ -1984,7 +1913,6 @@ impl Compiler {
             checker,
             program_seq: self.program_seq,
             namespace: module.to_string(),
-            aliases: self.aliases.clone(),
             typed_sidecar: self.typed_sidecar.clone(),
             hir_fns: self.hir_fns.clone(),
             hir_fn_names: self.hir_fn_names.clone(),
@@ -2018,7 +1946,6 @@ impl Compiler {
         std::mem::swap(&mut self.checker, &mut *ctx.checker);
         std::mem::swap(&mut self.program_seq, &mut ctx.program_seq);
         std::mem::swap(&mut self.namespace, &mut ctx.namespace);
-        std::mem::swap(&mut self.aliases, &mut ctx.aliases);
         std::mem::swap(&mut self.typed_sidecar, &mut ctx.typed_sidecar);
         std::mem::swap(&mut self.hir_fns, &mut ctx.hir_fns);
         std::mem::swap(&mut self.hir_fn_names, &mut ctx.hir_fn_names);
@@ -4112,9 +4039,7 @@ impl Compiler {
     /// build an object). The enclosing frame, for [`Self::par_frame_exit`].
     pub(super) fn par_frame_enter(&mut self) -> Context {
         let mut prev_ctx = std::mem::take(&mut self.context);
-        self.context.symbols = std::mem::take(&mut prev_ctx.symbols);
         self.context.classes = std::mem::take(&mut prev_ctx.classes);
-        self.context.impementations = std::mem::take(&mut prev_ctx.impementations);
         self.context.methods = std::mem::take(&mut prev_ctx.methods);
         prev_ctx
     }
@@ -4122,9 +4047,7 @@ impl Compiler {
     /// Back to the frame [`Self::par_frame_enter`] set aside.
     pub(super) fn par_frame_exit(&mut self, prev_ctx: Context) {
         let inner = std::mem::replace(&mut self.context, prev_ctx);
-        self.context.symbols = inner.symbols;
         self.context.classes = inner.classes;
-        self.context.impementations = inner.impementations;
         self.context.methods = inner.methods;
     }
 
@@ -5084,8 +5007,6 @@ impl Compiler {
 
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-        let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
-        let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
         let prev_fn_table_key = self.current_function_table_key.take();
         self.current_function_table_key = Some(qualified.clone());
         self.context.variables = Interner::default();
@@ -5165,8 +5086,6 @@ impl Compiler {
         self.compiling_two_word_enum = prev_two_word_enum;
         self.context.variables = prev_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
-        self.polyfn_vars = prev_polyfn_vars;
-        self.polyfn_sources = prev_polyfn_sources;
         self.current_function_table_key = prev_fn_table_key;
     }
 
@@ -5363,8 +5282,6 @@ impl Compiler {
                 .insert(specialization.key.clone(), mono_name.clone());
 
             let prev_fn_vars = std::mem::take(&mut self.context.variables);
-            let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
-            let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
             let prev_result_mode = self.compiling_result_mode;
             let prev_result_ok_is_result = self.compiling_result_ok_is_result;
             let prev_mono_clone = self.compiling_mono_clone;
@@ -5418,8 +5335,6 @@ impl Compiler {
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
             self.context.variables = prev_fn_vars;
-            self.polyfn_vars = prev_fn_polyfn_vars;
-            self.polyfn_sources = prev_fn_polyfn_sources;
         }
     }
 
@@ -5796,11 +5711,7 @@ impl Compiler {
         self.fn_arities.insert(name.clone(), (0, false));
 
         let prev_fn_vars = std::mem::take(&mut self.context.variables);
-        let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
-        let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
         let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-        let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
-        let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
         let prev_fn_qualified = self.current_function_qualified.replace(name.clone());
         let prev_fn_table_key = self.current_function_table_key.replace(name.clone());
         let prev_result_mode = std::mem::replace(&mut self.compiling_result_mode, false);
@@ -5832,11 +5743,7 @@ impl Compiler {
         self.compiling_result_mode = prev_result_mode;
         self.current_function_table_key = prev_fn_table_key;
         self.current_function_qualified = prev_fn_qualified;
-        self.polyfn_sources = prev_polyfn_sources;
-        self.polyfn_vars = prev_polyfn_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
-        self.context.stack_array_box = prev_stack_boxes;
-        self.context.stack_array_locals = prev_stack_arrays;
         self.context.variables = prev_fn_vars;
 
         self.setup_steps
@@ -6184,10 +6091,6 @@ impl Compiler {
             if *name == "main" {
                 self.user_main_defined = true;
             }
-            self.module_items
-                .entry(self.namespace.clone())
-                .or_default()
-                .push(name.to_string());
             let (fixed_arity, has_rest) = fn_arity_from_args(args);
             let table_key =
                 if self.checker.is_overloaded(name) || self.checker.is_overloaded(&qualified) {
@@ -6221,11 +6124,7 @@ impl Compiler {
 
             // Fresh slot map per function (locals from 0/1); shared Interner left holes / garbage match binds.
             let prev_fn_vars = std::mem::take(&mut self.context.variables);
-            let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
-            let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
             let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-            let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
-            let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
             let prev_fn_qualified = self.current_function_qualified.take();
             let prev_fn_table_key = self.current_function_table_key.take();
             let prev_fn_table_key_was_none = prev_fn_table_key.is_none();
@@ -6240,8 +6139,6 @@ impl Compiler {
             };
             self.push_const_env();
             self.context.variables = Interner::default();
-            self.context.stack_array_locals.clear();
-            self.context.stack_array_box.clear();
             self.context.unboxed_enum_locals.clear();
             let saved_debug_scope = self.debug_scope_enter(body.0.start as u32, body.0.end as u32);
             if self.compiling_method {
@@ -6282,10 +6179,6 @@ impl Compiler {
             self.hir_entry_sp = Some(entry_sp);
 
 
-            // Provisional span so self-recursive peels can see the opening
-            // predicate while the body is still streaming into `self.code`.
-            let prev_active = self.active_fn_name.take();
-            self.active_fn_name = Some(name.to_string());
             let lowered = prev_fn_table_key_was_none && self.try_lower_hir_function(span, body);
             if !lowered {
                 if !prev_fn_table_key_was_none {
@@ -6293,7 +6186,6 @@ impl Compiler {
                 }
                 self.report_unlowered(span, &table_key);
             }
-            self.active_fn_name = prev_active;
 
             self.bodies.advance();
             self.debug_scope_exit(saved_debug_scope);
@@ -6312,11 +6204,7 @@ impl Compiler {
             self.attach_hir_mir();
             self.flush_hir_par_tail();
             self.context.variables = prev_fn_vars;
-            self.context.stack_array_locals = prev_stack_arrays;
-            self.context.stack_array_box = prev_stack_boxes;
             self.context.unboxed_enum_locals = prev_unboxed_enum;
-            self.polyfn_vars = prev_fn_polyfn_vars;
-            self.polyfn_sources = prev_fn_polyfn_sources;
 
             self.emit_mono_specializations_for_function(
                 &qualified,
@@ -6337,22 +6225,8 @@ impl Compiler {
         let (span, child) = ast;
 
         match child.borrow() {
-            Expression::Use {
-                path: p,
-                name,
-                alias,
-            } => {
-                // Virtual modules are applied during typecheck
-                // (`Checker::apply_virtual_use`); no disk FQN alias.
-                if (self.checker.virtual_modules().resolves_use(p, name))
-                    || (name == "*") {
-                } else {
-                    // B3: free-fn names resolve through DefId / sidecar, not
-                    // `Compiler.aliases`. Typecheck already bound `use`.
-                    let _ = (p, name, alias);
-                }
-            }
-            Expression::Noop(_) => (),
+            // The checker bound every `use`; it emits nothing.
+            Expression::Use { .. } | Expression::Noop(_) => (),
             // `mod foo;`, pipeline loads the file; no code.
             Expression::Module(_, _body) => {}
             Expression::Program(children) => {
@@ -6499,7 +6373,6 @@ impl Compiler {
                 self.context
                     .classes
                     .insert(class_key.clone(), instance_fields);
-                self.context.symbols.intern(class_key);
             }
             Expression::Implementation { owner, methods, .. } => {
                 let saved_ns = self.namespace.clone();
@@ -6554,9 +6427,6 @@ impl Compiler {
                     }
                 }
 
-                self.context
-                    .impementations
-                    .insert(owner_key.clone(), owner_key);
                 self.namespace = saved_ns;
             }
             Expression::Method(_vis, body) => {
@@ -6571,7 +6441,7 @@ impl Compiler {
                 self.do_compile(body);
                 self.compiling_method = false;
             }
-            Expression::Argument { ty, name: n, .. } => {
+            Expression::Argument { name: n, .. } => {
                 // A parameter shadows a module `const` of the same name.
                 self.const_env_mut().remove(*n);
                 if let Some(kind) = self.argument_unboxed_range_kind(ast) {
@@ -6580,12 +6450,6 @@ impl Compiler {
                 } else {
                     let slot = self.context.variables.intern(n.to_string()) as u32;
                     self.record_debug_param(n, slot);
-                }
-                if ty
-                    .as_ref()
-                    .is_some_and(|t| matches!(t.1.as_ref(), Expression::Forall { .. }))
-                {
-                    self.polyfn_vars.insert(n.to_string());
                 }
             }
             Expression::Type(_)
@@ -6868,14 +6732,8 @@ impl Compiler {
                 self.test_cases.push((desc, offset));
 
                 let prev_fn_vars = std::mem::take(&mut self.context.variables);
-                let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
-                let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
                 let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-                let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
-                let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
                 self.context.variables = Interner::default();
-                self.context.stack_array_locals.clear();
-                self.context.stack_array_box.clear();
                 self.context.unboxed_enum_locals.clear();
 
                 let prev_result_mode = self.compiling_result_mode;
@@ -6903,11 +6761,7 @@ impl Compiler {
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
                 self.compiling_two_word_enum = prev_two_word_enum;
                 self.context.variables = prev_fn_vars;
-                self.context.stack_array_locals = prev_stack_arrays;
-                self.context.stack_array_box = prev_stack_boxes;
                 self.context.unboxed_enum_locals = prev_unboxed_enum;
-                self.polyfn_vars = prev_fn_polyfn_vars;
-                self.polyfn_sources = prev_fn_polyfn_sources;
             }
             // Layout comes from the typechecker; no bytes.
             Expression::ExternStruct(_) => {}
@@ -6939,23 +6793,25 @@ impl Compiler {
         self.messages.push(message);
     }
 
-    /// [`compile`] calls [`finalize_bodies`] afterwards for unit tests.
-    fn compile_unfused<'compiler>(
+    /// Check module `module`, build its HIR and lower its bodies
+    /// ([`Self::check_module_hir`], then [`Self::lower_module_bodies`]).
+    /// [`Self::compile`] calls [`Self::finalize_bodies`] afterwards.
+    fn check_and_lower_module<'compiler>(
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
         prepared: bool,
     ) {
-        if self.compile_unfused_begin(module, ast, prepared) {
-            self.compile_unfused_finish(module, ast);
+        if self.check_module_hir(module, ast, prepared) {
+            self.lower_module_bodies(module, ast);
         }
     }
 
-    /// The first half of [`Self::compile_unfused`]: check, HIR and its
+    /// The first half of [`Self::check_and_lower_module`]: check, HIR and its
     /// module-wide passes. `false` when the module stops there (the checker
     /// rejected it). Its namespace to restore is kept for
-    /// [`Self::compile_unfused_finish`].
-    fn compile_unfused_begin<'compiler>(
+    /// [`Self::lower_module_bodies`].
+    fn check_module_hir<'compiler>(
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
@@ -6967,7 +6823,6 @@ impl Compiler {
         self.namespace = module.to_string();
 
         self.emit_idx = 0;
-        self.temp_counter = 0;
         self.codegen_depth = 0;
         self.const_env_stack.clear();
         self.const_env_stack.push(HashMap::new());
@@ -6979,9 +6834,6 @@ impl Compiler {
             self.fn_debug_locals.clear();
             self.fn_debug_vars.clear();
         }
-        // `use` aliases are per-module; leftovers from a prior
-        // `compile_module` would otherwise redirect bare names.
-        self.aliases.clear();
         // The constant and string pools are shared across `compile_module`
         // calls: clearing them between modules would orphan the indices the
         // earlier modules hold. Reset them only for a fresh compile.
@@ -7157,9 +7009,9 @@ impl Compiler {
         true
     }
 
-    /// The second half of [`Self::compile_unfused`]: function bodies,
+    /// The second half of [`Self::check_and_lower_module`]: function bodies,
     /// thunks, and the context kept for later modules' clones.
-    fn compile_unfused_finish<'compiler>(&mut self, module: &str, ast: &mut (SimpleSpan, Box<Expression<'compiler>>)) {
+    fn lower_module_bodies<'compiler>(&mut self, module: &str, ast: &mut (SimpleSpan, Box<Expression<'compiler>>)) {
         let ns = self.module_outer_namespace.take().unwrap_or_default();
         let bare_cases = self.checker.bare_cases().clone();
         if self.auto_par && self.opt_options.auto_par {
@@ -7562,7 +7414,7 @@ impl Compiler {
     /// Resolve labels and link the bodies into program code.
     ///
     /// Called once after multi-file linking by the pipeline, or at the end
-    /// of single-file [`compile`] so unit tests observe fused output.
+    /// of single-file [`Self::compile`] so unit tests observe linked code.
     pub fn finalize_bodies(&mut self) {
         self.emit_foreign_clone_thunks();
         self.finalize_bodies_inner();
@@ -7722,12 +7574,13 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ){
-        self.compile_unfused(module, ast, false);
+        self.check_and_lower_module(module, ast, false);
         self.report_capability_violations();
         self.finalize_bodies();
     }
 
-    /// Append this module's IL to the shared buffer (multi-file pipeline).
+    /// Compile one module's bodies into the shared body table (multi-file
+    /// pipeline).
     ///
     /// Returns an empty vec for API compatibility; the pipeline should call
     /// [`finalize_bodies`] once on the linked compiler buffer.
@@ -7782,7 +7635,7 @@ impl Compiler {
     ) -> bool {
         let mut ok = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ok = self.compile_unfused_begin(module, ast, prepared);
+            ok = self.check_module_hir(module, ast, prepared);
         }));
         Self::rethrow_unless_recursion_limit(result);
         if ok {
@@ -7798,7 +7651,7 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ){
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.compile_unfused_finish(module, ast);
+            self.lower_module_bodies(module, ast);
         }));
         Self::rethrow_unless_recursion_limit(result);
     }
@@ -7820,7 +7673,7 @@ impl Compiler {
         prepared: bool,
     ){
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.compile_unfused(module, ast, prepared);
+            self.check_and_lower_module(module, ast, prepared);
         }));
         if let Err(payload) = result
             && payload
