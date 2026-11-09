@@ -66,7 +66,9 @@ payloads spill. The object is 48 bytes (56 with the header): a variant
 lost 8 since `finalized` moved into the GC header, a tuple gained 8 for
 the tag and type id. MIR spells a tuple allocation `MirAllocKind::TUPLE`
 (`alloc.tuple`), an `Enum` of that tag; snapshots, thread copies and the
-inline allocation images have no tuple form of their own.
+inline allocation images have no tuple form of their own. A class
+instance keeps its fields in the same store (`EnumPayload`), at the same
+offset in the object (8, after `tag` and `type_id` or `type_id` alone).
 
 ## Shared generic bodies
 

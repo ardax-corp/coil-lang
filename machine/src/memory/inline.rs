@@ -123,24 +123,19 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
                 return None;
             }
             let obj = ObjInstance::with_type_id_and_fields(type_id, usize::from(n));
-            let InstanceStorage::Inline { len, slots } = &obj.storage else {
-                unreachable!("a typed instance of inline width is inline");
-            };
             let layout = Layout::new::<GcData<ObjInstance>>();
             let data = std::mem::offset_of!(GcData<ObjInstance>, data);
             let mut img = vec![0u8; layout.size()];
             put_header(&mut img, KIND_INSTANCE);
             put(&mut img, data + off(&obj, &obj.type_id), &obj.type_id.to_le_bytes());
             let base = data + off(&obj, &obj.storage);
-            // SAFETY: `repr(u8)`: the discriminant is the first byte.
-            let d = unsafe { *std::ptr::from_ref(&obj.storage).cast::<u8>() };
+            let (d, len, _, slots, words) = payload_probe(&obj.storage);
             put(&mut img, base, &[d]);
-            put(&mut img, base + off(&obj.storage, len), &[*len]);
-            let at = base + off(&obj.storage, slots);
-            for (i, v) in slots.iter().enumerate() {
-                put(&mut img, at + i * 8, &v.bits().to_le_bytes());
+            put(&mut img, base + len, &[n]);
+            for (i, w) in words.iter().enumerate() {
+                put(&mut img, base + slots + i * 8, &w.to_le_bytes());
             }
-            (classes[1], layout, data, PACED_HEADER_BYTES + obj.size(), img, at)
+            (classes[1], layout, data, PACED_HEADER_BYTES + obj.size(), img, base + slots)
         }
     };
     debug_assert!(data % 8 == 0 && words_at % 8 == 0 && layout.size() % 8 == 0 && layout.align() <= 8);
@@ -188,17 +183,15 @@ pub fn instance_slots() -> InstanceSlots {
     let inline = ObjInstance::with_type_id_and_fields(1, 2);
     let storage = data + off(&inline, &inline.storage);
     // SAFETY: `repr(u8)`: the discriminant is the first byte.
-    let tag = |s: &InstanceStorage| unsafe { *std::ptr::from_ref(s).cast::<u8>() };
-    let InstanceStorage::Inline { len, slots } = &inline.storage else {
-        unreachable!("two fields are inline");
-    };
-    let (inline_tag, inline_len_at, inline_slots_at) = (tag(&inline.storage), storage + off(&inline.storage, len), storage + off(&inline.storage, slots));
+    let tag = |s: &EnumPayload| unsafe { *std::ptr::from_ref(&s.inner).cast::<u8>() };
+    let (inline_tag, len, _, slots, _) = payload_probe(&inline.storage);
+    let (inline_len_at, inline_slots_at) = (storage + len, storage + slots);
     let mut spill = ObjInstance::with_type_id_and_fields(1, INSTANCE_INLINE_FIELDS + 3);
     let spill_tag = tag(&spill.storage);
-    if let InstanceStorage::Spill(v) = &mut spill.storage {
-        v.reserve_exact(5);
+    if let EnumPayloadInner::Spill { words, .. } = &mut spill.storage.inner {
+        words.reserve_exact(5);
     }
-    let InstanceStorage::Spill(v) = &spill.storage else {
+    let EnumPayloadInner::Spill { words: v, .. } = &spill.storage.inner else {
         unreachable!("a wide instance spills");
     };
     let vec_at = storage + off(&spill.storage, v);

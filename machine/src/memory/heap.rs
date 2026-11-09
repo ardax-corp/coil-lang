@@ -2696,87 +2696,26 @@ pub enum Member {
     Object(Object),
 }
 
-/// Max typed field count stored inside [`ObjInstance`] without a Rust `Vec`.
-///
-/// Typed fields are raw words (the GC resolves them like tuple elements), so
-/// four fit where two tagged [`Member`]s used to; larger classes spill.
-pub const INSTANCE_INLINE_FIELDS: usize = 4;
+/// Max typed field count stored inside [`ObjInstance`] without a Rust `Vec`:
+/// the inline width of the store every product object shares
+/// ([`EnumPayload`]).
+pub const INSTANCE_INLINE_FIELDS: usize = ENUM_INLINE_ARITY;
 
-/// Dense slots: inline up to [`INSTANCE_INLINE_FIELDS`], else a `Vec`.
-/// `repr(u8)`: fixed layout, so native code fills an inline instance in
-/// place ([`InlineLayout`]).
-#[repr(u8)]
-enum InstanceStorage {
-    Inline {
-        len: u8,
-        slots: [Value; INSTANCE_INLINE_FIELDS],
-    },
-    Spill(Vec<Value>),
-}
-
-impl InstanceStorage {
-    fn typed_slots(nfields: usize) -> Self {
-        if nfields <= INSTANCE_INLINE_FIELDS {
-            Self::Inline {
-                len: nfields as u8,
-                slots: [Value::from(0i64); INSTANCE_INLINE_FIELDS],
-            }
-        } else {
-            Self::Spill(vec![Value::from(0i64); nfields])
-        }
-    }
-
-    fn from_vec(slots: Vec<Value>) -> Self {
-        let n = slots.len();
-        if n <= INSTANCE_INLINE_FIELDS {
-            let mut inline = [Value::from(0i64); INSTANCE_INLINE_FIELDS];
-            inline[..n].copy_from_slice(&slots);
-            Self::Inline {
-                len: n as u8,
-                slots: inline,
-            }
-        } else {
-            Self::Spill(slots)
-        }
-    }
-
-    fn as_slice(&self) -> &[Value] {
-        match self {
-            Self::Inline { len, slots } => &slots[..*len as usize],
-            Self::Spill(slots) => slots.as_slice(),
-        }
-    }
-
-    fn as_mut_slice(&mut self) -> &mut [Value] {
-        match self {
-            Self::Inline { len, slots } => &mut slots[..*len as usize],
-            Self::Spill(slots) => slots.as_mut_slice(),
-        }
-    }
-
-    fn is_inline(&self) -> bool {
-        matches!(self, Self::Inline { .. })
-    }
-
-    fn spill_capacity(&self) -> usize {
-        match self {
-            Self::Spill(slots) => slots.capacity(),
-            Self::Inline { .. } => 0,
-        }
-    }
-}
-
+/// `type_id` first, so the slots sit at the offset of an [`ObjEnum`]'s
+/// payload: one inline read serves both ([`instance_slots`]).
 #[repr(C)]
 pub struct ObjInstance {
-    storage: InstanceStorage,
     /// Compile-time class identity (`0` = none).
     pub type_id: u32,
+    /// The fields' words; their kinds come from the class row, so the
+    /// store's own packed kinds stay `0`.
+    storage: EnumPayload,
 }
 
 impl Default for ObjInstance {
     fn default() -> Self {
         Self {
-            storage: InstanceStorage::typed_slots(0),
+            storage: EnumPayload::empty(),
             type_id: 0,
         }
     }
@@ -2788,7 +2727,7 @@ impl ObjInstance {
     #[must_use]
     pub fn with_type_id_and_fields(type_id: u32, nfields: usize) -> Self {
         Self {
-            storage: InstanceStorage::typed_slots(nfields),
+            storage: EnumPayload::zeros(nfields),
             type_id,
         }
     }
@@ -2826,7 +2765,7 @@ impl ObjInstance {
     #[must_use]
     pub fn with_slots(type_id: u32, slots: Vec<Value>) -> Self {
         Self {
-            storage: InstanceStorage::from_vec(slots),
+            storage: EnumPayload::from_vec(slots),
             type_id,
         }
     }
@@ -2852,7 +2791,9 @@ impl GcSized for ObjInstance {
 /// so four fit where two tagged [`Member`]s used to; larger variants spill.
 pub const ENUM_INLINE_ARITY: usize = 4;
 
-/// Flat enum payload: inline words up to [`ENUM_INLINE_ARITY`], else a `Vec`.
+/// The fixed-slot store of every product object: a variant's payload, a
+/// tuple's items ([`ObjEnum`]) and an instance's fields ([`ObjInstance`]).
+/// Inline words up to [`ENUM_INLINE_ARITY`], else a `Vec`.
 #[repr(C)]
 pub struct EnumPayload {
     inner: EnumPayloadInner,
@@ -2884,6 +2825,21 @@ impl EnumPayload {
                 kinds: 0,
                 slots: [Value::default(); ENUM_INLINE_ARITY],
             },
+        }
+    }
+
+    /// `n` zero words: an instance's fields before their stores.
+    pub fn zeros(n: usize) -> Self {
+        if n <= ENUM_INLINE_ARITY {
+            Self {
+                inner: EnumPayloadInner::Inline {
+                    len: n as u8,
+                    kinds: 0,
+                    slots: [Value::from(0i64); ENUM_INLINE_ARITY],
+                },
+            }
+        } else {
+            Self::from_vec(vec![Value::from(0i64); n])
         }
     }
 
