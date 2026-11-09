@@ -418,7 +418,7 @@ pub trait LowerCx {
     /// The enum a two-word enum type pairs (not a tuple or range) and its
     /// variants' tags and payload word types (none for no payload), in
     /// declaration order.
-    fn pair_variants(&self, ty: &Ty) -> Option<(String, Vec<(u32, Option<MirTy>)>)>;
+    fn pair_variants(&self, ty: &Ty) -> Option<PairVariants>;
     /// The tags of a two-word enum type whose payload is `()` (bit `t`
     /// for tag `t`): the pair form carries `0` there, whatever word its
     /// box holds.
@@ -449,6 +449,10 @@ pub enum ScalarLit {
 
 /// Each variant's tag and payload arity, in declaration order.
 pub type HostVariants = Vec<(u32, u32)>;
+
+/// A two-word enum's name and its variants' tags and payload word types
+/// ([`LowerCx::pair_variants`]).
+pub type PairVariants = (String, Vec<(u32, Option<MirTy>)>);
 
 /// One stack operand of an FFI opcode ([`HirFfi`]), in push order.
 #[derive(Clone, Debug)]

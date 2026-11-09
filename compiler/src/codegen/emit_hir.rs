@@ -11567,7 +11567,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         Compiler::boxed_payloads(checker, &t, variant)
     }
 
-    fn pair_variants(&self, t: &Ty) -> Option<(String, Vec<(u32, Option<crate::mir::MirTy>)>)> {
+    fn pair_variants(&self, t: &Ty) -> Option<crate::mir::PairVariants> {
         let checker = &self.c.checker;
         let t = apply_ty_prune(checker.subst(), t);
         let kind = crate::layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
