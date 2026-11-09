@@ -24,7 +24,7 @@ use common::Value;
 use super::super::AddrHashBuilder;
 use super::{
     GcData, GcHeader, GcPhase, Heap, Member, ObjArray, ObjBoxed, ObjEnum,
-    ObjFn, ObjInstance, ObjTuple, Object, Slot,
+    ObjFn, ObjInstance, ObjTuple, Object, SlotVisitorMut,
 };
 
 type AddrSet = HashSet<u64, AddrHashBuilder>;
@@ -110,22 +110,31 @@ impl Object {
     /// precise slots of [`Object::for_each_reference`].
     #[cold]
     pub(super) fn rewrite_precise_refs(&self, heap: &Heap, fwd: &AddrMap) {
-        self.visit_slots_mut(heap, |slot| match slot {
-            Slot::Word(v, common::WORD_POINTER) => {
-                if let Some(n) = forward(fwd, *v) {
+        struct Rewriter<'a> {
+            heap: &'a Heap,
+            fwd: &'a AddrMap,
+        }
+        impl SlotVisitorMut for Rewriter<'_> {
+            #[inline(always)]
+            fn word(&mut self, v: &mut Value, kind: u8) {
+                if kind == common::WORD_POINTER
+                    && let Some(n) = forward(self.fwd, *v)
+                {
                     *v = n;
                 }
             }
-            Slot::Word(..) => {}
-            Slot::Member(m) => {
+
+            #[inline(always)]
+            fn member(&mut self, m: &mut Member) {
                 if let Member::Object(o) = m
-                    && let Some(&to) = fwd.get(&o.addr())
-                    && let Some(n) = heap.find_object_by_addr(to)
+                    && let Some(&to) = self.fwd.get(&o.addr())
+                    && let Some(n) = self.heap.find_object_by_addr(to)
                 {
                     *m = Member::Object(n);
                 }
             }
-        });
+        }
+        self.visit_slots_mut(heap, &mut Rewriter { heap, fwd });
     }
 }
 

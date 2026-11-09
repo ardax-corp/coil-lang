@@ -2288,11 +2288,19 @@ macro_rules! each_kind {
     };
 }
 
-/// One slot an object walk reports ([`Object::visit_slots`]): a raw word
-/// and its kind (`common::WORD_*`), or a typed member.
-pub(crate) enum Slot<W, M> {
-    Word(W, u8),
-    Member(M),
+/// What [`Object::visit_slots`] calls for each slot that may hold a
+/// reference: a raw word with its kind (`common::WORD_*`), or a typed
+/// member. Implementations mark their methods `#[inline(always)]`: a walk
+/// calls them from every arm, and the mark and nursery paths are hot.
+pub(crate) trait SlotVisitor {
+    fn word(&mut self, v: &Value, kind: u8);
+    fn member(&mut self, m: &Member);
+}
+
+/// [`SlotVisitor`] with the slots writable ([`Object::visit_slots_mut`]).
+pub(crate) trait SlotVisitorMut {
+    fn word(&mut self, v: &mut Value, kind: u8);
+    fn member(&mut self, m: &mut Member);
 }
 
 /// The one walk of an object's slots, behind [`Object::visit_slots`] (reads)
@@ -2311,7 +2319,7 @@ pub(crate) enum Slot<W, M> {
 /// The two expansions differ only in how they borrow the payloads.
 macro_rules! walk_slots {
     ($obj:expr, $heap:expr, $f:expr, $get:ident, $slice:ident, $gc_words:ident, $iter:ident $(, $m:tt)?) => {{
-        let mut f = $f;
+        let f = $f;
         match $obj {
             Object::Instance(i) => {
                 let inst = i.$get();
@@ -2319,21 +2327,21 @@ macro_rules! walk_slots {
                 let slots = & $($m)? *inst.storage.$slice();
                 for i in 0..slots.len() {
                     let kind = kinds.next_kind(slots);
-                    f(Slot::Word(& $($m)? slots[i], kind));
+                    f.word(& $($m)? slots[i], kind);
                 }
             }
             Object::Enum(e) => {
                 let payload = & $($m)? e.$get().payload;
                 let kinds = payload.kinds();
                 for (i, v) in payload.$slice().$iter().enumerate() {
-                    f(Slot::Word(v, common::packed_word_kind(kinds, i)));
+                    f.word(v, common::packed_word_kind(kinds, i));
                 }
             }
             Object::Tuple(t) => {
                 let elements = & $($m)? t.$get().elements;
                 let kinds = elements.kinds();
                 for (i, v) in elements.$slice().$iter().enumerate() {
-                    f(Slot::Word(v, common::packed_word_kind(kinds, i)));
+                    f.word(v, common::packed_word_kind(kinds, i));
                 }
             }
             Object::Array(a) => {
@@ -2344,12 +2352,12 @@ macro_rules! walk_slots {
                         if k > 1 {
                             for i in 0..words.len() {
                                 if ObjArray::lane_pointer(words, k, mask, i) {
-                                    f(Slot::Word(& $($m)? words[i], common::WORD_POINTER));
+                                    f.word(& $($m)? words[i], common::WORD_POINTER);
                                 }
                             }
                         } else {
                             for v in words.$iter() {
-                                f(Slot::Word(v, kind));
+                                f.word(v, kind);
                             }
                         }
                     }
@@ -2363,22 +2371,22 @@ macro_rules! walk_slots {
                     if masked && mask & (1u64 << i) == 0 {
                         continue;
                     }
-                    f(Slot::Word(v, if masked { common::WORD_POINTER } else { common::WORD_UNKNOWN }));
+                    f.word(v, if masked { common::WORD_POINTER } else { common::WORD_UNKNOWN });
                 }
             }
-            Object::Boxed(b) => f(Slot::Member(& $($m)? b.$get().payload)),
+            Object::Boxed(b) => f.member(& $($m)? b.$get().payload),
             Object::Root(r) => {
                 if let Some(m) = & $($m)? r.$get().payload {
-                    f(Slot::Member(m));
+                    f.member(m);
                 }
             }
             Object::Fn(func) => {
                 let func = func.$get();
                 for v in func.captures.$iter().chain(func.captured_args.$iter()) {
-                    f(Slot::Word(v, common::WORD_UNKNOWN));
+                    f.word(v, common::WORD_UNKNOWN);
                 }
                 for m in func.dicts.$iter().flatten().flatten() {
-                    f(Slot::Member(m));
+                    f.member(m);
                 }
             }
             Object::String(_)
@@ -2427,13 +2435,13 @@ impl Object {
     /// Call `f` on each slot of `self` that may hold a reference
     /// ([`walk_slots`]).
     #[inline]
-    pub(crate) fn visit_slots(&self, heap: &Heap, f: impl FnMut(Slot<&Value, &Member>)) {
+    pub(crate) fn visit_slots(&self, heap: &Heap, f: &mut impl SlotVisitor) {
         walk_slots!(self, heap, f, as_ref, as_slice, gc_words, iter)
     }
 
     /// [`Self::visit_slots`] with the slots writable, for a moving
     /// collector. Takes each payload as a write does ([`Gc::payload_mut`]).
-    pub(crate) fn visit_slots_mut(&self, heap: &Heap, f: impl FnMut(Slot<&mut Value, &mut Member>)) {
+    pub(crate) fn visit_slots_mut(&self, heap: &Heap, f: &mut impl SlotVisitorMut) {
         walk_slots!(self, heap, f, payload_mut, as_mut_slice, gc_words_mut, iter_mut, mut)
     }
 
@@ -2456,34 +2464,52 @@ impl Object {
     /// next mark skips it until a write.
     #[inline]
     pub fn mark_references(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
-        let mut any = false;
-        #[cfg(feature = "gc-stress")]
-        let (what, mut i) = (self.slot_owner(), 0usize);
-        self.visit_slots(heap, |slot| match slot {
-            Slot::Word(&v, kind) => {
+        struct Marker<'a> {
+            heap: &'a Heap,
+            grey: &'a mut Vec<Object>,
+            any: bool,
+            #[cfg(feature = "gc-stress")]
+            check: Option<(String, usize)>,
+        }
+        impl SlotVisitor for Marker<'_> {
+            #[inline(always)]
+            fn word(&mut self, &v: &Value, kind: u8) {
                 #[cfg(feature = "gc-stress")]
-                {
-                    if kind != common::WORD_UNKNOWN && !matches!(self, Self::Coroutine(_)) {
-                        heap.verify_kinded_word(&what, i, kind, v);
+                if let Some((what, i)) = &mut self.check {
+                    if kind != common::WORD_UNKNOWN {
+                        self.heap.verify_kinded_word(what, *i, kind, v);
                     }
-                    i += 1;
+                    *i += 1;
                 }
                 let reference = match kind {
                     common::WORD_SCALAR => false,
                     // `0` or an object: no classification.
                     common::WORD_POINTER => v.heap_addr() != 0,
-                    _ => heap.may_be_ref(v),
+                    _ => self.heap.may_be_ref(v),
                 };
                 if reference {
-                    any = true;
-                    heap.mark_value(v, grey_objects);
+                    self.any = true;
+                    self.heap.mark_value(v, self.grey);
                 }
             }
-            Slot::Member(m) => Self::mark_member(heap, m, grey_objects),
-        });
+
+            #[inline(always)]
+            fn member(&mut self, m: &Member) {
+                Object::mark_member(self.heap, m, self.grey);
+            }
+        }
+        let mut marker = Marker {
+            heap,
+            grey: grey_objects,
+            any: false,
+            // Coroutine words are not checked.
+            #[cfg(feature = "gc-stress")]
+            check: (!matches!(self, Self::Coroutine(_))).then(|| (self.slot_owner(), 0)),
+        };
+        self.visit_slots(heap, &mut marker);
         // Clear flag: scanned clean at this mark, unwritten since.
         if let Self::Array(a) = self
-            && !any
+            && !marker.any
             && a.as_ref().may_hold_refs()
         {
             a.payload_mut().may_hold_refs = false;
@@ -2510,19 +2536,37 @@ impl Object {
     /// (unknown-kind words, closure captures, unmasked coroutine words,
     /// `Member::Value` fields): a moving collector cannot rewrite those
     /// (`docs/internals/gc-evacuation.md`). Not on the mark path.
-    pub fn for_each_reference(&self, heap: &Heap, visit: &mut impl FnMut(u64, bool)) {
-        fn word(heap: &Heap, v: Value, precise: bool, visit: &mut impl FnMut(u64, bool)) {
-            let addr = v.heap_addr();
-            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                visit(addr, precise);
+    pub fn for_each_reference(&self, heap: &Heap, visit: &mut dyn FnMut(u64, bool)) {
+        struct Tracer<'a, 'v> {
+            heap: &'a Heap,
+            visit: &'v mut dyn FnMut(u64, bool),
+        }
+        impl Tracer<'_, '_> {
+            #[inline(always)]
+            fn resolve(&mut self, v: Value, precise: bool) {
+                let addr = v.heap_addr();
+                if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                    (self.visit)(addr, precise);
+                }
             }
         }
-        self.visit_slots(heap, |slot| match slot {
-            Slot::Word(_, common::WORD_SCALAR) => {}
-            Slot::Word(&v, kind) => word(heap, v, kind == common::WORD_POINTER, visit),
-            Slot::Member(Member::Object(o)) => visit(o.addr(), true),
-            Slot::Member(Member::Value(v)) => word(heap, *v, false, visit),
-        });
+        impl SlotVisitor for Tracer<'_, '_> {
+            #[inline(always)]
+            fn word(&mut self, &v: &Value, kind: u8) {
+                if kind != common::WORD_SCALAR {
+                    self.resolve(v, kind == common::WORD_POINTER);
+                }
+            }
+
+            #[inline(always)]
+            fn member(&mut self, m: &Member) {
+                match m {
+                    Member::Object(o) => (self.visit)(o.addr(), true),
+                    Member::Value(v) => self.resolve(*v, false),
+                }
+            }
+        }
+        self.visit_slots(heap, &mut Tracer { heap, visit });
     }
 
     /// Header nursery bits ([`GEN_YOUNG`] and friends).
