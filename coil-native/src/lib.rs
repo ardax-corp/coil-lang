@@ -1389,8 +1389,6 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                     // Native code keeps no frame words for the collector to
                     // scan, so there is nothing to zero.
                     MirInst::ClearWord { dest, .. } => need(dest)?,
-                    MirInst::Deopt { .. } => {}
-                    other => return Err(format!("instruction {}", inst_name(other))),
                 }
                 Ok(())
             };
@@ -2922,7 +2920,6 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, x);
             }
             MirInst::Phi { dest, .. } => self.view_of(f, *dest),
-            MirInst::Deopt { .. } => {}
             MirInst::CodePtr { dest, target } => {
                 let pc = *self.plan.pcs.get(target).ok_or("code pointer of a body with no body id")?;
                 let x = self.b.ins().iconst(types::I64, i64::from(pc));
@@ -3683,7 +3680,6 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
-            other => return Err(format!("instruction {}", inst_name(other))),
         }
         Ok(())
     }

@@ -123,7 +123,7 @@ pub fn capture_native_bodies<'a>(bodies: impl Iterator<Item = (&'a str, Option<L
             capture.bodies.extend(bodies.map(|(name, entry, mir)| {
                 let mut mir = mir.clone();
                 if !raw && optimizable(&mir) {
-                    super::specialize::optimize_mir(&mut mir, opts, false);
+                    super::specialize::optimize_mir(&mut mir, opts);
                 }
                 NativeBody { name: name.to_string(), entry, mir }
             }));

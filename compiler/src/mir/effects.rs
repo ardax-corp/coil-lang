@@ -138,7 +138,6 @@ impl MirInst {
             | Self::Yield { .. }
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
-            | Self::Deopt { .. }
             | Self::HeapFieldStore { .. }
             | Self::StoreIndex { .. }
             | Self::LaneStore { .. }
@@ -148,7 +147,6 @@ impl MirInst {
             | Self::HomeStore { .. }
             | Self::ClearWord { .. }
             | Self::KeepAlive { .. }
-            | Self::PanicStore { .. }
             | Self::ArrayPush { .. }
             | Self::Print { .. }
             | Self::FreeEarly { .. }

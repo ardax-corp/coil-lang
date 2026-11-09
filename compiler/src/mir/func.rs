@@ -69,7 +69,9 @@ pub struct MirFunc {
     /// the body keeps the code of each line instead of
     /// folding it away.
     pub keep_lines: bool,
-    /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
+    /// Leave / stop sites (I7 / C3). Always empty: no pass records one.
+    /// The archive still writes the (empty) list; dropping it is a format
+    /// change.
     pub deopt_sites: Vec<DeoptSite>,
     /// An `i64` may be a type variable's word, a raw scalar or a box: the
     /// objects this body makes carry no word kinds.
@@ -875,14 +877,6 @@ impl MirFunc {
                     return Err(format!("{dest} StoreStatic value type"));
                 }
             }
-            MirInst::PanicStore { dest, object, value, .. } => {
-                if self.ty(*dest) != MirTy::Bool || self.ty(*object) != MirTy::HeapRef {
-                    return Err(format!("{dest} PanicStore types"));
-                }
-                if !self.ty(*value).is_word_lane() {
-                    return Err(format!("{dest} PanicStore value type"));
-                }
-            }
             MirInst::Probe { dest, .. } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} Probe dest is not bool"));
@@ -970,11 +964,6 @@ impl MirFunc {
                     if !self.ty(*r).is_heap_word() {
                         return Err(format!("{dest} GcBarrier root {i} is not a heap word"));
                     }
-                }
-            }
-            MirInst::Deopt { dest, .. } => {
-                if self.ty(*dest) != MirTy::Bool {
-                    return Err(format!("{dest} Deopt dest is not bool"));
                 }
             }
             MirInst::String { dest, .. } => {

@@ -4,10 +4,8 @@ use crate::opt::OptimizeOptions;
 
 /// The MIR passes run on a body at `opts`' level: the folds, loop passes,
 /// SROA and the loop rewrites (`copy_until`, `byte_scan`, `bulk_push`,
-/// `vec_loops`). Both engines take this MIR (`native_capture`). `promote`:
-/// keep loop-written fields in registers (`promote_fields`, whose
-/// `PanicStore`s a backend must honour).
-pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions, promote: bool) {
+/// `vec_loops`). Both engines take this MIR (`native_capture`).
+pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions) {
     // `-O0` / `-Og` run none of these; `-O1` only the folds.
     if opts.mir_fold {
         crate::mir::sccp(func);
@@ -65,11 +63,6 @@ pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions, prom
     // Counted map and reduce loops run 8 lanes at a time in one op.
     if opts.mir_loop && crate::mir::vec_loops(func) > 0 {
         check_after(func, "vec_loops");
-    }
-    // A field a loop writes stays in a register across it; last, so no
-    // pass moves code across the stores a panic owes the heap.
-    if promote && opts.mir_loop && crate::mir::promote_fields(func) > 0 {
-        check_after(func, "promote_fields");
     }
     // Hints only: forward scans of pointer arrays prefetch ahead.
     if opts.mir_loop {

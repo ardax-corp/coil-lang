@@ -162,8 +162,9 @@ const I_YIELD: u8 = 37;
 const I_FFI: u8 = 38;
 const I_BYTE_SCAN: u8 = 39;
 const I_VEC_LOOP: u8 = 40;
-const I_PANIC_STORE: u8 = 41;
-const I_DEOPT: u8 = 42;
+// 41 and 42 are reserved: they were `PanicStore` and `Deopt`, which no
+// capture ever made (only tests and the uncalled `promote_fields` built
+// them). Never reuse them for another op.
 const I_PROBE: u8 = 43;
 const I_CALL_INDIRECT_PAIR: u8 = 44;
 const I_LANE_INDEX: u8 = 45;
@@ -762,19 +763,6 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                 }
             }
         }
-        MirInst::PanicStore { dest, object, value, index } => {
-            w.u8(I_PANIC_STORE);
-            w.v(*dest);
-            w.v(*object);
-            w.v(*value);
-            w.u32(*index);
-        }
-        MirInst::Deopt { dest, kind, loc } => {
-            w.u8(I_DEOPT);
-            w.v(*dest);
-            w.u8(idx(&DEOPTS, kind));
-            w.loc(*loc);
-        }
     }
 }
 
@@ -1199,8 +1187,6 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             };
             MirInst::VecLoop { dest, pos, from, to, kind }
         }
-        I_PANIC_STORE => MirInst::PanicStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()? },
-        I_DEOPT => MirInst::Deopt { dest: r.v()?, kind: r.pick(&DEOPTS, "deopt kind")?, loc: r.loc()? },
         t => return Err(format!("native MIR: bad instruction {t}")),
     })
 }
@@ -1272,9 +1258,7 @@ mod tests {
         f.ret_layout = MirLayout::TwoSlot;
         let loc = DebugLoc { file: 1, start_byte: 2, end_byte: 3 };
         let mut b = MirBlock::new(BlockId(0));
-        b.insts.push(MirInst::Deopt { dest: ValueId(1), kind: MirDeoptKind::Stop, loc });
         b.insts.push(MirInst::Probe { dest: ValueId(1), id: 7 });
-        b.insts.push(MirInst::PanicStore { dest: ValueId(2), object: ValueId(0), value: ValueId(0), index: 4 });
         b.insts.push(MirInst::GcBarrier { dest: ValueId(2), kind: MirGcKind::Safepoint, roots: vec![ValueId(0)] });
         f.blocks.push(b);
         let mut last = MirBlock::new(BlockId(1));
