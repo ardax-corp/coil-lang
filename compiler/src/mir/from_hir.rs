@@ -2319,7 +2319,7 @@ impl Lower<'_> {
 
     /// The empty tuple object a `()` value is as a word.
     fn unit_object(&mut self) -> Result<ValueId, Refusal> {
-        let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
+        let obj = self.b.ins_alloc(MirAllocKind::TUPLE, Vec::new()).map_err(mir)?;
         self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
     }
 
@@ -2484,7 +2484,7 @@ impl Lower<'_> {
                     _ => Err("aggregate pair".into()),
                 };
             }
-            let obj = l.b.ins_alloc(MirAllocKind::Tuple, items).map_err(mir)?;
+            let obj = l.b.ins_alloc(MirAllocKind::TUPLE, items).map_err(mir)?;
             Ok(Val::V(l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
         };
         let array_out = |l: &mut Self, items: Vec<ValueId>| -> Result<Val, Refusal> {
@@ -2730,7 +2730,7 @@ impl Lower<'_> {
             Some(t) => (self.inp.word_kind)(t),
             None => common::WORD_UNKNOWN,
         }));
-        let obj = self.b.ins_alloc_kinds(MirAllocKind::Tuple, words, kinds).map_err(mir)?;
+        let obj = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, kinds).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
@@ -2771,7 +2771,7 @@ impl Lower<'_> {
             if items.len() != 2 {
                 return Err("box pair type".into());
             }
-            let obj = self.b.ins_alloc(MirAllocKind::Tuple, vec![lo, hi]).map_err(mir)?;
+            let obj = self.b.ins_alloc(MirAllocKind::TUPLE, vec![lo, hi]).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
         // A numeric range: its typed object, start and end its fields.
@@ -4859,7 +4859,7 @@ impl Lower<'_> {
                     let v = self.b.ins_index(obj, at, read_ty(it), false).map_err(mir)?;
                     words.push(item(self, it, v)?);
                 }
-                let t = self.b.ins_alloc_kinds(MirAllocKind::Tuple, words, *kinds).map_err(mir)?;
+                let t = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, *kinds).map_err(mir)?;
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![t]).map_err(mir)?))
             }
             HirRetItems::Enum { variants } => {
@@ -4904,7 +4904,7 @@ impl Lower<'_> {
                 HirDictOp::Tuple(n) => {
                     let at = stack.len().checked_sub(n as usize).ok_or("dictionary arity")?;
                     let elems = stack.split_off(at);
-                    let dict = self.b.ins_alloc(MirAllocKind::Tuple, elems).map_err(mir)?;
+                    let dict = self.b.ins_alloc(MirAllocKind::TUPLE, elems).map_err(mir)?;
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).map_err(mir)?);
                 }
                 HirDictOp::Load(slot) => stack.push(*self.dict_params.get(&slot).ok_or("dictionary parameter")?),
@@ -6561,7 +6561,7 @@ impl Lower<'_> {
         let ty = self.expr_ty(id).ok_or("cross type")?.clone();
         let obj = if tuple {
             let kinds = common::pack_word_kinds(std::iter::repeat_n(common::WORD_SCALAR, 3));
-            self.b.ins_alloc_kinds(MirAllocKind::Tuple, words, kinds).map_err(mir)?
+            self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, kinds).map_err(mir)?
         } else {
             let stamp = array_elem(&ty).map_or(0, |e| (self.inp.array_stamp)(e));
             self.b.ins_alloc_kinds(MirAllocKind::Array, words, stamp).map_err(mir)?
@@ -6604,7 +6604,7 @@ impl Lower<'_> {
         };
         let bin = |l: &mut Self, op: MirBinOp, a: ValueId, b: ValueId| l.at_expr(id, |l2| l2.b.ins_binop(op, a, b).map_err(mir));
         let made = |l: &mut Self, tuple: bool, words: Vec<ValueId>| -> Result<ValueId, Refusal> {
-            let kind = if tuple { MirAllocKind::Tuple } else { MirAllocKind::Array };
+            let kind = if tuple { MirAllocKind::TUPLE } else { MirAllocKind::Array };
             let obj = l.b.ins_alloc(kind, words).map_err(mir)?;
             l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
         };
@@ -6906,7 +6906,7 @@ impl Lower<'_> {
                     };
                     words.push(w);
                 }
-                let t = self.b.ins_alloc(MirAllocKind::Tuple, words).map_err(mir)?;
+                let t = self.b.ins_alloc(MirAllocKind::TUPLE, words).map_err(mir)?;
                 self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![t]).map_err(mir)?
             }
         }))

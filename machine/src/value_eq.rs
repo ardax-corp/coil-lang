@@ -2,9 +2,10 @@
 //!
 //! Immediates and non-aggregate heap objects compare by machine word.
 //! Arrays (and nested arrays) compare by length and element-wise recursion.
-//! Strings compare by UTF-8 content (interned or not). Tuples compare
-//! element-wise like arrays. Boxed `ObjEnum` values compare by tag and payload
-//! (so `Result::Ok(x) == Result::Ok(x)` holds when the constructs still box).
+//! Strings compare by UTF-8 content (interned or not). Boxed `ObjEnum` values
+//! compare by tag and payload (so `Result::Ok(x) == Result::Ok(x)` holds when
+//! the constructs still box); a tuple is one of `PRODUCT_TAG`, so it compares
+//! element-wise.
 //! Records (instances whose type id [`common::is_record_type_id`]) compare
 //! slot by slot; class instances compare by identity.
 //! Heap-heap Result `Err` (`pointer | 1`) never equals an `Ok`; two `Err`s
@@ -62,7 +63,7 @@ fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
                 _ => None,
             }
         }
-        (Object::Array(_) | Object::Tuple(_), _) => None,
+        (Object::Array(_), _) => None,
         (Object::Instance(ga), Object::Instance(gb)) => {
             if record_slots(ga.as_ref(), gb.as_ref()).is_some() { None } else { Some(false) }
         }
@@ -121,16 +122,6 @@ fn values_eq_rec(
                 .zip(eb.iter())
                 .all(|(x, y)| values_eq_rec(heap, x, y, fwd, rev))
         }
-        (Object::Tuple(ga), Object::Tuple(gb)) => {
-            let ea = &ga.as_ref().elements();
-            let eb = &gb.as_ref().elements();
-            if ea.len() != eb.len() {
-                return false;
-            }
-            ea.iter()
-                .zip(eb.iter())
-                .all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev))
-        }
         (Object::String(ga), Object::String(gb)) => ga.as_ref().data == gb.as_ref().data,
         (Object::Enum(ga), Object::Enum(gb)) => {
             let ea = ga.as_ref();
@@ -166,7 +157,7 @@ fn record_slots<'a>(a: &'a ObjInstance, b: &'a ObjInstance) -> Option<(&'a [Valu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
+    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, ObjString, Object};
 
     fn set_array_elem(heap: &Heap, addr: u64, index: usize, value: Value) {
         let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
@@ -283,14 +274,8 @@ mod tests {
     #[test]
     fn tuple_deep_eq() {
         let mut heap = Heap::default();
-        let (ta, _) = heap.alloc(
-            ObjTuple::new(vec![Value::from(3_i64), Value::from(4_i64)]),
-            Object::Tuple,
-        );
-        let (tb, _) = heap.alloc(
-            ObjTuple::new(vec![Value::from(3_i64), Value::from(4_i64)]),
-            Object::Tuple,
-        );
+        let (ta, _) = heap.alloc(ObjEnum::tuple(&[Value::from(3_i64), Value::from(4_i64)], 0), Object::Enum);
+        let (tb, _) = heap.alloc(ObjEnum::tuple(&[Value::from(3_i64), Value::from(4_i64)], 0), Object::Enum);
         assert!(values_eq(
             &heap,
             Value::from(ta.addr()),

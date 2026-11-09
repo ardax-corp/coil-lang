@@ -8289,7 +8289,7 @@ impl Compiler {
                     let v = b.ins_index(obj, at, read_ty(it), false).map_err(err)?;
                     words.push(item(b, it, v)?);
                 }
-                let t = b.ins_alloc_kinds(MirAllocKind::Tuple, words, *kinds).map_err(err)?;
+                let t = b.ins_alloc_kinds(MirAllocKind::TUPLE, words, *kinds).map_err(err)?;
                 b.ins_gc_barrier(MirGcKind::Safepoint, vec![t]).map_err(err)
             }
             HirRetItems::Enum { variants } => {

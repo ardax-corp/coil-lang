@@ -186,7 +186,6 @@ fn inline_shape(kind: MirAllocKind, n: usize, extra: u64) -> Option<machine::nat
     }
     let n = u8::try_from(n).ok()?;
     match kind {
-        MirAllocKind::Tuple => Some(InlineShape::Tuple { kinds: extra as u8, n }),
         MirAllocKind::Enum { tag } => Some(InlineShape::Enum { tag, kinds: (extra >> 32) as u8, n }),
         MirAllocKind::Object { type_id, nfields } => Some(InlineShape::Instance { type_id, n: u8::try_from(nfields).ok()? }),
         _ => None,
@@ -1192,7 +1191,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(e)?;
                         }
                         match kind {
-                            MirAllocKind::Array | MirAllocKind::Lanes { .. } | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
+                            MirAllocKind::Array | MirAllocKind::Lanes { .. } | MirAllocKind::Enum { .. } => {}
                             MirAllocKind::DropEnum { .. } => {}
                             MirAllocKind::Object { .. } if elems.is_empty() => {}
                             // A function value: its body must have an entry

@@ -20,7 +20,7 @@ use crate::io::{
     alloc_result_ok, alloc_stream, as_result_unit, as_result_value, value_as_string,
 };
 use crate::io_handle::NativeHandle;
-use crate::memory::{Heap, ObjTuple, Object, StreamKind};
+use crate::memory::{Heap, ObjEnum, Object, StreamKind};
 
 /// `process::Stdio` tags, as the embedded module packs them into the flags
 /// word: two bits per stream, stdin in bits 0–1, stdout in 2–3, stderr in
@@ -310,12 +310,12 @@ fn host_output(heap: &mut Heap, args: &[Value]) -> Value {
         let out = heap.intern(String::from_utf8_lossy(&out).into_owned());
         let err = heap.intern(String::from_utf8_lossy(&err).into_owned());
         let (obj, _) = heap.alloc(
-            ObjTuple::new(vec![
+            ObjEnum::tuple(&[
                 Value::from(code),
                 Value::from(out.as_ptr() as *mut u8 as u64),
                 Value::from(err.as_ptr() as *mut u8 as u64),
-            ]),
-            Object::Tuple,
+            ], 0),
+            Object::Enum,
         );
         Value::from(obj.addr())
     });

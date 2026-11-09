@@ -14,7 +14,7 @@ use common::{BUILTIN_IO_ERROR_VARIANTS, BUILTIN_OPTION_VARIANTS, BUILTIN_RESULT_
 
 use crate::io_handle::{NativeHandle, WaitHandle};
 use crate::io_reactor::Interest;
-use crate::memory::{EnumPayload, Heap, ObjArray, ObjStream, ObjTuple, Object, StreamKind};
+use crate::memory::{EnumPayload, Heap, ObjArray, ObjEnum, ObjStream, Object, StreamKind};
 
 type OutputRedirect = *mut (dyn Write + Send);
 
@@ -1370,16 +1370,16 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
 
 fn alloc_tuple2(heap: &mut Heap, a: Value, b: Value) -> Value {
     let (obj, _) = heap.alloc(
-        ObjTuple::new(vec![a, b]),
-        Object::Tuple,
+        ObjEnum::tuple(&[a, b], 0),
+        Object::Enum,
     );
     Value::from(obj.addr())
 }
 
 fn alloc_tuple3(heap: &mut Heap, a: Value, b: Value, c: Value) -> Value {
     let (obj, _) = heap.alloc(
-        ObjTuple::new(vec![a, b, c]),
-        Object::Tuple,
+        ObjEnum::tuple(&[a, b, c], 0),
+        Object::Enum,
     );
     Value::from(obj.addr())
 }
@@ -1945,7 +1945,7 @@ mod tests {
 
     fn tuple_elems(heap: &Heap, v: Value) -> Vec<Value> {
         match heap.find_object_by_addr(v.bits()) {
-            Some(Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
+            Some(Object::Enum(gc)) if gc.as_ref().is_tuple() => gc.as_ref().elements().to_vec(),
             _ => panic!("expected tuple"),
         }
     }

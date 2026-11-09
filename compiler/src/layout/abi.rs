@@ -11,7 +11,7 @@
 //! payload enums with arity ≤1 fit in
 //! `[payload, tag]` without boxing an `ObjEnum`. A closed arity-2 tuple of
 //! immediates (`(int, int)`, `(int, float)`, …) uses the same CALL/RETURN
-//! width as `[a, b]` (second word on top) without boxing an `ObjTuple`.
+//! width as `[a, b]` (second word on top) without boxing a tuple object.
 //! Niched heap `Option<T>` / heap-heap `Result<T, E>` already use a
 //! strictly better one-word ABI and must stay there (never
 //! double-classified). Unbounded `T`, mixed heap products, and wider

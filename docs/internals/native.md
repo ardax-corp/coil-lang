@@ -328,7 +328,8 @@ driver.
 
 ## Inline allocation
 
-An `Alloc` of a fixed-size nursery object (an enum variant or tuple of 1 to 4 words, an
+An `Alloc` of a fixed-size nursery object (an enum variant or tuple, an enum object of
+`PRODUCT_TAG`, of 1 to 4 words, an
 instance of a class with 1 to 4 fields) does not call `coil_native_alloc` on its fast
 path. Native code loads the heap's gate (`HeapCounts::inline_gate`, closed while the
 nursery is off, a mark is open, pretenuring after a mostly surviving minor, a steal
@@ -341,7 +342,7 @@ to the helper, which refills the chunk and sets `gc_due` when a minor collection
 due, so collections still come at safepoints on time.
 
 The images come from `machine::memory::inline_object`, probed from real objects:
-`ObjEnum`, `ObjTuple`, `ObjInstance` and their payloads are `repr(C)` / `repr(u8)`, so
+`ObjEnum`, `ObjInstance` and their payloads are `repr(C)` / `repr(u8)`, so
 the compiler that writes the image and the runtime that reads the object agree. An AOT
 object records `layout_fingerprint` as `coil_aot_layout`; `install_aot` refuses an
 object made against other layouts. `COIL_NATIVE_INLINE_ALLOC=0` at compile time turns

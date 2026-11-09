@@ -27,7 +27,7 @@ pub fn sroa(func: &mut MirFunc) -> usize {
             match inst {
                 MirInst::Alloc {
                     dest,
-                    kind: MirAllocKind::Array | MirAllocKind::Tuple,
+                    kind: MirAllocKind::Array | MirAllocKind::TUPLE,
                     elems,
                     ..
                 } => {

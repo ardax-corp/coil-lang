@@ -307,6 +307,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 MirAllocKind::Object { type_id, nfields } => {
                     write!(f, " {type_id}, {nfields}")?;
                 }
+                MirAllocKind::TUPLE => {}
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
                 MirAllocKind::DropEnum { tag, type_id } => write!(f, " {tag}, {type_id}")?,
                 MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
@@ -327,11 +328,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                     }
                 }
                 MirAllocKind::Lanes { tag_mask } => write!(f, " {tag_mask}")?,
-                MirAllocKind::Array | MirAllocKind::Tuple => {}
+                MirAllocKind::Array => {}
             }
             for (i, e) in elems.iter().enumerate() {
                 if i == 0
-                    && matches!(kind, MirAllocKind::Array | MirAllocKind::Tuple)
+                    && matches!(*kind, MirAllocKind::Array | MirAllocKind::TUPLE)
                 {
                     write!(f, " {e}")?;
                 } else {
@@ -927,7 +928,7 @@ impl<'a> Parser<'a> {
             let kind = match kind_s {
                 "array" => MirAllocKind::Array,
                 "lanes" => MirAllocKind::Lanes { tag_mask: self.uint()? },
-                "tuple" => MirAllocKind::Tuple,
+                "tuple" => MirAllocKind::TUPLE,
                 "object" => {
                     let type_id = self.uint()? as u32;
                     self.expect(',')?;
@@ -1421,7 +1422,7 @@ bb3:
         let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![p]).unwrap();
         // An instance dictionary: a method's code pointer in a tuple.
         let code = b.ins_code_ptr(crate::bodies::Label(11)).unwrap();
-        let dict = b.ins_alloc(MirAllocKind::Tuple, vec![code]).unwrap();
+        let dict = b.ins_alloc(MirAllocKind::TUPLE, vec![code]).unwrap();
         let dict = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
         // A constrained generic's value over its dictionary, called with
         // the call site's.

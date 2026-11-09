@@ -21,7 +21,7 @@ impl FfiCall {
     /// tuple and, for a variadic call, the argument tags tuple.
     pub(crate) fn from_words(heap: &Heap, words: &[Value]) -> Self {
         let tuple = |v: Option<&Value>| match v.and_then(|v| heap.find_object_by_addr(v.bits())) {
-            Some(Object::Tuple(gc)) => Some(gc.as_ref().elements().to_vec()),
+            Some(Object::Enum(gc)) if gc.as_ref().is_tuple() => Some(gc.as_ref().elements().to_vec()),
             _ => None,
         };
         let arg_types = (words.len() > 3).then(|| tuple(words.get(3)).unwrap_or_default().iter().map(|v| ffi_type_from_value(v, heap)).collect());
@@ -64,7 +64,7 @@ fn register_signature_on_object(obj: &mut Object, sig: crate::ffi::FfiSignature,
 impl Runtime {
     fn ffi_tuple_types(&self, tuple: Value) -> Vec<crate::memory::FfiType> {
         match self.heap.find_object_by_addr(tuple.bits()) {
-            Some(Object::Tuple(gc)) => gc.as_ref().elements().iter().map(|v| ffi_type_from_value(v, &self.heap)).collect(),
+            Some(Object::Enum(gc)) if gc.as_ref().is_tuple() => gc.as_ref().elements().iter().map(|v| ffi_type_from_value(v, &self.heap)).collect(),
             _ => Vec::new(),
         }
     }

@@ -1021,7 +1021,6 @@ pub enum MirAllocKind {
     Lanes {
         tag_mask: u64,
     },
-    Tuple,
     /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
     /// dense Object `DenseMakeObject` is D2.
     Object {
@@ -1067,12 +1066,15 @@ pub enum MirAllocKind {
 }
 
 impl MirAllocKind {
+    /// A tuple: a product, an enum object of [`common::PRODUCT_TAG`].
+    pub const TUPLE: Self = Self::Enum { tag: common::PRODUCT_TAG };
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Array => "array",
             Self::Lanes { .. } => "lanes",
-            Self::Tuple => "tuple",
             Self::Object { .. } => "object",
+            Self::TUPLE => "tuple",
             Self::Enum { .. } => "enum",
             Self::DropEnum { .. } => "dropenum",
             Self::Coro { .. } => "coro",

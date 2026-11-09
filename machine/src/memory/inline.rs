@@ -1,12 +1,12 @@
 //! What native code's inline allocation writes (`docs/internals/native.md`,
-//! "Inline allocation"): a fixed-size nursery object (an enum or a tuple
-//! with an inline payload, an instance with inline fields) is bumped from
+//! "Inline allocation"): a fixed-size nursery object (an enum, a tuple
+//! among them, with an inline payload, an instance with inline fields) is bumped from
 //! its class's cursor ([`super::super::slab::Bump`]) and filled from an
 //! image of its slot, without a call into the runtime.
 //!
 //! The images are probed from real objects, so they follow the
-//! `repr(C)` / `repr(u8)` layouts of [`ObjEnum`], [`ObjTuple`],
-//! [`ObjInstance`] and their payloads. Those reprs keep the layout the same
+//! `repr(C)` / `repr(u8)` layouts of [`ObjEnum`], [`ObjInstance`] and
+//! their payloads. Those reprs keep the layout the same
 //! in the compiler that emits the code and the runtime that runs it, and
 //! [`layout_fingerprint`] lets an AOT runtime refuse an object compiled
 //! against another layout.
@@ -19,11 +19,10 @@ use super::*;
 /// One fixed-size object native code allocates inline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InlineShape {
-    /// `ALLOC_ENUM` of a variant with `n` payload words (1 to
-    /// [`ENUM_INLINE_ARITY`]), `kinds` its packed word kinds.
+    /// `ALLOC_ENUM` of a variant (a tuple: [`common::PRODUCT_TAG`]) with
+    /// `n` payload words (1 to [`ENUM_INLINE_ARITY`]), `kinds` their packed
+    /// word kinds.
     Enum { tag: u32, kinds: u8, n: u8 },
-    /// `ALLOC_TUPLE` of `n` elements (1 to [`ENUM_INLINE_ARITY`]).
-    Tuple { kinds: u8, n: u8 },
     /// `ALLOC_OBJECT` of a class with `n` fields (1 to
     /// [`INSTANCE_INLINE_FIELDS`]); its fields stay zero until stored.
     Instance { type_id: u32, n: u8 },
@@ -41,19 +40,19 @@ pub struct InlineObject {
     /// The slot's words as a fresh young object, header first, with its
     /// payload words zero.
     pub image: Vec<u64>,
-    /// Index in `image` of the first payload word: enum payload and tuple
+    /// Index in `image` of the first payload word: enum payload (tuple)
     /// words go there in order.
     pub words_at: u32,
 }
 
 /// The nursery classes of the inline shapes, made first in every heap so
 /// their cursor indexes are the same in every build.
-fn inline_layouts() -> [Layout; 3] {
-    [Layout::new::<GcData<ObjEnum>>(), Layout::new::<GcData<ObjTuple>>(), Layout::new::<GcData<ObjInstance>>()]
+fn inline_layouts() -> [Layout; 2] {
+    [Layout::new::<GcData<ObjEnum>>(), Layout::new::<GcData<ObjInstance>>()]
 }
 
 /// Make the inline shapes' nursery classes (a new heap, first).
-pub(super) fn make_inline_classes(slab: &mut Slab) -> [usize; 3] {
+pub(super) fn make_inline_classes(slab: &mut Slab) -> [usize; 2] {
     inline_layouts().map(|l| slab.young_class(l))
 }
 
@@ -119,26 +118,6 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
             }
             (classes[0], layout, data, PACED_HEADER_BYTES + obj.size(), img, base + slots)
         }
-        InlineShape::Tuple { kinds, n } => {
-            let n = usize::from(n);
-            if n == 0 || n > ENUM_INLINE_ARITY {
-                return None;
-            }
-            let obj = ObjTuple::from_slice(&placeholder[..n]).with_kinds(kinds);
-            let layout = Layout::new::<GcData<ObjTuple>>();
-            let data = std::mem::offset_of!(GcData<ObjTuple>, data);
-            let mut img = vec![0u8; layout.size()];
-            put_header(&mut img, KIND_TUPLE);
-            let base = data + off(&obj, &obj.elements);
-            let (d, len, k, slots, words) = payload_probe(&obj.elements);
-            put(&mut img, base, &[d]);
-            put(&mut img, base + len, &[n as u8]);
-            put(&mut img, base + k, &[kinds]);
-            for (i, w) in words.iter().enumerate() {
-                put(&mut img, base + slots + i * 8, &w.to_le_bytes());
-            }
-            (classes[1], layout, data, PACED_HEADER_BYTES + obj.size(), img, base + slots)
-        }
         InlineShape::Instance { type_id, n } => {
             if type_id == 0 || n == 0 || usize::from(n) > INSTANCE_INLINE_FIELDS {
                 return None;
@@ -161,7 +140,7 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
             for (i, v) in slots.iter().enumerate() {
                 put(&mut img, at + i * 8, &v.bits().to_le_bytes());
             }
-            (classes[2], layout, data, PACED_HEADER_BYTES + obj.size(), img, at)
+            (classes[1], layout, data, PACED_HEADER_BYTES + obj.size(), img, at)
         }
     };
     debug_assert!(data % 8 == 0 && words_at % 8 == 0 && layout.size() % 8 == 0 && layout.align() <= 8);
@@ -255,7 +234,6 @@ pub fn layout_fingerprint() -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     for n in 1..=ENUM_INLINE_ARITY as u8 {
         inline_object(InlineShape::Enum { tag: 0x0102_0304, kinds: 0x5a, n }).hash(&mut h);
-        inline_object(InlineShape::Tuple { kinds: 0xa5, n }).hash(&mut h);
     }
     for n in 1..=INSTANCE_INLINE_FIELDS as u8 {
         inline_object(InlineShape::Instance { type_id: 0x0607_0809, n }).hash(&mut h);
@@ -292,7 +270,6 @@ mod tests {
         let mut alloc = |shape: InlineShape, payload: &[Value]| -> u64 {
             let o = inline_object(shape).expect("inline shape");
             // The slow path first, so the class's cursor has a chunk.
-            let _ = heap.alloc(ObjTuple::from_slice(&words[..1]), Object::Tuple);
             let _ = heap.alloc(ObjEnum::new(1, EnumPayload::one(words[0])), Object::Enum);
             let _ = heap.alloc(ObjInstance::with_type_id_and_fields(3, 1), Object::Instance);
             let b = unsafe { &mut *bumps.add(o.class as usize) };
@@ -313,19 +290,20 @@ mod tests {
             at
         };
         let e = alloc(InlineShape::Enum { tag: 4, kinds: 0, n: 2 }, &words[1..]);
-        let t = alloc(InlineShape::Tuple { kinds: 0, n: 3 }, &words);
+        let tuple = InlineShape::Enum { tag: common::PRODUCT_TAG, kinds: 0, n: 3 };
+        let t = alloc(tuple, &words);
         let i = alloc(InlineShape::Instance { type_id: 5, n: 2 }, &[]);
         let Some(Object::Enum(gc)) = heap.find_object_by_addr(e) else { panic!("not an enum") };
         assert_eq!(gc.as_ref().tag, 4);
         assert_eq!(gc.as_ref().payload.as_slice(), &words[1..]);
         assert_eq!(Object::Enum(gc).generation() & GEN_YOUNG, GEN_YOUNG);
-        let Some(Object::Tuple(gc)) = heap.find_object_by_addr(t) else { panic!("not a tuple") };
-        assert_eq!(gc.as_ref().elements.as_slice(), &words);
+        let Some(gc) = heap.find_object_by_addr(t).and_then(Object::as_tuple) else { panic!("not a tuple") };
+        assert_eq!(gc.as_ref().elements(), &words);
         let Some(Object::Instance(gc)) = heap.find_object_by_addr(i) else { panic!("not an instance") };
         assert_eq!(gc.as_ref().type_id, 5);
         assert_eq!(gc.as_ref().slot(1), Some(Value::from(0_i64)));
         assert_eq!(gc.as_ref().slot(2), None);
-        for (a, s) in [(e, InlineShape::Enum { tag: 4, kinds: 0, n: 2 }), (t, InlineShape::Tuple { kinds: 0, n: 3 }), (i, InlineShape::Instance { type_id: 5, n: 2 })] {
+        for (a, s) in [(e, InlineShape::Enum { tag: 4, kinds: 0, n: 2 }), (t, tuple), (i, InlineShape::Instance { type_id: 5, n: 2 })] {
             assert_eq!(heap.find_object_by_addr(a).map(|o| o.size()), inline_object(s).map(|o| o.size as usize));
         }
     }
@@ -333,7 +311,7 @@ mod tests {
     #[test]
     fn wide_payloads_and_untyped_instances_stay_on_the_helper() {
         assert!(inline_object(InlineShape::Enum { tag: 0, kinds: 0, n: 5 }).is_none());
-        assert!(inline_object(InlineShape::Tuple { kinds: 0, n: 0 }).is_none());
+        assert!(inline_object(InlineShape::Enum { tag: common::PRODUCT_TAG, kinds: 0, n: 0 }).is_none());
         assert!(inline_object(InlineShape::Instance { type_id: 0, n: 1 }).is_none());
         assert!(inline_object(InlineShape::Instance { type_id: 1, n: 5 }).is_none());
     }

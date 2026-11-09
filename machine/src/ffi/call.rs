@@ -386,7 +386,7 @@ fn array_buffer_from_value(
     if let Some(obj) = heap.find_object_by_addr(addr) {
         let mut buf: Vec<i64> = match &obj {
             Object::Array(gc) => gc.as_ref().iter().map(|v| v.as_int()).collect(),
-            Object::Tuple(gc) => gc.as_ref().elements().iter().map(|v| v.as_int()).collect(),
+            Object::Enum(gc) if gc.as_ref().is_tuple() => gc.as_ref().elements().iter().map(|v| v.as_int()).collect(),
             _ => Vec::new(),
         };
         if !buf.is_empty() {
@@ -444,7 +444,7 @@ fn byte_arg_from_value(
             }
             (gc.as_ref().to_byte_vec(), writable)
         }
-        Some(Object::Tuple(gc)) => {
+        Some(Object::Enum(gc)) if gc.as_ref().is_tuple() => {
             (gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(), false)
         }
         _ => {

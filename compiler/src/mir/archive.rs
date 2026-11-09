@@ -31,7 +31,7 @@ use crate::mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 14;
+const FORMAT: u8 = 15;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for `bodies`, each with its entry from `body_ids`.
@@ -518,7 +518,6 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                     w.u8(9);
                     w.u64(tag_mask);
                 }
-                MirAllocKind::Tuple => w.u8(1),
                 MirAllocKind::Enum { tag } => {
                     w.u8(2);
                     w.u32(tag);
@@ -1066,7 +1065,6 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let dest = r.v()?;
             let kind = match r.u8()? {
                 0 => MirAllocKind::Array,
-                1 => MirAllocKind::Tuple,
                 2 => MirAllocKind::Enum { tag: r.u32()? },
                 3 => MirAllocKind::Object { type_id: r.u32()?, nfields: r.u32()? },
                 4 => MirAllocKind::Fn { target: Label(r.u32()?), operand: r.u32()?, mask: r.u32()? },

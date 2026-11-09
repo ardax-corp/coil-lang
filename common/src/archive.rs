@@ -128,6 +128,11 @@ impl<'a> ClassSlotKinds<'a> {
     }
 }
 
+/// The tag of a product object: an enum object with no variant, which is
+/// how the runtime keeps a tuple (and `()`, its empty one). No enum has
+/// this many variants.
+pub const PRODUCT_TAG: u32 = u32::MAX;
+
 /// Words whose kinds a packed `u8` records (2 bits each). Later words of a
 /// wider payload are unknown.
 pub const PACKED_KIND_WORDS: usize = 4;
