@@ -658,14 +658,9 @@ impl Compiler {
                 continue;
             }
             let w = self.outlined.borrow()[&name].body.clone();
-            let frame = self.par_frame_enter();
-            for &p in &w.params {
-                self.context.variables.intern(w.local(p).name.clone());
-            }
             let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(&w));
             let planned = self.plan_hir_body(&w).is_ok();
             self.hir_body_frame = outer;
-            self.par_frame_exit(frame);
             if !planned {
                 let callee = name.rsplit_once("$cold").map_or(name.as_str(), |(c, _)| c);
                 self.outline_refused.insert(callee.to_string());
@@ -706,10 +701,6 @@ impl Compiler {
     pub(super) fn flush_outlined(&mut self) {
         while let Some(name) = self.outlined_queue.pop() {
             let w = self.outlined.borrow()[&name].body.clone();
-            let frame = self.par_frame_enter();
-            for &p in &w.params {
-                self.context.variables.intern(w.local(p).name.clone());
-            }
             let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(&w));
             let Ok(mut emit) = self.plan_hir_body(&w) else {
                 panic!("internal error: outlined cold arm `{name}` does not plan");
@@ -724,7 +715,6 @@ impl Compiler {
             assert!(self.hir_mir.is_some(), "internal error: outlined cold arm `{name}` without direct MIR");
             self.bodies.record(name.clone(), Some(label));
             self.attach_hir_mir();
-            self.par_frame_exit(frame);
             self.queue_outlined(&w);
         }
     }
@@ -1288,10 +1278,6 @@ impl Compiler {
         };
         let inst = self.hir_instance(&module.bodies[index], &map);
         // Only its calls are probed, in a frame of its parameters.
-        let vars = std::mem::take(&mut self.context.variables);
-        for &p in &inst.params {
-            self.context.variables.intern(inst.local(p).name.clone());
-        }
         let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(&inst));
         let r = match self.hir_call_shapes(&inst) {
             Ok(Some(shaped)) => self.plan_hir_body(&shaped).map(|_| ()),
@@ -1299,7 +1285,6 @@ impl Compiler {
             Err(e) => Err(e),
         };
         self.hir_body_frame = outer;
-        self.context.variables = vars;
         self.hir_module = Some(module);
         !r.is_err_and(|why| why.starts_with("callee"))
     }
@@ -1308,20 +1293,19 @@ impl Compiler {
     /// when the body is outside what the lowering emits; the caller reports
     /// it ([`Self::report_unlowered`]).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan) -> bool {
-        let dicts = std::mem::take(&mut self.hir_frame_dicts);
+        let dicts = self.hir_frame_dicts.take();
         let outer = self.hir_body_frame.take();
         let lowered = self.try_lower_hir_function_in(span, dicts);
         self.hir_body_frame = outer;
         lowered
     }
 
-    fn try_lower_hir_function_in(&mut self, span: &SimpleSpan, dicts: frame::FrameDicts) -> bool {
+    fn try_lower_hir_function_in(&mut self, span: &SimpleSpan, dicts: Option<frame::FrameDicts>) -> bool {
         self.hir_refusal = None;
         *self.polyfn_over_application.borrow_mut() = None;
         // Clones an earlier body planned but never called give back their room.
         self.planned_method_clones.borrow_mut().clear();
-        let entry_sp = self.hir_entry_sp.take();
-        self.hir_mir_ctx = std::mem::take(&mut self.hir_entry_ctx);
+        self.hir_mir_ctx.clear();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
             self.hir_refusal = Some("no-hir-body");
             return false;
@@ -1343,14 +1327,21 @@ impl Compiler {
         let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
         let moded = self.hir_fold_key_eq_modes(hir);
         let hir = moded.as_ref().unwrap_or(hir);
-        let frame = self.hir_function_frame(hir, dicts);
-        debug_assert!(
-            entry_sp.is_none_or(|sp| sp == frame.entry_sp),
-            "entry words of `{}`: interned {entry_sp:?}, numbered from HIR {}",
-            hir.name,
-            frame.entry_sp
-        );
-        let entry_sp = entry_sp.map(|_| frame.entry_sp);
+        let frame = self.hir_function_frame(hir, dicts.unwrap_or_default());
+        // Direct MIR loads the context dictionaries on entry.
+        if let Some((base, n)) = dicts.and_then(|d| d.context)
+            && let Some(own) = frame.dict_slot(0)
+        {
+            for i in 0..n {
+                let slot = frame.dict_slot(i + 1).expect("context dictionary slot");
+                self.hir_mir_ctx.push((slot, own, (base + i) as u32));
+            }
+        }
+        let spans = std::mem::take(&mut self.param_name_spans);
+        for param in &frame.params {
+            self.record_debug_param_at(&param.name, param.slot, spans.get(&param.name).copied());
+        }
+        let entry_sp = dicts.map(|_| frame.entry_sp);
         self.hir_body_frame = Some(frame);
         // A generic fn with a nested type parameter read as a value that the
         // HIR could not alias: if the body is refused, that read is why (#916).
@@ -1617,8 +1608,7 @@ impl Compiler {
     /// function, then build its direct MIR: planned and emitted as any
     /// other body, with no HIR passes or inlining. `calls` are the callees
     /// the checker has no signature for; `start` runs once the body plans,
-    /// before its first op. The current frame (`context.variables`) must be
-    /// empty. Its ops carry no source location. `false` (nothing emitted)
+    /// before its first op. Its ops carry no source location. `false` (nothing emitted)
     /// when the body does not plan.
     pub(super) fn lower_synth_hir(
         &mut self,
@@ -1638,37 +1628,20 @@ impl Compiler {
             _ => Vec::new(),
         };
         let skip = pairs.len().saturating_sub(hir.params.len());
-        for (i, &param) in hir.params.iter().enumerate() {
-            let name = hir.local(param).name.clone();
-            match pairs.get(skip + i).cloned().flatten() {
-                Some(kind) => {
-                    self.alloc_unboxed_enum_slots(&name, &kind);
-                }
-                None => {
-                    self.context.variables.intern(name);
-                }
-            }
-        }
         // A bounded instance method's dictionaries (#1479): its own after
         // the parameters, the context read out of it on entry. An open glue
         // body's `Eq` dictionaries (#1642): plain parameters after its own.
         let dicts = match (self.synth_entry_dicts, self.synth_plain_dicts) {
-            (Some((_, n)), _) => frame::FrameDicts { own: Some((0, 0)), context: n, ..frame::FrameDicts::default() },
+            (Some(context), _) => frame::FrameDicts { own: Some((0, 0)), context: Some(context), ..frame::FrameDicts::default() },
             (None, Some(n)) => frame::FrameDicts { arity: n, ..frame::FrameDicts::default() },
             (None, None) => frame::FrameDicts::default(),
         };
         let frame = frame::BodyFrame::function(hir, |i| pairs.get(skip + i).cloned().flatten(), dicts);
         if let Some((base, n)) = self.synth_entry_dicts {
-            self.context.variables.intern("__dict0".to_string());
             let own = frame.dict_slot(0).expect("own dictionary");
             for i in 0..n {
-                self.context.variables.intern(format!("__dict{}", i + 1));
                 let slot = frame.dict_slot(i + 1).expect("context dictionary");
                 self.hir_mir_ctx.push((slot, own, (base + i) as u32));
-            }
-        } else if let Some(n) = self.synth_plain_dicts {
-            for i in 0..n {
-                self.context.variables.intern(format!("__dict{i}"));
             }
         }
         let entry_words = (self.synth_entry_dicts.is_some() || self.synth_plain_dicts.is_some()).then_some(frame.entry_sp);
@@ -4023,9 +3996,7 @@ impl Compiler {
                 .filter(|_| !lam.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })));
             let mut plans = Vec::with_capacity(2);
             for rep in std::iter::once(ret).chain(twin_kind.clone().map(Rep::Pair)) {
-                let prev_vars = std::mem::take(&mut self.context.variables);
                 let prev_two_word = self.compiling_two_word_enum.take();
-                Self::hir_lambda_frame(&mut self.context.variables, lam, &dicts, &pair_captures);
                 let dict_ns = dicts.iter().filter_map(|(name, _)| name.strip_prefix("__dict")?.parse().ok());
                 let lambda_frame = frame::BodyFrame::lambda(lam, &pair_captures, dict_ns);
                 let prev_frame = self.hir_body_frame.replace(lambda_frame);
@@ -4039,7 +4010,6 @@ impl Compiler {
                     .and_then(|mut plan| self.plan_hir_lambdas(module, lam, &mut plan).map(|()| plan));
                 self.hir_lambda_dicts = prev_dicts;
                 self.hir_body_frame = prev_frame;
-                self.context.variables = prev_vars;
                 self.compiling_two_word_enum = prev_two_word;
                 let mut plan = match plan {
                     Ok(plan) => plan,
@@ -4073,25 +4043,6 @@ impl Compiler {
             *at += if kind.is_some() { 2 } else { 1 };
             Some((inner, slot, kind.clone()))
         })
-    }
-
-    /// Intern a lambda's frame names: each capture's (and a two-word one's
-    /// second word's), each captured dictionary's, then each parameter's,
-    /// in [`frame::BodyFrame::lambda`]'s order.
-    fn hir_lambda_frame(vars: &mut Interner<String>, lam: &HirBody, dicts: &[(String, u32)], pairs: &[Option<PairKind>]) {
-        for (i, &(_, inner)) in lam.captures.iter().enumerate() {
-            let name = lam.local(inner).name.clone();
-            vars.intern(name.clone());
-            if pairs.get(i).is_some_and(Option::is_some) {
-                vars.intern(format!("{name}$hi"));
-            }
-        }
-        for (name, _) in dicts {
-            vars.intern(name.clone());
-        }
-        for &p in &lam.params {
-            vars.intern(lam.local(p).name.clone());
-        }
     }
 
     /// How the function being compiled returns `hir`'s result.
@@ -4164,11 +4115,6 @@ impl Compiler {
 
     fn plan_hir_body_ret(&self, hir: &HirBody, ret: Rep) -> Result<HirEmit, &'static str> {
         let frame = self.hir_body_frame.as_ref();
-        match frame {
-            Some(frame) => self.debug_check_body_frame(hir, frame),
-            // A clone probed for its calls ([`Self::hir_clone_plans`]).
-            None => debug_assert!(self.context.variables.is_empty(), "`{}` planned outside its frame: {:?}", hir.name, self.context.variables),
-        }
         let mut emit = HirEmit {
             plan: HirPlan {
                 calls: HashMap::new(),
@@ -4415,7 +4361,7 @@ impl Compiler {
         for (i, &param) in hir.params.iter().enumerate() {
             let local = self.hir_body_frame.as_ref().and_then(|f| f.params.get(i)).ok_or("parameter-slot")?;
             emit.slots[param.0 as usize] = Some(local.slot);
-            // A two-word parameter (`argument_unboxed_range_kind`) holds
+            // A two-word parameter (`param_pair_kind`) holds
             // `[start, end]` / `[payload, tag]` in two slots.
             match &local.pair {
                 Some((end, kind)) => {
@@ -5422,15 +5368,10 @@ impl Compiler {
             if refusal::refusal(body, &self.checker).is_some() {
                 continue;
             }
-            let prev = std::mem::take(&mut self.context.variables);
-            for &param in &body.params {
-                self.context.variables.intern(body.local(param).name.clone());
-            }
             let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(body));
             let ret = Rep::Word(body.ret.as_ref().map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
             let _ = self.plan_hir_body_ret(body, ret);
             self.hir_body_frame = outer;
-            self.context.variables = prev;
         }
         self.planning_for_clones = false;
         self.hir_module = Some(module);
@@ -10366,7 +10307,6 @@ impl Compiler {
         if let Some(kind) = pair {
             self.pin_two_word_return_kind(&name, Some(kind));
         }
-        let frame = self.par_frame_enter();
         let prev_key = self.current_function_table_key.replace(name.clone());
         let prev_two_word = self.compiling_two_word_enum.take();
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
@@ -10381,10 +10321,8 @@ impl Compiler {
                 _ => None,
             })
             .collect();
-        Self::hir_lambda_frame(&mut self.context.variables, &body, &dicts, &pairs);
         let dict_ns = dicts.iter().filter_map(|(name, _)| name.strip_prefix("__dict")?.parse().ok());
         let lambda_frame = frame::BodyFrame::lambda(&body, &pairs, dict_ns);
-        self.debug_check_body_frame(&body, &lambda_frame);
         let capture_words = body.captures.len() + pairs.iter().flatten().count();
         let prev_dicts = self.hir_lambda_dicts.replace((capture_words as u32, dicts.len() as u32));
         for param in &lambda_frame.params {
@@ -10417,7 +10355,6 @@ impl Compiler {
         self.hir_mir_ctx = prev_ctx;
         self.compiling_two_word_enum = prev_two_word;
         self.current_function_table_key = prev_key;
-        self.par_frame_exit(frame);
         // A parallel loop inside the lambda moved out of it too.
         if !emit.par_tail.is_empty() {
             self.hir_par_tail = Some(Box::new(HirParTail { hir: flat, emit }));
@@ -10472,7 +10409,6 @@ impl Compiler {
         let hir = self.hir_par_driver_body(site, driver, worker, (spawn, join), (begin, end));
         let words = hir.params.len() as u32;
         let arity = 3 + site.live_captures.len();
-        let frame = self.par_frame_enter();
         self.fn_arities.insert(driver.to_string(), (words, false));
         let calls = HashMap::from([(worker.to_string(), (vec![ValueLayout::Boxed; arity], ValueLayout::Boxed))]);
         let bind = driver.to_string();
@@ -10484,7 +10420,6 @@ impl Compiler {
             self.bodies.record(driver.to_string(), label);
             self.attach_hir_mir();
         }
-        self.par_frame_exit(frame);
         lowered
     }
 
@@ -10768,14 +10703,9 @@ impl Compiler {
         if refusal::refusal(w, &self.checker).is_some() {
             return None;
         }
-        let frame = self.par_frame_enter();
-        for &p in &w.params {
-            self.context.variables.intern(w.local(p).name.clone());
-        }
         let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(w));
         let Ok(mut emit) = self.plan_hir_body(w) else {
             self.hir_body_frame = outer;
-            self.par_frame_exit(frame);
             return None;
         };
         self.loop_par_helpers += 1;
@@ -10792,7 +10722,6 @@ impl Compiler {
         self.hir_body_frame = outer;
         self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
-        self.par_frame_exit(frame);
         // A parallel loop inside the worker moved out of it too.
         if !emit.par_tail.is_empty() {
             self.hir_par_tail = Some(Box::new(HirParTail { hir: w.clone(), emit }));
