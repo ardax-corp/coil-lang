@@ -1,6 +1,7 @@
 //! Untagged runtime values: immediates and heap pointers in one word.
 
-/// Runtime type tag used by the generics boxing opcodes (`BoxValue` / `UnboxValue`).
+/// A value's static scalar or heap type, as the compiler tags it (a
+/// `STRINGIFY` operand names one; [`stringify_operand`]).
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ValueTag {
@@ -42,9 +43,9 @@ impl ValueTag {
 }
 
 /// `STRINGIFY` operand for an immediate of static type `tag` (`Int`,
-/// `Float`, `Bool`, `Unit`): `1 + tag`. Operand `0` (archives before major
-/// 6 / minor 17, and values with no static scalar type) inspects the word:
-/// a box by its tag, a heap string as itself, anything else as an `int`.
+/// `Float`, `Bool`, `Unit`): `1 + tag`. Operand `0` (values with no static
+/// scalar type) inspects the word: a heap string as itself, anything else
+/// as an `int`.
 pub const fn stringify_operand(tag: ValueTag) -> u32 {
     1 + tag as u32
 }

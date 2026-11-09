@@ -1679,7 +1679,6 @@ impl Pipeline {
                         None => out.push_str(&format!(" (field {index})")),
                     }
                 }
-                common::SnapStep::Boxed => {}
             }
         }
         out
