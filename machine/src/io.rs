@@ -1568,13 +1568,17 @@ pub fn udp_recv_from_wait(heap: &mut Heap, stream: Value, buf: Value) -> Result<
     }
 }
 
-/// Decode a heap string `Value` into a Rust `String`.
-pub fn value_as_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
-    let v = peel_one_boxed(heap, v);
-    match heap.find_object_by_addr(v.bits()) {
-        Some(Object::String(gc)) => Ok(gc.as_ref().data.to_string()),
-        _ => Err(IoErrorTag::InvalidInput),
+/// The text of heap string `v`, if it is one.
+pub fn heap_string(heap: &Heap, v: Value) -> Option<String> {
+    match heap.find_object_by_addr(peel_one_boxed(heap, v).bits()) {
+        Some(Object::String(gc)) => Some(gc.as_ref().data.to_string()),
+        _ => None,
     }
+}
+
+/// [`heap_string`], `InvalidInput` when `v` is not a string.
+pub fn value_as_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
+    heap_string(heap, v).ok_or(IoErrorTag::InvalidInput)
 }
 
 /// `open` mode may be a heap string or an untagged 1-byte immediate (`"r"`).

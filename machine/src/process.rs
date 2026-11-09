@@ -17,7 +17,7 @@ use common::Value;
 
 use crate::io::{
     IoErrorTag, alloc_io_error, alloc_option_none, alloc_option_some, alloc_result_err,
-    alloc_result_ok, alloc_stream, as_result_unit, as_result_value,
+    alloc_result_ok, alloc_stream, as_result_unit, as_result_value, value_as_string,
 };
 use crate::io_handle::NativeHandle;
 use crate::memory::{Heap, ObjTuple, Object, StreamKind};
@@ -59,16 +59,9 @@ fn io_tag(e: std::io::Error) -> IoErrorTag {
     IoErrorTag::from_error(&e)
 }
 
-fn heap_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
-    match heap.find_object_by_addr(v.bits()) {
-        Some(Object::String(gc)) => Ok(gc.as_ref().data.to_string()),
-        _ => Err(IoErrorTag::InvalidInput),
-    }
-}
-
 fn heap_strings(heap: &Heap, v: Value) -> Result<Vec<String>, IoErrorTag> {
     match heap.find_object_by_addr(v.bits()) {
-        Some(Object::Array(gc)) => gc.as_ref().iter().map(|e| heap_string(heap, e)).collect(),
+        Some(Object::Array(gc)) => gc.as_ref().iter().map(|e| value_as_string(heap, e)).collect(),
         _ => Err(IoErrorTag::InvalidInput),
     }
 }
@@ -270,11 +263,11 @@ pub fn release(id: i64) {
 fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
     let r = (|| {
         let spec = SpawnSpec {
-            program: heap_string(heap, args[0])?,
+            program: value_as_string(heap, args[0])?,
             args: heap_strings(heap, args[1])?,
             env: heap_strings(heap, args[2])?,
             env_remove: heap_strings(heap, args[3])?,
-            cwd: heap_string(heap, args[4])?,
+            cwd: value_as_string(heap, args[4])?,
             flags: args[5].as_int(),
         };
         spawn(&spec).map(Value::from)
