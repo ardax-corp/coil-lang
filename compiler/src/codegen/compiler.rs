@@ -1128,7 +1128,7 @@ impl Compiler {
         !is_coro
             && class != "Iterator"
             && class != "IntoIterator"
-            && !inst_args.iter().any(Self::ty_has_var)
+            && !inst_args.iter().any(Ty::has_var)
             // The checker's head, whose parameters are variables (the AST
             // spelling names them as constructors).
             && self
@@ -1137,7 +1137,7 @@ impl Compiler {
                 .instances
                 .iter()
                 .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
-                .is_some_and(|inst| !inst.args.iter().any(Self::ty_has_var))
+                .is_some_and(|inst| !inst.args.iter().any(Ty::has_var))
             && !self.instance_call_takes_dict(class, method, fqn)
             && self
                 .instance_method_unbox_tys(class, method, inst_args)
@@ -1181,7 +1181,7 @@ impl Compiler {
         else {
             return;
         };
-        if !instance.args.iter().any(Self::ty_has_var) {
+        if !instance.args.iter().any(Ty::has_var) {
             return;
         }
         let head = instance.args.clone();
@@ -1366,7 +1366,7 @@ impl Compiler {
         let src = self.inst_clone_srcs.get(fqn)?;
         // Keyed without `readonly`, which has no runtime form (#1806).
         let lookup = &lookup.iter().map(crate::typechecking::ty::strip_readonly_deep).collect::<Vec<_>>()[..];
-        if lookup.len() != src.head.len() || lookup.iter().any(Self::ty_has_var) {
+        if lookup.len() != src.head.len() || lookup.iter().any(Ty::has_var) {
             return None;
         }
         let key = (fqn.to_string(), lookup.to_vec());
@@ -1524,7 +1524,7 @@ impl Compiler {
         for (have, want) in head.iter().zip(lookup) {
             Self::bind_scheme_vars(have, want, &mut vars);
         }
-        let free: HashSet<_> = head.iter().flat_map(crate::typechecking::subst::ftv).collect();
+        let free: HashSet<_> = head.iter().flat_map(crate::typechecking::ty::ftv_ty).collect();
         if free.iter().any(|v| !vars.contains_key(v)) {
             return None;
         }
@@ -1655,8 +1655,8 @@ impl Compiler {
             return false;
         };
         let body = self.hir_instance(&module.bodies[index], vars);
-        body.ret.as_ref().is_some_and(|t| !Self::ty_has_var(t))
-            && body.locals.iter().all(|l| l.ty.as_ref().is_some_and(|t| !Self::ty_has_var(t)))
+        body.ret.as_ref().is_some_and(|t| !Ty::has_var(t))
+            && body.locals.iter().all(|l| l.ty.as_ref().is_some_and(|t| !Ty::has_var(t)))
     }
 
     /// The `Function` node of the `impl` method of this program whose
@@ -1755,18 +1755,13 @@ impl Compiler {
     /// type parameters (`Option<T>`): a clone gives it its own layout,
     /// which the shared methods reading the same fields do not expect.
     pub(crate) fn has_enum_over_var(checker: &Checker, ty: &Ty) -> bool {
-        match ty {
+        ty.any(|t| match t {
             Ty::App(head, args) => {
-                (matches!(head.as_ref(), Ty::Con(name) if checker.enum_variants(name).is_some())
-                    && args.iter().any(Self::ty_has_var))
-                    || args.iter().any(|a| Self::has_enum_over_var(checker, a))
+                matches!(head.as_ref(), Ty::Con(name) if checker.enum_variants(name).is_some())
+                    && args.iter().any(Ty::has_var)
             }
-            Ty::Fun(a, b) => Self::has_enum_over_var(checker, a) || Self::has_enum_over_var(checker, b),
-            Ty::Tuple(items) => items.iter().any(|t| Self::has_enum_over_var(checker, t)),
-            Ty::Readonly(inner) => Self::has_enum_over_var(checker, inner),
-            Ty::Array { element, .. } => Self::has_enum_over_var(checker, element),
             _ => false,
-        }
+        })
     }
 
     /// Programs whose ASTs [`Self::emit_foreign_clones`] may need: none
@@ -2110,7 +2105,7 @@ impl Compiler {
             .instances
             .iter()
             .find(|inst| inst.class == class && inst.method_fqns.get(method).is_some_and(|f| f == fqn))
-            .filter(|inst| inst.args.len() == inst_args.len() && inst.args.iter().any(Self::ty_has_var))
+            .filter(|inst| inst.args.len() == inst_args.len() && inst.args.iter().any(Ty::has_var))
             .map(|inst| inst.args.clone());
         let inst_args = head.as_deref().unwrap_or(inst_args);
         let raw = self.raw_instance_methods.contains(fqn);
@@ -2227,7 +2222,7 @@ impl Compiler {
     /// open parameter): its words are a generic body's, moved as they are
     /// and rooted while live.
     fn synth_generic(mut hir: crate::hir::HirBody) -> crate::hir::HirBody {
-        hir.is_generic = hir.locals.iter().filter_map(|l| l.ty.as_ref()).chain(hir.ret.as_ref()).any(Self::ty_has_var);
+        hir.is_generic = hir.locals.iter().filter_map(|l| l.ty.as_ref()).chain(hir.ret.as_ref()).any(Ty::has_var);
         hir
     }
 
@@ -2962,7 +2957,7 @@ impl Compiler {
         // An open goal (`Show<Tree<T>>`, `Show<T>`) is served by a dictionary
         // in scope, or by the mono clone's concrete types; looking it up
         // would match an arbitrary instance (#551).
-        let open = lookup.iter().any(Self::ty_is_open);
+        let open = lookup.iter().any(Ty::has_free_var);
         if open {
             match self.resolve_open_dict_goal(class, lookup) {
                 Some(OpenDictGoal::Slot(slot)) => {
@@ -3000,7 +2995,7 @@ impl Compiler {
             };
             // An open goal may only select a generic instance (a concrete one
             // would be an arbitrary pick among the heads that unify).
-            if open && !instance.args.iter().any(Self::ty_is_open) {
+            if open && !instance.args.iter().any(Ty::has_free_var) {
                 return false;
             }
             let Some(class_def) = self.checker.generics().typeclass(&instance.class) else {
@@ -3127,7 +3122,7 @@ impl Compiler {
         }
         if let Some(vars) = self.mono_var_tys.last() {
             let concrete: Vec<Ty> = args.iter().map(|a| Self::apply_ty_var_map(a, vars)).collect();
-            if !concrete.iter().any(Self::ty_is_open) {
+            if !concrete.iter().any(Ty::has_free_var) {
                 return Some(OpenDictGoal::Concrete(concrete));
             }
         }
@@ -3205,25 +3200,6 @@ impl Compiler {
             }
         }
         out
-    }
-
-    /// Whether `ty` mentions a type variable anywhere, a record field's or
-    /// an enum payload's too ([`Self::ty_has_var`] looks at fewer shapes).
-    fn ty_is_open(ty: &Ty) -> bool {
-        !crate::typechecking::ty::ftv_ty(ty).is_empty()
-    }
-
-    fn ty_has_var(ty: &Ty) -> bool {
-        match ty {
-            Ty::Var(_) => true,
-            Ty::Fun(a, b) => Self::ty_has_var(a) || Self::ty_has_var(b),
-            Ty::App(h, args) => Self::ty_has_var(h) || args.iter().any(Self::ty_has_var),
-            Ty::Tuple(items) => items.iter().any(Self::ty_has_var),
-            Ty::Readonly(inner) => Self::ty_has_var(inner),
-            Ty::Array { element, .. } => Self::ty_has_var(element),
-            Ty::Constructor { owner, .. } => Self::ty_has_var(owner),
-            _ => false,
-        }
     }
 
     /// Whether a direct call to instance method `fqn` passes the instance
@@ -3343,7 +3319,7 @@ impl Compiler {
         let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
         let is_enum = crate::typechecking::ty::is_option_ty(&ty)
             || crate::typechecking::ty::result_ok_err(&ty).is_some();
-        (is_enum && !crate::typechecking::subst::ftv(&ty).is_empty())
+        (is_enum && ty.has_free_var())
             .then(|| self.value_layout(&ty))
     }
 
@@ -3522,7 +3498,7 @@ impl Compiler {
             .all(|t| {
                 !matches!(t, Ty::Var(_))
                     && !matches!(t, Ty::App(head, _) if matches!(head.as_ref(), Ty::Var(_)))
-                    && Self::ty_is_open(t)
+                    && Ty::has_free_var(t)
             })
             .then_some(lookup)
             .filter(|l| self.open_instance_dict_ok(&constraint.class, l, 0))
@@ -3558,7 +3534,7 @@ impl Compiler {
                     _ => crate::typechecking::ty::builtin_enum_app(&t).unwrap_or(t),
                 })
                 .collect();
-            if !args.iter().any(Self::ty_is_open) {
+            if !args.iter().any(Ty::has_free_var) {
                 return self.checker.generics().find_instance_relaxed(&c.class, &args).is_some();
             }
             if args.iter().any(|t| matches!(t, Ty::Var(_))) {
@@ -3737,7 +3713,7 @@ impl Compiler {
         let word = |t: &Ty| {
             crate::hir::classify::classify(&self.checker, t).is_some_and(crate::hir::classify::is_word)
                 && self.value_layout(t) == ValueLayout::Boxed
-                && !Self::ty_has_var(t)
+                && !Ty::has_var(t)
         };
         let sig = |name: &str| -> Option<(Vec<Ty>, Ty)> {
             let key = self.resolve_free_fn(name);
@@ -5154,7 +5130,7 @@ impl Compiler {
         while let Ty::Fun(_, ret) = result {
             result = ret;
         }
-        let free = crate::typechecking::subst::ftv(result);
+        let free = crate::typechecking::ty::ftv_ty(result);
         scheme.bounds.iter().any(|bound| free.contains(bound))
     }
 
@@ -5187,35 +5163,13 @@ impl Compiler {
         }
     }
 
+    /// `ty` with the type variables `map` binds replaced, a `forall`
+    /// instantiated: its body at `map`.
     pub(crate) fn apply_ty_var_map(ty: &Ty, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Ty {
         match ty {
             Ty::Var(v) => map.get(v).cloned().unwrap_or_else(|| ty.clone()),
-            Ty::Fun(a, r) => Ty::Fun(
-                Box::new(Self::apply_ty_var_map(a, map)),
-                Box::new(Self::apply_ty_var_map(r, map)),
-            ),
-            Ty::App(h, args) => Ty::App(
-                Box::new(Self::apply_ty_var_map(h, map)),
-                args.iter()
-                    .map(|a| Self::apply_ty_var_map(a, map))
-                    .collect(),
-            ),
-            Ty::Tuple(items) => Ty::Tuple(
-                items
-                    .iter()
-                    .map(|t| Self::apply_ty_var_map(t, map))
-                    .collect(),
-            ),
-            Ty::Array { element, length } => Ty::Array {
-                element: Box::new(Self::apply_ty_var_map(element, map)),
-                length: *length,
-            },
             Ty::Forall { body, .. } => Self::apply_ty_var_map(body, map),
-            Ty::Readonly(inner) => Ty::Readonly(Box::new(Self::apply_ty_var_map(inner, map))),
-            Ty::Record { fields } => Ty::Record {
-                fields: fields.iter().map(|(n, t)| (n.clone(), Self::apply_ty_var_map(t, map))).collect(),
-            },
-            other => other.clone(),
+            _ => ty.map_children(|t| Self::apply_ty_var_map(t, map)),
         }
     }
 
@@ -5398,10 +5352,10 @@ impl Compiler {
             for (child, param) in formals.zip(param_tys.iter().map(Some).chain(std::iter::repeat(None))) {
                 if let Expression::Argument { name, is_rest: false, .. } = child.1.as_ref()
                     && let Some(param) = param
-                    && Self::ty_has_var(param)
+                    && Ty::has_var(param)
                 {
                     let ty = Self::apply_ty_var_map(param, &var_tys);
-                    if !Self::ty_has_var(&ty) {
+                    if !Ty::has_var(&ty) {
                         overrides.insert(name.to_string(), ty);
                     }
                 }
@@ -7062,7 +7016,7 @@ impl Compiler {
             return;
         }
         let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
-        if Self::ty_has_var(&ty) || crate::layout::two_word_kind(&self.checker, &ty).is_none() {
+        if Ty::has_var(&ty) || crate::layout::two_word_kind(&self.checker, &ty).is_none() {
             return;
         }
         let (seen, out) = &mut *self.residue.borrow_mut();

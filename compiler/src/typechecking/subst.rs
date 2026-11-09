@@ -303,78 +303,23 @@ pub fn apply_ty(subst: &Subst, ty: &Ty) -> Ty {
             Some(t) => t.clone(),
             None => Ty::Var(*v),
         },
+        // The checker's hottest walk: its common shapes are spelled out
+        // here, the rest go through `map_children`.
         Ty::Con(_) | Ty::Existential { .. } | Ty::Never => ty.clone(),
         Ty::Fun(a, b) => Ty::Fun(Box::new(apply_ty(subst, a)), Box::new(apply_ty(subst, b))),
-        Ty::App(c, args) => Ty::App(
-            Box::new(apply_ty(subst, c)),
+        Ty::App(head, args) => Ty::App(
+            Box::new(apply_ty(subst, head)),
             args.iter().map(|t| apply_ty(subst, t)).collect(),
         ),
-        Ty::Sum { name, variants } => Ty::Sum {
-            name: name.clone(),
-            variants: variants
-                .iter()
-                .map(|(n, payload)| {
-                    let new_payload = match payload {
-                        crate::typechecking::ty::EnumVariantPayloadTy::Unit => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Unit
-                        }
-                        crate::typechecking::ty::EnumVariantPayloadTy::Tuple(tys) => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Tuple(
-                                tys.iter().map(|t| apply_ty(subst, t)).collect(),
-                            )
-                        }
-                        crate::typechecking::ty::EnumVariantPayloadTy::Record(fields) => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Record(
-                                fields
-                                    .iter()
-                                    .map(|(n, t)| (n.clone(), apply_ty(subst, t)))
-                                    .collect(),
-                            )
-                        }
-                    };
-                    (n.clone(), new_payload)
-                })
-                .collect(),
-        },
-        Ty::Constructor { owner, tag, arity } => Ty::Constructor {
-            owner: Box::new(apply_ty(subst, owner)),
-            tag: *tag,
-            arity: *arity,
-        },
-        // length and field names are inert
-        Ty::Tuple(tys) => Ty::Tuple(tys.iter().map(|t| apply_ty(subst, t)).collect()),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(apply_ty(subst, element)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields
-                .iter()
-                .map(|(n, t)| (n.clone(), apply_ty(subst, t)))
-                .collect(),
-        },
-        Ty::Forall {
-            bounds,
-            constraints,
-            body,
-        } => {
+        // A `forall`'s own variables are not the substitution's.
+        Ty::Forall { bounds, .. } if bounds.iter().any(|b| subst.contains(*b)) => {
             let mut inner = subst.clone();
             for bound in bounds {
                 let _ = inner.remove(*bound);
             }
-            Ty::Forall {
-                bounds: bounds.clone(),
-                constraints: constraints
-                    .iter()
-                    .map(|c| super::ty::Constraint {
-                        class: c.class.clone(),
-                        args: c.args.iter().map(|a| apply_ty(&inner, a)).collect(),
-                    })
-                    .collect(),
-                body: Box::new(apply_ty(&inner, body)),
-            }
+            ty.map_children(|t| apply_ty(&inner, t))
         }
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(apply_ty(subst, inner))),
+        _ => ty.map_children(|t| apply_ty(subst, t)),
     }
 }
 
@@ -444,12 +389,6 @@ pub fn union(s1: &Subst, s2: &Subst) -> Subst {
         result.insert(v, t.clone());
     }
     result
-}
-
-/// Re-export of `ftv_ty` at the module level for ergonomics.
-#[allow(dead_code)]
-pub fn ftv(ty: &Ty) -> HashSet<TyVarId> {
-    ftv_ty(ty)
 }
 
 #[cfg(test)]

@@ -1289,25 +1289,11 @@ impl Generics {
     /// [`Self::find_instance`] miss. Concrete instances are never returned.
     pub fn find_generic_instance(&self, class: &str, args: &[Ty]) -> Option<&InstanceDef> {
         self.instances.iter().find(|inst| {
-            inst.args.iter().any(ty_has_var) && Self::instances_unify(class, args, inst)
+            inst.args.iter().any(Ty::has_var) && Self::instances_unify(class, args, inst)
         })
     }
 }
 
-fn ty_has_var(ty: &Ty) -> bool {
-    match ty {
-        Ty::Var(_) => true,
-        Ty::Fun(a, b) => ty_has_var(a) || ty_has_var(b),
-        Ty::App(h, args) => ty_has_var(h) || args.iter().any(ty_has_var),
-        Ty::Tuple(items) => items.iter().any(ty_has_var),
-        Ty::Readonly(inner) => ty_has_var(inner),
-        Ty::Array { element, .. } => ty_has_var(element),
-        Ty::Constructor { owner, .. } => ty_has_var(owner),
-        // A record shape's (`Length<{ x: a }>`, #1542).
-        Ty::Record { fields } => fields.iter().any(|(_, t)| ty_has_var(t)),
-        _ => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -332,105 +332,13 @@ pub fn instantiate_with_kinds(
                 .collect(),
         })
         .collect();
-    let _assoc_projections = scheme
-        .assoc_projections
-        .iter()
-        .map(|p| super::ty::AssocProjection {
-            var: mapping.get(&p.var).copied().unwrap_or(p.var),
-            name: p.name.clone(),
-            args: p
-                .args
-                .iter()
-                .map(|a| substitute_vars(a, &mapping))
-                .collect(),
-        })
-        .collect::<Vec<_>>();
     (ty, constraints, fresh_kinds)
 }
 
-/// Walk `ty`, replacing every variable in `mapping` with its mapped
+/// Walk `ty`, replacing every free variable in `mapping` with its mapped
 /// value. Variables not in the mapping are left alone.
 pub(crate) fn substitute_vars(ty: &Ty, mapping: &HashMap<TyVarId, TyVarId>) -> Ty {
-    match ty {
-        Ty::Var(v) => match mapping.get(v) {
-            Some(&new) => Ty::Var(new),
-            None => Ty::Var(*v),
-        },
-        Ty::Con(_) | Ty::Existential { .. } | Ty::Never => ty.clone(),
-        Ty::Fun(a, b) => Ty::Fun(
-            Box::new(substitute_vars(a, mapping)),
-            Box::new(substitute_vars(b, mapping)),
-        ),
-        Ty::App(c, args) => Ty::App(
-            Box::new(substitute_vars(c, mapping)),
-            args.iter().map(|t| substitute_vars(t, mapping)).collect(),
-        ),
-        Ty::Sum { name, variants } => Ty::Sum {
-            name: name.clone(),
-            variants: variants
-                .iter()
-                .map(|(n, payload)| {
-                    let new_payload = match payload {
-                        crate::typechecking::ty::EnumVariantPayloadTy::Unit => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Unit
-                        }
-                        crate::typechecking::ty::EnumVariantPayloadTy::Tuple(tys) => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Tuple(
-                                tys.iter().map(|t| substitute_vars(t, mapping)).collect(),
-                            )
-                        }
-                        crate::typechecking::ty::EnumVariantPayloadTy::Record(fields) => {
-                            crate::typechecking::ty::EnumVariantPayloadTy::Record(
-                                fields
-                                    .iter()
-                                    .map(|(n, t)| (n.clone(), substitute_vars(t, mapping)))
-                                    .collect(),
-                            )
-                        }
-                    };
-                    (n.clone(), new_payload)
-                })
-                .collect(),
-        },
-        Ty::Constructor { owner, tag, arity } => Ty::Constructor {
-            owner: Box::new(substitute_vars(owner, mapping)),
-            tag: *tag,
-            arity: *arity,
-        },
-        Ty::Tuple(tys) => Ty::Tuple(tys.iter().map(|t| substitute_vars(t, mapping)).collect()),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(substitute_vars(element, mapping)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields
-                .iter()
-                .map(|(n, t)| (n.clone(), substitute_vars(t, mapping)))
-                .collect(),
-        },
-        Ty::Forall {
-            bounds,
-            constraints,
-            body,
-        } => {
-            let mut inner = mapping.clone();
-            for bound in bounds {
-                inner.remove(bound);
-            }
-            Ty::Forall {
-                bounds: bounds.clone(),
-                constraints: constraints
-                    .iter()
-                    .map(|c| super::ty::Constraint {
-                        class: c.class.clone(),
-                        args: c.args.iter().map(|a| substitute_vars(a, &inner)).collect(),
-                    })
-                    .collect(),
-                body: Box::new(substitute_vars(body, &inner)),
-            }
-        }
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(substitute_vars(inner, mapping))),
-    }
+    ty.subst_vars(&|v| mapping.get(&v).map(|&new| Ty::Var(new)))
 }
 
 #[cfg(test)]

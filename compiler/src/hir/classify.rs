@@ -155,7 +155,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
 pub fn poly_fun(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Forall { .. } => true,
-        t @ Ty::Fun(..) => !crate::typechecking::subst::ftv(t).is_empty(),
+        t @ Ty::Fun(..) => t.has_free_var(),
         _ => false,
     }
 }
@@ -214,18 +214,8 @@ pub(super) fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, o
 /// open in one its shared layout.
 fn params_closed(ty: &Ty) -> bool {
     match strip_readonly(ty) {
-        Ty::Var(_) => true,
         Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-        Ty::Constructor { owner: inner, .. } => params_closed(inner),
-        Ty::App(_, args) => args.iter().all(params_closed),
-        Ty::Tuple(items) => items.iter().all(params_closed),
-        Ty::Record { fields } => fields.iter().all(|(_, f)| params_closed(f)),
-        Ty::Array { element, .. } => params_closed(element),
-        Ty::Sum { variants, .. } => variants
-            .iter()
-            .all(|(_, p)| p.field_types().into_iter().all(params_closed)),
-        Ty::Con(_) | Ty::Never => true,
-        Ty::Readonly(_) => unreachable!("stripped"),
+        t => t.all_children(params_closed),
     }
 }
 
@@ -244,7 +234,7 @@ fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, uni
 /// A monomorphic function type of plain words: its value is one closure
 /// word, stored in an aggregate as that word.
 pub(super) fn mono_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
-    matches!(strip_readonly(ty), Ty::Fun(..)) && crate::typechecking::subst::ftv(ty).is_empty() && fun_words(checker, ty, seen)
+    matches!(strip_readonly(ty), Ty::Fun(..)) && !ty.has_free_var() && fun_words(checker, ty, seen)
 }
 
 /// A function type over type parameters whose words are plain
@@ -308,7 +298,7 @@ fn closed_field(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
                 || common::is_builtin_option_enum(n)
                 || common::is_builtin_result_enum(n)) =>
         {
-            crate::typechecking::subst::ftv(ty).is_empty() && args.iter().all(|a| closed_field(checker, a, seen))
+            !ty.has_free_var() && args.iter().all(|a| closed_field(checker, a, seen))
         }
         _ => false,
     }
