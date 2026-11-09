@@ -37,6 +37,9 @@ enum Rep {
 const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
 /// Typed inlining rounds: the calls a round splices in inline in the next.
 const HIR_INLINE_ROUNDS: usize = 3;
+
+/// The entry of a lambda whose plan may still be thrown away.
+const UNLABELLED: IlLabel = crate::bodies::Label(u32::MAX);
 /// A helper partial inlining cut out of a callee ([`crate::hir::outline`]):
 /// its body, and the word layouts its calls pass and take.
 #[derive(Debug, Clone)]
@@ -731,7 +734,7 @@ impl Compiler {
             || !plan.ops.is_empty()
             || !plan.fn_refs.is_empty()
             || !plan.polyfns.is_empty()
-            || !plan.lambdas.is_empty()
+            || body.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. }))
             || !plan.statics.is_empty()
             || !plan.consts.is_empty()
             || !plan.par_loops.is_empty()
@@ -1384,7 +1387,7 @@ impl Compiler {
             self.hir_module = Some(module);
             return true;
         }
-        let plan = if let Err(reason) = &shapes {
+        let base = if let Err(reason) = &shapes {
             Some(*reason)
         } else if hir.result_mode != self.compiling_result_mode {
             // Method result mode is keyed by the bare name in the AST.
@@ -1395,108 +1398,72 @@ impl Compiler {
         .or_else(|| refusal::refusal(hir, &self.checker))
         .map_or_else(|| self.plan_hir_body(hir), Err)
         .and_then(|mut emit| self.plan_hir_lambdas(&module, hir, &mut emit).map(|()| emit));
-        // Typed inlining rewrites the body and plans it again; a body whose
-        // inlined form does not plan keeps its calls.
+        // The HIR passes rewrite the body, resolving its calls as they go,
+        // and the result is planned once. A rewrite that does not plan is
+        // made again with less in it ([`HirPasses`]), each time counted.
         let ground_was = self.hir_ground_splice.replace(false);
-        let mut inlined = None;
-        let plan = match plan {
-            Ok(mut emit) if self.hir_inline_on(hir) => {
-                // Calls inside spliced code inline in the next round, all
-                // rounds together adding at most `growth` nodes.
-                let growth = hir.exprs.len().max(64) * 4;
-                for _ in 0..HIR_INLINE_ROUNDS {
-                    let body = inlined.as_ref().unwrap_or(hir);
-                    let left = growth.saturating_sub(body.exprs.len() - hir.exprs.len());
-                    let Some((next, replanned)) = self.hir_inline_replan(&module, body, &emit, left) else {
+        let mut rewrite = None;
+        if let Ok(emit) = &base {
+            // Each step starts with the clone budget as the base plan left
+            // it: what a rewrite that is thrown away planned takes no room.
+            let room = self.planned_method_clones.borrow().clone();
+            let mut level = Some(HirPasses::Once);
+            while let Some(passes) = level {
+                self.hir_ground_splice.set(false);
+                self.planned_method_clones.borrow_mut().clone_from(&room);
+                match self.hir_rewrite(&module, hir, emit, passes) {
+                    Ok(done) => {
+                        rewrite = done;
                         break;
-                    };
-                    inlined = Some(next);
-                    emit = replanned;
-                }
-                Ok(emit)
-            }
-            plan => plan,
-        };
-        // Local enums split into a tag and field locals, and local tuples
-        // into element locals, when the split body plans.
-        let plan = match plan {
-            Ok(emit) if self.opt_options.escape_analysis && !self.debugger_attached && !hir.is_coro => {
-                let body = inlined.as_ref().unwrap_or(hir);
-                let enums = crate::hir::enum_sroa::scalarize(body, |n| !self.checker.enum_has_drop(n));
-                let tuples = crate::hir::tuple_sroa::scalarize(enums.as_ref().unwrap_or(body), |t| !Ty::has_var(t));
-                let split = tuples.or(enums);
-                let classes = crate::hir::readonly_sroa::scalarize(split.as_ref().unwrap_or(body), |name| self.hir_readonly_split_fields(name));
-                let split = classes.or(split);
-                match split {
-                    Some(next) => match refusal::refusal(&next, &self.checker)
-                        .map_or_else(|| self.plan_hir_body(&next), Err)
-                        .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
-                    {
-                        Ok(replanned) => {
-                            inlined = Some(next);
-                            Ok(replanned)
+                    }
+                    Err(failed) => {
+                        crate::opt::note_hir_inline_refused(failed.reason);
+                        level = passes.less(&failed);
+                        if level.is_none() {
+                            panic!("internal error: `{}` does not plan with its values split, folded and unrolled: {}", hir.name, failed.reason);
                         }
-                        Err(why) => panic!("internal error: `{}` does not plan with its local values split: {why}", hir.name),
-                    },
-                    None => Ok(emit),
+                    }
                 }
             }
-            plan => plan,
-        };
-        // Short counted loops unroll, constants fold and counted-loop index
-        // sites are proven in bounds, when the rewritten body plans. CSE and
-        // loop-invariant motion run on MIR (`mir::cse`, `mir::licm`).
-        let plan = match plan {
-            Ok(emit)
-                if (self.opt_options.loop_unroll
-                    || self.opt_options.algebraic
-                    || self.opt_options.loop_bounds
-                    || self.opt_options.sink_return)
-                    && !self.debugger_attached
-                    && !hir.is_coro =>
-            {
-                let body = inlined.as_ref().unwrap_or(hir);
-                let steady = |n: &str| crate::pure_call::name_in(&self.steady_fns, n);
-                let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
-                let body_u = unrolled.as_ref().unwrap_or(body);
-                let tabled = self.opt_options.algebraic.then(|| self.hir_fold_tables(body_u)).flatten();
-                let body_t = tabled.as_ref().unwrap_or(body_u);
-                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_t)).flatten();
-                let body_f = folded.as_ref().unwrap_or(body_t);
-                let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_f, steady)).flatten();
-                let body_b = bounds.as_ref().unwrap_or(body_f);
-                let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
-                match sunk.or(bounds).or(folded).or(tabled).or(unrolled) {
-                    Some(next) => match refusal::refusal(&next, &self.checker)
-                        .map_or_else(|| self.plan_hir_body(&next), Err)
-                        .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
-                    {
-                        Ok(replanned) => {
-                            inlined = Some(next);
-                            Ok(replanned)
-                        }
-                        Err(why) => panic!("internal error: `{}` does not plan unrolled and folded: {why}", hir.name),
-                    },
-                    None => Ok(emit),
-                }
-            }
-            plan => plan,
-        };
+        }
+        self.hir_ground_splice.set(ground_was);
         // Other modules splice core's `Option` / `Result` methods at their
         // calls' types, as built (before this body's own rewrites).
-        if plan.is_ok()
+        if base.is_ok()
             && let Some(key) = hir.name.strip_prefix("core::")
             && let Some(body) = self.hir_core_method_body(hir)
         {
             self.hir_core_methods.insert(key.to_string(), body);
         }
-        let hir = inlined.as_ref().unwrap_or(hir);
-        // Any module may splice this clone, as planned here, its calls
-        // resolved in this module's context.
+        let (plan, spliced, before_frees, freed) = match (base, rewrite) {
+            (Ok(base), Some(HirRewrite { body, freed, emit, before, spliced })) => {
+                // With frees alone, the body before them is `hir` as planned.
+                let before = before.or_else(|| (body.is_none() && freed.is_some()).then_some(base));
+                (Ok((emit, before)), spliced, body, freed)
+            }
+            (base, _) => (base.map(|emit| (emit, None)), Vec::new(), None, None),
+        };
+        let hir = before_frees.as_ref().unwrap_or(hir);
+        // What the kept rewrite spliced: its helpers, and for coverage
+        // the bodies now inside this one.
+        if plan.is_ok() && !spliced.is_empty() {
+            crate::opt::note_hir_inlined(spliced.len());
+            self.queue_outlined(hir);
+            for (name, (start, end)) in spliced {
+                // Another module's body is scalar code with no host call.
+                if !self.hir_fn_names.contains_key(&name) {
+                    continue;
+                }
+                let loc = self.loc_from_span(SimpleSpan::from(start..end));
+                self.inlined_bodies.push((loc.file, loc.start_byte as usize..loc.end_byte as usize, name));
+            }
+        }
+        // Any module may splice this clone, as resolved here before its
+        // frees, its calls resolved in this module's context.
         if self.compiling_mono_clone
-            && let Ok(emit) = &plan
+            && let Ok((emit, before)) = &plan
             && let Some(key) = self.current_function_table_key.clone()
-            && let Some(body) = self.hir_resolved_clone_body(hir, emit)
+            && let Some(body) = self.hir_resolved_clone_body(hir, before.as_ref().unwrap_or(emit))
         {
             self.hir_resolved_clones.insert(key, body);
         }
@@ -1507,54 +1474,12 @@ impl Compiler {
         {
             self.hir_portable.insert(key, portable);
         }
-        let mut freed = None;
-        // Objects the escape facts prove dead are freed at the end of
-        // their scope or after the call they were passed to, when the
-        // rewritten body plans (`feature/escape-memory` step 2). Other
-        // modules splice the body as it was before.
-        let plan = match plan {
-            Ok(emit) if self.opt_options.early_free && !self.debugger_attached && !hir.is_coro => {
-                let module_path = self.checker.current_module_name().to_string();
-                let hosts: HashMap<u32, usize> = emit
-                    .plan
-                    .calls
-                    .iter()
-                    .filter_map(|(&i, c)| match c.builtin {
-                        Some(HirBuiltin::Host(n)) => Some((i, n)),
-                        _ => None,
-                    })
-                    .collect();
-                let host = |id: HirId| hosts.get(&id.0).copied();
-                // A two-word local and a stack array have no object, nor
-                // has a value a temp would hold as two words.
-                let slots = crate::hir::effects::Slots {
-                    local: &|l| emit.plan.pair_locals.contains_key(&l.0) || emit.plan.stacks.contains_key(&l.0),
-                    value: &|id| {
-                        matches!(self.hir_natural(hir, &emit, id), Some(Rep::Pair(_)))
-                            || Self::hir_ty(hir, id).is_some_and(|ty| self.hir_pair_ty_kind(ty).is_some())
-                    },
-                };
-                match self.program_effects.early_frees(&self.checker, &module_path, &module, hir, &host, &slots) {
-                    Some(next) => match refusal::refusal(&next, &self.checker)
-                        .map_or_else(|| self.plan_hir_body(&next), Err)
-                        .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
-                    {
-                        Ok(replanned) => {
-                            freed = Some(next);
-                            Ok(replanned)
-                        }
-                        Err(_) => Ok(emit),
-                    },
-                    None => Ok(emit),
-                }
-            }
-            plan => plan,
-        };
+        let plan = plan.map(|(emit, _)| emit);
         let hir = freed.as_ref().unwrap_or(hir);
-        self.hir_ground_splice.set(ground_was);
         let plan = plan.and_then(|emit| hir_bisect(&hir.name, self.opt_options.hir_bisect).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
+                self.hir_label_lambdas(&mut emit);
                 if let Some(root) = hir.root {
                     // Early exits are laid out after the body.
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
@@ -2108,6 +2033,148 @@ impl Compiler {
         })
     }
 
+    /// `hir` after the HIR passes `passes` allows, planned once: typed
+    /// inlining (its calls resolved again after each round), the splits of
+    /// local enums, tuples and readonly classes, unrolling, folding, bounds
+    /// proofs and return sinking, then early frees. `base` is `hir`'s own
+    /// plan. `Ok(None)` when no pass changed the body; `Err` when the
+    /// rewritten body does not plan.
+    fn hir_rewrite(
+        &mut self,
+        module: &crate::hir::HirModule,
+        hir: &HirBody,
+        base: &HirEmit,
+        passes: HirPasses,
+    ) -> Result<Option<HirRewrite>, HirRewriteFail> {
+        let quiet = !self.debugger_attached && !hir.is_coro;
+        let mut body: Option<HirBody> = None;
+        // `body`'s calls, resolved, while no later pass has changed it.
+        let mut resolved: Option<HirEmit> = None;
+        let mut spliced = Vec::new();
+        if passes.inlines() && self.hir_inline_on(hir) {
+            // Calls inside spliced code inline in the next round, all
+            // rounds together adding at most `growth` nodes.
+            let growth = hir.exprs.len().max(64) * 4;
+            for _ in 0..HIR_INLINE_ROUNDS {
+                let at = body.as_ref().unwrap_or(hir);
+                let left = growth.saturating_sub(at.exprs.len() - hir.exprs.len());
+                let Some((next, calls, sites)) = self.hir_inline_round(module, at, resolved.as_ref().unwrap_or(base), left, passes == HirPasses::Checked) else {
+                    break;
+                };
+                body = Some(next);
+                resolved = Some(calls);
+                spliced.extend(sites);
+            }
+        }
+        // Local enums split into a tag and field locals, and local tuples
+        // into element locals.
+        if self.opt_options.escape_analysis && quiet {
+            let at = body.as_ref().unwrap_or(hir);
+            let enums = crate::hir::enum_sroa::scalarize(at, |n| !self.checker.enum_has_drop(n));
+            let tuples = crate::hir::tuple_sroa::scalarize(enums.as_ref().unwrap_or(at), |t| !Ty::has_var(t));
+            let split = tuples.or(enums);
+            let classes = crate::hir::readonly_sroa::scalarize(split.as_ref().unwrap_or(at), |name| self.hir_readonly_split_fields(name));
+            if let Some(next) = classes.or(split) {
+                body = Some(next);
+                resolved = None;
+            }
+        }
+        // Short counted loops unroll, constants fold and counted-loop index
+        // sites are proven in bounds. CSE and loop-invariant motion run on
+        // MIR (`mir::cse`, `mir::licm`).
+        if (self.opt_options.loop_unroll || self.opt_options.algebraic || self.opt_options.loop_bounds || self.opt_options.sink_return) && quiet {
+            let at = body.as_ref().unwrap_or(hir);
+            let steady = |n: &str| crate::pure_call::name_in(&self.steady_fns, n);
+            let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(at, self.opt_options.loop_unroll_factor)).flatten();
+            let body_u = unrolled.as_ref().unwrap_or(at);
+            let tabled = self.opt_options.algebraic.then(|| self.hir_fold_tables(body_u)).flatten();
+            let body_t = tabled.as_ref().unwrap_or(body_u);
+            let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_t)).flatten();
+            let body_f = folded.as_ref().unwrap_or(body_t);
+            let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_f, steady)).flatten();
+            let body_b = bounds.as_ref().unwrap_or(body_f);
+            let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
+            if let Some(next) = sunk.or(bounds).or(folded).or(tabled).or(unrolled) {
+                body = Some(next);
+                resolved = None;
+            }
+        }
+        let frees = passes.frees() && self.opt_options.early_free && quiet;
+        if body.is_none() && !frees {
+            return Ok(None);
+        }
+        let fail = |reason, freed: bool| HirRewriteFail { reason, inlined: !spliced.is_empty(), freed };
+        // The body's calls and local layouts before its frees: what early
+        // freeing asks about, and what other modules splice.
+        let mut before = match &body {
+            None => None,
+            Some(at) => {
+                let calls = match resolved {
+                    Some(calls) => Ok(calls),
+                    None => self.hir_fresh_room(|| self.hir_body_ret(at).and_then(|ret| self.hir_resolve(at, ret))),
+                };
+                Some(calls.and_then(|mut emit| self.plan_hir_local_layouts(at, &mut emit).map(|()| emit)).map_err(|why| fail(why, false))?)
+            }
+        };
+        // Objects the escape facts prove dead are freed at the end of
+        // their scope or after the call they were passed to
+        // (`feature/escape-memory` step 2). Other modules splice the body
+        // as it was before.
+        let freed = if frees {
+            let at = body.as_ref().unwrap_or(hir);
+            let emit = before.as_ref().unwrap_or(base);
+            let module_path = self.checker.current_module_name().to_string();
+            let hosts: HashMap<u32, usize> = emit
+                .plan
+                .calls
+                .iter()
+                .filter_map(|(&i, c)| match c.builtin {
+                    Some(HirBuiltin::Host(n)) => Some((i, n)),
+                    _ => None,
+                })
+                .collect();
+            let host = |id: HirId| hosts.get(&id.0).copied();
+            // A two-word local and a stack array have no object, nor
+            // has a value a temp would hold as two words.
+            let slots = crate::hir::effects::Slots {
+                local: &|l| emit.plan.pair_locals.contains_key(&l.0) || emit.plan.stacks.contains_key(&l.0),
+                value: &|id| {
+                    matches!(self.hir_natural(at, emit, id), Some(Rep::Pair(_)))
+                        || Self::hir_ty(at, id).is_some_and(|ty| self.hir_pair_ty_kind(ty).is_some())
+                },
+            };
+            self.program_effects.early_frees(&self.checker, &module_path, module, at, &host, &slots)
+        } else {
+            None
+        };
+        if body.is_none() && freed.is_none() {
+            return Ok(None);
+        }
+        let last = freed.as_ref().or(body.as_ref()).expect("a rewritten body");
+        let plan = match refusal::refusal(last, &self.checker) {
+            Some(why) => Err(why),
+            // With no frees, the calls are already resolved.
+            None if freed.is_none() => self.hir_plan_laid(last, before.take().expect("the body's calls")),
+            None => self.hir_fresh_room(|| self.plan_hir_body(last)),
+        };
+        let emit = plan
+            .and_then(|mut emit| self.plan_hir_lambdas(module, last, &mut emit).map(|()| emit))
+            .map_err(|why| fail(why, freed.is_some()))?;
+        Ok(Some(HirRewrite { body, freed, emit, before, spliced }))
+    }
+
+    /// Resolve or plan a rewritten body with the clone budget free of what
+    /// this body's earlier plans took: the clones the result calls are then
+    /// the ones holding room. One that fails gives the room back.
+    fn hir_fresh_room<T>(&self, plan: impl FnOnce() -> Result<T, &'static str>) -> Result<T, &'static str> {
+        let held = std::mem::take(&mut *self.planned_method_clones.borrow_mut());
+        let out = plan();
+        if out.is_err() {
+            *self.planned_method_clones.borrow_mut() = held;
+        }
+        out
+    }
+
     /// Whether typed inlining runs on `hir`: on, at an opt level that
     /// inlines, with no debugger or coverage run, and in a plain function
     /// or method.
@@ -2121,15 +2188,20 @@ impl Compiler {
             && matches!(hir.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test)
     }
 
-    /// Inline the eligible direct calls `emit` planned in `hir`, then plan
-    /// the result. `None` when nothing inlined or the result did not plan.
-    fn hir_inline_replan(
+    /// Inline the eligible direct calls `emit` resolved in `hir`, then
+    /// resolve the result's calls: the body, those, and the callee and call
+    /// span of each site spliced. A call splices where it stands when the
+    /// result's calls resolve (`checked`: when the result plans), else
+    /// ahead of its statement. `None` when nothing inlined or neither
+    /// result did.
+    fn hir_inline_round(
         &mut self,
         module: &crate::hir::HirModule,
         hir: &HirBody,
         emit: &HirEmit,
         growth: usize,
-    ) -> Option<(HirBody, HirEmit)> {
+        checked: bool,
+    ) -> Option<(HirBody, HirEmit, Spliced)> {
         use crate::hir::{BodyKind, inline};
         // The module path a body's names resolve in.
         let home = |b: &HirBody| {
@@ -2298,7 +2370,7 @@ impl Compiler {
         // cold arms cut out, when that makes it fit. Over the cost limit, a
         // panic (a `construct` [`inline::inlinable`] refuses) or, `cross`,
         // over the cross-module limit.
-        // One lifetime for the callee and its cut, the replan's own.
+        // One lifetime for the callee and its cut, the round's own.
         fn same<'b, F: Fn(HirId, &'b HirBody, bool, bool) -> Result<(&'b HirBody, inline::Shape), String>>(f: F) -> F {
             f
         }
@@ -2597,7 +2669,12 @@ impl Compiler {
         // callee of this module that cannot be spliced is reported once,
         // with why (E0807).
         let refused_inline: std::cell::RefCell<Vec<(crate::hir::Span, String, String)>> = Default::default();
+        // A site is asked about more than once, and by both splices.
+        let asked: std::cell::RefCell<HashMap<u32, Option<(&HirBody, inline::Shape)>>> = Default::default();
         let callee_of = |id: HirId| {
+            if let Some(known) = asked.borrow().get(&id.0) {
+                return known.clone();
+            }
             let found = callee_for(id).and_then(|(callee, shape)| {
                 let planned = emit.plan.calls.get(&id.0);
                 let never = callee.hints.never
@@ -2624,30 +2701,13 @@ impl Compiler {
                     refused_inline.borrow_mut().push((b.span, b.name.clone(), reason.clone()));
                 }
             }
-            found.ok()
+            let found = found.ok();
+            asked.borrow_mut().insert(id.0, found.clone());
+            found
         };
         // A body with no dictionaries plans a spliced clone body as the
         // clone would (`hir_ground_splice`), from here to its last plan.
         let ground_splice = self.hir_ground_splice.get() || (!self.compiling_mono_clone && !hir.is_generic && !method_clones.is_empty());
-        let plan = |this: &mut Self, body: &HirBody| {
-            this.outlined_plan(body);
-            let was = this.hir_ground_splice.replace(ground_splice);
-            let planned = refusal::refusal(body, &this.checker)
-                .map_or_else(|| this.plan_hir_body(body), Err)
-                .and_then(|mut emit| this.plan_hir_lambdas(module, body, &mut emit).map(|()| emit))
-                .and_then(|emit| {
-                    // A mono clone's instance call whose context came from
-                    // the generic body's bounds has no dictionary here.
-                    let open = emit.plan.calls.iter().any(|(&id, call)| {
-                        id as usize >= hir.exprs.len() && call.instance.as_ref().is_some_and(|i| i.args.iter().any(Ty::has_var))
-                    });
-                    if open { Err("inline-open-instance") } else { Ok(emit) }
-                });
-            if planned.is_err() {
-                this.hir_ground_splice.set(was);
-            }
-            planned
-        };
         let opaque = |id: HirId| emit.plan.lens.contains_key(&id.0);
         // A lambda local whose calls were all spliced is no longer built.
         let lambdas: Vec<LocalId> = lambda_calls
@@ -2665,41 +2725,74 @@ impl Compiler {
             Self::hir_spliced_copies(&mut b, &self.checker);
             (b, s)
         };
-        let inlined = inline::inline_calls(hir, callee_of, growth, true, opaque).map(unbuilt);
-        // A call spliced in place may sit where its `let`s cannot lower:
-        // then only the hoisted sites.
-        let hoisted = inlined.as_ref().and_then(|_| inline::inline_calls(hir, callee_of, growth, false, opaque).map(unbuilt));
+        // A call spliced in place may sit where the result does not
+        // resolve or plan: then only the hoisted sites.
+        let len = hir.exprs.len();
+        let in_place = inline::inline_calls(hir, callee_of, growth, true, opaque).map(unbuilt);
+        let found = if checked {
+            let hoisted = in_place.as_ref().and_then(|_| inline::inline_calls(hir, callee_of, growth, false, opaque).map(unbuilt));
+            let mut found = in_place.map(|(body, sites)| (self.hir_plan_spliced(module, len, &body, ground_splice), body, sites));
+            if !matches!(found, Some((Ok(_), ..)))
+                && let Some((body, sites)) = hoisted
+            {
+                found = Some((self.hir_plan_spliced(module, len, &body, ground_splice), body, sites));
+            }
+            found
+        } else {
+            let mut found = in_place.map(|(body, sites)| (self.hir_resolve_spliced(len, &body, ground_splice), body, sites));
+            if matches!(found, Some((Err(_), ..)))
+                && let Some((body, sites)) = inline::inline_calls(hir, callee_of, growth, false, opaque).map(unbuilt)
+            {
+                found = Some((self.hir_resolve_spliced(len, &body, ground_splice), body, sites));
+            }
+            found
+        };
         for (span, name, reason) in refused_inline.into_inner() {
             self.note_inline_refused(span, name, reason);
         }
-        let (mut body, mut spliced) = inlined?;
-        let mut replanned = plan(self, &body);
-        if replanned.is_err()
-            && let Some((b, s)) = hoisted
-        {
-            (body, spliced) = (b, s);
-            replanned = plan(self, &body);
-        }
-        let sites = spliced.len();
-        match replanned {
-            Ok(emit) => {
-                crate::opt::note_hir_inlined(sites);
-                self.queue_outlined(&body);
-                for (name, (start, end)) in spliced {
-                    // Another module's body is scalar code with no host call.
-                    if !self.hir_fn_names.contains_key(&name) {
-                        continue;
-                    }
-                    let loc = self.loc_from_span(SimpleSpan::from(start..end));
-                    self.inlined_bodies.push((loc.file, loc.start_byte as usize..loc.end_byte as usize, name));
-                }
-                Some((body, emit))
+        match found? {
+            (Ok(calls), body, sites) => {
+                // The helpers it calls plan as functions of their own.
+                self.outlined_plan(&body);
+                Some((body, calls, sites))
             }
-            Err(reason) => {
+            (Err(reason), ..) => {
                 crate::opt::note_hir_inline_refused(reason);
                 None
             }
         }
+    }
+
+    /// The resolved calls of `body`, a body of `len` nodes with calls
+    /// spliced into it; `ground`: one of them a ground method clone's
+    /// (`hir_ground_splice`, which then holds to the body's last plan).
+    fn hir_resolve_spliced(&self, len: usize, body: &HirBody, ground: bool) -> Result<HirEmit, &'static str> {
+        let was = self.hir_ground_splice.replace(ground);
+        let resolved = self.hir_fresh_room(|| {
+            self.hir_body_ret(body).and_then(|ret| self.hir_resolve(body, ret)).and_then(|emit| {
+                // A mono clone's instance call whose context came from
+                // the generic body's bounds has no dictionary here.
+                let open = emit.plan.calls.iter().any(|(&id, call)| {
+                    id as usize >= len && call.instance.as_ref().is_some_and(|i| i.args.iter().any(Ty::has_var))
+                });
+                if open { Err("inline-open-instance") } else { Ok(emit) }
+            })
+        });
+        if resolved.is_err() {
+            self.hir_ground_splice.set(was);
+        }
+        resolved
+    }
+
+    /// [`Self::hir_resolve_spliced`], once `body` plans as it is.
+    fn hir_plan_spliced(&mut self, module: &crate::hir::HirModule, len: usize, body: &HirBody, ground: bool) -> Result<HirEmit, &'static str> {
+        let was = self.hir_ground_splice.replace(ground);
+        let planned = self
+            .hir_fresh_room(|| refusal::refusal(body, &self.checker).map_or_else(|| self.plan_hir_body(body), Err))
+            .and_then(|mut emit| self.plan_hir_lambdas(module, body, &mut emit));
+        self.hir_ground_splice.set(was);
+        planned?;
+        self.hir_resolve_spliced(len, body, ground)
     }
 
     /// Tidy the copies splicing leaves behind, so a spliced view (or other
@@ -3926,11 +4019,32 @@ impl Compiler {
             }
             let mut plans = plans.into_iter();
             let plan = plans.next().expect("the lambda's plan");
-            let twin = plans.next().zip(twin_kind).map(|(p, k)| (p, self.bodies.fresh_label(), k));
-            let label = self.bodies.fresh_label();
+            // Entries are reserved for the plan that is kept
+            // ([`Self::hir_label_lambdas`]).
+            let twin = plans.next().zip(twin_kind).map(|(p, k)| (p, UNLABELLED, k));
+            let label = UNLABELLED;
             emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, twin, pair_captures }));
         }
         Ok(())
+    }
+
+    /// Reserve the entry of each lambda `emit` planned, and of its twin and
+    /// the lambdas inside it: the plan is the one the body lowers from.
+    fn hir_label_lambdas(&mut self, emit: &mut HirEmit) {
+        let mut ids: Vec<u32> = emit.plan.lambdas.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let mut lam = emit.plan.lambdas.remove(&id).expect("planned lambda");
+            if let Some(inner) = lam.emit.as_mut() {
+                self.hir_label_lambdas(inner);
+            }
+            if let Some((inner, label, _)) = lam.twin.as_mut() {
+                self.hir_label_lambdas(inner);
+                *label = self.bodies.fresh_label();
+            }
+            lam.label = self.bodies.fresh_label();
+            emit.plan.lambdas.insert(id, lam);
+        }
     }
 
     /// Each capture of `lam`, its first slot and, taken as two words, its
@@ -4011,7 +4125,26 @@ impl Compiler {
         })
     }
 
+    /// Plan `hir` returning `ret`: its calls ([`Self::hir_resolve`]), then
+    /// its locals and every value edge ([`Self::hir_plan_laid`]).
     fn plan_hir_body_ret(&self, hir: &HirBody, ret: Rep) -> Result<HirEmit, &'static str> {
+        let mut emit = self.hir_resolve(hir, ret)?;
+        self.plan_hir_local_layouts(hir, &mut emit)?;
+        self.hir_plan_checked(hir, emit)
+    }
+
+    /// The plan of `hir` from its resolved calls and local layouts `emit`.
+    fn hir_plan_laid(&self, hir: &HirBody, emit: HirEmit) -> Result<HirEmit, &'static str> {
+        let emit = self.hir_plan_checked(hir, emit)?;
+        #[cfg(test)]
+        self.check_resolved_replan(hir, &emit);
+        Ok(emit)
+    }
+
+    /// What each node of `hir` names, with no value edge checked: its
+    /// calls and operators resolved, its globals as statics, constants and
+    /// function values. A clone a call needs is planned here.
+    fn hir_resolve(&self, hir: &HirBody, ret: Rep) -> Result<HirEmit, &'static str> {
         let mut emit = HirEmit {
             plan: HirPlan {
                 calls: HashMap::new(),
@@ -4188,7 +4321,12 @@ impl Compiler {
                 emit.plan.calls.insert(i as u32, call);
             }
         }
-        self.plan_hir_local_layouts(hir, &mut emit)?;
+        Ok(emit)
+    }
+
+    /// `emit` with `hir`'s tail calls marked, once every value edge is
+    /// checked against it.
+    fn hir_plan_checked(&self, hir: &HirBody, mut emit: HirEmit) -> Result<HirEmit, &'static str> {
         let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
         let tail = |value: HirId| {
             emit.plan.calls.get(&value.0).is_some_and(|call| {
@@ -5249,9 +5387,10 @@ impl Compiler {
         self.hir_request_method_clone(key);
     }
 
-    /// Plan each plain (non-generic, non-method) function body of the
-    /// module being compiled in a frame of its parameters, for the method
-    /// clones its calls record ([`Self::queue_early_foreign_clones`]).
+    /// Resolve the calls of each plain (non-generic, non-method) function
+    /// body of the module being compiled in a frame of its parameters, for
+    /// the method clones they record ([`Self::queue_early_foreign_clones`]).
+    /// No local is laid out and no value edge checked.
     pub(super) fn hir_plan_bodies_for_clones(&mut self) {
         let Some(module) = self.hir_module.take() else {
             return;
@@ -5266,7 +5405,7 @@ impl Compiler {
             }
             let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(body));
             let ret = Rep::Word(body.ret.as_ref().map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
-            let _ = self.plan_hir_body_ret(body, ret);
+            let _ = self.hir_resolve(body, ret);
             self.hir_body_frame = outer;
         }
         self.planning_for_clones = false;
@@ -10705,6 +10844,67 @@ impl Compiler {
 /// `limit` (`COIL_HIR_BISECT=N`, [`crate::opt::OptimizeOptions::hir_bisect`])
 /// lowers only the first `N` bodies the plan admits (per process) and names
 /// the `N`th on stderr, to bisect a miscompile.
+/// How much the HIR passes may rewrite a body ([`Compiler::hir_rewrite`]).
+/// A rewrite that does not plan is made again one step down.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HirPasses {
+    /// Every pass, the result planned once.
+    Once,
+    /// Every pass, each inlining round planned as it is made: a round
+    /// that does not plan is left out, and the rounds before it stay.
+    Checked,
+    /// No inlining.
+    NoInline,
+    /// No inlining and no early frees.
+    NoFrees,
+}
+
+impl HirPasses {
+    fn inlines(self) -> bool {
+        matches!(self, HirPasses::Once | HirPasses::Checked)
+    }
+
+    fn frees(self) -> bool {
+        self != HirPasses::NoFrees
+    }
+
+    /// The next step down that leaves out something `failed` had in it;
+    /// `None` when there is none (the splits and folds alone must plan).
+    fn less(self, failed: &HirRewriteFail) -> Option<HirPasses> {
+        match self {
+            HirPasses::Once if failed.inlined => Some(HirPasses::Checked),
+            HirPasses::Checked if failed.inlined => Some(HirPasses::NoInline),
+            HirPasses::NoFrees => None,
+            _ if failed.freed => Some(HirPasses::NoFrees),
+            _ => None,
+        }
+    }
+}
+
+/// A body the HIR passes rewrote, planned ([`Compiler::hir_rewrite`]).
+struct HirRewrite {
+    /// The body before its early frees, when a pass changed it.
+    body: Option<HirBody>,
+    /// The body with its early frees, when it has any.
+    freed: Option<HirBody>,
+    /// The plan of the last of them.
+    emit: HirEmit,
+    /// `body`'s calls and local layouts, when `emit` is `freed`'s plan.
+    before: Option<HirEmit>,
+    /// The callee and call span of each site inlining spliced.
+    spliced: Spliced,
+}
+
+/// The callee and call span of each site an inlining round spliced.
+type Spliced = Vec<(String, crate::hir::Span)>;
+
+/// A rewritten body that does not plan: why, and what was in it.
+struct HirRewriteFail {
+    reason: &'static str,
+    inlined: bool,
+    freed: bool,
+}
+
 fn hir_bisect(name: &str, limit: Option<usize>) -> bool {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SEEN: AtomicUsize = AtomicUsize::new(0);

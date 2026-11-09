@@ -13,7 +13,7 @@
 //! callee's statements ahead of the enclosing statement, which keeps the
 //! evaluation order; a call evaluated with no operand below it otherwise
 //! runs in place as a block value. Calls inside inlined code inline in the
-//! next round (`Compiler::hir_inline_replan`).
+//! next round (`Compiler::hir_inline_round`).
 
 use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, HirPatFields, LocalId, LocalKind};
 use super::{BinOp, BodyKind, Builtin, Lit};

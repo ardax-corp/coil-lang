@@ -1,4 +1,4 @@
-//! Typed inlining budgets (`Compiler::hir_inline_replan`).
+//! Typed inlining budgets (`Compiler::hir_inline_round`).
 
 /// How large a callee typed inlining may splice.
 #[derive(Clone, Debug)]
