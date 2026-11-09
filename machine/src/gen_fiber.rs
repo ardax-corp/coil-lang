@@ -59,8 +59,6 @@ pub(crate) fn finish(coro: RefCoroutine) {
     let c = coro.payload_mut();
     c.state = CoroState::Done;
     c.saved_stack.clear();
-    c.saved_frames.clear();
-    c.yield_from = None;
 }
 
 fn with_mut(coro: RefCoroutine, f: impl FnOnce(&mut ObjCoroutine)) {
@@ -180,7 +178,7 @@ fn step_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) ->
         }
         None => {
             let coro = gc.as_ref();
-            if coro.started || coro.state != CoroState::Suspended || coro.yield_from.is_some() {
+            if coro.started || coro.state != CoroState::Suspended {
                 return None;
             }
             let table = h.rt().native.as_deref_mut()?;
@@ -213,7 +211,6 @@ fn step_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) ->
             with_mut(gc, |c| {
                 c.saved_stack = words;
                 c.saved_live_mask = mask;
-                c.saved_frames.clear();
                 c.state = CoroState::Suspended;
                 c.native = Some(Box::new(crate::native::GenFiber::parked(call)));
             });
@@ -284,7 +281,6 @@ fn step_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> 
             with_mut(gc, |c| {
                 c.saved_stack = words;
                 c.saved_live_mask = mask;
-                c.saved_frames.clear();
                 c.state = CoroState::Suspended;
                 c.native = Some(fiber);
             });
@@ -319,7 +315,7 @@ fn step_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> 
 #[cfg(not(target_family = "wasm"))]
 fn new_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Box<crate::native::GenFiber>> {
     let coro = gc.as_ref();
-    if coro.started || coro.state != CoroState::Suspended || coro.yield_from.is_some() {
+    if coro.started || coro.state != CoroState::Suspended {
         return None;
     }
     let switches = h.rt().sched.is_some() && !h.switches_in_fibers();

@@ -18,8 +18,6 @@ stacker = "0.1.25"
 sha2 = "0.10"
 
 [dev-dependencies]
-# Lib tests format `Instruction`/`Byte` with Debug, also under `--release` (#1455).
-common = { path = "../common", features = ["debug-fmt"] }
 machine = { path = "../machine", default-features = false }
 # Integration tests run programs on the MIR interpreter, and user and
 # built-in derive macros at compile time. These crates depend on `compiler`.

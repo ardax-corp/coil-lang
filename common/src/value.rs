@@ -204,14 +204,12 @@ impl Value {
     }
 }
 
-#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0 as Storage,)
     }
 }
 
-#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0 as Storage,)

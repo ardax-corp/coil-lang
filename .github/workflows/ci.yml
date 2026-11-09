@@ -286,16 +286,14 @@ jobs:
 
       - name: Release compiler lib tests build (#1455)
         run: |
-          # Lib tests must compile without debug_assertions (cfg-gated Debug
-          # impls in `common`); build only.
+          # Lib tests must compile without debug_assertions; build only.
           CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p compiler --lib --no-run
 
       - name: Release machine lib tests (#1686)
         run: |
-          # Same profile as the step above, without debug_assertions; the
-          # dev-dependency on `common/debug-fmt` supplies the Debug impls.
+          # Same profile as the step above, without debug_assertions.
           CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p machine --lib
