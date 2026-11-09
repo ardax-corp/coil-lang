@@ -1121,19 +1121,9 @@ fn push_io_native(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(
         return;
     }
     let native = match kind {
-        // Stdio handles are `() -> Stream` (not Result).
-        IoKind::Stdin => io_closure(sig, move |heap, args| {
-            let v = stream_stdin(heap).unwrap_or_default();
-            Ok(Some(v))
-        }),
-        IoKind::Stdout => io_closure(sig, move |heap, args| {
-            let v = stream_stdout(heap).unwrap_or_default();
-            Ok(Some(v))
-        }),
-        IoKind::Stderr => io_closure(sig, move |heap, args| {
-            let v = stream_stderr(heap).unwrap_or_default();
-            Ok(Some(v))
-        }),
+        IoKind::Stdin | IoKind::Stdout | IoKind::Stderr | IoKind::ToBytes | IoKind::FromBytes => {
+            unreachable!("a direct native")
+        }
         IoKind::Open => io_closure(sig, move |heap, args| {
             let v = {
                 let path = match value_as_string(heap, args[0]) {
@@ -1189,17 +1179,6 @@ fn push_io_native(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(
             Ok(Some(v))
         }),
         IoKind::Drive => io_closure(sig, move |heap, args| Ok(Some(io_drive(heap)))),
-        IoKind::FromBytes => io_closure(sig, move |heap, args| {
-            let v = {
-                let r = from_bytes(heap, args[0]);
-                crate::str_bytes::as_string_result_value(heap, r)
-            };
-            Ok(Some(v))
-        }),
-        IoKind::ToBytes => io_closure(sig, move |heap, args| {
-            let v = to_bytes(heap, args[0]);
-            Ok(Some(v))
-        }),
         IoKind::TcpConnect => io_closure(sig, move |heap, args| {
             let v = {
                 let host = match value_as_string(heap, args[0]) {
