@@ -1,14 +1,11 @@
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet, VecDeque},
-    fs::File,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
-use common::{
-    decode_archived_program, ArchivedProgram, ProgramDebug, ARCHIVE_VERSION,
-};
+use common::ProgramDebug;
 use parser::{ast::Expression, Pratt, SimpleSpan};
 use reporting::{
     create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
@@ -28,9 +25,6 @@ mod contracts;
 #[path = "pipeline_contract_tests.rs"]
 mod contract_tests;
 pub use contract_tests::CASE_PREFIX as CONTRACT_CASE_PREFIX;
-
-/// Code, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
-type RunArtifacts = (Vec<u64>, Vec<String>, u32, ProgramDebug);
 
 /// Compile failed. Diagnostics are already on the pipeline; the error carries no extra payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1455,77 +1449,6 @@ impl Pipeline {
         compiler.emit_foreign_clones(&asts);
     }
 
-    pub fn compile(mut self, filename: String, output: String) {
-        let _capture = self.comptime_capture();
-        // Seed the worklist with the entry file. The
-        // entry is treated specially (top-level
-        // namespace), see `compile_file`.
-        let entry = PathBuf::from(&filename);
-        self.entry_file = Some(entry.clone());
-        self.begin_compile_opt_stats();
-        self.enqueue_file(entry);
-
-        // Discovery pass: walk the dependency graph
-        // transitively, enqueueing every referenced
-        // file. We re-process the worklist, parsing
-        // each file's AST to find its `use`/`mod`
-        // declarations, but NOT compiling yet. This
-        // builds the complete worklist so that the
-        // compilation pass can run in dependency
-        // order (dependencies first).
-        self.discover_all();
-        self.expand_user_macros();
-
-        // Compilation pass: topo-sort on `use`/`mod` edges
-        // (see `worklist_in_dependency_order`). Discovery's
-        // scan rotation invalidates plain LIFO `pop_back`.
-        self.compile_discovered_modules();
-
-        if self.failed || !self.check_capabilities() {
-            return;
-        }
-
-        // `finalize_bodies` tree-shakes and links the bodies.
-        // No post-lower peephole; production abs JMP is rejected in lower.
-        self.compiler_lazy_mut().finalize_bodies();
-        self.compute_consts(None);
-        if self.failed || self.had_errors() {
-            return;
-        }
-
-        // Wrap the code in the versioned `ArchivedProgram` envelope
-        // so that older `.ccoil` files can be rejected at load time via
-        // `version` mismatch (see `Pipeline::run`).
-        let debug = self.program_debug_full();
-        let level = self.debug_level();
-        let mut program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: self.compiler_lazy().static_slot_count(),
-            constants: self.compiler_lazy().constants().to_vec(),
-            strings: self.compiler_lazy().strings().to_vec(),
-            source_files: Vec::new(),
-            debug_locs: Vec::new(),
-            fn_symbols: Vec::new(),
-            struct_layouts: self.archived_struct_layouts(),
-            class_word_kinds: self.class_word_kinds(),
-            static_word_kinds: self.static_word_kinds(),
-            debug_lines: Vec::new(),
-            native_mir: Vec::new(),
-            startup: self.startup(),
-            main: self.main_offset(),
-        };
-        program.set_debug(debug, level);
-
-        let mut out = File::create(output).expect("Unable to open output file");
-        let _ = out
-            .write(
-                rkyv::to_bytes::<rkyv::rancor::Error>(&program)
-                    .unwrap()
-                    .as_slice(),
-            )
-            .expect("Unable to write compiled output to file");
-    }
-
     /// Compile a parsed AST and return the code.
     ///
     /// Does **not** emit when the checker rejected the program (B2).
@@ -2311,31 +2234,6 @@ impl Pipeline {
     }
 
 
-    pub fn run(
-        self,
-        filename: String,
-    ) -> Result<RunArtifacts, CompileFail> {
-        let mut f = File::open(filename).expect("Unable to find file");
-        let mut buffer = Vec::with_capacity(1024);
-        f.read_to_end(&mut buffer).expect("Unable to read file");
-
-        let program = decode_archived_program(&buffer).map_err(|_| CompileFail)?;
-
-        if self.failed {
-            return Err(CompileFail);
-        }
-
-        let debug = ProgramDebug {
-            fn_symbols: self.compiler_lazy().fn_debug_symbols(),
-            ..program.debug_bundle()
-        };
-        Ok((
-            program.constants,
-            program.strings,
-            program.static_slot_count,
-            debug,
-        ))
-    }
 }
 
 /// Hand the allocator's free pages back to the OS. glibc keeps a phase's
