@@ -3155,7 +3155,6 @@ impl Walk<'_> {
     }
 }
 
-/// Fallback reason for a node kind the lowering does not take.
 #[cfg(test)]
 #[path = "lower.tests.rs"]
 mod tests;
