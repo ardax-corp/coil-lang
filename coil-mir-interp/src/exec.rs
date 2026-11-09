@@ -187,44 +187,29 @@ fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> u8 {
     common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w))))
 }
 
-/// `a op b` on ints: `Err` is the trap.
+/// `a op b` on ints, as [`common::int_arith`] defines it (and the constant
+/// folders fold it): `Err` is the trap.
 #[inline(always)]
 fn ibin(op: MirBinOp, a: i64, b: i64) -> Result<i64, u64> {
-    Ok(match op {
-        MirBinOp::Add => a.checked_add(b).ok_or(TRAP_OVERFLOW)?,
-        MirBinOp::Sub => a.checked_sub(b).ok_or(TRAP_OVERFLOW)?,
-        MirBinOp::Mul => a.checked_mul(b).ok_or(TRAP_OVERFLOW)?,
-        MirBinOp::Div => {
-            if b == 0 {
-                return Err(TRAP_DIV_ZERO);
-            }
-            a.checked_div(b).ok_or(TRAP_OVERFLOW)?
-        }
-        MirBinOp::Rem => {
-            if b == 0 {
-                return Err(TRAP_DIV_ZERO);
-            }
-            // `x % -1` is 0, `MIN` included.
-            a.wrapping_rem(b)
-        }
-        MirBinOp::BitAnd => a & b,
-        MirBinOp::BitOr => a | b,
-        MirBinOp::Xor => a ^ b,
-        MirBinOp::Shl | MirBinOp::Shr => {
-            if b as u64 >= 64 {
-                return Err(TRAP_SHIFT);
-            }
-            if op == MirBinOp::Shl { a << b } else { a >> b }
-        }
-        MirBinOp::Pow => {
-            let mut out = 0i64;
-            // SAFETY: `out` is a live word.
-            match unsafe { rt::coil_native_ipow(a, b, &raw mut out) } {
-                0 => out,
-                c if c as u64 == TRAP_NEGATIVE_EXPONENT => return Err(TRAP_NEGATIVE_EXPONENT),
-                _ => return Err(TRAP_OVERFLOW),
-            }
-        }
+    use common::int_arith::{self as ia, IntTrap};
+    let r = match op {
+        MirBinOp::Add => ia::add(a, b),
+        MirBinOp::Sub => ia::sub(a, b),
+        MirBinOp::Mul => ia::mul(a, b),
+        MirBinOp::Div => ia::div(a, b),
+        MirBinOp::Rem => ia::rem(a, b),
+        MirBinOp::Shl => ia::shl(a, b),
+        MirBinOp::Shr => ia::shr(a, b),
+        MirBinOp::Pow => ia::pow(a, b),
+        MirBinOp::BitAnd => Ok(a & b),
+        MirBinOp::BitOr => Ok(a | b),
+        MirBinOp::Xor => Ok(a ^ b),
+    };
+    r.map_err(|t| match t {
+        IntTrap::Overflow => TRAP_OVERFLOW,
+        IntTrap::DivByZero => TRAP_DIV_ZERO,
+        IntTrap::NegativeExponent => TRAP_NEGATIVE_EXPONENT,
+        IntTrap::ShiftOutOfRange => TRAP_SHIFT,
     })
 }
 
