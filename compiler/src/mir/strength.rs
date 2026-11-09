@@ -320,7 +320,7 @@ fn materialize_product(
     let a = coerce_to(func, pre, a, ty)?;
     let b = coerce_to(func, pre, b, ty)?;
     if let (Some(ca), Some(cb)) = (func.const_of(a), func.const_of(b))
-        && let Some(c) = fold_mul(ty, ca, cb) {
+        && let Some(c) = super::instcombine::eval_bin(MirBinOp::Mul, ty, ca, cb) {
             return Some(insert_const(func, pre, c));
         }
     if is_one_const(func, a) {
@@ -457,16 +457,6 @@ fn zero_const(ty: MirTy) -> MirConst {
         MirTy::I64 => MirConst::I64(0),
         MirTy::F64 => MirConst::f64(0.0),
         _ => MirConst::I64(0),
-    }
-}
-
-fn fold_mul(ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
-    match (ty, a, b) {
-        (MirTy::I64, MirConst::I64(x), MirConst::I64(y)) => Some(MirConst::I64(x.checked_mul(y)?)),
-        (MirTy::F64, MirConst::F64(x), MirConst::F64(y)) => {
-            Some(MirConst::f64(f64::from_bits(x) * f64::from_bits(y)))
-        }
-        _ => None,
     }
 }
 

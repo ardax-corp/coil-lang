@@ -622,7 +622,8 @@ fn is_int_minus_one(ty: MirTy, c: Option<MirConst>) -> bool {
     matches!((ty, c), (MirTy::I64, Some(MirConst::I64(-1))))
 }
 
-fn eval_bin(op: MirBinOp, ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
+/// `a op b` on constants of `ty`, unless it would trap at run time.
+pub(super) fn eval_bin(op: MirBinOp, ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
     match ty {
         MirTy::I64 => {
             let (MirConst::I64(x), MirConst::I64(y)) = (a, b) else {
