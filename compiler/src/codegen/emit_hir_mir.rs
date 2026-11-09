@@ -321,7 +321,7 @@ impl Compiler {
             HirKind::Builtin { op: Builtin::TypeOf, .. } => return,
             _ => {}
         }
-        for k in lower::children(hir, id) {
+        for k in hir.children(id) {
             walk(k, true, defer, bound);
         }
     }
@@ -453,7 +453,7 @@ impl Compiler {
             t.reads_dicts = self.hir_mir_dict_reads(hir, emit, id);
         }
         let kids = self.hir_mir_note(hir, emit, id, t);
-        let all = lower::children(hir, id);
+        let all: Vec<HirId> = hir.children(id).collect();
         let kids = match kids {
             Kids::All => &all[..],
             Kids::None => &[],
@@ -2104,7 +2104,7 @@ impl Compiler {
             // The operand's type name; the operand is not evaluated.
             HirKind::Builtin { op: Builtin::TypeOf, .. } => {}
             _ => {
-                for k in lower::children(hir, id) {
+                for k in hir.children(id) {
                     self.hir_plan_par_walk(hir, emit, k, bound);
                 }
             }

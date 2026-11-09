@@ -553,7 +553,7 @@ pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLook
         let mut work = vec![inner];
         while let Some(at) = work.pop() {
             if inside.insert(at) {
-                work.extend(crate::hir::lower::children(body, at));
+                work.extend(body.children(at));
             }
         }
         let mut declared = std::collections::HashSet::new();

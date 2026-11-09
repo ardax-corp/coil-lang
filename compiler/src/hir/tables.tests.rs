@@ -36,7 +36,7 @@ fn count(body: &HirBody, pick: impl Fn(&HirKind) -> bool) -> usize {
     let mut stack = vec![body.root.expect("root")];
     while let Some(id) = stack.pop() {
         n += usize::from(pick(&body.expr(id).kind));
-        stack.extend(children(body, id));
+        stack.extend(body.children(id));
     }
     n
 }

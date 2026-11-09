@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 
 use super::inline::map_ids;
-use super::lower::children;
 use super::{BinOp, HirBody, HirExpr, HirId, HirKind, Lit, LocalId};
 
 /// Most trips a loop may have to unroll.
@@ -130,7 +129,7 @@ fn find(body: &HirBody, id: HirId, factor: i64, out: &mut Vec<Found>) {
         }
         return;
     }
-    for k in children(body, id) {
+    for k in body.children(id) {
         find(body, k, factor, out);
     }
 }
@@ -171,7 +170,7 @@ fn counted(body: &HirBody, s: HirId, before: &[HirId]) -> Option<Found> {
         return None;
     }
     let mut size = 0;
-    visit(body, then, &mut |_| size += 1);
+    body.visit_ids(then, &mut |_| size += 1);
     (size * trips as usize <= MAX_GROWTH).then_some(Found { lp: s, then, i, start, trips })
 }
 
@@ -210,7 +209,7 @@ fn plain(body: &HirBody, then: HirId, i: LocalId) -> bool {
         }
     }
     let mut ok = bumps == 1;
-    visit(body, then, &mut |k| {
+    body.visit_ids(then, &mut |k| {
         ok &= !matches!(
             body.expr(k).kind,
             HirKind::Loop { .. }
@@ -244,7 +243,7 @@ fn bump(body: &HirBody, s: HirId, i: LocalId) -> bool {
 /// Whether anything under `id` may write `i`.
 fn writes(body: &HirBody, id: HirId, i: LocalId) -> bool {
     let mut out = false;
-    visit(body, id, &mut |k| {
+    body.visit_ids(id, &mut |k| {
         out |= match &body.expr(k).kind {
             HirKind::Assign { place, .. } | HirKind::Append { base: place, .. } => {
                 matches!(body.expr(*place).kind, HirKind::Local(l) if l == i)
@@ -266,20 +265,13 @@ fn copy(body: &mut HirBody, id: HirId, i: LocalId, v: i64) -> HirId {
         return lit(body, id, v);
     }
     let mut map = HashMap::new();
-    for k in children(body, id) {
+    for k in body.children(id).collect::<Vec<_>>() {
         map.insert(k, copy(body, k, i, v));
     }
     let mut e = body.expr(id).clone();
     e.kind = map_ids(&e.kind, &|x| map.get(&x).copied().unwrap_or(x), &|l| l);
     e.node = None;
     push(body, e)
-}
-
-fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(HirId)) {
-    f(id);
-    for k in children(body, id) {
-        visit(body, k, f);
-    }
 }
 
 #[cfg(test)]

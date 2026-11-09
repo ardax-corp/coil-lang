@@ -405,11 +405,11 @@ fn defer_body_refused(body: &HirBody, id: HirId, loops: usize) -> bool {
         HirKind::Loop { .. } | HirKind::ForIn { .. } => loops + 1,
         _ => loops,
     };
-    children(body, id).into_iter().any(|k| defer_body_refused(body, k, loops))
+    body.children(id).any(|k| defer_body_refused(body, k, loops))
 }
 
 fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
-    f(id) || children(body, id).into_iter().any(|k| any_id(body, k, f))
+    f(id) || body.children(id).any(|k| any_id(body, k, f))
 }
 
 /// The stack arrays of `body`: each `let a = [..]` with 1..=32 items, or
@@ -832,7 +832,7 @@ pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
 /// `new` or string index anywhere inside it.
 pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool {
     let mut found = false;
-    visit(body, id, &mut |e| {
+    body.visit(id, &mut |e| {
         found |= stack_select(body, stack, e) || matches!(
             &e.kind,
             HirKind::Call { .. }
@@ -951,7 +951,7 @@ pub fn aggregate_packed(info: &AggregateArithInfo) -> Option<usize> {
 pub fn index_stages(body: &HirBody, stack: &HashMap<u32, usize>, args: &[HirId]) -> bool {
     args.iter().skip(1).any(|&arg| {
         let mut found = false;
-        visit(body, arg, &mut |e| found |= staged_read(body, stack, e));
+        body.visit(arg, &mut |e| found |= staged_read(body, stack, e));
         found
     })
 }
@@ -980,7 +980,7 @@ pub fn stray_jumps(module: &super::HirModule, body: &HirBody) -> Vec<(HirId, boo
             }
             kind => {
                 let inner = loops + u32::from(matches!(kind, HirKind::Loop { .. } | HirKind::ForIn { .. }));
-                for k in children(body, id) {
+                for k in body.children(id) {
                     walk(module, body, k, inner, out);
                 }
             }
@@ -1100,7 +1100,7 @@ pub fn unassigned_reads(module: &super::HirModule, body: &HirBody) -> Vec<HirId>
                     None
                 }
                 _ => {
-                    let kids = children(self.body, id);
+                    let kids: Vec<HirId> = self.body.children(id).collect();
                     self.seq(&kids, s)
                 }
             }
@@ -1111,14 +1111,6 @@ pub fn unassigned_reads(module: &super::HirModule, body: &HirBody) -> Vec<HirId>
         let _ = flow.flow(root, BTreeSet::new());
     }
     flow.out
-}
-
-/// Every node of `id`'s subtree, `id` first.
-pub(crate) fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
-    f(body.expr(id));
-    for k in children(body, id) {
-        visit(body, k, f);
-    }
 }
 
 /// Whether `id` always leaves the function by `return`.
@@ -1143,7 +1135,7 @@ pub(crate) fn cold_exit(body: &HirBody, id: HirId) -> bool {
 /// `id`'s subtree.
 pub(crate) fn plain(body: &HirBody, id: HirId) -> bool {
     let mut plain = true;
-    visit(body, id, &mut |e| {
+    body.visit(id, &mut |e| {
         plain &= !matches!(
             e.kind,
             HirKind::Loop { .. }
@@ -1158,39 +1150,6 @@ pub(crate) fn plain(body: &HirBody, id: HirId) -> bool {
         );
     });
     plain
-}
-
-/// The direct subexpressions of `id`.
-pub(crate) fn children(body: &HirBody, id: HirId) -> Vec<HirId> {
-    let e = body.expr(id);
-    let mut kids: Vec<HirId> = Vec::new();
-    match &e.kind {
-        HirKind::Field { base, .. } => kids.push(*base),
-        HirKind::Index { base, index, .. } => kids.extend([*base, *index]),
-        HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => kids.extend([*lhs, *rhs]),
-        HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => kids.push(*operand),
-        HirKind::Call { callee, args } => {
-            if let Callee::Value(v) = callee {
-                kids.push(*v);
-            }
-            kids.extend(args);
-        }
-        HirKind::Named { value, .. } | HirKind::Spread(value) => kids.push(*value),
-        HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => kids.extend(args),
-        HirKind::Block { stmts, tail } => kids.extend(stmts.iter().chain(tail)),
-        HirKind::Let { init, .. } => kids.extend(init),
-        HirKind::LetPat { init, .. } => kids.push(*init),
-        HirKind::Assign { place, value } | HirKind::Append { base: place, value } => kids.extend([*place, *value]),
-        HirKind::If { cond, then, els } => kids.extend([*cond, *then].into_iter().chain(*els)),
-        HirKind::Loop { body: b } | HirKind::Defer { body: b, .. } => kids.push(*b),
-        HirKind::ForIn { iterable, body: b, .. } => kids.extend([*iterable, *b]),
-        HirKind::Return(v) => kids.extend(v),
-        HirKind::Match { scrutinee, arms } => kids.extend(std::iter::once(*scrutinee).chain(arms.iter().map(|a| a.body))),
-        HirKind::Yield { value, .. } => kids.push(*value),
-        HirKind::Resume { handle, value } => kids.extend(std::iter::once(*handle).chain(*value)),
-        _ => {}
-    }
-    kids
 }
 
 /// `a && b` / `a || b` may evaluate `b` eagerly (one `AND` / `OR`, no
@@ -1426,20 +1385,20 @@ pub fn unrolled_range(hir: &HirBody, iterable: HirId, body: HirId, inclusive: bo
 /// Each copy of a `defer` is its own site that every later exit checks,
 /// so repeating one grows the exits with the square of the copies.
 fn has_defer(hir: &HirBody, id: HirId) -> bool {
-    matches!(hir.expr(id).kind, HirKind::Defer { .. }) || children(hir, id).into_iter().any(|k| has_defer(hir, k))
+    matches!(hir.expr(id).kind, HirKind::Defer { .. }) || hir.children(id).any(|k| has_defer(hir, k))
 }
 
 fn has_own_jump(hir: &HirBody, id: HirId) -> bool {
     match &hir.expr(id).kind {
         HirKind::Break | HirKind::Continue => true,
         HirKind::Loop { .. } | HirKind::ForIn { .. } => false,
-        _ => children(hir, id).into_iter().any(|k| has_own_jump(hir, k)),
+        _ => hir.children(id).any(|k| has_own_jump(hir, k)),
     }
 }
 
 /// A lambda is planned for one emission, so its body cannot repeat.
 fn has_lambda(hir: &HirBody, id: HirId) -> bool {
-    matches!(hir.expr(id).kind, HirKind::Lambda { .. }) || children(hir, id).into_iter().any(|k| has_lambda(hir, k))
+    matches!(hir.expr(id).kind, HirKind::Lambda { .. }) || hir.children(id).any(|k| has_lambda(hir, k))
 }
 
 /// Whether `body` holds a `continue` of its own loop (nested loops' are
@@ -1448,14 +1407,14 @@ pub fn has_own_continue(hir: &HirBody, body: HirId) -> bool {
     match &hir.expr(body).kind {
         HirKind::Continue => true,
         HirKind::Loop { .. } | HirKind::ForIn { .. } => false,
-        _ => children(hir, body).into_iter().any(|k| has_own_continue(hir, k)),
+        _ => hir.children(body).any(|k| has_own_continue(hir, k)),
     }
 }
 
 /// Whether `local` is assigned anywhere in `body`.
 pub fn assigns_local(hir: &HirBody, body: HirId, local: LocalId) -> bool {
     let mut found = false;
-    visit(hir, body, &mut |e| {
+    hir.visit(body, &mut |e| {
         if let HirKind::Assign { place, .. } = &e.kind
             && matches!(hir.expr(*place).kind, HirKind::Local(l) if l == local)
         {

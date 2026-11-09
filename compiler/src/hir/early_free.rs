@@ -800,7 +800,7 @@ fn parents(body: &HirBody) -> HashMap<HirId, HirId> {
     let mut out = HashMap::new();
     for i in 0..body.exprs.len() {
         let id = HirId(i as u32);
-        for c in super::super::lower::children(body, id) {
+        for c in body.children(id) {
             out.insert(c, id);
         }
     }
@@ -913,7 +913,7 @@ fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
         if matches!(body.expr(at).kind, HirKind::Return(_)) {
             returns.push(at);
         }
-        work.extend(super::super::lower::children(body, at));
+        work.extend(body.children(at));
     }
     for ret in returns {
         free_before_return(body, ret, local);

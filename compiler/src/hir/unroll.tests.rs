@@ -15,7 +15,7 @@ fn loops_left(src: &str) -> usize {
     let body = module.bodies.into_iter().find(|b| b.name == "f").expect("body");
     let out = unroll(&body, 8).unwrap_or(body);
     let mut n = 0;
-    visit(&out, out.root.expect("root"), &mut |k| n += usize::from(matches!(out.expr(k).kind, HirKind::Loop { .. })));
+    out.visit_ids(out.root.expect("root"), &mut |k| n += usize::from(matches!(out.expr(k).kind, HirKind::Loop { .. })));
     n
 }
 

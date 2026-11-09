@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::escape::CallLookup;
 use super::{is_vec, pat_binds, Summary, VEC_MUTATORS};
-use crate::hir::lower::{children, pure_index};
+use crate::hir::lower::pure_index;
 use crate::hir::{Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirModule, HirPat, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span};
 use crate::typechecking::infer::{Checker, ForInKind};
 use reporting::{ErrorCode, Message};
@@ -221,8 +221,7 @@ impl<'b> Facts<'b> {
             f.order[id.0 as usize] = next;
             next += 1;
             stack.push((id, true));
-            let kids = children(body, id);
-            for &k in kids.iter().rev() {
+            for k in body.children(id).rev() {
                 f.parent.insert(k, id);
                 stack.push((k, false));
             }
@@ -1543,7 +1542,7 @@ fn twins_of(body: &HirBody, at: HirId, id: HirId) -> Vec<HirId> {
             continue;
         }
         if n != id {
-            work.extend(children(body, n));
+            work.extend(body.children(n));
         }
     }
     out

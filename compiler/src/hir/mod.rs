@@ -197,6 +197,179 @@ impl HirBody {
     pub fn local(&self, id: LocalId) -> &HirLocal {
         &self.locals[id.0 as usize]
     }
+
+    /// The direct subexpressions of `id`, in evaluation order. A lambda's
+    /// body is another body, so it is not among them.
+    pub fn children(&self, id: HirId) -> Children<'_> {
+        let mut c = Children { head: [None; 2], rest: &[], tail: None, arms: &[] };
+        match &self.expr(id).kind {
+            HirKind::Field { base: a, .. }
+            | HirKind::Un { operand: a, .. }
+            | HirKind::Cast { value: a }
+            | HirKind::Named { value: a, .. }
+            | HirKind::Spread(a)
+            | HirKind::LetPat { init: a, .. }
+            | HirKind::Loop { body: a }
+            | HirKind::Defer { body: a, .. }
+            | HirKind::Yield { value: a, .. } => c.head = [Some(*a), None],
+            HirKind::Index { base: a, index: b, .. }
+            | HirKind::Bin { lhs: a, rhs: b, .. }
+            | HirKind::Logic { lhs: a, rhs: b, .. }
+            | HirKind::Assign { place: a, value: b }
+            | HirKind::Append { base: a, value: b }
+            | HirKind::ForIn { iterable: a, body: b, .. } => c.head = [Some(*a), Some(*b)],
+            HirKind::Call { callee, args } => {
+                if let Callee::Value(v) = callee {
+                    c.head = [Some(*v), None];
+                }
+                c.rest = args;
+            }
+            HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => c.rest = args,
+            HirKind::Block { stmts, tail } => {
+                c.rest = stmts;
+                c.tail = *tail;
+            }
+            HirKind::Let { init, .. } => c.head = [*init, None],
+            HirKind::If { cond, then, els } => {
+                c.head = [Some(*cond), Some(*then)];
+                c.tail = *els;
+            }
+            HirKind::Return(v) => c.head = [*v, None],
+            HirKind::Match { scrutinee, arms } => {
+                c.head = [Some(*scrutinee), None];
+                c.arms = arms;
+            }
+            HirKind::Resume { handle, value } => c.head = [Some(*handle), *value],
+            HirKind::Lit(_)
+            | HirKind::Local(_)
+            | HirKind::Global { .. }
+            | HirKind::Break
+            | HirKind::Continue
+            | HirKind::Lambda { .. }
+            | HirKind::Clear(_)
+            | HirKind::Unsupported(_) => {}
+        }
+        c
+    }
+
+    /// Every node of `id`'s subtree, `id` first.
+    pub fn visit(&self, id: HirId, f: &mut impl FnMut(&HirExpr)) {
+        f(self.expr(id));
+        for k in self.children(id) {
+            self.visit(k, f);
+        }
+    }
+
+    /// Every id of `id`'s subtree, `id` first.
+    pub fn visit_ids(&self, id: HirId, f: &mut impl FnMut(HirId)) {
+        f(id);
+        for k in self.children(id) {
+            self.visit_ids(k, f);
+        }
+    }
+
+    /// Whether some node of `id`'s subtree, `id` included, satisfies
+    /// `pred`; stops at the first that does.
+    pub fn any(&self, id: HirId, pred: &mut impl FnMut(&HirExpr) -> bool) -> bool {
+        pred(self.expr(id)) || self.children(id).any(|k| self.any(k, pred))
+    }
+
+    /// Each node's parent, by id (`None` for a root and for an unreached
+    /// node).
+    pub fn parents(&self) -> Vec<Option<HirId>> {
+        let mut parent = vec![None; self.exprs.len()];
+        for i in 0..self.exprs.len() {
+            let id = HirId(i as u32);
+            for c in self.children(id) {
+                parent[c.0 as usize] = Some(id);
+            }
+        }
+        parent
+    }
+
+    /// Append `e`; its id.
+    pub fn push(&mut self, e: HirExpr) -> HirId {
+        let id = HirId(self.exprs.len() as u32);
+        self.exprs.push(e);
+        id
+    }
+
+    /// Append a node the compiler made: one word, no AST node, no flags.
+    pub fn push_new(&mut self, kind: HirKind, ty: Option<Ty>, span: Span) -> HirId {
+        self.push(HirExpr { kind, ty, layout: Layout::Word, span, node: None, flags: HirFlags::default() })
+    }
+
+    /// A fresh compiler temp named `name`.
+    pub fn temp(&mut self, name: String, ty: Option<Ty>) -> LocalId {
+        let id = LocalId(self.locals.len() as u32);
+        self.locals.push(HirLocal { name, ty, kind: LocalKind::Temp, captured: false, borrow: false });
+        id
+    }
+}
+
+/// [`HirBody::children`]: up to two leading operands, then a list, an
+/// optional tail and `match` arm bodies, without allocating.
+pub struct Children<'a> {
+    head: [Option<HirId>; 2],
+    rest: &'a [HirId],
+    tail: Option<HirId>,
+    arms: &'a [HirArm],
+}
+
+impl Iterator for Children<'_> {
+    type Item = HirId;
+
+    fn next(&mut self) -> Option<HirId> {
+        if let Some(id) = self.head[0].take().or_else(|| self.head[1].take()) {
+            return Some(id);
+        }
+        if let Some((&id, rest)) = self.rest.split_first() {
+            self.rest = rest;
+            return Some(id);
+        }
+        if let Some(id) = self.tail.take() {
+            return Some(id);
+        }
+        let (arm, arms) = self.arms.split_first()?;
+        self.arms = arms;
+        Some(arm.body)
+    }
+}
+
+impl DoubleEndedIterator for Children<'_> {
+    fn next_back(&mut self) -> Option<HirId> {
+        if let Some((arm, arms)) = self.arms.split_last() {
+            self.arms = arms;
+            return Some(arm.body);
+        }
+        if let Some(id) = self.tail.take() {
+            return Some(id);
+        }
+        if let Some((&id, rest)) = self.rest.split_last() {
+            self.rest = rest;
+            return Some(id);
+        }
+        self.head[1].take().or_else(|| self.head[0].take())
+    }
+}
+
+impl HirPat {
+    /// Each local the pattern binds, left to right.
+    pub fn for_each_bind(&self, f: &mut impl FnMut(LocalId)) {
+        match self {
+            HirPat::Bind(l) => f(*l),
+            HirPat::Variant { fields: HirPatFields::Tuple(ps), .. } | HirPat::Tuple(ps) => ps.iter().for_each(|p| p.for_each_bind(f)),
+            HirPat::Variant { fields: HirPatFields::Record(fs), .. } | HirPat::Record(fs) => fs.iter().for_each(|(_, p)| p.for_each_bind(f)),
+            HirPat::Variant { fields: HirPatFields::Unit, .. } | HirPat::Wild | HirPat::Int(_) => {}
+        }
+    }
+
+    /// Whether the pattern binds `local`.
+    pub fn binds(&self, local: LocalId) -> bool {
+        let mut found = false;
+        self.for_each_bind(&mut |l| found |= l == local);
+        found
+    }
 }
 
 #[derive(Debug, Clone)]

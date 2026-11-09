@@ -286,7 +286,7 @@ fn exits(b: &HirBody, branch: HirId) -> bool {
 /// Some `return` under `e`.
 fn has_return(b: &HirBody, e: HirId) -> bool {
     let mut found = false;
-    super::lower::visit(b, e, &mut |x| found |= matches!(x.kind, HirKind::Return(_)));
+    b.visit(e, &mut |x| found |= matches!(x.kind, HirKind::Return(_)));
     found
 }
 
@@ -346,7 +346,7 @@ pub fn inline_calls<'a>(
         if !std::mem::replace(&mut live[id.0 as usize], true) {
             looped[id.0 as usize] = in_loop;
             let inner = in_loop || matches!(caller.expr(id).kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
-            todo.extend(super::lower::children(caller, id).into_iter().map(|c| (c, inner)));
+            todo.extend(caller.children(id).map(|c| (c, inner)));
         }
     }
     for (i, live) in live.into_iter().enumerate() {
@@ -656,7 +656,7 @@ impl Inliner<'_> {
         e: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
     ) -> Option<(HirId, &'a HirBody, Shape)> {
-        super::lower::children(&self.body, e)
+        self.body.children(e)
             .into_iter()
             .find_map(|x| self.in_place_site(x, callee_of, false))
     }
@@ -885,7 +885,7 @@ fn value_ty(t: &Option<ty::Ty>) -> bool {
 fn reads_only(callee: &HirBody, p: LocalId) -> bool {
     let mut parent = vec![None; callee.exprs.len()];
     for i in 0..callee.exprs.len() {
-        for c in super::lower::children(callee, HirId(i as u32)) {
+        for c in callee.children(HirId(i as u32)) {
             parent[c.0 as usize] = Some(HirId(i as u32));
         }
     }
@@ -1103,7 +1103,7 @@ pub fn invariant_locals(body: &HirBody) -> std::collections::HashSet<LocalId> {
             _ => {}
         }
         let inner = in_loop || matches!(body.expr(id).kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
-        todo.extend(super::lower::children(body, id).into_iter().map(|c| (c, inner)));
+        todo.extend(body.children(id).map(|c| (c, inner)));
     }
     body.params
         .iter()
@@ -1235,7 +1235,7 @@ pub fn blank_unreachable(body: &mut HirBody) {
         if std::mem::replace(&mut live[id.0 as usize], true) {
             continue;
         }
-        stack.extend(super::lower::children(body, id));
+        stack.extend(body.children(id));
     }
     for (e, live) in body.exprs.iter_mut().zip(live) {
         if !live {

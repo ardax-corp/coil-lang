@@ -30,7 +30,6 @@ use std::collections::{HashMap, HashSet};
 
 use common::EffectFlags;
 
-use super::lower::children;
 use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, HirPatFields, IndexKind, LocalId, LocalKind, MakeKind};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::infer::{Checker, ForInKind};
@@ -1316,7 +1315,7 @@ fn owned_locals(body: &HirBody, owned: &mut HashSet<LocalId>) {
     let mut parent: HashMap<HirId, HirId> = HashMap::new();
     for i in 0..body.exprs.len() {
         let id = HirId(i as u32);
-        for k in children(body, id) {
+        for k in body.children(id) {
             parent.insert(k, id);
         }
     }
@@ -2277,7 +2276,7 @@ impl Cx<'_> {
             }
             _ => {}
         }
-        for k in children(body, id) {
+        for k in body.children(id) {
             self.expr(w, k);
         }
     }

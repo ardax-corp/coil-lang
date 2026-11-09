@@ -1139,7 +1139,7 @@ impl Compiler {
                             let mut hit = false;
                             while let Some(c) = todo.pop() {
                                 hit |= matches!(out.expr(c).kind, HirKind::Call { .. });
-                                todo.extend(crate::hir::lower::children(&out, c));
+                                todo.extend(out.children(c));
                             }
                             hit
                         }
@@ -1888,7 +1888,7 @@ impl Compiler {
         // worker's frame, not this body's.
         let mut outlined = HashSet::new();
         for par in emit.plan.par_loops.values() {
-            lower::visit(hir, par.tail.body, &mut |x| match x.kind {
+            hir.visit(par.tail.body, &mut |x| match x.kind {
                 HirKind::Local(l) | HirKind::Let { local: l, .. } if frame.slots[l.0 as usize].is_none() => {
                     outlined.insert(l.0);
                 }
@@ -3477,7 +3477,7 @@ impl Compiler {
             if let HirKind::Local(l) = &body.expr(e).kind {
                 read.insert(*l);
             }
-            todo.extend(crate::hir::lower::children(body, e));
+            todo.extend(body.children(e));
         }
         // A view copied into another name is the same borrow: when neither
         // name is reassigned and no plain field of either is written, the
@@ -3747,7 +3747,7 @@ impl Compiler {
                     if spill.is_some_and(|(v, _)| v == x) {
                         continue;
                     }
-                    todo.extend(crate::hir::lower::children(body, x));
+                    todo.extend(body.children(x));
                     let e = &mut body.exprs[x.0 as usize];
                     e.kind = HirKind::Lit(Lit::Unit);
                     e.ty = Some(crate::typechecking::ty::unit());
@@ -3837,7 +3837,7 @@ impl Compiler {
                 HirKind::Clear(_) => continue,
                 _ => {}
             }
-            todo.extend(crate::hir::lower::children(body, e));
+            todo.extend(body.children(e));
         }
         for &l in locals {
             if read.contains(&l) {
@@ -10681,7 +10681,7 @@ impl Compiler {
         };
         // The head's planned locals (a range local the site read as
         // constants) are not the worker's; a bound needing one is refused below.
-        lower::visit(hir, head, &mut |x| {
+        hir.visit(head, &mut |x| {
             if let HirKind::Local(l) = x.kind
                 && !planned(l)
             {
@@ -10690,7 +10690,7 @@ impl Compiler {
         });
         let heads = outer.clone();
         let mut in_body = HashMap::new();
-        lower::visit(hir, body, &mut |x| match x.kind {
+        hir.visit(body, &mut |x| match x.kind {
             HirKind::Local(l) => note(l, &mut in_body, &mut ok),
             HirKind::Lambda { .. }
             | HirKind::Break
@@ -10744,7 +10744,7 @@ impl Compiler {
         match &hir.expr(id).kind {
             HirKind::Local(l) => *l == ix,
             HirKind::Assign { place, .. } if matches!(hir.expr(*place).kind, HirKind::Local(l) if l == ix) => false,
-            _ => lower::children(hir, id).into_iter().any(|k| Self::hir_reads_index(hir, k, ix)),
+            _ => hir.children(id).any(|k| Self::hir_reads_index(hir, k, ix)),
         }
     }
 
@@ -10763,10 +10763,10 @@ impl Compiler {
                 | HirKind::Index { .. }
         );
         if !computes {
-            return lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies));
+            return hir.children(id).any(|k| Self::hir_invariant_work(hir, k, varies));
         }
         let mut moves = true;
-        lower::visit(hir, id, &mut |x| match x.kind {
+        hir.visit(id, &mut |x| match x.kind {
             HirKind::Local(l) => moves &= !varies(l),
             HirKind::Let { .. }
             | HirKind::LetPat { .. }
@@ -10778,7 +10778,7 @@ impl Compiler {
             | HirKind::Continue => moves = false,
             _ => {}
         });
-        moves || lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies))
+        moves || hir.children(id).any(|k| Self::hir_invariant_work(hir, k, varies))
     }
 
     /// Parallel loop `id` moved into its own fork-join function, emitted
@@ -10820,10 +10820,10 @@ impl Compiler {
             Some(l) if site.is_dynamic() => {
                 let mut uses = 0usize;
                 if let Some(root) = hir.root {
-                    lower::visit(hir, root, &mut |x| uses += usize::from(matches!(x.kind, HirKind::Local(y) if y == l)));
+                    hir.visit(root, &mut |x| uses += usize::from(matches!(x.kind, HirKind::Local(y) if y == l)));
                 }
                 let mut inside = 0usize;
-                lower::visit(hir, id, &mut |x| inside += usize::from(matches!(x.kind, HirKind::Local(y) if y == l)));
+                hir.visit(id, &mut |x| inside += usize::from(matches!(x.kind, HirKind::Local(y) if y == l)));
                 if uses == inside {
                     None
                 } else if site.stride == 1 {
@@ -11367,7 +11367,7 @@ impl Compiler {
         let mut todo = vec![root];
         while let Some(id) = todo.pop() {
             if !std::mem::replace(&mut live[id.0 as usize], true) {
-                todo.extend(lower::children(&w, id));
+                todo.extend(w.children(id));
             }
         }
         for (e, live) in w.exprs.iter_mut().zip(live) {

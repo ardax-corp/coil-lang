@@ -145,7 +145,7 @@ fn binds(pat: &HirPat, local: LocalId) -> bool {
 pub(crate) fn parents(body: &HirBody) -> Vec<Option<HirId>> {
     let mut parent = vec![None; body.exprs.len()];
     for i in 0..body.exprs.len() {
-        for c in super::lower::children(body, HirId(i as u32)) {
+        for c in body.children(HirId(i as u32)) {
             parent[c.0 as usize] = Some(HirId(i as u32));
         }
     }
@@ -159,7 +159,7 @@ pub(super) fn mentions(body: &HirBody, root: HirId, local: LocalId) -> bool {
         if body.expr(id).kind == HirKind::Local(local) {
             return true;
         }
-        stack.extend(super::lower::children(body, id));
+        stack.extend(body.children(id));
     }
     false
 }

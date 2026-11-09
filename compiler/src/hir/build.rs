@@ -1839,7 +1839,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 HirKind::Break | HirKind::Continue if !in_loop => exits.push(at),
                 HirKind::Loop { body } => work.push((*body, true)),
                 HirKind::ForIn { iterable, body, .. } => work.extend([(*iterable, in_loop), (*body, true)]),
-                _ => work.extend(super::lower::children(&b.body, at).into_iter().map(|k| (k, in_loop))),
+                _ => work.extend(b.body.children(at).map(|k| (k, in_loop))),
             }
         }
         for at in exits {
@@ -3386,7 +3386,7 @@ fn shareable_catch_all(body: &HirBody, arm: &HirArm) -> bool {
         _ => return false,
     };
     let mut ok = true;
-    super::lower::visit(body, arm.body, &mut |e| {
+    body.visit(arm.body, &mut |e| {
         ok &= !matches!(
             &e.kind,
             HirKind::Lambda { .. }

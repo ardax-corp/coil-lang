@@ -176,7 +176,7 @@ fn binds(pat: &HirPat, local: LocalId) -> bool {
 fn parents(body: &HirBody) -> Vec<Option<HirId>> {
     let mut parent = vec![None; body.exprs.len()];
     for i in 0..body.exprs.len() {
-        for c in super::lower::children(body, HirId(i as u32)) {
+        for c in body.children(HirId(i as u32)) {
             parent[c.0 as usize] = Some(HirId(i as u32));
         }
     }
@@ -510,7 +510,7 @@ fn rename(body: &mut HirBody, id: HirId, from: LocalId, to: LocalId) {
         if matches!(body.expr(k).kind, HirKind::Local(l) if l == from) {
             body.exprs[k.0 as usize].kind = HirKind::Local(to);
         }
-        stack.extend(super::lower::children(body, k));
+        stack.extend(body.children(k));
     }
 }
 

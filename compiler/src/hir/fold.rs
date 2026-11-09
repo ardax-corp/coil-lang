@@ -11,7 +11,6 @@
 
 use common::int_arith;
 
-use super::lower::children;
 use super::{BinOp, HirBody, HirExpr, HirId, HirKind, HirPat, HirPatFields, Lit, MakeKind, UnOp};
 use crate::typechecking::ty::{self, Ty};
 
@@ -85,7 +84,7 @@ fn propagate_lets(body: &mut HirBody, root: HirId, hits: &mut usize) -> usize {
             HirKind::Local(l) if !places.contains(&k) => reads.push((k, *l)),
             _ => {}
         }
-        stack.extend(children(body, k).into_iter().rev());
+        stack.extend(body.children(k).rev());
     }
     let mut n = 0;
     for (k, l) in reads {
@@ -196,7 +195,7 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
             HirKind::Defer { captures, .. } => read.extend(captures.iter().flatten().copied()),
             _ => {}
         }
-        stack.extend(children(body, k).into_iter().rev());
+        stack.extend(body.children(k).rev());
     }
     let mut dropped = std::collections::HashSet::new();
     // An `Option` / `Result` or unit-variant constructor of constant fields
@@ -250,7 +249,7 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
 }
 
 fn post(body: &mut HirBody, id: HirId, hits: &mut usize) {
-    for k in children(body, id) {
+    for k in body.children(id).collect::<Vec<_>>() {
         post(body, k, hits);
     }
     merge_steps(body, id, hits);
@@ -406,7 +405,7 @@ fn known_variant(body: &mut HirBody, id: HirId) -> Option<HirKind> {
             HirKind::Local(l) if subst.iter().any(|(x, _)| x == l) => reads.push(k),
             _ => {}
         }
-        stack.extend(children(body, k));
+        stack.extend(body.children(k));
     }
     for k in reads {
         let HirKind::Local(l) = body.expr(k).kind else { unreachable!() };

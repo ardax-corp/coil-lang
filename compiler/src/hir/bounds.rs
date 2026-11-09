@@ -11,7 +11,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::lower::children;
 use super::{BinOp, Callee, HirBody, HirFlags, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, MakeKind};
 use crate::typechecking::ty::{self, Ty};
 
@@ -76,7 +75,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     /// throughout.
     fn walk(&mut self, id: HirId, facts: &Facts) {
         let HirKind::Block { stmts, tail } = &self.body.expr(id).kind else {
-            for k in children(self.body, id) {
+            for k in self.body.children(id) {
                 self.walk(k, facts);
             }
             return;
@@ -98,7 +97,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
                     self.walk(then, &at_top);
                 }
                 None => {
-                    for k in children(self.body, s) {
+                    for k in self.body.children(s) {
                         self.walk(k, &inner);
                     }
                 }
@@ -185,7 +184,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     fn only_grows(&self, loop_body: HirId, i: LocalId, facts: &Facts, w: &Writes) -> bool {
         let body = self.body;
         let mut ok = true;
-        visit(body, loop_body, &mut |id| match &body.expr(id).kind {
+        body.visit_ids(loop_body, &mut |id| match &body.expr(id).kind {
             HirKind::Assign { place, value } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == i) => {
                 ok &= match body.expr(*value).kind {
                     HirKind::Bin { op: BinOp::IntAdd, lhs, rhs } => {
@@ -325,7 +324,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
                     HirKind::Local(a) if a != i && a != n && facts.empty.contains(&a) && !body.local(a).captured => {
                         let wx = self.writes(*x);
                         let mut leaves = false;
-                        visit(body, *x, &mut |k| {
+                        body.visit_ids(*x, &mut |k| {
                             leaves |= matches!(body.expr(k).kind, HirKind::Break | HirKind::Continue | HirKind::Return(_));
                         });
                         (wx.steady && wx.locals.is_empty() && !leaves).then_some(a)
@@ -348,7 +347,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     fn writes(&self, id: HirId) -> Writes {
         let body = self.body;
         let mut w = Writes { locals: HashSet::new(), steady: true };
-        visit(body, id, &mut |k| match &body.expr(k).kind {
+        body.visit_ids(id, &mut |k| match &body.expr(k).kind {
             HirKind::Let { local, .. } => {
                 w.locals.insert(*local);
             }
@@ -407,14 +406,6 @@ fn binds(pat: &HirPat, out: &mut HashSet<LocalId>) {
     }
 }
 
-/// Every node under `id`, nested function bodies included.
-fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(HirId)) {
-    f(id);
-    for k in children(body, id) {
-        visit(body, k, f);
-    }
-}
-
 /// The nodes under `id` that run when it does: not inside a lambda or a
 /// `defer`, which run later.
 fn visit_now(body: &HirBody, id: HirId, f: &mut impl FnMut(HirId)) {
@@ -422,7 +413,7 @@ fn visit_now(body: &HirBody, id: HirId, f: &mut impl FnMut(HirId)) {
         return;
     }
     f(id);
-    for k in children(body, id) {
+    for k in body.children(id) {
         visit_now(body, k, f);
     }
 }

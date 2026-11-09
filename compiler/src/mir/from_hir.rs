@@ -1015,7 +1015,7 @@ fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
     let mut todo: Vec<HirId> = hir.root.into_iter().collect();
     while let Some(id) = todo.pop() {
         reached.push(id);
-        todo.extend(lower::children(hir, id));
+        todo.extend(hir.children(id));
     }
     for id in reached {
         let e = hir.expr(id);
@@ -1244,7 +1244,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             // The body's own bindings (`let`, a `for` variable, a pattern)
             // live in the thunk's frame, not the function's (#2134).
             let mut binds = Vec::new();
-            lower::visit(hir, *body, &mut |x| match &x.kind {
+            hir.visit(*body, &mut |x| match &x.kind {
                 HirKind::Let { local, .. } => binds.push(*local),
                 HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => {
                     crate::hir::effects::pat_binds(pat, &mut binds);
@@ -1416,7 +1416,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         // A `use (mut x)` the body assigns writes `x`'s home back, so the
         // pads of outer blocks read the new value.
         let mut assigned = Vec::new();
-        lower::visit(hir, body, &mut |x| {
+        hir.visit(body, &mut |x| {
             if let HirKind::Assign { place, .. } = x.kind
                 && let HirKind::Local(l) = hir.expr(place).kind
                 && captures.contains(&l)
@@ -6174,7 +6174,7 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let mut quiet = true;
-        lower::visit(self.hir, value, &mut |e| {
+        self.hir.visit(value, &mut |e| {
             quiet &= !matches!(
                 e.kind,
                 HirKind::Call { .. } | HirKind::Assign { .. } | HirKind::Append { .. } | HirKind::Yield { .. } | HirKind::Resume { .. }
@@ -8336,7 +8336,7 @@ impl Lower<'_> {
             if self.inp.cold_calls.contains(&at.0) {
                 return true;
             }
-            stack.extend(lower::children(self.hir, at));
+            stack.extend(self.hir.children(at));
         }
         false
     }

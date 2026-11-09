@@ -10,7 +10,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::lower::children;
 use crate::typechecking::ty::{self, Ty};
 
 use super::{Callee, HirBody, HirId, HirKind, Lit, LocalId, LocalKind, MakeKind};
@@ -43,7 +42,7 @@ pub fn lets_in_loops(body: &HirBody) -> HashSet<HirId> {
             out.insert(k);
         }
         let deeper = inside || matches!(e.kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
-        stack.extend(children(body, k).into_iter().map(|c| (c, deeper)));
+        stack.extend(body.children(k).map(|c| (c, deeper)));
     }
     out
 }
@@ -104,7 +103,7 @@ pub fn fold_tables(body: &HirBody, globals: &dyn GlobalTables, frozen: &dyn Fn(L
             }
             _ => {}
         }
-        stack.extend(children(body, k).into_iter().rev());
+        stack.extend(body.children(k).rev());
     }
     let local_of = |id: HirId| match body.expr(id).kind {
         HirKind::Local(l) => locals.get(&l).map(|t| (l, t)),
