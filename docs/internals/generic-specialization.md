@@ -58,7 +58,7 @@ their own layout and bounds resolve statically.
   module's bodies are lowered. A clone that plans keeps its HIR body in
   `hir_resolved_clones` (`hir_resolved_clone_body`: names qualified, types
   closed, its calls turned into `Callee::Resolved`, whose plans live in
-  `resolved_plans`). `hir_inline_replan` then splices a kept body like a
+  `resolved_plans`). `hir_inline_round` then splices a kept body like a
   same-module callee when the call needs no boxing, keeps the clone's ABI
   and fits `max_cross_module_inline_cost` (100: every node 1, a call 25)
   (`examples/perf/foreign_clone_hot.coil`).

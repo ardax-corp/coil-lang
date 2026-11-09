@@ -1793,12 +1793,12 @@ impl Compiler {
         }
     }
 
-    /// Before a module's bodies are emitted: plan each plain function body
-    /// once to learn which other modules' method clones it calls, and
-    /// queue those to compile first ([`Self::emit_foreign_clones`]), so
-    /// their resolved bodies are there when this module's bodies inline.
-    /// Planning here only fills `method_clone_plans`; its results are
-    /// dropped.
+    /// Before a module's bodies are emitted: resolve each plain function
+    /// body's calls once to learn which other modules' method clones it
+    /// calls, and queue those to compile first
+    /// ([`Self::emit_foreign_clones`]), so their resolved bodies are there
+    /// when this module's bodies inline. Resolving here only fills
+    /// `method_clone_plans`; its results are dropped.
     fn queue_early_foreign_clones(&mut self) {
         if !self.inline_cost.inline_across_modules || !self.opt_options.hir_inline_heap || self.debugger_attached {
             return;
