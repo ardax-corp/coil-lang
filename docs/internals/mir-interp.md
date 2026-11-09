@@ -36,7 +36,7 @@ each engine and level says something different:
 | `-O0` | Raw MIR |
 | `-Og` | HIR folds; `sroa`, `phi_sroa` |
 | `-O1` | HIR small inlining; SCCP, InstCombine, DestProp, `sroa`, `phi_sroa` |
-| `-O2`, `-O3`, `-Os` | The HIR passes of the level; every MIR pass but `promote_fields` |
+| `-O2`, `-O3`, `-Os` | The HIR passes of the level; every MIR pass |
 
 Generators, bodies with a cleanup pad and debugger or coverage builds keep their
 MIR as lowered at every level, as for native code.
@@ -81,14 +81,12 @@ Most ops map one to one onto Cranelift's lowering. These needed a decision.
 | Op | Handling | Status |
 |---|---|---|
 | `ByteScan`, `VecLoop` | Only passes make them, so raw MIR has none. Above `-O 0` they run the runtime's lane code (`coil_native_vector`), as native code does; the raw run of the same source is their independent check | Settled |
-| `PanicStore` | Only `promote_fields` makes it, which no capture runs; `prepare` refuses a body that holds one | Settled |
 | `Call` to a tail target | Takes the frame | Settled |
 | `Call` of a `drop` | Claims the finalizer first, as Cranelift | Settled |
 | `GcBarrier`, `KeepAlive`, `ClearWord` | No code; they matter only through the root maps | Settled |
 | `HomeLoad`, `HomeStore` | Homes follow the registers; a pad reads its frame's copy, which a runtime record roots | Settled |
 | `Yield`, `ResumeCoro` | `coil_native_yield`: on a fiber as native code does, or parked on the heap where there are no fibers (below) | Settled |
 | `CodePtr`, `Alloc` of `Fn` / `PolyFn` / `Coro` | The word is the body's identity (`label.0 + 1`) | Settled |
-| `Deopt` | No code; only tests build one. The debugger stops at any op, so it needs none | Settled |
 | `Probe` | Counts through `coil_native_probe`, as Cranelift's code does | Settled |
 | `HostInvoke`, `Ffi` | The helpers. A native the runtime's table replaced goes through that table, so the comptime sandbox holds | Settled |
 

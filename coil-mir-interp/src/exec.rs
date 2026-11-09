@@ -610,7 +610,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                     MirCastKind::Word => a,
                 });
             }
-            MirInst::Phi { .. } | MirInst::Deopt { .. } => {}
+            MirInst::Phi { .. } => {}
             MirInst::CodePtr { dest, target } => {
                 let Some(callee) = program(body).body_at(*target).filter(|b| b.pc != u32::MAX) else {
                     return Flow::Trap(TRAP_HELPER);
@@ -978,8 +978,6 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 }
                 set_word(f, regs, *dest, w);
             }
-            // `promote_fields` does not run on a capture; `refusal` says so.
-            MirInst::PanicStore { .. } => return Flow::Trap(TRAP_HELPER),
         }
         Flow::Next
     }

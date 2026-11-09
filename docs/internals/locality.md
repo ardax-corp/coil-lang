@@ -68,10 +68,9 @@ Numbers land here as each step merges.
   (`tests/collections/vec_loop_panic_stores.coil`).
   `fusion.coil` 4M x 5: fused loop 417 → 167 ms, equal to the two split loops
   (161 ms, unchanged).
-- **Step 4** (`mir::promote_fields`): `optimize_mir` runs it only with
-  `promote` set, and its one caller (`native_capture`) passes `false`: neither
-  Cranelift nor the interpreter handles `MirInst::PanicStore`. The pass does
-  this: a field
+- **Step 4** (`mir::promote_fields`, since removed: no capture ever ran it,
+  since neither Cranelift nor the interpreter could honour its
+  `MirInst::PanicStore`s). The pass did this: a field
   a loop writes, touched only through one object made before the loop and
   holding an `int` or `float`, is read once before the loop, carried in a
   φ and stored once on each exit. The loop may hold arithmetic, compares,
@@ -126,7 +125,7 @@ Numbers land here as each step merges.
   generator, a custom iterator. MIR keeps the bits per call
   (`MirFunc::call_fields`) and the names this body uses at each heap slot
   (`MirFunc::slot_fields`; an access lowered without a name makes the
-  slot unknown). `promote_fields` now accepts a loop with direct calls
+  slot unknown). `promote_fields` (since removed) accepted a loop with direct calls
   and keeps a slot in a register when none of the calls' bits meet the
   slot's names; a call may panic, so a `PanicStore` goes before it like
   any trap. A finalizer can run at any allocation, so every call also

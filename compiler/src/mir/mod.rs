@@ -10,7 +10,7 @@
 //! carry `Alloc` + `GcBarrier` with live-heap `roots`; their GC frame maps
 //! are the precise maps of their final code ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
 //! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` builds use
-//! the same tiers; explicit `Deopt` is skipped at emit. History of each
+//! the same tiers. History of each
 //! piece: `docs/internals/mir.md`.
 
 mod box_report;
@@ -39,7 +39,6 @@ mod sroa;
 mod vectorize;
 mod bool_thread;
 mod phi_sroa;
-mod promote;
 mod strength;
 mod text;
 mod ty;
@@ -75,7 +74,6 @@ pub use bulk::bulk_push;
 pub use byte_scan::byte_scan;
 pub use copy_until::copy_until;
 pub use vec_loop::vec_loops;
-pub use promote::promote_fields;
 pub use prefetch::mark_prefetch_scans;
 pub use interchange::interchange_loops;
 pub use strength::strength_reduce;

@@ -252,7 +252,7 @@ fn phi_dests(block: &super::func::MirBlock) -> HashSet<ValueId> {
 
 fn data_uses(inst: &MirInst) -> Vec<ValueId> {
     match inst {
-        MirInst::GcBarrier { .. } | MirInst::Deopt { .. } | MirInst::Const { .. } => Vec::new(),
+        MirInst::GcBarrier { .. } | MirInst::Const { .. } => Vec::new(),
         other => other.operands(),
     }
 }

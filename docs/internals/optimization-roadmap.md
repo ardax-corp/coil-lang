@@ -50,8 +50,7 @@ lowered, and the MIR interpreter's reference capture runs no pass.
 | `mark_prefetch_scans` | `mir/prefetch.rs` | `mir_loop` |
 
 `mir_fold` is on from `-O1` except at `-Og`; `mir_loop` is on at `-O2`, `-O3`
-and `-Os`. `promote_fields` (`mir/promote.rs`) sits between `vec_loops` and
-the prefetch marks but runs in no capture today. IV strength reduction is
+and `-Os`. IV strength reduction is
 float-only, because int overflow traps ([int-overflow.md](int-overflow.md)).
 
 HIR passes run first, in `codegen/emit_hir.rs`: `hir::fold`, `hir::inline`,

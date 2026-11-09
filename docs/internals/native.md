@@ -307,8 +307,7 @@ words in a stack slot and the helper runs the body and copies the slots back. A 
 panics at native code's own site. `COIL_NATIVE_STATS` counts these ops.
 
 `optimize_mir` gives native code the same bulk rewrites (`copy_until`, `bulk_push`) and
-runtime kernels (`vec_extend_range` / `vec_fill`). `promote_fields` does not run: its
-`PanicStore`s would need the unwinder to write promoted fields back.
+runtime kernels (`vec_extend_range` / `vec_fill`).
 
 ## The driver
 

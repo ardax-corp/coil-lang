@@ -62,9 +62,7 @@ reaches `optimize_mir`. Two switches gate the passes:
 | `mir_fold` | `-O1` and up, `-Os` | SCCP, InstCombine, DestProp, `thread_bool_phis` |
 | `mir_loop` | `-O2`, `-O3`, `-Os` | `loop_opts` (CSE, DestProp, LICM, CSE), `interchange_loops`, strength reduction, CSE, GVN/PRE, `copy_until`, `byte_scan`, `bulk_push`, `vec_loops`, `mark_prefetch_scans` |
 
-`sroa` and `phi_sroa` run at every level. `promote_fields` runs only when the
-caller asks for it, and no capture does: its `PanicStore`s would need the unwinder
-to write promoted fields back. Debug builds verify the MIR after each pass
+`sroa` and `phi_sroa` run at every level. Debug builds verify the MIR after each pass
 (`check_after`), so a pass that breaks SSA is named where it does.
 
 ## SCCP
@@ -215,7 +213,5 @@ Host `Option` / `Result<(), E>` / heap-heap `Result` values pack once at
 
 | Op | Who makes it |
 |----|--------------|
-| `Deopt` | Only tests. No engine gives it code, and `deopt_sites` is empty in a compiled body |
-| `PanicStore` | Only `promote_fields`, which no capture runs. `coil_mir_interp::prepare` refuses a body that holds one |
 | `Probe` | `mir::coverage`, in coverage builds |
 | `ByteScan`, `VecLoop` | Only passes, so raw MIR has none |

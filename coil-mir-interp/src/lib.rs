@@ -200,9 +200,6 @@ fn refusal(f: &MirFunc) -> Option<String> {
     let insts = f.blocks.iter().flat_map(|b| &b.insts);
     for inst in insts {
         match inst {
-            // `promote_fields` does not run on a capture, as for native
-            // code: what a panic owes the heap has no way to the unwinder.
-            MirInst::PanicStore { .. } => return Some("PanicStore".to_string()),
             MirInst::ByteScan { .. } | MirInst::VecLoop { .. } if compiler::native_mir::vector_op(inst).is_none() => {
                 return Some("a vector op the runtime's encoding cannot hold".to_string());
             }

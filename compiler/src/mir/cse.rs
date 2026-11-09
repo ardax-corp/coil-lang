@@ -611,11 +611,9 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::ClearWord { .. }
         | MirInst::KeepAlive { .. }
         | MirInst::Probe { .. }
-        | MirInst::PanicStore { .. }
         | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }
-        | MirInst::Deopt { .. }
         | MirInst::String { .. }
         | MirInst::CodePtr { .. }
         | MirInst::Print { .. }

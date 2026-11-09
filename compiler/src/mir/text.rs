@@ -3,7 +3,7 @@
 use super::func::{MirBlock, MirFunc};
 use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirLaneShape, MirUnaryOp, Terminator};
 #[cfg(test)]
-use super::inst::{BlockId, MirBinOp, MirCmpOp, MirDeoptKind, MirGcKind, ValueId};
+use super::inst::{BlockId, MirBinOp, MirCmpOp, MirGcKind, ValueId};
 use super::ty::MirTy;
 
 /// A [`MirLaneShape`] as the text form writes it.
@@ -293,7 +293,6 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::ClearWord { dest, value } => write!(f, "{dest} = clearword {value}"),
         MirInst::KeepAlive { dest, value } => write!(f, "{dest} = keepalive {value}"),
         MirInst::Probe { dest, id } => write!(f, "{dest} = probe {id}"),
-        MirInst::PanicStore { dest, object, value, index } => write!(f, "{dest} = panicstore {object}, {value}, {index}"),
         MirInst::ArrayPush {
             dest,
             array,
@@ -352,7 +351,6 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::Deopt { dest, kind, .. } => write!(f, "{dest} = deopt.{}", kind.as_str()),
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
         MirInst::CodePtr { dest, target } => write!(f, "{dest} = codeptr {}", target.0),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
@@ -710,15 +708,6 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::ClearWord { dest, value });
         }
-        if op == "panicstore" {
-            let object = self.value()?;
-            self.expect(',')?;
-            let value = self.value()?;
-            self.expect(',')?;
-            let index = self.uint()? as u32;
-            ensure_ty(types, dest, MirTy::Bool);
-            return Ok(MirInst::PanicStore { dest, object, value, index });
-        }
         if op == "keepalive" {
             let value = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
@@ -998,16 +987,6 @@ impl<'a> Parser<'a> {
             }
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::GcBarrier { dest, kind, roots });
-        }
-        if let Some(kind_s) = op.strip_prefix("deopt.") {
-            let kind = MirDeoptKind::parse(kind_s)
-                .ok_or_else(|| ParseError(format!("unknown deopt {kind_s}")))?;
-            ensure_ty(types, dest, MirTy::Bool);
-            return Ok(MirInst::Deopt {
-                dest,
-                kind,
-                loc: common::DebugLoc::unknown(),
-            });
         }
         if op == "codeptr" {
             let target = crate::bodies::Label(self.uint()? as u32);

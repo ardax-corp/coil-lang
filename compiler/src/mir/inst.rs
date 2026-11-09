@@ -183,7 +183,7 @@ impl MirCmpOp {
             (Self::Gt, true) => "fcmp.ogt",
             (Self::Ge, true) => "fcmp.oge",
             (Self::Eq, true) => "fcmp.oeq",
-            (Self::Ne, true) => "fcmp.one",
+            (Self::Ne, true) => "fcmp.une",
         }
     }
 
@@ -201,7 +201,7 @@ impl MirCmpOp {
             "fcmp.ogt" => (Self::Gt, true),
             "fcmp.oge" => (Self::Ge, true),
             "fcmp.oeq" => (Self::Eq, true),
-            "fcmp.one" => (Self::Ne, true),
+            "fcmp.une" => (Self::Ne, true),
             _ => return None,
         })
     }
@@ -626,17 +626,6 @@ pub enum MirInst {
         dest: ValueId,
         id: u32,
     },
-    /// The field store a panic in the code after this owes the heap: a
-    /// field kept in a register across a loop ([`super::promote_fields`])
-    /// holds `value` here, where the source had stored it. A panic between
-    /// this and the next label stores it before unwinding. Dest is a
-    /// `bool` unit token. Emits nothing in line.
-    PanicStore {
-        dest: ValueId,
-        object: ValueId,
-        value: ValueId,
-        index: u32,
-    },
     /// Element `index` of a lane array (two words per element): its first
     /// word in `dest`, its second (an enum's tag) in `dest_hi`. Out of
     /// bounds panics, as [`Self::Index`] does.
@@ -705,15 +694,6 @@ pub enum MirInst {
         dest: ValueId,
         kind: MirGcKind,
         roots: Vec<ValueId>,
-    },
-    /// Debugger stop / deopt boundary (I7). Dest is a `bool` token.
-    /// Sidecar only — emit skips this inst. Names the edge a later
-    /// native tier must leave or pause at. Only tests build one today.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Deopt {
-        dest: ValueId,
-        kind: MirDeoptKind,
-        loc: common::DebugLoc,
     },
     /// Const string-table push (I4 / Q9 R1). Dest is [`MirTy::HeapRef`].
     String {
@@ -1122,30 +1102,14 @@ impl MirGcKind {
     }
 }
 
-/// Stop / leave-specialized edge (I7). Not a code opcode.
+/// What a [`super::func::DeoptSite`] names: a stop or a leave-specialized
+/// edge (I7). No pass records one today.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirDeoptKind {
     /// Interpreter may pause here (line / `stepi` boundary).
     Stop,
     /// Leave specialized or native code; resume at this edge.
     Deopt,
-}
-
-impl MirDeoptKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stop => "stop",
-            Self::Deopt => "deopt",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "stop" => Self::Stop,
-            "deopt" => Self::Deopt,
-            _ => return None,
-        })
-    }
 }
 
 impl MirInst {
@@ -1177,7 +1141,6 @@ impl MirInst {
             | Self::ClearWord { dest, .. }
             | Self::KeepAlive { dest, .. }
             | Self::Probe { dest, .. }
-            | Self::PanicStore { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::LaneIndex { dest, .. }
             | Self::LaneStore { dest, .. }
@@ -1185,7 +1148,6 @@ impl MirInst {
             | Self::LanesToWords { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
-            | Self::Deopt { dest, .. }
             | Self::String { dest, .. }
             | Self::CodePtr { dest, .. }
             | Self::Print { dest, .. }
@@ -1230,11 +1192,6 @@ impl MirInst {
         )
     }
 
-    /// Explicit I7 stop / deopt inst.
-    pub fn is_deopt_edge(&self) -> bool {
-        matches!(self, Self::Deopt { .. })
-    }
-
     pub fn is_phi(&self) -> bool {
         matches!(self, Self::Phi { .. })
     }
@@ -1249,7 +1206,7 @@ impl MirInst {
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::HeapFieldLoad { object, .. } => vec![*object],
-            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => vec![*object, *value],
+            Self::HeapFieldStore { object, value, .. } => vec![*object, *value],
             Self::Index { array, index, .. } => vec![*array, *index],
             Self::StoreIndex {
                 array,
@@ -1276,7 +1233,7 @@ impl MirInst {
             Self::LanesToWords { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
-            Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
+            Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
@@ -1318,7 +1275,7 @@ impl MirInst {
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
             Self::HeapFieldLoad { object, .. } => *object = map(*object),
-            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => {
+            Self::HeapFieldStore { object, value, .. } => {
                 *object = map(*object);
                 *value = map(*value);
             }
@@ -1377,7 +1334,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => {}
+            Self::String { .. } | Self::CodePtr { .. } => {}
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
@@ -1519,5 +1476,15 @@ mod tests {
         assert_eq!(LaneExpr::and(x2, LaneExpr::and(ne(3), LaneExpr::not(ne(1)))), LaneExpr::Const(false));
         // Nothing shared: left as it is.
         assert_eq!(LaneExpr::or(ne(0), ne(1)).size(), 3);
+    }
+
+    /// Both engines compute float `!=` unordered (`NaN != x` holds), as
+    /// Rust's `!=` and Cranelift's `FloatCC::NotEqual` do: the label says
+    /// so, and the text parser reads it back.
+    #[test]
+    fn float_ne_is_labelled_unordered() {
+        let label = MirCmpOp::Ne.as_str(true);
+        assert!(label.starts_with("fcmp.u"), "{label}");
+        assert_eq!(MirCmpOp::parse(label), Some((MirCmpOp::Ne, true)));
     }
 }

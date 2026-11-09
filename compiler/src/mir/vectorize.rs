@@ -1228,7 +1228,6 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
 /// a field or static access, an effect.
 fn region_has_barrier_inst(_func: &MirFunc, inst: &MirInst) -> bool {
     inst.is_gc_edge()
-        || inst.is_deopt_edge()
         || matches!(
             inst,
             MirInst::Call { .. }
