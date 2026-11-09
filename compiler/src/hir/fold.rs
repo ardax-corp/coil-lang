@@ -25,7 +25,7 @@ pub fn fold(body: &HirBody) -> Option<HirBody> {
     let mut hits = 0;
     for _ in 0..ROUNDS {
         let before = hits;
-        post(&mut out, root, &mut hits);
+        post(&mut out, root, &mut hits, false);
         drop_unread(&mut out, root, &mut hits);
         // A match that folded can bind a constructor the next round's
         // `post` folds a match on.
@@ -33,7 +33,13 @@ pub fn fold(body: &HirBody) -> Option<HirBody> {
             break;
         }
     }
-    (hits > 0).then_some(out)
+    if hits == 0 {
+        return None;
+    }
+    // A dropped arm's nodes are still in the arena, where a query that
+    // scans it whole would read them as uses (a class local's escape).
+    super::inline::blank_orphans(&mut out, root);
+    Some(out)
 }
 
 /// A scalar local bound once by a `let` of a literal (or of a block that
@@ -248,15 +254,21 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
     }
 }
 
-fn post(body: &mut HirBody, id: HirId, hits: &mut usize) {
+/// Fold under `id`, then `id` itself; `based`: it is the base a field or
+/// index read takes its value from.
+fn post(body: &mut HirBody, id: HirId, hits: &mut usize, based: bool) {
+    let base = match body.expr(id).kind {
+        HirKind::Field { base, .. } | HirKind::Index { base, .. } => Some(base),
+        _ => None,
+    };
     for k in body.children(id).collect::<Vec<_>>() {
-        post(body, k, hits);
+        post(body, k, hits, base == Some(k));
     }
     merge_steps(body, id, hits);
     if let Some(kind) = rewrite(body, id)
         .or_else(|| square(body, id))
         .or_else(|| regroup(body, id))
-        .or_else(|| known_variant(body, id))
+        .or_else(|| known_variant(body, id, based))
     {
         // An `if` that folds to a branch that always leaves leaves too.
         let never = taken(body, id).is_some_and(|b| matches!(body.expr(b).ty, Some(Ty::Never)));
@@ -352,8 +364,9 @@ fn square(body: &mut HirBody, id: HirId) -> Option<HirKind> {
 /// are skipped. Every field must be a literal, a local read or a unit
 /// variant, and the arm
 /// must not assign a binding or a field's local (so each read of `x` still
-/// sees `a`).
-fn known_variant(body: &mut HirBody, id: HirId) -> Option<HirKind> {
+/// sees `a`). A match a field or index read takes its base from (`based`)
+/// has a layout of its own, which only a plain read in its place keeps.
+fn known_variant(body: &mut HirBody, id: HirId, based: bool) -> Option<HirKind> {
     let HirKind::Match { scrutinee, arms } = &body.expr(id).kind else { return None };
     let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, args } = &body.expr(*scrutinee).kind else {
         return None;
@@ -376,6 +389,9 @@ fn known_variant(body: &mut HirBody, id: HirId) -> Option<HirKind> {
         _ => Some(None),
     })??;
     if body.expr(arm).ty != body.expr(id).ty || body.expr(arm).layout != body.expr(id).layout {
+        return None;
+    }
+    if based && !matches!(body.expr(arm).kind, HirKind::Local(_)) {
         return None;
     }
     let mut subst = Vec::new();
