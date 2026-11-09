@@ -600,6 +600,8 @@ impl Compiler {
                             let fqn = format!("{}__{}__{}", class, ty_part, method_name);
                             let is_coro = Self::is_coro_with_body(method);
                             self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
+                            // Before any body plans a call to it (a `for` loop's `next`).
+                            self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                             if !is_coro && let Some(f) = Self::impl_method_fn(method) {
                                 self.note_inst_clone_src(class, method_name, &fqn, (f.0.start, f.0.end));
                             }
@@ -4479,9 +4481,12 @@ impl Compiler {
     /// use this for shapes only they can see (a coroutine body never returns a
     /// pair, however its return type reads).
     fn pin_two_word_return_kind(&self, name: &str, kind: Option<PairKind>) {
-        self.pair_return_kinds
-            .borrow_mut()
-            .insert(name.to_string(), kind);
+        let prev = self.pair_return_kinds.borrow_mut().insert(name.to_string(), kind.clone());
+        // A caller may already have planned against the cached answer.
+        debug_assert!(
+            prev.as_ref().is_none_or(|prev| *prev == kind),
+            "two-word return kind of `{name}` pinned to {kind:?} after {prev:?} was cached"
+        );
     }
 
     fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
@@ -6048,7 +6053,6 @@ impl Compiler {
                             let is_coro = Self::is_coro_with_body(method);
                             // A raw method takes neither boxed arguments nor a dictionary.
                             let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
-                            self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                             self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
                             self.pending_own_dicts = self.own_dict_layout(class, method_name, 1 + self.instance_context_len(&fqn));
                             self.note_inst_clone_compiled(&fqn);
@@ -6065,12 +6069,6 @@ impl Compiler {
                                 let fqn = format!("{}__{}__{}", class, ty_part, method_name);
                                 let is_coro = Self::is_coro_with_body(body);
                                 let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
-                                self.pin_trait_method_pair_return(
-                                    class,
-                                    method_name,
-                                    &arg_tys,
-                                    &fqn,
-                                );
                                 self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
                                 self.pending_own_dicts =
                                     self.own_dict_layout(class, method_name, 1 + self.instance_context_len(&fqn));
