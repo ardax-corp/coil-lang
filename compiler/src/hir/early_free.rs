@@ -40,11 +40,32 @@ use crate::hir::{HirFlags, IndexKind, Span};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{self, Ty};
 
+/// What lowering keeps in frame slots, with no object to free.
+pub struct Slots<'a> {
+    /// A local held as two words or as a stack array.
+    pub local: &'a dyn Fn(LocalId) -> bool,
+    /// A value a temp would hold as two words (a call's result of a
+    /// two-word type).
+    pub value: &'a dyn Fn(HirId) -> bool,
+}
+
 /// `body` with early frees added, or `None` when it has no place for one.
-pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
-    if body.is_coro || body.root.is_none() {
+/// `host` names the host native a call node runs.
+pub(super) fn rewrite(
+    checker: &Checker,
+    module: &HirModule,
+    body: &HirBody,
+    lookup: &CallLookup<'_>,
+    host: &dyn Fn(HirId) -> Option<usize>,
+    slots: &Slots<'_>,
+) -> Option<HirBody> {
+    if body.is_coro {
         return None;
     }
+    // A node an earlier pass dropped may share operands with the node
+    // that replaced it: rewriting it would rewrite live code.
+    let live = crate::hir::inline::without_orphans(body, body.root?);
+    let body = live.as_ref().unwrap_or(body);
     let viewed = byte_views(body, host);
     let changed = viewed.is_some();
     let body = viewed.as_ref().unwrap_or(body);
@@ -68,11 +89,21 @@ pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, loo
     let kept = e.close(escaped.union(returned)).union(e.held());
     let stored = e.close(escaped).union(e.held());
     let parents = parents(body);
-    let temps = call_temps(body, &mut e);
-    let linear = linear_locals(body, &mut e, &parents, stored);
-    let locals = block_locals(checker, body, &mut e, kept, &linear);
-    let chains = concat_temps(body, &mut e, &parents);
-    let scrutinees = match_temps(body, &mut e, &parents, kept);
+    // A field or index read takes its base's own layout, which the block
+    // a rewrite puts in the base's place does not have.
+    let based = |id: HirId| {
+        parents.get(&id).is_some_and(|p| matches!(body.expr(*p).kind, HirKind::Field { base, .. } | HirKind::Index { base, .. } if base == id))
+    };
+    let mut temps = call_temps(body, &mut e);
+    temps.retain(|&(call, arg, _)| !based(call) && !matches!(&body.expr(call).kind, HirKind::Call { args, .. } if (slots.value)(args[arg])));
+    let mut linear = linear_locals(body, &mut e, &parents, stored);
+    linear.retain(|&l, _| !(slots.local)(l));
+    let mut locals = block_locals(checker, body, &mut e, kept, &linear);
+    locals.retain(|&(_, l)| !(slots.local)(l));
+    let mut chains = concat_temps(body, &mut e, &parents);
+    chains.retain(|(head, _)| !based(*head));
+    let mut scrutinees = match_temps(body, &mut e, &parents, kept);
+    scrutinees.retain(|&m| !based(m));
     let takes = take_calls(body, &mut e, &parents, stored, host);
     let reassigns: Vec<(HirId, bool)> = (0..body.exprs.len())
         .map(|i| HirId(i as u32))
@@ -593,6 +624,12 @@ fn linear_locals(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId
     out
 }
 
+/// Whether `id` never yields a value (it always leaves or panics): there
+/// is nothing to bind, and no code after it to free in.
+fn never(body: &HirBody, id: HirId) -> bool {
+    matches!(body.expr(id).ty, Some(Ty::Never))
+}
+
 /// `x = v` on a linear local becomes `{ let t = v; free x; x = t }`.
 fn free_on_reassign(body: &mut HirBody, assign: HirId, deep: bool) {
     let HirKind::Assign { place, value } = body.expr(assign).kind.clone() else {
@@ -601,6 +638,9 @@ fn free_on_reassign(body: &mut HirBody, assign: HirId, deep: bool) {
     let HirKind::Local(local) = body.expr(place).kind else {
         return;
     };
+    if never(body, value) {
+        return;
+    }
     let span = body.expr(assign).span;
     let ty = body.expr(value).ty.clone();
     let t = body.temp("$free", ty.clone());
@@ -636,7 +676,10 @@ fn match_temps(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, 
             continue;
         };
         let x = body.expr(*scrutinee);
-        if matches!(x.kind, HirKind::Local(_)) || !freeable(x.ty.as_ref()) || !sized_by_value(x.ty.as_ref()) {
+        if matches!(x.kind, HirKind::Local(_)) || !freeable(x.ty.as_ref()) || !sized_by_value(x.ty.as_ref()) || never(body, m) {
+            continue;
+        }
+        if !allocates(body, *scrutinee) {
             continue;
         }
         let s = e.src(*scrutinee);
@@ -676,6 +719,20 @@ fn match_temps(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, 
         out.push(m);
     }
     out
+}
+
+/// Whether `v`, a value [`sized_by_value`], may be an object made at run
+/// time: not a literal (interned, never freed), nor a `Some` of one or a
+/// `None` (a pointer-niche `Option` is its payload's word), on any path.
+pub(super) fn allocates(body: &HirBody, v: HirId) -> bool {
+    match &body.expr(v).kind {
+        HirKind::Lit(_) => false,
+        HirKind::Make { kind: super::MakeKind::Variant { .. }, args } => args.iter().any(|&a| allocates(body, a)),
+        HirKind::Block { tail: Some(t), .. } => allocates(body, *t),
+        HirKind::If { then, els: Some(els), .. } => allocates(body, *then) || allocates(body, *els),
+        HirKind::Match { arms, .. } => arms.iter().any(|a| allocates(body, a.body)),
+        _ => true,
+    }
 }
 
 /// Whether the object a value of `ty` points at has a size its value
@@ -824,6 +881,9 @@ fn free_temp(body: &mut HirBody, call: HirId, arg: usize, deep: bool) {
         return;
     };
     let a = args[arg];
+    if never(body, call) {
+        return;
+    }
     let span = body.expr(call).span;
     let arg_ty = body.expr(a).ty.clone();
     let t = body.temp("$free", arg_ty.clone());
@@ -870,8 +930,8 @@ fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
         return;
     }
     // A block that always leaves early has no end to free at.
-    let exits = |k: &HirKind| matches!(k, HirKind::Return(_) | HirKind::Break | HirKind::Continue);
-    let diverges = stmts.last().is_some_and(|s| exits(&body.expr(*s).kind)) || tail.is_some_and(|t| exits(&body.expr(t).kind));
+    let exits = |id: HirId| matches!(body.expr(id).kind, HirKind::Return(_) | HirKind::Break | HirKind::Continue) || never(body, id);
+    let diverges = stmts.last().is_some_and(|&s| exits(s)) || tail.is_some_and(exits);
     // Every `return` after the `let`, nested or not, frees on its way out.
     let decl = stmts.iter().position(|s| matches!(body.expr(*s).kind, HirKind::Let { local: l, .. } if l == local));
     let after = decl.map_or(&stmts[..0], |d| &stmts[d + 1..]);
@@ -889,7 +949,13 @@ fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
     if diverges {
         return;
     }
+    let unit = |id: HirId| body.expr(id).ty.as_ref().is_none_or(|t| *t == ty::unit());
     let tail = match tail {
+        // A block that yields nothing runs its tail for its effects.
+        Some(t) if unit(block) && !unit(t) => {
+            stmts.push(t);
+            None
+        }
         Some(t) if computes(body, t, local) => {
             let ty = body.expr(t).ty.clone();
             let r = body.temp("$free", ty.clone());
@@ -911,7 +977,7 @@ fn free_before_return(body: &mut HirBody, ret: HirId, local: LocalId) {
     let span = body.expr(ret).span;
     let mut stmts = Vec::new();
     let value = match value {
-        Some(v) if computes(body, v, local) => {
+        Some(v) if computes(body, v, local) && !never(body, v) => {
             let ty = body.expr(v).ty.clone();
             let r = body.temp("$free", ty.clone());
             stmts.push(body.push_new(HirKind::Let { local: r, init: Some(v) }, Some(ty::unit()), span));

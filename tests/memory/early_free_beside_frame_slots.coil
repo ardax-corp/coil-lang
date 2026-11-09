@@ -1,0 +1,140 @@
+// Early frees beside values that have no object to free: a block or match
+// that leaves on every path, a two-word enum local, a stack array, a
+// call's two-word result and a call a field is read off. The frees that do apply still run, and every
+// value read after one is intact across a collection.
+use tests::assert;
+use gc::collect;
+use string::to_bytes;
+
+fn sign(string s, int n) -> int {
+    let b = to_bytes(s);
+    // Changed, so it stays a copy.
+    b.push("." as byte);
+    if n > b.len() {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+fn shout(string s) -> Option<string> {
+    if s.len() > 0 {
+        return Option::Some(s + "!");
+    }
+    return Option::None;
+}
+
+fn loud(string s) -> int {
+    match shout(s) {
+        Option::Some(t) => {
+            return t.len();
+        },
+        Option::None => {
+            return 0;
+        },
+    }
+}
+
+fn half(int n) -> Option<int> {
+    if n % 2 == 0 {
+        return Option::Some(n / 2);
+    }
+    return Option::None;
+}
+
+fn halved(string s) -> int {
+    let b = to_bytes(s);
+    b.push("." as byte);
+    let h = half(b.len());
+    collect();
+    return match h {
+        Option::Some(v) => v,
+        Option::None => 0 - 1,
+    };
+}
+
+fn picked(string s) -> int {
+    let b = to_bytes(s);
+    b.push("." as byte);
+    let ints = [10, 20, 30];
+    collect();
+    return ints[b.len() % 3];
+}
+
+fn through(int n) -> RangeInclusive<int> {
+    let r = 1..=n;
+    return r;
+}
+
+fn total(RangeInclusive<int> r) -> int {
+    let acc = 0;
+    for x in r {
+        acc = acc + x;
+    }
+    return acc;
+}
+
+fn parse(string s) -> Result<int, string> {
+    if s.len() == 0 {
+        return Result::Err("empty" + s);
+    }
+    return Result::Ok(s.len());
+}
+
+fn size(Result<int, string> r) -> int {
+    return match r {
+        Result::Ok(n) => n,
+        Result::Err(e) => 0 - e.len(),
+    };
+}
+
+fn sized(string s) -> int {
+    let b = to_bytes(s);
+    b.push("." as byte);
+    let n = size(parse(s)) + total(through(3));
+    collect();
+    return n + b.len();
+}
+
+class Rec {
+    pub n: int,
+    pub tag: string,
+}
+
+fn make(int n) -> Rec {
+    return new Rec(n, "r" + shout("x").map_or("", fn (string t) => t));
+}
+
+fn later(Rec r) -> Rec {
+    return make(r.n * 2);
+}
+
+test("a copy is freed before a block that leaves on every path") {
+    assert!(sign("ab", 5) == 1);
+    assert!(sign("abcdef", 5) == 0);
+}
+
+test("a match on a fresh string whose arms all leave") {
+    assert!(loud("ab") == 3);
+    assert!(loud("") == 0);
+}
+
+test("a two-word enum local beside a freed copy") {
+    assert!(halved("abc") == 2);
+    assert!(halved("abcd") == 0 - 1);
+}
+
+test("a stack array beside a freed copy") {
+    assert!(picked("a") == 30);
+    assert!(picked("ab") == 10);
+}
+
+test("a call's two-word result passed straight on") {
+    assert!(sized("abc") == 3 + 6 + 4);
+    assert!(sized("") == 0 - 5 + 6 + 1);
+}
+
+test("a field read off a call whose argument is a fresh object") {
+    assert!(later(make(5)).n == 10);
+    assert!(later(make(2)).tag == "rx!");
+}

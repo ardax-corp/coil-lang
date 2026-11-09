@@ -724,6 +724,11 @@ fn bind(Box b) -> (int) -> int {
 
 /// The body `name` after the early-free rewrite, if it changed.
 fn rewritten(src: &str, name: &str) -> Option<HirBody> {
+    rewritten_with(src, name, &Slots { local: &|_| false, value: &|_| false })
+}
+
+/// [`rewritten`], with what lowering keeps in frame slots.
+fn rewritten_with(src: &str, name: &str, slots: &Slots<'_>) -> Option<HirBody> {
     let owned = Box::leak(src.to_string().into_boxed_str());
     let ast = parser::Pratt::default().parse(owned).expect("parse");
     let mut checker = Checker::new();
@@ -738,7 +743,21 @@ fn rewritten(src: &str, name: &str) -> Option<HirBody> {
         HirKind::Call { callee: Callee::Named { name, .. }, .. } => common::host_native_id(name),
         _ => None,
     };
-    program.early_frees(&checker, "", &module, body, &host)
+    program.early_frees(&checker, "", &module, body, &host, slots)
+}
+
+/// The names of the locals `body` frees early.
+fn freed(body: &HirBody) -> Vec<String> {
+    body.exprs
+        .iter()
+        .filter_map(|x| match &x.kind {
+            HirKind::Builtin { op: crate::hir::Builtin::FreeEarly { .. }, args } => match body.expr(args[0]).kind {
+                HirKind::Local(l) => Some(body.local(l).name.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// Names of the calls left in `body`, and whether each takes its buffer.
@@ -769,7 +788,7 @@ fn frees(src: &str, name: &str) -> Vec<(bool, String)> {
         HirKind::Call { callee: Callee::Named { name, .. }, .. } => common::host_native_id(name),
         _ => None,
     };
-    let Some(rewritten) = program.early_frees(&checker, "", &module, body, &host) else {
+    let Some(rewritten) = program.early_frees(&checker, "", &module, body, &host, &Slots { local: &|_| false, value: &|_| false }) else {
         return Vec::new();
     };
     rewritten
@@ -1160,4 +1179,132 @@ fn fresh(Box b) -> Vec<int> {
     assert_eq!(items_of.returns_arg, 0, "{items_of:?}");
     let fresh = of(&m, &out, "fresh");
     assert_eq!(fresh.returns_inner, 0, "{fresh:?}");
+}
+
+/// A copy that is changed, then a block that leaves on every path, and a
+/// match on a fresh string whose arms all leave.
+const LEAVERS: &str = "
+use string::{to_bytes};
+fn sign(string s, int n) -> int {
+    let b = to_bytes(s);
+    b.push(\".\" as byte);
+    if n > b.len() {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+fn shout(string s) -> Option<string> {
+    if s.len() > 0 {
+        return Option::Some(s + \"!\");
+    }
+    return Option::None;
+}
+fn loud(string s) -> int {
+    match shout(s) {
+        Option::Some(t) => {
+            return t.len();
+        },
+        Option::None => {
+            return 0;
+        },
+    }
+}
+";
+
+#[test]
+fn a_value_that_never_arrives_is_bound_to_no_temp() {
+    // D4b: a `never` temp is a local no layout places, and the whole
+    // rewrite was thrown away with it.
+    for name in ["sign", "loud"] {
+        let Some(body) = rewritten(LEAVERS, name) else { continue };
+        let never: Vec<&str> = body.locals.iter().filter(|l| matches!(l.ty, Some(Ty::Never))).map(|l| l.name.as_str()).collect();
+        assert!(never.is_empty(), "{name}: {never:?}");
+    }
+    let sign = rewritten(LEAVERS, "sign").expect("sign frees its copy");
+    assert_eq!(freed(&sign), vec!["b".to_string(), "b".to_string()]);
+}
+
+#[test]
+fn what_lowering_keeps_in_frame_slots_is_not_freed() {
+    // D4b: a two-word local or call result and a stack array have no
+    // object; a free of one did not plan.
+    let src = format!(
+        "{TREES}\nuse string::{{to_bytes}};\nfn run(int d) -> int {{\n    return item_check(bottom_up(d));\n}}\nfn count(string s) -> int {{\n    let b = to_bytes(s);\n    b.push(\".\" as byte);\n    return b.len();\n}}\n"
+    );
+    let all = Slots { local: &|_| true, value: &|_| true };
+    assert_eq!(rewritten(&src, "run").map(|b| freed(&b).len()), Some(1));
+    assert_eq!(rewritten_with(&src, "run", &all).map(|b| freed(&b)).unwrap_or_default(), Vec::<String>::new());
+    assert_eq!(rewritten(&src, "count").map(|b| freed(&b)), Some(vec!["b".to_string()]));
+    assert_eq!(rewritten_with(&src, "count", &all).map(|b| freed(&b)).unwrap_or_default(), Vec::<String>::new());
+}
+
+#[test]
+fn a_call_a_field_is_read_off_stays_a_call() {
+    // D4b: the read takes the call's own layout as its base, which the
+    // block freeing the call's argument does not have.
+    let src = "
+class Rec {
+    pub n: int,
+    pub tag: string,
+}
+fn make(int n) -> Rec {
+    return new Rec(n, \"r\");
+}
+fn later(Rec r) -> Rec {
+    return make(r.n * 2);
+}
+fn run(int n) -> int {
+    return later(make(n)).n;
+}
+fn kept(int n) -> int {
+    let r = later(make(n));
+    return r.n;
+}
+";
+    assert!(rewritten(src, "kept").is_some_and(|b| !freed(&b).is_empty()), "a local's base is freed after the read");
+    let Some(body) = rewritten(src, "run") else { return };
+    for x in &body.exprs {
+        if let HirKind::Field { base, .. } = x.kind {
+            assert!(!matches!(body.expr(base).kind, HirKind::Block { .. }), "a block as a field base");
+        }
+    }
+}
+
+#[test]
+fn a_value_of_literals_is_no_object_to_free() {
+    // D4b: a `Some` of a literal or a `None` is no object made at run
+    // time; a free of it is a call that does nothing, once per match.
+    let src = "
+fn tagged(int n) -> int {
+    return match (if n % 3 == 0 { Option::Some(\"hit\") } else { Option::None }) {
+        Option::Some(_) => 1,
+        Option::None => 0,
+    };
+}
+fn built(int n, string s) -> int {
+    return match (if n % 3 == 0 { Option::Some(s + \"!\") } else { Option::None }) {
+        Option::Some(t) => t.len(),
+        Option::None => 0,
+    };
+}
+";
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let scrutinee = |name: &str| {
+        let body = module.bodies.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("no body `{name}`"));
+        let found = body.exprs.iter().find_map(|x| match x.kind {
+            HirKind::Match { scrutinee, .. } => Some(scrutinee),
+            _ => None,
+        });
+        (body, found.expect("a match"))
+    };
+    let (body, v) = scrutinee("tagged");
+    assert!(!early_free::allocates(body, v));
+    let (body, v) = scrutinee("built");
+    assert!(early_free::allocates(body, v));
 }
