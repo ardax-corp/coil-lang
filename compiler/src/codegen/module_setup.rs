@@ -174,7 +174,7 @@ impl Compiler {
                         Some(_) => Some(func.and_then(|m| m.ret_hi_ty).ok_or_else(|| format!("{init}: no two-word MIR return"))?),
                         None => None,
                     };
-                    let abi = crate::layout::DenseAbi { params: Vec::new(), ret, ret_hi };
+                    let abi = crate::layout::CallAbi { params: Vec::new(), ret, ret_hi };
                     let (value, hi) = b.ins_call(target, Vec::new(), &abi).map_err(mir)?;
                     b.ins_store_static(*slot, value).map_err(mir)?;
                     if let (Some(tail), Some(hi)) = (tail, hi) {

@@ -604,7 +604,7 @@ impl MirBuilder {
         &mut self,
         target: crate::bodies::Label,
         args: Vec<ValueId>,
-        abi: &crate::layout::DenseAbi,
+        abi: &crate::layout::CallAbi,
     ) -> Result<(ValueId, Option<ValueId>), MirError> {
         if abi.params.len() != args.len() {
             return Err(MirError::msg(format!(
@@ -1887,7 +1887,7 @@ mod tests {
         let mut b = MirBuilder::new("word");
         let word = b.add_param(MirTy::I64).unwrap();
         let heap = b.add_param(MirTy::HeapRef).unwrap();
-        let abi = |p| crate::layout::DenseAbi {
+        let abi = |p| crate::layout::CallAbi {
             params: vec![p],
             ret: MirTy::I64,
             ret_hi: None,

@@ -28,7 +28,7 @@ use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::layout::ValueLayout;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 
-use crate::layout::DenseAbi;
+use crate::layout::CallAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
 use super::inst::{BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst, MirLaneShape, Terminator, ValueId};
@@ -4014,7 +4014,7 @@ impl Lower<'_> {
                 let Some(obj) = self.word(iterable)? else {
                     return Ok(Val::Never);
                 };
-                let abi = DenseAbi {
+                let abi = CallAbi {
                     params: vec![self.b.value_ty(obj)],
                     ret: ty,
                     ret_hi: Some(ty),
@@ -4156,7 +4156,7 @@ impl Lower<'_> {
         };
         let it = match plan.into_iter {
             Some(into_iter) => {
-                let abi = DenseAbi {
+                let abi = CallAbi {
                     params: vec![self.b.value_ty(src)],
                     ret: it_ty,
                     ret_hi: None,
@@ -4186,7 +4186,7 @@ impl Lower<'_> {
         let exit = self.b.create_block();
         self.jump(head)?;
         self.switch(head);
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: vec![it_ty],
             ret,
             ret_hi,
@@ -4810,7 +4810,7 @@ impl Lower<'_> {
             let h = self.b.ins_alloc(MirAllocKind::Coro { target: site.target }, words).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?));
         }
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret: if site.word_ret { MirTy::HeapRef } else { ret },
             ret_hi,
@@ -5001,7 +5001,7 @@ impl Lower<'_> {
         }
         let worker = |l: &mut Self, mut words: Vec<ValueId>| -> Result<ValueId, Refusal> {
             words.push(l.b.ins_const(MirConst::I64(fork.hops)).map_err(mir)?);
-            let abi = DenseAbi {
+            let abi = CallAbi {
                 params: vec![MirTy::I64; words.len()],
                 ret,
                 ret_hi: None,
@@ -5021,7 +5021,7 @@ impl Lower<'_> {
         let join = self.b.create_block();
         self.b.branch(small, seq_block, par_block).map_err(mir)?;
         self.switch(seq_block);
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: vec![MirTy::I64],
             ret,
             ret_hi: None,
@@ -5049,7 +5049,7 @@ impl Lower<'_> {
             let slot = self.slot(local)?;
             words.push(self.b.use_local(slot, MirTy::I64).map_err(mir)?);
         }
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: vec![MirTy::I64; words.len()],
             ret: MirTy::I64,
             ret_hi: None,
@@ -5436,7 +5436,7 @@ impl Lower<'_> {
             let dicts = site.dicts.clone();
             words.extend(self.dict_values(&dicts)?);
         }
-        let abi = DenseAbi {
+        let abi = CallAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret,
             ret_hi: None,
@@ -6486,7 +6486,7 @@ impl Lower<'_> {
                     true if self.b.value_ty(v) != MirTy::HeapRef => return Err("show word".into()),
                     true => self.b.ins_word(v).map_err(mir)?,
                 };
-                let abi = DenseAbi {
+                let abi = CallAbi {
                     params: vec![self.b.value_ty(v)],
                     ret: MirTy::HeapRef,
                     ret_hi: None,
@@ -7113,7 +7113,7 @@ impl Lower<'_> {
         };
         let arr = match (into_iter, items) {
             (Some(target), _) => {
-                let abi = DenseAbi {
+                let abi = CallAbi {
                     params: vec![self.b.value_ty(src)],
                     ret: MirTy::HeapRef,
                     ret_hi: None,

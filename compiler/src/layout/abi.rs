@@ -516,22 +516,12 @@ mod mir_layout_tests {
     }
 }
 
-/// One-word dense callee signature.
+/// A MIR callee's signature: one MIR type per parameter word and the
+/// returned word(s).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DenseAbi {
+pub struct CallAbi {
     pub params: Vec<MirTy>,
     pub ret: MirTy,
     /// Tag / second product word. `None` is the one-word ABI.
     pub ret_hi: Option<MirTy>,
-}
-
-impl DenseAbi {
-
-}
-
-#[cfg(test)]
-mod dense_tests {
-    
-    
-
 }
