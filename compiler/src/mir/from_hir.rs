@@ -328,11 +328,11 @@ impl Lower<'_> {
         word(ty)
             .or_else(|| (self.cx.is_class(ty) || opaque_heap(ty) || is_gc_handle(ty)).then_some(MirTy::HeapRef))
             .or_else(|| self.cx.scalar_enum(ty))
-            .or_else(|| (self.inp.niche)(ty))
-            .or_else(|| (self.inp.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
+            .or_else(|| self.cx.niche(ty))
+            .or_else(|| self.cx.boxed_enum(ty, None).map(|_| MirTy::HeapRef))
             .or_else(|| {
                 array_elem(ty)
-                    .and_then(|e| self.heap_elem(e).or_else(|| (self.inp.niche)(e)).or_else(|| self.cx.scalar_enum(e)))
+                    .and_then(|e| self.heap_elem(e).or_else(|| self.cx.niche(e)).or_else(|| self.cx.scalar_enum(e)))
                     .map(|_| MirTy::HeapRef)
             })
             .or_else(|| (self.inp.opaque_vars && is_var(ty)).then_some(MirTy::I64))
@@ -352,14 +352,14 @@ impl Lower<'_> {
     fn heap_elem(&self, elem: &Ty) -> Option<MirTy> {
         let heap = self.word_ty(elem) == Some(MirTy::HeapRef)
             || matches!(strip_readonly(elem), Ty::Tuple(items) if !items.is_empty())
-            || (self.inp.boxed_view)(elem, None).is_some();
+            || self.cx.boxed_view(elem, None).is_some();
         heap.then_some(MirTy::HeapRef)
     }
 
     /// A heap word stored in a tuple or array slot as the value itself:
     /// not a niche word (stored boxed).
     fn plain_heap(&self, ty: &Ty) -> bool {
-        (self.word_ty(ty) == Some(MirTy::HeapRef) && (self.inp.niche)(ty).is_none())
+        (self.word_ty(ty) == Some(MirTy::HeapRef) && self.cx.niche(ty).is_none())
             || matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty())
     }
 
@@ -374,13 +374,14 @@ impl Lower<'_> {
             Some(t) => Some(t),
             // A type parameter's element: the opaque word as stored.
             _ if self.inp.opaque_vars && is_var(elem) => Some(MirTy::I64),
-            _ => (self.inp.niche)(elem).or_else(|| self.heap_elem(elem)),
+            _ => self.cx.niche(elem).or_else(|| self.heap_elem(elem)),
         }
     }
 }
 
-/// What lowering asks the checker about types as it reaches each node.
-/// The compiler implements it; it answers from the checker alone.
+/// What lowering asks the compiler as it reaches each node: how the
+/// checker lays out a type, and what a callee does. The compiler
+/// implements it.
 pub trait LowerCx {
     /// Whether a type is a class: its value is a heap object.
     fn is_class(&self, ty: &Ty) -> bool;
@@ -405,6 +406,36 @@ pub trait LowerCx {
     /// The element kind an array of a type is stamped with at construction
     /// (`layout::array_elem_stamp`): packed bytes, pointer elements.
     fn array_stamp(&self, ty: &Ty) -> u8;
+    /// For a boxed user enum type (one word, an `ObjEnum`, matched with
+    /// `JumpIfMatch`): with no variant, `Some` of nothing; with a variant,
+    /// its payload field types in declaration order. `None` for every other
+    /// type.
+    fn boxed_enum(&self, ty: &Ty, variant: Option<&str>) -> Option<Vec<Ty>>;
+    /// Like [`Self::boxed_enum`] for any enum, `Option` or `Result` type:
+    /// the view of a value of it boxed to one word (a pair kept in one
+    /// local).
+    fn boxed_view(&self, ty: &Ty, variant: Option<&str>) -> Option<Vec<Ty>>;
+    /// The enum a two-word enum type pairs (not a tuple or range) and its
+    /// variants' tags and payload word types (none for no payload), in
+    /// declaration order.
+    fn pair_variants(&self, ty: &Ty) -> Option<PairVariants>;
+    /// The tags of a two-word enum type whose payload is `()` (bit `t`
+    /// for tag `t`): the pair form carries `0` there, whatever word its
+    /// box holds.
+    fn unit_tags(&self, ty: &Ty) -> u64;
+    /// A variant's payload field names in declaration order, by enum and
+    /// variant name (a record pattern's fields in word order).
+    fn payload_names(&self, enum_name: &str, variant: &str) -> Vec<String>;
+    /// The word of a pointer-niche `Option` or `Result` type:
+    /// [`MirTy::NicheOpt`] when the zero word is one side (`None`,
+    /// `Ok(())`), [`MirTy::NicheRes`] when `Err` is the pointer with its
+    /// low bit set.
+    fn niche(&self, ty: &Ty) -> Option<MirTy>;
+    /// Whether a function, by its HIR callee name, is pure: it writes no
+    /// heap and does no I/O (it may trap or allocate).
+    fn pure_fn(&self, name: &str) -> bool;
+    /// Whether a function, by its HIR callee name, never resizes an array.
+    fn steady_fn(&self, name: &str) -> bool;
 }
 
 /// The backing word of a scalar enum variant, or an `int` match literal.
@@ -419,21 +450,9 @@ pub enum ScalarLit {
 /// Each variant's tag and payload arity, in declaration order.
 pub type HostVariants = Vec<(u32, u32)>;
 
-/// For a boxed user enum type (one word, an `ObjEnum`): with no variant,
-/// `Some` of nothing; with a variant, its payload field types in
-/// declaration order. `None` for every other type.
-pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a>;
-
-/// A variant's payload field names, by enum and variant name.
-pub type PayloadNamesFn<'a> = Box<dyn Fn(&str, &str) -> Vec<String> + 'a>;
-
-/// A two-word enum's name and its variants' tags and payload word types.
-pub type PairVariantsFn<'a> = Box<dyn Fn(&Ty) -> Option<(String, Vec<(u32, Option<MirTy>)>)> + 'a>;
-
-/// The word of a pointer-niche `Option` or `Result` type:
-/// [`MirTy::NicheOpt`] when the zero word is one side (`None`, `Ok(())`),
-/// [`MirTy::NicheRes`] when `Err` is the pointer with its low bit set.
-pub type NicheFn<'a> = Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>;
+/// A two-word enum's name and its variants' tags and payload word types
+/// ([`LowerCx::pair_variants`]).
+pub type PairVariants = (String, Vec<(u32, Option<MirTy>)>);
 
 /// One stack operand of an FFI opcode ([`HirFfi`]), in push order.
 #[derive(Clone, Debug)]
@@ -554,33 +573,10 @@ pub struct HirMirInput<'a> {
     pub ctx_dicts: &'a [(u32, u32, u32)],
     /// `x.len()` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
-    /// Whether a function, by its HIR callee name, is pure: it writes no
-    /// heap and does no I/O (it may trap or allocate).
-    pub pure_fn: Box<dyn Fn(&str) -> bool + 'a>,
-    /// Whether a function, by its HIR callee name, never resizes an array.
-    pub steady_fn: Box<dyn Fn(&str) -> bool + 'a>,
     /// No finalizer resizes an array ([`MirFunc::lengths_steady`]).
     pub alloc_steady: bool,
     /// Statements before which frame-slot locals box (they escape there).
     pub box_at: &'a HashMap<u32, Vec<u32>>,
-    /// Boxed user enums: a heap word, matched with `JumpIfMatch`.
-    pub boxed_enum: BoxedEnumFn<'a>,
-    /// The enum a two-word enum type pairs (not a tuple or range) and its
-    /// variants' tags and payload word types (none for no payload), in
-    /// declaration order.
-    pub pair_variants: PairVariantsFn<'a>,
-    /// The tags of a two-word enum type whose payload is `()` (bit `t`
-    /// for tag `t`): the pair form carries `0` there, whatever word its
-    /// box holds.
-    pub unit_tags: Box<dyn Fn(&Ty) -> u64 + 'a>,
-    /// A variant's payload field names in declaration order, by enum and
-    /// variant name (a record pattern's fields in word order).
-    pub payload_names: PayloadNamesFn<'a>,
-    /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
-    /// of a value of it boxed to one word (a pair kept in one local).
-    pub boxed_view: BoxedEnumFn<'a>,
-    /// Pointer-niche `Option` / `Result` words.
-    pub niche: NicheFn<'a>,
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
@@ -742,7 +738,7 @@ enum Open {
 struct Lower<'a> {
     hir: &'a HirBody,
     inp: &'a HirMirInput<'a>,
-    /// What lowering asks the checker.
+    /// What lowering asks the compiler.
     cx: &'a dyn LowerCx,
     b: MirBuilder,
     /// The block being filled.
@@ -1155,7 +1151,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
         && inp.ret_pair.is_none()
         && inp.ret_boxed_niche.is_none()
         && lower.word_ty(ret).is_none()
-        && (inp.boxed_view)(ret, None).is_none();
+        && cx.boxed_view(ret, None).is_none();
     let unit_ret = is_unit(ret) || never_ret;
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
@@ -1165,7 +1161,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
         None if matches!(strip_readonly(ret), Ty::Tuple(items) if !items.is_empty()) => MirTy::HeapRef,
         // So does any two-word value (a body called through a function
         // value, or depth-checked).
-        None if lower.word_ty(ret).is_none() && (inp.boxed_view)(ret, None).is_some() => MirTy::HeapRef,
+        None if lower.word_ty(ret).is_none() && cx.boxed_view(ret, None).is_some() => MirTy::HeapRef,
         None => lower.word_ty(ret).ok_or_else(|| format!("return type {}", ty_kind(ret)))?,
     };
     lower.unit_ret = unit_ret;
@@ -1196,7 +1192,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
                 // a `()` comes as the empty tuple object.
                 let word = lower.word_ty(ty)
                     .or_else(|| is_unit(ty).then_some(MirTy::HeapRef))
-                    .or_else(|| (inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+                    .or_else(|| cx.boxed_view(ty, None).map(|_| MirTy::HeapRef))
                     .or_else(|| matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty()).then_some(MirTy::HeapRef));
                 vec![word.ok_or_else(|| format!("param type {}", ty_kind(ty)))?]
             }
@@ -1661,7 +1657,7 @@ impl Lower<'_> {
     /// A local of a two-word type that HIR emission keeps boxed in one slot.
     fn boxed_local(&self, local: HirLocal) -> bool {
         !self.inp.pair_locals.contains_key(&local.0)
-            && self.hir.local(local).ty.as_ref().is_some_and(|t| (self.inp.boxed_view)(t, None).is_some())
+            && self.hir.local(local).ty.as_ref().is_some_and(|t| self.cx.boxed_view(t, None).is_some())
     }
 
     fn temp(&mut self) -> LocalId {
@@ -1918,7 +1914,7 @@ impl Lower<'_> {
     /// The MIR type of a one-word value of `ty`: its [`HirMirInput::word`],
     /// or the heap object an enum or tuple with no such word moves as.
     fn word_or_object(&self, ty: &Ty) -> Option<MirTy> {
-        self.word_ty(ty).or_else(|| ((self.inp.boxed_view)(ty, None).is_some() || is_heap_tuple(ty)).then_some(MirTy::HeapRef))
+        self.word_ty(ty).or_else(|| (self.cx.boxed_view(ty, None).is_some() || is_heap_tuple(ty)).then_some(MirTy::HeapRef))
     }
 
     /// A niche `Option` / `Result` word boxed to its `ObjEnum`.
@@ -1992,13 +1988,13 @@ impl Lower<'_> {
         let shaped = self.inp.strings.contains_key(&id.0);
         let plain = |t: MirTy| matches!(t, MirTy::I64 | MirTy::Bool | MirTy::F64) || (t == MirTy::HeapRef && !shaped);
         let ty = self.expr_ty(lhs)?;
-        match (self.inp.pair_variants)(ty) {
+        match self.cx.pair_variants(ty) {
             Some((_, variants)) => {
                 if !plain(tys.0) || variants.iter().any(|&(_, p)| p.is_some_and(|p| !plain(p))) {
                     return None;
                 }
                 // A `()` payload is equal whatever word carries it.
-                let units = (self.inp.unit_tags)(ty);
+                let units = self.cx.unit_tags(ty);
                 Some(PairEqWords::Variants(variants.into_iter().map(|(t, p)| (t, p.filter(|_| units >> t & 1 == 0))).collect()))
             }
             None => (plain(tys.0) && plain(tys.1)).then_some(PairEqWords::Product(tys.0, tys.1)),
@@ -2308,7 +2304,7 @@ impl Lower<'_> {
         // its box.
         if let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. }, args } = &self.hir.expr(id).kind
             && self.inp.pair_tys.contains_key(&id.0)
-            && let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_view)(t, Some(variant)))
+            && let Some(tys) = self.expr_ty(id).and_then(|t| self.cx.boxed_view(t, Some(variant)))
         {
             if let Some(ty) = self.expr_ty(id).cloned() {
                 self.note_box(super::box_report::BoxKind::Variant, &ty);
@@ -2387,9 +2383,9 @@ impl Lower<'_> {
         if hi_ty != MirTy::I64 {
             return Err("unbox pair type".into());
         }
-        let (_, variants) = (self.inp.pair_variants)(ty).ok_or("unbox pair type")?;
+        let (_, variants) = self.cx.pair_variants(ty).ok_or("unbox pair type")?;
         // A `()` payload is `0` in the pair, not its box's word.
-        let units = (self.inp.unit_tags)(ty);
+        let units = self.cx.unit_tags(ty);
         let variants: Vec<(u32, u32)> = variants
             .iter()
             .map(|&(t, w)| (t, if units >> t & 1 == 1 { UNIT_PAYLOAD } else { u32::from(w.is_some()) }))
@@ -2896,7 +2892,7 @@ impl Lower<'_> {
         matches!(self.hir.expr(id).kind, HirKind::Call { .. })
             && self.inp.hosts.contains_key(&id.0)
             && !self.inp.pair_tys.contains_key(&id.0)
-            && self.expr_ty(id).is_some_and(|t| self.word_ty(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
+            && self.expr_ty(id).is_some_and(|t| self.word_ty(t).is_none() && self.cx.boxed_view(t, None).is_some())
     }
 
     /// A call whose two-word result comes back boxed (`Vec::pop`'s thunk,
@@ -3659,13 +3655,13 @@ impl Lower<'_> {
             HirKind::Make {
                 kind: MakeKind::Variant { variant, .. },
                 args,
-            } if let Some(niche) = self.expr_ty(id).and_then(|t| (self.inp.niche)(t)) => {
+            } if let Some(niche) = self.expr_ty(id).and_then(|t| self.cx.niche(t)) => {
                 self.make_niche(variant, args, niche)
             }
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. },
                 args,
-            } if let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_enum)(t, Some(variant))) => {
+            } if let Some(tys) = self.expr_ty(id).and_then(|t| self.cx.boxed_enum(t, Some(variant))) => {
                 self.make_boxed(enum_name, *tag, &tys, args)
             }
             // An `Option` / `Result` neither niche nor a pair (its payload
@@ -3673,7 +3669,7 @@ impl Lower<'_> {
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. },
                 args,
-            } if let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_view)(t, Some(variant))) => {
+            } if let Some(tys) = self.expr_ty(id).and_then(|t| self.cx.boxed_view(t, Some(variant))) => {
                 self.make_boxed(enum_name, *tag, &tys, args)
             }
             // A scalar enum's variant is its backing constant.
@@ -4110,7 +4106,7 @@ impl Lower<'_> {
                 (MirTy::NicheOpt, None)
             }
             HirIterNext::Pair => {
-                let (_, variants) = (self.inp.pair_variants)(&opt).ok_or("iterator next type")?;
+                let (_, variants) = self.cx.pair_variants(&opt).ok_or("iterator next type")?;
                 let lo = variants.iter().find_map(|&(_, w)| w).ok_or("iterator next type")?;
                 (lo, Some(MirTy::I64))
             }
@@ -4558,7 +4554,7 @@ impl Lower<'_> {
             return false;
         };
         slot.checked_sub(at.0).and_then(|i| tys.get(i as usize)) == Some(&MirTy::HeapRef)
-            && (self.inp.pair_tys.contains_key(&id.0) || self.expr_ty(id).is_some_and(|t| self.word_ty(t).is_none() && (self.inp.boxed_view)(t, None).is_some()))
+            && (self.inp.pair_tys.contains_key(&id.0) || self.expr_ty(id).is_some_and(|t| self.word_ty(t).is_none() && self.cx.boxed_view(t, None).is_some()))
     }
 
     /// Whether field `id` of a frame-slot class local is a niche `Option`
@@ -4642,13 +4638,13 @@ impl Lower<'_> {
             Some(&(lo, hi)) if site.pair_ret => (lo, Some(hi)),
             // A callee returning the two-word value boxed (a depth-checked
             // body): the word, unboxed where a pair is read.
-            Some(_) if raw || (!site.pair_ret && (self.inp.boxed_view)(ty, None).is_some()) => (MirTy::HeapRef, None),
+            Some(_) if raw || (!site.pair_ret && self.cx.boxed_view(ty, None).is_some()) => (MirTy::HeapRef, None),
             _ if site.pair_ret => return Err("call type".into()),
             _ if unit => (MirTy::I64, None),
             // A tuple not returned as a pair comes back boxed.
             _ if is_heap_tuple(ty) => (MirTy::HeapRef, None),
             // An enum value of no pair or niche layout: its boxed object.
-            None if self.word_ty(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some() => (MirTy::HeapRef, None),
+            None if self.word_ty(ty).is_none() && self.cx.boxed_view(ty, None).is_some() => (MirTy::HeapRef, None),
             _ => (self.word_ty(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
         if site.word_ret && (site.pair_ret || site.coro || unit || ret_hi.is_some()) {
@@ -4664,7 +4660,7 @@ impl Lower<'_> {
                     crate::layout::two_word_range_kind(t).is_some()
                         // A readonly class pair's word is its instance.
                         || self.cx.pair_class(t).is_some()
-                        || (self.word_ty(t).is_none() && ((self.inp.boxed_view)(t, None).is_some() || is_heap_tuple(t)))
+                        || (self.word_ty(t).is_none() && (self.cx.boxed_view(t, None).is_some() || is_heap_tuple(t)))
                 });
             // A `()` goes as the empty tuple object, as HIR emission
             // passes it.
@@ -4757,7 +4753,7 @@ impl Lower<'_> {
         }
         if let HirKind::Call { callee: Callee::Named { name, .. }, .. } = &self.hir.expr(id).kind {
             // A pure function's one scalar word: an operator that may trap.
-            if (self.inp.pure_fn)(name)
+            if self.cx.pure_fn(name)
                 && !site.word_ret
                 && site.dicts.is_empty()
                 && niche.is_none()
@@ -4766,7 +4762,7 @@ impl Lower<'_> {
             {
                 self.b.mark_pure_call(dest);
             }
-            if (self.inp.steady_fn)(name) {
+            if self.cx.steady_fn(name) {
                 self.b.mark_steady_call(dest);
             }
         }
@@ -5119,7 +5115,7 @@ impl Lower<'_> {
         let boxed_pair = self.inp.pair_tys.contains_key(&id.0);
         // Any pair `unbox_word` reads back: an enum, a product tuple
         // (#1859), a range or a readonly class pair.
-        let unboxable = (self.inp.boxed_view)(ty, None).is_some()
+        let unboxable = self.cx.boxed_view(ty, None).is_some()
             || matches!(strip_readonly(ty), Ty::Tuple(items) if items.len() == 2)
             || crate::layout::two_word_range_kind(ty).is_some()
             || self.cx.pair_class(ty).is_some();
@@ -5136,7 +5132,7 @@ impl Lower<'_> {
             // An enum of no pair or niche layout comes back as its boxed
             // object (an open `Result<T, E>`, the instance's shared layout).
             self.word_ty(ty)
-                .or_else(|| (self.inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+                .or_else(|| self.cx.boxed_view(ty, None).map(|_| MirTy::HeapRef))
                 .ok_or_else(|| format!("bound call type {}", ty_kind(ty)))?
         };
         let mut words = Vec::with_capacity(args.len() + 1);
@@ -5212,7 +5208,7 @@ impl Lower<'_> {
         // so is a heap tuple (`fn () use (s) => (s, s)`, #1524).
         let ret = if self.inp.pair_tys.contains_key(&id.0)
             || (!unit && is_heap_tuple(ty))
-            || (!unit && self.word_ty(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some())
+            || (!unit && self.word_ty(ty).is_none() && self.cx.boxed_view(ty, None).is_some())
         {
             MirTy::HeapRef
         } else if unit {
@@ -5264,7 +5260,7 @@ impl Lower<'_> {
             MirTy::I64
         } else if self.inp.pair_tys.contains_key(&id.0)
             || is_heap_tuple(ty)
-            || (self.word_ty(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some())
+            || (self.word_ty(ty).is_none() && self.cx.boxed_view(ty, None).is_some())
         {
             MirTy::HeapRef
         } else {
@@ -5655,7 +5651,7 @@ impl Lower<'_> {
         }
         let ty = self.expr_ty(id).ok_or("static type")?;
         self.word_ty(ty)
-            .or_else(|| (self.inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+            .or_else(|| self.cx.boxed_view(ty, None).map(|_| MirTy::HeapRef))
             .or_else(|| matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty()).then_some(MirTy::HeapRef))
             .ok_or_else(|| format!("static type {}", ty_kind(ty)))
     }
@@ -5818,14 +5814,14 @@ impl Lower<'_> {
             .or_else(|| self.boxed_pair_item(ty).then_some(MirTy::HeapRef))
             // A niche `Option` / `Result` item is its niche word, as
             // `make_tuple` stores it (#1614).
-            .or_else(|| (self.inp.niche)(ty))
+            .or_else(|| self.cx.niche(ty))
     }
 
     /// Whether a tuple item of type `ty` is a two-word value held as its
     /// box, as `word_or_boxed` stores it.
     fn boxed_pair_item(&self, ty: &Ty) -> bool {
         self.word_ty(ty).is_none()
-            && ((self.inp.boxed_view)(ty, None).is_some() || crate::layout::two_word_range_kind(ty).is_some())
+            && (self.cx.boxed_view(ty, None).is_some() || crate::layout::two_word_range_kind(ty).is_some())
     }
 
     fn heap_array(&self, id: HirId) -> bool {
@@ -6261,7 +6257,7 @@ impl Lower<'_> {
             }
             let want = self.word_ty(t)
                 .filter(|_| !is_unit(t))
-                .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+                .or_else(|| self.cx.boxed_view(t, None).map(|_| MirTy::HeapRef))
                 .ok_or("make payload type")?;
             // A two-word payload is stored boxed.
             let v = if want == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? };
@@ -6293,7 +6289,7 @@ impl Lower<'_> {
     /// A two-word enum value boxed to one word: the tag tested against each variant's but
     /// the last, then that variant made from the payload word.
     fn box_pair(&mut self, ty: &Ty, lo: ValueId, tag: ValueId) -> Result<Val, Refusal> {
-        let (name, variants) = (self.inp.pair_variants)(ty).ok_or("box pair type")?;
+        let (name, variants) = self.cx.pair_variants(ty).ok_or("box pair type")?;
         if self.cx.enum_drop(&name).is_some() {
             return Err("box drop enum".into());
         }
@@ -6443,7 +6439,7 @@ impl Lower<'_> {
             // is (#1611).
             let ty_w = self
                 .tuple_item(ty)
-                .or_else(|| (self.inp.boxed_view)(ty, None).is_some().then_some(MirTy::HeapRef))
+                .or_else(|| self.cx.boxed_view(ty, None).is_some().then_some(MirTy::HeapRef))
                 .ok_or("show item type")?;
             let w = match key {
                 // A record's slot.
@@ -6756,7 +6752,7 @@ impl Lower<'_> {
             // stays the object it comes back as.
             Some(ty) => Some(
                 self.word_ty(ty)
-                    .or_else(|| (self.inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+                    .or_else(|| self.cx.boxed_view(ty, None).map(|_| MirTy::HeapRef))
                     .ok_or_else(|| format!("host result {}", ty_kind(ty)))?,
             ),
             None => return Err("host result".into()),
@@ -7460,23 +7456,23 @@ impl Lower<'_> {
                 self.lane(base).is_none()
                     && self.heap_array(base)
                     && self.expr_ty(base).and_then(|t| self.elem_word(t)) == Some(MirTy::HeapRef)
-                    && self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_view)(t, None).is_some())
+                    && self.expr_ty(scrutinee).is_some_and(|t| self.cx.boxed_view(t, None).is_some())
             }
             _ => false,
         };
         // A two-word host result is matched on its two words.
         let host_box = self.host_pair(scrutinee) && !self.host_two_words(scrutinee);
         let boxed_host = host_box || self.boxed_call(scrutinee) || self.host_boxed(scrutinee) || self.ffi_boxed(scrutinee);
-        if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
+        if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| self.cx.boxed_enum(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
         }
-        if let Some(niche) = self.expr_ty(scrutinee).and_then(|t| (self.inp.niche)(t)) {
+        if let Some(niche) = self.expr_ty(scrutinee).and_then(|t| self.cx.niche(t)) {
             return self.match_niche(scrutinee, arms, niche, tail);
         }
         // A value only ever kept boxed (an `Option` / `Result` whose
         // payload is two words itself): matched on its object.
         if !self.inp.pair_tys.contains_key(&scrutinee.0)
-            && self.expr_ty(scrutinee).is_some_and(|t| self.word_ty(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
+            && self.expr_ty(scrutinee).is_some_and(|t| self.word_ty(t).is_none() && self.cx.boxed_view(t, None).is_some())
         {
             return self.match_boxed(scrutinee, arms, tail);
         }
@@ -7488,7 +7484,7 @@ impl Lower<'_> {
             Val::V(obj)
                 if self.b.value_ty(obj) == MirTy::HeapRef
                     && let Some(ty) = self.expr_ty(scrutinee).cloned()
-                    && (self.inp.boxed_view)(&ty, None).is_some() =>
+                    && self.cx.boxed_view(&ty, None).is_some() =>
             {
                 return self.match_boxed_obj(obj, &ty, arms, tail);
             }
@@ -7629,7 +7625,7 @@ impl Lower<'_> {
     /// checker proved the match exhaustive.
     fn match_nested(&mut self, scrutinee: HirId, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
         let ty = self.expr_ty(scrutinee).ok_or("match scrutinee")?.clone();
-        if (self.inp.boxed_view)(&ty, None).is_none() {
+        if self.cx.boxed_view(&ty, None).is_none() {
             return Err("nested match type".into());
         }
         let Some(obj) = self.boxed_word(scrutinee)? else {
@@ -7668,7 +7664,7 @@ impl Lower<'_> {
         let tested = if catch.is_some() { tree.groups.len() } else { tree.groups.len() - 1 };
         let mut groups = Vec::with_capacity(tree.groups.len());
         for (gi, g) in tree.groups.iter().enumerate() {
-            let field_tys = (self.inp.boxed_view)(ty, Some(g.variant)).ok_or("nested variant payload")?;
+            let field_tys = self.cx.boxed_view(ty, Some(g.variant)).ok_or("nested variant payload")?;
             let mut words = Vec::with_capacity(field_tys.len());
             for (k, t) in field_tys.iter().enumerate() {
                 let w = self.payload_word_ty(t)?;
@@ -7714,7 +7710,7 @@ impl Lower<'_> {
                 }
                 for ((sub, &w), t) in subs.iter().zip(&words).zip(&field_tys) {
                     if let Some(sub) = sub {
-                        if matches!(sub, HirPat::Variant { .. }) && (self.inp.niche)(t).is_some() {
+                        if matches!(sub, HirPat::Variant { .. }) && self.cx.niche(t).is_some() {
                             return Err("nested niche pattern".into());
                         }
                         self.nested_test(sub, w, t, miss)?;
@@ -7738,7 +7734,7 @@ impl Lower<'_> {
         match fields {
             HirPatFields::Unit => Vec::new(),
             HirPatFields::Tuple(parts) => parts.iter().map(Some).collect(),
-            HirPatFields::Record(named) => (self.inp.payload_names)(enum_name, variant)
+            HirPatFields::Record(named) => self.cx.payload_names(enum_name, variant)
                 .iter()
                 .map(|name| named.iter().find(|(n, _)| n == name).map(|(_, p)| p))
                 .collect(),
@@ -7749,7 +7745,7 @@ impl Lower<'_> {
     fn payload_word_ty(&self, t: &Ty) -> Result<MirTy, Refusal> {
         self.word_ty(t)
             .or_else(|| is_unit(t).then_some(MirTy::I64))
-            .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+            .or_else(|| self.cx.boxed_view(t, None).map(|_| MirTy::HeapRef))
             .ok_or_else(|| "payload type".into())
     }
 
@@ -7799,7 +7795,7 @@ impl Lower<'_> {
                 if self.b.value_ty(v) != MirTy::HeapRef {
                     return Err("nested variant word".into());
                 }
-                let field_tys = (self.inp.boxed_view)(ty, Some(variant)).ok_or("nested variant payload")?;
+                let field_tys = self.cx.boxed_view(ty, Some(variant)).ok_or("nested variant payload")?;
                 let subs = self.sub_patterns(enum_name, variant, fields);
                 if !subs.is_empty() && subs.len() != field_tys.len() {
                     return Err("payload pattern".into());
@@ -7819,7 +7815,7 @@ impl Lower<'_> {
                     if let Some(sub) = sub {
                         // A niche-word payload tests as its own layout; only
                         // boxed and scalar payloads are tested here.
-                        if matches!(sub, HirPat::Variant { .. }) && (self.inp.niche)(t).is_some() {
+                        if matches!(sub, HirPat::Variant { .. }) && self.cx.niche(t).is_some() {
                             return Err("nested niche pattern".into());
                         }
                         self.nested_test(sub, w, t, miss)?;
@@ -7989,7 +7985,7 @@ impl Lower<'_> {
         let HirPat::Variant { variant, .. } = pat else {
             return Err("match arm pattern".into());
         };
-        let fields = (self.inp.boxed_view)(ty, Some(variant)).ok_or("variant payload")?;
+        let fields = self.cx.boxed_view(ty, Some(variant)).ok_or("variant payload")?;
         let binds = query::arm_fields(self.hir, pat).map_err(|e| e.to_string())?;
         if !binds.is_empty() && binds.len() != fields.len() {
             return Err("payload pattern".into());
@@ -8001,7 +7997,7 @@ impl Lower<'_> {
             .map(|(t, bind)| {
                 self.word_ty(t)
                     .or_else(|| is_unit(t).then_some(MirTy::I64))
-                    .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+                    .or_else(|| self.cx.boxed_view(t, None).map(|_| MirTy::HeapRef))
                     // A field of a type never resolved (a thread's or
                     // channel's value) that the arm ignores: its word is
                     // unpacked, as emission's, and never read.
