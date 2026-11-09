@@ -6,7 +6,7 @@ use std::{
 };
 
 use common::ProgramDebug;
-use parser::{ast::Expression, Pratt, SimpleSpan};
+use parser::{ast::Expression, SimpleSpan};
 use reporting::{
     create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
 };
@@ -130,10 +130,8 @@ pub struct Pipeline {
     overlays: HashMap<PathBuf, String>,
     /// Parsed + expanded AST per file (discover / compile / typecheck).
     ast_cache: crate::ast_cache::AstCache,
-    /// Files that declare a `fn drop()`, and whether an in-memory entry
-    /// does ([`Self::seed_fn_value_escapes`]).
+    /// Files that declare a `fn drop()` ([`Self::seed_fn_value_escapes`]).
     finalizer_files: HashSet<PathBuf>,
-    finalizers_in_entry: bool,
     /// The file each compiled program came from, by its program number
     /// (foreign clones compile from its AST).
     program_files: HashMap<usize, PathBuf>,
@@ -591,7 +589,6 @@ impl Pipeline {
             overlays: HashMap::new(),
             ast_cache: crate::ast_cache::AstCache::default(),
             finalizer_files: HashSet::new(),
-            finalizers_in_entry: false,
             program_files: HashMap::new(),
             include_tests: false,
             contract_runs: 0,
@@ -1058,15 +1055,14 @@ impl Pipeline {
         }
     }
 
-    /// Walk every cached AST (and optional in-memory entry) before emit so
-    /// two-slot RETURN cannot be chosen for a function whose address is
-    /// taken in another file of this compile.
-    fn seed_fn_value_escapes(&mut self, extra: Option<&(parser::SimpleSpan, Box<Expression<'_>>)>) {
+    /// Walk every cached AST before emit so two-slot RETURN cannot be
+    /// chosen for a function whose address is taken in another file of this
+    /// compile.
+    fn seed_fn_value_escapes(&mut self) {
         let mut names = HashSet::new();
         // A finalizer in any file runs at every file's allocation safepoints.
         let mut finalizers_resize = false;
         self.finalizer_files.clear();
-        self.finalizers_in_entry = false;
         let mut written = HashSet::new();
         for (file, cached) in self.ast_cache.iter() {
             if let Some(ast) = cached.ast() {
@@ -1079,13 +1075,6 @@ impl Pipeline {
                 finalizers_resize |= resize;
             }
         }
-        if let Some(ast) = extra {
-            crate::static_writes::collect_written_names(ast, &mut written);
-            crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
-            let (declared, resize) = crate::typechecking::purity::finalizer_facts(ast);
-            self.finalizers_in_entry = declared;
-            finalizers_resize |= resize;
-        }
         let compiler = self.compiler_lazy_mut();
         compiler.set_fn_value_escaped_program(names);
         compiler.set_program_finalizers_resize(Some(finalizers_resize));
@@ -1094,16 +1083,11 @@ impl Pipeline {
 
     /// Compile every discovered module in dependency order.
     fn compile_discovered_modules(&mut self) {
-        self.seed_fn_value_escapes(None);
-        self.emit_discovered_modules();
-    }
-
-    fn emit_discovered_modules(&mut self) {
+        self.seed_fn_value_escapes();
         let order = self.worklist_in_dependency_order();
         self.step(CompileStep::Modules(order.len()));
-        // Whether a module compiled after each one declares a `fn drop()`
-        // (an in-memory entry compiles after all of them).
-        let mut later = self.finalizers_in_entry;
+        // Whether a module compiled after each one declares a `fn drop()`.
+        let mut later = false;
         let mut pending = vec![false; order.len()];
         for (k, item) in order.iter().enumerate().rev() {
             pending[k] = later;
@@ -1473,82 +1457,17 @@ impl Pipeline {
         self.compiler_lazy_mut().constants().to_vec()
     }
 
+    /// Compile `src` as the entry file `<input>.coil`, its `use`s read from
+    /// disk.
     pub fn compile_src(&mut self, src: &str) -> Result<Vec<u64>, CompileFail> {
-        let _capture = self.comptime_capture();
-        // Derives, attribute and function-style macros and trait contract
-        // copies run in the discovery stage, which works on cached files:
-        // compile such input as an in-memory file.
-        let trait_contracts = src.contains("trait ") && (src.contains("requires") || src.contains("ensures"));
-        let macro_call = src
-            .match_indices("!(")
-            .any(|(at, _)| src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'));
-        // A `readonly class` derives its implied `Eq` / `Hash` there too.
-        let readonly_class = src.contains("readonly class");
-        if src.contains("#[") || trait_contracts || macro_call || readonly_class {
-            let path = PathBuf::from("<input>.coil");
-            self.overlays.insert(path.clone(), src.to_string());
-            let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));
-            self.overlays.remove(&path);
-            return result;
-        }
-        let parser = Pratt::default();
-        let path = Path::new("<input>");
-        let mut ast = match parser.parse(src) {
-            Ok(mut ast) => {
-                crate::const_fold::lift_startup_consts(&mut ast);
-                ast
-            }
-            Err(err) => {
-                self.emit_message(path, src, &err);
-                return Err(CompileFail);
-            }
-        };
-
-        self.reset_session();
-        self.sync_host_caps();
-        self.entry_file = None;
-        self.begin_compile_opt_stats();
-
-        // Discover disk modules (`io/sync.coil` in coil-stdlib, …) referenced by `use`
-        // before compiling the in-memory entry, same dependency order as
-        // `compile_src_from_file`, without requiring a temp file.
-        self.enqueue_uses(path, src, &ast);
-        self.enqueue_core(path);
-        self.discover_all();
-        self.expand_user_macros();
-        self.seed_fn_value_escapes(Some(&ast));
-        self.emit_discovered_modules();
-        if self.failed || self.had_errors() {
-            return Err(CompileFail);
-        }
-
-        self.compiler_lazy_mut().set_source_file(path);
-        self.compiler_lazy_mut().set_source_text(src);
-        self.compiler_lazy_mut().set_pending_finalizers(false);
-        // As `compile_file`: the other modules' method clones this one
-        // calls compile first, for its typed inlining to splice.
-        if self.compiler_lazy_mut().compile_module_begin("", &mut ast) {
-            self.emit_foreign_clones();
-            self.compiler_lazy_mut().compile_prepared_module_finish("", &mut ast);
-        }
-        self.emit_foreign_clones();
-
-        // Register source and drain typecheck / codegen diagnostics via the sink.
-        let file_id = self.sink.register_source(path, src);
-        self.emit_new_messages(file_id);
-        if self.had_errors() || !self.check_capabilities() {
-            return Err(CompileFail);
-        }
-
-        self.compiler_lazy_mut().finalize_bodies();
-        self.compute_consts(Some((path, src)));
-
-        // Warnings are kept for callers to inspect; only hard errors fail.
-        if self.had_errors() {
-            return Err(CompileFail);
-        }
-
-        Ok(self.compiler_lazy_mut().constants().to_vec())
+        // As a file, so derives, attribute and function-style macros and
+        // trait contract copies (which run in the discovery stage, on cached
+        // files) see it.
+        let path = PathBuf::from("<input>.coil");
+        self.overlays.insert(path.clone(), src.to_string());
+        let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));
+        self.overlays.remove(&path);
+        result
     }
 
     /// A capture for [`Self::compute_consts`], when the macro host runs MIR:
@@ -1918,51 +1837,29 @@ impl Pipeline {
         Ok(self.compiler_lazy_mut().constants().to_vec())
     }
 
-    /// Compile a source entry in-memory for `coil dissect` (never writes an archive).
+    /// Compile a source entry in-memory for `coil dissect` and `coil debug`
+    /// (never writes an archive).
     #[cfg(any(test, feature = "dissect"))]
     pub fn compile_dissect(&mut self, file: &str) -> Result<crate::DissectArtifacts, CompileFail> {
-        let _capture = self.comptime_capture();
-        let entry = PathBuf::from(file);
-        self.reset_session();
-        self.entry_file = Some(entry.clone());
-        // `coil verify`'s proof of this file, while it still matches; never
-        // while verifying, which makes the proof.
-        let proof = (!crate::verify::capture_active()).then(|| crate::verify::proof::Proof::load(&entry)).flatten();
-        let _proof = crate::verify::proof::ProofScope::set(proof);
-        self.begin_compile_opt_stats();
-        self.enqueue_file(entry);
+        self.compile_src_from_file(file)?;
+        Ok(self.dissect_artifacts())
+    }
 
-        self.discover_all();
-        self.expand_user_macros();
-        self.compile_discovered_modules();
-
-        if self.failed || self.had_errors() || !self.check_capabilities() {
-            return Err(CompileFail);
-        }
-
-        self.compiler_lazy_mut().finalize_bodies();
-        self.compute_consts(None);
-        if self.failed || self.had_errors() {
-            return Err(CompileFail);
-        }
-
-
-        // Warnings are kept for callers to inspect; only hard errors fail.
-        if self.had_errors() {
-            return Err(CompileFail);
-        }
-
+    /// The functions, strings, debug and type tables of the last compile,
+    /// for `coil dissect` and `coil debug`. The listing interleaves source
+    /// whatever `-g` an archive would keep.
+    #[cfg(any(test, feature = "dissect"))]
+    pub fn dissect_artifacts(&mut self) -> crate::DissectArtifacts {
         let functions = self.compiler_lazy_mut().function_symbols();
-        // The listing interleaves source whatever `-g` the archive would keep.
         let debug = self.program_debug_full();
         let (classes, enums) = self.compiler_lazy().debug_type_tables();
-        Ok(crate::DissectArtifacts {
+        crate::DissectArtifacts {
             strings: self.compiler_lazy_mut().strings().to_vec(),
             functions,
             debug,
             classes,
             enums,
-        })
+        }
     }
 
     /// Harness test cases from the last compile (`description`, entry id).
