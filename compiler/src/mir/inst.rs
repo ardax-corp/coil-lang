@@ -1162,6 +1162,56 @@ impl MirInst {
         }
     }
 
+    /// [`Self::dest`], to rename it (a cloned instruction's).
+    pub fn dest_mut(&mut self) -> &mut ValueId {
+        match self {
+            Self::Const { dest, .. }
+            | Self::Bin { dest, .. }
+            | Self::Cmp { dest, .. }
+            | Self::Unary { dest, .. }
+            | Self::Cast { dest, .. }
+            | Self::Phi { dest, .. }
+            | Self::HostInvoke { dest, .. }
+            | Self::Ffi { dest, .. }
+            | Self::Call { dest, .. }
+            | Self::CallIndirect { dest, .. }
+            | Self::MatchPayload { dest, .. }
+            | Self::HeapFieldLoad { dest, .. }
+            | Self::HeapFieldStore { dest, .. }
+            | Self::Index { dest, .. }
+            | Self::StoreIndex { dest, .. }
+            | Self::ArrayLen { dest, .. }
+            | Self::ResumeCoro { dest, .. }
+            | Self::Yield { dest, .. }
+            | Self::DoneCoro { dest, .. }
+            | Self::LoadStatic { dest, .. }
+            | Self::StoreStatic { dest, .. }
+            | Self::HomeLoad { dest, .. }
+            | Self::HomeStore { dest, .. }
+            | Self::ClearWord { dest, .. }
+            | Self::KeepAlive { dest, .. }
+            | Self::Probe { dest, .. }
+            | Self::ArrayPush { dest, .. }
+            | Self::LaneIndex { dest, .. }
+            | Self::LaneStore { dest, .. }
+            | Self::LanePush { dest, .. }
+            | Self::LanesToWords { dest, .. }
+            | Self::Alloc { dest, .. }
+            | Self::GcBarrier { dest, .. }
+            | Self::String { dest, .. }
+            | Self::CodePtr { dest, .. }
+            | Self::Print { dest, .. }
+            | Self::FreeEarly { dest, .. }
+            | Self::Panic { dest, .. }
+            | Self::Format { dest, .. }
+            | Self::Stringify { dest, .. }
+            | Self::Cow { dest, .. }
+            | Self::StrEq { dest, .. }
+            | Self::ByteScan { dest, .. }
+            | Self::VecLoop { dest, .. } => dest,
+        }
+    }
+
     /// `dest` plus a two-slot CALL tag / second word when present.
     pub fn dests(&self) -> impl Iterator<Item = ValueId> {
         let hi = match *self {
@@ -1175,21 +1225,6 @@ impl MirInst {
             _ => None,
         };
         std::iter::once(self.dest()).chain(hi)
-    }
-
-    /// Allocation or GC safepoint — specialize / native must not cross.
-    pub fn is_gc_edge(&self) -> bool {
-        matches!(
-            self,
-            Self::Alloc { .. }
-                | Self::ArrayPush { .. }
-                | Self::LanePush { .. }
-                | Self::LanesToWords { .. }
-                | Self::Format { .. }
-                | Self::Stringify { .. }
-                | Self::Cow { .. }
-                | Self::GcBarrier { .. }
-        )
     }
 
     pub fn is_phi(&self) -> bool {
@@ -1421,6 +1456,29 @@ impl Terminator {
         }
     }
 
+    /// The values this terminator reads: a branch's condition, a match's
+    /// scrutinee, the returned words. Not a match's [`Self::binds`].
+    pub fn uses(&self) -> impl Iterator<Item = ValueId> {
+        let words = match *self {
+            Self::Br { cond, .. } => [Some(cond), None],
+            Self::JumpIfMatch { scrutinee, .. } => [Some(scrutinee), None],
+            Self::Return { lo, hi } => [lo, hi],
+            Self::Jump { .. } | Self::Unreachable => [None, None],
+        };
+        words.into_iter().flatten()
+    }
+
+    /// The payload words a `JumpIfMatch` binds on its taken edge. Each is
+    /// the dest of a `MatchPayload` in the same block, which the engines
+    /// skip: the terminator writes the word, so it is not live before it.
+    /// A pass that deletes dead code still keeps those `MatchPayload`s.
+    pub fn binds(&self) -> &[ValueId] {
+        match self {
+            Self::JumpIfMatch { payloads, .. } => payloads,
+            _ => &[],
+        }
+    }
+
     pub fn rewrite_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match self {
             Self::Br { cond, .. } => *cond = map(*cond),
@@ -1476,6 +1534,20 @@ mod tests {
         assert_eq!(LaneExpr::and(x2, LaneExpr::and(ne(3), LaneExpr::not(ne(1)))), LaneExpr::Const(false));
         // Nothing shared: left as it is.
         assert_eq!(LaneExpr::or(ne(0), ne(1)).size(), 3);
+    }
+
+    /// A match reads its scrutinee; its payloads are words it binds on
+    /// the taken edge, not reads.
+    #[test]
+    fn terminator_uses_and_binds() {
+        let (s, p, q) = (ValueId(1), ValueId(2), ValueId(3));
+        let m = Terminator::JumpIfMatch { scrutinee: s, tag: 1, payloads: vec![p, q], taken: BlockId(1), not_taken: BlockId(2) };
+        assert_eq!(m.uses().collect::<Vec<_>>(), [s]);
+        assert_eq!(m.binds(), [p, q]);
+        let r = Terminator::Return { lo: Some(p), hi: Some(q) };
+        assert_eq!(r.uses().collect::<Vec<_>>(), [p, q]);
+        assert!(r.binds().is_empty());
+        assert_eq!(Terminator::Jump { dest: BlockId(0) }.uses().count(), 0);
     }
 
     /// Both engines compute float `!=` unordered (`NaN != x` holds), as

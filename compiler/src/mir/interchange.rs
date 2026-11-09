@@ -82,17 +82,6 @@ struct Nest {
     arrays: Vec<ValueId>,
 }
 
-fn def_of(func: &MirFunc, v: ValueId) -> Option<(BlockId, &MirInst)> {
-    func.blocks.iter().find_map(|b| b.insts.iter().find(|i| i.dests().any(|d| d == v)).map(|i| (b.id, i)))
-}
-
-fn const_i64(func: &MirFunc, v: ValueId) -> Option<i64> {
-    match def_of(func, v)? {
-        (_, MirInst::Const { c: MirConst::I64(k), .. }) => Some(*k),
-        _ => None,
-    }
-}
-
 /// `h`'s counter: `phi = φ[init: start, latch: phi + 1]; phi < bound`,
 /// the header holding nothing else, true to `body`.
 fn counter(func: &MirFunc, h: BlockId, entry: BlockId, latch: BlockId, outside: &dyn Fn(ValueId) -> bool) -> Option<(Counter, BlockId, BlockId)> {
@@ -124,7 +113,7 @@ fn counter(func: &MirFunc, h: BlockId, entry: BlockId, latch: BlockId, outside: 
 fn steps_by_one(func: &MirFunc, block: BlockId, c: &Counter) -> bool {
     func.block(block).insts.iter().any(|i| {
         matches!(i, MirInst::Bin { dest, op: MirBinOp::Add, ty: MirTy::I64, lhs, rhs }
-            if *dest == c.step && (*lhs == c.phi && const_i64(func, *rhs) == Some(1) || *rhs == c.phi && const_i64(func, *lhs) == Some(1)))
+            if *dest == c.step && (*lhs == c.phi && func.const_i64(*rhs) == Some(1) || *rhs == c.phi && func.const_i64(*lhs) == Some(1)))
     })
 }
 
@@ -181,7 +170,7 @@ fn nest_of(func: &MirFunc, lp: &LoopInfo) -> Option<Nest> {
         if b.insts.iter().any(|i| i.operands().iter().any(|v| inside.contains(v))) {
             return None;
         }
-        if b.term.as_ref().is_some_and(|t| super::gc::term_uses(t).iter().any(|v| inside.contains(v))) {
+        if b.term.as_ref().is_some_and(|t| t.uses().any(|v| inside.contains(&v))) {
             return None;
         }
     }
@@ -296,7 +285,7 @@ fn clone_blocks(func: &mut MirFunc, blocks: &[BlockId]) -> HashMap<BlockId, Bloc
     for &b in blocks {
         let mut insts = func.block(b).insts.clone();
         for inst in &mut insts {
-            set_dest(inst, map(inst.dest()));
+            *inst.dest_mut() = map(inst.dest());
             inst.rewrite_values(&map);
             if let MirInst::Phi { args, .. } = inst {
                 for (from, _) in args.iter_mut() {
@@ -321,21 +310,6 @@ fn clone_blocks(func: &mut MirFunc, blocks: &[BlockId]) -> HashMap<BlockId, Bloc
         }
     }
     bmap
-}
-
-/// Give `inst` (a kind a nest may hold) the dest `d`.
-fn set_dest(inst: &mut MirInst, d: ValueId) {
-    match inst {
-        MirInst::Const { dest, .. }
-        | MirInst::Bin { dest, .. }
-        | MirInst::Cmp { dest, .. }
-        | MirInst::Unary { dest, .. }
-        | MirInst::Cast { dest, .. }
-        | MirInst::Phi { dest, .. }
-        | MirInst::Index { dest, .. }
-        | MirInst::StoreIndex { dest, .. } => *dest = d,
-        _ => unreachable!("a nest holds no {inst:?}"),
-    }
 }
 
 /// Guard, clone the original nest for when the guard fails, and swap the

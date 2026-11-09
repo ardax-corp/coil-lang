@@ -18,17 +18,7 @@ pub fn used_params(f: &MirFunc) -> usize {
         for inst in &b.insts {
             used.extend(inst.operands());
         }
-        match &b.term {
-            Some(Terminator::Br { cond, .. }) => {
-                used.insert(*cond);
-            }
-            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
-                used.insert(*scrutinee);
-                used.extend(payloads.iter().copied());
-            }
-            Some(Terminator::Return { lo, hi }) => used.extend(lo.iter().chain(hi.iter()).copied()),
-            _ => {}
-        }
+        used.extend(b.term.iter().flat_map(Terminator::uses));
     }
     f.params.iter().rposition(|p| used.contains(p)).map_or(0, |i| i + 1)
 }
@@ -40,23 +30,7 @@ pub fn is_generator(f: &MirFunc) -> bool {
 
 /// An instruction whose helper may allocate.
 pub fn allocates(inst: &MirInst) -> bool {
-    matches!(
-        inst,
-        MirInst::Alloc { .. }
-            | MirInst::ArrayPush { .. }
-            | MirInst::LanePush { .. }
-            | MirInst::LanesToWords { .. }
-            | MirInst::String { .. }
-            | MirInst::Format { .. }
-            | MirInst::Stringify { .. }
-            | MirInst::Cow { .. }
-            | MirInst::HostInvoke { .. }
-            | MirInst::CallIndirect { .. }
-            | MirInst::ResumeCoro { .. }
-            | MirInst::FreeEarly { .. }
-            | MirInst::Yield { .. }
-            | MirInst::Ffi { .. }
-    )
+    inst.props().allocates
 }
 
 /// A value native code holds: a scalar, or a heap word it passes along and

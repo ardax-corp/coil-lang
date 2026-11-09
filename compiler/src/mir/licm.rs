@@ -485,12 +485,8 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
             Some(Terminator::Br { cond, .. }) => {
                 tested.insert(*cond);
             }
-            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
-                read_elsewhere.insert(*scrutinee);
-                read_elsewhere.extend(payloads);
-            }
-            Some(Terminator::Return { lo, hi }) => read_elsewhere.extend(lo.iter().chain(hi)),
-            Some(Terminator::Jump { .. } | Terminator::Unreachable) | None => {}
+            Some(t) => read_elsewhere.extend(t.uses().chain(t.binds().iter().copied())),
+            None => {}
         }
     }
 
@@ -583,7 +579,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
                 let fresh = ValueId(func.types.len() as u32);
                 func.types.push(func.types[v.index()]);
                 let mut lit = lit.clone();
-                set_test_dest(&mut lit, fresh);
+                *lit.dest_mut() = fresh;
                 lits.push(lit);
                 fresh
             })
@@ -639,7 +635,7 @@ fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guar
                 let fresh = ValueId(func.types.len() as u32);
                 func.types.push(func.ty(old));
                 map.insert(old, fresh);
-                set_test_dest(&mut copy, fresh);
+                *copy.dest_mut() = fresh;
                 copies.push(copy);
             }
         }
@@ -655,11 +651,7 @@ fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guar
             read.extend(inst.operands());
         }
         if let Some(term) = &block.term {
-            let mut term = term.clone();
-            term.rewrite_values(|v| {
-                read.insert(v);
-                v
-            });
+            read.extend(term.uses().chain(term.binds().iter().copied()));
         }
     }
     read.extend(func.debug_slots.values().copied());
@@ -735,19 +727,6 @@ fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guar
         for (_, v) in env.iter_mut() {
             *v = rename.get(v).copied().unwrap_or(*v);
         }
-    }
-}
-
-/// Rename the value a [`cheap_test`] instruction defines.
-fn set_test_dest(inst: &mut MirInst, fresh: ValueId) {
-    match inst {
-        MirInst::Const { dest, .. }
-        | MirInst::Cmp { dest, .. }
-        | MirInst::Cast { dest, .. }
-        | MirInst::ArrayLen { dest, .. }
-        | MirInst::Bin { dest, .. }
-        | MirInst::Unary { dest, .. } => *dest = fresh,
-        _ => unreachable!("not a cheap test"),
     }
 }
 

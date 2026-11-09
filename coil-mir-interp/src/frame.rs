@@ -143,7 +143,7 @@ impl RootMaps {
         let ip = ip as usize;
         let Some(inst) = b.insts.get(ip) else {
             // At the terminator: nothing runs there that collects.
-            return b.term.as_ref().map(term_uses).unwrap_or_default().into_iter().collect();
+            return b.term.iter().flat_map(Terminator::uses).collect();
         };
         let mut live = self.live_after[bi][ip].clone();
         for d in inst.dests() {
@@ -154,15 +154,6 @@ impl RootMaps {
             live.insert(*value);
         }
         live
-    }
-}
-
-fn term_uses(t: &Terminator) -> Vec<ValueId> {
-    match t {
-        Terminator::Br { cond, .. } => vec![*cond],
-        Terminator::JumpIfMatch { scrutinee, .. } => vec![*scrutinee],
-        Terminator::Return { lo, hi } => lo.iter().chain(hi).copied().collect(),
-        _ => Vec::new(),
     }
 }
 

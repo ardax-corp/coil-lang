@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::func::MirFunc;
+use super::func::{MirFunc, resolve};
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, ValueId,
 };
@@ -166,15 +166,6 @@ pub fn gvn(func: &mut MirFunc) -> usize {
     removed
 }
 
-fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
-    while let Some(&n) = subst.get(&v) {
-        if n == v {
-            break;
-        }
-        v = n;
-    }
-    v
-}
 
 fn gvn_dom(func: &mut MirFunc) -> usize {
     let n = func.blocks.len();
@@ -409,16 +400,7 @@ fn inst_from_key(key: ExprKey, dest: ValueId) -> MirInst {
 }
 
 fn apply_subst(func: &mut MirFunc, subst: &HashMap<ValueId, ValueId>) -> usize {
-    let map = |v: ValueId| resolve(subst, v);
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(map);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(map);
-        }
-    }
-    func.rewrite_debug_slots(map);
+    func.replace_uses(subst);
     let removed: HashSet<ValueId> = subst.keys().copied().collect();
     for block in &mut func.blocks {
         block.insts.retain(|i| !removed.contains(&i.dest()));
@@ -456,33 +438,9 @@ fn rpo(func: &MirFunc) -> Vec<BlockId> {
 
 pub(super) fn dce(func: &mut MirFunc) {
     let mut live: HashSet<ValueId> = HashSet::new();
-    for block in &func.blocks {
-        if let Some(term) = &block.term {
-            match term {
-                super::inst::Terminator::Br { cond, .. } => {
-                    live.insert(*cond);
-                }
-                super::inst::Terminator::JumpIfMatch {
-                    scrutinee,
-                    payloads,
-                    ..
-                } => {
-                    live.insert(*scrutinee);
-                    for p in payloads {
-                        live.insert(*p);
-                    }
-                }
-                super::inst::Terminator::Return { lo, hi } => {
-                    if let Some(v) = lo {
-                        live.insert(*v);
-                    }
-                    if let Some(v) = hi {
-                        live.insert(*v);
-                    }
-                }
-                _ => {}
-            }
-        }
+    for term in func.blocks.iter().filter_map(|b| b.term.as_ref()) {
+        // A match's payloads keep the `MatchPayload`s that name them.
+        live.extend(term.uses().chain(term.binds().iter().copied()));
     }
     // An op that can panic stays for its trap even when its value is dead.
     let traps: HashSet<ValueId> = func
@@ -497,7 +455,7 @@ pub(super) fn dce(func: &mut MirFunc) {
         changed = false;
         for block in &func.blocks {
             for inst in block.insts.iter().rev() {
-                if live.contains(&inst.dest()) || inst.is_effect_barrier() || traps.contains(&inst.dest()) {
+                if inst.dests().any(|d| live.contains(&d)) || inst.is_effect_barrier() || traps.contains(&inst.dest()) {
                     for o in inst.operands() {
                         if live.insert(o) {
                             changed = true;
@@ -529,7 +487,7 @@ pub(super) fn dce(func: &mut MirFunc) {
         block.insts.retain(|i| {
             i.is_effect_barrier()
                 || traps.contains(&i.dest())
-                || live.contains(&i.dest())
+                || i.dests().any(|d| live.contains(&d))
                 || matches!(i, MirInst::MatchPayload { scrutinee, .. } if unpacked.contains(&(b, *scrutinee)))
         });
     }
@@ -646,6 +604,48 @@ mod tests {
     use super::*;
     use crate::mir::builder::MirBuilder;
     use crate::mir::{MirBinOp, MirConst, MirTy};
+
+    /// A coverage probe counts a run: nothing reads its token, and it stays.
+    #[test]
+    fn dce_keeps_a_coverage_probe() {
+        let mut b = MirBuilder::new("probe");
+        let x = b.add_param(MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(x)).unwrap();
+        let mut f = b.finish().unwrap();
+        let token = ValueId(f.types.len() as u32);
+        f.types.push(MirTy::Bool);
+        let entry = f.entry.index();
+        f.blocks[entry].insts.push(MirInst::Probe { dest: token, id: 0 });
+        dce(&mut f);
+        assert!(f.blocks[entry].insts.iter().any(|i| matches!(i, MirInst::Probe { .. })), "{f}");
+        assert!(MirInst::Probe { dest: token, id: 0 }.is_effect_barrier());
+    }
+
+    /// A pure two-word native whose first word is unused: its second word
+    /// still keeps it.
+    #[test]
+    fn dce_keeps_a_pair_read_through_its_second_word() {
+        let mut b = MirBuilder::new("pair");
+        let x = b.add_param(MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(x)).unwrap();
+        let mut f = b.finish().unwrap();
+        let (lo, hi) = (ValueId(f.types.len() as u32), ValueId(f.types.len() as u32 + 1));
+        f.types.extend([MirTy::I64, MirTy::I64]);
+        assert!(super::super::effects::host_is_pure(common::MATH_SIN_ID));
+        let entry = f.entry.index();
+        f.blocks[entry].insts.push(MirInst::HostInvoke {
+            dest: lo,
+            dest_hi: Some(hi),
+            native_id: common::MATH_SIN_ID,
+            layout: common::HOST_ENUM_LAYOUT_PAIR as u8,
+            args: vec![x],
+        });
+        f.blocks[entry].term = Some(super::super::inst::Terminator::Return { lo: Some(hi), hi: None });
+        dce(&mut f);
+        assert!(f.blocks[entry].insts.iter().any(|i| i.dests().any(|d| d == hi)), "{f}");
+    }
 
     fn count_bin(func: &MirFunc, op: MirBinOp) -> usize {
         func.blocks

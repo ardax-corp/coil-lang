@@ -2,10 +2,10 @@
 //! does, through the same helpers.
 
 use compiler::native_mir::{
-    MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, vector_op, word_kind,
+    AllocCall, MirAllocKind, MirBinOp, alloc_call, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, vector_op, word_kind,
 };
 use machine::native::{
-    self as rt, ALLOC_ARRAY, ALLOC_LANES, Applied, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE, NOT_AN_ENUM, NativeCtx,
+    self as rt, Applied, NOT_AN_ENUM, NativeCtx,
     ROOTS_AMBIGUOUS, TRAP_BUDGET, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -187,44 +187,29 @@ fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> u8 {
     common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w))))
 }
 
-/// `a op b` on ints: `Err` is the trap.
+/// `a op b` on ints, as [`common::int_arith`] defines it (and the constant
+/// folders fold it): `Err` is the trap.
 #[inline(always)]
 fn ibin(op: MirBinOp, a: i64, b: i64) -> Result<i64, u64> {
-    Ok(match op {
-        MirBinOp::Add => a.checked_add(b).ok_or(TRAP_OVERFLOW)?,
-        MirBinOp::Sub => a.checked_sub(b).ok_or(TRAP_OVERFLOW)?,
-        MirBinOp::Mul => a.checked_mul(b).ok_or(TRAP_OVERFLOW)?,
-        MirBinOp::Div => {
-            if b == 0 {
-                return Err(TRAP_DIV_ZERO);
-            }
-            a.checked_div(b).ok_or(TRAP_OVERFLOW)?
-        }
-        MirBinOp::Rem => {
-            if b == 0 {
-                return Err(TRAP_DIV_ZERO);
-            }
-            // `x % -1` is 0, `MIN` included.
-            a.wrapping_rem(b)
-        }
-        MirBinOp::BitAnd => a & b,
-        MirBinOp::BitOr => a | b,
-        MirBinOp::Xor => a ^ b,
-        MirBinOp::Shl | MirBinOp::Shr => {
-            if b as u64 >= 64 {
-                return Err(TRAP_SHIFT);
-            }
-            if op == MirBinOp::Shl { a << b } else { a >> b }
-        }
-        MirBinOp::Pow => {
-            let mut out = 0i64;
-            // SAFETY: `out` is a live word.
-            match unsafe { rt::coil_native_ipow(a, b, &raw mut out) } {
-                0 => out,
-                c if c as u64 == TRAP_NEGATIVE_EXPONENT => return Err(TRAP_NEGATIVE_EXPONENT),
-                _ => return Err(TRAP_OVERFLOW),
-            }
-        }
+    use common::int_arith::{self as ia, IntTrap};
+    let r = match op {
+        MirBinOp::Add => ia::add(a, b),
+        MirBinOp::Sub => ia::sub(a, b),
+        MirBinOp::Mul => ia::mul(a, b),
+        MirBinOp::Div => ia::div(a, b),
+        MirBinOp::Rem => ia::rem(a, b),
+        MirBinOp::Shl => ia::shl(a, b),
+        MirBinOp::Shr => ia::shr(a, b),
+        MirBinOp::Pow => ia::pow(a, b),
+        MirBinOp::BitAnd => Ok(a & b),
+        MirBinOp::BitOr => Ok(a | b),
+        MirBinOp::Xor => Ok(a ^ b),
+    };
+    r.map_err(|t| match t {
+        IntTrap::Overflow => TRAP_OVERFLOW,
+        IntTrap::DivByZero => TRAP_DIV_ZERO,
+        IntTrap::NegativeExponent => TRAP_NEGATIVE_EXPONENT,
+        IntTrap::ShiftOutOfRange => TRAP_SHIFT,
     })
 }
 
@@ -821,32 +806,9 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 if matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::DropEnum { .. }) {
                     order.reverse();
                 }
-                let packed = || u64::from(if *kinds != 0 { *kinds } else { packed_kinds(f, &order) });
                 let pc_of = |t| program(body).body_at(t).map(|b| b.pc).filter(|&pc| pc != u32::MAX);
-                let n = order.len() as u64;
-                let (code, n, extra, last) = match *kind {
-                    MirAllocKind::Array => (ALLOC_ARRAY, n, u64::from(*kinds), None),
-                    MirAllocKind::Lanes { tag_mask } => (ALLOC_LANES, n, tag_mask, None),
-                    MirAllocKind::Tuple => (ALLOC_TUPLE, n, packed(), None),
-                    MirAllocKind::Enum { tag } => (ALLOC_ENUM, n, u64::from(tag) | (packed() << 32), None),
-                    MirAllocKind::Object { type_id, nfields } => (ALLOC_OBJECT, u64::from(nfields), u64::from(type_id), None),
-                    MirAllocKind::DropEnum { tag, type_id } => (ALLOC_DROP_ENUM, n + 1, u64::from(tag) | (packed() << 32), Some(u64::from(type_id))),
-                    MirAllocKind::Fn { target, operand, mask } => {
-                        let Some(pc) = pc_of(target) else { return Flow::Trap(TRAP_HELPER) };
-                        (ALLOC_FN, n + 1, u64::from(pc) | (u64::from(operand) << 32), Some(u64::from(mask)))
-                    }
-                    MirAllocKind::Coro { target } => {
-                        let Some(pc) = pc_of(target) else { return Flow::Trap(TRAP_HELPER) };
-                        (ALLOC_CORO, n, u64::from(pc), None)
-                    }
-                    MirAllocKind::PolyFn { target } => {
-                        let Some(pc) = pc_of(target) else { return Flow::Trap(TRAP_HELPER) };
-                        (ALLOC_POLY_FN, n, u64::from(pc), None)
-                    }
-                    MirAllocKind::PolyFnCapture { target, params } => {
-                        let Some(pc) = pc_of(target) else { return Flow::Trap(TRAP_HELPER) };
-                        (ALLOC_POLY_FN, n, u64::from(pc) | (u64::from(params) << 32), None)
-                    }
+                let Ok(AllocCall { code, n, extra, last }) = alloc_call(*kind, order.len(), *kinds, || packed_kinds(f, &order), pc_of) else {
+                    return Flow::Trap(TRAP_HELPER);
                 };
                 let s = &mut (*act).scratch;
                 s.clear();

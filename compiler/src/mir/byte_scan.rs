@@ -28,7 +28,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::func::{MirBlock, MirFunc};
+use super::func::{const_i64, Defs, MirBlock, MirFunc};
 use super::inst::{
     BlockId, LaneExpr, LaneVal, MirBinOp, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
 };
@@ -127,26 +127,12 @@ struct Plan {
     expr: LaneExpr,
 }
 
-pub(super) fn defs(func: &MirFunc) -> HashMap<ValueId, (BlockId, &MirInst)> {
-    func.blocks
-        .iter()
-        .flat_map(|b| b.insts.iter().map(move |i| (i.dest(), (b.id, i))))
-        .collect()
-}
-
-pub(super) fn const_i64(defs: &HashMap<ValueId, (BlockId, &MirInst)>, v: ValueId) -> Option<i64> {
-    match defs.get(&v) {
-        Some((_, MirInst::Const { c: MirConst::I64(k), .. })) => Some(*k),
-        _ => None,
-    }
-}
-
 /// `iv` and its bound from the header test: `(bound, inclusive, cont)`,
 /// where the loop continues on the `cont` side of `cond` while
 /// `iv < bound` (`<=` when inclusive), or when `backward` while
 /// `iv > bound` (`>=`).
 pub(super) fn header_test(
-    defs: &HashMap<ValueId, (BlockId, &MirInst)>,
+    defs: &Defs,
     cond: ValueId,
     iv: ValueId,
     backward: bool,
@@ -181,7 +167,7 @@ pub(super) fn header_test(
 
 struct Walk<'a> {
     func: &'a MirFunc,
-    defs: HashMap<ValueId, (BlockId, &'a MirInst)>,
+    defs: Defs<'a>,
     lp: &'a LoopInfo,
     iv: ValueId,
     byte_at: u16,
@@ -373,7 +359,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo, byte_at: u16) -> Option<Plan> {
     let Some(Terminator::Br { cond, taken, not_taken }) = func.block(h).term.clone() else {
         return None;
     };
-    let defs = defs(func);
+    let defs = func.defs();
     // The induction variable: `iv = φ(.., iv + 1)`.
     let phis: Vec<(ValueId, MirTy, ValueId)> = func
         .block(h)
