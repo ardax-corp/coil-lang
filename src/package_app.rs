@@ -23,29 +23,11 @@ use crate::fail_and_exit;
 /// (`coil package` defaults to `-g1`; `--strip-debug` is `-g0`).
 fn compile_program(pipeline: &mut Pipeline, filename: &str) -> Result<ArchivedProgram, ()> {
     let constants = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
-    let mut program = ArchivedProgram {
-        version: ARCHIVE_VERSION,
-        static_slot_count: pipeline.static_slot_count(),
-        constants,
-        strings: pipeline.strings().to_vec(),
-        source_files: Vec::new(),
-        debug_locs: Vec::new(),
-        fn_symbols: Vec::new(),
-        struct_layouts: pipeline.archived_struct_layouts(),
-        class_word_kinds: pipeline.class_word_kinds(),
-        static_word_kinds: pipeline.static_word_kinds(),
-        debug_lines: Vec::new(),
-        native_mir: Vec::new(),
-        startup: pipeline.startup(),
-        main: pipeline.main_offset(),
-    };
     // Cleanup ranges are behaviour (panics run `defer`s), not debug info:
     // `set_debug` keeps them at every level.
     // Native code locates its panics by byte span: an AOT payload keeps the
     // spans with the lines.
-    let level = pipeline.debug_level();
-    program.set_debug(pipeline.program_debug_full(), level);
-    Ok(program)
+    Ok(pipeline.archive(constants, |_| Vec::new()))
 }
 
 /// The payload bytes of `program`.

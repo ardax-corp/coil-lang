@@ -2119,6 +2119,32 @@ impl Pipeline {
         self.compiler_lazy().main_offset()
     }
 
+    /// The `.ccoil` archive of the program just compiled to `constants`, its
+    /// debug tables at [`Self::debug_level`]. `native_mir` makes the MIR
+    /// section from the full debug tables (body ids by name); empty for
+    /// none.
+    pub fn archive(&self, constants: Vec<u64>, native_mir: impl FnOnce(&ProgramDebug) -> Vec<u8>) -> common::ArchivedProgram {
+        let debug = self.program_debug_full();
+        let mut program = common::ArchivedProgram {
+            version: common::ARCHIVE_VERSION,
+            static_slot_count: self.static_slot_count(),
+            constants,
+            strings: self.strings().to_vec(),
+            source_files: Vec::new(),
+            debug_locs: Vec::new(),
+            fn_symbols: Vec::new(),
+            struct_layouts: self.archived_struct_layouts(),
+            class_word_kinds: self.class_word_kinds(),
+            static_word_kinds: self.static_word_kinds(),
+            debug_lines: Vec::new(),
+            native_mir: native_mir(&debug),
+            startup: self.startup(),
+            main: self.main_offset(),
+        };
+        program.set_debug(debug, self.debug_level());
+        program
+    }
+
     /// `-g` level: the one set, else `-g1` at `-Os` and `-g2` otherwise. An
     /// engine that runs MIR finds a panic's location by its byte span
     /// (`Locator::native_site_location`), so there `-g1` keeps the spans
