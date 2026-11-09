@@ -1939,10 +1939,13 @@ impl Compiler {
 
     /// Swap `ctx` with this compiler's module context. Entering (`enter`),
     /// `ctx`'s checker takes the program-wide state (substitution, type
-    /// variable counter, static slots) first; leaving, it hands it back.
+    /// variable counter, static slots) first, and the structural instances
+    /// later modules' goals registered (`Eq<Option<int>>`, #2354); leaving,
+    /// it hands the state back.
     fn swap_module_ctx(&mut self, ctx: &mut ModuleCtx, enter: bool) {
         if enter {
             ctx.checker.swap_program_state(&mut self.checker);
+            ctx.checker.adopt_structural_instances(&self.checker);
         }
         std::mem::swap(&mut self.checker, &mut *ctx.checker);
         std::mem::swap(&mut self.program_seq, &mut ctx.program_seq);

@@ -1176,6 +1176,22 @@ impl Generics {
         });
     }
 
+    /// Add the ground structural instances [`Self::register_structural_instance`]
+    /// registered in `other` that this one lacks. They are program-wide, as
+    /// the prelude's: a later module's goal (`Eq<Option<int>>`) registers
+    /// one that a clone compiled in an earlier module's context needs (#2354).
+    pub fn adopt_structural_instances(&mut self, other: &Generics) {
+        for inst in &other.instances {
+            let structural = inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && inst.context.is_empty();
+            if structural
+                && inst.args.iter().all(|a| super::ty::ftv_ty(a).is_empty())
+                && self.find_instance(&inst.class, &inst.args).is_none()
+            {
+                self.instances.push(inst.clone());
+            }
+        }
+    }
+
     /// The method of `class`'s structural instance for tuples of `arity`
     /// with open items (#1479): `Show__(_, _)__show`.
     pub fn structural_tuple_fqn(class: &str, arity: usize, method: &str) -> String {
