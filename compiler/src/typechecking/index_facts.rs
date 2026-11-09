@@ -729,7 +729,7 @@ fn walk_loop(args: WalkLoopArgs<'_>) {
             .and_then(|id| checker.for_in_info_at(id))
             .is_some_and(|i| matches!(i.kind, ForInKind::Array))
             || checker
-                .for_in_info_span(loop_node.0.start, loop_node.0.end)
+                .for_in_info_for_span(loop_node.0.start, loop_node.0.end)
                 .is_some_and(|i| matches!(i.kind, ForInKind::Array))
             || nid(checker, iterable)
                 .and_then(|id| checker.lookup_at(id))

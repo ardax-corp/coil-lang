@@ -1551,7 +1551,7 @@ fn twins_of(body: &HirBody, at: HirId, id: HirId) -> Vec<HirId> {
 /// Whether code emission packs `id` as an existential (by node or span).
 fn pack_site(checker: &Checker, body: &HirBody, id: HirId) -> bool {
     let e = body.expr(id);
-    e.node.is_some_and(|n| checker.existential_pack_at(n).is_some()) || checker.existential_pack_span(e.span.0, e.span.1).is_some()
+    e.node.is_some_and(|n| checker.existential_pack_at(n).is_some()) || checker.existential_pack_for_span(e.span.0, e.span.1).is_some()
 }
 
 /// A value a constructor made just now: `new C(..)`, an array literal, an

@@ -170,8 +170,8 @@ impl Checker {
             tys.insert(*id, apply_ty_prune(subst, ty));
         }
 
-        let mut overloads = HashMap::with_capacity(self.selected_overloads.len());
-        for (id, &(fixed_arity, is_rest, candidate_id)) in &self.selected_overloads {
+        let mut overloads = HashMap::with_capacity(self.selected_overloads.by_id().len());
+        for (id, &(fixed_arity, is_rest, candidate_id)) in self.selected_overloads.by_id() {
             overloads.insert(
                 *id,
                 SelectedOverload {
@@ -199,8 +199,8 @@ impl Checker {
             tys_by_span,
             def_ids: self.def_ids_by_node.clone(),
             overloads,
-            dicts: self.call_site_dicts.clone(),
-            for_in: self.for_in_infos.clone(),
+            dicts: self.call_site_dicts.by_id().clone(),
+            for_in: self.for_in_infos.by_id().clone(),
             ffi_tags,
             in_bounds_index: self.in_bounds_index.clone(),
             nonneg_expr: self.nonneg_expr.clone(),

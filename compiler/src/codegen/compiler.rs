@@ -946,7 +946,7 @@ impl Compiler {
     ) -> Option<(usize, bool, u32)> {
         // The call span is exact; the emit-order NodeId can drift onto a
         // sibling call and pick its overload.
-        if let Some(o) = self.checker.selected_overload_span(start, end) {
+        if let Some(o) = self.checker.selected_overload_at(start, end) {
             return Some(o);
         }
         let id = node?;
@@ -970,7 +970,7 @@ impl Compiler {
                 return Some(info);
             }
         }
-        self.checker.for_in_info_span(start, end).cloned()
+        self.checker.for_in_info_for_span(start, end).cloned()
     }
 
     fn sidecar_dicts(
@@ -987,7 +987,7 @@ impl Compiler {
                 return Some(dicts);
             }
         }
-        self.checker.call_dicts_span(start, end)
+        self.checker.call_dicts_for_span(start, end)
     }
 
     fn bound_operator_hint(
@@ -998,7 +998,7 @@ impl Compiler {
     ) -> Option<crate::typechecking::infer::BoundOperatorCall> {
         node.and_then(|id| self.checker.bound_operator_call_at(id))
             .cloned()
-            .or_else(|| self.checker.bound_operator_call_span(start, end).cloned())
+            .or_else(|| self.checker.bound_operator_call_for_span(start, end).cloned())
     }
 
     fn bound_method_hint(
@@ -1009,7 +1009,7 @@ impl Compiler {
     ) -> Option<crate::typechecking::infer::BoundMethodCall> {
         node.and_then(|id| self.checker.bound_method_call_at(id))
             .cloned()
-            .or_else(|| self.checker.bound_method_call_span(start, end).cloned())
+            .or_else(|| self.checker.bound_method_call_for_span(start, end).cloned())
     }
 
     fn bound_display_hint(
@@ -1020,7 +1020,7 @@ impl Compiler {
     ) -> Option<crate::typechecking::infer::BoundDisplayCall> {
         node.and_then(|id| self.checker.bound_display_call_at(id))
             .cloned()
-            .or_else(|| self.checker.bound_display_call_span(start, end).cloned())
+            .or_else(|| self.checker.bound_display_call_for_span(start, end).cloned())
     }
 
     fn existential_method_hint(
@@ -1033,7 +1033,7 @@ impl Compiler {
             .cloned()
             .or_else(|| {
                 self.checker
-                    .existential_method_call_span(start, end)
+                    .existential_method_call_for_span(start, end)
                     .cloned()
             })
     }
@@ -1048,7 +1048,7 @@ impl Compiler {
             .map(<[usize]>::to_vec)
             .or_else(|| {
                 self.checker
-                    .forwarded_dicts_span(start, end)
+                    .forwarded_dicts_for_span(start, end)
                     .map(<[usize]>::to_vec)
             })
     }

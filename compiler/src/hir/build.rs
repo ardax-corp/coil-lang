@@ -1646,7 +1646,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let pack = e
             .node
             .and_then(|n| self.checker.existential_pack_at(n))
-            .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
+            .or_else(|| self.checker.existential_pack_for_span(e.span.0, e.span.1))?;
         let subst = self.checker.subst();
         // `readonly` has no runtime form: a `readonly P` packs as a `P` (#1558).
         let ty = crate::typechecking::subst::apply_ty_prune(subst, e.ty.as_ref()?);
@@ -2348,8 +2348,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             let (start, end) = (node.0.start, node.0.end);
             return self.node_id(node).is_some_and(|id| {
                 self.checker.bound_method_call_at(id).is_some() || self.checker.call_dicts_at(id).is_some()
-            }) || self.checker.bound_method_call_span(start, end).is_some()
-                || self.checker.call_dicts_span(start, end).is_some();
+            }) || self.checker.bound_method_call_for_span(start, end).is_some()
+                || self.checker.call_dicts_for_span(start, end).is_some();
         }
         let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
         !(bare && self.checker.static_slot_index(&format!("{key}::{member}")).is_some())
@@ -2553,7 +2553,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let info = self
             .node_id(node)
             .and_then(|id| self.sidecar.for_in(id).cloned())
-            .or_else(|| self.checker.for_in_info_span(node.0.start, node.0.end).cloned());
+            .or_else(|| self.checker.for_in_info_for_span(node.0.start, node.0.end).cloned());
         let item_ty = info.as_ref().map(|i| i.item_ty.clone());
         b.scopes.push(HashMap::new());
         let pat = match (identifier, pattern) {

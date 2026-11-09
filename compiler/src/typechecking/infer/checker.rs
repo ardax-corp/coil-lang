@@ -172,29 +172,18 @@ impl Checker {
             vec_rest_spread: false,
             vec_rest_spreads: std::collections::HashSet::new(),
             overload_sets: std::collections::HashMap::new(),
-            selected_overloads_by_span: std::collections::HashMap::new(),
-            selected_overloads: std::collections::HashMap::new(),
+            selected_overloads: SideTable::default(),
             overload_decl_by_span: std::collections::HashMap::new(),
-            call_site_dicts: HashMap::new(),
-            call_site_dicts_by_span: HashMap::new(),
-            call_site_forward_dicts: HashMap::new(),
-            call_site_forward_dicts_by_span: HashMap::new(),
-            bound_method_calls: HashMap::new(),
-            bound_method_calls_by_span: HashMap::new(),
-            bound_operator_calls: HashMap::new(),
-            bound_operator_calls_by_span: HashMap::new(),
-            aggregate_arith: HashMap::new(),
-            aggregate_arith_by_span: HashMap::new(),
-            linear_algebra: HashMap::new(),
-            linear_algebra_by_span: HashMap::new(),
-            bound_display_calls: HashMap::new(),
-            bound_display_calls_by_span: HashMap::new(),
-            existential_packs: HashMap::new(),
-            existential_packs_by_span: HashMap::new(),
-            existential_method_calls: HashMap::new(),
-            existential_method_calls_by_span: HashMap::new(),
-            for_in_infos: HashMap::new(),
-            for_in_infos_by_span: HashMap::new(),
+            call_site_dicts: SideTable::default(),
+            call_site_forward_dicts: SideTable::default(),
+            bound_method_calls: SideTable::default(),
+            bound_operator_calls: SideTable::default(),
+            aggregate_arith: SideTable::default(),
+            linear_algebra: SideTable::default(),
+            bound_display_calls: SideTable::default(),
+            existential_packs: SideTable::default(),
+            existential_method_calls: SideTable::default(),
+            for_in_infos: SideTable::default(),
             typeclass_method_schemes: HashMap::new(),
             trait_readonly_params: HashMap::new(),
             current_expected: None,
@@ -1702,7 +1691,6 @@ impl Checker {
         // Keep module-qualified overloads across files; drop bare keys so they do not leak.
         self.overload_sets.retain(|k, _| k.contains("::"));
         // Declaration/call span tables are per-module.
-        self.selected_overloads_by_span.clear();
         self.selected_overloads.clear();
         self.overload_decl_by_span.clear();
         self.partial_fills_by_span.clear();
@@ -1710,25 +1698,15 @@ impl Checker {
         self.partial_filled_tys_by_span.clear();
         self.lambda_uncaptured_outer = None;
         self.call_site_dicts.clear();
-        self.call_site_dicts_by_span.clear();
         self.call_site_forward_dicts.clear();
-        self.call_site_forward_dicts_by_span.clear();
         self.bound_method_calls.clear();
-        self.bound_method_calls_by_span.clear();
         self.bound_operator_calls.clear();
-        self.bound_operator_calls_by_span.clear();
         self.aggregate_arith.clear();
-        self.aggregate_arith_by_span.clear();
         self.linear_algebra.clear();
-        self.linear_algebra_by_span.clear();
         self.bound_display_calls.clear();
-        self.bound_display_calls_by_span.clear();
         self.existential_packs.clear();
-        self.existential_packs_by_span.clear();
         self.existential_method_calls.clear();
-        self.existential_method_calls_by_span.clear();
         self.for_in_infos.clear();
-        self.for_in_infos_by_span.clear();
         // Traits declared in a named module stay registered in `generics`
         // across files (importers `use` them); keep their method schemes too
         // so an importer can call and implement them. Entry-file traits and
@@ -6148,11 +6126,7 @@ impl Checker {
         range: &std::ops::Range<usize>,
         triple: (usize, bool, u32),
     ) {
-        if let Some(id) = id {
-            self.selected_overloads.insert(id, triple);
-        }
-        self.selected_overloads_by_span
-            .insert((range.start, range.end), triple);
+        self.selected_overloads.insert(id, (range.start, range.end), triple);
     }
 
     /// Look up the inferred type of a node by [`NodeId`].
@@ -6169,13 +6143,12 @@ impl Checker {
 
     /// Concrete trait instances selected while discharging a call's bounds.
     pub fn call_dicts_at(&self, id: NodeId) -> Option<&[InstanceDef]> {
-        self.call_site_dicts.get(&id).map(Vec::as_slice)
+        self.call_site_dicts.at(id).map(Vec::as_slice)
     }
 
     /// Span fallback for [`call_dicts_at`] when NodeIds are misaligned.
     pub fn call_dicts_for_span(&self, start: usize, end: usize) -> Option<&[InstanceDef]> {
-        self.call_site_dicts_by_span
-            .get(&(start, end))
+        self.call_site_dicts.for_span(start, end)
             .map(Vec::as_slice)
     }
 
@@ -6237,38 +6210,28 @@ impl Checker {
         range: &Range<usize>,
         instance: InstanceDef,
     ) {
-        if let Some(call_id) = call_id {
-            self.call_site_dicts
-                .entry(call_id)
-                .or_default()
-                .push(instance.clone());
-        }
-        self.call_site_dicts_by_span
-            .entry((range.start, range.end))
-            .or_default()
-            .push(instance);
+        self.call_site_dicts.push(call_id, (range.start, range.end), instance);
     }
 
     pub fn forwarded_dicts_at(&self, id: NodeId) -> Option<&[usize]> {
-        self.call_site_forward_dicts.get(&id).map(Vec::as_slice)
+        self.call_site_forward_dicts.at(id).map(Vec::as_slice)
     }
 
     pub fn forwarded_dicts_for_span(&self, start: usize, end: usize) -> Option<&[usize]> {
-        self.call_site_forward_dicts_by_span
-            .get(&(start, end))
+        self.call_site_forward_dicts.for_span(start, end)
             .map(Vec::as_slice)
     }
 
     pub fn bound_method_call_at(&self, id: NodeId) -> Option<&BoundMethodCall> {
-        self.bound_method_calls.get(&id)
+        self.bound_method_calls.at(id)
     }
 
     pub fn bound_method_call_for_span(&self, start: usize, end: usize) -> Option<&BoundMethodCall> {
-        self.bound_method_calls_by_span.get(&(start, end))
+        self.bound_method_calls.for_span(start, end)
     }
 
     pub fn bound_operator_call_at(&self, id: NodeId) -> Option<&BoundOperatorCall> {
-        self.bound_operator_calls.get(&id)
+        self.bound_operator_calls.at(id)
     }
 
     pub fn bound_operator_call_for_span(
@@ -6276,11 +6239,11 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&BoundOperatorCall> {
-        self.bound_operator_calls_by_span.get(&(start, end))
+        self.bound_operator_calls.for_span(start, end)
     }
 
     pub fn bound_display_call_at(&self, id: NodeId) -> Option<&BoundDisplayCall> {
-        self.bound_display_calls.get(&id)
+        self.bound_display_calls.at(id)
     }
 
     pub fn bound_display_call_for_span(
@@ -6288,19 +6251,19 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&BoundDisplayCall> {
-        self.bound_display_calls_by_span.get(&(start, end))
+        self.bound_display_calls.for_span(start, end)
     }
 
     pub fn existential_pack_at(&self, id: NodeId) -> Option<&ExistentialPack> {
-        self.existential_packs.get(&id)
+        self.existential_packs.at(id)
     }
 
     pub fn existential_pack_for_span(&self, start: usize, end: usize) -> Option<&ExistentialPack> {
-        self.existential_packs_by_span.get(&(start, end))
+        self.existential_packs.for_span(start, end)
     }
 
     pub fn existential_method_call_at(&self, id: NodeId) -> Option<&ExistentialMethodCall> {
-        self.existential_method_calls.get(&id)
+        self.existential_method_calls.at(id)
     }
 
     pub fn existential_method_call_for_span(
@@ -6308,7 +6271,7 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&ExistentialMethodCall> {
-        self.existential_method_calls_by_span.get(&(start, end))
+        self.existential_method_calls.for_span(start, end)
     }
 
     /// Bit `i`: trait method `class::method` declares parameter `i`
@@ -6332,7 +6295,7 @@ impl Checker {
     /// All call-site dicts (for debugging / testing).
     #[cfg(test)]
     pub fn all_call_site_dicts(&self) -> &HashMap<NodeId, Vec<InstanceDef>> {
-        &self.call_site_dicts
+        self.call_site_dicts.by_id()
     }
 
     /// Borrow the pre-walk [`IdTable`].
@@ -6617,11 +6580,7 @@ impl Checker {
             dict_index,
             method_slot,
         };
-        if let Some(id) = id {
-            self.bound_operator_calls.insert(id, hint.clone());
-        }
-        self.bound_operator_calls_by_span
-            .insert((range.start, range.end), hint);
+        self.bound_operator_calls.insert(id, (range.start, range.end), hint);
     }
 
     /// `-a` / `~a` on a type variable goes through its `Neg` / `BitNot`
@@ -6714,8 +6673,7 @@ impl Checker {
             dict_index,
             method_slot,
         };
-        self.bound_display_calls_by_span
-            .insert((range.start, range.end), hint);
+        self.bound_display_calls.insert(None, (range.start, range.end), hint);
     }
 
     /// Peel `Constructor` / structural `Sum` down to a nominal head so
@@ -7115,10 +7073,7 @@ impl Checker {
                 match self.find_unique_instance(&class, std::slice::from_ref(&lookup_ty), &range) {
                     Ok(Some(_)) => {
                         let pack = ExistentialPack { class: class.clone(), value_ty: lookup_ty };
-                        if let Some(id) = id {
-                            self.existential_packs.insert(id, pack.clone());
-                        }
-                        self.existential_packs_by_span.insert(span, pack);
+                        self.existential_packs.insert(id, span, pack);
                     }
                     Ok(None) => {
                         let pretty = Constraint { class: class.clone(), args: vec![lookup_ty] };
@@ -7773,11 +7728,7 @@ impl Checker {
         };
 
         let info = AggregateArithInfo { kind, op: agg_op };
-        if let Some(id) = id {
-            self.aggregate_arith.insert(id, info.clone());
-        }
-        self.aggregate_arith_by_span
-            .insert((range.start, range.end), info);
+        self.aggregate_arith.insert(id, (range.start, range.end), info);
 
         result_ty_for(&result_shape)
     }
@@ -7825,11 +7776,7 @@ impl Checker {
                 },
                 op: AggregateOp::Neg,
             };
-            if let Some(id) = id {
-                self.aggregate_arith.insert(id, info.clone());
-            }
-            self.aggregate_arith_by_span
-                .insert((range.start, range.end), info);
+            self.aggregate_arith.insert(id, (range.start, range.end), info);
             return Ty::Tuple(vec![elem; elems.len()]);
         }
         if let Ty::Array { element, length } = &pruned {
@@ -7852,11 +7799,7 @@ impl Checker {
                 },
                 op: AggregateOp::Neg,
             };
-            if let Some(id) = id {
-                self.aggregate_arith.insert(id, info.clone());
-            }
-            self.aggregate_arith_by_span
-                .insert((range.start, range.end), info);
+            self.aggregate_arith.insert(id, (range.start, range.end), info);
             return Ty::Array {
                 element: Box::new(elem),
                 length: *length,
@@ -7870,7 +7813,7 @@ impl Checker {
         &self,
         id: NodeId,
     ) -> Option<&crate::typechecking::aggregate_arith::AggregateArithInfo> {
-        self.aggregate_arith.get(&id)
+        self.aggregate_arith.at(id)
     }
 
     pub fn aggregate_arith_for_span(
@@ -7878,14 +7821,14 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&crate::typechecking::aggregate_arith::AggregateArithInfo> {
-        self.aggregate_arith_by_span.get(&(start, end))
+        self.aggregate_arith.for_span(start, end)
     }
 
     pub fn linear_algebra_at(
         &self,
         id: NodeId,
     ) -> Option<&crate::typechecking::aggregate_arith::LinearAlgebraInfo> {
-        self.linear_algebra.get(&id)
+        self.linear_algebra.at(id)
     }
 
     pub fn linear_algebra_for_span(
@@ -7893,7 +7836,7 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&crate::typechecking::aggregate_arith::LinearAlgebraInfo> {
-        self.linear_algebra_by_span.get(&(start, end))
+        self.linear_algebra.for_span(start, end)
     }
 
     fn record_linear_algebra(
@@ -7903,11 +7846,7 @@ impl Checker {
         info: crate::typechecking::aggregate_arith::LinearAlgebraInfo,
     ) {
         self.warn_packed_la_dim_limit(&info.kind, range);
-        if let Some(id) = id {
-            self.linear_algebra.insert(id, info.clone());
-        }
-        self.linear_algebra_by_span
-            .insert((range.start, range.end), info);
+        self.linear_algebra.insert(id, (range.start, range.end), info);
     }
 
     /// Warn when static dims exceed Approach A packed-opcode packing
@@ -9868,11 +9807,7 @@ impl Checker {
                                 class: class.clone(),
                                 value_ty: lookup_ty,
                             };
-                            if let Some(id) = self.ids.id_of_output(expr) {
-                                self.existential_packs.insert(id, pack.clone());
-                            }
-                            self.existential_packs_by_span
-                                .insert((expr.0.start, expr.0.end), pack);
+                            self.existential_packs.insert(self.ids.id_of_output(expr), (expr.0.start, expr.0.end), pack);
                         }
                         expected
                     }
@@ -10617,14 +10552,7 @@ impl Checker {
                     if let Some(call_id) = call_id
                         && let Some(dict_index) = self.dict_index_for(&needed)
                     {
-                        self.call_site_forward_dicts
-                            .entry(call_id)
-                            .or_default()
-                            .push(dict_index);
-                        self.call_site_forward_dicts_by_span
-                            .entry((range.start, range.end))
-                            .or_default()
-                            .push(dict_index);
+                        self.call_site_forward_dicts.push(Some(call_id), (range.start, range.end), dict_index);
                     }
                     continue;
                 }
@@ -10635,14 +10563,7 @@ impl Checker {
                 // bind `T` itself (#1442).
                 if let Some(dict_index) = self.improve_from_given(&needed) {
                     if let Some(call_id) = call_id {
-                        self.call_site_forward_dicts
-                            .entry(call_id)
-                            .or_default()
-                            .push(dict_index);
-                        self.call_site_forward_dicts_by_span
-                        .entry((range.start, range.end))
-                        .or_default()
-                            .push(dict_index);
+                        self.call_site_forward_dicts.push(Some(call_id), (range.start, range.end), dict_index);
                     }
                     continue;
                 }
@@ -14905,67 +14826,11 @@ impl Checker {
     ///
     /// Returns `(fixed_arity, is_rest, candidate_id)` of the chosen candidate.
     pub fn selected_overload_at(&self, start: usize, end: usize) -> Option<(usize, bool, u32)> {
-        self.selected_overloads_by_span.get(&(start, end)).copied()
-    }
-
-    pub fn call_dicts_span(&self, start: usize, end: usize) -> Option<&[InstanceDef]> {
-        self.call_dicts_for_span(start, end)
-    }
-
-    pub fn for_in_info_span(&self, start: usize, end: usize) -> Option<&ForInInfo> {
-        self.for_in_info_for_span(start, end)
-    }
-
-    pub fn bound_operator_call_span(&self, start: usize, end: usize) -> Option<&BoundOperatorCall> {
-        self.bound_operator_call_for_span(start, end)
-    }
-
-    pub fn bound_method_call_span(&self, start: usize, end: usize) -> Option<&BoundMethodCall> {
-        self.bound_method_call_for_span(start, end)
-    }
-
-    pub fn bound_display_call_span(&self, start: usize, end: usize) -> Option<&BoundDisplayCall> {
-        self.bound_display_call_for_span(start, end)
-    }
-
-    pub fn existential_pack_span(&self, start: usize, end: usize) -> Option<&ExistentialPack> {
-        self.existential_pack_for_span(start, end)
-    }
-
-    pub fn existential_method_call_span(
-        &self,
-        start: usize,
-        end: usize,
-    ) -> Option<&ExistentialMethodCall> {
-        self.existential_method_call_for_span(start, end)
-    }
-
-    pub fn forwarded_dicts_span(&self, start: usize, end: usize) -> Option<&[usize]> {
-        self.forwarded_dicts_for_span(start, end)
-    }
-
-    pub fn aggregate_arith_span(
-        &self,
-        start: usize,
-        end: usize,
-    ) -> Option<&crate::typechecking::aggregate_arith::AggregateArithInfo> {
-        self.aggregate_arith_for_span(start, end)
-    }
-
-    pub fn linear_algebra_span(
-        &self,
-        start: usize,
-        end: usize,
-    ) -> Option<&crate::typechecking::aggregate_arith::LinearAlgebraInfo> {
-        self.linear_algebra_for_span(start, end)
-    }
-
-    pub fn selected_overload_span(&self, start: usize, end: usize) -> Option<(usize, bool, u32)> {
-        self.selected_overload_at(start, end)
+        self.selected_overloads.for_span(start, end).copied()
     }
 
     pub fn selected_overload_at_id(&self, id: NodeId) -> Option<(usize, bool, u32)> {
-        self.selected_overloads.get(&id).copied()
+        self.selected_overloads.at(id).copied()
     }
 
     /// Declaration-site overload identity for mangling the function table key.
@@ -20645,12 +20510,12 @@ impl Checker {
 
     /// For-in lowering info recorded during typecheck (by Loop node id).
     pub fn for_in_info_at(&self, id: NodeId) -> Option<&ForInInfo> {
-        self.for_in_infos.get(&id)
+        self.for_in_infos.at(id)
     }
 
     /// For-in lowering info by source span (fallback when ids misalign).
     pub fn for_in_info_for_span(&self, start: usize, end: usize) -> Option<&ForInInfo> {
-        self.for_in_infos_by_span.get(&(start, end))
+        self.for_in_infos.for_span(start, end)
     }
 
     /// Resolve `for x in` iterable type to `Item` and record [`ForInInfo`].
@@ -20835,11 +20700,7 @@ impl Checker {
         loop_range: &Range<usize>,
         info: ForInInfo,
     ) {
-        if let Some(id) = loop_id {
-            self.for_in_infos.insert(id, info.clone());
-        }
-        self.for_in_infos_by_span
-            .insert((loop_range.start, loop_range.end), info);
+        self.for_in_infos.insert(loop_id, (loop_range.start, loop_range.end), info);
     }
 
     /// Builtin iterable shapes → `(Item, ForInKind)`. Returns `None` when
@@ -21398,11 +21259,7 @@ impl Checker {
                 has_receiver: false,
                 class: class.clone(),
             };
-            if let Some(call_id) = call_id {
-                self.bound_method_calls.insert(call_id, hint.clone());
-            }
-            self.bound_method_calls_by_span
-                .insert((range.start, range.end), hint);
+            self.bound_method_calls.insert(call_id, (range.start, range.end), hint);
         }
         let arg_exprs: Option<&[Output]> = match fields {
             EnumConstructPayload::Tuple(args) => Some(args.as_slice()),
@@ -21448,10 +21305,7 @@ impl Checker {
             has_receiver,
             class: class.clone(),
         };
-        if let Some(call_id) = id {
-            self.bound_method_calls.insert(call_id, hint.clone());
-        }
-        self.bound_method_calls_by_span.insert((range.start, range.end), hint);
+        self.bound_method_calls.insert(id, (range.start, range.end), hint);
         let result = self.apply_function(
             Some(&format!("{}::{}", class, method)),
             &fun_ty,
@@ -21527,10 +21381,7 @@ impl Checker {
                 arity: arg_tys.len(),
                 has_receiver,
             };
-            if let Some(call_id) = id {
-                self.existential_method_calls.insert(call_id, hint.clone());
-            }
-            self.existential_method_calls_by_span.insert((range.start, range.end), hint);
+            self.existential_method_calls.insert(id, (range.start, range.end), hint);
             let exprs = if args.is_empty() { None } else { Some(args) };
             let result = self.apply_existential_method(&owner, method, &scheme, arg_tys, exprs, (id, range.clone()));
             return Some((owner, result));

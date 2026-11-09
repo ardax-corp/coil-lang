@@ -451,7 +451,7 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
 pub fn linear_algebra(checker: &Checker, body: &HirBody, id: HirId) -> bool {
     let e = body.expr(id);
     let (start, end) = e.span;
-    e.node.is_some_and(|n| checker.linear_algebra_at(n).is_some()) || checker.linear_algebra_span(start, end).is_some()
+    e.node.is_some_and(|n| checker.linear_algebra_at(n).is_some()) || checker.linear_algebra_for_span(start, end).is_some()
 }
 
 /// The checker's element-wise plan for an aggregate `a op b` / `-a` at `id`;
@@ -464,7 +464,7 @@ pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ag
     }
     e.node
         .and_then(|n| checker.aggregate_arith_at(n))
-        .or_else(|| checker.aggregate_arith_span(start, end))
+        .or_else(|| checker.aggregate_arith_for_span(start, end))
         .cloned()
         .or_else(|| recover_aggregate(checker, body, id))
 }
@@ -557,7 +557,7 @@ pub fn index_stages(body: &HirBody, stack: &HashMap<u32, usize>, args: &[HirId])
 pub fn existential_hint(body: &HirBody, checker: &Checker, id: HirId) -> bool {
     let e = body.expr(id);
     e.node.and_then(|n| checker.existential_method_call_at(n)).is_some()
-        || checker.existential_method_call_span(e.span.0, e.span.1).is_some()
+        || checker.existential_method_call_for_span(e.span.0, e.span.1).is_some()
 }
 
 /// Whether `id` always leaves the function by `return`.
