@@ -1043,10 +1043,10 @@ impl Checker {
                 // earlier registration's head variables (#1670).
                 let (mut was, mut now) = (Vec::new(), Vec::new());
                 for a in &self.generics.instances[idx].args {
-                    Checker::collect_ty_vars(a, &mut was);
+                    a.collect_vars(&mut was);
                 }
                 for a in &arg_tys {
-                    Checker::collect_ty_vars(a, &mut now);
+                    a.collect_vars(&mut now);
                 }
                 if was.len() == now.len() {
                     self.weak_checks.alias(&was, &now);

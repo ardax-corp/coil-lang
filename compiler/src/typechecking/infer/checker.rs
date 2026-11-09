@@ -22,7 +22,7 @@ use crate::typechecking::ty::{
     EnumVariantPayloadTy, RANGE, RANGE_INCLUSIVE, Ty, TyVarId, boolean, float, ftv_ty, int,
     is_option_ty, is_result_ty, never, option_app_ty, option_inner, option_ty, range_app,
     range_inclusive_ty, range_ty, readonly_ty, result_app_ty, result_ok_err, result_ty,
-    schemaize_payload, schemaize_ty, string, strip_readonly, subst_payload_params, subst_ty_params,
+    schemaize_ty, string, strip_readonly, subst_ty_params,
     unit as unit_ty, vec_app_ty, vec_element_ty,
 };
 use crate::typechecking::unify::{UnifyError, unify_with};
@@ -2190,25 +2190,6 @@ impl Checker {
         self.codegen_var_types.insert(name, ty);
     }
 
-    /// Whether any type-parameter hole appears in `ty` (including nested
-    /// tuple / array / record / app argument positions).
-    fn ty_contains_open_var(ty: &Ty) -> bool {
-        match ty {
-            Ty::Var(_) => true,
-            Ty::Forall { body, .. } => Self::ty_contains_open_var(body),
-            Ty::Fun(arg, ret) => Self::ty_contains_open_var(arg) || Self::ty_contains_open_var(ret),
-            Ty::App(ctor, args) => {
-                Self::ty_contains_open_var(ctor) || args.iter().any(Self::ty_contains_open_var)
-            }
-            Ty::Array { element: inner, .. } => Self::ty_contains_open_var(inner),
-            Ty::Tuple(elems) => elems.iter().any(Self::ty_contains_open_var),
-            Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_contains_open_var(t)),
-            Ty::Constructor { owner, .. } => Self::ty_contains_open_var(owner),
-            Ty::Readonly(inner) => Self::ty_contains_open_var(inner),
-            Ty::Con(_) | Ty::Sum { .. } | Ty::Existential { .. } | Ty::Never => false,
-        }
-    }
-
     /// True when any parameter position in a (possibly quantified) function
     /// type still contains an open type variable, the runtime value is a
     /// PolyFn that expects boxed args.
@@ -2216,7 +2197,7 @@ impl Checker {
         match ty {
             Ty::Forall { body, .. } => Self::fn_args_contain_type_param(body),
             Ty::Fun(arg, ret) => {
-                Self::ty_contains_open_var(arg) || Self::fn_args_contain_type_param(ret)
+                arg.has_var() || Self::fn_args_contain_type_param(ret)
             }
             _ => false,
         }
@@ -6284,7 +6265,7 @@ impl Checker {
             return;
         };
         let resolved = apply_ty_prune(&self.subst, result);
-        if !Self::ty_mentions_var(&resolved) {
+        if !resolved.has_var() {
             return;
         }
         if let Ok(s) = unify_with(&self.subst, &resolved, &expected) {
@@ -6302,7 +6283,7 @@ impl Checker {
     ) -> (Vec<Ty>, Vec<Constraint>, FreshVars) {
         let mut vars = Vec::new();
         for a in args {
-            Self::collect_ty_vars(a, &mut vars);
+            a.collect_vars(&mut vars);
         }
         if vars.is_empty() {
             return (args.to_vec(), context.to_vec(), Vec::new());
@@ -6323,54 +6304,6 @@ impl Checker {
             })
             .collect();
         (args, context, mapping)
-    }
-
-    fn collect_ty_vars(ty: &Ty, out: &mut Vec<TyVarId>) {
-        match ty {
-            Ty::Var(v) => {
-                if !out.contains(v) {
-                    out.push(*v);
-                }
-            }
-            Ty::Fun(a, b) => {
-                Self::collect_ty_vars(a, out);
-                Self::collect_ty_vars(b, out);
-            }
-            Ty::App(h, args) => {
-                Self::collect_ty_vars(h, out);
-                for a in args {
-                    Self::collect_ty_vars(a, out);
-                }
-            }
-            Ty::Tuple(items) => {
-                for i in items {
-                    Self::collect_ty_vars(i, out);
-                }
-            }
-            Ty::Readonly(inner) => Self::collect_ty_vars(inner, out),
-            Ty::Array { element, .. } => Self::collect_ty_vars(element, out),
-            Ty::Record { fields } => {
-                for (_, t) in fields {
-                    Self::collect_ty_vars(t, out);
-                }
-            }
-            Ty::Constructor { owner, .. } => Self::collect_ty_vars(owner, out),
-            _ => {}
-        }
-    }
-
-    fn ty_mentions_var(ty: &Ty) -> bool {
-        match ty {
-            Ty::Var(_) => true,
-            Ty::Fun(a, b) => Self::ty_mentions_var(a) || Self::ty_mentions_var(b),
-            Ty::App(h, args) => Self::ty_mentions_var(h) || args.iter().any(Self::ty_mentions_var),
-            Ty::Tuple(items) => items.iter().any(Self::ty_mentions_var),
-            Ty::Readonly(inner) => Self::ty_mentions_var(inner),
-            Ty::Array { element, .. } => Self::ty_mentions_var(element),
-            Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_mentions_var(t)),
-            Ty::Constructor { owner, .. } => Self::ty_mentions_var(owner),
-            _ => false,
-        }
     }
 
     fn record_call_site_dict(
@@ -6948,7 +6881,7 @@ impl Checker {
     /// Whether `ty` mentions a type parameter in scope.
     fn mentions_rigid_type_param(&self, ty: &Ty) -> bool {
         let mut vars = Vec::new();
-        Self::collect_ty_vars(&apply_ty_prune(&self.subst, ty), &mut vars);
+        apply_ty_prune(&self.subst, ty).collect_vars(&mut vars);
         vars.into_iter().any(|v| self.rigid_type_param_name(v).is_some())
     }
 
@@ -11157,12 +11090,12 @@ impl Checker {
         };
         // A tuple with an open item: the instance for its arity, with a
         // context per item (#1479).
-        if class == "Show" && matches!(&ty, Ty::Tuple(_)) && Self::ty_mentions_var(&ty) {
+        if class == "Show" && matches!(&ty, Ty::Tuple(_)) && ty.has_var() {
             let vars = items.iter().map(|_| self.counter.fresh()).collect();
             self.generics.register_structural_tuple(class, vars);
             return;
         }
-        if Self::ty_mentions_var(&ty) || self.generics.has_instance(class, &ty) {
+        if ty.has_var() || self.generics.has_instance(class, &ty) {
             return;
         }
         for item in &items {
@@ -11195,7 +11128,7 @@ impl Checker {
         let Ty::Tuple(items) = &ty else {
             return;
         };
-        if items.is_empty() || Self::ty_mentions_var(&ty) || self.generics.has_instance("Ord", &ty) {
+        if items.is_empty() || ty.has_var() || self.generics.has_instance("Ord", &ty) {
             return;
         }
         for item in items {
@@ -11332,7 +11265,7 @@ impl Checker {
             for (have, need) in inst_args.iter().zip(wanted_lookup.iter()) {
                 // An open goal argument cannot choose a generic instance
                 // (`Show<β>` against `Show for Box<T>` would pin `β`).
-                if matches!(apply_ty_prune(&local, need), Ty::Var(_)) && Self::ty_mentions_var(have)
+                if matches!(apply_ty_prune(&local, need), Ty::Var(_)) && have.has_var()
                 {
                     ok = false;
                     break;
@@ -11482,7 +11415,7 @@ impl Checker {
             .map(|a| apply_ty_prune(&self.subst, a))
             .collect();
         let mentions_rigid = needed_args.iter().any(|a| {
-            crate::typechecking::subst::ftv(a)
+            crate::typechecking::ty::ftv_ty(a)
                 .into_iter()
                 .any(|v| rigid.iter().any(|(_, r)| *r == Ty::Var(v)))
         });
@@ -17657,7 +17590,7 @@ impl Checker {
                         frame.iter().map(|(n, id)| (*id, n.clone())).collect();
                     payloads
                         .iter()
-                        .map(|p| schemaize_payload(p, &var_to_name))
+                        .map(|p| p.map_types(|t| schemaize_ty(t, &var_to_name)))
                         .collect()
                 } else {
                     payloads
@@ -18627,7 +18560,7 @@ impl Checker {
             .get(enum_name)
             .and_then(|p| p.get(tag as usize).cloned())
             .unwrap_or(EnumVariantPayloadTy::Unit);
-        let payload = subst_payload_params(&schema, &map);
+        let payload = schema.map_types(|t| subst_ty_params(t, &map));
         let owner = Ty::App(Box::new(Ty::Con(enum_name.to_string())), args);
         (payload, owner)
     }
@@ -18744,7 +18677,7 @@ impl Checker {
                     map.insert(p.clone(), a.clone());
                 }
                 let schema = self.enum_payloads.get(enum_name)?.get(tag as usize)?;
-                Some(subst_payload_params(schema, &map))
+                Some(schema.map_types(|t| subst_ty_params(t, &map)))
             }
             Ty::Constructor { owner, .. } => self.poly_payload_from_app(enum_name, tag, owner),
             _ => None,
@@ -19181,7 +19114,7 @@ impl Checker {
                     names
                         .iter()
                         .zip(payloads.iter())
-                        .map(|(n, p)| (n.clone(), subst_payload_params(p, &map)))
+                        .map(|(n, p)| (n.clone(), p.map_types(|t| subst_ty_params(t, &map))))
                         .collect(),
                 )
             }
@@ -21719,7 +21652,7 @@ impl Checker {
         };
         // A tuple with an open item is not a bound's receiver: its instance
         // is the arity-wide tuple one, a ground call's (#1479).
-        let open_tuple = first.as_ref().is_some_and(|ty| matches!(ty, Ty::Tuple(_)) && Self::ty_mentions_var(ty));
+        let open_tuple = first.as_ref().is_some_and(|ty| matches!(ty, Ty::Tuple(_)) && ty.has_var());
         let receiver_var = first.as_ref().and_then(Self::constraint_var_of_ty);
         if !open_tuple && !only_trait(self.bound_method_candidates(method, None)).is_empty() {
             // With no variable first argument, a bound is only the callee
@@ -22371,17 +22304,9 @@ fn if_value_without_else(e: &Output) -> bool {
 /// Whether `ty` holds an inference variable or one of `params`, a generic
 /// class's parameter names as its field types spell them.
 fn ty_names_param(ty: &Ty, params: &[String]) -> bool {
-    let named = |t: &Ty| ty_names_param(t, params);
-    match ty {
+    ty.any(|t| match t {
         Ty::Var(_) => true,
-        Ty::Con(name) => params.iter().any(|p| p == name),
-        Ty::Fun(a, b) => named(a) || named(b),
-        Ty::App(head, args) => named(head) || args.iter().any(named),
-        Ty::Tuple(items) => items.iter().any(named),
-        Ty::Readonly(inner) => named(inner),
-        Ty::Array { element, .. } => named(element),
-        Ty::Constructor { owner, .. } => named(owner),
-        Ty::Record { fields } => fields.iter().any(|(_, t)| named(t)),
+        Ty::Con(name) => params.contains(name),
         _ => false,
-    }
+    })
 }

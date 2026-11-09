@@ -142,10 +142,182 @@ impl EnumVariantPayloadTy {
     }
 }
 
+impl EnumVariantPayloadTy {
+    /// The payload's field types, in declaration order.
+    pub fn types(&self) -> impl Iterator<Item = &Ty> {
+        let (tuple, record): (&[Ty], &[(String, Ty)]) = match self {
+            EnumVariantPayloadTy::Unit => (&[], &[]),
+            EnumVariantPayloadTy::Tuple(tys) => (tys, &[]),
+            EnumVariantPayloadTy::Record(fields) => (&[], fields),
+        };
+        tuple.iter().chain(record.iter().map(|(_, ty)| ty))
+    }
+
+    /// The payload with `f` applied to each field type; its shape and field
+    /// names are kept.
+    pub fn map_types(&self, mut f: impl FnMut(&Ty) -> Ty) -> EnumVariantPayloadTy {
+        match self {
+            EnumVariantPayloadTy::Unit => EnumVariantPayloadTy::Unit,
+            EnumVariantPayloadTy::Tuple(tys) => EnumVariantPayloadTy::Tuple(tys.iter().map(f).collect()),
+            EnumVariantPayloadTy::Record(fields) => {
+                EnumVariantPayloadTy::Record(fields.iter().map(|(n, t)| (n.clone(), f(t))).collect())
+            }
+        }
+    }
+}
+
+/// Traversal. Each walk over a `Ty` is written on these, so every shape
+/// is visited: an enum's payloads (unit, tuple and record) and a `forall`'s
+/// body and constraint arguments included. They are blind to binders: a
+/// walk that must treat a `forall`'s bound variables apart (free variables,
+/// substitution) matches [`Ty::Forall`] itself and recurses through the
+/// children for the rest.
 impl Ty {
     /// Convenience constructor for a type constructor from a static name.
     pub fn con(name: &'static str) -> Ty {
         Ty::Con(name.to_string())
+    }
+
+    /// `self` with `f` applied to each direct child type. A leaf (`Var`,
+    /// `Con`, `Existential`, `Never`) is returned as it is; names, tags,
+    /// lengths and `forall` binders are kept.
+    pub fn map_children(&self, mut f: impl FnMut(&Ty) -> Ty) -> Ty {
+        match self {
+            Ty::Var(_) | Ty::Con(_) | Ty::Existential { .. } | Ty::Never => self.clone(),
+            Ty::Fun(a, b) => Ty::Fun(Box::new(f(a)), Box::new(f(b))),
+            Ty::App(head, args) => Ty::App(Box::new(f(head)), args.iter().map(&mut f).collect()),
+            Ty::Sum { name, variants } => Ty::Sum {
+                name: name.clone(),
+                variants: variants.iter().map(|(n, p)| (n.clone(), p.map_types(&mut f))).collect(),
+            },
+            Ty::Constructor { owner, tag, arity } => Ty::Constructor {
+                owner: Box::new(f(owner)),
+                tag: *tag,
+                arity: *arity,
+            },
+            Ty::Tuple(items) => Ty::Tuple(items.iter().map(f).collect()),
+            Ty::Array { element, length } => Ty::Array {
+                element: Box::new(f(element)),
+                length: *length,
+            },
+            Ty::Record { fields } => Ty::Record {
+                fields: fields.iter().map(|(n, t)| (n.clone(), f(t))).collect(),
+            },
+            Ty::Readonly(inner) => Ty::Readonly(Box::new(f(inner))),
+            Ty::Forall { bounds, constraints, body } => Ty::Forall {
+                bounds: bounds.clone(),
+                constraints: constraints
+                    .iter()
+                    .map(|c| Constraint {
+                        class: c.class.clone(),
+                        args: c.args.iter().map(&mut f).collect(),
+                    })
+                    .collect(),
+                body: Box::new(f(body)),
+            },
+        }
+    }
+
+    /// Whether `pred` holds for a direct child type of `self`, children in
+    /// order (an `App`'s head before its arguments, a `forall`'s body before
+    /// its constraint arguments).
+    pub fn any_child(&self, mut pred: impl FnMut(&Ty) -> bool) -> bool {
+        match self {
+            Ty::Var(_) | Ty::Con(_) | Ty::Existential { .. } | Ty::Never => false,
+            Ty::Fun(a, b) => pred(a) || pred(b),
+            Ty::App(head, args) => pred(head) || args.iter().any(pred),
+            Ty::Sum { variants, .. } => variants.iter().any(|(_, p)| p.types().any(&mut pred)),
+            Ty::Constructor { owner: inner, .. } | Ty::Array { element: inner, .. } | Ty::Readonly(inner) => pred(inner),
+            Ty::Tuple(items) => items.iter().any(pred),
+            Ty::Record { fields } => fields.iter().any(|(_, t)| pred(t)),
+            Ty::Forall { constraints, body, .. } => {
+                pred(body) || constraints.iter().any(|c| c.args.iter().any(&mut pred))
+            }
+        }
+    }
+
+    /// Whether `pred` holds for every direct child type of `self`.
+    pub fn all_children(&self, mut pred: impl FnMut(&Ty) -> bool) -> bool {
+        !self.any_child(|child| !pred(child))
+    }
+
+    /// Visit each direct child type of `self`, in [`Ty::any_child`]'s order.
+    pub fn for_each_child(&self, mut f: impl FnMut(&Ty)) {
+        self.any_child(|child| {
+            f(child);
+            false
+        });
+    }
+
+    /// Whether `pred` holds for `self` or any type inside it (pre-order,
+    /// stopping at the first hit).
+    pub fn any(&self, mut pred: impl FnMut(&Ty) -> bool) -> bool {
+        self.any_by(&mut pred)
+    }
+
+    fn any_by<F: FnMut(&Ty) -> bool>(&self, pred: &mut F) -> bool {
+        pred(self) || self.any_child(|child| child.any_by(pred))
+    }
+
+    /// Visit `self` and every type inside it, pre-order.
+    pub fn walk(&self, mut f: impl FnMut(&Ty)) {
+        self.any(|ty| {
+            f(ty);
+            false
+        });
+    }
+
+    /// Whether a type variable appears anywhere in `self`. Blind to binders:
+    /// a `forall`'s own variables count, so a rank-n type is open.
+    pub fn has_var(&self) -> bool {
+        self.any(|ty| matches!(ty, Ty::Var(_)))
+    }
+
+    /// Whether a free type variable appears in `self`: one no enclosing
+    /// `forall` binds ([`ftv_ty`] without building the set).
+    pub fn has_free_var(&self) -> bool {
+        self.free_var_under(&mut Vec::new())
+    }
+
+    fn free_var_under(&self, bound: &mut Vec<TyVarId>) -> bool {
+        match self {
+            Ty::Var(v) => !bound.contains(v),
+            Ty::Forall { bounds, .. } => {
+                let depth = bound.len();
+                bound.extend(bounds);
+                let hit = self.any_child(|child| child.free_var_under(bound));
+                bound.truncate(depth);
+                hit
+            }
+            _ => self.any_child(|child| child.free_var_under(bound)),
+        }
+    }
+
+    /// Append to `out` the type variables in `self` it does not hold yet,
+    /// in order of first appearance (pre-order). Blind to binders, as
+    /// [`Ty::has_var`] is.
+    pub fn collect_vars(&self, out: &mut Vec<TyVarId>) {
+        self.walk(|ty| {
+            if let Ty::Var(v) = ty
+                && !out.contains(v)
+            {
+                out.push(*v);
+            }
+        });
+    }
+
+    /// `self` with each free type variable `v` that `lookup` maps replaced
+    /// by `lookup(v)`. Inside a `forall`, its bound variables are left alone.
+    pub fn subst_vars<F: Fn(TyVarId) -> Option<Ty> + ?Sized>(&self, lookup: &F) -> Ty {
+        match self {
+            Ty::Var(v) => lookup(*v).unwrap_or_else(|| self.clone()),
+            Ty::Forall { bounds, .. } => {
+                let inner: &dyn Fn(TyVarId) -> Option<Ty> =
+                    &|v| if bounds.contains(&v) { None } else { lookup(v) };
+                self.map_children(|child| child.subst_vars(inner))
+            }
+            _ => self.map_children(|child| child.subst_vars(lookup)),
+        }
     }
 }
 
@@ -643,20 +815,9 @@ pub fn strip_readonly(ty: &Ty) -> &Ty {
 /// `ty` with every `readonly` qualifier in it peeled: the type a clone is
 /// keyed and built at, since `readonly` has no runtime form (#1555, #1806).
 pub fn strip_readonly_deep(ty: &Ty) -> Ty {
-    let rec = |items: &[Ty]| items.iter().map(strip_readonly_deep).collect::<Vec<_>>();
     match ty {
         Ty::Readonly(inner) => strip_readonly_deep(inner),
-        Ty::App(head, args) => Ty::App(Box::new(strip_readonly_deep(head)), rec(args)),
-        Ty::Fun(a, b) => Ty::Fun(Box::new(strip_readonly_deep(a)), Box::new(strip_readonly_deep(b))),
-        Ty::Tuple(items) => Ty::Tuple(rec(items)),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(strip_readonly_deep(element)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, t)| (n.clone(), strip_readonly_deep(t))).collect(),
-        },
-        _ => ty.clone(),
+        _ => ty.map_children(strip_readonly_deep),
     }
 }
 
@@ -723,207 +884,34 @@ pub fn record(fields: Vec<(String, Ty)>) -> Ty {
 pub fn subst_ty_params(ty: &Ty, params: &std::collections::HashMap<String, Ty>) -> Ty {
     match ty {
         Ty::Con(name) => params.get(name).cloned().unwrap_or_else(|| ty.clone()),
-        Ty::Var(_) => ty.clone(),
-        Ty::Fun(a, b) => Ty::Fun(
-            Box::new(subst_ty_params(a, params)),
-            Box::new(subst_ty_params(b, params)),
-        ),
-        Ty::App(con, args) => Ty::App(
-            Box::new(subst_ty_params(con, params)),
-            args.iter().map(|a| subst_ty_params(a, params)).collect(),
-        ),
-        Ty::Sum { name, variants } => Ty::Sum {
-            name: name.clone(),
-            variants: variants
-                .iter()
-                .map(|(n, p)| (n.clone(), subst_payload_params(p, params)))
-                .collect(),
-        },
-        Ty::Constructor { owner, tag, arity } => Ty::Constructor {
-            owner: Box::new(subst_ty_params(owner, params)),
-            tag: *tag,
-            arity: *arity,
-        },
-        Ty::Tuple(tys) => Ty::Tuple(tys.iter().map(|t| subst_ty_params(t, params)).collect()),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(subst_ty_params(element, params)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields
-                .iter()
-                .map(|(n, t)| (n.clone(), subst_ty_params(t, params)))
-                .collect(),
-        },
-        Ty::Existential { .. } => ty.clone(),
-        Ty::Forall {
-            bounds,
-            constraints,
-            body,
-        } => Ty::Forall {
-            bounds: bounds.clone(),
-            constraints: constraints.clone(),
-            body: Box::new(subst_ty_params(body, params)),
-        },
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(subst_ty_params(inner, params))),
-        Ty::Never => Ty::Never,
-    }
-}
-
-/// Substitute named type-parameter placeholders in a variant payload.
-pub fn subst_payload_params(
-    payload: &EnumVariantPayloadTy,
-    params: &std::collections::HashMap<String, Ty>,
-) -> EnumVariantPayloadTy {
-    match payload {
-        EnumVariantPayloadTy::Unit => EnumVariantPayloadTy::Unit,
-        EnumVariantPayloadTy::Tuple(tys) => {
-            EnumVariantPayloadTy::Tuple(tys.iter().map(|t| subst_ty_params(t, params)).collect())
-        }
-        EnumVariantPayloadTy::Record(fields) => EnumVariantPayloadTy::Record(
-            fields
-                .iter()
-                .map(|(n, t)| (n.clone(), subst_ty_params(t, params)))
-                .collect(),
-        ),
+        _ => ty.map_children(|t| subst_ty_params(t, params)),
     }
 }
 
 /// Rewrite in-scope type-parameter variables to `Ty::Con(name)` schema
 /// markers for storage in the enum payload registry.
 pub fn schemaize_ty(ty: &Ty, var_to_name: &std::collections::HashMap<TyVarId, String>) -> Ty {
-    match ty {
-        Ty::Var(id) => var_to_name
-            .get(id)
-            .map(|n| Ty::Con(n.clone()))
-            .unwrap_or_else(|| ty.clone()),
-        Ty::Con(_) | Ty::Existential { .. } | Ty::Never => ty.clone(),
-        Ty::Fun(a, b) => Ty::Fun(
-            Box::new(schemaize_ty(a, var_to_name)),
-            Box::new(schemaize_ty(b, var_to_name)),
-        ),
-        Ty::App(con, args) => Ty::App(
-            Box::new(schemaize_ty(con, var_to_name)),
-            args.iter().map(|a| schemaize_ty(a, var_to_name)).collect(),
-        ),
-        Ty::Sum { name, variants } => Ty::Sum {
-            name: name.clone(),
-            variants: variants
-                .iter()
-                .map(|(n, p)| (n.clone(), schemaize_payload(p, var_to_name)))
-                .collect(),
-        },
-        Ty::Constructor { owner, tag, arity } => Ty::Constructor {
-            owner: Box::new(schemaize_ty(owner, var_to_name)),
-            tag: *tag,
-            arity: *arity,
-        },
-        Ty::Tuple(tys) => Ty::Tuple(tys.iter().map(|t| schemaize_ty(t, var_to_name)).collect()),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(schemaize_ty(element, var_to_name)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields
-                .iter()
-                .map(|(n, t)| (n.clone(), schemaize_ty(t, var_to_name)))
-                .collect(),
-        },
-        Ty::Forall {
-            bounds,
-            constraints,
-            body,
-        } => Ty::Forall {
-            bounds: bounds.clone(),
-            constraints: constraints.clone(),
-            body: Box::new(schemaize_ty(body, var_to_name)),
-        },
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(schemaize_ty(inner, var_to_name))),
-    }
+    ty.subst_vars(&|v| var_to_name.get(&v).map(|n| Ty::Con(n.clone())))
 }
 
-/// Schemaize a variant payload (type-param vars → `Con(name)`).
-pub fn schemaize_payload(
-    payload: &EnumVariantPayloadTy,
-    var_to_name: &std::collections::HashMap<TyVarId, String>,
-) -> EnumVariantPayloadTy {
-    match payload {
-        EnumVariantPayloadTy::Unit => EnumVariantPayloadTy::Unit,
-        EnumVariantPayloadTy::Tuple(tys) => {
-            EnumVariantPayloadTy::Tuple(tys.iter().map(|t| schemaize_ty(t, var_to_name)).collect())
-        }
-        EnumVariantPayloadTy::Record(fields) => EnumVariantPayloadTy::Record(
-            fields
-                .iter()
-                .map(|(n, t)| (n.clone(), schemaize_ty(t, var_to_name)))
-                .collect(),
-        ),
-    }
-}
-
-/// Free type variables of a `Ty`.
+/// Free type variables of a `Ty`: a `forall`'s own variables are bound.
 pub fn ftv_ty(ty: &Ty) -> HashSet<TyVarId> {
     let mut acc = HashSet::new();
-    go(ty, &mut acc);
+    collect_free_vars(ty, &mut acc);
     acc
 }
 
-fn go(ty: &Ty, acc: &mut HashSet<TyVarId>) {
+fn collect_free_vars(ty: &Ty, acc: &mut HashSet<TyVarId>) {
     match ty {
         Ty::Var(v) => {
             acc.insert(*v);
         }
-        Ty::Con(_) | Ty::Existential { .. } | Ty::Never => {}
-        Ty::Fun(a, b) => {
-            go(a, acc);
-            go(b, acc);
+        Ty::Forall { bounds, .. } => {
+            let mut inner = HashSet::new();
+            ty.for_each_child(|child| collect_free_vars(child, &mut inner));
+            acc.extend(inner.into_iter().filter(|v| !bounds.contains(v)));
         }
-        Ty::App(head, args) => {
-            // Phase 5: HKT heads may be `Ty::Var(F)` — must collect F.
-            go(head, acc);
-            for a in args {
-                go(a, acc);
-            }
-        }
-        // Recursive enum payloads use Ty::Con(name) (isorecursive encoding).
-        Ty::Sum { variants, .. } => {
-            for (_, payload) in variants {
-                for p in payload.field_types() {
-                    go(p, acc);
-                }
-            }
-        }
-        Ty::Constructor { owner, .. } => {
-            go(owner, acc);
-        }
-        Ty::Tuple(tys) => {
-            for t in tys {
-                go(t, acc);
-            }
-        }
-        Ty::Array { element, .. } => {
-            go(element, acc);
-        }
-        Ty::Record { fields } => {
-            for (_, fty) in fields {
-                go(fty, acc);
-            }
-        }
-        Ty::Forall {
-            bounds,
-            constraints,
-            body,
-        } => {
-            go(body, acc);
-            for c in constraints {
-                for a in &c.args {
-                    go(a, acc);
-                }
-            }
-            let bound: HashSet<_> = bounds.iter().copied().collect();
-            acc.retain(|v| !bound.contains(v));
-        }
-        Ty::Readonly(inner) => go(inner, acc),
+        _ => ty.for_each_child(|child| collect_free_vars(child, acc)),
     }
 }
 
@@ -947,6 +935,65 @@ mod tests {
 
     fn v(i: u32) -> Ty {
         Ty::Var(TyVarId(i))
+    }
+
+    fn forall(bound: u32, body: Ty) -> Ty {
+        Ty::Forall {
+            bounds: vec![TyVarId(bound)],
+            constraints: vec![Constraint::unary("Show", TyVarId(bound))],
+            body: Box::new(body),
+        }
+    }
+
+    fn sum(payload: Ty) -> Ty {
+        Ty::Sum {
+            name: "Pick".to_string(),
+            variants: vec![
+                ("One".to_string(), EnumVariantPayloadTy::Tuple(vec![payload.clone()])),
+                ("Two".to_string(), EnumVariantPayloadTy::Record(vec![("a".to_string(), payload)])),
+                ("Zero".to_string(), EnumVariantPayloadTy::Unit),
+            ],
+        }
+    }
+
+    #[test]
+    fn map_children_reaches_payloads_and_forall_constraints() {
+        let to_int = |t: &Ty| if matches!(t, Ty::Var(_)) { int() } else { t.clone() };
+        assert_eq!(sum(v(0)).map_children(to_int), sum(int()));
+        let Ty::Forall { constraints, body, .. } = forall(1, v(1)).map_children(to_int) else {
+            panic!("forall kept")
+        };
+        assert_eq!(*body, int());
+        assert_eq!(constraints[0].args, vec![int()]);
+    }
+
+    #[test]
+    fn any_and_collect_vars_see_every_shape() {
+        let record = record(vec![("x".to_string(), v(2))]);
+        let ty = Ty::Tuple(vec![sum(v(0)), forall(1, v(1)), record, v(0)]);
+        assert!(sum(v(0)).has_var());
+        let mut vars = Vec::new();
+        ty.collect_vars(&mut vars);
+        assert_eq!(vars, vec![TyVarId(0), TyVarId(1), TyVarId(2)]);
+    }
+
+    #[test]
+    fn free_vars_skip_a_foralls_own() {
+        let ty = forall(1, Ty::Fun(Box::new(v(1)), Box::new(v(0))));
+        assert!(ty.has_var());
+        assert!(ty.has_free_var());
+        assert_eq!(ftv_ty(&ty), HashSet::from([TyVarId(0)]));
+        assert!(!forall(1, v(1)).has_free_var());
+        // A variable free outside the `forall` stays free.
+        let outer = Ty::Tuple(vec![v(1), forall(1, v(1))]);
+        assert_eq!(ftv_ty(&outer), HashSet::from([TyVarId(1)]));
+    }
+
+    #[test]
+    fn subst_vars_leaves_bound_vars_alone() {
+        let ty = Ty::Tuple(vec![v(1), forall(1, v(1))]);
+        let got = ty.subst_vars(&|var| (var == TyVarId(1)).then(int));
+        assert_eq!(got, Ty::Tuple(vec![int(), forall(1, v(1))]));
     }
 
     #[test]
