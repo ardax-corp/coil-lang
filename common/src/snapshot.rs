@@ -146,8 +146,7 @@ impl HeapSnapshot {
         out
     }
 
-    /// Total encoded length read from the header at `words[0..]`, for the
-    /// code verifier (which checks it fits the pool).
+    /// Total encoded length read from the header at `words[0..]`.
     pub fn encoded_len(words: &[u64]) -> Option<usize> {
         match words {
             [SNAPSHOT_MAGIC, len, ..] => usize::try_from(*len).ok(),
