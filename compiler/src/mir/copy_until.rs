@@ -29,8 +29,8 @@ use std::collections::{HashMap, HashSet};
 
 use common::VEC_EXTEND_RANGE_ID;
 
-use super::byte_scan::{const_i64, defs, header_test, relayout, retarget, Builder, PhiArgs};
-use super::func::MirFunc;
+use super::byte_scan::{header_test, relayout, retarget, Builder, PhiArgs};
+use super::func::{const_i64, MirFunc};
 use super::inst::{BlockId, MirBinOp, MirCmpOp, MirConst, MirInst, Terminator, ValueId};
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
@@ -89,7 +89,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo, byte_at: u16) -> Option<Plan> {
     let Some(Terminator::Br { cond, taken, not_taken }) = func.block(h).term else {
         return None;
     };
-    let defs = defs(func);
+    let defs = func.defs();
     let invariant = |v: ValueId| defs.get(&v).is_none_or(|(b, _)| !lp.blocks.contains(b));
 
     // Exactly two φs: the induction variable and the array pushed to.

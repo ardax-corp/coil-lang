@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::cse::dce;
-use super::func::MirFunc;
+use super::func::{Defs, MirFunc};
 use super::inst::{BlockId, MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId};
 use super::ty::MirTy;
 
@@ -45,14 +45,6 @@ pub fn phi_sroa(func: &mut MirFunc) -> usize {
         dce(func);
     }
     threaded + split
-}
-
-/// Where each value is defined: its block and the instruction.
-fn defs(func: &MirFunc) -> HashMap<ValueId, (BlockId, &MirInst)> {
-    func.blocks
-        .iter()
-        .flat_map(|b| b.insts.iter().map(move |i| (i.dest(), (b.id, i))))
-        .collect()
 }
 
 /// Drop removed values from the sidecars that name them.
@@ -97,7 +89,7 @@ fn term_reads(term: &Terminator, v: ValueId) -> bool {
 
 /// What a niche `Option` word is known to hold: `Some(true)` for `None`
 /// (the zero word), `Some(false)` for a fresh object.
-fn niche_is_none(defs: &HashMap<ValueId, (BlockId, &MirInst)>, v: ValueId) -> Option<bool> {
+fn niche_is_none(defs: &Defs, v: ValueId) -> Option<bool> {
     match defs.get(&v)?.1 {
         MirInst::Cast {
             kind: MirCastKind::Word,
@@ -163,7 +155,7 @@ fn thread_one(func: &mut MirFunc) -> bool {
         let Some(opt_phi) = phis.iter().find(|i| i.dest() == opt) else {
             continue;
         };
-        let d = defs(func);
+        let d = func.defs();
         let known: Option<Vec<bool>> = from
             .iter()
             .map(|&p| incoming(opt_phi, p).and_then(|v| niche_is_none(&d, v)))
@@ -242,7 +234,7 @@ fn reachable(func: &MirFunc) -> HashSet<BlockId> {
 
 /// `Word` casts heap → niche → heap read the heap word itself.
 fn forward_word_round_trips(func: &mut MirFunc) {
-    let d = defs(func);
+    let d = func.defs();
     let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
     for (&v, (_, inst)) in &d {
         if let MirInst::Cast { kind: MirCastKind::Word, to: MirTy::HeapRef, src, .. } = inst

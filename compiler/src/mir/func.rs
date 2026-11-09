@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use common::DebugLoc;
 
 use super::gc::LiveRootSet;
-use super::inst::{BlockId, LocalId, MirDeoptKind, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, LocalId, MirConst, MirDeoptKind, MirInst, Terminator, ValueId};
 use crate::layout::MirLayout;
 use super::ty::MirTy;
 
@@ -149,6 +149,18 @@ pub struct MirFunc {
     pub pair_twin: Option<crate::bodies::Label>,
 }
 
+/// The instruction defining each value (its [`MirInst::dest`]) and its
+/// block ([`MirFunc::defs`]).
+pub type Defs<'a> = HashMap<ValueId, (BlockId, &'a MirInst)>;
+
+/// The `int` constant `v` is, when [`Defs`] says so.
+pub fn const_i64(defs: &Defs, v: ValueId) -> Option<i64> {
+    match defs.get(&v) {
+        Some((_, MirInst::Const { c: MirConst::I64(k), .. })) => Some(*k),
+        _ => None,
+    }
+}
+
 /// Where `v` ends up under `subst`: its replacement's replacement, and
 /// so on. A cycle stops at the first value seen twice.
 pub fn resolve(subst: &HashMap<ValueId, ValueId>, start: ValueId) -> ValueId {
@@ -257,6 +269,39 @@ impl MirFunc {
     pub fn replace_uses(&mut self, subst: &HashMap<ValueId, ValueId>) {
         if !subst.is_empty() {
             self.map_values(|v| resolve(subst, v));
+        }
+    }
+
+    /// Every value's defining instruction, for many lookups.
+    pub fn defs(&self) -> Defs<'_> {
+        self.blocks.iter().flat_map(|b| b.insts.iter().map(move |i| (i.dest(), (b.id, i)))).collect()
+    }
+
+    /// The instruction defining `v` and its block. A scan of the body: for
+    /// more than a few lookups build [`Self::defs`].
+    pub fn def_of(&self, v: ValueId) -> Option<(BlockId, &MirInst)> {
+        self.blocks.iter().find_map(|b| b.insts.iter().find(|i| i.dest() == v).map(|i| (b.id, i)))
+    }
+
+    /// The instruction defining `v` (a scan, as [`Self::def_of`]).
+    pub fn def_inst(&self, v: ValueId) -> Option<&MirInst> {
+        self.def_of(v).map(|(_, i)| i)
+    }
+
+    /// The constant `v` is, when a `Const` defines it (a scan, as
+    /// [`Self::def_of`]).
+    pub fn const_of(&self, v: ValueId) -> Option<MirConst> {
+        match self.def_of(v) {
+            Some((_, MirInst::Const { c, .. })) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// The `int` constant `v` is (a scan, as [`Self::def_of`]).
+    pub fn const_i64(&self, v: ValueId) -> Option<i64> {
+        match self.const_of(v) {
+            Some(MirConst::I64(k)) => Some(k),
+            _ => None,
         }
     }
 

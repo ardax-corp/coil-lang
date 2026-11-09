@@ -82,17 +82,6 @@ struct Nest {
     arrays: Vec<ValueId>,
 }
 
-fn def_of(func: &MirFunc, v: ValueId) -> Option<(BlockId, &MirInst)> {
-    func.blocks.iter().find_map(|b| b.insts.iter().find(|i| i.dests().any(|d| d == v)).map(|i| (b.id, i)))
-}
-
-fn const_i64(func: &MirFunc, v: ValueId) -> Option<i64> {
-    match def_of(func, v)? {
-        (_, MirInst::Const { c: MirConst::I64(k), .. }) => Some(*k),
-        _ => None,
-    }
-}
-
 /// `h`'s counter: `phi = φ[init: start, latch: phi + 1]; phi < bound`,
 /// the header holding nothing else, true to `body`.
 fn counter(func: &MirFunc, h: BlockId, entry: BlockId, latch: BlockId, outside: &dyn Fn(ValueId) -> bool) -> Option<(Counter, BlockId, BlockId)> {
@@ -124,7 +113,7 @@ fn counter(func: &MirFunc, h: BlockId, entry: BlockId, latch: BlockId, outside: 
 fn steps_by_one(func: &MirFunc, block: BlockId, c: &Counter) -> bool {
     func.block(block).insts.iter().any(|i| {
         matches!(i, MirInst::Bin { dest, op: MirBinOp::Add, ty: MirTy::I64, lhs, rhs }
-            if *dest == c.step && (*lhs == c.phi && const_i64(func, *rhs) == Some(1) || *rhs == c.phi && const_i64(func, *lhs) == Some(1)))
+            if *dest == c.step && (*lhs == c.phi && func.const_i64(*rhs) == Some(1) || *rhs == c.phi && func.const_i64(*lhs) == Some(1)))
     })
 }
 

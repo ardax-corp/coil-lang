@@ -506,7 +506,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
                 len
             }
         };
-        match const_of(at.b.func, off) {
+        match at.b.func.const_i64(off) {
             Some(k) => {
                 let lo = at.konst(-k);
                 let from_ok = at.cmp(MirCmpOp::Ge, i0, lo);
@@ -593,10 +593,3 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     run
 }
 
-/// The constant `v` holds, when it is one (a constant stream offset).
-fn const_of(func: &MirFunc, v: ValueId) -> Option<i64> {
-    func.blocks.iter().flat_map(|b| &b.insts).find_map(|i| match i {
-        MirInst::Const { dest, c: MirConst::I64(k) } if *dest == v => Some(*k),
-        _ => None,
-    })
-}
