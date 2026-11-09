@@ -511,7 +511,7 @@ unsafe fn payload(ctx: *mut NativeCtx, f: &MirFunc, scrutinee: ValueId, s: u64, 
     }
     // SAFETY: `ctx` is live and `s` a heap word.
     unsafe {
-        let w = rt::coil_native_enum_payload(ctx, s, u64::from(index));
+        let w = rt::coil_native_product_load(ctx, s, u64::from(index));
         ((*ctx).bail == 0).then_some(w)
     }
 }
@@ -784,8 +784,9 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set_word(f, regs, *dest, w);
             }
             MirInst::ArrayLen { dest, array } => set!(*dest, rt::coil_native_len(get!(*array))),
-            MirInst::HeapFieldLoad { dest, object, index } => {
-                let w = rt::coil_native_field(get!(*object), u64::from(*index));
+            MirInst::ProductLoad { dest, object, slot } => {
+                let w = rt::coil_native_product_load(ctx, get!(*object), u64::from(*slot));
+                check!();
                 set_word(f, regs, *dest, w);
             }
             MirInst::StoreIndex { dest, array, index, value, .. } => {

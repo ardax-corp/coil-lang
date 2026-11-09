@@ -148,14 +148,17 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
     })
 }
 
-/// Where native code reads and writes an instance's slots in place
-/// (`docs/internals/native.md`, "Inline field access"): byte offsets from
-/// the object's address, probed from real objects as the images are.
+/// Where native code reads a product object's slots in place, and writes an
+/// instance's (`docs/internals/native.md`, "Inline field access"): byte
+/// offsets from the object's address, probed from real objects as the
+/// images are. An instance's fields and an enum's payload (a tuple's items)
+/// are one store at one offset, so the store offsets serve both kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct InstanceSlots {
-    /// The header's kind byte, and an instance's kind.
+pub struct ProductSlots {
+    /// The header's kind byte, an instance's kind and an enum's.
     pub kind_at: u32,
     pub kind: u8,
+    pub enum_kind: u8,
     /// The header's generation byte, and the bit the write barrier takes
     /// the slow path on ([`GEN_UNLOGGED`]).
     pub generation_at: u32,
@@ -175,13 +178,16 @@ pub struct InstanceSlots {
     pub inline_stores: bool,
 }
 
-/// The [`InstanceSlots`] of this build.
+/// The [`ProductSlots`] of this build.
 #[must_use]
-pub fn instance_slots() -> InstanceSlots {
+pub fn product_slots() -> ProductSlots {
     let data = std::mem::offset_of!(GcData<ObjInstance>, data);
     let header = GcHeader::new();
     let inline = ObjInstance::with_type_id_and_fields(1, 2);
     let storage = data + off(&inline, &inline.storage);
+    let variant = ObjEnum::new(7, EnumPayload::one(Value::default()));
+    let enum_data = std::mem::offset_of!(GcData<ObjEnum>, data);
+    assert_eq!(enum_data + off(&variant, &variant.payload), storage, "an enum's payload and an instance's fields share an offset");
     // SAFETY: `repr(u8)`: the discriminant is the first byte.
     let tag = |s: &EnumPayload| unsafe { *std::ptr::from_ref(&s.inner).cast::<u8>() };
     let (inline_tag, len, _, slots, _) = payload_probe(&inline.storage);
@@ -202,9 +208,10 @@ pub fn instance_slots() -> InstanceSlots {
     let ptr = words.iter().position(|&w| w == v.as_ptr() as usize).expect("a Vec holds its pointer");
     let len_word = words.iter().position(|&w| w == v.len()).expect("a Vec holds its length");
     assert!(v.capacity() != v.len() && ptr != len_word);
-    InstanceSlots {
+    ProductSlots {
         kind_at: off(&header, &header.kind) as u32,
         kind: KIND_INSTANCE,
+        enum_kind: KIND_ENUM,
         generation_at: off(&header, &header.generation) as u32,
         unlogged: GEN_UNLOGGED,
         storage_at: storage as u32,
@@ -243,7 +250,7 @@ pub fn layout_fingerprint() -> u64 {
         std::mem::size_of::<super::super::slab::Bump>(),
     ];
     counts.hash(&mut h);
-    instance_slots().hash(&mut h);
+    product_slots().hash(&mut h);
     h.finish()
 }
 
@@ -309,11 +316,11 @@ mod tests {
         assert!(inline_object(InlineShape::Instance { type_id: 1, n: 5 }).is_none());
     }
 
-    /// Slots read and written at [`instance_slots`]' offsets are the
+    /// Slots read and written at [`product_slots`]' offsets are the
     /// instance's own, inline and spilled.
     #[test]
-    fn instance_slots_find_the_fields() {
-        let l = instance_slots();
+    fn product_slots_find_the_fields() {
+        let l = product_slots();
         let mut heap = Heap::default();
         for n in [2usize, INSTANCE_INLINE_FIELDS + 2] {
             let mut obj = ObjInstance::with_type_id_and_fields(9, n);

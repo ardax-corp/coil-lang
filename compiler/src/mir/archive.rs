@@ -31,7 +31,7 @@ use crate::mir::{
 
 const MAGIC: &[u8; 5] = b"CNMIR";
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 15;
+const FORMAT: u8 = 16;
 const NO_PC: u32 = u32::MAX;
 
 /// The section for `bodies`, each with its entry from `body_ids`.
@@ -481,11 +481,11 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*dest);
             w.v(*array);
         }
-        MirInst::HeapFieldLoad { dest, object, index } => {
+        MirInst::ProductLoad { dest, object, slot } => {
             w.u8(I_FIELD);
             w.v(*dest);
             w.v(*object);
-            w.u32(*index);
+            w.u32(*slot);
         }
         MirInst::StoreIndex { dest, array, index, value, unchecked } => {
             w.u8(I_STORE_INDEX);
@@ -1052,7 +1052,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         }
         I_INDEX => MirInst::Index { dest: r.v()?, array: r.v()?, index: r.v()?, unchecked: r.u8()? != 0 },
         I_LEN => MirInst::ArrayLen { dest: r.v()?, array: r.v()? },
-        I_FIELD => MirInst::HeapFieldLoad { dest: r.v()?, object: r.v()?, index: r.u32()? },
+        I_FIELD => MirInst::ProductLoad { dest: r.v()?, object: r.v()?, slot: r.u32()? },
         I_STORE_INDEX => MirInst::StoreIndex {
             dest: r.v()?,
             array: r.v()?,

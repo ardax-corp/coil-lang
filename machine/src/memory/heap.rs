@@ -2702,7 +2702,7 @@ pub enum Member {
 pub const INSTANCE_INLINE_FIELDS: usize = ENUM_INLINE_ARITY;
 
 /// `type_id` first, so the slots sit at the offset of an [`ObjEnum`]'s
-/// payload: one inline read serves both ([`instance_slots`]).
+/// payload: one inline read serves both ([`product_slots`]).
 #[repr(C)]
 pub struct ObjInstance {
     /// Compile-time class identity (`0` = none).
@@ -5078,7 +5078,7 @@ mod nursery;
 
 #[path = "inline.rs"]
 mod inline;
-pub use inline::{InlineObject, InlineShape, InstanceSlots, inline_object, instance_slots, layout_fingerprint};
+pub use inline::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
 pub use nursery::MinorPlan;
 
 #[path = "snapshot.rs"]

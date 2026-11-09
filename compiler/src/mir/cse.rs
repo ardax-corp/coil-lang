@@ -142,10 +142,10 @@ fn read_key(
         }
         MirInst::ArrayLen { dest, array } if invariant_loads.contains(dest) => ReadKey::FixedLen { array: *array },
         MirInst::Index { array, index, .. } => ReadKey::Index { array: *array, index: *index },
-        MirInst::HeapFieldLoad { dest, object, index } if invariant_loads.contains(dest) => {
-            ReadKey::FixedField { object: *object, index: *index }
+        MirInst::ProductLoad { dest, object, slot } if invariant_loads.contains(dest) => {
+            ReadKey::FixedField { object: *object, index: *slot }
         }
-        MirInst::HeapFieldLoad { object, index, .. } => ReadKey::Field { object: *object, index: *index },
+        MirInst::ProductLoad { object, slot, .. } => ReadKey::Field { object: *object, index: *slot },
         MirInst::ArrayLen { array, .. } => ReadKey::Len { array: *array },
         MirInst::Call { dest, target, args, dest_hi: None } if pure_calls.contains(dest) => ReadKey::Call { target: *target, args: args.clone() },
         _ => return None,
@@ -550,7 +550,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Call { .. }
         | MirInst::CallIndirect { .. }
         | MirInst::MatchPayload { .. }
-        | MirInst::HeapFieldLoad { .. }
+        | MirInst::ProductLoad { .. }
         | MirInst::HeapFieldStore { .. }
         | MirInst::Index { .. }
         | MirInst::StoreIndex { .. }
@@ -862,20 +862,20 @@ mod tests {
 
     #[test]
     fn element_store_does_not_kill_field_reads() {
-        let mut f = parse("    v2 = heaploadfield v0, 0\n    v5 = storeindex v0, v1, v1\n    v3 = heaploadfield v0, 0\n    v4 = iadd v2, v3\n    return v4");
+        let mut f = parse("    v2 = productload v0, 0\n    v5 = storeindex v0, v1, v1\n    v3 = productload v0, 0\n    v4 = iadd v2, v3\n    return v4");
         assert_eq!(cse(&mut f), 1);
         f.verify().unwrap();
-        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 1);
+        assert_eq!(count(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 1);
     }
 
     #[test]
     fn field_store_kills_field_reads_not_element_reads() {
         let mut f = parse(
-            "    v2 = heaploadfield v0, 0\n    v6 = index v0, v1\n    v5 = heapsetfield.slot v0, v1, 0\n    v3 = heaploadfield v0, 0\n    v7 = index v0, v1\n    v4 = iadd v2, v3\n    v8 = iadd v4, v6\n    v9 = iadd v8, v7\n    return v9",
+            "    v2 = productload v0, 0\n    v6 = index v0, v1\n    v5 = heapsetfield.slot v0, v1, 0\n    v3 = productload v0, 0\n    v7 = index v0, v1\n    v4 = iadd v2, v3\n    v8 = iadd v4, v6\n    v9 = iadd v8, v7\n    return v9",
         );
         assert_eq!(cse(&mut f), 1);
         f.verify().unwrap();
-        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 2);
+        assert_eq!(count(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 2);
         assert_eq!(count(&f, |i| matches!(i, MirInst::Index { .. })), 1);
     }
 
@@ -883,11 +883,11 @@ mod tests {
     fn readonly_class_field_read_survives_field_stores() {
         // #1560: the second read of a readonly class instance's field is
         // the first, across a field store.
-        let mut f = parse("    v2 = heaploadfield v0, 0\n    v5 = heapsetfield.slot v0, v1, 1\n    v3 = heaploadfield v0, 0\n    v4 = iadd v2, v3\n    return v4");
+        let mut f = parse("    v2 = productload v0, 0\n    v5 = heapsetfield.slot v0, v1, 1\n    v3 = productload v0, 0\n    v4 = iadd v2, v3\n    return v4");
         f.invariant_loads.extend([ValueId(2), ValueId(3)]);
         assert_eq!(cse(&mut f), 1);
         f.verify().unwrap();
-        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 1);
+        assert_eq!(count(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 1);
     }
 
     #[test]

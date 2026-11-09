@@ -86,7 +86,7 @@ pub struct MirFunc {
     /// Calls of a pure function returning one scalar word: CSE and LICM
     /// may treat them as operators that can trap.
     pub pure_calls: HashSet<ValueId>,
-    /// `HeapFieldLoad`s of a `readonly class` instance's field: no store
+    /// `ProductLoad`s of a `readonly class` instance's field: no store
     /// or call changes the word, so LICM and CSE treat them as operators
     /// on the object (#1560).
     pub invariant_loads: HashSet<ValueId>,
@@ -980,18 +980,18 @@ impl MirFunc {
                     return Err(format!("{dest} MatchPayload dest type"));
                 }
             }
-            MirInst::HeapFieldLoad {
+            MirInst::ProductLoad {
                 dest,
                 object,
-                // Any slot index: the dense form packs one that fits a
+                // Any slot slot: the dense form packs one that fits a
                 // byte, and the stack form takes a full word (#1498).
-                index: _,
+                slot: _,
             } => {
                 if self.ty(*object) != MirTy::HeapRef {
-                    return Err(format!("{dest} HeapFieldLoad object type"));
+                    return Err(format!("{dest} ProductLoad object type"));
                 }
                 if !self.ty(*dest).is_specialized() {
-                    return Err(format!("{dest} HeapFieldLoad dest type"));
+                    return Err(format!("{dest} ProductLoad dest type"));
                 }
             }
             MirInst::HeapFieldStore {

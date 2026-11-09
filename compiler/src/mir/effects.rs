@@ -118,7 +118,7 @@ impl MirInst {
             Self::StrEq { .. } => OpProps { vector_barrier: true, ..P },
             // Counts a run: nothing reads its token.
             Self::Probe { .. } => OpProps { barrier: true, vector_barrier: true, ..P },
-            Self::MatchPayload { .. } | Self::HeapFieldLoad { .. } | Self::CodePtr { .. } | Self::LoadStatic { .. } | Self::HomeLoad { .. } => {
+            Self::MatchPayload { .. } | Self::ProductLoad { .. } | Self::CodePtr { .. } | Self::LoadStatic { .. } | Self::HomeLoad { .. } => {
                 OpProps { vector_barrier: true, ..P }
             }
             Self::String { .. } => OpProps { allocates: true, vector_barrier: true, ..P },
@@ -187,7 +187,7 @@ impl MirInst {
             }
     }
 
-    /// May change a word a [`MirInst::HeapFieldLoad`] reads (an instance
+    /// May change a word a [`MirInst::ProductLoad`] reads (an instance
     /// slot or an enum payload word): a field store, or code that may
     /// store. See [`Self::writes_elements`].
     pub fn writes_fields(&self, calls: &CallFacts) -> bool {

@@ -514,10 +514,10 @@ pub enum MirInst {
     },
     /// Heap `LoadField` of slot `index` on an escaping object (D1 maps).
     /// `object` is [`MirTy::HeapRef`]. Dest is the field word (not SROA).
-    HeapFieldLoad {
+    ProductLoad {
         dest: ValueId,
         object: ValueId,
-        index: u32,
+        slot: u32,
     },
     /// Heap `SetField` of slot `index`. Dest is the stored value (runtime
     /// leaves it TOS).
@@ -1121,7 +1121,7 @@ impl MirInst {
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
-            | Self::HeapFieldLoad { dest, .. }
+            | Self::ProductLoad { dest, .. }
             | Self::HeapFieldStore { dest, .. }
             | Self::Index { dest, .. }
             | Self::StoreIndex { dest, .. }
@@ -1171,7 +1171,7 @@ impl MirInst {
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
-            | Self::HeapFieldLoad { dest, .. }
+            | Self::ProductLoad { dest, .. }
             | Self::HeapFieldStore { dest, .. }
             | Self::Index { dest, .. }
             | Self::StoreIndex { dest, .. }
@@ -1235,7 +1235,7 @@ impl MirInst {
             Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
-            Self::HeapFieldLoad { object, .. } => vec![*object],
+            Self::ProductLoad { object, .. } => vec![*object],
             Self::HeapFieldStore { object, value, .. } => vec![*object, *value],
             Self::Index { array, index, .. } => vec![*array, *index],
             Self::StoreIndex {
@@ -1304,7 +1304,7 @@ impl MirInst {
                 *callee = map(*callee);
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
-            Self::HeapFieldLoad { object, .. } => *object = map(*object),
+            Self::ProductLoad { object, .. } => *object = map(*object),
             Self::HeapFieldStore { object, value, .. } => {
                 *object = map(*object);
                 *value = map(*value);

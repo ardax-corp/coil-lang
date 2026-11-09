@@ -230,7 +230,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             scrutinee,
             index,
         } => write!(f, "{dest} = matchpayload {scrutinee}, {index}"),
-        MirInst::HeapFieldLoad { dest, object, index } => write!(f, "{dest} = heaploadfield {object}, {index}"),
+        MirInst::ProductLoad { dest, object, slot } => write!(f, "{dest} = productload {object}, {slot}"),
         MirInst::HeapFieldStore {
             dest,
             object,
@@ -578,8 +578,7 @@ impl<'a> Parser<'a> {
         }
         if op == "lnot"
             || op == "matchpayload"
-            || op == "heapgetfield"
-            || op == "heaploadfield"
+            || op == "productload"
             || op == "heapsetfield"
             || op == "heapsetfield.slot"
         {
@@ -603,12 +602,12 @@ impl<'a> Parser<'a> {
                     index,
                 });
             }
-            if op == "heaploadfield" {
+            if op == "productload" {
                 let object = self.value()?;
                 self.expect(',')?;
                 let index = self.uint()? as u32;
                 ensure_ty(types, dest, MirTy::I64);
-                return Ok(MirInst::HeapFieldLoad { dest, object, index });
+                return Ok(MirInst::ProductLoad { dest, object, slot: index });
             }
             if op == "heapsetfield.slot" {
                 let object = self.value()?;
