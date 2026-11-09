@@ -336,12 +336,12 @@ impl Lower<'_> {
                     .and_then(|e| self.heap_elem(e).or_else(|| self.cx.niche(e)).or_else(|| self.cx.scalar_enum(e)))
                     .map(|_| MirTy::HeapRef)
             })
-            .or_else(|| (self.inp.opaque_vars && is_var(ty)).then_some(MirTy::I64))
-            .or_else(|| (self.inp.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
+            .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
+            .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
             // A higher-kinded `P<A>` (a type variable applied): an object
             // of whatever type constructor `P` is, which the body only
             // moves.
-            .or_else(|| (self.inp.opaque_vars && is_var_app(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| (self.opaque_vars && is_var_app(ty)).then_some(MirTy::HeapRef))
             // A bare-class existential: its `[boxed value, dictionary]` pack.
             .or_else(|| matches!(strip_readonly(ty), Ty::Existential { .. }).then_some(MirTy::HeapRef))
             // A foreign `ptr`: a raw address, never a heap word.
@@ -374,7 +374,7 @@ impl Lower<'_> {
         match scalar(elem).or_else(|| self.cx.scalar_enum(elem)) {
             Some(t) => Some(t),
             // A type parameter's element: the opaque word as stored.
-            _ if self.inp.opaque_vars && is_var(elem) => Some(MirTy::I64),
+            _ if self.opaque_vars && is_var(elem) => Some(MirTy::I64),
             _ => self.cx.niche(elem).or_else(|| self.heap_elem(elem)),
         }
     }
@@ -425,7 +425,7 @@ impl Lower<'_> {
         let Some(cell) = self.facts.fields.get(id.0 as usize) else {
             return HirFieldFact::default();
         };
-        *cell.get_or_init(|| self.cx.field(id, self.inp.fields.contains_key(&id.0)))
+        *cell.get_or_init(|| self.cx.field(id, self.frame_field(id).is_some()))
     }
 
     /// A heap object's field `id` that holds the word its type says (or an
@@ -447,10 +447,67 @@ impl Lower<'_> {
         }
     }
 
+    /// A stack array local's first slot, length and element type.
+    fn stack(&self, local: u32) -> Option<(u32, usize, MirTy)> {
+        let cell = self.facts.stacks.get(local as usize)?;
+        *cell.get_or_init(|| self.cx.stack(local))
+    }
+
+    /// The length of `id` when it is a stack array local, as
+    /// [`query::aggregate_src`] reads it.
+    fn stack_lens(&self, id: HirId) -> HashMap<u32, usize> {
+        match self.hir.expr(id).kind {
+            HirKind::Local(local) => self.stack(local.0).map(|(_, n, _)| (local.0, n)).into_iter().collect(),
+            _ => HashMap::new(),
+        }
+    }
+
+    /// A class local kept in frame slots: each field slot's type.
+    fn sroa(&self, local: u32) -> Option<&Vec<MirTy>> {
+        let cell = self.facts.sroa.get(local as usize)?;
+        cell.get_or_init(|| self.cx.sroa(local)).as_ref()
+    }
+
+    /// The class of an `sroa` local: its type id and field count.
+    fn sroa_class(&self, local: u32) -> Option<(u32, u32)> {
+        self.sroa(local)?;
+        self.cx.sroa_class(local)
+    }
+
+    /// The frame slot of field read or write `id` on an `sroa` local.
+    fn frame_field(&self, id: HirId) -> Option<u32> {
+        let cell = self.facts.frame_fields.get(id.0 as usize)?;
+        *cell.get_or_init(|| self.cx.frame_field(id))
+    }
+
+    /// What `new` `id` makes.
+    fn new_fact(&self, id: HirId) -> &HirNew {
+        static NONE: HirNew = HirNew { object: None, tails: Vec::new(), arg_niches: Vec::new() };
+        match self.facts.news.get(id.0 as usize) {
+            Some(cell) => cell.get_or_init(|| self.cx.new_object(id)),
+            None => &NONE,
+        }
+    }
+
+    /// `new C(..)` `id` on the heap: the class's type id and its fields'
+    /// word types.
+    fn news(&self, id: HirId) -> Option<&(u32, Vec<MirTy>)> {
+        self.new_fact(id).object.as_ref()
+    }
+
+    /// A host native call lowering makes directly.
+    fn host_call(&self, id: HirId) -> Option<&HirHost> {
+        let cell = self.facts.hosts.get(id.0 as usize)?;
+        cell.get_or_init(|| self.cx.host(id)).as_ref()
+    }
+
     /// A heap field or `new` argument `id` whose slot holds a boxed enum
     /// object for a value whose own word is this niche layout.
     fn boxed_niche(&self, id: HirId) -> Option<ValueLayout> {
-        self.inp.boxed_niches.get(&id.0).copied().or(match self.field(id).word {
+        let args = self.facts.new_arg_niches.get_or_init(|| {
+            (0..self.hir.exprs.len() as u32).flat_map(|i| self.new_fact(HirId(i)).arg_niches.iter().copied()).collect()
+        });
+        args.get(&id.0).copied().or(match self.field(id).word {
             HirFieldWord::OpenNiche { layout, .. } => Some(layout),
             _ => None,
         })
@@ -533,6 +590,81 @@ pub trait LowerCx {
     /// How the body's lane arrays are used: the `Vec` calls that work on
     /// their lanes and the arrays that leave for one-word code.
     fn lane_uses(&self) -> HirLaneUses;
+    /// A generic body's type parameter values are opaque words it only
+    /// moves (a raw scalar or a box, as the caller passed it).
+    fn opaque_vars(&self) -> bool;
+    /// A stack array local kept in frame slots: its first slot, length and
+    /// element type.
+    fn stack(&self, local: u32) -> Option<(u32, usize, MirTy)>;
+    /// A class local kept in frame slots: the type of each field's slot,
+    /// from the local's own.
+    fn sroa(&self, local: u32) -> Option<Vec<MirTy>>;
+    /// The class of an `sroa` local, for its box where it escapes: the
+    /// type id and field count.
+    fn sroa_class(&self, local: u32) -> Option<(u32, u32)>;
+    /// The frame slot of a field read or written on an `sroa` local.
+    fn frame_field(&self, id: HirId) -> Option<u32>;
+    /// A field read or write on a record: the field's slot (records are
+    /// slotted objects, their fields sorted by name) and word type.
+    fn record_field(&self, id: HirId) -> Option<(u32, MirTy)>;
+    /// A record literal whose every field holds the word its type says:
+    /// the shape's `InitTyped` type id, and each field's slot and word
+    /// type, in literal order.
+    fn record(&self, id: HirId) -> Option<(u32, Vec<(u32, MirTy)>)>;
+    /// A record `let` pattern that binds only locals and wildcards: each
+    /// bound field's slot and word type (`None`: a wildcard), in pattern
+    /// order.
+    fn record_pat(&self, id: HirId) -> Option<Vec<Option<(u32, MirTy)>>>;
+    /// What `new C(..)` `id` makes on the heap.
+    fn new_object(&self, id: HirId) -> HirNew;
+    /// A `Vec::push` call HIR emission inlines.
+    fn push(&self, id: HirId) -> bool;
+    /// A host native call whose arguments and result are plain (boxed
+    /// layout) words.
+    fn host(&self, id: HirId) -> Option<HirHost>;
+    /// A `for x in xs` loop whose array the checker pinned: its reads need
+    /// no bounds check.
+    fn pinned_for(&self, id: HirId) -> bool;
+    /// The niche layout of a result the body returns boxed (a test body's
+    /// `Result`): each return builds the `ObjEnum`.
+    fn ret_boxed_niche(&self) -> Option<ValueLayout>;
+    /// The static slot of a `Global` read or assigned that is a static.
+    fn static_slot(&self, id: HirId) -> Option<u32>;
+    /// The tail slot of a two-word static: its second word, the first in
+    /// the static's own slot.
+    fn static_tail(&self, id: HirId) -> Option<u32>;
+    /// The folded value of a `Global` that is a `const`.
+    fn const_value(&self, id: HirId) -> Option<&crate::const_fold::ConstValue>;
+    /// An element-wise array or tuple operator.
+    fn aggregate(&self, id: HirId) -> Option<&crate::typechecking::AggregateArithInfo>;
+    /// A call a `return` of the body may make as `TailCall`.
+    fn tail_call(&self, id: HirId) -> bool;
+    /// An `x.len()` call: a fixed size, or `None` for the array's length.
+    fn len_of(&self, id: HirId) -> Option<Option<u32>>;
+    /// The frame-slot locals that box before statement `id` (they escape
+    /// there).
+    fn box_at(&self, id: HirId) -> Option<&[u32]>;
+    /// Whether early exits move out of line.
+    fn cold_ok(&self) -> bool;
+}
+
+/// A host native call lowering makes directly ([`LowerCx::host`]): the
+/// native id, its result layout, and for a two-word enum result each
+/// variant's tag and payload arity in declaration order.
+pub type HirHost = (u16, u8, Option<HostVariants>);
+
+/// What a `new C(..)` makes on the heap ([`LowerCx::new_object`]).
+#[derive(Clone, Debug, Default)]
+pub struct HirNew {
+    /// The class's type id and its fields' word types, when every field
+    /// holds the word its type names.
+    pub object: Option<(u32, Vec<MirTy>)>,
+    /// Each field's tail slot when the class has flat two-word fields
+    /// (`Checker::class_flat_tails`): its second word.
+    pub tails: Vec<Option<u32>>,
+    /// The arguments for a field open in a class parameter whose own word
+    /// is a niche layout: boxed to the enum object the field holds.
+    pub arg_niches: Vec<(u32, ValueLayout)>,
 }
 
 /// How a field read or write `e.f` reaches the field
@@ -632,20 +764,7 @@ enum PairEqWords {
 pub struct HirMirInput<'a> {
     /// Planned local id of each local (the first word of a pair local).
     pub slots: &'a [Option<u32>],
-    /// Stack arrays kept in frame slots: first slot, length and element
-    /// type.
-    pub stacks: HashMap<u32, (u32, usize, MirTy)>,
-    /// Class locals kept in frame slots: the type of each field's slot,
-    /// from the local's own.
-    pub sroa: HashMap<u32, Vec<MirTy>>,
-    /// The class of each `sroa` local, for its box where it escapes: the
-    /// type id and field count.
-    pub sroa_classes: HashMap<u32, (u32, u32)>,
-    /// The slot of each field read or written on such a class local.
-    pub fields: HashMap<u32, u32>,
     pub calls: &'a HashMap<u32, HirCallSite>,
-    /// Calls a `return` of the body may make as `TailCall` (the plan's).
-    pub tail_calls: &'a std::collections::HashSet<u32>,
     /// The user `into_iter` entry each counted `for` loop calls.
     pub into_iters: &'a HashMap<u32, Label>,
     /// Each `for` loop over a user iterator's `into_iter` and `next`.
@@ -653,13 +772,6 @@ pub struct HirMirInput<'a> {
     /// String table index of each `string` literal, and of each `const`
     /// global folded to a string.
     pub strings: &'a HashMap<u32, u32>,
-    /// Static slot of each `Global` read or assigned that is a static.
-    pub statics: &'a HashMap<u32, u32>,
-    /// The tail slot of each of those that is a two-word static: its
-    /// second word, the first in the static's own slot.
-    pub static_tails: HashMap<u32, u32>,
-    /// Folded value of each `Global` that is a `const`.
-    pub consts: &'a HashMap<u32, crate::const_fold::ConstValue>,
     /// `format` calls with only word arguments, and string `+` (as
     /// `"%s%s"`): the format string's index.
     pub formats: &'a HashMap<u32, u32>,
@@ -696,20 +808,12 @@ pub struct HirMirInput<'a> {
     /// prologue loads them: each one's frame slot, then the slot of the
     /// dictionary parameter it is read from and its index there.
     pub ctx_dicts: &'a [(u32, u32, u32)],
-    /// `x.len()` calls: a fixed size, or `None` for the array's length.
-    pub lens: &'a HashMap<u32, Option<u32>>,
     /// No finalizer resizes an array ([`MirFunc::lengths_steady`]).
     pub alloc_steady: bool,
-    /// Statements before which frame-slot locals box (they escape there).
-    pub box_at: &'a HashMap<u32, Vec<u32>>,
     /// Function-local `const` tables of literals (#1561): the array
     /// `Make` and the static slot it is built into on first use and loaded
     /// from after that.
     pub frozen_arrays: HashMap<u32, u32>,
-    /// `new` arguments whose slot holds a boxed enum object (a generic
-    /// class's field open in a parameter) for a value whose own word is
-    /// this niche layout: boxed on the way in ([`Lower::boxed_niche`]).
-    pub boxed_niches: HashMap<u32, ValueLayout>,
     /// Call arguments of a niche layout a shared generic takes in a boxed
     /// parameter: boxed to their enum object, by argument.
     pub niche_args: &'a HashMap<u32, ValueLayout>,
@@ -726,9 +830,6 @@ pub struct HirMirInput<'a> {
     /// The `coro_close` native a `for` loop over a generator calls when
     /// it is left early.
     pub coro_close_native: Option<u16>,
-    /// Field reads and writes on records: the field's slot (records are
-    /// slotted objects, their fields sorted by name) and word type.
-    pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
     /// `new C(args).f` reads whose object is never built: each argument
@@ -748,33 +849,6 @@ pub struct HirMirInput<'a> {
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,
-    /// Element-wise array and tuple operators, by expression.
-    pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
-    /// Record literals whose every field holds the word its type says:
-    /// the shape's `InitTyped` type id, and each field's slot and word
-    /// type, in literal order.
-    pub records: HashMap<u32, (u32, Vec<(u32, MirTy)>)>,
-    /// Record `let` patterns that bind only locals and wildcards: each
-    /// bound field's slot and word type (`None`: a wildcard), in pattern
-    /// order.
-    pub record_pats: HashMap<u32, Vec<Option<(u32, MirTy)>>>,
-    /// `Vec::push` calls HIR emission inlines.
-    pub pushes: HashSet<u32>,
-    /// Host native calls whose arguments and result are plain (boxed
-    /// layout) words: the native id, its result layout, and for a two-word enum result each
-    /// variant's tag and payload arity in declaration order.
-    pub hosts: HashMap<u32, (u16, u8, Option<HostVariants>)>,
-    /// `new C(..)` on the heap: the class's type id and its fields' word
-    /// types.
-    pub news: HashMap<u32, (u32, Vec<MirTy>)>,
-    /// `new C(..)` of a class with flat two-word fields: each field's tail
-    /// slot, which holds its second word (`Checker::class_flat_tails`).
-    pub new_tails: HashMap<u32, Vec<Option<u32>>>,
-    /// `for x in xs` loops whose array the checker pinned: their reads
-    /// need no bounds check.
-    pub pinned_for: HashSet<u32>,
-    /// Whether early exits move out of line.
-    pub cold_ok: bool,
     /// Calls of cold functions (`#[cold]`, or never returning): an arm
     /// that makes one is laid out after the body.
     pub cold_calls: HashSet<u32>,
@@ -786,16 +860,10 @@ pub struct HirMirInput<'a> {
     /// A lambda's captured dictionaries (#1526): `(first slot, count)`,
     /// each one heap word after its own captures, before its parameters.
     pub lambda_dicts: Option<(u32, u32)>,
-    /// A generic body's type parameter values are opaque words it only
-    /// moves (a raw scalar or a box, as the caller passed it).
-    pub opaque_vars: bool,
     /// A debugger reads the body's locals from their frame words.
     pub debugger: bool,
     /// A coverage compile: each source line keeps the code it emits.
     pub coverage: bool,
-    /// The niche layout of a result the body returns boxed (a test body's
-    /// `Result`): each return builds the `ObjEnum`.
-    pub ret_boxed_niche: Option<ValueLayout>,
 }
 
 struct Loop {
@@ -849,6 +917,10 @@ struct Lower<'a> {
     facts: Facts,
     /// The word types of the body's result when it returns two words.
     ret_pair: Option<(MirTy, MirTy)>,
+    /// The niche layout of a result the body returns boxed.
+    ret_boxed_niche: Option<ValueLayout>,
+    /// The body's type parameter values are opaque words it only moves.
+    opaque_vars: bool,
     b: MirBuilder,
     /// The block being filled.
     cur: BlockId,
@@ -946,6 +1018,8 @@ impl<'a> Lower<'a> {
             cx,
             facts: Facts::new(hir),
             ret_pair: cx.ret_pair(),
+            ret_boxed_niche: cx.ret_boxed_niche(),
+            opaque_vars: cx.opaque_vars(),
             b,
             cur,
             loops: Vec::new(),
@@ -988,6 +1062,12 @@ struct Facts {
     lanes: Vec<OnceCell<Option<HirLaneElem>>>,
     fields: Vec<OnceCell<HirFieldFact>>,
     lane_uses: OnceCell<HirLaneUses>,
+    stacks: Vec<OnceCell<Option<(u32, usize, MirTy)>>>,
+    sroa: Vec<OnceCell<Option<Vec<MirTy>>>>,
+    frame_fields: Vec<OnceCell<Option<u32>>>,
+    news: Vec<OnceCell<HirNew>>,
+    new_arg_niches: OnceCell<HashMap<u32, ValueLayout>>,
+    hosts: Vec<OnceCell<Option<HirHost>>>,
 }
 
 /// `n` empty answers.
@@ -1003,6 +1083,12 @@ impl Facts {
             lanes: cells(hir.exprs.len()),
             fields: cells(hir.exprs.len()),
             lane_uses: OnceCell::new(),
+            stacks: cells(hir.locals.len()),
+            sroa: cells(hir.locals.len()),
+            frame_fields: cells(hir.exprs.len()),
+            news: cells(hir.exprs.len()),
+            new_arg_niches: OnceCell::new(),
+            hosts: cells(hir.exprs.len()),
         }
     }
 }
@@ -1265,7 +1351,7 @@ fn mir(e: MirError) -> Refusal {
 /// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
 /// parameter in two.
 pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<MirFunc, Refusal> {
-    if hir.is_generic && !inp.opaque_vars {
+    if hir.is_generic && !cx.opaque_vars() {
         return Err("body kind generic".into());
     }
     if !hir.captures.is_empty() {
@@ -1287,13 +1373,13 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
     // word): nothing reads its word, so it returns as a unit body.
     let never_ret = matches!(strip_readonly(ret), Ty::Var(_))
         && lower.ret_pair.is_none()
-        && inp.ret_boxed_niche.is_none()
+        && lower.ret_boxed_niche.is_none()
         && lower.word_ty(ret).is_none()
         && cx.boxed_view(ret, None).is_none();
     let unit_ret = is_unit(ret) || never_ret;
     let ret_ty = match lower.ret_pair {
         _ if unit_ret => MirTy::I64,
-        None if inp.ret_boxed_niche.is_some() => MirTy::HeapRef,
+        None if lower.ret_boxed_niche.is_some() => MirTy::HeapRef,
         Some((lo, _)) => lo,
         // A tuple not returned as a pair comes back boxed.
         None if matches!(strip_readonly(ret), Ty::Tuple(items) if !items.is_empty()) => MirTy::HeapRef,
@@ -1418,7 +1504,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
             Val::Never => {}
             // A valued body the checker lets end without a return (a
             // `while` on a constant `true`) never gets here.
-            Val::Unit if !lower.unit_ret && lower.inp.ret_boxed_niche.is_none() && !unit_result(&lower.ret_hir) => {
+            Val::Unit if !lower.unit_ret && lower.ret_boxed_niche.is_none() && !unit_result(&lower.ret_hir) => {
                 lower.b.unreachable().map_err(mir)?;
             }
             val => lower.ret(val)?,
@@ -1450,7 +1536,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
     }
     func.debug_keep = inp.debugger;
     func.keep_lines = inp.coverage;
-    if inp.opaque_vars {
+    if cx.opaque_vars() {
         opaque_moves_only(hir, inp)?;
         func.opaque_words = true;
     }
@@ -1773,7 +1859,7 @@ impl Lower<'_> {
     /// The type of a one-word local. A stack array or class local is
     /// slots, not a word.
     fn local_ty(&self, local: HirLocal) -> Result<MirTy, Refusal> {
-        if self.inp.stacks.contains_key(&local.0) || self.inp.sroa.contains_key(&local.0) {
+        if self.stack(local.0).is_some() || self.sroa(local.0).is_some() {
             return Err("frame-slot local value".into());
         }
         let ty = self.hir.local(local).ty.as_ref().ok_or("local type")?;
@@ -1969,7 +2055,7 @@ impl Lower<'_> {
 
     /// Return `val`, which must fit the function's result.
     fn ret(&mut self, val: Val) -> Result<(), Refusal> {
-        if let Some(layout) = self.inp.ret_boxed_niche {
+        if let Some(layout) = self.ret_boxed_niche {
             let boxed = match val {
                 // `Ok(())` boxed: `CONST 0; MakeEnum 0 1`, as HIR emission.
                 Val::Unit if unit_result(&self.ret_hir) => {
@@ -2310,7 +2396,7 @@ impl Lower<'_> {
             return Ok(Some(self.b.ins_product_load(obj, slot, ty).map_err(mir)?));
         }
         // So does a frame-slot class local's open niche field: its slot's box.
-        if let Some(&slot) = self.inp.fields.get(&id.0)
+        if let Some(slot) = self.frame_field(id)
             && self.open_slot_niche(id).is_some_and(|w| Ok(w) == niche_word(layout))
         {
             return Ok(Some(match self.boxed_field(id, slot)? {
@@ -2333,7 +2419,7 @@ impl Lower<'_> {
     /// `return` of a one-word function with no value: `0`, as HIR
     /// emission's `CONST 0; RETURN`.
     fn ret_zero(&mut self) -> Result<(), Refusal> {
-        if self.inp.ret_boxed_niche.is_some() {
+        if self.ret_boxed_niche.is_some() {
             return self.ret(Val::Unit);
         }
         let ty = self.b.func().ret_ty.ok_or("return value")?;
@@ -2470,7 +2556,7 @@ impl Lower<'_> {
         // A two-word static is its box already, unless it keeps its two
         // words: then they are boxed here.
         if let HirKind::Global { .. } = self.hir.expr(id).kind
-            && self.inp.static_tails.contains_key(&id.0)
+            && self.cx.static_tail(id).is_some()
         {
             let ty = self.expr_ty(id).ok_or("static type")?.clone();
             let Some((lo, hi)) = self.pair(id)? else {
@@ -2482,7 +2568,7 @@ impl Lower<'_> {
             };
         }
         if let HirKind::Global { .. } = self.hir.expr(id).kind
-            && let Some(&slot) = self.inp.statics.get(&id.0)
+            && let Some(slot) = self.cx.static_slot(id)
             && self.pair_tys(id).is_some()
         {
             return Ok(Some(self.b.ins_load_static(slot, MirTy::HeapRef).map_err(mir)?));
@@ -2767,11 +2853,11 @@ impl Lower<'_> {
     /// (only when `items`, read as reached), stack array slots, a pair, or
     /// a heap word (a scalar for a broadcast's other side).
     fn agg_operand(&mut self, id: HirId, items: bool) -> Result<Option<AggSrc>, Refusal> {
-        if items && let Some(src) = query::aggregate_src(self.hir, &self.inp.stacks.iter().map(|(&k, &(_, n, _))| (k, n)).collect(), id) {
+        if items && let Some(src) = query::aggregate_src(self.hir, &self.stack_lens(id), id) {
             match src {
                 query::AggregateSrc::Items(items) => return Ok(Some(AggSrc::Items(items))),
                 query::AggregateSrc::Slots(local) if self.boxed(id).is_none() => {
-                    let (base, n, _) = self.inp.stacks[&local.0];
+                    let (base, n, _) = self.stack(local.0).expect("stack array");
                     return Ok(Some(AggSrc::Slots(base, n)));
                 }
                 _ => {}
@@ -3005,7 +3091,7 @@ impl Lower<'_> {
     /// A host call whose result is a boxed enum unboxed to a pair.
     fn host_pair(&self, id: HirId) -> bool {
         matches!(self.hir.expr(id).kind, HirKind::Call { .. })
-            && self.inp.hosts.get(&id.0).is_some_and(|h| h.2.is_some())
+            && self.host_call(id).is_some_and(|h| h.2.is_some())
             && self.pair_tys(id).is_some()
     }
 
@@ -3028,7 +3114,7 @@ impl Lower<'_> {
             return self.host_boxed(tail(then)) && self.host_boxed(tail(els));
         }
         matches!(self.hir.expr(id).kind, HirKind::Call { .. })
-            && self.inp.hosts.contains_key(&id.0)
+            && self.host_call(id).is_some()
             && self.pair_tys(id).is_none()
             && self.expr_ty(id).is_some_and(|t| self.word_ty(t).is_none() && self.cx.boxed_view(t, None).is_some())
     }
@@ -3146,8 +3232,8 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(kind) = self.inp.unrolled_las.get(&id.0) => self.unrolled_la(id, kind.clone(), args),
             HirKind::Bin { lhs, rhs, .. } if let Some(kind) = self.inp.unrolled_las.get(&id.0) => self.unrolled_la(id, kind.clone(), &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if let Some(kind) = self.inp.unrolled_las.get(&id.0) => self.unrolled_la(id, kind.clone(), &[*operand]),
-            HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
-            HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
+            HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.cx.aggregate(id) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
+            HirKind::Un { operand, .. } if let Some(info) = self.cx.aggregate(id) => self.aggregate(id, &info.clone(), *operand, None),
             // A bound type parameter's operator: its dictionary method.
             HirKind::Bin { lhs, rhs, .. } if let Some(bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, &[*lhs, *rhs], bound),
             HirKind::Un { operand, .. } if let Some(bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, &[*operand], bound),
@@ -3158,11 +3244,11 @@ impl Lower<'_> {
             HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.inp.op_prims.contains(&id.0) => self.op_prim(id, sym, *lhs, *rhs),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.partial(id, &f.clone(), args),
-            HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
-            HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
+            HirKind::Call { args, .. } if let (Some(fixed), [arg]) = (self.cx.len_of(id), args.as_slice()) => self.len(*arg, fixed),
+            HirKind::Call { args, .. } if self.cx.push(id) => self.push(args),
             HirKind::Call { args, .. } if self.inp.matrix_wraps.contains(&id.0) && args.len() == 1 => self.value(args[0]),
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
-            HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
+            HirKind::Call { args, .. } if self.host_call(id).is_some() => self.host(id, args),
             HirKind::Call { .. } if let Some(site) = self.inp.ffis.get(&id.0) => self.ffi(id, &site.clone()),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
             HirKind::Call { callee: Callee::Value(f), args } if let Some(p) = self.inp.poly_calls.get(&id.0) => self.call_poly(id, *f, args, &p.clone()),
@@ -3399,12 +3485,12 @@ impl Lower<'_> {
                 }
                 val
             }
-            HirKind::Let { local, init: Some(init) } if self.inp.stacks.contains_key(&local.0) || self.inp.sroa.contains_key(&local.0) => {
+            HirKind::Let { local, init: Some(init) } if self.stack(local.0).is_some() || self.sroa(local.0).is_some() => {
                 self.fill_slots(*local, *init)
             }
             HirKind::Assign { place, value }
                 if let HirKind::Local(local) = self.hir.expr(*place).kind
-                    && self.inp.stacks.contains_key(&local.0) =>
+                    && self.stack(local.0).is_some() =>
             {
                 self.fill_slots(local, *value)
             }
@@ -3417,7 +3503,7 @@ impl Lower<'_> {
             HirKind::Assign { place, value } if let HirKind::Index { base, index, .. } = self.hir.expr(*place).kind => {
                 self.stack_store(*place, base, index, *value)
             }
-            HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
+            HirKind::Assign { place, value } if let Some(slot) = self.frame_field(*place) => {
                 if let Some(done) = self.cow_field(*place, *value, slot)? {
                     return Ok(done);
                 }
@@ -3466,7 +3552,7 @@ impl Lower<'_> {
             HirKind::Field { base, .. }
                 if self.inp.field_news.contains(&id.0)
                     && let Some((slot, ty)) = self.heap_field(id)
-                    && self.inp.news.contains_key(&base.0)
+                    && self.news(*base).is_some()
                     && let HirKind::Make { args, .. } = &self.hir.expr(*base).kind =>
             {
                 // As HIR emission's: the object is never observed, so its
@@ -3603,7 +3689,7 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             // A record's field: its slot.
-            HirKind::Field { base, .. } if let Some(&(slot, ty)) = self.inp.record_fields.get(&id.0) => {
+            HirKind::Field { base, .. } if let Some((slot, ty)) = self.cx.record_field(id) => {
                 let Some(obj) = self.word(*base)? else {
                     return Ok(Val::Never);
                 };
@@ -3611,7 +3697,7 @@ impl Lower<'_> {
             }
             HirKind::Assign { place, value }
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
-                    && let Some(&(slot, ty)) = self.inp.record_fields.get(&place.0) =>
+                    && let Some((slot, ty)) = self.cx.record_field(*place) =>
             {
                 // The value, then the object, as `SetField`; a two-word
                 // value boxed, a `()` the empty tuple object (#1510).
@@ -3634,10 +3720,9 @@ impl Lower<'_> {
                 self.b.ins_heap_field_store(obj, v, slot).map_err(mir)?;
                 Ok(Val::Unit)
             }
-            HirKind::Make { kind: MakeKind::Record(_), args } if let Some((type_id, words)) = self.inp.records.get(&id.0) => {
+            HirKind::Make { kind: MakeKind::Record(_), args } if let Some((type_id, words)) = self.cx.record(id) => {
                 // Each value in literal order, then the slotted object and
                 // each value to its slot (the fields sorted by name).
-                let (type_id, words) = (*type_id, words.clone());
                 let mut slots = vec![None; words.len()];
                 for (&arg, (slot, ty)) in args.iter().zip(words) {
                     // A `()` runs for its effect and is stored as the empty
@@ -3669,14 +3754,14 @@ impl Lower<'_> {
                 Ok(Val::V(obj))
             }
             // An open niche field's box, read back as its niche word.
-            HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) && let Some(niche) = self.open_slot_niche(id) => {
+            HirKind::Field { .. } if let Some(slot) = self.frame_field(id) && let Some(niche) = self.open_slot_niche(id) => {
                 let obj = match self.boxed_field(id, slot)? {
                     Some((obj, index)) => self.b.ins_product_load(obj, index, MirTy::HeapRef).map_err(mir)?,
                     None => self.b.use_local(LocalId(slot), MirTy::HeapRef).map_err(mir)?,
                 };
                 self.unbox_niche(obj, niche)
             }
-            HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
+            HirKind::Field { .. } if let Some(slot) = self.frame_field(id) => {
                 let ty = self
                     .expr_ty(id)
                     .and_then(|t| self.word_ty(t))
@@ -3691,7 +3776,7 @@ impl Lower<'_> {
             }
             HirKind::Index { base, index, .. }
                 if let HirKind::Local(local) = self.hir.expr(*base).kind
-                    && let Some(&(slot, n, ty)) = self.inp.stacks.get(&local.0)
+                    && let Some((slot, n, ty)) = self.stack(local.0)
                     && !self.boxes.contains_key(&local.0) =>
             {
                 let lit = matches!(self.hir.expr(*index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i));
@@ -3766,7 +3851,7 @@ impl Lower<'_> {
             }
             // `let { a, b } = r` of a record: each bound field read from its
             // slot.
-            HirKind::LetPat { pat: HirPat::Record(parts), init } if let Some(words) = self.inp.record_pats.get(&id.0) => {
+            HirKind::LetPat { pat: HirPat::Record(parts), init } if let Some(words) = self.cx.record_pat(id) => {
                 let Some(obj) = self.word(*init)? else {
                     return Ok(Val::Never);
                 };
@@ -3774,7 +3859,7 @@ impl Lower<'_> {
                     return Err("let pattern record".into());
                 }
                 for ((_, part), word) in parts.iter().zip(words) {
-                    if let (HirPat::Bind(local), Some((slot, ty))) = (part, *word) {
+                    if let (HirPat::Bind(local), Some((slot, ty))) = (part, word) {
                         let v = self.b.ins_product_load(obj, slot, ty).map_err(mir)?;
                         self.bind(*local, v)?;
                     }
@@ -3789,7 +3874,7 @@ impl Lower<'_> {
                 Some(&slot) => self.frozen_array(id, args, slot),
                 None => self.make_array(id, args),
             },
-            HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
+            HirKind::Make { kind: MakeKind::Class(_), args } if self.news(id).is_some() => self.make_object(id, args),
             HirKind::Make {
                 kind: MakeKind::Variant { variant, .. },
                 args,
@@ -4584,13 +4669,13 @@ impl Lower<'_> {
     /// `id` into one heap array each:
     /// every use after it in source order goes through the array.
     fn box_before(&mut self, id: HirId) -> Result<(), Refusal> {
-        let Some(locals) = self.inp.box_at.get(&id.0) else {
+        let Some(locals) = self.cx.box_at(id) else {
             return Ok(());
         };
         for &local in locals {
             // A frame-slot class local: an object of its class, each slot
             // stored to its field.
-            if let (Some(tys), Some(&(type_id, nfields))) = (self.inp.sroa.get(&local), self.inp.sroa_classes.get(&local)) {
+            if let (Some(tys), Some((type_id, nfields))) = (self.sroa(local), self.sroa_class(local)) {
                 if tys.len() != nfields as usize {
                     return Err("boxed class local".into());
                 }
@@ -4614,7 +4699,7 @@ impl Lower<'_> {
                 self.boxes.insert(local, slot);
                 continue;
             }
-            let Some(&(base, n, ty)) = self.inp.stacks.get(&local) else {
+            let Some((base, n, ty)) = self.stack(local) else {
                 return Err("boxed class local".into());
             };
             // Each slot's word as it is, as HIR emission's `MakeArray`: a
@@ -4682,13 +4767,13 @@ impl Lower<'_> {
     /// Whether field `id` of a frame-slot class local is a two-word enum
     /// its slot holds boxed (as HIR emission's `new` stored it).
     fn boxed_slot_field(&self, id: HirId) -> bool {
-        let (Some(&slot), HirKind::Field { base, .. }) = (self.inp.fields.get(&id.0), &self.hir.expr(id).kind) else {
+        let (Some(slot), HirKind::Field { base, .. }) = (self.frame_field(id), &self.hir.expr(id).kind) else {
             return false;
         };
         let HirKind::Local(local) = self.hir.expr(*base).kind else {
             return false;
         };
-        let (Some(tys), Ok(at)) = (self.inp.sroa.get(&local.0), self.slot(local)) else {
+        let (Some(tys), Ok(at)) = (self.sroa(local.0), self.slot(local)) else {
             return false;
         };
         slot.checked_sub(at.0).and_then(|i| tys.get(i as usize)) == Some(&MirTy::HeapRef)
@@ -4699,13 +4784,13 @@ impl Lower<'_> {
     /// / `Result` its slot holds boxed (a generic class's field open in a
     /// parameter, as the class's heap object holds it): its niche word.
     fn open_slot_niche(&self, id: HirId) -> Option<MirTy> {
-        let (Some(&slot), HirKind::Field { base, .. }) = (self.inp.fields.get(&id.0), &self.hir.expr(id).kind) else {
+        let (Some(slot), HirKind::Field { base, .. }) = (self.frame_field(id), &self.hir.expr(id).kind) else {
             return None;
         };
         let HirKind::Local(local) = self.hir.expr(*base).kind else {
             return None;
         };
-        let (Some(tys), Ok(at)) = (self.inp.sroa.get(&local.0), self.slot(local)) else {
+        let (Some(tys), Ok(at)) = (self.sroa(local.0), self.slot(local)) else {
             return None;
         };
         let niche = self.expr_ty(id).and_then(|t| self.word_ty(t)).filter(|w| matches!(w, MirTy::NicheOpt | MirTy::NicheRes))?;
@@ -4726,7 +4811,7 @@ impl Lower<'_> {
         let (start, end) = self.hir.expr(id).span;
         // Generated code without a place of its own has the enclosing one,
         // but for a host call: the capability check finds it by its own span.
-        let placeless = crate::attrs::is_fresh_span(start) && !self.inp.hosts.contains_key(&id.0);
+        let placeless = crate::attrs::is_fresh_span(start) && self.host_call(id).is_none();
         if let Some(file) = self.inp.file.filter(|_| !placeless) {
             let (start, end) = crate::variadic::written_span(start, end);
             self.b.pending_loc = DebugLoc {
@@ -4886,7 +4971,7 @@ impl Lower<'_> {
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
         // A planned tail call: its callee may take this frame when the
         // call's result is what the body returns.
-        if self.inp.tail_calls.contains(&id.0) && !site.word_ret && niche.is_none() && site.ret_items.is_none() {
+        if self.cx.tail_call(id) && !site.word_ret && niche.is_none() && site.ret_items.is_none() {
             self.b.allow_tail_call(site.target);
         }
         if let HirKind::Call { callee: Callee::Named { name, .. }, .. } = &self.hir.expr(id).kind {
@@ -5640,9 +5725,9 @@ impl Lower<'_> {
         // own slot.
         let words: Vec<(LocalId, MirTy)> = if let Some(&slot) = self.boxes.get(&local.0) {
             vec![(slot, MirTy::HeapRef)]
-        } else if let Some(&(base, n, ty)) = self.inp.stacks.get(&local.0) {
+        } else if let Some((base, n, ty)) = self.stack(local.0) {
             (0..n as u32).map(|i| (LocalId(base + i), ty)).collect()
-        } else if let Some(tys) = self.inp.sroa.get(&local.0) {
+        } else if let Some(tys) = self.sroa(local.0) {
             let base = self.slot(local)?.0;
             tys.iter().enumerate().map(|(i, &ty)| (LocalId(base + i as u32), ty)).collect()
         } else if self.pair_local(local).is_some()
@@ -5682,8 +5767,8 @@ impl Lower<'_> {
             return Err("refill boxed stack array".into());
         }
         let base = self.slot(local)?.0;
-        let tys = match (self.inp.stacks.get(&local.0), self.inp.sroa.get(&local.0)) {
-            (Some(&(_, n, ty)), _) => vec![ty; n],
+        let tys = match (self.stack(local.0), self.sroa(local.0)) {
+            (Some((_, n, ty)), _) => vec![ty; n],
             (None, Some(tys)) => tys.clone(),
             (None, None) => return Err("frame-slot local".into()),
         };
@@ -5719,7 +5804,7 @@ impl Lower<'_> {
                     self.b.def_local(LocalId(base + i as u32), v).map_err(mir)?;
                 }
             }
-            HirKind::Local(src) if let Some(&(from, n, ty)) = self.inp.stacks.get(&src.0) && n == tys.len() => {
+            HirKind::Local(src) if let Some((from, n, ty)) = self.stack(src.0) && n == tys.len() => {
                 for i in 0..n as u32 {
                     let v = self.b.use_local(LocalId(from + i), ty).map_err(mir)?;
                     self.b.def_local(LocalId(base + i), v).map_err(mir)?;
@@ -5798,9 +5883,9 @@ impl Lower<'_> {
     /// `const`. A function used as a value is not this phase's.
     fn global(&mut self, id: HirId) -> Result<Val, Refusal> {
         use crate::const_fold::ConstValue;
-        if let Some(&slot) = self.inp.statics.get(&id.0) {
+        if let Some(slot) = self.cx.static_slot(id) {
             // A two-word static's words, from its slot and its tail.
-            if let (Some(&tail), Some((lo_ty, hi_ty))) = (self.inp.static_tails.get(&id.0), self.pair_tys(id)) {
+            if let (Some(tail), Some((lo_ty, hi_ty))) = (self.cx.static_tail(id), self.pair_tys(id)) {
                 let lo = self.b.ins_load_static(slot, lo_ty).map_err(mir)?;
                 let hi = self.b.ins_load_static(tail, hi_ty).map_err(mir)?;
                 return Ok(Val::Pair(lo, hi));
@@ -5814,7 +5899,7 @@ impl Lower<'_> {
             }
             return Ok(Val::V(v));
         }
-        let c = match self.inp.consts.get(&id.0) {
+        let c = match self.cx.const_value(id) {
             Some(ConstValue::Int(n)) => MirConst::I64(*n),
             Some(ConstValue::Float(f)) => MirConst::F64(f.to_bits()),
             Some(ConstValue::Bool(b)) => MirConst::Bool(*b),
@@ -5850,7 +5935,7 @@ impl Lower<'_> {
         }
         match self.hir.expr(place).kind {
             HirKind::Global { .. } => {
-                let slot = *self.inp.statics.get(&place.0).ok_or("adjust place")?;
+                let slot = self.cx.static_slot(place).ok_or("adjust place")?;
                 if self.static_ty(place)? != ty {
                     return Err("adjust type".into());
                 }
@@ -5912,8 +5997,8 @@ impl Lower<'_> {
     /// `STATIC = v`: the value, then `StoreStatic`, as HIR emission. The
     /// value is stored as is (no fixed-array copy).
     fn store_static(&mut self, place: HirId, value: HirId) -> Result<Val, Refusal> {
-        let slot = *self.inp.statics.get(&place.0).ok_or("assign place")?;
-        if let (Some(&tail), Some((lo_ty, hi_ty))) = (self.inp.static_tails.get(&place.0), self.pair_tys(place)) {
+        let slot = self.cx.static_slot(place).ok_or("assign place")?;
+        if let (Some(tail), Some((lo_ty, hi_ty))) = (self.cx.static_tail(place), self.pair_tys(place)) {
             let Some((lo, hi)) = self.pair(value)? else {
                 return Ok(Val::Never);
             };
@@ -5947,7 +6032,7 @@ impl Lower<'_> {
             .or_else(|| self.plain_heap(ty).then_some(MirTy::HeapRef))
             // A type parameter's item in a shared body: the opaque word as
             // stored, as an array's (#1143).
-            .or_else(|| (self.inp.opaque_vars && is_var(ty)).then_some(MirTy::I64))
+            .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
             // A two-word item (an `Option<int>`, a range) rides boxed (#1486).
             .or_else(|| self.boxed_pair_item(ty).then_some(MirTy::HeapRef))
             // A niche `Option` / `Result` item is its niche word, as
@@ -6319,7 +6404,7 @@ impl Lower<'_> {
     /// `new C(..)`: every argument, then the object and each field's store
     /// (no argument sees the object, so none runs with it allocated).
     fn make_object(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        let type_id = self.inp.news[&id.0].0;
+        let type_id = self.news(id).expect("new object").0;
         let Some(words) = self.object_words(id, args)? else {
             return Ok(Val::Never);
         };
@@ -6335,8 +6420,8 @@ impl Lower<'_> {
     /// The field words of `new C(args)` (`id`), each argument run in
     /// order into the word its slot holds; `None` if one never returns.
     fn object_words(&mut self, id: HirId, args: &[HirId]) -> Result<Option<Vec<ValueId>>, Refusal> {
-        let tys = self.inp.news[&id.0].1.clone();
-        let tails = self.inp.new_tails.get(&id.0).cloned().unwrap_or_default();
+        let tys = self.news(id).expect("new object").1.clone();
+        let tails = self.new_fact(id).tails.clone();
         let mut words = Vec::with_capacity(args.len());
         let mut tail_words = Vec::new();
         for (i, (&arg, ty)) in args.iter().zip(tys).enumerate() {
@@ -6852,8 +6937,7 @@ impl Lower<'_> {
         {
             return self.lane_call(id, args, lane_call);
         }
-        let (native, layout, unbox) = &self.inp.hosts[&id.0];
-        let (mut native, layout) = (*native, *layout);
+        let (mut native, layout, unbox) = self.host_call(id).cloned().expect("host call");
         // A `from_bytes` whose buffer is dead after it takes the bytes.
         if self.hir.expr(id).flags.contains(crate::hir::HirFlags::TAKE) && common::host_native_id("from_bytes") == Some(usize::from(native)) {
             native = common::FROM_BYTES_TAKE_ID;
@@ -6861,7 +6945,7 @@ impl Lower<'_> {
         let raw = std::mem::take(&mut self.raw_host);
         let pair = match (self.pair_tys(id), unbox) {
             (Some(_), Some(_)) if raw => None,
-            (Some(tys), Some(variants)) => Some((tys, variants.clone())),
+            (Some(tys), Some(variants)) => Some((tys, variants)),
             (Some(_), None) => return Err("host pair result".into()),
             (None, _) => None,
         };
@@ -7196,7 +7280,7 @@ impl Lower<'_> {
         self.b.branch(more, body_b, exit).map_err(mir)?;
         self.switch(body_b);
         let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
-        let pinned = matches!(items, Items::Array) && self.inp.pinned_for.contains(&id.0);
+        let pinned = matches!(items, Items::Array) && self.cx.pinned_for(id);
         let item = self.b.ins_index(arr, cur, elem, pinned).map_err(mir)?;
         match (pat, parts) {
             (HirPat::Bind(local), _) => {
@@ -7396,7 +7480,7 @@ impl Lower<'_> {
     /// HIR emission stages them.
     fn stack_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
         let stack = match self.hir.expr(base).kind {
-            HirKind::Local(local) if !self.boxes.contains_key(&local.0) => self.inp.stacks.get(&local.0).copied(),
+            HirKind::Local(local) if !self.boxes.contains_key(&local.0) => self.stack(local.0),
             _ => None,
         };
         let Some((slot, n, ty)) = stack else {
@@ -8095,7 +8179,7 @@ impl Lower<'_> {
         if let Some(&(w, untagged)) = self.unniche.get(&v)
             && untagged == err
             && self.b.value_ty(w) == niche
-            && self.inp.ret_boxed_niche.is_none()
+            && self.ret_boxed_niche.is_none()
         {
             return Ok(Val::V(w));
         }
@@ -8398,7 +8482,7 @@ impl Lower<'_> {
     /// Lay out the blocks lowering started since `order[start]` after the
     /// body; a range nested in one already marked goes with it.
     fn mark_cold(&mut self, start: usize) {
-        if self.inp.cold_ok {
+        if self.cx.cold_ok() {
             self.cold.retain(|&(s, _)| s < start);
             self.cold.push((start, self.order.len()));
         }
