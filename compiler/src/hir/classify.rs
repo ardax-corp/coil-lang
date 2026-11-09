@@ -1,0 +1,485 @@
+//! What MIR lowering may do with a value of a type ([`ValueClass`]), and
+//! the type queries it rests on: words, enums, ranges, closed and open
+//! types.
+
+use super::{HirBody, HirId, HirKind, LocalId, MakeKind};
+use crate::typechecking::infer::Checker;
+use crate::typechecking::subst::apply_ty_prune;
+use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
+
+/// What the lowering may do with a value of some type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueClass {
+    /// `int`, `float` or `bool`: operators apply.
+    Scalar,
+    /// `()`: only as a call or function result.
+    Unit,
+    /// `string`: moved and passed, never operated on.
+    Opaque,
+    /// `Option`, `Result` or a closed, non-generic user enum.
+    Enum,
+    /// An instance of a non-generic user class: one heap pointer word.
+    Object,
+    /// A heap tuple, array or `Vec<T>` with closed element types: one
+    /// pointer word, indexed with `Index` / `StoreIndex`.
+    Aggregate,
+}
+
+/// The classes a local, argument, field or payload word can hold.
+pub fn is_word(class: ValueClass) -> bool {
+    !matches!(class, ValueClass::Unit)
+}
+
+/// The class of `ty`, or `None` when the lowering does not handle it.
+pub fn classify(checker: &Checker, ty: &Ty) -> Option<ValueClass> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    classify_in(checker, &ty, &mut Vec::new())
+}
+
+fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<ValueClass> {
+    let ty = strip_readonly(ty);
+    if is_scalar(ty) {
+        return Some(ValueClass::Scalar);
+    }
+    if crate::layout::is_unit(ty) {
+        return Some(ValueClass::Unit);
+    }
+    match ty {
+        Ty::Con(n) if n == coil_ty::STRING => Some(ValueClass::Opaque),
+        // A foreign pointer: one word, only moved and passed to `extern`s.
+        Ty::Con(n) if n == "ptr" && !checker.is_class(n) && checker.enum_variants(n).is_none() => Some(ValueClass::Opaque),
+        // Host handles (`io` streams, threads, channels, locks): one word.
+        Ty::Con(n) if n == coil_ty::STREAM && !checker.is_class(n) && checker.enum_variants(n).is_none() => {
+            Some(ValueClass::Opaque)
+        }
+        Ty::Constructor { owner, .. } => classify_in(checker, owner, seen),
+        // A `()` item is stored as the empty tuple object (#1427).
+        Ty::Tuple(items) if !items.is_empty() => aggregate(checker, items.iter(), true, seen),
+        // A record: one dict word, its fields read and written by name. A
+        // `()` field is stored as the empty tuple object, as a tuple's.
+        Ty::Record { fields } if !fields.is_empty() => fields
+            .iter()
+            .all(|(_, f)| classify_in(checker, f, seen).is_some_and(|class| is_word(class) || class == ValueClass::Unit))
+            .then_some(ValueClass::Opaque),
+        Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), false, seen),
+        // A bare-class existential (`Show x`): one `[value, dictionary]`
+        // tuple word, only moved and called through its dictionary.
+        Ty::Existential { .. } => Some(ValueClass::Opaque),
+        // `Matrix<D>` is its data at run time.
+        Ty::App(..) if crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty).is_some() => {
+            classify_in(checker, crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty)?, seen)
+        }
+        Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
+            aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), false, seen)
+        }
+        // A higher-kinded parameter's instance (`F<A>` in a shared body):
+        // the instance's one word, only moved and passed to its dictionary.
+        Ty::App(head, _) if matches!(head.as_ref(), Ty::Var(_)) => Some(ValueClass::Opaque),
+        Ty::App(head, args) => {
+            let Ty::Con(name) = head.as_ref() else {
+                return None;
+            };
+            // A coroutine handle: one heap word, only moved, resumed and
+            // tested with `done`.
+            if name == "coroutine" && args.len() == 2 {
+                return Some(ValueClass::Opaque);
+            }
+            // A GC `Root<T>` / `Weak<T>` handle: one host word, only moved
+            // and passed to the `gc` natives.
+            if matches!(name.as_str(), coil_ty::ROOT | coil_ty::WEAK) && args.len() == 1 && !checker.is_class(name) {
+                return Some(ValueClass::Opaque);
+            }
+            // A `thread` handle (`Thread<T>`, `Sender<T>`, …): one host word.
+            if coil_ty::opaque_handle_name(ty).is_some() && !checker.is_class(name) {
+                return Some(ValueClass::Opaque);
+            }
+            // A generic class instance: one object word, its methods shared
+            // across instances (fields are only read inside them).
+            // (A generic enum with an `impl` has a class key too; it is
+            // still an enum.)
+            if is_generic_class(checker, name) && checker.enum_variants(name).is_none() {
+                return Some(ValueClass::Opaque);
+            }
+            let option = common::is_builtin_option_enum(name);
+            let result = common::is_builtin_result_enum(name);
+            if !(option || result) {
+                return generic_user_enum(checker, name, args, seen);
+            }
+            if args.len() != if option { 1 } else { 2 } {
+                return None;
+            }
+            // A `()` payload is the empty tuple object (#1449).
+            for arg in args {
+                classify_in(checker, arg, seen)?;
+            }
+            args.iter().all(|a| payload_closed(checker, a, seen)).then_some(ValueClass::Enum)
+        }
+        Ty::Sum { name, variants } => {
+            if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) {
+                for (_, payload) in variants {
+                    for field in payload.field_types() {
+                        classify_in(checker, field, seen)?;
+                    }
+                }
+                let closed = variants
+                    .iter()
+                    .all(|(_, p)| p.field_types().into_iter().all(|f| payload_closed(checker, f, seen)));
+                return closed.then_some(ValueClass::Enum);
+            }
+            if checker.is_scalar_enum(name) {
+                return Some(ValueClass::Opaque);
+            }
+            user_enum(checker, name, seen)
+        }
+        // A monomorphic function value (closure, partial, `fn` object):
+        // one word, only moved and called through `CallIndirect`.
+        Ty::Fun(..) if fun_words(checker, ty, seen) => Some(ValueClass::Opaque),
+        // A polymorphic function value (`let f = id`, a `forall` parameter):
+        // one `PolyFn` word, called with boxed arguments.
+        Ty::Fun(..) | Ty::Forall { .. } if poly_fun(ty) => Some(ValueClass::Opaque),
+        // `self` inside a generic class's shared method body.
+        Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
+        // A scalar-backed enum is its backing word, only moved and matched.
+        Ty::Con(name) if checker.is_scalar_enum(name) => Some(ValueClass::Opaque),
+        Ty::Con(name) if checker.is_class(name) && checker.enum_variants(name).is_none() => object_class(checker, name, seen),
+        Ty::Con(name) => user_enum(checker, name, seen),
+        // A type parameter inside a generic class's shared method body: one
+        // boxed word, only moved.
+        Ty::Var(_) => Some(ValueClass::Opaque),
+        _ => None,
+    }
+}
+
+/// A function type still open in a type parameter, or a rank-n `forall`:
+/// a `PolyFn` value, whose calls box their arguments.
+pub fn poly_fun(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Forall { .. } => true,
+        t @ Ty::Fun(..) => !crate::typechecking::subst::ftv(t).is_empty(),
+        _ => false,
+    }
+}
+
+/// A function type whose parameters and result are plain words: no enum
+/// (its layout may be niche or a pair), no unit; a bare type variable is
+/// one word.
+/// The result may also be a closed enum: a call through the function
+/// returns a one-word enum as that word, any other boxed.
+fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    fun_words_in(checker, ty, seen, false)
+}
+
+/// [`fun_words`], with `open_enum` also taking an `Option` / `Result`
+/// whose type variable nothing pinned (`Ok(2)`'s error type): one boxed
+/// word, no niche or pair (#1520). Only a closure literal's own type may:
+/// its body and its calls see the one open type, where a parameter's
+/// caller may pass a closure returning the pinned enum's pair.
+pub(super) fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: bool) -> bool {
+    // A bare type parameter (a shared generic body's own `T -> U`
+    // parameter) is one boxed word too.
+    let plain = |t: &Ty, seen: &mut Vec<String>| {
+        (crate::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..) | Ty::Var(_)))
+            && matches!(
+                classify_in(checker, t, seen),
+                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
+            )
+    };
+    match strip_readonly(ty) {
+        // `() -> T` takes a unit parameter, and `T -> ()` returns one.
+        Ty::Fun(param, ret) => {
+            let unit = |t: &Ty| crate::layout::is_unit(strip_readonly(t));
+            let closed_enum = |t: &Ty, seen: &mut Vec<String>| {
+                (crate::layout::ty_is_closed(t) || open_enum && crate::layout::of(checker, t) == crate::layout::Layout::Word)
+                    && classify_in(checker, t, seen) == Some(ValueClass::Enum)
+            };
+            // A closure literal's tuple of type parameters (a shared generic
+            // body's `fn () use (x) => (x, x)`) is its one heap tuple word:
+            // an open tuple is never a pair (#1524).
+            let open_tuple = |t: &Ty, seen: &mut Vec<String>| {
+                open_enum
+                    && matches!(strip_readonly(t), Ty::Tuple(_))
+                    && !crate::layout::ty_is_closed(t)
+                    && params_closed(t)
+                    && classify_in(checker, t, seen) == Some(ValueClass::Aggregate)
+            };
+            (unit(param) || plain(param, seen) || closed_enum(param, seen))
+                && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen) || open_tuple(ret, seen))
+        }
+        _ => false,
+    }
+}
+
+/// Closed but for type parameters (a generic class's shared method body):
+/// each parameter is one boxed word, and [`crate::layout::of`] gives a type
+/// open in one its shared layout.
+fn params_closed(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Var(_) => true,
+        Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
+        Ty::Constructor { owner: inner, .. } => params_closed(inner),
+        Ty::App(_, args) => args.iter().all(params_closed),
+        Ty::Tuple(items) => items.iter().all(params_closed),
+        Ty::Record { fields } => fields.iter().all(|(_, f)| params_closed(f)),
+        Ty::Array { element, .. } => params_closed(element),
+        Ty::Sum { variants, .. } => variants
+            .iter()
+            .all(|(_, p)| p.field_types().into_iter().all(params_closed)),
+        Ty::Con(_) | Ty::Never => true,
+        Ty::Readonly(_) => unreachable!("stripped"),
+    }
+}
+
+/// A tuple, array or `Vec` whose element types are closed but for type
+/// parameters (elements are classified where they are read). With `unit`,
+/// an item may be `()`.
+fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, unit: bool, seen: &mut Vec<String>) -> Option<ValueClass> {
+    items
+        .all(|t| {
+            (params_closed(t) || is_existential(t) || mono_fun(checker, t, seen) || open_fun(checker, t, seen))
+                && classify_in(checker, t, seen).is_none_or(|class| is_word(class) || unit && class == ValueClass::Unit)
+        })
+        .then_some(ValueClass::Aggregate)
+}
+
+/// A monomorphic function type of plain words: its value is one closure
+/// word, stored in an aggregate as that word.
+pub(super) fn mono_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    matches!(strip_readonly(ty), Ty::Fun(..)) && crate::typechecking::subst::ftv(ty).is_empty() && fun_words(checker, ty, seen)
+}
+
+/// A function type over type parameters whose words are plain
+/// ([`fun_words`]: a bare `T` is one boxed word), such as the elements of a
+/// shared generic body's `Vec<unit -> T>`: one closure word each (#2136).
+/// An open `Option` / `Result` (`Vec<unit -> Result<T, E>>`) is its one
+/// object word here too: a ground caller reaches the mono clone, so every
+/// closure the shared body sees was made where the enum is open (#2153).
+pub(super) fn open_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    matches!(strip_readonly(ty), Ty::Fun(..)) && fun_words_in(checker, ty, seen, true)
+}
+
+/// A class declared with type parameters (`class HashMap<K, V>`).
+pub fn is_generic_class(checker: &Checker, name: &str) -> bool {
+    if !checker.has_impl(name) {
+        return false;
+    }
+    let ctors = &checker.generics().generic_type_ctors;
+    ctors.contains_key(name) || checker.resolve_class_key(name).is_some_and(|key| ctors.contains_key(&key))
+}
+
+/// An `Option` / `Result` payload whose word is known: [`params_closed`],
+/// or a monomorphic function or existential (one heap word each), so
+/// `Option<fn() -> string>` is an enum value (#1991).
+fn payload_closed(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    params_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen)
+}
+
+/// A user class the lowering builds and reads: not generic, with every
+/// field type closed.
+fn object_class(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<ValueClass> {
+    let key = checker.resolve_class_key(name)?;
+    let ctors = &checker.generics().generic_type_ctors;
+    if ctors.contains_key(&key) || ctors.contains_key(name) {
+        return None;
+    }
+    // A class whose function field mentions the class (`fn(Node) -> ()`)
+    // reaches it again: assume the object word while its fields are
+    // checked (#1989).
+    let marker = format!("class {key}");
+    if seen.contains(&marker) {
+        return Some(ValueClass::Object);
+    }
+    let fields = checker.class_fields(&key)?;
+    seen.push(marker);
+    let ok = fields.iter().all(|(_, ty)| closed_field(checker, ty, seen));
+    seen.pop();
+    ok.then_some(ValueClass::Object)
+}
+
+/// A class field type the lowering stores as one known word: closed, an
+/// existential, a monomorphic function, or a `Vec` / `Option` / `Result`
+/// of those (`Vec<Comp>`, `Option<fn() -> string>`, #1988, #1991).
+fn closed_field(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    if crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen) {
+        return true;
+    }
+    match strip_readonly(ty) {
+        Ty::App(head, args)
+            if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE
+                || common::is_builtin_option_enum(n)
+                || common::is_builtin_result_enum(n)) =>
+        {
+            crate::typechecking::subst::ftv(ty).is_empty() && args.iter().all(|a| closed_field(checker, a, seen))
+        }
+        _ => false,
+    }
+}
+
+/// A bare-class existential (`Show`): one `[value, dictionary]` word, closed
+/// as an element or a field though its packed type is not.
+fn is_existential(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Existential { .. })
+}
+
+/// Whether `id` is a `Vec<T>`.
+pub fn is_vec(body: &HirBody, checker: &Checker, id: HirId) -> bool {
+    body.expr(id)
+        .ty
+        .as_ref()
+        .is_some_and(|t| coil_ty::vec_element_ty(&apply_ty_prune(checker.subst(), t)).is_some())
+}
+
+/// A user enum the lowering builds and matches: not scalar-backed, not a
+/// class, not builtin, with every payload field a handled non-unit type.
+fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<ValueClass> {
+    if common::is_builtin_option_enum(name)
+        || common::is_builtin_result_enum(name)
+        || common::is_builtin_ffi_enum(name)
+        || checker.is_scalar_enum(name)
+        // An enum with an `impl` also has a class key; it is still an enum.
+        || (checker.is_class(name) && checker.enum_variants(name).is_none())
+    {
+        return None;
+    }
+    if seen.iter().any(|s| s == name) {
+        return Some(ValueClass::Enum);
+    }
+    let variants = checker.enum_variants(name)?;
+    if variants.is_empty() {
+        return None;
+    }
+    seen.push(name.to_string());
+    let ok = variants.iter().all(|(_, _, payload)| {
+        payload.iter().all(|field| {
+            crate::layout::ty_is_closed(field) && classify_in(checker, field, seen).is_some()
+        })
+    });
+    seen.pop();
+    ok.then_some(ValueClass::Enum)
+}
+
+/// `enum_name::variant`'s payload types at a ground instance of a generic
+/// user enum (`Tree<int>`): the declared types with its parameters bound.
+pub fn generic_enum_payload(checker: &Checker, enum_name: &str, variant: &str, args: &[Ty]) -> Option<Vec<Ty>> {
+    let params = checker.type_ctor_params(enum_name)?;
+    if params.len() != args.len() {
+        return None;
+    }
+    let (_, _, payload) = checker.enum_variants(enum_name)?.into_iter().find(|(n, _, _)| n == variant)?;
+    Some(payload.iter().map(|t| crate::layout::bind_params(t, params, args)).collect())
+}
+
+/// An instance of a generic user enum (`Tree<int>`, or `Tree<T>` in a
+/// shared body): laid out as a closed enum with its parameters bound.
+fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<String>) -> Option<ValueClass> {
+    if checker.is_class(name) && checker.enum_variants(name).is_none() {
+        return None;
+    }
+    // Open only in type parameters: a shared generic body's instance,
+    // each parameter one boxed word.
+    if !args.iter().all(params_closed) {
+        return None;
+    }
+    let key = format!("{name}<{args:?}>");
+    if seen.contains(&key) {
+        return Some(ValueClass::Enum);
+    }
+    let variants = checker.enum_variants(name)?;
+    if variants.is_empty() {
+        return None;
+    }
+    seen.push(key);
+    let ok = variants.iter().all(|(variant, _, _)| {
+        generic_enum_payload(checker, name, variant, args).is_some_and(|payload| {
+            payload
+                .iter()
+                .all(|field| params_closed(field) && classify_in(checker, field, seen).is_some())
+        })
+    });
+    seen.pop();
+    ok.then_some(ValueClass::Enum)
+}
+
+/// A numeric `Range` / `RangeInclusive`: `[start, end]` in a direct
+/// call's arguments and result and in an unboxed local, else one boxed word.
+pub fn is_range_pair(ty: &Ty) -> bool {
+    crate::layout::two_word_range_kind(ty).is_some()
+}
+
+/// A `Range<T>` / `RangeInclusive<T>` over an open type parameter `T`.
+pub fn is_open_range(ty: &Ty) -> bool {
+    crate::typechecking::ty::range_app(ty).is_some_and(|(elem, _)| matches!(strip_readonly(elem), Ty::Var(_)))
+}
+
+/// A `()`-typed local: bound by `let` for its initializer's effect only.
+pub fn is_unit_local(body: &HirBody, checker: &Checker, local: LocalId) -> bool {
+    body.local(local)
+        .ty
+        .as_ref()
+        .and_then(|ty| classify(checker, ty))
+        == Some(ValueClass::Unit)
+}
+
+/// `int`, `float`, `bool` or `byte`: one immediate word with a primitive
+/// lane (`byte` shares the int lane).
+pub fn is_scalar(ty: &Ty) -> bool {
+    primitive(ty).is_some()
+}
+
+/// `Vec<byte>` (or the checker's internal unsized byte array): a growable
+/// byte array.
+pub fn is_byte_vec(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Array { element, length: coil_ty::ArrayLength::Dynamic } => is_byte(element),
+        Ty::App(head, args) => {
+            matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) && matches!(args.as_slice(), [e] if is_byte(e))
+        }
+        _ => false,
+    }
+}
+
+/// `[T; N]` with `N > 0`: a fixed array, which a local copies on
+/// assignment.
+pub fn is_fixed_array(checker: &Checker, ty: &Ty) -> bool {
+    matches!(
+        strip_readonly(&apply_ty_prune(checker.subst(), ty)),
+        Ty::Array { length: coil_ty::ArrayLength::Static(n), .. } if *n > 0
+    )
+}
+
+/// A byte array type: a string literal typed so is its bytes.
+pub fn is_byte_array(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Array { element, .. } if is_byte(element))
+}
+
+pub fn is_byte(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Con(n) if n == coil_ty::BYTE)
+}
+
+/// The items of a `(a, b, ..)` literal argument.
+pub fn tuple_items(body: &HirBody, id: HirId) -> Option<&[HirId]> {
+    match &body.expr(id).kind {
+        HirKind::Make { kind: MakeKind::Tuple, args } => Some(args),
+        _ => None,
+    }
+}
+
+/// The primitive name of a scalar type, as the cast opcodes key it.
+pub fn primitive(ty: &Ty) -> Option<&'static str> {
+    match strip_readonly(ty) {
+        Ty::Con(n) if n == coil_ty::INT => Some(coil_ty::INT),
+        Ty::Con(n) if n == coil_ty::FLOAT => Some(coil_ty::FLOAT),
+        Ty::Con(n) if n == coil_ty::BOOL => Some(coil_ty::BOOL),
+        Ty::Con(n) if n == coil_ty::BYTE => Some(coil_ty::BYTE),
+        _ => None,
+    }
+}
+
+/// A class or enum operand of a unary operator, which dispatches to the
+/// type's trait instance (`impl Neg for V`).
+pub(crate) fn user_operand(checker: &Checker, ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Con(name) | Ty::Sum { name, .. } => checker.is_class(name) || checker.enum_variants(name).is_some(),
+        Ty::App(head, _) => matches!(head.as_ref(), Ty::Con(name) if checker.is_class(name)),
+        _ => false,
+    }
+}

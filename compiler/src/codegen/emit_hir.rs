@@ -1,6 +1,6 @@
 //! HIR body planning for MIR lowering.
 //!
-//! Every function body inside [`crate::hir::lower`]'s subset is planned
+//! Every function body inside [`crate::hir::refusal`]'s subset is planned
 //! here and lowered to MIR by `mir::lower_from_hir`; a refused body is an
 //! internal error. [`Compiler::compile_function_decl_into`] keeps the prologue, slots
 //! for parameters and function records; the body itself is a placeholder
@@ -13,7 +13,8 @@
 //! and call tables `from_hir` reads.
 
 use super::*;
-use crate::hir::lower::{self, ValueClass};
+use crate::hir::classify::{self, ValueClass};
+use crate::hir::{query, refusal};
 use crate::hir::{
     BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, MakeKind, UnOp,
 };
@@ -793,7 +794,7 @@ impl Compiler {
                     let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(body, *scrutinee)?);
                     let core = match crate::typechecking::ty::strip_readonly(&ty) {
                         Ty::App(head, _) => matches!(&**head, Ty::Con(n) if n == "Option" || n == "Result"),
-                        t => lower::primitive(t).is_some(),
+                        t => classify::primitive(t).is_some(),
                     };
                     if !core {
                         return None;
@@ -939,7 +940,7 @@ impl Compiler {
         let ty = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
         let scalar = |t: &Option<Ty>| match ty(t) {
             Some(Ty::Never) => true,
-            Some(t) => lower::primitive(&t).is_some() || matches!(&t, Ty::Con(n) if n == crate::typechecking::ty::UNIT),
+            Some(t) => classify::primitive(&t).is_some() || matches!(&t, Ty::Con(n) if n == crate::typechecking::ty::UNIT),
             None => false,
         };
         if !scalar(&body.ret) || !body.locals.iter().all(|l| scalar(&l.ty)) || !body.exprs.iter().all(|e| scalar(&e.ty)) {
@@ -958,7 +959,7 @@ impl Compiler {
                 | HirKind::Let { .. }
                 | HirKind::Return(_) => {}
                 // `"a"` typed `byte`: its code.
-                HirKind::Lit(Lit::Str(raw)) if lower::byte_literal(raw).is_some() && ty(&e.ty).and_then(|t| lower::primitive(&t)) == Some("byte") => {}
+                HirKind::Lit(Lit::Str(raw)) if query::byte_literal(raw).is_some() && ty(&e.ty).and_then(|t| classify::primitive(&t)) == Some("byte") => {}
                 HirKind::Bin { op, .. } if !matches!(op, BinOp::Overloaded(_) | BinOp::StrConcat) => {}
                 HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(_)) => {}
                 HirKind::Call {
@@ -1069,7 +1070,7 @@ impl Compiler {
     fn hir_lambda_shape(&self, hir: &HirBody, call: HirId, lambda: &HirBody, budget: usize) -> Result<crate::hir::inline::Shape, String> {
         let scalar = |ty: &Option<Ty>| {
             ty.as_ref().is_some_and(|t| {
-                matches!(lower::classify(&self.checker, t), Some(ValueClass::Scalar | ValueClass::Unit))
+                matches!(classify::classify(&self.checker, t), Some(ValueClass::Scalar | ValueClass::Unit))
                     || immediate_pair(&crate::layout::of(&self.checker, t))
             })
         };
@@ -1342,7 +1343,7 @@ impl Compiler {
         // An assignment or adjust used as a value splits into statements
         // ahead of its own.
         let mut staged: Option<crate::hir::HirBody> = None;
-        while let Some((_, Some(at))) = lower::refusal_at(staged.as_ref().unwrap_or(hir), &self.checker) {
+        while let Some((_, Some(at))) = refusal::refusal_at(staged.as_ref().unwrap_or(hir), &self.checker) {
             match crate::hir::stage::stage(staged.as_ref().unwrap_or(hir), at) {
                 Some(body) => staged = Some(body),
                 None => break,
@@ -1351,7 +1352,7 @@ impl Compiler {
         let hir = staged.as_ref().unwrap_or(hir);
         // A type-only `let x: T;` of a non-scalar type read before it is
         // assigned is the program's error (#1273).
-        let unassigned = lower::unassigned_reads(&module, hir);
+        let unassigned = refusal::unassigned_reads(&module, hir);
         if !unassigned.is_empty() {
             for at in unassigned {
                 let (start, end) = hir.expr(at).span;
@@ -1372,7 +1373,7 @@ impl Compiler {
         }
         // A `break` / `continue` outside every loop is the program's error;
         // nothing else of the body is emitted.
-        let stray = lower::stray_jumps(&module, hir);
+        let stray = refusal::stray_jumps(&module, hir);
         if !stray.is_empty() {
             for (at, brk) in stray {
                 let keyword = if brk { "break" } else { "continue" };
@@ -1408,7 +1409,7 @@ impl Compiler {
         } else {
             None
         }
-        .or_else(|| lower::refusal(hir, &self.checker))
+        .or_else(|| refusal::refusal(hir, &self.checker))
         .map_or_else(|| self.plan_hir_body(hir), Err)
         .and_then(|mut emit| self.plan_hir_lambdas(&module, hir, &mut emit).map(|()| emit));
         // Typed inlining rewrites the body and plans it again; a body whose
@@ -1443,7 +1444,7 @@ impl Compiler {
                 let classes = crate::hir::readonly_sroa::scalarize(split.as_ref().unwrap_or(body), |name| self.hir_readonly_split_fields(name));
                 let split = classes.or(split);
                 match split {
-                    Some(next) => match lower::refusal(&next, &self.checker)
+                    Some(next) => match refusal::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
                     {
@@ -1482,7 +1483,7 @@ impl Compiler {
                 let body_b = bounds.as_ref().unwrap_or(body_f);
                 let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
                 match sunk.or(bounds).or(folded).or(tabled).or(unrolled) {
-                    Some(next) => match lower::refusal(&next, &self.checker)
+                    Some(next) => match refusal::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
                     {
@@ -1541,7 +1542,7 @@ impl Compiler {
                     .collect();
                 let host = |id: HirId| hosts.get(&id.0).copied();
                 match self.program_effects.early_frees(&self.checker, &module_path, &module, hir, &host) {
-                    Some(next) => match lower::refusal(&next, &self.checker)
+                    Some(next) => match refusal::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
                     {
@@ -1658,7 +1659,7 @@ impl Compiler {
                 self.context.variables.len() as u32
             })
         });
-        let plan = lower::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
+        let plan = refusal::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
         let lowered = match plan {
             Ok(mut emit) => {
                 start(self);
@@ -2004,7 +2005,7 @@ impl Compiler {
         // A string field, or a two-word enum's, holds its boxed heap word.
         let field_word = |t: &Ty| {
             word(t).or_else(|| scalar_enum(t)).or_else(|| {
-                let boxed = match lower::classify(checker, t)? {
+                let boxed = match classify::classify(checker, t)? {
                     ValueClass::Opaque => matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING),
                     ValueClass::Enum => true,
                     _ => false,
@@ -3228,7 +3229,7 @@ impl Compiler {
                 && clone.is_none()
                 && callee.kind == BodyKind::Method
                 && let Some(owner) = callee.name.rsplit("::").nth(1)
-                && lower::is_generic_class(&self.checker, owner)
+                && classify::is_generic_class(&self.checker, owner)
             {
                 return Err("generic-class".to_string());
             }
@@ -3281,7 +3282,7 @@ impl Compiler {
             let scalar = |ty: &Option<Ty>| {
                 ty.as_ref().is_some_and(|t| {
                     matches!(
-                        lower::classify(&self.checker, t),
+                        classify::classify(&self.checker, t),
                         Some(ValueClass::Scalar | ValueClass::Unit)
                     ) || immediate_pair(&crate::layout::of(&self.checker, t))
                 })
@@ -3386,7 +3387,7 @@ impl Compiler {
                 return Err("outlined-plan");
             }
             let was = this.hir_ground_splice.replace(ground_splice);
-            let planned = lower::refusal(body, &this.checker)
+            let planned = refusal::refusal(body, &this.checker)
                 .map_or_else(|| this.plan_hir_body(body), Err)
                 .and_then(|mut emit| this.plan_hir_lambdas(module, body, &mut emit).map(|()| emit))
                 .and_then(|emit| {
@@ -3661,7 +3662,7 @@ impl Compiler {
                 let ok = match &kind {
                     HirKind::Local(s) => !assigned.contains(s) && !body.local(*s).captured,
                     HirKind::Lit(_) => true,
-                    _ if spill.is_none() && body.expr(v).ty.as_ref().is_some_and(|t| crate::hir::lower::primitive(t).is_some()) => {
+                    _ if spill.is_none() && body.expr(v).ty.as_ref().is_some_and(|t| crate::hir::classify::primitive(t).is_some()) => {
                         let tmp = LocalId((fresh + spilled.len()) as u32);
                         spill = Some((v, tmp));
                         kind = HirKind::Local(tmp);
@@ -4621,8 +4622,8 @@ impl Compiler {
                         .local(outer)
                         .ty
                         .as_ref()
-                        .and_then(|t| lower::classify(&self.checker, t))
-                        .is_some_and(lower::is_word);
+                        .and_then(|t| classify::classify(&self.checker, t))
+                        .is_some_and(classify::is_word);
                 if !plain {
                     return Err("lambda-capture");
                 }
@@ -4635,7 +4636,7 @@ impl Compiler {
             }
             let ret_ty = lam.ret.as_ref().ok_or("lambda-ret")?;
             let ret = Rep::Word(self.value_layout(ret_ty));
-            if let Some(reason) = lower::refusal(lam, &self.checker) {
+            if let Some(reason) = refusal::refusal(lam, &self.checker) {
                 return Err(reason);
             }
             // A shared generic body's dictionaries (`__dictN`), captured
@@ -4752,7 +4753,7 @@ impl Compiler {
                 // `T` result is the concrete layout at its callers.
                 let boundary = self.compiling_mono_clone
                     && declared.is_some_and(|d| Self::hir_convertible(&Rep::Word(d), &Rep::Word(layout)))
-                    && hir.ret.as_ref().and_then(|ty| lower::classify(&self.checker, ty)) == Some(ValueClass::Enum)
+                    && hir.ret.as_ref().and_then(|ty| classify::classify(&self.checker, ty)) == Some(ValueClass::Enum)
                     && self
                         .compiling_fn_return_ty()
                         .and_then(|ty| self.generic_enum_layout(&ty))
@@ -4760,7 +4761,7 @@ impl Compiler {
                 // A bare `T` result passes through in its concrete layout,
                 // whatever its open type's layout.
                 let bare = self.compiling_mono_clone
-                    && hir.ret.as_ref().and_then(|ty| lower::classify(&self.checker, ty)) == Some(ValueClass::Enum)
+                    && hir.ret.as_ref().and_then(|ty| classify::classify(&self.checker, ty)) == Some(ValueClass::Enum)
                     && self
                         .compiling_fn_return_ty()
                         .is_some_and(|ty| matches!(apply_ty_prune(self.checker.subst(), &ty), Ty::Var(_)));
@@ -4837,12 +4838,12 @@ impl Compiler {
             .exprs
             .iter()
             .filter_map(|e| match &e.kind {
-                HirKind::Call { callee, args } => match lower::ffi_builtin(&self.checker, callee) {
+                HirKind::Call { callee, args } => match query::ffi_builtin(&self.checker, callee) {
                     Some(crate::typechecking::FfiBuiltin::Declare) if args.len() >= 4 => {
-                        Some(lower::tuple_items(hir, args[2]).unwrap_or(&[]).iter().chain([&args[3]]).map(|t| t.0).collect::<Vec<_>>())
+                        Some(classify::tuple_items(hir, args[2]).unwrap_or(&[]).iter().chain([&args[3]]).map(|t| t.0).collect::<Vec<_>>())
                     }
                     Some(crate::typechecking::FfiBuiltin::Invoke) if args.len() == 3 => Some(
-                        lower::tuple_items(hir, args[2])
+                        classify::tuple_items(hir, args[2])
                             .unwrap_or(&[])
                             .iter()
                             .filter(|t| match &hir.expr(**t).kind {
@@ -4902,7 +4903,7 @@ impl Compiler {
                 continue;
             }
             if let HirKind::Un { op: UnOp::Neg, .. } = expr.kind
-                && let Some(info) = lower::aggregate_info(&self.checker, hir, HirId(i as u32))
+                && let Some(info) = query::aggregate_info(&self.checker, hir, HirId(i as u32))
             {
                 self.hir_check_aggregate(&info)?;
                 emit.plan.ops.insert(i as u32, HirOp::Aggregate(info));
@@ -4915,7 +4916,7 @@ impl Compiler {
                 // `-a` / `~a` on a bound type parameter: its `Neg` / `BitNot`
                 // dictionary method on the operand's one word.
                 let ty = Self::hir_ty(hir, operand).ok_or("operator-bound")?;
-                if !lower::classify(&self.checker, ty).is_some_and(lower::is_word) {
+                if !classify::classify(&self.checker, ty).is_some_and(classify::is_word) {
                     return Err("operator-bound");
                 }
                 emit.plan.ops.insert(
@@ -4929,7 +4930,7 @@ impl Compiler {
             }
             if let HirKind::Un { op: op @ (UnOp::Neg | UnOp::BitNot), operand } = expr.kind
                 && let Some(ty) = Self::hir_ty(hir, operand)
-                && lower::user_operand(&self.checker, ty)
+                && classify::user_operand(&self.checker, ty)
             {
                 // `-v` / `~v` on a user type: its `Neg` / `BitNot` instance.
                 let (class, method) = match op {
@@ -5022,7 +5023,7 @@ impl Compiler {
     /// (`sroa`), and enum locals kept as `[payload, tag]` pairs. Needs the
     /// planned calls, whose results decide pair locals.
     fn plan_hir_local_layouts(&self, hir: &HirBody, emit: &mut HirEmit) -> Result<(), &'static str> {
-        let mut stacks = lower::stack_arrays(hir, &self.checker);
+        let mut stacks = query::stack_arrays(hir, &self.checker);
         // A lane array (two-word elements) is never a stack array: its
         // slots would hold each element boxed.
         stacks.len.retain(|&l, _| {
@@ -5035,7 +5036,7 @@ impl Compiler {
         emit.plan.stacks = stacks.len;
         emit.plan.box_at = stacks.box_at;
         // Escaping frame-slot class locals box before their escape too.
-        let class_boxes = lower::class_boxes(hir, &self.checker);
+        let class_boxes = query::class_boxes(hir, &self.checker);
         let class_boxed: HashSet<u32> = class_boxes.values().flatten().copied().collect();
         for (stmt, locals) in class_boxes {
             emit.plan.box_at.entry(stmt).or_default().extend(locals);
@@ -5061,8 +5062,8 @@ impl Compiler {
             local,
             init: Some(init),
         } = expr.kind
-            && lower::sroa_local(hir, &self.checker, &class_boxed, local, init)
-            && let Some(class) = lower::sroa_class(hir, &self.checker, init)
+            && query::sroa_local(hir, &self.checker, &class_boxed, local, init)
+            && let Some(class) = query::sroa_class(hir, &self.checker, init)
         {
             emit.plan.sroa.insert(local.0, class);
         }
@@ -5153,7 +5154,7 @@ impl Compiler {
                 HirKind::Make {
                     kind: MakeKind::Range { .. },
                     ..
-                } if hir.expr(init).ty.as_ref().is_some_and(|t| lower::is_open_range(&apply_ty_prune(self.checker.subst(), t))) => None,
+                } if hir.expr(init).ty.as_ref().is_some_and(|t| classify::is_open_range(&apply_ty_prune(self.checker.subst(), t))) => None,
                 HirKind::Make {
                     kind: MakeKind::Range { inclusive },
                     ..
@@ -5435,7 +5436,7 @@ impl Compiler {
         // `C::f(..)` on a generic class is its one shared body.
         let shared = name
             .rsplit_once("::")
-            .is_some_and(|(owner, _)| self.checker.has_impl(owner) && lower::is_generic_class(&self.checker, owner));
+            .is_some_and(|(owner, _)| self.checker.has_impl(owner) && classify::is_generic_class(&self.checker, owner));
         let generic = self.checker.is_generic_fn(&lookup);
         let clone_key = key.clone();
         let mut abi = self.hir_call_abi(key, &lookup, argc, None, shared || generic)?;
@@ -5516,14 +5517,14 @@ impl Compiler {
         };
         let mut params = Vec::with_capacity(filled.len());
         for ty in &filled {
-            match lower::classify(&self.checker, ty) {
+            match classify::classify(&self.checker, ty) {
                 Some(ValueClass::Enum) | None => return Err("callee-partial"),
-                Some(class) if lower::is_word(class) => params.push(self.value_layout(ty)),
+                Some(class) if classify::is_word(class) => params.push(self.value_layout(ty)),
                 Some(_) => return Err("callee-partial"),
             }
         }
         let ty = Self::hir_ty(hir, call).ok_or("call-type")?;
-        if lower::classify(&self.checker, ty) != Some(ValueClass::Opaque) {
+        if classify::classify(&self.checker, ty) != Some(ValueClass::Opaque) {
             return Err("callee-partial");
         }
         Ok(Some(HirCall {
@@ -5598,7 +5599,7 @@ impl Compiler {
         }
         let plain = |id: HirId, unit: bool| -> Result<ValueLayout, &'static str> {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id).ok_or("callee-signature")?);
-            match lower::classify(&self.checker, &ty) {
+            match classify::classify(&self.checker, &ty) {
                 Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
                     if crate::layout::ty_is_closed(&ty) =>
                 {
@@ -5658,7 +5659,7 @@ impl Compiler {
         }
         let plain = |id: HirId, unit: bool| -> Result<ValueLayout, &'static str> {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id).ok_or("callee-signature")?);
-            match lower::classify(&self.checker, &ty) {
+            match classify::classify(&self.checker, &ty) {
                 Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
                     if crate::layout::ty_is_closed(&ty) =>
                 {
@@ -5807,7 +5808,7 @@ impl Compiler {
         let enum_boundary = |generic: &Ty, concrete: &Ty| {
             !matches!(generic, Ty::Var(_))
                 && !crate::layout::ty_is_closed(generic)
-                && lower::classify(&self.checker, concrete) == Some(ValueClass::Enum)
+                && classify::classify(&self.checker, concrete) == Some(ValueClass::Enum)
                 && self.generic_enum_layout(generic).is_some()
         };
         // Arguments pass in the clone's own layout at its types: the clone
@@ -5815,8 +5816,8 @@ impl Compiler {
         let mut params = Vec::with_capacity(args.len());
         for param in &param_tys {
             let ty = at(param);
-            match lower::classify(&self.checker, &ty) {
-                Some(class) if lower::is_word(class) => {}
+            match classify::classify(&self.checker, &ty) {
+                Some(class) if classify::is_word(class) => {}
                 // A `()` parameter (`T = unit`) takes the empty tuple
                 // object, as a plain call's (#1086, #1450).
                 Some(ValueClass::Unit) => {
@@ -5837,7 +5838,7 @@ impl Compiler {
         // A returned function (`return show`, a `PolyFn`) is one word, and
         // so is a `Vec` of ground ones (#2136).
         let fun = matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Fun(..) | Ty::Forall { .. }) || ground_fun(&ret);
-        if !(crate::layout::ty_is_closed(&ret) || fun) || lower::classify(&self.checker, &ret).is_none() {
+        if !(crate::layout::ty_is_closed(&ret) || fun) || classify::classify(&self.checker, &ret).is_none() {
             return Err("callee-signature");
         }
         let ret_layout = if enum_boundary(&ret_ty, &ret) {
@@ -5931,7 +5932,7 @@ impl Compiler {
         // clone is only a cost decision.
         let word = |ty: &Ty| {
             crate::layout::ty_is_closed(ty)
-                && (lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                && (classify::classify(&self.checker, ty).is_some_and(classify::is_word)
                     || matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_)))
         };
         let lookup_tys = src
@@ -5947,7 +5948,7 @@ impl Compiler {
         // from the shared one's.
         let one = |ty: &Ty| {
             Self::closed_value_ty(ty)
-                && (lower::classify(&self.checker, ty).is_some_and(lower::is_word)
+                && (classify::classify(&self.checker, ty).is_some_and(classify::is_word)
                     || matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_)))
         };
         let mut params = Vec::with_capacity(param_tys.len());
@@ -5975,7 +5976,7 @@ impl Compiler {
             && !one(&ret)
             && !crate::layout::ty_is_closed(&ret_ty)
             && crate::layout::ty_is_closed(&ret)
-            && lower::classify(&self.checker, &ret) == Some(ValueClass::Enum);
+            && classify::classify(&self.checker, &ret) == Some(ValueClass::Enum);
         let unit = matches!(&ret, Ty::Con(n) if n == crate::typechecking::ty::UNIT);
         let ret_layout = if boundary {
             self.generic_enum_layout(&ret_ty)?
@@ -6047,7 +6048,7 @@ impl Compiler {
             if body.kind != crate::hir::BodyKind::Function || body.is_generic || body.is_coro || !body.captures.is_empty() || body.root.is_none() {
                 continue;
             }
-            if lower::refusal(body, &self.checker).is_some() {
+            if refusal::refusal(body, &self.checker).is_some() {
                 continue;
             }
             let prev = std::mem::take(&mut self.context.variables);
@@ -6185,13 +6186,13 @@ impl Compiler {
             return Ok(call);
         }
         let recv = *args.first().ok_or("method-receiver")?;
-        if forwards && (lower::is_vec(hir, &self.checker, recv) || method == "to_vec") {
+        if forwards && (classify::is_vec(hir, &self.checker, recv) || method == "to_vec") {
             return Err("callee-trait");
         }
         // A trait method the `Vec` type has no method of (`v.show()`,
         // #1848) resolves as any receiver's.
         let vec_method = self.context.methods.get(common::BUILTIN_VEC_TYPE).is_some_and(|m| m.contains_key(method));
-        if lower::is_vec(hir, &self.checker, recv) && vec_method {
+        if classify::is_vec(hir, &self.checker, recv) && vec_method {
             return self.resolve_hir_vec_method(hir, call, method, args);
         }
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
@@ -6229,10 +6230,10 @@ impl Compiler {
         // its open signature types keep the body's own layouts.
         // A generic enum's (`Option<T>`'s) too: called at ground types, its
         // clone there.
-        let shared = lower::is_generic_class(&self.checker, owner)
-            && matches!(lower::classify(&self.checker, &recv_ty), Some(ValueClass::Opaque | ValueClass::Enum));
+        let shared = classify::is_generic_class(&self.checker, owner)
+            && matches!(classify::classify(&self.checker, &recv_ty), Some(ValueClass::Opaque | ValueClass::Enum));
         // A user enum's word is its heap object, passed as a class's is.
-        let receiver = match lower::classify(&self.checker, &recv_ty) {
+        let receiver = match classify::classify(&self.checker, &recv_ty) {
             Some(ValueClass::Object) => true,
             // A niche `Option` / `Result` boxes to the shared body's `self`.
             Some(ValueClass::Enum) => {
@@ -6285,7 +6286,7 @@ impl Compiler {
         // niche `Option` / `Result` receiver goes boxed.
         let self_layout = match self.value_layout(&recv_ty) {
             ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
-                if lower::is_generic_class(&self.checker, owner) =>
+                if classify::is_generic_class(&self.checker, owner) =>
             {
                 ValueLayout::Boxed
             }
@@ -6593,7 +6594,7 @@ impl Compiler {
         // layout the dictionary's adapter speaks.
         let word = |id: HirId, declared: Option<&Ty>| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
-            match lower::classify(&self.checker, ty) {
+            match classify::classify(&self.checker, ty) {
                 Some(ValueClass::Enum) if !crate::layout::ty_is_closed(&apply_ty_prune(self.checker.subst(), ty)) => {
                     Ok(self.value_layout(ty))
                 }
@@ -6923,7 +6924,7 @@ impl Compiler {
     ) -> Result<(Vec<ValueLayout>, ValueLayout), &'static str> {
         let word = |id: HirId| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
-            match lower::classify(&self.checker, ty) {
+            match classify::classify(&self.checker, ty) {
                 None => Err("callee-trait"),
                 Some(ValueClass::Enum) => match self.value_layout(ty) {
                     ValueLayout::Boxed => Ok(ValueLayout::Boxed),
@@ -7105,14 +7106,14 @@ impl Compiler {
         let mut params = vec![ValueLayout::Boxed];
         for &arg in &args[1..] {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).ok_or("callee-signature")?);
-            match lower::classify(&self.checker, &ty) {
+            match classify::classify(&self.checker, &ty) {
                 Some(ValueClass::Enum) | None => return Err("callee-trait"),
-                Some(class) if lower::is_word(class) => params.push(self.value_layout(&ty)),
+                Some(class) if classify::is_word(class) => params.push(self.value_layout(&ty)),
                 Some(_) => return Err("callee-trait"),
             }
         }
         let ret_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call).ok_or("callee-signature")?);
-        if !crate::layout::ty_is_closed(&ret_ty) || lower::classify(&self.checker, &ret_ty).is_none() {
+        if !crate::layout::ty_is_closed(&ret_ty) || classify::classify(&self.checker, &ret_ty).is_none() {
             return Err("callee-signature");
         }
         let ret = if crate::layout::of(&self.checker, &ret_ty).words() == 1 {
@@ -7146,7 +7147,7 @@ impl Compiler {
         match builtin {
             HirBuiltin::FfiDyn(FfiBuiltin::Declare) => args[..2].to_vec(),
             HirBuiltin::FfiDyn(FfiBuiltin::Invoke) => {
-                let items = lower::tuple_items(hir, args[2]).unwrap_or(&[]);
+                let items = classify::tuple_items(hir, args[2]).unwrap_or(&[]);
                 args[..2].iter().chain(items).copied().collect()
             }
             _ => args.to_vec(),
@@ -7212,7 +7213,7 @@ impl Compiler {
                 let string = matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING);
                 // A scalar enum's word is its backing literal.
                 let scalar = crate::layout::is_scalar_enum_ty(&self.checker, ty);
-                if !string && !scalar && lower::primitive(ty).is_none() {
+                if !string && !scalar && classify::primitive(ty).is_none() {
                     return Err("format-argument");
                 }
             }
@@ -7233,8 +7234,8 @@ impl Compiler {
                 continue;
             }
             let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
-            match lower::classify(&self.checker, ty) {
-                Some(class) if lower::is_word(class) => {}
+            match classify::classify(&self.checker, ty) {
+                Some(class) if classify::is_word(class) => {}
                 // A `()` argument passes the empty tuple object, as to a
                 // plain call (#1428).
                 Some(ValueClass::Unit) => {
@@ -7251,7 +7252,7 @@ impl Compiler {
             });
         }
         let ret_ty = Self::hir_ty(hir, call).ok_or("callee-signature")?;
-        if lower::classify(&self.checker, ret_ty).is_none() {
+        if classify::classify(&self.checker, ret_ty).is_none() {
             return Err("callee-signature");
         }
         Ok(HirCall {
@@ -7419,8 +7420,8 @@ impl Compiler {
             _ => return Err("callee-signature"),
         };
         for ty in &param_tys {
-            match lower::classify(&self.checker, ty) {
-                Some(class) if lower::is_word(class) => {}
+            match classify::classify(&self.checker, ty) {
+                Some(class) if classify::is_word(class) => {}
                 // A `()` parameter takes the empty tuple object (#1086).
                 Some(ValueClass::Unit) => {
                     params.push(ValueLayout::Boxed);
@@ -7435,7 +7436,7 @@ impl Compiler {
         for param in returned.into_iter().rev() {
             ret_ty = Ty::Fun(Box::new(param), Box::new(ret_ty));
         }
-        if !coro && lower::classify(&self.checker, &ret_ty).is_none() && !open_ty(&ret_ty) {
+        if !coro && classify::classify(&self.checker, &ret_ty).is_none() && !open_ty(&ret_ty) {
             return Err("callee-signature");
         }
         // A plain free function takes its numeric range parameters as
@@ -7596,7 +7597,7 @@ impl Compiler {
         // (`HashMap::new()` never given a value).
         let loose = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            lower::classify(&self.checker, &ty).is_some().then_some(ty)
+            classify::classify(&self.checker, &ty).is_some().then_some(ty)
         };
         let mut arg_tys = Vec::with_capacity(args.len());
         for (k, &arg) in args.iter().enumerate() {
@@ -7623,7 +7624,7 @@ impl Compiler {
             // a tagged word (`BoxValue Instance` for an enum, the niche word
             // itself: a shared body holds rep(ground T)); a pair enum word
             // does not.
-            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && !self.hir_boxed_enum_word(ty) && !self.hir_niche_word(ty) {
+            if classify::classify(&self.checker, ty) == Some(ValueClass::Enum) && !self.hir_boxed_enum_word(ty) && !self.hir_niche_word(ty) {
                 return Err("callee-generic");
             }
             boxed.push(Some(ty.clone()));
@@ -7675,7 +7676,7 @@ impl Compiler {
         let unbox = (ret_boxed && !open(&ret_ty)).then(|| ret_ty.clone());
         // A niche result comes back as its niche word boxed.
         if unbox.is_some()
-            && lower::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum)
+            && classify::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum)
             && !self.hir_boxed_enum_word(&ret_ty)
             && !self.hir_niche_word(&ret_ty)
         {
@@ -8507,7 +8508,7 @@ impl Compiler {
     /// instance, open or ground: `BoxValue` passes it through as itself
     /// (#2138, #2149).
     fn hir_object_word(&self, ty: &Ty) -> bool {
-        if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && self.hir_boxed_enum_word(ty) {
+        if classify::classify(&self.checker, ty) == Some(ValueClass::Enum) && self.hir_boxed_enum_word(ty) {
             return true;
         }
         let head = match crate::typechecking::ty::strip_readonly(ty) {
@@ -8530,7 +8531,7 @@ impl Compiler {
     fn hir_open_enum_word(&self, ty: &Ty) -> bool {
         !crate::layout::ty_is_closed(ty)
             && matches!(crate::typechecking::ty::strip_readonly(ty), Ty::App(..) | Ty::Sum { .. } | Ty::Constructor { .. })
-            && lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
+            && classify::classify(&self.checker, ty) == Some(ValueClass::Enum)
             && self.hir_boxed_enum_word(ty)
     }
 
@@ -8641,7 +8642,7 @@ impl Compiler {
             return None;
         }
         let ty = apply_ty_prune(self.checker.subst(), hir.local(local).ty.as_ref()?);
-        if Self::ty_has_var(&ty) || lower::is_open_range(&ty) {
+        if Self::ty_has_var(&ty) || classify::is_open_range(&ty) {
             return None;
         }
         self.hir_mir_pair_tys(&ty)?;
@@ -8731,7 +8732,7 @@ impl Compiler {
     /// reference or a finalizer observes), looking `depth` payloads deep.
     fn holds_object(&self, ty: &Ty, depth: usize) -> bool {
         let ty = apply_ty_prune(self.checker.subst(), ty);
-        match lower::classify(&self.checker, &ty) {
+        match classify::classify(&self.checker, &ty) {
             Some(ValueClass::Scalar | ValueClass::Unit | ValueClass::Opaque) => false,
             Some(ValueClass::Enum) if depth > 0 => {
                 let head = match crate::typechecking::ty::strip_readonly(&ty) {
@@ -8775,7 +8776,7 @@ impl Compiler {
         let inert = |t: &Option<Ty>| {
             t.as_ref().is_some_and(|t| {
                 let t = apply_ty_prune(self.checker.subst(), t);
-                lower::primitive(&t) == Some("string") || !self.holds_object(&t, 0) || self.enum_of_strings(&t, 4)
+                classify::primitive(&t) == Some("string") || !self.holds_object(&t, 0) || self.enum_of_strings(&t, 4)
             })
         };
         !callee.exprs.iter().any(|e| matches!(e.kind, HirKind::Call { .. } | HirKind::Builtin { .. } | HirKind::Lambda { .. }))
@@ -8784,7 +8785,7 @@ impl Compiler {
 
     /// An enum whose payloads are strings and scalars, `depth` deep.
     fn enum_of_strings(&self, ty: &Ty, depth: usize) -> bool {
-        if depth == 0 || !matches!(lower::classify(&self.checker, ty), Some(ValueClass::Enum)) {
+        if depth == 0 || !matches!(classify::classify(&self.checker, ty), Some(ValueClass::Enum)) {
             return false;
         }
         let head = match crate::typechecking::ty::strip_readonly(ty) {
@@ -8805,7 +8806,7 @@ impl Compiler {
             Self::payload_tys_of(&self.checker, ty, v).is_some_and(|ps| {
                 ps.iter().all(|p| {
                     let p = apply_ty_prune(self.checker.subst(), p);
-                    lower::primitive(&p) == Some("string") || !self.holds_object(&p, 0) || self.enum_of_strings(&p, depth - 1)
+                    classify::primitive(&p) == Some("string") || !self.holds_object(&p, 0) || self.enum_of_strings(&p, depth - 1)
                 })
             })
         })
@@ -8841,7 +8842,7 @@ impl Compiler {
                             _ => None,
                         }
                     } else {
-                        lower::generic_enum_payload(this, n, variant, args)
+                        classify::generic_enum_payload(this, n, variant, args)
                     }
                 }
                 Ty::Con(n) => this
@@ -8996,7 +8997,7 @@ impl Compiler {
         let [arg] = args.as_slice() else {
             return None;
         };
-        let is_len = matches!(callee, Callee::Method { name } if name == "len") && lower::structural_len(hir, &self.checker, *arg);
+        let is_len = matches!(callee, Callee::Method { name } if name == "len") && query::structural_len(hir, &self.checker, *arg);
         if is_len
             && let HirKind::Make {
                 kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Record(_),
@@ -9095,7 +9096,7 @@ impl Compiler {
         } else if self.checker.is_overloaded(&resolved) || picked.is_some() {
             return None;
         }
-        if !matches!(lower::classify(&self.checker, &ty), Some(ValueClass::Opaque))
+        if !matches!(classify::classify(&self.checker, &ty), Some(ValueClass::Opaque))
             || !matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Fun(..))
             || self.checker.is_generic_fn(strip_overload_key(&resolved))
             || self.lookup_slot(name).is_some()
@@ -9366,7 +9367,7 @@ impl Compiler {
             })?
         };
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-        let prim = lower::primitive(&ty);
+        let prim = classify::primitive(&ty);
         let fits = match value {
             ConstValue::Int(_) => prim == Some(crate::typechecking::ty::INT),
             ConstValue::Float(_) => prim == Some(crate::typechecking::ty::FLOAT),
@@ -9436,7 +9437,7 @@ impl Compiler {
         let node = hir.expr(id);
         let (start, end) = node.span;
         if !matches!(sym, "==" | "!=")
-            && let Some(info) = lower::aggregate_info(&self.checker, hir, id)
+            && let Some(info) = query::aggregate_info(&self.checker, hir, id)
         {
             self.hir_check_aggregate(&info)?;
             return Ok(HirOp::Aggregate(info));
@@ -9462,7 +9463,7 @@ impl Compiler {
             // Each operand passes as its one word.
             for operand in [lhs, rhs] {
                 let ty = Self::hir_ty(hir, operand).ok_or("operator-bound")?;
-                if !lower::classify(&self.checker, ty).is_some_and(lower::is_word) {
+                if !classify::classify(&self.checker, ty).is_some_and(classify::is_word) {
                     return Err("operator-bound");
                 }
             }
@@ -9476,7 +9477,7 @@ impl Compiler {
 
     /// The packed path needs its host kernel.
     fn hir_check_aggregate(&self, info: &crate::typechecking::AggregateArithInfo) -> Check {
-        if lower::aggregate_packed(info).is_some() && self.native_id(common::PACKED_VEC_ARITH).is_none() {
+        if query::aggregate_packed(info).is_some() && self.native_id(common::PACKED_VEC_ARITH).is_none() {
             return Err("operator-packed");
         }
         Ok(())
@@ -9487,7 +9488,7 @@ impl Compiler {
     /// `None` when the operator does not take the kernel.
     pub(super) fn packed_aggregate_meta(info: &crate::typechecking::AggregateArithInfo) -> Option<u32> {
         use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
-        let len = lower::aggregate_packed(info)?;
+        let len = query::aggregate_packed(info)?;
         let op_code: u32 = match info.op {
             AggregateOp::Add => 0,
             AggregateOp::Sub => 1,
@@ -9597,7 +9598,7 @@ impl Compiler {
             _ => self.checker.fn_return_ty(&fqn)?,
         };
         if !matches!(
-            lower::classify(&self.checker, &ret),
+            classify::classify(&self.checker, &ret),
             Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
         ) {
             return None;
@@ -9749,7 +9750,7 @@ impl Compiler {
     /// closed, non-unit types, laid out as declared.
     fn hir_readonly_split_fields(&self, name: &str) -> Option<Vec<(String, Ty)>> {
         let key = self.checker.resolve_class_key(name)?;
-        if !self.checker.is_readonly_class(&key) || self.checker.class_has_drop(&key) || lower::is_generic_class(&self.checker, &key) {
+        if !self.checker.is_readonly_class(&key) || self.checker.class_has_drop(&key) || classify::is_generic_class(&self.checker, &key) {
             return None;
         }
         let class = self.resolve_class_ident(name);
@@ -9859,7 +9860,7 @@ impl Compiler {
         if let Some(Rep::Pair(kind)) = self.hir_natural(hir, emit, scrutinee)
             && arms.iter().all(|arm| match &arm.pat {
                 HirPat::Wild => true,
-                HirPat::Variant { .. } => lower::arm_fields(hir, &arm.pat).is_ok_and(|f| f.len() <= 1),
+                HirPat::Variant { .. } => query::arm_fields(hir, &arm.pat).is_ok_and(|f| f.len() <= 1),
                 _ => false,
             })
         {
@@ -9901,7 +9902,7 @@ impl Compiler {
                 // `Option` or tuple it returns: E0127, #916). An enum result
                 // is the call's word, or its object (#1515). A closure
                 // result is adapted to the call's ground type (#1589).
-                if lower::polyfn_callee(hir, &self.checker, *f) {
+                if query::polyfn_callee(hir, &self.checker, *f) {
                     let e = hir.expr(id);
                     // A generic function's `PolyFn` that records no arity
                     // (`MakePolyFn`, `polyfn_params`) called with more
@@ -10128,8 +10129,8 @@ impl Compiler {
         }
         let option = common::is_builtin_option_enum(enum_name);
         let result = common::is_builtin_result_enum(enum_name);
-        let unit_arg = |i: usize| lower::is_unit_make(hir, args[i]);
-        let unit_value = |i: usize| !unit_arg(i) && lower::is_unit_value(hir, &self.checker, args[i]);
+        let unit_arg = |i: usize| query::is_unit_make(hir, args[i]);
+        let unit_value = |i: usize| !unit_arg(i) && query::is_unit_value(hir, &self.checker, args[i]);
         let word_arg = |i: usize| -> Check {
             // A boxed `()` payload is the empty tuple object (`Ok(())`,
             // `Some(())`, #1449).
@@ -10252,7 +10253,7 @@ impl Compiler {
         arms: &[HirArm],
         want: Option<&Rep>,
     ) -> Check {
-        if lower::has_nested_test(arms) {
+        if query::has_nested_test(arms) {
             self.hir_check_value(hir, emit, scrutinee, &BOXED)?;
             let ty = Self::hir_ty(hir, scrutinee).ok_or("match-type")?;
             for arm in arms {
@@ -10264,7 +10265,7 @@ impl Compiler {
             }
             return Ok(());
         }
-        if lower::is_scalar_match(&self.checker, hir, scrutinee, arms) {
+        if query::is_scalar_match(&self.checker, hir, scrutinee, arms) {
             self.hir_check_value(hir, emit, scrutinee, &BOXED)?;
             for arm in arms {
                 if let HirPat::Bind(local) = &arm.pat
@@ -10284,7 +10285,7 @@ impl Compiler {
         let ty = Self::hir_ty(hir, scrutinee).ok_or("match-type")?;
         let scrut_enum = self.hir_enum_name(ty).ok_or("match-type")?;
         for arm in arms {
-            let fields = lower::arm_fields(hir, &arm.pat)?;
+            let fields = query::arm_fields(hir, &arm.pat)?;
             match &arm.pat {
                 HirPat::Variant {
                     enum_name, variant, ..
@@ -10362,7 +10363,7 @@ impl Compiler {
                 local,
                 init: Some(init),
             } => {
-                if lower::is_unit_local(hir, &self.checker, *local) {
+                if classify::is_unit_local(hir, &self.checker, *local) {
                     return self.hir_check_effect(hir, emit, *init);
                 }
                 if emit.plan.sroa.contains_key(&local.0) {
@@ -10502,7 +10503,7 @@ impl Compiler {
                         return Err("for-in-custom");
                     }
                 }
-                match (lower::range_bounds(hir, *iterable), kind) {
+                match (query::range_bounds(hir, *iterable), kind) {
                     (Some(bounds), _) => {
                         for b in bounds {
                             self.hir_check_value(hir, emit, b, &BOXED)?;
@@ -10521,8 +10522,8 @@ impl Compiler {
                 op: Builtin::Panic | Builtin::Print,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED),
-            HirKind::Return(value) => match lower::returned_value(hir, *value) {
-                Some(v) if lower::is_unit_value(hir, &self.checker, v) => {
+            HirKind::Return(value) => match query::returned_value(hir, *value) {
+                Some(v) if query::is_unit_value(hir, &self.checker, v) => {
                     self.hir_check_effect(hir, emit, v)?;
                     if emit.plan.ret.words() == 1 { Ok(()) } else { Err("return-unit") }
                 }
@@ -10533,9 +10534,9 @@ impl Compiler {
             HirKind::Match { scrutinee, arms } => {
                 self.hir_check_match(hir, emit, *scrutinee, arms, None)
             }
-            _ if lower::is_unit_make(hir, id) || matches!(hir.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
+            _ if query::is_unit_make(hir, id) || matches!(hir.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
             HirKind::Make { .. } => self.hir_check_value(hir, emit, id, &BOXED),
-            HirKind::Local(local) if lower::is_unit_local(hir, &self.checker, *local) => Ok(()),
+            HirKind::Local(local) if classify::is_unit_local(hir, &self.checker, *local) => Ok(()),
             _ => {
                 let natural = self.hir_natural(hir, emit, id).ok_or("statement")?;
                 self.hir_check_value(hir, emit, id, &natural)
@@ -10630,7 +10631,7 @@ impl Compiler {
         let copied = match hir.expr(value).kind {
             HirKind::Local(src) => {
                 !emit.plan.stacks.contains_key(&src.0)
-                    && Self::hir_ty(hir, value).is_some_and(|t| lower::is_fixed_array(&self.checker, t))
+                    && Self::hir_ty(hir, value).is_some_and(|t| classify::is_fixed_array(&self.checker, t))
             }
             _ => false,
         };
@@ -10808,7 +10809,7 @@ impl Compiler {
             Some(_) => None,
             None => Some(*outer.get(&site.index)?),
         };
-        let int = |l: LocalId| hir.local(l).ty.as_ref().and_then(lower::primitive) == Some("int");
+        let int = |l: LocalId| hir.local(l).ty.as_ref().and_then(classify::primitive) == Some("int");
         if !args.iter().chain(&index).all(|&l| int(l)) {
             return None;
         }
@@ -11392,7 +11393,7 @@ impl Compiler {
     /// declared function is: planned, emitted and lowered to MIR. Its
     /// entry, or `None` with nothing emitted when it does not plan.
     fn hir_par_worker_fn(&mut self, w: &HirBody) -> Option<(u32, String)> {
-        if lower::refusal(w, &self.checker).is_some() {
+        if refusal::refusal(w, &self.checker).is_some() {
             return None;
         }
         let frame = self.par_frame_enter();
@@ -11601,7 +11602,7 @@ impl crate::hir::tables::GlobalTables for HirTables<'_> {
         use crate::hir::Lit;
         let value = self.c.hir_frozen_table(self.hir, id)?.get(k)?.as_ref()?;
         let ty = apply_ty_prune(self.c.checker.subst(), Compiler::hir_ty(self.hir, read)?);
-        let prim = lower::primitive(&ty);
+        let prim = classify::primitive(&ty);
         match value {
             ConstValue::Int(n) if prim == Some(crate::typechecking::ty::INT) => Some(Lit::Int(*n)),
             ConstValue::Float(f) if prim == Some(crate::typechecking::ty::FLOAT) => Some(Lit::Float(*f)),

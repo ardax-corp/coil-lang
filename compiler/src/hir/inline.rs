@@ -601,7 +601,7 @@ impl Inliner<'_> {
         zero: bool,
     ) -> Option<(HirId, &'a HirBody, Shape)> {
         let b = &self.body;
-        let scalar = |e: HirId| b.expr(e).ty.as_ref().and_then(super::lower::primitive).is_some();
+        let scalar = |e: HirId| b.expr(e).ty.as_ref().and_then(super::classify::primitive).is_some();
         let at = |x: HirId, zero: bool| self.in_place_site(x, callee_of, zero);
         match &b.expr(s).kind {
             HirKind::Call { callee, args }

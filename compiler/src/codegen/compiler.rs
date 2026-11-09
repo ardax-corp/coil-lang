@@ -3732,7 +3732,7 @@ impl Compiler {
         let int = coil_ty::int();
         let is_con = |t: &Ty, name: &str| matches!(strip_readonly(t), Ty::Con(n) if n == name);
         let word = |t: &Ty| {
-            crate::hir::lower::classify(&self.checker, t).is_some_and(crate::hir::lower::is_word)
+            crate::hir::classify::classify(&self.checker, t).is_some_and(crate::hir::classify::is_word)
                 && self.value_layout(t) == ValueLayout::Boxed
                 && !Self::ty_has_var(t)
         };

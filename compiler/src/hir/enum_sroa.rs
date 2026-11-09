@@ -161,7 +161,7 @@ fn variant_of(body: &HirBody, v: HirId) -> Option<(&str, u32)> {
 
 /// A type a field local holds: a scalar, or a `string`.
 fn field(t: &Ty) -> bool {
-    super::lower::primitive(t).is_some() || matches!(ty::strip_readonly(t), Ty::Con(n) if n == "string")
+    super::classify::primitive(t).is_some() || matches!(ty::strip_readonly(t), Ty::Con(n) if n == "string")
 }
 
 /// The tag and field locals for `local`: a field's type from a build's
@@ -426,7 +426,7 @@ fn build(body: &mut HirBody, v: HirId, stage: bool, split: &Split, define: bool)
         {
             for f in others {
                 let ty = body.local(f).ty.clone();
-                let zero = match ty.as_ref().and_then(super::lower::primitive) {
+                let zero = match ty.as_ref().and_then(super::classify::primitive) {
                     Some("float") => Lit::Float(0.0),
                     Some("bool") => Lit::Bool(false),
                     Some(_) => Lit::Int(0),
@@ -460,8 +460,8 @@ fn arm(body: &mut HirBody, a: HirArm, split: &Split) -> HirArm {
             // A binding read-only like its field reads the field itself.
             if !body.local(*b).captured
                 && body.local(*b).ty == body.local(f).ty
-                && !super::lower::assigns_local(body, a.body, *b)
-                && !super::lower::assigns_local(body, a.body, f)
+                && !super::query::assigns_local(body, a.body, *b)
+                && !super::query::assigns_local(body, a.body, f)
             {
                 rename(body, a.body, *b, f);
                 rename_in_clears(body, *b, f);

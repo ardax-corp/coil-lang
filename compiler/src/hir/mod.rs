@@ -4,7 +4,7 @@
 //! query that decides how a value of a given type is represented, so HIR
 //! planning and MIR cannot disagree. Phase 1 is
 //! [`build`] (AST + checker facts to HIR) and [`print`] (`coil dissect
-//! --hir`). Phase 2 is [`lower`]: codegen lowers every function body from
+//! --hir`). Phase 2 is [`refusal`]: codegen lowers every function body from
 //! HIR (the AST walk is gone since phase 8). Phase 3 widens that subset to enums, `Option` /
 //! `Result` in every layout (boxed, niche, two-slot), `match`, `?`, `??` and
 //! Result-mode returns.
@@ -22,7 +22,9 @@ pub mod effects;
 pub mod enum_sroa;
 pub mod inline;
 pub mod outline;
-pub mod lower;
+pub mod classify;
+pub mod query;
+pub mod refusal;
 pub mod match_tree;
 pub mod print;
 pub mod stage;

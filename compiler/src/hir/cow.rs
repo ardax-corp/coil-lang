@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::escape::CallLookup;
 use super::{is_vec, Summary, VEC_MUTATORS};
-use crate::hir::lower::pure_index;
+use crate::hir::query::pure_index;
 use crate::hir::{Builtin, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span};
 use crate::typechecking::infer::{Checker, ForInKind};
 use reporting::{ErrorCode, Message};
