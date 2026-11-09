@@ -69,7 +69,6 @@ enum BareCtor {
     None,
 }
 
-
 /// What an `impl` block's owner is, for `fn drop()` checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DropOwner {
@@ -172,29 +171,18 @@ impl Checker {
             vec_rest_spread: false,
             vec_rest_spreads: std::collections::HashSet::new(),
             overload_sets: std::collections::HashMap::new(),
-            selected_overloads_by_span: std::collections::HashMap::new(),
-            selected_overloads: std::collections::HashMap::new(),
+            selected_overloads: SideTable::default(),
             overload_decl_by_span: std::collections::HashMap::new(),
-            call_site_dicts: HashMap::new(),
-            call_site_dicts_by_span: HashMap::new(),
-            call_site_forward_dicts: HashMap::new(),
-            call_site_forward_dicts_by_span: HashMap::new(),
-            bound_method_calls: HashMap::new(),
-            bound_method_calls_by_span: HashMap::new(),
-            bound_operator_calls: HashMap::new(),
-            bound_operator_calls_by_span: HashMap::new(),
-            aggregate_arith: HashMap::new(),
-            aggregate_arith_by_span: HashMap::new(),
-            linear_algebra: HashMap::new(),
-            linear_algebra_by_span: HashMap::new(),
-            bound_display_calls: HashMap::new(),
-            bound_display_calls_by_span: HashMap::new(),
-            existential_packs: HashMap::new(),
-            existential_packs_by_span: HashMap::new(),
-            existential_method_calls: HashMap::new(),
-            existential_method_calls_by_span: HashMap::new(),
-            for_in_infos: HashMap::new(),
-            for_in_infos_by_span: HashMap::new(),
+            call_site_dicts: SideTable::default(),
+            call_site_forward_dicts: SideTable::default(),
+            bound_method_calls: SideTable::default(),
+            bound_operator_calls: SideTable::default(),
+            aggregate_arith: SideTable::default(),
+            linear_algebra: SideTable::default(),
+            bound_display_calls: SideTable::default(),
+            existential_packs: SideTable::default(),
+            existential_method_calls: SideTable::default(),
+            for_in_infos: SideTable::default(),
             typeclass_method_schemes: HashMap::new(),
             trait_readonly_params: HashMap::new(),
             current_expected: None,
@@ -1702,7 +1690,6 @@ impl Checker {
         // Keep module-qualified overloads across files; drop bare keys so they do not leak.
         self.overload_sets.retain(|k, _| k.contains("::"));
         // Declaration/call span tables are per-module.
-        self.selected_overloads_by_span.clear();
         self.selected_overloads.clear();
         self.overload_decl_by_span.clear();
         self.partial_fills_by_span.clear();
@@ -1710,25 +1697,15 @@ impl Checker {
         self.partial_filled_tys_by_span.clear();
         self.lambda_uncaptured_outer = None;
         self.call_site_dicts.clear();
-        self.call_site_dicts_by_span.clear();
         self.call_site_forward_dicts.clear();
-        self.call_site_forward_dicts_by_span.clear();
         self.bound_method_calls.clear();
-        self.bound_method_calls_by_span.clear();
         self.bound_operator_calls.clear();
-        self.bound_operator_calls_by_span.clear();
         self.aggregate_arith.clear();
-        self.aggregate_arith_by_span.clear();
         self.linear_algebra.clear();
-        self.linear_algebra_by_span.clear();
         self.bound_display_calls.clear();
-        self.bound_display_calls_by_span.clear();
         self.existential_packs.clear();
-        self.existential_packs_by_span.clear();
         self.existential_method_calls.clear();
-        self.existential_method_calls_by_span.clear();
         self.for_in_infos.clear();
-        self.for_in_infos_by_span.clear();
         // Traits declared in a named module stay registered in `generics`
         // across files (importers `use` them); keep their method schemes too
         // so an importer can call and implement them. Entry-file traits and
@@ -5236,55 +5213,15 @@ impl Checker {
                     self.constrain_range_to_vec(owner, &resolved, &range);
                 }
                 let fqn = format!("{}::{}", owner, method);
-                let user_argc = method_args.len();
                 let mut candidate = None;
                 let scheme = if self.is_overloaded(&fqn) {
-                    let prelim_tys: Vec<Ty> = method_args
-                        .iter()
-                        .map(|a| {
-                            let value = match a.1.as_ref() {
-                                Expression::NamedArg(_, v) => v,
-                                _ => a,
-                            };
-                            let ty = self.infer(value);
-                            apply_ty_prune(&self.subst, &ty)
-                        })
-                        .collect();
-                    match self.select_overload_for_args(&fqn, user_argc, &prelim_tys) {
-                        OverloadSelect::Selected(c) => {
-                            let c = c.clone();
-                            self.record_selected_overload(
-                                id,
-                                &range,
-                                (c.fixed_arity, c.is_rest, c.id),
-                            );
+                    match self.select_call_overload(&fqn, method_args, id, &range) {
+                        Ok(c) => {
                             let scheme = c.scheme.clone();
                             candidate = Some(c);
                             scheme
                         }
-                        OverloadSelect::Ambiguous => {
-                            return self.error_with_help(
-                                ErrorCode::AmbiguousOverload,
-                                format!(
-                                    "Ambiguous overload: call to `{}` matches multiple candidates",
-                                    fqn
-                                ),
-                                range,
-                                Some(self.ambiguous_overload_help(&fqn)),
-                            );
-                        }
-                        OverloadSelect::NoMatch => {
-                            return self.error(
-                                ErrorCode::WrongArity,
-                                format!(
-                                    "No overload of `{}` accepts {} argument{}",
-                                    fqn,
-                                    user_argc,
-                                    if user_argc == 1 { "" } else { "s" }
-                                ),
-                                range,
-                            );
-                        }
+                        Err(ty) => return ty,
                     }
                 } else {
                     self.methods
@@ -5367,79 +5304,18 @@ impl Checker {
                 );
             }
             let fqn = format!("{}::{}", owner, method);
-            let user_argc = method_args.len();
-            let (scheme, selected) = if self.is_overloaded(&fqn) {
-                let prelim_tys: Vec<Ty> = method_args
-                    .iter()
-                    .map(|a| {
-                        let value = match a.1.as_ref() {
-                            Expression::NamedArg(_, v) => v,
-                            _ => a,
-                        };
-                        let ty = self.infer(value);
-                        apply_ty_prune(&self.subst, &ty)
-                    })
-                    .collect();
-                match self.select_overload_for_args(&fqn, user_argc, &prelim_tys) {
-                    OverloadSelect::Selected(c) => {
-                        let c = c.clone();
-                        self.record_selected_overload(
-                            id,
-                            &range,
-                            (c.fixed_arity, c.is_rest, c.id),
-                        );
-                        (c.scheme, true)
-                    }
-                    OverloadSelect::Ambiguous => {
-                        return self.error_with_help(
-                            ErrorCode::AmbiguousOverload,
-                            format!(
-                                "Ambiguous overload: call to `{}` matches multiple candidates",
-                                fqn
-                            ),
-                            range,
-                            Some(self.ambiguous_overload_help(&fqn)),
-                        );
-                    }
-                    OverloadSelect::NoMatch => {
-                        let available: Vec<String> = self
-                            .overload_sets
-                            .get(&fqn)
-                            .map(|cs| {
-                                cs.iter()
-                                    .map(|c| {
-                                        if c.is_rest {
-                                            format!("{}+ args (rest)", c.fixed_arity)
-                                        } else {
-                                            format!("{} args", c.fixed_arity)
-                                        }
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        return self.error_with_help(
-                            ErrorCode::WrongArity,
-                            format!(
-                                "No overload of `{}` accepts {} argument{}",
-                                fqn,
-                                user_argc,
-                                if user_argc == 1 { "" } else { "s" }
-                            ),
-                            range,
-                            Some(format!("available arities: {}", available.join(", "))),
-                        );
-                    }
+            let scheme = if self.is_overloaded(&fqn) {
+                match self.select_call_overload(&fqn, method_args, id, &range) {
+                    Ok(c) => c.scheme,
+                    Err(ty) => return ty,
                 }
             } else {
-                let scheme = self
-                    .methods
+                self.methods
                     .get(owner)
                     .and_then(|m| m.get(*method))
                     .map(|(_, s)| s.clone())
-                    .expect("method present");
-                (scheme, false)
+                    .expect("method present")
             };
-            let _ = selected;
             let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
             let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
             let mut arg_exprs = Vec::with_capacity(1 + method_args.len());
@@ -5689,42 +5565,19 @@ impl Checker {
                 Some("write `x.len()` instead of `len(x)`".to_string()),
             );
         }
+        // A builtin callable takes its arguments in parameter order: named
+        // ones reordered (and inferred) here, positional ones as written.
+        let builtin = self.string_fn_for_call(&ident).is_some()
+            || self.prelude_fn_in_scope(&ident).is_some()
+            || self.ffi_fn_in_scope(&ident).is_some();
+        let reordered;
+        let arg_slice: &[Output] = if builtin && has_named {
+            reordered = self.infer_and_reorder_call_args(&ident, raw_args, &range).1;
+            &reordered
+        } else {
+            args.as_deref().unwrap_or(&[])
+        };
         if let Some(kind) = self.string_fn_for_call(&ident) {
-            let arg_slice = if has_named {
-                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
-                return match kind {
-                    StringBuiltin::Format => {
-                        self.infer_string_format_call(reordered.as_slice(), range)
-                    }
-                    _ => {
-                        if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
-                            && !self.enums.contains_key(common::BUILTIN_STRING_ERROR_ENUM)
-                        {
-                            self.register_builtin_string_error();
-                        }
-                        let fun_ty = self.instantiate_ty(&Self::string_fn_scheme(kind));
-                        let flat_args = self.flatten_spread_call_args(reordered.as_slice());
-                        let arg_tys: Vec<Ty> = flat_args
-                            .iter()
-                            .map(|arg| self.infer_call_arg(arg))
-                            .collect();
-                        self.apply_function(
-                            Some(&ident),
-                            &fun_ty,
-                            &arg_tys,
-                            if flat_args.is_empty() {
-                                None
-                            } else {
-                                Some(&flat_args)
-                            },
-                            id,
-                            range,
-                        )
-                    }
-                };
-            } else {
-                args.as_deref().unwrap_or(&[])
-            };
             return match kind {
                 StringBuiltin::Format => self.infer_string_format_call(arg_slice, range),
                 _ => {
@@ -5756,22 +5609,6 @@ impl Checker {
         }
         // Prelude callables (auto-imported or via `use`).
         if let Some(kind) = self.prelude_fn_in_scope(&ident) {
-            if has_named {
-                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
-                return match kind {
-                    PreludeFn::Dot => self.infer_dot(&reordered, id, range),
-                    PreludeFn::MatMul => self.infer_matmul(&reordered, id, range),
-                    PreludeFn::Cross => self.infer_cross(&reordered, id, range),
-                    PreludeFn::Matrix => self.infer_matrix_ctor(&reordered, id, range),
-                    PreludeFn::Intersect => {
-                        self.infer_matrix_cells_call(&reordered, id, range, "intersect")
-                    }
-                    PreludeFn::Diff => self.infer_matrix_cells_call(&reordered, id, range, "diff"),
-                    PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
-                    PreludeFn::FnKey => self.infer_fn_key(&reordered, range),
-                };
-            }
-            let arg_slice = args.as_deref().unwrap_or(&[]);
             return match kind {
                 PreludeFn::Dot => self.infer_dot(arg_slice, id, range),
                 PreludeFn::MatMul => self.infer_matmul(arg_slice, id, range),
@@ -5787,15 +5624,6 @@ impl Checker {
         }
         // `dload` / `declare` / `invoke` after `use ffi::{…}`.
         if let Some(kind) = self.ffi_fn_in_scope(&ident) {
-            if has_named {
-                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
-                return match kind {
-                    FfiBuiltin::Dload => self.infer_ffi_dload(&reordered, range),
-                    FfiBuiltin::Declare => self.infer_ffi_declare(&reordered, range),
-                    FfiBuiltin::Invoke => self.infer_ffi_invoke(&reordered, range),
-                };
-            }
-            let arg_slice = args.as_deref().unwrap_or(&[]);
             return match kind {
                 FfiBuiltin::Dload => self.infer_ffi_dload(arg_slice, range),
                 FfiBuiltin::Declare => self.infer_ffi_declare(arg_slice, range),
@@ -5823,97 +5651,32 @@ impl Checker {
         // Must happen before `has_named` and `fn_has_rest` branches so
         // the correct candidate's param_names / is_rest are used.
         if self.is_overloaded(&ident) {
-            let argc = raw_args.len();
-            // Preliminary arg types for same-arity disambiguation.
-            // Named args contribute their value type in source order;
-            // reordering happens after the candidate is chosen.
-            let prelim_tys: Vec<Ty> = raw_args
-                .iter()
-                .map(|a| {
-                    let value = match a.1.as_ref() {
-                        Expression::NamedArg(_, v) => v,
-                        _ => a,
-                    };
-                    let ty = self.infer(value);
-                    apply_ty_prune(&self.subst, &ty)
-                })
-                .collect();
-            let candidate_opt = self.select_overload_for_args(&ident, argc, &prelim_tys);
-            match candidate_opt {
-                OverloadSelect::NoMatch => {
-                    // No candidate accepts this arity/types, emit a
-                    // "no overload" error listing the available arities.
-                    let available: Vec<String> = self
-                        .overload_candidates(&ident)
-                        .map(|cs| cs.iter().map(Self::overload_sig_label).collect())
-                        .unwrap_or_default();
-                    return self.error_with_help(
-                        ErrorCode::WrongArity,
-                        format!(
-                            "No overload of `{}` accepts {} argument{}",
-                            ident,
-                            argc,
-                            if argc == 1 { "" } else { "s" }
-                        ),
-                        range,
-                        Some(format!("available overloads: {}", available.join(", "))),
-                    );
-                }
-                OverloadSelect::Ambiguous => {
-                    return self.error_with_help(
-                        ErrorCode::AmbiguousOverload,
-                        format!(
-                            "Ambiguous overload: call to `{}` matches multiple candidates",
-                            ident
-                        ),
-                        range,
-                        Some(self.ambiguous_overload_help(&ident)),
-                    );
-                }
-                OverloadSelect::Selected(candidate) => {
-                    let candidate = candidate.clone();
-                    // Record the selection for codegen.
-                    self.record_selected_overload(
-                        id,
-                        &range,
-                        (candidate.fixed_arity, candidate.is_rest, candidate.id),
-                    );
-                    let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = {
-                        let (fun_ty, constraints, mapping) =
-                            self.instantiate_scheme_mapped(&candidate.scheme);
-                        (fun_ty, constraints, mapping, Some(candidate.scheme.clone()))
-                    };
-                    let (arg_tys, ordered_args) = self.infer_and_reorder_call_args_with_candidate(
-                        &ident, &candidate, raw_args, &range,
-                    );
-                    let result = self.apply_function(
-                        Some(&ident),
-                        &fun_ty,
-                        &arg_tys,
-                        if ordered_args.is_empty() {
-                            None
-                        } else {
-                            Some(&ordered_args)
-                        },
-                        id,
-                        range.clone(),
-                    );
-                    if !fresh_constraints.is_empty() {
-                        self.bind_call_result_to_expected(&result);
-                        self.discharge_constraints(id, &fresh_constraints, &range);
-                        if let Some(scheme) = original_scheme.as_ref() {
-                            self.pin_assoc_after_discharge(
-                                "",
-                                &fresh_constraints,
-                                Some(scheme),
-                                &fresh_mapping,
-                                &range,
-                            );
-                        }
-                    }
-                    return result;
-                }
-            }
+            let candidate = match self.select_call_overload(&ident, raw_args, id, &range) {
+                Ok(c) => c,
+                Err(ty) => return ty,
+            };
+            let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = {
+                let (fun_ty, constraints, mapping) =
+                    self.instantiate_scheme_mapped(&candidate.scheme);
+                (fun_ty, constraints, mapping, Some(candidate.scheme.clone()))
+            };
+            let (arg_tys, ordered_args) = self.infer_and_reorder_call_args_with_candidate(
+                &ident, &candidate, raw_args, &range,
+            );
+            let result = self.apply_function(
+                Some(&ident),
+                &fun_ty,
+                &arg_tys,
+                if ordered_args.is_empty() {
+                    None
+                } else {
+                    Some(&ordered_args)
+                },
+                id,
+                range.clone(),
+            );
+            self.discharge_call_bounds("", &result, &fresh_constraints, original_scheme.as_ref(), &fresh_mapping, id, &range);
+            return result;
         }
 
         // Named call-site args: resolve an ordinary
@@ -5976,19 +5739,7 @@ impl Checker {
                     range.clone(),
                 )
             };
-            if !fresh_constraints.is_empty() {
-                self.bind_call_result_to_expected(&result);
-                self.discharge_constraints(id, &fresh_constraints, &range);
-                if let Some(scheme) = original_scheme.as_ref() {
-                    self.pin_assoc_after_discharge(
-                        "",
-                        &fresh_constraints,
-                        Some(scheme),
-                        &fresh_mapping,
-                        &range,
-                    );
-                }
-            }
+            self.discharge_call_bounds("", &result, &fresh_constraints, original_scheme.as_ref(), &fresh_mapping, id, &range);
             // Named under-apply is now allowed (residual Fun is returned
             // for partial application). Error only on unknown/duplicate
             // named args (handled inside infer_and_reorder_call_args).
@@ -6026,19 +5777,7 @@ impl Checker {
                 id,
                 range.clone(),
             );
-            if !fresh_constraints.is_empty() {
-                self.bind_call_result_to_expected(&result);
-                self.discharge_constraints(id, &fresh_constraints, &range);
-                if let Some(scheme) = original_scheme.as_ref() {
-                    self.pin_assoc_after_discharge(
-                        "",
-                        &fresh_constraints,
-                        Some(scheme),
-                        &fresh_mapping,
-                        &range,
-                    );
-                }
-            }
+            self.discharge_call_bounds("", &result, &fresh_constraints, original_scheme.as_ref(), &fresh_mapping, id, &range);
             return result;
         }
 
@@ -6124,19 +5863,7 @@ impl Checker {
         );
         self.check_thread_value_sendable(&ident, &arg_tys, &range);
         // Discharge instantiated trait constraints (or propagate if caller shares the bound).
-        if !fresh_constraints.is_empty() {
-            self.bind_call_result_to_expected(&result);
-            self.discharge_constraints(id, &fresh_constraints, &range);
-            if let Some(scheme) = original_scheme.as_ref() {
-                self.pin_assoc_after_discharge(
-                    "",
-                    &fresh_constraints,
-                    Some(scheme),
-                    &fresh_mapping,
-                    &range,
-                );
-            }
-        }
+        self.discharge_call_bounds("", &result, &fresh_constraints, original_scheme.as_ref(), &fresh_mapping, id, &range);
         result
     }
 
@@ -6148,11 +5875,7 @@ impl Checker {
         range: &std::ops::Range<usize>,
         triple: (usize, bool, u32),
     ) {
-        if let Some(id) = id {
-            self.selected_overloads.insert(id, triple);
-        }
-        self.selected_overloads_by_span
-            .insert((range.start, range.end), triple);
+        self.selected_overloads.insert(id, (range.start, range.end), triple);
     }
 
     /// Look up the inferred type of a node by [`NodeId`].
@@ -6169,13 +5892,12 @@ impl Checker {
 
     /// Concrete trait instances selected while discharging a call's bounds.
     pub fn call_dicts_at(&self, id: NodeId) -> Option<&[InstanceDef]> {
-        self.call_site_dicts.get(&id).map(Vec::as_slice)
+        self.call_site_dicts.at(id).map(Vec::as_slice)
     }
 
     /// Span fallback for [`call_dicts_at`] when NodeIds are misaligned.
     pub fn call_dicts_for_span(&self, start: usize, end: usize) -> Option<&[InstanceDef]> {
-        self.call_site_dicts_by_span
-            .get(&(start, end))
+        self.call_site_dicts.for_span(start, end)
             .map(Vec::as_slice)
     }
 
@@ -6237,38 +5959,28 @@ impl Checker {
         range: &Range<usize>,
         instance: InstanceDef,
     ) {
-        if let Some(call_id) = call_id {
-            self.call_site_dicts
-                .entry(call_id)
-                .or_default()
-                .push(instance.clone());
-        }
-        self.call_site_dicts_by_span
-            .entry((range.start, range.end))
-            .or_default()
-            .push(instance);
+        self.call_site_dicts.push(call_id, (range.start, range.end), instance);
     }
 
     pub fn forwarded_dicts_at(&self, id: NodeId) -> Option<&[usize]> {
-        self.call_site_forward_dicts.get(&id).map(Vec::as_slice)
+        self.call_site_forward_dicts.at(id).map(Vec::as_slice)
     }
 
     pub fn forwarded_dicts_for_span(&self, start: usize, end: usize) -> Option<&[usize]> {
-        self.call_site_forward_dicts_by_span
-            .get(&(start, end))
+        self.call_site_forward_dicts.for_span(start, end)
             .map(Vec::as_slice)
     }
 
     pub fn bound_method_call_at(&self, id: NodeId) -> Option<&BoundMethodCall> {
-        self.bound_method_calls.get(&id)
+        self.bound_method_calls.at(id)
     }
 
     pub fn bound_method_call_for_span(&self, start: usize, end: usize) -> Option<&BoundMethodCall> {
-        self.bound_method_calls_by_span.get(&(start, end))
+        self.bound_method_calls.for_span(start, end)
     }
 
     pub fn bound_operator_call_at(&self, id: NodeId) -> Option<&BoundOperatorCall> {
-        self.bound_operator_calls.get(&id)
+        self.bound_operator_calls.at(id)
     }
 
     pub fn bound_operator_call_for_span(
@@ -6276,11 +5988,11 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&BoundOperatorCall> {
-        self.bound_operator_calls_by_span.get(&(start, end))
+        self.bound_operator_calls.for_span(start, end)
     }
 
     pub fn bound_display_call_at(&self, id: NodeId) -> Option<&BoundDisplayCall> {
-        self.bound_display_calls.get(&id)
+        self.bound_display_calls.at(id)
     }
 
     pub fn bound_display_call_for_span(
@@ -6288,19 +6000,19 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&BoundDisplayCall> {
-        self.bound_display_calls_by_span.get(&(start, end))
+        self.bound_display_calls.for_span(start, end)
     }
 
     pub fn existential_pack_at(&self, id: NodeId) -> Option<&ExistentialPack> {
-        self.existential_packs.get(&id)
+        self.existential_packs.at(id)
     }
 
     pub fn existential_pack_for_span(&self, start: usize, end: usize) -> Option<&ExistentialPack> {
-        self.existential_packs_by_span.get(&(start, end))
+        self.existential_packs.for_span(start, end)
     }
 
     pub fn existential_method_call_at(&self, id: NodeId) -> Option<&ExistentialMethodCall> {
-        self.existential_method_calls.get(&id)
+        self.existential_method_calls.at(id)
     }
 
     pub fn existential_method_call_for_span(
@@ -6308,7 +6020,7 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&ExistentialMethodCall> {
-        self.existential_method_calls_by_span.get(&(start, end))
+        self.existential_method_calls.for_span(start, end)
     }
 
     /// Bit `i`: trait method `class::method` declares parameter `i`
@@ -6332,7 +6044,7 @@ impl Checker {
     /// All call-site dicts (for debugging / testing).
     #[cfg(test)]
     pub fn all_call_site_dicts(&self) -> &HashMap<NodeId, Vec<InstanceDef>> {
-        &self.call_site_dicts
+        self.call_site_dicts.by_id()
     }
 
     /// Borrow the pre-walk [`IdTable`].
@@ -6617,11 +6329,7 @@ impl Checker {
             dict_index,
             method_slot,
         };
-        if let Some(id) = id {
-            self.bound_operator_calls.insert(id, hint.clone());
-        }
-        self.bound_operator_calls_by_span
-            .insert((range.start, range.end), hint);
+        self.bound_operator_calls.insert(id, (range.start, range.end), hint);
     }
 
     /// `-a` / `~a` on a type variable goes through its `Neg` / `BitNot`
@@ -6714,8 +6422,7 @@ impl Checker {
             dict_index,
             method_slot,
         };
-        self.bound_display_calls_by_span
-            .insert((range.start, range.end), hint);
+        self.bound_display_calls.insert(None, (range.start, range.end), hint);
     }
 
     /// Peel `Constructor` / structural `Sum` down to a nominal head so
@@ -7115,10 +6822,7 @@ impl Checker {
                 match self.find_unique_instance(&class, std::slice::from_ref(&lookup_ty), &range) {
                     Ok(Some(_)) => {
                         let pack = ExistentialPack { class: class.clone(), value_ty: lookup_ty };
-                        if let Some(id) = id {
-                            self.existential_packs.insert(id, pack.clone());
-                        }
-                        self.existential_packs_by_span.insert(span, pack);
+                        self.existential_packs.insert(id, span, pack);
                     }
                     Ok(None) => {
                         let pretty = Constraint { class: class.clone(), args: vec![lookup_ty] };
@@ -7773,11 +7477,7 @@ impl Checker {
         };
 
         let info = AggregateArithInfo { kind, op: agg_op };
-        if let Some(id) = id {
-            self.aggregate_arith.insert(id, info.clone());
-        }
-        self.aggregate_arith_by_span
-            .insert((range.start, range.end), info);
+        self.aggregate_arith.insert(id, (range.start, range.end), info);
 
         result_ty_for(&result_shape)
     }
@@ -7825,11 +7525,7 @@ impl Checker {
                 },
                 op: AggregateOp::Neg,
             };
-            if let Some(id) = id {
-                self.aggregate_arith.insert(id, info.clone());
-            }
-            self.aggregate_arith_by_span
-                .insert((range.start, range.end), info);
+            self.aggregate_arith.insert(id, (range.start, range.end), info);
             return Ty::Tuple(vec![elem; elems.len()]);
         }
         if let Ty::Array { element, length } = &pruned {
@@ -7852,11 +7548,7 @@ impl Checker {
                 },
                 op: AggregateOp::Neg,
             };
-            if let Some(id) = id {
-                self.aggregate_arith.insert(id, info.clone());
-            }
-            self.aggregate_arith_by_span
-                .insert((range.start, range.end), info);
+            self.aggregate_arith.insert(id, (range.start, range.end), info);
             return Ty::Array {
                 element: Box::new(elem),
                 length: *length,
@@ -7870,7 +7562,7 @@ impl Checker {
         &self,
         id: NodeId,
     ) -> Option<&crate::typechecking::aggregate_arith::AggregateArithInfo> {
-        self.aggregate_arith.get(&id)
+        self.aggregate_arith.at(id)
     }
 
     pub fn aggregate_arith_for_span(
@@ -7878,14 +7570,14 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&crate::typechecking::aggregate_arith::AggregateArithInfo> {
-        self.aggregate_arith_by_span.get(&(start, end))
+        self.aggregate_arith.for_span(start, end)
     }
 
     pub fn linear_algebra_at(
         &self,
         id: NodeId,
     ) -> Option<&crate::typechecking::aggregate_arith::LinearAlgebraInfo> {
-        self.linear_algebra.get(&id)
+        self.linear_algebra.at(id)
     }
 
     pub fn linear_algebra_for_span(
@@ -7893,7 +7585,7 @@ impl Checker {
         start: usize,
         end: usize,
     ) -> Option<&crate::typechecking::aggregate_arith::LinearAlgebraInfo> {
-        self.linear_algebra_by_span.get(&(start, end))
+        self.linear_algebra.for_span(start, end)
     }
 
     fn record_linear_algebra(
@@ -7903,11 +7595,7 @@ impl Checker {
         info: crate::typechecking::aggregate_arith::LinearAlgebraInfo,
     ) {
         self.warn_packed_la_dim_limit(&info.kind, range);
-        if let Some(id) = id {
-            self.linear_algebra.insert(id, info.clone());
-        }
-        self.linear_algebra_by_span
-            .insert((range.start, range.end), info);
+        self.linear_algebra.insert(id, (range.start, range.end), info);
     }
 
     /// Warn when static dims exceed Approach A packed-opcode packing
@@ -8265,8 +7953,6 @@ impl Checker {
         msg.with_help(help.to_string());
         self.messages.push(msg);
     }
-
-
 
     /// `ord(string) -> Result<byte, string>`.
     /// `black_box(x) -> typeof x`.
@@ -9868,11 +9554,7 @@ impl Checker {
                                 class: class.clone(),
                                 value_ty: lookup_ty,
                             };
-                            if let Some(id) = self.ids.id_of_output(expr) {
-                                self.existential_packs.insert(id, pack.clone());
-                            }
-                            self.existential_packs_by_span
-                                .insert((expr.0.start, expr.0.end), pack);
+                            self.existential_packs.insert(self.ids.id_of_output(expr), (expr.0.start, expr.0.end), pack);
                         }
                         expected
                     }
@@ -10617,14 +10299,7 @@ impl Checker {
                     if let Some(call_id) = call_id
                         && let Some(dict_index) = self.dict_index_for(&needed)
                     {
-                        self.call_site_forward_dicts
-                            .entry(call_id)
-                            .or_default()
-                            .push(dict_index);
-                        self.call_site_forward_dicts_by_span
-                            .entry((range.start, range.end))
-                            .or_default()
-                            .push(dict_index);
+                        self.call_site_forward_dicts.push(Some(call_id), (range.start, range.end), dict_index);
                     }
                     continue;
                 }
@@ -10635,14 +10310,7 @@ impl Checker {
                 // bind `T` itself (#1442).
                 if let Some(dict_index) = self.improve_from_given(&needed) {
                     if let Some(call_id) = call_id {
-                        self.call_site_forward_dicts
-                            .entry(call_id)
-                            .or_default()
-                            .push(dict_index);
-                        self.call_site_forward_dicts_by_span
-                        .entry((range.start, range.end))
-                        .or_default()
-                            .push(dict_index);
+                        self.call_site_forward_dicts.push(Some(call_id), (range.start, range.end), dict_index);
                     }
                     continue;
                 }
@@ -10879,6 +10547,29 @@ impl Checker {
 
     /// After discharging constraints for a trait method call, pin
     /// freshened associated-type variables from the scheme mapping.
+    /// After a call's arguments are applied: bind its still-open result to
+    /// the expected type, discharge the bounds its scheme instantiated
+    /// (landing in `call_dicts_at` for codegen) and pin the associated-type
+    /// projections they resolved. Nothing to do for a bound-free scheme.
+    #[allow(clippy::too_many_arguments)]
+    fn discharge_call_bounds(
+        &mut self,
+        class: &str,
+        result: &Ty,
+        constraints: &[Constraint],
+        scheme: Option<&Scheme>,
+        mapping: &HashMap<TyVarId, TyVarId>,
+        id: Option<NodeId>,
+        range: &Range<usize>,
+    ) {
+        if constraints.is_empty() {
+            return;
+        }
+        self.bind_call_result_to_expected(result);
+        self.discharge_constraints(id, constraints, range);
+        self.pin_assoc_after_discharge(class, constraints, scheme, mapping, range);
+    }
+
     fn pin_assoc_after_discharge(
         &mut self,
         class: &str,
@@ -14789,6 +14480,57 @@ impl Checker {
     }
 
     /// All registered overload candidates for `fn_name`, if any.
+    /// The overload of `name` a call with `args` selects, recorded for
+    /// codegen. Each argument's value (a named one's too) is inferred first
+    /// for same-arity disambiguation; reordering happens after the pick. On
+    /// no match or an ambiguous one the error is reported and its type is
+    /// the `Err`.
+    fn select_call_overload(
+        &mut self,
+        name: &str,
+        args: &[Output],
+        id: Option<NodeId>,
+        range: &Range<usize>,
+    ) -> Result<OverloadCandidate, Ty> {
+        let prelim_tys: Vec<Ty> = args
+            .iter()
+            .map(|a| {
+                let value = match a.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => a,
+                };
+                let ty = self.infer(value);
+                apply_ty_prune(&self.subst, &ty)
+            })
+            .collect();
+        match self.select_overload_for_args(name, args.len(), &prelim_tys) {
+            OverloadSelect::Selected(c) => {
+                let c = c.clone();
+                self.record_selected_overload(id, range, (c.fixed_arity, c.is_rest, c.id));
+                Ok(c)
+            }
+            OverloadSelect::Ambiguous => Err(self.error_with_help(
+                ErrorCode::AmbiguousOverload,
+                format!("Ambiguous overload: call to `{name}` matches multiple candidates"),
+                range.clone(),
+                Some(self.ambiguous_overload_help(name)),
+            )),
+            OverloadSelect::NoMatch => {
+                let available: Vec<String> = self
+                    .overload_candidates(name)
+                    .map(|cs| cs.iter().map(Self::overload_sig_label).collect())
+                    .unwrap_or_default();
+                let argc = args.len();
+                Err(self.error_with_help(
+                    ErrorCode::WrongArity,
+                    format!("No overload of `{name}` accepts {argc} argument{}", if argc == 1 { "" } else { "s" }),
+                    range.clone(),
+                    Some(format!("available overloads: {}", available.join(", "))),
+                ))
+            }
+        }
+    }
+
     pub fn overload_candidates(&self, fn_name: &str) -> Option<&[OverloadCandidate]> {
         self.overload_sets
             .get(fn_name)
@@ -14905,67 +14647,11 @@ impl Checker {
     ///
     /// Returns `(fixed_arity, is_rest, candidate_id)` of the chosen candidate.
     pub fn selected_overload_at(&self, start: usize, end: usize) -> Option<(usize, bool, u32)> {
-        self.selected_overloads_by_span.get(&(start, end)).copied()
-    }
-
-    pub fn call_dicts_span(&self, start: usize, end: usize) -> Option<&[InstanceDef]> {
-        self.call_dicts_for_span(start, end)
-    }
-
-    pub fn for_in_info_span(&self, start: usize, end: usize) -> Option<&ForInInfo> {
-        self.for_in_info_for_span(start, end)
-    }
-
-    pub fn bound_operator_call_span(&self, start: usize, end: usize) -> Option<&BoundOperatorCall> {
-        self.bound_operator_call_for_span(start, end)
-    }
-
-    pub fn bound_method_call_span(&self, start: usize, end: usize) -> Option<&BoundMethodCall> {
-        self.bound_method_call_for_span(start, end)
-    }
-
-    pub fn bound_display_call_span(&self, start: usize, end: usize) -> Option<&BoundDisplayCall> {
-        self.bound_display_call_for_span(start, end)
-    }
-
-    pub fn existential_pack_span(&self, start: usize, end: usize) -> Option<&ExistentialPack> {
-        self.existential_pack_for_span(start, end)
-    }
-
-    pub fn existential_method_call_span(
-        &self,
-        start: usize,
-        end: usize,
-    ) -> Option<&ExistentialMethodCall> {
-        self.existential_method_call_for_span(start, end)
-    }
-
-    pub fn forwarded_dicts_span(&self, start: usize, end: usize) -> Option<&[usize]> {
-        self.forwarded_dicts_for_span(start, end)
-    }
-
-    pub fn aggregate_arith_span(
-        &self,
-        start: usize,
-        end: usize,
-    ) -> Option<&crate::typechecking::aggregate_arith::AggregateArithInfo> {
-        self.aggregate_arith_for_span(start, end)
-    }
-
-    pub fn linear_algebra_span(
-        &self,
-        start: usize,
-        end: usize,
-    ) -> Option<&crate::typechecking::aggregate_arith::LinearAlgebraInfo> {
-        self.linear_algebra_for_span(start, end)
-    }
-
-    pub fn selected_overload_span(&self, start: usize, end: usize) -> Option<(usize, bool, u32)> {
-        self.selected_overload_at(start, end)
+        self.selected_overloads.for_span(start, end).copied()
     }
 
     pub fn selected_overload_at_id(&self, id: NodeId) -> Option<(usize, bool, u32)> {
-        self.selected_overloads.get(&id).copied()
+        self.selected_overloads.at(id).copied()
     }
 
     /// Declaration-site overload identity for mangling the function table key.
@@ -20645,12 +20331,12 @@ impl Checker {
 
     /// For-in lowering info recorded during typecheck (by Loop node id).
     pub fn for_in_info_at(&self, id: NodeId) -> Option<&ForInInfo> {
-        self.for_in_infos.get(&id)
+        self.for_in_infos.at(id)
     }
 
     /// For-in lowering info by source span (fallback when ids misalign).
     pub fn for_in_info_for_span(&self, start: usize, end: usize) -> Option<&ForInInfo> {
-        self.for_in_infos_by_span.get(&(start, end))
+        self.for_in_infos.for_span(start, end)
     }
 
     /// Resolve `for x in` iterable type to `Item` and record [`ForInInfo`].
@@ -20835,11 +20521,7 @@ impl Checker {
         loop_range: &Range<usize>,
         info: ForInInfo,
     ) {
-        if let Some(id) = loop_id {
-            self.for_in_infos.insert(id, info.clone());
-        }
-        self.for_in_infos_by_span
-            .insert((loop_range.start, loop_range.end), info);
+        self.for_in_infos.insert(loop_id, (loop_range.start, loop_range.end), info);
     }
 
     /// Builtin iterable shapes → `(Item, ForInKind)`. Returns `None` when
@@ -21398,11 +21080,7 @@ impl Checker {
                 has_receiver: false,
                 class: class.clone(),
             };
-            if let Some(call_id) = call_id {
-                self.bound_method_calls.insert(call_id, hint.clone());
-            }
-            self.bound_method_calls_by_span
-                .insert((range.start, range.end), hint);
+            self.bound_method_calls.insert(call_id, (range.start, range.end), hint);
         }
         let arg_exprs: Option<&[Output]> = match fields {
             EnumConstructPayload::Tuple(args) => Some(args.as_slice()),
@@ -21416,11 +21094,7 @@ impl Checker {
             call_id,
             range.clone(),
         );
-        if !constraints.is_empty() {
-            self.bind_call_result_to_expected(&result);
-            self.discharge_constraints(call_id, &constraints, &range);
-            self.pin_assoc_after_discharge(&class, &constraints, Some(&scheme), &mapping, &range);
-        }
+        self.discharge_call_bounds(&class, &result, &constraints, Some(&scheme), &mapping, call_id, &range);
         Some(result)
     }
 
@@ -21448,10 +21122,7 @@ impl Checker {
             has_receiver,
             class: class.clone(),
         };
-        if let Some(call_id) = id {
-            self.bound_method_calls.insert(call_id, hint.clone());
-        }
-        self.bound_method_calls_by_span.insert((range.start, range.end), hint);
+        self.bound_method_calls.insert(id, (range.start, range.end), hint);
         let result = self.apply_function(
             Some(&format!("{}::{}", class, method)),
             &fun_ty,
@@ -21460,11 +21131,7 @@ impl Checker {
             id,
             range.clone(),
         );
-        if !constraints.is_empty() {
-            self.bind_call_result_to_expected(&result);
-            self.discharge_constraints(id, &constraints, range);
-            self.pin_assoc_after_discharge(&class, &constraints, Some(&scheme), &mapping, range);
-        }
+        self.discharge_call_bounds(&class, &result, &constraints, Some(&scheme), &mapping, id, range);
         result
     }
 
@@ -21491,11 +21158,7 @@ impl Checker {
             id,
             range.clone(),
         );
-        if !constraints.is_empty() {
-            self.bind_call_result_to_expected(&result);
-            self.discharge_constraints(id, &constraints, range);
-            self.pin_assoc_after_discharge(class, &constraints, Some(scheme), &mapping, range);
-        }
+        self.discharge_call_bounds(class, &result, &constraints, Some(scheme), &mapping, id, range);
         apply_ty_prune(&self.subst, &result)
     }
 
@@ -21527,10 +21190,7 @@ impl Checker {
                 arity: arg_tys.len(),
                 has_receiver,
             };
-            if let Some(call_id) = id {
-                self.existential_method_calls.insert(call_id, hint.clone());
-            }
-            self.existential_method_calls_by_span.insert((range.start, range.end), hint);
+            self.existential_method_calls.insert(id, (range.start, range.end), hint);
             let exprs = if args.is_empty() { None } else { Some(args) };
             let result = self.apply_existential_method(&owner, method, &scheme, arg_tys, exprs, (id, range.clone()));
             return Some((owner, result));

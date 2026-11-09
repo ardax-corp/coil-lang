@@ -143,8 +143,8 @@ const OWN_DICT_PLACEHOLDER: &str = "$instance";
 /// One candidate in a compile-time overload set (arity and/or parameter types).
 ///
 /// Stored in [`Checker::overload_sets`] keyed by the function's simple
-/// (or qualified) name.  Codegen uses the span-indexed
-/// [`Checker::selected_overloads_by_span`] to decide which ABI to emit.
+/// (or qualified) name.  Codegen uses the call site's selection
+/// ([`Checker::selected_overload_at`]) to decide which ABI to emit.
 #[derive(Clone, Debug)]
 pub struct OverloadCandidate {
     /// Unique id within the overload family (registration order).
@@ -428,62 +428,44 @@ pub struct Checker {
     /// candidates, call-site resolution uses [`Checker::select_overload_for_args`].
     overload_sets: std::collections::HashMap<String, Vec<OverloadCandidate>>,
 
-    /// Call-site selection results keyed by source span `(start, end)`.
-    ///
-    /// Value is `(fixed_arity, is_rest, candidate_id)`. Populated during
-    /// inference; consumed by codegen for the mangled table key.
-    pub selected_overloads_by_span: std::collections::HashMap<(usize, usize), (usize, bool, u32)>,
-
-    /// Same as [`Self::selected_overloads_by_span`], keyed by the call/ident [`NodeId`].
-    selected_overloads: std::collections::HashMap<NodeId, (usize, bool, u32)>,
+    /// Call-site overload selections: `(fixed_arity, is_rest,
+    /// candidate_id)`. Populated during inference; consumed by codegen for
+    /// the mangled table key.
+    selected_overloads: SideTable<(usize, bool, u32)>,
 
     /// Declaration span → `(candidate_id, fixed_arity, is_rest)` for
     /// overloaded functions so codegen can mangle each body uniquely.
     pub overload_decl_by_span: std::collections::HashMap<(usize, usize), (u32, usize, bool)>,
 
     /// Concrete trait dictionaries selected at each generic call site.
-    call_site_dicts: HashMap<NodeId, Vec<InstanceDef>>,
-    /// Span fallback when pre-walk / infer NodeIds are misaligned in
-    /// function bodies (same motivation as `bound_method_calls_by_span`).
-    call_site_dicts_by_span: HashMap<(usize, usize), Vec<InstanceDef>>,
+    call_site_dicts: SideTable<Vec<InstanceDef>>,
 
     /// Open dictionaries forwarded from the enclosing generic function.
-    call_site_forward_dicts: HashMap<NodeId, Vec<usize>>,
-    call_site_forward_dicts_by_span: HashMap<(usize, usize), Vec<usize>>,
+    call_site_forward_dicts: SideTable<Vec<usize>>,
 
     /// Calls resolved through an active trait constraint.
-    bound_method_calls: HashMap<NodeId, BoundMethodCall>,
-    bound_method_calls_by_span: HashMap<(usize, usize), BoundMethodCall>,
+    bound_method_calls: SideTable<BoundMethodCall>,
 
     /// Operators resolved through an active trait constraint.
-    bound_operator_calls: HashMap<NodeId, BoundOperatorCall>,
-    bound_operator_calls_by_span: HashMap<(usize, usize), BoundOperatorCall>,
+    bound_operator_calls: SideTable<BoundOperatorCall>,
 
     /// Aggregate (tuple/array) element-wise / broadcast arithmetic.
-    aggregate_arith: HashMap<NodeId, crate::typechecking::aggregate_arith::AggregateArithInfo>,
-    aggregate_arith_by_span:
-        HashMap<(usize, usize), crate::typechecking::aggregate_arith::AggregateArithInfo>,
+    aggregate_arith: SideTable<crate::typechecking::aggregate_arith::AggregateArithInfo>,
 
     /// Named linear-algebra helpers (`dot` / `matmul` / `cross`).
-    linear_algebra: HashMap<NodeId, crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
-    linear_algebra_by_span:
-        HashMap<(usize, usize), crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
+    linear_algebra: SideTable<crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
 
     /// `%v` arguments resolved through an active `Show` constraint.
-    bound_display_calls: HashMap<NodeId, BoundDisplayCall>,
-    bound_display_calls_by_span: HashMap<(usize, usize), BoundDisplayCall>,
+    bound_display_calls: SideTable<BoundDisplayCall>,
 
     /// Expressions whose result must be packed as `(boxed_value, dict)`.
-    existential_packs: HashMap<NodeId, ExistentialPack>,
-    existential_packs_by_span: HashMap<(usize, usize), ExistentialPack>,
+    existential_packs: SideTable<ExistentialPack>,
 
     /// Calls dispatched through an existential argument/receiver dictionary.
-    existential_method_calls: HashMap<NodeId, ExistentialMethodCall>,
-    existential_method_calls_by_span: HashMap<(usize, usize), ExistentialMethodCall>,
+    existential_method_calls: SideTable<ExistentialMethodCall>,
 
     /// `for x in` lowering info (Iterator protocol).
-    for_in_infos: HashMap<NodeId, ForInInfo>,
-    for_in_infos_by_span: HashMap<(usize, usize), ForInInfo>,
+    for_in_infos: SideTable<ForInInfo>,
 
     /// Typeclass method signatures, keyed by `(class, method)`.
     typeclass_method_schemes: HashMap<(String, String), Scheme>,
@@ -910,7 +892,9 @@ impl Default for Checker {
 
 mod checker;
 mod coverage;
+mod side_table;
 mod sidecar;
+use side_table::SideTable;
 use coverage::CoverageTree;
 pub use sidecar::{SelectedOverload, TypedSidecar};
 

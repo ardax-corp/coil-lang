@@ -5124,7 +5124,7 @@ impl Compiler {
             // local may still carry the init's type: `let s: Named =
             // Pick::Num(3)` holds the pack's one word (#2322).
             let e = hir.expr(init);
-            if e.node.is_some_and(|n| self.checker.existential_pack_at(n).is_some()) || self.checker.existential_pack_span(e.span.0, e.span.1).is_some() {
+            if e.node.is_some_and(|n| self.checker.existential_pack_at(n).is_some()) || self.checker.existential_pack_for_span(e.span.0, e.span.1).is_some() {
                 continue;
             }
             if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
@@ -7070,7 +7070,7 @@ impl Compiler {
         let (start, end) = node.span;
         node.node
             .and_then(|n| self.checker.linear_algebra_at(n))
-            .or_else(|| self.checker.linear_algebra_span(start, end))
+            .or_else(|| self.checker.linear_algebra_for_span(start, end))
             .cloned()
     }
 
@@ -9427,8 +9427,8 @@ impl Compiler {
         }
         if node.node.is_some_and(|n| {
             self.checker.linear_algebra_at(n).is_some() || self.checker.aggregate_arith_at(n).is_some()
-        }) || self.checker.linear_algebra_span(start, end).is_some()
-            || self.checker.aggregate_arith_span(start, end).is_some()
+        }) || self.checker.linear_algebra_for_span(start, end).is_some()
+            || self.checker.aggregate_arith_for_span(start, end).is_some()
         {
             return Err("operator-aggregate");
         }
@@ -10562,7 +10562,7 @@ impl Compiler {
         let pack = e
             .node
             .and_then(|n| self.checker.existential_pack_at(n))
-            .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
+            .or_else(|| self.checker.existential_pack_for_span(e.span.0, e.span.1))?;
         let subst = self.checker.subst();
         // `readonly` has no runtime form: a `readonly P` packs as a `P` (#1558).
         let ty = crate::typechecking::ty::nominal_enum(crate::typechecking::ty::strip_readonly(&apply_ty_prune(subst, e.ty.as_ref()?)).clone());
