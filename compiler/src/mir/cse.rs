@@ -605,6 +605,31 @@ mod tests {
     use crate::mir::builder::MirBuilder;
     use crate::mir::{MirBinOp, MirConst, MirTy};
 
+    /// A pure two-word native whose first word is unused: its second word
+    /// still keeps it.
+    #[test]
+    fn dce_keeps_a_pair_read_through_its_second_word() {
+        let mut b = MirBuilder::new("pair");
+        let x = b.add_param(MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(x)).unwrap();
+        let mut f = b.finish().unwrap();
+        let (lo, hi) = (ValueId(f.types.len() as u32), ValueId(f.types.len() as u32 + 1));
+        f.types.extend([MirTy::I64, MirTy::I64]);
+        assert!(super::super::effects::host_is_pure(common::MATH_SIN_ID));
+        let entry = f.entry.index();
+        f.blocks[entry].insts.push(MirInst::HostInvoke {
+            dest: lo,
+            dest_hi: Some(hi),
+            native_id: common::MATH_SIN_ID,
+            layout: common::HOST_ENUM_LAYOUT_PAIR as u8,
+            args: vec![x],
+        });
+        f.blocks[entry].term = Some(super::super::inst::Terminator::Return { lo: Some(hi), hi: None });
+        dce(&mut f);
+        assert!(f.blocks[entry].insts.iter().any(|i| i.dests().any(|d| d == hi)), "{f}");
+    }
+
     fn count_bin(func: &MirFunc, op: MirBinOp) -> usize {
         func.blocks
             .iter()
