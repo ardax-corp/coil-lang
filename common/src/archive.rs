@@ -85,21 +85,47 @@ pub fn push_tagged_entry(kinds: &mut Vec<u8>, tag_slot: u16, pointer_tags: u64) 
 /// one whose entry is missing or names a slot out of range, is
 /// [`WORD_UNKNOWN`].
 pub fn class_slot_kinds<'a>(kinds: &'a [u8], slots: &'a [crate::Value]) -> impl Iterator<Item = u8> + 'a {
-    let n = slots.len();
-    let mut entries = kinds.get(n..).unwrap_or_default().as_chunks::<TAGGED_ENTRY_BYTES>().0.iter();
-    (0..n).map(move |i| match kinds.get(i).copied() {
-        Some(WORD_TAGGED) => entries
-            .next()
-            .and_then(|e| {
-                let slot = usize::from(u16::from_le_bytes([e[0], e[1]]));
-                let mask = u64::from_le_bytes(e[2..10].try_into().ok()?);
-                let tag = slots.get(slot)?.bits();
-                Some(if tag < 64 && mask >> tag & 1 == 1 { WORD_POINTER } else { WORD_SCALAR })
-            })
-            .unwrap_or(WORD_UNKNOWN),
-        Some(kind) => kind,
-        None => WORD_UNKNOWN,
-    })
+    let mut walk = ClassSlotKinds::new(kinds, slots.len());
+    (0..slots.len()).map(move |_| walk.next_kind(slots))
+}
+
+/// [`class_slot_kinds`] one slot at a time. Each step reads the slots only
+/// for the tag it needs, so a walk may rewrite the slots it has passed
+/// between steps (a tag slot is a scalar, which such a walk leaves alone).
+pub struct ClassSlotKinds<'a> {
+    kinds: &'a [u8],
+    entries: std::slice::Iter<'a, [u8; TAGGED_ENTRY_BYTES]>,
+    next: usize,
+}
+
+impl<'a> ClassSlotKinds<'a> {
+    /// The walk over an instance of `n` slots under class row `kinds`.
+    #[inline]
+    pub fn new(kinds: &'a [u8], n: usize) -> Self {
+        let entries = kinds.get(n..).unwrap_or_default().as_chunks::<TAGGED_ENTRY_BYTES>().0.iter();
+        Self { kinds, entries, next: 0 }
+    }
+
+    /// The kind of the next slot, its tag (if it has one) read from `slots`.
+    #[inline]
+    pub fn next_kind(&mut self, slots: &[crate::Value]) -> u8 {
+        let i = self.next;
+        self.next += 1;
+        match self.kinds.get(i).copied() {
+            Some(WORD_TAGGED) => self
+                .entries
+                .next()
+                .and_then(|e| {
+                    let slot = usize::from(u16::from_le_bytes([e[0], e[1]]));
+                    let mask = u64::from_le_bytes(e[2..10].try_into().ok()?);
+                    let tag = slots.get(slot)?.bits();
+                    Some(if tag < 64 && mask >> tag & 1 == 1 { WORD_POINTER } else { WORD_SCALAR })
+                })
+                .unwrap_or(WORD_UNKNOWN),
+            Some(kind) => kind,
+            None => WORD_UNKNOWN,
+        }
+    }
 }
 
 /// Words whose kinds a packed `u8` records (2 bits each). Later words of a
