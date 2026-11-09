@@ -162,7 +162,7 @@ fn record_slots<'a>(a: &'a ObjInstance, b: &'a ObjInstance) -> Option<(&'a [Valu
     if !common::is_record_type_id(a.type_id) || !common::is_record_type_id(b.type_id) {
         return None;
     }
-    let (sa, sb) = (a.slots()?, b.slots()?);
+    let (sa, sb) = (a.slots(), b.slots());
     (sa.len() == sb.len()).then_some((sa, sb))
 }
 

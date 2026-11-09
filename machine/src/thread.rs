@@ -267,9 +267,10 @@ pub enum PortableValue {
         /// `fn drop()` key, kept like [`Self::Instance`]'s `type_id`.
         type_id: u32,
     },
+    /// A class instance: its slots in order.
     Instance {
         type_id: u32,
-        fields: Vec<(String, PortableValue)>,
+        fields: Vec<PortableValue>,
     },
     /// A `BoxValue` cell: its tag (what `UnboxValue` checks) and payload.
     Boxed(u16, Box<PortableValue>),
@@ -1182,20 +1183,9 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
         }
         Object::Instance(gc) => {
             let inst = gc.as_ref();
-            let mut fields = Vec::new();
-            if let Some(slots) = inst.slots() {
-                for v in slots {
-                    fields.push((String::new(), encode_value(heap, *v, cx)?));
-                }
-            } else {
-                for (k, m) in inst.iter_fields() {
-                    let name = k.as_ref().data.to_string();
-                    let pv = match m {
-                        Member::Value(iv) => encode_value(heap, iv, cx)?,
-                        Member::Object(o) => encode_object(heap, o, cx)?,
-                    };
-                    fields.push((name, pv));
-                }
+            let mut fields = Vec::with_capacity(inst.slots().len());
+            for v in inst.slots() {
+                fields.push(encode_value(heap, *v, cx)?);
             }
             Ok(PortableValue::Instance {
                 type_id: inst.type_id,
@@ -1292,28 +1282,12 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Instance { type_id, fields } => {
-            if type_id != 0 && !fields.is_empty() && fields.iter().all(|(n, _)| n.is_empty()) {
-                let mut slots = Vec::with_capacity(fields.len());
-                for (_, pv) in fields {
-                    slots.push(decode_portable(heap, pv)?);
-                }
-                let inst = ObjInstance::with_slots(type_id, slots);
-                let (obj, _) = heap.alloc(inst, Object::Instance);
-                Ok(Value::from(obj.addr()))
-            } else {
-                let mut inst = if type_id != 0 {
-                    ObjInstance::with_type_id(type_id)
-                } else {
-                    ObjInstance::default()
-                };
-                for (name, pv) in fields {
-                    let key = heap.intern(name);
-                    let val = decode_portable(heap, pv)?;
-                    inst.set(key, member_from_value(heap, val));
-                }
-                let (obj, _) = heap.alloc(inst, Object::Instance);
-                Ok(Value::from(obj.addr()))
+            let mut slots = Vec::with_capacity(fields.len());
+            for pv in fields {
+                slots.push(decode_portable(heap, pv)?);
             }
+            let (obj, _) = heap.alloc(ObjInstance::with_slots(type_id, slots), Object::Instance);
+            Ok(Value::from(obj.addr()))
         }
         PortableValue::Boxed(tag, inner) => {
             let v = decode_portable(heap, *inner)?;

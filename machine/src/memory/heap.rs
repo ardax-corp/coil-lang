@@ -840,7 +840,7 @@ impl Heap {
                 if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
                     return None;
                 }
-                let slots = inst.storage.as_slice()?.to_vec();
+                let slots = inst.storage.as_slice().to_vec();
                 self.alloc(ObjInstance::with_slots(inst.type_id, slots), Object::Instance).0
             }
             Object::Array(gc) => {
@@ -2480,19 +2480,12 @@ impl Object {
         match self {
             Self::Instance(i) => {
                 let inst = i.as_ref();
-                match &inst.storage {
-                    InstanceStorage::Table(table) => {
-                        table.iter().for_each(|(_, v)| member(&v, visit));
-                    }
-                    InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
-                        let kinds = heap.class_field_kinds(inst.type_id);
-                        let slots = inst.storage.as_slice().unwrap_or_default();
-                        for (v, kind) in slots.iter().zip(common::class_slot_kinds(kinds, slots)) {
-                            match kind {
-                                common::WORD_SCALAR => {}
-                                kind => word(*v, kind == common::WORD_POINTER, visit),
-                            }
-                        }
+                let kinds = heap.class_field_kinds(inst.type_id);
+                let slots = inst.storage.as_slice();
+                for (v, kind) in slots.iter().zip(common::class_slot_kinds(kinds, slots)) {
+                    match kind {
+                        common::WORD_SCALAR => {}
+                        kind => word(*v, kind == common::WORD_POINTER, visit),
                     }
                 }
             }
@@ -2740,12 +2733,11 @@ pub enum Member {
 /// four fit where two tagged [`Member`]s used to; larger classes spill.
 pub const INSTANCE_INLINE_FIELDS: usize = 4;
 
-/// Named intern table (`type_id == 0` / `INIT`) or dense typed slots.
+/// Dense slots: inline up to [`INSTANCE_INLINE_FIELDS`], else a `Vec`.
 /// `repr(u8)`: fixed layout, so native code fills an inline instance in
 /// place ([`InlineLayout`]).
 #[repr(u8)]
 enum InstanceStorage {
-    Table(Table<Member>),
     Inline {
         len: u8,
         slots: [Value; INSTANCE_INLINE_FIELDS],
@@ -2779,19 +2771,17 @@ impl InstanceStorage {
         }
     }
 
-    fn as_slice(&self) -> Option<&[Value]> {
+    fn as_slice(&self) -> &[Value] {
         match self {
-            Self::Inline { len, slots } => Some(&slots[..*len as usize]),
-            Self::Spill(slots) => Some(slots.as_slice()),
-            Self::Table(_) => None,
+            Self::Inline { len, slots } => &slots[..*len as usize],
+            Self::Spill(slots) => slots.as_slice(),
         }
     }
 
-    fn as_mut_slice(&mut self) -> Option<&mut [Value]> {
+    fn as_mut_slice(&mut self) -> &mut [Value] {
         match self {
-            Self::Inline { len, slots } => Some(&mut slots[..*len as usize]),
-            Self::Spill(slots) => Some(slots.as_mut_slice()),
-            Self::Table(_) => None,
+            Self::Inline { len, slots } => &mut slots[..*len as usize],
+            Self::Spill(slots) => slots.as_mut_slice(),
         }
     }
 
@@ -2802,7 +2792,7 @@ impl InstanceStorage {
     fn spill_capacity(&self) -> usize {
         match self {
             Self::Spill(slots) => slots.capacity(),
-            Self::Inline { .. } | Self::Table(_) => 0,
+            Self::Inline { .. } => 0,
         }
     }
 }
@@ -2810,7 +2800,7 @@ impl InstanceStorage {
 #[repr(C)]
 pub struct ObjInstance {
     storage: InstanceStorage,
-    /// Compile-time class identity (`0` = none / dict / legacy `INIT`).
+    /// Compile-time class identity (`0` = none).
     pub type_id: u32,
     /// Set when `drop` has run (GC or explicit); drop must not run twice.
     pub finalized: bool,
@@ -2819,7 +2809,7 @@ pub struct ObjInstance {
 impl Default for ObjInstance {
     fn default() -> Self {
         Self {
-            storage: InstanceStorage::Table(Table::default()),
+            storage: InstanceStorage::typed_slots(0),
             type_id: 0,
             finalized: false,
         }
@@ -2827,65 +2817,38 @@ impl Default for ObjInstance {
 }
 
 impl ObjInstance {
-
-    #[must_use]
-    pub fn with_type_id(type_id: u32) -> Self {
-        Self::with_type_id_and_fields(type_id, 0)
-    }
-
-    /// Typed instances (`type_id != 0`) use dense slots of `nfields`.
-    /// Counts ≤ [`INSTANCE_INLINE_FIELDS`] stay in the header; larger spill.
-    /// `nfields == 0` keeps a named table so legacy `InitTyped` + GetField still works.
+    /// `nfields` dense slots, zeroed. Counts ≤ [`INSTANCE_INLINE_FIELDS`]
+    /// stay in the header; larger spill.
     #[must_use]
     pub fn with_type_id_and_fields(type_id: u32, nfields: usize) -> Self {
-        let storage = if type_id != 0 && nfields > 0 {
-            InstanceStorage::typed_slots(nfields)
-        } else {
-            InstanceStorage::Table(Table::default())
-        };
         Self {
-            storage,
+            storage: InstanceStorage::typed_slots(nfields),
             type_id,
             finalized: false,
         }
     }
 
-    pub fn set(&mut self, key: RefString, value: Member) {
-        if let InstanceStorage::Table(table) = &mut self.storage {
-            table.insert(key, value);
-        }
-    }
-
-    /// Named read: the table entry, or a typed slot by its known name.
+    /// Named read of a typed slot by its known name.
     pub fn get(&self, key: RefString) -> Option<Value> {
-        match &self.storage {
-            InstanceStorage::Table(table) => table.get(key).map(|m| match m {
-                Member::Value(v) => v,
-                Member::Object(o) => Value::from(o.addr()),
-            }),
-            InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
-                let slot = common::range_heap_field_slot(self.type_id, &key.as_ref().data)?;
-                self.slot(slot)
-            }
-        }
+        let slot = common::range_heap_field_slot(self.type_id, &key.as_ref().data)?;
+        self.slot(slot)
     }
 
     pub fn slot(&self, index: usize) -> Option<Value> {
-        self.storage.as_slice()?.get(index).copied()
+        self.storage.as_slice().get(index).copied()
     }
 
     pub fn set_slot(&mut self, index: usize, value: Value) {
-        if let Some(slots) = self.storage.as_mut_slice()
-            && let Some(slot) = slots.get_mut(index) {
-                *slot = value;
-            }
+        if let Some(slot) = self.storage.as_mut_slice().get_mut(index) {
+            *slot = value;
+        }
     }
 
-    pub fn slot_len(&self) -> Option<usize> {
-        self.storage.as_slice().map(|s| s.len())
+    pub fn slot_len(&self) -> usize {
+        self.storage.as_slice().len()
     }
 
-    pub fn slots(&self) -> Option<&[Value]> {
+    pub fn slots(&self) -> &[Value] {
         self.storage.as_slice()
     }
 
@@ -2904,54 +2867,17 @@ impl ObjInstance {
         }
     }
 
-    /// Iterate live `(key, value)` entries in table order (DictEntries).
-    /// Typed slot instances have no interned names.
-    pub fn iter_fields(&self) -> InstanceFieldIter<'_> {
-        match &self.storage {
-            InstanceStorage::Table(table) => InstanceFieldIter::Table(table.iter()),
-            InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => InstanceFieldIter::Empty,
-        }
-    }
-
     fn mark_members(&self, heap: &Heap, grey_objects: &mut Vec<Object>) {
-        match &self.storage {
-            InstanceStorage::Table(table) => {
-                table.iter().for_each(|(k, v)| {
-                    k.mark();
-                    Object::mark_member(heap, &v, grey_objects);
-                });
+        let slots = self.storage.as_slice();
+        let kinds = heap.class_field_kinds(self.type_id);
+        for (i, (v, kind)) in slots.iter().zip(common::class_slot_kinds(kinds, slots)).enumerate() {
+            #[cfg(not(feature = "gc-stress"))]
+            let _ = i;
+            #[cfg(feature = "gc-stress")]
+            heap.verify_kinded_word(&format!("class {}", self.type_id), i, kind, *v);
+            if kind != common::WORD_SCALAR {
+                heap.mark_value(*v, grey_objects);
             }
-            InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
-                if let Some(slots) = self.storage.as_slice() {
-                    let kinds = heap.class_field_kinds(self.type_id);
-                    for (i, (v, kind)) in slots.iter().zip(common::class_slot_kinds(kinds, slots)).enumerate() {
-                        #[cfg(not(feature = "gc-stress"))]
-                        let _ = i;
-                        #[cfg(feature = "gc-stress")]
-                        heap.verify_kinded_word(&format!("class {}", self.type_id), i, kind, *v);
-                        if kind != common::WORD_SCALAR {
-                            heap.mark_value(*v, grey_objects);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Named-field walk for dicts; empty for dense typed slots.
-pub enum InstanceFieldIter<'a> {
-    Table(Iter<'a, Member>),
-    Empty,
-}
-
-impl Iterator for InstanceFieldIter<'_> {
-    type Item = (RefString, Member);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Table(it) => it.next(),
-            Self::Empty => None,
         }
     }
 }
@@ -2964,7 +2890,7 @@ impl GcSized for ObjInstance {
     }
 
     fn size(&self) -> usize {
-        // `Table` / inline slots live in the object; only a spill `Vec` is extra.
+        // Inline slots live in the object; only a spill `Vec` is extra.
         std::mem::size_of::<Self>()
             + self.storage.spill_capacity() * std::mem::size_of::<Value>()
     }
@@ -5461,15 +5387,15 @@ mod tests {
     fn instance_slots_inlines_upto_cap_and_spills_above() {
         let one = ObjInstance::with_type_id_and_fields(1, 1);
         assert!(one.slots_are_inline());
-        assert_eq!(one.slot_len(), Some(1));
+        assert_eq!(one.slot_len(), 1);
 
         let two = ObjInstance::with_type_id_and_fields(1, INSTANCE_INLINE_FIELDS);
         assert!(two.slots_are_inline());
-        assert_eq!(two.slot_len(), Some(INSTANCE_INLINE_FIELDS));
+        assert_eq!(two.slot_len(), INSTANCE_INLINE_FIELDS);
 
         let spilled = ObjInstance::with_type_id_and_fields(1, INSTANCE_INLINE_FIELDS + 1);
         assert!(!spilled.slots_are_inline());
-        assert_eq!(spilled.slot_len(), Some(INSTANCE_INLINE_FIELDS + 1));
+        assert_eq!(spilled.slot_len(), INSTANCE_INLINE_FIELDS + 1);
 
         let from_vec = ObjInstance::with_slots(
             2,

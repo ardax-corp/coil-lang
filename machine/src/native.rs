@@ -1214,7 +1214,7 @@ pub extern "C" fn coil_native_len(addr: u64) -> u64 {
         Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().len(),
         Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
         Some(crate::memory::Object::Instance(gc)) => {
-            gc.as_ref().slot_len().unwrap_or_else(|| gc.as_ref().iter_fields().count())
+            gc.as_ref().slot_len()
         }
         _ => 0,
     }) as u64
@@ -1227,7 +1227,7 @@ pub extern "C" fn coil_native_field(addr: u64, index: u64) -> u64 {
     match object(addr) {
         Some(crate::memory::Object::Enum(e)) => e.as_ref().payload.get(index).map_or(0, |v| v.bits()),
         Some(crate::memory::Object::Instance(gc)) => {
-            gc.as_ref().slot_len().and_then(|_| gc.as_ref().slot(index)).map_or(0, |v| v.bits())
+            gc.as_ref().slot(index).map_or(0, |v| v.bits())
         }
         _ => 0,
     }
@@ -1442,7 +1442,7 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
     let Some(crate::memory::Object::Instance(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    if gc.as_ref().slot_len().is_none_or(|n| slot >= n) {
+    if slot >= gc.as_ref().slot_len() {
         return unsafe { bail(ctx) };
     }
     gc.as_mut().set_slot(slot, common::Value::from(value));

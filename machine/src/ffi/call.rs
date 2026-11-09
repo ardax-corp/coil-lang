@@ -209,16 +209,10 @@ fn instance_field(heap: &mut Heap, addr: u64, layout: &CStructLayout, i: usize) 
         .ok_or_else(|| FfiError::Unsupported("struct value not found on heap".into()))?;
     match obj {
         // A record: the field's slot.
-        Object::Instance(gc) if gc.as_ref().slot_len().is_some() => gc
+        Object::Instance(gc) => gc
             .as_ref()
             .slot(struct_record_slot(layout, i))
             .ok_or_else(|| FfiError::Unsupported(format!("missing field `{fname}`"))),
-        Object::Instance(gc) => {
-            let key = heap.intern(fname.to_string());
-            gc.as_ref()
-                .get(key)
-                .ok_or_else(|| FfiError::Unsupported(format!("missing field `{fname}`")))
-        }
         _ => Err(FfiError::Unsupported(
             "struct argument must be a record/dict instance".into(),
         )),
@@ -800,7 +794,6 @@ pub fn invoke_via_libffi(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::Member;
     use crate::ffi::FfiSignatureBuilder;
     use crate::ffi::library_candidates;
 
@@ -1418,16 +1411,12 @@ mod tests {
         assert_eq!(layout.align, 4);
 
         let mut heap = Heap::default();
-        let ka = heap.intern("a".into());
-        let kb = heap.intern("b".into());
-        let kc = heap.intern("c".into());
-        let (obj, mut gc) = heap.alloc(crate::memory::ObjInstance::default(), Object::Instance);
-        {
-            let inst = gc.as_mut();
-            inst.set(ka, Member::Value(Value::from(1i64)));
-            inst.set(kb, Member::Value(Value::from(0x11223344i64)));
-            inst.set(kc, Member::Value(Value::from(7i64)));
-        }
+        // A record: its slots are the fields sorted by name.
+        let slots = vec![Value::from(1i64), Value::from(0x11223344i64), Value::from(7i64)];
+        let (obj, _) = heap.alloc(
+            crate::memory::ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots),
+            Object::Instance,
+        );
         let value = Value::from(obj.addr());
         let mut packed = Vec::new();
         pack_struct(

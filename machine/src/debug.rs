@@ -312,10 +312,7 @@ pub fn object_view(heap: &crate::memory::Heap, v: common::Value) -> Option<Debug
         Object::String(gc) => DebugObject::Str(gc.as_ref().data.to_string()),
         Object::Instance(gc) => {
             let inst = gc.as_ref();
-            match inst.slots() {
-                Some(fields) => DebugObject::Instance { type_id: inst.type_id, fields: fields.to_vec() },
-                None => DebugObject::Other("dict"),
-            }
+            DebugObject::Instance { type_id: inst.type_id, fields: inst.slots().to_vec() }
         }
         Object::Array(gc) => DebugObject::Array(gc.as_ref().to_vec()),
         Object::Tuple(gc) => DebugObject::Tuple(gc.as_ref().elements().to_vec()),

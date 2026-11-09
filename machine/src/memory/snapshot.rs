@@ -260,9 +260,7 @@ impl Capture<'_> {
             }
             Object::Instance(gc) => {
                 let inst = gc.as_ref();
-                let Some(slots) = inst.slots() else {
-                    return Err(self.error_at(at, "an untyped instance"));
-                };
+                let slots = inst.slots();
                 let kinds = self.heap.class_field_kinds(inst.type_id);
                 let words = slots
                     .iter()
@@ -317,10 +315,6 @@ impl Capture<'_> {
                 }
             }
         }
-    }
-
-    fn error_at(&self, object: u32, what: &'static str) -> SnapshotError {
-        self.error(self.found[object as usize].1, what)
     }
 }
 

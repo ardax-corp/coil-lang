@@ -23,7 +23,7 @@ use common::Value;
 
 use super::super::AddrHashBuilder;
 use super::{
-    GcData, GcHeader, GcPhase, Heap, InstanceStorage, Member, ObjArray, ObjBoxed, ObjEnum,
+    GcData, GcHeader, GcPhase, Heap, Member, ObjArray, ObjBoxed, ObjEnum,
     ObjFn, ObjInstance, ObjTuple, Object,
 };
 
@@ -135,31 +135,14 @@ impl Object {
         match self {
             Self::Instance(i) => {
                 let inst = i.payload_mut();
-                match &mut inst.storage {
-                    InstanceStorage::Table(table) => {
-                        let updates: Vec<_> = table
-                            .iter()
-                            .filter_map(|(k, v)| {
-                                let mut m = v;
-                                fix_member(&mut m).then_some((k, m))
-                            })
-                            .collect();
-                        for (k, m) in updates {
-                            table.insert(k, m);
-                        }
-                    }
-                    storage => {
-                        let kinds = heap.class_field_kinds(inst.type_id);
-                        if let Some(words) = storage.as_mut_slice() {
-                            // A tagged word's kind reads its tag slot, which
-                            // no fix changes: resolve them all first.
-                            let resolved: Vec<u8> = common::class_slot_kinds(kinds, words).collect();
-                            for (v, kind) in words.iter_mut().zip(resolved) {
-                                if kind == common::WORD_POINTER {
-                                    fix(v);
-                                }
-                            }
-                        }
+                let kinds = heap.class_field_kinds(inst.type_id);
+                let words = inst.storage.as_mut_slice();
+                // A tagged word's kind reads its tag slot, which no fix
+                // changes: resolve them all first.
+                let resolved: Vec<u8> = common::class_slot_kinds(kinds, words).collect();
+                for (v, kind) in words.iter_mut().zip(resolved) {
+                    if kind == common::WORD_POINTER {
+                        fix(v);
                     }
                 }
             }

@@ -40,7 +40,7 @@ fn text(heap: &Heap, v: Value) -> String {
 
 fn instance_slots(heap: &Heap, v: Value) -> Vec<Value> {
     match object(heap, v) {
-        Object::Instance(gc) => gc.as_ref().slots().expect("typed").to_vec(),
+        Object::Instance(gc) => gc.as_ref().slots().to_vec(),
         _ => panic!("not an instance"),
     }
 }
