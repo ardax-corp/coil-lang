@@ -3080,11 +3080,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 };
             }
         }
-        // A ground instance of a generic user enum binds its parameters.
+        // An instance of a generic user enum binds its parameters, one type
+        // per field in field order: open in a generic body's own type
+        // variables (`Pick<T>`), as `Option<T>`'s is, which its clones bind
+        // (#2358).
         if let Some(Ty::App(_, args)) = scrut
             && let Some(payload) = super::classify::generic_enum_payload(self.checker, enum_name, variant, args)
         {
-            return payload.into_iter().filter(layout::ty_is_closed).collect();
+            return payload;
         }
         self.checker
             .enum_variants(enum_name)
