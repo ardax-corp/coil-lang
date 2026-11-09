@@ -69,7 +69,6 @@ enum BareCtor {
     None,
 }
 
-
 /// What an `impl` block's owner is, for `fn drop()` checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DropOwner {
@@ -5214,55 +5213,15 @@ impl Checker {
                     self.constrain_range_to_vec(owner, &resolved, &range);
                 }
                 let fqn = format!("{}::{}", owner, method);
-                let user_argc = method_args.len();
                 let mut candidate = None;
                 let scheme = if self.is_overloaded(&fqn) {
-                    let prelim_tys: Vec<Ty> = method_args
-                        .iter()
-                        .map(|a| {
-                            let value = match a.1.as_ref() {
-                                Expression::NamedArg(_, v) => v,
-                                _ => a,
-                            };
-                            let ty = self.infer(value);
-                            apply_ty_prune(&self.subst, &ty)
-                        })
-                        .collect();
-                    match self.select_overload_for_args(&fqn, user_argc, &prelim_tys) {
-                        OverloadSelect::Selected(c) => {
-                            let c = c.clone();
-                            self.record_selected_overload(
-                                id,
-                                &range,
-                                (c.fixed_arity, c.is_rest, c.id),
-                            );
+                    match self.select_call_overload(&fqn, method_args, id, &range) {
+                        Ok(c) => {
                             let scheme = c.scheme.clone();
                             candidate = Some(c);
                             scheme
                         }
-                        OverloadSelect::Ambiguous => {
-                            return self.error_with_help(
-                                ErrorCode::AmbiguousOverload,
-                                format!(
-                                    "Ambiguous overload: call to `{}` matches multiple candidates",
-                                    fqn
-                                ),
-                                range,
-                                Some(self.ambiguous_overload_help(&fqn)),
-                            );
-                        }
-                        OverloadSelect::NoMatch => {
-                            return self.error(
-                                ErrorCode::WrongArity,
-                                format!(
-                                    "No overload of `{}` accepts {} argument{}",
-                                    fqn,
-                                    user_argc,
-                                    if user_argc == 1 { "" } else { "s" }
-                                ),
-                                range,
-                            );
-                        }
+                        Err(ty) => return ty,
                     }
                 } else {
                     self.methods
@@ -5345,79 +5304,18 @@ impl Checker {
                 );
             }
             let fqn = format!("{}::{}", owner, method);
-            let user_argc = method_args.len();
-            let (scheme, selected) = if self.is_overloaded(&fqn) {
-                let prelim_tys: Vec<Ty> = method_args
-                    .iter()
-                    .map(|a| {
-                        let value = match a.1.as_ref() {
-                            Expression::NamedArg(_, v) => v,
-                            _ => a,
-                        };
-                        let ty = self.infer(value);
-                        apply_ty_prune(&self.subst, &ty)
-                    })
-                    .collect();
-                match self.select_overload_for_args(&fqn, user_argc, &prelim_tys) {
-                    OverloadSelect::Selected(c) => {
-                        let c = c.clone();
-                        self.record_selected_overload(
-                            id,
-                            &range,
-                            (c.fixed_arity, c.is_rest, c.id),
-                        );
-                        (c.scheme, true)
-                    }
-                    OverloadSelect::Ambiguous => {
-                        return self.error_with_help(
-                            ErrorCode::AmbiguousOverload,
-                            format!(
-                                "Ambiguous overload: call to `{}` matches multiple candidates",
-                                fqn
-                            ),
-                            range,
-                            Some(self.ambiguous_overload_help(&fqn)),
-                        );
-                    }
-                    OverloadSelect::NoMatch => {
-                        let available: Vec<String> = self
-                            .overload_sets
-                            .get(&fqn)
-                            .map(|cs| {
-                                cs.iter()
-                                    .map(|c| {
-                                        if c.is_rest {
-                                            format!("{}+ args (rest)", c.fixed_arity)
-                                        } else {
-                                            format!("{} args", c.fixed_arity)
-                                        }
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        return self.error_with_help(
-                            ErrorCode::WrongArity,
-                            format!(
-                                "No overload of `{}` accepts {} argument{}",
-                                fqn,
-                                user_argc,
-                                if user_argc == 1 { "" } else { "s" }
-                            ),
-                            range,
-                            Some(format!("available arities: {}", available.join(", "))),
-                        );
-                    }
+            let scheme = if self.is_overloaded(&fqn) {
+                match self.select_call_overload(&fqn, method_args, id, &range) {
+                    Ok(c) => c.scheme,
+                    Err(ty) => return ty,
                 }
             } else {
-                let scheme = self
-                    .methods
+                self.methods
                     .get(owner)
                     .and_then(|m| m.get(*method))
                     .map(|(_, s)| s.clone())
-                    .expect("method present");
-                (scheme, false)
+                    .expect("method present")
             };
-            let _ = selected;
             let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
             let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
             let mut arg_exprs = Vec::with_capacity(1 + method_args.len());
@@ -5801,97 +5699,32 @@ impl Checker {
         // Must happen before `has_named` and `fn_has_rest` branches so
         // the correct candidate's param_names / is_rest are used.
         if self.is_overloaded(&ident) {
-            let argc = raw_args.len();
-            // Preliminary arg types for same-arity disambiguation.
-            // Named args contribute their value type in source order;
-            // reordering happens after the candidate is chosen.
-            let prelim_tys: Vec<Ty> = raw_args
-                .iter()
-                .map(|a| {
-                    let value = match a.1.as_ref() {
-                        Expression::NamedArg(_, v) => v,
-                        _ => a,
-                    };
-                    let ty = self.infer(value);
-                    apply_ty_prune(&self.subst, &ty)
-                })
-                .collect();
-            let candidate_opt = self.select_overload_for_args(&ident, argc, &prelim_tys);
-            match candidate_opt {
-                OverloadSelect::NoMatch => {
-                    // No candidate accepts this arity/types, emit a
-                    // "no overload" error listing the available arities.
-                    let available: Vec<String> = self
-                        .overload_candidates(&ident)
-                        .map(|cs| cs.iter().map(Self::overload_sig_label).collect())
-                        .unwrap_or_default();
-                    return self.error_with_help(
-                        ErrorCode::WrongArity,
-                        format!(
-                            "No overload of `{}` accepts {} argument{}",
-                            ident,
-                            argc,
-                            if argc == 1 { "" } else { "s" }
-                        ),
-                        range,
-                        Some(format!("available overloads: {}", available.join(", "))),
-                    );
-                }
-                OverloadSelect::Ambiguous => {
-                    return self.error_with_help(
-                        ErrorCode::AmbiguousOverload,
-                        format!(
-                            "Ambiguous overload: call to `{}` matches multiple candidates",
-                            ident
-                        ),
-                        range,
-                        Some(self.ambiguous_overload_help(&ident)),
-                    );
-                }
-                OverloadSelect::Selected(candidate) => {
-                    let candidate = candidate.clone();
-                    // Record the selection for codegen.
-                    self.record_selected_overload(
-                        id,
-                        &range,
-                        (candidate.fixed_arity, candidate.is_rest, candidate.id),
-                    );
-                    let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = {
-                        let (fun_ty, constraints, mapping) =
-                            self.instantiate_scheme_mapped(&candidate.scheme);
-                        (fun_ty, constraints, mapping, Some(candidate.scheme.clone()))
-                    };
-                    let (arg_tys, ordered_args) = self.infer_and_reorder_call_args_with_candidate(
-                        &ident, &candidate, raw_args, &range,
-                    );
-                    let result = self.apply_function(
-                        Some(&ident),
-                        &fun_ty,
-                        &arg_tys,
-                        if ordered_args.is_empty() {
-                            None
-                        } else {
-                            Some(&ordered_args)
-                        },
-                        id,
-                        range.clone(),
-                    );
-                    if !fresh_constraints.is_empty() {
-                        self.bind_call_result_to_expected(&result);
-                        self.discharge_constraints(id, &fresh_constraints, &range);
-                        if let Some(scheme) = original_scheme.as_ref() {
-                            self.pin_assoc_after_discharge(
-                                "",
-                                &fresh_constraints,
-                                Some(scheme),
-                                &fresh_mapping,
-                                &range,
-                            );
-                        }
-                    }
-                    return result;
-                }
-            }
+            let candidate = match self.select_call_overload(&ident, raw_args, id, &range) {
+                Ok(c) => c,
+                Err(ty) => return ty,
+            };
+            let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = {
+                let (fun_ty, constraints, mapping) =
+                    self.instantiate_scheme_mapped(&candidate.scheme);
+                (fun_ty, constraints, mapping, Some(candidate.scheme.clone()))
+            };
+            let (arg_tys, ordered_args) = self.infer_and_reorder_call_args_with_candidate(
+                &ident, &candidate, raw_args, &range,
+            );
+            let result = self.apply_function(
+                Some(&ident),
+                &fun_ty,
+                &arg_tys,
+                if ordered_args.is_empty() {
+                    None
+                } else {
+                    Some(&ordered_args)
+                },
+                id,
+                range.clone(),
+            );
+            self.discharge_call_bounds("", &result, &fresh_constraints, original_scheme.as_ref(), &fresh_mapping, id, &range);
+            return result;
         }
 
         // Named call-site args: resolve an ordinary
@@ -5954,19 +5787,7 @@ impl Checker {
                     range.clone(),
                 )
             };
-            if !fresh_constraints.is_empty() {
-                self.bind_call_result_to_expected(&result);
-                self.discharge_constraints(id, &fresh_constraints, &range);
-                if let Some(scheme) = original_scheme.as_ref() {
-                    self.pin_assoc_after_discharge(
-                        "",
-                        &fresh_constraints,
-                        Some(scheme),
-                        &fresh_mapping,
-                        &range,
-                    );
-                }
-            }
+            self.discharge_call_bounds("", &result, &fresh_constraints, original_scheme.as_ref(), &fresh_mapping, id, &range);
             // Named under-apply is now allowed (residual Fun is returned
             // for partial application). Error only on unknown/duplicate
             // named args (handled inside infer_and_reorder_call_args).
@@ -6004,19 +5825,7 @@ impl Checker {
                 id,
                 range.clone(),
             );
-            if !fresh_constraints.is_empty() {
-                self.bind_call_result_to_expected(&result);
-                self.discharge_constraints(id, &fresh_constraints, &range);
-                if let Some(scheme) = original_scheme.as_ref() {
-                    self.pin_assoc_after_discharge(
-                        "",
-                        &fresh_constraints,
-                        Some(scheme),
-                        &fresh_mapping,
-                        &range,
-                    );
-                }
-            }
+            self.discharge_call_bounds("", &result, &fresh_constraints, original_scheme.as_ref(), &fresh_mapping, id, &range);
             return result;
         }
 
@@ -6102,19 +5911,7 @@ impl Checker {
         );
         self.check_thread_value_sendable(&ident, &arg_tys, &range);
         // Discharge instantiated trait constraints (or propagate if caller shares the bound).
-        if !fresh_constraints.is_empty() {
-            self.bind_call_result_to_expected(&result);
-            self.discharge_constraints(id, &fresh_constraints, &range);
-            if let Some(scheme) = original_scheme.as_ref() {
-                self.pin_assoc_after_discharge(
-                    "",
-                    &fresh_constraints,
-                    Some(scheme),
-                    &fresh_mapping,
-                    &range,
-                );
-            }
-        }
+        self.discharge_call_bounds("", &result, &fresh_constraints, original_scheme.as_ref(), &fresh_mapping, id, &range);
         result
     }
 
@@ -8204,8 +8001,6 @@ impl Checker {
         msg.with_help(help.to_string());
         self.messages.push(msg);
     }
-
-
 
     /// `ord(string) -> Result<byte, string>`.
     /// `black_box(x) -> typeof x`.
@@ -10800,6 +10595,29 @@ impl Checker {
 
     /// After discharging constraints for a trait method call, pin
     /// freshened associated-type variables from the scheme mapping.
+    /// After a call's arguments are applied: bind its still-open result to
+    /// the expected type, discharge the bounds its scheme instantiated
+    /// (landing in `call_dicts_at` for codegen) and pin the associated-type
+    /// projections they resolved. Nothing to do for a bound-free scheme.
+    #[allow(clippy::too_many_arguments)]
+    fn discharge_call_bounds(
+        &mut self,
+        class: &str,
+        result: &Ty,
+        constraints: &[Constraint],
+        scheme: Option<&Scheme>,
+        mapping: &HashMap<TyVarId, TyVarId>,
+        id: Option<NodeId>,
+        range: &Range<usize>,
+    ) {
+        if constraints.is_empty() {
+            return;
+        }
+        self.bind_call_result_to_expected(result);
+        self.discharge_constraints(id, constraints, range);
+        self.pin_assoc_after_discharge(class, constraints, scheme, mapping, range);
+    }
+
     fn pin_assoc_after_discharge(
         &mut self,
         class: &str,
@@ -14710,6 +14528,57 @@ impl Checker {
     }
 
     /// All registered overload candidates for `fn_name`, if any.
+    /// The overload of `name` a call with `args` selects, recorded for
+    /// codegen. Each argument's value (a named one's too) is inferred first
+    /// for same-arity disambiguation; reordering happens after the pick. On
+    /// no match or an ambiguous one the error is reported and its type is
+    /// the `Err`.
+    fn select_call_overload(
+        &mut self,
+        name: &str,
+        args: &[Output],
+        id: Option<NodeId>,
+        range: &Range<usize>,
+    ) -> Result<OverloadCandidate, Ty> {
+        let prelim_tys: Vec<Ty> = args
+            .iter()
+            .map(|a| {
+                let value = match a.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => a,
+                };
+                let ty = self.infer(value);
+                apply_ty_prune(&self.subst, &ty)
+            })
+            .collect();
+        match self.select_overload_for_args(name, args.len(), &prelim_tys) {
+            OverloadSelect::Selected(c) => {
+                let c = c.clone();
+                self.record_selected_overload(id, range, (c.fixed_arity, c.is_rest, c.id));
+                Ok(c)
+            }
+            OverloadSelect::Ambiguous => Err(self.error_with_help(
+                ErrorCode::AmbiguousOverload,
+                format!("Ambiguous overload: call to `{name}` matches multiple candidates"),
+                range.clone(),
+                Some(self.ambiguous_overload_help(name)),
+            )),
+            OverloadSelect::NoMatch => {
+                let available: Vec<String> = self
+                    .overload_candidates(name)
+                    .map(|cs| cs.iter().map(Self::overload_sig_label).collect())
+                    .unwrap_or_default();
+                let argc = args.len();
+                Err(self.error_with_help(
+                    ErrorCode::WrongArity,
+                    format!("No overload of `{name}` accepts {argc} argument{}", if argc == 1 { "" } else { "s" }),
+                    range.clone(),
+                    Some(format!("available overloads: {}", available.join(", "))),
+                ))
+            }
+        }
+    }
+
     pub fn overload_candidates(&self, fn_name: &str) -> Option<&[OverloadCandidate]> {
         self.overload_sets
             .get(fn_name)
@@ -21273,11 +21142,7 @@ impl Checker {
             call_id,
             range.clone(),
         );
-        if !constraints.is_empty() {
-            self.bind_call_result_to_expected(&result);
-            self.discharge_constraints(call_id, &constraints, &range);
-            self.pin_assoc_after_discharge(&class, &constraints, Some(&scheme), &mapping, &range);
-        }
+        self.discharge_call_bounds(&class, &result, &constraints, Some(&scheme), &mapping, call_id, &range);
         Some(result)
     }
 
@@ -21314,11 +21179,7 @@ impl Checker {
             id,
             range.clone(),
         );
-        if !constraints.is_empty() {
-            self.bind_call_result_to_expected(&result);
-            self.discharge_constraints(id, &constraints, range);
-            self.pin_assoc_after_discharge(&class, &constraints, Some(&scheme), &mapping, range);
-        }
+        self.discharge_call_bounds(&class, &result, &constraints, Some(&scheme), &mapping, id, range);
         result
     }
 
@@ -21345,11 +21206,7 @@ impl Checker {
             id,
             range.clone(),
         );
-        if !constraints.is_empty() {
-            self.bind_call_result_to_expected(&result);
-            self.discharge_constraints(id, &constraints, range);
-            self.pin_assoc_after_discharge(class, &constraints, Some(scheme), &mapping, range);
-        }
+        self.discharge_call_bounds(class, &result, &constraints, Some(scheme), &mapping, id, range);
         apply_ty_prune(&self.subst, &result)
     }
 
