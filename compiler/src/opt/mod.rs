@@ -26,9 +26,6 @@ pub struct OptimizeOptions {
     /// Lay out early exits after the function body in HIR lowering
     /// (`emit_hir`, COI-128).
     pub branch_optimization: bool,
-    /// Record body tiers and HIR counters into [`stats::OptStats`] (COI-131).
-    /// Default **off**.
-    pub collect_stats: bool,
     /// Compute pure calls with constant arguments at compile time
     /// (`Pipeline::compute_consts`, comptime step 4). On at Standard and
     /// above (and Size); `--fold-calls off` turns it off
@@ -71,7 +68,7 @@ pub struct OptimizeOptions {
 mod opt_level;
 mod stats;
 pub use opt_level::{EarlyFree, HintFactors, OptLevel};
-pub(crate) use stats::{note_comptime_consts, note_comptime_macros, note_hir_fallback, note_hir_mir,
+pub(crate) use stats::{note_comptime_consts, note_comptime_macros, note_hir_mir, note_hir_refused,
     note_hir_inline_refused, note_hir_inlined, note_hir_lowered,
 };
 pub use stats::{OptStats, begin_opt_stats, last_opt_stats};

@@ -180,7 +180,6 @@ fn all_off() -> OptimizeOptions {
         loop_unroll_factor: 8,
         escape_analysis: false,
         branch_optimization: false,
-        collect_stats: false,
         call_fold: false,
         mir_fold: false,
         mir_loop: false,

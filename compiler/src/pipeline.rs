@@ -174,7 +174,7 @@ pub struct Pipeline {
     runs_mir: bool,
     /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
-    /// Collect IL opt counters for `--opt-stats` (COI-131).
+    /// Collect HIR and compile-time counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
     /// Off: no call is computed at compile time, whatever the level.
     /// `--fold-calls` sets it.
@@ -255,7 +255,6 @@ impl Pipeline {
                 c.register_native_id(name, *id);
             }
             c.set_opt_level(self.opt_level);
-            c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
             if let Some(on) = self.hir_inline {
@@ -2117,10 +2116,8 @@ impl Pipeline {
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_level = level;
         if self.compiler.get().is_some() {
-            let collect = self.collect_opt_stats;
             let dbg = self.debugger_attached;
             self.compiler_lazy_mut().set_opt_level(level);
-            self.compiler_lazy_mut().set_collect_opt_stats(collect);
             self.compiler_lazy_mut().set_debugger_attached(dbg);
         }
     }
@@ -2138,10 +2135,8 @@ impl Pipeline {
     pub fn set_debugger_attached(&mut self, on: bool) {
         self.debugger_attached = on;
         if self.compiler.get().is_some() {
-            let collect = self.collect_opt_stats;
             let level = self.opt_level;
             self.compiler_lazy_mut().set_opt_level(level);
-            self.compiler_lazy_mut().set_collect_opt_stats(collect);
             self.compiler_lazy_mut().set_debugger_attached(on);
         }
     }
@@ -2150,12 +2145,10 @@ impl Pipeline {
         self.debugger_attached
     }
 
-    /// Collect IL optimization counters (COI-131). Off by default.
+    /// Start a fresh `--opt-stats` window at each compile (COI-131). Off
+    /// by default.
     pub fn set_collect_opt_stats(&mut self, on: bool) {
         self.collect_opt_stats = on;
-        if self.compiler.get().is_some() {
-            self.compiler_lazy_mut().set_collect_opt_stats(on);
-        }
     }
 
     /// Which contract clauses become runtime checks. Unset, `-O0` / `-O1` /
@@ -2175,7 +2168,6 @@ impl Pipeline {
         crate::hir::set_contract_level(self.contracts());
         if self.collect_opt_stats {
             crate::opt::begin_opt_stats();
-            self.compiler_lazy_mut().set_collect_opt_stats(true);
         }
     }
 
@@ -2680,12 +2672,9 @@ fn main() { add(1, 2); }
         pipeline.set_collect_opt_stats(true);
         pipeline.compile_src(src).expect("compile");
         let stats = crate::last_opt_stats();
-        assert!(
-            stats.functions_inlined >= 1,
-            "tiny add should inline; stats={stats:?}"
-        );
+        assert!(stats.hir_inlined >= 1, "tiny add should inline; stats={stats:?}");
         let json = stats.format_json();
-        assert!(json.contains("\"functions_inlined\""));
+        assert!(json.contains("\"hir_inlined\""));
     }
 
     #[test]

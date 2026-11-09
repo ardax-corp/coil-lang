@@ -67,7 +67,7 @@ Tracked in Linear project Known limitations. Long-form notes below stay the in-r
 | Frame roots of two-word locals — **ambiguous by design**: the first word of a local `Result<int, string>` or an enum with a heap payload is rooted ambiguously (`frame_words::pair_words`), so an object it reaches stays put through a collection while that frame is live. A flat class field of the same type is precise by its tag (`WORD_TAGGED`, [layout.md](layout.md)) | — |
 | Optimization levels (`OptLevel`) — **implemented** (`-O0`…`-O3`, `-Os`, `-Og`; `Standard` default) | — |
 | Iterative optimization — **removed** (re-running the pipeline is unsound: LICM is not idempotent) | COI-130 |
-| Optimization statistics — **default off** (`collect_stats` / `--opt-stats`) | COI-131 |
+| Optimization statistics — **default off** (`--opt-stats`) | COI-131 |
 | Named-local class scalar replacement — **Q2**: unique named `new C` field-SROA; identity boxes **once** and reuses (`named_class_box_once_identity`). Field-only stays unboxed ([language-quirks.md](language-quirks.md)) | COI-320 / COI-84 / COI-324 |
 | Bounds analysis — unchecked access exists for proven counted / stride loops (`LE` / `GT`); `LEQ`/`GEQ` are not proofs. Helper-call coverage is COI-99 | COI-85 |
 | Pure helper calls in counted loops — **implemented**: length hoists and unchecked rewrites survive pure call sites | COI-99 |

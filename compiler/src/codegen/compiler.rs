@@ -372,11 +372,6 @@ impl Compiler {
         self.debugger_attached = on;
     }
 
-    /// Enable or disable IL opt-stat collection (COI-131).
-    pub fn set_collect_opt_stats(&mut self, on: bool) {
-        self.opt_options.collect_stats = on;
-    }
-
     pub fn intern_string(&mut self, value: impl AsRef<str>) -> u32 {
         let value = value.as_ref();
         if let Some(&idx) = self.string_indices.get(value) {

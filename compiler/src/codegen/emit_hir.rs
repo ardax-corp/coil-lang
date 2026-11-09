@@ -1594,7 +1594,7 @@ impl Compiler {
                 true
             }
             Err(reason) => {
-                crate::opt::note_hir_fallback(reason);
+                crate::opt::note_hir_refused(reason);
                 self.hir_refusal = Some(reason);
                 false
             }
