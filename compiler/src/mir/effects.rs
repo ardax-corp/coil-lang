@@ -115,7 +115,9 @@ impl MirInst {
             Self::Unary { op, .. } => OpProps { traps: if *op == MirUnaryOp::Neg { Traps::IfIntOperand } else { Traps::No }, ..P },
             Self::Index { unchecked, .. } => OpProps { traps: if *unchecked { Traps::No } else { Traps::Yes }, ..P },
             Self::LaneIndex { .. } => OpProps { traps: Traps::Yes, ..P },
-            Self::StrEq { .. } | Self::Probe { .. } => P,
+            Self::StrEq { .. } => P,
+            // Counts a run: nothing reads its token.
+            Self::Probe { .. } => OpProps { barrier: true, ..P },
             Self::MatchPayload { .. } | Self::HeapFieldLoad { .. } | Self::CodePtr { .. } | Self::LoadStatic { .. } | Self::HomeLoad { .. } => {
                 OpProps { vector_barrier: true, ..P }
             }
