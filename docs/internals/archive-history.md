@@ -26,6 +26,12 @@ major.
 - Host native `values_eq_shaped` (**161**) is a panic stub: the compiler
   stopped emitting it in #2330 (`==` on such a type calls compiler-made
   glue). Its id is kept.
+- A tuple is an enum object of `PRODUCT_TAG` (`u32::MAX`): heap kind 5,
+  `ALLOC_TUPLE` (1), MIR allocation kind 1, snapshot object kind 3
+  (`SnapObject::Tuple`) and snapshot word tag 3 (`SnapWord::EmptyTuple`,
+  now `UnitEnum` of `PRODUCT_TAG`) are free. An `Alloc`'s words are in
+  declaration order for every kind; engines no longer reverse an enum's.
+  MIR section `FORMAT` 15.
 
 ## Major 7
 

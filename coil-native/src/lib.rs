@@ -186,7 +186,6 @@ fn inline_shape(kind: MirAllocKind, n: usize, extra: u64) -> Option<machine::nat
     }
     let n = u8::try_from(n).ok()?;
     match kind {
-        MirAllocKind::Tuple => Some(InlineShape::Tuple { kinds: extra as u8, n }),
         MirAllocKind::Enum { tag } => Some(InlineShape::Enum { tag, kinds: (extra >> 32) as u8, n }),
         MirAllocKind::Object { type_id, nfields } => Some(InlineShape::Instance { type_id, n: u8::try_from(nfields).ok()? }),
         _ => None,
@@ -1192,7 +1191,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(e)?;
                         }
                         match kind {
-                            MirAllocKind::Array | MirAllocKind::Lanes { .. } | MirAllocKind::Tuple | MirAllocKind::Enum { .. } => {}
+                            MirAllocKind::Array | MirAllocKind::Lanes { .. } | MirAllocKind::Enum { .. } => {}
                             MirAllocKind::DropEnum { .. } => {}
                             MirAllocKind::Object { .. } if elems.is_empty() => {}
                             // A function value: its body must have an entry
@@ -3323,12 +3322,7 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, v);
             }
             MirInst::Alloc { dest, kind, elems, kinds } => {
-                // Declaration order: an enum's elems are in push order and
-                // its payload starts with the last push, as `DenseMake`.
-                let mut words = elems.clone();
-                if matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::DropEnum { .. }) {
-                    words.reverse();
-                }
+                let words = elems;
                 // An opaque body's `int` words may be objects: their kinds
                 // stay unknown.
                 let packed = || if f.opaque_words { 0 } else { common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w)))) };
@@ -3344,12 +3338,12 @@ impl<'a> Lower<'a> {
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
                     self.b.append_block_param(join, types::I64);
-                    self.inline_alloc(f, &obj, *kind, &words, join);
+                    self.inline_alloc(f, &obj, *kind, words, join);
                     join
                 });
                 let p = match last {
-                    Some(w) => self.words_slot_with(f, &words, Some(w as i64)),
-                    None => self.words_slot(f, &words),
+                    Some(w) => self.words_slot_with(f, words, Some(w as i64)),
+                    None => self.words_slot(f, words),
                 };
                 let code = self.b.ins().iconst(types::I64, code as i64);
                 let n = self.b.ins().iconst(types::I64, n as i64);

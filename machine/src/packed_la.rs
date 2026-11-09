@@ -22,7 +22,7 @@
 use common::Value;
 use common::int_arith::{self, IntResult, IntTrap};
 
-use crate::{Heap, ObjArray, ObjTuple, Object};
+use crate::{Heap, ObjArray, ObjEnum, Object};
 
 /// `out[i] = f(a[i], b[i])`, stopping at the first trap.
 fn zip_i64(a: &[i64], b: &[i64], out: &mut [i64], f: fn(i64, i64) -> IntResult) -> Result<(), IntTrap> {
@@ -78,7 +78,7 @@ fn elements_of(obj: &Object) -> Option<std::borrow::Cow<'_, [Value]>> {
             Some(w) => std::borrow::Cow::Borrowed(w),
             None => std::borrow::Cow::Owned(gc.as_ref().to_vec()),
         }),
-        Object::Tuple(gc) => Some(std::borrow::Cow::Borrowed(gc.as_ref().elements())),
+        Object::Enum(gc) if gc.as_ref().is_tuple() => Some(std::borrow::Cow::Borrowed(gc.as_ref().elements())),
         _ => None,
     }
 }
@@ -165,7 +165,7 @@ fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>
 
 fn alloc_aggregate(heap: &mut Heap, values: Vec<Value>, is_tuple: bool) -> Value {
     let addr = if is_tuple {
-        let (object, _) = heap.alloc(ObjTuple::new(values), Object::Tuple);
+        let (object, _) = heap.alloc(ObjEnum::tuple(&values, 0), Object::Enum);
         object.addr()
     } else {
         let arr = ObjArray::from_values(values, heap);

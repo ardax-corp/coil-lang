@@ -10,7 +10,7 @@
 use common::{HeapSnapshot, SnapObject, SnapStep, SnapWord, SnapshotError, Value};
 
 use super::super::AddrHashBuilder;
-use super::{EnumPayload, Heap, ObjArray, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
+use super::{EnumPayload, Heap, ObjArray, ObjEnum, ObjInstance, ObjString, Object};
 
 /// A root to capture: the static slot it is stored to, its value, and the
 /// slot's word kind (`common::WORD_*`).
@@ -88,10 +88,6 @@ impl Heap {
                     let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
                     gc.payload_mut().words_mut().copy_from_slice(&values);
                 }
-                (Object::Tuple(gc), SnapObject::Tuple { words, .. }) => {
-                    let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
-                    gc.payload_mut().elements.as_mut_slice().copy_from_slice(&values);
-                }
                 (Object::Enum(gc), SnapObject::Enum { words, .. }) => {
                     let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
                     gc.payload_mut().payload.as_mut_slice().copy_from_slice(&values);
@@ -128,9 +124,6 @@ impl Heap {
             SnapObject::Lanes { k, tag_mask, words } => {
                 self.alloc(ObjArray::from_lanes(zeros(words.len()), usize::from(*k), *tag_mask), Object::Array).0
             }
-            SnapObject::Tuple { kinds, words } => {
-                self.alloc(ObjTuple::new(zeros(words.len())).with_kinds(*kinds), Object::Tuple).0
-            }
             SnapObject::Enum { tag, type_id, kinds, words } => {
                 let mut e = ObjEnum::new(*tag, EnumPayload::from_vec(zeros(words.len())).with_kinds(*kinds));
                 e.type_id = *type_id;
@@ -147,7 +140,6 @@ impl Heap {
             SnapWord::Raw(raw) => Value::from(raw),
             SnapWord::Ref { index, err_bit } => Value::from(objects[index as usize].addr() | u64::from(err_bit)),
             SnapWord::UnitEnum { tag, err_bit } => Value::from(self.immortal_unit_enum(tag).addr() | u64::from(err_bit)),
-            SnapWord::EmptyTuple { err_bit } => Value::from(self.immortal_empty_tuple().addr() | u64::from(err_bit)),
         }
     }
 }
@@ -175,7 +167,6 @@ impl Capture<'_> {
                     err_bit,
                 });
             }
-            Object::Tuple(gc) if gc.as_ref().elements().is_empty() => return Ok(SnapWord::EmptyTuple { err_bit }),
             _ => {}
         }
         if let Some(what) = unsupported(&object) {
@@ -228,16 +219,11 @@ impl Capture<'_> {
                     words,
                 }
             }
-            Object::Tuple(gc) => {
-                let t = gc.as_ref();
-                let kinds = t.kinds();
-                let words = self.kinded(t.elements(), kinds, |i| parent(SnapStep::TupleElement(i)))?;
-                SnapObject::Tuple { kinds, words }
-            }
             Object::Enum(gc) => {
                 let e = gc.as_ref();
                 let kinds = e.payload.kinds();
-                let words = self.kinded(&e.payload, kinds, |i| parent(SnapStep::Payload(i)))?;
+                let step = if e.is_tuple() { SnapStep::TupleElement } else { SnapStep::Payload };
+                let words = self.kinded(&e.payload, kinds, |i| parent(step(i)))?;
                 SnapObject::Enum {
                     tag: e.tag,
                     type_id: e.type_id,
@@ -302,7 +288,6 @@ fn unsupported(object: &Object) -> Option<&'static str> {
     Some(match object {
         Object::String(_)
         | Object::Array(_)
-        | Object::Tuple(_)
         | Object::Enum(_)
         | Object::Instance(_) => return None,
         Object::Fn(_) => "a function value",

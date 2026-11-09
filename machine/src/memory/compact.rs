@@ -24,7 +24,7 @@ use common::Value;
 use super::super::AddrHashBuilder;
 use super::{
     GcData, GcHeader, GcPhase, Heap, Member, ObjArray, ObjEnum,
-    ObjFn, ObjInstance, ObjTuple, Object, SlotVisitorMut,
+    ObjFn, ObjInstance, Object, SlotVisitorMut,
 };
 
 type AddrSet = HashSet<u64, AddrHashBuilder>;
@@ -95,10 +95,8 @@ impl Object {
     pub(super) fn movable_layout(&self) -> Option<Layout> {
         Some(match self {
             Self::Instance(_) => Layout::new::<GcData<ObjInstance>>(),
-            // Unit variants are shared immortals.
+            // Unit variants and `()` are shared immortals.
             Self::Enum(e) if !e.as_ref().payload.is_empty() => Layout::new::<GcData<ObjEnum>>(),
-            // `()` is a shared immortal.
-            Self::Tuple(t) if !t.as_ref().elements().is_empty() => Layout::new::<GcData<ObjTuple>>(),
             Self::Array(_) => Layout::new::<GcData<ObjArray>>(),
             Self::Fn(_) => Layout::new::<GcData<ObjFn>>(),
             _ => return None,

@@ -134,7 +134,7 @@ use crate::ffi::Natives;
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
 use crate::memory::{
     EnumPayload, Heap, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
-    ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
+    ObjSender, ObjThread, ObjThreadMutex, Object,
 };
 
 /// Immutable program image shared across OS threads.
@@ -260,7 +260,7 @@ pub enum PortableValue {
     Array(Vec<PortableValue>),
     /// A packed byte array (`Vec<byte>` / `Vec<bool>`), kept packed.
     Bytes(Vec<u8>),
-    Tuple(Vec<PortableValue>),
+    /// A variant, or a tuple under [`common::PRODUCT_TAG`].
     Enum {
         tag: u32,
         payload: Vec<PortableValue>,
@@ -292,7 +292,6 @@ impl std::fmt::Debug for PortableValue {
             Self::String(s) => write!(f, "String({s:?})"),
             Self::Array(a) => f.debug_tuple("Array").field(a).finish(),
             Self::Bytes(b) => f.debug_tuple("Bytes").field(b).finish(),
-            Self::Tuple(t) => f.debug_tuple("Tuple").field(t).finish(),
             Self::Enum {
                 tag,
                 payload,
@@ -325,7 +324,6 @@ impl PartialEq for PortableValue {
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Array(a), Self::Array(b)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
-            (Self::Tuple(a), Self::Tuple(b)) => a == b,
             (
                 Self::Enum {
                     tag: t1,
@@ -1149,13 +1147,6 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
             }
             Ok(PortableValue::Array(out))
         }
-        Object::Tuple(gc) => {
-            let mut out = Vec::with_capacity(gc.as_ref().elements().len());
-            for e in gc.as_ref().elements() {
-                out.push(encode_value(heap, *e, cx)?);
-            }
-            Ok(PortableValue::Tuple(out))
-        }
         Object::Enum(gc) => {
             let mut payload = Vec::with_capacity(gc.as_ref().payload.len());
             for m in &gc.as_ref().payload {
@@ -1233,19 +1224,15 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let (obj, _) = heap.alloc(ObjArray::from_bytes(bytes), Object::Array);
             Ok(Value::from(obj.addr()))
         }
-        PortableValue::Tuple(elems) => {
-            let mut elements = Vec::with_capacity(elems.len());
-            for e in elems {
-                elements.push(decode_portable(heap, e)?);
-            }
-            let (obj, _) = heap.alloc(ObjTuple::new(elements), Object::Tuple);
-            Ok(Value::from(obj.addr()))
-        }
         PortableValue::Enum {
             tag,
             payload,
             type_id,
         } => {
+            // Unit variants and `()` are the shared immortals.
+            if payload.is_empty() && type_id == 0 {
+                return Ok(Value::from(heap.immortal_unit_enum(tag).addr()));
+            }
             let mut members = Vec::with_capacity(payload.len());
             for pv in payload {
                 let v = decode_portable(heap, pv)?;
@@ -1674,7 +1661,7 @@ pub fn host_channel(heap: &mut Heap, _args: &[Value]) -> Value {
     );
     let (rx_obj, _) = heap.alloc(ObjReceiver { inner }, Object::Receiver);
     let pair = vec![Value::from(tx_obj.addr()), Value::from(rx_obj.addr())];
-    let (tup, _) = heap.alloc(ObjTuple::new(pair), Object::Tuple);
+    let (tup, _) = heap.alloc(ObjEnum::tuple(&pair, 0), Object::Enum);
     let v = Value::from(tup.addr());
     as_result_value(heap, ErrorSet::Channel, Ok(v))}
 
@@ -1872,7 +1859,7 @@ fn try_host_with_lock(
 }
 
 fn parse_lock_callback_result(heap: &Heap, ret: Value) -> Result<(Value, Value), ThreadErrorTag> {
-    let Some(Object::Tuple(gc)) = heap.find_object_by_addr(ret.bits()) else {
+    let Some(gc) = heap.find_object_by_addr(ret.bits()).and_then(Object::as_tuple) else {
         return Err(ThreadErrorTag::Other);
     };
     let elems = &gc.as_ref().elements();
@@ -2292,7 +2279,7 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0);
-        let Member::Object(Object::Tuple(tup)) = &heap.member_of(gc.as_ref().payload[0]) else {
+        let Member::Object(Object::Enum(tup)) = &heap.member_of(gc.as_ref().payload[0]) else {
             panic!("expected (Sender, Receiver) tuple");
         };
         let elems = &tup.as_ref().elements();
@@ -2353,16 +2340,14 @@ mod tests {
     #[test]
     fn portable_roundtrip_tuple_and_enum() {
         let mut heap = Heap::default();
-        let (tup, _) = heap.alloc(
-            ObjTuple::new(vec![Value::from(7_i64), Value::from(8_i64)]),
-            Object::Tuple,
-        );
+        let (tup, _) = heap.alloc(ObjEnum::tuple(&[Value::from(7_i64), Value::from(8_i64)], 0), Object::Enum);
         let pv = value_to_portable(&heap, Value::from(tup.addr())).unwrap();
-        assert!(matches!(pv, PortableValue::Tuple(ref e) if e.len() == 2));
+        assert!(matches!(pv, PortableValue::Enum { tag: common::PRODUCT_TAG, ref payload, .. } if payload.len() == 2));
         let back = portable_to_value(&mut heap, pv).unwrap();
-        let Object::Tuple(gc) = heap.find_object_by_addr(back.bits()).unwrap() else {
+        let Object::Enum(gc) = heap.find_object_by_addr(back.bits()).unwrap() else {
             panic!("expected tuple");
         };
+        assert!(gc.as_ref().is_tuple());
         assert_eq!(gc.as_ref().elements()[0].as_int(), 7);
         assert_eq!(gc.as_ref().elements()[1].as_int(), 8);
 
@@ -2449,14 +2434,11 @@ mod tests {
         let mut heap = Heap::default();
         let out = crate::io::stream_stdout(&mut heap).unwrap();
         let unsent = crate::io::alloc_unsent_stream(&mut heap);
-        let (tup, _) = heap.alloc(
-            ObjTuple::new(vec![out, Value::from(1_i64), unsent]),
-            Object::Tuple,
-        );
+        let (tup, _) = heap.alloc(ObjEnum::tuple(&[out, Value::from(1_i64), unsent], 0), Object::Enum);
         let v = Value::from(tup.addr());
         assert_eq!(value_to_portable(&heap, v), Err(ThreadErrorTag::NotSendable));
         assert!(value_to_spawn_arg(&heap, v).is_err());
-        let Ok(SpawnArg::Value(PortableValue::Tuple(elems))) = value_to_static_arg(&heap, v) else {
+        let Ok(SpawnArg::Value(PortableValue::Enum { tag: common::PRODUCT_TAG, payload: elems, .. })) = value_to_static_arg(&heap, v) else {
             panic!("expected a copied tuple");
         };
         assert!(matches!(
@@ -2470,8 +2452,8 @@ mod tests {
         assert_eq!(elems[1], PortableValue::Immediate(Value::from(1_i64).bits()));
         assert_eq!(elems[2], PortableValue::UnsentStream);
         let mut worker = Heap::default();
-        let copy = portable_to_value(&mut worker, PortableValue::Tuple(elems)).unwrap();
-        let Some(Object::Tuple(gc)) = worker.find_object_by_addr(copy.bits()) else {
+        let copy = portable_to_value(&mut worker, PortableValue::Enum { tag: common::PRODUCT_TAG, payload: elems, type_id: 0 }).unwrap();
+        let Some(Object::Enum(gc)) = worker.find_object_by_addr(copy.bits()) else {
             panic!("expected a tuple");
         };
         let elems = gc.as_ref().elements().to_vec();
@@ -2528,12 +2510,9 @@ mod tests {
         assert!(matches!(rw_pv, PortableValue::RwLockHandle(_)));
 
         // Nested in a tuple (request/reply spawn arg shape).
-        let (tup, _) = heap.alloc(
-            ObjTuple::new(vec![tx, rx]),
-            Object::Tuple,
-        );
+        let (tup, _) = heap.alloc(ObjEnum::tuple(&[tx, rx], 0), Object::Enum);
         let tup_pv = value_to_portable(&heap, Value::from(tup.addr())).unwrap();
-        let PortableValue::Tuple(elems) = tup_pv else {
+        let PortableValue::Enum { tag: common::PRODUCT_TAG, payload: elems, .. } = tup_pv else {
             panic!("expected tuple");
         };
         assert_eq!(elems.len(), 2);

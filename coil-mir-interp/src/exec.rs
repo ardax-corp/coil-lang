@@ -2,7 +2,7 @@
 //! does, through the same helpers.
 
 use compiler::native_mir::{
-    AllocCall, MirAllocKind, MirBinOp, alloc_call, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, vector_op, word_kind,
+    AllocCall, MirBinOp, alloc_call, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, vector_op, word_kind,
 };
 use machine::native::{
     self as rt, Applied, NOT_AN_ENUM, NativeCtx,
@@ -800,19 +800,13 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set!(*dest, w);
             }
             MirInst::Alloc { dest, kind, elems, kinds } => {
-                // Declaration order: an enum's elems are in push order and
-                // its payload starts with the last push, as `DenseMake`.
-                let mut order = elems.clone();
-                if matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::DropEnum { .. }) {
-                    order.reverse();
-                }
                 let pc_of = |t| program(body).body_at(t).map(|b| b.pc).filter(|&pc| pc != u32::MAX);
-                let Ok(AllocCall { code, n, extra, last }) = alloc_call(*kind, order.len(), *kinds, || packed_kinds(f, &order), pc_of) else {
+                let Ok(AllocCall { code, n, extra, last }) = alloc_call(*kind, elems.len(), *kinds, || packed_kinds(f, elems), pc_of) else {
                     return Flow::Trap(TRAP_HELPER);
                 };
                 let s = &mut (*act).scratch;
                 s.clear();
-                s.extend(order.iter().map(|v| get!(*v)));
+                s.extend(elems.iter().map(|v| get!(*v)));
                 s.extend(last);
                 let w = rt::coil_native_alloc(ctx, code, s.as_ptr(), n, extra);
                 check!();

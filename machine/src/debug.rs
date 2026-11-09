@@ -313,7 +313,7 @@ pub fn object_view(heap: &crate::memory::Heap, v: common::Value) -> Option<Debug
             DebugObject::Instance { type_id: inst.type_id, fields: inst.slots().to_vec() }
         }
         Object::Array(gc) => DebugObject::Array(gc.as_ref().to_vec()),
-        Object::Tuple(gc) => DebugObject::Tuple(gc.as_ref().elements().to_vec()),
+        Object::Enum(gc) if gc.as_ref().is_tuple() => DebugObject::Tuple(gc.as_ref().elements().to_vec()),
         Object::Enum(gc) => {
             let e = gc.as_ref();
             DebugObject::Enum { tag: e.tag, payload: e.payload.to_vec() }

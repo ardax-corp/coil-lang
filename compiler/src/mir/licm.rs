@@ -790,7 +790,7 @@ fn motion(
             (!reads_heap || !fx.heap() && !fx.lengths).then_some(Motion::Traps)
         }
         MirInst::Alloc {
-            kind: super::inst::MirAllocKind::Array | super::inst::MirAllocKind::Tuple,
+            kind: super::inst::MirAllocKind::Array | super::inst::MirAllocKind::TUPLE,
             ..
         }
         | MirInst::GcBarrier { .. } => free(dense && !fx.heap()),

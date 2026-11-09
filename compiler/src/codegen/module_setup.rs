@@ -194,7 +194,7 @@ impl Compiler {
                         .map(|&t| b.ins_const(MirConst::I64(i64::from(t))))
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(mir)?;
-                    let tuple = b.ins_alloc(MirAllocKind::Tuple, tags).map_err(mir)?;
+                    let tuple = b.ins_alloc(MirAllocKind::TUPLE, tags).map_err(mir)?;
                     let tuple = b.ins_gc_barrier(MirGcKind::Safepoint, vec![tuple]).map_err(mir)?;
                     let ret = b.ins_const(MirConst::I64(i64::from(*ret))).map_err(mir)?;
                     let id = Self::setup_ffi(&mut b, MirFfiOp::Declare, *operand, vec![lib, name, tuple, ret])?;

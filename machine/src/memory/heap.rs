@@ -279,8 +279,6 @@ pub struct Heap {
     /// Last tag returned by [`Self::immortal_unit_enum`]. Unit constructors
     /// (binary-tree leaves) hit this instead of the map.
     unit_enum: Option<(u32, Object)>,
-    /// Shared `()` ([`Self::immortal_empty_tuple`]), never swept or moved.
-    empty_tuple: Option<Object>,
     /// Shared function values that capture and fill nothing, by entry,
     /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
     immortal_fns: HashMap<(u32, u32, bool), Object>,
@@ -369,7 +367,6 @@ impl Default for Heap {
             finalizable: Vec::new(),
             immortal_enums: HashMap::default(),
             unit_enum: None,
-            empty_tuple: None,
             immortal_fns: HashMap::new(),
             gc_gray: Vec::new(),
             gc_root_objects: Vec::new(),
@@ -924,8 +921,8 @@ impl Heap {
                 return false;
             };
             let (type_id, finalized) = match obj {
-                Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
-                Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                Object::Instance(gc) => (gc.as_ref().type_id, obj.is_finalized()),
+                Object::Enum(gc) => (gc.as_ref().type_id, obj.is_finalized()),
                 // A closeable generator stays listed until it is done.
                 Object::Coroutine(gc) => {
                     let open = gc.as_ref().closeable && gc.as_ref().state == CoroState::Suspended;
@@ -1452,11 +1449,8 @@ impl Heap {
     /// Whether `obj` has a `drop` that has not run yet.
     fn pending_drop(&self, obj: Object) -> bool {
         self.finalizer_object(obj)
-            && match obj {
-                Object::Instance(gc) => !gc.as_ref().finalized,
-                Object::Enum(gc) => !gc.as_ref().finalized,
-                _ => false,
-            }
+            && matches!(obj, Object::Instance(_) | Object::Enum(_))
+            && !obj.is_finalized()
     }
 
     /// Whether [`Self::free_early`] may free `obj` (when nothing reaches it).
@@ -1468,7 +1462,6 @@ impl Heap {
                 !s_ref.hash_set() || self.strings.find(&s_ref.data, s_ref.hash_code()).is_none_or(|i| i.as_ptr() != s.as_ptr())
             }
             Object::Array(_) => true,
-            Object::Tuple(t) => !t.as_ref().elements().is_empty(),
             // An object whose `drop` is pending is walked; [`Self::free_early`]
             // leaves it to the collector unless its `drop` already ran.
             Object::Enum(e) => !e.as_ref().payload.is_empty(),
@@ -1858,9 +1851,6 @@ impl Heap {
         for obj in self.immortal_enums.values() {
             roots.push(obj.addr());
         }
-        if let Some(obj) = self.empty_tuple {
-            roots.push(obj.addr());
-        }
         roots.extend(self.immortal_fns.values().map(Object::addr));
         roots
     }
@@ -1884,13 +1874,7 @@ impl Heap {
     /// The shared empty tuple `()`. It has no elements to change, so every
     /// `()` (a `Result<(), E>` `Ok`, a unit return) can be one object.
     pub fn immortal_empty_tuple(&mut self) -> Object {
-        if let Some(obj) = self.empty_tuple {
-            return obj;
-        }
-        let _epoch_guard = self.epoch_guard();
-        let (object, _) = self.alloc_unlocked(ObjTuple::from_slice(&[]), Object::Tuple);
-        self.empty_tuple = Some(object);
-        object
+        self.immortal_unit_enum(common::PRODUCT_TAG)
     }
 
     /// Return a shared arity-0 enum for `tag`, allocating once per tag.
@@ -2245,7 +2229,6 @@ pub enum Object {
     Instance(RefInstance),
     Enum(RefEnum),
     Library(RefLibrary),
-    Tuple(crate::memory::Gc<ObjTuple>),
     Array(crate::memory::Gc<ObjArray>),
     Coroutine(RefCoroutine),
     /// Strong GC pin: marks `payload` while this handle is reachable.
@@ -2269,7 +2252,6 @@ macro_rules! each_kind {
             Object::Instance($r) => $body,
             Object::Enum($r) => $body,
             Object::Library($r) => $body,
-            Object::Tuple($r) => $body,
             Object::Array($r) => $body,
             Object::Coroutine($r) => $body,
             Object::Root($r) => $body,
@@ -2304,7 +2286,7 @@ pub(crate) trait SlotVisitorMut {
 /// and [`Object::visit_slots_mut`] (rewrites). It says which words of each
 /// kind of object may hold a reference and how sure that is:
 ///
-/// - instance slots, enum payload and tuple words: every word, with the
+/// - instance slots and enum payload (tuple) words: every word, with the
 ///   kind its class row or construction site recorded (scalars included);
 /// - array words, when [`ObjArray::may_hold_refs`]: a word array's words
 ///   with its element kind, a lane array's pointer lanes only;
@@ -2331,13 +2313,6 @@ macro_rules! walk_slots {
                 let payload = & $($m)? e.$get().payload;
                 let kinds = payload.kinds();
                 for (i, v) in payload.$slice().$iter().enumerate() {
-                    f.word(v, common::packed_word_kind(kinds, i));
-                }
-            }
-            Object::Tuple(t) => {
-                let elements = & $($m)? t.$get().elements;
-                let kinds = elements.kinds();
-                for (i, v) in elements.$slice().$iter().enumerate() {
                     f.word(v, common::packed_word_kind(kinds, i));
                 }
             }
@@ -2584,6 +2559,29 @@ impl Object {
         unsafe { &*(self.addr() as *const GcHeader) }.shared.get()
     }
 
+    /// This object as a tuple: an enum object of [`common::PRODUCT_TAG`].
+    #[inline]
+    pub fn as_tuple(self) -> Option<RefEnum> {
+        match self {
+            Self::Enum(e) if e.as_ref().is_tuple() => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Whether this object's `drop` has been claimed.
+    #[inline]
+    pub fn is_finalized(&self) -> bool {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.finalized.get()
+    }
+
+    /// Claim this object's `drop`: `false` when it was claimed already.
+    #[inline]
+    pub fn claim_finalizer(&self) -> bool {
+        // SAFETY: as in `is_finalized`.
+        !unsafe { &*(self.addr() as *const GcHeader) }.finalized.replace(true)
+    }
+
     #[inline]
     pub(crate) fn set_shared(&self) {
         unsafe { &*(self.addr() as *const GcHeader) }.shared.set(true);
@@ -2595,16 +2593,15 @@ impl Object {
         each_kind!(self, r => r.as_ptr() as u64)
     }
 
-    /// The header kind byte. 8 (a boxed scalar, gone with archive major 8)
-    /// and 11 are free; no kind takes them, so a stale number never reads as
-    /// another kind.
+    /// The header kind byte. 5 (a tuple, now an enum object of
+    /// [`common::PRODUCT_TAG`]), 8 (a boxed scalar) and 11 are free; no kind
+    /// takes them, so a stale number never reads as another kind.
     fn kind(self) -> u8 {
         match self {
             Self::String(_) => 1,
             Self::Instance(_) => KIND_INSTANCE,
             Self::Enum(_) => KIND_ENUM,
             Self::Library(_) => 4,
-            Self::Tuple(_) => KIND_TUPLE,
             Self::Array(_) => 6,
             Self::Coroutine(_) => 7,
             Self::Root(_) => 9,
@@ -2633,7 +2630,6 @@ impl Object {
             2 => Self::Instance(unsafe { Gc::from_addr(addr) }),
             3 => Self::Enum(unsafe { Gc::from_addr(addr) }),
             4 => Self::Library(unsafe { Gc::from_addr(addr) }),
-            5 => Self::Tuple(unsafe { Gc::from_addr(addr) }),
             6 => Self::Array(unsafe { Gc::from_addr(addr) }),
             7 => Self::Coroutine(unsafe { Gc::from_addr(addr) }),
             9 => Self::Root(unsafe { Gc::from_addr(addr) }),
@@ -2661,9 +2657,9 @@ impl fmt::Display for Object {
         match self {
             Self::String(s) => write!(f, "{}", s.as_ref()),
             Self::Instance(_) => write!(f, "0x{:08x}", self.addr()),
+            Self::Enum(e) if e.as_ref().is_tuple() => write!(f, "{}", e.as_ref()),
             Self::Enum(_) => write!(f, "0x{:08x}", self.addr()),
             Self::Library(_) => write!(f, "0x{:08x}", self.addr()),
-            Self::Tuple(t) => write!(f, "{}", t.as_ref()),
             Self::Array(a) => write!(f, "{}", a.as_ref()),
             Self::Coroutine(c) => write!(f, "{}", c.as_ref()),
             Self::Root(_) => write!(f, "<root 0x{:08x}>", self.addr()),
@@ -2700,91 +2696,27 @@ pub enum Member {
     Object(Object),
 }
 
-/// Max typed field count stored inside [`ObjInstance`] without a Rust `Vec`.
-///
-/// Typed fields are raw words (the GC resolves them like tuple elements), so
-/// four fit where two tagged [`Member`]s used to; larger classes spill.
-pub const INSTANCE_INLINE_FIELDS: usize = 4;
+/// Max typed field count stored inside [`ObjInstance`] without a Rust `Vec`:
+/// the inline width of the store every product object shares
+/// ([`EnumPayload`]).
+pub const INSTANCE_INLINE_FIELDS: usize = ENUM_INLINE_ARITY;
 
-/// Dense slots: inline up to [`INSTANCE_INLINE_FIELDS`], else a `Vec`.
-/// `repr(u8)`: fixed layout, so native code fills an inline instance in
-/// place ([`InlineLayout`]).
-#[repr(u8)]
-enum InstanceStorage {
-    Inline {
-        len: u8,
-        slots: [Value; INSTANCE_INLINE_FIELDS],
-    },
-    Spill(Vec<Value>),
-}
-
-impl InstanceStorage {
-    fn typed_slots(nfields: usize) -> Self {
-        if nfields <= INSTANCE_INLINE_FIELDS {
-            Self::Inline {
-                len: nfields as u8,
-                slots: [Value::from(0i64); INSTANCE_INLINE_FIELDS],
-            }
-        } else {
-            Self::Spill(vec![Value::from(0i64); nfields])
-        }
-    }
-
-    fn from_vec(slots: Vec<Value>) -> Self {
-        let n = slots.len();
-        if n <= INSTANCE_INLINE_FIELDS {
-            let mut inline = [Value::from(0i64); INSTANCE_INLINE_FIELDS];
-            inline[..n].copy_from_slice(&slots);
-            Self::Inline {
-                len: n as u8,
-                slots: inline,
-            }
-        } else {
-            Self::Spill(slots)
-        }
-    }
-
-    fn as_slice(&self) -> &[Value] {
-        match self {
-            Self::Inline { len, slots } => &slots[..*len as usize],
-            Self::Spill(slots) => slots.as_slice(),
-        }
-    }
-
-    fn as_mut_slice(&mut self) -> &mut [Value] {
-        match self {
-            Self::Inline { len, slots } => &mut slots[..*len as usize],
-            Self::Spill(slots) => slots.as_mut_slice(),
-        }
-    }
-
-    fn is_inline(&self) -> bool {
-        matches!(self, Self::Inline { .. })
-    }
-
-    fn spill_capacity(&self) -> usize {
-        match self {
-            Self::Spill(slots) => slots.capacity(),
-            Self::Inline { .. } => 0,
-        }
-    }
-}
-
+/// `type_id` first, so the slots sit at the offset of an [`ObjEnum`]'s
+/// payload: one inline read serves both ([`instance_slots`]).
 #[repr(C)]
 pub struct ObjInstance {
-    storage: InstanceStorage,
     /// Compile-time class identity (`0` = none).
     pub type_id: u32,
-    /// Set when `drop` has run (GC or explicit); drop must not run twice.
-    pub finalized: bool,
+    /// The fields' words; their kinds come from the class row, so the
+    /// store's own packed kinds stay `0`.
+    storage: EnumPayload,
 }
 
 impl Default for ObjInstance {
     fn default() -> Self {
         Self {
-            storage: InstanceStorage::typed_slots(0),
+            storage: EnumPayload::empty(),
             type_id: 0,
-            finalized: false,
         }
     }
 }
@@ -2795,9 +2727,8 @@ impl ObjInstance {
     #[must_use]
     pub fn with_type_id_and_fields(type_id: u32, nfields: usize) -> Self {
         Self {
-            storage: InstanceStorage::typed_slots(nfields),
+            storage: EnumPayload::zeros(nfields),
             type_id,
-            finalized: false,
         }
     }
 
@@ -2834,9 +2765,8 @@ impl ObjInstance {
     #[must_use]
     pub fn with_slots(type_id: u32, slots: Vec<Value>) -> Self {
         Self {
-            storage: InstanceStorage::from_vec(slots),
+            storage: EnumPayload::from_vec(slots),
             type_id,
-            finalized: false,
         }
     }
 }
@@ -2861,7 +2791,9 @@ impl GcSized for ObjInstance {
 /// so four fit where two tagged [`Member`]s used to; larger variants spill.
 pub const ENUM_INLINE_ARITY: usize = 4;
 
-/// Flat enum payload: inline words up to [`ENUM_INLINE_ARITY`], else a `Vec`.
+/// The fixed-slot store of every product object: a variant's payload, a
+/// tuple's items ([`ObjEnum`]) and an instance's fields ([`ObjInstance`]).
+/// Inline words up to [`ENUM_INLINE_ARITY`], else a `Vec`.
 #[repr(C)]
 pub struct EnumPayload {
     inner: EnumPayloadInner,
@@ -2893,6 +2825,21 @@ impl EnumPayload {
                 kinds: 0,
                 slots: [Value::default(); ENUM_INLINE_ARITY],
             },
+        }
+    }
+
+    /// `n` zero words: an instance's fields before their stores.
+    pub fn zeros(n: usize) -> Self {
+        if n <= ENUM_INLINE_ARITY {
+            Self {
+                inner: EnumPayloadInner::Inline {
+                    len: n as u8,
+                    kinds: 0,
+                    slots: [Value::from(0i64); ENUM_INLINE_ARITY],
+                },
+            }
+        } else {
+            Self::from_vec(vec![Value::from(0i64); n])
         }
     }
 
@@ -3037,12 +2984,10 @@ impl<'a> IntoIterator for &'a EnumPayload {
 #[repr(C)]
 pub struct ObjEnum {
     pub tag: u32,
-    pub payload: EnumPayload,
     /// Finalizer key for an enum with `fn drop()` (`TagEnumType`); `0` = none.
     /// Unit variants are shared immortals and are never tagged.
     pub type_id: u32,
-    /// Set once the finalizer has been claimed, like [`ObjInstance::finalized`].
-    pub finalized: bool,
+    pub payload: EnumPayload,
 }
 
 impl ObjEnum {
@@ -3051,8 +2996,27 @@ impl ObjEnum {
             tag,
             payload,
             type_id: 0,
-            finalized: false,
         }
+    }
+
+    /// A tuple of `elements`, `kinds` their packed word kinds: a product,
+    /// an enum object of [`common::PRODUCT_TAG`]. Immutable; up to
+    /// [`ENUM_INLINE_ARITY`] words live in the object, wider ones spill.
+    #[inline]
+    pub fn tuple(elements: &[Value], kinds: u8) -> Self {
+        Self::new(common::PRODUCT_TAG, EnumPayload::from_slice(elements).with_kinds(kinds))
+    }
+
+    /// Whether this object is a tuple ([`Self::tuple`]), not a variant.
+    #[inline]
+    pub fn is_tuple(&self) -> bool {
+        self.tag == common::PRODUCT_TAG
+    }
+
+    /// A tuple's elements (a variant's payload words).
+    #[inline]
+    pub fn elements(&self) -> &[Value] {
+        &self.payload
     }
 }
 
@@ -3064,7 +3028,7 @@ impl GcSized for ObjEnum {
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.payload.spill_capacity() * std::mem::size_of::<Member>()
+        std::mem::size_of::<Self>() + self.payload.spill_capacity() * std::mem::size_of::<Value>()
     }
 }
 
@@ -3149,46 +3113,6 @@ impl GcSized for ObjString {
 impl From<&str> for ObjString {
     fn from(value: &str) -> Self {
         Self::from_data(value.into())
-    }
-}
-
-/// Immutable tuple: up to [`ENUM_INLINE_ARITY`] words live in the object,
-/// wider tuples spill (same storage as enum payloads).
-#[repr(C)]
-pub struct ObjTuple {
-    elements: EnumPayload,
-}
-
-impl ObjTuple {
-    pub fn new(elements: Vec<Value>) -> Self {
-        Self {
-            elements: EnumPayload::from_vec(elements),
-        }
-    }
-
-    #[inline]
-    pub fn from_slice(elements: &[Value]) -> Self {
-        Self {
-            elements: EnumPayload::from_slice(elements),
-        }
-    }
-
-    /// Record the construction site's element word kinds.
-    #[inline]
-    pub fn with_kinds(self, kinds: u8) -> Self {
-        Self {
-            elements: self.elements.with_kinds(kinds),
-        }
-    }
-
-    #[inline]
-    pub fn kinds(&self) -> u8 {
-        self.elements.kinds()
-    }
-
-    #[inline]
-    pub fn elements(&self) -> &[Value] {
-        &self.elements
     }
 }
 
@@ -4249,14 +4173,6 @@ impl fmt::Display for ObjRwLock {
     }
 }
 
-impl GcSized for ObjTuple {
-    const NURSERY: bool = true;
-
-    fn size(&self) -> usize {
-        mem::size_of::<Self>() + self.elements.spill_capacity() * mem::size_of::<Value>()
-    }
-}
-
 impl GcSized for ObjArray {
     const NURSERY: bool = true;
 
@@ -4294,12 +4210,15 @@ impl GcSized for ObjFn {
     }
 }
 
-impl fmt::Display for ObjTuple {
+impl fmt::Display for ObjEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.is_tuple() {
+            return write!(f, "<variant {}>", self.tag);
+        }
         write!(
             f,
             "({})",
-            self.elements
+            self.payload
                 .iter()
                 .map(|v| format!("{}", v.as_int()))
                 .collect::<Vec<_>>()
@@ -4510,7 +4429,6 @@ pub trait GcSized {
 /// [`GcHeader::kind`] of the objects native code allocates inline.
 const KIND_INSTANCE: u8 = 2;
 const KIND_ENUM: u8 = 3;
-const KIND_TUPLE: u8 = 5;
 
 /// [`GcHeader::generation`]: the object lives in a young (nursery) chunk.
 pub(crate) const GEN_YOUNG: u8 = 1;
@@ -4634,6 +4552,9 @@ struct GcHeader {
     /// copies it first ([`Heap::cow_unique`]). Sticky until the slot is
     /// reused.
     shared: Cell<bool>,
+    /// An instance's or enum's `drop` has been claimed: it never runs
+    /// twice ([`Object::claim_finalizer`]).
+    finalized: Cell<bool>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
     /// byte of what is header padding before an 8-aligned payload; release
@@ -4656,6 +4577,7 @@ impl GcHeader {
             fresh: Cell::new(false),
             generation: Cell::new(0),
             shared: Cell::new(false),
+            finalized: Cell::new(false),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
         }
@@ -5407,7 +5329,7 @@ mod tests {
             ObjEnum::new(1, EnumPayload::from_slice(&words).with_kinds(kinds)),
             Object::Enum,
         );
-        let (tup, _) = heap.alloc(ObjTuple::from_slice(&words).with_kinds(kinds), Object::Tuple);
+        let (tup, _) = heap.alloc(ObjEnum::tuple(&words, kinds), Object::Enum);
 
         for obj in [en, tup] {
             let mut seen = Vec::new();
@@ -5661,7 +5583,7 @@ mod tests {
         unsafe { heap.sweep() };
         heap.restore_gc_roots(roots);
         match heap.find_object_by_addr(first) {
-            Some(Object::Tuple(t)) => assert!(t.as_ref().elements().is_empty()),
+            Some(Object::Enum(t)) => assert!(t.as_ref().is_tuple() && t.as_ref().elements().is_empty()),
             _ => panic!("`()` must survive a sweep"),
         }
     }
@@ -6010,9 +5932,7 @@ mod tests {
         let drops = heap.early_drops(Value::from(late.addr()), false, &keep).expect("listed");
         assert_eq!(drops.iter().map(|o| o.addr()).collect::<Vec<_>>(), vec![late.addr()]);
         assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 0, "its drop has not run");
-        if let Object::Instance(gc) = late {
-            gc.payload_mut().finalized = true;
-        }
+        late.claim_finalizer();
         assert!(heap.early_drops(Value::from(late.addr()), false, &keep).is_some_and(|d| d.is_empty()));
         assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 1);
     }
@@ -6036,8 +5956,7 @@ mod tests {
         let mut want = vec![early.addr(), tagged.addr()];
         want.sort_unstable();
         assert_eq!(got, want);
-        let Object::Instance(gc) = early else { unreachable!() };
-        gc.payload_mut().finalized = true;
+        early.claim_finalizer();
         let left: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
         assert_eq!(left, vec![tagged.addr()]);
         assert_eq!(heap.finalizable.len(), 2, "finalized entries leave the list");

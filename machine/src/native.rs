@@ -1186,7 +1186,7 @@ fn object(addr: u64) -> Option<crate::memory::Object> {
 pub unsafe extern "C" fn coil_native_index(ctx: *mut NativeCtx, addr: u64, index: i64) -> u64 {
     let read = match object(addr) {
         Some(crate::memory::Object::Array(gc)) => gc.as_ref().read_indexed(index, false),
-        Some(crate::memory::Object::Tuple(gc)) => {
+        Some(crate::memory::Object::Enum(gc)) if gc.as_ref().is_tuple() => {
             let elements = gc.as_ref().elements();
             usize::try_from(index).ok().and_then(|i| elements.get(i).copied())
         }
@@ -1197,7 +1197,7 @@ pub unsafe extern "C" fn coil_native_index(ctx: *mut NativeCtx, addr: u64, index
         None => {
             // SAFETY: the caller passes its live context.
             unsafe {
-                if matches!(object(addr), Some(crate::memory::Object::Array(_) | crate::memory::Object::Tuple(_))) {
+                if object(addr).is_some_and(|o| matches!(o, crate::memory::Object::Array(_)) || o.as_tuple().is_some()) {
                     (*ctx).trap = TRAP_OUT_OF_BOUNDS;
                 }
                 bail(ctx)
@@ -1211,7 +1211,7 @@ pub unsafe extern "C" fn coil_native_index(ctx: *mut NativeCtx, addr: u64, index
 pub extern "C" fn coil_native_len(addr: u64) -> u64 {
     (match object(addr) {
         Some(crate::memory::Object::Array(gc)) => gc.as_ref().len(),
-        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements().len(),
+        Some(crate::memory::Object::Enum(gc)) if gc.as_ref().is_tuple() => gc.as_ref().elements().len(),
         Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
         Some(crate::memory::Object::Instance(gc)) => {
             gc.as_ref().slot_len()
@@ -1266,12 +1266,12 @@ pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64,
 /// `payload_mask` is `0`, otherwise the enum variant of tag `hi`, whose
 /// payload is `lo` (or the empty tuple, under `unit_mask`) when it has one.
 fn lane_box(heap: &mut crate::memory::Heap, lo: u64, hi: u64, shape: [u64; 3]) -> u64 {
-    use crate::memory::{EnumPayload, ObjEnum, ObjTuple, Object};
+    use crate::memory::{EnumPayload, ObjEnum, Object};
     let [tag_mask, payload_mask, unit_mask] = shape;
     if payload_mask == 0 {
         let kinds = common::pack_word_kinds([common::WORD_SCALAR, common::WORD_SCALAR]);
         let items = [common::Value::from(lo), common::Value::from(hi)];
-        return heap.alloc(ObjTuple::from_slice(&items).with_kinds(kinds), Object::Tuple).0.addr();
+        return heap.alloc(ObjEnum::tuple(&items, kinds), Object::Enum).0.addr();
     }
     let tag = hi as u32;
     let bit = 1u64.checked_shl(tag).unwrap_or(0);
@@ -1294,14 +1294,14 @@ fn lane_box(heap: &mut crate::memory::Heap, lo: u64, hi: u64, shape: [u64; 3]) -
 /// none) and tag.
 fn lane_unbox(word: common::Value) -> Option<(u64, u64)> {
     match object(word.bits())? {
+        crate::memory::Object::Enum(gc) if gc.as_ref().is_tuple() => match gc.as_ref().elements() {
+            [a, b] => Some((a.bits(), b.bits())),
+            _ => None,
+        },
         crate::memory::Object::Enum(gc) => {
             let e = gc.as_ref();
             Some((e.payload.first().map_or(0, |v| v.bits()), u64::from(e.tag)))
         }
-        crate::memory::Object::Tuple(gc) => match gc.as_ref().elements() {
-            [a, b] => Some((a.bits(), b.bits())),
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -1641,14 +1641,14 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
 
 /// [`coil_native_alloc`] kinds.
 pub use common::native_alloc::{
-    ALLOC_ARRAY, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_LANES, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE,
+    ALLOC_ARRAY, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_LANES, ALLOC_OBJECT, ALLOC_POLY_FN,
 };
 
 /// A new object of `kind` from the `n` words at `words`, in declaration
 /// order (an enum's payload order):
 /// - [`ALLOC_ARRAY`]: `extra` is the element word kind (`0`: none);
-/// - [`ALLOC_TUPLE`]: `extra` is the packed word kinds;
-/// - [`ALLOC_ENUM`]: `extra` is `tag | kinds << 32`;
+/// - [`ALLOC_ENUM`]: `extra` is `tag | kinds << 32`, a tuple's tag
+///   [`common::PRODUCT_TAG`];
 /// - [`ALLOC_OBJECT`]: `extra` is the type id and `n` the field count
 ///   (`words` unused: stores fill the fields);
 /// - [`ALLOC_FN`]: a function value, as `MakeFn`: `extra` is the entry id
@@ -1668,7 +1668,7 @@ pub use common::native_alloc::{
 /// `ctx` is the call's [`NativeCtx`]; `words` points at `n` words.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words: *const u64, n: u64, extra: u64) -> u64 {
-    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, ObjTuple, Object};
+    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, Object};
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
     };
@@ -1695,8 +1695,6 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             }
             heap.alloc(ObjArray::from_lanes(values, 2, extra), Object::Array).0.addr()
         }
-        ALLOC_TUPLE if n == 0 => return heap.immortal_empty_tuple().addr(),
-        ALLOC_TUPLE => heap.alloc(ObjTuple::from_slice(&values).with_kinds(extra as u8), Object::Tuple).0.addr(),
         ALLOC_DROP_ENUM => {
             let Some((&type_id, payload)) = values.split_last() else {
                 return unsafe { bail(ctx) };

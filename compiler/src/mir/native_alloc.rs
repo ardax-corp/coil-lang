@@ -2,7 +2,7 @@
 //! code and the interpreter) pass to `coil_native_alloc`.
 
 use common::native_alloc::{
-    ALLOC_ARRAY, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_LANES, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE,
+    ALLOC_ARRAY, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_LANES, ALLOC_OBJECT, ALLOC_POLY_FN,
 };
 
 use super::MirAllocKind;
@@ -36,7 +36,6 @@ pub fn alloc_call(
     Ok(match kind {
         MirAllocKind::Array => call(ALLOC_ARRAY, n, u64::from(kinds), None),
         MirAllocKind::Lanes { tag_mask } => call(ALLOC_LANES, n, tag_mask, None),
-        MirAllocKind::Tuple => call(ALLOC_TUPLE, n, kinds_or_packed(), None),
         MirAllocKind::Enum { tag } => call(ALLOC_ENUM, n, u64::from(tag) | (kinds_or_packed() << 32), None),
         MirAllocKind::Object { type_id, nfields } => call(ALLOC_OBJECT, u64::from(nfields), u64::from(type_id), None),
         MirAllocKind::DropEnum { tag, type_id } => {

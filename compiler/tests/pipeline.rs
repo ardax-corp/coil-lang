@@ -3532,7 +3532,7 @@ fn main() {
     assert!(
         !compiled
             .insts("main")
-            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Tuple | MirAllocKind::Object { .. }, .. })),
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::TUPLE | MirAllocKind::Object { .. }, .. })),
         "`main` passes the pairs without boxing them"
     );
 }

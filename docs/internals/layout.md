@@ -32,7 +32,7 @@ two-slot call width).
 | `Result<(), E>`, `E` a ground heap type | niche: `0` = `Ok(())`, else the error pointer | `Layout::NicheUnitResult` |
 | `Result<T, E>`, `T` and `E` ground heap types | niche: pointer = `Ok`, `pointer \| 1` = `Err` | `Layout::NicheResult`; never steals int bits |
 | `Option<int>` (any immediate inner), `Result<immediate, _>`, `Result<(), immediate>`, closed payload enums with every arity `<= 1`, arity-2 immediate tuples, two-field immediate `readonly class` (#1562) | boxed object | `Layout::Pair`: two slots only under the call convention below |
-| `Option<Option<_>>`, `Result<Result<_>>`, mixed heap/immediate, enums with `fn drop` | boxed `ObjEnum` / `ObjTuple` | `Layout::Word` |
+| `Option<Option<_>>`, `Result<Result<_>>`, mixed heap/immediate, enums with `fn drop` | boxed `ObjEnum` | `Layout::Word` |
 | `Option<T>` / `Result<T, E>` with `T` open | boxed `ObjEnum` | see [Open enums](#open-enums) |
 | bare `V` in a shared body | `rep(ground T)` | |
 
@@ -54,6 +54,21 @@ word flag (`HirCallSite::words` / `word_ret`, `HirPolyCall`,
 bits retyped (`MirBuilder::ins_word` / `ins_word_as`: only a `float` or
 `bool` changes MIR type), so nothing boxes a word at an edge. `Show` of a scalar passes its type
 on `STRINGIFY`'s operand instead of boxing for the tag.
+
+**Heap products.** A boxed tuple and a boxed variant are one object kind,
+`ObjEnum` (`tag`, `type_id`, then the payload). A tuple is the tag-less
+product: its tag is `common::PRODUCT_TAG` (`u32::MAX`, which no enum
+reaches), its `type_id` `0`, and `()` is the shared unit object of that
+tag. Its words are the payload, in declaration order, with the packed
+word kinds of the first four (`PACKED_KIND_WORDS`); later words are
+unknown, which the collector resolves. Up to four words are inline, wider
+payloads spill. The object is 48 bytes (56 with the header): a variant
+lost 8 since `finalized` moved into the GC header, a tuple gained 8 for
+the tag and type id. MIR spells a tuple allocation `MirAllocKind::TUPLE`
+(`alloc.tuple`), an `Enum` of that tag; snapshots, thread copies and the
+inline allocation images have no tuple form of their own. A class
+instance keeps its fields in the same store (`EnumPayload`), at the same
+offset in the object (8, after `tag` and `type_id` or `type_id` alone).
 
 ## Shared generic bodies
 
