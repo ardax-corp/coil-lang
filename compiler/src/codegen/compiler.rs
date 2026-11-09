@@ -2783,7 +2783,7 @@ impl Compiler {
         .into_iter()
         .flatten()
         .collect();
-        let slot_of = |i: usize| self.lookup_slot(&format!("__dict{i}"));
+        let slot_of = |i: usize| self.frame_dict(i);
         for name in &names {
             if let Some(inst) = self
                 .checker
@@ -3219,7 +3219,7 @@ impl Compiler {
         }
 
         for dict_index in 0..dict_arity {
-            if let Some(slot) = self.lookup_slot(&format!("__dict{}", dict_index)) {
+            if let Some(slot) = self.frame_dict(dict_index) {
                 out.push(DictStep::Load(slot));
                 continue;
             }

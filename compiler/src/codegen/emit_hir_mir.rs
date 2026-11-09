@@ -1566,7 +1566,7 @@ impl Compiler {
     fn hir_mir_dict_ops(&mut self, generic: &HirGeneric) -> Option<Vec<crate::mir::HirDictOp>> {
         let mut ops = Vec::new();
         for &i in &generic.forwarded {
-            if let Some(slot) = self.lookup_slot(&format!("__dict{i}")) {
+            if let Some(slot) = self.frame_dict(i) {
                 if !self.hir_mir_dict_param(slot) {
                     return None;
                 }
@@ -1618,7 +1618,7 @@ impl Compiler {
         let Some(sp) = self.hir_mir_dict_sp else {
             return false;
         };
-        (slot < sp && (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).any(|s| s == slot))
+        (slot < sp && (0..).map_while(|i| self.frame_dict(i)).any(|s| s == slot))
             || self.hir_mir_ctx.iter().any(|&(s, own, _)| s == slot && own < sp)
     }
 
@@ -1834,7 +1834,7 @@ impl Compiler {
 
     /// Whether a call of `generic` reads a frame dictionary: one it forwards, or one of the call site's.
     fn hir_mir_generic_dict_reads(&mut self, generic: &HirGeneric) -> bool {
-        generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some_and(|slot| !self.hir_mir_dict_param(slot)))
+        generic.forwarded.iter().any(|&i| self.frame_dict(i).is_some_and(|slot| !self.hir_mir_dict_param(slot)))
             || self.hir_mir_probe_unplanned(|this, steps| {
                 this.plan_call_site_dicts(steps, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
             })
@@ -1898,7 +1898,7 @@ impl Compiler {
 
     /// Whether `steps` load one of the frame's dictionaries.
     fn hir_mir_steps_read_dicts(&self, steps: &[DictStep]) -> bool {
-        let dicts: HashSet<u32> = (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).collect();
+        let dicts: HashSet<u32> = (0..).map_while(|i| self.frame_dict(i)).collect();
         steps.iter().any(|step| matches!(step, DictStep::Load(slot) if dicts.contains(slot)))
     }
 
@@ -1984,7 +1984,7 @@ impl Compiler {
             }
             // An arity-wide tuple thunk's item: its own dictionary (#1479).
             Ty::Var(v) if let Some(&n) = self.synth_show_dicts.get(v) => {
-                let dict = self.lookup_slot(&format!("__dict{n}"))?;
+                let dict = self.frame_dict(n)?;
                 return Some(crate::mir::HirShow::Bound { dict, method: 0 });
             }
             _ => {}
