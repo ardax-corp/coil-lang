@@ -5,7 +5,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | Document | Contents |
 |----------|----------|
 | [Pipeline](pipeline.md) | Parse → typecheck → HIR (inline, optimize) → MIR for every body → archive → native code or the MIR interpreter |
-| [Archive history](archive-history.md) | Major 7 (MIR and data only) and older minors (5–37) |
+| [Archive history](archive-history.md) | Major 8 (the 2026-11 cleanup), major 7 (MIR and data only) and older minors (5–37) |
 | [Dictionary passing](dictionary-passing.md) | Calling convention for trait-bounded generics that are not monomorphized |
 | [Type unification](type-unification.md) | Unification rules of the checker, by type shape |
 | [Comptime](comptime.md) | Code that runs while compiling: consts, `comptime` expressions and blocks, macros, folding; stages, limits, IO grants, result cache, tooling |
