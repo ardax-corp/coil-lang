@@ -97,6 +97,7 @@ pub struct Summary {
 mod escape;
 #[path = "early_free.rs"]
 mod early_free;
+pub use early_free::Slots;
 #[path = "cow.rs"]
 pub mod cow;
 
@@ -257,10 +258,19 @@ impl ProgramEffects {
 
     /// `body` (as the HIR optimizer left it) with early frees of the
     /// objects nothing else reaches ([`early_free`]), when it has any.
-    /// `host` names the host native a call node runs, as planned.
-    pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
+    /// `host` names the host native a call node runs, as planned; `slots`
+    /// is what the plan keeps in frame slots.
+    pub fn early_frees(
+        &self,
+        checker: &Checker,
+        module_path: &str,
+        module: &HirModule,
+        body: &HirBody,
+        host: &dyn Fn(HirId) -> Option<usize>,
+        slots: &early_free::Slots<'_>,
+    ) -> Option<HirBody> {
         let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
-        early_free::rewrite(checker, module, body, &lookup, host)
+        early_free::rewrite(checker, module, body, &lookup, host, slots)
     }
 
     /// `body` with its copy-on-write ops ([`cow`]), when it needs any.

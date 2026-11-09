@@ -1525,7 +1525,16 @@ impl Compiler {
                     })
                     .collect();
                 let host = |id: HirId| hosts.get(&id.0).copied();
-                match self.program_effects.early_frees(&self.checker, &module_path, &module, hir, &host) {
+                // A two-word local and a stack array have no object, nor
+                // has a value a temp would hold as two words.
+                let slots = crate::hir::effects::Slots {
+                    local: &|l| emit.plan.pair_locals.contains_key(&l.0) || emit.plan.stacks.contains_key(&l.0),
+                    value: &|id| {
+                        matches!(self.hir_natural(hir, &emit, id), Some(Rep::Pair(_)))
+                            || Self::hir_ty(hir, id).is_some_and(|ty| self.hir_pair_ty_kind(ty).is_some())
+                    },
+                };
+                match self.program_effects.early_frees(&self.checker, &module_path, &module, hir, &host, &slots) {
                     Some(next) => match refusal::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
@@ -7835,10 +7844,15 @@ impl Compiler {
     /// The pair kind a local of a closed two-word type takes whatever its
     /// init: an open range stays its object (#1230).
     fn hir_pair_local_kind(&self, hir: &HirBody, local: LocalId) -> Option<PairKind> {
+        self.hir_pair_ty_kind(hir.local(local).ty.as_ref()?)
+    }
+
+    /// [`Self::hir_pair_local_kind`] of a local of type `ty`.
+    fn hir_pair_ty_kind(&self, ty: &Ty) -> Option<PairKind> {
         if !self.opt_options.hir_pair_locals {
             return None;
         }
-        let ty = apply_ty_prune(self.checker.subst(), hir.local(local).ty.as_ref()?);
+        let ty = apply_ty_prune(self.checker.subst(), ty);
         if Ty::has_var(&ty) || classify::is_open_range(&ty) {
             return None;
         }

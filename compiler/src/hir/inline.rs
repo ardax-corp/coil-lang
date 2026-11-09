@@ -1210,6 +1210,32 @@ pub fn blank_unreachable(body: &mut HirBody) {
 /// Blank the nodes not reachable from `root`: what a query that scans the
 /// whole arena reads is then only code that can run.
 pub fn blank_orphans(body: &mut HirBody, root: HirId) {
+    let live = reachable(body, root);
+    for (e, live) in body.exprs.iter_mut().zip(live) {
+        if !live {
+            e.kind = HirKind::Lit(Lit::Unit);
+        }
+    }
+}
+
+/// `body` with its orphans blanked ([`blank_orphans`]), when it has any.
+pub fn without_orphans(body: &HirBody, root: HirId) -> Option<HirBody> {
+    let live = reachable(body, root);
+    let blank = HirKind::Lit(Lit::Unit);
+    if body.exprs.iter().zip(&live).all(|(e, &live)| live || e.kind == blank) {
+        return None;
+    }
+    let mut out = body.clone();
+    for (e, live) in out.exprs.iter_mut().zip(live) {
+        if !live {
+            e.kind = blank.clone();
+        }
+    }
+    Some(out)
+}
+
+/// Which nodes `root` reaches.
+fn reachable(body: &HirBody, root: HirId) -> Vec<bool> {
     let mut live = vec![false; body.exprs.len()];
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
@@ -1218,11 +1244,7 @@ pub fn blank_orphans(body: &mut HirBody, root: HirId) {
         }
         stack.extend(body.children(id));
     }
-    for (e, live) in body.exprs.iter_mut().zip(live) {
-        if !live {
-            e.kind = HirKind::Lit(Lit::Unit);
-        }
-    }
+    live
 }
 
 /// Push `s` onto `out`, a nested block that always exits as its own
