@@ -614,10 +614,6 @@ pub struct Compiler {
     residue_lint: std::cell::Cell<bool>,
     /// E0808 warnings waiting for the module's messages, each once by key.
     residue: std::cell::RefCell<(HashSet<String>, Vec<Message>)>,
-    /// The context dictionaries of the body being lowered, as its prologue
-    /// loads them out of its own dictionary: each one's frame slot, the own
-    /// dictionary's slot and the index there.
-    hir_mir_ctx: Vec<(u32, u32, u32)>,
     /// HIR of the module being compiled.
     hir_module: Option<crate::hir::HirModule>,
     /// Function body index in [`Self::hir_module`] by declaration span.
@@ -817,7 +813,6 @@ impl Default for Compiler {
             hir_lambda_pairs: std::cell::RefCell::new(Vec::new()),
             residue_lint: std::cell::Cell::new(false),
             residue: std::cell::RefCell::new((HashSet::new(), Vec::new())),
-            hir_mir_ctx: Vec::new(),
             hir_fn_names: HashMap::new(),
             cold_fns: HashSet::new(),
             cold_labels: HashSet::new(),
@@ -849,6 +844,7 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 }
 
 mod compiler;
+pub(crate) use compiler::frame::BodyFrame;
 mod inline_cost;
 
 /// One `defer` thunk of the function being compiled.

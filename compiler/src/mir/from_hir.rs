@@ -24,6 +24,7 @@ use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::layout::ValueLayout;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 
+use crate::codegen::BodyFrame;
 use crate::layout::CallAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
@@ -394,7 +395,12 @@ impl Lower<'_> {
     /// A pair local's second-word slot and word types.
     fn pair_local_tys(&self, local: HirLocal) -> Option<(u32, MirTy, MirTy)> {
         let cell = self.facts.pair_locals.get(local.0 as usize)?;
-        *cell.get_or_init(|| self.cx.pair_local(local.0))
+        // A pair local the body never binds (its `let` folded away by
+        // inlining) has no second word: nothing reads it.
+        *cell.get_or_init(|| {
+            let (lo, hi) = self.cx.pair_local(local.0)?;
+            Some((*self.frame.tags.get(&local.0)?, lo, hi))
+        })
     }
 
     /// `id`'s element when it is a lane array (`Vec` of a two-word type).
@@ -450,7 +456,10 @@ impl Lower<'_> {
     /// A stack array local's first slot, length and element type.
     fn stack(&self, local: u32) -> Option<(u32, usize, MirTy)> {
         let cell = self.facts.stacks.get(local as usize)?;
-        *cell.get_or_init(|| self.cx.stack(local))
+        *cell.get_or_init(|| {
+            let (n, elem) = self.cx.stack(local)?;
+            Some((self.frame.slot(HirLocal(local))?, n, elem))
+        })
     }
 
     /// The length of `id` when it is a stack array local, as
@@ -477,7 +486,10 @@ impl Lower<'_> {
     /// The frame slot of field read or write `id` on an `sroa` local.
     fn frame_field(&self, id: HirId) -> Option<u32> {
         let cell = self.facts.frame_fields.get(id.0 as usize)?;
-        *cell.get_or_init(|| self.cx.frame_field(id))
+        *cell.get_or_init(|| {
+            let (local, field) = self.cx.frame_field(id)?;
+            Some(self.frame.slot(HirLocal(local))? + field)
+        })
     }
 
     /// What `new` `id` makes.
@@ -581,7 +593,23 @@ pub trait LowerCx {
     /// `LaneIndex` / `LaneStore` / `LanePush`).
     fn lane_elem(&self, ty: &Ty) -> Option<HirLaneElem>;
     /// A pair local's second-word slot and word types, by local.
-    fn pair_local(&self, local: u32) -> Option<(u32, MirTy, MirTy)>;
+    fn pair_local(&self, local: u32) -> Option<(MirTy, MirTy)>;
+    /// The body's entry frame: where its parameters, captures and
+    /// dictionaries sit, and where its own locals start.
+    fn frame(&self) -> &BodyFrame;
+    /// The frame's dictionaries are parameters of the body's MIR, each one
+    /// heap word (a shared generic body's, a lambda's captured ones). A
+    /// mono clone's frame keeps their slots, and nothing passes them.
+    fn dict_params(&self) -> bool;
+    /// The locals the body binds in its frame, besides its parameters. Any
+    /// other binding is read as its value.
+    fn bound_locals(&self) -> HashSet<u32>;
+    /// The frame words of a local the body binds.
+    fn local_words(&self, local: u32) -> LocalWords;
+    /// Called once with the frame lowering numbered (each local's first
+    /// slot): refuses a body with a slot-kept local, field or two-word
+    /// value lowering cannot type.
+    fn check_frame(&self, slots: &[Option<u32>]) -> Result<(), Refusal>;
     /// The word types of the body's result when it returns two words.
     fn ret_pair(&self) -> Option<(MirTy, MirTy)>;
     /// How field read or write `id` reaches its slot, unless it is a field
@@ -593,17 +621,18 @@ pub trait LowerCx {
     /// A generic body's type parameter values are opaque words it only
     /// moves (a raw scalar or a box, as the caller passed it).
     fn opaque_vars(&self) -> bool;
-    /// A stack array local kept in frame slots: its first slot, length and
-    /// element type.
-    fn stack(&self, local: u32) -> Option<(u32, usize, MirTy)>;
+    /// A stack array local kept in frame slots: its length and element
+    /// type.
+    fn stack(&self, local: u32) -> Option<(usize, MirTy)>;
     /// A class local kept in frame slots: the type of each field's slot,
     /// from the local's own.
     fn sroa(&self, local: u32) -> Option<Vec<MirTy>>;
     /// The class of an `sroa` local, for its box where it escapes: the
     /// type id and field count.
     fn sroa_class(&self, local: u32) -> Option<(u32, u32)>;
-    /// The frame slot of a field read or written on an `sroa` local.
-    fn frame_field(&self, id: HirId) -> Option<u32>;
+    /// A field read or written on an `sroa` local: the local and the
+    /// field's slot from the local's first.
+    fn frame_field(&self, id: HirId) -> Option<(u32, u32)>;
     /// A field read or write on a record: the field's slot (records are
     /// slotted objects, their fields sorted by name) and word type.
     fn record_field(&self, id: HirId) -> Option<(u32, MirTy)>;
@@ -762,8 +791,6 @@ enum PairEqWords {
 
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
-    /// Planned local id of each local (the first word of a pair local).
-    pub slots: &'a [Option<u32>],
     pub calls: &'a HashMap<u32, HirCallSite>,
     /// The user `into_iter` entry each counted `for` loop calls.
     pub into_iters: &'a HashMap<u32, Label>,
@@ -804,10 +831,6 @@ pub struct HirMirInput<'a> {
     /// Trait methods on a bare-class existential pack, by call: the
     /// method's slot in the pack's dictionary.
     pub existential_calls: &'a HashMap<u32, u32>,
-    /// A bounded generic instance method's context dictionaries, as its
-    /// prologue loads them: each one's frame slot, then the slot of the
-    /// dictionary parameter it is read from and its index there.
-    pub ctx_dicts: &'a [(u32, u32, u32)],
     /// No finalizer resizes an array ([`MirFunc::lengths_steady`]).
     pub alloc_steady: bool,
     /// Function-local `const` tables of literals (#1561): the array
@@ -854,16 +877,75 @@ pub struct HirMirInput<'a> {
     pub cold_calls: HashSet<u32>,
     /// Source file of the body, for statement locations.
     pub file: Option<u32>,
-    /// Frame words at entry when trailing dictionary parameters follow
-    /// the body's own (a shared generic instance): each is one heap word.
-    pub entry_words: Option<u32>,
-    /// A lambda's captured dictionaries (#1526): `(first slot, count)`,
-    /// each one heap word after its own captures, before its parameters.
-    pub lambda_dicts: Option<(u32, u32)>,
     /// A debugger reads the body's locals from their frame words.
     pub debugger: bool,
     /// A coverage compile: each source line keeps the code it emits.
     pub coverage: bool,
+}
+
+/// The frame words of a local ([`LowerCx::local_words`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalWords {
+    /// One slot per word: a plain local's one, a stack array's elements, a
+    /// scalar-replaced class local's fields.
+    Slots(u32),
+    /// The two words of a pair.
+    Pair,
+}
+
+/// The frame a body's MIR keeps its locals in: the entry words where
+/// [`BodyFrame`] puts them, then each local the body binds, in local order,
+/// one id per word. A local's [`LocalId`] is its frame slot.
+#[derive(Debug, Default)]
+pub struct LocalFrame {
+    /// First id of each local that has words (`None`: never bound here).
+    pub slots: Vec<Option<u32>>,
+    /// Second id of each two-word (pair) local.
+    pub tags: HashMap<u32, u32>,
+    /// Words of each bound local.
+    pub widths: HashMap<u32, u32>,
+}
+
+impl LocalFrame {
+    fn new(hir: &HirBody, cx: &dyn LowerCx) -> Result<Self, Refusal> {
+        let entry = cx.frame();
+        let mut frame = LocalFrame { slots: vec![None; hir.locals.len()], ..LocalFrame::default() };
+        // A lambda lowers with its captures as its first parameters.
+        if entry.entry_locals().count() != hir.params.len() {
+            return Err("param slot".into());
+        }
+        for (&param, local) in hir.params.iter().zip(entry.entry_locals()) {
+            frame.slots[param.0 as usize] = Some(local.slot);
+            frame.widths.insert(param.0, 1);
+            if let Some((tag, _)) = local.pair {
+                frame.tags.insert(param.0, tag);
+            }
+        }
+        let bound = cx.bound_locals();
+        let mut next = entry.frame_base;
+        for local in 0..hir.locals.len() as u32 {
+            if frame.slots[local as usize].is_some() || !bound.contains(&local) {
+                continue;
+            }
+            let width = match cx.local_words(local) {
+                LocalWords::Slots(n) => n,
+                LocalWords::Pair => {
+                    frame.tags.insert(local, next + 1);
+                    2
+                }
+            };
+            frame.slots[local as usize] = Some(next);
+            frame.widths.insert(local, width);
+            next += width;
+        }
+        cx.check_frame(&frame.slots)?;
+        Ok(frame)
+    }
+
+    /// `local`'s first slot.
+    fn slot(&self, local: HirLocal) -> Option<u32> {
+        self.slots.get(local.0 as usize).copied().flatten()
+    }
 }
 
 struct Loop {
@@ -911,6 +993,8 @@ enum Open {
 struct Lower<'a> {
     hir: &'a HirBody,
     inp: &'a HirMirInput<'a>,
+    /// Where the body's locals sit.
+    frame: &'a LocalFrame,
     /// What lowering asks the compiler.
     cx: &'a dyn LowerCx,
     /// What lowering has asked so far, by node and local.
@@ -1010,11 +1094,12 @@ struct Lower<'a> {
 impl<'a> Lower<'a> {
     /// A lowering of `hir` into `b`, at its entry block, for a body that
     /// returns `()` until the caller says otherwise.
-    fn new(hir: &'a HirBody, inp: &'a HirMirInput<'a>, cx: &'a dyn LowerCx, b: MirBuilder) -> Self {
+    fn new(hir: &'a HirBody, inp: &'a HirMirInput<'a>, cx: &'a dyn LowerCx, frame: &'a LocalFrame, b: MirBuilder) -> Self {
         let cur = b.entry();
         Lower {
             hir,
             inp,
+            frame,
             cx,
             facts: Facts::new(hir),
             ret_pair: cx.ret_pair(),
@@ -1350,7 +1435,13 @@ fn mir(e: MirError) -> Refusal {
 
 /// Lower `hir` to MIR. Parameters must sit in slots `0..n`, a pair
 /// parameter in two.
-pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<MirFunc, Refusal> {
+pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<(MirFunc, LocalFrame), Refusal> {
+    let frame = LocalFrame::new(hir, cx)?;
+    let func = lower_in(hir, inp, cx, &frame)?;
+    Ok((func, frame))
+}
+
+fn lower_in(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx, frame: &LocalFrame) -> Result<MirFunc, Refusal> {
     if hir.is_generic && !cx.opaque_vars() {
         return Err("body kind generic".into());
     }
@@ -1367,7 +1458,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
     let mut b = MirBuilder::new(hir.name.clone());
     // Host natives are word edges.
     b.allow_host_edges = true;
-    let mut lower = Lower::new(hir, inp, cx, b);
+    let mut lower = Lower::new(hir, inp, cx, frame, b);
     // A body that never returns (it only panics) leaves its return type a
     // type variable no word layout covers (a shared generic body's is a
     // word): nothing reads its word, so it returns as a unit body.
@@ -1391,20 +1482,23 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
     lower.unit_ret = unit_ret;
     lower.ret_hir = ret.clone();
     lower.b.set_ret_ty(ret_ty);
+    // The entry words, in slot order: each parameter's (a lambda's
+    // captures first), and each dictionary's when the body takes them.
+    let entry = cx.frame();
+    let takes_dicts = cx.dict_params();
+    let dict_slots: HashSet<u32> = entry.dicts.values().copied().filter(|&slot| takes_dicts && slot < entry.entry_sp).collect();
     let mut next = 0;
     let mut dict_params = HashMap::new();
-    let mut lambda_dicts = inp.lambda_dicts;
-    for &param in &hir.params {
-        if let Some((at, n)) = lambda_dicts
-            && at == next
-        {
-            for slot in at..at + n {
-                dict_params.insert(slot, lower.b.add_param(MirTy::HeapRef).map_err(mir)?);
-            }
-            next += n;
-            lambda_dicts = None;
+    let mut add_dicts = |lower: &mut Lower, next: &mut u32| -> Result<(), Refusal> {
+        while dict_slots.contains(next) {
+            dict_params.insert(*next, lower.b.add_param(MirTy::HeapRef).map_err(mir)?);
+            *next += 1;
         }
-        if inp.slots.get(param.0 as usize).copied().flatten() != Some(next) {
+        Ok(())
+    };
+    for &param in &hir.params {
+        add_dicts(&mut lower, &mut next)?;
+        if frame.slot(param) != Some(next) {
             return Err("param slot".into());
         }
         let words = match lower.pair_local_tys(param) {
@@ -1431,29 +1525,19 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
             next += 1;
         }
     }
-    if let Some((at, n)) = lambda_dicts {
-        if at != next {
-            return Err("lambda dictionary slot".into());
-        }
-        for slot in at..at + n {
-            dict_params.insert(slot, lower.b.add_param(MirTy::HeapRef).map_err(mir)?);
-        }
-    }
-    if let Some(entry) = inp.entry_words {
-        if entry < next {
+    // Dictionaries: read only where a dictionary program loads one.
+    add_dicts(&mut lower, &mut next)?;
+    if takes_dicts {
+        if next != entry.entry_sp {
             return Err("param slot".into());
         }
-        // Dictionaries: read only where a dictionary program loads one.
-        for slot in next..entry {
-            dict_params.insert(slot, lower.b.add_param(MirTy::HeapRef).map_err(mir)?);
+        // An instance method's context dictionaries: each read out of its
+        // own dictionary at entry, into its slot.
+        for &(slot, own, index) in &entry.context {
+            let own = *dict_params.get(&own).ok_or("context dictionary")?;
+            let dict = lower.b.ins_tuple_item(own, index, MirTy::HeapRef).map_err(mir)?;
+            dict_params.insert(slot, dict);
         }
-    }
-    // An instance method's context dictionaries: each read out of its own
-    // dictionary at entry, as the prologue loads them into their slots.
-    for &(slot, own, index) in inp.ctx_dicts {
-        let own = *dict_params.get(&own).ok_or("context dictionary")?;
-        let dict = lower.b.ins_tuple_item(own, index, MirTy::HeapRef).map_err(mir)?;
-        dict_params.insert(slot, dict);
     }
     lower.dict_params = dict_params;
     lower.pin_locals()?;
@@ -1475,7 +1559,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
             });
             let lets: Vec<u32> = binds
                 .into_iter()
-                .filter(|l| inp.slots.get(l.0 as usize).copied().flatten().is_none())
+                .filter(|&l| frame.slot(l).is_none())
                 .map(|l| l.0)
                 .collect();
             for l in lets {
@@ -1530,7 +1614,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx) -> Result<
     // A pad is an extra: a body without one stays pinned to HIR emission.
     if let (Some(pad), Some(native)) = (pad, inp.unwind_native)
         && !pad.caps.keys().any(|l| boxed.contains(l))
-        && let Ok(cleanup) = lower_pad(hir, inp, cx, PadParts { defers: &defers, defer_locals, next_temp, homes: &pad, home_tys: &func.homes, native })
+        && let Ok(cleanup) = lower_pad(hir, inp, cx, frame, PadParts { defers: &defers, defer_locals, next_temp, homes: &pad, home_tys: &func.homes, native })
     {
         func.cleanup = Some(Box::new(cleanup));
     }
@@ -1567,14 +1651,14 @@ struct PadParts<'p> {
 /// The unwind cleanup pad of a body with `defer`s: each armed `defer`, last first, with its captures
 /// read from their homes as they stood at the panic, then `unwind_resume`.
 /// It runs in the body's frame and reads the homes there.
-fn lower_pad(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx, parts: PadParts<'_>) -> Result<MirFunc, Refusal> {
+fn lower_pad(hir: &HirBody, inp: &HirMirInput, cx: &dyn LowerCx, frame: &LocalFrame, parts: PadParts<'_>) -> Result<MirFunc, Refusal> {
     let mut b = MirBuilder::new(format!("{}$pad", hir.name));
     b.allow_host_edges = true;
     b.set_ret_ty(MirTy::I64);
     for &ty in parts.home_tys {
         b.add_home(ty).map_err(mir)?;
     }
-    let mut pad = Lower::new(hir, inp, cx, b);
+    let mut pad = Lower::new(hir, inp, cx, frame, b);
     pad.unit_ret = true;
     pad.next_temp = parts.next_temp;
     pad.defer_locals = parts.defer_locals;
@@ -1821,7 +1905,7 @@ impl Lower<'_> {
                 return None;
             }
             let ty = self.local_ty(c).ok()?;
-            let slot = self.inp.slots.get(c.0 as usize).copied().flatten().map(LocalId);
+            let slot = self.frame.slot(c).map(LocalId);
             let home = self.b.add_home(ty).ok()?;
             pad.caps.insert(c.0, (home, slot));
             if let Some(slot) = slot
@@ -1846,11 +1930,8 @@ impl Lower<'_> {
     }
 
     fn slot(&self, local: HirLocal) -> Result<LocalId, Refusal> {
-        self.inp
-            .slots
-            .get(local.0 as usize)
-            .copied()
-            .flatten()
+        self.frame
+            .slot(local)
             .map(LocalId)
             .or_else(|| self.defer_locals.get(&local.0).copied())
             .ok_or_else(|| "local slot".into())
@@ -1937,7 +2018,7 @@ impl Lower<'_> {
         for (i, local) in self.hir.locals.iter().enumerate() {
             let id = HirLocal(i as u32);
             if !local.ty.as_ref().is_some_and(|t| self.cx.pinned(t))
-                || self.inp.slots.get(i).copied().flatten().is_none()
+                || self.frame.slot(id).is_none()
                 || self.pair_local_tys(id).is_some()
             {
                 continue;
@@ -5740,7 +5821,7 @@ impl Lower<'_> {
             vec![(lo, if lo_ty == MirTy::I64 { MirTy::HeapRef } else { lo_ty })]
         } else if self.pair_local_tys(local).is_some() {
             return Err("clear pair local".into());
-        } else if self.inp.slots.get(local.0 as usize).copied().flatten().is_none() && !self.defer_locals.contains_key(&local.0) {
+        } else if self.frame.slot(local).is_none() && !self.defer_locals.contains_key(&local.0) {
             // No frame slot: a binding read as its value (an arm's SSA
             // value, which need not reach this clear), or one emission
             // never bound (an arm a split enum dropped or renamed to its
@@ -7579,7 +7660,7 @@ impl Lower<'_> {
             (MirTy::I64, MirTy::F64) => self.fit(v, ty)?,
             _ => return Err("binding type".into()),
         };
-        if self.inp.slots.get(local.0 as usize).copied().flatten().is_none() {
+        if self.frame.slot(local).is_none() {
             let assigned = self.hir.exprs.iter().any(|e| {
                 matches!(e.kind, HirKind::Assign { place, .. } if matches!(self.hir.expr(place).kind, HirKind::Local(l) if l == local))
             });
