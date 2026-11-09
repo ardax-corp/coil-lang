@@ -250,7 +250,7 @@ impl Compiler {
         let walk = |k: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>| self.hir_mir_bound(hir, emit, k, value, defer, bound);
         match &hir.expr(id).kind {
             HirKind::Let { local, .. } => {
-                if !defer && !lower::is_unit_local(hir, &self.checker, *local) {
+                if !defer && !classify::is_unit_local(hir, &self.checker, *local) {
                     bound.insert(local.0);
                 }
             }
@@ -295,7 +295,7 @@ impl Compiler {
             }
             // `while false { .. }` is dropped.
             HirKind::Loop { body }
-                if lower::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
+                if query::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
             {
                 return;
             }
@@ -336,9 +336,9 @@ impl Compiler {
         // The arm's binding, or its first `n` payload fields'.
         let fields = |arm: &HirArm, n: usize, out: &mut Vec<LocalId>| match &arm.pat {
             HirPat::Bind(l) => out.push(*l),
-            pat => out.extend(lower::arm_fields(hir, pat).unwrap_or_default().into_iter().take(n).flatten()),
+            pat => out.extend(query::arm_fields(hir, pat).unwrap_or_default().into_iter().take(n).flatten()),
         };
-        if lower::has_nested_test(arms) || lower::is_scalar_match(&self.checker, hir, scrutinee, arms) {
+        if query::has_nested_test(arms) || query::is_scalar_match(&self.checker, hir, scrutinee, arms) {
             for arm in arms {
                 arm.pat.for_each_bind(&mut |l| out.push(l));
             }
@@ -347,11 +347,11 @@ impl Compiler {
         let Some(ty) = Self::hir_ty(hir, scrutinee) else {
             return out;
         };
-        let identity = |arm: &HirArm| value && lower::is_identity_arm(hir, arm);
+        let identity = |arm: &HirArm| value && query::is_identity_arm(hir, arm);
         let payloads = |variant: &str| self.hir_payload_tys(ty, variant).unwrap_or_default();
         match self.hir_dispatch_rep(hir, emit, scrutinee, arms) {
             Rep::Word(ValueLayout::Boxed) => {
-                let in_place = lower::match_needs_slots(hir, arms);
+                let in_place = query::match_needs_slots(hir, arms);
                 for arm in arms {
                     match &arm.pat {
                         HirPat::Variant { variant, .. } if in_place || !identity(arm) => fields(arm, payloads(variant).len(), &mut out),
@@ -414,8 +414,8 @@ impl Compiler {
                         HirPat::Bind(l) => out.push(*l),
                         _ if rewraps && self.hir_rewrap_tag(hir, ty, arm).is_some() => {}
                         pat => {
-                            let named = lower::arm_fields(hir, pat).is_ok_and(|f| f.iter().any(Option::is_some));
-                            let reads = !payloads(side).is_empty() && (lower::is_identity_arm(hir, arm) || named);
+                            let named = query::arm_fields(hir, pat).is_ok_and(|f| f.iter().any(Option::is_some));
+                            let reads = !payloads(side).is_empty() && (query::is_identity_arm(hir, arm) || named);
                             if reads && !identity(arm) {
                                 fields(arm, 1, &mut out);
                             }
@@ -530,8 +530,8 @@ impl Compiler {
         }
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
-                if Self::hir_ty(hir, id).and_then(lower::primitive) != Some(crate::typechecking::ty::BYTE)
-                    && !Self::hir_ty(hir, id).is_some_and(lower::is_byte_array) =>
+                if Self::hir_ty(hir, id).and_then(classify::primitive) != Some(crate::typechecking::ty::BYTE)
+                    && !Self::hir_ty(hir, id).is_some_and(classify::is_byte_array) =>
             {
                 let idx = self.intern_string(unescape_coil_string(raw));
                 t.strings.insert(id.0, idx);
@@ -627,7 +627,7 @@ impl Compiler {
             }
             // `while false { .. }` is dropped.
             HirKind::Loop { body }
-                if lower::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
+                if query::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
             {
                 return Kids::None;
             }
@@ -683,7 +683,7 @@ impl Compiler {
                 self.hir_mir_op_call(hir, id, &[*operand], (class, method, fqn), lookup, t);
             }
             HirKind::Call { callee: Callee::Value(f), args } => {
-                if lower::polyfn_callee(hir, &self.checker, *f) {
+                if query::polyfn_callee(hir, &self.checker, *f) {
                     self.hir_mir_polyfn_call(hir, emit, id, *f, args, t);
                 } else {
                     t.value_calls.insert(id.0);
@@ -833,10 +833,10 @@ impl Compiler {
                 match kind {
                     FfiBuiltin::Dload => (MirFfiOp::Load, 0),
                     FfiBuiltin::Declare => {
-                        let items = lower::tuple_items(hir, args[2])?;
-                        let sig = items.iter().map(|&t| lower::ffi_tag(hir, &self.checker, t).map(tag)).collect::<Option<Vec<_>>>()?;
+                        let items = classify::tuple_items(hir, args[2])?;
+                        let sig = items.iter().map(|&t| query::ffi_tag(hir, &self.checker, t).map(tag)).collect::<Option<Vec<_>>>()?;
                         operands.push(O::Tuple(sig));
-                        operands.push(tag(lower::ffi_tag(hir, &self.checker, args[3])?));
+                        operands.push(tag(query::ffi_tag(hir, &self.checker, args[3])?));
                         let variadic = args.get(4).is_some_and(|&v| matches!(hir.expr(v).kind, HirKind::Lit(Lit::Bool(true))));
                         (MirFfiOp::Declare, (items.len() as u32 & 0xFFFF) | (u32::from(variadic) << 16))
                     }
@@ -851,9 +851,9 @@ impl Compiler {
                         }
                         operands.push(O::Tuple(items));
                         let mut operand = n & 0xFFFF;
-                        if lower::ffi_fn_variadic(hir, &self.checker, args[1]) {
-                            let items = lower::tuple_items(hir, args[2])?;
-                            let tags = lower::ffi_variadic_tags(hir, &self.checker, id, items)?;
+                        if query::ffi_fn_variadic(hir, &self.checker, args[1]) {
+                            let items = classify::tuple_items(hir, args[2])?;
+                            let tags = query::ffi_variadic_tags(hir, &self.checker, id, items)?;
                             operands.push(O::Tuple(tags.into_iter().map(tag).collect()));
                             operand |= 1 << 16;
                         }
@@ -885,7 +885,7 @@ impl Compiler {
         // from the iterable needs no call.
         if let Some(counted) = counted {
             use crate::typechecking::infer::ForInCounted as C;
-            if matches!(counted, C::Range { .. }) && lower::range_bounds(hir, iterable).is_some() {
+            if matches!(counted, C::Range { .. }) && query::range_bounds(hir, iterable).is_some() {
                 return;
             }
             self.raw_instance_call = false;
@@ -1777,7 +1777,7 @@ impl Compiler {
             }
             // A call through a `PolyFn` local: the call site's dictionaries
             // for the generic function it was bound from.
-            HirKind::Call { callee: Callee::Value(f), args } if lower::polyfn_callee(hir, &self.checker, *f) => {
+            HirKind::Call { callee: Callee::Value(f), args } if query::polyfn_callee(hir, &self.checker, *f) => {
                 let Some(source) = self.hir_polyfn_source(hir, emit, *f) else {
                     return false;
                 };
@@ -2044,8 +2044,8 @@ impl Compiler {
         match &hir.expr(id).kind {
             // `while false { .. }` is dropped.
             HirKind::Loop { body }
-                if lower::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
-            HirKind::Loop { body } if let Some((cond, then)) = lower::while_shape(hir, *body) => {
+                if query::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
+            HirKind::Loop { body } if let Some((cond, then)) = query::while_shape(hir, *body) => {
                 if !self.hir_plan_par_site(hir, emit, id, cond, None, then, bound) {
                     self.hir_plan_par_walk(hir, emit, cond, bound);
                     self.hir_plan_par_walk(hir, emit, then, bound);
@@ -2065,7 +2065,7 @@ impl Compiler {
             HirKind::Let { local, init } => {
                 if let Some(init) = init {
                     self.hir_plan_par_walk(hir, emit, *init, bound);
-                    if !lower::is_unit_local(hir, &self.checker, *local) {
+                    if !classify::is_unit_local(hir, &self.checker, *local) {
                         bound.insert(local.0);
                     }
                 }

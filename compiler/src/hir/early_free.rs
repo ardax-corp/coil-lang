@@ -384,7 +384,7 @@ fn block_locals(checker: &Checker, body: &HirBody, e: &mut Escape<'_, '_>, kept:
         // (lowering's SROA); freeing it would make it a whole-object use.
         // A class with a `drop` stays an object, and its free runs the `drop`.
         if let HirKind::Let { init: Some(i), .. } = body.expr(*decl).kind
-            && crate::hir::lower::sroa_class(body, checker, i).is_some()
+            && crate::hir::query::sroa_class(body, checker, i).is_some()
             && uses.get(&l).is_none_or(|us| us.iter().all(|u| bases.contains(u)))
         {
             continue;

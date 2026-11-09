@@ -877,7 +877,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         // a `match self` sees the payloads.
         if let Some(owner) = owner
             && !is_static
-            && crate::hir::lower::is_generic_class(self.checker, owner)
+            && crate::hir::classify::is_generic_class(self.checker, owner)
             && self.checker.enum_variants(owner).is_none()
             && let Some(&this) = b.body.params.first()
         {
@@ -2834,7 +2834,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     /// Whether a `match` on `ty` lowers as a dispatch: an `int`, or an
-    /// enum (a scalar one included), as `lower::is_scalar_match` and
+    /// enum (a scalar one included), as `query::is_scalar_match` and
     /// `Walk::match_` take it.
     fn dispatchable(&self, ty: &Ty) -> bool {
         let ty = strip_readonly(ty);
@@ -2845,7 +2845,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         };
         scalar_enum
             || matches!(ty, Ty::Con(n) if n == coil_ty::INT)
-            || super::lower::classify(self.checker, ty) == Some(super::lower::ValueClass::Enum)
+            || super::classify::classify(self.checker, ty) == Some(super::classify::ValueClass::Enum)
     }
 
     /// Regroup arms with nested payload patterns into one arm per outer
@@ -3082,7 +3082,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
         // A ground instance of a generic user enum binds its parameters.
         if let Some(Ty::App(_, args)) = scrut
-            && let Some(payload) = super::lower::generic_enum_payload(self.checker, enum_name, variant, args)
+            && let Some(payload) = super::classify::generic_enum_payload(self.checker, enum_name, variant, args)
         {
             return payload.into_iter().filter(layout::ty_is_closed).collect();
         }

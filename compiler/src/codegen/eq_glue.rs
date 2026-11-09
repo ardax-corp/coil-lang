@@ -617,7 +617,7 @@ impl Compiler {
 fn float_leaf(shape: &GlueShape) -> bool {
     fn ty_leaf(ty: &Ty) -> bool {
         let ty = strip_readonly(ty);
-        if crate::hir::lower::primitive(ty) == Some(coil_ty::FLOAT) {
+        if crate::hir::classify::primitive(ty) == Some(coil_ty::FLOAT) {
             return true;
         }
         if let Some(element) = coil_ty::vec_element_ty(ty) {

@@ -13,7 +13,7 @@ the GC?" doc (2026-10-26).
 ## What exists before this work
 
 - Scalar replacement inside one body, after inlining: class field-SROA
-  (Q2, `hir/lower.rs` `class_boxes`), `hir/readonly_sroa.rs`,
+  (Q2, `hir/query.rs` `class_boxes`), `hir/readonly_sroa.rs`,
   `hir/tuple_sroa.rs`, `hir/enum_sroa.rs`, `[T; N]` slots (Q1).
 - Value representation: immediates, pointer niches, two-slot
   `Option`/`Result`/pairs, packed `Vec<byte>`/`Vec<bool>` ([layout.md](layout.md)).

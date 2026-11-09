@@ -6,7 +6,7 @@
 //! lowering returns better as a value (see [`keeps_value`]). Bodies with a
 //! `defer` are left alone: every return would repeat the deferred code.
 
-use super::lower::is_identity_arm;
+use super::query::is_identity_arm;
 use super::{HirBody, HirExpr, HirId, HirKind};
 use crate::typechecking::ty::Ty;
 

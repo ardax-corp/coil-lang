@@ -3,7 +3,7 @@
 //!
 //! A cold arm is an arm of an `if` statement that always fails (a panic,
 //! with any statements before it) or that calls a cold function. The arm
-//! must be plain code ([`super::lower::plain`]: no loop, closure, `defer`,
+//! must be plain code ([`super::query::plain`]: no loop, closure, `defer`,
 //! coroutine step or `break` / `continue`) with no `return`. Its free
 //! locals become the helper's parameters. It may assign at most one of
 //! them, by name only (`x = ..`): the helper takes that local's value and
@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::inline::map_ids;
-use super::lower::plain;
+use super::query::plain;
 use super::{BodyKind, Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, LocalId, LocalKind};
 use crate::typechecking::ty;
 

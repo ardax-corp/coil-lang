@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::DebugLoc;
 
-use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
+use crate::hir::{classify, query, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::bodies::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::layout::ValueLayout;
@@ -852,7 +852,7 @@ struct PadHomes {
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
 pub fn scalar(ty: &Ty) -> Option<MirTy> {
-    match lower::primitive(ty)? {
+    match classify::primitive(ty)? {
         // A byte is its value as an int word (casts mask it).
         "int" | "byte" => Some(MirTy::I64),
         "float" => Some(MirTy::F64),
@@ -2439,7 +2439,7 @@ impl Lower<'_> {
         use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
         // The packed kernel: each operand one word (boxed), then the meta
         // word, as a matrix operator's.
-        if lower::aggregate_packed(info).is_some() {
+        if query::aggregate_packed(info).is_some() {
             let la = *self.inp.linalgs.get(&id.0).ok_or("packed aggregate")?;
             let args: Vec<HirId> = [lhs].into_iter().chain(rhs).collect();
             return self.linalg(id, la, &args);
@@ -2668,10 +2668,10 @@ impl Lower<'_> {
     /// (only when `items`, read as reached), stack array slots, a pair, or
     /// a heap word (a scalar for a broadcast's other side).
     fn agg_operand(&mut self, id: HirId, items: bool) -> Result<Option<AggSrc>, Refusal> {
-        if items && let Some(src) = lower::aggregate_src(self.hir, &self.inp.stacks.iter().map(|(&k, &(_, n, _))| (k, n)).collect(), id) {
+        if items && let Some(src) = query::aggregate_src(self.hir, &self.inp.stacks.iter().map(|(&k, &(_, n, _))| (k, n)).collect(), id) {
             match src {
-                lower::AggregateSrc::Items(items) => return Ok(Some(AggSrc::Items(items))),
-                lower::AggregateSrc::Slots(local) if self.boxed(id).is_none() => {
+                query::AggregateSrc::Items(items) => return Ok(Some(AggSrc::Items(items))),
+                query::AggregateSrc::Slots(local) if self.boxed(id).is_none() => {
                     let (base, n, _) = self.inp.stacks[&local.0];
                     return Ok(Some(AggSrc::Slots(base, n)));
                 }
@@ -3021,8 +3021,8 @@ impl Lower<'_> {
                     Lit::Float(f) => MirConst::F64(f.to_bits()),
                     Lit::Bool(v) => MirConst::Bool(*v),
                     Lit::Unit => return Ok(Val::Unit),
-                    Lit::Str(raw) if self.expr_ty(id).and_then(lower::primitive) == Some(crate::typechecking::ty::BYTE) => {
-                        MirConst::I64(i64::from(lower::byte_literal(raw).ok_or("byte literal")?))
+                    Lit::Str(raw) if self.expr_ty(id).and_then(classify::primitive) == Some(crate::typechecking::ty::BYTE) => {
+                        MirConst::I64(i64::from(query::byte_literal(raw).ok_or("byte literal")?))
                     }
                     Lit::Str(_) => match self.inp.strings.get(&id.0) {
                         Some(&idx) if self.expr_ty(id).is_some_and(is_string) => {
@@ -3262,7 +3262,7 @@ impl Lower<'_> {
                 Ok(Val::V(out.map_err(mir)?))
             }
             HirKind::Cast { value } => {
-                let names = (self.expr_ty(*value).and_then(lower::primitive), self.expr_ty(id).and_then(lower::primitive));
+                let names = (self.expr_ty(*value).and_then(classify::primitive), self.expr_ty(id).and_then(classify::primitive));
                 // A cast between two heap words of no primitive type (a
                 // byte string literal's array `as Vec<byte>` / `[byte; N]`)
                 // emits no opcode: the value is its own word.
@@ -3618,7 +3618,7 @@ impl Lower<'_> {
                     && !self.boxes.contains_key(&local.0) =>
             {
                 let lit = matches!(self.hir.expr(*index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i));
-                if !lit && !lower::stack_index_proven(self.hir, id, *index, n) {
+                if !lit && !query::stack_index_proven(self.hir, id, *index, n) {
                     let Some(idx) = self.index_word(*index)? else {
                         return Ok(Val::Never);
                     };
@@ -3706,10 +3706,10 @@ impl Lower<'_> {
                 }
                 Ok(Val::Unit)
             }
-            _ if lower::is_unit_make(self.hir, id) => Ok(Val::Unit),
+            _ if query::is_unit_make(self.hir, id) => Ok(Val::Unit),
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
             HirKind::Make { kind: MakeKind::Tuple, args } => self.make_tuple(args),
-            HirKind::Make { kind: MakeKind::Range { .. }, args } if self.expr_ty(id).is_some_and(lower::is_open_range) => self.make_open_range(id, args),
+            HirKind::Make { kind: MakeKind::Range { .. }, args } if self.expr_ty(id).is_some_and(classify::is_open_range) => self.make_open_range(id, args),
             HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => match self.inp.frozen_arrays.get(&id.0) {
                 Some(&slot) => self.frozen_array(id, args, slot),
                 None => self.make_array(id, args),
@@ -3861,7 +3861,7 @@ impl Lower<'_> {
             // `while false { .. }` never runs: HIR emission drops it (and
             // plans nothing in it).
             HirKind::Loop { body }
-                if lower::while_shape(self.hir, *body).is_some_and(|(cond, _)| matches!(self.hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
+                if query::while_shape(self.hir, *body).is_some_and(|(cond, _)| matches!(self.hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
             {
                 Ok(Val::Unit)
             }
@@ -3956,7 +3956,7 @@ impl Lower<'_> {
                     // A `()`-typed value (`return check(x)?`, a unit
                     // `match`) or a bare `return` in a one-word `Result<(),
                     // E>` function: the value for its effect, then `0`.
-                    Some(v) if self.inp.ret_pair.is_none() && (lower::is_unit_make(self.hir, *v) || self.expr_ty(*v).is_some_and(is_unit)) => {
+                    Some(v) if self.inp.ret_pair.is_none() && (query::is_unit_make(self.hir, *v) || self.expr_ty(*v).is_some_and(is_unit)) => {
                         if !self.effect(*v)? {
                             return Ok(Val::Never);
                         }
@@ -3982,13 +3982,13 @@ impl Lower<'_> {
     /// when the body never assigns it, `hi` is read once, and the step
     /// adds one after the body (or at a `continue`).
     fn for_range(&mut self, local: HirLocal, iterable: HirId, body: HirId, inclusive: bool, float: bool, into_iter: Option<Label>) -> Result<Val, Refusal> {
-        let bounds = lower::range_bounds(self.hir, iterable);
+        let bounds = query::range_bounds(self.hir, iterable);
         let ty = self.local_ty(local)?;
         if ty != if float { MirTy::F64 } else { MirTy::I64 } {
             return Err("for in range type".into());
         }
         let x = self.slot(local)?;
-        if !float && let Some((start, trips)) = lower::unrolled_range(self.hir, iterable, body, inclusive) {
+        if !float && let Some((start, trips)) = query::unrolled_range(self.hir, iterable, body, inclusive) {
             // Unrolled: each value into `x`, then the body.
             for k in 0..trips {
                 let v = self.b.ins_const(MirConst::I64(start + i64::from(k))).map_err(mir)?;
@@ -4001,7 +4001,7 @@ impl Lower<'_> {
         }
         // A body that assigns `x` steps a counter of its own, copied into
         // `x` each trip, as HIR emission's.
-        let assigned = lower::assigns_local(self.hir, body, local);
+        let assigned = query::assigns_local(self.hir, body, local);
         // `a..b` written in place, or a range pair (a local or a call).
         let (start, end) = match bounds {
             _ if let Some(target) = into_iter => {
@@ -4229,7 +4229,7 @@ impl Lower<'_> {
     /// step.
     #[allow(clippy::too_many_arguments)]
     fn counted_body(&mut self, body: HirId, head: BlockId, exit: BlockId, counter: LocalId, ty: MirTy, one: MirConst, last: Option<ValueId>) -> Result<Val, Refusal> {
-        let step = lower::has_own_continue(self.hir, body).then(|| self.b.create_block());
+        let step = query::has_own_continue(self.hir, body).then(|| self.b.create_block());
         self.loops.push(Loop {
             cont: step.unwrap_or(head),
             cont_used: false,
@@ -4388,7 +4388,7 @@ impl Lower<'_> {
     /// on overflow.
     fn strength_reduce(&self, op: BinOp, lhs: HirId, rhs: HirId) -> Option<(HirId, u32, MirBinOp)> {
         let pow2 = |id: HirId| self.int_imm(id).and_then(crate::const_fold::strength_div_int);
-        let byte = |id: HirId| self.expr_ty(id).is_some_and(lower::is_byte);
+        let byte = |id: HirId| self.expr_ty(id).is_some_and(classify::is_byte);
         let nonneg = self.hir.expr(lhs).flags.contains(HirFlags::NONNEG) || byte(lhs);
         match op {
             BinOp::IntMul => pow2(rhs)
@@ -4466,7 +4466,7 @@ impl Lower<'_> {
         let Some(l) = self.word(lhs)? else {
             return Ok(Val::Never);
         };
-        if lower::logic_eager(self.hir, rhs) {
+        if query::logic_eager(self.hir, rhs) {
             // `b` has no effect and cannot trap: one `&` / `|`, as HIR
             // lowering emits it.
             let Some(r) = self.word(rhs)? else {
@@ -5580,7 +5580,7 @@ impl Lower<'_> {
             let base = self.slot(local)?.0;
             tys.iter().enumerate().map(|(i, &ty)| (LocalId(base + i as u32), ty)).collect()
         } else if self.pair_local(local).is_some()
-            && self.hir.local(local).ty.as_ref().is_some_and(crate::hir::lower::is_range_pair)
+            && self.hir.local(local).ty.as_ref().is_some_and(crate::hir::classify::is_range_pair)
         {
             // An unboxed range is two numbers: nothing to clear.
             return Ok(());
@@ -5675,7 +5675,7 @@ impl Lower<'_> {
         {
             return Ok(Some(Ok(i as u32)));
         }
-        if !lower::stack_index_proven(self.hir, node, index, n) {
+        if !query::stack_index_proven(self.hir, node, index, n) {
             return Err("stack index".into());
         }
         Ok(self.index_word(index)?.map(Err))
@@ -5690,7 +5690,7 @@ impl Lower<'_> {
         if self.b.value_ty(idx) != MirTy::I64 {
             return Err("index type".into());
         }
-        if let Some(m) = lower::index_euclid(self.hir, index) {
+        if let Some(m) = query::index_euclid(self.hir, index) {
             let sh = self.b.ins_const(MirConst::I64(63)).map_err(mir)?;
             let m = self.b.ins_const(MirConst::I64(i64::from(m))).map_err(mir)?;
             let sign = self.b.ins_binop(MirBinOp::Shr, idx, sh).map_err(mir)?;
@@ -5813,8 +5813,8 @@ impl Lower<'_> {
         };
         let repeatable = match self.hir.expr(place).kind {
             // `xs[0].v++` reads its base twice, as `xs[0].v += 1` does (#1978).
-            HirKind::Field { base, .. } => lower::read_base(self.hir, base),
-            HirKind::Index { base, index, .. } => lower::pure_base(self.hir, base) && lower::pure_index(self.hir, index),
+            HirKind::Field { base, .. } => query::read_base(self.hir, base),
+            HirKind::Index { base, index, .. } => query::pure_base(self.hir, base) && query::pure_index(self.hir, index),
             _ => false,
         };
         if !repeatable {
@@ -6315,7 +6315,7 @@ impl Lower<'_> {
         for (&arg, t) in args.iter().zip(tys) {
             // A `()` payload is the empty tuple object, after a `()`-typed
             // value's effect (`Some(f())`, #1449).
-            if lower::is_unit_make(self.hir, arg) || is_unit(t) {
+            if query::is_unit_make(self.hir, arg) || is_unit(t) {
                 if !self.effect(arg)? {
                     return Ok(Val::Never);
                 }
@@ -6342,7 +6342,7 @@ impl Lower<'_> {
         // Declaration-order payload kinds, as HIR emission's `MakeEnumK`; a
         // `()` payload is the empty tuple object, a pointer.
         let kinds = common::pack_word_kinds(args.iter().zip(tys).map(|(&a, t)| {
-            if lower::is_unit_make(self.hir, a) || is_unit(t) {
+            if query::is_unit_make(self.hir, a) || is_unit(t) {
                 common::WORD_POINTER
             } else {
                 (self.inp.word_kind)(t)
@@ -7355,7 +7355,7 @@ impl Lower<'_> {
             return Err("stack item type".into());
         }
         let lit = matches!(self.hir.expr(index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i));
-        if !lit && !lower::stack_index_proven(self.hir, place, index, n) {
+        if !lit && !query::stack_index_proven(self.hir, place, index, n) {
             let Some(idx) = self.index_word(index)? else {
                 return Ok(Val::Never);
             };
@@ -7465,7 +7465,7 @@ impl Lower<'_> {
                 let lo = match args {
                     [] => self.zero(lo_ty)?,
                     // A `()` payload: `0`, after a `()`-typed value's effect.
-                    [arg] if lower::is_unit_make(self.hir, *arg) || self.expr_ty(*arg).is_some_and(is_unit) => {
+                    [arg] if query::is_unit_make(self.hir, *arg) || self.expr_ty(*arg).is_some_and(is_unit) => {
                         if !self.effect(*arg)? {
                             return Ok(Val::Never);
                         }
@@ -7513,7 +7513,7 @@ impl Lower<'_> {
             .position(|a| matches!(a.pat, HirPat::Wild | HirPat::Bind(_)))
             .map_or(arms.len(), |i| i + 1);
         let arms = &arms[..reach];
-        if lower::has_nested_test(arms) {
+        if query::has_nested_test(arms) {
             return self.match_nested(scrutinee, arms, tail);
         }
         if let Some(consts) = self.scalar_arms(scrutinee, arms) {
@@ -7574,7 +7574,7 @@ impl Lower<'_> {
                 && matches!(self.hir.expr(arm.body).kind, HirKind::Lit(Lit::Int(0)))
         };
         if let [a, b] = arms
-            && (zero_arm(a) && lower::is_identity_arm(self.hir, b) || zero_arm(b) && lower::is_identity_arm(self.hir, a))
+            && (zero_arm(a) && query::is_identity_arm(self.hir, b) || zero_arm(b) && query::is_identity_arm(self.hir, a))
             && self.b.value_ty(payload) == MirTy::I64
         {
             return Ok(Val::V(payload));
@@ -7969,7 +7969,7 @@ impl Lower<'_> {
             HirPat::Wild => {}
             HirPat::Bind(local) => self.bind(*local, w)?,
             HirPat::Variant { .. } => {
-                let binds = lower::arm_fields(self.hir, &arm.pat).map_err(|e| e.to_string())?;
+                let binds = query::arm_fields(self.hir, &arm.pat).map_err(|e| e.to_string())?;
                 let unit = |l: &HirLocal| self.hir.local(*l).ty.as_ref().is_some_and(is_unit);
                 match binds.as_slice() {
                     [] | [None] => {}
@@ -8014,7 +8014,7 @@ impl Lower<'_> {
         let arg = match args {
             [] => return zero(self),
             // `Ok(e)` of a `()`-typed `e`: `e` for its effect, then `Ok(())`.
-            [arg] if lower::is_unit_make(self.hir, *arg) || self.expr_ty(*arg).is_some_and(is_unit) => {
+            [arg] if query::is_unit_make(self.hir, *arg) || self.expr_ty(*arg).is_some_and(is_unit) => {
                 if !self.effect(*arg)? {
                     return Ok(Val::Never);
                 }
@@ -8064,7 +8064,7 @@ impl Lower<'_> {
             return Err("match arm pattern".into());
         };
         let fields = (self.inp.boxed_view)(ty, Some(variant)).ok_or("variant payload")?;
-        let binds = lower::arm_fields(self.hir, pat).map_err(|e| e.to_string())?;
+        let binds = query::arm_fields(self.hir, pat).map_err(|e| e.to_string())?;
         if !binds.is_empty() && binds.len() != fields.len() {
             return Err("payload pattern".into());
         }
@@ -8089,7 +8089,7 @@ impl Lower<'_> {
 
     /// Each arm's constant when `match` tests an `int`, or a scalar enum
     /// backed by an `int` or `float`, against literals (`None` for a
-    /// catch-all), as `lower::is_scalar_match`.
+    /// catch-all), as `query::is_scalar_match`.
     fn scalar_arms(&self, scrutinee: HirId, arms: &[HirArm]) -> Option<Vec<Option<ScalarLit>>> {
         let ty = self.expr_ty(scrutinee)?;
         let int = matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::INT);
@@ -8320,9 +8320,9 @@ impl Lower<'_> {
     }
 
     /// An arm to lay out after the body: one that only exits or fails
-    /// ([`lower::cold_exit`]), or one that calls a cold function.
+    /// ([`query::cold_exit`]), or one that calls a cold function.
     fn cold_arm(&self, id: HirId) -> bool {
-        lower::cold_exit(self.hir, id) || self.calls_cold(id)
+        query::cold_exit(self.hir, id) || self.calls_cold(id)
     }
 
     /// Whether `id`'s subtree calls a cold function (`#[cold]`, or one
