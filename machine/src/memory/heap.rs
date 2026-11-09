@@ -2041,20 +2041,6 @@ impl Heap {
         }
     }
 
-    /// Mark enum payload / tuple words, skipping those the construction
-    /// site proved scalar.
-    #[inline]
-    fn mark_kinded_words(&self, words: &[Value], kinds: u8, grey_objects: &mut Vec<Object>) {
-        for (i, v) in words.iter().enumerate() {
-            let kind = common::packed_word_kind(kinds, i);
-            #[cfg(feature = "gc-stress")]
-            self.verify_kinded_word("an enum payload / tuple", i, kind, *v);
-            if kind != common::WORD_SCALAR {
-                self.mark_value(*v, grey_objects);
-            }
-        }
-    }
-
     /// Every live object, in slab order.
     pub fn objects(&self) -> HeapIter<'_> {
         HeapIter {
@@ -2277,77 +2263,186 @@ pub enum Object {
     RwLock(RefRwLock),
 }
 
+/// `$body` with `$r` bound to `$obj`'s handle, whatever its kind.
+macro_rules! each_kind {
+    ($obj:expr, $r:ident => $body:expr) => {
+        match $obj {
+            Object::String($r) => $body,
+            Object::Instance($r) => $body,
+            Object::Enum($r) => $body,
+            Object::Library($r) => $body,
+            Object::Tuple($r) => $body,
+            Object::Array($r) => $body,
+            Object::Coroutine($r) => $body,
+            Object::Boxed($r) => $body,
+            Object::Root($r) => $body,
+            Object::Weak($r) => $body,
+            Object::Fn($r) => $body,
+            Object::Stream($r) => $body,
+            Object::Thread($r) => $body,
+            Object::Sender($r) => $body,
+            Object::Receiver($r) => $body,
+            Object::Mutex($r) => $body,
+            Object::RwLock($r) => $body,
+        }
+    };
+}
+
+/// What [`Object::visit_slots`] calls for each slot that may hold a
+/// reference: a raw word with its kind (`common::WORD_*`), or a typed
+/// member. Implementations mark their methods `#[inline(always)]`: a walk
+/// calls them from every arm, and the mark and nursery paths are hot.
+pub(crate) trait SlotVisitor {
+    fn word(&mut self, v: &Value, kind: u8);
+    fn member(&mut self, m: &Member);
+}
+
+/// [`SlotVisitor`] with the slots writable ([`Object::visit_slots_mut`]).
+pub(crate) trait SlotVisitorMut {
+    fn word(&mut self, v: &mut Value, kind: u8);
+    fn member(&mut self, m: &mut Member);
+}
+
+/// The one walk of an object's slots, behind [`Object::visit_slots`] (reads)
+/// and [`Object::visit_slots_mut`] (rewrites). It says which words of each
+/// kind of object may hold a reference and how sure that is:
+///
+/// - instance slots, enum payload and tuple words: every word, with the
+///   kind its class row or construction site recorded (scalars included);
+/// - array words, when [`ObjArray::may_hold_refs`]: a word array's words
+///   with its element kind, a lane array's pointer lanes only;
+/// - coroutine words: [`common::WORD_POINTER`] where `saved_live_mask`
+///   names them, [`common::WORD_UNKNOWN`] where there is no mask;
+/// - closure captures: [`common::WORD_UNKNOWN`]; `Boxed` / `Root` payloads
+///   and closure dicts: members.
+///
+/// The two expansions differ only in how they borrow the payloads.
+macro_rules! walk_slots {
+    ($obj:expr, $heap:expr, $f:expr, $get:ident, $slice:ident, $gc_words:ident, $iter:ident $(, $m:tt)?) => {{
+        let f = $f;
+        match $obj {
+            Object::Instance(i) => {
+                let inst = i.$get();
+                let mut kinds = common::ClassSlotKinds::new($heap.class_field_kinds(inst.type_id), inst.storage.as_slice().len());
+                let slots = & $($m)? *inst.storage.$slice();
+                for i in 0..slots.len() {
+                    let kind = kinds.next_kind(slots);
+                    f.word(& $($m)? slots[i], kind);
+                }
+            }
+            Object::Enum(e) => {
+                let payload = & $($m)? e.$get().payload;
+                let kinds = payload.kinds();
+                for (i, v) in payload.$slice().$iter().enumerate() {
+                    f.word(v, common::packed_word_kind(kinds, i));
+                }
+            }
+            Object::Tuple(t) => {
+                let elements = & $($m)? t.$get().elements;
+                let kinds = elements.kinds();
+                for (i, v) in elements.$slice().$iter().enumerate() {
+                    f.word(v, common::packed_word_kind(kinds, i));
+                }
+            }
+            Object::Array(a) => {
+                let a = a.$get();
+                if a.may_hold_refs() {
+                    let (k, mask, kind) = (a.lanes(), a.tag_mask, a.elem_kind());
+                    if let Some(words) = a.$gc_words() {
+                        if k > 1 {
+                            for i in 0..words.len() {
+                                if ObjArray::lane_pointer(words, k, mask, i) {
+                                    f.word(& $($m)? words[i], common::WORD_POINTER);
+                                }
+                            }
+                        } else {
+                            for v in words.$iter() {
+                                f.word(v, kind);
+                            }
+                        }
+                    }
+                }
+            }
+            Object::Coroutine(c) => {
+                let coro = c.$get();
+                let mask = coro.saved_live_mask;
+                for (i, v) in coro.saved_stack.$iter().enumerate() {
+                    let masked = mask != 0 && i < 64;
+                    if masked && mask & (1u64 << i) == 0 {
+                        continue;
+                    }
+                    f.word(v, if masked { common::WORD_POINTER } else { common::WORD_UNKNOWN });
+                }
+            }
+            Object::Boxed(b) => f.member(& $($m)? b.$get().payload),
+            Object::Root(r) => {
+                if let Some(m) = & $($m)? r.$get().payload {
+                    f.member(m);
+                }
+            }
+            Object::Fn(func) => {
+                let func = func.$get();
+                for v in func.captures.$iter().chain(func.captured_args.$iter()) {
+                    f.word(v, common::WORD_UNKNOWN);
+                }
+                for m in func.dicts.$iter().flatten().flatten() {
+                    f.member(m);
+                }
+            }
+            Object::String(_)
+            | Object::Library(_)
+            | Object::Weak(_)
+            | Object::Stream(_)
+            | Object::Thread(_)
+            | Object::Sender(_)
+            | Object::Receiver(_)
+            | Object::Mutex(_)
+            | Object::RwLock(_) => {}
+        }
+    }};
+}
+
 impl Object {
+    /// Every kind starts with the `repr(C)` [`GcHeader`].
+    #[inline]
+    fn header(&self) -> &GcHeader {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }
+    }
+
     /// Mark the current object reference and put it in `grey_objects` if its has not been marked.
+    #[inline]
     pub fn mark(&self, grey_objects: &mut Vec<Self>) {
-        let marked = match self {
-            Self::String(s) => s.mark(),
-            Self::Instance(i) => i.mark(),
-            Self::Enum(e) => e.mark(),
-            Self::Library(l) => l.mark(),
-            Self::Tuple(t) => t.mark(),
-            Self::Array(a) => a.mark(),
-            Self::Coroutine(c) => c.mark(),
-            Self::Boxed(b) => b.mark(),
-            Self::Root(r) => r.mark(),
-            Self::Weak(w) => w.mark(),
-            Self::Fn(f) => f.mark(),
-            Self::Stream(s) => s.mark(),
-            Self::Thread(t) => t.mark(),
-            Self::Sender(s) => s.mark(),
-            Self::Receiver(r) => r.mark(),
-            Self::Mutex(m) => m.mark(),
-            Self::RwLock(l) => l.mark(),
-        };
-        if marked {
+        let header = self.header();
+        if !header.marked.get() {
+            header.marked.set(true);
             grey_objects.push(*self);
         }
     }
 
     /// Unmark the object.
+    #[inline]
     pub fn unmark(&self) {
-        match self {
-            Self::String(s) => s.unmark(),
-            Self::Instance(i) => i.unmark(),
-            Self::Enum(e) => e.unmark(),
-            Self::Library(l) => l.unmark(),
-            Self::Tuple(t) => t.unmark(),
-            Self::Array(a) => a.unmark(),
-            Self::Coroutine(c) => c.unmark(),
-            Self::Boxed(b) => b.unmark(),
-            Self::Root(r) => r.unmark(),
-            Self::Weak(w) => w.unmark(),
-            Self::Fn(f) => f.unmark(),
-            Self::Stream(s) => s.unmark(),
-            Self::Thread(t) => t.unmark(),
-            Self::Sender(s) => s.unmark(),
-            Self::Receiver(r) => r.unmark(),
-            Self::Mutex(m) => m.unmark(),
-            Self::RwLock(l) => l.unmark(),
-        }
+        self.header().marked.set(false);
     }
 
     #[must_use]
+    #[inline]
     pub fn is_marked(&self) -> bool {
-        match self {
-            Self::String(s) => s.is_marked(),
-            Self::Instance(i) => i.is_marked(),
-            Self::Enum(e) => e.is_marked(),
-            Self::Library(l) => l.is_marked(),
-            Self::Tuple(t) => t.is_marked(),
-            Self::Array(a) => a.is_marked(),
-            Self::Coroutine(c) => c.is_marked(),
-            Self::Boxed(b) => b.is_marked(),
-            Self::Root(r) => r.is_marked(),
-            Self::Weak(w) => w.is_marked(),
-            Self::Fn(f) => f.is_marked(),
-            Self::Stream(s) => s.is_marked(),
-            Self::Thread(t) => t.is_marked(),
-            Self::Sender(s) => s.is_marked(),
-            Self::Receiver(r) => r.is_marked(),
-            Self::Mutex(m) => m.is_marked(),
-            Self::RwLock(l) => l.is_marked(),
-        }
+        self.header().marked.get()
+    }
+
+    /// Call `f` on each slot of `self` that may hold a reference
+    /// ([`walk_slots`]).
+    #[inline]
+    pub(crate) fn visit_slots(&self, heap: &Heap, f: &mut impl SlotVisitor) {
+        walk_slots!(self, heap, f, as_ref, as_slice, gc_words, iter)
+    }
+
+    /// [`Self::visit_slots`] with the slots writable, for a moving
+    /// collector. Takes each payload as a write does ([`Gc::payload_mut`]).
+    pub(crate) fn visit_slots_mut(&self, heap: &Heap, f: &mut impl SlotVisitorMut) {
+        walk_slots!(self, heap, f, payload_mut, as_mut_slice, gc_words_mut, iter_mut, mut)
     }
 
     /// Mark a stored member, including Result `Err` tagged pointers in `Value`.
@@ -2365,178 +2460,113 @@ impl Object {
     /// Aggregates that store raw [`Value`]s (arrays, tuples, fn captures,
     /// coroutine stacks) resolve those addresses through `heap`. Stream attach
     /// state is host-side (A4); channel payloads are PortableValue copies,
-    /// not this-heap pointers.
+    /// not this-heap pointers. An array found to hold none is flagged so the
+    /// next mark skips it until a write.
+    #[inline]
     pub fn mark_references(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
+        struct Marker<'a> {
+            heap: &'a Heap,
+            grey: &'a mut Vec<Object>,
+            any: bool,
+            #[cfg(feature = "gc-stress")]
+            check: Option<(String, usize)>,
+        }
+        impl SlotVisitor for Marker<'_> {
+            #[inline(always)]
+            fn word(&mut self, &v: &Value, kind: u8) {
+                #[cfg(feature = "gc-stress")]
+                if let Some((what, i)) = &mut self.check {
+                    if kind != common::WORD_UNKNOWN {
+                        self.heap.verify_kinded_word(what, *i, kind, v);
+                    }
+                    *i += 1;
+                }
+                let reference = match kind {
+                    common::WORD_SCALAR => false,
+                    // `0` or an object: no classification.
+                    common::WORD_POINTER => v.heap_addr() != 0,
+                    _ => self.heap.may_be_ref(v),
+                };
+                if reference {
+                    self.any = true;
+                    self.heap.mark_value(v, self.grey);
+                }
+            }
+
+            #[inline(always)]
+            fn member(&mut self, m: &Member) {
+                Object::mark_member(self.heap, m, self.grey);
+            }
+        }
+        let mut marker = Marker {
+            heap,
+            grey: grey_objects,
+            any: false,
+            // Coroutine words are not checked.
+            #[cfg(feature = "gc-stress")]
+            check: (!matches!(self, Self::Coroutine(_))).then(|| (self.slot_owner(), 0)),
+        };
+        self.visit_slots(heap, &mut marker);
+        // Clear flag: scanned clean at this mark, unwritten since.
+        if let Self::Array(a) = self
+            && !marker.any
+            && a.as_ref().may_hold_refs()
+        {
+            a.payload_mut().may_hold_refs = false;
+        }
+    }
+
+    /// What a gc-stress check names the slots of `self` by.
+    #[cfg(feature = "gc-stress")]
+    fn slot_owner(&self) -> String {
         match self {
-            Self::String(_) => {}
-            Self::Instance(i) => i.as_ref().mark_members(heap, grey_objects),
-            Self::Enum(e) => {
-                let payload = &e.as_ref().payload;
-                heap.mark_kinded_words(payload, payload.kinds(), grey_objects);
-            }
-            Self::Library(_) => {}
-            Self::Tuple(t) => {
-                let t = t.as_ref();
-                heap.mark_kinded_words(t.elements(), t.kinds(), grey_objects);
-            }
-            Self::Array(a) => {
-                // Clear flag: scanned clean at a previous mark, unwritten since.
-                if a.as_ref().may_hold_refs() && a.as_ref().lanes() > 1 {
-                    // A lane array: lane 0 a reference exactly where its
-                    // element's tag says so.
-                    let mut any = false;
-                    for (v, kind) in a.as_ref().kinded_words() {
-                        if kind == common::WORD_POINTER && v.heap_addr() != 0 {
-                            #[cfg(feature = "gc-stress")]
-                            heap.verify_kinded_word("a lane array's pointer lane", 0, common::WORD_POINTER, v);
-                            any = true;
-                            heap.mark_value(v, grey_objects);
-                        }
-                    }
-                    if !any {
-                        a.payload_mut().may_hold_refs = false;
-                    }
-                } else if a.as_ref().may_hold_refs() {
-                    let pointers = a.as_ref().elem_kind() == common::WORD_POINTER;
-                    let mut any = false;
-                    for v in a.as_ref().words().unwrap_or_default() {
-                        #[cfg(feature = "gc-stress")]
-                        if pointers {
-                            heap.verify_kinded_word("a pointer-kind array", 0, common::WORD_POINTER, *v);
-                        }
-                        // Pointer kind: `0` or an object, no classification.
-                        if (pointers && v.heap_addr() != 0) || (!pointers && heap.may_be_ref(*v)) {
-                            any = true;
-                            heap.mark_value(*v, grey_objects);
-                        }
-                    }
-                    if !any {
-                        a.payload_mut().may_hold_refs = false;
-                    }
-                }
-            }
-            Self::Coroutine(c) => {
-                let coro = c.as_ref();
-                let mask = coro.saved_live_mask;
-                for (i, v) in coro.saved_stack.iter().enumerate() {
-                    if mask != 0 && i < 64 && mask & (1u64 << i) == 0 {
-                        continue;
-                    }
-                    heap.mark_value(*v, grey_objects);
-                }
-            }
-            Self::Boxed(b) => Self::mark_member(heap, &b.as_ref().payload, grey_objects),
-            Self::Root(r) => {
-                if let Some(member) = &r.as_ref().payload {
-                    Self::mark_member(heap, member, grey_objects);
-                }
-            }
-            Self::Weak(_) => {}
-            Self::Fn(f) => {
-                let f = f.as_ref();
-                for v in f.captures.iter().chain(f.captured_args.iter()) {
-                    heap.mark_value(*v, grey_objects);
-                }
-                for captured in f.dicts.iter().flatten().flatten() {
-                    Self::mark_member(heap, captured, grey_objects);
-                }
-            }
-            Self::Stream(_) => {}
-            Self::Thread(_) => {}
-            Self::Sender(_) => {}
-            Self::Receiver(_) => {}
-            Self::Mutex(_) => {}
-            Self::RwLock(_) => {}
+            Self::Instance(i) => format!("class {}", i.as_ref().type_id),
+            Self::Array(a) if a.as_ref().lanes() > 1 => "a lane array's pointer lane".into(),
+            Self::Array(_) => "a pointer-kind array".into(),
+            _ => "an enum payload / tuple".into(),
         }
     }
 
     /// Every heap reference `self` holds, with whether the word is precise.
     ///
-    /// Precise: `Member::Object` fields, coroutine links, and coroutine stack
-    /// words named by a nonzero `saved_live_mask`. Everything else is a raw
+    /// Precise: `Member::Object` fields, words a class row, construction
+    /// site or element kind records as pointers, and coroutine stack words
+    /// named by a nonzero `saved_live_mask`. Everything else is a raw
     /// `Value` word that is traced by address lookup and may be an immediate
-    /// (tuple / array elements, closure captures, unmasked coroutine words,
-    /// `Member::Value` fields) — a moving collector cannot rewrite those
+    /// (unknown-kind words, closure captures, unmasked coroutine words,
+    /// `Member::Value` fields): a moving collector cannot rewrite those
     /// (`docs/internals/gc-evacuation.md`). Not on the mark path.
     pub fn for_each_reference(&self, heap: &Heap, visit: &mut dyn FnMut(u64, bool)) {
-        let word = |v: Value, precise: bool, visit: &mut dyn FnMut(u64, bool)| {
-            let addr = v.heap_addr();
-            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                visit(addr, precise);
-            }
-        };
-        let kinded = |words: &[Value], kinds: u8, visit: &mut dyn FnMut(u64, bool)| {
-            for (i, v) in words.iter().enumerate() {
-                match common::packed_word_kind(kinds, i) {
-                    common::WORD_SCALAR => {}
-                    kind => word(*v, kind == common::WORD_POINTER, visit),
-                }
-            }
-        };
-        let member = |m: &Member, visit: &mut dyn FnMut(u64, bool)| match m {
-            Member::Object(o) => visit(o.addr(), true),
-            Member::Value(v) => word(*v, false, visit),
-        };
-        match self {
-            Self::Instance(i) => {
-                let inst = i.as_ref();
-                let kinds = heap.class_field_kinds(inst.type_id);
-                let slots = inst.storage.as_slice();
-                for (v, kind) in slots.iter().zip(common::class_slot_kinds(kinds, slots)) {
-                    match kind {
-                        common::WORD_SCALAR => {}
-                        kind => word(*v, kind == common::WORD_POINTER, visit),
-                    }
-                }
-            }
-            Self::Enum(e) => {
-                let payload = &e.as_ref().payload;
-                kinded(payload, payload.kinds(), visit);
-            }
-            Self::Tuple(t) => {
-                let t = t.as_ref();
-                kinded(t.elements(), t.kinds(), visit);
-            }
-            Self::Array(a) => {
-                let a = a.as_ref();
-                if a.may_hold_refs() {
-                    a.kinded_words().filter(|&(_, kind)| kind != common::WORD_SCALAR).for_each(|(v, kind)| word(v, kind == common::WORD_POINTER, visit));
-                }
-            }
-            Self::Coroutine(c) => {
-                let coro = c.as_ref();
-                let mask = coro.saved_live_mask;
-                for (i, v) in coro.saved_stack.iter().enumerate() {
-                    let masked = mask != 0 && i < 64;
-                    if masked && mask & (1u64 << i) == 0 {
-                        continue;
-                    }
-                    word(*v, masked, visit);
-                }
-            }
-            Self::Boxed(b) => member(&b.as_ref().payload, visit),
-            Self::Root(r) => {
-                if let Some(m) = &r.as_ref().payload {
-                    member(m, visit);
-                }
-            }
-            Self::Fn(f) => {
-                let f = f.as_ref();
-                for v in f.captures.iter().chain(f.captured_args.iter()) {
-                    word(*v, false, visit);
-                }
-                f.dicts.iter().flatten().flatten().for_each(|m| member(m, visit));
-            }
-            Self::String(_)
-            | Self::Library(_)
-            | Self::Weak(_)
-            | Self::Stream(_)
-            | Self::Thread(_)
-            | Self::Sender(_)
-            | Self::Receiver(_)
-            | Self::Mutex(_)
-            | Self::RwLock(_) => {}
+        struct Tracer<'a, 'v> {
+            heap: &'a Heap,
+            visit: &'v mut dyn FnMut(u64, bool),
         }
+        impl Tracer<'_, '_> {
+            #[inline(always)]
+            fn resolve(&mut self, v: Value, precise: bool) {
+                let addr = v.heap_addr();
+                if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                    (self.visit)(addr, precise);
+                }
+            }
+        }
+        impl SlotVisitor for Tracer<'_, '_> {
+            #[inline(always)]
+            fn word(&mut self, &v: &Value, kind: u8) {
+                if kind != common::WORD_SCALAR {
+                    self.resolve(v, kind == common::WORD_POINTER);
+                }
+            }
+
+            #[inline(always)]
+            fn member(&mut self, m: &Member) {
+                match m {
+                    Member::Object(o) => (self.visit)(o.addr(), true),
+                    Member::Value(v) => self.resolve(*v, false),
+                }
+            }
+        }
+        self.visit_slots(heap, &mut Tracer { heap, visit });
     }
 
     /// Header nursery bits ([`GEN_YOUNG`] and friends).
@@ -2564,26 +2594,9 @@ impl Object {
     }
 
     #[must_use]
+    #[inline]
     pub fn addr(&self) -> u64 {
-        match self {
-            Self::String(s) => s.as_ptr() as u64,
-            Self::Instance(i) => i.as_ptr() as u64,
-            Self::Enum(e) => e.as_ptr() as u64,
-            Self::Library(l) => l.as_ptr() as u64,
-            Self::Tuple(t) => t.as_ptr() as u64,
-            Self::Array(a) => a.as_ptr() as u64,
-            Self::Coroutine(c) => c.as_ptr() as u64,
-            Self::Boxed(b) => b.as_ptr() as u64,
-            Self::Root(r) => r.as_ptr() as u64,
-            Self::Weak(w) => w.as_ptr() as u64,
-            Self::Fn(f) => f.as_ptr() as u64,
-            Self::Stream(s) => s.as_ptr() as u64,
-            Self::Thread(t) => t.as_ptr() as u64,
-            Self::Sender(s) => s.as_ptr() as u64,
-            Self::Receiver(r) => r.as_ptr() as u64,
-            Self::Mutex(m) => m.as_ptr() as u64,
-            Self::RwLock(l) => l.as_ptr() as u64,
-        }
+        each_kind!(self, r => r.as_ptr() as u64)
     }
 
     fn kind(self) -> u8 {
@@ -2610,25 +2623,7 @@ impl Object {
 
     /// Drop the payload and poison `kind = 0`. Slot memory stays mapped.
     unsafe fn recycle_payload(self) {
-        match self {
-            Self::String(s) => unsafe { s.recycle() },
-            Self::Instance(i) => unsafe { i.recycle() },
-            Self::Enum(e) => unsafe { e.recycle() },
-            Self::Library(l) => unsafe { l.recycle() },
-            Self::Tuple(t) => unsafe { t.recycle() },
-            Self::Array(a) => unsafe { a.recycle() },
-            Self::Coroutine(c) => unsafe { c.recycle() },
-            Self::Boxed(b) => unsafe { b.recycle() },
-            Self::Root(r) => unsafe { r.recycle() },
-            Self::Weak(w) => unsafe { w.recycle() },
-            Self::Fn(f) => unsafe { f.recycle() },
-            Self::Stream(s) => unsafe { s.recycle() },
-            Self::Thread(t) => unsafe { t.recycle() },
-            Self::Sender(s) => unsafe { s.recycle() },
-            Self::Receiver(r) => unsafe { r.recycle() },
-            Self::Mutex(m) => unsafe { m.recycle() },
-            Self::RwLock(l) => unsafe { l.recycle() },
-        }
+        each_kind!(self, r => unsafe { r.recycle() })
     }
 
     /// Rebuild a typed handle from a live allocation. The address must be a
@@ -2660,25 +2655,7 @@ impl Object {
 
 impl GcSized for Object {
     fn size(&self) -> usize {
-        match self {
-            Self::String(s) => s.size(),
-            Self::Instance(i) => i.size(),
-            Self::Enum(e) => e.size(),
-            Self::Library(l) => l.size(),
-            Self::Tuple(t) => t.size(),
-            Self::Array(a) => a.size(),
-            Self::Coroutine(c) => c.size(),
-            Self::Boxed(b) => b.size(),
-            Self::Root(r) => r.size(),
-            Self::Weak(w) => w.size(),
-            Self::Fn(f) => f.size(),
-            Self::Stream(s) => s.size(),
-            Self::Thread(t) => t.size(),
-            Self::Sender(s) => s.size(),
-            Self::Receiver(r) => r.size(),
-            Self::Mutex(m) => m.size(),
-            Self::RwLock(l) => l.size(),
-        }
+        each_kind!(self, r => r.size())
     }
 }
 
@@ -2864,20 +2841,6 @@ impl ObjInstance {
             storage: InstanceStorage::from_vec(slots),
             type_id,
             finalized: false,
-        }
-    }
-
-    fn mark_members(&self, heap: &Heap, grey_objects: &mut Vec<Object>) {
-        let slots = self.storage.as_slice();
-        let kinds = heap.class_field_kinds(self.type_id);
-        for (i, (v, kind)) in slots.iter().zip(common::class_slot_kinds(kinds, slots)).enumerate() {
-            #[cfg(not(feature = "gc-stress"))]
-            let _ = i;
-            #[cfg(feature = "gc-stress")]
-            heap.verify_kinded_word(&format!("class {}", self.type_id), i, kind, *v);
-            if kind != common::WORD_SCALAR {
-                heap.mark_value(*v, grey_objects);
-            }
         }
     }
 }
@@ -3528,11 +3491,16 @@ impl ObjArray {
             if k == 1 {
                 return (v, kind);
             }
-            let lane = i % k;
-            let tag = words[i - lane + 1].bits();
-            let pointer = lane == 0 && tag < 64 && mask >> tag & 1 == 1;
-            (v, if pointer { common::WORD_POINTER } else { common::WORD_SCALAR })
+            (v, if Self::lane_pointer(words, k, mask, i) { common::WORD_POINTER } else { common::WORD_SCALAR })
         })
+    }
+
+    /// Whether word `i` of lane words `words` (`k` per element) is a
+    /// reference: lane 0 of an element whose tag (lane 1) is in `mask`.
+    #[inline]
+    fn lane_pointer(words: &[Value], k: usize, mask: u64, i: usize) -> bool {
+        let lane = i % k;
+        lane == 0 && words.get(i + 1).is_some_and(|t| t.bits() < 64 && mask >> t.bits() & 1 == 1)
     }
 
     /// Element word kind (`common::WORD_*`).
@@ -4055,6 +4023,13 @@ impl ObjArray {
     /// Word elements for the collector's in-place fixups (compaction); no
     /// flag change, `None` for packed bytes (never references).
     #[inline]
+    pub(crate) fn gc_words(&self) -> Option<&[Value]> {
+        match &self.data {
+            ArrayData::Words(w) | ArrayData::Lanes { words: w, .. } => Some(w),
+            ArrayData::Bytes(_) => None,
+        }
+    }
+
     pub(crate) fn gc_words_mut(&mut self) -> Option<&mut [Value]> {
         match &mut self.data {
             ArrayData::Words(w) | ArrayData::Lanes { words: w, .. } => Some(w),
