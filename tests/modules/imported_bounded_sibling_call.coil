@@ -1,0 +1,21 @@
+// Another module's method with two bounds (`K: Eq + Hash`) calling a
+// sibling method, cloned at `Option` keys: the clone passes the sibling the
+// structural `Eq` of `Option<int>` this module's goal registered (#2354).
+// @output 0 1 0 2\n0 1 0\n
+use io::sync::println;
+use string::format;
+use keyed_bag::KeyedBag;
+
+fn main() {
+    let ints: KeyedBag<Option<int>> = new KeyedBag(Vec::new());
+    let a = ints.insert(Option::Some(1));
+    let b = ints.insert(Option::None);
+    let c = ints.insert(Option::Some(1));
+    let d = ints.insert(Option::Some(2));
+    let _ = println(format("%i %i %i %i", a, b, c, d));
+    let strs: KeyedBag<Option<string>> = new KeyedBag(Vec::new());
+    let e = strs.insert(Option::Some("x"));
+    let f = strs.insert(Option::Some("y"));
+    let g = strs.insert(Option::Some("x"));
+    let _ = println(format("%i %i %i", e, f, g));
+}

@@ -1,0 +1,27 @@
+// A generic class whose bounded method calls a sibling method, cloned by
+// another module (`tests/modules/imported_bounded_sibling_call.coil`).
+
+/// Distinct keys in insertion order.
+class KeyedBag<K> {
+    pub keys: Vec<K>,
+}
+
+impl KeyedBag<K: Eq + Hash> {
+    /// The index of `k`, added first when it is not there yet.
+    pub fn insert(K k) -> int {
+        return self.index_at(k, k.hash());
+    }
+
+    /// The index of `k`, whose hash is `h`, added when missing.
+    pub fn index_at(K k, int h) -> int {
+        let i = 0;
+        while i < self.keys.len() {
+            if self.keys[i].hash() == h && self.keys[i] == k {
+                return i;
+            }
+            i = i + 1;
+        }
+        self.keys.push(k);
+        return self.keys.len() - 1;
+    }
+}

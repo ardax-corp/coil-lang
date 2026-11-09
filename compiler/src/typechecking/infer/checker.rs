@@ -20492,6 +20492,13 @@ impl Checker {
         std::mem::swap(&mut self.static_tails, &mut other.static_tails);
     }
 
+    /// Take the ground structural instances `other` registered that this
+    /// checker lacks
+    /// ([`crate::typechecking::generics::Generics::adopt_structural_instances`]).
+    pub fn adopt_structural_instances(&mut self, other: &Checker) {
+        self.generics.adopt_structural_instances(&other.generics);
+    }
+
     /// Give each `static let` of a closed two-word type a tail slot for
     /// its second word, after every declared slot: a store writes both
     /// words and a read loads both, with no box. A `const` keeps one slot
