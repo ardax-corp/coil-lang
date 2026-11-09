@@ -24,7 +24,7 @@ use common::Value;
 use super::super::AddrHashBuilder;
 use super::{
     GcData, GcHeader, GcPhase, Heap, Member, ObjArray, ObjBoxed, ObjEnum,
-    ObjFn, ObjInstance, ObjTuple, Object,
+    ObjFn, ObjInstance, ObjTuple, Object, Slot,
 };
 
 type AddrSet = HashSet<u64, AddrHashBuilder>;
@@ -106,97 +106,26 @@ impl Object {
         })
     }
 
-    /// Rewrite this object's precise references to moved objects. Mirrors
-    /// the precise cases of [`Object::for_each_reference`].
+    /// Rewrite this object's precise references to moved objects: the
+    /// precise slots of [`Object::for_each_reference`].
     #[cold]
     pub(super) fn rewrite_precise_refs(&self, heap: &Heap, fwd: &AddrMap) {
-        let fix = |v: &mut Value| {
-            if let Some(n) = forward(fwd, *v) {
-                *v = n;
-            }
-        };
-        let fix_kinded = |words: &mut [Value], kinds: u8| {
-            for (i, v) in words.iter_mut().enumerate() {
-                if common::packed_word_kind(kinds, i) == common::WORD_POINTER {
-                    fix(v);
+        self.visit_slots_mut(heap, |slot| match slot {
+            Slot::Word(v, common::WORD_POINTER) => {
+                if let Some(n) = forward(fwd, *v) {
+                    *v = n;
                 }
             }
-        };
-        let fix_member = |m: &mut Member| -> bool {
-            if let Member::Object(o) = m
-                && let Some(&to) = fwd.get(&o.addr())
-                && let Some(n) = heap.find_object_by_addr(to)
-            {
-                *m = Member::Object(n);
-                return true;
-            }
-            false
-        };
-        match self {
-            Self::Instance(i) => {
-                let inst = i.payload_mut();
-                let kinds = heap.class_field_kinds(inst.type_id);
-                let words = inst.storage.as_mut_slice();
-                // A tagged word's kind reads its tag slot, which no fix
-                // changes: resolve them all first.
-                let resolved: Vec<u8> = common::class_slot_kinds(kinds, words).collect();
-                for (v, kind) in words.iter_mut().zip(resolved) {
-                    if kind == common::WORD_POINTER {
-                        fix(v);
-                    }
+            Slot::Word(..) => {}
+            Slot::Member(m) => {
+                if let Member::Object(o) = m
+                    && let Some(&to) = fwd.get(&o.addr())
+                    && let Some(n) = heap.find_object_by_addr(to)
+                {
+                    *m = Member::Object(n);
                 }
             }
-            Self::Enum(e) => {
-                let payload = &mut e.payload_mut().payload;
-                let kinds = payload.kinds();
-                fix_kinded(payload.as_mut_slice(), kinds);
-            }
-            Self::Tuple(t) => {
-                let t = t.payload_mut();
-                let kinds = t.kinds();
-                fix_kinded(t.elements.as_mut_slice(), kinds);
-            }
-            Self::Array(a) => {
-                let a = a.payload_mut();
-                if a.may_hold_refs() && a.elem_kind() == common::WORD_POINTER {
-                    a.gc_words_mut().unwrap_or_default().iter_mut().for_each(fix);
-                } else if a.may_hold_refs() && a.lanes() > 1 {
-                    // A pointer lane's kind reads its element's tag, which
-                    // no fix changes: resolve them all first.
-                    let kinds: Vec<u8> = a.kinded_words().map(|(_, kind)| kind).collect();
-                    for (v, kind) in a.gc_words_mut().unwrap_or_default().iter_mut().zip(kinds) {
-                        if kind == common::WORD_POINTER {
-                            fix(v);
-                        }
-                    }
-                }
-            }
-            Self::Coroutine(c) => {
-                let coro = c.payload_mut();
-                let mask = coro.saved_live_mask;
-                if mask != 0 {
-                    for (i, v) in coro.saved_stack.iter_mut().enumerate().take(64) {
-                        if mask & (1u64 << i) != 0 {
-                            fix(v);
-                        }
-                    }
-                }
-            }
-            Self::Boxed(b) => {
-                fix_member(&mut b.payload_mut().payload);
-            }
-            Self::Root(r) => {
-                if let Some(m) = &mut r.payload_mut().payload {
-                    fix_member(m);
-                }
-            }
-            Self::Fn(f) => {
-                for m in f.payload_mut().dicts.iter_mut().flatten().flatten() {
-                    fix_member(m);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 }
 
