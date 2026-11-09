@@ -65,7 +65,6 @@ impl TyInterner {
 /// and `f(x)` with `Option<int> x` share one clone (#1477).
 pub fn mono_key_ty(ty: &Ty) -> Ty {
     use crate::typechecking::ty::{option_app_ty, option_inner, result_app_ty, result_ok_err};
-    let rec = |items: &[Ty]| items.iter().map(mono_key_ty).collect::<Vec<_>>();
     match ty {
         Ty::Constructor { owner, .. } => mono_key_ty(owner),
         Ty::Sum { name, .. } if common::is_builtin_option_enum(name) => match option_inner(ty) {
@@ -77,20 +76,11 @@ pub fn mono_key_ty(ty: &Ty) -> Ty {
             None => ty.clone(),
         },
         Ty::Sum { name, .. } => Ty::Con(name.clone()),
-        Ty::App(head, args) => Ty::App(Box::new(mono_key_ty(head)), rec(args)),
-        Ty::Fun(a, b) => Ty::Fun(Box::new(mono_key_ty(a)), Box::new(mono_key_ty(b))),
-        Ty::Tuple(items) => Ty::Tuple(rec(items)),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(mono_key_ty(element)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, t)| (n.clone(), mono_key_ty(t))).collect(),
-        },
         // `readonly` is a type-checking qualifier with no runtime form, so
         // `f(x)` and `f(readonly x)` share one clone (#1555).
         Ty::Readonly(inner) => mono_key_ty(inner),
-        Ty::Var(_) | Ty::Con(_) | Ty::Existential { .. } | Ty::Forall { .. } | Ty::Never => ty.clone(),
+        Ty::Forall { .. } => ty.clone(),
+        _ => ty.map_children(mono_key_ty),
     }
 }
 
@@ -908,7 +898,7 @@ pub fn ground_ty(checker: &Checker, expr: &Output) -> Option<Ty> {
 /// A ground type: no type variable left. A ground function type is one
 /// (an argument `fn (int x) => ..` keys its call like any other).
 fn concrete_ty(ty: &Ty) -> Option<Ty> {
-    if contains_var(ty) {
+    if ty.has_var() {
         return None;
     }
     Some(ty.clone())
@@ -920,29 +910,6 @@ fn type_arg(ty: &Ty) -> Option<Ty> {
     concrete_ty(ty).filter(|ty| !matches!(ty, Ty::Fun(..)))
 }
 
-fn contains_var(ty: &Ty) -> bool {
-    match ty {
-        Ty::Var(_) => true,
-        Ty::Fun(a, b) => contains_var(a) || contains_var(b),
-        Ty::App(head, args) => contains_var(head) || args.iter().any(contains_var),
-        Ty::Sum { variants, .. } => variants.iter().any(|(_, payload)| match payload {
-            crate::typechecking::ty::EnumVariantPayloadTy::Unit => false,
-            crate::typechecking::ty::EnumVariantPayloadTy::Tuple(items) => {
-                items.iter().any(contains_var)
-            }
-            crate::typechecking::ty::EnumVariantPayloadTy::Record(fields) => {
-                fields.iter().any(|(_, ty)| contains_var(ty))
-            }
-        }),
-        Ty::Constructor { owner, .. } => contains_var(owner),
-        Ty::Tuple(items) => items.iter().any(contains_var),
-        Ty::Array { element, .. } => contains_var(element),
-        Ty::Record { fields } => fields.iter().any(|(_, ty)| contains_var(ty)),
-        Ty::Forall { body, .. } => contains_var(body),
-        Ty::Readonly(inner) => contains_var(inner),
-        Ty::Con(_) | Ty::Existential { .. } | Ty::Never => false,
-    }
-}
 
 fn apply_caps(
     candidates: Vec<MonoCandidate>,
