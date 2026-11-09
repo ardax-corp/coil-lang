@@ -455,7 +455,7 @@ pub(super) fn dce(func: &mut MirFunc) {
         changed = false;
         for block in &func.blocks {
             for inst in block.insts.iter().rev() {
-                if live.contains(&inst.dest()) || inst.is_effect_barrier() || traps.contains(&inst.dest()) {
+                if inst.dests().any(|d| live.contains(&d)) || inst.is_effect_barrier() || traps.contains(&inst.dest()) {
                     for o in inst.operands() {
                         if live.insert(o) {
                             changed = true;
@@ -487,7 +487,7 @@ pub(super) fn dce(func: &mut MirFunc) {
         block.insts.retain(|i| {
             i.is_effect_barrier()
                 || traps.contains(&i.dest())
-                || live.contains(&i.dest())
+                || i.dests().any(|d| live.contains(&d))
                 || matches!(i, MirInst::MatchPayload { scrutinee, .. } if unpacked.contains(&(b, *scrutinee)))
         });
     }
