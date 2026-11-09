@@ -1296,7 +1296,7 @@ impl Compiler {
     /// Lower the body of the function declared at `span` from HIR. `false`
     /// when the body is outside what the lowering emits; the caller reports
     /// it ([`Self::report_unlowered`]).
-    pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
+    pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan) -> bool {
         self.hir_refusal = None;
         *self.polyfn_over_application.borrow_mut() = None;
         // Clones an earlier body planned but never called give back their room.
@@ -1385,23 +1385,7 @@ impl Compiler {
             self.hir_module = Some(module);
             return true;
         }
-        // Where the AST walk would start the body: the body's pre-order
-        // position when the emit cursor still sits on parameter nodes before
-        // it, else the cursor itself (it can run ahead of the pre-order ids
-        // in `impl` blocks, and the walk takes one id per node from there).
-        // A file that emits a trailing `impl` first leaves the cursor at the
-        // end; the AST walk then takes no ids, and neither does this body.
-        let table = self.checker.id_table();
-        let body_pos = table
-            .walk_id(body, table.ids().get(self.emit_idx).copied())
-            .map(|id| (id.0 as usize).max(self.emit_idx))
-            .filter(|&pos| pos <= table.len())
-            // A class static's initializer is walked from the field's own
-            // id, as the AST takes them.
-            .or((hir.kind == crate::hir::BodyKind::Static).then_some(self.emit_idx));
-        let plan = if body_pos.is_none() {
-            Some("emit-cursor")
-        } else if let Err(reason) = &shapes {
+        let plan = if let Err(reason) = &shapes {
             Some(*reason)
         } else if hir.result_mode != self.compiling_result_mode {
             // Method result mode is keyed by the bare name in the AST.
@@ -1588,7 +1572,6 @@ impl Compiler {
                 if !emit.par_tail.is_empty() {
                     self.hir_par_tail = Some(Box::new(HirParTail { hir: hir.clone(), emit }));
                 }
-                self.skip_emit_ids_in(body_pos.unwrap_or(self.emit_idx), body);
                 crate::opt::note_hir_lowered();
                 true
             }
@@ -4243,17 +4226,6 @@ impl Compiler {
             fn_key_sites: Vec::new(),
             stray_muts: Vec::new(),
         }
-    }
-
-    /// Move the emit-order id cursor past `body`'s subtree (which starts at
-    /// pre-order position `pos`), where the AST walk would have left it.
-    fn skip_emit_ids_in(&mut self, pos: usize, body: &Output<'_>) {
-        fn count(node: &Output<'_>) -> usize {
-            let mut n = 1;
-            crate::typechecking::id::walk_children(node, &mut |c| n += count(c));
-            n
-        }
-        self.emit_idx = (pos + count(body)).min(self.checker.id_table().len());
     }
 
     /// Bind parameter slots, resolve every call and check every value edge;

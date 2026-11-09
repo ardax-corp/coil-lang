@@ -289,10 +289,6 @@ pub struct Compiler {
     checker: crate::typechecking::Checker,
     /// NodeId/DefId facts from the last `check_program` (B2).
     typed_sidecar: crate::typechecking::TypedSidecar,
-    /// Index into [`crate::typechecking::Checker::ids`] used by
-    /// `do_compile` to recover the `NodeId` of the node it's currently
-    /// emitting. Reset at the start of each `compile`.
-    emit_idx: usize,
     /// The archive's constant pool: encoded heap snapshots, which a
     /// `RestoreSnapshot` startup op names by index.
     constants: Vec<u64>,
@@ -710,7 +706,6 @@ impl Default for Compiler {
             context: Context::default(),
             checker: crate::typechecking::Checker::new(),
             typed_sidecar: crate::typechecking::TypedSidecar::default(),
-            emit_idx: 0,
             constants: Vec::default(),
             strings: Vec::default(),
             string_indices: HashMap::default(),
@@ -867,8 +862,8 @@ pub(crate) struct InstCloneSrc {
     span: (usize, usize),
     /// The checker's instance head, over the instance's type variables.
     head: Vec<Ty>,
-    /// The emit cursor at the shared method's compile, once compiled.
-    emit_idx: Option<usize>,
+    /// Whether the shared method is compiled, so a clone can compile from it.
+    compiled: bool,
     program: usize,
     /// A default body's trait parameter names (its head is theirs), then
     /// the names of its own bounded type parameters.

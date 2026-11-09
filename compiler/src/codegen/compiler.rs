@@ -707,14 +707,6 @@ impl Compiler {
         slot
     }
 
-    fn next_emit_id(&mut self) -> Option<crate::typechecking::id::NodeId> {
-        let id = self.checker.id_table().ids().get(self.emit_idx).copied();
-        if id.is_some() {
-            self.emit_idx += 1;
-        }
-        id
-    }
-
     fn node_id_of(&self, node: &Output<'_>) -> Option<crate::typechecking::id::NodeId> {
         self.checker.id_table().id_of_output(node)
     }
@@ -1192,7 +1184,7 @@ impl Compiler {
                 method: method.to_string(),
                 span,
                 head,
-                emit_idx: None,
+                compiled: false,
                 program: self.program_seq,
                 trait_params: None,
                 own_bounds: 0,
@@ -1240,7 +1232,7 @@ impl Compiler {
                 method: method.to_string(),
                 span,
                 head,
-                emit_idx: None,
+                compiled: false,
                 program: self.program_seq,
                 trait_params: Some(params),
                 own_bounds: n_own,
@@ -1289,7 +1281,7 @@ impl Compiler {
                 method: name.to_string(),
                 span: (f.0.start, f.0.end),
                 head: vars.into_iter().map(Ty::Var).collect(),
-                emit_idx: None,
+                compiled: false,
                 program: self.program_seq,
                 trait_params: None,
                 own_bounds: 0,
@@ -1334,7 +1326,7 @@ impl Compiler {
                 method: name.to_string(),
                 span: (function.0.start, function.0.end),
                 head: vars.into_iter().map(Ty::Var).collect(),
-                emit_idx: None,
+                compiled: false,
                 program: self.program_seq,
                 trait_params: None,
                 own_bounds: 0,
@@ -1347,14 +1339,14 @@ impl Compiler {
         );
     }
 
-    /// The emit cursor a clone of `fqn` replays, taken as its shared body
-    /// is compiled.
+    /// Mark `fqn`'s shared body compiled: its clones can now be compiled
+    /// from it.
     fn note_inst_clone_compiled(&mut self, fqn: &str) {
-        let (idx, seq) = (self.emit_idx, self.program_seq);
+        let seq = self.program_seq;
         if let Some(src) = self.inst_clone_srcs.get_mut(fqn)
             && src.program == seq
         {
-            src.emit_idx = Some(idx);
+            src.compiled = true;
         }
     }
 
@@ -1565,12 +1557,12 @@ impl Compiler {
                 continue;
             }
             let vars = self.inst_clone_vars(&src.head, &req.lookup).unwrap_or_default();
-            let method = (src.program == self.program_seq)
-                .then(|| src.emit_idx.zip(self.find_impl_method_fn(children, &req.src)))
+            let method = (src.program == self.program_seq && src.compiled)
+                .then(|| self.find_impl_method_fn(children, &req.src))
                 .flatten()
                 .filter(|_| self.inst_clone_ground(src.span, &vars));
             match method {
-                Some((idx, (method, head_args))) => {
+                Some((method, head_args)) => {
                     // The instance's type parameter names (`T::m(..)`).
                     let mut names = HashMap::new();
                     for ((arg, have), want) in head_args.iter().zip(&src.head).zip(&req.lookup) {
@@ -1593,7 +1585,6 @@ impl Compiler {
                             self.current_function_qualified.replace(req.src.clone()),
                         )
                     });
-                    let prev_idx = std::mem::replace(&mut self.emit_idx, idx);
                     let prev_mono = std::mem::replace(&mut self.compiling_mono_clone, true);
                     let prev_ctx = self.pending_instance_ctx.take();
                     let prev_own = self.pending_own_dicts.take();
@@ -1609,7 +1600,6 @@ impl Compiler {
                         self.pending_instance_ctx = prev_ctx;
                         self.pending_own_dicts = prev_own;
                         self.compiling_mono_clone = prev_mono;
-                        self.emit_idx = prev_idx;
                         if let Some((method, namespace, qualified)) = inherent {
                             self.compiling_method = method;
                             self.namespace = namespace;
@@ -1633,7 +1623,6 @@ impl Compiler {
                     self.pending_instance_ctx = prev_ctx;
                     self.pending_own_dicts = prev_own;
                     self.compiling_mono_clone = prev_mono;
-                    self.emit_idx = prev_idx;
                     if let Some((method, namespace, qualified)) = inherent {
                         self.compiling_method = method;
                         self.namespace = namespace;
@@ -4632,7 +4621,6 @@ impl Compiler {
         dict_arity: usize,
         source: Option<&str>,
     ) {
-        let _method_id = self.next_emit_id();
         let own_dicts = self.pending_own_dicts.take();
         let Expression::Function {
             docs: _,
@@ -4646,10 +4634,10 @@ impl Compiler {
             self.do_compile(method);
             return;
         };
-        let Some(body) = body else {
+        if body.is_none() {
             self.consume_function_signature_output(method);
             return;
-        };
+        }
 
         self.bind_function_entry(qualified.clone());
         if *is_coro {
@@ -4714,7 +4702,7 @@ impl Compiler {
                     c.hir_entry_ctx.push((slot, own, (base + i) as u32));
                 }
             }
-            if !c.try_lower_hir_function(&method.0, body) {
+            if !c.try_lower_hir_function(&method.0) {
                 // Every body runs from its direct MIR, so one whose HIR does
                 // not lower (an instance clone included) is a compile error.
                 c.report_unlowered(&method.0, &qualified);
@@ -4867,9 +4855,9 @@ impl Compiler {
         source_name: &str,
         span: &SimpleSpan,
     ) {
-        let Some(body) = body else {
+        if body.is_none() {
             return;
-        };
+        }
         let specializations = self.planned_mono_specializations(qualified, type_params, source_name);
         if specializations.is_empty() {
             return;
@@ -4906,13 +4894,6 @@ impl Compiler {
             self.mono_type_param_tys.push(type_param_tys);
             self.mono_var_tys.push(var_tys);
 
-            // The clone replays the source's ids from its parameters, as an
-            // instance clone does: the cursor it leaves behind would run the
-            // walk past the module's ids for the items after (#1190).
-            let prev_idx = self.emit_idx;
-            if let Some(id) = self.checker.id_table().id_of_output(args) {
-                self.emit_idx = id.0 as usize;
-            }
             // Its own body record: a clone left as trailing glue of the source
             // body has no registered entry, so a CALL to it from another
             // function was resolved through another body's private label ids.
@@ -4920,7 +4901,7 @@ impl Compiler {
                 c.do_compile(args);
                 // One HIR per instance: the generic body's HIR at this clone's
                 // type arguments.
-                if !c.try_lower_hir_function(span, body) {
+                if !c.try_lower_hir_function(span) {
                     c.report_unlowered(span, &mono_name);
                 }
                 c.bodies.advance();
@@ -4929,7 +4910,6 @@ impl Compiler {
             self.mono_codegen_var_types.pop();
             self.mono_type_param_tys.pop();
             self.mono_var_tys.pop();
-            self.emit_idx = prev_idx;
             self.compiling_mono_clone = prev_mono_clone;
         }
     }
@@ -5018,7 +4998,6 @@ impl Compiler {
     }
 
     fn consume_function_signature_output<'compiler>(&mut self, method: &Output<'compiler>) {
-        let _method_id = self.next_emit_id();
         if let Expression::Function { args, body, .. } = method.1.as_ref() {
             self.do_compile(args);
             if let Some(body) = body {
@@ -5324,7 +5303,7 @@ impl Compiler {
         };
         // The initializer returns the value; the setup region stores it.
         self.with_body_frame(&name, frame, |c| {
-            if !c.try_lower_hir_function(&init.0, init) {
+            if !c.try_lower_hir_function(&init.0) {
                 c.report_unlowered(&init.0, fqn);
             }
         });
@@ -5683,13 +5662,11 @@ impl Compiler {
                     qualified.clone()
                 };
             let _ = self.bind_function_entry(table_key.clone());
-            // A clone replays the ids from the function's own node, as its
-            // `compile_function_output_with_name` walk takes them.
-            if let Some(id) = self.checker.id_table().id_of_output(ast)
-                && let Some(src) = self.inst_clone_srcs.get_mut(&qualified)
+            // Its clones compile from this body from now on.
+            if let Some(src) = self.inst_clone_srcs.get_mut(&qualified)
                 && src.program == self.program_seq
             {
-                src.emit_idx = Some(id.0 as usize);
+                src.compiled = true;
             }
             self.fn_arities
                 .insert(table_key.clone(), (fixed_arity as u32, has_rest));
@@ -5752,7 +5729,7 @@ impl Compiler {
                 let entry_sp = c.context.variables.len() as u32;
                 c.hir_entry_sp = Some(entry_sp);
 
-                let lowered = prev_fn_table_key_was_none && c.try_lower_hir_function(span, body);
+                let lowered = prev_fn_table_key_was_none && c.try_lower_hir_function(span);
                 if !lowered {
                     if !prev_fn_table_key_was_none {
                         c.hir_refusal = Some("nested-fn");
@@ -5788,7 +5765,6 @@ impl Compiler {
         &mut self,
         ast: &(SimpleSpan, Box<Expression<'compiler>>),
     ) {
-        let _ = self.next_emit_id();
         let (span, child) = ast;
 
         match child.borrow() {
@@ -6080,8 +6056,6 @@ impl Compiler {
                             self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                         }
                         Expression::Method(_, body) => {
-                            let _method_wrapper_id = self.checker.id_table().ids()[self.emit_idx];
-                            self.emit_idx += 1;
                             if let Expression::Function {
                                 docs: _,
                                 name: method_name,
@@ -6257,7 +6231,7 @@ impl Compiler {
             }
             // Resolved by the typechecker; no bytes.
             Expression::TypeAlias { .. } => {}
-            Expression::TestCase { name, body } => {
+            Expression::TestCase { name, .. } => {
                 let desc = match name.1.as_ref() {
                     Expression::String(s) => (*s).to_string(),
                     Expression::Expr((_, inner)) => match inner.as_ref() {
@@ -6288,7 +6262,7 @@ impl Compiler {
                 // Recorded as a body of its own: unrecorded tests would share
                 // the epilogue and collide with labels in earlier bodies.
                 self.with_body_frame(&fn_name, frame, |c| {
-                    if !c.try_lower_hir_function(span, body) {
+                    if !c.try_lower_hir_function(span) {
                         c.report_unlowered(span, &fn_name);
                     }
                     c.bodies.advance();
@@ -6353,7 +6327,6 @@ impl Compiler {
         let ns = self.namespace.clone();
         self.namespace = module.to_string();
 
-        self.emit_idx = 0;
         self.codegen_depth = 0;
         self.const_env_stack.clear();
         self.const_env_stack.push(HashMap::new());
@@ -6617,7 +6590,7 @@ impl Compiler {
         self.messages.extend(residue);
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
-        if self.inst_clone_srcs.values().any(|s| s.program == seq && s.emit_idx.is_some()) {
+        if self.inst_clone_srcs.values().any(|s| s.program == seq && s.compiled) {
             let ctx = self.take_module_ctx(module);
             self.module_ctxs.insert(seq, ctx);
         }
