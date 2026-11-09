@@ -114,10 +114,10 @@ impl MirInst {
             },
             Self::Unary { op, .. } => OpProps { traps: if *op == MirUnaryOp::Neg { Traps::IfIntOperand } else { Traps::No }, ..P },
             Self::Index { unchecked, .. } => OpProps { traps: if *unchecked { Traps::No } else { Traps::Yes }, ..P },
-            Self::LaneIndex { .. } => OpProps { traps: Traps::Yes, ..P },
-            Self::StrEq { .. } => P,
+            Self::LaneIndex { .. } => OpProps { traps: Traps::Yes, vector_barrier: true, ..P },
+            Self::StrEq { .. } => OpProps { vector_barrier: true, ..P },
             // Counts a run: nothing reads its token.
-            Self::Probe { .. } => OpProps { barrier: true, ..P },
+            Self::Probe { .. } => OpProps { barrier: true, vector_barrier: true, ..P },
             Self::MatchPayload { .. } | Self::HeapFieldLoad { .. } | Self::CodePtr { .. } | Self::LoadStatic { .. } | Self::HomeLoad { .. } => {
                 OpProps { vector_barrier: true, ..P }
             }
@@ -130,7 +130,7 @@ impl MirInst {
             Self::CallIndirect { .. } | Self::Ffi { .. } => {
                 OpProps { barrier: true, effects: Effects::Yes, allocates: true, vector_barrier: true, ..P }
             }
-            Self::ResumeCoro { .. } | Self::Yield { .. } => OpProps { barrier: true, effects: Effects::Yes, allocates: true, ..P },
+            Self::ResumeCoro { .. } | Self::Yield { .. } => OpProps { barrier: true, effects: Effects::Yes, allocates: true, vector_barrier: true, ..P },
             Self::Alloc { .. } => OpProps { barrier: true, gc_edge: true, allocates: true, ..P },
             Self::GcBarrier { .. } => OpProps { barrier: true, gc_edge: true, ..P },
             Self::ArrayPush { .. } | Self::LanePush { .. } => OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, ..P },
@@ -139,7 +139,7 @@ impl MirInst {
                 OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, vector_barrier: true, ..P }
             }
             Self::StoreIndex { .. } => OpProps { barrier: true, ..P },
-            Self::LaneStore { .. } => OpProps { barrier: true, traps: Traps::Yes, ..P },
+            Self::LaneStore { .. } => OpProps { barrier: true, traps: Traps::Yes, vector_barrier: true, ..P },
             Self::HeapFieldStore { .. } | Self::StoreStatic { .. } | Self::HomeStore { .. } | Self::ClearWord { .. } | Self::KeepAlive { .. } | Self::Print { .. } | Self::Panic { .. } => {
                 OpProps { barrier: true, vector_barrier: true, ..P }
             }
