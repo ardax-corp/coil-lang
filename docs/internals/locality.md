@@ -115,28 +115,14 @@ Numbers land here as each step merges.
   order; so does a column reduction (`interchange.coil`), whose partial
   sums would overflow in a different order. Those would need a proof
   that no overflow happens (range analysis), which is not planned.
-- **Step 3** (field summaries): the HIR effect summary of each body
-  gains `fields`, the fields of any object it or its callees may read or
-  write, as one bit per field name (a hash into 64 bits, so names may
-  share a bit). Reading or writing `x.f`, or a record pattern naming `f`,
-  sets `f`'s bit. Everything that may touch a field it cannot name sets
-  every bit: unknown code, a trait or function-value call, `==` or an
-  ordering on objects, a builtin or native given an object, resuming a
-  generator, a custom iterator. MIR keeps the bits per call
-  (`MirFunc::call_fields`) and the names this body uses at each heap slot
-  (`MirFunc::slot_fields`; an access lowered without a name makes the
-  slot unknown). `promote_fields` (since removed) accepted a loop with direct calls
-  and keeps a slot in a register when none of the calls' bits meet the
-  slot's names; a call may panic, so a `PanicStore` goes before it like
-  any trap. A finalizer can run at any allocation, so every call also
-  carries the bits of every `fn drop()` in the program
-  (`ProgramEffects::drop_fields`). Modules compile in dependency order:
-  one compiled while a later module (or the entry) still declares a drop
-  treats every call as touching every field
-  (`Compiler::set_pending_finalizers`).
+- **Step 3** (field summaries, removed): the HIR effect summary of each
+  body carried `fields`, one bit per field name it or its callees might
+  touch, and MIR kept the bits per call and per heap slot for
+  `promote_fields`, which kept a slot in a register across calls that
+  could not touch it. The pass went in #2343 and the summaries, the MIR
+  tables and their archive encoding with archive major 8.
   `promocall.coil` (the step 4 probe with a non-inlined recursive call in
-  the loop, 1M x 20, three alternating runs): 1250-1370 → 930-1020 ms,
-  the same as hand-written locals (910-1010 ms).
+  the loop, 1M x 20) measured 1250-1370 → 930-1020 ms while it ran.
 - **Step 6** (prefetch): `mir::mark_prefetch_scans` marks each `Index`
   that reads a heap word from an array made before its loop, at a header
   φ the loop steps up by a positive constant (`MirFunc::prefetch_loads`).

@@ -449,9 +449,6 @@ pub struct HirFfi {
     pub niche: Option<MirTy>,
 }
 
-/// [`HirMirInput::call_fields`]: by callee name and definition.
-pub type CallFields<'a> = Box<dyn Fn(&str, Option<crate::typechecking::def_id::DefId>) -> u64 + 'a>;
-
 /// How `Lower::pair_eq` compares two two-word values' words.
 enum PairEqWords {
     /// An enum pair: per variant, its tag and its payload's word type.
@@ -546,9 +543,6 @@ pub struct HirMirInput<'a> {
     pub pure_fn: Box<dyn Fn(&str) -> bool + 'a>,
     /// Whether a function, by its HIR callee name, never resizes an array.
     pub steady_fn: Box<dyn Fn(&str) -> bool + 'a>,
-    /// The fields a call of the named function may read or write
-    /// ([`crate::hir::effects::Summary::fields`]).
-    pub call_fields: CallFields<'a>,
     /// No finalizer resizes an array ([`MirFunc::lengths_steady`]).
     pub alloc_steady: bool,
     /// Statements before which frame-slot locals box (they escape there).
@@ -2984,28 +2978,6 @@ impl Lower<'_> {
         if let Some(&v) = self.preset.get(&id.0) {
             return Ok(v);
         }
-        // A class or record field by name: its slot's access below.
-        let place = match &self.hir.expr(id).kind {
-            HirKind::Assign { place, .. } => *place,
-            _ => id,
-        };
-        let note = match &self.hir.expr(place).kind {
-            HirKind::Field { name, .. } => self
-                .inp
-                .heap_fields
-                .get(&place.0)
-                .or_else(|| self.inp.record_fields.get(&place.0))
-                .map(|&(slot, _)| self.b.note_slot_field(slot, name)),
-            _ => None,
-        };
-        let out = self.value_unpacked_at(id);
-        if let Some(note) = note {
-            self.b.end_field_note(note);
-        }
-        out
-    }
-
-    fn value_unpacked_at(&mut self, id: HirId) -> Result<Val, Refusal> {
         let e = self.hir.expr(id);
         let returned = std::mem::take(&mut self.ret_tail);
         if let Some(par) = self.inp.par_loops.get(&id.0) {
@@ -4814,7 +4786,7 @@ impl Lower<'_> {
         if self.inp.tail_calls.contains(&id.0) && !site.word_ret && niche.is_none() && site.ret_items.is_none() {
             self.b.allow_tail_call(site.target);
         }
-        if let HirKind::Call { callee: Callee::Named { name, def, .. }, .. } = &self.hir.expr(id).kind {
+        if let HirKind::Call { callee: Callee::Named { name, .. }, .. } = &self.hir.expr(id).kind {
             // A pure function's one scalar word: an operator that may trap.
             if (self.inp.pure_fn)(name)
                 && !site.word_ret
@@ -4828,7 +4800,6 @@ impl Lower<'_> {
             if (self.inp.steady_fn)(name) {
                 self.b.mark_steady_call(dest);
             }
-            self.b.mark_call_fields(dest, (self.inp.call_fields)(name, *def));
         }
         // A shared generic body's object holding its type parameters'
         // values boxed, rebuilt with them unboxed (#1549).

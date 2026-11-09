@@ -1102,16 +1102,6 @@ impl MirGcKind {
     }
 }
 
-/// What a [`super::func::DeoptSite`] names: a stop or a leave-specialized
-/// edge (I7). No pass records one today.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum MirDeoptKind {
-    /// Interpreter may pause here (line / `stepi` boundary).
-    Stop,
-    /// Leave specialized or native code; resume at this edge.
-    Deopt,
-}
-
 impl MirInst {
     pub fn dest(&self) -> ValueId {
         match *self {

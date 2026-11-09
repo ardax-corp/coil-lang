@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::EffectFlags;
 
-use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, HirPatFields, IndexKind, LocalId, LocalKind, MakeKind};
+use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::infer::{Checker, ForInKind};
 use crate::typechecking::purity::classify_host_name;
@@ -91,22 +91,6 @@ pub struct Summary {
     /// something else also reaches. `false`: a caller that drops the
     /// result may free all of it.
     pub shared_ret: bool,
-    /// The fields of any object the call may read or write, itself or
-    /// through a callee, as [`field_bit`]s of their names; [`ALL_FIELDS`]
-    /// when it may touch one this summary cannot name (unknown code, a
-    /// whole-object op such as `==`, a native given an object). Lets MIR
-    /// keep a field in a register across the call (locality step 3).
-    pub fields: u64,
-}
-
-/// [`Summary::fields`] of a call that may touch any field.
-pub const ALL_FIELDS: u64 = u64::MAX;
-
-/// The [`Summary::fields`] bit of field `name`: one of 64 by a hash of the
-/// name, so two names may share a bit, never one name two.
-pub fn field_bit(name: &str) -> u64 {
-    let h = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
-    1 << (h % 64)
 }
 
 #[path = "escape.rs"]
@@ -169,7 +153,6 @@ impl Summary {
             opaque_args: if flags.contains(EffectFlags::UNKNOWN) { u64::MAX } else { 0 },
             returns: u64::MAX,
             shared_ret: true,
-            fields: if flags.contains(EffectFlags::UNKNOWN) { ALL_FIELDS } else { 0 },
         }
     }
 }
@@ -362,31 +345,6 @@ impl ProgramEffects {
             }
             s
         })
-    }
-
-    /// [`Summary::fields`] of a call of the user function or method
-    /// `name` (`def` when the call has one), as recorded so far; every
-    /// field for a body not recorded or one that calls its function
-    /// parameters.
-    pub fn call_fields(&self, checker: &Checker, module_path: &str, name: &str, def: Option<DefId>) -> u64 {
-        let current = checker.current_module_name() == module_path;
-        let s = match def.or_else(|| current.then(|| checker.def_id_of(name)).flatten()) {
-            Some(def) => self.fns.get(&def),
-            None => self.by_name.get(name).or_else(|| self.by_name.get(format!("{module_path}::{name}").as_str())),
-        };
-        match s {
-            Some(s) if s.latent == 0 => s.fields,
-            _ => ALL_FIELDS,
-        }
-    }
-
-    /// [`Summary::fields`] of every `fn drop()` recorded so far: what a
-    /// finalizer run at an allocation may touch.
-    pub fn drop_fields(&self) -> u64 {
-        self.by_name
-            .iter()
-            .filter(|(name, _)| name.rsplit("::").next() == Some("drop"))
-            .fold(0, |m, (_, s)| m | if s.latent == 0 { s.fields } else { ALL_FIELDS })
     }
 
     /// Keep why a module's bodies mutate their parameters
@@ -1527,35 +1485,6 @@ fn user_type_member(checker: &Checker, name: &str) -> bool {
     })
 }
 
-/// A value of `ty` reaches no object field and runs no code: a
-/// primitive, or a `Vec` or tuple of those. A function value passed to a
-/// native may be called there.
-fn field_free(ty: Option<&Ty>) -> bool {
-    match ty {
-        Some(Ty::Readonly(inner)) => field_free(Some(inner)),
-        Some(Ty::Fun(..)) => false,
-        Some(Ty::App(_, items)) if is_vec(ty) => items.iter().all(|t| field_free(Some(t))),
-        Some(Ty::Tuple(items)) => items.iter().all(|t| field_free(Some(t))),
-        Some(t) => !may_hold_mutable(Some(t)),
-        None => false,
-    }
-}
-
-/// The fields a pattern reads by name ([`Summary::fields`]).
-fn pat_fields(pat: &HirPat) -> u64 {
-    let named = |fields: &[(String, HirPat)]| fields.iter().fold(0, |m, (n, p)| m | field_bit(n) | pat_fields(p));
-    match pat {
-        HirPat::Tuple(items) | HirPat::Variant { fields: HirPatFields::Tuple(items), .. } => items.iter().fold(0, |m, p| m | pat_fields(p)),
-        HirPat::Record(fields) | HirPat::Variant { fields: HirPatFields::Record(fields), .. } => named(fields),
-        _ => 0,
-    }
-}
-
-/// A call that only builds a `Vec` or a variant around its arguments.
-fn holds_args(checker: &Checker, name: &str) -> bool {
-    is_vec_ctor(name) || name == "Vec::from" || name.rsplit_once("::").is_some_and(|(owner, member)| checker.tag_for(owner, member).is_some())
-}
-
 fn is_vec_ctor(name: &str) -> bool {
     matches!(name, "Vec::new" | "Vec::with_capacity")
 }
@@ -2135,7 +2064,6 @@ impl Cx<'_> {
         w.out.flags = w.out.flags.union(s.flags);
         w.out.visible = w.out.visible.union(s.visible);
         w.out.statics |= s.statics;
-        w.out.fields |= s.fields;
         if let Some(causes) = w.causes.as_mut()
             && !s.flags.is_pure()
         {
@@ -2153,7 +2081,6 @@ impl Cx<'_> {
     fn expr(&self, w: &mut Walk<'_>, id: HirId) {
         let body = &self.module.bodies[w.index];
         let e = body.expr(id);
-        w.out.fields |= self.own_fields(body, id);
         match &e.kind {
             HirKind::Call { callee, args } => self.call(w, id, callee, args),
             HirKind::Assign { place, value } => match &body.expr(*place).kind {
@@ -2267,28 +2194,6 @@ impl Cx<'_> {
         }
     }
 
-    /// The fields node `id` itself reads or writes ([`Summary::fields`]):
-    /// a field by name, or every field for an op that reads whole objects
-    /// (structural `==`, a builtin given one, resuming a generator).
-    fn own_fields(&self, body: &HirBody, id: HirId) -> u64 {
-        let objects = |ids: &[HirId]| ids.iter().any(|a| !field_free(body.expr(*a).ty.as_ref()));
-        match &body.expr(id).kind {
-            HirKind::Field { name, .. } => field_bit(name),
-            HirKind::Bin {
-                op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
-                lhs,
-                rhs,
-            } if objects(&[*lhs, *rhs]) => ALL_FIELDS,
-            HirKind::Index { base, kind: IndexKind::Other, .. } if objects(&[*base]) => ALL_FIELDS,
-            HirKind::Builtin { args, .. } if objects(args) => ALL_FIELDS,
-            HirKind::Spread(inner) if objects(&[*inner]) => ALL_FIELDS,
-            HirKind::Resume { .. } => ALL_FIELDS,
-            HirKind::Match { arms, .. } => arms.iter().fold(0, |m, a| m | pat_fields(&a.pat)),
-            HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => pat_fields(pat),
-            _ => 0,
-        }
-    }
-
     fn is_private(&self, w: &Walk<'_>, base: HirId) -> bool {
         let body = &self.module.bodies[w.index];
         let facts = &self.facts[w.index];
@@ -2306,11 +2211,6 @@ impl Cx<'_> {
                 }
                 self.apply(w, at, name, s, callee, args);
                 let host = callee.is_none() && self.known_named(w, name, *def).is_none();
-                // A native given an object may read any of its fields
-                // (`format("%v", o)`); a new `Vec` or variant only holds it.
-                if host && !holds_args(self.checker, name) && args.iter().any(|a| !field_free(body.expr(*a).ty.as_ref())) {
-                    w.out.fields = ALL_FIELDS;
-                }
                 let trait_decl = host && self.is_trait_method(name);
                 // `Trait::m(p)` on a concrete receiver runs its impl, whose
                 // body says what it mutates, as `p.m()` (#1647).
@@ -2345,11 +2245,6 @@ impl Cx<'_> {
                 let shown = format!(".{name}()");
                 match self.method(w, recv, name) {
                     Some((s, callee)) => {
-                        // As a native above: a `Vec` method may compare
-                        // elements (`contains`).
-                        if callee.is_none() && args.iter().any(|a| !field_free(body.expr(*a).ty.as_ref())) {
-                            w.out.fields = ALL_FIELDS;
-                        }
                         self.apply(w, at, &shown, s, callee, args);
                         let trait_decl = callee.is_none() && self.method_is_trait_dispatch(w, recv, name);
                         self.call_mutates(w, at, &shown, s.mutates, callee, Some(&shown), args, trait_decl);
@@ -2599,7 +2494,6 @@ impl Cx<'_> {
             opaque_args: u64::MAX,
             returns: u64::MAX,
             shared_ret: true,
-            fields: ALL_FIELDS,
         })
     }
 
@@ -2835,15 +2729,10 @@ impl Cx<'_> {
                 return Some(s);
             }
         }
-        // The AST walk does not say which fields a body touches.
-        let walked = |fx: &EffectFlags| Summary {
-            fields: ALL_FIELDS,
-            ..Summary::of(*fx)
-        };
         if let Some(fx) = def.and_then(|d| self.checker.program_fn_effects.get(&d)) {
-            return Some(walked(fx));
+            return Some(Summary::of(*fx));
         }
-        self.checker.program_method_effects.get(name).map(walked)
+        self.checker.program_method_effects.get(name).map(|fx| Summary::of(*fx))
     }
 
     /// The summary of `recv.name(..)` when the receiver is a user class or
@@ -2878,7 +2767,6 @@ impl Cx<'_> {
                     opaque_args: o.opaque_args | s.opaque_args,
                     returns: o.returns | s.returns,
                     shared_ret: o.shared_ret || s.shared_ret,
-                    fields: o.fields | s.fields,
                 },
             });
         }
