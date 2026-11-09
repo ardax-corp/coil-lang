@@ -2,10 +2,7 @@
 
 /// Vec length-changing methods that are a type error on `[T; N]` (Q3).
 pub fn is_fixed_array_grow_method(method: &str) -> bool {
-    matches!(
-        method,
-        "push" | "insert" | "pop" | "remove" | "clear" | "reserve"
-    )
+    crate::typechecking::ty::vec_method(method).is_some_and(|m| m.mutates)
 }
 
 #[cfg(test)]
