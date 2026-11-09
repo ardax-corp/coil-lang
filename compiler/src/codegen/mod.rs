@@ -576,7 +576,7 @@ pub struct Compiler {
     auto_par: bool,
 
 
-    /// IL optimization preset (COI-127).
+    /// HIR and MIR pass switches of the optimization level (COI-127).
     opt_options: crate::opt::OptimizeOptions,
 
     /// Cost budgets for typed inlining (COI-124).

@@ -110,8 +110,8 @@ impl Drop for ComptimeCapture {
 }
 
 /// Record `bodies` when a capture is open. Unless it is a raw one
-/// ([`start_raw_capture`]), each comes after the MIR passes the dense tier
-/// runs ([`super::specialize::optimize_mir`]) at `opts`' level: native code
+/// ([`start_raw_capture`]), each comes after the MIR passes
+/// ([`super::specialize::optimize_mir`]) at `opts`' level: native code
 /// gets the same loop rewrites (vector loops, byte scans, bulk copies and
 /// fills, which call the runtime's kernels). A generator, a body with a
 /// cleanup pad, a debugger's or a coverage build's keep their MIR as

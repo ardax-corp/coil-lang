@@ -339,7 +339,8 @@ impl Compiler {
         self.opt_options.hir_inline = on;
     }
 
-    /// Apply an [`crate::OptLevel`] preset to IL opts and inlining budgets.
+    /// Apply an [`crate::OptLevel`] preset to the HIR / MIR pass switches
+    /// and inlining budgets.
     /// The switches no level sets keep their values.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         let mut opts = level.options();
@@ -1067,7 +1068,7 @@ impl Compiler {
 
     /// Identifier type for codegen: mono arm overrides, then span cache, then
     /// scoped checker bindings. Preferring span avoids later functions' `let x`
-    /// overwriting earlier `x` entries used by `static_len_of` / arith.
+    /// overwriting earlier `x` entries.
     fn codegen_ident_ty(&self, node: &Output) -> Option<Ty> {
         use crate::typechecking::subst::apply_ty_prune;
         let Expression::Identifier(name) = node.1.as_ref() else {
@@ -2233,7 +2234,8 @@ impl Compiler {
         fqn == crate::typechecking::generics::Generics::default_method_fqn(class, method)
     }
 
-    /// [`Self::concrete_operator_target`] for an operand of type `ty`.
+    /// The trait instance type and method FQN an operator `class::method`
+    /// on an operand of type `ty` calls.
     pub(super) fn concrete_operator_target_ty(&self, ty: &Ty, class: &str, method: &str) -> Option<(Ty, String)> {
         let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
         // A `readonly` operand's operator is its type's instance (#1645).
@@ -2368,7 +2370,8 @@ impl Compiler {
         })
     }
 
-    /// Walk call sites in `node`. `pred(callee_name, is_value_method)`,     /// `is_value_method` is true for `recv.method(...)` on an identifier/
+    /// Walk call sites in `node`. `pred(callee_name, is_value_method)`:
+    /// `is_value_method` is true for `recv.method(...)` on an identifier/
     /// variable receiver.
     fn walk_expr_calls(node: &Output<'_>, pred: &mut dyn FnMut(&str, bool) -> bool) -> bool {
         if let Expression::Call { name, args } = node.1.as_ref() {
@@ -2698,7 +2701,7 @@ impl Compiler {
     }
 
     /// The table key a free `fn` is emitted under: `name#arity.id` for an
-    /// overload (as `compile_function`), so a call emitted before a later
+    /// overload, so a call emitted before a later
     /// overload's body still finds its entry (#848).
     fn overload_entry_key(&self, name: &str, qualified: &str, decl: &Output) -> String {
         if !(self.checker.is_overloaded(name) || self.checker.is_overloaded(qualified)) {
@@ -4369,7 +4372,7 @@ impl Compiler {
         self.emit_builtin_body(fqn, params, ret, word_ret, op);
     }
 
-    /// A builtin entry whose dictionary ABI boxes its result (`box_tag`):
+    /// A builtin entry whose dictionary ABI boxes its result:
     /// `fqn` itself is raw, taking and returning the words a ground call
     /// (`a.add(4)`, `3.into()`) passes and expects, and its `$dict` adapter
     /// keeps the boxed ABI shared generic bodies call through (#1030).
@@ -5069,7 +5072,7 @@ impl Compiler {
         }
         let lowered = self.try_lower_hir_function(&method.0, body);
         if !lowered {
-            // Every body runs IL from its direct MIR, so one HIR does not
+            // Every body runs from its direct MIR, so one whose HIR does not
             // lower (an instance clone included) is a compile error.
             self.report_unlowered(&method.0, &qualified);
         }
@@ -5316,7 +5319,7 @@ impl Compiler {
             }
 
             self.bodies.advance();
-            // Its own IL function: a clone left as trailing glue of the source
+            // Its own body record: a clone left as trailing glue of the source
             // body has no registered entry, so a CALL to it from another
             // function was resolved through another body's private label ids.
             let entry = self.fn_entry_labels.get(&mono_name).copied();

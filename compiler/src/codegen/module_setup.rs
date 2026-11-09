@@ -208,7 +208,7 @@ impl Compiler {
     }
 
     /// An FFI op whose `Result` is unwrapped: the `Ok` word, or a panic
-    /// with the `ffi::Error`'s message (`emit_result_unwrap_or_panic`).
+    /// with the `ffi::Error`'s message.
     fn setup_ffi(b: &mut MirBuilder, op: MirFfiOp, operand: u32, args: Vec<crate::mir::ValueId>) -> Result<crate::mir::ValueId, String> {
         let mir = |e: crate::mir::MirError| e.to_string();
         let obj = b.ins_ffi(op, operand, args).map_err(mir)?;

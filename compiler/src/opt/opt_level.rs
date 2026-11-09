@@ -42,7 +42,7 @@ impl OptLevel {
     }
 
     /// Typed-inlining budgets. Lives here so CLI tests can check mapping without
-    /// constructing a `Compiler` (codegen would create an IL cycle).
+    /// constructing a `Compiler`.
     pub fn inline_max_cost(self) -> usize {
         match self {
             Self::None | Self::Debug => 0,
@@ -223,7 +223,7 @@ impl OptimizeOptions {
 fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
     level_free_knobs(&mut o);
-    // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
+    // Gate HIR passes in `emit_hir`: constant folding (at
     // every level), scalar replacement (enum / tuple SROA), counted-loop
     // bounds proofs and full unroll of short counted loops (not at Size: it
     // grows code).

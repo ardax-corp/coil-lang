@@ -158,7 +158,8 @@ pub struct Pipeline {
     extra_dload_stems: Vec<String>,
     /// CLI / Pipeline API grants and dload pins.
     host_grants: HostGrants,
-    /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
+    /// Optimization preset ([`crate::OptLevel`], COI-127 / COI-173): which HIR
+    /// and MIR passes run, and the inline budget. Default Standard.
     opt_level: crate::OptLevel,
     /// `--contracts`; `None` derives it from the opt level.
     contracts: Option<crate::ContractLevel>,
@@ -1903,7 +1904,7 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
-        // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
+        // Link every module's bodies once: tree-shake and resolve labels.
         self.step(CompileStep::Link);
         self.compiler_lazy_mut().finalize_bodies();
         self.compute_consts(None);
@@ -2019,7 +2020,6 @@ impl Pipeline {
         }
     }
 
-    /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
     /// Turn computing pure calls with constant arguments at compile time
     /// off (or back on, at `-O2` and above). Tests of what such a call
     /// compiles to turn it off. `--fold-calls on|off` calls this.

@@ -1,12 +1,13 @@
 //! The side tables direct MIR lowering reads ([`crate::mir::HirMirInput`]),
-//! planned over the HIR: the entries the stack emission of a body calls,
-//! the strings it interns, worked out from the plan, the function and
-//! label tables and the string interner, never from the ops emitted.
+//! worked out over a planned HIR body: the entries its code calls and the
+//! strings it interns, from the plan, the function and label tables and
+//! the string interner.
 //!
-//! The walk visits what emission evaluates (an operand emission skips,
-//! such as `typeof`'s, is skipped here too) and repeats emission's side
-//! effects through the same helpers (interning, method clones), so it
-//! gives the same answer whether or not the body was emitted first.
+//! "Emission" below is the code MIR lowering writes for the plan. The walk
+//! visits what that code evaluates (an operand it skips, such as
+//! `typeof`'s, is skipped here too) and repeats the plan's side effects
+//! through the same helpers (interning, method clones), so it gives the
+//! same answer whether or not the plan ran them first.
 
 use super::*;
 use super::compiler::DictStep;
@@ -238,7 +239,8 @@ impl Compiler {
     /// Collect the locals `id` binds in this body's frame, as emission
     /// binds them: not a `defer` body's (its thunk's frame), an outlined
     /// parallel loop's (its worker's), a `()` `let`'s, code emission drops,
-    /// or a `match` arm's that emission reads off the operand stack.
+    /// or a `match` arm's whose payload word stays the value
+    /// ([`Self::hir_mir_arm_binds`]).
     /// `value`: whether emission wants `id`'s value, not
     /// only its effect.
     fn hir_mir_bound(&self, hir: &HirBody, emit: &HirEmit, id: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>) {

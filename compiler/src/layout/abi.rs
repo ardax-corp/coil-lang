@@ -1,5 +1,5 @@
 //! How a value crosses a call edge: the two-slot direct `CALL`/`RETURN`
-//! width, the MIR ABI class, and the typed dense call signature. Each is a
+//! width, the MIR ABI class, and the typed call signature. Each is a
 //! view of [`super::rep::of_resolved`].
 //!
 //! ## Two-slot pairs
@@ -26,30 +26,12 @@
 //! nursery: two-slot is `[payload, tag]` (or `[a, b]`) on direct
 //! `CALL`/`RETURN`; heap niches are one `Value` word.
 //!
-//! ## Dense call ABI
+//! ## Call ABI
 //!
-//! Typed dense call/return ABI (COI-291 M1).
-//!
-//! Dense bodies keep `i64` / `f64` / `bool` in frame slots.
-//! A dense→dense `CALL` uses the same one-word Value layout the runtime already
-//! uses at CALL/RETURN — bits are typed slots, not boxed heap objects.
-//!
-//! ### Layout
-//!
-//! | Edge | Words | Slots / stack |
-//! |------|-------|----------------|
-//! | Args | `arity` | callee slots `0..arity` (same bits as caller `LOAD`s) |
-//! | Return | 1..=2 | TOS after `RETURN`; caller `STORE`s dests |
-//! | Niche Option/Result | 1 | Q8 word lane (match reconstructs as `Br`) |
-//! | Multi-word return | 2 | `[payload, tag]` / `[a, b]` (B3 / C1) |
-//!
-//! HostInvoke: LICM hoists scalar-pure math; S3 / Q9 R2 emit I6-typed hosts
-//! including `from_bytes` / `to_bytes`. User `CALL` uses this map when the callee is already
-//! dense, or an open one-word / two-slot ABI (S3 / B3). Q7 one-word
-//! self-`CALL` / `TailCall` use the open one-word ABI. **B7** sibling /
-//! mutual `TailCall` and **C1** self two-slot `CALL` / `RETURN` use the
-//! same open ABI. `CallIndirect` stays refuse.
-//! HeapRef and niche words are one-word lanes (Q8).
+//! [`CallAbi`] is a MIR callee's typed signature (COI-291 M1): one
+//! [`MirTy`] per parameter word and the returned word, plus `ret_hi`, the
+//! tag or second product word of a two-slot return (B3 / C1). Niche
+//! `Option` / `Result` and heap references are one-word lanes (Q8).
 //!
 //! SSA models at most dest + `dest_hi`. N>2 is the same `ret_words` field
 //! but needs extra dests + archive encoding — not a self-vs-helper wall.

@@ -31,14 +31,14 @@ pub struct OptimizeOptions {
     /// above (and Size); `--fold-calls off` turns it off
     /// (`Pipeline::set_call_fold`).
     pub call_fold: bool,
-    /// MIR constant propagation and folding before emission
-    /// (`mir::specialize`): SCCP, InstCombine and DestProp on dense
-    /// bodies, SCCP and InstCombine's folds on bodies. On at every
-    /// level but None and Debug.
+    /// MIR constant propagation and folding (`mir::specialize`): SCCP,
+    /// InstCombine, DestProp and `bool` φ threading. On at every level but
+    /// None and Debug.
     pub mir_fold: bool,
-    /// MIR redundancy and loop passes (`mir::specialize`): CSE, LICM, IV
-    /// strength reduction and GVN/PRE, and the dense saxpy-reduce pack and
-    /// vectorizer. On at Standard and above (and Size).
+    /// MIR redundancy and loop passes (`mir::specialize`): CSE, LICM, loop
+    /// interchange, IV strength reduction, GVN, and the loop rewrites
+    /// (`copy_until`, `byte_scan`, `bulk_push`, `vec_loops`). On at
+    /// Standard and above (and Size).
     pub mir_loop: bool,
     /// Typed inlining of HIR bodies (`hir::inline`). Every level; the
     /// inline budget is what turns it off at `-O0` / `-Og`. Always on;
