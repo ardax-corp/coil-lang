@@ -1477,4 +1477,14 @@ mod tests {
         // Nothing shared: left as it is.
         assert_eq!(LaneExpr::or(ne(0), ne(1)).size(), 3);
     }
+
+    /// Both engines compute float `!=` unordered (`NaN != x` holds), as
+    /// Rust's `!=` and Cranelift's `FloatCC::NotEqual` do: the label says
+    /// so, and the text parser reads it back.
+    #[test]
+    fn float_ne_is_labelled_unordered() {
+        let label = MirCmpOp::Ne.as_str(true);
+        assert!(label.starts_with("fcmp.u"), "{label}");
+        assert_eq!(MirCmpOp::parse(label), Some((MirCmpOp::Ne, true)));
+    }
 }
