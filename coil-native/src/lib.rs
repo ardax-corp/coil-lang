@@ -3338,12 +3338,12 @@ impl<'a> Lower<'a> {
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
                     self.b.append_block_param(join, types::I64);
-                    self.inline_alloc(f, &obj, *kind, &words, join);
+                    self.inline_alloc(f, &obj, *kind, words, join);
                     join
                 });
                 let p = match last {
-                    Some(w) => self.words_slot_with(f, &words, Some(w as i64)),
-                    None => self.words_slot(f, &words),
+                    Some(w) => self.words_slot_with(f, words, Some(w as i64)),
+                    None => self.words_slot(f, words),
                 };
                 let code = self.b.ins().iconst(types::I64, code as i64);
                 let n = self.b.ins().iconst(types::I64, n as i64);
